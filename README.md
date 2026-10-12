@@ -4,14 +4,14 @@
 
 The author admires the work of the authors of [oMLX](https://github.com/jundot/omlx) and recommends their app before trying MADMetal.
 
-One model, one inference pipeline. MADMetal does not host a family of models behind a shared runner. Each model is a Python file that owns its forward, its weight records, and its Metal kernels. The `madmetal` command only chooses which file to run.
+One model, one inference pipeline. MADMetal does not host a family of models behind a shared runner. Each model owns its forward, its weight records, and its Metal kernels. The `madmetal` command loads that model's entry file.
 
 ```text
 uv sync --extra dev
 uv run madmetal --qwen38-flash-next probe
 ```
 
-That flag loads `qwen38-flash-next.py`. `probe` measures one block of 32 on the GPU. It does not pack weights.
+That flag loads `qwen38-flash-next.py`. The `qwen38_flash_next` package beside that file holds the forward. `probe` measures one block of 32 on the GPU. It does not pack weights.
 
 The first pipeline is Qwen3.8-Flash-Next on an M5 Pro: native Metal tensor records, a single-request OpenAI-compatible server, and a prefix cache for agentic coding. The as-built contract is [ARCHITECTURE.md](ARCHITECTURE.md). The papers and specifications are [REFERENCES.md](REFERENCES.md). Agents start at [AGENTS.md](AGENTS.md).
 

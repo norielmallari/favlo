@@ -2,13 +2,13 @@
 
 As-built contract for **MADMetal**. The name expands to MADMetal Accelerated Decoding on Metal.
 
-One model is one pipeline file. `madmetal --qwen38-flash-next` loads `qwen38-flash-next.py` and nothing else. A future model is a new file and a new flag. It does not share this forward, these records, or these kernels.
+One model is one pipeline. `madmetal --qwen38-flash-next` loads `qwen38-flash-next.py`, which loads the `qwen38_flash_next` package. A future model is a new entry file, a new package, and a new flag. It does not share this forward, these records, or these kernels.
 
 The target machine is an M5 Pro: 20 shader cores, a neural accelerator beside the shader pipelines in each core, 307 GB/s unified DRAM, and an APFS volume whose device block and allocation block are 4096 bytes. Requires macOS 27 and the matching Metal SDK. The 16-core Neural Engine is not used. Sub-byte tensor planes also require 128-byte alignment inside the record. A 4 KB file offset does not by itself satisfy that.
 
 ## In scope
 
-- `qwen38-flash-next.py` runs three stages for this model: a BF16 calibration prefill, a converter from Hugging Face BF16 shards to native records, and the text runtime.
+- `qwen38_flash_next` runs three stages for this model: a BF16 calibration prefill, a converter from Hugging Face BF16 shards to native records, and the text runtime. `qwen38-flash-next.py` is the entry the command loads.
 - One sequence at a time. Prefill and decode. Layered kernels.
 - `GET /v1/models` and `POST /v1/chat/completions`, including streaming.
 - The checkpoint chat template. Sampling is temperature, top-p, and top-k.
@@ -18,7 +18,7 @@ The target machine is an M5 Pro: 20 shader cores, a neural accelerator beside th
 
 ## Out of scope
 
-- A generic runner and any edit to `qwen38-flash-next.py` on behalf of another model.
+- A generic runner and any edit to `qwen38_flash_next` on behalf of another model.
 - Affine group-64 packing and per-layer bit allocation.
 - Batching and the Neural Engine.
 - The vision tower. It stays unloaded.

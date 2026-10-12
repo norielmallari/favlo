@@ -33,7 +33,7 @@ package = true
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-src = ["src", "tests", "qwen38-flash-next.py"]
+src = ["src", "tests", "qwen38-flash-next.py", "qwen38_flash_next"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

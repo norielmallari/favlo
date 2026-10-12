@@ -8,14 +8,14 @@ Read this file first. Then read [ARCHITECTURE.md](ARCHITECTURE.md). The papers a
 
 MADMetal Accelerated Decoding on Metal. Each model is its own inference pipeline, written for that model's shapes and for the Metal tensor types on Apple Silicon.
 
-The first pipeline is Qwen3.8-Flash-Next, in `qwen38-flash-next.py`, selected with `madmetal --qwen38-flash-next`.
+The first pipeline is Qwen3.8-Flash-Next. `madmetal --qwen38-flash-next` loads `qwen38-flash-next.py`, which loads the `qwen38_flash_next` package.
 
 The runtime does not call into a multi-model server to run the forward.
 
 ## In scope
 
-- `qwen38-flash-next.py`: BF16 calibration prefill, converter to native records, and the text runtime for that model.
-- `madmetal` command that dispatches one model flag onto one pipeline file.
+- `qwen38_flash_next`: BF16 calibration prefill, converter to native records, and the text runtime for that model. `qwen38-flash-next.py` is the entry the command loads.
+- `madmetal` command that dispatches one model flag onto one pipeline entry.
 - OpenAI-compatible `GET /v1/models` and `POST /v1/chat/completions`, one request at a time, with streaming, tools, and a grammar on the tool-call span.
 - Prefix cache of that model's full state.
 - Expert records streamed from SSD by Metal IO, already in the tensor layout. One expert is one load of the live image.
@@ -23,7 +23,7 @@ The runtime does not call into a multi-model server to run the forward.
 ## Out of scope
 
 - A shared model runner, a base class that every model subclasses, or a kernel that branches on model type.
-- A second model file until that model is explicitly added.
+- A second model until that model is explicitly added.
 - Affine group-64 packing and per-layer bit allocation.
 - Batching, the Neural Engine, and the vision tower.
 - Multi-token prediction in the serving loop. The MTP weights are packed. The endpoint samples one token at a time.
@@ -34,14 +34,24 @@ The runtime does not call into a multi-model server to run the forward.
 ## Layout
 
 ```text
-qwen38-flash-next.py    this model's pipeline
-src/madmetal/           command entry; selects one pipeline and stops
+qwen38-flash-next.py       command entry; loads the package by path
+qwen38_flash_next/         this model's pipeline
+  shaders/                 Metal source, read as text
+  formats.py               record math
+  convert.py               BF16 shards to the record
+  probe.py                 block and matmul checks
+  session.py               device buffers and shaders
+  checks.py                host formulas for the kernel checks
+  record.py                the file the shaders read
+  runtime.py               the forward
+  commands.py              quantize, bf16, complete, serve
+src/madmetal/              process entry; selects one pipeline and stops
 pyproject.toml
 ```
 
-A model filename may contain hyphens. The command loads it by path. It is not an importable module name.
+A model entry filename may contain hyphens. The command loads it by path. It is not an importable module name. The package beside it uses underscores.
 
-Adding a model means adding a file and a flag. It does not mean editing `qwen38-flash-next.py`.
+Adding a model means adding an entry file, a package, and a flag. It does not mean editing `qwen38_flash_next`.
 
 ## Re-implementation
 
@@ -51,8 +61,8 @@ The calibration prompt strings are data in a bucket JSON: `tool_calling`, `chat`
 
 ## Invariants
 
-1. One process, one model flag, one pipeline file.
-2. The pipeline file owns the math. Shared code is limited to process entry and pieces that are not the model, and only when a second pipeline exists to share them.
+1. One process, one model flag, one pipeline package. The command loads that package through one hyphenated entry file.
+2. The pipeline package owns the math. Shared code is limited to process entry and pieces that are not the model, and only when a second pipeline exists to share them.
 3. Weights on disk for this model are the Metal records in ARCHITECTURE.md.
 4. The key/value cache defaults to BF16 for every cached token. fp8 E4M3 and E5M2 are a switch.
 5. Do not invent routing hits, calibration energies, or hidden-state errors. The device roundtrip in ARCHITECTURE.md measures nibble order and int4 endpoints before the expert table is packed.

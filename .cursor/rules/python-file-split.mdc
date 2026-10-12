@@ -1,0 +1,32 @@
+---
+description: Split and organize Python files by responsibility, with one-way imports
+globs: **/*.py
+alwaysApply: false
+---
+
+# Python file split
+
+Split a module when it has more than one job, or when a section is data the rest of the file only reads. Line count is not the trigger. PEP 8 sets no file-length limit. Related classes and functions stay in one module.
+
+A package name is an identifier. A hyphenated pipeline entry stays a path-loaded file. The package beside it uses underscores. `qwen38-flash-next.py` loads `qwen38_flash_next`.
+
+## How to cut
+
+- One module, one responsibility. Imports point one way: `formats` → `convert` / `session` → `runtime` → `commands`.
+- If two modules need each other, the cut is wrong. Move the shared names into a third module, or leave the pieces together.
+- Keep one class in one file. Do not break a class into mixins to shorten a file.
+- Move large source strings, such as Metal shaders, into files the module reads as text. Compile them the same way as before.
+- Re-export the names callers already use from the package `__init__.py`. A path-loaded entry exposes those names, including `main`.
+- Use a regular package with `__init__.py`. A namespace package is for one name split across distributions.
+- A new model is a new entry file, a new package, and a new flag. It does not edit `qwen38_flash_next`, and it does not add a base class in `src/madmetal`.
+- Update AGENTS.md and ARCHITECTURE.md in the same change that moves a pipeline module.
+
+## Examples
+
+Wrong: split `Qwen38Runtime` into `gdn.py`, `qsa.py`, and `moe.py` that import each other.
+
+Right: leave the forward in `runtime.py`. Put packing in `formats.py`, which the runtime imports and which does not import the runtime.
+
+Wrong: name the package `qwen38-flash-next/` and import it.
+
+Right: keep `qwen38-flash-next.py` as the entry. Put the modules in `qwen38_flash_next/`, and read `shaders/act.metal` as text.
