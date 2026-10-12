@@ -1,0 +1,30 @@
+# MADMetal
+
+**MADMetal Accelerated Decoding on Metal.**
+
+The author admires the work of the authors of [oMLX](https://github.com/jundot/omlx) and recommends their app before trying MADMetal.
+
+One model, one inference pipeline. MADMetal does not host a family of models behind a shared runner. Each model is a Python file that owns its forward, its weight records, and its Metal kernels. The `madmetal` command only chooses which file to run.
+
+```text
+uv sync --extra dev
+uv run madmetal --qwen38-flash-next probe
+```
+
+That flag loads `qwen38-flash-next.py`. `probe` measures one block of 32 on the GPU. It does not pack weights.
+
+The first pipeline is Qwen3.8-Flash-Next on an M5 Pro: native Metal tensor records, a single-request OpenAI-compatible server, and a prefix cache for agentic coding. The as-built contract is [ARCHITECTURE.md](ARCHITECTURE.md). The papers and specifications are [REFERENCES.md](REFERENCES.md). Agents start at [AGENTS.md](AGENTS.md).
+
+## Development
+
+Code in this repository is written with AI assistance and reviewed before it is kept. This note is disclosure only. It does not replace the license, and it does not grant or limit any rights under the license.
+
+## Problems
+
+Report a problem in this repository's issue tracker.
+
+## License
+
+Copyright 2026 Noriel Mallari
+
+MADMetal is licensed under the Apache License, Version 2.0. The terms are in [LICENSE.md](LICENSE.md).

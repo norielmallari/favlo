@@ -1,0 +1,18 @@
+---
+description: Derive MADMetal algorithms from public papers and Metal, not from other repos
+alwaysApply: true
+---
+
+# Public algorithms, Metal mapping
+
+Every equation in a pipeline comes from a public paper, spec, or vendor document, then mapped onto a Metal op this machine actually runs. Another repository's source, tests, comments, or design notes are not a reference. Porting them pulls in that runtime's layout and hides the Metal mapping.
+
+Score a formula on this runtime's own forward. An int4 argmax is not evidence the equation is right. Check the BF16 shader dot of the checkpoint values.
+
+Record the citation in REFERENCES.md and the as-built form in ARCHITECTURE.md.
+
+## Examples
+
+Wrong: open another runtime's n-gram forward and copy its hash so the tokens match.
+
+Right: Cheng et al. eq. (6) for the branch gate, the tech report's `1/n_r` on the residual read, and a Metal float dot of the stored matrix.

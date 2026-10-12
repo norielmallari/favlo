@@ -1,0 +1,42 @@
+[project]
+name = "madmetal"
+version = "0.1.0"
+description = "MADMetal Accelerated Decoding on Metal"
+readme = "README.md"
+license = "Apache-2.0"
+authors = [{name = "Noriel Mallari"}]
+requires-python = ">=3.12"
+dependencies = [
+    "jinja2>=3.1",
+    "numpy>=2.1",
+    "pyobjc-framework-Metal",
+    "safetensors>=0.6",
+    "tokenizers>=0.22",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.12",
+]
+
+[project.scripts]
+madmetal = "madmetal.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests", "qwen38-flash-next.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

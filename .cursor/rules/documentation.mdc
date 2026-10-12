@@ -1,0 +1,32 @@
+---
+description: Write public MADMetal docs in a neutral tone and keep personal data out of the repo
+alwaysApply: true
+---
+
+# Public documentation
+
+This repository is public. Anyone can read the tree, the history, issues, and pull requests. Write docs, commits, comments, and examples as if they will stay public.
+
+## No personal data
+
+Do not commit personal data or secrets. That includes names, email addresses, phone numbers, account handles, home directories, hostnames, serial numbers, local network addresses, tokens, keys, passwords, and private URLs. Logs, screenshots, and sample output follow the same rule.
+
+Use a placeholder instead: `~/.madmetal`, `127.0.0.1`, `example-model`. If a secret was committed, remove it and rotate it. Deleting the file in a later commit leaves it in history.
+
+## Tone and shape
+
+Use calm, neutral sentences. State what the project does and what the reader can run. Skip slogans, urgency, and notes about a particular machine.
+
+A claim by the author is in the third person. Write "the author", not "I", "me", or "my".
+
+A public README says what the project is, how to install it, one minimal command, the license, and where to report a problem. Keep the as-built detail in linked docs such as ARCHITECTURE.md. Prefer relative links between files in the repo.
+
+## Examples
+
+Wrong: "Fixed the crash on the user's M5 at `/Users/user/Models`. Email me at user@example.com."
+
+Right: "The server listens on `127.0.0.1:8000`. A missing checkpoint path is reported and the process exits."
+
+Wrong: "I admire this work, and I recommend it before trying MADMetal."
+
+Right: "The author admires this work and recommends it before trying MADMetal."

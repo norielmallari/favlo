@@ -1,0 +1,26 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Local machine
+.DS_Store
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+
+# Logs and generated output
+*.log
+artifacts/
+
+# Weights and records stay outside the tree
+*.safetensors
+*.bin
+*.gguf
