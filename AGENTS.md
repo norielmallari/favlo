@@ -18,7 +18,7 @@ The runtime does not call into a multi-model server to run the forward.
 - `madmetal` command that dispatches one model flag onto one pipeline file.
 - OpenAI-compatible `GET /v1/models` and `POST /v1/chat/completions`, one request at a time, with streaming, tools, and a grammar on the tool-call span.
 - Prefix cache of that model's full state.
-- Expert records streamed from SSD, 4 KB-aligned, already in the tensor layout.
+- Expert records streamed from SSD by Metal IO, already in the tensor layout. One expert is one load of the live image.
 
 ## Out of scope
 
@@ -27,7 +27,7 @@ The runtime does not call into a multi-model server to run the forward.
 - Affine group-64 packing and per-layer bit allocation.
 - Batching, the Neural Engine, and the vision tower.
 - Multi-token prediction in the serving loop. The MTP weights are packed. The endpoint samples one token at a time.
-- Fusing a whole layer into one command buffer. The first runtime is a correct layered loop.
+- Fusing a whole layer into one kernel. The runtime is a layered loop. Shaders share a command buffer until the host needs an expert file offset or the sampled token id.
 - Using another application's source, tests, comments, or design notes as the reference for a profiler, quantizer, kernel, or forward.
 - A host GEMV, a CPU matmul of activations, or any stand-in forward that runs because a Metal kernel is missing. Prefill, decode, and the calibration prefill are Metal shaders on Apple Silicon.
 

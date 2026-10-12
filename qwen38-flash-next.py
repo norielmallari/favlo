@@ -36,6 +36,7 @@ MIB = 1024 * 1024
 EXPERT_SLOT = 3 * MIB
 NGRAM_SLOT = 128
 NGRAM_WIDTH = 160
+IO_CHUNK = 256 * 1024 * 1024
 RECORD_VERSION = 1
 DEFAULT_RECORD = Path.home() / ".madmetal" / "qwen38-flash-next"
 
@@ -422,6 +423,11 @@ def _write_u32(buffer: Any, value: int) -> None:
 
 def _buffer_bytes(buffer: Any, count: int) -> bytes:
     return bytes(_buffer_view(buffer, count))
+
+
+def _buffer_slice(buffer: Any, offset: int, nbytes: int) -> bytes:
+    view = _buffer_view(buffer, offset + nbytes)
+    return bytes(view[offset : offset + nbytes])
 
 
 def _objc_pair(result: Any) -> tuple[Any, str | None]:
@@ -1453,6 +1459,785 @@ kernel void attend_gqa(
 """
 
 
+ACT_SHADER = r"""
+#include <metal_stdlib>
+using namespace metal;
+
+static float silu_f(float v) {
+    if (v >= 0.0f) {
+        return v / (1.0f + exp(-v));
+    }
+    float e = exp(v);
+    return v * e / (1.0f + e);
+}
+
+static float sigmoid_f(float v) {
+    if (v >= 0.0f) {
+        return 1.0f / (1.0f + exp(-v));
+    }
+    float e = exp(v);
+    return e / (1.0f + e);
+}
+
+static float softplus_f(float v) {
+    return log(1.0f + exp(-fabs(v))) + max(v, 0.0f);
+}
+
+kernel void silu_f32(
+    device const float* x [[buffer(0)]],
+    device float* y [[buffer(1)]],
+    constant uint& n [[buffer(2)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid < n) {
+        y[tid] = silu_f(x[tid]);
+    }
+}
+
+kernel void sigmoid_f32(
+    device const float* x [[buffer(0)]],
+    device float* y [[buffer(1)]],
+    constant uint& n [[buffer(2)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid < n) {
+        y[tid] = sigmoid_f(x[tid]);
+    }
+}
+
+kernel void softplus_f32(
+    device const float* x [[buffer(0)]],
+    device float* y [[buffer(1)]],
+    constant uint& n [[buffer(2)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid < n) {
+        y[tid] = softplus_f(x[tid]);
+    }
+}
+
+kernel void scale_f32(
+    device const float* x [[buffer(0)]],
+    device float* y [[buffer(1)]],
+    constant uint& n [[buffer(2)]],
+    constant float& factor [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid < n) {
+        y[tid] = x[tid] * factor;
+    }
+}
+
+kernel void mul_f32(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device float* y [[buffer(2)]],
+    constant uint& n [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid < n) {
+        y[tid] = a[tid] * b[tid];
+    }
+}
+
+kernel void add_f32(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device float* y [[buffer(2)]],
+    constant uint& n [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid < n) {
+        y[tid] = a[tid] + b[tid];
+    }
+}
+
+kernel void add_into_f32(
+    device float* dst [[buffer(0)]],
+    device const float* src [[buffer(1)]],
+    constant uint& n [[buffer(2)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid < n) {
+        dst[tid] += src[tid];
+    }
+}
+
+kernel void copy_f32(
+    device const float* src [[buffer(0)]],
+    device float* dst [[buffer(1)]],
+    constant uint& n [[buffer(2)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid < n) {
+        dst[tid] = src[tid];
+    }
+}
+
+kernel void axpy_slot(
+    device float* dst [[buffer(0)]],
+    device const float* src [[buffer(1)]],
+    device const float* scales [[buffer(2)]],
+    constant uint& n [[buffer(3)]],
+    constant uint& slot [[buffer(4)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid < n) {
+        dst[tid] += scales[slot] * src[tid];
+    }
+}
+
+kernel void scale_rows_f32(
+    device const float* x [[buffer(0)]],
+    device const float* scales [[buffer(1)]],
+    device float* y [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint total = count * cols;
+    if (tid >= total) {
+        return;
+    }
+    y[tid] = x[tid] * scales[tid / cols];
+}
+
+kernel void rms_rows(
+    device const float* x [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device float* y [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    constant float& eps [[buffer(4)]],
+    constant uint& zero_centered [[buffer(5)]],
+    constant uint& weight_rows [[buffer(6)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    device const float* rowp = x + row * cols;
+    float acc = 0.0f;
+    for (uint i = lane; i < cols; i += 32u) {
+        float value = rowp[i];
+        acc += value * value;
+    }
+    float inv = rsqrt(simd_sum(acc) / float(cols) + eps);
+    uint wrow = weight_rows == 0u ? 0u : (row % weight_rows);
+    device const float* gain = weight + wrow * cols;
+    device float* out = y + row * cols;
+    for (uint i = lane; i < cols; i += 32u) {
+        float factor = gain[i];
+        if (zero_centered != 0u) {
+            factor = 1.0f + factor;
+        }
+        out[i] = rowp[i] * inv * factor;
+    }
+}
+
+kernel void l2_rows(
+    device const float* x [[buffer(0)]],
+    device float* y [[buffer(1)]],
+    constant uint& cols [[buffer(2)]],
+    constant float& eps [[buffer(3)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    device const float* rowp = x + row * cols;
+    float acc = 0.0f;
+    for (uint i = lane; i < cols; i += 32u) {
+        float value = rowp[i];
+        acc += value * value;
+    }
+    float inv = rsqrt(simd_sum(acc) + eps);
+    device float* out = y + row * cols;
+    for (uint i = lane; i < cols; i += 32u) {
+        out[i] = rowp[i] * inv;
+    }
+}
+
+kernel void rope_rows(
+    device const float* x [[buffer(0)]],
+    device float* y [[buffer(1)]],
+    constant uint& cols [[buffer(2)]],
+    constant uint& rotary [[buffer(3)]],
+    constant uint& position [[buffer(4)]],
+    constant float& theta [[buffer(5)]],
+    constant uint& rows [[buffer(6)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint total = rows * cols;
+    if (tid >= total) {
+        return;
+    }
+    uint pairs = rotary >> 1;
+    uint row = tid / cols;
+    uint col = tid - row * cols;
+    float value = x[row * cols + col];
+    if (col >= rotary) {
+        y[row * cols + col] = value;
+        return;
+    }
+    uint pair = col < pairs ? col : col - pairs;
+    float freq = pow(theta, -float(pair) / float(pairs));
+    float angle = float(position) * freq;
+    float c = cos(angle);
+    float s = sin(angle);
+    float first = x[row * cols + pair];
+    float second = x[row * cols + pairs + pair];
+    if (col < pairs) {
+        y[row * cols + col] = first * c - second * s;
+    } else {
+        y[row * cols + col] = first * s + second * c;
+    }
+}
+
+kernel void causal_conv(
+    device float* history [[buffer(0)]],
+    device const float* current [[buffer(1)]],
+    device const float* weight [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant uint& channels [[buffer(4)]],
+    constant uint& taps [[buffer(5)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= channels) {
+        return;
+    }
+    uint hist = taps - 1u;
+    float acc = 0.0f;
+    for (uint tap = 0u; tap < hist; ++tap) {
+        float sample = history[tap * channels + tid];
+        acc += weight[tid * taps + tap] * sample;
+    }
+    acc += weight[tid * taps + hist] * current[tid];
+    out[tid] = acc;
+    for (uint tap = 0u; tap + 1u < hist; ++tap) {
+        history[tap * channels + tid] = history[(tap + 1u) * channels + tid];
+    }
+    if (hist > 0u) {
+        history[(hist - 1u) * channels + tid] = current[tid];
+    }
+}
+
+kernel void dilated_conv(
+    device float* history [[buffer(0)]],
+    device const float* current [[buffer(1)]],
+    device const float* weight [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant uint& channels [[buffer(4)]],
+    constant uint& taps [[buffer(5)]],
+    constant uint& dilation [[buffer(6)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= channels) {
+        return;
+    }
+    uint span = (taps - 1u) * dilation;
+    float acc = 0.0f;
+    for (uint tap = 0u; tap < taps; ++tap) {
+        uint frame = tap * dilation;
+        float sample = current[tid];
+        if (frame != span) {
+            sample = history[frame * channels + tid];
+        }
+        acc += weight[tid * taps + tap] * sample;
+    }
+    out[tid] = acc;
+    for (uint frame = 0u; frame + 1u < span; ++frame) {
+        uint next = (frame + 1u) * channels + tid;
+        history[frame * channels + tid] = history[next];
+    }
+    if (span > 0u) {
+        history[(span - 1u) * channels + tid] = current[tid];
+    }
+}
+
+kernel void repeat_rows(
+    device const float* src [[buffer(0)]],
+    device float* dst [[buffer(1)]],
+    constant uint& rows [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    constant uint& times [[buffer(4)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint total = rows * times * cols;
+    if (tid >= total) {
+        return;
+    }
+    uint col = tid % cols;
+    uint src_row = (tid / cols) / times;
+    dst[tid] = src[src_row * cols + col];
+}
+
+kernel void residual_write(
+    device float* residual [[buffer(0)]],
+    device const float* scales [[buffer(1)]],
+    device const float* mixed [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    constant uint& branches [[buffer(4)]],
+    constant uint& hidden [[buffer(5)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint span = branches * hidden;
+    uint total = count * span;
+    if (tid >= total) {
+        return;
+    }
+    uint token = tid / span;
+    uint within = tid - token * span;
+    uint branch = within / hidden;
+    uint col = within - branch * hidden;
+    float scale = scales[token * branches + branch];
+    residual[tid] += scale * mixed[token * hidden + col];
+}
+
+kernel void branch_mean(
+    device const float* gate [[buffer(0)]],
+    device const float* hats [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    constant uint& branches [[buffer(4)]],
+    constant uint& hidden [[buffer(5)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint total = count * hidden;
+    if (tid >= total) {
+        return;
+    }
+    uint col = tid % hidden;
+    uint token = tid / hidden;
+    float acc = 0.0f;
+    for (uint branch = 0u; branch < branches; ++branch) {
+        uint index = (token * branches + branch) * hidden + col;
+        acc += gate[index] * hats[index];
+    }
+    out[tid] = acc / float(branches);
+}
+
+kernel void gdn_alpha(
+    device const float* raw [[buffer(0)]],
+    device const float* dt_bias [[buffer(1)]],
+    device const float* a_log [[buffer(2)]],
+    device float* alpha [[buffer(3)]],
+    constant uint& n [[buffer(4)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= n) {
+        return;
+    }
+    alpha[tid] = exp(-exp(a_log[tid]) * softplus_f(raw[tid] + dt_bias[tid]));
+}
+
+kernel void ple_gate(
+    device const float* query [[buffer(0)]],
+    device const float* keyed [[buffer(1)]],
+    device float* gate [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    constant float& inv_sqrt [[buffer(4)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    device const float* q = query + row * cols;
+    device const float* k = keyed + row * cols;
+    float acc = 0.0f;
+    for (uint i = lane; i < cols; i += 32u) {
+        acc += q[i] * k[i];
+    }
+    float dot = simd_sum(acc) * inv_sqrt;
+    if (lane != 0u) {
+        return;
+    }
+    float mag = fabs(dot);
+    if (mag < 1.0e-6f) {
+        mag = 1.0e-6f;
+    }
+    float sign = 0.0f;
+    if (dot < 0.0f) {
+        sign = -1.0f;
+    } else if (dot > 0.0f) {
+        sign = 1.0f;
+    }
+    gate[row] = sigmoid_f(sign * sqrt(mag));
+}
+
+kernel void gate_broadcast(
+    device const float* gate [[buffer(0)]],
+    device const float* value [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    constant uint& branches [[buffer(3)]],
+    constant uint& hidden [[buffer(4)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint total = branches * hidden;
+    if (tid >= total) {
+        return;
+    }
+    out[tid] = gate[tid / hidden] * value[tid % hidden];
+}
+
+kernel void split_q(
+    device const float* packed [[buffer(0)]],
+    device float* query [[buffer(1)]],
+    device float* gate [[buffer(2)]],
+    constant uint& heads [[buffer(3)]],
+    constant uint& dim [[buffer(4)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint total = heads * dim;
+    if (tid >= total) {
+        return;
+    }
+    uint head = tid / dim;
+    uint col = tid - head * dim;
+    query[tid] = packed[head * dim * 2u + col];
+    gate[tid] = packed[head * dim * 2u + dim + col];
+}
+
+kernel void sigmoid_mul(
+    device const float* left [[buffer(0)]],
+    device const float* gate [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    constant uint& n [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid < n) {
+        out[tid] = left[tid] * sigmoid_f(gate[tid]);
+    }
+}
+
+kernel void topk_softmax(
+    device const float* logits [[buffer(0)]],
+    device uint* index [[buffer(1)]],
+    device float* weight [[buffer(2)]],
+    device float* probs [[buffer(3)]],
+    constant uint& n [[buffer(4)]],
+    constant uint& k [[buffer(5)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid != 0u) {
+        return;
+    }
+    float peak = logits[0];
+    for (uint i = 1u; i < n; ++i) {
+        peak = max(peak, logits[i]);
+    }
+    float sum = 0.0f;
+    for (uint i = 0u; i < n; ++i) {
+        float prob = exp(logits[i] - peak);
+        probs[i] = prob;
+        sum += prob;
+    }
+    for (uint i = 0u; i < n; ++i) {
+        probs[i] /= sum;
+    }
+    for (uint slot = 0u; slot < k; ++slot) {
+        uint best_i = 0u;
+        float best = -1.0f;
+        for (uint i = 0u; i < n; ++i) {
+            if (probs[i] > best) {
+                best = probs[i];
+                best_i = i;
+            }
+        }
+        index[slot] = best_i;
+        weight[slot] = best;
+        probs[best_i] = -1.0f;
+    }
+    float chosen = 0.0f;
+    for (uint slot = 0u; slot < k; ++slot) {
+        chosen += weight[slot];
+    }
+    for (uint slot = 0u; slot < k; ++slot) {
+        weight[slot] /= chosen;
+    }
+}
+
+kernel void argmax_partial(
+    device const float* values [[buffer(0)]],
+    device float* peaks [[buffer(1)]],
+    device uint* index [[buffer(2)]],
+    constant uint& n [[buffer(3)]],
+    constant uint& grid [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= grid) {
+        return;
+    }
+    float best = -INFINITY;
+    uint best_i = 0u;
+    for (uint i = gid; i < n; i += grid) {
+        float value = values[i];
+        if (value > best) {
+            best = value;
+            best_i = i;
+        }
+    }
+    peaks[gid] = best;
+    index[gid] = best_i;
+}
+
+kernel void argmax_final(
+    device const float* peaks [[buffer(0)]],
+    device const uint* index [[buffer(1)]],
+    device uint* out [[buffer(2)]],
+    constant uint& n [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid != 0u) {
+        return;
+    }
+    float best = peaks[0];
+    uint best_i = index[0];
+    for (uint i = 1u; i < n; ++i) {
+        if (peaks[i] > best) {
+            best = peaks[i];
+            best_i = index[i];
+        }
+    }
+    out[0] = best_i;
+}
+
+kernel void cast_f16_pad(
+    device const float* src [[buffer(0)]],
+    device half* dst [[buffer(1)]],
+    constant uint& logical [[buffer(2)]],
+    constant uint& stored [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= stored) {
+        return;
+    }
+    float value = 0.0f;
+    if (tid < logical) {
+        value = src[tid];
+    }
+    value = clamp(value, -65504.0f, 65504.0f);
+    dst[tid] = half(value);
+}
+
+kernel void cast_prefill(
+    device const float* src [[buffer(0)]],
+    device half* dst [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    constant uint& logical [[buffer(3)]],
+    constant uint& padded [[buffer(4)]],
+    constant uint& stored [[buffer(5)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint total = padded * stored;
+    if (tid >= total) {
+        return;
+    }
+    uint row = tid / stored;
+    uint col = tid - row * stored;
+    float value = 0.0f;
+    if (row < count && col < logical) {
+        value = src[row * logical + col];
+    }
+    dst[tid] = half(clamp(value, -65504.0f, 65504.0f));
+}
+
+kernel void compact_rows(
+    device const float* src [[buffer(0)]],
+    device float* dst [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& packed [[buffer(4)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint total = count * rows;
+    if (tid >= total) {
+        return;
+    }
+    uint col = tid % rows;
+    uint row = tid / rows;
+    dst[tid] = src[row * packed + col];
+}
+
+kernel void embed_gather(
+    device const uchar* image [[buffer(0)]],
+    device const uint* tokens [[buffer(1)]],
+    device float* residual [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    constant uint& logical [[buffer(4)]],
+    constant uint& data_row [[buffer(5)]],
+    constant uint& scale_row [[buffer(6)]],
+    constant uint& data_base [[buffer(7)]],
+    constant uint& branches [[buffer(8)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint total = count * logical;
+    if (tid >= total) {
+        return;
+    }
+    uint token_i = tid / logical;
+    uint col = tid - token_i * logical;
+    uint token = tokens[token_i];
+    device const uchar* data = image + token * data_row;
+    device const uchar* scales = image + data_base + token * scale_row;
+    uchar byte = data[col >> 1];
+    uint nibble = (col & 1u) != 0u ? (byte >> 4) : (byte & 0x0Fu);
+    int code = int(nibble);
+    if (code > 7) {
+        code -= 16;
+    }
+    int exponent = int(scales[col >> 5]) - 127;
+    float value = float(code) * ldexp(1.0f, exponent);
+    for (uint branch = 0u; branch < branches; ++branch) {
+        uint at = (token_i * branches + branch) * logical + col;
+        residual[at] = value;
+    }
+}
+
+kernel void dequant_ngram(
+    device const uchar* slots [[buffer(0)]],
+    device float* out [[buffer(1)]],
+    constant uint& width [[buffer(2)]],
+    constant uint& slot_bytes [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint rows = 16u;
+    if (tid >= rows * width) {
+        return;
+    }
+    uint row = tid / width;
+    uint col = tid - row * width;
+    device const uchar* slot = slots + row * slot_bytes;
+    uchar byte = slot[col >> 1];
+    uint nibble = (col & 1u) != 0u ? (byte >> 4) : (byte & 0x0Fu);
+    int code = int(nibble);
+    if (code > 7) {
+        code -= 16;
+    }
+    int exponent = int(slot[80u + (col >> 5)]) - 127;
+    out[tid] = float(code) * ldexp(1.0f, exponent);
+}
+
+kernel void broadcast_rows(
+    device const float* src [[buffer(0)]],
+    device float* dst [[buffer(1)]],
+    constant uint& cols [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= cols) {
+        return;
+    }
+    float value = src[tid];
+    for (uint row = 0u; row < rows; ++row) {
+        dst[row * cols + tid] = value;
+    }
+}
+
+kernel void sample_f32(
+    device const float* logits [[buffer(0)]],
+    device float* scratch [[buffer(1)]],
+    device uint* out [[buffer(2)]],
+    constant uint& n [[buffer(3)]],
+    constant float& temperature [[buffer(4)]],
+    constant float& top_p [[buffer(5)]],
+    constant uint& top_k [[buffer(6)]],
+    constant float& uniform [[buffer(7)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid != 0u) {
+        return;
+    }
+    float peak = -INFINITY;
+    for (uint i = 0u; i < n; ++i) {
+        float score = logits[i] / temperature;
+        scratch[i] = score;
+        peak = max(peak, score);
+    }
+    if (top_k > 0u && top_k < n) {
+        float previous = INFINITY;
+        float cutoff = peak;
+        for (uint nth = 0u; nth < top_k; ++nth) {
+            float next = -INFINITY;
+            for (uint i = 0u; i < n; ++i) {
+                float value = scratch[i];
+                if (value < previous && value > next) {
+                    next = value;
+                }
+            }
+            cutoff = next;
+            previous = next;
+        }
+        for (uint i = 0u; i < n; ++i) {
+            if (scratch[i] < cutoff) {
+                scratch[i] = -INFINITY;
+            }
+        }
+        peak = cutoff;
+    }
+    float sum = 0.0f;
+    for (uint i = 0u; i < n; ++i) {
+        float prob = 0.0f;
+        if (scratch[i] > -INFINITY) {
+            prob = exp(scratch[i] - peak);
+        }
+        scratch[i] = prob;
+        sum += prob;
+    }
+    if (!(sum > 0.0f)) {
+        uint best = 0u;
+        float best_v = logits[0];
+        for (uint i = 1u; i < n; ++i) {
+            if (logits[i] > best_v) {
+                best_v = logits[i];
+                best = i;
+            }
+        }
+        out[0] = best;
+        return;
+    }
+    for (uint i = 0u; i < n; ++i) {
+        scratch[i] /= sum;
+    }
+    if (top_p < 1.0f) {
+        float cursor = 0.0f;
+        while (true) {
+            uint best = 0u;
+            float best_p = 0.0f;
+            for (uint i = 0u; i < n; ++i) {
+                if (scratch[i] > best_p) {
+                    best_p = scratch[i];
+                    best = i;
+                }
+            }
+            if (!(best_p > 0.0f)) {
+                break;
+            }
+            scratch[best] = -best_p;
+            cursor += best_p;
+            if (cursor > top_p) {
+                break;
+            }
+        }
+        sum = 0.0f;
+        for (uint i = 0u; i < n; ++i) {
+            if (scratch[i] < 0.0f) {
+                scratch[i] = -scratch[i];
+                sum += scratch[i];
+            } else {
+                scratch[i] = 0.0f;
+            }
+        }
+        for (uint i = 0u; i < n; ++i) {
+            scratch[i] /= sum;
+        }
+    }
+    float cursor = 0.0f;
+    for (uint i = 0u; i < n; ++i) {
+        cursor += scratch[i];
+        if (uniform < cursor) {
+            out[0] = i;
+            return;
+        }
+    }
+    out[0] = n - 1u;
+}
+"""
+
+
 def _log(message: str) -> None:
     sys.stderr.write(message + "\n")
     sys.stderr.flush()
@@ -1518,6 +2303,8 @@ class Int4Matrix:
         weights: Any,
         scales: Any,
         stored_inner: int | None = None,
+        weight_off: int = 0,
+        scale_off: int = 0,
     ) -> None:
         self.rows = rows
         self.inner = inner
@@ -1525,13 +2312,16 @@ class Int4Matrix:
         self.packed_rows = packed_rows
         self.weights = weights
         self.scales = scales
+        self.weight_off = weight_off
+        self.scale_off = scale_off
 
 
 class F16Matrix:
-    def __init__(self, rows: int, inner: int, weights: Any) -> None:
+    def __init__(self, rows: int, inner: int, weights: Any, weight_off: int = 0) -> None:
         self.rows = rows
         self.inner = inner
         self.weights = weights
+        self.weight_off = weight_off
 
 
 class F32Matrix:
@@ -1541,6 +2331,25 @@ class F32Matrix:
         self.rows = rows
         self.inner = inner
         self.weights = weights
+
+
+class Dev:
+    """A float buffer that stays on the device until the host has to read it."""
+
+    def __init__(self, buf: Any, n: int, offset: int = 0) -> None:
+        self.buf = buf
+        self.n = n
+        self.offset = offset
+
+    def view(self, shift: int, n: int) -> Dev:
+        if shift < 0 or n < 0 or shift + n > self.n:
+            message = f"view {shift}+{n} outside {self.n}"
+            raise ValueError(message)
+        return Dev(self.buf, n, self.offset + shift)
+
+
+def _dev_bind(src: Dev) -> tuple[Any, int]:
+    return src.buf, src.offset * 4
 
 
 class MetalSession:
@@ -1555,10 +2364,27 @@ class MetalSession:
             message = f"shader dot assumes simd width 32, device reported {width}"
             raise RuntimeError(message)
         self.queue = self.device.newCommandQueue()
+        self.launch_count = 0
+        self.command_count = 0
+        self.gpu_seconds = 0.0
+        self.encode_seconds = 0.0
+        self.io_seconds = 0.0
+        self.io_loads = 0
+        self._encoder = None
+        self._command = None
+        self._batch_launches = 0
+        self._retain: list[Any] = []
+        self._held_constants: list[bytes] = []
+        self._io = None
+        self._event = None
+        self._event_value = 0
+        self._io_pending: list[Any] = []
         options = self.metal.MTLCompileOptions.alloc().init()
         options.setLanguageVersion_((4 << 16) + 1)
         library, error = _objc_pair(
-            self.device.newLibraryWithSource_options_error_(VECTOR_SHADER, options, None)
+            self.device.newLibraryWithSource_options_error_(
+                VECTOR_SHADER + ACT_SHADER, options, None
+            )
         )
         if library is None:
             message = f"vector shader failed to compile: {error}"
@@ -1567,6 +2393,47 @@ class MetalSession:
         self.f32_pipe = self._pipeline(library, "gemv_f32")
         self.gdn_pipe = self._pipeline(library, "gdn_delta")
         self.attend_pipe = self._pipeline(library, "attend_gqa")
+        act_names = (
+            "silu_f32",
+            "sigmoid_f32",
+            "softplus_f32",
+            "scale_f32",
+            "mul_f32",
+            "add_f32",
+            "add_into_f32",
+            "copy_f32",
+            "axpy_slot",
+            "scale_rows_f32",
+            "rms_rows",
+            "l2_rows",
+            "rope_rows",
+            "causal_conv",
+            "dilated_conv",
+            "repeat_rows",
+            "residual_write",
+            "branch_mean",
+            "gdn_alpha",
+            "ple_gate",
+            "gate_broadcast",
+            "split_q",
+            "sigmoid_mul",
+            "topk_softmax",
+            "argmax_partial",
+            "argmax_final",
+            "cast_f16_pad",
+            "cast_prefill",
+            "compact_rows",
+            "embed_gather",
+            "dequant_ngram",
+            "broadcast_rows",
+            "sample_f32",
+        )
+        self.act = {name: self._pipeline(library, name) for name in act_names}
+        self._argmax_peaks = self.alloc(1024 * 4)
+        self._argmax_index = self.alloc(1024 * 4)
+        self._argmax_out = self.alloc(4)
+        self._topk_probs = self.alloc(512 * 4)
+        self._sample_scratch = None
         self.activation = self.alloc(10240 * 2)
         self.f32_activation = self.alloc(10240 * 4)
         self.destination = self.alloc(248320 * 4)
@@ -1678,6 +2545,7 @@ class MetalSession:
             (struct.pack("<I", matrix.rows), struct.pack("<I", matrix.stored_inner)),
             self.metal.MTLSize(matrix.rows, 1, 1),
             self.metal.MTLSize(32, 1, 1),
+            (0, matrix.weight_off, matrix.scale_off, 0),
         )
         raw = _buffer_bytes(self.destination, matrix.rows * 4)
         return np.frombuffer(raw, dtype=np.float32).copy()
@@ -1723,6 +2591,7 @@ class MetalSession:
             (struct.pack("<I", matrix.rows), struct.pack("<I", matrix.inner)),
             self.metal.MTLSize(matrix.rows, 1, 1),
             self.metal.MTLSize(32, 1, 1),
+            (0, matrix.weight_off, 0),
         )
         raw = _buffer_bytes(self.destination, matrix.rows * 4)
         return np.frombuffer(raw, dtype=np.float32).copy()
@@ -1798,21 +2667,733 @@ class MetalSession:
         constants: tuple[bytes, ...],
         groups: Any,
         threads: Any,
+        buffer_offsets: tuple[int, ...] | None = None,
     ) -> None:
+        self.flush()
+        started = time.perf_counter()
         command = self.queue.commandBuffer()
         encoder = command.computeCommandEncoder()
         encoder.setComputePipelineState_(pipeline)
+        offsets = buffer_offsets or ((0,) * len(buffers))
         for index, buffer in enumerate(buffers):
-            encoder.setBuffer_offset_atIndex_(buffer, 0, index)
+            encoder.setBuffer_offset_atIndex_(buffer, offsets[index], index)
         for offset, blob in enumerate(constants):
             encoder.setBytes_length_atIndex_(blob, len(blob), len(buffers) + offset)
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(groups, threads)
         encoder.endEncoding()
         command.commit()
         command.waitUntilCompleted()
+        self.launch_count += 1
+        self.command_count += 1
+        self.encode_seconds += time.perf_counter() - started
+        gpu_start = float(command.GPUStartTime())
+        gpu_end = float(command.GPUEndTime())
+        if gpu_end > gpu_start:
+            self.gpu_seconds += gpu_end - gpu_start
         if int(command.status()) != 4:
             message = f"Metal command status {command.status()} {command.error()}"
             raise RuntimeError(message)
+
+    def _size(self, width: int, height: int = 1, depth: int = 1) -> Any:
+        return self.metal.MTLSize(width, height, depth)
+
+    def dispatch(
+        self,
+        pipeline: Any,
+        bindings: Sequence[tuple[Any, int]],
+        constants: Sequence[bytes],
+        groups: Any,
+        threads: Any,
+    ) -> None:
+        if self._command is None:
+            self._command = self.queue.commandBuffer()
+            self._batch_launches = 0
+        if self._encoder is None:
+            self._encoder = self._command.computeCommandEncoder()
+        encoder = self._encoder
+        encoder.setComputePipelineState_(pipeline)
+        for index, (buffer, offset) in enumerate(bindings):
+            encoder.setBuffer_offset_atIndex_(buffer, int(offset), index)
+        base = len(bindings)
+        for index, blob in enumerate(constants):
+            self._held_constants.append(blob)
+            encoder.setBytes_length_atIndex_(blob, len(blob), base + index)
+        encoder.dispatchThreadgroups_threadsPerThreadgroup_(groups, threads)
+        self._batch_launches += 1
+
+    def flush(self) -> None:
+        if self._encoder is not None:
+            self._encoder.endEncoding()
+            self._encoder = None
+        if self._command is None:
+            return
+        started = time.perf_counter()
+        command = self._command
+        command.commit()
+        command.waitUntilCompleted()
+        self.launch_count += self._batch_launches
+        self.command_count += 1
+        self._batch_launches = 0
+        self.encode_seconds += time.perf_counter() - started
+        gpu_start = float(command.GPUStartTime())
+        gpu_end = float(command.GPUEndTime())
+        if gpu_end > gpu_start:
+            self.gpu_seconds += gpu_end - gpu_start
+        self._command = None
+        self._retain.clear()
+        self._held_constants.clear()
+        pending = self._io_pending
+        self._io_pending = []
+        if int(command.status()) != 4:
+            message = f"Metal command status {command.status()} {command.error()}"
+            raise RuntimeError(message)
+        for io_command in pending:
+            if int(io_command.status()) != 3:
+                message = f"Metal IO status {io_command.status()} {io_command.error()}"
+                raise RuntimeError(message)
+
+    def tmp(self, n: int) -> Dev:
+        buf = self.alloc(n * 4)
+        self._retain.append(buf)
+        return Dev(buf, n)
+
+    def dev_from(self, array: np.ndarray) -> Dev:
+        flat = np.ascontiguousarray(array, dtype=np.float32).reshape(-1)
+        buf = self.upload(flat.tobytes())
+        self._retain.append(buf)
+        return Dev(buf, int(flat.size))
+
+    def dev_u32(self, values: Sequence[int]) -> Dev:
+        raw = np.asarray(list(values), dtype=np.uint32)
+        buf = self.upload(raw.tobytes())
+        self._retain.append(buf)
+        return Dev(buf, int(raw.size))
+
+    def read_f32(self, src: Dev) -> np.ndarray:
+        self.flush()
+        nbytes = (src.offset + src.n) * 4
+        raw = _buffer_bytes(src.buf, nbytes)
+        return np.frombuffer(raw, dtype=np.float32, count=src.n, offset=src.offset * 4).copy()
+
+    def read_u32(self, src: Dev) -> np.ndarray:
+        self.flush()
+        nbytes = (src.offset + src.n) * 4
+        raw = _buffer_bytes(src.buf, nbytes)
+        return np.frombuffer(raw, dtype=np.uint32, count=src.n, offset=src.offset * 4).copy()
+
+    def _ew(
+        self,
+        name: str,
+        bindings: Sequence[tuple[Any, int]],
+        constants: Sequence[bytes],
+        n: int,
+        width: int = 256,
+    ) -> None:
+        groups = max((n + width - 1) // width, 1)
+        self.dispatch(self.act[name], bindings, constants, self._size(groups), self._size(width))
+
+    def _unary(self, name: str, src: Dev) -> Dev:
+        dst = self.tmp(src.n)
+        self._ew(name, (_dev_bind(src), _dev_bind(dst)), (struct.pack("<I", src.n),), src.n)
+        return dst
+
+    def silu(self, src: Dev) -> Dev:
+        return self._unary("silu_f32", src)
+
+    def sigmoid(self, src: Dev) -> Dev:
+        return self._unary("sigmoid_f32", src)
+
+    def softplus(self, src: Dev) -> Dev:
+        return self._unary("softplus_f32", src)
+
+    def scale(self, src: Dev, factor: float) -> Dev:
+        dst = self.tmp(src.n)
+        self._ew(
+            "scale_f32",
+            (_dev_bind(src), _dev_bind(dst)),
+            (struct.pack("<I", src.n), struct.pack("<f", float(factor))),
+            src.n,
+        )
+        return dst
+
+    def mul(self, left: Dev, right: Dev) -> Dev:
+        if left.n != right.n:
+            message = f"mul lengths {left.n} and {right.n}"
+            raise ValueError(message)
+        dst = self.tmp(left.n)
+        self._ew(
+            "mul_f32",
+            (_dev_bind(left), _dev_bind(right), _dev_bind(dst)),
+            (struct.pack("<I", left.n),),
+            left.n,
+        )
+        return dst
+
+    def add(self, left: Dev, right: Dev) -> Dev:
+        dst = self.tmp(left.n)
+        self._ew(
+            "add_f32",
+            (_dev_bind(left), _dev_bind(right), _dev_bind(dst)),
+            (struct.pack("<I", left.n),),
+            left.n,
+        )
+        return dst
+
+    def add_into(self, dst: Dev, src: Dev) -> None:
+        self._ew(
+            "add_into_f32",
+            (_dev_bind(dst), _dev_bind(src)),
+            (struct.pack("<I", src.n),),
+            src.n,
+        )
+
+    def copy_into(self, src: Dev, dst: Dev, dst_shift: int) -> None:
+        self._ew(
+            "copy_f32",
+            (_dev_bind(src), (dst.buf, (dst.offset + dst_shift) * 4)),
+            (struct.pack("<I", src.n),),
+            src.n,
+        )
+
+    def copy_dev(self, src: Dev) -> Dev:
+        dst = self.tmp(src.n)
+        self.copy_into(src, dst, 0)
+        return dst
+
+    def copy_span(self, src: Dev, src_shift: int, dst_buf: Any, dst_float: int, n: int) -> None:
+        view = src.view(src_shift, n)
+        self._ew(
+            "copy_f32",
+            (_dev_bind(view), (dst_buf, dst_float * 4)),
+            (struct.pack("<I", n),),
+            n,
+        )
+
+    def axpy(self, dst: Dev, src: Dev, scales: Dev, slot: int) -> None:
+        self._ew(
+            "axpy_slot",
+            (_dev_bind(dst), _dev_bind(src), _dev_bind(scales)),
+            (struct.pack("<I", dst.n), struct.pack("<I", slot)),
+            dst.n,
+        )
+
+    def scale_rows(self, values: Dev, scales: Dev, count: int, cols: int) -> Dev:
+        dst = self.tmp(count * cols)
+        self._ew(
+            "scale_rows_f32",
+            (_dev_bind(values), _dev_bind(scales), _dev_bind(dst)),
+            (struct.pack("<I", count), struct.pack("<I", cols)),
+            count * cols,
+        )
+        return dst
+
+    def rms(
+        self,
+        src: Dev,
+        weight: Any,
+        weight_byte: int,
+        cols: int,
+        rows: int,
+        eps: float,
+        zero_centered: bool,
+        weight_rows: int,
+    ) -> Dev:
+        dst = self.tmp(rows * cols)
+        centered = 1 if zero_centered else 0
+        self.dispatch(
+            self.act["rms_rows"],
+            (_dev_bind(src), (weight, weight_byte), _dev_bind(dst)),
+            (
+                struct.pack("<I", cols),
+                struct.pack("<f", float(eps)),
+                struct.pack("<I", centered),
+                struct.pack("<I", weight_rows),
+            ),
+            self._size(rows),
+            self._size(32),
+        )
+        return dst
+
+    def l2(self, src: Dev, rows: int, cols: int, eps: float) -> Dev:
+        dst = self.tmp(rows * cols)
+        self.dispatch(
+            self.act["l2_rows"],
+            (_dev_bind(src), _dev_bind(dst)),
+            (struct.pack("<I", cols), struct.pack("<f", float(eps))),
+            self._size(rows),
+            self._size(32),
+        )
+        return dst
+
+    def rope(
+        self, src: Dev, rows: int, cols: int, rotary: int, position: int, theta: float
+    ) -> Dev:
+        dst = self.tmp(rows * cols)
+        self._ew(
+            "rope_rows",
+            (_dev_bind(src), _dev_bind(dst)),
+            (
+                struct.pack("<I", cols),
+                struct.pack("<I", rotary),
+                struct.pack("<I", position),
+                struct.pack("<f", float(theta)),
+                struct.pack("<I", rows),
+            ),
+            rows * cols,
+        )
+        return dst
+
+    def causal_conv(
+        self,
+        history: Any,
+        current: Dev,
+        weight: Any,
+        weight_byte: int,
+        channels: int,
+        kernel: int,
+    ) -> Dev:
+        dst = self.tmp(channels)
+        self._ew(
+            "causal_conv",
+            ((history, 0), _dev_bind(current), (weight, weight_byte), _dev_bind(dst)),
+            (struct.pack("<I", channels), struct.pack("<I", kernel)),
+            channels,
+        )
+        return dst
+
+    def dilated_conv(
+        self,
+        history: Any,
+        current: Dev,
+        weight: Any,
+        weight_byte: int,
+        channels: int,
+        kernel: int,
+        dilation: int,
+    ) -> Dev:
+        dst = self.tmp(channels)
+        self._ew(
+            "dilated_conv",
+            ((history, 0), _dev_bind(current), (weight, weight_byte), _dev_bind(dst)),
+            (
+                struct.pack("<I", channels),
+                struct.pack("<I", kernel),
+                struct.pack("<I", dilation),
+            ),
+            channels,
+        )
+        return dst
+
+    def repeat_rows(self, src: Dev, rows: int, cols: int, times: int) -> Dev:
+        total = rows * times * cols
+        dst = self.tmp(total)
+        self._ew(
+            "repeat_rows",
+            (_dev_bind(src), _dev_bind(dst)),
+            (struct.pack("<I", rows), struct.pack("<I", cols), struct.pack("<I", times)),
+            total,
+        )
+        return dst
+
+    def residual_write(
+        self, residual: Dev, scales: Dev, mixed: Dev, count: int, branches: int, hidden: int
+    ) -> None:
+        self._ew(
+            "residual_write",
+            (_dev_bind(residual), _dev_bind(scales), _dev_bind(mixed)),
+            (struct.pack("<I", count), struct.pack("<I", branches), struct.pack("<I", hidden)),
+            count * branches * hidden,
+        )
+
+    def branch_mean(self, gate: Dev, hats: Dev, count: int, branches: int, hidden: int) -> Dev:
+        dst = self.tmp(count * hidden)
+        self._ew(
+            "branch_mean",
+            (_dev_bind(gate), _dev_bind(hats), _dev_bind(dst)),
+            (struct.pack("<I", count), struct.pack("<I", branches), struct.pack("<I", hidden)),
+            count * hidden,
+        )
+        return dst
+
+    def gdn_alpha(self, raw: Dev, dt_bias: Any, dt_byte: int, a_log: Any, a_byte: int) -> Dev:
+        dst = self.tmp(raw.n)
+        self._ew(
+            "gdn_alpha",
+            (_dev_bind(raw), (dt_bias, dt_byte), (a_log, a_byte), _dev_bind(dst)),
+            (struct.pack("<I", raw.n),),
+            raw.n,
+        )
+        return dst
+
+    def ple_gate(self, query: Dev, keyed: Dev, cols: int, rows: int) -> Dev:
+        dst = self.tmp(rows)
+        self.dispatch(
+            self.act["ple_gate"],
+            (_dev_bind(query), _dev_bind(keyed), _dev_bind(dst)),
+            (struct.pack("<I", cols), struct.pack("<f", 1.0 / math.sqrt(cols))),
+            self._size(rows),
+            self._size(32),
+        )
+        return dst
+
+    def gate_broadcast(self, gate: Dev, value: Dev, branches: int, hidden: int) -> Dev:
+        dst = self.tmp(branches * hidden)
+        self._ew(
+            "gate_broadcast",
+            (_dev_bind(gate), _dev_bind(value), _dev_bind(dst)),
+            (struct.pack("<I", branches), struct.pack("<I", hidden)),
+            branches * hidden,
+        )
+        return dst
+
+    def split_q(self, packed: Dev, heads: int = 24, dim: int = 256) -> tuple[Dev, Dev]:
+        query = self.tmp(heads * dim)
+        gate = self.tmp(heads * dim)
+        self._ew(
+            "split_q",
+            (_dev_bind(packed), _dev_bind(query), _dev_bind(gate)),
+            (struct.pack("<I", heads), struct.pack("<I", dim)),
+            heads * dim,
+        )
+        return query, gate
+
+    def sigmoid_mul(self, left: Dev, gate: Dev) -> Dev:
+        dst = self.tmp(left.n)
+        self._ew(
+            "sigmoid_mul",
+            (_dev_bind(left), _dev_bind(gate), _dev_bind(dst)),
+            (struct.pack("<I", left.n),),
+            left.n,
+        )
+        return dst
+
+    def topk(self, logits: Dev, n: int, k: int) -> tuple[Dev, Dev]:
+        if n > 512:
+            message = f"router width {n} exceeds the top-k shader"
+            raise ValueError(message)
+        index = self.tmp(k)
+        weight = self.tmp(k)
+        self.dispatch(
+            self.act["topk_softmax"],
+            (_dev_bind(logits), _dev_bind(index), _dev_bind(weight), (self._topk_probs, 0)),
+            (struct.pack("<I", n), struct.pack("<I", k)),
+            self._size(1),
+            self._size(1),
+        )
+        return index, weight
+
+    def argmax(self, logits: Dev) -> int:
+        grid = 1024
+        self.dispatch(
+            self.act["argmax_partial"],
+            (_dev_bind(logits), (self._argmax_peaks, 0), (self._argmax_index, 0)),
+            (struct.pack("<I", logits.n), struct.pack("<I", grid)),
+            self._size(grid // 256),
+            self._size(256),
+        )
+        self.dispatch(
+            self.act["argmax_final"],
+            ((self._argmax_peaks, 0), (self._argmax_index, 0), (self._argmax_out, 0)),
+            (struct.pack("<I", grid),),
+            self._size(1),
+            self._size(1),
+        )
+        self.flush()
+        raw = _buffer_bytes(self._argmax_out, 4)
+        return int(np.frombuffer(raw, dtype=np.uint32)[0])
+
+    def sample(self, logits: Dev, temperature: float, top_p: float, top_k: int, rng: Any) -> int:
+        if temperature <= 0.0:
+            return self.argmax(logits)
+        if self._sample_scratch is None or self._sample_scratch.length() < logits.n * 4:
+            self._sample_scratch = self.alloc(logits.n * 4)
+        uniform = float(rng.random())
+        self.dispatch(
+            self.act["sample_f32"],
+            (_dev_bind(logits), (self._sample_scratch, 0), (self._argmax_out, 0)),
+            (
+                struct.pack("<I", logits.n),
+                struct.pack("<f", float(temperature)),
+                struct.pack("<f", float(top_p)),
+                struct.pack("<I", int(top_k)),
+                struct.pack("<f", uniform),
+            ),
+            self._size(1),
+            self._size(1),
+        )
+        self.flush()
+        raw = _buffer_bytes(self._argmax_out, 4)
+        return int(np.frombuffer(raw, dtype=np.uint32)[0])
+
+    def _cast_half(self, src: Dev, logical: int, stored: int) -> Any:
+        half = self.alloc(stored * 2)
+        self._retain.append(half)
+        self._ew(
+            "cast_f16_pad",
+            (_dev_bind(src), (half, 0)),
+            (struct.pack("<I", logical), struct.pack("<I", stored)),
+            stored,
+        )
+        return half
+
+    def gemv_into(self, matrix: Any, src: Dev, dst: Dev, dst_row: int) -> None:
+        if src.n != matrix.inner:
+            message = f"gemv source {src.n} does not match inner {matrix.inner}"
+            raise ValueError(message)
+        rows = int(matrix.rows)
+        dst_off = (dst.offset + dst_row * rows) * 4
+        if isinstance(matrix, F32Matrix):
+            self.dispatch(
+                self.f32_pipe,
+                (_dev_bind(src), (matrix.weights, 0), (dst.buf, dst_off)),
+                (struct.pack("<I", rows), struct.pack("<I", matrix.inner)),
+                self._size(rows),
+                self._size(32),
+            )
+            return
+        if isinstance(matrix, F16Matrix):
+            half = self._cast_half(src, matrix.inner, matrix.inner)
+            self.dispatch(
+                self.f16_pipe,
+                ((half, 0), (matrix.weights, matrix.weight_off), (dst.buf, dst_off)),
+                (struct.pack("<I", rows), struct.pack("<I", matrix.inner)),
+                self._size(rows),
+                self._size(32),
+            )
+            return
+        half = self._cast_half(src, matrix.inner, matrix.stored_inner)
+        self.dispatch(
+            self.gemm.decode,
+            (
+                (half, 0),
+                (matrix.weights, matrix.weight_off),
+                (matrix.scales, matrix.scale_off),
+                (dst.buf, dst_off),
+            ),
+            (struct.pack("<I", rows), struct.pack("<I", matrix.stored_inner)),
+            self._size(rows),
+            self._size(32),
+        )
+
+    def linear(self, matrix: Any, src: Dev, count: int, inner: int) -> Dev:
+        if src.n != count * inner:
+            message = f"linear source {src.n} is not {count} by {inner}"
+            raise ValueError(message)
+        gemm = (
+            count > 1
+            and isinstance(matrix, Int4Matrix)
+            and matrix.rows % 32 == 0
+            and matrix.inner == inner
+        )
+        if not gemm:
+            dst = self.tmp(count * int(matrix.rows))
+            for index in range(count):
+                self.gemv_into(matrix, src.view(index * inner, inner), dst, index)
+            return dst
+        return self._gemm_int4(matrix, src, count, inner)
+
+    def _gemm_int4(self, matrix: Int4Matrix, src: Dev, count: int, inner: int) -> Dev:
+        padded = ((count + 63) // 64) * 64
+        stored = matrix.stored_inner
+        cols = matrix.rows
+        act = self.alloc(padded * stored * 2)
+        self._retain.append(act)
+        wide = self.tmp(padded * cols)
+        _fill_buffer(wide.buf, padded * cols * 4, 0)
+        self._ew(
+            "cast_prefill",
+            (_dev_bind(src), (act, 0)),
+            (
+                struct.pack("<I", count),
+                struct.pack("<I", inner),
+                struct.pack("<I", padded),
+                struct.pack("<I", stored),
+            ),
+            padded * stored,
+        )
+        self.dispatch(
+            self.gemm.prefill,
+            (
+                (act, 0),
+                (matrix.weights, matrix.weight_off),
+                (matrix.scales, matrix.scale_off),
+                _dev_bind(wide),
+            ),
+            (
+                struct.pack("<I", padded),
+                struct.pack("<I", cols),
+                struct.pack("<I", stored),
+            ),
+            self._size(cols // 32, padded // 64, 1),
+            self._size(32 * 4, 1, 1),
+        )
+        packed = self.tmp(count * matrix.rows)
+        self._ew(
+            "compact_rows",
+            (_dev_bind(wide), _dev_bind(packed)),
+            (
+                struct.pack("<I", count),
+                struct.pack("<I", matrix.rows),
+                struct.pack("<I", cols),
+            ),
+            count * matrix.rows,
+        )
+        return packed
+
+    def gdn_dev(
+        self, state: Any, query: Dev, key: Dev, value: Dev, alpha: Dev, beta: Dev
+    ) -> Dev:
+        dst = self.tmp(48 * 128)
+        self.dispatch(
+            self.gdn_pipe,
+            (
+                (state, 0),
+                _dev_bind(query),
+                _dev_bind(key),
+                _dev_bind(value),
+                _dev_bind(alpha),
+                _dev_bind(beta),
+                _dev_bind(dst),
+            ),
+            (),
+            self._size(48),
+            self._size(128),
+        )
+        return dst
+
+    def attend_dev(self, query: Dev, key_buf: Any, value_buf: Any, tokens: int) -> Dev:
+        scores = self.alloc(24 * tokens * 4)
+        self._retain.append(scores)
+        dst = self.tmp(24 * 256)
+        self.dispatch(
+            self.attend_pipe,
+            (
+                _dev_bind(query),
+                (key_buf, 0),
+                (value_buf, 0),
+                (scores, 0),
+                _dev_bind(dst),
+            ),
+            (
+                struct.pack("<I", tokens),
+                struct.pack("<I", 2),
+                struct.pack("<I", 256),
+                struct.pack("<f", 1.0 / math.sqrt(256.0)),
+            ),
+            self._size(24),
+            self._size(32),
+        )
+        return dst
+
+    def broadcast(self, src: Dev, dst: Dev, dst_shift: int, rows: int, cols: int) -> None:
+        self._ew(
+            "broadcast_rows",
+            (_dev_bind(src), (dst.buf, (dst.offset + dst_shift) * 4)),
+            (struct.pack("<I", cols), struct.pack("<I", rows)),
+            cols,
+        )
+
+    def embed_gather(
+        self,
+        image: Any,
+        image_off: int,
+        tokens: Dev,
+        dst: Dev,
+        count: int,
+        logical: int,
+        data_row: int,
+        scale_row: int,
+        data_base: int,
+        branches: int,
+    ) -> None:
+        self._ew(
+            "embed_gather",
+            ((image, image_off), _dev_bind(tokens), _dev_bind(dst)),
+            (
+                struct.pack("<I", count),
+                struct.pack("<I", logical),
+                struct.pack("<I", data_row),
+                struct.pack("<I", scale_row),
+                struct.pack("<I", data_base),
+                struct.pack("<I", branches),
+            ),
+            count * logical,
+        )
+
+    def ensure_io(self) -> None:
+        if self._io is not None:
+            return
+        desc = self.metal.MTLIOCommandQueueDescriptor.alloc().init()
+        queue, error = _objc_pair(self.device.newIOCommandQueueWithDescriptor_error_(desc, None))
+        if queue is None:
+            message = f"Metal IO queue failed: {error}"
+            raise RuntimeError(message)
+        self._io = queue
+        self._event = self.device.newSharedEvent()
+
+    def io_read(
+        self,
+        handle: Any,
+        loads: Sequence[tuple[Any, int, int, int]],
+        *,
+        gpu_wait: bool = False,
+    ) -> None:
+        """Load file ranges straight into buffers. ``loads`` is dest, dest byte, size, source."""
+        self.ensure_io()
+        started = time.perf_counter()
+        command = self._io.commandBuffer()
+        issued = 0
+        for buffer, dest_off, size, src_off in loads:
+            # One load above 256MB returns MTLIOStatusError on this GPU.
+            offset = 0
+            while offset < size:
+                take = min(IO_CHUNK, size - offset)
+                command.loadBuffer_offset_size_sourceHandle_sourceHandleOffset_(
+                    buffer, dest_off + offset, take, handle, src_off + offset
+                )
+                offset += take
+                issued += 1
+        self._event_value += 1
+        command.signalEvent_value_(self._event, self._event_value)
+        command.commit()
+        self.io_loads += issued
+        if gpu_wait:
+            self._io_pending.append(command)
+            self._compute_waits_for(self._event_value)
+            self.io_seconds += time.perf_counter() - started
+            return
+        command.waitUntilCompleted()
+        self.io_seconds += time.perf_counter() - started
+        # MTLIOStatusComplete is 3. It is not MTLCommandBufferStatusCompleted.
+        if int(command.status()) != 3:
+            message = f"Metal IO status {command.status()} {command.error()}"
+            raise RuntimeError(message)
+
+    def _compute_waits_for(self, value: int) -> None:
+        if self._encoder is not None:
+            self._encoder.endEncoding()
+            self._encoder = None
+        if self._command is None:
+            self._command = self.queue.commandBuffer()
+            self._batch_launches = 0
+        self._command.encodeWaitForEvent_value_(self._event, value)
+
+    def ngram_dequant(self, handle: Any, rows: Sequence[int]) -> Dev:
+        raw = self.alloc(len(rows) * NGRAM_SLOT)
+        self._retain.append(raw)
+        loads = [
+            (raw, index * NGRAM_SLOT, NGRAM_SLOT, int(row) * NGRAM_SLOT)
+            for index, row in enumerate(rows)
+        ]
+        self.io_read(handle, loads, gpu_wait=True)
+        dst = self.tmp(len(rows) * NGRAM_WIDTH)
+        self._ew(
+            "dequant_ngram",
+            ((raw, 0), _dev_bind(dst)),
+            (struct.pack("<I", NGRAM_WIDTH), struct.pack("<I", NGRAM_SLOT)),
+            len(rows) * NGRAM_WIDTH,
+        )
+        return dst
 
 
 def check_state_kernels() -> None:
@@ -2005,6 +3586,97 @@ def _dilated_conv(
     history.append(np.array(current, copy=True))
     del history[:-span]
     return mixed
+
+
+def _close(name: str, got: np.ndarray, expect: np.ndarray) -> None:
+    if np.allclose(got, expect, rtol=1e-4, atol=1e-4):
+        return
+    delta = float(np.max(np.abs(got.astype(np.float64) - expect.astype(np.float64))))
+    message = f"{name} shader diverged by {delta}"
+    raise RuntimeError(message)
+
+
+def check_act_kernels() -> None:
+    """Elementwise and reduction shaders match the host formulas on one draw."""
+    gpu = MetalSession()
+    rng = np.random.default_rng(1)
+    values = rng.normal(size=128).astype(np.float32)
+    src = gpu.dev_from(values)
+    _close("silu", gpu.read_f32(gpu.silu(src)), _silu(values))
+    _close("sigmoid", gpu.read_f32(gpu.sigmoid(src)), _sigmoid(values))
+    _close("softplus", gpu.read_f32(gpu.softplus(src)), _softplus(values))
+    _close("scale", gpu.read_f32(gpu.scale(src, 0.25)), values * np.float32(0.25))
+    other = rng.normal(size=128).astype(np.float32)
+    _close("mul", gpu.read_f32(gpu.mul(src, gpu.dev_from(other))), values * other)
+    rows, cols = 4, 32
+    matrix = rng.normal(size=(rows, cols)).astype(np.float32)
+    gain = rng.normal(size=(rows, cols)).astype(np.float32)
+    weight = gpu.upload(np.ascontiguousarray(gain).tobytes())
+    got = gpu.rms(gpu.dev_from(matrix), weight, 0, cols, rows, 1e-6, True, rows)
+    _close("rms", gpu.read_f32(got).reshape(rows, cols), _rms(matrix, gain, 1e-6))
+    shared = rng.normal(size=cols).astype(np.float32)
+    shared_buf = gpu.upload(shared.tobytes())
+    got = gpu.rms(gpu.dev_from(matrix), shared_buf, 0, cols, rows, 1e-6, False, 0)
+    flat = _rms(matrix, shared, 1e-6, zero_centered=False)
+    _close("rms-gain", gpu.read_f32(got).reshape(rows, cols), flat)
+    heads = rng.normal(size=(16, 8)).astype(np.float32)
+    got = gpu.l2(gpu.dev_from(heads), 16, 8, 1e-6)
+    _close("l2", gpu.read_f32(got).reshape(16, 8), _l2norm(heads, 1e-6))
+    spun = rng.normal(size=(2, 16)).astype(np.float32)
+    got = gpu.rope(gpu.dev_from(spun), 2, 16, 8, 3, 1.0e4)
+    _close("rope", gpu.read_f32(got).reshape(2, 16), _rope(spun, 3, 8, 1.0e4))
+    channels, taps = 8, 4
+    conv_w = rng.normal(size=(channels, taps)).astype(np.float32)
+    conv_buf = gpu.upload(np.ascontiguousarray(conv_w).tobytes())
+    history = gpu.zeros((taps - 1) * channels * 4)
+    host_hist: list[np.ndarray] = []
+    for _ in range(3):
+        current = rng.normal(size=channels).astype(np.float32)
+        expect = _causal_conv(host_hist, current, conv_w)
+        got = gpu.causal_conv(history, gpu.dev_from(current), conv_buf, 0, channels, taps)
+        _close("conv", gpu.read_f32(got), expect)
+    dilate = 3
+    span = (taps - 1) * dilate
+    dilate_hist = gpu.zeros(span * channels * 4)
+    host_dilate: list[np.ndarray] = []
+    for _ in range(4):
+        current = rng.normal(size=channels).astype(np.float32)
+        expect = _dilated_conv(host_dilate, current, conv_w, dilate)
+        got = gpu.dilated_conv(
+            dilate_hist, gpu.dev_from(current), conv_buf, 0, channels, taps, dilate
+        )
+        _close("dilated", gpu.read_f32(got), expect)
+    logits = np.arange(64, dtype=np.float32)
+    index, chosen = gpu.topk(gpu.dev_from(logits), 64, 4)
+    ids = gpu.read_u32(index)
+    weights = gpu.read_f32(chosen)
+    shifted = logits - np.max(logits)
+    probs = np.exp(shifted)
+    probs /= probs.sum()
+    order = np.argsort(probs)[::-1][:4]
+    if not np.array_equal(ids, order.astype(np.uint32)):
+        message = f"top-k ids {ids} expected {order}"
+        raise RuntimeError(message)
+    _close("top-k", weights, (probs[order] / probs[order].sum()).astype(np.float32))
+    wide = rng.normal(size=1000).astype(np.float32)
+    if gpu.argmax(gpu.dev_from(wide)) != int(np.argmax(wide)):
+        message = "argmax shader diverged"
+        raise RuntimeError(message)
+    gate = rng.normal(size=(2, 4, 8)).astype(np.float32)
+    hats = rng.normal(size=(2, 4, 8)).astype(np.float32)
+    got = gpu.branch_mean(gpu.dev_from(gate), gpu.dev_from(hats), 2, 4, 8)
+    _close("mean", gpu.read_f32(got), np.mean(gate * hats, axis=1).reshape(-1))
+    weight_m = rng.normal(size=(32, 64)).astype(np.float32)
+    packed, scales = quantize_matrix(weight_m)
+    loaded = gpu.load_int4(packed + scales, 32, 64, 64)
+    vector = rng.normal(size=64).astype(np.float32)
+    expect = gpu.int4(loaded, vector)
+    got = gpu.linear(loaded, gpu.dev_from(vector), 1, 64)
+    _close("gemv", gpu.read_f32(got), expect)
+    batch = rng.normal(size=(2, 64)).astype(np.float32)
+    expect = gpu.int4_rows(loaded, batch)
+    got = gpu.linear(loaded, gpu.dev_from(batch), 2, 64)
+    _close("gemm", gpu.read_f32(got), expect.reshape(-1))
 
 
 class ShardStore:
@@ -2609,7 +4281,6 @@ class QuantRecord:
         if self.manifest.get("version") != RECORD_VERSION or not self.manifest.get("complete"):
             message = f"quantized record is incomplete: {root}"
             raise RuntimeError(message)
-        self.resident_fd = os.open(root / "resident.bin", os.O_RDONLY)
         self.expert_fds = [
             os.open(root / "experts" / f"{layer:02d}.bin", os.O_RDONLY)
             for layer in range(int(self.manifest["layers"]))
@@ -2625,12 +4296,26 @@ class QuantRecord:
         self.pages: dict[int, bytes] = {}
         self.gate_up_bytes = sum(int4_plane_sizes(1280, stored_k_int4(2560, align_k=True)))
 
-    def read_resident(self, offset: int, nbytes: int) -> bytes:
-        blob = os.pread(self.resident_fd, nbytes, offset)
-        if len(blob) != nbytes:
-            message = f"resident read at {offset} returned {len(blob)} of {nbytes}"
-            raise OSError(message)
-        return blob
+    def open_io(self, gpu: MetalSession) -> None:
+        """File handles for loads that land in the buffer a shader reads."""
+        import Foundation
+
+        gpu.ensure_io()
+
+        def handle(path: Path) -> Any:
+            url = Foundation.NSURL.fileURLWithPath_(str(path))
+            opened = gpu.device.newUncachedIOHandleWithURL_error_(url, None)
+            if opened is None:
+                message = f"Metal IO handle failed for {path.name}"
+                raise RuntimeError(message)
+            return opened
+
+        self.resident_io = handle(self.root / "resident.bin")
+        self.ngram_io = handle(self.root / "ngram.bin")
+        self.expert_io = [
+            handle(self.root / "experts" / f"{layer:02d}.bin")
+            for layer in range(int(self.manifest["layers"]))
+        ]
 
     def expert_image(self, layer: int, expert: int) -> bytes:
         view = pread_exact(
@@ -2702,10 +4387,12 @@ class Qwen38Runtime:
         self.f32: dict[str, np.ndarray] = {}
         self.i64: dict[str, np.ndarray] = {}
         self._embed_meta: dict[str, int] = {}
-        self._embed_image = b""
+        self._resident: Any = None
+        self._f32_meta: dict[str, dict[str, Any]] = {}
+        self._f32_uploaded: dict[str, Any] = {}
         self.expert_cache: dict[tuple[int, int], tuple[Int4Matrix, Int4Matrix]] = {}
         self.tokens: list[int] = []
-        self.last_logits: np.ndarray | None = None
+        self.last_logits: Dev | None = None
         self._decode_tokens = 0
         self._decode_seconds = 0.0
         self.rng = np.random.default_rng()
@@ -2714,12 +4401,20 @@ class Qwen38Runtime:
             for index, kind in enumerate(self.kinds)
             if kind == "linear_attention"
         }
-        self.conv_hist: dict[int, list[np.ndarray]] = {index: [] for index in self.gdn_state}
-        self.ple_hist: list[np.ndarray] = []
-        self.kv: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {
-            index: [] for index, kind in enumerate(self.kinds) if kind == "full_attention"
+        self._conv_bytes = 3 * 10240 * 4
+        self.conv_hist = {
+            index: self.gpu.zeros(self._conv_bytes) for index in self.gdn_state
         }
-        self.indexer_k: dict[int, list[np.ndarray]] = {index: [] for index in self.kv}
+        self._ple_span = (4 - 1) * self.ngram_size
+        self._ple_bytes = self._ple_span * 10240 * 4
+        self.ple_hist = self.gpu.zeros(self._ple_bytes)
+        attention = [
+            index for index, kind in enumerate(self.kinds) if kind == "full_attention"
+        ]
+        self.kv_len = dict.fromkeys(attention, 0)
+        self.kv_k = {index: self.gpu.alloc(512 * 4) for index in attention}
+        self.kv_v = {index: self.gpu.alloc(512 * 4) for index in attention}
+        self.indexer_buf = {index: self.gpu.alloc(128 * 4) for index in attention}
         self._bundle: dict[int, dict[str, Any]] = {}
         self._final: dict[str, Any] | None = None
         self._head: Int4Matrix | None = None
@@ -2759,12 +4454,10 @@ class Qwen38Runtime:
         for buffer in self.gdn_state.values():
             _fill_buffer(buffer, 48 * 128 * 128 * 4, 0)
         for history in self.conv_hist.values():
-            history.clear()
-        self.ple_hist.clear()
-        for cache in self.kv.values():
-            cache.clear()
-        for cache in self.indexer_k.values():
-            cache.clear()
+            _fill_buffer(history, self._conv_bytes, 0)
+        _fill_buffer(self.ple_hist, self._ple_bytes, 0)
+        for index in self.kv_len:
+            self.kv_len[index] = 0
 
     def align(self, prompt: list[int]) -> int:
         if prompt[: len(self.tokens)] != self.tokens:
@@ -2797,7 +4490,7 @@ class Qwen38Runtime:
 
     def _new_tokens(
         self,
-        logits: np.ndarray,
+        logits: Any,
         max_tokens: int,
         temperature: float,
         top_p: float,
@@ -2806,7 +4499,7 @@ class Qwen38Runtime:
         self._decode_tokens = 0
         self._decode_seconds = 0.0
         for _ in range(max_tokens):
-            token = _sample(logits, temperature, top_p, top_k, self.rng)
+            token = self._pick(logits, temperature, top_p, top_k)
             if token in self.stop_ids:
                 break
             yield token
@@ -2815,56 +4508,49 @@ class Qwen38Runtime:
     def _log_decode(self) -> None:
         _log(_tok_s("decode", self._decode_tokens, self._decode_seconds))
 
-    def forward(self, tokens: list[int], *, decode: bool = False) -> np.ndarray:
+    def _pick(self, logits: Any, temperature: float, top_p: float, top_k: int) -> int:
+        if isinstance(logits, Dev):
+            return self.gpu.sample(logits, temperature, top_p, top_k, self.rng)
+        return _sample(logits, temperature, top_p, top_k, self.rng)
+
+    def forward(self, tokens: list[int], *, decode: bool = False) -> Dev:
         started = time.perf_counter()
-        residuals = [self._embed(token) for token in tokens]
         count = len(tokens)
+        residual = self._embed_dev(tokens)
         for layer in range(self.layers):
-            # Command buffers retain the expert weights they read. Drain the
-            # pool after the layer drops those weights, or a long BF16 decode
-            # keeps every expert from the prompt resident.
+            # Objective-C objects from encoding this layer. The command buffer
+            # stays open until the next expert-id read.
             with objc.autorelease_pool():
                 if (layer + 1) in self.ple_layers:
-                    for index, token_residual in enumerate(residuals):
-                        history = self.tokens + tokens[: index + 1]
-                        memory = self._ple_memory(token_residual, history)
-                        residuals[index] = token_residual + memory
+                    self._ple_dev(residual, tokens, count)
                 bundle = self._layer(layer)
-                hats = np.stack(
-                    [_rms(item, bundle["attn_norm"], self.eps) for item in residuals]
-                )
-                xs = self._gr_read(bundle["attn_down"], bundle["attn_up"], hats)
+                hats = self._rms_branches(residual, bundle["attn_norm"], count)
+                xs = self._gr_dev(bundle["attn_down"], bundle["attn_up"], hats, count)
                 if self.kinds[layer] == "linear_attention":
-                    mixed = self._gdn_out(layer, bundle, xs)
+                    mixed = self._gdn_dev(layer, bundle, xs, count)
                 elif self.kinds[layer] == "full_attention":
-                    mixed = self._qsa_out(layer, bundle, xs)
+                    mixed = self._qsa_dev(layer, bundle, xs, count)
                 else:
                     message = f"unknown layer type {self.kinds[layer]}"
                     raise RuntimeError(message)
-                inject = self.gpu.int4_rows(bundle["attn_inject"], hats.reshape(count, -1))
-                scales = 2.0 * _sigmoid(inject * 0.25)
-                for index in range(count):
-                    residuals[index] = residuals[index] + scales[index][:, None] * mixed[index]
-                hats = np.stack(
-                    [_rms(item, bundle["mlp_norm"], self.eps) for item in residuals]
-                )
-                xs = self._gr_read(bundle["mlp_down"], bundle["mlp_up"], hats)
-                mixed = self._moe(layer, bundle, xs)
+                self._inject_dev(residual, hats, mixed, bundle["attn_inject"], count)
+                hats = self._rms_branches(residual, bundle["mlp_norm"], count)
+                xs = self._gr_dev(bundle["mlp_down"], bundle["mlp_up"], hats, count)
+                mixed = self._moe_dev(layer, bundle, xs, count)
                 if self._bf16:
                     held = len(self.expert_cache)
                     self.expert_cache.clear()
-                inject = self.gpu.int4_rows(bundle["mlp_inject"], hats.reshape(count, -1))
-                scales = 2.0 * _sigmoid(inject * 0.25)
-                for index in range(count):
-                    residuals[index] = residuals[index] + scales[index][:, None] * mixed[index]
+                self._inject_dev(residual, hats, mixed, bundle["mlp_inject"], count)
                 if self._bf16:
                     _log(f"layer {layer} stepped {count} experts {held}")
         final = self._final_bundle()
-        hat = _rms(residuals[-1], final["norm"], self.eps)[None, ...]
-        hidden = self._gr_read(final["down"], final["up"], hat)[0]
-        logits = self.gpu.int4(self._lm_head(), hidden)
+        last = residual.view((count - 1) * self.branches * self.hidden, self.branches * self.hidden)
+        hat = self._rms_branches(last, final["norm"], 1)
+        hidden = self._gr_dev(final["down"], final["up"], hat, 1)
+        logits = self.gpu.linear(self._lm_head(), hidden, 1, self.hidden)
         self.tokens.extend(tokens)
         self.last_logits = logits
+        self.gpu.flush()
         elapsed = time.perf_counter() - started
         if decode:
             self._decode_tokens += len(tokens)
@@ -2875,26 +4561,40 @@ class Qwen38Runtime:
 
     def _load_record(self) -> None:
         _log("loading quantized record")
+        if not isinstance(self.files, QuantRecord):
+            message = "quantized load has no record"
+            raise RuntimeError(message)
+        self.files.open_io(self.gpu)
         manifest = self.files.manifest
+        size = (self.files.root / "resident.bin").stat().st_size
+        self._resident = self.gpu.alloc(size)
+        self.gpu.io_read(self.files.resident_io, [(self._resident, 0, size, 0)])
         for key, meta in manifest["int4"].items():
-            image = self.files.read_resident(meta["offset"], meta["data"] + meta["scales"])
             if key == manifest["embed_key"]:
                 self._embed_meta = meta
-                self._embed_image = image
                 continue
-            self.weights[key] = self.gpu.load_int4(
-                image, meta["rows"], meta["logical_inner"], meta["stored_inner"]
+            rows = int(meta["rows"])
+            offset = int(meta["offset"])
+            self.weights[key] = Int4Matrix(
+                rows,
+                int(meta["logical_inner"]),
+                ((rows + 31) // 32) * 32,
+                self._resident,
+                self._resident,
+                int(meta["stored_inner"]),
+                offset,
+                offset + int(meta["data"]),
             )
         for key, meta in manifest["f16"].items():
-            blob = self.files.read_resident(meta["offset"], meta["rows"] * meta["inner"] * 2)
-            self.f16_weights[key] = F16Matrix(meta["rows"], meta["inner"], self.gpu.upload(blob))
-        for key, meta in manifest["f32"].items():
-            count = int(np.prod(meta["shape"]))
-            blob = self.files.read_resident(meta["offset"], count * 4)
-            self.f32[key] = np.frombuffer(blob, dtype=np.float32).copy().reshape(meta["shape"])
+            self.f16_weights[key] = F16Matrix(
+                int(meta["rows"]), int(meta["inner"]), self._resident, int(meta["offset"])
+            )
+        self._f32_meta = manifest["f32"]
         for key, meta in manifest["i64"].items():
             count = int(np.prod(meta["shape"]))
-            blob = self.files.read_resident(meta["offset"], count * 8)
+            # Address constants for the host n-gram hash. The resident load
+            # already placed these bytes in the shared buffer.
+            blob = _buffer_slice(self._resident, int(meta["offset"]), count * 8)
             self.i64[key] = np.frombuffer(blob, dtype=np.int64).copy().reshape(meta["shape"])
         _log(f"loaded {len(self.weights)} int4 matrices")
 
@@ -2942,35 +4642,65 @@ class Qwen38Runtime:
             self.weights[key] = self.gpu.load_f32(store.matrix(key))
         _log(f"loaded {len(self.weights)} bf16 matrices")
 
-    def _embed(self, token: int) -> np.ndarray:
+    def _embed_dev(self, tokens: list[int]) -> Dev:
+        count = len(tokens)
+        span = self.branches * self.hidden
+        dst = self.gpu.tmp(count * span)
         if self._bf16:
             if self.store is None:
                 message = "BF16 embed has no shard store"
                 raise RuntimeError(message)
             key = "model.language_model.embed_tokens.weight"
-            vector = self.store.read_bf16(key, token * self.hidden, self.hidden, (self.hidden,))
-            return np.broadcast_to(vector, (4, self.hidden)).copy()
+            for index, token in enumerate(tokens):
+                vector = self.store.read_bf16(
+                    key, token * self.hidden, self.hidden, (self.hidden,)
+                )
+                self.gpu.broadcast(
+                    self.gpu.dev_from(vector), dst, index * span, self.branches, self.hidden
+                )
+            return dst
         meta = self._embed_meta
-        stored = meta["stored_inner"]
-        data_row = stored // 2
-        scale_row = stored // BLOCK
-        data = self._embed_image[token * data_row : (token + 1) * data_row]
-        scale_at = meta["data"] + token * scale_row
-        scales = self._embed_image[scale_at : scale_at + scale_row]
-        vector = dequant_int4(bytes(data), bytes(scales), 1, stored)[0, : self.hidden]
-        return np.broadcast_to(vector, (4, self.hidden)).copy()
-
-    def _gr_read(self, down: Int4Matrix, up: Int4Matrix, hats: np.ndarray) -> np.ndarray:
-        count = hats.shape[0]
-        # Tech report eq. (31): SiLU((1/n_r) W_d vec(R̂)). The branch mean is the
-        # second 1/n_r.
-        scale = 1.0 / self.branches
-        projected = self.gpu.int4_rows(down, hats.reshape(count, -1))
-        hidden = _silu(projected * scale)
-        gate = _sigmoid(self.gpu.int4_rows(up, hidden)).reshape(
-            count, self.branches, self.hidden
+        stored = int(meta["stored_inner"])
+        self.gpu.embed_gather(
+            self._resident,
+            int(meta["offset"]),
+            self.gpu.dev_u32(tokens),
+            dst,
+            count,
+            self.hidden,
+            stored // 2,
+            stored // BLOCK,
+            int(meta["data"]),
+            self.branches,
         )
-        return np.mean(gate * hats, axis=1)
+        return dst
+
+    def _rms_branches(self, residual: Dev, binding: tuple[Any, int], count: int) -> Dev:
+        weight, offset = binding
+        return self.gpu.rms(
+            residual,
+            weight,
+            offset,
+            self.hidden,
+            count * self.branches,
+            self.eps,
+            True,
+            self.branches,
+        )
+
+    def _gr_dev(self, down: Any, up: Any, hats: Dev, count: int) -> Dev:
+        # Tech report eq. (31): SiLU((1/n_r) W_d vec(R̂)). The branch mean is the second 1/n_r.
+        flat = self.branches * self.hidden
+        projected = self.gpu.linear(down, hats, count, flat)
+        hidden = self.gpu.silu(self.gpu.scale(projected, 1.0 / self.branches))
+        gate = self.gpu.sigmoid(self.gpu.linear(up, hidden, count, int(up.inner)))
+        return self.gpu.branch_mean(gate, hats, count, self.branches, self.hidden)
+
+    def _inject_dev(self, residual: Dev, hats: Dev, mixed: Dev, weight: Any, count: int) -> None:
+        flat = self.branches * self.hidden
+        inject = self.gpu.linear(weight, hats, count, flat)
+        scales = self.gpu.scale(self.gpu.sigmoid(self.gpu.scale(inject, 0.25)), 2.0)
+        self.gpu.residual_write(residual, scales, mixed, count, self.branches, self.hidden)
 
     def _layer(self, layer: int) -> dict[str, Any]:
         cached = self._bundle.get(layer)
@@ -2978,11 +4708,11 @@ class Qwen38Runtime:
             return cached
         prefix = f"model.language_model.layers.{layer}"
         bundle: dict[str, Any] = {
-            "attn_norm": self._norm(f"{prefix}.attn_hyper_connection.hc_norm.weight"),
+            "attn_norm": self._weight(f"{prefix}.attn_hyper_connection.hc_norm.weight"),
             "attn_down": self._int4(f"{prefix}.attn_hyper_connection.input_mix_weight_down.weight"),
             "attn_up": self._int4(f"{prefix}.attn_hyper_connection.input_mix_weight_up.weight"),
             "attn_inject": self._int4(f"{prefix}.attn_hyper_connection.block_inject_weight.weight"),
-            "mlp_norm": self._norm(f"{prefix}.mlp_hyper_connection.hc_norm.weight"),
+            "mlp_norm": self._weight(f"{prefix}.mlp_hyper_connection.hc_norm.weight"),
             "mlp_down": self._int4(f"{prefix}.mlp_hyper_connection.input_mix_weight_down.weight"),
             "mlp_up": self._int4(f"{prefix}.mlp_hyper_connection.input_mix_weight_up.weight"),
             "mlp_inject": self._int4(f"{prefix}.mlp_hyper_connection.block_inject_weight.weight"),
@@ -2999,10 +4729,10 @@ class Qwen38Runtime:
                     "a": self._int4(f"{prefix}.linear_attn.in_proj_a.weight"),
                     "b": self._int4(f"{prefix}.linear_attn.in_proj_b.weight"),
                     "out": self._int4(f"{prefix}.linear_attn.out_proj.weight"),
-                    "conv": self._f32(f"{prefix}.linear_attn.conv1d.weight").reshape(10240, 4),
-                    "a_log": self._f32(f"{prefix}.linear_attn.A_log").reshape(-1),
-                    "dt_bias": self._f32(f"{prefix}.linear_attn.dt_bias").reshape(-1),
-                    "norm": self._f32(f"{prefix}.linear_attn.norm.weight").reshape(-1),
+                    "conv": self._weight(f"{prefix}.linear_attn.conv1d.weight"),
+                    "a_log": self._weight(f"{prefix}.linear_attn.A_log"),
+                    "dt_bias": self._weight(f"{prefix}.linear_attn.dt_bias"),
+                    "norm": self._weight(f"{prefix}.linear_attn.norm.weight"),
                 }
             )
         else:
@@ -3012,154 +4742,249 @@ class Qwen38Runtime:
                     "k_proj": self._int4(f"{prefix}.self_attn.k_proj.weight"),
                     "v_proj": self._int4(f"{prefix}.self_attn.v_proj.weight"),
                     "o_proj": self._int4(f"{prefix}.self_attn.o_proj.weight"),
-                    "q_norm": self._f32(f"{prefix}.self_attn.q_norm.weight").reshape(-1),
-                    "k_norm": self._f32(f"{prefix}.self_attn.k_norm.weight").reshape(-1),
+                    "q_norm": self._weight(f"{prefix}.self_attn.q_norm.weight"),
+                    "k_norm": self._weight(f"{prefix}.self_attn.k_norm.weight"),
                     "index_qk": self._int4(f"{prefix}.self_attn.indexer.index_qk_proj.weight"),
                 }
             )
         self._bundle[layer] = bundle
         return bundle
 
-    def _norm(self, key: str) -> np.ndarray:
-        return self._f32(key).reshape(4, self.hidden)
-
-    def _f32(self, key: str) -> np.ndarray:
-        return self.f32[key]
+    def _weight(self, key: str) -> tuple[Any, int]:
+        if self._bf16:
+            cached = self._f32_uploaded.get(key)
+            if cached is None:
+                array = np.ascontiguousarray(self.f32[key], dtype=np.float32)
+                cached = self.gpu.upload(array.tobytes())
+                self._f32_uploaded[key] = cached
+            return cached, 0
+        meta = self._f32_meta[key]
+        return self._resident, int(meta["offset"])
 
     def _int4(self, key: str) -> Int4Matrix:
         return self.weights[key]
 
-    def _gdn_out(self, layer: int, bundle: dict[str, Any], xs: np.ndarray) -> np.ndarray:
-        qkv = self.gpu.int4_rows(bundle["qkv"], xs)
-        z = self.gpu.int4_rows(bundle["z"], xs)
-        raw_a = self.gpu.int4_rows(bundle["a"], xs)
-        raw_b = self.gpu.int4_rows(bundle["b"], xs)
-        heads = []
-        for index in range(xs.shape[0]):
-            mixed = _silu(_causal_conv(self.conv_hist[layer], qkv[index], bundle["conv"]))
-            query = _l2norm(mixed[:2048].reshape(16, 128), self.eps)
-            key = _l2norm(mixed[2048:4096].reshape(16, 128), self.eps)
+    def _gdn_dev(self, layer: int, bundle: dict[str, Any], xs: Dev, count: int) -> Dev:
+        hidden = self.hidden
+        qkv = self.gpu.linear(bundle["qkv"], xs, count, hidden)
+        z = self.gpu.linear(bundle["z"], xs, count, hidden)
+        raw_a = self.gpu.linear(bundle["a"], xs, count, hidden)
+        raw_b = self.gpu.linear(bundle["b"], xs, count, hidden)
+        conv_w, conv_off = bundle["conv"]
+        dt_w, dt_off = bundle["dt_bias"]
+        a_w, a_off = bundle["a_log"]
+        norm_w, norm_off = bundle["norm"]
+        heads = self.gpu.tmp(count * 6144)
+        for index in range(count):
+            current = qkv.view(index * 10240, 10240)
+            mixed = self.gpu.silu(
+                self.gpu.causal_conv(self.conv_hist[layer], current, conv_w, conv_off, 10240, 4)
+            )
+            query = self.gpu.l2(mixed.view(0, 2048), 16, 128, self.eps)
+            key = self.gpu.l2(mixed.view(2048, 2048), 16, 128, self.eps)
             # L2 norm, then the query is scaled by 1/sqrt(head_dim). The key is not.
-            query = query * (query.shape[-1] ** -0.5)
-            value = mixed[4096:].reshape(48, 128)
-            query = np.repeat(query, 3, axis=0)
-            key = np.repeat(key, 3, axis=0)
-            beta = _sigmoid(raw_b[index])
-            alpha = np.exp(-np.exp(bundle["a_log"]) * _softplus(raw_a[index] + bundle["dt_bias"]))
-            y = self.gpu.gdn(self.gdn_state[layer], query, key, value, alpha, beta)
-            y = _rms(y.reshape(48, 128), bundle["norm"], self.eps, zero_centered=False).reshape(-1)
-            heads.append(y * _sigmoid(z[index]))
-        return self.gpu.int4_rows(bundle["out"], np.stack(heads))
+            query = self.gpu.scale(query, 128.0**-0.5)
+            value = mixed.view(4096, 6144)
+            query = self.gpu.repeat_rows(query, 16, 128, 3)
+            key = self.gpu.repeat_rows(key, 16, 128, 3)
+            beta = self.gpu.sigmoid(raw_b.view(index * 48, 48))
+            alpha = self.gpu.gdn_alpha(raw_a.view(index * 48, 48), dt_w, dt_off, a_w, a_off)
+            y = self.gpu.gdn_dev(self.gdn_state[layer], query, key, value, alpha, beta)
+            y = self.gpu.rms(y, norm_w, norm_off, 128, 48, self.eps, False, 0)
+            gated = self.gpu.mul(y, self.gpu.sigmoid(z.view(index * 6144, 6144)))
+            self.gpu.copy_into(gated, heads, index * 6144)
+        return self.gpu.linear(bundle["out"], heads, count, 6144)
 
-    def _qsa_out(self, layer: int, bundle: dict[str, Any], xs: np.ndarray) -> np.ndarray:
-        query = self.gpu.int4_rows(bundle["q_proj"], xs)
-        key = self.gpu.int4_rows(bundle["k_proj"], xs)
-        value = self.gpu.int4_rows(bundle["v_proj"], xs)
-        index_qk = self.gpu.int4_rows(bundle["index_qk"], xs)
-        gated = []
+    def _grow_slot(
+        self, table: dict[int, Any], layer: int, length: int, width: int
+    ) -> tuple[Any, int]:
+        need = (length + 1) * width * 4
+        buf = table[layer]
+        if buf.length() < need:
+            grown = self.gpu.alloc(max(need * 2, width * 4))
+            if length:
+                self.gpu._retain.append(buf)
+                self.gpu.copy_span(Dev(buf, length * width), 0, grown, 0, length * width)
+            table[layer] = grown
+            buf = grown
+        return buf, length * width
+
+    def _qsa_dev(self, layer: int, bundle: dict[str, Any], xs: Dev, count: int) -> Dev:
+        hidden = self.hidden
+        query = self.gpu.linear(bundle["q_proj"], xs, count, hidden)
+        key = self.gpu.linear(bundle["k_proj"], xs, count, hidden)
+        value = self.gpu.linear(bundle["v_proj"], xs, count, hidden)
+        index_qk = self.gpu.linear(bundle["index_qk"], xs, count, hidden)
+        q_w, q_off = bundle["q_norm"]
+        k_w, k_off = bundle["k_norm"]
+        gated = self.gpu.tmp(count * 6144)
         base = len(self.tokens)
-        for index in range(xs.shape[0]):
+        for index in range(count):
             position = base + index
             # Fused q_proj is per head [query, sigmoid gate], 256 + 256.
-            # The tech report splits this projection at head granularity.
-            packed = query[index].reshape(24, 2, 256)
-            q = _rms(packed[:, 0], bundle["q_norm"], self.eps)
-            k = _rms(key[index].reshape(2, 256), bundle["k_norm"], self.eps)
-            v = value[index].reshape(2, 256)
-            q = _rope(q, position, self.rotary_dim, self.rope_theta)
-            k = _rope(k, position, self.rotary_dim, self.rope_theta)
-            self.kv[layer].append((k, v))
-            self.indexer_k[layer].append(index_qk[index, 512:640].copy())
-            tokens = len(self.kv[layer])
+            packed = query.view(index * 12288, 12288)
+            q_part, gate_pre = self.gpu.split_q(packed)
+            q = self.gpu.rms(q_part, q_w, q_off, 256, 24, self.eps, True, 0)
+            k = self.gpu.rms(key.view(index * 512, 512), k_w, k_off, 256, 2, self.eps, True, 0)
+            q = self.gpu.rope(q, 24, 256, self.rotary_dim, position, self.rope_theta)
+            k = self.gpu.rope(k, 2, 256, self.rotary_dim, position, self.rope_theta)
+            length = self.kv_len[layer]
+            k_buf, k_at = self._grow_slot(self.kv_k, layer, length, 512)
+            v_buf, v_at = self._grow_slot(self.kv_v, layer, length, 512)
+            i_buf, i_at = self._grow_slot(self.indexer_buf, layer, length, 128)
+            self.kv_len[layer] = length + 1
+            self.gpu.copy_span(k, 0, k_buf, k_at, 512)
+            self.gpu.copy_span(value, index * 512, v_buf, v_at, 512)
+            self.gpu.copy_span(index_qk, index * 640 + 512, i_buf, i_at, 128)
+            tokens = self.kv_len[layer]
             if tokens // 4 > 512:
                 message = "sequence is past the 2048-token indexer budget"
                 raise RuntimeError(message)
-            k_stack = np.stack([item[0] for item in self.kv[layer]])
-            v_stack = np.stack([item[1] for item in self.kv[layer]])
-            context = self.gpu.attend(q, k_stack, v_stack).reshape(24, 256)
-            gate = _sigmoid(packed[:, 1])
-            gated.append((context * gate).reshape(-1))
-        return self.gpu.int4_rows(bundle["o_proj"], np.stack(gated))
+            context = self.gpu.attend_dev(q, k_buf, v_buf, tokens)
+            merged = self.gpu.sigmoid_mul(context, gate_pre)
+            self.gpu.copy_into(merged, gated, index * 6144)
+        return self.gpu.linear(bundle["o_proj"], gated, count, 6144)
 
-    def _moe(self, layer: int, bundle: dict[str, Any], xs: np.ndarray) -> np.ndarray:
-        gate = _silu(self.gpu.int4_rows(bundle["shared_gate"], xs))
-        up = self.gpu.int4_rows(bundle["shared_up"], xs)
-        shared = self.gpu.int4_rows(bundle["shared_down"], gate * up)
-        coeff = _sigmoid(self.gpu.int4_rows(bundle["shared_coeff"], xs))
-        shared = shared * coeff
+    def _moe_dev(self, layer: int, bundle: dict[str, Any], xs: Dev, count: int) -> Dev:
+        hidden = self.hidden
+        gate = self.gpu.silu(self.gpu.linear(bundle["shared_gate"], xs, count, hidden))
+        up = self.gpu.linear(bundle["shared_up"], xs, count, hidden)
+        shared = self.gpu.linear(bundle["shared_down"], self.gpu.mul(gate, up), count, self.moe)
+        coeff = self.gpu.sigmoid(self.gpu.linear(bundle["shared_coeff"], xs, count, hidden))
+        shared = self.gpu.scale_rows(shared, coeff, count, hidden)
         router = self._router(layer)
-        outputs = []
-        for index in range(xs.shape[0]):
-            logits = self.gpu.f16(router, xs[index])
-            choice, weight = _topk(logits, self.top_k)
-            picked = [int(expert) for expert in choice.tolist()]
-            for expert in sorted(picked):
-                self._ensure_expert(layer, expert)
-            mixed = shared[index].copy()
-            for expert, scale in zip(picked, weight.tolist(), strict=True):
-                mixed += scale * self._routed(layer, expert, xs[index])
-            outputs.append(mixed)
-        return np.stack(outputs)
+        out = self.gpu.tmp(count * hidden)
+        for index in range(count):
+            row = xs.view(index * hidden, hidden)
+            logits = self.gpu.linear(router, row, 1, hidden)
+            choice, weight = self.gpu.topk(logits, logits.n, self.top_k)
+            picked = [int(expert) for expert in self.gpu.read_u32(choice).tolist()]
+            self._load_experts(layer, picked)
+            mixed = self.gpu.copy_dev(shared.view(index * hidden, hidden))
+            for slot, expert in enumerate(picked):
+                routed = self._routed_dev(layer, expert, row)
+                self.gpu.axpy(mixed, routed, weight, slot)
+            self.gpu.copy_into(mixed, out, index * hidden)
+        return out
 
     def _router(self, layer: int) -> F16Matrix:
         return self.f16_weights[f"model.language_model.layers.{layer}.mlp.gate.weight"]
 
-    def _ensure_expert(self, layer: int, expert: int) -> tuple[Int4Matrix, Int4Matrix]:
-        cached = self.expert_cache.get((layer, expert))
-        if cached is not None:
-            return cached
+    def _load_experts(self, layer: int, experts: Sequence[int]) -> None:
+        missing = [
+            int(expert) for expert in experts if (layer, int(expert)) not in self.expert_cache
+        ]
+        if not missing:
+            return
         if self._bf16:
-            if self.store is None:
-                message = "BF16 expert load has no shard store"
-                raise RuntimeError(message)
-            gate = self.gpu.load_f32(self.store.expert(layer, "gate_up_proj", expert))
-            down = self.gpu.load_f32(self.store.expert(layer, "down_proj", expert))
-            cached = (gate, down)
-            self.expert_cache[(layer, expert)] = cached
-            return cached
-        image = self.files.expert_image(layer, expert)
-        split = self.files.gate_up_bytes
+            for expert in missing:
+                self._ensure_bf16_expert(layer, expert)
+            return
+        if not isinstance(self.files, QuantRecord):
+            message = "expert load has no record"
+            raise RuntimeError(message)
+        buffers: list[tuple[int, Any]] = []
+        loads: list[tuple[Any, int, int, int]] = []
+        for expert in sorted(set(missing)):
+            buf = self.gpu.alloc(self.files.live)
+            buffers.append((expert, buf))
+            loads.append((buf, 0, self.files.live, expert * self.files.slot))
+        self.gpu.io_read(self.files.expert_io[layer], loads, gpu_wait=True)
+        for expert, buf in buffers:
+            self.expert_cache[(layer, expert)] = self._expert_views(buf)
+
+    def _expert_views(self, buf: Any) -> tuple[Int4Matrix, Int4Matrix]:
         stored_down = stored_k_int4(self.moe, align_k=True)
-        gate_up = self.gpu.load_int4(image[:split], 1280, self.hidden, self.hidden)
-        down = self.gpu.load_int4(image[split:], self.hidden, self.moe, stored_down)
-        cached = (gate_up, down)
-        self.expert_cache[(layer, expert)] = cached
-        return cached
+        data_n, scale_n = int4_plane_sizes(1280, self.hidden)
+        split = data_n + scale_n
+        down_data, _down_scale = int4_plane_sizes(self.hidden, stored_down)
+        gate = Int4Matrix(1280, self.hidden, 1280, buf, buf, self.hidden, 0, data_n)
+        down = Int4Matrix(
+            self.hidden,
+            self.moe,
+            self.hidden,
+            buf,
+            buf,
+            stored_down,
+            split,
+            split + down_data,
+        )
+        return gate, down
 
-    def _routed(self, layer: int, expert: int, vector: np.ndarray) -> np.ndarray:
-        gate_up, down = self._ensure_expert(layer, expert)
-        hidden = self.gpu.int4(gate_up, vector)
-        activated = _silu(hidden[: self.moe]) * hidden[self.moe :]
-        return self.gpu.int4(down, activated)
+    def _ensure_bf16_expert(self, layer: int, expert: int) -> None:
+        if self.store is None:
+            message = "BF16 expert load has no shard store"
+            raise RuntimeError(message)
+        gate = self.gpu.load_f32(self.store.expert(layer, "gate_up_proj", expert))
+        down = self.gpu.load_f32(self.store.expert(layer, "down_proj", expert))
+        self.expert_cache[(layer, expert)] = (gate, down)
 
-    def _ple_memory(self, residual: np.ndarray, tokens: list[int]) -> np.ndarray:
+    def _routed_dev(self, layer: int, expert: int, vector: Dev) -> Dev:
+        gate_up, down = self.expert_cache[(layer, expert)]
+        hidden = self.gpu.linear(gate_up, vector, 1, self.hidden)
+        activated = self.gpu.mul(
+            self.gpu.silu(hidden.view(0, self.moe)), hidden.view(self.moe, self.moe)
+        )
+        return self.gpu.linear(down, activated, 1, self.moe)
+
+    def _ple_dev(self, residual: Dev, tokens: list[int], count: int) -> None:
         """N-gram memory injected before this layer's residual read."""
         ple = self._ple_bundle()
-        rows = []
-        for head in range(self.ngram_heads):
-            index = _ngram_row(
-                tokens,
-                head,
-                ple["mult"],
-                ple["offset"],
-                ple["vocab"],
-                heads_per_ngram=self.heads_per_ngram,
-                ngram_size=self.ngram_size,
-                eos=self.eos,
+        span = self.branches * self.hidden
+        conv_w, conv_off = ple["conv"]
+        for index in range(count):
+            history = self.tokens + tokens[: index + 1]
+            rows = [
+                _ngram_row(
+                    history,
+                    head,
+                    ple["mult"],
+                    ple["offset"],
+                    ple["vocab"],
+                    heads_per_ngram=self.heads_per_ngram,
+                    ngram_size=self.ngram_size,
+                    eos=self.eos,
+                )
+                for head in range(self.ngram_heads)
+            ]
+            embedding = self._ngram_embedding(rows)
+            key = self.gpu.linear(ple["key"], embedding, 1, self.hidden)
+            value = self.gpu.linear(ple["value"], embedding, 1, self.hidden)
+            slot = residual.view(index * span, span)
+            query_w, query_off = ple["norm_query"]
+            key_w, key_off = ple["norm_key"]
+            conv_norm, conv_norm_off = ple["norm_conv"]
+            query = self.gpu.rms(
+                slot, query_w, query_off, self.hidden, self.branches, self.eps, True, self.branches
             )
-            rows.append(self.files.ngram_vector(index))
-        embedding = np.concatenate(rows)
-        key = self.gpu.int4(ple["key"], embedding).reshape(self.branches, self.hidden)
-        value = self.gpu.int4(ple["value"], embedding)
-        query = _rms(residual, ple["norm_query"].reshape(self.branches, self.hidden), self.eps)
-        keyed = _rms(key, ple["norm_key"].reshape(self.branches, self.hidden), self.eps)
-        scaled = np.sum(query * keyed, axis=-1) / math.sqrt(self.hidden)
-        score = np.sign(scaled) * np.sqrt(np.maximum(np.abs(scaled), 1e-6))
-        gate = _sigmoid(score)
-        updated = gate[:, None] * value
-        normed = _rms(updated, ple["norm_conv"].reshape(self.branches, self.hidden), self.eps)
-        conv = _dilated_conv(self.ple_hist, normed.reshape(-1), ple["conv"], self.ngram_size)
-        return updated + _silu(conv.reshape(self.branches, self.hidden))
+            keyed = self.gpu.rms(
+                key, key_w, key_off, self.hidden, self.branches, self.eps, True, self.branches
+            )
+            gate = self.gpu.ple_gate(query, keyed, self.hidden, self.branches)
+            updated = self.gpu.gate_broadcast(gate, value, self.branches, self.hidden)
+            normed = self.gpu.rms(
+                updated,
+                conv_norm,
+                conv_norm_off,
+                self.hidden,
+                self.branches,
+                self.eps,
+                True,
+                self.branches,
+            )
+            conv = self.gpu.dilated_conv(
+                self.ple_hist, normed, conv_w, conv_off, span, 4, self.ngram_size
+            )
+            self.gpu.add_into(slot, self.gpu.add(updated, self.gpu.silu(conv)))
+
+    def _ngram_embedding(self, rows: list[int]) -> Dev:
+        if self._bf16:
+            stacked = np.concatenate([self.files.ngram_vector(int(row)) for row in rows])
+            return self.gpu.dev_from(stacked)
+        if not isinstance(self.files, QuantRecord):
+            message = "n-gram load has no record"
+            raise RuntimeError(message)
+        return self.gpu.ngram_dequant(self.files.ngram_io, rows)
 
     def _ple_bundle(self) -> dict[str, Any]:
         if self._ple is not None:
@@ -3169,10 +4994,10 @@ class Qwen38Runtime:
         self._ple = {
             "key": self._int4(f"{base}.key_proj.weight"),
             "value": self._int4(f"{base}.value_proj.weight"),
-            "conv": self._f32(f"{base}.conv1d.weight").reshape(10240, 4),
-            "norm_conv": self._f32(f"{base}.norm_conv.weight").reshape(-1),
-            "norm_key": self._f32(f"{base}.norm_key.weight").reshape(-1),
-            "norm_query": self._f32(f"{base}.norm_query.weight").reshape(-1),
+            "conv": self._weight(f"{base}.conv1d.weight"),
+            "norm_conv": self._weight(f"{base}.norm_conv.weight"),
+            "norm_key": self._weight(f"{base}.norm_key.weight"),
+            "norm_query": self._weight(f"{base}.norm_query.weight"),
             "mult": self.i64[f"{table}.layer_multipliers"],
             "offset": self.i64[f"{table}.ngram_heads_offsets"],
             "vocab": self.i64[f"{table}.ngram_heads_vocab_sizes"],
@@ -3183,7 +5008,7 @@ class Qwen38Runtime:
         if self._final is None:
             base = "model.language_model.hyper_connection_mixer"
             self._final = {
-                "norm": self._norm(f"{base}.hc_norm.weight"),
+                "norm": self._weight(f"{base}.hc_norm.weight"),
                 "down": self._int4(f"{base}.input_mix_weight_down.weight"),
                 "up": self._int4(f"{base}.input_mix_weight_up.weight"),
             }
