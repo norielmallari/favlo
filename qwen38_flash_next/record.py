@@ -42,16 +42,21 @@ class QuantRecord:
         layers = int(self.manifest["layers"])
         experts = int(self.manifest["experts"])
         self.hot = [[int(expert) for expert in row] for row in self.manifest["hot"]]
-        if len(self.hot) != layers:
-            message = f"hot lists {len(self.hot)} do not match {layers} layers"
+        raw_super = self.manifest.get("super") or [[] for _ in range(layers)]
+        self.super = [[int(expert) for expert in row] for row in raw_super]
+        if len(self.hot) != layers or len(self.super) != layers:
+            message = f"tier lists do not match {layers} layers"
             raise RuntimeError(message)
         self._hot_sets = [set(row) for row in self.hot]
+        self._super_sets = [set(row) for row in self.super]
         self._cold_sets: list[set[int]] = []
         self._tier_row: list[dict[int, tuple[int, int]]] = []
-        for hot in self.hot:
+        for hot, pin in zip(self.hot, self.super, strict=True):
             mapping: dict[int, tuple[int, int]] = {}
             for row, expert in enumerate(hot):
                 mapping[expert] = (0, row)
+            for row, expert in enumerate(pin):
+                mapping[expert] = (2, row)
             cold: set[int] = set()
             cold_row = 0
             for expert in range(experts):
@@ -70,6 +75,14 @@ class QuantRecord:
             os.open(root / "experts" / f"{layer:02d}-cold.bin", os.O_RDONLY)
             for layer in range(layers)
         ]
+        self.super_fds: list[int | None] = []
+        for layer, pin in enumerate(self.super):
+            if not pin:
+                self.super_fds.append(None)
+                continue
+            fd = os.open(root / "experts" / f"{layer:02d}-super.bin", os.O_RDONLY)
+            _bypass_cache(fd)
+            self.super_fds.append(fd)
         for fd in (*self.hot_fds, *self.cold_fds):
             _bypass_cache(fd)
         self.ngram_fd = os.open(root / "ngram.bin", os.O_RDONLY)
@@ -78,7 +91,9 @@ class QuantRecord:
         self.slot = int(self.manifest["expert_slot"])
         self.cold_live = int(self.manifest["cold_live"])
         self.cold_slot = int(self.manifest["cold_slot"])
-        self.expert_scratch = mmap.mmap(-1, max(self.live, self.cold_live))
+        self.super_live = int(self.manifest.get("super_live") or 0)
+        self.super_slot = int(self.manifest.get("super_slot") or 0)
+        self.expert_scratch = mmap.mmap(-1, max(self.live, self.cold_live, self.super_live))
         self.page_scratch = mmap.mmap(-1, PAGE)
         self.pages: dict[int, bytes] = {}
         self.gate_up_bytes = sum(int4_plane_sizes(1280, stored_k_int4(2560, align_k=True)))
@@ -113,21 +128,43 @@ class QuantRecord:
     def cold_set(self, layer: int) -> set[int]:
         return self._cold_sets[layer]
 
+    def super_set(self, layer: int) -> set[int]:
+        return self._super_sets[layer]
+
     def tier_row(self, layer: int, expert: int) -> tuple[int, int]:
         return self._tier_row[layer][int(expert)]
 
     def stride(self, tier: int) -> int:
-        return self.slot if tier == 0 else self.cold_slot
+        if tier == 0:
+            return self.slot
+        if tier == 2:
+            return self.super_slot
+        return self.cold_slot
 
     def payload(self, tier: int) -> int:
-        return self.live if tier == 0 else self.cold_live
+        if tier == 0:
+            return self.live
+        if tier == 2:
+            return self.super_live
+        return self.cold_live
 
     def io_handle(self, layer: int, tier: int) -> Any:
+        if tier == 2:
+            message = "a super expert is resident and is not staged from SSD"
+            raise RuntimeError(message)
         return self.hot_io[layer] if tier == 0 else self.cold_io[layer]
 
     def expert_image(self, layer: int, expert: int) -> bytes:
         tier, row = self.tier_row(layer, expert)
-        fd = self.hot_fds[layer] if tier == 0 else self.cold_fds[layer]
+        if tier == 2:
+            fd = self.super_fds[layer]
+        elif tier == 0:
+            fd = self.hot_fds[layer]
+        else:
+            fd = self.cold_fds[layer]
+        if fd is None:
+            message = f"layer {layer} has no super file"
+            raise RuntimeError(message)
         view = pread_exact(fd, self.payload(tier), row * self.stride(tier), self.expert_scratch)
         blob = bytes(view)
         del view

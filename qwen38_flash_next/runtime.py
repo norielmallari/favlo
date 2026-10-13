@@ -89,6 +89,8 @@ class Qwen38Runtime:
         self.atlas: ExpertAtlas | None = None
         self._hot = expert_planes(4, self.hidden, self.moe)
         self._cold = expert_planes(2, self.hidden, self.moe)
+        self._super_planes = expert_planes(8, self.hidden, self.moe)
+        self._super_images: dict[tuple[int, int], Any] = {}
         self.tokens: list[int] = []
         self.last_logits: Dev | None = None
         self._decode_tokens = 0
@@ -125,6 +127,7 @@ class Qwen38Runtime:
             self.files = QuantRecord(root)
             self._load_record()
             self.atlas = ExpertAtlas(self.gpu, self.files, self.layers, self.experts)
+            self._load_supers()
             state_bytes = 48 * 128 * 128 * 4
             self._gdn_shadow = {
                 index: self.gpu.alloc(state_bytes) for index in self.gdn_state
@@ -765,7 +768,7 @@ class Qwen38Runtime:
                 slots,
                 planes,
             )
-        return running
+        return self._decode_super(layer, row, running, ids, weight)
 
     def _decode_tier(
         self,
@@ -833,9 +836,10 @@ class Qwen38Runtime:
         mixed = self._moe_tier(
             layer, xs, weight, shared, host_ids, count, self.files.hot_set(layer), self._hot
         )
-        return self._moe_tier(
+        mixed = self._moe_tier(
             layer, xs, weight, mixed, host_ids, count, self.files.cold_set(layer), self._cold
         )
+        return self._prefill_super(layer, xs, weight, mixed, host_ids, count)
 
     def _moe_tier(
         self,
@@ -899,6 +903,100 @@ class Qwen38Runtime:
         )
         return self.gpu.moe_scatter(
             shared, down, inverse_buf, weight, count, self.top_k, self.hidden
+        )
+
+    def _load_supers(self) -> None:
+        if not isinstance(self.files, QuantRecord):
+            return
+        for layer, row in enumerate(self.files.super):
+            for expert in row:
+                image = self.files.expert_image(layer, expert)
+                self._super_images[(layer, expert)] = self.gpu.upload_resident(image)
+
+    def _decode_super(
+        self, layer: int, row: Dev, running: Dev, ids: list[int], weight: Dev
+    ) -> Dev:
+        hits = [slot for slot, expert in enumerate(ids) if (layer, expert) in self._super_images]
+        if not hits:
+            return running
+        running = self.gpu.copy_dev(running)
+        planes = self._super_planes
+        for slot in hits:
+            image = self._super_images[(layer, ids[slot])]
+            gate = self.gpu.gemv_int8(
+                row,
+                image,
+                planes.gate_rows,
+                planes.gate_inner,
+                0,
+                planes.gate_scale,
+                self.hidden,
+                half=False,
+            )
+            activated = self.gpu.moe_activate(gate, 1, self.moe, planes.down_inner)
+            down = self.gpu.gemv_int8(
+                activated,
+                image,
+                self.hidden,
+                planes.down_inner,
+                planes.down_weight,
+                planes.down_scale,
+                self.moe,
+                half=True,
+            )
+            self.gpu.axpy(running, down, weight, slot)
+        return running
+
+    def _prefill_super(
+        self,
+        layer: int,
+        xs: Dev,
+        weight: Dev,
+        shared: Dev,
+        host_ids: np.ndarray,
+        count: int,
+    ) -> Dev:
+        if not isinstance(self.files, QuantRecord) or not self.files.super_set(layer):
+            return shared
+        experts, offsets, tokens, inverse = group_tier(
+            host_ids, count, self.top_k, self.files.super_set(layer)
+        )
+        if int(experts.size) == 0:
+            return shared
+        planes = self._super_planes
+        n_assign = int(tokens.size)
+        partial = self.gpu.tmp(n_assign * self.hidden)
+        for index, expert in enumerate(experts.tolist()):
+            start = int(offsets[index])
+            stop = int(offsets[index + 1])
+            image = self._super_images[(layer, int(expert))]
+            for assign in range(start, stop):
+                token = int(tokens[assign])
+                token_row = xs.view(token * self.hidden, self.hidden)
+                gate = self.gpu.gemv_int8(
+                    token_row,
+                    image,
+                    planes.gate_rows,
+                    planes.gate_inner,
+                    0,
+                    planes.gate_scale,
+                    self.hidden,
+                    half=False,
+                )
+                activated = self.gpu.moe_activate(gate, 1, self.moe, planes.down_inner)
+                down = self.gpu.gemv_int8(
+                    activated,
+                    image,
+                    self.hidden,
+                    planes.down_inner,
+                    planes.down_weight,
+                    planes.down_scale,
+                    self.moe,
+                    half=True,
+                )
+                self.gpu.copy_into(down, partial, assign * self.hidden)
+        return self.gpu.moe_scatter(
+            shared, partial, self._upload_u32(inverse), weight, count, self.top_k, self.hidden
         )
 
     def _upload_u32(self, values: np.ndarray) -> Any:

@@ -138,7 +138,12 @@ class ExpertAtlas:
         protect = held
         for expert in wanted:
             self._touch(layer, expert)
-        missing = [expert for expert in wanted if (layer, expert) not in self.resident]
+        missing = []
+        for expert in wanted:
+            if self.files.tier_row(layer, expert)[0] == 2:
+                continue
+            if (layer, expert) not in self.resident:
+                missing.append(expert)
         if not missing:
             return 0
         groups: list[tuple[Any, list[tuple[Any, int, int, int]]]] = []

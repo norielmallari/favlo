@@ -40,7 +40,9 @@ def _record(path: Path | None) -> Path:
 
 def quantize_main(args: Any) -> int:
     try:
-        packed = quantize_checkpoint(_checkpoint(args.source), args.output, args.hot)
+        packed = quantize_checkpoint(
+            _checkpoint(args.source), args.output, args.hot, args.super
+        )
         write_grove(args.output, replace=packed)
     except Exception as exc:
         traceback.print_exc()
@@ -399,6 +401,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     quant_parser.add_argument("--source", type=Path, default=None)
     quant_parser.add_argument("--output", type=Path, default=DEFAULT_RECORD)
     quant_parser.add_argument("--hot", type=Path, default=None)
+    quant_parser.add_argument("--super", type=Path, default=None)
     serve_parser = sub.add_parser("serve", help="serve the quantized record")
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8000)

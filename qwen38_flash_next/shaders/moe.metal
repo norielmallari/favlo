@@ -17,6 +17,87 @@ static float int4_weight(
     return float(code) * factor;
 }
 
+static int int8_code(uchar byte) {
+    int code = int(byte);
+    return code > 127 ? code - 256 : code;
+}
+
+kernel void gemv_int8_f32(
+    device const float* activation [[buffer(0)]],
+    device const uchar* weights [[buffer(1)]],
+    device const uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    constant uint& logical [[buffer(6)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= cols) {
+        return;
+    }
+    uint blocks = inner >> 5;
+    device const uchar* packed = weights + (ulong)row * inner;
+    device const uchar* row_scale = scales + (ulong)row * blocks;
+    float acc = 0.0f;
+    for (uint block = lane; block < blocks; block += 32u) {
+        uint base = block << 5;
+        if (base >= logical) {
+            break;
+        }
+        float factor = e8m0_scale(row_scale[block]);
+        for (uint i = 0u; i < 32u; ++i) {
+            uint elem = base + i;
+            if (elem >= logical) {
+                break;
+            }
+            acc += float(int8_code(packed[elem])) * factor * activation[elem];
+        }
+    }
+    float sum = simd_sum(acc);
+    if (lane == 0u) {
+        destination[row] = sum;
+    }
+}
+
+kernel void gemv_int8_half(
+    device const half* activation [[buffer(0)]],
+    device const uchar* weights [[buffer(1)]],
+    device const uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    constant uint& logical [[buffer(6)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= cols) {
+        return;
+    }
+    uint blocks = inner >> 5;
+    device const uchar* packed = weights + (ulong)row * inner;
+    device const uchar* row_scale = scales + (ulong)row * blocks;
+    float acc = 0.0f;
+    for (uint block = lane; block < blocks; block += 32u) {
+        uint base = block << 5;
+        if (base >= logical) {
+            break;
+        }
+        float factor = e8m0_scale(row_scale[block]);
+        for (uint i = 0u; i < 32u; ++i) {
+            uint elem = base + i;
+            if (elem >= logical) {
+                break;
+            }
+            acc += float(int8_code(packed[elem])) * factor * float(activation[elem]);
+        }
+    }
+    float sum = simd_sum(acc);
+    if (lane == 0u) {
+        destination[row] = sum;
+    }
+}
+
 kernel void gather_f32(
     device const float* src [[buffer(0)]],
     device const uint* index [[buffer(1)]],

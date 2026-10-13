@@ -100,7 +100,7 @@ uv run madmetal --qwen38-flash-next quantize
 uv run madmetal --qwen38-flash-next serve
 ```
 
-`quantize` reads the Hugging Face BF16 shards once and writes the record. `--hot` selects the int4 keep set; the complement is int2. Running it again on the same output continues from `quantize_progress.json`. After the manifest is written it stores one greedy grove completion in `grove.json`. `serve` reads that record. A request does not quantize a weight.
+`quantize` reads the Hugging Face BF16 shards once and writes the record. `--hot` selects the int4 keep set. `--super` lifts listed ids out of that keep set into resident int8. The complement of the keep set is int2. Running it again on the same output continues from `quantize_progress.json`. After the manifest is written it stores one greedy grove completion in `grove.json`. `serve` reads that record. A request does not quantize a weight.
 
 `probe` writes one block of 32 and reads it back on the GPU. It is the measurement in ARCHITECTURE.md. It does not pack an expert.
 

@@ -450,6 +450,8 @@ class MetalSession:
             "moe_decode_gate_int2",
             "moe_decode_down_int2",
             "gemv_int4_f32",
+            "gemv_int8_f32",
+            "gemv_int8_half",
         )
         self.act = {name: self._pipeline(library, name) for name in act_names}
         self._argmax_peaks = self.alloc(1024 * 4)
@@ -1458,6 +1460,56 @@ class MetalSession:
             count * matrix.rows,
         )
         return packed
+
+    def gemv_int8(
+        self,
+        activation: Any,
+        image: Any,
+        cols: int,
+        stored: int,
+        weight_off: int,
+        scale_off: int,
+        logical: int,
+        *,
+        half: bool,
+    ) -> Dev:
+        dst = self.tmp(cols)
+        kernel = "gemv_int8_half" if half else "gemv_int8_f32"
+        self.dispatch(
+            self.act[kernel],
+            (
+                _bind_any(activation),
+                (image, weight_off),
+                (image, scale_off),
+                _dev_bind(dst),
+            ),
+            (
+                struct.pack("<I", cols),
+                struct.pack("<I", stored),
+                struct.pack("<I", logical),
+            ),
+            self._size(cols),
+            self._size(32),
+        )
+        return dst
+
+    def upload_resident(self, blob: bytes) -> Any:
+        """Copy one super-expert image into a buffer that stays resident."""
+        staging = _shared_buffer(self.device, blob)
+        private = self.device.newBufferWithLength_options_(
+            len(blob), self.metal.MTLResourceStorageModePrivate
+        )
+        if private is None:
+            return staging
+        command = self.queue.commandBuffer()
+        blit = command.blitCommandEncoder()
+        blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size_(
+            staging, 0, private, 0, len(blob)
+        )
+        blit.endEncoding()
+        command.commit()
+        command.waitUntilCompleted()
+        return private
 
     def gdn_dev(
         self, state: Any, query: Dev, key: Dev, value: Dev, alpha: Dev, beta: Dev

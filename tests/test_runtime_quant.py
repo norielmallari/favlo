@@ -323,6 +323,62 @@ def test_complete_thinking_flag_enables_thinking(monkeypatch) -> None:
     assert seen == [True, False]
 
 
+def test_super_image_is_page_aligned() -> None:
+    assert pipeline.super_live_bytes() == 5_068_800
+    assert pipeline.super_slot_bytes() == 5_079_040
+    assert pipeline.super_slot_bytes() % pipeline.PAGE == 0
+    planes = pipeline.expert_planes(8)
+    assert planes.gate_inner == 2560
+    assert planes.down_inner == 640
+    gate = np.zeros((1280, 2560), np.float32)
+    down = np.zeros((2560, 640), np.float32)
+    image = pipeline.quantize_int8_image(gate)[0] + pipeline.quantize_int8_image(down)[0]
+    assert len(image) == pipeline.super_live_bytes()
+
+
+def test_super_ids_leave_the_keep_set(tmp_path) -> None:
+    path = tmp_path / "super.json"
+    path.write_text(
+        '{"super_experts": ['
+        '{"layer": 2, "expert": 322},'
+        '{"layer": 4, "expert": 108},'
+        '{"layer": 4, "expert": 373},'
+        '{"layer": 6, "expert": 223},'
+        '{"layer": 10, "expert": 107}'
+        "]}"
+    )
+    rows = pipeline.load_super_ids(path, 48, 512)
+    assert rows[2] == [322]
+    assert rows[4] == [108, 373]
+    assert rows[0] == []
+    keep = list(range(384))
+    hot, cold, pin = pipeline.split_keep(keep, [108, 373], 512)
+    assert pin == [108, 373]
+    assert len(hot) == 382
+    assert 108 not in hot and 373 not in hot
+    assert len(cold) == 128
+    assert set(cold).isdisjoint(keep)
+
+
+def test_int8_kernels_match_dequant() -> None:
+    from qwen38_flash_next.session import MetalSession
+
+    rng = np.random.default_rng(1)
+    cols, inner = 32, 32
+    weight = rng.normal(size=(cols, inner)).astype(np.float32)
+    image, stored = pipeline.quantize_int8_image(weight, align_k=False)
+    assert stored == inner
+    data_n, _scale_n = pipeline.int8_plane_sizes(cols, inner)
+    restored = pipeline.dequant_int8(image[:data_n], image[data_n:], cols, inner)
+    session = MetalSession()
+    vector = rng.normal(size=(inner,)).astype(np.float32)
+    resident = session.upload_resident(image)
+    result = session.gemv_int8(
+        session.dev_from(vector), resident, cols, inner, 0, data_n, inner, half=False
+    )
+    assert np.allclose(session.read_f32(result), restored @ vector, rtol=1e-3, atol=1e-3)
+
+
 def test_cold_image_is_page_aligned() -> None:
     assert pipeline.cold_live_bytes() == 1_658_880
     assert pipeline.cold_slot_bytes() == 1_671_168

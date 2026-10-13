@@ -30,6 +30,9 @@ from qwen38_flash_next.formats import (
     ngram_slots,
     quantize_int2_image,
     quantize_int4_image,
+    quantize_int8_image,
+    super_live_bytes,
+    super_slot_bytes,
 )
 from qwen38_flash_next.session import _log, bf16_to_f32
 
@@ -252,6 +255,42 @@ def load_hot_ids(path: Path, layers: int, experts: int) -> list[list[int]]:
     return banks
 
 
+def load_super_ids(path: Path | None, layers: int, experts: int) -> list[list[int]]:
+    """Layer index to the int8 pin. A missing file leaves every layer empty."""
+    rows: list[list[int]] = [[] for _ in range(layers)]
+    if path is None:
+        return rows
+    raw = json.loads(path.read_text())
+    items = raw["super_experts"] if isinstance(raw, dict) else raw
+    for item in items:
+        layer = int(item["layer"])
+        expert = int(item["expert"])
+        if layer < 0 or layer >= layers or expert < 0 or expert >= experts:
+            message = f"super expert {layer}:{expert} is outside the model"
+            raise RuntimeError(message)
+        if expert in rows[layer]:
+            message = f"super expert {expert} is repeated on layer {layer}"
+            raise RuntimeError(message)
+        rows[layer].append(expert)
+    return rows
+
+
+def split_keep(
+    hot: Sequence[int], supers: Sequence[int], experts: int
+) -> tuple[list[int], list[int], list[int]]:
+    """Lift the int8 pin out of the keep-set. Cold is every id outside that keep-set."""
+    keep = [int(expert) for expert in hot]
+    pin = [int(expert) for expert in supers]
+    keep_set = set(keep)
+    pin_set = set(pin)
+    if not pin_set <= keep_set:
+        message = "a super expert is outside the hot keep-set"
+        raise RuntimeError(message)
+    hot_only = [expert for expert in keep if expert not in pin_set]
+    cold = [expert for expert in range(experts) if expert not in keep_set]
+    return hot_only, cold, pin
+
+
 def _load_progress(dest: Path) -> dict[str, Any]:
     path = _progress_path(dest)
     if not path.is_file():
@@ -418,31 +457,44 @@ def _open_tier(path: Path, count: int, slot: int) -> int:
     return fd
 
 
-def _layer_ready(dest: Path, layer: int, hot_count: int, cold_count: int) -> bool:
-    hot = dest / "experts" / f"{layer:02d}-hot.bin"
-    cold = dest / "experts" / f"{layer:02d}-cold.bin"
+def _layer_ready(
+    dest: Path, layer: int, hot_count: int, cold_count: int, super_count: int
+) -> bool:
+    root = dest / "experts"
+    hot = root / f"{layer:02d}-hot.bin"
+    cold = root / f"{layer:02d}-cold.bin"
     if not hot.is_file() or hot.stat().st_size < hot_count * expert_slot_bytes():
         return False
-    return cold.is_file() and cold.stat().st_size >= cold_count * cold_slot_bytes()
+    if not cold.is_file() or cold.stat().st_size < cold_count * cold_slot_bytes():
+        return False
+    if super_count == 0:
+        return True
+    super_file = root / f"{layer:02d}-super.bin"
+    return super_file.is_file() and super_file.stat().st_size >= super_count * super_slot_bytes()
 
 
-def pack_expert_layer(source: str, dest: str, layer: int, hot: list[int], experts: int) -> int:
-    """Pack one layer. Hot rows are int4. Cold rows are int2. Both files are fsynced."""
+def pack_expert_layer(
+    source: str, dest: str, layer: int, hot: list[int], supers: list[int], experts: int
+) -> int:
+    """Pack one layer. Super rows are int8, hot rows are int4, cold rows are int2."""
     store = ShardStore(Path(source))
     prefix = f"model.language_model.layers.{layer}.mlp.experts"
     gate_key = f"{prefix}.gate_up_proj"
     down_key = f"{prefix}.down_proj"
     root = Path(dest) / "experts"
-    hot_ids = [int(expert) for expert in hot]
-    cold = cold_ids(hot_ids, experts)
+    hot_ids, cold, pin = split_keep(hot, supers, experts)
     hot_at = {expert: row for row, expert in enumerate(hot_ids)}
     cold_at = {expert: row for row, expert in enumerate(cold)}
+    pin_at = {expert: row for row, expert in enumerate(pin)}
     hot_slot = expert_slot_bytes()
     cold_slot = cold_slot_bytes()
+    pin_slot = super_slot_bytes()
     hot_live = expert_live_bytes()
     cold_live = cold_live_bytes()
+    pin_live = super_live_bytes()
     hot_fd = _open_tier(root / f"{layer:02d}-hot.bin", len(hot_ids), hot_slot)
     cold_fd = _open_tier(root / f"{layer:02d}-cold.bin", len(cold), cold_slot)
+    pin_fd = _open_tier(root / f"{layer:02d}-super.bin", len(pin), pin_slot) if pin else None
     try:
         _log(f"quantize experts layer {layer}")
         for expert in range(experts):
@@ -451,7 +503,13 @@ def pack_expert_layer(source: str, dest: str, layer: int, hot: list[int], expert
             if gate.shape != (1280, 2560) or down.shape != (2560, 640):
                 message = f"{gate_key} shapes {gate.shape} {down.shape}"
                 raise RuntimeError(message)
-            if expert in hot_at:
+            if expert in pin_at:
+                image = quantize_int8_image(gate)[0] + quantize_int8_image(down)[0]
+                if len(image) != pin_live or pin_fd is None:
+                    message = f"super image is {len(image)} bytes, expected {pin_live}"
+                    raise RuntimeError(message)
+                os.pwrite(pin_fd, image, pin_at[expert] * pin_slot)
+            elif expert in hot_at:
                 image = quantize_int4_image(gate)[0] + quantize_int4_image(down)[0]
                 if len(image) != hot_live:
                     message = f"hot image is {len(image)} bytes, expected {hot_live}"
@@ -467,9 +525,13 @@ def pack_expert_layer(source: str, dest: str, layer: int, hot: list[int], expert
                 _log(f"layer {layer} expert {expert}")
         os.fsync(hot_fd)
         os.fsync(cold_fd)
+        if pin_fd is not None:
+            os.fsync(pin_fd)
     finally:
         os.close(hot_fd)
         os.close(cold_fd)
+        if pin_fd is not None:
+            os.close(pin_fd)
     return layer
 
 
@@ -556,7 +618,9 @@ def _write_expert_file(
         os.close(fd)
 
 
-def quantize_checkpoint(source: Path, dest: Path, hot: Path | None = None) -> bool:
+def quantize_checkpoint(
+    source: Path, dest: Path, hot: Path | None = None, supers: Path | None = None
+) -> bool:
     """Write the Metal record once. A later run continues from quantize_progress.json.
 
     Returns true when this call wrote the manifest. A record that is already complete
@@ -584,15 +648,19 @@ def quantize_checkpoint(source: Path, dest: Path, hot: Path | None = None) -> bo
     kinds = list(text["layer_types"])
     experts = int(text["num_experts"])
     hot_ids = load_hot_ids(hot, len(kinds), experts)
+    super_ids = load_super_ids(supers, len(kinds), experts)
     saved_hot = progress.get("hot")
+    saved_super = progress.get("super")
     if saved_hot is None:
         progress["hot"] = hot_ids
+        progress["super"] = super_ids
         _save_progress(dest, progress)
-    elif saved_hot != hot_ids:
+    elif saved_hot != hot_ids or saved_super != super_ids:
         message = "hot set does not match this partial record"
         raise RuntimeError(message)
-    hot_count = len(hot_ids[0])
-    cold_count = experts - hot_count
+    split = [split_keep(row, pin, experts) for row, pin in zip(hot_ids, super_ids, strict=True)]
+    hot_only = [row[0] for row in split]
+    cold_count = len(split[0][1])
     if progress["resident"] and not (dest / "resident.bin").is_file():
         progress["resident"] = False
     if not progress["resident"]:
@@ -675,7 +743,9 @@ def quantize_checkpoint(source: Path, dest: Path, hot: Path | None = None) -> bo
     done_layers = {int(layer) for layer in progress["layers"]}
     pending_layers: list[int] = []
     for layer in range(len(kinds)):
-        if layer in done_layers and _layer_ready(dest, layer, hot_count, cold_count):
+        if layer in done_layers and _layer_ready(
+            dest, layer, len(hot_only[layer]), cold_count, len(super_ids[layer])
+        ):
             continue
         if layer in done_layers:
             progress["layers"] = [item for item in progress["layers"] if int(item) != layer]
@@ -687,7 +757,13 @@ def quantize_checkpoint(source: Path, dest: Path, hot: Path | None = None) -> bo
         with ProcessPoolExecutor(max_workers=LAYER_WORKERS) as pool:
             futures = [
                 pool.submit(
-                    pack_expert_layer, str(source), str(dest), layer, hot_ids[layer], experts
+                    pack_expert_layer,
+                    str(source),
+                    str(dest),
+                    layer,
+                    hot_ids[layer],
+                    super_ids[layer],
+                    experts,
                 )
                 for layer in pending_layers
             ]
@@ -743,9 +819,13 @@ def quantize_checkpoint(source: Path, dest: Path, hot: Path | None = None) -> bo
         "expert_live": expert_live_bytes(),
         "cold_slot": cold_slot_bytes(),
         "cold_live": cold_live_bytes(),
-        "hot_count": hot_count,
+        "hot_count": [len(row) for row in hot_only],
         "cold_count": cold_count,
-        "hot": hot_ids,
+        "super_count": [len(row) for row in super_ids],
+        "super_slot": super_slot_bytes(),
+        "super_live": super_live_bytes(),
+        "hot": hot_only,
+        "super": super_ids,
         "experts": experts,
         "layers": len(kinds),
         "ngram_rows": NGRAM_SHARD_COUNT * NGRAM_ROWS_PER_SHARD,
