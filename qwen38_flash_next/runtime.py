@@ -517,7 +517,8 @@ class Qwen38Runtime:
                 view = residual.view(offset * span, n * span)
                 self.gpu.rewind_scratch()
                 # Objective-C temporaries from this chunk. The command buffer stays
-                # open until prefill needs expert ids, or the host reads the token.
+                # open until prefill needs expert ids, the host reads the token, or
+                # the next n-gram chunk reuses this scratch.
                 with objc.autorelease_pool():
                     chunk_tokens = tokens[offset : offset + n]
                     if (layer + 1) in self.ple_layers:
@@ -561,6 +562,10 @@ class Qwen38Runtime:
                         self._inject_dev(view, hats, mixed, bundle["mlp_inject"], n)
                     if self._decoding and self.atlas is not None:
                         self.gpu.submit()
+                # Packed n-gram loads land in this scratch arena. The next rewind
+                # reuses those offsets, so this chunk finishes before that rewind.
+                if wide and (layer + 1) in self.ple_layers:
+                    self.gpu.flush()
             if wide:
                 if bundle is None:
                     message = "prefill layer had no tokens"

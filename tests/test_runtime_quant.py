@@ -198,6 +198,17 @@ def test_preallocate_claims_each_chunk(tmp_path, monkeypatch) -> None:
         assert contig >= 4 * pipeline.PAGE
 
 
+def test_omitted_enable_thinking_leaves_the_block_open() -> None:
+    import qwen38_flash_next.commands as commands
+
+    assert commands._enable_thinking({}) is True
+    assert commands._enable_thinking({"enable_thinking": True}) is True
+    assert commands._enable_thinking({"enable_thinking": False}) is False
+    assert commands._enable_thinking({"enable_thinking": None}) is True
+    assert commands._enable_thinking({"chat_template_kwargs": {"enable_thinking": False}}) is False
+    assert commands._enable_thinking({"enable_thinking": False, "chat_template_kwargs": {"enable_thinking": True}}) is False
+
+
 def test_omitted_sampling_follows_the_model_card() -> None:
     import qwen38_flash_next.commands as commands
 

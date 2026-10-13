@@ -10,7 +10,7 @@ import threading
 import time
 import traceback
 from collections.abc import Iterator, Sequence
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -144,6 +144,12 @@ def complete(args: Any) -> int:
     return 0
 
 
+class _SingleRequestServer(HTTPServer):
+    """Accept the next connection only after the current request returns."""
+
+    request_queue_size = 128
+
+
 def serve(args: Any) -> int:
     try:
         runtime = Qwen38Runtime(
@@ -191,7 +197,7 @@ def serve(args: Any) -> int:
                 body = json.loads(self.rfile.read(length) or b"{}")
                 messages = body["messages"]
                 tools = body.get("tools")
-                enable_thinking = bool(body.get("enable_thinking", False))
+                enable_thinking = _enable_thinking(body)
                 max_tokens = _request_limit(body)
                 temperature, top_p, top_k = _sampling(body, enable_thinking)
                 stream = bool(body.get("stream", False))
@@ -348,7 +354,7 @@ def serve(args: Any) -> int:
             self.end_headers()
             self.wfile.write(blob)
 
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    server = _SingleRequestServer((args.host, args.port), Handler)
     _log(f"listening on http://{args.host}:{args.port}")
     try:
         server.serve_forever()
@@ -405,6 +411,20 @@ def _drain_stream(runtime: Any, tokens: Iterator[int], emit: Any) -> str:
     if failed:
         raise failed[0]
     return text
+
+
+def _enable_thinking(body: dict[str, Any]) -> bool:
+    """Leave `<think>` open unless the request closes it.
+
+    The chat template writes the reasoning during decode when this is true.
+    An explicit false closes the block in the prompt, so decode starts at the answer.
+    """
+    if "enable_thinking" in body and body["enable_thinking"] is not None:
+        return bool(body["enable_thinking"])
+    kwargs = body.get("chat_template_kwargs")
+    if isinstance(kwargs, dict) and kwargs.get("enable_thinking") is not None:
+        return bool(kwargs["enable_thinking"])
+    return True
 
 
 def _sampling(body: dict[str, Any], thinking: bool) -> tuple[float, float, int]:
