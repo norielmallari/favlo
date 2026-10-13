@@ -2099,8 +2099,8 @@ class MetalSession:
         n_blocks: int,
         stride: int,
     ) -> None:
-        self._ew(
-            "indexer_select",
+        self.dispatch(
+            self.act["indexer_select"],
             (_dev_bind(scores), _dev_bind(indices), _dev_bind(counts)),
             (
                 struct.pack("<I", count),
@@ -2108,7 +2108,8 @@ class MetalSession:
                 struct.pack("<I", n_blocks),
                 struct.pack("<I", stride),
             ),
-            count,
+            self._size(max(count, 1)),
+            self._size(256),
         )
 
     def qsa_attend_selected(

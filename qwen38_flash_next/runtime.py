@@ -613,13 +613,15 @@ class Qwen38Runtime:
         return budget
 
     def _begin_prefill_stream(self) -> None:
-        """Two layer buffers. The atlas stays unallocated until this call returns."""
+        """Two layer buffers. A warm atlas stays allocated beside them."""
         if not isinstance(self.files, QuantRecord):
             return
         self._end_prefill_stream()
-        self.atlas = None
         budget = self._stage_budget()
         self._stage = [self.gpu.alloc(budget), self.gpu.alloc(budget)]
+        if (self._stage[0] is None or self._stage[1] is None) and self.atlas is not None:
+            self.atlas = None
+            self._stage = [self.gpu.alloc(budget), self.gpu.alloc(budget)]
         if self._stage[0] is None or self._stage[1] is None:
             message = f"prefill stage of {budget} bytes was not allocated"
             raise RuntimeError(message)

@@ -96,7 +96,7 @@ The collect signature is the corpus hash, the sample count, the sequence length,
 
 ## Schedule
 
-Prefill and decode are Metal shaders. A missing kernel stays missing. A prompt call streams each layer's hot and cold files into one of two staging buffers and does not hold the atlas. After that call the atlas is allocated. A prompt longer than one 2048-token chunk runs each int4 expert that received at least 64 tokens through matmul2d, once for the whole layer. The int2 tier and smaller int4 groups stay on the grouped shader. Decode stages missing expert runs and uses a GEMV for one token. Scratch for a prompt chunk is 2 MiB per token, or 256 MiB, whichever is larger. The half × int8 `matmul2d` dispatch does not complete on this GPU, so it is not on the request path.
+Prefill and decode are Metal shaders. A missing kernel stays missing. A prompt call streams each layer's hot and cold files into one of two staging buffers and does not read the atlas. An atlas built by an earlier decode stays allocated when the staging buffers fit beside it. A cold start, or a device that refuses those buffers, allocates the atlas after the call. A prompt longer than one 2048-token chunk runs each int4 expert that received at least 64 tokens through matmul2d, once for the whole layer. The int2 tier and smaller int4 groups stay on the grouped shader. Decode stages missing expert runs and uses a GEMV for one token. Scratch for a prompt chunk is 2 MiB per token, or 256 MiB, whichever is larger. The half × int8 `matmul2d` dispatch does not complete on this GPU, so it is not on the request path.
 
 The kernel map, the quantize workers, and the host steps are in [docs/qwen38/schedule.md](docs/qwen38/schedule.md).
 

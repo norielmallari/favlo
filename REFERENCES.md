@@ -122,6 +122,12 @@ Apple. WWDC22 session 10066, *Discover Metal 3.* Many small loads are the case t
 
 The plan that uses these is [docs/prefill-decode-split/prefill-decode-split.md](docs/prefill-decode-split/prefill-decode-split.md). It is not the as-built forward.
 
+## Decode
+
+Mohamed Amine Bergach. *When Quantization Is Free: An int4 KV Cache That Outruns fp16 on Apple Silicon.* [arXiv:2605.05699](https://arxiv.org/abs/2605.05699), May 2026. A fused int4 key/value cache can transfer less per decode step than fp16 on unified memory. The measured models are not this checkpoint.
+
+The plan that uses the Qwen3.8 report, the Metal tensor path above, and that cache result is [docs/decode-options/decode-options.md](docs/decode-options/decode-options.md). It is not the as-built decode.
+
 ## Prompt text
 
 The calibration strings are data, not an algorithm. They are a bucket JSON: `tool_calling`, `chat`, `mixed`, `reasoning`, `code`, `en`, `ko`, `zh`, `ja`. `tool_calling` and `chat` are already chat-templated.

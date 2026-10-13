@@ -537,7 +537,9 @@ static uint score_bits(float value) {
     return as_type<uint>(value);
 }
 
-static bool radix_active(uint bits, thread const uint* shift, thread const uint* byte, uint nprefix) {
+static bool radix_active_tg(
+    uint bits, threadgroup const uint* shift, threadgroup const uint* byte, uint nprefix
+) {
     for (uint p = 0u; p < nprefix; ++p) {
         if (((bits >> shift[p]) & 255u) != byte[p]) {
             return false;
@@ -572,6 +574,37 @@ kernel void indexer_block_score(
         pooled[d] = sum * 0.25f;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
+    // One query: every lane owns one dimension, and lane 0 adds them in
+    // dimension order so the dot matches the serial sum.
+    if (count <= 1u) {
+        uint pos = base;
+        if (block >= pos / 4u) {
+            if (lane == 0u) {
+                scores[block] = 0.0f;
+            }
+            return;
+        }
+        threadgroup float parts[4][128];
+        if (lane < 128u) {
+            for (uint head = 0u; head < 4u; ++head) {
+                float q = index_qk[head * 128u + lane];
+                parts[head][lane] = q * pooled[lane];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (lane == 0u) {
+            float acc = 0.0f;
+            for (uint head = 0u; head < 4u; ++head) {
+                float dot = 0.0f;
+                for (uint d = 0u; d < 128u; ++d) {
+                    dot += parts[head][d];
+                }
+                acc += max(dot, 0.0f);
+            }
+            scores[block] = acc;
+        }
+        return;
+    }
     for (uint query = lane; query < count; query += tg_size) {
         uint pos = base + query;
         if (block >= pos / 4u) {
@@ -591,7 +624,8 @@ kernel void indexer_block_score(
     }
 }
 
-// One thread per query. Writes token ids, at most 2052, into indices[query * stride].
+// One threadgroup per query. Each lane owns a contiguous run of blocks.
+// The histogram and the index-ordered collect match context.top_blocks.
 kernel void indexer_select(
     device const float* scores [[buffer(0)]],
     device uint* indices [[buffer(1)]],
@@ -600,7 +634,8 @@ kernel void indexer_select(
     constant uint& base [[buffer(4)]],
     constant uint& n_blocks [[buffer(5)]],
     constant uint& stride [[buffer(6)]],
-    uint query [[thread_position_in_grid]])
+    uint query [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]])
 {
     if (query >= count) {
         return;
@@ -610,111 +645,208 @@ kernel void indexer_select(
     uint n_complete = tail / 4u;
     device uint* out = indices + query * stride;
     if (n_complete <= 512u) {
-        for (uint t = 0u; t <= pos; ++t) {
-            out[t] = t;
+        if (lane == 0u) {
+            for (uint t = 0u; t <= pos; ++t) {
+                out[t] = t;
+            }
+            counts[query] = pos + 1u;
         }
-        counts[query] = pos + 1u;
         return;
     }
     device const float* row = scores + query * n_blocks;
-    uint prefix_shift[4];
-    uint prefix_byte[4];
-    uint nprefix = 0u;
-    uint picked[512];
-    uint npicked = 0u;
-    uint need = 512u;
-    for (uint pass = 0u; pass < 4u; ++pass) {
+    threadgroup atomic_uint hist[256];
+    threadgroup uint prefix_shift[4];
+    threadgroup uint prefix_byte[4];
+    threadgroup uint nprefix;
+    threadgroup uint picked[512];
+    threadgroup uint npicked;
+    threadgroup uint need;
+    threadgroup uint cut;
+    threadgroup uint remaining;
+    threadgroup uint stop;
+    threadgroup uint chunk_base[256];
+    if (lane == 0u) {
+        nprefix = 0u;
+        npicked = 0u;
+        need = 512u;
+        stop = 0u;
+    }
+    if (lane < 256u) {
+        atomic_store_explicit(&hist[lane], 0u, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint chunk = (n_complete + 255u) / 256u;
+    uint start = lane * chunk;
+    uint end = min(start + chunk, n_complete);
+
+    uint running = 1u;
+    for (uint pass = 0u; pass < 4u && running != 0u; ++pass) {
         uint shift = 24u - pass * 8u;
-        uint hist[256];
-        for (uint bucket = 0u; bucket < 256u; ++bucket) {
-            hist[bucket] = 0u;
+        if (lane < 256u) {
+            atomic_store_explicit(&hist[lane], 0u, memory_order_relaxed);
         }
-        for (uint block = 0u; block < n_complete; ++block) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint block = start; block < end; ++block) {
             uint bits = score_bits(row[block]);
-            if (radix_active(bits, prefix_shift, prefix_byte, nprefix)) {
-                hist[(bits >> shift) & 255u] += 1u;
+            if (radix_active_tg(bits, prefix_shift, prefix_byte, nprefix)) {
+                uint byte = (bits >> shift) & 255u;
+                atomic_fetch_add_explicit(&hist[byte], 1u, memory_order_relaxed);
             }
         }
-        uint active_n = 0u;
-        for (uint bucket = 0u; bucket < 256u; ++bucket) {
-            active_n += hist[bucket];
-        }
-        if (active_n <= need) {
-            for (uint block = 0u; block < n_complete && npicked < 512u; ++block) {
-                uint bits = score_bits(row[block]);
-                if (radix_active(bits, prefix_shift, prefix_byte, nprefix)) {
-                    picked[npicked] = block;
-                    npicked += 1u;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (lane == 0u) {
+            uint active_n = 0u;
+            for (uint bucket = 0u; bucket < 256u; ++bucket) {
+                active_n += atomic_load_explicit(&hist[bucket], memory_order_relaxed);
+            }
+            if (active_n <= need) {
+                cut = 256u;
+                remaining = 0u;
+            } else {
+                uint rem = need;
+                uint chosen = 0u;
+                for (int bucket = 255; bucket >= 0; --bucket) {
+                    uint have = atomic_load_explicit(&hist[uint(bucket)], memory_order_relaxed);
+                    if (have >= rem) {
+                        chosen = uint(bucket);
+                        break;
+                    }
+                    rem -= have;
                 }
+                cut = chosen;
+                remaining = rem;
             }
-            break;
         }
-        uint remaining = need;
-        uint cut = 0u;
-        for (int bucket = 255; bucket >= 0; --bucket) {
-            uint have = hist[uint(bucket)];
-            if (have >= remaining) {
-                cut = uint(bucket);
-                break;
-            }
-            remaining -= have;
-        }
-        for (uint block = 0u; block < n_complete && npicked < 512u; ++block) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        uint local = 0u;
+        for (uint block = start; block < end; ++block) {
             uint bits = score_bits(row[block]);
-            if (!radix_active(bits, prefix_shift, prefix_byte, nprefix)) {
+            if (!radix_active_tg(bits, prefix_shift, prefix_byte, nprefix)) {
                 continue;
             }
-            if (((bits >> shift) & 255u) > cut) {
-                picked[npicked] = block;
-                npicked += 1u;
+            uint byte = (bits >> shift) & 255u;
+            bool take = cut == 256u || byte > cut;
+            if (take) {
+                local += 1u;
             }
         }
-        if (shift == 0u) {
-            uint taken = 0u;
-            for (uint block = 0u; block < n_complete && taken < remaining && npicked < 512u; ++block) {
-                uint bits = score_bits(row[block]);
-                if (!radix_active(bits, prefix_shift, prefix_byte, nprefix)) {
-                    continue;
-                }
-                if (((bits >> shift) & 255u) == cut) {
-                    picked[npicked] = block;
-                    npicked += 1u;
-                    taken += 1u;
-                }
+        if (lane < 256u) {
+            chunk_base[lane] = local;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (lane == 0u) {
+            uint sum = 0u;
+            for (uint i = 0u; i < 256u; ++i) {
+                uint have = chunk_base[i];
+                chunk_base[i] = npicked + sum;
+                sum += have;
             }
-            break;
+            npicked += sum;
         }
-        if (remaining == 0u) {
-            break;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        uint slot = lane < 256u ? chunk_base[lane] : 0u;
+        for (uint block = start; block < end; ++block) {
+            uint bits = score_bits(row[block]);
+            if (!radix_active_tg(bits, prefix_shift, prefix_byte, nprefix)) {
+                continue;
+            }
+            uint byte = (bits >> shift) & 255u;
+            if (cut == 256u || byte > cut) {
+                picked[slot] = block;
+                slot += 1u;
+            }
         }
-        prefix_shift[nprefix] = shift;
-        prefix_byte[nprefix] = cut;
-        nprefix += 1u;
-        need = remaining;
-    }
-    for (uint i = 1u; i < npicked; ++i) {
-        uint value = picked[i];
-        uint j = i;
-        while (j > 0u && picked[j - 1u] > value) {
-            picked[j] = picked[j - 1u];
-            j -= 1u;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (cut == 256u || shift == 0u || remaining == 0u) {
+            if (shift == 0u && cut != 256u && remaining > 0u) {
+                uint matched = 0u;
+                for (uint block = start; block < end; ++block) {
+                    uint bits = score_bits(row[block]);
+                    if (!radix_active_tg(bits, prefix_shift, prefix_byte, nprefix)) {
+                        continue;
+                    }
+                    if (((bits >> shift) & 255u) == cut) {
+                        matched += 1u;
+                    }
+                }
+                if (lane < 256u) {
+                    chunk_base[lane] = matched;
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                if (lane == 0u) {
+                    uint sum = 0u;
+                    for (uint i = 0u; i < 256u; ++i) {
+                        uint have = chunk_base[i];
+                        chunk_base[i] = sum;
+                        sum += have;
+                    }
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                uint placed = 0u;
+                uint origin = lane < 256u ? chunk_base[lane] : 0u;
+                for (uint block = start; block < end; ++block) {
+                    uint bits = score_bits(row[block]);
+                    if (!radix_active_tg(bits, prefix_shift, prefix_byte, nprefix)) {
+                        continue;
+                    }
+                    if (((bits >> shift) & 255u) != cut) {
+                        continue;
+                    }
+                    if (origin + placed < remaining) {
+                        picked[npicked + origin + placed] = block;
+                    }
+                    placed += 1u;
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                if (lane == 0u) {
+                    npicked += remaining;
+                    stop = 1u;
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            } else {
+                if (lane == 0u) {
+                    stop = 1u;
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+        } else {
+            if (lane == 0u) {
+                prefix_shift[nprefix] = shift;
+                prefix_byte[nprefix] = cut;
+                nprefix += 1u;
+                need = remaining;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
-        picked[j] = value;
+        running = stop == 0u ? 1u : 0u;
     }
-    uint n = 0u;
-    for (uint i = 0u; i < npicked; ++i) {
-        uint start = picked[i] * 4u;
-        out[n] = start;
-        out[n + 1u] = start + 1u;
-        out[n + 2u] = start + 2u;
-        out[n + 3u] = start + 3u;
-        n += 4u;
+    if (lane == 0u) {
+        for (uint i = 1u; i < npicked; ++i) {
+            uint value = picked[i];
+            uint j = i;
+            while (j > 0u && picked[j - 1u] > value) {
+                picked[j] = picked[j - 1u];
+                j -= 1u;
+            }
+            picked[j] = value;
+        }
+        uint n = 0u;
+        for (uint i = 0u; i < npicked; ++i) {
+            uint block_start = picked[i] * 4u;
+            out[n] = block_start;
+            out[n + 1u] = block_start + 1u;
+            out[n + 2u] = block_start + 2u;
+            out[n + 3u] = block_start + 3u;
+            n += 4u;
+        }
+        for (uint t = tail; t <= pos && n < stride; ++t) {
+            out[n] = t;
+            n += 1u;
+        }
+        counts[query] = n;
     }
-    for (uint t = tail; t <= pos && n < stride; ++t) {
-        out[n] = t;
-        n += 1u;
-    }
-    counts[query] = n;
 }
 
 kernel void qsa_attend_selected(
