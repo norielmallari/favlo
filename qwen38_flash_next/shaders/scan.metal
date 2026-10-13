@@ -528,6 +528,317 @@ kernel void qsa_attend(
     }
 }
 
+// Non-negative finite scores rank by their IEEE bits. context.top_blocks
+// walks the same four bytes and keeps the lower index on a tie.
+static uint score_bits(float value) {
+    if (!isfinite(value) || value < 0.0f) {
+        value = 0.0f;
+    }
+    return as_type<uint>(value);
+}
+
+static bool radix_active(uint bits, thread const uint* shift, thread const uint* byte, uint nprefix) {
+    for (uint p = 0u; p < nprefix; ++p) {
+        if (((bits >> shift[p]) & 255u) != byte[p]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// One threadgroup owns one block. The pooled key is shared across the queries.
+kernel void indexer_block_score(
+    device const float* index_qk [[buffer(0)]],
+    device const float* cache [[buffer(1)]],
+    device float* scores [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    constant uint& base [[buffer(4)]],
+    constant uint& n_blocks [[buffer(5)]],
+    uint block [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]],
+    uint tg_size [[threads_per_threadgroup]])
+{
+    if (block >= n_blocks) {
+        return;
+    }
+    threadgroup float pooled[128];
+    for (uint d = lane; d < 128u; d += tg_size) {
+        float sum = 0.0f;
+        uint token = block * 4u;
+        sum += cache[(token + 0u) * 128u + d];
+        sum += cache[(token + 1u) * 128u + d];
+        sum += cache[(token + 2u) * 128u + d];
+        sum += cache[(token + 3u) * 128u + d];
+        pooled[d] = sum * 0.25f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint query = lane; query < count; query += tg_size) {
+        uint pos = base + query;
+        if (block >= pos / 4u) {
+            scores[query * n_blocks + block] = 0.0f;
+            continue;
+        }
+        float acc = 0.0f;
+        for (uint head = 0u; head < 4u; ++head) {
+            device const float* qh = index_qk + query * 640u + head * 128u;
+            float dot = 0.0f;
+            for (uint d = 0u; d < 128u; ++d) {
+                dot += qh[d] * pooled[d];
+            }
+            acc += max(dot, 0.0f);
+        }
+        scores[query * n_blocks + block] = acc;
+    }
+}
+
+// One thread per query. Writes token ids, at most 2052, into indices[query * stride].
+kernel void indexer_select(
+    device const float* scores [[buffer(0)]],
+    device uint* indices [[buffer(1)]],
+    device uint* counts [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    constant uint& base [[buffer(4)]],
+    constant uint& n_blocks [[buffer(5)]],
+    constant uint& stride [[buffer(6)]],
+    uint query [[thread_position_in_grid]])
+{
+    if (query >= count) {
+        return;
+    }
+    uint pos = base + query;
+    uint tail = (pos / 4u) * 4u;
+    uint n_complete = tail / 4u;
+    device uint* out = indices + query * stride;
+    if (n_complete <= 512u) {
+        for (uint t = 0u; t <= pos; ++t) {
+            out[t] = t;
+        }
+        counts[query] = pos + 1u;
+        return;
+    }
+    device const float* row = scores + query * n_blocks;
+    uint prefix_shift[4];
+    uint prefix_byte[4];
+    uint nprefix = 0u;
+    uint picked[512];
+    uint npicked = 0u;
+    uint need = 512u;
+    for (uint pass = 0u; pass < 4u; ++pass) {
+        uint shift = 24u - pass * 8u;
+        uint hist[256];
+        for (uint bucket = 0u; bucket < 256u; ++bucket) {
+            hist[bucket] = 0u;
+        }
+        for (uint block = 0u; block < n_complete; ++block) {
+            uint bits = score_bits(row[block]);
+            if (radix_active(bits, prefix_shift, prefix_byte, nprefix)) {
+                hist[(bits >> shift) & 255u] += 1u;
+            }
+        }
+        uint active_n = 0u;
+        for (uint bucket = 0u; bucket < 256u; ++bucket) {
+            active_n += hist[bucket];
+        }
+        if (active_n <= need) {
+            for (uint block = 0u; block < n_complete && npicked < 512u; ++block) {
+                uint bits = score_bits(row[block]);
+                if (radix_active(bits, prefix_shift, prefix_byte, nprefix)) {
+                    picked[npicked] = block;
+                    npicked += 1u;
+                }
+            }
+            break;
+        }
+        uint remaining = need;
+        uint cut = 0u;
+        for (int bucket = 255; bucket >= 0; --bucket) {
+            uint have = hist[uint(bucket)];
+            if (have >= remaining) {
+                cut = uint(bucket);
+                break;
+            }
+            remaining -= have;
+        }
+        for (uint block = 0u; block < n_complete && npicked < 512u; ++block) {
+            uint bits = score_bits(row[block]);
+            if (!radix_active(bits, prefix_shift, prefix_byte, nprefix)) {
+                continue;
+            }
+            if (((bits >> shift) & 255u) > cut) {
+                picked[npicked] = block;
+                npicked += 1u;
+            }
+        }
+        if (shift == 0u) {
+            uint taken = 0u;
+            for (uint block = 0u; block < n_complete && taken < remaining && npicked < 512u; ++block) {
+                uint bits = score_bits(row[block]);
+                if (!radix_active(bits, prefix_shift, prefix_byte, nprefix)) {
+                    continue;
+                }
+                if (((bits >> shift) & 255u) == cut) {
+                    picked[npicked] = block;
+                    npicked += 1u;
+                    taken += 1u;
+                }
+            }
+            break;
+        }
+        if (remaining == 0u) {
+            break;
+        }
+        prefix_shift[nprefix] = shift;
+        prefix_byte[nprefix] = cut;
+        nprefix += 1u;
+        need = remaining;
+    }
+    for (uint i = 1u; i < npicked; ++i) {
+        uint value = picked[i];
+        uint j = i;
+        while (j > 0u && picked[j - 1u] > value) {
+            picked[j] = picked[j - 1u];
+            j -= 1u;
+        }
+        picked[j] = value;
+    }
+    uint n = 0u;
+    for (uint i = 0u; i < npicked; ++i) {
+        uint start = picked[i] * 4u;
+        out[n] = start;
+        out[n + 1u] = start + 1u;
+        out[n + 2u] = start + 2u;
+        out[n + 3u] = start + 3u;
+        n += 4u;
+    }
+    for (uint t = tail; t <= pos && n < stride; ++t) {
+        out[n] = t;
+        n += 1u;
+    }
+    counts[query] = n;
+}
+
+kernel void qsa_attend_selected(
+    device const float* query [[buffer(0)]],
+    device const float* gate [[buffer(1)]],
+    device const float* key [[buffer(2)]],
+    device const float* value [[buffer(3)]],
+    device const uint* indices [[buffer(4)]],
+    device const uint* counts [[buffer(5)]],
+    device float* output [[buffer(6)]],
+    constant uint& count [[buffer(7)]],
+    constant uint& stride [[buffer(8)]],
+    constant float& scale [[buffer(9)]],
+    constant uint& groups [[buffer(10)]],
+    uint head [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]])
+{
+    threadgroup float scores[2052];
+    threadgroup float red[16];
+    uint kv = head / 12u;
+    for (uint token = 0u; token < count; ++token) {
+        device const float* qh = query + (token * 24u + head) * 256u;
+        device const uint* ids = indices + token * stride;
+        uint nsel = counts[token];
+        if (nsel > 2052u) {
+            nsel = 2052u;
+        }
+        for (uint slot = simd; slot < nsel; slot += groups) {
+            uint t = ids[slot];
+            device const float* kt = key + (t * 2u + kv) * 256u;
+            float dot = 0.0f;
+            for (uint d = lane; d < 256u; d += 32u) {
+                dot += qh[d] * kt[d];
+            }
+            float score = simd_sum(dot) * scale;
+            if (lane == 0u) {
+                scores[slot] = score;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float local_max = -INFINITY;
+        for (uint slot = simd; slot < nsel; slot += groups) {
+            local_max = max(local_max, scores[slot]);
+        }
+        local_max = simd_max(local_max);
+        if (lane == 0u) {
+            red[simd] = local_max;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float maxs = -INFINITY;
+        for (uint group = 0u; group < groups; ++group) {
+            maxs = max(maxs, red[group]);
+        }
+        for (uint slot = simd; slot < nsel; slot += groups) {
+            if (lane == 0u) {
+                scores[slot] = exp(scores[slot] - maxs);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float local_sum = 0.0f;
+        for (uint slot = simd; slot < nsel; slot += groups) {
+            local_sum += scores[slot];
+        }
+        if (lane == 0u) {
+            red[simd] = local_sum;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float denom = 0.0f;
+        for (uint group = 0u; group < groups; ++group) {
+            denom += red[group];
+        }
+        float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+        float acc4 = 0.0f, acc5 = 0.0f, acc6 = 0.0f, acc7 = 0.0f;
+        for (uint slot = simd; slot < nsel; slot += groups) {
+            float weight = scores[slot] / denom;
+            device const float* vt = value + (ids[slot] * 2u + kv) * 256u;
+            acc0 += weight * vt[lane];
+            acc1 += weight * vt[lane + 32u];
+            acc2 += weight * vt[lane + 64u];
+            acc3 += weight * vt[lane + 96u];
+            acc4 += weight * vt[lane + 128u];
+            acc5 += weight * vt[lane + 160u];
+            acc6 += weight * vt[lane + 192u];
+            acc7 += weight * vt[lane + 224u];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        device float* out = output + (token * 24u + head) * 256u;
+        device const float* gh = gate + (token * 24u + head) * 256u;
+        for (uint group = 0u; group < groups; ++group) {
+            if (simd == group) {
+                float gated0 = acc0 * sigmoid_f(gh[lane]);
+                float gated1 = acc1 * sigmoid_f(gh[lane + 32u]);
+                float gated2 = acc2 * sigmoid_f(gh[lane + 64u]);
+                float gated3 = acc3 * sigmoid_f(gh[lane + 96u]);
+                float gated4 = acc4 * sigmoid_f(gh[lane + 128u]);
+                float gated5 = acc5 * sigmoid_f(gh[lane + 160u]);
+                float gated6 = acc6 * sigmoid_f(gh[lane + 192u]);
+                float gated7 = acc7 * sigmoid_f(gh[lane + 224u]);
+                if (group == 0u) {
+                    out[lane] = gated0;
+                    out[lane + 32u] = gated1;
+                    out[lane + 64u] = gated2;
+                    out[lane + 96u] = gated3;
+                    out[lane + 128u] = gated4;
+                    out[lane + 160u] = gated5;
+                    out[lane + 192u] = gated6;
+                    out[lane + 224u] = gated7;
+                } else {
+                    out[lane] += gated0;
+                    out[lane + 32u] += gated1;
+                    out[lane + 64u] += gated2;
+                    out[lane + 96u] += gated3;
+                    out[lane + 128u] += gated4;
+                    out[lane + 160u] += gated5;
+                    out[lane + 192u] += gated6;
+                    out[lane + 224u] += gated7;
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+}
+
 // Four rows per simdgroup. Each lane reads its own 16-byte block so a simdgroup
 // streams 512-byte bursts instead of reloading one broadcast block.
 kernel void gemv_int4_f32(

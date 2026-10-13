@@ -99,12 +99,20 @@ def _consecutive_rows(indexed: Sequence[tuple[int, int]]) -> list[list[tuple[int
 class ExpertAtlas:
     """A bounded device copy of expert images, indexed by a 64-bit offset table."""
 
-    def __init__(self, gpu: Any, files: Any, layers: int, experts: int) -> None:
+    def __init__(
+        self,
+        gpu: Any,
+        files: Any,
+        layers: int,
+        experts: int,
+        candidates: tuple[int, ...] | None = None,
+    ) -> None:
         self.gpu = gpu
         self.files = files
         self.layers = layers
         self.experts = experts
-        self.atlas, self.budget = _allocate(gpu, RESIDENT_CANDIDATES)
+        chosen = RESIDENT_CANDIDATES if candidates is None else candidates
+        self.atlas, self.budget = _allocate(gpu, chosen)
         self.table = gpu.alloc(layers * experts * 8)
         _fill_buffer(self.table, layers * experts * 8, 0xFF)
         self.miss = gpu.zeros(layers * 4)

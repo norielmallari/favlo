@@ -12,11 +12,27 @@ from typing import Any
 import numpy as np
 import objc
 
-from qwen38_flash_next.checks import _ngram_row, _sample
+from qwen38_flash_next.checks import _ngram_row, _sample, ngram_rows
+from qwen38_flash_next.context import (
+    BLOCK as INDEX_BLOCK,
+)
+from qwen38_flash_next.context import (
+    DENSE_LIMIT,
+    HEADROOM,
+    INDEX_STRIDE,
+    PREFILL_CHUNK,
+    kv_bytes_per_token,
+    machine_memory,
+    prompt_token_limit,
+    resident_candidates,
+    residual_bytes_per_token,
+    scratch_bytes,
+)
 from qwen38_flash_next.convert import ShardStore, _layer_f32_keys, _layer_int4_keys
 from qwen38_flash_next.experts import ExpertAtlas, group_tier
 from qwen38_flash_next.formats import (
     BLOCK,
+    NGRAM_WIDTH,
     ExpertPlanes,
     expert_planes,
     int4_plane_sizes,
@@ -61,7 +77,9 @@ def after_atlas_load(resident: Sequence[int]) -> int:
 class Qwen38Runtime:
     """One sequence of Qwen3.8-Flash-Next. Linear maps are Metal shader dots."""
 
-    def __init__(self, root: Path, *, bf16: bool = False) -> None:
+    def __init__(
+        self, root: Path, *, bf16: bool = False, resident_percent: float | None = None
+    ) -> None:
         self.gpu = MetalSession()
         _log(f"shaders ready on {_device_name(self.gpu.device)}")
         self.root = root
@@ -113,6 +131,11 @@ class Qwen38Runtime:
         self._stage_miss: Any = None
         self._stage_event = [0, 0]
         self._stage_bytes = 0
+        self._hold_xs: Any = None
+        self._hold_out: Any = None
+        self._hold_ids: Any = None
+        self._hold_w: Any = None
+        self._hold_cap = 0
         self._hot = expert_planes(4, self.hidden, self.moe)
         self._cold = expert_planes(2, self.hidden, self.moe)
         self._super_planes = expert_planes(8, self.hidden, self.moe)
@@ -178,6 +201,47 @@ class Qwen38Runtime:
                 self.stop_ids.add(eos_ids)
             elif isinstance(eos_ids, list):
                 self.stop_ids.update(int(item) for item in eos_ids)
+        self._set_prompt_limit(resident_percent)
+
+    def _set_prompt_limit(self, resident_percent: float | None) -> None:
+        self.resident_percent = resident_percent
+        self.prefill_chunk = PREFILL_CHUNK
+        attention = sum(kind == "full_attention" for kind in self.kinds)
+        fixed = HEADROOM
+        staging = 0
+        if isinstance(self.files, QuantRecord):
+            fixed += (self.files.root / "resident.bin").stat().st_size
+            hot = sum(os.fstat(fd).st_size for fd in self.files.hot_fds)
+            self.resident_candidates = resident_candidates(hot, resident_percent)
+            self.resident_budget = self.resident_candidates[0]
+            staging = self._stage_budget() * 2
+        else:
+            self.resident_candidates = ()
+            self.resident_budget = 0
+        index_row = PREFILL_CHUNK * INDEX_STRIDE * 4
+        self.prompt_limit = prompt_token_limit(
+            memory=machine_memory(),
+            resident_hot=self.resident_budget,
+            kv_per_token=kv_bytes_per_token(attention),
+            residual_per_token=residual_bytes_per_token(self.branches, self.hidden),
+            scratch=scratch_bytes(PREFILL_CHUNK) + index_row,
+            staging=staging,
+            fixed=fixed,
+            score_per_token=PREFILL_CHUNK,
+        )
+        _log(
+            f"prompt limit {self.prompt_limit} tokens, "
+            f"resident budget {self.resident_budget >> 20} MiB"
+        )
+
+    def _require_prompt_room(self, total: int) -> None:
+        if total <= self.prompt_limit:
+            return
+        message = (
+            f"prompt of {total} tokens exceeds the memory limit of {self.prompt_limit} "
+            f"(resident experts {self.resident_budget >> 20} MiB)"
+        )
+        raise RuntimeError(message)
 
     def _add_stop_token(self, piece: Any) -> None:
         """A single-id end marker stops generation. The n-gram boundary stays `eos`."""
@@ -245,8 +309,7 @@ class Qwen38Runtime:
             if max_tokens is not None and produced >= max_tokens:
                 self._hit_limit = True
                 return
-            # Same bound as the sparse-attention indexer: (length + 1) // 4 > 512.
-            if (len(self.tokens) + 1) // 4 > 512:
+            if len(self.tokens) + 1 > self.prompt_limit:
                 self._hit_limit = True
                 return
             token = self._pick(logits, temperature, top_p, top_k, produced_ids)
@@ -332,15 +395,19 @@ class Qwen38Runtime:
         gpu_at = self.gpu.gpu_seconds
         self._decoding = decode
         stage_bytes = 0
+        total = len(self.tokens) + len(tokens)
+        self._require_prompt_room(total)
+        chunk = len(tokens) if decode else min(len(tokens), self.prefill_chunk)
+        scratch = scratch_bytes(max(chunk, 1))
+        if not decode and total > DENSE_LIMIT:
+            blocks = max(total // INDEX_BLOCK, 1)
+            scratch += chunk * blocks * 4 + chunk * INDEX_STRIDE * 4
+        self.gpu.begin_scratch(scratch, copies=2 if decode else 1)
         if not self._bf16:
             if decode:
                 self._ensure_atlas()
             else:
                 self._begin_prefill_stream()
-        self.gpu.begin_scratch(
-            max(256 << 20, len(tokens) * (2 << 20)),
-            copies=2 if decode else 1,
-        )
         streamed = self.atlas.streamed if self.atlas is not None else 0
         if self.atlas is not None:
             _fill_buffer(self.atlas.miss, self.layers * 4, 0)
@@ -391,36 +458,80 @@ class Qwen38Runtime:
 
     def _forward_body(self, tokens: list[int]) -> Dev:
         count = len(tokens)
+        self._reserve_caches(len(self.tokens) + count)
         residual = self._embed_dev(tokens)
+        span = self.branches * self.hidden
+        step = count if self._decoding else self.prefill_chunk
+        wide = self._streaming_prefill and count > self.prefill_chunk
+        if wide:
+            self._ensure_hold(count)
         for layer in range(self.layers):
-            self.gpu.rewind_scratch()
-            # Objective-C temporaries from this layer. The command buffer stays
-            # open until prefill needs expert ids, or the host reads the token.
-            with objc.autorelease_pool():
-                if (layer + 1) in self.ple_layers:
-                    self._ple_dev(residual, tokens, count)
-                bundle = self._layer(layer)
-                hats = self._rms_branches(residual, bundle["attn_norm"], count)
-                xs = self._gr_dev(bundle["attn_down"], bundle["attn_up"], hats, count)
-                if self.kinds[layer] == "linear_attention":
-                    mixed = self._gdn_dev(layer, bundle, xs, count)
-                elif self.kinds[layer] == "full_attention":
-                    mixed = self._qsa_dev(layer, bundle, xs, count)
-                else:
-                    message = f"unknown layer type {self.kinds[layer]}"
+            layer_started = time.perf_counter()
+            held = 0
+            submitted = False
+            bundle = None
+            if wide and layer + 1 < self.layers:
+                self._submit_prefill_layer(layer + 1)
+                submitted = True
+            for offset in range(0, count, step):
+                n = min(step, count - offset)
+                view = residual.view(offset * span, n * span)
+                self.gpu.rewind_scratch()
+                # Objective-C temporaries from this chunk. The command buffer stays
+                # open until prefill needs expert ids, or the host reads the token.
+                with objc.autorelease_pool():
+                    chunk_tokens = tokens[offset : offset + n]
+                    if (layer + 1) in self.ple_layers:
+                        self._ple_dev(view, chunk_tokens, n, prior=tokens[:offset])
+                    bundle = self._layer(layer)
+                    hats = self._rms_branches(view, bundle["attn_norm"], n)
+                    xs = self._gr_dev(bundle["attn_down"], bundle["attn_up"], hats, n)
+                    if self.kinds[layer] == "linear_attention":
+                        mixed = self._gdn_dev(layer, bundle, xs, n)
+                    elif self.kinds[layer] == "full_attention":
+                        mixed = self._qsa_dev(
+                            layer, bundle, xs, n, base=len(self.tokens) + offset
+                        )
+                    else:
+                        message = f"unknown layer type {self.kinds[layer]}"
+                        raise RuntimeError(message)
+                    self._inject_dev(view, hats, mixed, bundle["attn_inject"], n)
+                    hats = self._rms_branches(view, bundle["mlp_norm"], n)
+                    xs = self._gr_dev(bundle["mlp_down"], bundle["mlp_up"], hats, n)
+                    if wide:
+                        self.gpu.copy_bytes(
+                            xs.buf,
+                            xs.offset * 4,
+                            self._hold_xs,
+                            offset * self.hidden * 4,
+                            n * self.hidden * 4,
+                        )
+                        self.gpu.barrier()
+                    else:
+                        mixed = self._moe_dev(
+                            layer,
+                            bundle,
+                            xs,
+                            n,
+                            submit_next=self._streaming_prefill and not submitted,
+                        )
+                        submitted = True
+                        if self._bf16:
+                            held = len(self.expert_cache)
+                            self.expert_cache.clear()
+                        self._inject_dev(view, hats, mixed, bundle["mlp_inject"], n)
+                    if self._decoding and self.atlas is not None:
+                        self.gpu.submit()
+            if wide:
+                if bundle is None:
+                    message = "prefill layer had no tokens"
                     raise RuntimeError(message)
-                self._inject_dev(residual, hats, mixed, bundle["attn_inject"], count)
-                hats = self._rms_branches(residual, bundle["mlp_norm"], count)
-                xs = self._gr_dev(bundle["mlp_down"], bundle["mlp_up"], hats, count)
-                mixed = self._moe_dev(layer, bundle, xs, count)
-                if self._bf16:
-                    held = len(self.expert_cache)
-                    self.expert_cache.clear()
-                self._inject_dev(residual, hats, mixed, bundle["mlp_inject"], count)
-                if self._decoding and self.atlas is not None:
-                    self.gpu.submit()
-                if self._bf16:
-                    _log(f"layer {layer} stepped {count} experts {held}")
+                self._moe_wide(layer, bundle, residual, count)
+            if self._bf16:
+                _log(f"layer {layer} stepped {count} experts {held}")
+            elif count > DENSE_LIMIT:
+                elapsed = time.perf_counter() - layer_started
+                _log(f"layer {layer} {elapsed:.2f}s")
         self.gpu.rewind_scratch()
         final = self._final_bundle()
         last = residual.view(
@@ -459,14 +570,13 @@ class Qwen38Runtime:
             return
         if not isinstance(self.files, QuantRecord):
             return
-        self.atlas = ExpertAtlas(self.gpu, self.files, self.layers, self.experts)
+        self.atlas = ExpertAtlas(
+            self.gpu, self.files, self.layers, self.experts, self.resident_candidates
+        )
 
-    def _begin_prefill_stream(self) -> None:
-        """Two layer buffers. The atlas stays unallocated until this call returns."""
+    def _stage_budget(self) -> int:
         if not isinstance(self.files, QuantRecord):
-            return
-        self._end_prefill_stream()
-        self.atlas = None
+            return 0
         budget = 0
         for layer in range(self.layers):
             hot_bytes, cold_bytes, _table = prefill_image_table(
@@ -477,6 +587,15 @@ class Qwen38Runtime:
                 self.files.cold_slot,
             )
             budget = max(budget, hot_bytes + cold_bytes)
+        return budget
+
+    def _begin_prefill_stream(self) -> None:
+        """Two layer buffers. The atlas stays unallocated until this call returns."""
+        if not isinstance(self.files, QuantRecord):
+            return
+        self._end_prefill_stream()
+        self.atlas = None
+        budget = self._stage_budget()
         self._stage = [self.gpu.alloc(budget), self.gpu.alloc(budget)]
         if self._stage[0] is None or self._stage[1] is None:
             message = f"prefill stage of {budget} bytes was not allocated"
@@ -735,9 +854,22 @@ class Qwen38Runtime:
     def _residual(self, count: int) -> Dev:
         n = count * self.branches * self.hidden
         if self._residual_buf is None or self._residual_n < n:
-            self._residual_buf = self.gpu.alloc(n * 4)
+            buf = self.gpu.alloc(n * 4)
+            if buf is None:
+                message = f"residual of {n * 4} bytes was not allocated"
+                raise RuntimeError(message)
+            self._residual_buf = buf
             self._residual_n = n
         return Dev(self._residual_buf, n)
+
+    def _reserve_caches(self, total: int) -> None:
+        for layer, length in self.kv_len.items():
+            extra = total - length
+            if extra <= 0:
+                continue
+            self._reserve(self.kv_k, layer, length, extra, 512)
+            self._reserve(self.kv_v, layer, length, extra, 512)
+            self._reserve(self.indexer_buf, layer, length, extra, 128)
 
     def _gr_dev(self, down: Any, up: Any, hats: Dev, count: int) -> Dev:
         # Tech report eq. (31): SiLU((1/n_r) W_d vec(R̂)). The branch mean is the second 1/n_r.
@@ -856,16 +988,25 @@ class Qwen38Runtime:
     ) -> Any:
         need = (length + extra) * width * 4
         buf = table[layer]
-        if buf.length() < need:
-            grown = self.gpu.alloc(max(need * 2, width * 4))
-            if length:
-                self.gpu._retain.append(buf)
-                self.gpu.copy_span(Dev(buf, length * width), 0, grown, 0, length * width)
-            table[layer] = grown
-            buf = grown
-        return buf
+        if buf is not None and buf.length() >= need:
+            return buf
+        # Short sequences keep the doubled buffer. A long prompt allocates the
+        # request, so the admission check is not followed by a second copy of it.
+        chunk = PREFILL_CHUNK * width * 4
+        alloc_n = max(need * 2, width * 4) if need <= chunk else need
+        grown = self.gpu.alloc(alloc_n)
+        if grown is None:
+            message = f"cache of {alloc_n} bytes was not allocated"
+            raise RuntimeError(message)
+        if length and buf is not None:
+            self.gpu._retain.append(buf)
+            self.gpu.copy_span(Dev(buf, length * width), 0, grown, 0, length * width)
+        table[layer] = grown
+        return grown
 
-    def _qsa_dev(self, layer: int, bundle: dict[str, Any], xs: Dev, count: int) -> Dev:
+    def _qsa_dev(
+        self, layer: int, bundle: dict[str, Any], xs: Dev, count: int, *, base: int
+    ) -> Dev:
         hidden = self.hidden
         query = self.gpu.linear(bundle["q_proj"], xs, count, hidden)
         key = self.gpu.linear(bundle["k_proj"], xs, count, hidden)
@@ -873,15 +1014,14 @@ class Qwen38Runtime:
         index_qk = self.gpu.linear(bundle["index_qk"], xs, count, hidden)
         q_w, q_off = bundle["q_norm"]
         k_w, k_off = bundle["k_norm"]
-        base = len(self.tokens)
         q_part, gate_pre = self.gpu.split_q_batch(query, count)
         q = self.gpu.rms(q_part, q_w, q_off, 256, count * 24, self.eps, True, 0)
         k = self.gpu.rms(key, k_w, k_off, 256, count * 2, self.eps, True, 0)
         q = self.gpu.rope_batch(q, count, 24, 256, self.rotary_dim, base, self.rope_theta)
         k = self.gpu.rope_batch(k, count, 2, 256, self.rotary_dim, base, self.rope_theta)
         length = self.kv_len[layer]
-        if (length + count) // 4 > 512:
-            message = "sequence is past the 2048-token indexer budget"
+        if length != base:
+            message = f"attention cache length {length} does not match position {base}"
             raise RuntimeError(message)
         k_buf = self._reserve(self.kv_k, layer, length, count, 512)
         v_buf = self._reserve(self.kv_v, layer, length, count, 512)
@@ -890,10 +1030,31 @@ class Qwen38Runtime:
         self.gpu.copy_bytes(k.buf, k.offset * 4, k_buf, length * 512 * 4, count * 512 * 4)
         self.gpu.copy_bytes(value.buf, value.offset * 4, v_buf, length * 512 * 4, count * 512 * 4)
         self.gpu.indexer_write(index_qk, i_buf, count, length)
-        gated = self.gpu.qsa_attend(q, gate_pre, k_buf, v_buf, count, length)
+        if base + count <= DENSE_LIMIT:
+            gated = self.gpu.qsa_attend(q, gate_pre, k_buf, v_buf, count, length)
+        else:
+            n_blocks = max((base + count - 1) // INDEX_BLOCK, 1)
+            scores = self.gpu.tmp(count * n_blocks)
+            indices = self.gpu.tmp(count * INDEX_STRIDE)
+            selected = self.gpu.tmp(count)
+            self.gpu.indexer_block_score(index_qk, i_buf, scores, count, length, n_blocks)
+            self.gpu.indexer_select(
+                scores, indices, selected, count, length, n_blocks, INDEX_STRIDE
+            )
+            gated = self.gpu.qsa_attend_selected(
+                q, gate_pre, k_buf, v_buf, indices, selected, count, INDEX_STRIDE
+            )
         return self.gpu.linear(bundle["o_proj"], gated, count, 6144)
 
-    def _moe_dev(self, layer: int, bundle: dict[str, Any], xs: Dev, count: int) -> Dev:
+    def _moe_dev(
+        self,
+        layer: int,
+        bundle: dict[str, Any],
+        xs: Dev,
+        count: int,
+        *,
+        submit_next: bool = True,
+    ) -> Dev:
         if self._bf16 or (self.atlas is None and not self._streaming_prefill):
             return self._moe_bf16(layer, bundle, xs, count)
         router = self._router(layer)
@@ -913,7 +1074,9 @@ class Qwen38Runtime:
         rows = np.asarray(host_ids, dtype=np.uint32).reshape(count, self.top_k)
         self._predicted[layer] = [int(item) for item in rows[-1].tolist()]
         if self._streaming_prefill:
-            return self._moe_from_stage(layer, bundle, xs, count, weight, host_ids)
+            return self._moe_from_stage(
+                layer, bundle, xs, count, weight, host_ids, submit_next=submit_next
+            )
         if self.atlas is None:
             message = "decode has no expert atlas"
             raise RuntimeError(message)
@@ -936,14 +1099,291 @@ class Qwen38Runtime:
         count: int,
         weight: Dev,
         host_ids: np.ndarray,
+        *,
+        submit_next: bool,
     ) -> Dev:
         shared = self._shared_expert(bundle, xs, count)
         self.gpu.io_fence(self._stage_event[layer % 2])
         self._write_stage_table(layer)
         mixed = self._moe_grouped(layer, xs, weight, shared, host_ids, count)
-        if layer + 1 < self.layers:
+        if submit_next and layer + 1 < self.layers:
             self._submit_prefill_layer(layer + 1)
         return mixed
+
+    def _ensure_hold(self, count: int) -> None:
+        if self._hold_cap >= count and self._hold_xs is not None:
+            return
+        xs_bytes = count * self.hidden * 4
+        id_bytes = count * self.top_k * 4
+        self._hold_xs = self.gpu.alloc(xs_bytes)
+        self._hold_out = self.gpu.alloc(xs_bytes)
+        self._hold_ids = self.gpu.alloc(id_bytes)
+        self._hold_w = self.gpu.alloc(id_bytes)
+        held = (self._hold_xs, self._hold_out, self._hold_ids, self._hold_w)
+        if any(buf is None for buf in held):
+            message = f"prefill expert hold of {count} tokens was not allocated"
+            raise RuntimeError(message)
+        self._hold_cap = count
+
+    def _room_for_expert(self) -> None:
+        arena = self.gpu._arena
+        if arena is None or self.gpu._arena_used <= int(arena.length()) // 2:
+            return
+        self.gpu.flush()
+        self.gpu.rewind_scratch()
+
+    def _keep_mixed(self, mixed: Dev, count: int) -> Dev:
+        n = count * self.hidden
+        if mixed.buf is not self._hold_out or mixed.offset != 0 or mixed.n != n:
+            self.gpu.copy_bytes(mixed.buf, mixed.offset * 4, self._hold_out, 0, n * 4)
+        self.gpu.flush()
+        self.gpu.rewind_scratch()
+        return Dev(self._hold_out, n)
+
+    def _moe_wide(self, layer: int, bundle: dict[str, Any], residual: Dev, count: int) -> None:
+        """Int4 experts for the whole layer, after every attention chunk."""
+        self._route_hold(layer, bundle, count)
+        if not isinstance(self.files, QuantRecord):
+            message = "prefill has no expert record"
+            raise RuntimeError(message)
+        if self._stage is None or self._stage_table is None or self._stage_miss is None:
+            message = "prefill stream has no staging buffer"
+            raise RuntimeError(message)
+        raw = _buffer_bytes(self._hold_ids, count * self.top_k * 4)
+        host_ids = np.frombuffer(raw, dtype=np.uint32).copy()
+        rows = host_ids.reshape(count, self.top_k)
+        self._predicted[layer] = [int(item) for item in rows[-1].tolist()]
+        self._choice[layer] = Dev(self._hold_ids, self.top_k, (count - 1) * self.top_k)
+        self.gpu.io_fence(self._stage_event[layer % 2])
+        self._write_stage_table(layer)
+        xs = Dev(self._hold_xs, count * self.hidden)
+        weight = Dev(self._hold_w, count * self.top_k)
+        running = Dev(self._hold_out, count * self.hidden)
+        running = self._moe_int4_matmul(layer, xs, weight, running, host_ids, count)
+        running = self._moe_tier_batched(
+            layer,
+            xs,
+            weight,
+            running,
+            host_ids,
+            count,
+            self.files.cold_set(layer),
+            self._cold,
+            self._stage[layer % 2],
+            self._stage_table,
+            0,
+            self._stage_miss,
+        )
+        running = self._prefill_super(layer, xs, weight, running, host_ids, count)
+        running = self._keep_mixed(running, count)
+        span = self.branches * self.hidden
+        for offset in range(0, count, self.prefill_chunk):
+            n = min(self.prefill_chunk, count - offset)
+            self.gpu.rewind_scratch()
+            view = residual.view(offset * span, n * span)
+            hats = self._rms_branches(view, bundle["mlp_norm"], n)
+            self._inject_dev(
+                view,
+                hats,
+                running.view(offset * self.hidden, n * self.hidden),
+                bundle["mlp_inject"],
+                n,
+            )
+
+    def _route_hold(self, layer: int, bundle: dict[str, Any], count: int) -> None:
+        router = self._router(layer)
+        hidden = self.hidden
+        for offset in range(0, count, self.prefill_chunk):
+            n = min(self.prefill_chunk, count - offset)
+            self.gpu.rewind_scratch()
+            xs = Dev(self._hold_xs, count * hidden).view(offset * hidden, n * hidden)
+            shared = self._shared_expert(bundle, xs, n)
+            self.gpu.copy_bytes(
+                shared.buf,
+                shared.offset * 4,
+                self._hold_out,
+                offset * hidden * 4,
+                n * hidden * 4,
+            )
+            choice, weight = self.gpu.topk_batch(
+                self.gpu.linear(router, xs, n, hidden), n, self.experts, self.top_k
+            )
+            self.gpu.copy_bytes(
+                choice.buf,
+                choice.offset * 4,
+                self._hold_ids,
+                offset * self.top_k * 4,
+                n * self.top_k * 4,
+            )
+            self.gpu.copy_bytes(
+                weight.buf,
+                weight.offset * 4,
+                self._hold_w,
+                offset * self.top_k * 4,
+                n * self.top_k * 4,
+            )
+            self.gpu.barrier()
+        self.gpu.flush()
+
+    def _moe_int4_matmul(
+        self,
+        layer: int,
+        xs: Dev,
+        weight: Dev,
+        running: Dev,
+        host_ids: np.ndarray,
+        count: int,
+    ) -> Dev:
+        if not isinstance(self.files, QuantRecord) or self._stage is None:
+            message = "prefill stream has no staging buffer"
+            raise RuntimeError(message)
+        members = self.files.hot_set(layer)
+        flat = np.asarray(host_ids, dtype=np.uint32).reshape(count, self.top_k)
+        chosen: dict[int, list[tuple[int, int]]] = {}
+        for token in range(count):
+            row = flat[token]
+            for slot in range(self.top_k):
+                expert = int(row[slot])
+                if expert in members:
+                    chosen.setdefault(expert, []).append((token, slot))
+        large: list[tuple[int, list[tuple[int, int]]]] = []
+        small: set[int] = set()
+        for expert, pairs in chosen.items():
+            if len(pairs) >= 64:
+                large.append((expert, pairs))
+            else:
+                small.add(expert)
+        if large:
+            _hot_bytes, _cold_bytes, image = prefill_image_table(
+                self.files.hot[layer],
+                self.files.super[layer],
+                self.experts,
+                self.files.slot,
+                self.files.cold_slot,
+            )
+            stage = self._stage[layer % 2]
+            for expert, pairs in large:
+                self._room_for_expert()
+                base = int(image[expert])
+                if base < 0:
+                    message = f"layer {layer} expert {expert} is not in the staging buffer"
+                    raise RuntimeError(message)
+                tokens = np.asarray([item[0] for item in pairs], dtype=np.uint32)
+                slots = np.asarray([item[1] for item in pairs], dtype=np.uint32)
+                n = int(tokens.size)
+                token_buf = self._upload_u32(tokens)
+                slot_buf = self._upload_u32(slots)
+                gate, down = self._expert_views(stage)
+                gate.weight_off += base
+                gate.scale_off += base
+                down.weight_off += base
+                down.scale_off += base
+                gathered = self.gpu.gather_half(xs, token_buf, n, self.hidden, gate.stored_inner)
+                activated = self.gpu.moe_activate(
+                    self.gpu.gemm_int4_half(gate, gathered, n),
+                    n,
+                    self.moe,
+                    down.stored_inner,
+                )
+                mixed = self.gpu.gemm_int4_half(down, activated, n)
+                self.gpu.moe_add_weighted(
+                    mixed, token_buf, slot_buf, weight, running, n, self.hidden, self.top_k
+                )
+        if small:
+            self.gpu.flush()
+            self.gpu.rewind_scratch()
+            table = self._stage_table
+            miss = self._stage_miss
+            if table is None or miss is None:
+                message = "prefill stream has no offset table"
+                raise RuntimeError(message)
+            return self._moe_tier_batched(
+                layer,
+                xs,
+                weight,
+                running,
+                host_ids,
+                count,
+                small,
+                self._hot,
+                stage if large else self._stage[layer % 2],
+                table,
+                0,
+                miss,
+            )
+        if large:
+            self.gpu.flush()
+            self.gpu.rewind_scratch()
+        return running
+
+    def _moe_tier_batched(
+        self,
+        layer: int,
+        xs: Dev,
+        weight: Dev,
+        shared: Dev,
+        host_ids: np.ndarray,
+        count: int,
+        members: set[int],
+        planes: ExpertPlanes,
+        weights: Any,
+        table: Any,
+        table_base: int,
+        miss: Any,
+    ) -> Dev:
+        if not members:
+            return shared
+        flat = np.asarray(host_ids, dtype=np.uint32).reshape(count, self.top_k)
+        sizes: dict[int, int] = {}
+        for token in range(count):
+            for slot in range(self.top_k):
+                expert = int(flat[token, slot])
+                if expert in members:
+                    sizes[expert] = sizes.get(expert, 0) + 1
+        if not sizes:
+            return shared
+        running = shared
+        batch: set[int] = set()
+        assigned = 0
+        cap = 65536
+        for expert, size in sizes.items():
+            if batch and assigned + size > cap:
+                running = self._moe_tier(
+                    layer,
+                    xs,
+                    weight,
+                    running,
+                    host_ids,
+                    count,
+                    batch,
+                    planes,
+                    weights,
+                    table,
+                    table_base,
+                    miss,
+                )
+                running = self._keep_mixed(running, count)
+                batch = set()
+                assigned = 0
+            batch.add(expert)
+            assigned += size
+        if batch:
+            running = self._moe_tier(
+                layer,
+                xs,
+                weight,
+                running,
+                host_ids,
+                count,
+                batch,
+                planes,
+                weights,
+                table,
+                table_base,
+                miss,
+            )
+            running = self._keep_mixed(running, count)
+        return running
 
     def _shared_expert(self, bundle: dict[str, Any], xs: Dev, count: int) -> Dev:
         hidden = self.hidden
@@ -1337,13 +1777,23 @@ class Qwen38Runtime:
         )
         return self.gpu.linear(down, activated, 1, self.moe)
 
-    def _ple_dev(self, residual: Dev, tokens: list[int], count: int) -> None:
+    def _ple_dev(
+        self,
+        residual: Dev,
+        tokens: list[int],
+        count: int,
+        prior: list[int] | None = None,
+    ) -> None:
         """N-gram memory injected before this layer's residual read."""
+        if count >= 256:
+            self._ple_chunk(residual, tokens, count, prior)
+            return
         ple = self._ple_bundle()
         span = self.branches * self.hidden
         conv_w, conv_off = ple["conv"]
+        prefix = self.tokens if prior is None else self.tokens + prior
         for index in range(count):
-            history = self.tokens + tokens[: index + 1]
+            history = prefix + tokens[: index + 1]
             rows = [
                 _ngram_row(
                     history,
@@ -1385,6 +1835,88 @@ class Qwen38Runtime:
             conv = self.gpu.dilated_conv(
                 self.ple_hist, normed, conv_w, conv_off, span, 4, self.ngram_size
             )
+            self.gpu.add_into(slot, self.gpu.add(updated, self.gpu.silu(conv)))
+
+    def _ple_chunk(
+        self,
+        residual: Dev,
+        tokens: list[int],
+        count: int,
+        prior: list[int] | None,
+    ) -> None:
+        """One row-id pass and one dequant for a long chunk. The conv stays ordered."""
+        ple = self._ple_bundle()
+        prefix = self.tokens if prior is None else self.tokens + prior
+        rows = ngram_rows(
+            prefix + tokens,
+            ple["mult"],
+            ple["offset"],
+            ple["vocab"],
+            heads_per_ngram=self.heads_per_ngram,
+            ngram_size=self.ngram_size,
+            eos=self.eos,
+            start=len(prefix),
+        )
+        if len(rows) != count * self.ngram_heads:
+            message = f"n-gram rows {len(rows)} are not {count} by {self.ngram_heads}"
+            raise RuntimeError(message)
+        embedding = self._ngram_embedding(rows)
+        width = self.ngram_heads * NGRAM_WIDTH
+        if width != self.hidden or embedding.n != count * width:
+            message = f"n-gram width {width} embedding {embedding.n} does not match hidden"
+            raise RuntimeError(message)
+        key = self.gpu.linear(ple["key"], embedding, count, self.hidden)
+        value = self.gpu.linear(ple["value"], embedding, count, self.hidden)
+        if key.n != count * self.branches * self.hidden or value.n != count * self.hidden:
+            message = "n-gram projection width does not match the residual"
+            raise RuntimeError(message)
+        query_w, query_off = ple["norm_query"]
+        key_w, key_off = ple["norm_key"]
+        query = self.gpu.rms(
+            residual,
+            query_w,
+            query_off,
+            self.hidden,
+            count * self.branches,
+            self.eps,
+            True,
+            self.branches,
+        )
+        keyed = self.gpu.rms(
+            key,
+            key_w,
+            key_off,
+            self.hidden,
+            count * self.branches,
+            self.eps,
+            True,
+            self.branches,
+        )
+        gate = self.gpu.ple_gate(query, keyed, self.hidden, count * self.branches)
+        span = self.branches * self.hidden
+        conv_w, conv_off = ple["conv"]
+        conv_norm, conv_norm_off = ple["norm_conv"]
+        for index in range(count):
+            updated = self.gpu.gate_broadcast(
+                gate.view(index * self.branches, self.branches),
+                value.view(index * self.hidden, self.hidden),
+                self.branches,
+                self.hidden,
+            )
+            normed = self.gpu.rms(
+                updated,
+                conv_norm,
+                conv_norm_off,
+                self.hidden,
+                self.branches,
+                self.eps,
+                True,
+                self.branches,
+            )
+            conv = self.gpu.dilated_conv(
+                self.ple_hist, normed, conv_w, conv_off, span, 4, self.ngram_size
+            )
+            slot = residual.view(index * span, span)
             self.gpu.add_into(slot, self.gpu.add(updated, self.gpu.silu(conv)))
 
     def _ngram_embedding(self, rows: list[int]) -> Dev:

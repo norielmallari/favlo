@@ -18,7 +18,7 @@ The runtime does not call into a multi-model server to run the forward.
 - `madmetal` command that dispatches one model flag onto one pipeline entry.
 - OpenAI-compatible `GET /v1/models` and `POST /v1/chat/completions`, one request at a time, with streaming and tools. While a function name is open, the sampler keeps only tokens that continue a name from the request. A `tool_choice` that names one function forces that call's opening.
 - Prefix cache of that model's full state.
-- Expert records streamed from SSD by Metal IO into a resident atlas. Consecutive ids are one sequential load of the live images.
+- Expert records streamed from SSD by Metal IO into a resident atlas. Consecutive ids are one sequential load of the live images. `--resident-percent` on `serve` and `complete` sets that atlas as a percent of the hot tier. Omitting it keeps the 24 GiB ladder. The prompt length is the tokens that fit after that budget. The indexer attends at most 512 blocks of 4, plus the unfinished tail.
 
 ## Out of scope
 

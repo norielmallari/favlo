@@ -250,6 +250,58 @@ def _ngram_row(
     return int(offsets[head]) + signed % int(vocabs[head])
 
 
+def ngram_rows(
+    tokens: Sequence[int],
+    multipliers: np.ndarray,
+    offsets: np.ndarray,
+    vocabs: np.ndarray,
+    *,
+    heads_per_ngram: int,
+    ngram_size: int,
+    eos: int,
+    start: int = 0,
+) -> list[int]:
+    """Row id for every head of ``tokens[start:]``.
+
+    One segment scan. Shift 0 is the token itself. An older lookback that
+    starts before this segment contributes the EOS id. The mix matches
+    ``_ngram_row``.
+    """
+    n_heads = (ngram_size - 1) * heads_per_ngram
+    mults = [int(value) for value in np.reshape(multipliers, -1).tolist()]
+    head_off = [int(value) for value in np.reshape(offsets, -1).tolist()]
+    head_vocab = [int(value) for value in np.reshape(vocabs, -1).tolist()]
+    if n_heads > len(head_off) or n_heads > len(head_vocab) or ngram_size > len(mults):
+        message = "n-gram head table is shorter than the head count"
+        raise ValueError(message)
+    seq = [int(token) for token in tokens]
+    if start < 0 or start > len(seq):
+        message = f"n-gram start {start} is outside {len(seq)}"
+        raise ValueError(message)
+    segment = 0
+    starts = [0] * len(seq)
+    for index, token in enumerate(seq):
+        starts[index] = segment
+        if token == eos:
+            segment = index + 1
+    rows: list[int] = []
+    stop = int(eos)
+    for pos in range(start, len(seq)):
+        segment_start = starts[pos]
+        for head in range(n_heads):
+            order = 2 + head // heads_per_ngram
+            mixed = 0
+            for shift in range(order):
+                if shift == 0 or pos - shift >= segment_start:
+                    token = seq[pos - shift]
+                else:
+                    token = stop
+                mixed ^= (token * mults[shift]) & _I64_MASK
+            signed = mixed - (1 << 64) if mixed >= _I64_SIGN else mixed
+            rows.append(head_off[head] + signed % head_vocab[head])
+    return rows
+
+
 def _dilated_conv(
     history: list[np.ndarray], current: np.ndarray, weight: np.ndarray, dilation: int
 ) -> np.ndarray:

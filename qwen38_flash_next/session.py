@@ -426,6 +426,7 @@ class MetalSession:
             "compact_rows",
             "embed_gather",
             "dequant_ngram",
+            "dequant_ngram_packed",
             "broadcast_rows",
             "sample_f32",
             "sample_topk_partial",
@@ -440,12 +441,16 @@ class MetalSession:
             "split_q_batch",
             "rope_batch",
             "indexer_write",
+            "indexer_block_score",
+            "indexer_select",
             "qsa_attend",
+            "qsa_attend_selected",
             "gather_f32",
             "gather_half",
             "moe_grouped",
             "moe_activate",
             "moe_scatter",
+            "moe_add_weighted",
             "moe_decode_gate",
             "moe_decode_down",
             "moe_grouped_int2",
@@ -499,12 +504,15 @@ class MetalSession:
 
     def begin_scratch(self, nbytes: int, *, copies: int = 1) -> None:
         copies = 2 if copies > 1 else 1
-        if (
-            len(self._arenas) != copies
-            or self._arenas[0] is None
-            or int(self._arenas[0].length()) < nbytes
-        ):
-            self._arenas = [self.alloc(nbytes) for _ in range(copies)]
+        ready = len(self._arenas) == copies and all(
+            buf is not None and int(buf.length()) >= nbytes for buf in self._arenas
+        )
+        if not ready:
+            arenas = [self.alloc(nbytes) for _ in range(copies)]
+            if any(buf is None for buf in arenas):
+                message = f"scratch arena of {nbytes} bytes was not allocated"
+                raise RuntimeError(message)
+            self._arenas = arenas
         self._arena_i = 0
         self._arena = self._arenas[0]
         self._arena_used = 0
@@ -515,7 +523,8 @@ class MetalSession:
     def _bump(self, nbytes: int) -> int:
         align = 256
         if self._arena is None:
-            self.begin_scratch(64 << 20)
+            message = "scratch arena was not allocated"
+            raise RuntimeError(message)
         off = (self._arena_used + align - 1) & ~(align - 1)
         need = off + max(nbytes, 1)
         if need > int(self._arena.length()):
@@ -813,6 +822,12 @@ class MetalSession:
         """Commit the open buffer and keep encoding into the other scratch arena."""
         self._enqueue_open()
         self._flip_scratch()
+
+    def barrier(self) -> None:
+        """Order buffer reads and writes for the dispatches encoded after this."""
+        if self._encoder is None:
+            return
+        self._encoder.memoryBarrierWithScope_(self.metal.MTLBarrierScopeBuffers)
 
     def flush(self) -> None:
         self._enqueue_open()
@@ -1503,6 +1518,50 @@ class MetalSession:
         )
         return packed
 
+    def gemm_int4_half(self, matrix: Int4Matrix, act: Span, count: int) -> Dev:
+        """int4 matmul whose activation is already half, one row per token."""
+        if count < 1 or matrix.rows % 32 != 0:
+            message = f"matmul count {count} rows {matrix.rows} cannot use the prefill tile"
+            raise RuntimeError(message)
+        padded = ((count + 63) // 64) * 64
+        stored = matrix.stored_inner
+        if padded != count:
+            wide_act = self.span(padded * stored * 2)
+            self.copy_bytes(
+                act.buf, act.offset, wide_act.buf, wide_act.offset, count * stored * 2
+            )
+            act = wide_act
+        cols = matrix.rows
+        wide = self.tmp(padded * cols)
+        self.dispatch(
+            self.gemm.prefill,
+            (
+                (act.buf, act.offset),
+                (matrix.weights, matrix.weight_off),
+                (matrix.scales, matrix.scale_off),
+                _dev_bind(wide),
+            ),
+            (
+                struct.pack("<I", padded),
+                struct.pack("<I", cols),
+                struct.pack("<I", stored),
+            ),
+            self._size(cols // 32, padded // 64, 1),
+            self._size(32 * 4, 1, 1),
+        )
+        packed = self.tmp(count * matrix.rows)
+        self._ew(
+            "compact_rows",
+            (_dev_bind(wide), _dev_bind(packed)),
+            (
+                struct.pack("<I", count),
+                struct.pack("<I", matrix.rows),
+                struct.pack("<I", cols),
+            ),
+            count * matrix.rows,
+        )
+        return packed
+
     def gemv_int8(
         self,
         activation: Any,
@@ -1773,6 +1832,8 @@ class MetalSession:
             self._command_wait = value
 
     def ngram_dequant(self, handle: Any, rows: Sequence[int]) -> Dev:
+        if len(rows) > 16:
+            return self._ngram_dequant_packed(handle, rows)
         raw = self.span(len(rows) * NGRAM_SLOT)
         loads: list[tuple[Any, int, int, int]] = []
         copies: list[tuple[Any, int, int]] = []
@@ -1806,6 +1867,53 @@ class MetalSession:
             (struct.pack("<I", NGRAM_WIDTH), struct.pack("<I", NGRAM_SLOT)),
             len(rows) * NGRAM_WIDTH,
         )
+        return dst
+
+    def _ngram_dequant_packed(self, handle: Any, rows: Sequence[int]) -> Dev:
+        """Load the pages a chunk needs and expand every slot in one shader."""
+        dst = self.tmp(len(rows) * NGRAM_WIDTH)
+        step = 4096
+        for start in range(0, len(rows), step):
+            part = rows[start : start + step]
+            slots: dict[int, int] = {}
+            order: list[int] = []
+            offs: list[int] = []
+            for row in part:
+                byte = int(row) * NGRAM_SLOT
+                page = byte // PAGE
+                local = byte - page * PAGE
+                slot = slots.get(page)
+                if slot is None:
+                    slot = len(order)
+                    slots[page] = slot
+                    order.append(page)
+                offs.append(slot * PAGE + local)
+            pack = self.span(max(len(order), 1) * PAGE)
+            loads = [
+                (pack.buf, pack.offset + slot * PAGE, PAGE, page * PAGE)
+                for page, slot in slots.items()
+            ]
+            if loads:
+                self.io_read(handle, loads, gpu_wait=True)
+            raw = np.ascontiguousarray(np.asarray(offs, dtype=np.uint32)).tobytes()
+            index = self.span(len(raw))
+            _buffer_view(index.buf, index.offset + len(raw))[
+                index.offset : index.offset + len(raw)
+            ] = raw
+            part_dst = self.tmp(len(part) * NGRAM_WIDTH)
+            self._ew(
+                "dequant_ngram_packed",
+                ((pack.buf, pack.offset), (index.buf, index.offset), _dev_bind(part_dst)),
+                (struct.pack("<I", NGRAM_WIDTH), struct.pack("<I", len(part))),
+                len(part) * NGRAM_WIDTH,
+            )
+            self.copy_bytes(
+                part_dst.buf,
+                part_dst.offset * 4,
+                dst.buf,
+                dst.offset * 4 + start * NGRAM_WIDTH * 4,
+                part_dst.n * 4,
+            )
         return dst
 
     def copy_bytes(self, src: Any, src_off: int, dst: Any, dst_off: int, n: int) -> None:
@@ -1951,6 +2059,77 @@ class MetalSession:
         )
         return dst
 
+    def indexer_block_score(
+        self, index_qk: Dev, cache: Any, scores: Dev, count: int, base: int, n_blocks: int
+    ) -> None:
+        self.dispatch(
+            self.act["indexer_block_score"],
+            (_dev_bind(index_qk), (cache, 0), _dev_bind(scores)),
+            (
+                struct.pack("<I", count),
+                struct.pack("<I", base),
+                struct.pack("<I", n_blocks),
+            ),
+            self._size(n_blocks),
+            self._size(128),
+        )
+
+    def indexer_select(
+        self,
+        scores: Dev,
+        indices: Dev,
+        counts: Dev,
+        count: int,
+        base: int,
+        n_blocks: int,
+        stride: int,
+    ) -> None:
+        self._ew(
+            "indexer_select",
+            (_dev_bind(scores), _dev_bind(indices), _dev_bind(counts)),
+            (
+                struct.pack("<I", count),
+                struct.pack("<I", base),
+                struct.pack("<I", n_blocks),
+                struct.pack("<I", stride),
+            ),
+            count,
+        )
+
+    def qsa_attend_selected(
+        self,
+        query: Dev,
+        gate: Dev,
+        key: Any,
+        value: Any,
+        indices: Dev,
+        counts: Dev,
+        count: int,
+        stride: int,
+    ) -> Dev:
+        dst = self.tmp(count * 24 * 256)
+        self.dispatch(
+            self.act["qsa_attend_selected"],
+            (
+                _dev_bind(query),
+                _dev_bind(gate),
+                (key, 0),
+                (value, 0),
+                _dev_bind(indices),
+                _dev_bind(counts),
+                _dev_bind(dst),
+            ),
+            (
+                struct.pack("<I", count),
+                struct.pack("<I", stride),
+                struct.pack("<f", 1.0 / math.sqrt(256.0)),
+                struct.pack("<I", 16),
+            ),
+            self._size(24),
+            self._size(512),
+        )
+        return dst
+
     def gather_half(self, src: Dev, tokens: Any, n: int, logical: int, stored: int) -> Span:
         dst = self.span(max(n, 1) * stored * 2)
         self._ew(
@@ -2055,6 +2234,36 @@ class MetalSession:
             count * hidden,
         )
         return dst
+
+    def moe_add_weighted(
+        self,
+        down: Dev,
+        tokens: Any,
+        slots: Any,
+        weight: Dev,
+        dst: Dev,
+        n: int,
+        hidden: int,
+        topk: int,
+    ) -> None:
+        if n < 1:
+            return
+        self._ew(
+            "moe_add_weighted",
+            (
+                _dev_bind(down),
+                _bind_any(tokens),
+                _bind_any(slots),
+                _dev_bind(weight),
+                _dev_bind(dst),
+            ),
+            (
+                struct.pack("<I", n),
+                struct.pack("<I", hidden),
+                struct.pack("<I", topk),
+            ),
+            n * hidden,
+        )
 
     def moe_decode_gate(
         self,

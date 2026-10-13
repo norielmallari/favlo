@@ -650,6 +650,32 @@ kernel void dequant_ngram(
     out[tid] = float(code) * ldexp(1.0f, exponent);
 }
 
+// Same nibble expand as dequant_ngram. ``row_off`` is the byte offset of each
+// 128-byte slot inside ``pack``, so one dispatch covers a whole chunk.
+kernel void dequant_ngram_packed(
+    device const uchar* pack [[buffer(0)]],
+    device const uint* row_off [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    constant uint& width [[buffer(3)]],
+    constant uint& n_rows [[buffer(4)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= n_rows * width) {
+        return;
+    }
+    uint row = tid / width;
+    uint col = tid - row * width;
+    device const uchar* slot = pack + row_off[row];
+    uchar byte = slot[col >> 1];
+    uint nibble = (col & 1u) != 0u ? (byte >> 4) : (byte & 0x0Fu);
+    int code = int(nibble);
+    if (code > 7) {
+        code -= 16;
+    }
+    int exponent = int(slot[80u + (col >> 5)]) - 127;
+    out[tid] = float(code) * ldexp(1.0f, exponent);
+}
+
 kernel void broadcast_rows(
     device const float* src [[buffer(0)]],
     device float* dst [[buffer(1)]],

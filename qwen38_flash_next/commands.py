@@ -95,7 +95,9 @@ def bf16_complete(args: Any) -> int:
 
 def complete(args: Any) -> int:
     try:
-        runtime = Qwen38Runtime(_record(args.record))
+        runtime = Qwen38Runtime(
+            _record(args.record), resident_percent=args.resident_percent
+        )
         if args.raw:
             prompt = list(runtime.tokenizer.encode(args.prompt).ids)
         else:
@@ -134,7 +136,9 @@ def complete(args: Any) -> int:
 
 def serve(args: Any) -> int:
     try:
-        runtime = Qwen38Runtime(_record(args.record))
+        runtime = Qwen38Runtime(
+            _record(args.record), resident_percent=args.resident_percent
+        )
     except Exception as exc:
         traceback.print_exc()
         sys.stderr.write(f"{type(exc).__name__}: {exc}\n")
@@ -459,6 +463,15 @@ def _completion(
     }
 
 
+def _add_resident_percent(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--resident-percent",
+        type=float,
+        default=None,
+        help="percent of the hot expert tier to keep resident",
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="madmetal --qwen38-flash-next")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -474,6 +487,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     serve_parser = sub.add_parser("serve", help="serve the quantized record")
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8129)
+    _add_resident_percent(serve_parser)
     serve_parser.add_argument("--record", type=Path, default=None)
     serve_parser.add_argument(
         "--transcript",
@@ -513,6 +527,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--raw", action="store_true", help="tokenize the prompt with no chat template"
     )
     complete_parser.add_argument("--record", type=Path, default=None)
+    _add_resident_percent(complete_parser)
     complete_parser.add_argument(
         "--transcript",
         type=Path,

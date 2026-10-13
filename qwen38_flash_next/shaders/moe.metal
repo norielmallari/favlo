@@ -293,6 +293,33 @@ kernel void moe_scatter(
     out[tid] = acc;
 }
 
+// Add one expert's rows into the running mix. ``tokens`` and ``slots`` are
+// the assignment order. Distinct experts can land on the same token, so the
+// add is atomic across dispatches.
+kernel void moe_add_weighted(
+    device const float* down [[buffer(0)]],
+    device const uint* tokens [[buffer(1)]],
+    device const uint* slots [[buffer(2)]],
+    device const float* weight [[buffer(3)]],
+    device atomic_float* dst [[buffer(4)]],
+    constant uint& n [[buffer(5)]],
+    constant uint& hidden [[buffer(6)]],
+    constant uint& topk [[buffer(7)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint total = n * hidden;
+    if (tid >= total) {
+        return;
+    }
+    uint row = tid / hidden;
+    uint col = tid - row * hidden;
+    uint token = tokens[row];
+    float scale = weight[token * topk + slots[row]];
+    atomic_fetch_add_explicit(
+        dst + token * hidden + col, scale * down[tid], memory_order_relaxed
+    );
+}
+
 kernel void moe_decode_gate(
     device const float* activation [[buffer(0)]],
     device const uchar* atlas [[buffer(1)]],
