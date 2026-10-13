@@ -1,6 +1,6 @@
 """Prompt length and the resident hot-expert budget.
 
-The prompt limit is the tokens that fit. The indexer window is separate:
+The prompt limit is the tokens that fit, and at most 131,072. The indexer window is separate:
 a query attends at most 512 complete blocks of 4, plus the unfinished tail.
 """
 
@@ -28,6 +28,7 @@ SCRATCH_PER_TOKEN = 2 << 20
 RESIDENT_FLOOR = 8 << 30
 RESIDENT_STEP = 4 << 30
 DEFAULT_LADDER = (24 << 30, 20 << 30, 16 << 30, 12 << 30, 8 << 30)
+DEFAULT_PROMPT_LIMIT = 128 << 10
 
 
 def machine_memory() -> int:
@@ -114,12 +115,14 @@ def prompt_token_limit(
     staging: int,
     fixed: int,
     score_per_token: int = 0,
+    cap: int = DEFAULT_PROMPT_LIMIT,
 ) -> int:
-    """Tokens that fit in the prefill peak and in the decode peak.
+    """Tokens that fit in the prefill peak and in the decode peak, at most ``cap``.
 
     Prefill holds the cache, the residual, one chunk of block scores, scratch,
     and the staging buffers. Decode holds the cache, scratch, and the resident
     hot-expert budget. ``fixed`` is the weights and headroom mapped in both.
+    The default cap is 131,072 tokens.
     """
     if kv_per_token <= 0:
         raise ValueError("kv_per_token")
@@ -130,7 +133,8 @@ def prompt_token_limit(
     decode_room = memory - fixed - scratch - resident_hot
     prefill_tokens = prefill_room // prefill_each if prefill_room > 0 else 0
     decode_tokens = decode_room // kv_per_token if decode_room > 0 else 0
-    return max(0, min(prefill_tokens, decode_tokens))
+    fitted = max(0, min(prefill_tokens, decode_tokens))
+    return min(fitted, cap)
 
 
 def score_bits(value: float) -> int:

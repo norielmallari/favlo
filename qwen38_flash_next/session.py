@@ -211,6 +211,10 @@ def _tok_s(label: str, tokens: int, seconds: float) -> str:
     return f"{label} {tokens / seconds:.2f} tok/s ({tokens} tok in {seconds:.2f}s)"
 
 
+def _aligned_offset(used: int, align: int) -> int:
+    return (used + align - 1) & ~(align - 1)
+
+
 def _require_page(offset: int, size: int) -> None:
     """Uncached SSD reads stay off the bounce buffer only when both ends match the VM page."""
     if offset % PAGE or size % PAGE:
@@ -508,6 +512,10 @@ class MetalSession:
             buf is not None and int(buf.length()) >= nbytes for buf in self._arenas
         )
         if not ready:
+            # Drop the previous arenas before the new allocation. A long prefill
+            # scratch kept alive across this call does not fit beside the atlas.
+            self._arena = None
+            self._arenas = []
             arenas = [self.alloc(nbytes) for _ in range(copies)]
             if any(buf is None for buf in arenas):
                 message = f"scratch arena of {nbytes} bytes was not allocated"
@@ -520,12 +528,11 @@ class MetalSession:
     def rewind_scratch(self) -> None:
         self._arena_used = 0
 
-    def _bump(self, nbytes: int) -> int:
-        align = 256
+    def _bump(self, nbytes: int, *, align: int = 256) -> int:
         if self._arena is None:
             message = "scratch arena was not allocated"
             raise RuntimeError(message)
-        off = (self._arena_used + align - 1) & ~(align - 1)
+        off = _aligned_offset(self._arena_used, align)
         need = off + max(nbytes, 1)
         if need > int(self._arena.length()):
             message = f"scratch arena is {int(self._arena.length())} bytes, need {need}"
@@ -535,6 +542,14 @@ class MetalSession:
 
     def span(self, nbytes: int) -> Span:
         off = self._bump(nbytes)
+        return Span(self._arena, off)
+
+    def span_page(self, nbytes: int) -> Span:
+        """A scratch span whose offset is a multiple of the VM page.
+
+        Uncached Metal IO rejects any other destination offset.
+        """
+        off = self._bump(nbytes, align=PAGE)
         return Span(self._arena, off)
 
     def upload(self, blob: bytes) -> Any:
@@ -1888,7 +1903,7 @@ class MetalSession:
                     slots[page] = slot
                     order.append(page)
                 offs.append(slot * PAGE + local)
-            pack = self.span(max(len(order), 1) * PAGE)
+            pack = self.span_page(max(len(order), 1) * PAGE)
             loads = [
                 (pack.buf, pack.offset + slot * PAGE, PAGE, page * PAGE)
                 for page, slot in slots.items()

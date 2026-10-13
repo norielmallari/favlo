@@ -6,6 +6,7 @@ import pytest
 from qwen38_flash_next.context import (
     BLOCK,
     DEFAULT_LADDER,
+    DEFAULT_PROMPT_LIMIT,
     DENSE_LIMIT,
     INDEX_STRIDE,
     KEEP_BLOCKS,
@@ -65,6 +66,20 @@ def test_prompt_limit_uses_the_tighter_peak() -> None:
         )
         == 52
     )
+
+
+def test_prompt_limit_defaults_to_128k() -> None:
+    fitted = prompt_token_limit(
+        memory=1 << 40,
+        resident_hot=0,
+        kv_per_token=1,
+        residual_per_token=0,
+        scratch=0,
+        staging=0,
+        fixed=0,
+    )
+    assert fitted == DEFAULT_PROMPT_LIMIT
+    assert DEFAULT_PROMPT_LIMIT == 128 << 10
 
 
 def test_block_score_is_the_relu_sum_of_the_mean_key() -> None:

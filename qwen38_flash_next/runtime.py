@@ -54,6 +54,7 @@ from qwen38_flash_next.session import (
     _tok_s,
 )
 from qwen38_flash_next.tools import (
+    canonical_continuation,
     continuing_ids,
     forced_call_options,
     function_name_options,
@@ -148,6 +149,7 @@ class Qwen38Runtime:
         self.rng = np.random.default_rng()
         self.tool_names: list[str] = []
         self.required_function: str | None = None
+        self.required_closes = False
         self._token_pieces: list[str] | None = None
         self.gdn_state = {
             index: self.gpu.zeros(48 * 128 * 128 * 4)
@@ -238,7 +240,7 @@ class Qwen38Runtime:
         if total <= self.prompt_limit:
             return
         message = (
-            f"prompt of {total} tokens exceeds the memory limit of {self.prompt_limit} "
+            f"prompt of {total} tokens exceeds the limit of {self.prompt_limit} "
             f"(resident experts {self.resident_budget >> 20} MiB)"
         )
         raise RuntimeError(message)
@@ -318,6 +320,12 @@ class Qwen38Runtime:
             yield token
             produced += 1
             produced_ids.append(token)
+            if self.required_function and "</tool_call>" in self.decode(produced_ids):
+                return
+            # The prefill logits keep that scratch alive. Release them before the
+            # decode arenas are allocated.
+            self.last_logits = None
+            logits = None
             logits = self.forward([token], decode=True)
 
     def _log_decode(self) -> None:
@@ -360,13 +368,28 @@ class Qwen38Runtime:
         return _sample(logits, temperature, top_p, top_k, self.rng)
 
     def _constrained_name(self, logits: Dev, temperature: float, produced: list[int]) -> int | None:
-        """Draw among tokens that finish a required call opening or a declared name."""
+        """The next id of a required opening, or a token that continues a declared name.
+
+        A required opening uses the tokenizer's encoding of that text.
+        """
         text = self.decode(produced) if produced else ""
-        options = forced_call_options(text, self.required_function)
+        options = forced_call_options(
+            text, self.required_function, close=self.required_closes
+        )
+        forced = options is not None
         if options is None and produced:
             options = function_name_options(text, self.tool_names)
         if not options:
             return None
+        if forced and len(options) == 1:
+            nxt = canonical_continuation(
+                produced,
+                options[0],
+                lambda piece: self.tokenizer.encode(piece).ids,
+                self.decode,
+            )
+            if nxt is not None:
+                return nxt
         allowed = continuing_ids(options, self._pieces())
         if not allowed:
             return None
@@ -991,9 +1014,10 @@ class Qwen38Runtime:
         if buf is not None and buf.length() >= need:
             return buf
         # Short sequences keep the doubled buffer. A long prompt allocates the
-        # request, so the admission check is not followed by a second copy of it.
+        # request plus a few decode tokens, so the next step does not copy it.
         chunk = PREFILL_CHUNK * width * 4
-        alloc_n = max(need * 2, width * 4) if need <= chunk else need
+        slack = 64 * width * 4
+        alloc_n = max(need * 2, width * 4) if need <= chunk else need + slack
         grown = self.gpu.alloc(alloc_n)
         if grown is None:
             message = f"cache of {alloc_n} bytes was not allocated"

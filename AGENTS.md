@@ -16,9 +16,9 @@ The runtime does not call into a multi-model server to run the forward.
 
 - `qwen38_flash_next`: BF16 calibration prefill, converter to native records, and the text runtime for that model. `qwen38-flash-next.py` is the entry the command loads.
 - `madmetal` command that dispatches one model flag onto one pipeline entry.
-- OpenAI-compatible `GET /v1/models` and `POST /v1/chat/completions`, one request at a time, with streaming and tools. While a function name is open, the sampler keeps only tokens that continue a name from the request. A `tool_choice` that names one function forces that call's opening.
+- OpenAI-compatible `GET /v1/models` and `POST /v1/chat/completions`, one request at a time, with streaming and tools. While a function name is open, the sampler keeps only tokens that continue a name from the request. A `tool_choice` that names one function forces that call's opening as the tokenizer's encoding of that text.
 - Prefix cache of that model's full state.
-- Expert records streamed from SSD by Metal IO into a resident atlas. Consecutive ids are one sequential load of the live images. `--resident-percent` on `serve` and `complete` sets that atlas as a percent of the hot tier. Omitting it keeps the 24 GiB ladder. The prompt length is the tokens that fit after that budget. The indexer attends at most 512 blocks of 4, plus the unfinished tail.
+- Expert records streamed from SSD by Metal IO into a resident atlas. Consecutive ids are one sequential load of the live images. `--resident-percent` on `serve` and `complete` sets that atlas as a percent of the hot tier. Omitting it keeps the 24 GiB ladder. The prompt length is the tokens that fit after that budget, and at most 131,072. The indexer attends at most 512 blocks of 4, plus the unfinished tail.
 
 ## Out of scope
 
@@ -102,9 +102,10 @@ uv run madmetal --qwen38-flash-next kernels
 uv run madmetal --qwen38-flash-next quantize
 uv run madmetal --qwen38-flash-next serve
 uv run python -m harness --base-url http://127.0.0.1:8129/v1 --workspace ./note-workspace
+uv run python -m harness.long_prompt --tokens 65536
 ```
 
-`quantize` reads the Hugging Face BF16 shards once and writes the record. `--hot` selects the int4 keep set. `--super` lifts listed ids out of that keep set into resident int8. The complement of the keep set is int2. Running it again on the same output continues from `quantize_progress.json`. After the manifest is written it stores one greedy grove completion in `grove.json`. `serve` reads that record. A request does not quantize a weight. `pytest` includes the file agent: it starts `serve` and checks that create, edit, and confirm land in the workspace. `python -m harness` is that client against an already running server.
+`quantize` reads the Hugging Face BF16 shards once and writes the record. `--hot` selects the int4 keep set. `--super` lifts listed ids out of that keep set into resident int8. The complement of the keep set is int2. Running it again on the same output continues from `quantize_progress.json`. After the manifest is written it stores one greedy grove completion in `grove.json`. `serve` reads that record. A request does not quantize a weight. `pytest` includes the file agent: it starts `serve` and checks that create, edit, and confirm land in the workspace. `python -m harness` is that client against an already running server. `python -m harness.long_prompt` starts `serve`, reads repository files one turn at a time until the prompt reaches the token target, and prints the server's prefill and decode rates. That run is not part of `pytest`.
 
 `probe` writes one block of 32 and reads it back on the GPU. It is the measurement in [docs/qwen38/probe.md](docs/qwen38/probe.md). It does not pack an expert.
 

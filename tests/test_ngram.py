@@ -2,6 +2,8 @@
 
 import numpy as np
 from qwen38_flash_next.checks import _ngram_row, ngram_rows
+from qwen38_flash_next.formats import PAGE
+from qwen38_flash_next.session import _aligned_offset
 
 
 def test_ngram_rows_match_scan_across_eos():
@@ -21,3 +23,11 @@ def test_ngram_rows_match_scan_across_eos():
             assert rows[pos * heads + head] == expected
     tail = ngram_rows(tokens, mult, offsets, vocabs, start=3, **kwargs)
     assert tail == rows[3 * heads :]
+
+
+def test_packed_ngram_destination_is_page_aligned() -> None:
+    used = 3_471_360
+    off = _aligned_offset(used, PAGE)
+    assert off % PAGE == 0
+    assert off >= used
+    assert off - used < PAGE

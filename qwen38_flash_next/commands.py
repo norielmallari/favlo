@@ -23,7 +23,13 @@ from qwen38_flash_next.grove import write_grove
 from qwen38_flash_next.probe import matmul, probe
 from qwen38_flash_next.runtime import Qwen38Runtime
 from qwen38_flash_next.session import _append_transcript, _log, _prompt_text
-from qwen38_flash_next.tools import ContentGate, parse_tool_calls, required_function, tool_names
+from qwen38_flash_next.tools import (
+    ContentGate,
+    call_closes,
+    parse_tool_calls,
+    required_function,
+    tool_names,
+)
 
 
 def _checkpoint(path: Path | None) -> Path:
@@ -186,6 +192,7 @@ def serve(args: Any) -> int:
                 with lock:
                     runtime.tool_names = tool_names(tools)
                     runtime.required_function = required_function(body.get("tool_choice"))
+                    runtime.required_closes = call_closes(tools, runtime.required_function)
                     try:
                         prompt = runtime.encode_chat(messages, tools, enable_thinking)
                         _log(f"prompt tokens {len(prompt)}")
@@ -218,6 +225,7 @@ def serve(args: Any) -> int:
                     finally:
                         runtime.tool_names = []
                         runtime.required_function = None
+                        runtime.required_closes = False
             except Exception as exc:
                 traceback.print_exc()
                 if self._started:

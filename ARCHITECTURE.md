@@ -14,7 +14,7 @@ Layouts are in [docs/qwen38/record.md](docs/qwen38/record.md). The n-gram hash i
 - One sequence at a time. Prefill and decode. Layered kernels.
 - `GET /v1/models` and `POST /v1/chat/completions`, including streaming.
 - The checkpoint chat template. Sampling is temperature, top-p, and top-k.
-- Tool calls. The template renders `tools` and tool results. A completion that contains `<tool_call>` blocks is returned as OpenAI `tool_calls`, on the JSON response and as stream deltas. While a function name is open, the sampler keeps only tokens that continue a name from that request. A `tool_choice` that names one function forces the opening `<tool_call><function=name>` before the arguments.
+- Tool calls. The template renders `tools` and tool results. A completion that contains `<tool_call>` blocks is returned as OpenAI `tool_calls`, on the JSON response and as stream deltas. While a function name is open, the sampler keeps only tokens that continue a name from that request. A `tool_choice` that names one function forces the opening `<tool_call><function=name>` before the arguments. Those opening tokens are the tokenizer's encoding of that text, so a later render of the same opening is the same ids. A function with no parameters forces the closing tags the same way. Generation stops when that call's `</tool_call>` has closed.
 - A prefix cache so a continuation prefills only the new tokens.
 - Expert streaming from SSD into a resident atlas. Consecutive expert ids are one sequential Metal IO. The shader reads the live image from that atlas.
 
@@ -59,7 +59,7 @@ Indexer keys stay BF16 in every mode. At 262,144 tokens they add 0.75 GiB. Pooli
 
 ## Context
 
-The prompt length is the number of tokens that fit in memory. The reservation is the resident hot-expert budget, the weights that stay mapped, and the scratch for one 2048-token chunk. What remains is divided by the bytes the cache stores per token. Prefill also holds the residual and the two layer staging buffers, and one chunk of indexer block scores. The limit uses the width of the buffers the runtime allocates for K, V, and the indexer key.
+The prompt length is the number of tokens that fit in memory, and at most 131,072. The reservation is the resident hot-expert budget, the weights that stay mapped, and the scratch for one 2048-token chunk. What remains is divided by the bytes the cache stores per token. Prefill also holds the residual and the two layer staging buffers, and one chunk of indexer block scores. The limit uses the width of the buffers the runtime allocates for K, V, and the indexer key. A machine that cannot hold 131,072 tokens keeps the shorter fit.
 
 `serve` and `complete` take `--resident-percent`. That is the atlas budget as a percent of the hot-tier bytes, page-aligned, stepping down by 4 GiB until 8 GiB or the device accepts the buffer. Omitting it keeps the 24, 20, 16, 12, 8 GiB ladder. The prompt limit reserves the first candidate, so a prompt that was accepted still fits when the atlas is allocated. A prompt past the limit is refused. Generation stops when the next token would pass it.
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 _CALL = re.compile(
@@ -133,15 +133,61 @@ def required_function(tool_choice: Any) -> str | None:
     return None
 
 
-def forced_call_options(text: str, name: str | None) -> list[str] | None:
+def canonical_continuation(
+    produced: Sequence[int],
+    option: str,
+    encode: Callable[[str], Sequence[int]],
+    decode: Callable[[Sequence[int]], str],
+) -> int | None:
+    """The next id of ``encode(decode(produced) + option)`` when it continues ``produced``.
+
+    A forced opening has to be that encoding. A later render of the same text
+    is then the same ids, and the prefix cache can extend.
+    """
+    if not option:
+        return None
+    prefix = decode(list(produced)) if produced else ""
+    ids = list(encode(prefix + option))
+    if ids[: len(produced)] != list(produced):
+        return None
+    if len(ids) == len(produced):
+        return None
+    return int(ids[len(produced)])
+
+
+def call_closes(tools: Any, name: str | None) -> bool:
+    """True when the named function declares no parameters.
+
+    The forced tokens then include ``</function>`` and ``</tool_call>``.
+    """
+    if not name or not isinstance(tools, list):
+        return False
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function") if tool.get("type") == "function" else tool
+        if not isinstance(function, dict) or function.get("name") != name:
+            continue
+        parameters = function.get("parameters")
+        if not isinstance(parameters, dict):
+            return True
+        properties = parameters.get("properties")
+        return not isinstance(properties, dict) or not properties
+    return False
+
+
+def forced_call_options(text: str, name: str | None, *, close: bool = False) -> list[str] | None:
     """The unwritten opening of a named tool call.
 
     ``None`` once that opening is complete, or when no function was required.
-    The opening is ``<tool_call>`` plus ``<function=name>``.
+    The opening is ``<tool_call>`` plus ``<function=name>``. A function with no
+    parameters also forces the closing tags.
     """
     if not name:
         return None
     target = f"<tool_call>\n<function={name}>\n"
+    if close:
+        target += "</function>\n</tool_call>"
     if not target.startswith(text):
         return None
     rest = target[len(text) :]

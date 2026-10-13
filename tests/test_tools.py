@@ -162,8 +162,46 @@ def test_required_function_forces_the_opening() -> None:
         required_function({"type": "function", "function": {"name": "edit_file"}}) == "edit_file"
     )
     assert forced_call_options("", "edit_file") == ["<tool_call>\n<function=edit_file>\n"]
+    assert forced_call_options("", "read_file", close=True) == [
+        "<tool_call>\n<function=read_file>\n</function>\n</tool_call>"
+    ]
+    from qwen38_flash_next.tools import call_closes
+
+    tools = [
+        {"type": "function", "function": {"name": "read_file", "parameters": {"properties": {}}}},
+        {
+            "type": "function",
+            "function": {
+                "name": "edit_file",
+                "parameters": {"properties": {"path": {"type": "string"}}},
+            },
+        },
+    ]
+    assert call_closes(tools, "read_file")
+    assert not call_closes(tools, "edit_file")
     assert forced_call_options("<tool_call>\n<function=edit_file>\n", "edit_file") is None
     assert forced_call_options("Done", "edit_file") is None
+
+
+def test_canonical_continuation_follows_the_encoder() -> None:
+    from qwen38_flash_next.tools import canonical_continuation
+
+    def encode(text: str) -> list[int]:
+        return [ord(char) for char in text]
+
+    def decode(ids: list[int]) -> str:
+        return "".join(chr(item) for item in ids)
+
+    target = "<tool_call>\n<function=read_file>\n"
+    produced: list[int] = []
+    while True:
+        rest = target[len(decode(produced)) :]
+        if not rest:
+            break
+        nxt = canonical_continuation(produced, rest, encode, decode)
+        assert nxt is not None
+        produced.append(nxt)
+    assert produced == encode(target)
 
 
 def test_completion_carries_created() -> None:
