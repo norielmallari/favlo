@@ -13,6 +13,7 @@ import objc
 
 from qwen38_flash_next.checks import _ngram_row, _sample
 from qwen38_flash_next.convert import ShardStore, _layer_f32_keys, _layer_int4_keys
+from qwen38_flash_next.experts import ExpertAtlas, group_assignments
 from qwen38_flash_next.formats import BLOCK, int4_plane_sizes, stored_k_int4
 from qwen38_flash_next.record import QuantRecord, _Bf16Ngram
 from qwen38_flash_next.session import (
@@ -20,7 +21,9 @@ from qwen38_flash_next.session import (
     F16Matrix,
     Int4Matrix,
     MetalSession,
+    _buffer_bytes,
     _buffer_slice,
+    _buffer_view,
     _check_f32_gemv,
     _device_name,
     _fill_buffer,
@@ -68,6 +71,21 @@ class Qwen38Runtime:
         self._f32_meta: dict[str, dict[str, Any]] = {}
         self._f32_uploaded: dict[str, Any] = {}
         self.expert_cache: dict[tuple[int, int], tuple[Int4Matrix, Int4Matrix]] = {}
+        self._choice: dict[int, Dev] = {}
+        self._choice_ids = self.gpu.alloc(self.layers * self.top_k * 4)
+        self._residual_buf: Any = None
+        self._residual_n = 0
+        self._decoding = False
+        self._force_sync = False
+        self.atlas: ExpertAtlas | None = None
+        stored_down = stored_k_int4(self.moe, align_k=True)
+        gate_data, gate_scale = int4_plane_sizes(2 * self.moe, self.hidden)
+        self._gate_rows = 2 * self.moe
+        self._gate_scale = gate_data
+        self._down_weight = gate_data + gate_scale
+        down_data, _down_scale = int4_plane_sizes(self.hidden, stored_down)
+        self._down_scale = self._down_weight + down_data
+        self._down_inner = stored_down
         self.tokens: list[int] = []
         self.last_logits: Dev | None = None
         self._decode_tokens = 0
@@ -103,6 +121,15 @@ class Qwen38Runtime:
         else:
             self.files = QuantRecord(root)
             self._load_record()
+            self.atlas = ExpertAtlas(self.gpu, self.files, self.layers, self.experts)
+            state_bytes = 48 * 128 * 128 * 4
+            self._gdn_shadow = {
+                index: self.gpu.alloc(state_bytes) for index in self.gdn_state
+            }
+            self._conv_shadow = {
+                index: self.gpu.alloc(self._conv_bytes) for index in self.conv_hist
+            }
+            self._ple_shadow = self.gpu.alloc(self._ple_bytes)
         tok_cfg = json.loads((root / "tokenizer_config.json").read_text())
         self.chat_template = tok_cfg["chat_template"]
         from tokenizers import Tokenizer
@@ -147,7 +174,7 @@ class Qwen38Runtime:
     def generate(
         self,
         prompt: list[int],
-        max_tokens: int,
+        max_tokens: int | None,
         temperature: float,
         top_p: float,
         top_k: int,
@@ -168,18 +195,28 @@ class Qwen38Runtime:
     def _new_tokens(
         self,
         logits: Any,
-        max_tokens: int,
+        max_tokens: int | None,
         temperature: float,
         top_p: float,
         top_k: int,
     ):
         self._decode_tokens = 0
         self._decode_seconds = 0.0
-        for _ in range(max_tokens):
+        self._hit_limit = False
+        produced = 0
+        while True:
+            if max_tokens is not None and produced >= max_tokens:
+                self._hit_limit = True
+                return
+            # Same bound as the sparse-attention indexer: (length + 1) // 4 > 512.
+            if (len(self.tokens) + 1) // 4 > 512:
+                self._hit_limit = True
+                return
             token = self._pick(logits, temperature, top_p, top_k)
             if token in self.stop_ids:
-                break
+                return
             yield token
+            produced += 1
             logits = self.forward([token], decode=True)
 
     def _log_decode(self) -> None:
@@ -192,11 +229,43 @@ class Qwen38Runtime:
 
     def forward(self, tokens: list[int], *, decode: bool = False) -> Dev:
         started = time.perf_counter()
+        self._decoding = decode
+        self.gpu.begin_scratch(max(256 << 20, len(tokens) * (8 << 20)))
+        streamed = self.atlas.streamed if self.atlas is not None else 0
+        if self.atlas is not None:
+            _fill_buffer(self.atlas.miss, self.layers * 4, 0)
+        if decode and self.atlas is not None:
+            self._capture_recurrent()
+        logits = self._forward_body(tokens)
+        self.gpu.flush()
+        if self.atlas is not None and self._expert_miss():
+            if not decode:
+                message = "prefill referenced an expert that was not loaded"
+                raise RuntimeError(message)
+            logits = self._rerun_decode(tokens)
+        self.tokens.extend(tokens)
+        self.last_logits = logits
+        elapsed = time.perf_counter() - started
+        if decode:
+            self._decode_tokens += len(tokens)
+            self._decode_seconds += elapsed
+        else:
+            _log(_tok_s("prefill", len(tokens), elapsed))
+            if self.atlas is not None:
+                delta = self.atlas.streamed - streamed
+                _log(
+                    f"experts resident {self.atlas.resident_count}"
+                    f" streamed {delta >> 20} MiB"
+                )
+        return logits
+
+    def _forward_body(self, tokens: list[int]) -> Dev:
         count = len(tokens)
         residual = self._embed_dev(tokens)
         for layer in range(self.layers):
-            # Objective-C objects from encoding this layer. The command buffer
-            # stays open until the next expert-id read.
+            self.gpu.rewind_scratch()
+            # Objective-C temporaries from this layer. The command buffer stays
+            # open until prefill needs expert ids, or the host reads the token.
             with objc.autorelease_pool():
                 if (layer + 1) in self.ple_layers:
                     self._ple_dev(residual, tokens, count)
@@ -220,21 +289,87 @@ class Qwen38Runtime:
                 self._inject_dev(residual, hats, mixed, bundle["mlp_inject"], count)
                 if self._bf16:
                     _log(f"layer {layer} stepped {count} experts {held}")
+        self.gpu.rewind_scratch()
         final = self._final_bundle()
-        last = residual.view((count - 1) * self.branches * self.hidden, self.branches * self.hidden)
+        last = residual.view(
+            (count - 1) * self.branches * self.hidden, self.branches * self.hidden
+        )
         hat = self._rms_branches(last, final["norm"], 1)
         hidden = self._gr_dev(final["down"], final["up"], hat, 1)
-        logits = self.gpu.linear(self._lm_head(), hidden, 1, self.hidden)
-        self.tokens.extend(tokens)
-        self.last_logits = logits
+        return self.gpu.linear(self._lm_head(), hidden, 1, self.hidden)
+
+    def _rerun_decode(self, tokens: list[int]) -> Dev:
+        """Load whatever this token routed to, then run it again from the snapshot."""
+        logits = self.last_logits
+        for _ in range(self.layers):
+            self._reload_misses()
+            if self.atlas is not None:
+                _fill_buffer(self.atlas.miss, self.layers * 4, 0)
+            self._restore_recurrent()
+            logits = self._forward_body(tokens)
+            self.gpu.flush()
+            if not self._expert_miss():
+                return logits
+        self._force_sync = True
+        if self.atlas is not None:
+            _fill_buffer(self.atlas.miss, self.layers * 4, 0)
+        self._restore_recurrent()
+        logits = self._forward_body(tokens)
         self.gpu.flush()
-        elapsed = time.perf_counter() - started
-        if decode:
-            self._decode_tokens += len(tokens)
-            self._decode_seconds += elapsed
-        else:
-            _log(_tok_s("prefill", len(tokens), elapsed))
+        self._force_sync = False
+        if self._expert_miss():
+            message = "expert atlas missed after reloading this token"
+            raise RuntimeError(message)
         return logits
+
+    def _expert_miss(self) -> bool:
+        if self.atlas is None:
+            return False
+        raw = _buffer_bytes(self.atlas.miss, self.layers * 4)
+        return bool(np.frombuffer(raw, dtype=np.uint32).any())
+
+    def _capture_recurrent(self) -> None:
+        self._kv_snap = {
+            index: (
+                self.kv_k[index],
+                self.kv_v[index],
+                self.indexer_buf[index],
+                self.kv_len[index],
+            )
+            for index in self.kv_len
+        }
+        state_bytes = 48 * 128 * 128 * 4
+        for layer, buf in self.gdn_state.items():
+            self.gpu.copy_bytes(buf, 0, self._gdn_shadow[layer], 0, state_bytes)
+        for layer, buf in self.conv_hist.items():
+            self.gpu.copy_bytes(buf, 0, self._conv_shadow[layer], 0, self._conv_bytes)
+        self.gpu.copy_bytes(self.ple_hist, 0, self._ple_shadow, 0, self._ple_bytes)
+
+    def _restore_recurrent(self) -> None:
+        for index, (key, value, indexer, length) in self._kv_snap.items():
+            self.kv_k[index] = key
+            self.kv_v[index] = value
+            self.indexer_buf[index] = indexer
+            self.kv_len[index] = length
+        state_bytes = 48 * 128 * 128 * 4
+        for layer, buf in self.gdn_state.items():
+            self.gpu.copy_bytes(self._gdn_shadow[layer], 0, buf, 0, state_bytes)
+        for layer, buf in self.conv_hist.items():
+            self.gpu.copy_bytes(self._conv_shadow[layer], 0, buf, 0, self._conv_bytes)
+        self.gpu.copy_bytes(self._ple_shadow, 0, self.ple_hist, 0, self._ple_bytes)
+
+    def _reload_misses(self) -> None:
+        if self.atlas is None:
+            return
+        pending: list[tuple[int, list[int]]] = []
+        protect: set[tuple[int, int]] = set()
+        for layer, choice in self._choice.items():
+            ids = [int(expert) for expert in self.gpu.read_u32(choice).tolist()]
+            pending.append((layer, ids))
+            protect.update((layer, expert) for expert in ids)
+        for layer, ids in pending:
+            event = self.atlas.stage(layer, ids, protect)
+            self.gpu.io_fence(event)
 
     def _load_record(self) -> None:
         _log("loading quantized record")
@@ -322,7 +457,7 @@ class Qwen38Runtime:
     def _embed_dev(self, tokens: list[int]) -> Dev:
         count = len(tokens)
         span = self.branches * self.hidden
-        dst = self.gpu.tmp(count * span)
+        dst = self._residual(count)
         if self._bf16:
             if self.store is None:
                 message = "BF16 embed has no shard store"
@@ -365,18 +500,25 @@ class Qwen38Runtime:
             self.branches,
         )
 
+    def _residual(self, count: int) -> Dev:
+        n = count * self.branches * self.hidden
+        if self._residual_buf is None or self._residual_n < n:
+            self._residual_buf = self.gpu.alloc(n * 4)
+            self._residual_n = n
+        return Dev(self._residual_buf, n)
+
     def _gr_dev(self, down: Any, up: Any, hats: Dev, count: int) -> Dev:
         # Tech report eq. (31): SiLU((1/n_r) W_d vec(R̂)). The branch mean is the second 1/n_r.
         flat = self.branches * self.hidden
-        projected = self.gpu.linear(down, hats, count, flat)
-        hidden = self.gpu.silu(self.gpu.scale(projected, 1.0 / self.branches))
-        gate = self.gpu.sigmoid(self.gpu.linear(up, hidden, count, int(up.inner)))
+        hidden = self.gpu.linear(
+            down, hats, count, flat, epilogue=3, epilogue_scale=1.0 / self.branches
+        )
+        gate = self.gpu.linear(up, hidden, count, int(up.inner), epilogue=2)
         return self.gpu.branch_mean(gate, hats, count, self.branches, self.hidden)
 
     def _inject_dev(self, residual: Dev, hats: Dev, mixed: Dev, weight: Any, count: int) -> None:
         flat = self.branches * self.hidden
-        inject = self.gpu.linear(weight, hats, count, flat)
-        scales = self.gpu.scale(self.gpu.sigmoid(self.gpu.scale(inject, 0.25)), 2.0)
+        scales = self.gpu.linear(weight, hats, count, flat, epilogue=4)
         self.gpu.residual_write(residual, scales, mixed, count, self.branches, self.hidden)
 
     def _layer(self, layer: int) -> dict[str, Any]:
@@ -451,31 +593,36 @@ class Qwen38Runtime:
         dt_w, dt_off = bundle["dt_bias"]
         a_w, a_off = bundle["a_log"]
         norm_w, norm_off = bundle["norm"]
+        mixed = self.gpu.tmp(count * 10240)
+        self.gpu.gdn_conv_scan(self.conv_hist[layer], qkv, conv_w, conv_off, mixed, count)
         heads = self.gpu.tmp(count * 6144)
-        for index in range(count):
-            current = qkv.view(index * 10240, 10240)
-            mixed = self.gpu.silu(
-                self.gpu.causal_conv(self.conv_hist[layer], current, conv_w, conv_off, 10240, 4)
-            )
-            query = self.gpu.l2(mixed.view(0, 2048), 16, 128, self.eps)
-            key = self.gpu.l2(mixed.view(2048, 2048), 16, 128, self.eps)
-            # L2 norm, then the query is scaled by 1/sqrt(head_dim). The key is not.
-            query = self.gpu.scale(query, 128.0**-0.5)
-            value = mixed.view(4096, 6144)
-            query = self.gpu.repeat_rows(query, 16, 128, 3)
-            key = self.gpu.repeat_rows(key, 16, 128, 3)
-            beta = self.gpu.sigmoid(raw_b.view(index * 48, 48))
-            alpha = self.gpu.gdn_alpha(raw_a.view(index * 48, 48), dt_w, dt_off, a_w, a_off)
-            y = self.gpu.gdn_dev(self.gdn_state[layer], query, key, value, alpha, beta)
-            y = self.gpu.rms(y, norm_w, norm_off, 128, 48, self.eps, False, 0)
-            gated = self.gpu.mul(y, self.gpu.sigmoid(z.view(index * 6144, 6144)))
-            self.gpu.copy_into(gated, heads, index * 6144)
+        self.gpu.gdn_state_scan(
+            self.gdn_state[layer],
+            mixed,
+            raw_a,
+            raw_b,
+            z,
+            dt_w,
+            dt_off,
+            a_w,
+            a_off,
+            norm_w,
+            norm_off,
+            heads,
+            count,
+            self.eps,
+        )
         return self.gpu.linear(bundle["out"], heads, count, 6144)
 
     def _grow_slot(
         self, table: dict[int, Any], layer: int, length: int, width: int
     ) -> tuple[Any, int]:
-        need = (length + 1) * width * 4
+        return self._reserve(table, layer, length, 1, width), length * width
+
+    def _reserve(
+        self, table: dict[int, Any], layer: int, length: int, extra: int, width: int
+    ) -> Any:
+        need = (length + extra) * width * 4
         buf = table[layer]
         if buf.length() < need:
             grown = self.gpu.alloc(max(need * 2, width * 4))
@@ -484,7 +631,7 @@ class Qwen38Runtime:
                 self.gpu.copy_span(Dev(buf, length * width), 0, grown, 0, length * width)
             table[layer] = grown
             buf = grown
-        return buf, length * width
+        return buf
 
     def _qsa_dev(self, layer: int, bundle: dict[str, Any], xs: Dev, count: int) -> Dev:
         hidden = self.hidden
@@ -494,41 +641,61 @@ class Qwen38Runtime:
         index_qk = self.gpu.linear(bundle["index_qk"], xs, count, hidden)
         q_w, q_off = bundle["q_norm"]
         k_w, k_off = bundle["k_norm"]
-        gated = self.gpu.tmp(count * 6144)
         base = len(self.tokens)
-        for index in range(count):
-            position = base + index
-            # Fused q_proj is per head [query, sigmoid gate], 256 + 256.
-            packed = query.view(index * 12288, 12288)
-            q_part, gate_pre = self.gpu.split_q(packed)
-            q = self.gpu.rms(q_part, q_w, q_off, 256, 24, self.eps, True, 0)
-            k = self.gpu.rms(key.view(index * 512, 512), k_w, k_off, 256, 2, self.eps, True, 0)
-            q = self.gpu.rope(q, 24, 256, self.rotary_dim, position, self.rope_theta)
-            k = self.gpu.rope(k, 2, 256, self.rotary_dim, position, self.rope_theta)
-            length = self.kv_len[layer]
-            k_buf, k_at = self._grow_slot(self.kv_k, layer, length, 512)
-            v_buf, v_at = self._grow_slot(self.kv_v, layer, length, 512)
-            i_buf, i_at = self._grow_slot(self.indexer_buf, layer, length, 128)
-            self.kv_len[layer] = length + 1
-            self.gpu.copy_span(k, 0, k_buf, k_at, 512)
-            self.gpu.copy_span(value, index * 512, v_buf, v_at, 512)
-            self.gpu.copy_span(index_qk, index * 640 + 512, i_buf, i_at, 128)
-            tokens = self.kv_len[layer]
-            if tokens // 4 > 512:
-                message = "sequence is past the 2048-token indexer budget"
-                raise RuntimeError(message)
-            context = self.gpu.attend_dev(q, k_buf, v_buf, tokens)
-            merged = self.gpu.sigmoid_mul(context, gate_pre)
-            self.gpu.copy_into(merged, gated, index * 6144)
+        q_part, gate_pre = self.gpu.split_q_batch(query, count)
+        q = self.gpu.rms(q_part, q_w, q_off, 256, count * 24, self.eps, True, 0)
+        k = self.gpu.rms(key, k_w, k_off, 256, count * 2, self.eps, True, 0)
+        q = self.gpu.rope_batch(q, count, 24, 256, self.rotary_dim, base, self.rope_theta)
+        k = self.gpu.rope_batch(k, count, 2, 256, self.rotary_dim, base, self.rope_theta)
+        length = self.kv_len[layer]
+        if (length + count) // 4 > 512:
+            message = "sequence is past the 2048-token indexer budget"
+            raise RuntimeError(message)
+        k_buf = self._reserve(self.kv_k, layer, length, count, 512)
+        v_buf = self._reserve(self.kv_v, layer, length, count, 512)
+        i_buf = self._reserve(self.indexer_buf, layer, length, count, 128)
+        self.kv_len[layer] = length + count
+        self.gpu.copy_bytes(k.buf, k.offset * 4, k_buf, length * 512 * 4, count * 512 * 4)
+        self.gpu.copy_bytes(value.buf, value.offset * 4, v_buf, length * 512 * 4, count * 512 * 4)
+        self.gpu.indexer_write(index_qk, i_buf, count, length)
+        gated = self.gpu.qsa_attend(q, gate_pre, k_buf, v_buf, count, length)
         return self.gpu.linear(bundle["o_proj"], gated, count, 6144)
 
     def _moe_dev(self, layer: int, bundle: dict[str, Any], xs: Dev, count: int) -> Dev:
+        if self._bf16 or self.atlas is None:
+            return self._moe_bf16(layer, bundle, xs, count)
+        router = self._router(layer)
+        choice, weight = self.gpu.topk_batch(
+            self.gpu.linear(router, xs, count, self.hidden), count, self.experts, self.top_k
+        )
+        if count == 1:
+            slot = layer * self.top_k
+            self.gpu.copy_bytes(
+                choice.buf, choice.offset * 4, self._choice_ids, slot * 4, self.top_k * 4
+            )
+            choice = Dev(self._choice_ids, self.top_k, slot)
+        self._choice[layer] = choice
+        # Stage before the expert kernels. A miss would zero that layer and
+        # change every later route, so the token would have to be replayed.
+        host_ids = self.gpu.read_u32(choice)
+        event = self.atlas.stage(layer, host_ids.tolist())
+        shared = self._shared_expert(bundle, xs, count)
+        self.gpu.io_fence(event)
+        if count == 1:
+            return self._moe_decode(layer, xs, choice, weight, shared)
+        return self._moe_grouped(layer, xs, weight, shared, host_ids, count)
+
+    def _shared_expert(self, bundle: dict[str, Any], xs: Dev, count: int) -> Dev:
         hidden = self.hidden
-        gate = self.gpu.silu(self.gpu.linear(bundle["shared_gate"], xs, count, hidden))
+        gate = self.gpu.linear(bundle["shared_gate"], xs, count, hidden, epilogue=1)
         up = self.gpu.linear(bundle["shared_up"], xs, count, hidden)
         shared = self.gpu.linear(bundle["shared_down"], self.gpu.mul(gate, up), count, self.moe)
-        coeff = self.gpu.sigmoid(self.gpu.linear(bundle["shared_coeff"], xs, count, hidden))
-        shared = self.gpu.scale_rows(shared, coeff, count, hidden)
+        coeff = self.gpu.linear(bundle["shared_coeff"], xs, count, hidden, epilogue=2)
+        return self.gpu.scale_rows(shared, coeff, count, hidden)
+
+    def _moe_bf16(self, layer: int, bundle: dict[str, Any], xs: Dev, count: int) -> Dev:
+        hidden = self.hidden
+        shared = self._shared_expert(bundle, xs, count)
         router = self._router(layer)
         out = self.gpu.tmp(count * hidden)
         for index in range(count):
@@ -543,6 +710,109 @@ class Qwen38Runtime:
                 self.gpu.axpy(mixed, routed, weight, slot)
             self.gpu.copy_into(mixed, out, index * hidden)
         return out
+
+    def _moe_decode(self, layer: int, xs: Dev, choice: Dev, weight: Dev, shared: Dev) -> Dev:
+        if self.atlas is None:
+            message = "decode has no expert atlas"
+            raise RuntimeError(message)
+        row = xs if xs.n == self.hidden else xs.view(0, self.hidden)
+        shared_row = shared if shared.n == self.hidden else shared.view(0, self.hidden)
+        gate = self.gpu.moe_decode_gate(
+            row,
+            self.atlas.atlas,
+            self.atlas.table,
+            choice,
+            self.top_k,
+            layer * self.experts,
+            self._gate_rows,
+            self.hidden,
+            0,
+            self._gate_scale,
+            self.atlas.miss,
+            layer,
+        )
+        activated = self.gpu.moe_activate(gate, self.top_k, self.moe, self._down_inner)
+        return self.gpu.moe_decode_down(
+            activated,
+            self.atlas.atlas,
+            self.atlas.table,
+            choice,
+            weight,
+            shared_row,
+            self.top_k,
+            layer * self.experts,
+            self.hidden,
+            self._down_inner,
+            self._down_weight,
+            self._down_scale,
+            self.atlas.miss,
+            layer,
+        )
+
+    def _moe_grouped(
+        self,
+        layer: int,
+        xs: Dev,
+        weight: Dev,
+        shared: Dev,
+        host_ids: np.ndarray,
+        count: int,
+    ) -> Dev:
+        if self.atlas is None:
+            message = "prefill has no expert atlas"
+            raise RuntimeError(message)
+        experts, offsets, tokens, inverse = group_assignments(host_ids, count, self.top_k)
+        n_assign = int(tokens.size)
+        n_groups = int(experts.size)
+        token_buf = self._upload_u32(tokens)
+        expert_buf = self._upload_u32(experts)
+        offset_buf = self._upload_u32(offsets)
+        inverse_buf = self._upload_u32(inverse)
+        gathered = self.gpu.gather_half(xs, token_buf, n_assign, self.hidden, self.hidden)
+        gate = self.gpu.span(n_assign * self._gate_rows * 4)
+        self.gpu.moe_grouped(
+            gathered,
+            self.atlas.atlas,
+            self.atlas.table,
+            expert_buf,
+            offset_buf,
+            gate,
+            self.atlas.miss,
+            n_groups,
+            layer * self.experts,
+            self._gate_rows,
+            self.hidden,
+            0,
+            self._gate_scale,
+            layer,
+        )
+        activated = self.gpu.moe_activate(gate, n_assign, self.moe, self._down_inner)
+        down = self.gpu.span(n_assign * self.hidden * 4)
+        self.gpu.moe_grouped(
+            activated,
+            self.atlas.atlas,
+            self.atlas.table,
+            expert_buf,
+            offset_buf,
+            down,
+            self.atlas.miss,
+            n_groups,
+            layer * self.experts,
+            self.hidden,
+            self._down_inner,
+            self._down_weight,
+            self._down_scale,
+            layer,
+        )
+        return self.gpu.moe_scatter(
+            shared, down, inverse_buf, weight, count, self.top_k, self.hidden
+        )
+
+    def _upload_u32(self, values: np.ndarray) -> Any:
+        raw = np.ascontiguousarray(values, dtype=np.uint32).tobytes()
+        blob = self.gpu.span(len(raw))
+        _buffer_view(blob.buf, blob.offset + len(raw))[blob.offset : blob.offset + len(raw)] = raw
+        return blob
 
     def _router(self, layer: int) -> F16Matrix:
         return self.f16_weights[f"model.language_model.layers.{layer}.mlp.gate.weight"]

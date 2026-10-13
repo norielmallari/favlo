@@ -1,6 +1,11 @@
 """Qwen3.8-Flash-Next pipeline. The hyphenated entry file loads this package."""
 
-from qwen38_flash_next.checks import check_act_kernels, check_state_kernels
+from qwen38_flash_next.checks import (
+    check_act_kernels,
+    check_gdn_scan,
+    check_routed_expert,
+    check_state_kernels,
+)
 from qwen38_flash_next.commands import main
 from qwen38_flash_next.convert import (
     _expert_start,
@@ -9,6 +14,7 @@ from qwen38_flash_next.convert import (
     ngram_resume_row,
     pread_exact,
 )
+from qwen38_flash_next.experts import group_assignments
 from qwen38_flash_next.formats import (
     DEFAULT_RECORD,
     EXPERT_SLOT,
@@ -56,8 +62,11 @@ __all__ = [
     "_save_progress",
     "_tok_s",
     "check_act_kernels",
+    "check_gdn_scan",
     "check_int4_gemm",
+    "check_routed_expert",
     "check_state_kernels",
+    "group_assignments",
     "classify_subbyte",
     "decode_e4m3",
     "decode_e5m2",

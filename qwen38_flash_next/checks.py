@@ -212,6 +212,139 @@ def _close(name: str, got: np.ndarray, expect: np.ndarray) -> None:
     raise RuntimeError(message)
 
 
+def check_routed_expert() -> None:
+    """The fused expert kernels match the per-row int4 dot, including a shared slot."""
+    gpu = MetalSession()
+    rng = np.random.default_rng(2)
+    hidden, moe, stored = 64, 32, 64
+    gate_w = rng.normal(size=(moe * 2, hidden)).astype(np.float32) * 0.05
+    down_w = rng.normal(size=(hidden, stored)).astype(np.float32) * 0.05
+    down_w[:, moe:] = 0.0
+    gate_p, gate_s = quantize_matrix(gate_w)
+    down_p, down_s = quantize_matrix(down_w)
+    image = gate_p + gate_s + down_p + down_s
+    atlas = gpu.upload(image)
+    table = gpu.upload(np.asarray([0, -1], dtype=np.int64).tobytes())
+    miss = gpu.zeros(4)
+    vector = rng.normal(size=hidden).astype(np.float32)
+    gate = gpu.load_int4(gate_p + gate_s, moe * 2, hidden, hidden)
+    reference_gate = gpu.read_f32(gpu.linear(gate, gpu.dev_from(vector), 1, hidden))
+    activated = _silu(reference_gate[:moe]) * reference_gate[moe:]
+    padded = np.zeros(stored, dtype=np.float32)
+    padded[:moe] = activated
+    down = gpu.load_int4(down_p + down_s, hidden, stored, stored)
+    reference = gpu.read_f32(gpu.linear(down, gpu.dev_from(padded), 1, stored))
+    ids = gpu.dev_u32([0])
+    weights = gpu.dev_from(np.asarray([0.5], dtype=np.float32))
+    shared = gpu.dev_from(np.full(hidden, 0.25, dtype=np.float32))
+    got_gate = gpu.moe_decode_gate(
+        gpu.dev_from(vector),
+        atlas,
+        table,
+        ids,
+        1,
+        0,
+        moe * 2,
+        hidden,
+        0,
+        len(gate_p),
+        miss,
+        0,
+    )
+    _close("moe-gate", gpu.read_f32(got_gate), reference_gate)
+    activated_half = gpu.moe_activate(got_gate, 1, moe, stored)
+    got = gpu.moe_decode_down(
+        activated_half,
+        atlas,
+        table,
+        ids,
+        weights,
+        shared,
+        1,
+        0,
+        hidden,
+        stored,
+        len(gate_p) + len(gate_s),
+        len(gate_p) + len(gate_s) + len(down_p),
+        miss,
+        0,
+    )
+    _close("moe-down", gpu.read_f32(got), reference * 0.5 + 0.25)
+
+
+def check_gdn_scan() -> None:
+    """The chunk scan matches the per-token convolution and delta update."""
+    gpu = MetalSession()
+    rng = np.random.default_rng(3)
+    eps = 1e-6
+    count = 2
+    qkv = rng.normal(size=(count, 10240)).astype(np.float32) * 0.02
+    conv_w = rng.normal(size=(10240, 4)).astype(np.float32) * 0.02
+    conv_buf = gpu.upload(np.ascontiguousarray(conv_w).tobytes())
+    hist_ref = gpu.zeros(3 * 10240 * 4)
+    mixed_rows = []
+    for token in range(count):
+        current = gpu.dev_from(qkv[token])
+        mixed_rows.append(
+            gpu.read_f32(gpu.silu(gpu.causal_conv(hist_ref, current, conv_buf, 0, 10240, 4)))
+        )
+    hist_scan = gpu.zeros(3 * 10240 * 4)
+    mixed = gpu.tmp(count * 10240)
+    gpu.gdn_conv_scan(hist_scan, gpu.dev_from(qkv), conv_buf, 0, mixed, count)
+    got = gpu.read_f32(mixed).reshape(count, 10240)
+    for token, row in enumerate(mixed_rows):
+        _close(f"gdn-conv-{token}", got[token], row)
+    _close(
+        "gdn-hist",
+        np.frombuffer(_buffer_bytes(hist_scan, 3 * 10240 * 4), dtype=np.float32),
+        np.frombuffer(_buffer_bytes(hist_ref, 3 * 10240 * 4), dtype=np.float32),
+    )
+    raw_a = rng.normal(size=(count, 48)).astype(np.float32) * 0.1
+    raw_b = rng.normal(size=(count, 48)).astype(np.float32) * 0.1
+    z = rng.normal(size=(count, 6144)).astype(np.float32) * 0.1
+    dt = rng.normal(size=48).astype(np.float32) * 0.1
+    a_log = rng.normal(size=48).astype(np.float32) * 0.1
+    norm = rng.normal(size=128).astype(np.float32) * 0.1 + 1.0
+    dt_buf = gpu.upload(dt.tobytes())
+    a_buf = gpu.upload(a_log.tobytes())
+    norm_buf = gpu.upload(norm.tobytes())
+    state_ref = gpu.zeros(48 * 128 * 128 * 4)
+    heads_ref = []
+    for token in range(count):
+        row = gpu.dev_from(mixed_rows[token])
+        query = gpu.l2(row.view(0, 2048), 16, 128, eps)
+        key = gpu.l2(row.view(2048, 2048), 16, 128, eps)
+        query = gpu.scale(query, 128.0**-0.5)
+        query = gpu.repeat_rows(query, 16, 128, 3)
+        key = gpu.repeat_rows(key, 16, 128, 3)
+        beta = gpu.sigmoid(gpu.dev_from(raw_b[token]))
+        alpha = gpu.gdn_alpha(gpu.dev_from(raw_a[token]), dt_buf, 0, a_buf, 0)
+        y = gpu.gdn_dev(state_ref, query, key, row.view(4096, 6144), alpha, beta)
+        y = gpu.rms(y, norm_buf, 0, 128, 48, eps, False, 0)
+        heads_ref.append(gpu.read_f32(gpu.mul(y, gpu.sigmoid(gpu.dev_from(z[token])))))
+    state_scan = gpu.zeros(48 * 128 * 128 * 4)
+    heads = gpu.tmp(count * 6144)
+    gpu.gdn_state_scan(
+        state_scan,
+        mixed,
+        gpu.dev_from(raw_a),
+        gpu.dev_from(raw_b),
+        gpu.dev_from(z),
+        dt_buf,
+        0,
+        a_buf,
+        0,
+        norm_buf,
+        0,
+        heads,
+        count,
+        eps,
+    )
+    got_heads = gpu.read_f32(heads).reshape(count, 6144)
+    for token, row in enumerate(heads_ref):
+        _close(f"gdn-state-{token}", got_heads[token], row)
+
+
 def check_act_kernels() -> None:
     """Elementwise and reduction shaders match the host formulas on one draw."""
     gpu = MetalSession()

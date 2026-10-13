@@ -13,11 +13,18 @@ from typing import Any
 
 import numpy as np
 
-from qwen38_flash_next.formats import BLOCK, IO_CHUNK, NGRAM_SLOT, NGRAM_WIDTH, int4_plane_sizes
+from qwen38_flash_next.formats import (
+    BLOCK,
+    IO_CHUNK,
+    NGRAM_SLOT,
+    NGRAM_WIDTH,
+    PAGE,
+    int4_plane_sizes,
+)
 from qwen38_flash_next.shader_text import shader_text
 
 VECTOR_SHADER = shader_text("vector.metal")
-ACT_SHADER = shader_text("act.metal")
+ACT_SHADER = shader_text("act.metal", "scan.metal", "moe.metal")
 # Prefill is mpp::tensor_ops::matmul2d. The E8M0 plane requires transpose_right.
 # Extents are (inner, outer) with the inner dimension contiguous, which is
 # row-major [rows, inner] for the activation and [cols, inner] for the weight.
@@ -307,6 +314,28 @@ def _dev_bind(src: Dev) -> tuple[Any, int]:
     return src.buf, src.offset * 4
 
 
+def _bind_any(src: Any) -> tuple[Any, int]:
+    if isinstance(src, Dev):
+        return _dev_bind(src)
+    if isinstance(src, Span):
+        return src.buf, src.offset
+    return src, 0
+
+
+class Span:
+    """A byte range in a buffer that outlives one command buffer."""
+
+    def __init__(self, buf: Any, offset: int) -> None:
+        self.buf = buf
+        self.offset = offset
+
+
+def _zero_dev(src: Dev) -> None:
+    start = src.offset * 4
+    nbytes = src.n * 4
+    _buffer_view(src.buf, start + nbytes)[start : start + nbytes] = bytes(nbytes)
+
+
 class MetalSession:
     """Decode dots, prefill matmul2d, the GDN delta, and grouped-query attention."""
 
@@ -323,6 +352,10 @@ class MetalSession:
         self.command_count = 0
         self.gpu_seconds = 0.0
         self.encode_seconds = 0.0
+        self.host_encode = 0.0
+        self.wait_seconds = 0.0
+        self._arena = None
+        self._arena_used = 0
         self.io_seconds = 0.0
         self.io_loads = 0
         self._encoder = None
@@ -382,6 +415,24 @@ class MetalSession:
             "dequant_ngram",
             "broadcast_rows",
             "sample_f32",
+            "copy_bytes",
+            "gemv_f32_batch",
+            "gemv_f16_batch",
+            "decode_int4_batch",
+            "topk_batch",
+            "gdn_conv_scan",
+            "gdn_state_scan",
+            "split_q_batch",
+            "rope_batch",
+            "indexer_write",
+            "qsa_attend",
+            "gather_half",
+            "moe_grouped",
+            "moe_activate",
+            "moe_scatter",
+            "moe_decode_gate",
+            "moe_decode_down",
+            "gemv_int4_f32",
         )
         self.act = {name: self._pipeline(library, name) for name in act_names}
         self._argmax_peaks = self.alloc(1024 * 4)
@@ -389,6 +440,8 @@ class MetalSession:
         self._argmax_out = self.alloc(4)
         self._topk_probs = self.alloc(512 * 4)
         self._sample_scratch = None
+        self._ngram_pages: dict[int, Any] = {}
+        self._ngram_order: list[int] = []
         self.activation = self.alloc(10240 * 2)
         self.f32_activation = self.alloc(10240 * 4)
         self.destination = self.alloc(248320 * 4)
@@ -420,6 +473,30 @@ class MetalSession:
         return self.device.newBufferWithLength_options_(
             max(nbytes, 16), self.metal.MTLResourceStorageModeShared
         )
+
+    def begin_scratch(self, nbytes: int) -> None:
+        if self._arena is None or int(self._arena.length()) < nbytes:
+            self._arena = self.alloc(nbytes)
+        self._arena_used = 0
+
+    def rewind_scratch(self) -> None:
+        self._arena_used = 0
+
+    def _bump(self, nbytes: int) -> int:
+        align = 256
+        if self._arena is None:
+            self.begin_scratch(64 << 20)
+        off = (self._arena_used + align - 1) & ~(align - 1)
+        need = off + max(nbytes, 1)
+        if need > int(self._arena.length()):
+            message = f"scratch arena is {int(self._arena.length())} bytes, need {need}"
+            raise RuntimeError(message)
+        self._arena_used = need
+        return off
+
+    def span(self, nbytes: int) -> Span:
+        off = self._bump(nbytes)
+        return Span(self._arena, off)
 
     def upload(self, blob: bytes) -> Any:
         buffer = self.alloc(len(blob))
@@ -660,6 +737,7 @@ class MetalSession:
         groups: Any,
         threads: Any,
     ) -> None:
+        started = time.perf_counter()
         if self._command is None:
             self._command = self.queue.commandBuffer()
             self._batch_launches = 0
@@ -675,6 +753,7 @@ class MetalSession:
             encoder.setBytes_length_atIndex_(blob, len(blob), base + index)
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(groups, threads)
         self._batch_launches += 1
+        self.host_encode += time.perf_counter() - started
 
     def flush(self) -> None:
         if self._encoder is not None:
@@ -685,7 +764,9 @@ class MetalSession:
         started = time.perf_counter()
         command = self._command
         command.commit()
+        waited = time.perf_counter()
         command.waitUntilCompleted()
+        self.wait_seconds += time.perf_counter() - waited
         self.launch_count += self._batch_launches
         self.command_count += 1
         self._batch_launches = 0
@@ -708,9 +789,8 @@ class MetalSession:
                 raise RuntimeError(message)
 
     def tmp(self, n: int) -> Dev:
-        buf = self.alloc(n * 4)
-        self._retain.append(buf)
-        return Dev(buf, n)
+        off = self._bump(n * 4)
+        return Dev(self._arena, n, off // 4)
 
     def dev_from(self, array: np.ndarray) -> Dev:
         flat = np.ascontiguousarray(array, dtype=np.float32).reshape(-1)
@@ -726,15 +806,13 @@ class MetalSession:
 
     def read_f32(self, src: Dev) -> np.ndarray:
         self.flush()
-        nbytes = (src.offset + src.n) * 4
-        raw = _buffer_bytes(src.buf, nbytes)
-        return np.frombuffer(raw, dtype=np.float32, count=src.n, offset=src.offset * 4).copy()
+        raw = _buffer_slice(src.buf, src.offset * 4, src.n * 4)
+        return np.frombuffer(raw, dtype=np.float32).copy()
 
     def read_u32(self, src: Dev) -> np.ndarray:
         self.flush()
-        nbytes = (src.offset + src.n) * 4
-        raw = _buffer_bytes(src.buf, nbytes)
-        return np.frombuffer(raw, dtype=np.uint32, count=src.n, offset=src.offset * 4).copy()
+        raw = _buffer_slice(src.buf, src.offset * 4, src.n * 4)
+        return np.frombuffer(raw, dtype=np.uint32).copy()
 
     def _ew(
         self,
@@ -1080,12 +1158,11 @@ class MetalSession:
         raw = _buffer_bytes(self._argmax_out, 4)
         return int(np.frombuffer(raw, dtype=np.uint32)[0])
 
-    def _cast_half(self, src: Dev, logical: int, stored: int) -> Any:
-        half = self.alloc(stored * 2)
-        self._retain.append(half)
+    def _cast_half(self, src: Dev, logical: int, stored: int) -> Span:
+        half = self.span(stored * 2)
         self._ew(
             "cast_f16_pad",
-            (_dev_bind(src), (half, 0)),
+            (_dev_bind(src), (half.buf, half.offset)),
             (struct.pack("<I", logical), struct.pack("<I", stored)),
             stored,
         )
@@ -1110,7 +1187,7 @@ class MetalSession:
             half = self._cast_half(src, matrix.inner, matrix.inner)
             self.dispatch(
                 self.f16_pipe,
-                ((half, 0), (matrix.weights, matrix.weight_off), (dst.buf, dst_off)),
+                ((half.buf, half.offset), (matrix.weights, matrix.weight_off), (dst.buf, dst_off)),
                 (struct.pack("<I", rows), struct.pack("<I", matrix.inner)),
                 self._size(rows),
                 self._size(32),
@@ -1120,7 +1197,7 @@ class MetalSession:
         self.dispatch(
             self.gemm.decode,
             (
-                (half, 0),
+                (half.buf, half.offset),
                 (matrix.weights, matrix.weight_off),
                 (matrix.scales, matrix.scale_off),
                 (dst.buf, dst_off),
@@ -1130,34 +1207,143 @@ class MetalSession:
             self._size(32),
         )
 
-    def linear(self, matrix: Any, src: Dev, count: int, inner: int) -> Dev:
+    def linear(
+        self,
+        matrix: Any,
+        src: Dev,
+        count: int,
+        inner: int,
+        *,
+        epilogue: int = 0,
+        epilogue_scale: float = 1.0,
+    ) -> Dev:
         if src.n != count * inner:
             message = f"linear source {src.n} is not {count} by {inner}"
             raise ValueError(message)
+        if count == 1 and isinstance(matrix, Int4Matrix):
+            return self._gemv_int4(matrix, src, epilogue, epilogue_scale)
         gemm = (
             count > 1
             and isinstance(matrix, Int4Matrix)
             and matrix.rows % 32 == 0
             and matrix.inner == inner
         )
-        if not gemm:
-            dst = self.tmp(count * int(matrix.rows))
-            for index in range(count):
-                self.gemv_into(matrix, src.view(index * inner, inner), dst, index)
+        if gemm:
+            dst = self._gemm_int4(matrix, src, count, inner)
+        elif count == 1:
+            dst = self.tmp(int(matrix.rows))
+            self.gemv_into(matrix, src, dst, 0)
+            return self._apply_epilogue(dst, epilogue, epilogue_scale)
+        else:
+            dst = self._gemv_batch(matrix, src, count, inner)
+        return self._apply_epilogue(dst, epilogue, epilogue_scale)
+
+    def _apply_epilogue(self, src: Dev, epilogue: int, scale: float) -> Dev:
+        if epilogue == 0:
+            return src
+        if epilogue == 1:
+            return self.silu(src)
+        if epilogue == 2:
+            return self.sigmoid(src)
+        if epilogue == 3:
+            return self.silu(self.scale(src, scale))
+        if epilogue == 4:
+            return self.scale(self.sigmoid(self.scale(src, 0.25)), 2.0)
+        message = f"unknown linear epilogue {epilogue}"
+        raise ValueError(message)
+
+    def _gemv_int4(self, matrix: Int4Matrix, src: Dev, epilogue: int, scale: float) -> Dev:
+        rows = int(matrix.rows)
+        dst = self.tmp(rows)
+        self.dispatch(
+            self.act["gemv_int4_f32"],
+            (
+                _dev_bind(src),
+                (matrix.weights, matrix.weight_off),
+                (matrix.scales, matrix.scale_off),
+                _dev_bind(dst),
+            ),
+            (
+                struct.pack("<I", rows),
+                struct.pack("<I", int(matrix.stored_inner)),
+                struct.pack("<I", int(matrix.inner)),
+                struct.pack("<I", int(epilogue)),
+                struct.pack("<f", float(scale)),
+            ),
+            self._size((rows + 15) // 16),
+            self._size(128),
+        )
+        return dst
+
+    def _gemv_batch(self, matrix: Any, src: Dev, count: int, inner: int) -> Dev:
+        rows = int(matrix.rows)
+        dst = self.tmp(count * rows)
+        if isinstance(matrix, F32Matrix):
+            self.dispatch(
+                self.act["gemv_f32_batch"],
+                (_dev_bind(src), (matrix.weights, 0), _dev_bind(dst)),
+                (
+                    struct.pack("<I", count),
+                    struct.pack("<I", rows),
+                    struct.pack("<I", inner),
+                ),
+                self._size(count * rows),
+                self._size(32),
+            )
             return dst
-        return self._gemm_int4(matrix, src, count, inner)
+        if isinstance(matrix, F16Matrix):
+            stored = inner
+            weights = matrix.weights
+            weight_off = matrix.weight_off
+            pipe = self.act["gemv_f16_batch"]
+            scales = None
+            scale_off = 0
+        else:
+            stored = int(matrix.stored_inner)
+            weights = matrix.weights
+            weight_off = matrix.weight_off
+            pipe = self.act["decode_int4_batch"]
+            scales = matrix.scales
+            scale_off = matrix.scale_off
+        half = self.span(count * stored * 2)
+        self._ew(
+            "cast_prefill",
+            (_dev_bind(src), (half.buf, half.offset)),
+            (
+                struct.pack("<I", count),
+                struct.pack("<I", inner),
+                struct.pack("<I", count),
+                struct.pack("<I", stored),
+            ),
+            count * stored,
+        )
+        bindings = [(half.buf, half.offset), (weights, weight_off)]
+        if scales is not None:
+            bindings.append((scales, scale_off))
+        bindings.append(_dev_bind(dst))
+        self.dispatch(
+            pipe,
+            bindings,
+            (
+                struct.pack("<I", count),
+                struct.pack("<I", rows),
+                struct.pack("<I", stored),
+            ),
+            self._size(count * rows),
+            self._size(32),
+        )
+        return dst
 
     def _gemm_int4(self, matrix: Int4Matrix, src: Dev, count: int, inner: int) -> Dev:
         padded = ((count + 63) // 64) * 64
         stored = matrix.stored_inner
         cols = matrix.rows
-        act = self.alloc(padded * stored * 2)
-        self._retain.append(act)
+        act = self.span(padded * stored * 2)
         wide = self.tmp(padded * cols)
-        _fill_buffer(wide.buf, padded * cols * 4, 0)
+        _zero_dev(wide)
         self._ew(
             "cast_prefill",
-            (_dev_bind(src), (act, 0)),
+            (_dev_bind(src), (act.buf, act.offset)),
             (
                 struct.pack("<I", count),
                 struct.pack("<I", inner),
@@ -1169,7 +1355,7 @@ class MetalSession:
         self.dispatch(
             self.gemm.prefill,
             (
-                (act, 0),
+                (act.buf, act.offset),
                 (matrix.weights, matrix.weight_off),
                 (matrix.scales, matrix.scale_off),
                 _dev_bind(wide),
@@ -1286,6 +1472,36 @@ class MetalSession:
         self._io = queue
         self._event = self.device.newSharedEvent()
 
+    def io_submit(self, handle: Any, loads: Sequence[tuple[Any, int, int, int]]) -> int:
+        """Start loads and return the shared-event value compute should wait for."""
+        if not loads:
+            return 0
+        self.ensure_io()
+        started = time.perf_counter()
+        command = self._io.commandBuffer()
+        issued = 0
+        for buffer, dest_off, size, src_off in loads:
+            offset = 0
+            while offset < size:
+                take = min(IO_CHUNK, size - offset)
+                command.loadBuffer_offset_size_sourceHandle_sourceHandleOffset_(
+                    buffer, dest_off + offset, take, handle, src_off + offset
+                )
+                offset += take
+                issued += 1
+        self._event_value += 1
+        value = self._event_value
+        command.signalEvent_value_(self._event, value)
+        command.commit()
+        self.io_loads += issued
+        self._io_pending.append(command)
+        self.io_seconds += time.perf_counter() - started
+        return int(value)
+
+    def io_fence(self, value: int) -> None:
+        if value:
+            self._compute_waits_for(value)
+
     def io_read(
         self,
         handle: Any,
@@ -1334,18 +1550,358 @@ class MetalSession:
         self._command.encodeWaitForEvent_value_(self._event, value)
 
     def ngram_dequant(self, handle: Any, rows: Sequence[int]) -> Dev:
-        raw = self.alloc(len(rows) * NGRAM_SLOT)
-        self._retain.append(raw)
-        loads = [
-            (raw, index * NGRAM_SLOT, NGRAM_SLOT, int(row) * NGRAM_SLOT)
-            for index, row in enumerate(rows)
-        ]
-        self.io_read(handle, loads, gpu_wait=True)
+        raw = self.span(len(rows) * NGRAM_SLOT)
+        loads: list[tuple[Any, int, int, int]] = []
+        copies: list[tuple[Any, int, int]] = []
+        needed: set[int] = set()
+        for index, row in enumerate(rows):
+            byte = int(row) * NGRAM_SLOT
+            page = byte // PAGE
+            local = byte - page * PAGE
+            buf = self._ngram_pages.get(page)
+            if buf is None:
+                buf = self.alloc(PAGE)
+                self._ngram_pages[page] = buf
+                self._ngram_order.append(page)
+                loads.append((buf, 0, PAGE, page * PAGE))
+                needed.add(page)
+            copies.append((buf, local, index * NGRAM_SLOT))
+        while len(self._ngram_order) > 4096:
+            old = self._ngram_order.pop(0)
+            if old in needed:
+                self._ngram_order.append(old)
+                break
+            self._ngram_pages.pop(old, None)
+        if loads:
+            self.io_read(handle, loads, gpu_wait=True)
+        for buf, local, dest in copies:
+            self.copy_bytes(buf, local, raw.buf, raw.offset + dest, NGRAM_SLOT)
         dst = self.tmp(len(rows) * NGRAM_WIDTH)
         self._ew(
             "dequant_ngram",
-            ((raw, 0), _dev_bind(dst)),
+            ((raw.buf, raw.offset), _dev_bind(dst)),
             (struct.pack("<I", NGRAM_WIDTH), struct.pack("<I", NGRAM_SLOT)),
             len(rows) * NGRAM_WIDTH,
+        )
+        return dst
+
+    def copy_bytes(self, src: Any, src_off: int, dst: Any, dst_off: int, n: int) -> None:
+        self._ew(
+            "copy_bytes",
+            ((src, src_off), (dst, dst_off)),
+            (struct.pack("<I", n),),
+            n,
+        )
+
+    def topk_batch(self, logits: Dev, count: int, n: int, k: int) -> tuple[Dev, Dev]:
+        index = self.tmp(count * k)
+        weight = self.tmp(count * k)
+        scratch = self.span(count * n * 4)
+        self.dispatch(
+            self.act["topk_batch"],
+            (_dev_bind(logits), _dev_bind(index), _dev_bind(weight), (scratch.buf, scratch.offset)),
+            (struct.pack("<I", count), struct.pack("<I", n), struct.pack("<I", k)),
+            self._size(count),
+            self._size(1),
+        )
+        return index, weight
+
+    def gdn_conv_scan(
+        self,
+        history: Any,
+        qkv: Dev,
+        weight: Any,
+        weight_byte: int,
+        mixed: Dev,
+        count: int,
+    ) -> None:
+        self._ew(
+            "gdn_conv_scan",
+            ((history, 0), _dev_bind(qkv), (weight, weight_byte), _dev_bind(mixed)),
+            (struct.pack("<I", count), struct.pack("<I", 10240), struct.pack("<I", 4)),
+            10240,
+        )
+
+    def gdn_state_scan(
+        self,
+        state: Any,
+        mixed: Dev,
+        raw_a: Dev,
+        raw_b: Dev,
+        z: Dev,
+        dt_bias: Any,
+        dt_byte: int,
+        a_log: Any,
+        a_byte: int,
+        norm: Any,
+        norm_byte: int,
+        heads: Dev,
+        count: int,
+        eps: float,
+    ) -> None:
+        self.dispatch(
+            self.act["gdn_state_scan"],
+            (
+                (state, 0),
+                _dev_bind(mixed),
+                _dev_bind(raw_a),
+                _dev_bind(raw_b),
+                _dev_bind(z),
+                (dt_bias, dt_byte),
+                (a_log, a_byte),
+                (norm, norm_byte),
+                _dev_bind(heads),
+            ),
+            (struct.pack("<I", count), struct.pack("<f", float(eps))),
+            self._size(48),
+            self._size(128),
+        )
+
+    def split_q_batch(
+        self, packed: Dev, count: int, heads: int = 24, dim: int = 256
+    ) -> tuple[Dev, Dev]:
+        query = self.tmp(count * heads * dim)
+        gate = self.tmp(count * heads * dim)
+        self._ew(
+            "split_q_batch",
+            (_dev_bind(packed), _dev_bind(query), _dev_bind(gate)),
+            (struct.pack("<I", count), struct.pack("<I", heads), struct.pack("<I", dim)),
+            count * heads * dim,
+        )
+        return query, gate
+
+    def rope_batch(
+        self,
+        src: Dev,
+        count: int,
+        heads: int,
+        cols: int,
+        rotary: int,
+        position: int,
+        theta: float,
+    ) -> Dev:
+        dst = self.tmp(count * heads * cols)
+        self._ew(
+            "rope_batch",
+            (_dev_bind(src), _dev_bind(dst)),
+            (
+                struct.pack("<I", cols),
+                struct.pack("<I", rotary),
+                struct.pack("<I", position),
+                struct.pack("<f", float(theta)),
+                struct.pack("<I", heads),
+                struct.pack("<I", count),
+            ),
+            count * heads * cols,
+        )
+        return dst
+
+    def indexer_write(self, index_qk: Dev, cache: Any, count: int, base: int) -> None:
+        self._ew(
+            "indexer_write",
+            (_dev_bind(index_qk), (cache, 0)),
+            (struct.pack("<I", count), struct.pack("<I", base)),
+            count * 128,
+        )
+
+    def qsa_attend(
+        self, query: Dev, gate: Dev, key: Any, value: Any, count: int, base: int
+    ) -> Dev:
+        dst = self.tmp(count * 24 * 256)
+        self.dispatch(
+            self.act["qsa_attend"],
+            (
+                _dev_bind(query),
+                _dev_bind(gate),
+                (key, 0),
+                (value, 0),
+                _dev_bind(dst),
+            ),
+            (
+                struct.pack("<I", count),
+                struct.pack("<I", base),
+                struct.pack("<f", 1.0 / math.sqrt(256.0)),
+            ),
+            self._size(24),
+            self._size(32),
+        )
+        return dst
+
+    def gather_half(self, src: Dev, tokens: Any, n: int, logical: int, stored: int) -> Span:
+        dst = self.span(max(n, 1) * stored * 2)
+        self._ew(
+            "gather_half",
+            (_dev_bind(src), _bind_any(tokens), (dst.buf, dst.offset)),
+            (
+                struct.pack("<I", n),
+                struct.pack("<I", logical),
+                struct.pack("<I", stored),
+            ),
+            max(n * stored, 1),
+        )
+        return dst
+
+    def moe_grouped(
+        self,
+        activation: Any,
+        atlas: Any,
+        table: Any,
+        group_expert: Any,
+        group_offset: Any,
+        destination: Any,
+        miss: Any,
+        n_groups: int,
+        table_base: int,
+        cols: int,
+        inner: int,
+        weight_off: int,
+        scale_off: int,
+        miss_index: int,
+    ) -> None:
+        if n_groups < 1:
+            return
+        self.dispatch(
+            self.act["moe_grouped"],
+            (
+                _bind_any(activation),
+                (atlas, 0),
+                (table, 0),
+                _bind_any(group_expert),
+                _bind_any(group_offset),
+                _bind_any(destination),
+                (miss, 0),
+            ),
+            (
+                struct.pack("<I", table_base),
+                struct.pack("<I", cols),
+                struct.pack("<I", inner),
+                struct.pack("<I", weight_off),
+                struct.pack("<I", scale_off),
+                struct.pack("<I", miss_index),
+            ),
+            self._size(n_groups * cols),
+            self._size(32),
+        )
+
+    def moe_activate(self, gate_up: Any, n: int, moe: int, stored: int) -> Span:
+        dst = self.span(max(n, 1) * stored * 2)
+        self._ew(
+            "moe_activate",
+            (_bind_any(gate_up), (dst.buf, dst.offset)),
+            (struct.pack("<I", n), struct.pack("<I", moe), struct.pack("<I", stored)),
+            max(n * stored, 1),
+        )
+        return dst
+
+    def moe_scatter(
+        self,
+        shared: Dev,
+        partial: Any,
+        inverse: Any,
+        weights: Dev,
+        count: int,
+        topk: int,
+        hidden: int,
+    ) -> Dev:
+        dst = self.tmp(count * hidden)
+        self._ew(
+            "moe_scatter",
+            (
+                _dev_bind(shared),
+                _bind_any(partial),
+                _bind_any(inverse),
+                _dev_bind(weights),
+                _dev_bind(dst),
+            ),
+            (
+                struct.pack("<I", count),
+                struct.pack("<I", topk),
+                struct.pack("<I", hidden),
+            ),
+            count * hidden,
+        )
+        return dst
+
+    def moe_decode_gate(
+        self,
+        activation: Dev,
+        atlas: Any,
+        table: Any,
+        ids: Dev,
+        topk: int,
+        table_base: int,
+        cols: int,
+        inner: int,
+        weight_off: int,
+        scale_off: int,
+        miss: Any,
+        miss_index: int,
+    ) -> Dev:
+        dst = self.tmp(topk * cols)
+        self.dispatch(
+            self.act["moe_decode_gate"],
+            (
+                _dev_bind(activation),
+                (atlas, 0),
+                (table, 0),
+                _dev_bind(ids),
+                _dev_bind(dst),
+                (miss, 0),
+            ),
+            (
+                struct.pack("<I", topk),
+                struct.pack("<I", table_base),
+                struct.pack("<I", cols),
+                struct.pack("<I", inner),
+                struct.pack("<I", weight_off),
+                struct.pack("<I", scale_off),
+                struct.pack("<I", miss_index),
+            ),
+            self._size(topk * cols),
+            self._size(32),
+        )
+        return dst
+
+    def moe_decode_down(
+        self,
+        activation: Any,
+        atlas: Any,
+        table: Any,
+        ids: Dev,
+        weights: Dev,
+        shared: Dev,
+        topk: int,
+        table_base: int,
+        cols: int,
+        inner: int,
+        weight_off: int,
+        scale_off: int,
+        miss: Any,
+        miss_index: int,
+    ) -> Dev:
+        dst = self.tmp(cols)
+        self.dispatch(
+            self.act["moe_decode_down"],
+            (
+                _bind_any(activation),
+                (atlas, 0),
+                (table, 0),
+                _dev_bind(ids),
+                _dev_bind(weights),
+                _dev_bind(shared),
+                _dev_bind(dst),
+                (miss, 0),
+            ),
+            (
+                struct.pack("<I", topk),
+                struct.pack("<I", table_base),
+                struct.pack("<I", cols),
+                struct.pack("<I", inner),
+                struct.pack("<I", weight_off),
+                struct.pack("<I", scale_off),
+                struct.pack("<I", miss_index),
+            ),
+            self._size(cols),
+            self._size(32),
         )
         return dst

@@ -158,3 +158,48 @@ def test_transcript_appends_prompt_and_output(tmp_path) -> None:
     text = path.read_text(encoding="utf-8")
     assert text == "prompt:\n2+2=\n\noutput:\n4\n\nprompt:\nnext\n\noutput:\nmore\n"
     pipeline._append_transcript(None, "skipped", "skipped")
+
+
+def test_omitted_max_tokens_runs_until_stop() -> None:
+    import qwen38_flash_next.commands as commands
+
+    assert commands._request_limit({}) is None
+    assert commands._request_limit({"max_tokens": None}) is None
+    assert commands._request_limit({"max_tokens": 0}) == 0
+    assert commands._request_limit({"max_tokens": 32}) == 32
+    assert commands._request_limit({"max_completion_tokens": 16}) == 16
+
+
+def test_complete_thinking_flag_enables_thinking(monkeypatch) -> None:
+    import qwen38_flash_next.commands as commands
+
+    seen: list[bool] = []
+
+    class Tokenizer:
+        def encode(self, text: str) -> object:
+            return type("Encoded", (), {"ids": [4]})()
+
+    class Runtime:
+        def __init__(self, path: object) -> None:
+            self.tokenizer = Tokenizer()
+
+        def encode_chat(self, messages: object, tools: object, enable_thinking: bool) -> list[int]:
+            seen.append(enable_thinking)
+            return [1]
+
+        def forward(self, prompt: list[int]) -> np.ndarray:
+            return np.zeros(8, dtype=np.float32)
+
+        def decode(self, ids: list[int]) -> str:
+            return ""
+
+        def _new_tokens(self, *args: object) -> list[int]:
+            return []
+
+        def _log_decode(self) -> None:
+            return None
+
+    monkeypatch.setattr(commands, "Qwen38Runtime", Runtime)
+    assert pipeline.main(["complete", "--prompt", "2+2", "--thinking"]) == 0
+    assert pipeline.main(["complete", "--prompt", "2+2"]) == 0
+    assert seen == [True, False]

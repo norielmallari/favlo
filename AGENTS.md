@@ -18,7 +18,7 @@ The runtime does not call into a multi-model server to run the forward.
 - `madmetal` command that dispatches one model flag onto one pipeline entry.
 - OpenAI-compatible `GET /v1/models` and `POST /v1/chat/completions`, one request at a time, with streaming, tools, and a grammar on the tool-call span.
 - Prefix cache of that model's full state.
-- Expert records streamed from SSD by Metal IO, already in the tensor layout. One expert is one load of the live image.
+- Expert records streamed from SSD by Metal IO into a resident atlas. Consecutive ids are one sequential load of the live images.
 
 ## Out of scope
 
@@ -43,6 +43,7 @@ qwen38_flash_next/         this model's pipeline
   session.py               device buffers and shaders
   checks.py                host formulas for the kernel checks
   record.py                the file the shaders read
+  experts.py               resident expert atlas
   runtime.py               the forward
   commands.py              quantize, bf16, complete, serve
 src/madmetal/              process entry; selects one pipeline and stops

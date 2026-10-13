@@ -94,7 +94,7 @@ def complete(args: Any) -> int:
             prompt = list(runtime.tokenizer.encode(args.prompt).ids)
         else:
             messages = [{"role": "user", "content": args.prompt}]
-            prompt = runtime.encode_chat(messages, None, enable_thinking=not args.thinking)
+            prompt = runtime.encode_chat(messages, None, enable_thinking=args.thinking)
         _log(f"prompt tokens {len(prompt)} ids {prompt}")
         logits = runtime.forward(prompt)
         order = np.argsort(logits)[::-1]
@@ -171,7 +171,7 @@ def serve(args: Any) -> int:
                 messages = body["messages"]
                 tools = body.get("tools")
                 enable_thinking = bool(body.get("enable_thinking", False))
-                max_tokens = int(body.get("max_tokens") or body.get("max_completion_tokens") or 64)
+                max_tokens = _request_limit(body)
                 temperature = float(body.get("temperature", 0.0))
                 top_p = float(body.get("top_p", 1.0))
                 top_k = int(body.get("top_k", 0))
@@ -195,7 +195,7 @@ def serve(args: Any) -> int:
                         text = runtime.decode(tokens)
                         _log(f"completion: {text}")
                         _append_transcript(args.transcript, _prompt_text(messages), text)
-                        reason = "length" if len(tokens) == max_tokens else "stop"
+                        reason = "length" if runtime._hit_limit else "stop"
                         self._json(200, _completion(text, len(prompt), len(tokens), reason))
             except Exception as exc:
                 traceback.print_exc()
@@ -206,7 +206,7 @@ def serve(args: Any) -> int:
         def _stream(
             self,
             prompt: list[int],
-            max_tokens: int,
+            max_tokens: int | None,
             temperature: float,
             top_p: float,
             top_k: int,
@@ -247,7 +247,7 @@ def serve(args: Any) -> int:
                     }
                 )
                 previous = text
-            reason = "length" if len(produced) == max_tokens else "stop"
+            reason = "length" if runtime._hit_limit else "stop"
             self._event({"choices": [{"index": 0, "delta": {}, "finish_reason": reason}]})
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
@@ -274,6 +274,15 @@ def serve(args: Any) -> int:
     except KeyboardInterrupt:
         server.shutdown()
     return 0
+
+
+def _request_limit(body: dict[str, Any]) -> int | None:
+    """A missing cap runs until a stop id. Zero is a cap of zero, not a missing cap."""
+    if "max_tokens" in body and body["max_tokens"] is not None:
+        return int(body["max_tokens"])
+    if "max_completion_tokens" in body and body["max_completion_tokens"] is not None:
+        return int(body["max_completion_tokens"])
+    return None
 
 
 def _completion(
@@ -324,7 +333,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     bf16_parser.add_argument("--temperature", type=float, default=0.0)
     bf16_parser.add_argument("--top-p", type=float, default=1.0)
     bf16_parser.add_argument("--top-k", type=int, default=0)
-    bf16_parser.add_argument("--thinking", action="store_true")
+    bf16_parser.add_argument(
+        "--thinking", action="store_true", help="enable thinking in the chat template"
+    )
     bf16_parser.add_argument(
         "--raw", action="store_true", help="tokenize the prompt with no chat template"
     )
@@ -341,7 +352,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     complete_parser.add_argument("--temperature", type=float, default=0.0)
     complete_parser.add_argument("--top-p", type=float, default=1.0)
     complete_parser.add_argument("--top-k", type=int, default=0)
-    complete_parser.add_argument("--thinking", action="store_true")
+    complete_parser.add_argument(
+        "--thinking", action="store_true", help="enable thinking in the chat template"
+    )
     complete_parser.add_argument(
         "--raw", action="store_true", help="tokenize the prompt with no chat template"
     )
