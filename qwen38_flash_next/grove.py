@@ -33,6 +33,9 @@ def load_grove(root: Path) -> dict[str, Any]:
     if float(data.get("temperature", 1)) != 0.0:
         message = f"grove completion is not greedy: {path}"
         raise RuntimeError(message)
+    if "kv_cache" in data and data["kv_cache"] != "e4m3":
+        message = f"grove completion used kv cache {data['kv_cache']}: {path}"
+        raise RuntimeError(message)
     return data
 
 
@@ -55,6 +58,7 @@ def write_grove(root: Path, *, replace: bool = False, runtime: Any | None = None
         "top_k": 0,
         "max_tokens": GROVE_MAX_TOKENS,
         "thinking": False,
+        "kv_cache": "e4m3",
     }
     _write_json(path, payload)
     _log(f"grove stored: {path.name}")

@@ -69,7 +69,7 @@ The calibration prompt strings are data in a bucket JSON: `tool_calling`, `chat`
 1. One process, one model flag, one pipeline package. The command loads that package through one hyphenated entry file.
 2. The pipeline package owns the math. Shared code is limited to process entry and pieces that are not the model, and only when a second pipeline exists to share them.
 3. Weights on disk for this model are the Metal records in [docs/qwen38/record.md](docs/qwen38/record.md). The tier rules are in ARCHITECTURE.md.
-4. The key/value cache defaults to BF16 for every cached token. fp8 E4M3 and E5M2 are a switch.
+4. The key/value cache defaults to E4M3 for completed blocks of four. The unfinished tail stays BF16. `--kv-cache bf16` stores every K and V token as BF16. The indexer key stays BF16.
 5. Do not invent routing hits, calibration energies, or hidden-state errors. The device roundtrip in [docs/qwen38/probe.md](docs/qwen38/probe.md) measures nibble order and int4 endpoints before the expert table is packed.
 6. Keep ARCHITECTURE.md current in the same change that alters the pipeline, the records, the cache, the endpoint, or the scope. Update the note in `docs/qwen38/` that owns a layout, the n-gram hash, the kernel schedule, or the probe. ARCHITECTURE.md wins if they disagree.
 7. This process is the runtime. Re-implement from public research documents. Do not use another application's source as the reference, and do not launch another application's environment.

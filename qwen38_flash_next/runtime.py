@@ -32,10 +32,16 @@ from qwen38_flash_next.convert import ShardStore, _layer_f32_keys, _layer_int4_k
 from qwen38_flash_next.experts import ExpertAtlas, group_tier
 from qwen38_flash_next.formats import (
     BLOCK,
+    DEFAULT_KV_CACHE,
+    INDEX_BF16_BYTES,
+    KV_BF16_BYTES,
+    KV_E4M3_BYTES,
+    KV_TAIL_TOKENS,
     NGRAM_WIDTH,
     ExpertPlanes,
     expert_planes,
     int4_plane_sizes,
+    kv_cache_name,
     stored_k_int4,
 )
 from qwen38_flash_next.record import QuantRecord, _Bf16Ngram, prefill_image_table
@@ -79,7 +85,12 @@ class Qwen38Runtime:
     """One sequence of Qwen3.8-Flash-Next. Linear maps are Metal shader dots."""
 
     def __init__(
-        self, root: Path, *, bf16: bool = False, resident_percent: float | None = None
+        self,
+        root: Path,
+        *,
+        bf16: bool = False,
+        resident_percent: float | None = None,
+        kv_cache: str = DEFAULT_KV_CACHE,
     ) -> None:
         self.gpu = MetalSession()
         _log(f"shaders ready on {_device_name(self.gpu.device)}")
@@ -105,6 +116,7 @@ class Qwen38Runtime:
         self.ngram_size = int(text["ngram_size"])
         self.ngram_heads = (self.ngram_size - 1) * self.heads_per_ngram
         self._bf16 = bf16
+        self.kv_cache = kv_cache_name(kv_cache)
         self.store: ShardStore | None = None
         self.files: QuantRecord | _Bf16Ngram
         self.weights: dict[str, Int4Matrix] = {}
@@ -167,9 +179,13 @@ class Qwen38Runtime:
             index for index, kind in enumerate(self.kinds) if kind == "full_attention"
         ]
         self.kv_len = dict.fromkeys(attention, 0)
-        self.kv_k = {index: self.gpu.alloc(512 * 4) for index in attention}
-        self.kv_v = {index: self.gpu.alloc(512 * 4) for index in attention}
-        self.indexer_buf = {index: self.gpu.alloc(128 * 4) for index in attention}
+        body = KV_BF16_BYTES if self.kv_cache == "bf16" else KV_E4M3_BYTES
+        tail = KV_TAIL_TOKENS * KV_BF16_BYTES
+        self.kv_k = {index: self.gpu.alloc(body) for index in attention}
+        self.kv_v = {index: self.gpu.alloc(body) for index in attention}
+        self.kv_k_tail = {index: self.gpu.alloc(tail) for index in attention}
+        self.kv_v_tail = {index: self.gpu.alloc(tail) for index in attention}
+        self.indexer_buf = {index: self.gpu.alloc(INDEX_BF16_BYTES) for index in attention}
         self._bundle: dict[int, dict[str, Any]] = {}
         self._final: dict[str, Any] | None = None
         self._head: Int4Matrix | None = None
@@ -224,7 +240,7 @@ class Qwen38Runtime:
         self.prompt_limit = prompt_token_limit(
             memory=machine_memory(),
             resident_hot=self.resident_budget,
-            kv_per_token=kv_bytes_per_token(attention),
+            kv_per_token=kv_bytes_per_token(attention, cache=self.kv_cache),
             residual_per_token=residual_bytes_per_token(self.branches, self.hidden),
             scratch=scratch_bytes(PREFILL_CHUNK) + index_row,
             staging=staging,
@@ -232,7 +248,7 @@ class Qwen38Runtime:
             score_per_token=PREFILL_CHUNK,
         )
         _log(
-            f"prompt limit {self.prompt_limit} tokens, "
+            f"prompt limit {self.prompt_limit} tokens, kv {self.kv_cache}, "
             f"resident budget {self.resident_budget >> 20} MiB"
         )
 
@@ -709,6 +725,8 @@ class Qwen38Runtime:
             index: (
                 self.kv_k[index],
                 self.kv_v[index],
+                self.kv_k_tail[index],
+                self.kv_v_tail[index],
                 self.indexer_buf[index],
                 self.kv_len[index],
             )
@@ -722,9 +740,11 @@ class Qwen38Runtime:
         self.gpu.copy_bytes(self.ple_hist, 0, self._ple_shadow, 0, self._ple_bytes)
 
     def _restore_recurrent(self) -> None:
-        for index, (key, value, indexer, length) in self._kv_snap.items():
+        for index, (key, value, key_tail, value_tail, indexer, length) in self._kv_snap.items():
             self.kv_k[index] = key
             self.kv_v[index] = value
+            self.kv_k_tail[index] = key_tail
+            self.kv_v_tail[index] = value_tail
             self.indexer_buf[index] = indexer
             self.kv_len[index] = length
         state_bytes = 48 * 128 * 128 * 4
@@ -892,9 +912,7 @@ class Qwen38Runtime:
             extra = total - length
             if extra <= 0:
                 continue
-            self._reserve(self.kv_k, layer, length, extra, 512)
-            self._reserve(self.kv_v, layer, length, extra, 512)
-            self._reserve(self.indexer_buf, layer, length, extra, 128)
+            self._grow_kv(layer, length, extra)
 
     def _gr_dev(self, down: Any, up: Any, hats: Dev, count: int) -> Dev:
         # Tech report eq. (31): SiLU((1/n_r) W_d vec(R̂)). The branch mean is the second 1/n_r.
@@ -1008,6 +1026,64 @@ class Qwen38Runtime:
     ) -> tuple[Any, int]:
         return self._reserve(table, layer, length, 1, width), length * width
 
+    def _grow_kv(self, layer: int, length: int, extra: int) -> tuple[Any, Any, Any]:
+        end = length + extra
+        used, stride = self._kv_span(length)
+        need, _stride = self._kv_span(end)
+        key = self._reserve_bytes(self.kv_k, layer, used, need, stride)
+        value = self._reserve_bytes(self.kv_v, layer, used, need, stride)
+        indexer = self._reserve_bytes(
+            self.indexer_buf,
+            layer,
+            length * INDEX_BF16_BYTES,
+            end * INDEX_BF16_BYTES,
+            INDEX_BF16_BYTES,
+        )
+        return key, value, indexer
+
+    def _kv_span(self, tokens: int) -> tuple[int, int]:
+        if self.kv_cache == "bf16":
+            return tokens * KV_BF16_BYTES, KV_BF16_BYTES
+        complete = (tokens // 4) * 4
+        return complete * KV_E4M3_BYTES, KV_E4M3_BYTES
+
+    def _reserve_bytes(
+        self, table: dict[int, Any], layer: int, used: int, need: int, stride: int
+    ) -> Any:
+        buf = table[layer]
+        if need <= 0:
+            return buf
+        if buf is not None and buf.length() >= need:
+            return buf
+        chunk = PREFILL_CHUNK * stride
+        slack = 64 * stride
+        alloc_n = max(need * 2, stride) if need <= chunk else need + slack
+        grown = self.gpu.alloc(alloc_n)
+        if grown is None:
+            message = f"cache of {alloc_n} bytes was not allocated"
+            raise RuntimeError(message)
+        if used and buf is not None:
+            self.gpu._retain.append(buf)
+            self.gpu.copy_bytes(buf, 0, grown, 0, used)
+        table[layer] = grown
+        return grown
+
+    def _store_kv(self, key: Dev, value: Dev, layer: int, count: int, base: int) -> None:
+        tails = (
+            key,
+            value,
+            self.kv_k[layer],
+            self.kv_v[layer],
+            self.kv_k_tail[layer],
+            self.kv_v_tail[layer],
+            count,
+            base,
+            self.kv_cache,
+        )
+        self.gpu.kv_store(*tails, 0)
+        if self.kv_cache == "e4m3":
+            self.gpu.kv_store(*tails, 1)
+
     def _reserve(
         self, table: dict[int, Any], layer: int, length: int, extra: int, width: int
     ) -> Any:
@@ -1049,15 +1125,25 @@ class Qwen38Runtime:
         if length != base:
             message = f"attention cache length {length} does not match position {base}"
             raise RuntimeError(message)
-        k_buf = self._reserve(self.kv_k, layer, length, count, 512)
-        v_buf = self._reserve(self.kv_v, layer, length, count, 512)
-        i_buf = self._reserve(self.indexer_buf, layer, length, count, 128)
+        k_buf, v_buf, i_buf = self._grow_kv(layer, length, count)
+        self._store_kv(k, value, layer, count, length)
         self.kv_len[layer] = length + count
-        self.gpu.copy_bytes(k.buf, k.offset * 4, k_buf, length * 512 * 4, count * 512 * 4)
-        self.gpu.copy_bytes(value.buf, value.offset * 4, v_buf, length * 512 * 4, count * 512 * 4)
         self.gpu.indexer_write(index_qk, i_buf, count, length)
+        complete = 0 if self.kv_cache == "bf16" else ((length + count) // 4) * 4
+        mode = 0 if self.kv_cache == "bf16" else 1
         if base + count <= DENSE_LIMIT:
-            gated = self.gpu.qsa_attend(q, gate_pre, k_buf, v_buf, count, length)
+            gated = self.gpu.qsa_attend(
+                q,
+                gate_pre,
+                k_buf,
+                v_buf,
+                count,
+                length,
+                mode=mode,
+                complete=complete,
+                key_tail=self.kv_k_tail[layer],
+                value_tail=self.kv_v_tail[layer],
+            )
         else:
             n_blocks = max((base + count - 1) // INDEX_BLOCK, 1)
             scores = self.gpu.tmp(count * n_blocks)
@@ -1068,7 +1154,18 @@ class Qwen38Runtime:
                 scores, indices, selected, count, length, n_blocks, INDEX_STRIDE
             )
             gated = self.gpu.qsa_attend_selected(
-                q, gate_pre, k_buf, v_buf, indices, selected, count, INDEX_STRIDE
+                q,
+                gate_pre,
+                k_buf,
+                v_buf,
+                indices,
+                selected,
+                count,
+                INDEX_STRIDE,
+                mode=mode,
+                complete=complete,
+                key_tail=self.kv_k_tail[layer],
+                value_tail=self.kv_v_tail[layer],
             )
         return self.gpu.linear(bundle["o_proj"], gated, count, 6144)
 

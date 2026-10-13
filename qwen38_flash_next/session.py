@@ -20,6 +20,8 @@ from qwen38_flash_next.formats import (
     NGRAM_WIDTH,
     PAGE,
     int4_plane_sizes,
+    kv_cache_name,
+    kv_store_groups,
 )
 from qwen38_flash_next.shader_text import shader_text
 
@@ -444,6 +446,7 @@ class MetalSession:
             "gdn_state_scan",
             "split_q_batch",
             "rope_batch",
+            "kv_store",
             "indexer_write",
             "indexer_block_score",
             "indexer_select",
@@ -465,6 +468,7 @@ class MetalSession:
             "gemv_int8_half",
         )
         self.act = {name: self._pipeline(library, name) for name in act_names}
+        self._kv_pad = self.alloc(64)
         self._argmax_peaks = self.alloc(1024 * 4)
         self._argmax_index = self.alloc(1024 * 4)
         self._argmax_out = self.alloc(4)
@@ -2042,6 +2046,43 @@ class MetalSession:
         )
         return dst
 
+    def kv_store(
+        self,
+        key: Dev,
+        value: Dev,
+        key_body: Any,
+        value_body: Any,
+        key_tail: Any,
+        value_tail: Any,
+        count: int,
+        base: int,
+        cache: str,
+        phase: int,
+    ) -> None:
+        groups = kv_store_groups(count, base, cache, phase)
+        if groups <= 0:
+            return
+        mode = 0 if kv_cache_name(cache) == "bf16" else 1
+        self.dispatch(
+            self.act["kv_store"],
+            (
+                _dev_bind(key),
+                _dev_bind(value),
+                (key_body, 0),
+                (value_body, 0),
+                (key_tail, 0),
+                (value_tail, 0),
+            ),
+            (
+                struct.pack("<I", count),
+                struct.pack("<I", base),
+                struct.pack("<I", mode),
+                struct.pack("<I", phase),
+            ),
+            self._size(groups),
+            self._size(32),
+        )
+
     def indexer_write(self, index_qk: Dev, cache: Any, count: int, base: int) -> None:
         self._ew(
             "indexer_write",
@@ -2051,7 +2092,18 @@ class MetalSession:
         )
 
     def qsa_attend(
-        self, query: Dev, gate: Dev, key: Any, value: Any, count: int, base: int
+        self,
+        query: Dev,
+        gate: Dev,
+        key: Any,
+        value: Any,
+        count: int,
+        base: int,
+        *,
+        mode: int,
+        complete: int,
+        key_tail: Any = None,
+        value_tail: Any = None,
     ) -> Dev:
         dst = self.tmp(count * 24 * 256)
         self.dispatch(
@@ -2061,6 +2113,8 @@ class MetalSession:
                 _dev_bind(gate),
                 (key, 0),
                 (value, 0),
+                (self._kv_pad if key_tail is None else key_tail, 0),
+                (self._kv_pad if value_tail is None else value_tail, 0),
                 _dev_bind(dst),
             ),
             (
@@ -2068,6 +2122,8 @@ class MetalSession:
                 struct.pack("<I", base),
                 struct.pack("<f", 1.0 / math.sqrt(256.0)),
                 struct.pack("<I", 16),
+                struct.pack("<I", mode),
+                struct.pack("<I", complete),
             ),
             self._size(24),
             self._size(512),
@@ -2122,6 +2178,11 @@ class MetalSession:
         counts: Dev,
         count: int,
         stride: int,
+        *,
+        mode: int,
+        complete: int,
+        key_tail: Any = None,
+        value_tail: Any = None,
     ) -> Dev:
         dst = self.tmp(count * 24 * 256)
         self.dispatch(
@@ -2131,6 +2192,8 @@ class MetalSession:
                 _dev_bind(gate),
                 (key, 0),
                 (value, 0),
+                (self._kv_pad if key_tail is None else key_tail, 0),
+                (self._kv_pad if value_tail is None else value_tail, 0),
                 _dev_bind(indices),
                 _dev_bind(counts),
                 _dev_bind(dst),
@@ -2140,6 +2203,8 @@ class MetalSession:
                 struct.pack("<I", stride),
                 struct.pack("<f", 1.0 / math.sqrt(256.0)),
                 struct.pack("<I", 16),
+                struct.pack("<I", mode),
+                struct.pack("<I", complete),
             ),
             self._size(24),
             self._size(512),

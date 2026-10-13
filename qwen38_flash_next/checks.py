@@ -11,6 +11,7 @@ import numpy as np
 from qwen38_flash_next.formats import (
     dequant_int2,
     int2_plane_sizes,
+    pack_bf16,
     quantize_int2_image,
     quantize_matrix,
 )
@@ -63,6 +64,7 @@ def check_state_kernels() -> None:
 
 
 def _check_qsa(session: MetalSession, rng: np.random.Generator) -> None:
+    session.begin_scratch(1 << 20, copies=1)
     count = 2
     base = 40
     span = base + count
@@ -70,14 +72,18 @@ def _check_qsa(session: MetalSession, rng: np.random.Generator) -> None:
     gate = rng.normal(size=(count, 24, 256)).astype(np.float32)
     key = rng.normal(size=(span, 2, 256)).astype(np.float32)
     value = rng.normal(size=(span, 2, 256)).astype(np.float32)
+    key_bytes, key = pack_bf16(key)
+    value_bytes, value = pack_bf16(value)
     got = session.read_f32(
         session.qsa_attend(
             session.dev_from(query),
             session.dev_from(gate),
-            session.upload(np.ascontiguousarray(key).tobytes()),
-            session.upload(np.ascontiguousarray(value).tobytes()),
+            session.upload(key_bytes),
+            session.upload(value_bytes),
             count,
             base,
+            mode=0,
+            complete=0,
         )
     ).reshape(count, 24, 256)
     scale = 1.0 / math.sqrt(256.0)

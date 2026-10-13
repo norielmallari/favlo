@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 from qwen38_flash_next.context import INDEX_STRIDE, block_score, select_query_tokens
+from qwen38_flash_next.formats import pack_bf16
 from qwen38_flash_next.session import Dev, MetalSession
 
 
@@ -57,16 +58,17 @@ def test_one_token_block_score_matches_the_host_dot() -> None:
     index_qk[:512] = heads.reshape(-1)
     cache = np.zeros((8, 128), np.float32)
     cache[:4] = keys
+    cache_bytes, cache_f = pack_bf16(cache)
     scores = session.dev_from(np.zeros(3, np.float32))
     session.indexer_block_score(
         session.dev_from(index_qk),
-        session.upload(np.ascontiguousarray(cache).tobytes()),
+        session.upload(cache_bytes),
         scores,
         1,
         8,
         3,
     )
     got = session.read_f32(scores)
-    reference = block_score(heads.tolist(), keys.tolist())
+    reference = block_score(heads.tolist(), cache_f[:4].tolist())
     assert float(got[0]) == pytest.approx(reference, rel=1e-5, abs=1e-5)
     assert got[2] == 0.0

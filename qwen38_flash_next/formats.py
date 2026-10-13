@@ -219,6 +219,132 @@ def decode_e5m2(byte: int) -> float:
     return sign * (1.0 + mantissa / 4.0) * 2.0 ** (exponent - 15)
 
 
+# K and V are 2 heads of 256. The indexer key is 128 channels and stays BF16.
+KV_CHANNELS = 512
+INDEX_CHANNELS = 128
+KV_GROUP = 32
+KV_E4M3_BYTES = KV_CHANNELS + KV_CHANNELS // KV_GROUP
+KV_BF16_BYTES = KV_CHANNELS * 2
+INDEX_BF16_BYTES = INDEX_CHANNELS * 2
+KV_TAIL_TOKENS = 3
+KV_CACHES = ("e4m3", "bf16")
+DEFAULT_KV_CACHE = "e4m3"
+E4M3_MAX = 448.0
+_E4M3_POSITIVE = [(code, decode_e4m3(code)) for code in range(128) if code != 0x7F]
+
+
+def kv_cache_name(name: str) -> str:
+    if name not in KV_CACHES:
+        message = f"kv cache {name}"
+        raise ValueError(message)
+    return name
+
+
+def kv_e8m0_byte(amax: float) -> int:
+    """Power-of-two scale that fits one block of 32 into finite E4M3."""
+    value = np.float32(amax)
+    if not (value > 0):
+        return 0
+    ratio = np.float32(value / np.float32(E4M3_MAX))
+    if not np.isfinite(ratio):
+        return 254
+    bits = int(ratio.view(np.uint32))
+    exponent = (bits >> 23) & 255
+    mantissa = bits & 0x7FFFFF
+    if exponent == 255:
+        return 254
+    if exponent == 0:
+        return 0
+    power = (exponent - 127) if mantissa == 0 else (exponent - 127 + 1)
+    biased = power + 127
+    if biased < 0:
+        return 0
+    if biased > 254:
+        return 254
+    return biased
+
+
+def encode_e4m3(value: float) -> int:
+    """Nearest finite OCP E4M3FN code. Ties keep the even mantissa bit."""
+    number = np.float32(value)
+    if np.isnan(number):
+        return 0x7F
+    sign = 0x80 if np.signbit(number) else 0
+    magnitude = abs(float(number))
+    if np.isinf(number) or magnitude >= E4M3_MAX:
+        return sign | 0x7E
+    best = 0
+    best_distance = abs(_E4M3_POSITIVE[0][1] - magnitude)
+    for code, decoded in _E4M3_POSITIVE[1:]:
+        distance = abs(decoded - magnitude)
+        even_tie = distance == best_distance and (code & 1) == 0 and (best & 1) == 1
+        if distance < best_distance or even_tie:
+            best = code
+            best_distance = distance
+    return sign | best
+
+
+def encode_bf16(value: float) -> int:
+    """Round-ties-to-even into the top 16 bits. Matches Metal `bfloat`."""
+    number = np.float32(value)
+    bits = int(number.view(np.uint32))
+    if not np.isfinite(number):
+        return (bits >> 16) & 0xFFFF
+    least = (bits >> 16) & 1
+    rounded = (bits + 0x7FFF + least) & 0xFFFFFFFF
+    return (rounded >> 16) & 0xFFFF
+
+
+def decode_bf16(bits: int) -> float:
+    word = np.uint32(int(bits) & 0xFFFF) << np.uint32(16)
+    return float(word.view(np.float32))
+
+
+def quantize_e4m3_token(values: np.ndarray) -> bytes:
+    """One token of 512 channels: 512 E4M3 codes then 16 E8M0 scales."""
+    block = np.asarray(values, dtype=np.float32).reshape(KV_CHANNELS)
+    out = bytearray(KV_E4M3_BYTES)
+    for group in range(KV_CHANNELS // KV_GROUP):
+        part = block[group * KV_GROUP : (group + 1) * KV_GROUP]
+        scale = kv_e8m0_byte(float(np.max(np.abs(part))))
+        factor = np.float32(decode_e8m0(scale))
+        for index, value in enumerate(part.tolist()):
+            coded = 0.0 if scale == 0 else float(np.float32(value) / factor)
+            out[group * KV_GROUP + index] = encode_e4m3(coded)
+        out[KV_CHANNELS + group] = scale
+    return bytes(out)
+
+
+def pack_bf16(values: np.ndarray) -> tuple[bytes, np.ndarray]:
+    """BF16 bytes and the float32 values those bytes decode to."""
+    flat = np.asarray(values, dtype=np.float32).reshape(-1)
+    codes = np.empty(flat.size, dtype=np.uint16)
+    back = np.empty(flat.size, dtype=np.float32)
+    for index, value in enumerate(flat.tolist()):
+        code = encode_bf16(value)
+        codes[index] = code
+        back[index] = np.float32(decode_bf16(code))
+    return codes.tobytes(), back.reshape(np.shape(values))
+
+
+def kv_store_groups(count: int, base: int, cache: str, phase: int) -> int:
+    """Threadgroups of 32 for one `kv_store` dispatch. A zero result is a no-op."""
+    if count < 0 or base < 0 or phase not in (0, 1):
+        message = "kv store"
+        raise ValueError(message)
+    name = kv_cache_name(cache)
+    if name == "bf16":
+        return 0 if phase else count * 32
+    old_complete = base & ~3
+    new_end = base + count
+    new_complete = new_end & ~3
+    if phase == 0:
+        return (new_complete - old_complete) * 32
+    if new_complete == old_complete:
+        return count * 32
+    return (new_end - new_complete) * 32
+
+
 def _finite_equal(left: float, right: float) -> bool:
     if math.isnan(left) and math.isnan(right):
         return True

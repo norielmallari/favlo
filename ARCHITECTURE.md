@@ -26,7 +26,7 @@ Layouts are in [docs/qwen38/record.md](docs/qwen38/record.md). The n-gram hash i
 - The vision tower. It stays unloaded.
 - Multi-token prediction during serving. MTP experts are packed. The endpoint decodes one token at a time, because a draft token would have to pass the same grammar mask.
 - Fusing a whole layer into one kernel. The runtime is a layered loop. Shaders share a command buffer until the host needs an expert file offset or the sampled token id.
-- fp4 and fp8 as expert data planes. Further key/value widths: unscaled fp8, int8, int4, fp4, int2, and a wider K than V.
+- fp4 and fp8 as expert data planes. Further key/value widths: fp8 E5M2, unscaled fp8, int8, int4, fp4, int2, and a wider K than V.
 - Tool-call grammars on speculative drafts.
 - A dependency on another inference app: its packages, its virtualenv, or its files. The README credit is a link, not a library.
 - A second, slower forward. Host GEMV and CPU matmul of activations are not stand-ins for a missing shader. The converter's packing runs on the CPU because it writes the file. The request path does not.
@@ -49,13 +49,13 @@ Image sizes, the five super ids, the directory name, and the E8M0 rule are in [d
 
 ## Key/value cache
 
-The serving default stores the full sparse-attention K and V in BF16. Every cached token, both heads, all twelve layers. That is 24,576 bytes per token, and 6.0 GiB at the native 262,144-token context.
+`serve`, `complete`, and `bf16` take `--kv-cache e4m3` or `--kv-cache bf16`. The default is `e4m3`.
 
-`metal_fp8_e4m3` and `metal_fp8_e5m2` are implemented, each with an E8M0 scale every 32 channels along the head. They are a switch. A tool-use journey has to stay good on fp8 before that switch is the one the server starts with. At E4M3 the same K and V are 12,672 bytes per token, 3.094 GiB at 262,144 tokens.
+E4M3 stores each completed block of four K and V tokens as `metal_fp8_e4m3` with an E8M0 scale every 32 channels along the head. The scale rounds up so the peak of the block fits in the finite E4M3 range, whose largest value is 448. The unfinished tail, at most three tokens, stays BF16. K and V for a completed token are 1,056 bytes, 12,672 bytes across the twelve layers.
 
-When the fp8 switch is on, completed blocks of four tokens are stored fp8 and the unfinished tail stays BF16. That tail is not a cache hit. When the default is on, the whole history including the tail is BF16.
+`--kv-cache bf16` stores every K and V token as BF16, including the tail. That is 24,576 bytes per token across the twelve layers.
 
-Indexer keys stay BF16 in every mode. At 262,144 tokens they add 0.75 GiB. Pooling is mean, then cast back, then norm, then rotary, in that order.
+Indexer keys stay BF16 in both modes. At 262,144 tokens they add 0.75 GiB. The live prefix keeps the tail, and the next token of the same sequence reads it. Pooling is mean, then cast back, then norm, then rotary, in that order.
 
 ## Context
 
@@ -67,7 +67,7 @@ The indexer attends at most 512 complete blocks of 4 tokens, plus the unfinished
 
 ## Prefix cache
 
-One request at a time. A hit is an exact token prefix that was stored, after the checkpoint template has been applied. The usual hit is the previous turn of the same chat. Two chats that share a system prompt hit only when that prompt was stored as its own prefix. With the BF16 default, the stored length is the real token count. The multiple-of-four rule applies only while the fp8 switch is on.
+One request at a time. A hit is an exact token prefix that was stored, after the checkpoint template has been applied. The usual hit is the previous turn of the same chat. Two chats that share a system prompt hit only when that prompt was stored as its own prefix. The stored length is the real token count, including an unfinished E4M3 tail. This process does not write a prefix file. A persisted boundary would end on a completed block of four.
 
 Each cached prefix stores, at that boundary:
 

@@ -395,9 +395,161 @@ kernel void rope_batch(
     }
 }
 
+static ushort f32_to_bf16(float value) {
+    return as_type<ushort>(bfloat(value));
+}
+
+static float bf16_to_f32(ushort bits) {
+    return float(as_type<bfloat>(bits));
+}
+
+static float e4m3_to_f32(uchar code) {
+    uint value = code;
+    float sign = (value & 0x80u) != 0u ? -1.0f : 1.0f;
+    uint exponent = (value >> 3) & 0xfu;
+    uint mantissa = value & 0x7u;
+    if (exponent == 0u) {
+        return sign * (float(mantissa) / 8.0f) * exp2(-6.0f);
+    }
+    if (exponent == 15u && mantissa == 7u) {
+        return sign * NAN;
+    }
+    return sign * (1.0f + float(mantissa) / 8.0f) * exp2(float(exponent) - 7.0f);
+}
+
+// Same ceil as formats.kv_e8m0_byte. Exponent 0 in the shader scale flushes to zero.
+static uchar kv_e8m0(float amax) {
+    if (!(amax > 0.0f)) {
+        return 0u;
+    }
+    float ratio = amax / 448.0f;
+    if (!isfinite(ratio)) {
+        return 254u;
+    }
+    uint bits = as_type<uint>(ratio);
+    uint exponent = (bits >> 23) & 255u;
+    uint mantissa = bits & 0x7fffffu;
+    if (exponent == 255u) {
+        return 254u;
+    }
+    if (exponent == 0u) {
+        return 0u;
+    }
+    int power = mantissa == 0u ? int(exponent) - 127 : int(exponent) - 126;
+    int biased = power + 127;
+    if (biased < 0) {
+        return 0u;
+    }
+    if (biased > 254) {
+        return 254u;
+    }
+    return uchar(biased);
+}
+
+static float load_kv(
+    device const uchar* body,
+    device const ushort* tail,
+    uint token,
+    uint channel,
+    uint mode,
+    uint complete)
+{
+    if (mode == 0u) {
+        device const ushort* words = (device const ushort*)body;
+        return bf16_to_f32(words[token * 512u + channel]);
+    }
+    if (token < complete) {
+        device const uchar* rec = body + token * 528u;
+        return e4m3_to_f32(rec[channel]) * e8m0_scale(rec[512u + (channel >> 5)]);
+    }
+    return bf16_to_f32(tail[(token - complete) * 512u + channel]);
+}
+
+// Phase 0 writes completed E4M3 blocks, or every new token when mode is BF16.
+// Phase 1 writes the unfinished BF16 tail after those blocks. The two phases
+// are separate dispatches so a tail write cannot race the read of the old tail.
+kernel void kv_store(
+    device const float* key [[buffer(0)]],
+    device const float* value [[buffer(1)]],
+    device uchar* key_body [[buffer(2)]],
+    device uchar* value_body [[buffer(3)]],
+    device ushort* key_tail [[buffer(4)]],
+    device ushort* value_tail [[buffer(5)]],
+    constant uint& count [[buffer(6)]],
+    constant uint& base [[buffer(7)]],
+    constant uint& mode [[buffer(8)]],
+    constant uint& phase [[buffer(9)]],
+    uint group_id [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]])
+{
+    threadgroup float vals[32];
+    threadgroup float scaled[32];
+    threadgroup uint shared_scale;
+    uint plane = group_id & 1u;
+    uint rest = group_id >> 1;
+    uint group = rest & 15u;
+    uint token_i = rest >> 4;
+    uint channel = group * 32u + lane;
+    device const float* src = plane == 0u ? key : value;
+    device uchar* body = plane == 0u ? key_body : value_body;
+    device ushort* tail = plane == 0u ? key_tail : value_tail;
+    if (mode == 0u) {
+        float item = src[token_i * 512u + channel];
+        device ushort* dst = (device ushort*)body;
+        dst[(base + token_i) * 512u + channel] = f32_to_bf16(item);
+        return;
+    }
+    uint old_complete = base & ~3u;
+    uint new_end = base + count;
+    uint new_complete = new_end & ~3u;
+    if (phase == 0u) {
+        uint abs_token = old_complete + token_i;
+        float item = abs_token < base
+            ? bf16_to_f32(tail[(abs_token - old_complete) * 512u + channel])
+            : src[(abs_token - base) * 512u + channel];
+        vals[lane] = item;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (lane == 0u) {
+            float amax = 0.0f;
+            for (uint i = 0u; i < 32u; ++i) {
+                amax = max(amax, fabs(vals[i]));
+            }
+            shared_scale = kv_e8m0(amax);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        uint scale = shared_scale;
+        scaled[lane] = scale == 0u ? 0.0f : vals[lane] / e8m0_scale(uchar(scale));
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (lane == 0u) {
+            device uchar* rec = body + abs_token * 528u;
+            uint origin = group * 32u;
+            for (uint chunk = 0u; chunk < 4u; ++chunk) {
+                vec<float, 8> part;
+                for (uint i = 0u; i < 8u; ++i) {
+                    part[i] = scaled[chunk * 8u + i];
+                }
+                auto packed = pack<metal_fp8_e4m3_format>(part);
+                auto bytes = packed.as_storage_type();
+                for (uint i = 0u; i < 8u; ++i) {
+                    rec[origin + chunk * 8u + i] = bytes[i];
+                }
+            }
+            rec[512u + group] = uchar(scale);
+        }
+        return;
+    }
+    if (new_complete == old_complete) {
+        uint slot = (base - old_complete) + token_i;
+        tail[slot * 512u + channel] = f32_to_bf16(src[token_i * 512u + channel]);
+        return;
+    }
+    uint abs_token = new_complete + token_i;
+    tail[token_i * 512u + channel] = f32_to_bf16(src[(abs_token - base) * 512u + channel]);
+}
+
 kernel void indexer_write(
     device const float* index_qk [[buffer(0)]],
-    device float* cache [[buffer(1)]],
+    device ushort* cache [[buffer(1)]],
     constant uint& count [[buffer(2)]],
     constant uint& base [[buffer(3)]],
     uint tid [[thread_position_in_grid]])
@@ -408,7 +560,8 @@ kernel void indexer_write(
     }
     uint token = tid / 128u;
     uint col = tid - token * 128u;
-    cache[(base + token) * 128u + col] = index_qk[token * 640u + 512u + col];
+    float item = index_qk[token * 640u + 512u + col];
+    cache[(base + token) * 128u + col] = f32_to_bf16(item);
 }
 
 // Sixteen simdgroups split the visible keys and values. One simdgroup walking
@@ -416,13 +569,17 @@ kernel void indexer_write(
 kernel void qsa_attend(
     device const float* query [[buffer(0)]],
     device const float* gate [[buffer(1)]],
-    device const float* key [[buffer(2)]],
-    device const float* value [[buffer(3)]],
-    device float* output [[buffer(4)]],
-    constant uint& count [[buffer(5)]],
-    constant uint& base [[buffer(6)]],
-    constant float& scale [[buffer(7)]],
-    constant uint& groups [[buffer(8)]],
+    device const uchar* key [[buffer(2)]],
+    device const uchar* value [[buffer(3)]],
+    device const ushort* key_tail [[buffer(4)]],
+    device const ushort* value_tail [[buffer(5)]],
+    device float* output [[buffer(6)]],
+    constant uint& count [[buffer(7)]],
+    constant uint& base [[buffer(8)]],
+    constant float& scale [[buffer(9)]],
+    constant uint& groups [[buffer(10)]],
+    constant uint& mode [[buffer(11)]],
+    constant uint& complete [[buffer(12)]],
     uint head [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_simdgroup]],
     uint simd [[simdgroup_index_in_threadgroup]])
@@ -434,10 +591,10 @@ kernel void qsa_attend(
         device const float* qh = query + (token * 24u + head) * 256u;
         uint visible = base + token + 1u;
         for (uint t = simd; t < visible; t += groups) {
-            device const float* kt = key + (t * 2u + kv) * 256u;
             float dot = 0.0f;
             for (uint d = lane; d < 256u; d += 32u) {
-                dot += qh[d] * kt[d];
+                float kt = load_kv(key, key_tail, t, kv * 256u + d, mode, complete);
+                dot += qh[d] * kt;
             }
             float score = simd_sum(dot) * scale;
             if (lane == 0u) {
@@ -480,15 +637,15 @@ kernel void qsa_attend(
         float acc4 = 0.0f, acc5 = 0.0f, acc6 = 0.0f, acc7 = 0.0f;
         for (uint t = simd; t < visible; t += groups) {
             float weight = scores[t] / denom;
-            device const float* vt = value + (t * 2u + kv) * 256u;
-            acc0 += weight * vt[lane];
-            acc1 += weight * vt[lane + 32u];
-            acc2 += weight * vt[lane + 64u];
-            acc3 += weight * vt[lane + 96u];
-            acc4 += weight * vt[lane + 128u];
-            acc5 += weight * vt[lane + 160u];
-            acc6 += weight * vt[lane + 192u];
-            acc7 += weight * vt[lane + 224u];
+            uint vchan = kv * 256u;
+            acc0 += weight * load_kv(value, value_tail, t, vchan + lane, mode, complete);
+            acc1 += weight * load_kv(value, value_tail, t, vchan + lane + 32u, mode, complete);
+            acc2 += weight * load_kv(value, value_tail, t, vchan + lane + 64u, mode, complete);
+            acc3 += weight * load_kv(value, value_tail, t, vchan + lane + 96u, mode, complete);
+            acc4 += weight * load_kv(value, value_tail, t, vchan + lane + 128u, mode, complete);
+            acc5 += weight * load_kv(value, value_tail, t, vchan + lane + 160u, mode, complete);
+            acc6 += weight * load_kv(value, value_tail, t, vchan + lane + 192u, mode, complete);
+            acc7 += weight * load_kv(value, value_tail, t, vchan + lane + 224u, mode, complete);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         device float* out = output + (token * 24u + head) * 256u;
@@ -551,7 +708,7 @@ static bool radix_active_tg(
 // One threadgroup owns one block. The pooled key is shared across the queries.
 kernel void indexer_block_score(
     device const float* index_qk [[buffer(0)]],
-    device const float* cache [[buffer(1)]],
+    device const ushort* cache [[buffer(1)]],
     device float* scores [[buffer(2)]],
     constant uint& count [[buffer(3)]],
     constant uint& base [[buffer(4)]],
@@ -567,10 +724,10 @@ kernel void indexer_block_score(
     for (uint d = lane; d < 128u; d += tg_size) {
         float sum = 0.0f;
         uint token = block * 4u;
-        sum += cache[(token + 0u) * 128u + d];
-        sum += cache[(token + 1u) * 128u + d];
-        sum += cache[(token + 2u) * 128u + d];
-        sum += cache[(token + 3u) * 128u + d];
+        sum += bf16_to_f32(cache[(token + 0u) * 128u + d]);
+        sum += bf16_to_f32(cache[(token + 1u) * 128u + d]);
+        sum += bf16_to_f32(cache[(token + 2u) * 128u + d]);
+        sum += bf16_to_f32(cache[(token + 3u) * 128u + d]);
         pooled[d] = sum * 0.25f;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -852,15 +1009,19 @@ kernel void indexer_select(
 kernel void qsa_attend_selected(
     device const float* query [[buffer(0)]],
     device const float* gate [[buffer(1)]],
-    device const float* key [[buffer(2)]],
-    device const float* value [[buffer(3)]],
-    device const uint* indices [[buffer(4)]],
-    device const uint* counts [[buffer(5)]],
-    device float* output [[buffer(6)]],
-    constant uint& count [[buffer(7)]],
-    constant uint& stride [[buffer(8)]],
-    constant float& scale [[buffer(9)]],
-    constant uint& groups [[buffer(10)]],
+    device const uchar* key [[buffer(2)]],
+    device const uchar* value [[buffer(3)]],
+    device const ushort* key_tail [[buffer(4)]],
+    device const ushort* value_tail [[buffer(5)]],
+    device const uint* indices [[buffer(6)]],
+    device const uint* counts [[buffer(7)]],
+    device float* output [[buffer(8)]],
+    constant uint& count [[buffer(9)]],
+    constant uint& stride [[buffer(10)]],
+    constant float& scale [[buffer(11)]],
+    constant uint& groups [[buffer(12)]],
+    constant uint& mode [[buffer(13)]],
+    constant uint& complete [[buffer(14)]],
     uint head [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_simdgroup]],
     uint simd [[simdgroup_index_in_threadgroup]])
@@ -877,10 +1038,10 @@ kernel void qsa_attend_selected(
         }
         for (uint slot = simd; slot < nsel; slot += groups) {
             uint t = ids[slot];
-            device const float* kt = key + (t * 2u + kv) * 256u;
             float dot = 0.0f;
             for (uint d = lane; d < 256u; d += 32u) {
-                dot += qh[d] * kt[d];
+                float kt = load_kv(key, key_tail, t, kv * 256u + d, mode, complete);
+                dot += qh[d] * kt;
             }
             float score = simd_sum(dot) * scale;
             if (lane == 0u) {
@@ -923,15 +1084,16 @@ kernel void qsa_attend_selected(
         float acc4 = 0.0f, acc5 = 0.0f, acc6 = 0.0f, acc7 = 0.0f;
         for (uint slot = simd; slot < nsel; slot += groups) {
             float weight = scores[slot] / denom;
-            device const float* vt = value + (ids[slot] * 2u + kv) * 256u;
-            acc0 += weight * vt[lane];
-            acc1 += weight * vt[lane + 32u];
-            acc2 += weight * vt[lane + 64u];
-            acc3 += weight * vt[lane + 96u];
-            acc4 += weight * vt[lane + 128u];
-            acc5 += weight * vt[lane + 160u];
-            acc6 += weight * vt[lane + 192u];
-            acc7 += weight * vt[lane + 224u];
+            uint picked = ids[slot];
+            uint vchan = kv * 256u;
+            acc0 += weight * load_kv(value, value_tail, picked, vchan + lane, mode, complete);
+            acc1 += weight * load_kv(value, value_tail, picked, vchan + lane + 32u, mode, complete);
+            acc2 += weight * load_kv(value, value_tail, picked, vchan + lane + 64u, mode, complete);
+            acc3 += weight * load_kv(value, value_tail, picked, vchan + lane + 96u, mode, complete);
+            acc4 += weight * load_kv(value, value_tail, picked, vchan + lane + 128u, mode, complete);
+            acc5 += weight * load_kv(value, value_tail, picked, vchan + lane + 160u, mode, complete);
+            acc6 += weight * load_kv(value, value_tail, picked, vchan + lane + 192u, mode, complete);
+            acc7 += weight * load_kv(value, value_tail, picked, vchan + lane + 224u, mode, complete);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         device float* out = output + (token * 24u + head) * 256u;

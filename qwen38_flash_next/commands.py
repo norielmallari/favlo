@@ -62,7 +62,9 @@ def quantize_main(args: Any) -> int:
 def bf16_complete(args: Any) -> int:
     """Same forward as complete, with Metal dots of the checkpoint BF16 values."""
     try:
-        runtime = Qwen38Runtime(_checkpoint(args.source), bf16=True)
+        runtime = Qwen38Runtime(
+            _checkpoint(args.source), bf16=True, kv_cache=args.kv_cache
+        )
         if args.raw:
             prompt = list(runtime.tokenizer.encode(args.prompt).ids)
         else:
@@ -102,7 +104,9 @@ def bf16_complete(args: Any) -> int:
 def complete(args: Any) -> int:
     try:
         runtime = Qwen38Runtime(
-            _record(args.record), resident_percent=args.resident_percent
+            _record(args.record),
+            resident_percent=args.resident_percent,
+            kv_cache=args.kv_cache,
         )
         if args.raw:
             prompt = list(runtime.tokenizer.encode(args.prompt).ids)
@@ -143,7 +147,9 @@ def complete(args: Any) -> int:
 def serve(args: Any) -> int:
     try:
         runtime = Qwen38Runtime(
-            _record(args.record), resident_percent=args.resident_percent
+            _record(args.record),
+            resident_percent=args.resident_percent,
+            kv_cache=args.kv_cache,
         )
     except Exception as exc:
         traceback.print_exc()
@@ -471,6 +477,15 @@ def _completion(
     }
 
 
+def _add_kv_cache(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--kv-cache",
+        choices=("e4m3", "bf16"),
+        default="e4m3",
+        help="K and V width. e4m3 keeps a BF16 tail on the open block of 4",
+    )
+
+
 def _add_resident_percent(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--resident-percent",
@@ -496,6 +511,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8129)
     _add_resident_percent(serve_parser)
+    _add_kv_cache(serve_parser)
     serve_parser.add_argument("--record", type=Path, default=None)
     serve_parser.add_argument(
         "--transcript",
@@ -516,6 +532,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--raw", action="store_true", help="tokenize the prompt with no chat template"
     )
     bf16_parser.add_argument("--source", type=Path, default=None)
+    _add_kv_cache(bf16_parser)
     bf16_parser.add_argument(
         "--transcript",
         type=Path,
@@ -536,6 +553,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     complete_parser.add_argument("--record", type=Path, default=None)
     _add_resident_percent(complete_parser)
+    _add_kv_cache(complete_parser)
     complete_parser.add_argument(
         "--transcript",
         type=Path,

@@ -13,7 +13,14 @@ import struct
 import sys
 from collections.abc import Sequence
 
-from qwen38_flash_next.formats import PAGE
+from qwen38_flash_next.formats import (
+    DEFAULT_KV_CACHE,
+    INDEX_BF16_BYTES,
+    KV_BF16_BYTES,
+    KV_E4M3_BYTES,
+    PAGE,
+    kv_cache_name,
+)
 
 # The dense attend kernel stores one score per visible token in scores[2052].
 # 512 blocks of 4, plus a tail of at most 4, is the sparse window.
@@ -43,13 +50,16 @@ def machine_memory() -> int:
     return int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
 
 
-def kv_bytes_per_token(
-    attention_layers: int, *, kv_width: int = 512, index_width: int = 128
-) -> int:
-    """Bytes of K, V, and indexer key the runtime allocates per token."""
+def kv_bytes_per_token(attention_layers: int, *, cache: str = DEFAULT_KV_CACHE) -> int:
+    """Bytes of K, V, and the indexer key stored per token.
+
+    The E4M3 tail is at most three BF16 tokens and is not part of this count.
+    """
     if attention_layers < 0:
         raise ValueError("attention_layers")
-    return attention_layers * (kv_width + kv_width + index_width) * 4
+    name = kv_cache_name(cache)
+    pair = KV_E4M3_BYTES * 2 if name == "e4m3" else KV_BF16_BYTES * 2
+    return attention_layers * (pair + INDEX_BF16_BYTES)
 
 
 def residual_bytes_per_token(branches: int, hidden: int) -> int:
