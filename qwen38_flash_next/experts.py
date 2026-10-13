@@ -11,7 +11,7 @@ import numpy as np
 from qwen38_flash_next.formats import PAGE
 from qwen38_flash_next.session import _buffer_view, _fill_buffer, _log
 
-RESIDENT_CANDIDATES = (20 << 30, 16 << 30, 12 << 30, 8 << 30)
+RESIDENT_CANDIDATES = (24 << 30, 20 << 30, 16 << 30, 12 << 30, 8 << 30)
 
 
 def group_assignments(

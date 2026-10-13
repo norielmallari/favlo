@@ -379,6 +379,30 @@ def test_int8_kernels_match_dequant() -> None:
     assert np.allclose(session.read_f32(result), restored @ vector, rtol=1e-3, atol=1e-3)
 
 
+class _FixedUniform:
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    def random(self) -> float:
+        return self.value
+
+
+def test_parallel_sample_draws_inside_the_top_k() -> None:
+    from qwen38_flash_next.session import MetalSession
+
+    logits = np.full(64, -20.0, np.float32)
+    logits[50] = 5.0
+    logits[1] = 4.0
+    logits[15] = 1.0
+    logits[40] = 0.0
+    session = MetalSession()
+    values = session.dev_from(logits)
+    assert session.sample(values, 1.0, 1.0, 4, _FixedUniform(0.0)) == 1
+    assert session.sample(values, 1.0, 1.0, 4, _FixedUniform(0.27)) == 15
+    assert session.sample(values, 1.0, 1.0, 4, _FixedUniform(0.99)) == 50
+    assert session.sample(values, 0.0, 1.0, 4, _FixedUniform(0.99)) == 50
+
+
 def test_cold_image_is_page_aligned() -> None:
     assert pipeline.cold_live_bytes() == 1_658_880
     assert pipeline.cold_slot_bytes() == 1_671_168

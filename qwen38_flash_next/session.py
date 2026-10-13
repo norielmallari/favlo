@@ -428,6 +428,8 @@ class MetalSession:
             "dequant_ngram",
             "broadcast_rows",
             "sample_f32",
+            "sample_topk_partial",
+            "sample_topk_draw",
             "copy_bytes",
             "gemv_f32_batch",
             "gemv_f16_batch",
@@ -457,6 +459,8 @@ class MetalSession:
         self._argmax_peaks = self.alloc(1024 * 4)
         self._argmax_index = self.alloc(1024 * 4)
         self._argmax_out = self.alloc(4)
+        self._sample_top_s = self.alloc(1024 * 32 * 4)
+        self._sample_top_i = self.alloc(1024 * 32 * 4)
         self._topk_probs = self.alloc(512 * 4)
         self._sample_scratch = None
         self._ngram_pages: dict[int, Any] = {}
@@ -1218,17 +1222,55 @@ class MetalSession:
     def sample(self, logits: Dev, temperature: float, top_p: float, top_k: int, rng: Any) -> int:
         if temperature <= 0.0:
             return self.argmax(logits)
-        if self._sample_scratch is None or self._sample_scratch.length() < logits.n * 4:
-            self._sample_scratch = self.alloc(logits.n * 4)
+        keep = int(top_k)
         uniform = float(rng.random())
+        if keep <= 0 or keep > 32:
+            if self._sample_scratch is None or self._sample_scratch.length() < logits.n * 4:
+                self._sample_scratch = self.alloc(logits.n * 4)
+            self.dispatch(
+                self.act["sample_f32"],
+                (_dev_bind(logits), (self._sample_scratch, 0), (self._argmax_out, 0)),
+                (
+                    struct.pack("<I", logits.n),
+                    struct.pack("<f", float(temperature)),
+                    struct.pack("<f", float(top_p)),
+                    struct.pack("<I", keep),
+                    struct.pack("<f", uniform),
+                ),
+                self._size(1),
+                self._size(1),
+            )
+            self.flush()
+            raw = _buffer_bytes(self._argmax_out, 4)
+            return int(np.frombuffer(raw, dtype=np.uint32)[0])
+        grid = 1024
         self.dispatch(
-            self.act["sample_f32"],
-            (_dev_bind(logits), (self._sample_scratch, 0), (self._argmax_out, 0)),
+            self.act["sample_topk_partial"],
+            (
+                _dev_bind(logits),
+                (self._sample_top_s, 0),
+                (self._sample_top_i, 0),
+            ),
             (
                 struct.pack("<I", logits.n),
+                struct.pack("<I", keep),
                 struct.pack("<f", float(temperature)),
+                struct.pack("<I", grid),
+            ),
+            self._size(grid // 256),
+            self._size(256),
+        )
+        self.dispatch(
+            self.act["sample_topk_draw"],
+            (
+                (self._sample_top_s, 0),
+                (self._sample_top_i, 0),
+                (self._argmax_out, 0),
+            ),
+            (
+                struct.pack("<I", grid),
+                struct.pack("<I", keep),
                 struct.pack("<f", float(top_p)),
-                struct.pack("<I", int(top_k)),
                 struct.pack("<f", uniform),
             ),
             self._size(1),

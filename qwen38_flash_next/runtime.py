@@ -237,7 +237,7 @@ class Qwen38Runtime:
         started = time.perf_counter()
         self._decoding = decode
         self.gpu.begin_scratch(
-            max(256 << 20, len(tokens) * (8 << 20)),
+            max(256 << 20, len(tokens) * (2 << 20)),
             copies=2 if decode else 1,
         )
         streamed = self.atlas.streamed if self.atlas is not None else 0

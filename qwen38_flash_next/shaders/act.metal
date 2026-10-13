@@ -666,6 +666,139 @@ kernel void broadcast_rows(
     }
 }
 
+// Each thread keeps the top k scores it sees. The draw kernel merges those lists.
+kernel void sample_topk_partial(
+    device const float* logits [[buffer(0)]],
+    device float* top_scores [[buffer(1)]],
+    device uint* top_ids [[buffer(2)]],
+    constant uint& n [[buffer(3)]],
+    constant uint& k [[buffer(4)]],
+    constant float& temperature [[buffer(5)]],
+    constant uint& grid [[buffer(6)]],
+    uint gid [[thread_position_in_grid]])
+{
+    float scores[32];
+    uint ids[32];
+    uint keep = k > 32u ? 32u : k;
+    for (uint s = 0u; s < 32u; ++s) {
+        scores[s] = -INFINITY;
+        ids[s] = 0u;
+    }
+    if (gid < grid && keep > 0u) {
+        for (uint i = gid; i < n; i += grid) {
+            float score = logits[i] / temperature;
+            if (!(score > scores[keep - 1u])) {
+                continue;
+            }
+            uint pos = keep - 1u;
+            while (pos > 0u && score > scores[pos - 1u]) {
+                scores[pos] = scores[pos - 1u];
+                ids[pos] = ids[pos - 1u];
+                pos -= 1u;
+            }
+            scores[pos] = score;
+            ids[pos] = i;
+        }
+    }
+    if (gid < grid) {
+        for (uint s = 0u; s < 32u; ++s) {
+            top_scores[gid * 32u + s] = scores[s];
+            top_ids[gid * 32u + s] = ids[s];
+        }
+    }
+}
+
+kernel void sample_topk_draw(
+    device const float* top_scores [[buffer(0)]],
+    device const uint* top_ids [[buffer(1)]],
+    device uint* out [[buffer(2)]],
+    constant uint& grid [[buffer(3)]],
+    constant uint& k [[buffer(4)]],
+    constant float& top_p [[buffer(5)]],
+    constant float& uniform [[buffer(6)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid != 0u) {
+        return;
+    }
+    float scores[32];
+    uint ids[32];
+    float probs[32];
+    uint keep = k > 32u ? 32u : k;
+    for (uint s = 0u; s < 32u; ++s) {
+        scores[s] = -INFINITY;
+        ids[s] = 0u;
+        probs[s] = 0.0f;
+    }
+    for (uint g = 0u; g < grid; ++g) {
+        for (uint s = 0u; s < keep; ++s) {
+            float score = top_scores[g * 32u + s];
+            uint id = top_ids[g * 32u + s];
+            if (!(score > scores[keep - 1u])) {
+                continue;
+            }
+            uint pos = keep - 1u;
+            while (pos > 0u && score > scores[pos - 1u]) {
+                scores[pos] = scores[pos - 1u];
+                ids[pos] = ids[pos - 1u];
+                pos -= 1u;
+            }
+            scores[pos] = score;
+            ids[pos] = id;
+        }
+    }
+    float peak = scores[0];
+    float sum = 0.0f;
+    for (uint s = 0u; s < keep; ++s) {
+        float prob = exp(scores[s] - peak);
+        probs[s] = prob;
+        sum += prob;
+    }
+    if (top_p < 1.0f && sum > 0.0f) {
+        float cursor = 0.0f;
+        uint kept = keep;
+        for (uint s = 0u; s < keep; ++s) {
+            cursor += probs[s] / sum;
+            if (cursor > top_p) {
+                kept = s + 1u;
+                break;
+            }
+        }
+        sum = 0.0f;
+        for (uint s = 0u; s < keep; ++s) {
+            if (s >= kept) {
+                probs[s] = 0.0f;
+            }
+            sum += probs[s];
+        }
+    }
+    for (uint a = 1u; a < keep; ++a) {
+        float prob = probs[a];
+        uint id = ids[a];
+        uint b = a;
+        while (b > 0u && ids[b - 1u] > id) {
+            probs[b] = probs[b - 1u];
+            ids[b] = ids[b - 1u];
+            b -= 1u;
+        }
+        probs[b] = prob;
+        ids[b] = id;
+    }
+    if (!(sum > 0.0f)) {
+        out[0] = ids[0];
+        return;
+    }
+    float cursor = 0.0f;
+    for (uint s = 0u; s < keep; ++s) {
+        cursor += probs[s] / sum;
+        if (uniform < cursor) {
+            out[0] = ids[s];
+            return;
+        }
+    }
+    out[0] = ids[keep - 1u];
+}
+
 kernel void sample_f32(
     device const float* logits [[buffer(0)]],
     device float* scratch [[buffer(1)]],
