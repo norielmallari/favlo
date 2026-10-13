@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import queue
 import sys
 import threading
 import traceback
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ import numpy as np
 from qwen38_flash_next.checks import check_state_kernels
 from qwen38_flash_next.convert import quantize_checkpoint
 from qwen38_flash_next.formats import DEFAULT_RECORD
+from qwen38_flash_next.grove import write_grove
 from qwen38_flash_next.probe import matmul, probe
 from qwen38_flash_next.runtime import Qwen38Runtime
 from qwen38_flash_next.session import _append_transcript, _log, _prompt_text
@@ -38,7 +40,8 @@ def _record(path: Path | None) -> Path:
 
 def quantize_main(args: Any) -> int:
     try:
-        quantize_checkpoint(_checkpoint(args.source), args.output, args.hot)
+        packed = quantize_checkpoint(_checkpoint(args.source), args.output, args.hot)
+        write_grove(args.output, replace=packed)
     except Exception as exc:
         traceback.print_exc()
         sys.stderr.write(f"{type(exc).__name__}: {exc}\n")
@@ -68,9 +71,8 @@ def bf16_complete(args: Any) -> int:
             _log(f"4 rank {rank} logit {float(logits[four[0]]):.2f}")
         produced: list[int] = []
         shown = ""
-        for token in runtime._new_tokens(
-            logits, args.max_tokens, args.temperature, args.top_p, args.top_k
-        ):
+        temperature, top_p, top_k = _cli_sampling(args)
+        for token in runtime._new_tokens(logits, args.max_tokens, temperature, top_p, top_k):
             produced.append(token)
             text = runtime.decode(produced)
             sys.stdout.write(text[len(shown) :])
@@ -108,9 +110,8 @@ def complete(args: Any) -> int:
             _log(f"4 rank {rank} logit {float(logits[four[0]]):.2f}")
         produced: list[int] = []
         shown = ""
-        for token in runtime._new_tokens(
-            logits, args.max_tokens, args.temperature, args.top_p, args.top_k
-        ):
+        temperature, top_p, top_k = _cli_sampling(args)
+        for token in runtime._new_tokens(logits, args.max_tokens, temperature, top_p, top_k):
             produced.append(token)
             text = runtime.decode(produced)
             sys.stdout.write(text[len(shown) :])
@@ -172,9 +173,7 @@ def serve(args: Any) -> int:
                 tools = body.get("tools")
                 enable_thinking = bool(body.get("enable_thinking", False))
                 max_tokens = _request_limit(body)
-                temperature = float(body.get("temperature", 0.0))
-                top_p = float(body.get("top_p", 1.0))
-                top_k = int(body.get("top_k", 0))
+                temperature, top_p, top_k = _sampling(body, enable_thinking)
                 stream = bool(body.get("stream", False))
                 with lock:
                     prompt = runtime.encode_chat(messages, tools, enable_thinking)
@@ -230,23 +229,25 @@ def serve(args: Any) -> int:
                 _log("prefill 0 tok")
             else:
                 logits = runtime.forward(prompt[start:])
-            produced: list[int] = []
-            previous = ""
-            for token in runtime._new_tokens(logits, max_tokens, temperature, top_p, top_k):
-                produced.append(token)
-                text = runtime.decode(produced)
+
+            def emit(piece: str) -> None:
                 self._event(
                     {
                         "choices": [
                             {
                                 "index": 0,
-                                "delta": {"content": text[len(previous) :]},
+                                "delta": {"content": piece},
                                 "finish_reason": None,
                             }
                         ]
                     }
                 )
-                previous = text
+
+            previous = _drain_stream(
+                runtime,
+                runtime._new_tokens(logits, max_tokens, temperature, top_p, top_k),
+                emit,
+            )
             reason = "length" if runtime._hit_limit else "stop"
             self._event({"choices": [{"index": 0, "delta": {}, "finish_reason": reason}]})
             self.wfile.write(b"data: [DONE]\n\n")
@@ -274,6 +275,86 @@ def serve(args: Any) -> int:
     except KeyboardInterrupt:
         server.shutdown()
     return 0
+
+
+# Qwen team, Qwen3.8-Flash-Next model card.
+# https://huggingface.co/Qwen/Qwen3.8-Flash-Next
+THINKING_TEMPERATURE = 1.0
+THINKING_TOP_P = 0.95
+THINKING_TOP_K = 20
+INSTRUCT_TEMPERATURE = 0.7
+INSTRUCT_TOP_P = 0.8
+INSTRUCT_TOP_K = 20
+
+
+def _drain_stream(runtime: Any, tokens: Iterator[int], emit: Any) -> str:
+    """Enqueue sampled ids and keep stepping. Detokenize and emit on a side thread."""
+    pending: queue.Queue[int | None] = queue.Queue()
+    failed: list[BaseException] = []
+    text = ""
+
+    def write() -> None:
+        nonlocal text
+        produced: list[int] = []
+        previous = ""
+        try:
+            while True:
+                token = pending.get()
+                if token is None:
+                    break
+                produced.append(token)
+                decoded = runtime.decode(produced)
+                piece = decoded[len(previous) :]
+                previous = decoded
+                if piece:
+                    emit(piece)
+        except BaseException as exc:
+            failed.append(exc)
+        text = previous
+
+    writer = threading.Thread(target=write, name="madmetal-stream")
+    writer.start()
+    try:
+        for token in tokens:
+            if failed:
+                break
+            pending.put(token)
+    finally:
+        pending.put(None)
+        writer.join()
+    if failed:
+        raise failed[0]
+    return text
+
+
+def _sampling(body: dict[str, Any], thinking: bool) -> tuple[float, float, int]:
+    """Model-card sampling for the mode, unless the request sets a field.
+
+    Temperature 0 stays an argmax. Thinking is 1.0 / 0.95 / 20. Instruct is 0.7 / 0.8 / 20.
+    """
+    temperature = body.get("temperature", None)
+    top_p = body.get("top_p", None)
+    top_k = body.get("top_k", None)
+    if thinking:
+        defaults = (THINKING_TEMPERATURE, THINKING_TOP_P, THINKING_TOP_K)
+    else:
+        defaults = (INSTRUCT_TEMPERATURE, INSTRUCT_TOP_P, INSTRUCT_TOP_K)
+    return (
+        defaults[0] if temperature is None else float(temperature),
+        defaults[1] if top_p is None else float(top_p),
+        defaults[2] if top_k is None else int(top_k),
+    )
+
+
+def _cli_sampling(args: Any) -> tuple[float, float, int]:
+    body: dict[str, Any] = {}
+    if args.temperature is not None:
+        body["temperature"] = args.temperature
+    if args.top_p is not None:
+        body["top_p"] = args.top_p
+    if args.top_k is not None:
+        body["top_k"] = args.top_k
+    return _sampling(body, bool(args.thinking))
 
 
 def _request_limit(body: dict[str, Any]) -> int | None:
@@ -331,9 +412,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     bf16_parser = sub.add_parser("bf16", help="complete from the BF16 checkpoint with Metal dots")
     bf16_parser.add_argument("--prompt", required=True)
     bf16_parser.add_argument("--max-tokens", type=int, default=8)
-    bf16_parser.add_argument("--temperature", type=float, default=0.0)
-    bf16_parser.add_argument("--top-p", type=float, default=1.0)
-    bf16_parser.add_argument("--top-k", type=int, default=0)
+    bf16_parser.add_argument("--temperature", type=float, default=None)
+    bf16_parser.add_argument("--top-p", type=float, default=None)
+    bf16_parser.add_argument("--top-k", type=int, default=None)
     bf16_parser.add_argument(
         "--thinking", action="store_true", help="enable thinking in the chat template"
     )
@@ -350,9 +431,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     complete_parser = sub.add_parser("complete", help="print one completion from the record")
     complete_parser.add_argument("--prompt", required=True)
     complete_parser.add_argument("--max-tokens", type=int, default=8)
-    complete_parser.add_argument("--temperature", type=float, default=0.0)
-    complete_parser.add_argument("--top-p", type=float, default=1.0)
-    complete_parser.add_argument("--top-k", type=int, default=0)
+    complete_parser.add_argument("--temperature", type=float, default=None)
+    complete_parser.add_argument("--top-p", type=float, default=None)
+    complete_parser.add_argument("--top-k", type=int, default=None)
     complete_parser.add_argument(
         "--thinking", action="store_true", help="enable thinking in the chat template"
     )

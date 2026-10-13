@@ -198,6 +198,86 @@ def test_preallocate_claims_each_chunk(tmp_path, monkeypatch) -> None:
         assert contig >= 4 * pipeline.PAGE
 
 
+def test_omitted_sampling_follows_the_model_card() -> None:
+    import qwen38_flash_next.commands as commands
+
+    assert commands._sampling({}, thinking=True) == (1.0, 0.95, 20)
+    assert commands._sampling({}, thinking=False) == (0.7, 0.8, 20)
+    assert commands._sampling(
+        {"temperature": None, "top_p": None, "top_k": None}, thinking=False
+    ) == (0.7, 0.8, 20)
+    assert commands._sampling({"temperature": 0}, thinking=True) == (0.0, 0.95, 20)
+    assert commands._sampling({"temperature": 0, "top_p": 1, "top_k": 0}, thinking=False) == (
+        0.0,
+        1.0,
+        0,
+    )
+
+
+def test_grove_file_stores_the_greedy_completion(tmp_path) -> None:
+    import qwen38_flash_next.grove as grove
+
+    class Runtime:
+        _hit_limit = False
+
+        def encode_chat(
+            self, messages: list[dict[str, str]], tools: object, thinking: bool
+        ) -> list[int]:
+            assert messages[0]["content"] == grove.GROVE_PROMPT
+            assert tools is None
+            assert thinking is False
+            return [1]
+
+        def generate(
+            self,
+            prompt: list[int],
+            max_tokens: int | None,
+            temperature: float,
+            top_p: float,
+            top_k: int,
+        ) -> list[int]:
+            assert prompt == [1]
+            assert max_tokens == grove.GROVE_MAX_TOKENS
+            assert temperature == 0.0
+            assert top_p == 1.0
+            assert top_k == 0
+            return [2]
+
+        def decode(self, token_ids: list[int]) -> str:
+            assert token_ids == [2]
+            return "six trees\n"
+
+    grove.write_grove(tmp_path, replace=True, runtime=Runtime())
+    stored = grove.load_grove(tmp_path)
+    assert stored["output"] == "six trees"
+    assert stored["thinking"] is False
+
+    class Unused:
+        def encode_chat(self, messages: object, tools: object, thinking: bool) -> list[int]:
+            raise AssertionError("existing grove file")
+
+    grove.write_grove(tmp_path, runtime=Unused())
+    assert grove.load_grove(tmp_path)["output"] == "six trees"
+
+
+def test_stream_detokenize_runs_off_the_step_thread() -> None:
+    import threading
+
+    import qwen38_flash_next.commands as commands
+
+    step = threading.get_ident()
+
+    class Runtime:
+        def decode(self, token_ids: list[int]) -> str:
+            assert threading.get_ident() != step
+            return "".join(chr(97 + token) for token in token_ids)
+
+    pieces: list[str] = []
+    text = commands._drain_stream(Runtime(), iter((0, 1, 2)), pieces.append)
+    assert pieces == ["a", "b", "c"]
+    assert text == "abc"
+
+
 def test_omitted_max_tokens_runs_until_stop() -> None:
     import qwen38_flash_next.commands as commands
 

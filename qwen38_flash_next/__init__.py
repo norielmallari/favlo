@@ -54,6 +54,7 @@ from qwen38_flash_next.formats import (
     unpack_int2,
     unpack_int4,
 )
+from qwen38_flash_next.grove import load_grove
 from qwen38_flash_next.probe import Roundtrip, check_int4_gemm, classify_subbyte
 from qwen38_flash_next.runtime import Qwen38Runtime
 from qwen38_flash_next.session import _append_transcript, _tok_s
@@ -95,6 +96,7 @@ __all__ = [
     "group_tier",
     "int2_plane_sizes",
     "int4_plane_sizes",
+    "load_grove",
     "load_hot_ids",
     "main",
     "ngram_byte_offset",

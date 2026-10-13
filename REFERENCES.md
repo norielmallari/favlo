@@ -15,7 +15,7 @@ The forward follows this report:
 
 Qwen Team. *Qwen3.8-Flash-Next.* Model card and blog, August 2026. [Blog](https://qwen.ai/blog?id=qwen3.8-flash-next).
 
-Shapes, the 3:1 GDN/QSA schedule, the 512-expert top-10 MoE, the shared expert, the 262,144 context, and the thinking-mode sampling defaults (`temperature=1.0`, `top_p=0.95`, `top_k=20`) come from the model card. The checkpoint tokenizer and chat template are part of that release. Vision weights stay unloaded.
+Shapes, the 3:1 GDN/QSA schedule, the 512-expert top-10 MoE, the shared expert, the 262,144 context, and the sampling defaults come from the model card. Thinking mode is `temperature=1.0`, `top_p=0.95`, `top_k=20`. Instruct mode is `temperature=0.7`, `top_p=0.8`, `top_k=20`. The checkpoint tokenizer and chat template are part of that release. Vision weights stay unloaded.
 
 Qwen Team. *Qwen3-Next: Towards Ultimate Training and Inference Efficiency.* [Alibaba Cloud](https://www.alibabacloud.com/blog/602580). The 3:1 hybrid, partial RoPE on the first quarter of the head, and the head dimension of 256 are introduced here and kept by the Qwen3.8 report.
 

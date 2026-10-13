@@ -556,8 +556,12 @@ def _write_expert_file(
         os.close(fd)
 
 
-def quantize_checkpoint(source: Path, dest: Path, hot: Path | None = None) -> None:
-    """Write the Metal record once. A later run continues from quantize_progress.json."""
+def quantize_checkpoint(source: Path, dest: Path, hot: Path | None = None) -> bool:
+    """Write the Metal record once. A later run continues from quantize_progress.json.
+
+    Returns true when this call wrote the manifest. A record that is already complete
+    returns false and leaves the packed files in place.
+    """
     if hot is None:
         message = "pass --hot with the keep-set JSON"
         raise RuntimeError(message)
@@ -570,7 +574,7 @@ def quantize_checkpoint(source: Path, dest: Path, hot: Path | None = None) -> No
         done = json.loads(manifest_path.read_text())
         if done.get("complete") and done.get("version") == RECORD_VERSION:
             _log(f"record already complete: {dest}")
-            return
+            return False
     for name in ("config.json", "tokenizer.json", "tokenizer_config.json"):
         shutil.copyfile(source / name, dest / name)
     progress = _load_progress(dest)
@@ -760,6 +764,7 @@ def quantize_checkpoint(source: Path, dest: Path, hot: Path | None = None) -> No
         os.close(manifest_fd)
     os.replace(tmp, manifest_path)
     _log(f"record complete: {dest}")
+    return True
 
 
 def _write_ngram(store: ShardStore, dest: Path, progress: dict[str, Any]) -> None:
