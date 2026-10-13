@@ -102,6 +102,26 @@ Apple. WWDC26 session 330, *Optimize custom machine learning operations with Met
 
 The probe in `qwen38-flash-next.py` is the measurement of those rules on this M5 Pro. It is recorded in [ARCHITECTURE.md](ARCHITECTURE.md).
 
+## Phase split
+
+Pratyush Patel et al. *Splitwise: Efficient Generative LLM Inference Using Phase Splitting.* ISCA 2024. [arXiv:2311.18677](https://arxiv.org/abs/2311.18677). The prompt and the generated tokens are different phases, and the key/value cache is what crosses the boundary.
+
+Yinmin Zhong et al. *DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving.* OSDI 2024. [arXiv:2401.09670](https://arxiv.org/abs/2401.09670). The same split, placed so the cache transfer fits the link.
+
+Amey Agrawal et al. *SARATHI: Efficient LLM Inference by Piggybacking Decodes with Chunked Prefills.* [arXiv:2308.16369](https://arxiv.org/abs/2308.16369), 2023. A prompt can be computed in chunks. This runtime does not batch a chunk with other requests.
+
+Yuning Zhang, Grant Pinkert, Nan Yang, Yanli Li, and Dong Yuan. *DuoServe-MoE: Dual-Phase Expert Prefetch and Cache Scheduling for Efficient MoE LLM Inference.* [arXiv:2509.07379](https://arxiv.org/abs/2509.07379), 2025. A prompt activates many experts. A generated token activates a few. Prefill loads overlap the non-expert work.
+
+Xin He et al. *ExpertFlow: Efficient Mixture-of-Experts Inference via Predictive Expert Caching and Token Scheduling.* DAC 2026. [arXiv:2410.17954](https://arxiv.org/abs/2410.17954). Later routes can be predicted. A miss still loads the routed expert.
+
+Kwanhee Kyung, Sungmin Yun, and Jung Ho Ahn. *SSD Offloading for LLM Mixture-of-Experts Weights Considered Harmful in Energy Efficiency.* [arXiv:2508.06978](https://arxiv.org/abs/2508.06978), 2025. Hiding the wait does not shrink the bytes moved.
+
+Apple. WWDC22 session 10104, *Load resources faster with Metal 3.* An IO command queue runs beside the compute queue. Shared events order them. The queue can be concurrent, and a command buffer can load a buffer directly from a file handle.
+
+Apple. WWDC22 session 10066, *Discover Metal 3.* Many small loads are the case that fast resource loading adds. A long sequential file is the bulk transfer.
+
+The plan that uses these is [docs/prefill-decode-split/prefill-decode-split.md](docs/prefill-decode-split/prefill-decode-split.md). It is not the as-built forward.
+
 ## Prompt text
 
 The calibration strings are data, not an algorithm. They are a bucket JSON: `tool_calling`, `chat`, `mixed`, `reasoning`, `code`, `en`, `ko`, `zh`, `ja`. `tool_calling` and `chat` are already chat-templated.

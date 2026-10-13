@@ -499,3 +499,34 @@ def test_ngram_groups_share_a_file() -> None:
         {key(0): "a.bin", key(1): "a.bin", key(2): "b.bin"}, [2, 0, 1]
     )
     assert groups == [[2], [0, 1]]
+
+
+def test_after_atlas_load_starts_when_resident_stops_growing() -> None:
+    from qwen38_flash_next.runtime import after_atlas_load
+
+    assert after_atlas_load([]) == 0
+    assert after_atlas_load([10]) == 1
+    assert after_atlas_load([10, 40, 80, 80, 80]) == 3
+    assert after_atlas_load([10, 40, 30, 90]) == 2
+
+
+def test_prefill_table_places_cold_after_the_hot_file() -> None:
+    from qwen38_flash_next.record import prefill_image_table
+
+    hot = [5, 1]
+    supers = [9]
+    slot = 16384
+    hot_bytes, cold_bytes, table = prefill_image_table(hot, supers, 12, slot, slot)
+    assert hot_bytes == 2 * slot
+    assert cold_bytes == 9 * slot
+    assert int(table[5]) == 0
+    assert int(table[1]) == slot
+    assert int(table[9]) == -1
+    assert int(table[0]) == hot_bytes
+    assert int(table[2]) == hot_bytes + slot
+    try:
+        prefill_image_table([9], [9], 12, slot, slot)
+    except RuntimeError as exc:
+        assert "super" in str(exc)
+    else:
+        raise AssertionError("a super id in the hot file was accepted")

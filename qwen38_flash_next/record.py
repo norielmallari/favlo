@@ -23,6 +23,45 @@ from qwen38_flash_next.formats import (
 from qwen38_flash_next.session import MetalSession
 
 
+def prefill_image_table(
+    hot: list[int],
+    supers: list[int],
+    experts: int,
+    hot_slot: int,
+    cold_slot: int,
+) -> tuple[int, int, np.ndarray]:
+    """Byte offset of each expert in a hot-file-then-cold-file staging buffer.
+
+    Hot rows keep the hot-file order. Cold rows are the ids in neither list,
+    ascending, which is the order ``NN-cold.bin`` was packed. A super id is -1.
+    """
+    if hot_slot % PAGE or cold_slot % PAGE:
+        message = f"prefill stride {hot_slot}/{cold_slot} is not a multiple of {PAGE}"
+        raise RuntimeError(message)
+    placed: dict[int, tuple[int, int]] = {}
+    if set(hot) & set(supers):
+        message = "a super expert is still in the hot file"
+        raise RuntimeError(message)
+    for row, expert in enumerate(hot):
+        placed[int(expert)] = (0, row)
+    for row, expert in enumerate(supers):
+        placed[int(expert)] = (2, row)
+    table = np.full(experts, -1, dtype=np.int64)
+    hot_bytes = len(hot) * hot_slot
+    cold_row = 0
+    for expert in range(experts):
+        found = placed.get(expert)
+        if found is None:
+            table[expert] = hot_bytes + cold_row * cold_slot
+            cold_row += 1
+            continue
+        tier, row = found
+        if tier == 0:
+            table[expert] = row * hot_slot
+    cold_bytes = cold_row * cold_slot
+    return hot_bytes, cold_bytes, table
+
+
 class QuantRecord:
     """The file the shaders read. It does not contain BF16 weights."""
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -21,7 +22,7 @@ from qwen38_flash_next.formats import (
     int4_plane_sizes,
     stored_k_int4,
 )
-from qwen38_flash_next.record import QuantRecord, _Bf16Ngram
+from qwen38_flash_next.record import QuantRecord, _Bf16Ngram, prefill_image_table
 from qwen38_flash_next.session import (
     Dev,
     F16Matrix,
@@ -36,6 +37,19 @@ from qwen38_flash_next.session import (
     _log,
     _tok_s,
 )
+
+
+def after_atlas_load(resident: Sequence[int]) -> int:
+    """First decode step after the resident count stops growing.
+
+    The steps before that index are the atlas fill. A later step may add a
+    resident again when a hole is reused; the fill still ended at the first
+    plateau.
+    """
+    for index in range(1, len(resident)):
+        if resident[index] <= resident[index - 1]:
+            return index
+    return len(resident)
 
 
 class Qwen38Runtime:
@@ -87,6 +101,12 @@ class Qwen38Runtime:
         self._decoding = False
         self._force_sync = False
         self.atlas: ExpertAtlas | None = None
+        self._streaming_prefill = False
+        self._stage: list[Any] | None = None
+        self._stage_table: Any = None
+        self._stage_miss: Any = None
+        self._stage_event = [0, 0]
+        self._stage_bytes = 0
         self._hot = expert_planes(4, self.hidden, self.moe)
         self._cold = expert_planes(2, self.hidden, self.moe)
         self._super_planes = expert_planes(8, self.hidden, self.moe)
@@ -95,6 +115,7 @@ class Qwen38Runtime:
         self.last_logits: Dev | None = None
         self._decode_tokens = 0
         self._decode_seconds = 0.0
+        self._decode_steps: list[tuple[float, float, int]] = []
         self.rng = np.random.default_rng()
         self.gdn_state = {
             index: self.gpu.zeros(48 * 128 * 128 * 4)
@@ -126,7 +147,6 @@ class Qwen38Runtime:
         else:
             self.files = QuantRecord(root)
             self._load_record()
-            self.atlas = ExpertAtlas(self.gpu, self.files, self.layers, self.experts)
             self._load_supers()
             state_bytes = 48 * 128 * 128 * 4
             self._gdn_shadow = {
@@ -208,6 +228,7 @@ class Qwen38Runtime:
     ):
         self._decode_tokens = 0
         self._decode_seconds = 0.0
+        self._decode_steps = []
         self._hit_limit = False
         produced = 0
         while True:
@@ -227,6 +248,26 @@ class Qwen38Runtime:
 
     def _log_decode(self) -> None:
         _log(_tok_s("decode", self._decode_tokens, self._decode_seconds))
+        resident = [step[2] for step in self._decode_steps]
+        start = after_atlas_load(resident)
+        filled = self._decode_steps[:start]
+        steady = self._decode_steps[start:]
+        if filled:
+            _log(
+                "decode atlas load "
+                f"{len(filled)} tok in {sum(step[0] for step in filled):.2f}s"
+            )
+        if not steady:
+            _log("decode after atlas load: atlas still filling")
+            return
+        wall = sum(step[0] for step in steady)
+        gpu = sum(step[1] for step in steady)
+        _log(_tok_s("decode after atlas load", len(steady), wall))
+        if gpu > 0:
+            _log(
+                "decode after atlas load "
+                f"{len(steady) / gpu:.2f} tok/s ({len(steady)} tok in {gpu:.2f}s gpu)"
+            )
 
     def _pick(self, logits: Any, temperature: float, top_p: float, top_k: int) -> int:
         if isinstance(logits, Dev):
@@ -235,7 +276,14 @@ class Qwen38Runtime:
 
     def forward(self, tokens: list[int], *, decode: bool = False) -> Dev:
         started = time.perf_counter()
+        gpu_at = self.gpu.gpu_seconds
         self._decoding = decode
+        stage_bytes = 0
+        if not self._bf16:
+            if decode:
+                self._ensure_atlas()
+            else:
+                self._begin_prefill_stream()
         self.gpu.begin_scratch(
             max(256 << 20, len(tokens) * (2 << 20)),
             copies=2 if decode else 1,
@@ -248,7 +296,15 @@ class Qwen38Runtime:
             self._capture_recurrent()
         logits = self._forward_body(tokens)
         self.gpu.flush()
-        if self.atlas is not None and self._expert_miss():
+        if self._streaming_prefill:
+            missed = self._stage_missed()
+            stage_bytes = self._stage_bytes
+            self._end_prefill_stream()
+            if missed:
+                message = "prefill referenced an expert that was not loaded"
+                raise RuntimeError(message)
+            self._ensure_atlas()
+        elif self.atlas is not None and self._expert_miss():
             if not decode:
                 message = "prefill referenced an expert that was not loaded"
                 raise RuntimeError(message)
@@ -256,12 +312,23 @@ class Qwen38Runtime:
         self.tokens.extend(tokens)
         self.last_logits = logits
         elapsed = time.perf_counter() - started
+        gpu_elapsed = self.gpu.gpu_seconds - gpu_at
         if decode:
             self._decode_tokens += len(tokens)
             self._decode_seconds += elapsed
+            resident = self.atlas.resident_count if self.atlas is not None else 0
+            self._decode_steps.append((elapsed, gpu_elapsed, resident))
         else:
             _log(_tok_s("prefill", len(tokens), elapsed))
-            if self.atlas is not None:
+            if gpu_elapsed > 0 and len(tokens) > 0:
+                _log(
+                    "prefill after load "
+                    f"{len(tokens) / gpu_elapsed:.2f} tok/s "
+                    f"({len(tokens)} tok in {gpu_elapsed:.2f}s gpu)"
+                )
+            if stage_bytes:
+                _log(f"experts streamed {stage_bytes >> 20} MiB")
+            elif self.atlas is not None:
                 delta = self.atlas.streamed - streamed
                 _log(
                     f"experts resident {self.atlas.resident_count}"
@@ -333,6 +400,93 @@ class Qwen38Runtime:
             message = "expert atlas missed after reloading this token"
             raise RuntimeError(message)
         return logits
+
+    def _ensure_atlas(self) -> None:
+        if self._bf16 or self.atlas is not None:
+            return
+        if not isinstance(self.files, QuantRecord):
+            return
+        self.atlas = ExpertAtlas(self.gpu, self.files, self.layers, self.experts)
+
+    def _begin_prefill_stream(self) -> None:
+        """Two layer buffers. The atlas stays unallocated until this call returns."""
+        if not isinstance(self.files, QuantRecord):
+            return
+        self._end_prefill_stream()
+        self.atlas = None
+        budget = 0
+        for layer in range(self.layers):
+            hot_bytes, cold_bytes, _table = prefill_image_table(
+                self.files.hot[layer],
+                self.files.super[layer],
+                self.experts,
+                self.files.slot,
+                self.files.cold_slot,
+            )
+            budget = max(budget, hot_bytes + cold_bytes)
+        self._stage = [self.gpu.alloc(budget), self.gpu.alloc(budget)]
+        if self._stage[0] is None or self._stage[1] is None:
+            message = f"prefill stage of {budget} bytes was not allocated"
+            raise RuntimeError(message)
+        self._stage_table = self.gpu.alloc(self.experts * 8)
+        self._stage_miss = self.gpu.zeros(self.layers * 4)
+        self._stage_event = [0, 0]
+        self._stage_bytes = 0
+        self._streaming_prefill = True
+        self._submit_prefill_layer(0)
+        _log(f"prefill stage {budget >> 20} MiB x2")
+
+    def _end_prefill_stream(self) -> None:
+        self._streaming_prefill = False
+        self._stage = None
+        self._stage_table = None
+        self._stage_miss = None
+        self._stage_event = [0, 0]
+
+    def _submit_prefill_layer(self, layer: int) -> None:
+        if not isinstance(self.files, QuantRecord) or self._stage is None:
+            message = "prefill stream has no tier files"
+            raise RuntimeError(message)
+        hot_bytes, cold_bytes, _table = prefill_image_table(
+            self.files.hot[layer],
+            self.files.super[layer],
+            self.experts,
+            self.files.slot,
+            self.files.cold_slot,
+        )
+        buf = self._stage[layer % 2]
+        hot_size = os.fstat(self.files.hot_fds[layer]).st_size
+        cold_size = os.fstat(self.files.cold_fds[layer]).st_size
+        if hot_size < hot_bytes or cold_size < cold_bytes:
+            message = f"layer {layer} tier file is shorter than the image table"
+            raise RuntimeError(message)
+        groups: list[tuple[Any, list[tuple[Any, int, int, int]]]] = []
+        if hot_bytes:
+            groups.append((self.files.hot_io[layer], [(buf, 0, hot_bytes, 0)]))
+        if cold_bytes:
+            groups.append((self.files.cold_io[layer], [(buf, hot_bytes, cold_bytes, 0)]))
+        self._stage_event[layer % 2] = self.gpu.io_submit_mixed(groups)
+        self._stage_bytes += hot_bytes + cold_bytes
+
+    def _write_stage_table(self, layer: int) -> None:
+        if not isinstance(self.files, QuantRecord) or self._stage_table is None:
+            message = "prefill stream has no offset table"
+            raise RuntimeError(message)
+        _hot, _cold, table = prefill_image_table(
+            self.files.hot[layer],
+            self.files.super[layer],
+            self.experts,
+            self.files.slot,
+            self.files.cold_slot,
+        )
+        raw = np.ascontiguousarray(table, dtype=np.int64).tobytes()
+        _buffer_view(self._stage_table, len(raw))[: len(raw)] = raw
+
+    def _stage_missed(self) -> bool:
+        if self._stage_miss is None:
+            return False
+        raw = _buffer_bytes(self._stage_miss, self.layers * 4)
+        return bool(np.frombuffer(raw, dtype=np.uint32).any())
 
     def _expert_miss(self) -> bool:
         if self.atlas is None:
@@ -687,13 +841,13 @@ class Qwen38Runtime:
         return self.gpu.linear(bundle["o_proj"], gated, count, 6144)
 
     def _moe_dev(self, layer: int, bundle: dict[str, Any], xs: Dev, count: int) -> Dev:
-        if self._bf16 or self.atlas is None:
+        if self._bf16 or (self.atlas is None and not self._streaming_prefill):
             return self._moe_bf16(layer, bundle, xs, count)
         router = self._router(layer)
         choice, weight = self.gpu.topk_batch(
             self.gpu.linear(router, xs, count, self.hidden), count, self.experts, self.top_k
         )
-        if count == 1:
+        if count == 1 and not self._streaming_prefill:
             slot = layer * self.top_k
             self.gpu.copy_bytes(
                 choice.buf, choice.offset * 4, self._choice_ids, slot * 4, self.top_k * 4
@@ -705,6 +859,11 @@ class Qwen38Runtime:
         host_ids = self.gpu.read_u32(choice)
         rows = np.asarray(host_ids, dtype=np.uint32).reshape(count, self.top_k)
         self._predicted[layer] = [int(item) for item in rows[-1].tolist()]
+        if self._streaming_prefill:
+            return self._moe_from_stage(layer, bundle, xs, count, weight, host_ids)
+        if self.atlas is None:
+            message = "decode has no expert atlas"
+            raise RuntimeError(message)
         protect = self._prefetch_protect if self._decoding else None
         event = self.atlas.stage(layer, host_ids.tolist(), protect)
         queued = self._prefetch_events.pop(layer, 0)
@@ -715,6 +874,23 @@ class Qwen38Runtime:
         if count == 1:
             return self._moe_decode(layer, xs, weight, shared, host_ids)
         return self._moe_grouped(layer, xs, weight, shared, host_ids, count)
+
+    def _moe_from_stage(
+        self,
+        layer: int,
+        bundle: dict[str, Any],
+        xs: Dev,
+        count: int,
+        weight: Dev,
+        host_ids: np.ndarray,
+    ) -> Dev:
+        shared = self._shared_expert(bundle, xs, count)
+        self.gpu.io_fence(self._stage_event[layer % 2])
+        self._write_stage_table(layer)
+        mixed = self._moe_grouped(layer, xs, weight, shared, host_ids, count)
+        if layer + 1 < self.layers:
+            self._submit_prefill_layer(layer + 1)
+        return mixed
 
     def _shared_expert(self, bundle: dict[str, Any], xs: Dev, count: int) -> Dev:
         hidden = self.hidden
@@ -830,14 +1006,52 @@ class Qwen38Runtime:
         host_ids: np.ndarray,
         count: int,
     ) -> Dev:
-        if self.atlas is None or not isinstance(self.files, QuantRecord):
+        if not isinstance(self.files, QuantRecord):
+            message = "prefill has no expert record"
+            raise RuntimeError(message)
+        if self._streaming_prefill:
+            if self._stage is None or self._stage_table is None or self._stage_miss is None:
+                message = "prefill stream has no staging buffer"
+                raise RuntimeError(message)
+            weights = self._stage[layer % 2]
+            table = self._stage_table
+            table_base = 0
+            miss = self._stage_miss
+        elif self.atlas is None:
             message = "prefill has no expert atlas"
             raise RuntimeError(message)
+        else:
+            weights = self.atlas.atlas
+            table = self.atlas.table
+            table_base = layer * self.experts
+            miss = self.atlas.miss
         mixed = self._moe_tier(
-            layer, xs, weight, shared, host_ids, count, self.files.hot_set(layer), self._hot
+            layer,
+            xs,
+            weight,
+            shared,
+            host_ids,
+            count,
+            self.files.hot_set(layer),
+            self._hot,
+            weights,
+            table,
+            table_base,
+            miss,
         )
         mixed = self._moe_tier(
-            layer, xs, weight, mixed, host_ids, count, self.files.cold_set(layer), self._cold
+            layer,
+            xs,
+            weight,
+            mixed,
+            host_ids,
+            count,
+            self.files.cold_set(layer),
+            self._cold,
+            weights,
+            table,
+            table_base,
+            miss,
         )
         return self._prefill_super(layer, xs, weight, mixed, host_ids, count)
 
@@ -851,10 +1065,11 @@ class Qwen38Runtime:
         count: int,
         members: set[int],
         planes: ExpertPlanes,
+        weights: Any,
+        table: Any,
+        table_base: int,
+        miss: Any,
     ) -> Dev:
-        if self.atlas is None:
-            message = "prefill has no expert atlas"
-            raise RuntimeError(message)
         experts, offsets, tokens, inverse = group_tier(host_ids, count, self.top_k, members)
         if int(experts.size) == 0:
             return shared
@@ -869,14 +1084,14 @@ class Qwen38Runtime:
         gemm = self.gpu.moe_grouped if planes.bits == 4 else self.gpu.moe_grouped_int2
         gemm(
             gathered,
-            self.atlas.atlas,
-            self.atlas.table,
+            weights,
+            table,
             expert_buf,
             offset_buf,
             gate,
-            self.atlas.miss,
+            miss,
             n_groups,
-            layer * self.experts,
+            table_base,
             planes.gate_rows,
             planes.gate_inner,
             0,
@@ -887,14 +1102,14 @@ class Qwen38Runtime:
         down = self.gpu.span(n_assign * self.hidden * 4)
         gemm(
             activated,
-            self.atlas.atlas,
-            self.atlas.table,
+            weights,
+            table,
             expert_buf,
             offset_buf,
             down,
-            self.atlas.miss,
+            miss,
             n_groups,
-            layer * self.experts,
+            table_base,
             self.hidden,
             planes.down_inner,
             planes.down_weight,
