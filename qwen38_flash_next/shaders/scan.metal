@@ -465,6 +465,38 @@ static float load_kv(
     return bf16_to_f32(tail[(token - complete) * 512u + channel]);
 }
 
+// Eight consecutive channels. A lane owns lane*8, so the simdgroup covers
+// the 256-wide head in order and one E8M0 scale covers the eight.
+static void load_kv8(
+    device const uchar* body,
+    device const ushort* tail,
+    uint token,
+    uint channel,
+    uint mode,
+    uint complete,
+    thread float out[8])
+{
+    if (mode == 0u) {
+        device const ushort* words = ((device const ushort*)body) + token * 512u + channel;
+        for (uint i = 0u; i < 8u; ++i) {
+            out[i] = bf16_to_f32(words[i]);
+        }
+        return;
+    }
+    if (token < complete) {
+        device const uchar* rec = body + token * 528u;
+        float scale = e8m0_scale(rec[512u + (channel >> 5)]);
+        for (uint i = 0u; i < 8u; ++i) {
+            out[i] = e4m3_to_f32(rec[channel + i]) * scale;
+        }
+        return;
+    }
+    device const ushort* words = tail + (token - complete) * 512u + channel;
+    for (uint i = 0u; i < 8u; ++i) {
+        out[i] = bf16_to_f32(words[i]);
+    }
+}
+
 // Phase 0 writes completed E4M3 blocks, or every new token when mode is BF16.
 // Phase 1 writes the unfinished BF16 tail after those blocks. The two phases
 // are separate dispatches so a tail write cannot race the read of the old tail.
@@ -564,8 +596,8 @@ kernel void indexer_write(
     cache[(base + token) * 128u + col] = f32_to_bf16(item);
 }
 
-// Sixteen simdgroups split the visible keys and values. One simdgroup walking
-// the whole cache leaves the GPU idle once the sequence is long.
+// One threadgroup owns one head and one token. Sixteen simdgroups split
+// that token's visible keys and values.
 kernel void qsa_attend(
     device const float* query [[buffer(0)]],
     device const float* gate [[buffer(1)]],
@@ -580,23 +612,36 @@ kernel void qsa_attend(
     constant uint& groups [[buffer(10)]],
     constant uint& mode [[buffer(11)]],
     constant uint& complete [[buffer(12)]],
-    uint head [[threadgroup_position_in_grid]],
+    uint2 gid [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_simdgroup]],
     uint simd [[simdgroup_index_in_threadgroup]])
 {
     threadgroup float scores[2052];
     threadgroup float red[16];
+    uint head = gid.x;
+    uint token = gid.y;
+    if (head >= 24u || token >= count) {
+        return;
+    }
     uint kv = head / 12u;
-    for (uint token = 0u; token < count; ++token) {
-        device const float* qh = query + (token * 24u + head) * 256u;
-        uint visible = base + token + 1u;
-        for (uint t = simd; t < visible; t += groups) {
-            float dot = 0.0f;
-            for (uint d = lane; d < 256u; d += 32u) {
-                float kt = load_kv(key, key_tail, t, kv * 256u + d, mode, complete);
-                dot += qh[d] * kt;
-            }
-            float score = simd_sum(dot) * scale;
+    device const float* qh = query + (token * 24u + head) * 256u;
+    uint ch = lane * 8u;
+    float q0 = qh[ch];
+    float q1 = qh[ch + 1u];
+    float q2 = qh[ch + 2u];
+    float q3 = qh[ch + 3u];
+    float q4 = qh[ch + 4u];
+    float q5 = qh[ch + 5u];
+    float q6 = qh[ch + 6u];
+    float q7 = qh[ch + 7u];
+    uint kchan = kv * 256u + ch;
+    uint visible = base + token + 1u;
+    for (uint t = simd; t < visible; t += groups) {
+        float key8[8];
+        load_kv8(key, key_tail, t, kchan, mode, complete, key8);
+        float dot = q0 * key8[0] + q1 * key8[1] + q2 * key8[2] + q3 * key8[3];
+        dot += q4 * key8[4] + q5 * key8[5] + q6 * key8[6] + q7 * key8[7];
+        float score = simd_sum(dot) * scale;
             if (lane == 0u) {
                 scores[t] = score;
             }
@@ -637,52 +682,52 @@ kernel void qsa_attend(
         float acc4 = 0.0f, acc5 = 0.0f, acc6 = 0.0f, acc7 = 0.0f;
         for (uint t = simd; t < visible; t += groups) {
             float weight = scores[t] / denom;
-            uint vchan = kv * 256u;
-            acc0 += weight * load_kv(value, value_tail, t, vchan + lane, mode, complete);
-            acc1 += weight * load_kv(value, value_tail, t, vchan + lane + 32u, mode, complete);
-            acc2 += weight * load_kv(value, value_tail, t, vchan + lane + 64u, mode, complete);
-            acc3 += weight * load_kv(value, value_tail, t, vchan + lane + 96u, mode, complete);
-            acc4 += weight * load_kv(value, value_tail, t, vchan + lane + 128u, mode, complete);
-            acc5 += weight * load_kv(value, value_tail, t, vchan + lane + 160u, mode, complete);
-            acc6 += weight * load_kv(value, value_tail, t, vchan + lane + 192u, mode, complete);
-            acc7 += weight * load_kv(value, value_tail, t, vchan + lane + 224u, mode, complete);
+            float value8[8];
+            load_kv8(value, value_tail, t, kchan, mode, complete, value8);
+            acc0 += weight * value8[0];
+            acc1 += weight * value8[1];
+            acc2 += weight * value8[2];
+            acc3 += weight * value8[3];
+            acc4 += weight * value8[4];
+            acc5 += weight * value8[5];
+            acc6 += weight * value8[6];
+            acc7 += weight * value8[7];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         device float* out = output + (token * 24u + head) * 256u;
         device const float* gh = gate + (token * 24u + head) * 256u;
         for (uint s = 0u; s < groups; ++s) {
             if (simd == s) {
-                float gated0 = acc0 * sigmoid_f(gh[lane]);
-                float gated1 = acc1 * sigmoid_f(gh[lane + 32u]);
-                float gated2 = acc2 * sigmoid_f(gh[lane + 64u]);
-                float gated3 = acc3 * sigmoid_f(gh[lane + 96u]);
-                float gated4 = acc4 * sigmoid_f(gh[lane + 128u]);
-                float gated5 = acc5 * sigmoid_f(gh[lane + 160u]);
-                float gated6 = acc6 * sigmoid_f(gh[lane + 192u]);
-                float gated7 = acc7 * sigmoid_f(gh[lane + 224u]);
+                float gated0 = acc0 * sigmoid_f(gh[ch]);
+                float gated1 = acc1 * sigmoid_f(gh[ch + 1u]);
+                float gated2 = acc2 * sigmoid_f(gh[ch + 2u]);
+                float gated3 = acc3 * sigmoid_f(gh[ch + 3u]);
+                float gated4 = acc4 * sigmoid_f(gh[ch + 4u]);
+                float gated5 = acc5 * sigmoid_f(gh[ch + 5u]);
+                float gated6 = acc6 * sigmoid_f(gh[ch + 6u]);
+                float gated7 = acc7 * sigmoid_f(gh[ch + 7u]);
                 if (s == 0u) {
-                    out[lane] = gated0;
-                    out[lane + 32u] = gated1;
-                    out[lane + 64u] = gated2;
-                    out[lane + 96u] = gated3;
-                    out[lane + 128u] = gated4;
-                    out[lane + 160u] = gated5;
-                    out[lane + 192u] = gated6;
-                    out[lane + 224u] = gated7;
+                    out[ch] = gated0;
+                    out[ch + 1u] = gated1;
+                    out[ch + 2u] = gated2;
+                    out[ch + 3u] = gated3;
+                    out[ch + 4u] = gated4;
+                    out[ch + 5u] = gated5;
+                    out[ch + 6u] = gated6;
+                    out[ch + 7u] = gated7;
                 } else {
-                    out[lane] += gated0;
-                    out[lane + 32u] += gated1;
-                    out[lane + 64u] += gated2;
-                    out[lane + 96u] += gated3;
-                    out[lane + 128u] += gated4;
-                    out[lane + 160u] += gated5;
-                    out[lane + 192u] += gated6;
-                    out[lane + 224u] += gated7;
+                    out[ch] += gated0;
+                    out[ch + 1u] += gated1;
+                    out[ch + 2u] += gated2;
+                    out[ch + 3u] += gated3;
+                    out[ch + 4u] += gated4;
+                    out[ch + 5u] += gated5;
+                    out[ch + 6u] += gated6;
+                    out[ch + 7u] += gated7;
                 }
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
         }
-    }
 }
 
 // Non-negative finite scores rank by their IEEE bits. context.top_blocks
@@ -1022,28 +1067,40 @@ kernel void qsa_attend_selected(
     constant uint& groups [[buffer(12)]],
     constant uint& mode [[buffer(13)]],
     constant uint& complete [[buffer(14)]],
-    uint head [[threadgroup_position_in_grid]],
+    uint2 gid [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_simdgroup]],
     uint simd [[simdgroup_index_in_threadgroup]])
 {
     threadgroup float scores[2052];
     threadgroup float red[16];
+    uint head = gid.x;
+    uint token = gid.y;
+    if (head >= 24u || token >= count) {
+        return;
+    }
     uint kv = head / 12u;
-    for (uint token = 0u; token < count; ++token) {
-        device const float* qh = query + (token * 24u + head) * 256u;
-        device const uint* ids = indices + token * stride;
-        uint nsel = counts[token];
-        if (nsel > 2052u) {
-            nsel = 2052u;
-        }
-        for (uint slot = simd; slot < nsel; slot += groups) {
-            uint t = ids[slot];
-            float dot = 0.0f;
-            for (uint d = lane; d < 256u; d += 32u) {
-                float kt = load_kv(key, key_tail, t, kv * 256u + d, mode, complete);
-                dot += qh[d] * kt;
-            }
-            float score = simd_sum(dot) * scale;
+    device const float* qh = query + (token * 24u + head) * 256u;
+    uint ch = lane * 8u;
+    float q0 = qh[ch];
+    float q1 = qh[ch + 1u];
+    float q2 = qh[ch + 2u];
+    float q3 = qh[ch + 3u];
+    float q4 = qh[ch + 4u];
+    float q5 = qh[ch + 5u];
+    float q6 = qh[ch + 6u];
+    float q7 = qh[ch + 7u];
+    uint kchan = kv * 256u + ch;
+    device const uint* ids = indices + token * stride;
+    uint nsel = counts[token];
+    if (nsel > 2052u) {
+        nsel = 2052u;
+    }
+    for (uint slot = simd; slot < nsel; slot += groups) {
+        float key8[8];
+        load_kv8(key, key_tail, ids[slot], kchan, mode, complete, key8);
+        float dot = q0 * key8[0] + q1 * key8[1] + q2 * key8[2] + q3 * key8[3];
+        dot += q4 * key8[4] + q5 * key8[5] + q6 * key8[6] + q7 * key8[7];
+        float score = simd_sum(dot) * scale;
             if (lane == 0u) {
                 scores[slot] = score;
             }
@@ -1084,53 +1141,52 @@ kernel void qsa_attend_selected(
         float acc4 = 0.0f, acc5 = 0.0f, acc6 = 0.0f, acc7 = 0.0f;
         for (uint slot = simd; slot < nsel; slot += groups) {
             float weight = scores[slot] / denom;
-            uint picked = ids[slot];
-            uint vchan = kv * 256u;
-            acc0 += weight * load_kv(value, value_tail, picked, vchan + lane, mode, complete);
-            acc1 += weight * load_kv(value, value_tail, picked, vchan + lane + 32u, mode, complete);
-            acc2 += weight * load_kv(value, value_tail, picked, vchan + lane + 64u, mode, complete);
-            acc3 += weight * load_kv(value, value_tail, picked, vchan + lane + 96u, mode, complete);
-            acc4 += weight * load_kv(value, value_tail, picked, vchan + lane + 128u, mode, complete);
-            acc5 += weight * load_kv(value, value_tail, picked, vchan + lane + 160u, mode, complete);
-            acc6 += weight * load_kv(value, value_tail, picked, vchan + lane + 192u, mode, complete);
-            acc7 += weight * load_kv(value, value_tail, picked, vchan + lane + 224u, mode, complete);
+            float value8[8];
+            load_kv8(value, value_tail, ids[slot], kchan, mode, complete, value8);
+            acc0 += weight * value8[0];
+            acc1 += weight * value8[1];
+            acc2 += weight * value8[2];
+            acc3 += weight * value8[3];
+            acc4 += weight * value8[4];
+            acc5 += weight * value8[5];
+            acc6 += weight * value8[6];
+            acc7 += weight * value8[7];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         device float* out = output + (token * 24u + head) * 256u;
         device const float* gh = gate + (token * 24u + head) * 256u;
         for (uint group = 0u; group < groups; ++group) {
             if (simd == group) {
-                float gated0 = acc0 * sigmoid_f(gh[lane]);
-                float gated1 = acc1 * sigmoid_f(gh[lane + 32u]);
-                float gated2 = acc2 * sigmoid_f(gh[lane + 64u]);
-                float gated3 = acc3 * sigmoid_f(gh[lane + 96u]);
-                float gated4 = acc4 * sigmoid_f(gh[lane + 128u]);
-                float gated5 = acc5 * sigmoid_f(gh[lane + 160u]);
-                float gated6 = acc6 * sigmoid_f(gh[lane + 192u]);
-                float gated7 = acc7 * sigmoid_f(gh[lane + 224u]);
+                float gated0 = acc0 * sigmoid_f(gh[ch]);
+                float gated1 = acc1 * sigmoid_f(gh[ch + 1u]);
+                float gated2 = acc2 * sigmoid_f(gh[ch + 2u]);
+                float gated3 = acc3 * sigmoid_f(gh[ch + 3u]);
+                float gated4 = acc4 * sigmoid_f(gh[ch + 4u]);
+                float gated5 = acc5 * sigmoid_f(gh[ch + 5u]);
+                float gated6 = acc6 * sigmoid_f(gh[ch + 6u]);
+                float gated7 = acc7 * sigmoid_f(gh[ch + 7u]);
                 if (group == 0u) {
-                    out[lane] = gated0;
-                    out[lane + 32u] = gated1;
-                    out[lane + 64u] = gated2;
-                    out[lane + 96u] = gated3;
-                    out[lane + 128u] = gated4;
-                    out[lane + 160u] = gated5;
-                    out[lane + 192u] = gated6;
-                    out[lane + 224u] = gated7;
+                    out[ch] = gated0;
+                    out[ch + 1u] = gated1;
+                    out[ch + 2u] = gated2;
+                    out[ch + 3u] = gated3;
+                    out[ch + 4u] = gated4;
+                    out[ch + 5u] = gated5;
+                    out[ch + 6u] = gated6;
+                    out[ch + 7u] = gated7;
                 } else {
-                    out[lane] += gated0;
-                    out[lane + 32u] += gated1;
-                    out[lane + 64u] += gated2;
-                    out[lane + 96u] += gated3;
-                    out[lane + 128u] += gated4;
-                    out[lane + 160u] += gated5;
-                    out[lane + 192u] += gated6;
-                    out[lane + 224u] += gated7;
+                    out[ch] += gated0;
+                    out[ch + 1u] += gated1;
+                    out[ch + 2u] += gated2;
+                    out[ch + 3u] += gated3;
+                    out[ch + 4u] += gated4;
+                    out[ch + 5u] += gated5;
+                    out[ch + 6u] += gated6;
+                    out[ch + 7u] += gated7;
                 }
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
         }
-    }
 }
 
 // Four rows per simdgroup. Each lane reads its own 16-byte block so a simdgroup

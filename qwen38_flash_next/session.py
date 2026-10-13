@@ -2125,7 +2125,7 @@ class MetalSession:
                 struct.pack("<I", mode),
                 struct.pack("<I", complete),
             ),
-            self._size(24),
+            self._size(24, max(count, 1)),
             self._size(512),
         )
         return dst
@@ -2206,7 +2206,7 @@ class MetalSession:
                 struct.pack("<I", mode),
                 struct.pack("<I", complete),
             ),
-            self._size(24),
+            self._size(24, max(count, 1)),
             self._size(512),
         )
         return dst

@@ -15,7 +15,7 @@ from qwen38_flash_next.formats import (
     quantize_int2_image,
     quantize_matrix,
 )
-from qwen38_flash_next.session import MetalSession, _buffer_bytes, _buffer_view
+from qwen38_flash_next.session import Dev, MetalSession, _buffer_bytes, _buffer_view
 
 
 def check_state_kernels() -> None:
@@ -99,6 +99,51 @@ def _check_qsa(session: MetalSession, rng: np.random.Generator) -> None:
             expect[token, head] = probs @ value[:visible, kv] * _sigmoid(gate[token, head])
     if not np.allclose(got, expect, rtol=1e-4, atol=1e-4):
         message = "sparse attention shader diverged"
+        raise RuntimeError(message)
+    _check_qsa_selected(session, rng)
+
+
+def _check_qsa_selected(session: MetalSession, rng: np.random.Generator) -> None:
+    count = 3
+    stride = 6
+    span = 40
+    query = rng.normal(size=(count, 24, 256)).astype(np.float32)
+    gate = rng.normal(size=(count, 24, 256)).astype(np.float32)
+    key = rng.normal(size=(span, 2, 256)).astype(np.float32)
+    value = rng.normal(size=(span, 2, 256)).astype(np.float32)
+    key_bytes, key = pack_bf16(key)
+    value_bytes, value = pack_bf16(value)
+    picked = np.stack(
+        [rng.choice(span, size=stride, replace=False) for _ in range(count)]
+    ).astype(np.uint32)
+    lengths = np.array([stride, 3, stride], dtype=np.uint32)
+    got = session.read_f32(
+        session.qsa_attend_selected(
+            session.dev_from(query),
+            session.dev_from(gate),
+            session.upload(key_bytes),
+            session.upload(value_bytes),
+            Dev(session.upload(np.ascontiguousarray(picked).tobytes()), count * stride),
+            Dev(session.upload(np.ascontiguousarray(lengths).tobytes()), count),
+            count,
+            stride,
+            mode=0,
+            complete=0,
+        )
+    ).reshape(count, 24, 256)
+    scale = 1.0 / math.sqrt(256.0)
+    expect = np.empty_like(query)
+    for token in range(count):
+        ids = picked[token, : int(lengths[token])]
+        for head in range(24):
+            kv = head // 12
+            scores = key[ids, kv] @ query[token, head] * scale
+            scores = scores - scores.max()
+            probs = np.exp(scores)
+            probs /= probs.sum()
+            expect[token, head] = probs @ value[ids, kv] * _sigmoid(gate[token, head])
+    if not np.allclose(got, expect, rtol=1e-4, atol=1e-4):
+        message = "selected attention shader diverged"
         raise RuntimeError(message)
 
 
