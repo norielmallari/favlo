@@ -15,12 +15,13 @@ from typing import Any
 
 import numpy as np
 
+from qwen38_flash_next.allocate import preallocate, round_preferred, seal_contiguous
 from qwen38_flash_next.formats import (
-    EXPERT_SLOT,
     NGRAM_SLOT,
     NGRAM_WIDTH,
     RECORD_VERSION,
     expert_live_bytes,
+    expert_slot_bytes,
     int4_plane_sizes,
     ngram_slots,
     quantize_int4_image,
@@ -132,6 +133,7 @@ def _expert_matrix(store: ShardStore, key: str, expert: int) -> np.ndarray:
 
 class ResidentWriter:
     def __init__(self, path: Path) -> None:
+        self.path = path
         self.fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
         os.ftruncate(self.fd, 0)
         self.offset = 0
@@ -181,8 +183,13 @@ class ResidentWriter:
         self.i64[key] = {"offset": self._write(blob), "shape": list(array.shape)}
 
     def close(self) -> None:
+        padded = round_preferred(self.offset)
+        if padded > self.offset:
+            os.pwrite(self.fd, b"\x00" * (padded - self.offset), self.offset)
+            self.offset = padded
         os.fsync(self.fd)
         os.close(self.fd)
+        seal_contiguous(self.path, self.offset)
 
 
 def _progress_path(dest: Path) -> Path:
@@ -240,7 +247,7 @@ def _expert_start(
     experts: int,
 ) -> int:
     """First expert still to write. ``experts`` means the file is finished."""
-    full = experts * EXPERT_SLOT
+    full = experts * expert_slot_bytes()
     size = path.stat().st_size if path.is_file() else 0
     if done and size >= full:
         return experts
@@ -331,11 +338,12 @@ def _write_expert_file(
     commit: Callable[[int], None] | None = None,
 ) -> None:
     live = expert_live_bytes()
+    slot = expert_slot_bytes()
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        full = experts * EXPERT_SLOT
+        full = experts * slot
         if start == 0 or os.fstat(fd).st_size < full:
-            os.ftruncate(fd, full)
+            preallocate(fd, full)
         for expert in range(start, experts):
             gate = _expert_matrix(store, gate_key, expert)
             down = _expert_matrix(store, down_key, expert)
@@ -346,7 +354,7 @@ def _write_expert_file(
             if len(image) != live:
                 message = f"expert image is {len(image)} bytes, expected {live}"
                 raise RuntimeError(message)
-            os.pwrite(fd, image, expert * EXPERT_SLOT)
+            os.pwrite(fd, image, expert * slot)
             if expert % 64 == 0:
                 _log(f"{path.name} expert {expert}")
             if commit is not None and (expert % 64 == 63 or expert == experts - 1):
@@ -541,7 +549,7 @@ def quantize_checkpoint(source: Path, dest: Path) -> None:
     manifest = {
         "version": RECORD_VERSION,
         "complete": True,
-        "expert_slot": EXPERT_SLOT,
+        "expert_slot": expert_slot_bytes(),
         "expert_live": expert_live_bytes(),
         "experts": experts,
         "layers": len(kinds),
@@ -570,12 +578,15 @@ def _write_ngram(store: ShardStore, dest: Path, progress: dict[str, Any]) -> Non
         rows_per = 2_500_012
         shards = 128
         total = shards * rows_per
+        total_bytes = total * NGRAM_SLOT
         saved = int(progress["ngram_rows"])
         written = ngram_resume_row(saved, os.fstat(fd).st_size)
         if written != saved:
             progress["ngram_rows"] = written
             _save_progress(dest, progress)
             _log(f"n-gram cursor rewound to {written}")
+        if written == 0 and os.fstat(fd).st_size < total_bytes:
+            preallocate(fd, total_bytes)
         if written >= total:
             return
         if written:

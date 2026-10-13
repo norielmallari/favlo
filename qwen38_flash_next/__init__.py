@@ -17,12 +17,12 @@ from qwen38_flash_next.convert import (
 from qwen38_flash_next.experts import group_assignments
 from qwen38_flash_next.formats import (
     DEFAULT_RECORD,
-    EXPERT_SLOT,
     INT2_ORDER_PATTERN,
     INT4_ORDER_PATTERN,
     NGRAM_SLOT,
     NGRAM_WIDTH,
     PAGE,
+    PREFERRED_IO,
     RECORD_VERSION,
     decode_e4m3,
     decode_e5m2,
@@ -30,6 +30,7 @@ from qwen38_flash_next.formats import (
     dequant_int4,
     e8m0_scale_byte,
     expert_live_bytes,
+    expert_slot_bytes,
     int4_plane_sizes,
     ngram_slots,
     pack_int2,
@@ -47,12 +48,12 @@ from qwen38_flash_next.session import _append_transcript, _tok_s
 
 __all__ = [
     "DEFAULT_RECORD",
-    "EXPERT_SLOT",
     "INT2_ORDER_PATTERN",
     "INT4_ORDER_PATTERN",
     "NGRAM_SLOT",
     "NGRAM_WIDTH",
     "PAGE",
+    "PREFERRED_IO",
     "RECORD_VERSION",
     "Qwen38Runtime",
     "Roundtrip",
@@ -74,6 +75,7 @@ __all__ = [
     "dequant_int4",
     "e8m0_scale_byte",
     "expert_live_bytes",
+    "expert_slot_bytes",
     "int4_plane_sizes",
     "main",
     "ngram_resume_row",

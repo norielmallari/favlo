@@ -12,13 +12,19 @@ BLOCK = 32
 SENTINEL = 0x5A
 HOST_BYTES = 4096
 PAGE = 16384
-MIB = 1024 * 1024
-EXPERT_SLOT = 3 * MIB
+# statvfs f_bsize on this APFS volume, and the transfer size that fills the SSD.
+PREFERRED_IO = 1 << 20
 NGRAM_SLOT = 128
 NGRAM_WIDTH = 160
 IO_CHUNK = 256 * 1024 * 1024
-RECORD_VERSION = 1
-DEFAULT_RECORD = Path.home() / ".madmetal" / "qwen38-flash-next"
+RECORD_VERSION = 2
+# Hugging Face model name, then -madmetal-, then each non-empty tier per layer.
+# s super int8, h hot int4, c cold int2. This record is all 512 at int4.
+DEFAULT_RECORD = (
+    Path(__file__).resolve().parents[1]
+    / "models"
+    / "Qwen3.8-Flash-Next-madmetal-h512-int4"
+)
 
 # MTLTensorDataType values from the macOS 27 SDK headers.
 TENSOR_INT8 = 45
@@ -342,3 +348,8 @@ def expert_live_bytes() -> int:
     gate_up = sum(int4_plane_sizes(1280, stored_k_int4(2560, align_k=True)))
     down = sum(int4_plane_sizes(2560, stored_k_int4(640, align_k=True)))
     return gate_up + down
+
+
+def expert_slot_bytes() -> int:
+    """On-disk stride of one expert. The live image, so a run contains no hole."""
+    return expert_live_bytes()

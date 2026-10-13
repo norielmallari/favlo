@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 
+from qwen38_flash_next.formats import PAGE
 from qwen38_flash_next.session import _buffer_view, _fill_buffer, _log
 
 RESIDENT_CANDIDATES = (20 << 30, 16 << 30, 12 << 30, 8 << 30)
@@ -107,6 +108,9 @@ class ExpertAtlas:
         for first, last in _consecutive(missing):
             span = (last - first) * self.slot + self.live
             offset = self._alloc_span(span, protect)
+            if offset % PAGE or span % PAGE:
+                message = f"expert load {offset}+{span} is not a multiple of {PAGE}"
+                raise RuntimeError(message)
             for index, expert in enumerate(range(first, last + 1)):
                 self._publish(layer, expert, offset + index * self.slot, first, last, offset, span)
             loads.append((self.atlas, offset, span, first * self.slot))

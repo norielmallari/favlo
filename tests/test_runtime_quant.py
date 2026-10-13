@@ -57,7 +57,8 @@ def test_middle_expert_image_is_a_whole_number_of_pages() -> None:
     live = pipeline.expert_live_bytes()
     assert live == 2_785_280
     assert live % pipeline.PAGE == 0
-    assert live < pipeline.EXPERT_SLOT
+    assert pipeline.expert_slot_bytes() == live
+    assert (512 * live) % pipeline.PREFERRED_IO == 0
 
 
 def test_ngram_resume_row_rewinds_when_the_file_is_short() -> None:
@@ -71,7 +72,7 @@ def test_ngram_resume_row_keeps_the_checkpoint_when_the_file_is_ahead() -> None:
 def _full_expert_file(path, experts: int) -> None:
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        os.ftruncate(fd, experts * pipeline.EXPERT_SLOT)
+        os.ftruncate(fd, experts * pipeline.expert_slot_bytes())
     finally:
         os.close(fd)
 
@@ -158,6 +159,43 @@ def test_transcript_appends_prompt_and_output(tmp_path) -> None:
     text = path.read_text(encoding="utf-8")
     assert text == "prompt:\n2+2=\n\noutput:\n4\n\nprompt:\nnext\n\noutput:\nmore\n"
     pipeline._append_transcript(None, "skipped", "skipped")
+
+
+def test_preallocate_covers_the_file_in_one_extent(tmp_path) -> None:
+    import qwen38_flash_next.allocate as allocate
+
+    path = tmp_path / "blob"
+    nbytes = 8 * pipeline.PAGE
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        allocate.preallocate(fd, nbytes)
+        os.pwrite(fd, b"\xab" * nbytes, 0)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    st = path.stat()
+    assert st.st_size == nbytes
+    assert st.st_blocks * 512 >= nbytes
+    contig, device = allocate.contiguous_bytes(path, 0, nbytes)
+    assert device >= 0
+    assert contig >= nbytes
+
+
+def test_preallocate_claims_each_chunk(tmp_path, monkeypatch) -> None:
+    import qwen38_flash_next.allocate as allocate
+
+    monkeypatch.setattr(allocate, "_CHUNK", 4 * pipeline.PAGE)
+    path = tmp_path / "chunks"
+    nbytes = 8 * pipeline.PAGE
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        allocate.preallocate(fd, nbytes)
+    finally:
+        os.close(fd)
+    for offset in (0, 4 * pipeline.PAGE):
+        contig, device = allocate.contiguous_bytes(path, offset, 4 * pipeline.PAGE)
+        assert device >= 0
+        assert contig >= 4 * pipeline.PAGE
 
 
 def test_omitted_max_tokens_runs_until_stop() -> None:

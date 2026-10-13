@@ -38,6 +38,7 @@ qwen38-flash-next.py       command entry; loads the package by path
 qwen38_flash_next/         this model's pipeline
   shaders/                 Metal source, read as text
   formats.py               record math
+  allocate.py              contiguous page-aligned files
   convert.py               BF16 shards to the record
   probe.py                 block and matmul checks
   session.py               device buffers and shaders

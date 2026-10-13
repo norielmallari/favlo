@@ -211,6 +211,13 @@ def _tok_s(label: str, tokens: int, seconds: float) -> str:
     return f"{label} {tokens / seconds:.2f} tok/s ({tokens} tok in {seconds:.2f}s)"
 
 
+def _require_page(offset: int, size: int) -> None:
+    """Uncached SSD reads stay off the bounce buffer only when both ends match the VM page."""
+    if offset % PAGE or size % PAGE:
+        message = f"Metal IO range {offset}+{size} is not a multiple of {PAGE}"
+        raise RuntimeError(message)
+
+
 def _append_transcript(path: Path | None, prompt: str, output: str) -> None:
     """Append one prompt and its completion. Token rates stay on the console."""
     if path is None:
@@ -1481,6 +1488,8 @@ class MetalSession:
         command = self._io.commandBuffer()
         issued = 0
         for buffer, dest_off, size, src_off in loads:
+            _require_page(dest_off, size)
+            _require_page(src_off, size)
             offset = 0
             while offset < size:
                 take = min(IO_CHUNK, size - offset)
@@ -1516,6 +1525,8 @@ class MetalSession:
         issued = 0
         for buffer, dest_off, size, src_off in loads:
             # One load above 256MB returns MTLIOStatusError on this GPU.
+            _require_page(dest_off, size)
+            _require_page(src_off, size)
             offset = 0
             while offset < size:
                 take = min(IO_CHUNK, size - offset)
