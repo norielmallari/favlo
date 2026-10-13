@@ -1,0 +1,16 @@
+#!/bin/sh
+# Optional: git config core.hooksPath .githooks
+set -e
+MSG_FILE="$1"
+SUBJECT=$(sed -n '1p' "$MSG_FILE")
+# Allow merge/squash default messages and explicit reverts.
+case "$SUBJECT" in
+Merge*|Squashed*|Revert\ *)
+  exit 0
+  ;;
+esac
+if ! printf '%s\n' "$SUBJECT" | grep -Eq '^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-z0-9._-]+\))?!?: .+'; then
+  echo "commit-msg: subject must follow Conventional Commits." >&2
+  echo "  example: feat(qwen38): add scan shader for MoE prefill" >&2
+  exit 1
+fi

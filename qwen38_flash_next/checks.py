@@ -8,7 +8,12 @@ from typing import Any
 
 import numpy as np
 
-from qwen38_flash_next.formats import quantize_matrix
+from qwen38_flash_next.formats import (
+    dequant_int2,
+    int2_plane_sizes,
+    quantize_int2_image,
+    quantize_matrix,
+)
 from qwen38_flash_next.session import MetalSession, _buffer_bytes
 
 
@@ -212,6 +217,91 @@ def _close(name: str, got: np.ndarray, expect: np.ndarray) -> None:
     raise RuntimeError(message)
 
 
+def _check_int2_expert(gpu: MetalSession) -> None:
+    """int2 gate and down match a half-rounded dot of the packed codes."""
+    rng = np.random.default_rng(5)
+    hidden, moe, stored = 64, 32, 64
+    gate_w = rng.normal(size=(moe * 2, hidden)).astype(np.float32) * 0.05
+    down_w = rng.normal(size=(hidden, stored)).astype(np.float32) * 0.05
+    down_w[:, moe:] = 0.0
+    gate_image, gate_k = quantize_int2_image(gate_w, align_k=False)
+    down_image, down_k = quantize_int2_image(down_w, align_k=False)
+    if gate_k != hidden or down_k != stored:
+        message = f"int2 stored K {gate_k} {down_k}"
+        raise RuntimeError(message)
+    gate_data, gate_scale = int2_plane_sizes(moe * 2, hidden)
+    down_data, down_scale = int2_plane_sizes(hidden, stored)
+    restored_gate = dequant_int2(gate_image[:gate_data], gate_image[gate_data:], moe * 2, hidden)
+    restored_down = dequant_int2(down_image[:down_data], down_image[down_data:], hidden, stored)
+    image = gate_image + down_image
+    atlas = gpu.upload(image)
+    table = gpu.upload(np.asarray([0], dtype=np.int64).tobytes())
+    miss = gpu.zeros(4)
+    vector = rng.normal(size=hidden).astype(np.float32)
+    act = vector.astype(np.float16).astype(np.float32)
+    reference_gate = restored_gate @ act
+    ids = gpu.dev_u32([0])
+    got_gate = gpu.moe_decode_gate_int2(
+        gpu.dev_from(vector),
+        atlas,
+        table,
+        ids,
+        1,
+        0,
+        moe * 2,
+        hidden,
+        0,
+        gate_data,
+        miss,
+        0,
+    )
+    _close("moe-int2-gate", gpu.read_f32(got_gate), reference_gate)
+    half_row = np.ascontiguousarray(vector.astype(np.float16))
+    grouped = gpu.tmp(moe * 2)
+    gpu.moe_grouped_int2(
+        gpu.upload(half_row.tobytes()),
+        atlas,
+        table,
+        gpu.dev_u32([0]),
+        gpu.dev_u32([0, 1]),
+        grouped,
+        miss,
+        1,
+        0,
+        moe * 2,
+        hidden,
+        0,
+        gate_data,
+        0,
+    )
+    _close("moe-int2-grouped", gpu.read_f32(grouped), reference_gate)
+    gate_host = gpu.read_f32(got_gate)
+    activated = _silu(gate_host[:moe]) * gate_host[moe:]
+    padded = np.zeros(stored, dtype=np.float32)
+    padded[:moe] = activated
+    reference = restored_down @ padded.astype(np.float16).astype(np.float32)
+    activated_half = gpu.moe_activate(got_gate, 1, moe, stored)
+    weights = gpu.dev_from(np.asarray([0.5], dtype=np.float32))
+    shared = gpu.dev_from(np.full(hidden, 0.25, dtype=np.float32))
+    got = gpu.moe_decode_down_int2(
+        activated_half,
+        atlas,
+        table,
+        ids,
+        weights,
+        shared,
+        1,
+        0,
+        hidden,
+        stored,
+        len(gate_image),
+        len(gate_image) + down_data,
+        miss,
+        0,
+    )
+    _close("moe-int2-down", gpu.read_f32(got), reference * 0.5 + 0.25)
+
+
 def check_routed_expert() -> None:
     """The fused expert kernels match the per-row int4 dot, including a shared slot."""
     gpu = MetalSession()
@@ -270,6 +360,7 @@ def check_routed_expert() -> None:
         0,
     )
     _close("moe-down", gpu.read_f32(got), reference * 0.5 + 0.25)
+    _check_int2_expert(gpu)
 
 
 def check_gdn_scan() -> None:

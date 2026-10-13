@@ -72,6 +72,22 @@ The calibration prompt strings are data in a bucket JSON: `tool_calling`, `chat`
 7. This process is the runtime. Re-implement from public research documents. Do not use another application's source as the reference, and do not launch another application's environment.
 8. Prefill, decode, and the calibration prefill map onto Metal. The endpoint serves tokens those shaders produced. A missing kernel stays missing. It is not replaced by a slower forward.
 
+## Commits
+
+Use [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): imperative summary` on the subject line. Common types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `chore`, `build`, `ci`. Scope is optional; prefer a short pipeline id such as `qwen38` or `madmetal` when the change is localized.
+
+```text
+feat(qwen38): stream experts from SSD into the resident atlas
+perf(qwen38): fuse scan prefix into MoE prefill shader
+docs: describe parallel quantize worker layout
+```
+
+Optional hook (local only; do not commit git config):
+
+```text
+git config core.hooksPath .githooks
+```
+
 ## Commands
 
 ```text
@@ -84,7 +100,7 @@ uv run madmetal --qwen38-flash-next quantize
 uv run madmetal --qwen38-flash-next serve
 ```
 
-`quantize` reads the Hugging Face BF16 shards once and writes the record. Running it again on the same output continues from `quantize_progress.json`. `serve` reads that record. A request does not quantize a weight.
+`quantize` reads the Hugging Face BF16 shards once and writes the record. `--hot` selects the int4 keep set; the complement is int2. Running it again on the same output continues from `quantize_progress.json`. `serve` reads that record. A request does not quantize a weight.
 
 `probe` writes one block of 32 and reads it back on the GPU. It is the measurement in ARCHITECTURE.md. It does not pack an expert.
 

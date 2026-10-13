@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
@@ -17,13 +18,13 @@ PREFERRED_IO = 1 << 20
 NGRAM_SLOT = 128
 NGRAM_WIDTH = 160
 IO_CHUNK = 256 * 1024 * 1024
-RECORD_VERSION = 2
+RECORD_VERSION = 3
 # Hugging Face model name, then -madmetal-, then each non-empty tier per layer.
-# s super int8, h hot int4, c cold int2. This record is all 512 at int4.
+# s super int8, h hot int4, c cold int2. This record is 384 hot int4 and 128 cold int2.
 DEFAULT_RECORD = (
     Path(__file__).resolve().parents[1]
     / "models"
-    / "Qwen3.8-Flash-Next-madmetal-h512-int4"
+    / "Qwen3.8-Flash-Next-madmetal-h384-int4-c128-int2"
 )
 
 # MTLTensorDataType values from the macOS 27 SDK headers.
@@ -351,5 +352,135 @@ def expert_live_bytes() -> int:
 
 
 def expert_slot_bytes() -> int:
-    """On-disk stride of one expert. The live image, so a run contains no hole."""
+    """On-disk stride of one hot expert. The live int4 image, so a run contains no hole."""
     return expert_live_bytes()
+
+
+def stored_k_int2(inner: int) -> int:
+    """int2 row bytes must be a multiple of 128, so stored K is a multiple of 512."""
+    if inner % BLOCK:
+        message = f"inner dimension {inner} is not a multiple of {BLOCK}"
+        raise ValueError(message)
+    return ((inner + 511) // 512) * 512
+
+
+def int2_plane_sizes(rows: int, stored_inner: int) -> tuple[int, int]:
+    return rows * (stored_inner // 4), rows * (stored_inner // BLOCK)
+
+
+def quantize_int2_rows(block: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Pack [rows, stored_k] float32 as int2, low bits first, one E8M0 byte per 32."""
+    rows, inner = block.shape
+    if inner % BLOCK:
+        message = f"inner dimension {inner} is not a multiple of {BLOCK}"
+        raise ValueError(message)
+    blocks = block.reshape(rows, inner // BLOCK, BLOCK)
+    amax = np.max(np.abs(blocks), axis=-1).astype(np.float64)
+    ratio = amax / QMAX[2]
+    mantissa, exponent = np.frexp(np.maximum(ratio, np.finfo(np.float64).tiny))
+    power = exponent.astype(np.int32) - (mantissa == 0.5).astype(np.int32)
+    power = np.where(amax <= 0.0, np.int32(-127), power)
+    biased = np.clip(power + 127, 0, 254).astype(np.uint8)
+    scale = np.ldexp(np.ones(amax.shape, dtype=np.float32), biased.astype(np.int32) - 127)
+    codes = np.rint(blocks / scale[..., None])
+    codes = np.clip(codes, -2, 1).astype(np.int32)
+    bits = (codes & 0x3).astype(np.uint8)
+    packed = (
+        bits[..., 0::4]
+        | (bits[..., 1::4] << 2)
+        | (bits[..., 2::4] << 4)
+        | (bits[..., 3::4] << 6)
+    )
+    return np.ascontiguousarray(packed), np.ascontiguousarray(biased)
+
+
+def quantize_int2_image(weight: np.ndarray, *, align_k: bool = True) -> tuple[bytes, int]:
+    """Data plane, then tight E8M0 scales. ``align_k`` pads K out to a multiple of 512."""
+    matrix = np.ascontiguousarray(weight, dtype=np.float32)
+    rows, inner = matrix.shape
+    stored = stored_k_int2(inner) if align_k else inner
+    if stored % BLOCK:
+        message = f"stored K {stored} is not a multiple of {BLOCK}"
+        raise ValueError(message)
+    if stored != inner:
+        matrix = np.pad(matrix, ((0, 0), (0, stored - inner)))
+    data_n, scale_n = int2_plane_sizes(rows, stored)
+    image = bytearray(data_n + scale_n)
+    step = 256
+    data_row = stored // 4
+    scale_row = stored // BLOCK
+    for start in range(0, rows, step):
+        stop = min(start + step, rows)
+        packed, scales = quantize_int2_rows(matrix[start:stop])
+        count = stop - start
+        image[start * data_row : stop * data_row] = packed.reshape(count, data_row).tobytes()
+        base = data_n + start * scale_row
+        image[base : base + count * scale_row] = scales.reshape(count, scale_row).tobytes()
+    return bytes(image), stored
+
+
+def dequant_int2(packed: bytes, scales: bytes, rows: int, inner: int) -> np.ndarray:
+    raw = np.frombuffer(packed, dtype=np.uint8).reshape(rows, inner // 4)
+    codes = np.empty((rows, inner), dtype=np.int32)
+    codes[:, 0::4] = raw & 0x3
+    codes[:, 1::4] = (raw >> 2) & 0x3
+    codes[:, 2::4] = (raw >> 4) & 0x3
+    codes[:, 3::4] = (raw >> 6) & 0x3
+    codes = np.where(codes > 1, codes - 4, codes)
+    factors = np.frombuffer(scales, dtype=np.uint8).astype(np.int32).reshape(rows, inner // BLOCK)
+    restored = codes.reshape(rows, inner // BLOCK, BLOCK).astype(np.float32)
+    restored *= np.ldexp(np.ones(factors.shape, dtype=np.float32), factors - 127)[..., None]
+    return restored.reshape(rows, inner)
+
+
+def cold_live_bytes() -> int:
+    """Narrow gate_up image followed by the down image."""
+    gate_up = sum(int2_plane_sizes(1280, stored_k_int2(2560)))
+    down = sum(int2_plane_sizes(2560, stored_k_int2(640)))
+    return gate_up + down
+
+
+def cold_slot_bytes() -> int:
+    """On-disk stride of one cold expert. The live image rounded up to a page."""
+    live = cold_live_bytes()
+    return (live + PAGE - 1) & ~(PAGE - 1)
+
+
+class ExpertPlanes(NamedTuple):
+    """Byte offsets of one concatenated gate_up + down image."""
+
+    bits: int
+    gate_rows: int
+    gate_inner: int
+    gate_scale: int
+    down_inner: int
+    down_weight: int
+    down_scale: int
+
+
+def expert_planes(bits: int, hidden: int = 2560, moe: int = 640) -> ExpertPlanes:
+    """Layout of the image the expert shaders index. Gate data starts at 0."""
+    gate_rows = 2 * moe
+    if bits == 4:
+        gate_inner = stored_k_int4(hidden, align_k=True)
+        gate_data, gate_scales = int4_plane_sizes(gate_rows, gate_inner)
+        down_inner = stored_k_int4(moe, align_k=True)
+        down_data, _down_scales = int4_plane_sizes(hidden, down_inner)
+    elif bits == 2:
+        gate_inner = stored_k_int2(hidden)
+        gate_data, gate_scales = int2_plane_sizes(gate_rows, gate_inner)
+        down_inner = stored_k_int2(moe)
+        down_data, _down_scales = int2_plane_sizes(hidden, down_inner)
+    else:
+        message = f"expert plane width {bits} is not 2 or 4"
+        raise ValueError(message)
+    gate_image = gate_data + gate_scales
+    return ExpertPlanes(
+        bits,
+        gate_rows,
+        gate_inner,
+        gate_data,
+        down_inner,
+        gate_image,
+        gate_image + down_data,
+    )

@@ -38,7 +38,7 @@ def _record(path: Path | None) -> Path:
 
 def quantize_main(args: Any) -> int:
     try:
-        quantize_checkpoint(_checkpoint(args.source), args.output)
+        quantize_checkpoint(_checkpoint(args.source), args.output, args.hot)
     except Exception as exc:
         traceback.print_exc()
         sys.stderr.write(f"{type(exc).__name__}: {exc}\n")
@@ -317,6 +317,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     quant_parser = sub.add_parser("quantize", help="write the Metal record from BF16 shards")
     quant_parser.add_argument("--source", type=Path, default=None)
     quant_parser.add_argument("--output", type=Path, default=DEFAULT_RECORD)
+    quant_parser.add_argument("--hot", type=Path, default=None)
     serve_parser = sub.add_parser("serve", help="serve the quantized record")
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8000)

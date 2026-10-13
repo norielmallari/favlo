@@ -9,7 +9,8 @@ import mmap
 import os
 import shutil
 import struct
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -19,11 +20,15 @@ from qwen38_flash_next.allocate import preallocate, round_preferred, seal_contig
 from qwen38_flash_next.formats import (
     NGRAM_SLOT,
     NGRAM_WIDTH,
+    PAGE,
     RECORD_VERSION,
+    cold_live_bytes,
+    cold_slot_bytes,
     expert_live_bytes,
     expert_slot_bytes,
     int4_plane_sizes,
     ngram_slots,
+    quantize_int2_image,
     quantize_int4_image,
 )
 from qwen38_flash_next.session import _log, bf16_to_f32
@@ -36,6 +41,12 @@ class ShardStore:
         self.weight_map: dict[str, str] = index["weight_map"]
         self._headers: dict[str, tuple[int, dict[str, Any]]] = {}
         self._fds: dict[str, int] = {}
+
+    def close(self) -> None:
+        for fd in self._fds.values():
+            os.close(fd)
+        self._fds.clear()
+        self._headers.clear()
 
     def _locate(self, key: str) -> tuple[int, int, str, list[int]]:
         shard = self.weight_map[key]
@@ -196,6 +207,51 @@ def _progress_path(dest: Path) -> Path:
     return dest / "quantize_progress.json"
 
 
+LAYER_WORKERS = 4
+NGRAM_ROWS_PER_SHARD = 2_500_012
+NGRAM_SHARD_COUNT = 128
+
+
+def pending_indices(done: Sequence[int], total: int) -> list[int]:
+    """Indices that are not in the finished set."""
+    finished = {int(item) for item in done}
+    return [index for index in range(total) if index not in finished]
+
+
+def ngram_byte_offset(shard: int, local: int) -> int:
+    """Byte offset of one n-gram row. Shard tensors do not share a row range."""
+    return (shard * NGRAM_ROWS_PER_SHARD + local) * NGRAM_SLOT
+
+
+def cold_ids(hot: Sequence[int], experts: int) -> list[int]:
+    chosen = {int(expert) for expert in hot}
+    return [expert for expert in range(experts) if expert not in chosen]
+
+
+def load_hot_ids(path: Path, layers: int, experts: int) -> list[list[int]]:
+    """Layer index to the hot expert ids. Every layer has the same count."""
+    raw = json.loads(path.read_text())
+    banks: list[list[int]] = []
+    for layer in range(layers):
+        key = str(layer)
+        if key not in raw:
+            message = f"hot set is missing layer {layer}"
+            raise RuntimeError(message)
+        ids = [int(item) for item in raw[key]]
+        if len(ids) != len(set(ids)) or any(item < 0 or item >= experts for item in ids):
+            message = f"hot set for layer {layer} is not ids in 0..{experts - 1}"
+            raise RuntimeError(message)
+        if not ids or len(ids) == experts:
+            message = f"hot set for layer {layer} leaves no cold experts"
+            raise RuntimeError(message)
+        banks.append(ids)
+    counts = {len(ids) for ids in banks}
+    if len(counts) != 1:
+        message = "hot keep-set counts differ by layer"
+        raise RuntimeError(message)
+    return banks
+
+
 def _load_progress(dest: Path) -> dict[str, Any]:
     path = _progress_path(dest)
     if not path.is_file():
@@ -204,7 +260,7 @@ def _load_progress(dest: Path) -> dict[str, Any]:
             "resident": False,
             "layers": [],
             "mtp": False,
-            "ngram_rows": 0,
+            "ngram_shards": [],
         }
     progress = json.loads(path.read_text())
     if progress.get("version") != RECORD_VERSION:
@@ -328,6 +384,142 @@ def _layer_f32_keys(prefix: str, kind: str) -> list[str]:
     return keys
 
 
+def write_tier_file(path: Path, images: Sequence[bytes], slot: int) -> None:
+    """Preallocate one tier file and write each image at ``row * slot``."""
+    if slot % PAGE:
+        message = f"tier stride {slot} is not a multiple of {PAGE}"
+        raise RuntimeError(message)
+    if not images:
+        message = f"{path.name} has no images"
+        raise RuntimeError(message)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        preallocate(fd, len(images) * slot)
+        for row, image in enumerate(images):
+            if len(image) > slot:
+                message = f"{path.name} image {row} is longer than the stride"
+                raise RuntimeError(message)
+            os.pwrite(fd, image, row * slot)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _open_tier(path: Path, count: int, slot: int) -> int:
+    if count < 1 or slot % PAGE:
+        message = f"{path.name} stride {slot} count {count} is not page-aligned"
+        raise RuntimeError(message)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        preallocate(fd, count * slot)
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _layer_ready(dest: Path, layer: int, hot_count: int, cold_count: int) -> bool:
+    hot = dest / "experts" / f"{layer:02d}-hot.bin"
+    cold = dest / "experts" / f"{layer:02d}-cold.bin"
+    if not hot.is_file() or hot.stat().st_size < hot_count * expert_slot_bytes():
+        return False
+    return cold.is_file() and cold.stat().st_size >= cold_count * cold_slot_bytes()
+
+
+def pack_expert_layer(source: str, dest: str, layer: int, hot: list[int], experts: int) -> int:
+    """Pack one layer. Hot rows are int4. Cold rows are int2. Both files are fsynced."""
+    store = ShardStore(Path(source))
+    prefix = f"model.language_model.layers.{layer}.mlp.experts"
+    gate_key = f"{prefix}.gate_up_proj"
+    down_key = f"{prefix}.down_proj"
+    root = Path(dest) / "experts"
+    hot_ids = [int(expert) for expert in hot]
+    cold = cold_ids(hot_ids, experts)
+    hot_at = {expert: row for row, expert in enumerate(hot_ids)}
+    cold_at = {expert: row for row, expert in enumerate(cold)}
+    hot_slot = expert_slot_bytes()
+    cold_slot = cold_slot_bytes()
+    hot_live = expert_live_bytes()
+    cold_live = cold_live_bytes()
+    hot_fd = _open_tier(root / f"{layer:02d}-hot.bin", len(hot_ids), hot_slot)
+    cold_fd = _open_tier(root / f"{layer:02d}-cold.bin", len(cold), cold_slot)
+    try:
+        _log(f"quantize experts layer {layer}")
+        for expert in range(experts):
+            gate = _expert_matrix(store, gate_key, expert)
+            down = _expert_matrix(store, down_key, expert)
+            if gate.shape != (1280, 2560) or down.shape != (2560, 640):
+                message = f"{gate_key} shapes {gate.shape} {down.shape}"
+                raise RuntimeError(message)
+            if expert in hot_at:
+                image = quantize_int4_image(gate)[0] + quantize_int4_image(down)[0]
+                if len(image) != hot_live:
+                    message = f"hot image is {len(image)} bytes, expected {hot_live}"
+                    raise RuntimeError(message)
+                os.pwrite(hot_fd, image, hot_at[expert] * hot_slot)
+            else:
+                image = quantize_int2_image(gate)[0] + quantize_int2_image(down)[0]
+                if len(image) != cold_live:
+                    message = f"cold image is {len(image)} bytes, expected {cold_live}"
+                    raise RuntimeError(message)
+                os.pwrite(cold_fd, image, cold_at[expert] * cold_slot)
+            if expert % 64 == 0:
+                _log(f"layer {layer} expert {expert}")
+        os.fsync(hot_fd)
+        os.fsync(cold_fd)
+    finally:
+        os.close(hot_fd)
+        os.close(cold_fd)
+    return layer
+
+
+def _ngram_key(shard: int) -> str:
+    return (
+        "model.language_model.layers.1.ple.ple_embedding."
+        f"ngram_embedding.shard_{shard}.weight"
+    )
+
+
+def ngram_file_groups(weight_map: dict[str, str], shards: Sequence[int]) -> list[list[int]]:
+    """One group per safetensors file, so a file has one reader."""
+    groups: dict[str, list[int]] = {}
+    order: list[str] = []
+    for shard in shards:
+        file = weight_map[_ngram_key(int(shard))]
+        if file not in groups:
+            groups[file] = []
+            order.append(file)
+        groups[file].append(int(shard))
+    return [groups[file] for file in order]
+
+
+def pack_ngram_shards(source: str, dest: str, shards: list[int]) -> list[int]:
+    """Write finished n-gram tensors at their fixed offsets. Does not truncate the file."""
+    store = ShardStore(Path(source))
+    path = Path(dest) / "ngram.bin"
+    fd = os.open(path, os.O_RDWR)
+    try:
+        for shard in shards:
+            key = _ngram_key(shard)
+            _fd, _start, _dtype, shape = store._locate(key)
+            if list(shape) != [NGRAM_ROWS_PER_SHARD, NGRAM_WIDTH]:
+                message = f"{key} shape {shape}"
+                raise RuntimeError(message)
+            local = 0
+            while local < NGRAM_ROWS_PER_SHARD:
+                count = min(4096, NGRAM_ROWS_PER_SHARD - local)
+                matrix = store.read_bf16(
+                    key, local * NGRAM_WIDTH, count * NGRAM_WIDTH, (count, NGRAM_WIDTH)
+                )
+                os.pwrite(fd, ngram_slots(matrix), ngram_byte_offset(shard, local))
+                local += count
+            _log(f"n-gram shard {shard}")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return shards
+
+
 def _write_expert_file(
     store: ShardStore,
     path: Path,
@@ -364,8 +556,11 @@ def _write_expert_file(
         os.close(fd)
 
 
-def quantize_checkpoint(source: Path, dest: Path) -> None:
+def quantize_checkpoint(source: Path, dest: Path, hot: Path | None = None) -> None:
     """Write the Metal record once. A later run continues from quantize_progress.json."""
+    if hot is None:
+        message = "pass --hot with the keep-set JSON"
+        raise RuntimeError(message)
     if not (source / "config.json").is_file():
         message = f"checkpoint config is missing: {source}"
         raise FileNotFoundError(message)
@@ -384,6 +579,16 @@ def quantize_checkpoint(source: Path, dest: Path) -> None:
     text = config["text_config"]
     kinds = list(text["layer_types"])
     experts = int(text["num_experts"])
+    hot_ids = load_hot_ids(hot, len(kinds), experts)
+    saved_hot = progress.get("hot")
+    if saved_hot is None:
+        progress["hot"] = hot_ids
+        _save_progress(dest, progress)
+    elif saved_hot != hot_ids:
+        message = "hot set does not match this partial record"
+        raise RuntimeError(message)
+    hot_count = len(hot_ids[0])
+    cold_count = experts - hot_count
     if progress["resident"] and not (dest / "resident.bin").is_file():
         progress["resident"] = False
     if not progress["resident"]:
@@ -463,50 +668,31 @@ def quantize_checkpoint(source: Path, dest: Path) -> None:
     catalog = progress["catalog"]
     expert_dir = dest / "experts"
     expert_dir.mkdir(exist_ok=True)
-    done_layers = set(progress["layers"])
+    done_layers = {int(layer) for layer in progress["layers"]}
+    pending_layers: list[int] = []
     for layer in range(len(kinds)):
-        path = expert_dir / f"{layer:02d}.bin"
-        prefix = f"model.language_model.layers.{layer}.mlp.experts"
-        start = _expert_start(
-            progress,
-            done=layer in done_layers,
-            inflight_key=layer,
-            path=path,
-            experts=experts,
-        )
-        if start >= experts:
-            if layer not in done_layers:
-                progress["layers"].append(layer)
-                done_layers.add(layer)
-                _clear_inflight(progress)
-                _save_progress(dest, progress)
+        if layer in done_layers and _layer_ready(dest, layer, hot_count, cold_count):
             continue
         if layer in done_layers:
-            progress["layers"] = [item for item in progress["layers"] if item != layer]
+            progress["layers"] = [item for item in progress["layers"] if int(item) != layer]
             done_layers.discard(layer)
-        if start:
-            _log(f"resume experts layer {layer} at {start}")
-        else:
-            _log(f"quantize experts layer {layer}")
-
-        def commit_expert(expert: int, layer: int = layer) -> None:
-            progress["inflight_key"] = layer
-            progress["inflight_expert"] = expert
-            _save_progress(dest, progress)
-
-        _write_expert_file(
-            store,
-            path,
-            f"{prefix}.gate_up_proj",
-            f"{prefix}.down_proj",
-            experts,
-            start,
-            commit_expert,
-        )
-        progress["layers"].append(layer)
-        done_layers.add(layer)
-        _clear_inflight(progress)
-        _save_progress(dest, progress)
+        pending_layers.append(layer)
+    if pending_layers:
+        store.close()
+        _log(f"quantize experts, {len(pending_layers)} layers, {LAYER_WORKERS} workers")
+        with ProcessPoolExecutor(max_workers=LAYER_WORKERS) as pool:
+            futures = [
+                pool.submit(
+                    pack_expert_layer, str(source), str(dest), layer, hot_ids[layer], experts
+                )
+                for layer in pending_layers
+            ]
+            for future in as_completed(futures):
+                layer = int(future.result())
+                progress["layers"].append(layer)
+                done_layers.add(layer)
+                _save_progress(dest, progress)
+                _log(f"experts layer {layer} done")
     mtp_path = dest / "mtp-experts.bin"
     mtp_start = _expert_start(
         progress,
@@ -551,9 +737,14 @@ def quantize_checkpoint(source: Path, dest: Path) -> None:
         "complete": True,
         "expert_slot": expert_slot_bytes(),
         "expert_live": expert_live_bytes(),
+        "cold_slot": cold_slot_bytes(),
+        "cold_live": cold_live_bytes(),
+        "hot_count": hot_count,
+        "cold_count": cold_count,
+        "hot": hot_ids,
         "experts": experts,
         "layers": len(kinds),
-        "ngram_rows": 128 * 2_500_012,
+        "ngram_rows": NGRAM_SHARD_COUNT * NGRAM_ROWS_PER_SHARD,
         "ngram_slot": NGRAM_SLOT,
         "ngram_width": NGRAM_WIDTH,
         "embed_key": "model.language_model.embed_tokens.weight",
@@ -573,53 +764,30 @@ def quantize_checkpoint(source: Path, dest: Path) -> None:
 
 def _write_ngram(store: ShardStore, dest: Path, progress: dict[str, Any]) -> None:
     path = dest / "ngram.bin"
+    total_bytes = NGRAM_SHARD_COUNT * NGRAM_ROWS_PER_SHARD * NGRAM_SLOT
+    done = [int(shard) for shard in progress.get("ngram_shards", [])]
+    pending = pending_indices(done, NGRAM_SHARD_COUNT)
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        rows_per = 2_500_012
-        shards = 128
-        total = shards * rows_per
-        total_bytes = total * NGRAM_SLOT
-        saved = int(progress["ngram_rows"])
-        written = ngram_resume_row(saved, os.fstat(fd).st_size)
-        if written != saved:
-            progress["ngram_rows"] = written
-            _save_progress(dest, progress)
-            _log(f"n-gram cursor rewound to {written}")
-        if written == 0 and os.fstat(fd).st_size < total_bytes:
+        size = os.fstat(fd).st_size
+        if not done and size < total_bytes:
             preallocate(fd, total_bytes)
-        if written >= total:
-            return
-        if written:
-            _log(f"resume n-gram at row {written}/{total}")
-        shard = written // rows_per
-        local = written % rows_per
-        while shard < shards:
-            key = (
-                "model.language_model.layers.1.ple.ple_embedding."
-                f"ngram_embedding.shard_{shard}.weight"
-            )
-            _fd, _start, _dtype, shape = store._locate(key)
-            if list(shape) != [rows_per, NGRAM_WIDTH]:
-                message = f"{key} shape {shape}"
-                raise RuntimeError(message)
-            while local < rows_per:
-                count = min(4096, rows_per - local)
-                matrix = store.read_bf16(
-                    key, local * NGRAM_WIDTH, count * NGRAM_WIDTH, (count, NGRAM_WIDTH)
-                )
-                blob = ngram_slots(matrix)
-                os.pwrite(fd, blob, (shard * rows_per + local) * NGRAM_SLOT)
-                local += count
-                written += count
-                if local % (4096 * 16) == 0 or local == rows_per:
-                    os.fsync(fd)
-                    progress["ngram_rows"] = written
-                    _save_progress(dest, progress)
-                    _log(f"n-gram rows {written}/{total}")
-            shard += 1
-            local = 0
-        os.fsync(fd)
-        progress["ngram_rows"] = total
-        _save_progress(dest, progress)
+        elif size < total_bytes:
+            message = f"n-gram file is {size} bytes, expected {total_bytes}"
+            raise RuntimeError(message)
     finally:
         os.close(fd)
+    if not pending:
+        return
+    groups = ngram_file_groups(store.weight_map, pending)
+    _log(f"quantize n-gram, {len(pending)} tensors, {len(groups)} files")
+    with ProcessPoolExecutor(max_workers=LAYER_WORKERS) as pool:
+        futures = [
+            pool.submit(pack_ngram_shards, str(store.root), str(dest), group) for group in groups
+        ]
+        for future in as_completed(futures):
+            finished = [int(shard) for shard in future.result()]
+            progress.setdefault("ngram_shards", [])
+            progress["ngram_shards"].extend(finished)
+            _save_progress(dest, progress)
+            _log(f"n-gram shards {len(progress['ngram_shards'])}/{NGRAM_SHARD_COUNT}")

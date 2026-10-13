@@ -241,3 +241,101 @@ def test_complete_thinking_flag_enables_thinking(monkeypatch) -> None:
     assert pipeline.main(["complete", "--prompt", "2+2", "--thinking"]) == 0
     assert pipeline.main(["complete", "--prompt", "2+2"]) == 0
     assert seen == [True, False]
+
+
+def test_cold_image_is_page_aligned() -> None:
+    assert pipeline.cold_live_bytes() == 1_658_880
+    assert pipeline.cold_slot_bytes() == 1_671_168
+    assert pipeline.cold_slot_bytes() % pipeline.PAGE == 0
+    assert (128 * pipeline.cold_slot_bytes()) % pipeline.PREFERRED_IO == 0
+    planes = pipeline.expert_planes(2)
+    assert planes.down_inner == 1024
+    assert planes.gate_inner == 2560
+    gate = np.zeros((1280, 2560), np.float32)
+    down = np.zeros((2560, 640), np.float32)
+    image = pipeline.quantize_int2_image(gate)[0] + pipeline.quantize_int2_image(down)[0]
+    assert len(image) == pipeline.cold_live_bytes()
+
+
+def test_int2_block_matches_quantize_block() -> None:
+    values = [0.2, -0.3, 1.5, -1.5, 0.0, 0.05, -0.05, 0.4] + [0.0] * 24
+    codes, scale = pipeline.quantize_block(values, 2)
+    image, stored = pipeline.quantize_int2_image(
+        np.asarray(values, dtype=np.float32).reshape(1, 32), align_k=False
+    )
+    assert stored == 32
+    data_n, _scale_n = pipeline.int2_plane_sizes(1, 32)
+    got = [
+        pipeline.sign_extend(code, 2)
+        for code in pipeline.unpack_int2(image[:data_n], low_bits_first=True, count=32)
+    ]
+    assert got == codes
+    assert image[data_n] == scale
+
+
+def test_group_tier_skips_the_other_bank() -> None:
+    ids = np.array([[0, 1, 2], [2, 0, 3]], dtype=np.uint32)
+    experts, _offsets, tokens, inverse = pipeline.group_tier(ids, 2, 3, {0, 2})
+    assert experts.tolist() == [0, 2]
+    assert int(inverse[1]) == 0xFFFFFFFF
+    assert int(inverse[5]) == 0xFFFFFFFF
+    assert int(tokens.size) == 4
+
+
+def test_hot_ids_require_the_same_count(tmp_path) -> None:
+    path = tmp_path / "hot.json"
+    path.write_text('{"0": [0, 1], "1": [2]}')
+    try:
+        pipeline.load_hot_ids(path, 2, 4)
+    except RuntimeError as exc:
+        assert "differ" in str(exc)
+    else:
+        raise AssertionError("expected hot counts to differ")
+    path.write_text('{"0": [0, 1], "1": [1, 2]}')
+    assert pipeline.load_hot_ids(path, 2, 4) == [[0, 1], [1, 2]]
+
+
+def test_tier_file_and_resume_set(tmp_path) -> None:
+    slot = pipeline.PAGE
+    hot = tmp_path / "00-hot.bin"
+    cold = tmp_path / "00-cold.bin"
+    pipeline.write_tier_file(hot, [b"\x11" * 32, b"\x22" * 32], slot)
+    pipeline.write_tier_file(cold, [b"\x33" * 16], slot)
+    assert hot.stat().st_size == 2 * slot
+    blob = hot.read_bytes()
+    assert blob[:32] == b"\x11" * 32
+    assert blob[slot : slot + 32] == b"\x22" * 32
+    assert cold.read_bytes()[:16] == b"\x33" * 16
+    assert pipeline.pending_indices([0], 2) == [1]
+
+
+def test_ngram_tensors_do_not_overlap(tmp_path) -> None:
+    slot = pipeline.NGRAM_SLOT
+    path = tmp_path / "ngram.bin"
+    first = pipeline.ngram_byte_offset(0, 0)
+    second = pipeline.ngram_byte_offset(0, 10)
+    assert second - first == 10 * slot
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        os.pwrite(fd, b"\xab" * slot, first)
+        os.pwrite(fd, b"\xcd" * slot, second)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    blob = path.read_bytes()
+    assert blob[first : first + slot] == b"\xab" * slot
+    assert blob[second : second + slot] == b"\xcd" * slot
+    assert pipeline.pending_indices([0, 2], 4) == [1, 3]
+
+
+def test_ngram_groups_share_a_file() -> None:
+    def key(shard: int) -> str:
+        return (
+            "model.language_model.layers.1.ple.ple_embedding."
+            f"ngram_embedding.shard_{shard}.weight"
+        )
+
+    groups = pipeline.ngram_file_groups(
+        {key(0): "a.bin", key(1): "a.bin", key(2): "b.bin"}, [2, 0, 1]
+    )
+    assert groups == [[2], [0, 1]]

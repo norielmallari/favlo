@@ -13,8 +13,14 @@ import objc
 
 from qwen38_flash_next.checks import _ngram_row, _sample
 from qwen38_flash_next.convert import ShardStore, _layer_f32_keys, _layer_int4_keys
-from qwen38_flash_next.experts import ExpertAtlas, group_assignments
-from qwen38_flash_next.formats import BLOCK, int4_plane_sizes, stored_k_int4
+from qwen38_flash_next.experts import ExpertAtlas, group_tier
+from qwen38_flash_next.formats import (
+    BLOCK,
+    ExpertPlanes,
+    expert_planes,
+    int4_plane_sizes,
+    stored_k_int4,
+)
 from qwen38_flash_next.record import QuantRecord, _Bf16Ngram
 from qwen38_flash_next.session import (
     Dev,
@@ -78,14 +84,8 @@ class Qwen38Runtime:
         self._decoding = False
         self._force_sync = False
         self.atlas: ExpertAtlas | None = None
-        stored_down = stored_k_int4(self.moe, align_k=True)
-        gate_data, gate_scale = int4_plane_sizes(2 * self.moe, self.hidden)
-        self._gate_rows = 2 * self.moe
-        self._gate_scale = gate_data
-        self._down_weight = gate_data + gate_scale
-        down_data, _down_scale = int4_plane_sizes(self.hidden, stored_down)
-        self._down_scale = self._down_weight + down_data
-        self._down_inner = stored_down
+        self._hot = expert_planes(4, self.hidden, self.moe)
+        self._cold = expert_planes(2, self.hidden, self.moe)
         self.tokens: list[int] = []
         self.last_logits: Dev | None = None
         self._decode_tokens = 0
@@ -682,7 +682,7 @@ class Qwen38Runtime:
         shared = self._shared_expert(bundle, xs, count)
         self.gpu.io_fence(event)
         if count == 1:
-            return self._moe_decode(layer, xs, choice, weight, shared)
+            return self._moe_decode(layer, xs, weight, shared, host_ids)
         return self._moe_grouped(layer, xs, weight, shared, host_ids, count)
 
     def _shared_expert(self, bundle: dict[str, Any], xs: Dev, count: int) -> Dev:
@@ -711,40 +711,81 @@ class Qwen38Runtime:
             self.gpu.copy_into(mixed, out, index * hidden)
         return out
 
-    def _moe_decode(self, layer: int, xs: Dev, choice: Dev, weight: Dev, shared: Dev) -> Dev:
-        if self.atlas is None:
+    def _moe_decode(
+        self, layer: int, xs: Dev, weight: Dev, shared: Dev, host_ids: np.ndarray
+    ) -> Dev:
+        if self.atlas is None or not isinstance(self.files, QuantRecord):
             message = "decode has no expert atlas"
             raise RuntimeError(message)
         row = xs if xs.n == self.hidden else xs.view(0, self.hidden)
         shared_row = shared if shared.n == self.hidden else shared.view(0, self.hidden)
-        gate = self.gpu.moe_decode_gate(
+        ids = [int(expert) for expert in np.asarray(host_ids).reshape(-1).tolist()]
+        running = shared_row
+        for members, planes in (
+            (self.files.hot_set(layer), self._hot),
+            (self.files.cold_set(layer), self._cold),
+        ):
+            slots = [index for index, expert in enumerate(ids) if expert in members]
+            if not slots:
+                continue
+            running = self._decode_tier(
+                layer,
+                row,
+                running,
+                [ids[index] for index in slots],
+                weight,
+                slots,
+                planes,
+            )
+        return running
+
+    def _decode_tier(
+        self,
+        layer: int,
+        row: Dev,
+        shared_row: Dev,
+        ids: list[int],
+        weight: Dev,
+        slots: list[int],
+        planes: ExpertPlanes,
+    ) -> Dev:
+        if self.atlas is None:
+            message = "decode has no expert atlas"
+            raise RuntimeError(message)
+        choice = self.gpu.dev_u32(ids)
+        compact = self.gpu.tmp(len(slots))
+        self.gpu.gather_f32(weight, self.gpu.dev_u32(slots), compact, len(slots))
+        weight = compact
+        gate_fn = self.gpu.moe_decode_gate if planes.bits == 4 else self.gpu.moe_decode_gate_int2
+        down_fn = self.gpu.moe_decode_down if planes.bits == 4 else self.gpu.moe_decode_down_int2
+        gate = gate_fn(
             row,
             self.atlas.atlas,
             self.atlas.table,
             choice,
-            self.top_k,
+            len(ids),
             layer * self.experts,
-            self._gate_rows,
-            self.hidden,
+            planes.gate_rows,
+            planes.gate_inner,
             0,
-            self._gate_scale,
+            planes.gate_scale,
             self.atlas.miss,
             layer,
         )
-        activated = self.gpu.moe_activate(gate, self.top_k, self.moe, self._down_inner)
-        return self.gpu.moe_decode_down(
+        activated = self.gpu.moe_activate(gate, len(ids), self.moe, planes.down_inner)
+        return down_fn(
             activated,
             self.atlas.atlas,
             self.atlas.table,
             choice,
             weight,
             shared_row,
-            self.top_k,
+            len(ids),
             layer * self.experts,
             self.hidden,
-            self._down_inner,
-            self._down_weight,
-            self._down_scale,
+            planes.down_inner,
+            planes.down_weight,
+            planes.down_scale,
             self.atlas.miss,
             layer,
         )
@@ -758,10 +799,33 @@ class Qwen38Runtime:
         host_ids: np.ndarray,
         count: int,
     ) -> Dev:
+        if self.atlas is None or not isinstance(self.files, QuantRecord):
+            message = "prefill has no expert atlas"
+            raise RuntimeError(message)
+        mixed = self._moe_tier(
+            layer, xs, weight, shared, host_ids, count, self.files.hot_set(layer), self._hot
+        )
+        return self._moe_tier(
+            layer, xs, weight, mixed, host_ids, count, self.files.cold_set(layer), self._cold
+        )
+
+    def _moe_tier(
+        self,
+        layer: int,
+        xs: Dev,
+        weight: Dev,
+        shared: Dev,
+        host_ids: np.ndarray,
+        count: int,
+        members: set[int],
+        planes: ExpertPlanes,
+    ) -> Dev:
         if self.atlas is None:
             message = "prefill has no expert atlas"
             raise RuntimeError(message)
-        experts, offsets, tokens, inverse = group_assignments(host_ids, count, self.top_k)
+        experts, offsets, tokens, inverse = group_tier(host_ids, count, self.top_k, members)
+        if int(experts.size) == 0:
+            return shared
         n_assign = int(tokens.size)
         n_groups = int(experts.size)
         token_buf = self._upload_u32(tokens)
@@ -769,8 +833,9 @@ class Qwen38Runtime:
         offset_buf = self._upload_u32(offsets)
         inverse_buf = self._upload_u32(inverse)
         gathered = self.gpu.gather_half(xs, token_buf, n_assign, self.hidden, self.hidden)
-        gate = self.gpu.span(n_assign * self._gate_rows * 4)
-        self.gpu.moe_grouped(
+        gate = self.gpu.span(n_assign * planes.gate_rows * 4)
+        gemm = self.gpu.moe_grouped if planes.bits == 4 else self.gpu.moe_grouped_int2
+        gemm(
             gathered,
             self.atlas.atlas,
             self.atlas.table,
@@ -780,15 +845,15 @@ class Qwen38Runtime:
             self.atlas.miss,
             n_groups,
             layer * self.experts,
-            self._gate_rows,
-            self.hidden,
+            planes.gate_rows,
+            planes.gate_inner,
             0,
-            self._gate_scale,
+            planes.gate_scale,
             layer,
         )
-        activated = self.gpu.moe_activate(gate, n_assign, self.moe, self._down_inner)
+        activated = self.gpu.moe_activate(gate, n_assign, self.moe, planes.down_inner)
         down = self.gpu.span(n_assign * self.hidden * 4)
-        self.gpu.moe_grouped(
+        gemm(
             activated,
             self.atlas.atlas,
             self.atlas.table,
@@ -799,9 +864,9 @@ class Qwen38Runtime:
             n_groups,
             layer * self.experts,
             self.hidden,
-            self._down_inner,
-            self._down_weight,
-            self._down_scale,
+            planes.down_inner,
+            planes.down_weight,
+            planes.down_scale,
             layer,
         )
         return self.gpu.moe_scatter(
@@ -833,10 +898,14 @@ class Qwen38Runtime:
         buffers: list[tuple[int, Any]] = []
         loads: list[tuple[Any, int, int, int]] = []
         for expert in sorted(set(missing)):
+            tier, row = self.files.tier_row(layer, expert)
+            if tier != 0:
+                message = "the linear expert path reads int4 hot images"
+                raise RuntimeError(message)
             buf = self.gpu.alloc(self.files.live)
             buffers.append((expert, buf))
-            loads.append((buf, 0, self.files.live, expert * self.files.slot))
-        self.gpu.io_read(self.files.expert_io[layer], loads, gpu_wait=True)
+            loads.append((buf, 0, self.files.live, row * self.files.slot))
+        self.gpu.io_read(self.files.hot_io[layer], loads, gpu_wait=True)
         for expert, buf in buffers:
             self.expert_cache[(layer, expert)] = self._expert_views(buf)
 

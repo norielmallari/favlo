@@ -39,17 +39,46 @@ class QuantRecord:
         if self.manifest.get("version") != RECORD_VERSION or not self.manifest.get("complete"):
             message = f"quantized record is incomplete: {root}"
             raise RuntimeError(message)
-        self.expert_fds = [
-            os.open(root / "experts" / f"{layer:02d}.bin", os.O_RDONLY)
-            for layer in range(int(self.manifest["layers"]))
+        layers = int(self.manifest["layers"])
+        experts = int(self.manifest["experts"])
+        self.hot = [[int(expert) for expert in row] for row in self.manifest["hot"]]
+        if len(self.hot) != layers:
+            message = f"hot lists {len(self.hot)} do not match {layers} layers"
+            raise RuntimeError(message)
+        self._hot_sets = [set(row) for row in self.hot]
+        self._cold_sets: list[set[int]] = []
+        self._tier_row: list[dict[int, tuple[int, int]]] = []
+        for hot in self.hot:
+            mapping: dict[int, tuple[int, int]] = {}
+            for row, expert in enumerate(hot):
+                mapping[expert] = (0, row)
+            cold: set[int] = set()
+            cold_row = 0
+            for expert in range(experts):
+                if expert in mapping:
+                    continue
+                mapping[expert] = (1, cold_row)
+                cold.add(expert)
+                cold_row += 1
+            self._tier_row.append(mapping)
+            self._cold_sets.append(cold)
+        self.hot_fds = [
+            os.open(root / "experts" / f"{layer:02d}-hot.bin", os.O_RDONLY)
+            for layer in range(layers)
         ]
-        for fd in self.expert_fds:
+        self.cold_fds = [
+            os.open(root / "experts" / f"{layer:02d}-cold.bin", os.O_RDONLY)
+            for layer in range(layers)
+        ]
+        for fd in (*self.hot_fds, *self.cold_fds):
             _bypass_cache(fd)
         self.ngram_fd = os.open(root / "ngram.bin", os.O_RDONLY)
         _bypass_cache(self.ngram_fd)
         self.live = int(self.manifest["expert_live"])
         self.slot = int(self.manifest["expert_slot"])
-        self.expert_scratch = mmap.mmap(-1, self.live)
+        self.cold_live = int(self.manifest["cold_live"])
+        self.cold_slot = int(self.manifest["cold_slot"])
+        self.expert_scratch = mmap.mmap(-1, max(self.live, self.cold_live))
         self.page_scratch = mmap.mmap(-1, PAGE)
         self.pages: dict[int, bytes] = {}
         self.gate_up_bytes = sum(int4_plane_sizes(1280, stored_k_int4(2560, align_k=True)))
@@ -70,15 +99,36 @@ class QuantRecord:
 
         self.resident_io = handle(self.root / "resident.bin")
         self.ngram_io = handle(self.root / "ngram.bin")
-        self.expert_io = [
-            handle(self.root / "experts" / f"{layer:02d}.bin")
-            for layer in range(int(self.manifest["layers"]))
+        layers = int(self.manifest["layers"])
+        self.hot_io = [
+            handle(self.root / "experts" / f"{layer:02d}-hot.bin") for layer in range(layers)
+        ]
+        self.cold_io = [
+            handle(self.root / "experts" / f"{layer:02d}-cold.bin") for layer in range(layers)
         ]
 
+    def hot_set(self, layer: int) -> set[int]:
+        return self._hot_sets[layer]
+
+    def cold_set(self, layer: int) -> set[int]:
+        return self._cold_sets[layer]
+
+    def tier_row(self, layer: int, expert: int) -> tuple[int, int]:
+        return self._tier_row[layer][int(expert)]
+
+    def stride(self, tier: int) -> int:
+        return self.slot if tier == 0 else self.cold_slot
+
+    def payload(self, tier: int) -> int:
+        return self.live if tier == 0 else self.cold_live
+
+    def io_handle(self, layer: int, tier: int) -> Any:
+        return self.hot_io[layer] if tier == 0 else self.cold_io[layer]
+
     def expert_image(self, layer: int, expert: int) -> bytes:
-        view = pread_exact(
-            self.expert_fds[layer], self.live, expert * self.slot, self.expert_scratch
-        )
+        tier, row = self.tier_row(layer, expert)
+        fd = self.hot_fds[layer] if tier == 0 else self.cold_fds[layer]
+        view = pread_exact(fd, self.payload(tier), row * self.stride(tier), self.expert_scratch)
         blob = bytes(view)
         del view
         return blob

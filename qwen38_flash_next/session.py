@@ -433,12 +433,16 @@ class MetalSession:
             "rope_batch",
             "indexer_write",
             "qsa_attend",
+            "gather_f32",
             "gather_half",
             "moe_grouped",
             "moe_activate",
             "moe_scatter",
             "moe_decode_gate",
             "moe_decode_down",
+            "moe_grouped_int2",
+            "moe_decode_gate_int2",
+            "moe_decode_down_int2",
             "gemv_int4_f32",
         )
         self.act = {name: self._pipeline(library, name) for name in act_names}
@@ -1507,6 +1511,38 @@ class MetalSession:
         self.io_seconds += time.perf_counter() - started
         return int(value)
 
+    def io_submit_mixed(
+        self, groups: Sequence[tuple[Any, Sequence[tuple[Any, int, int, int]]]]
+    ) -> int:
+        """One command buffer for every tier, so the fence covers both files."""
+        pending = [(handle, loads) for handle, loads in groups if loads]
+        if not pending:
+            return 0
+        self.ensure_io()
+        started = time.perf_counter()
+        command = self._io.commandBuffer()
+        issued = 0
+        for handle, loads in pending:
+            for buffer, dest_off, size, src_off in loads:
+                _require_page(dest_off, size)
+                _require_page(src_off, size)
+                offset = 0
+                while offset < size:
+                    take = min(IO_CHUNK, size - offset)
+                    command.loadBuffer_offset_size_sourceHandle_sourceHandleOffset_(
+                        buffer, dest_off + offset, take, handle, src_off + offset
+                    )
+                    offset += take
+                    issued += 1
+        self._event_value += 1
+        value = self._event_value
+        command.signalEvent_value_(self._event, value)
+        command.commit()
+        self.io_loads += issued
+        self._io_pending.append(command)
+        self.io_seconds += time.perf_counter() - started
+        return int(value)
+
     def io_fence(self, value: int) -> None:
         if value:
             self._compute_waits_for(value)
@@ -1752,6 +1788,14 @@ class MetalSession:
         )
         return dst
 
+    def gather_f32(self, src: Dev, index: Dev, dst: Dev, n: int) -> None:
+        self._ew(
+            "gather_f32",
+            (_dev_bind(src), _dev_bind(index), _dev_bind(dst)),
+            (struct.pack("<I", n),),
+            max(n, 1),
+        )
+
     def moe_grouped(
         self,
         activation: Any,
@@ -1768,11 +1812,13 @@ class MetalSession:
         weight_off: int,
         scale_off: int,
         miss_index: int,
+        *,
+        kernel: str = "moe_grouped",
     ) -> None:
         if n_groups < 1:
             return
         self.dispatch(
-            self.act["moe_grouped"],
+            self.act[kernel],
             (
                 _bind_any(activation),
                 (atlas, 0),
@@ -1847,10 +1893,12 @@ class MetalSession:
         scale_off: int,
         miss: Any,
         miss_index: int,
+        *,
+        kernel: str = "moe_decode_gate",
     ) -> Dev:
         dst = self.tmp(topk * cols)
         self.dispatch(
-            self.act["moe_decode_gate"],
+            self.act[kernel],
             (
                 _dev_bind(activation),
                 (atlas, 0),
@@ -1889,10 +1937,12 @@ class MetalSession:
         scale_off: int,
         miss: Any,
         miss_index: int,
+        *,
+        kernel: str = "moe_decode_down",
     ) -> Dev:
         dst = self.tmp(cols)
         self.dispatch(
-            self.act["moe_decode_down"],
+            self.act[kernel],
             (
                 _bind_any(activation),
                 (atlas, 0),
@@ -1916,3 +1966,12 @@ class MetalSession:
             self._size(32),
         )
         return dst
+
+    def moe_grouped_int2(self, *args: Any, **kwargs: Any) -> None:
+        self.moe_grouped(*args, kernel="moe_grouped_int2", **kwargs)
+
+    def moe_decode_gate_int2(self, *args: Any, **kwargs: Any) -> Dev:
+        return self.moe_decode_gate(*args, kernel="moe_decode_gate_int2", **kwargs)
+
+    def moe_decode_down_int2(self, *args: Any, **kwargs: Any) -> Dev:
+        return self.moe_decode_down(*args, kernel="moe_decode_down_int2", **kwargs)
