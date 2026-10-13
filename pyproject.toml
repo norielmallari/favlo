@@ -18,6 +18,10 @@ dependencies = [
 dev = [
     "pytest>=8",
     "ruff>=0.12",
+    "agent-framework-openai>=1",
+]
+harness = [
+    "agent-framework-openai>=1",
 ]
 
 [project.scripts]
@@ -40,3 +44,4 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = [".", "src"]

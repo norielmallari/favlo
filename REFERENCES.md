@@ -100,7 +100,7 @@ Apple. WWDC25 session 262, *Combine Metal 4 machine learning and graphics.* A te
 
 Apple. WWDC26 session 330, *Optimize custom machine learning operations with Metal tensors.* Quantized data and the E8M0 scale plane are one multi-plane tensor. `matmul2d` dequantizes that tensor. The scale block in the sample is 32 by 1.
 
-The probe in `qwen38-flash-next.py` is the measurement of those rules on this M5 Pro. It is recorded in [ARCHITECTURE.md](ARCHITECTURE.md).
+The probe in `qwen38-flash-next.py` is the measurement of those rules on this M5 Pro. It is recorded in [docs/qwen38/probe.md](docs/qwen38/probe.md).
 
 ## Phase split
 

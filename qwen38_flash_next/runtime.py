@@ -37,6 +37,12 @@ from qwen38_flash_next.session import (
     _log,
     _tok_s,
 )
+from qwen38_flash_next.tools import (
+    continuing_ids,
+    forced_call_options,
+    function_name_options,
+    normalize_messages,
+)
 
 
 def after_atlas_load(resident: Sequence[int]) -> int:
@@ -117,6 +123,9 @@ class Qwen38Runtime:
         self._decode_seconds = 0.0
         self._decode_steps: list[tuple[float, float, int]] = []
         self.rng = np.random.default_rng()
+        self.tool_names: list[str] = []
+        self.required_function: str | None = None
+        self._token_pieces: list[str] | None = None
         self.gdn_state = {
             index: self.gpu.zeros(48 * 128 * 128 * 4)
             for index, kind in enumerate(self.kinds)
@@ -230,6 +239,7 @@ class Qwen38Runtime:
         self._decode_seconds = 0.0
         self._decode_steps = []
         self._hit_limit = False
+        produced_ids: list[int] = []
         produced = 0
         while True:
             if max_tokens is not None and produced >= max_tokens:
@@ -239,11 +249,12 @@ class Qwen38Runtime:
             if (len(self.tokens) + 1) // 4 > 512:
                 self._hit_limit = True
                 return
-            token = self._pick(logits, temperature, top_p, top_k)
+            token = self._pick(logits, temperature, top_p, top_k, produced_ids)
             if token in self.stop_ids:
                 return
             yield token
             produced += 1
+            produced_ids.append(token)
             logits = self.forward([token], decode=True)
 
     def _log_decode(self) -> None:
@@ -269,10 +280,52 @@ class Qwen38Runtime:
                 f"{len(steady) / gpu:.2f} tok/s ({len(steady)} tok in {gpu:.2f}s gpu)"
             )
 
-    def _pick(self, logits: Any, temperature: float, top_p: float, top_k: int) -> int:
+    def _pick(
+        self,
+        logits: Any,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        produced: list[int],
+    ) -> int:
+        if self.tool_names and isinstance(logits, Dev):
+            constrained = self._constrained_name(logits, temperature, produced)
+            if constrained is not None:
+                return constrained
         if isinstance(logits, Dev):
             return self.gpu.sample(logits, temperature, top_p, top_k, self.rng)
         return _sample(logits, temperature, top_p, top_k, self.rng)
+
+    def _constrained_name(self, logits: Dev, temperature: float, produced: list[int]) -> int | None:
+        """Draw among tokens that finish a required call opening or a declared name."""
+        text = self.decode(produced) if produced else ""
+        options = forced_call_options(text, self.required_function)
+        if options is None and produced:
+            options = function_name_options(text, self.tool_names)
+        if not options:
+            return None
+        allowed = continuing_ids(options, self._pieces())
+        if not allowed:
+            return None
+        raw = _buffer_slice(logits.buf, logits.offset * 4, logits.n * 4)
+        values = np.frombuffer(raw, dtype=np.float32)
+        ids = np.asarray(allowed, dtype=np.int64)
+        chosen = values[ids]
+        if temperature <= 0.0 or not np.isfinite(chosen).any():
+            return int(ids[int(np.argmax(chosen))])
+        scaled = chosen / temperature
+        scaled = scaled - np.max(scaled)
+        weights = np.exp(scaled)
+        total = float(np.sum(weights))
+        if total == 0.0 or not np.isfinite(total):
+            return int(ids[int(np.argmax(chosen))])
+        return int(self.rng.choice(ids, p=weights / total))
+
+    def _pieces(self) -> list[str]:
+        if self._token_pieces is None:
+            size = int(self.tokenizer.get_vocab_size())
+            self._token_pieces = [self.tokenizer.decode([index]) for index in range(size)]
+        return self._token_pieces
 
     def forward(self, tokens: list[int], *, decode: bool = False) -> Dev:
         started = time.perf_counter()
@@ -1386,7 +1439,7 @@ class Qwen38Runtime:
 
         template = Environment().from_string(self.chat_template)
         text = template.render(
-            messages=messages,
+            messages=normalize_messages(messages),
             tools=tools,
             add_generation_prompt=True,
             enable_thinking=enable_thinking,

@@ -7,6 +7,7 @@ import json
 import queue
 import sys
 import threading
+import time
 import traceback
 from collections.abc import Iterator, Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,6 +23,7 @@ from qwen38_flash_next.grove import write_grove
 from qwen38_flash_next.probe import matmul, probe
 from qwen38_flash_next.runtime import Qwen38Runtime
 from qwen38_flash_next.session import _append_transcript, _log, _prompt_text
+from qwen38_flash_next.tools import ContentGate, parse_tool_calls, required_function, tool_names
 
 
 def _checkpoint(path: Path | None) -> Path:
@@ -178,26 +180,40 @@ def serve(args: Any) -> int:
                 temperature, top_p, top_k = _sampling(body, enable_thinking)
                 stream = bool(body.get("stream", False))
                 with lock:
-                    prompt = runtime.encode_chat(messages, tools, enable_thinking)
-                    _log(f"prompt tokens {len(prompt)}")
-                    if stream:
-                        self._stream(
-                            prompt,
-                            max_tokens,
-                            temperature,
-                            top_p,
-                            top_k,
-                            _prompt_text(messages),
-                        )
-                    else:
-                        tokens = runtime.generate(
-                            prompt, max_tokens, temperature, top_p, top_k
-                        )
-                        text = runtime.decode(tokens)
-                        _log(f"completion: {text}")
-                        _append_transcript(args.transcript, _prompt_text(messages), text)
-                        reason = "length" if runtime._hit_limit else "stop"
-                        self._json(200, _completion(text, len(prompt), len(tokens), reason))
+                    runtime.tool_names = tool_names(tools)
+                    runtime.required_function = required_function(body.get("tool_choice"))
+                    try:
+                        prompt = runtime.encode_chat(messages, tools, enable_thinking)
+                        _log(f"prompt tokens {len(prompt)}")
+                        if stream:
+                            self._stream(
+                                prompt,
+                                max_tokens,
+                                temperature,
+                                top_p,
+                                top_k,
+                                _prompt_text(messages),
+                            )
+                        else:
+                            tokens = runtime.generate(
+                                prompt, max_tokens, temperature, top_p, top_k
+                            )
+                            text = runtime.decode(tokens)
+                            content, calls = parse_tool_calls(text)
+                            _log(f"completion: {text}")
+                            _append_transcript(args.transcript, _prompt_text(messages), text)
+                            if calls:
+                                reason = "tool_calls"
+                            else:
+                                reason = "length" if runtime._hit_limit else "stop"
+                                content = text
+                            self._json(
+                                200,
+                                _completion(content, len(prompt), len(tokens), reason, calls),
+                            )
+                    finally:
+                        runtime.tool_names = []
+                        runtime.required_function = None
             except Exception as exc:
                 traceback.print_exc()
                 if self._started:
@@ -232,25 +248,69 @@ def serve(args: Any) -> int:
             else:
                 logits = runtime.forward(prompt[start:])
 
+            gate = ContentGate()
+
             def emit(piece: str) -> None:
-                self._event(
-                    {
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {"content": piece},
-                                "finish_reason": None,
-                            }
-                        ]
-                    }
-                )
+                visible = gate.push(piece)
+                if visible:
+                    self._event(
+                        {
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"content": visible},
+                                    "finish_reason": None,
+                                }
+                            ]
+                        }
+                    )
 
             previous = _drain_stream(
                 runtime,
                 runtime._new_tokens(logits, max_tokens, temperature, top_p, top_k),
                 emit,
             )
-            reason = "length" if runtime._hit_limit else "stop"
+            tail = gate.finish()
+            if tail:
+                emit_content = {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": tail},
+                            "finish_reason": None,
+                        }
+                    ]
+                }
+                self._event(emit_content)
+            _content, calls = parse_tool_calls(previous)
+            if calls:
+                for index, call in enumerate(calls):
+                    self._event(
+                        {
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "index": index,
+                                                "id": call["id"],
+                                                "type": "function",
+                                                "function": {
+                                                    "name": call["function"]["name"],
+                                                    "arguments": call["function"]["arguments"],
+                                                },
+                                            }
+                                        ]
+                                    },
+                                    "finish_reason": None,
+                                }
+                            ]
+                        }
+                    )
+                reason = "tool_calls"
+            else:
+                reason = "length" if runtime._hit_limit else "stop"
             self._event({"choices": [{"index": 0, "delta": {}, "finish_reason": reason}]})
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
@@ -369,16 +429,25 @@ def _request_limit(body: dict[str, Any]) -> int | None:
 
 
 def _completion(
-    text: str, prompt_tokens: int, completion_tokens: int, finish_reason: str
+    text: str | None,
+    prompt_tokens: int,
+    completion_tokens: int,
+    finish_reason: str,
+    tool_calls: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    message: dict[str, Any] = {"role": "assistant", "content": text}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+        finish_reason = "tool_calls"
     return {
         "id": "chatcmpl-madmetal",
         "object": "chat.completion",
+        "created": int(time.time()),
         "model": "qwen38-flash-next",
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": text},
+                "message": message,
                 "finish_reason": finish_reason,
             }
         ],
@@ -404,7 +473,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     quant_parser.add_argument("--super", type=Path, default=None)
     serve_parser = sub.add_parser("serve", help="serve the quantized record")
     serve_parser.add_argument("--host", default="127.0.0.1")
-    serve_parser.add_argument("--port", type=int, default=8000)
+    serve_parser.add_argument("--port", type=int, default=8129)
     serve_parser.add_argument("--record", type=Path, default=None)
     serve_parser.add_argument(
         "--transcript",

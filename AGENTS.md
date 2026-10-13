@@ -2,7 +2,7 @@
 
 Starting point for coding agents in **MADMetal**.
 
-Read this file first. Then read [ARCHITECTURE.md](ARCHITECTURE.md). The papers and specifications the math is taken from are [REFERENCES.md](REFERENCES.md). Product name and the one-pipeline rule are [README.md](README.md). If another doc disagrees with the architecture, **ARCHITECTURE.md wins**.
+Read this file first. Then read [ARCHITECTURE.md](ARCHITECTURE.md). The record, the n-gram hash, the kernel schedule, and the probe are in [docs/qwen38/](docs/qwen38/record.md). The papers and specifications the math is taken from are [REFERENCES.md](REFERENCES.md). Product name and the one-pipeline rule are [README.md](README.md). If another doc disagrees with the architecture, **ARCHITECTURE.md wins**.
 
 ## What this repo is
 
@@ -16,7 +16,7 @@ The runtime does not call into a multi-model server to run the forward.
 
 - `qwen38_flash_next`: BF16 calibration prefill, converter to native records, and the text runtime for that model. `qwen38-flash-next.py` is the entry the command loads.
 - `madmetal` command that dispatches one model flag onto one pipeline entry.
-- OpenAI-compatible `GET /v1/models` and `POST /v1/chat/completions`, one request at a time, with streaming, tools, and a grammar on the tool-call span.
+- OpenAI-compatible `GET /v1/models` and `POST /v1/chat/completions`, one request at a time, with streaming and tools. While a function name is open, the sampler keeps only tokens that continue a name from the request. A `tool_choice` that names one function forces that call's opening.
 - Prefix cache of that model's full state.
 - Expert records streamed from SSD by Metal IO into a resident atlas. Consecutive ids are one sequential load of the live images.
 
@@ -44,10 +44,13 @@ qwen38_flash_next/         this model's pipeline
   session.py               device buffers and shaders
   checks.py                host formulas for the kernel checks
   record.py                the file the shaders read
+  tools.py                 tool-call text parsed into OpenAI messages
   experts.py               resident expert atlas
   runtime.py               the forward
   commands.py              quantize, bf16, complete, serve
 src/madmetal/              process entry; selects one pipeline and stops
+harness/                   file-agent client for the smoke test
+docs/qwen38/               record, n-gram, schedule, and probe notes
 pyproject.toml
 ```
 
@@ -65,10 +68,10 @@ The calibration prompt strings are data in a bucket JSON: `tool_calling`, `chat`
 
 1. One process, one model flag, one pipeline package. The command loads that package through one hyphenated entry file.
 2. The pipeline package owns the math. Shared code is limited to process entry and pieces that are not the model, and only when a second pipeline exists to share them.
-3. Weights on disk for this model are the Metal records in ARCHITECTURE.md.
+3. Weights on disk for this model are the Metal records in [docs/qwen38/record.md](docs/qwen38/record.md). The tier rules are in ARCHITECTURE.md.
 4. The key/value cache defaults to BF16 for every cached token. fp8 E4M3 and E5M2 are a switch.
-5. Do not invent routing hits, calibration energies, or hidden-state errors. The device roundtrip in ARCHITECTURE.md measures nibble order and int4 endpoints before the expert table is packed.
-6. Keep ARCHITECTURE.md current in the same change that alters the pipeline, the records, the cache, the endpoint, or the scope.
+5. Do not invent routing hits, calibration energies, or hidden-state errors. The device roundtrip in [docs/qwen38/probe.md](docs/qwen38/probe.md) measures nibble order and int4 endpoints before the expert table is packed.
+6. Keep ARCHITECTURE.md current in the same change that alters the pipeline, the records, the cache, the endpoint, or the scope. Update the note in `docs/qwen38/` that owns a layout, the n-gram hash, the kernel schedule, or the probe. ARCHITECTURE.md wins if they disagree.
 7. This process is the runtime. Re-implement from public research documents. Do not use another application's source as the reference, and do not launch another application's environment.
 8. Prefill, decode, and the calibration prefill map onto Metal. The endpoint serves tokens those shaders produced. A missing kernel stays missing. It is not replaced by a slower forward.
 
@@ -98,10 +101,11 @@ uv run madmetal --qwen38-flash-next matmul
 uv run madmetal --qwen38-flash-next kernels
 uv run madmetal --qwen38-flash-next quantize
 uv run madmetal --qwen38-flash-next serve
+uv run python -m harness --base-url http://127.0.0.1:8129/v1 --workspace ./note-workspace
 ```
 
-`quantize` reads the Hugging Face BF16 shards once and writes the record. `--hot` selects the int4 keep set. `--super` lifts listed ids out of that keep set into resident int8. The complement of the keep set is int2. Running it again on the same output continues from `quantize_progress.json`. After the manifest is written it stores one greedy grove completion in `grove.json`. `serve` reads that record. A request does not quantize a weight.
+`quantize` reads the Hugging Face BF16 shards once and writes the record. `--hot` selects the int4 keep set. `--super` lifts listed ids out of that keep set into resident int8. The complement of the keep set is int2. Running it again on the same output continues from `quantize_progress.json`. After the manifest is written it stores one greedy grove completion in `grove.json`. `serve` reads that record. A request does not quantize a weight. `pytest` includes the file agent: it starts `serve` and checks that create, edit, and confirm land in the workspace. `python -m harness` is that client against an already running server.
 
-`probe` writes one block of 32 and reads it back on the GPU. It is the measurement in ARCHITECTURE.md. It does not pack an expert.
+`probe` writes one block of 32 and reads it back on the GPU. It is the measurement in [docs/qwen38/probe.md](docs/qwen38/probe.md). It does not pack an expert.
 
 `matmul` runs one int4 E8M0 tile through `matmul2d` and the decode shader dot. Those are the prefill and decode primitives. They do not load the checkpoint.

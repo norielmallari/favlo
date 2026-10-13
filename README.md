@@ -6,14 +6,23 @@ The author admires the work of the authors of [oMLX](https://github.com/jundot/o
 
 One model, one inference pipeline. MADMetal does not host a family of models behind a shared runner. Each model owns its forward, its weight records, and its Metal kernels. The `madmetal` command loads that model's entry file.
 
+The first pipeline is Qwen3.8-Flash-Next on an M5 Pro: native Metal tensor records, a single-request OpenAI-compatible server, and a prefix cache for agentic coding. `qwen38-flash-next.py` loads the `qwen38_flash_next` package. The as-built contract is [ARCHITECTURE.md](ARCHITECTURE.md). The papers and specifications are [REFERENCES.md](REFERENCES.md). Agents start at [AGENTS.md](AGENTS.md).
+
+## Running the Server
+
+`serve` listens on `127.0.0.1:8129`.
+
 ```text
 uv sync --extra dev
-uv run madmetal --qwen38-flash-next probe
+uv run madmetal --qwen38-flash-next serve
+uv run python -m harness --workspace ./note-workspace
 ```
 
-That flag loads `qwen38-flash-next.py`. The `qwen38_flash_next` package beside that file holds the forward. `probe` measures one block of 32 on the GPU. It does not pack weights.
+The harness is a [Microsoft Agent Framework](https://github.com/microsoft/agent-framework) client. It creates a file, replaces its text, and confirms the result.
 
-The first pipeline is Qwen3.8-Flash-Next on an M5 Pro: native Metal tensor records, a single-request OpenAI-compatible server, and a prefix cache for agentic coding. The as-built contract is [ARCHITECTURE.md](ARCHITECTURE.md). The papers and specifications are [REFERENCES.md](REFERENCES.md). Agents start at [AGENTS.md](AGENTS.md).
+## Milestone
+
+The first milestone is that agentic loop on this server.
 
 ## Development
 
