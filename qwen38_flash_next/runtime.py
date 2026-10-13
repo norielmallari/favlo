@@ -79,6 +79,9 @@ class Qwen38Runtime:
         self.expert_cache: dict[tuple[int, int], tuple[Int4Matrix, Int4Matrix]] = {}
         self._choice: dict[int, Dev] = {}
         self._choice_ids = self.gpu.alloc(self.layers * self.top_k * 4)
+        self._predicted: dict[int, list[int]] = {}
+        self._prefetch_events: dict[int, int] = {}
+        self._prefetch_protect: set[tuple[int, int]] = set()
         self._residual_buf: Any = None
         self._residual_n = 0
         self._decoding = False
@@ -230,11 +233,15 @@ class Qwen38Runtime:
     def forward(self, tokens: list[int], *, decode: bool = False) -> Dev:
         started = time.perf_counter()
         self._decoding = decode
-        self.gpu.begin_scratch(max(256 << 20, len(tokens) * (8 << 20)))
+        self.gpu.begin_scratch(
+            max(256 << 20, len(tokens) * (8 << 20)),
+            copies=2 if decode else 1,
+        )
         streamed = self.atlas.streamed if self.atlas is not None else 0
         if self.atlas is not None:
             _fill_buffer(self.atlas.miss, self.layers * 4, 0)
         if decode and self.atlas is not None:
+            self._prefetch_decode()
             self._capture_recurrent()
         logits = self._forward_body(tokens)
         self.gpu.flush()
@@ -287,6 +294,8 @@ class Qwen38Runtime:
                     held = len(self.expert_cache)
                     self.expert_cache.clear()
                 self._inject_dev(residual, hats, mixed, bundle["mlp_inject"], count)
+                if self._decoding and self.atlas is not None:
+                    self.gpu.submit()
                 if self._bf16:
                     _log(f"layer {layer} stepped {count} experts {held}")
         self.gpu.rewind_scratch()
@@ -327,6 +336,19 @@ class Qwen38Runtime:
             return False
         raw = _buffer_bytes(self.atlas.miss, self.layers * 4)
         return bool(np.frombuffer(raw, dtype=np.uint32).any())
+
+    def _prefetch_decode(self) -> None:
+        """Queue the previous token's experts before this token's shaders start."""
+        self._prefetch_events = {}
+        if self.atlas is None or not self._predicted:
+            self._prefetch_protect = set()
+            return
+        protect = {
+            (layer, expert) for layer, ids in self._predicted.items() for expert in ids
+        }
+        self._prefetch_protect = protect
+        for layer, ids in self._predicted.items():
+            self._prefetch_events[layer] = self.atlas.stage(layer, ids, protect)
 
     def _capture_recurrent(self) -> None:
         self._kv_snap = {
@@ -678,7 +700,13 @@ class Qwen38Runtime:
         # Stage before the expert kernels. A miss would zero that layer and
         # change every later route, so the token would have to be replayed.
         host_ids = self.gpu.read_u32(choice)
-        event = self.atlas.stage(layer, host_ids.tolist())
+        rows = np.asarray(host_ids, dtype=np.uint32).reshape(count, self.top_k)
+        self._predicted[layer] = [int(item) for item in rows[-1].tolist()]
+        protect = self._prefetch_protect if self._decoding else None
+        event = self.atlas.stage(layer, host_ids.tolist(), protect)
+        queued = self._prefetch_events.pop(layer, 0)
+        if queued > event:
+            event = queued
         shared = self._shared_expert(bundle, xs, count)
         self.gpu.io_fence(event)
         if count == 1:

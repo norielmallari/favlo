@@ -411,6 +411,8 @@ kernel void indexer_write(
     cache[(base + token) * 128u + col] = index_qk[token * 640u + 512u + col];
 }
 
+// Sixteen simdgroups split the visible keys and values. One simdgroup walking
+// the whole cache leaves the GPU idle once the sequence is long.
 kernel void qsa_attend(
     device const float* query [[buffer(0)]],
     device const float* gate [[buffer(1)]],
@@ -420,51 +422,109 @@ kernel void qsa_attend(
     constant uint& count [[buffer(5)]],
     constant uint& base [[buffer(6)]],
     constant float& scale [[buffer(7)]],
+    constant uint& groups [[buffer(8)]],
     uint head [[threadgroup_position_in_grid]],
-    uint lane [[thread_index_in_simdgroup]])
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]])
 {
     threadgroup float scores[2052];
+    threadgroup float red[16];
     uint kv = head / 12u;
     for (uint token = 0u; token < count; ++token) {
         device const float* qh = query + (token * 24u + head) * 256u;
         uint visible = base + token + 1u;
-        for (uint t = 0u; t < visible; ++t) {
+        for (uint t = simd; t < visible; t += groups) {
             device const float* kt = key + (t * 2u + kv) * 256u;
-            float acc = 0.0f;
+            float dot = 0.0f;
             for (uint d = lane; d < 256u; d += 32u) {
-                acc += qh[d] * kt[d];
+                dot += qh[d] * kt[d];
             }
-            float score = simd_sum(acc) * scale;
+            float score = simd_sum(dot) * scale;
             if (lane == 0u) {
                 scores[t] = score;
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        float maxs = -INFINITY;
-        for (uint t = 0u; t < visible; ++t) {
-            maxs = max(maxs, scores[t]);
+        float local_max = -INFINITY;
+        for (uint t = simd; t < visible; t += groups) {
+            local_max = max(local_max, scores[t]);
         }
+        local_max = simd_max(local_max);
         if (lane == 0u) {
-            for (uint t = 0u; t < visible; ++t) {
+            red[simd] = local_max;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float maxs = -INFINITY;
+        for (uint s = 0u; s < groups; ++s) {
+            maxs = max(maxs, red[s]);
+        }
+        for (uint t = simd; t < visible; t += groups) {
+            if (lane == 0u) {
                 scores[t] = exp(scores[t] - maxs);
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        float denom = 0.0f;
-        for (uint t = 0u; t < visible; ++t) {
-            denom += scores[t];
+        float local_sum = 0.0f;
+        for (uint t = simd; t < visible; t += groups) {
+            local_sum += scores[t];
         }
-        device float* out = output + (token * 24u + head) * 256u;
-        device const float* gh = gate + (token * 24u + head) * 256u;
-        for (uint d = lane; d < 256u; d += 32u) {
-            float acc = 0.0f;
-            for (uint t = 0u; t < visible; ++t) {
-                device const float* vt = value + (t * 2u + kv) * 256u;
-                acc += scores[t] / denom * vt[d];
-            }
-            out[d] = acc * sigmoid_f(gh[d]);
+        if (lane == 0u) {
+            red[simd] = local_sum;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
+        float denom = 0.0f;
+        for (uint s = 0u; s < groups; ++s) {
+            denom += red[s];
+        }
+        float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+        float acc4 = 0.0f, acc5 = 0.0f, acc6 = 0.0f, acc7 = 0.0f;
+        for (uint t = simd; t < visible; t += groups) {
+            float weight = scores[t] / denom;
+            device const float* vt = value + (t * 2u + kv) * 256u;
+            acc0 += weight * vt[lane];
+            acc1 += weight * vt[lane + 32u];
+            acc2 += weight * vt[lane + 64u];
+            acc3 += weight * vt[lane + 96u];
+            acc4 += weight * vt[lane + 128u];
+            acc5 += weight * vt[lane + 160u];
+            acc6 += weight * vt[lane + 192u];
+            acc7 += weight * vt[lane + 224u];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        device float* out = output + (token * 24u + head) * 256u;
+        device const float* gh = gate + (token * 24u + head) * 256u;
+        for (uint s = 0u; s < groups; ++s) {
+            if (simd == s) {
+                float gated0 = acc0 * sigmoid_f(gh[lane]);
+                float gated1 = acc1 * sigmoid_f(gh[lane + 32u]);
+                float gated2 = acc2 * sigmoid_f(gh[lane + 64u]);
+                float gated3 = acc3 * sigmoid_f(gh[lane + 96u]);
+                float gated4 = acc4 * sigmoid_f(gh[lane + 128u]);
+                float gated5 = acc5 * sigmoid_f(gh[lane + 160u]);
+                float gated6 = acc6 * sigmoid_f(gh[lane + 192u]);
+                float gated7 = acc7 * sigmoid_f(gh[lane + 224u]);
+                if (s == 0u) {
+                    out[lane] = gated0;
+                    out[lane + 32u] = gated1;
+                    out[lane + 64u] = gated2;
+                    out[lane + 96u] = gated3;
+                    out[lane + 128u] = gated4;
+                    out[lane + 160u] = gated5;
+                    out[lane + 192u] = gated6;
+                    out[lane + 224u] = gated7;
+                } else {
+                    out[lane] += gated0;
+                    out[lane + 32u] += gated1;
+                    out[lane + 64u] += gated2;
+                    out[lane + 96u] += gated3;
+                    out[lane + 128u] += gated4;
+                    out[lane + 160u] += gated5;
+                    out[lane + 192u] += gated6;
+                    out[lane + 224u] += gated7;
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
     }
 }
 

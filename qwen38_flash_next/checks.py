@@ -14,7 +14,7 @@ from qwen38_flash_next.formats import (
     quantize_int2_image,
     quantize_matrix,
 )
-from qwen38_flash_next.session import MetalSession, _buffer_bytes
+from qwen38_flash_next.session import MetalSession, _buffer_bytes, _buffer_view
 
 
 def check_state_kernels() -> None:
@@ -58,6 +58,66 @@ def check_state_kernels() -> None:
     if not np.allclose(attended, expect, rtol=1e-4, atol=1e-4):
         message = "attention shader diverged"
         raise RuntimeError(message)
+    _check_qsa(session, rng)
+    _check_submit_keeps_scratch(session)
+
+
+def _check_qsa(session: MetalSession, rng: np.random.Generator) -> None:
+    count = 2
+    base = 40
+    span = base + count
+    query = rng.normal(size=(count, 24, 256)).astype(np.float32)
+    gate = rng.normal(size=(count, 24, 256)).astype(np.float32)
+    key = rng.normal(size=(span, 2, 256)).astype(np.float32)
+    value = rng.normal(size=(span, 2, 256)).astype(np.float32)
+    got = session.read_f32(
+        session.qsa_attend(
+            session.dev_from(query),
+            session.dev_from(gate),
+            session.upload(np.ascontiguousarray(key).tobytes()),
+            session.upload(np.ascontiguousarray(value).tobytes()),
+            count,
+            base,
+        )
+    ).reshape(count, 24, 256)
+    scale = 1.0 / math.sqrt(256.0)
+    expect = np.empty_like(query)
+    for token in range(count):
+        visible = base + token + 1
+        for head in range(24):
+            kv = head // 12
+            scores = key[:visible, kv] @ query[token, head] * scale
+            scores = scores - scores.max()
+            probs = np.exp(scores)
+            probs /= probs.sum()
+            expect[token, head] = probs @ value[:visible, kv] * _sigmoid(gate[token, head])
+    if not np.allclose(got, expect, rtol=1e-4, atol=1e-4):
+        message = "sparse attention shader diverged"
+        raise RuntimeError(message)
+
+
+def _check_submit_keeps_scratch(session: MetalSession) -> None:
+    session.begin_scratch(1 << 20, copies=2)
+    src = session.tmp(4)
+    raw = np.arange(4, dtype=np.float32)
+    _buffer_bytes_write(src, raw)
+    dst = session.alloc(16)
+    session.copy_bytes(src.buf, src.offset * 4, dst, 0, 16)
+    session.submit()
+    session.rewind_scratch()
+    other = session.tmp(4)
+    _buffer_bytes_write(other, np.zeros(4, dtype=np.float32))
+    session.flush()
+    got = np.frombuffer(_buffer_bytes(dst, 16), dtype=np.float32)
+    if not np.array_equal(got, raw):
+        message = "submitted scratch was overwritten before the GPU read it"
+        raise RuntimeError(message)
+
+
+def _buffer_bytes_write(src: Any, values: np.ndarray) -> None:
+    start = src.offset * 4
+    view = _buffer_view(src.buf, start + values.nbytes)
+    view[start : start + values.nbytes] = values.tobytes()
 
 
 def _rms(

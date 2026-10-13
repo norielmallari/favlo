@@ -362,18 +362,24 @@ class MetalSession:
         self.host_encode = 0.0
         self.wait_seconds = 0.0
         self._arena = None
+        self._arenas: list[Any] = []
+        self._arena_i = 0
         self._arena_used = 0
+        self._inflight: list[tuple[Any, list[Any], list[bytes]]] = []
+        self._spare: list[Any] = []
+        self._io_chain = 0
         self.io_seconds = 0.0
         self.io_loads = 0
         self._encoder = None
         self._command = None
         self._batch_launches = 0
+        self._command_wait = 0
         self._retain: list[Any] = []
         self._held_constants: list[bytes] = []
         self._io = None
         self._event = None
         self._event_value = 0
-        self._io_pending: list[Any] = []
+        self._io_pending: list[tuple[Any, int]] = []
         options = self.metal.MTLCompileOptions.alloc().init()
         options.setLanguageVersion_((4 << 16) + 1)
         library, error = _objc_pair(
@@ -485,9 +491,16 @@ class MetalSession:
             max(nbytes, 16), self.metal.MTLResourceStorageModeShared
         )
 
-    def begin_scratch(self, nbytes: int) -> None:
-        if self._arena is None or int(self._arena.length()) < nbytes:
-            self._arena = self.alloc(nbytes)
+    def begin_scratch(self, nbytes: int, *, copies: int = 1) -> None:
+        copies = 2 if copies > 1 else 1
+        if (
+            len(self._arenas) != copies
+            or self._arenas[0] is None
+            or int(self._arenas[0].length()) < nbytes
+        ):
+            self._arenas = [self.alloc(nbytes) for _ in range(copies)]
+        self._arena_i = 0
+        self._arena = self._arenas[0]
         self._arena_used = 0
 
     def rewind_scratch(self) -> None:
@@ -766,37 +779,76 @@ class MetalSession:
         self._batch_launches += 1
         self.host_encode += time.perf_counter() - started
 
-    def flush(self) -> None:
+    def _enqueue_open(self) -> None:
         if self._encoder is not None:
             self._encoder.endEncoding()
             self._encoder = None
         if self._command is None:
             return
-        started = time.perf_counter()
         command = self._command
         command.commit()
-        waited = time.perf_counter()
-        command.waitUntilCompleted()
-        self.wait_seconds += time.perf_counter() - waited
+        self._inflight.append((command, self._retain, self._held_constants, self._command_wait))
+        self._retain = []
+        self._held_constants = []
+        self._command_wait = 0
         self.launch_count += self._batch_launches
         self.command_count += 1
         self._batch_launches = 0
-        self.encode_seconds += time.perf_counter() - started
-        gpu_start = float(command.GPUStartTime())
-        gpu_end = float(command.GPUEndTime())
-        if gpu_end > gpu_start:
-            self.gpu_seconds += gpu_end - gpu_start
         self._command = None
-        self._retain.clear()
-        self._held_constants.clear()
+
+    def _flip_scratch(self) -> None:
+        if len(self._arenas) < 2:
+            return
+        self._arena_i ^= 1
+        self._arena = self._arenas[self._arena_i]
+        self._arena_used = 0
+
+    def submit(self) -> None:
+        """Commit the open buffer and keep encoding into the other scratch arena."""
+        self._enqueue_open()
+        self._flip_scratch()
+
+    def flush(self) -> None:
+        self._enqueue_open()
+        if not self._inflight:
+            self._retain.clear()
+            self._held_constants.clear()
+            return
+        started = time.perf_counter()
         pending = self._io_pending
         self._io_pending = []
-        if int(command.status()) != 4:
-            message = f"Metal command status {command.status()} {command.error()}"
-            raise RuntimeError(message)
-        for io_command in pending:
-            if int(io_command.status()) != 3:
-                message = f"Metal IO status {io_command.status()} {io_command.error()}"
+        inflight = self._inflight
+        self._inflight = []
+        ready = 0
+        for command, retained, _constants, waited_for in inflight:
+            waited = time.perf_counter()
+            command.waitUntilCompleted()
+            self.wait_seconds += time.perf_counter() - waited
+            gpu_start = float(command.GPUStartTime())
+            gpu_end = float(command.GPUEndTime())
+            if gpu_end > gpu_start:
+                self.gpu_seconds += gpu_end - gpu_start
+            self._recycle(retained)
+            if waited_for > ready:
+                ready = waited_for
+            if int(command.status()) != 4:
+                message = f"Metal command status {command.status()} {command.error()}"
+                raise RuntimeError(message)
+        self.encode_seconds += time.perf_counter() - started
+        self._retain.clear()
+        self._held_constants.clear()
+        for io_command, value in pending:
+            # Loads submitted for a later layer are still in flight. The host
+            # reads expert ids before that layer's fence, so Pending is expected.
+            if value > ready:
+                self._io_pending.append((io_command, value))
+                continue
+            status = int(io_command.status())
+            if status == 0:
+                io_command.waitUntilCompleted()
+                status = int(io_command.status())
+            if status != 3:
+                message = f"Metal IO status {status} {io_command.error()}"
                 raise RuntimeError(message)
 
     def tmp(self, n: int) -> Dev:
@@ -811,9 +863,24 @@ class MetalSession:
 
     def dev_u32(self, values: Sequence[int]) -> Dev:
         raw = np.asarray(list(values), dtype=np.uint32)
-        buf = self.upload(raw.tobytes())
+        blob = raw.tobytes()
+        buf = self._checkout(len(blob))
+        if blob:
+            _buffer_view(buf, len(blob))[:] = blob
         self._retain.append(buf)
         return Dev(buf, int(raw.size))
+
+    def _checkout(self, nbytes: int) -> Any:
+        for index, buf in enumerate(self._spare):
+            if int(buf.length()) >= nbytes:
+                return self._spare.pop(index)
+        return self.alloc(max(nbytes, 64))
+
+    def _recycle(self, buffers: list[Any]) -> None:
+        for buf in buffers:
+            if len(self._spare) >= 32 or int(buf.length()) > 4096:
+                continue
+            self._spare.append(buf)
 
     def read_f32(self, src: Dev) -> np.ndarray:
         self.flush()
@@ -1476,6 +1543,10 @@ class MetalSession:
         if self._io is not None:
             return
         desc = self.metal.MTLIOCommandQueueDescriptor.alloc().init()
+        # MTLIOPriorityHigh. A decode token queues one load per layer before the
+        # mixer, so the queue has to accept that many buffers without blocking.
+        desc.setPriority_(0)
+        desc.setMaxCommandBufferCount_(128)
         queue, error = _objc_pair(self.device.newIOCommandQueueWithDescriptor_error_(desc, None))
         if queue is None:
             message = f"Metal IO queue failed: {error}"
@@ -1483,13 +1554,32 @@ class MetalSession:
         self._io = queue
         self._event = self.device.newSharedEvent()
 
+    def _open_io(self) -> Any:
+        self.ensure_io()
+        command = self._io.commandBuffer()
+        if command is None:
+            message = "Metal IO command buffer was not vended"
+            raise RuntimeError(message)
+        # The queue is concurrent. Each buffer waits for the previous signal
+        # so a higher event value means the earlier loads have finished.
+        if self._io_chain:
+            command.waitForEvent_value_(self._event, self._io_chain)
+        return command
+
+    def _commit_io(self, command: Any) -> int:
+        self._event_value += 1
+        value = self._event_value
+        command.signalEvent_value_(self._event, value)
+        command.commit()
+        self._io_chain = value
+        return value
+
     def io_submit(self, handle: Any, loads: Sequence[tuple[Any, int, int, int]]) -> int:
         """Start loads and return the shared-event value compute should wait for."""
         if not loads:
             return 0
-        self.ensure_io()
         started = time.perf_counter()
-        command = self._io.commandBuffer()
+        command = self._open_io()
         issued = 0
         for buffer, dest_off, size, src_off in loads:
             _require_page(dest_off, size)
@@ -1502,12 +1592,9 @@ class MetalSession:
                 )
                 offset += take
                 issued += 1
-        self._event_value += 1
-        value = self._event_value
-        command.signalEvent_value_(self._event, value)
-        command.commit()
+        value = self._commit_io(command)
         self.io_loads += issued
-        self._io_pending.append(command)
+        self._io_pending.append((command, value))
         self.io_seconds += time.perf_counter() - started
         return int(value)
 
@@ -1518,9 +1605,8 @@ class MetalSession:
         pending = [(handle, loads) for handle, loads in groups if loads]
         if not pending:
             return 0
-        self.ensure_io()
         started = time.perf_counter()
-        command = self._io.commandBuffer()
+        command = self._open_io()
         issued = 0
         for handle, loads in pending:
             for buffer, dest_off, size, src_off in loads:
@@ -1534,12 +1620,9 @@ class MetalSession:
                     )
                     offset += take
                     issued += 1
-        self._event_value += 1
-        value = self._event_value
-        command.signalEvent_value_(self._event, value)
-        command.commit()
+        value = self._commit_io(command)
         self.io_loads += issued
-        self._io_pending.append(command)
+        self._io_pending.append((command, value))
         self.io_seconds += time.perf_counter() - started
         return int(value)
 
@@ -1555,9 +1638,8 @@ class MetalSession:
         gpu_wait: bool = False,
     ) -> None:
         """Load file ranges straight into buffers. ``loads`` is dest, dest byte, size, source."""
-        self.ensure_io()
         started = time.perf_counter()
-        command = self._io.commandBuffer()
+        command = self._open_io()
         issued = 0
         for buffer, dest_off, size, src_off in loads:
             # One load above 256MB returns MTLIOStatusError on this GPU.
@@ -1571,13 +1653,11 @@ class MetalSession:
                 )
                 offset += take
                 issued += 1
-        self._event_value += 1
-        command.signalEvent_value_(self._event, self._event_value)
-        command.commit()
+        value = self._commit_io(command)
         self.io_loads += issued
         if gpu_wait:
-            self._io_pending.append(command)
-            self._compute_waits_for(self._event_value)
+            self._io_pending.append((command, value))
+            self._compute_waits_for(value)
             self.io_seconds += time.perf_counter() - started
             return
         command.waitUntilCompleted()
@@ -1595,6 +1675,8 @@ class MetalSession:
             self._command = self.queue.commandBuffer()
             self._batch_launches = 0
         self._command.encodeWaitForEvent_value_(self._event, value)
+        if value > self._command_wait:
+            self._command_wait = value
 
     def ngram_dequant(self, handle: Any, rows: Sequence[int]) -> Dev:
         raw = self.span(len(rows) * NGRAM_SLOT)
@@ -1768,9 +1850,10 @@ class MetalSession:
                 struct.pack("<I", count),
                 struct.pack("<I", base),
                 struct.pack("<f", 1.0 / math.sqrt(256.0)),
+                struct.pack("<I", 16),
             ),
             self._size(24),
-            self._size(32),
+            self._size(512),
         )
         return dst
 
