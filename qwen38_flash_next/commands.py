@@ -232,12 +232,19 @@ def serve(args: Any) -> int:
                     runtime.required_function = required_function(body.get("tool_choice"))
                     runtime.required_closes = call_closes(tools, runtime.required_function)
                     close = runtime.tokenizer.encode("</think>").ids
+                    opened = runtime.tokenizer.encode("<think>").ids
                     if enable_thinking and len(close) == 1:
                         runtime._avoid_token = int(close[0])
                         runtime._avoid_until = 8
+                        runtime._block_tokens = set()
+                    elif not enable_thinking and len(opened) == 1:
+                        runtime._avoid_token = None
+                        runtime._avoid_until = 0
+                        runtime._block_tokens = {int(opened[0])}
                     else:
                         runtime._avoid_token = None
                         runtime._avoid_until = 0
+                        runtime._block_tokens = set()
                     penalty = body.get("presence_penalty")
                     runtime._presence_penalty = 0.0 if penalty is None else float(penalty)
                     frequency = body.get("frequency_penalty")

@@ -131,3 +131,13 @@ Options 1, 2, and 3 in [docs/decode-options/decode-options.md](docs/decode-optio
 ## Prompt text
 
 The calibration strings are data, not an algorithm. They are a bucket JSON: `tool_calling`, `chat`, `mixed`, `reasoning`, `code`, `en`, `ko`, `zh`, `ja`. `tool_calling` and `chat` are already chat-templated.
+
+## Benchmarks
+
+Jeffrey Zhou et al. *Instruction-Following Evaluation for Large Language Models.* [arXiv:2311.07911](https://arxiv.org/abs/2311.07911), 2023. IFEval. Prompt-level and instruction-level accuracy, strict and loose.
+
+Karl Cobbe et al. *Training Verifiers to Solve Math Word Problems.* [arXiv:2110.14168](https://arxiv.org/abs/2110.14168), 2021. GSM8K. The final number is the `####` line.
+
+Mark Chen et al. *Evaluating Large Language Models Trained on Code.* [arXiv:2107.03374](https://arxiv.org/abs/2107.03374), 2021. HumanEval. pass@1 is one sample against the published tests.
+
+The harness note is [docs/qwen38/benchmarks.md](docs/qwen38/benchmarks.md).

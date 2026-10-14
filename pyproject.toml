@@ -18,10 +18,18 @@ dependencies = [
 dev = [
     "pytest>=8",
     "ruff>=0.12",
+    "absl-py>=2",
     "agent-framework-openai>=1",
+    "immutabledict>=4",
+    "langdetect>=1.0.9",
+    "nltk>=3.9",
 ]
 harness = [
+    "absl-py>=2",
     "agent-framework-openai>=1",
+    "immutabledict>=4",
+    "langdetect>=1.0.9",
+    "nltk>=3.9",
 ]
 
 [project.scripts]
@@ -38,6 +46,7 @@ package = true
 target-version = "py312"
 line-length = 100
 src = ["src", "tests", "qwen38-flash-next.py", "qwen38_flash_next"]
+extend-exclude = ["harness/benchmarks/vendor"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

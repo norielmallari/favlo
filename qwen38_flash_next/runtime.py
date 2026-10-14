@@ -138,6 +138,7 @@ class Qwen38Runtime:
         self._atlas_trusted = False
         self._avoid_token: int | None = None
         self._avoid_until = 0
+        self._block_tokens: set[int] = set()
         self._presence_penalty = 0.0
         self._frequency_penalty = 0.0
         self._penalty_window = 20
@@ -421,6 +422,9 @@ class Qwen38Runtime:
                 and self._avoid_token < logits.n
             ):
                 self.gpu.suppress_logit(logits, self._avoid_token)
+            for token in self._block_tokens:
+                if token < logits.n:
+                    self.gpu.suppress_logit(logits, token)
             if banned is not None and banned < logits.n:
                 self.gpu.suppress_logit(logits, banned)
             for token in narrow:
@@ -436,7 +440,7 @@ class Qwen38Runtime:
                     for stop in self.stop_ids:
                         if stop < logits.n:
                             self.gpu.suppress_logit(logits, stop)
-        elif penalized or banned is not None or narrow:
+        elif penalized or banned is not None or narrow or self._block_tokens:
             logits = np.array(logits, copy=True)
             for token in penalized:
                 if token < int(logits.size):
@@ -444,6 +448,9 @@ class Qwen38Runtime:
             if banned is not None and banned < int(logits.size):
                 logits[int(banned)] = -1.0e30
             for token in narrow:
+                if token < int(logits.size):
+                    logits[int(token)] = -1.0e30
+            for token in self._block_tokens:
                 if token < int(logits.size):
                     logits[int(token)] = -1.0e30
         if isinstance(logits, Dev):

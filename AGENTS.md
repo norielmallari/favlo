@@ -49,7 +49,7 @@ qwen38_flash_next/         this model's pipeline
   runtime.py               the forward
   commands.py              quantize, bf16, complete, serve
 src/madmetal/              process entry; selects one pipeline and stops
-harness/                   file-agent client for the smoke test
+harness/                   file-agent client, coherence, and the three benchmarks
 docs/qwen38/               record, n-gram, schedule, and probe notes
 pyproject.toml
 ```
@@ -103,7 +103,10 @@ uv run madmetal --qwen38-flash-next quantize
 uv run madmetal --qwen38-flash-next serve
 uv run python -m harness --base-url http://127.0.0.1:8129/v1 --workspace ./note-workspace
 uv run python -m harness.long_prompt --tokens 65536
+uv run python -m harness.benchmarks
 ```
+
+`python -m harness.benchmarks` scores IFEval, GSM8K, and HumanEval. It records the first 100 rows of each, then continues through the full sets. `--sample-only` stops after the 100. That run is not part of `pytest`.
 
 `quantize` reads the Hugging Face BF16 shards once and writes the record. `--hot` selects the int4 keep set. `--super` lifts listed ids out of that keep set into resident int8. The complement of the keep set is int2. Running it again on the same output continues from `quantize_progress.json`. After the manifest is written it stores one greedy grove completion in `grove.json`. `serve` reads that record. A request does not quantize a weight. `pytest` includes the file agent: it starts `serve` and checks that create, edit, and confirm land in the workspace. `python -m harness` is that client against an already running server. `python -m harness.long_prompt` starts `serve`, reads repository files one turn at a time until the prompt reaches the token target, and prints the server's prefill and decode rates. That run is not part of `pytest`.
 
