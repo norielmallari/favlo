@@ -242,7 +242,14 @@ def serve(args: Any) -> int:
                         window=_penalty_window(body),
                     )
                     try:
-                        prompt = runtime.encode_chat(messages, tools, enable_thinking)
+                        effort = body.get("reasoning_effort")
+                        prompt = runtime.encode_chat(
+                            messages,
+                            tools,
+                            enable_thinking,
+                            reasoning_effort=effort if isinstance(effort, str) else None,
+                            continue_final=bool(body.get("continue_final_message")),
+                        )
                         _log(f"prompt tokens {len(prompt)}")
                         if stream:
                             self._stream(

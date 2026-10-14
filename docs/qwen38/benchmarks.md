@@ -1,19 +1,29 @@
 # Benchmarks
 
-The harness scores three published sets against `serve`. Thinking is off, and the open think tag stays out of the draw. The draw is greedy, temperature 0. Presence is omitted, so instruct mode uses the model card value of 1.5. Each request is one chat completion. A leading close tag is removed, and the checker reads the reply that follows. The sample is the first 100 rows of each file, in file order. The full run keeps those rows and continues through the rest. Responses resume from `artifacts/benchmarks`.
+The harness scores three published sets against `serve`. IFEval leaves thinking off, and the open think tag stays out of that draw. GSM8K and HumanEval turn thinking on at reasoning effort low. The draw is greedy, temperature 0. Presence is omitted on IFEval and GSM8K, so instruct mode uses the model card value of 1.5 and thinking mode uses 0. HumanEval sends presence 0. Each request is one chat completion. A leading close tag is removed, and the checker reads the reply that follows. An empty reply, or a reply with no function, is scored from the reasoning text when that text contains the function. The intelligence smoke is the first 30 rows of each file, in file order. The full run keeps those rows and continues through the rest. Responses resume from `artifacts/benchmarks`.
 
 ## Sets
 
 IFEval is Zhou et al., Apache-2.0, 541 prompts, checker commit `e6890f85757d`. The user message is the published prompt. A reply may run to 2048 tokens. The report is prompt-level and instruction-level accuracy, strict and loose.
 
-GSM8K is Cobbe et al., MIT, 1,319 test problems, data commit `b0bb162abedc`. The user message is the question plus one line asking for a final `####` number. The match is the published `####` extractor.
+GSM8K is Cobbe et al., MIT, 1,319 test problems, data commit `b0bb162abedc`. Thinking is on at reasoning effort low. The user message is the question, and the last line of the reply must be `####` and the final number. A reply may run to 1536 tokens. The match is the first number on the `####` line. Words and a currency sign may sit between the marker and the number. A reply with no such line uses its last number.
 
-HumanEval is Chen et al., MIT, 164 problems, checker commit `37c4dd63798c`. The user message asks for the function. A python fence is reduced to the function body, then the published tests run in a subprocess with a 3 second limit. The score is pass@1 for one greedy sample. A reply may run to 512 tokens. GSM8K replies may run to 768 tokens.
+HumanEval is Chen et al., MIT, 164 problems, checker commit `37c4dd63798c`. Thinking is on at reasoning effort low, and presence is 0, because a function body repeats indentation and keywords. The user message asks for the function. A python fence is reduced to the function body, then the published tests run in a subprocess with a 3 second limit. The score is pass@1 for one greedy sample. A reply may run to 1024 tokens.
 
 ```text
 uv run python -m harness.benchmarks
 uv run python -m harness.benchmarks --sample-only
+uv run python -m harness.benchmarks --sample-only --only humaneval
 ```
+
+## Intelligence smoke
+
+The smoke is the first 30 rows. A score at or above 0.80 after the tenth row has to hold through the thirtieth.
+
+<!-- smoke -->
+- GSM8K: n=30  27/30  0.900
+- HumanEval: n=30  23/30  0.767
+<!-- /smoke -->
 
 ## Sample of 100
 

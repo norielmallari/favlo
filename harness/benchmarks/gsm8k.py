@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 _DATA = Path(__file__).resolve().parent / "data" / "gsm8k" / "test.jsonl"
-_ANSWER = re.compile(r"#### (\-?[0-9\.\,]+)")
+_NUMBER = re.compile(r"-?[0-9][0-9,]*(?:\.[0-9]+)?")
 _INVALID = "[invalid]"
 
 
@@ -37,11 +37,23 @@ def messages(row: dict[str, str]) -> list[dict[str, str]]:
 
 
 def extract_answer(completion: str) -> str:
-    """The grade-school-math match: the first `####` number, commas removed."""
-    match = _ANSWER.search(completion)
-    if match is None:
+    """The final number, commas removed.
+
+    The first number on the ``####`` line wins. Words and a currency sign may
+    sit between the marker and that number. A reply with no such number uses
+    the last number in the text.
+    """
+    for line in completion.splitlines():
+        if "####" not in line:
+            continue
+        found = _NUMBER.findall(line.split("####", 1)[1])
+        if found:
+            return found[0].replace(",", "")
+        break
+    found = _NUMBER.findall(completion)
+    if not found:
         return _INVALID
-    return match.group(1).strip().replace(",", "")
+    return found[-1].replace(",", "")
 
 
 def correct(response: str, row: dict[str, str]) -> bool:

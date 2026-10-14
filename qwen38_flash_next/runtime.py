@@ -405,9 +405,18 @@ class Qwen38Runtime:
             and looped_span(produced)
         ):
             return self._avoid_token
+        fence_open = False
+        if (
+            self._avoid_token is not None
+            and self._avoid_token in produced
+            and len(produced) >= 16
+        ):
+            reply = self.decode(produced).split("</think>", 1)[-1]
+            fence_open = reply.count("```") % 2 == 1
         banned = repeated_cycle(produced)
         narrow = stuck_ids(produced)
-        repeat = answer_repeat_id(produced) if self._answer_mode else None
+        closed = self._avoid_token is not None and self._avoid_token in produced
+        repeat = answer_repeat_id(produced) if self._answer_mode or closed else None
         penalized: list[int] = []
         penalty = 0.0
         if self._frequency_penalty and produced:
@@ -440,7 +449,11 @@ class Qwen38Runtime:
                 closed = self._avoid_token in produced
                 if closed:
                     answered = len(produced) - 1 - produced.index(self._avoid_token)
-                hold_stop = (not closed and len(produced) < 64) or (closed and answered < 16)
+                hold_stop = (
+                    fence_open
+                    or (not closed and len(produced) < 64)
+                    or (closed and answered < 16)
+                )
                 if hold_stop:
                     for stop in self.stop_ids:
                         if stop < logits.n:
@@ -2394,7 +2407,12 @@ class Qwen38Runtime:
         return self._head
 
     def encode_chat(
-        self, messages: list[dict[str, Any]], tools: Any, enable_thinking: bool
+        self,
+        messages: list[dict[str, Any]],
+        tools: Any,
+        enable_thinking: bool,
+        reasoning_effort: str | None = None,
+        continue_final: bool = False,
     ) -> list[int]:
         from jinja2 import Environment
 
@@ -2402,14 +2420,27 @@ class Qwen38Runtime:
             raise RuntimeError(message)
 
         template = Environment().from_string(self.chat_template)
-        text = template.render(
-            messages=normalize_messages(messages),
-            tools=tools,
-            add_generation_prompt=True,
-            enable_thinking=enable_thinking,
-            raise_exception=raise_exception,
-        )
+        rendered = {
+            "messages": normalize_messages(messages),
+            "tools": tools,
+            "add_generation_prompt": not continue_final,
+            "enable_thinking": enable_thinking,
+            "raise_exception": raise_exception,
+        }
+        if reasoning_effort:
+            rendered["reasoning_effort"] = reasoning_effort
+        text = template.render(**rendered)
+        if continue_final:
+            text = _drop_final_close(text)
         return list(self.tokenizer.encode(text).ids)
 
     def decode(self, token_ids: list[int]) -> str:
         return self.tokenizer.decode(token_ids)
+
+
+def _drop_final_close(text: str) -> str:
+    """Leave the last assistant turn open so generation continues it."""
+    close = "<|im_end|>\n"
+    if text.endswith(close):
+        return text[: -len(close)]
+    return text

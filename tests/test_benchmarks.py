@@ -6,6 +6,13 @@ from harness.benchmarks import gsm8k, humaneval, ifeval
 from harness.benchmarks.serve import reply_text
 
 
+def test_code_detection_prefers_a_function() -> None:
+    from harness.benchmarks.serve import _has_code
+
+    assert _has_code("def f():\n    return 1\n")
+    assert not _has_code("Let me analyze the docstring.")
+
+
 def test_reply_text_drops_a_leading_close_tag() -> None:
     assert reply_text("</think>\n\nThe answer is 4.") == "The answer is 4."
     assert reply_text("The answer is 4.") == "The answer is 4."
@@ -16,6 +23,8 @@ def test_gsm8k_matches_the_published_number() -> None:
     assert len(rows) == 1319
     assert gsm8k.extract_answer("working\n#### 18") == "18"
     assert gsm8k.extract_answer("#### 1,024") == "1024"
+    assert gsm8k.extract_answer("#### The answer is $70,000.") == "70000"
+    assert gsm8k.extract_answer("The final answer is 540.") == "540"
     assert gsm8k.correct(rows[0]["answer"], rows[0]) is True
     assert gsm8k.correct("#### 0", rows[0]) is False
 
@@ -26,6 +35,9 @@ def test_humaneval_canonical_solution_passes() -> None:
     assert humaneval.passed(rows[0], rows[0]["canonical_solution"]) is True
     fenced = "```python\n" + rows[0]["prompt"] + rows[0]["canonical_solution"] + "\n```"
     assert humaneval.passed(rows[0], fenced) is True
+    strlen = next(row for row in rows if row["entry_point"] == "strlen")
+    renamed = "```python\ndef strlen(s: str) -> int:\n    return len(s)\n```"
+    assert humaneval.passed(strlen, renamed) is True
 
 
 def test_ifeval_sentence_tokenizer_is_vendored() -> None:

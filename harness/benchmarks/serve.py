@@ -101,6 +101,10 @@ def stop_server(proc: subprocess.Popen[str]) -> None:
         proc.kill()
 
 
+def _has_code(text: str) -> bool:
+    return "def " in text or "```" in text
+
+
 def reply_text(content: str) -> str:
     """Drop one leading close tag. The prompt already closed the think block."""
     stripped = content.lstrip()
@@ -113,18 +117,28 @@ def complete(
     port: int,
     messages: list[dict[str, str]],
     max_tokens: int,
+    *,
+    thinking: bool = False,
+    effort: str | None = None,
+    presence: float | None = None,
+    continue_final: bool = False,
 ) -> tuple[str, str, int]:
     """Greedy reply. Returns content, finish reason, and completion tokens."""
-    body = json.dumps(
-        {
-            "model": "qwen38-flash-next",
-            "messages": messages,
-            "stream": False,
-            "max_tokens": max_tokens,
-            "temperature": 0,
-            "enable_thinking": False,
-        }
-    ).encode()
+    payload: dict[str, object] = {
+        "model": "qwen38-flash-next",
+        "messages": messages,
+        "stream": False,
+        "max_tokens": max_tokens,
+        "temperature": 0,
+        "enable_thinking": thinking,
+    }
+    if effort:
+        payload["reasoning_effort"] = effort
+    if presence is not None:
+        payload["presence_penalty"] = presence
+    if continue_final:
+        payload["continue_final_message"] = True
+    body = json.dumps(payload).encode()
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}/v1/chat/completions",
         data=body,
@@ -136,5 +150,10 @@ def complete(
     choice = payload["choices"][0]
     message = choice.get("message") or {}
     content = reply_text(message.get("content") or "")
+    reasoning = message.get("reasoning_content") or ""
+    if reasoning and not _has_code(content) and _has_code(reasoning):
+        content = reasoning
+    elif not content.strip():
+        content = reasoning
     usage = payload.get("usage") or {}
     return content, str(choice.get("finish_reason") or ""), int(usage.get("completion_tokens") or 0)

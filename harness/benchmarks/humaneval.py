@@ -43,21 +43,23 @@ def messages(row: dict[str, str]) -> list[dict[str, str]]:
 
 
 def function_body(completion: str, entry_point: str) -> str:
-    """Keep the function body. A python fence is unwrapped first.
+    """Keep one function. A python fence is unwrapped first.
 
-    A reply that repeats the signature is cut after that signature. A reply
-    that is already the body is left indented, because the published prompt
-    already includes the signature and the docstring.
+    A reply that includes ``def {entry_point}`` is kept from that line. The
+    published prompt is still prepended, and this definition replaces it, so
+    a renamed parameter stays bound. A reply that is already the body is left
+    indented.
     """
     fenced = _FENCE.findall(completion)
     text = fenced[0] if fenced else completion
     needle = f"def {entry_point}"
     if needle in text:
-        signature = text.find(":\n", text.find(needle))
-        if signature >= 0:
-            text = text[signature + 2 :]
-    for stop in ("\ndef ", "\nclass ", "\nif __name__"):
+        text = text[text.find(needle) :]
+    for stop in ("\ndef ", "\nclass ", "\nif __name__", "\n```"):
         at = text.find(stop)
+        if needle in text and at >= 0 and text.startswith(needle):
+            # The stop must not cut the definition that starts this text.
+            at = text.find(stop, len(needle))
         if at >= 0:
             text = text[:at]
     if text and not text.endswith("\n"):

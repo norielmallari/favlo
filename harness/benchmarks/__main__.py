@@ -1,4 +1,4 @@
-"""Run the three suites, record the first 100, then finish each set."""
+"""Intelligence smoke: the first 30 of IFEval, GSM8K, and HumanEval."""
 
 from __future__ import annotations
 
@@ -13,7 +13,8 @@ from harness.benchmarks.serve import Server, complete
 
 _ROOT = Path(__file__).resolve().parents[2]
 _DOC = _ROOT / "docs" / "qwen38" / "benchmarks.md"
-_MAX_TOKENS = {"ifeval": 2048, "gsm8k": 768, "humaneval": 512}
+_SMOKE = 30
+_MAX_TOKENS = {"ifeval": 2048, "gsm8k": 1536, "humaneval": 1024}
 
 
 def _load_jsonl(path: Path) -> dict[str, dict[str, Any]]:
@@ -74,11 +75,28 @@ def _failed(name: str, row_id: str, detail: str) -> dict[str, Any]:
     return row
 
 
-def _ask(server: Server, messages: list[dict[str, str]], max_tokens: int):
+def _ask(
+    server: Server,
+    messages: list[dict[str, str]],
+    max_tokens: int,
+    *,
+    thinking: bool = False,
+    effort: str | None = None,
+    presence: float | None = None,
+    continue_final: bool = False,
+):
     last = "the server closed the connection"
     for _attempt in range(3):
         try:
-            return complete(server.port, messages, max_tokens)
+            return complete(
+                server.port,
+                messages,
+                max_tokens,
+                thinking=thinking,
+                effort=effort,
+                presence=presence,
+                continue_final=continue_final,
+            )
         except (OSError, json.JSONDecodeError) as exc:
             last = f"{type(exc).__name__}: {exc}"
             print(f"restarting server: {last}", flush=True)
@@ -95,12 +113,27 @@ def _run_rows(
 ) -> list[dict[str, Any]]:
     done = _load_jsonl(path)
     max_tokens = _MAX_TOKENS[name]
+    thinking = name in {"gsm8k", "humaneval"}
+    effort = "low" if thinking else None
+    # A function body repeats indentation and keywords. The instruct presence
+    # penalty suppresses those repeats, so HumanEval leaves presence at 0.
+    # Thinking stays on so the analysis is not the reply the tests execute.
+    presence = 0.0 if name == "humaneval" else None
+    continue_final = False
     scored: list[dict[str, Any]] = []
     for index, row in enumerate(rows, start=1):
         cached = done.get(str(row["id"]))
         if cached is None:
             started = time.perf_counter()
-            text, reason, tokens = _ask(server, row["messages"], max_tokens)
+            text, reason, tokens = _ask(
+                server,
+                row["messages"],
+                max_tokens,
+                thinking=thinking,
+                effort=effort,
+                presence=presence,
+                continue_final=continue_final,
+            )
             if reason == "error":
                 outcome = _failed(name, str(row["id"]), str(tokens))
             else:
@@ -146,14 +179,14 @@ def _fmt(summary: dict[str, Any] | None) -> str:
     return f"n={summary['n']}  {summary['correct']}/{summary['n']}  {summary['accuracy']:.3f}"
 
 
-def _write_doc(sample: dict[str, Any], full: dict[str, Any] | None) -> None:
+def _write_doc(smoke: dict[str, Any] | None, full: dict[str, Any] | None) -> None:
     text = _DOC.read_text()
-    sample_block = "\n".join(f"- {name}: {_fmt(summary)}" for name, summary in sample.items())
-    full_block = "not run"
+    if smoke is not None:
+        smoke_block = "\n".join(f"- {name}: {_fmt(summary)}" for name, summary in smoke.items())
+        text = _replace(text, "smoke", smoke_block)
     if full is not None:
         full_block = "\n".join(f"- {name}: {_fmt(summary)}" for name, summary in full.items())
-    text = _replace(text, "sample", sample_block)
-    text = _replace(text, "full", full_block)
+        text = _replace(text, "full", full_block)
     _DOC.write_text(text)
 
 
@@ -221,7 +254,7 @@ def _suite(
     return summary
 
 
-def run(output: Path, *, sample_only: bool) -> int:
+def run(output: Path, *, sample_only: bool, only: set[str] | None = None) -> int:
     server = Server()
     server.start()
     try:
@@ -231,19 +264,22 @@ def run(output: Path, *, sample_only: bool) -> int:
             ("gsm8k", _gsm_items(), _score_gsm, lambda rows: _rate(rows, "correct")),
             ("humaneval", _he_items(), _score_he, lambda rows: _rate(rows, "correct")),
         )
-        sample: dict[str, Any] = {}
+        if only:
+            suites = tuple(item for item in suites if item[0] in only)
+        smoke: dict[str, Any] = {}
         for name, items, score_row, summarize in suites:
-            sample[name] = _suite(name, server, items, output, score_row, summarize, 100)
-        (output / "sample-100.json").write_text(json.dumps(sample, indent=2) + "\n")
-        _write_doc(sample, None)
-        print("sample-100 recorded", flush=True)
+            smoke[name] = _suite(name, server, items, output, score_row, summarize, _SMOKE)
+        (output / "smoke.json").write_text(json.dumps(smoke, indent=2) + "\n")
+        if only is None:
+            _write_doc(smoke, None)
+        print("smoke recorded", flush=True)
         if sample_only:
             return 0
         full: dict[str, Any] = {}
         for name, items, score_row, summarize in suites:
             full[name] = _suite(name, server, items, output, score_row, summarize, None)
         (output / "full.json").write_text(json.dumps(full, indent=2) + "\n")
-        _write_doc(sample, full)
+        _write_doc(None, full)
         print("full recorded", flush=True)
     except Exception as exc:
         print(exc, flush=True)
@@ -264,10 +300,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--sample-only",
         action="store_true",
-        help="score the first 100 of each set and stop",
+        help="score the first 30 of each set and stop",
+    )
+    parser.add_argument(
+        "--only",
+        nargs="+",
+        choices=("ifeval", "gsm8k", "humaneval"),
+        help="score these sets and leave the others unread",
     )
     args = parser.parse_args(argv)
-    return run(args.output, sample_only=args.sample_only)
+    only = set(args.only) if args.only else None
+    return run(args.output, sample_only=args.sample_only, only=only)
 
 
 if __name__ == "__main__":
