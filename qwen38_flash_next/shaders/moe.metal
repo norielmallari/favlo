@@ -320,6 +320,13 @@ kernel void moe_add_weighted(
     );
 }
 
+static bool tier_accepts(uint want, device const uchar* tier, uint index) {
+    if (want == 255u) {
+        return true;
+    }
+    return uint(tier[index]) == want;
+}
+
 kernel void moe_decode_gate(
     device const float* activation [[buffer(0)]],
     device const uchar* atlas [[buffer(1)]],
@@ -327,19 +334,27 @@ kernel void moe_decode_gate(
     device const uint* ids [[buffer(3)]],
     device float* destination [[buffer(4)]],
     device uint* miss [[buffer(5)]],
-    constant uint& topk [[buffer(6)]],
-    constant uint& table_base [[buffer(7)]],
-    constant uint& cols [[buffer(8)]],
-    constant uint& inner [[buffer(9)]],
-    constant uint& weight_off [[buffer(10)]],
-    constant uint& scale_off [[buffer(11)]],
-    constant uint& miss_index [[buffer(12)]],
+    device const uchar* tier [[buffer(6)]],
+    constant uint& topk [[buffer(7)]],
+    constant uint& table_base [[buffer(8)]],
+    constant uint& cols [[buffer(9)]],
+    constant uint& inner [[buffer(10)]],
+    constant uint& weight_off [[buffer(11)]],
+    constant uint& scale_off [[buffer(12)]],
+    constant uint& miss_index [[buffer(13)]],
+    constant uint& want [[buffer(14)]],
     uint lane [[thread_index_in_simdgroup]],
     uint tg [[threadgroup_position_in_grid]])
 {
     uint slot = tg / cols;
     uint row = tg - slot * cols;
     if (slot >= topk) {
+        return;
+    }
+    if (!tier_accepts(want, tier, table_base + ids[slot])) {
+        if (lane == 0u) {
+            destination[slot * cols + row] = 0.0f;
+        }
         return;
     }
     long base = table[table_base + ids[slot]];
@@ -381,13 +396,15 @@ kernel void moe_decode_down(
     device const float* shared [[buffer(5)]],
     device float* destination [[buffer(6)]],
     device uint* miss [[buffer(7)]],
-    constant uint& topk [[buffer(8)]],
-    constant uint& table_base [[buffer(9)]],
-    constant uint& cols [[buffer(10)]],
-    constant uint& inner [[buffer(11)]],
-    constant uint& weight_off [[buffer(12)]],
-    constant uint& scale_off [[buffer(13)]],
-    constant uint& miss_index [[buffer(14)]],
+    device const uchar* tier [[buffer(8)]],
+    constant uint& topk [[buffer(9)]],
+    constant uint& table_base [[buffer(10)]],
+    constant uint& cols [[buffer(11)]],
+    constant uint& inner [[buffer(12)]],
+    constant uint& weight_off [[buffer(13)]],
+    constant uint& scale_off [[buffer(14)]],
+    constant uint& miss_index [[buffer(15)]],
+    constant uint& want [[buffer(16)]],
     uint lane [[thread_index_in_simdgroup]],
     uint row [[threadgroup_position_in_grid]])
 {
@@ -396,6 +413,9 @@ kernel void moe_decode_down(
     }
     float acc = shared[row];
     for (uint slot = 0u; slot < topk; ++slot) {
+        if (!tier_accepts(want, tier, table_base + ids[slot])) {
+            continue;
+        }
         long base = table[table_base + ids[slot]];
         if (base < 0) {
             if (row == 0u && lane == 0u) {
@@ -565,19 +585,27 @@ kernel void moe_decode_gate_int2(
     device const uint* ids [[buffer(3)]],
     device float* destination [[buffer(4)]],
     device uint* miss [[buffer(5)]],
-    constant uint& topk [[buffer(6)]],
-    constant uint& table_base [[buffer(7)]],
-    constant uint& cols [[buffer(8)]],
-    constant uint& inner [[buffer(9)]],
-    constant uint& weight_off [[buffer(10)]],
-    constant uint& scale_off [[buffer(11)]],
-    constant uint& miss_index [[buffer(12)]],
+    device const uchar* tier [[buffer(6)]],
+    constant uint& topk [[buffer(7)]],
+    constant uint& table_base [[buffer(8)]],
+    constant uint& cols [[buffer(9)]],
+    constant uint& inner [[buffer(10)]],
+    constant uint& weight_off [[buffer(11)]],
+    constant uint& scale_off [[buffer(12)]],
+    constant uint& miss_index [[buffer(13)]],
+    constant uint& want [[buffer(14)]],
     uint lane [[thread_index_in_simdgroup]],
     uint tg [[threadgroup_position_in_grid]])
 {
     uint slot = tg / cols;
     uint row = tg - slot * cols;
     if (slot >= topk) {
+        return;
+    }
+    if (!tier_accepts(want, tier, table_base + ids[slot])) {
+        if (lane == 0u) {
+            destination[slot * cols + row] = 0.0f;
+        }
         return;
     }
     long base = table[table_base + ids[slot]];
@@ -618,13 +646,15 @@ kernel void moe_decode_down_int2(
     device const float* shared [[buffer(5)]],
     device float* destination [[buffer(6)]],
     device uint* miss [[buffer(7)]],
-    constant uint& topk [[buffer(8)]],
-    constant uint& table_base [[buffer(9)]],
-    constant uint& cols [[buffer(10)]],
-    constant uint& inner [[buffer(11)]],
-    constant uint& weight_off [[buffer(12)]],
-    constant uint& scale_off [[buffer(13)]],
-    constant uint& miss_index [[buffer(14)]],
+    device const uchar* tier [[buffer(8)]],
+    constant uint& topk [[buffer(9)]],
+    constant uint& table_base [[buffer(10)]],
+    constant uint& cols [[buffer(11)]],
+    constant uint& inner [[buffer(12)]],
+    constant uint& weight_off [[buffer(13)]],
+    constant uint& scale_off [[buffer(14)]],
+    constant uint& miss_index [[buffer(15)]],
+    constant uint& want [[buffer(16)]],
     uint lane [[thread_index_in_simdgroup]],
     uint row [[threadgroup_position_in_grid]])
 {
@@ -633,6 +663,9 @@ kernel void moe_decode_down_int2(
     }
     float acc = shared[row];
     for (uint slot = 0u; slot < topk; ++slot) {
+        if (!tier_accepts(want, tier, table_base + ids[slot])) {
+            continue;
+        }
         long base = table[table_base + ids[slot]];
         if (base < 0) {
             if (row == 0u && lane == 0u) {

@@ -1065,8 +1065,9 @@ kernel void qsa_attend_selected(
     constant uint& stride [[buffer(10)]],
     constant float& scale [[buffer(11)]],
     constant uint& groups [[buffer(12)]],
-    constant uint& mode [[buffer(13)]],
+    constant uint& kv_mode [[buffer(13)]],
     constant uint& complete [[buffer(14)]],
+    device const uint* cache_mode [[buffer(15)]],
     uint2 gid [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_simdgroup]],
     uint simd [[simdgroup_index_in_threadgroup]])
@@ -1095,9 +1096,15 @@ kernel void qsa_attend_selected(
     if (nsel > 2052u) {
         nsel = 2052u;
     }
-    for (uint slot = simd; slot < nsel; slot += groups) {
+    // Buffer 13 does not reach load_kv8 on this kernel. The mode is a device word.
+    uint kv_load = cache_mode[0];
+    uint ngroups = groups;
+    if (ngroups == 0u || ngroups > 16u) {
+        ngroups = 16u;
+    }
+    for (uint slot = simd; slot < nsel; slot += ngroups) {
         float key8[8];
-        load_kv8(key, key_tail, ids[slot], kchan, mode, complete, key8);
+        load_kv8(key, key_tail, ids[slot], kchan, kv_load, complete, key8);
         float dot = q0 * key8[0] + q1 * key8[1] + q2 * key8[2] + q3 * key8[3];
         dot += q4 * key8[4] + q5 * key8[5] + q6 * key8[6] + q7 * key8[7];
         float score = simd_sum(dot) * scale;
@@ -1107,7 +1114,7 @@ kernel void qsa_attend_selected(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         float local_max = -INFINITY;
-        for (uint slot = simd; slot < nsel; slot += groups) {
+        for (uint slot = simd; slot < nsel; slot += ngroups) {
             local_max = max(local_max, scores[slot]);
         }
         local_max = simd_max(local_max);
@@ -1116,17 +1123,17 @@ kernel void qsa_attend_selected(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         float maxs = -INFINITY;
-        for (uint group = 0u; group < groups; ++group) {
+        for (uint group = 0u; group < ngroups; ++group) {
             maxs = max(maxs, red[group]);
         }
-        for (uint slot = simd; slot < nsel; slot += groups) {
+        for (uint slot = simd; slot < nsel; slot += ngroups) {
             if (lane == 0u) {
                 scores[slot] = exp(scores[slot] - maxs);
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         float local_sum = 0.0f;
-        for (uint slot = simd; slot < nsel; slot += groups) {
+        for (uint slot = simd; slot < nsel; slot += ngroups) {
             local_sum += scores[slot];
         }
         if (lane == 0u) {
@@ -1134,15 +1141,15 @@ kernel void qsa_attend_selected(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         float denom = 0.0f;
-        for (uint group = 0u; group < groups; ++group) {
+        for (uint group = 0u; group < ngroups; ++group) {
             denom += red[group];
         }
         float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
         float acc4 = 0.0f, acc5 = 0.0f, acc6 = 0.0f, acc7 = 0.0f;
-        for (uint slot = simd; slot < nsel; slot += groups) {
+        for (uint slot = simd; slot < nsel; slot += ngroups) {
             float weight = scores[slot] / denom;
             float value8[8];
-            load_kv8(value, value_tail, ids[slot], kchan, mode, complete, value8);
+            load_kv8(value, value_tail, ids[slot], kchan, kv_load, complete, value8);
             acc0 += weight * value8[0];
             acc1 += weight * value8[1];
             acc2 += weight * value8[2];
@@ -1155,7 +1162,7 @@ kernel void qsa_attend_selected(
         threadgroup_barrier(mem_flags::mem_threadgroup);
         device float* out = output + (token * 24u + head) * 256u;
         device const float* gh = gate + (token * 24u + head) * 256u;
-        for (uint group = 0u; group < groups; ++group) {
+        for (uint group = 0u; group < ngroups; ++group) {
             if (simd == group) {
                 float gated0 = acc0 * sigmoid_f(gh[ch]);
                 float gated1 = acc1 * sigmoid_f(gh[ch + 1u]);

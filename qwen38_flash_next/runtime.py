@@ -65,6 +65,8 @@ from qwen38_flash_next.tools import (
     forced_call_options,
     function_name_options,
     normalize_messages,
+    repeated_cycle,
+    stuck_ids,
 )
 
 
@@ -130,6 +132,12 @@ class Qwen38Runtime:
         self.expert_cache: dict[tuple[int, int], tuple[Int4Matrix, Int4Matrix]] = {}
         self._choice: dict[int, Dev] = {}
         self._choice_ids = self.gpu.alloc(self.layers * self.top_k * 4)
+        self._tier: Any = None
+        self._atlas_trusted = False
+        self._avoid_token: int | None = None
+        self._avoid_until = 0
+        self._presence_penalty = 0.0
+        self._frequency_penalty = 0.0
         self._predicted: dict[int, list[int]] = {}
         self._prefetch_events: dict[int, int] = {}
         self._prefetch_protect: set[tuple[int, int]] = set()
@@ -198,6 +206,7 @@ class Qwen38Runtime:
             self.files = QuantRecord(root)
             self._load_record()
             self._load_supers()
+            self._upload_tiers()
             state_bytes = 48 * 128 * 128 * 4
             self._gdn_shadow = {
                 index: self.gpu.alloc(state_bytes) for index in self.gdn_state
@@ -321,6 +330,8 @@ class Qwen38Runtime:
         self._decode_seconds = 0.0
         self._decode_steps = []
         self._hit_limit = False
+        # The first sampled token fills the atlas. Later tokens reuse it.
+        self._atlas_trusted = False
         produced_ids: list[int] = []
         produced = 0
         while True:
@@ -379,6 +390,41 @@ class Qwen38Runtime:
             constrained = self._constrained_name(logits, temperature, produced)
             if constrained is not None:
                 return constrained
+        banned = repeated_cycle(produced)
+        narrow = stuck_ids(produced)
+        if isinstance(logits, Dev):
+            if self._frequency_penalty and produced:
+                self.gpu.presence(logits, produced, self._frequency_penalty)
+            elif self._presence_penalty and produced:
+                self.gpu.presence(logits, dict.fromkeys(produced), self._presence_penalty)
+            if (
+                self._avoid_token is not None
+                and len(produced) < self._avoid_until
+                and self._avoid_token < logits.n
+            ):
+                self.gpu.suppress_logit(logits, self._avoid_token)
+            if banned is not None and banned < logits.n:
+                self.gpu.suppress_logit(logits, banned)
+            for token in narrow:
+                if token < logits.n:
+                    self.gpu.suppress_logit(logits, token)
+            if self._avoid_token is not None:
+                answered = 0
+                closed = self._avoid_token in produced
+                if closed:
+                    answered = len(produced) - 1 - produced.index(self._avoid_token)
+                hold_stop = (not closed and len(produced) < 64) or (closed and answered < 16)
+                if hold_stop:
+                    for stop in self.stop_ids:
+                        if stop < logits.n:
+                            self.gpu.suppress_logit(logits, stop)
+        elif banned is not None or narrow:
+            logits = np.array(logits, copy=True)
+            if banned is not None and banned < int(logits.size):
+                logits[int(banned)] = -1.0e30
+            for token in narrow:
+                if token < int(logits.size):
+                    logits[int(token)] = -1.0e30
         if isinstance(logits, Dev):
             return self.gpu.sample(logits, temperature, top_p, top_k, self.rng)
         return _sample(logits, temperature, top_p, top_k, self.rng)
@@ -453,6 +499,7 @@ class Qwen38Runtime:
         if decode and self.atlas is not None:
             self._prefetch_decode()
             self._capture_recurrent()
+        resident_before = self.atlas.resident_count if decode and self.atlas is not None else 0
         logits = self._forward_body(tokens)
         self.gpu.flush()
         if self._streaming_prefill:
@@ -467,7 +514,13 @@ class Qwen38Runtime:
             if not decode:
                 message = "prefill referenced an expert that was not loaded"
                 raise RuntimeError(message)
+            self._atlas_trusted = False
             logits = self._rerun_decode(tokens)
+        if decode and self.atlas is not None and not self._expert_miss():
+            self._note_routes()
+            # A token that loaded experts is still filling the atlas. Trusting
+            # the next one would compute it twice, once before the miss replay.
+            self._atlas_trusted = self.atlas.resident_count == resident_before
         self.tokens.extend(tokens)
         self.last_logits = logits
         elapsed = time.perf_counter() - started
@@ -587,6 +640,7 @@ class Qwen38Runtime:
 
     def _rerun_decode(self, tokens: list[int]) -> Dev:
         """Load whatever this token routed to, then run it again from the snapshot."""
+        self._atlas_trusted = False
         logits = self.last_logits
         for _ in range(self.layers):
             self._reload_misses()
@@ -1196,6 +1250,15 @@ class Qwen38Runtime:
             )
             choice = Dev(self._choice_ids, self.top_k, slot)
         self._choice[layer] = choice
+        if (
+            count == 1
+            and self._decoding
+            and self._atlas_trusted
+            and self._tier is not None
+            and isinstance(self.files, QuantRecord)
+        ):
+            shared = self._shared_expert(bundle, xs, count)
+            return self._moe_decode_trusted(layer, xs, weight, shared)
         # Stage before the expert kernels. A miss would zero that layer and
         # change every later route, so the token would have to be replayed.
         host_ids = self.gpu.read_u32(choice)
@@ -1567,6 +1630,105 @@ class Qwen38Runtime:
             )
         return self._decode_super(layer, row, running, ids, weight)
 
+    def _moe_decode_trusted(self, layer: int, xs: Dev, weight: Dev, shared: Dev) -> Dev:
+        """Expert GEMVs from the device ids. The host does not read them between layers."""
+        if self.atlas is None or self._tier is None or not isinstance(self.files, QuantRecord):
+            message = "decode has no tier table"
+            raise RuntimeError(message)
+        choice = Dev(self._choice_ids, self.top_k, layer * self.top_k)
+        row = xs if xs.n == self.hidden else xs.view(0, self.hidden)
+        shared_row = shared if shared.n == self.hidden else shared.view(0, self.hidden)
+        running = self._decode_tier_ids(layer, row, shared_row, choice, weight, self._hot, 0)
+        running = self._decode_tier_ids(layer, row, running, choice, weight, self._cold, 1)
+        return self._decode_super_trusted(layer, row, running, choice, weight)
+
+    def _decode_tier_ids(
+        self,
+        layer: int,
+        row: Dev,
+        shared_row: Dev,
+        choice: Dev,
+        weight: Dev,
+        planes: ExpertPlanes,
+        want: int,
+    ) -> Dev:
+        if self.atlas is None or self._tier is None:
+            message = "decode has no tier table"
+            raise RuntimeError(message)
+        gate_fn = self.gpu.moe_decode_gate if planes.bits == 4 else self.gpu.moe_decode_gate_int2
+        down_fn = self.gpu.moe_decode_down if planes.bits == 4 else self.gpu.moe_decode_down_int2
+        gate = gate_fn(
+            row,
+            self.atlas.atlas,
+            self.atlas.table,
+            choice,
+            self.top_k,
+            layer * self.experts,
+            planes.gate_rows,
+            planes.gate_inner,
+            0,
+            planes.gate_scale,
+            self.atlas.miss,
+            layer,
+            want=want,
+            tier=self._tier,
+        )
+        activated = self.gpu.moe_activate(gate, self.top_k, self.moe, planes.down_inner)
+        return down_fn(
+            activated,
+            self.atlas.atlas,
+            self.atlas.table,
+            choice,
+            weight,
+            shared_row,
+            self.top_k,
+            layer * self.experts,
+            self.hidden,
+            planes.down_inner,
+            planes.down_weight,
+            planes.down_scale,
+            self.atlas.miss,
+            layer,
+            want=want,
+            tier=self._tier,
+        )
+
+    def _decode_super_trusted(
+        self, layer: int, row: Dev, running: Dev, choice: Dev, weight: Dev
+    ) -> Dev:
+        if not isinstance(self.files, QuantRecord):
+            return running
+        pins = self.files.super[layer]
+        if not pins:
+            return running
+        running = self.gpu.copy_dev(running)
+        planes = self._super_planes
+        for expert in pins:
+            image = self._super_images[(layer, expert)]
+            gate = self.gpu.gemv_int8(
+                row,
+                image,
+                planes.gate_rows,
+                planes.gate_inner,
+                0,
+                planes.gate_scale,
+                self.hidden,
+                half=False,
+            )
+            activated = self.gpu.moe_activate(gate, 1, self.moe, planes.down_inner)
+            down = self.gpu.gemv_int8(
+                activated,
+                image,
+                self.hidden,
+                planes.down_inner,
+                planes.down_weight,
+                planes.down_scale,
+                self.moe,
+                half=True,
+            )
+            self.gpu.axpy_matching(running, down, weight, choice, expert)
+        return running
+
     def _decode_tier(
         self,
         layer: int,
@@ -1740,6 +1902,28 @@ class Qwen38Runtime:
         return self.gpu.moe_scatter(
             shared, down, inverse_buf, weight, count, self.top_k, self.hidden
         )
+
+    def _upload_tiers(self) -> None:
+        """One byte per expert: 0 hot, 1 cold, 2 super."""
+        if not isinstance(self.files, QuantRecord):
+            return
+        raw = bytearray(self.layers * self.experts)
+        for layer in range(self.layers):
+            base = layer * self.experts
+            for expert in self.files.hot_set(layer):
+                raw[base + expert] = 0
+            for expert in self.files.cold_set(layer):
+                raw[base + expert] = 1
+            for expert in self.files.super_set(layer):
+                raw[base + expert] = 2
+        self._tier = self.gpu.upload(bytes(raw))
+
+    def _note_routes(self) -> None:
+        """The router ids of this token, read after the command buffer has finished."""
+        raw = _buffer_bytes(self._choice_ids, self.layers * self.top_k * 4)
+        ids = np.frombuffer(raw, dtype=np.uint32).reshape(self.layers, self.top_k)
+        for layer in range(self.layers):
+            self._predicted[layer] = [int(expert) for expert in ids[layer]]
 
     def _load_supers(self) -> None:
         if not isinstance(self.files, QuantRecord):

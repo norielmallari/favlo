@@ -309,7 +309,7 @@ def test_complete_thinking_flag_enables_thinking(monkeypatch) -> None:
             return type("Encoded", (), {"ids": [4]})()
 
     class Runtime:
-        def __init__(self, path: object) -> None:
+        def __init__(self, path: object, **_kwargs: object) -> None:
             self.tokenizer = Tokenizer()
 
         def encode_chat(self, messages: object, tools: object, enable_thinking: bool) -> list[int]:
@@ -382,6 +382,7 @@ def test_int8_kernels_match_dequant() -> None:
     data_n, _scale_n = pipeline.int8_plane_sizes(cols, inner)
     restored = pipeline.dequant_int8(image[:data_n], image[data_n:], cols, inner)
     session = MetalSession()
+    session.begin_scratch(4096)
     vector = rng.normal(size=(inner,)).astype(np.float32)
     resident = session.upload_resident(image)
     result = session.gemv_int8(

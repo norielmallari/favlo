@@ -113,6 +113,28 @@ kernel void copy_f32(
     }
 }
 
+kernel void axpy_matching(
+    device float* dst [[buffer(0)]],
+    device const float* src [[buffer(1)]],
+    device const float* scales [[buffer(2)]],
+    device const uint* ids [[buffer(3)]],
+    constant uint& n [[buffer(4)]],
+    constant uint& topk [[buffer(5)]],
+    constant uint& expert [[buffer(6)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= n) {
+        return;
+    }
+    float scale = 0.0f;
+    for (uint slot = 0u; slot < topk; ++slot) {
+        if (ids[slot] == expert) {
+            scale += scales[slot];
+        }
+    }
+    dst[tid] += scale * src[tid];
+}
+
 kernel void axpy_slot(
     device float* dst [[buffer(0)]],
     device const float* src [[buffer(1)]],
@@ -823,6 +845,33 @@ kernel void sample_topk_draw(
         }
     }
     out[0] = ids[keep - 1u];
+}
+
+kernel void presence_logits(
+    device float* logits [[buffer(0)]],
+    device const uint* ids [[buffer(1)]],
+    constant uint& n [[buffer(2)]],
+    constant float& penalty [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid != 0u) {
+        return;
+    }
+    for (uint i = 0u; i < n; ++i) {
+        logits[ids[i]] -= penalty;
+    }
+}
+
+kernel void suppress_logit(
+    device float* logits [[buffer(0)]],
+    constant uint& index [[buffer(1)]],
+    constant float& value [[buffer(2)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid != 0u) {
+        return;
+    }
+    logits[index] = value;
 }
 
 kernel void sample_f32(

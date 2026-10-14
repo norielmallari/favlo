@@ -66,6 +66,98 @@ def normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return normalized
 
 
+_THINK_CLOSE = "</think>"
+
+
+class ThinkStream:
+    """Split a completion that starts inside an open ``<think>`` block.
+
+    The chat template leaves ``<think>`` at the end of the prompt, so the
+    generated tokens are reasoning until ``</think>``. Text after that tag
+    is the reply. A request with thinking closed emits only the reply.
+    """
+
+    def __init__(self, thinking: bool) -> None:
+        self._reasoning = thinking
+        self._held = ""
+
+    def push(self, piece: str) -> list[tuple[str, str]]:
+        if piece == "":
+            return []
+        if not self._reasoning:
+            return [("content", piece)]
+        self._held += piece
+        at = self._held.find(_THINK_CLOSE)
+        if at < 0:
+            keep = _marker_prefix_of(self._held, _THINK_CLOSE)
+            emit = self._held[:-keep] if keep else self._held
+            self._held = self._held[-keep:] if keep else ""
+            return [("reasoning", emit)] if emit else []
+        reasoning = self._held[:at]
+        rest = self._held[at + len(_THINK_CLOSE) :]
+        self._held = ""
+        self._reasoning = False
+        out: list[tuple[str, str]] = []
+        if reasoning:
+            out.append(("reasoning", reasoning))
+        if rest:
+            out.append(("content", rest))
+        return out
+
+    def finish(self) -> list[tuple[str, str]]:
+        if not self._held:
+            return []
+        channel = "reasoning" if self._reasoning else "content"
+        emit = self._held
+        self._held = ""
+        return [(channel, emit)]
+
+
+def repeated_cycle(ids: Sequence[int]) -> int | None:
+    """The next id of a token span that has already been emitted three times."""
+    count = len(ids)
+    for length in range(48, 0, -1):
+        if count < length * 3:
+            continue
+        cycle = ids[-length:]
+        if ids[-2 * length : -length] != cycle:
+            continue
+        if ids[-3 * length : -2 * length] != cycle:
+            continue
+        return int(cycle[0])
+    return None
+
+
+def stuck_ids(ids: Sequence[int]) -> list[int]:
+    """Ids in a recent window that uses only a handful of distinct tokens."""
+    if len(ids) < 24:
+        return []
+    window = list(ids[-24:])
+    distinct = set(window)
+    if len(distinct) > 8:
+        return []
+        return []
+    return [int(token) for token in distinct]
+
+
+def tail_repeats(text: str) -> bool:
+    """Whether the last 80 characters already appeared in the recent text."""
+    compact = " ".join(text.split())
+    if len(compact) < 160:
+        return False
+    tail = compact[-80:]
+    return tail in compact[-800:-80]
+
+
+def split_thinking(text: str, thinking: bool) -> tuple[str, str]:
+    """Reasoning and reply from one completion string."""
+    gate = ThinkStream(thinking)
+    parts = gate.push(text) + gate.finish()
+    reasoning = "".join(piece for channel, piece in parts if channel == "reasoning")
+    content = "".join(piece for channel, piece in parts if channel == "content")
+    return reasoning, content
+
+
 class ContentGate:
     """Hold back a completion suffix that may still grow into `<tool_call>`."""
 
@@ -267,8 +359,12 @@ def _normalize_call(call: Any) -> Any:
 
 
 def _marker_prefix(text: str) -> int:
+    return _marker_prefix_of(text, _MARKER)
+
+
+def _marker_prefix_of(text: str, marker: str) -> int:
     keep = 0
-    for size in range(1, len(_MARKER)):
-        if text.endswith(_MARKER[:size]):
+    for size in range(1, len(marker)):
+        if text.endswith(marker[:size]):
             keep = size
     return keep

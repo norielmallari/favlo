@@ -4,7 +4,14 @@ import json
 
 import pytest
 from qwen38_flash_next.formats import DEFAULT_RECORD
-from qwen38_flash_next.tools import ContentGate, normalize_messages, parse_tool_calls
+from qwen38_flash_next.tools import (
+    ContentGate,
+    ThinkStream,
+    normalize_messages,
+    parse_tool_calls,
+    repeated_cycle,
+    split_thinking,
+)
 
 
 def test_parse_tool_call_keeps_multiline_arguments() -> None:
@@ -202,6 +209,50 @@ def test_canonical_continuation_follows_the_encoder() -> None:
         assert nxt is not None
         produced.append(nxt)
     assert produced == encode(target)
+
+
+def test_think_stream_holds_a_partial_close_tag() -> None:
+    stream = ThinkStream(True)
+    assert stream.push("The ninth buoy is bl") == [("reasoning", "The ninth buoy is bl")]
+    assert stream.push("ue.</thi") == [("reasoning", "ue.")]
+    assert stream.push("nk>\nMara Ellison Voss.") == [("content", "\nMara Ellison Voss.")]
+    assert stream.finish() == []
+
+
+def test_think_stream_closed_request_is_content() -> None:
+    stream = ThinkStream(False)
+    assert stream.push("Mara Ellison Voss") == [("content", "Mara Ellison Voss")]
+    assert stream.finish() == []
+
+
+def test_repeated_cycle_is_the_next_token_of_the_span() -> None:
+    cycle = [4, 5, 6, 7, 8, 9]
+    assert repeated_cycle(cycle * 3) == 4
+    assert repeated_cycle(cycle * 2 + [4]) is None
+    assert repeated_cycle([1, 1, 1]) == 1
+    assert repeated_cycle([1, 1]) is None
+    assert repeated_cycle([7, 8, 7, 8, 7, 8]) == 7
+
+
+def test_stuck_ids_are_the_small_recent_set() -> None:
+    from qwen38_flash_next.tools import stuck_ids
+
+    assert set(stuck_ids([1, 2, 3] * 8)) == {1, 2, 3}
+    assert stuck_ids(list(range(24))) == []
+
+
+def test_tail_repeats_when_the_ending_already_appeared() -> None:
+    from qwen38_flash_next.tools import tail_repeats
+
+    phrase = "The question is from Mara Voss and the buoy stays blue. "
+    assert tail_repeats(phrase * 4)
+    assert not tail_repeats("The ninth buoy is blue and the name is Mara Ellison Voss.")
+
+
+def test_split_thinking_keeps_reasoning_when_the_tag_is_missing() -> None:
+    reasoning, content = split_thinking("still thinking", True)
+    assert reasoning == "still thinking"
+    assert content == ""
 
 
 def test_completion_carries_created() -> None:

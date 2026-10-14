@@ -386,6 +386,10 @@ class MetalSession:
         self._event = None
         self._event_value = 0
         self._io_pending: list[tuple[Any, int]] = []
+        self._tier_pad = self.alloc(16)
+        self._cache_mode = self.alloc(16)
+        self._cache_mode_held = -1
+        self._presence_ids: Any = None
         options = self.metal.MTLCompileOptions.alloc().init()
         options.setLanguageVersion_((4 << 16) + 1)
         library, error = _objc_pair(
@@ -410,6 +414,7 @@ class MetalSession:
             "add_into_f32",
             "copy_f32",
             "axpy_slot",
+            "axpy_matching",
             "scale_rows_f32",
             "rms_rows",
             "l2_rows",
@@ -435,6 +440,8 @@ class MetalSession:
             "dequant_ngram_packed",
             "broadcast_rows",
             "sample_f32",
+            "suppress_logit",
+            "presence_logits",
             "sample_topk_partial",
             "sample_topk_draw",
             "copy_bytes",
@@ -794,6 +801,7 @@ class MetalSession:
         constants: Sequence[bytes],
         groups: Any,
         threads: Any,
+        late: Sequence[tuple[Any, int, int]] = (),
     ) -> None:
         started = time.perf_counter()
         if self._command is None:
@@ -809,6 +817,8 @@ class MetalSession:
         for index, blob in enumerate(constants):
             self._held_constants.append(blob)
             encoder.setBytes_length_atIndex_(blob, len(blob), base + index)
+        for buffer, offset, index in late:
+            encoder.setBuffer_offset_atIndex_(buffer, int(offset), index)
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(groups, threads)
         self._batch_launches += 1
         self.host_encode += time.perf_counter() - started
@@ -1018,6 +1028,19 @@ class MetalSession:
             (_dev_bind(view), (dst_buf, dst_float * 4)),
             (struct.pack("<I", n),),
             n,
+        )
+
+    def axpy_matching(self, dst: Dev, src: Dev, scales: Dev, ids: Dev, expert: int) -> None:
+        """Add ``src`` into ``dst`` for every slot whose id is ``expert``."""
+        self._ew(
+            "axpy_matching",
+            (_dev_bind(dst), _dev_bind(src), _dev_bind(scales), _dev_bind(ids)),
+            (
+                struct.pack("<I", dst.n),
+                struct.pack("<I", ids.n),
+                struct.pack("<I", expert),
+            ),
+            dst.n,
         )
 
     def axpy(self, dst: Dev, src: Dev, scales: Dev, slot: int) -> None:
@@ -1313,6 +1336,30 @@ class MetalSession:
         self.flush()
         raw = _buffer_bytes(self._argmax_out, 4)
         return int(np.frombuffer(raw, dtype=np.uint32)[0])
+
+    def suppress_logit(self, logits: Dev, index: int, value: float = -1.0e30) -> None:
+        self._ew(
+            "suppress_logit",
+            (_dev_bind(logits),),
+            (struct.pack("<I", int(index)), struct.pack("<f", float(value))),
+            1,
+            1,
+        )
+
+    def presence(self, logits: Dev, ids: Sequence[int], penalty: float) -> None:
+        seen = [int(token) for token in ids if 0 <= int(token) < logits.n]
+        if not seen or penalty == 0.0:
+            return
+        blob = np.asarray(seen, dtype=np.uint32).tobytes()
+        if self._presence_ids is None or int(self._presence_ids.length()) < len(blob):
+            self._presence_ids = self.alloc(max(len(blob), 1024))
+        _buffer_view(self._presence_ids, len(blob))[:] = blob
+        self._ew(
+            "presence_logits",
+            (_dev_bind(logits), (self._presence_ids, 0)),
+            (struct.pack("<I", len(seen)), struct.pack("<f", float(penalty))),
+            1,
+        )
 
     def _cast_half(self, src: Dev, logical: int, stored: int) -> Span:
         half = self.span(stored * 2)
@@ -2185,6 +2232,9 @@ class MetalSession:
         value_tail: Any = None,
     ) -> Dev:
         dst = self.tmp(count * 24 * 256)
+        if self._cache_mode_held != mode:
+            _write_u32(self._cache_mode, mode)
+            self._cache_mode_held = mode
         self.dispatch(
             self.act["qsa_attend_selected"],
             (
@@ -2208,6 +2258,7 @@ class MetalSession:
             ),
             self._size(24, max(count, 1)),
             self._size(512),
+            ((self._cache_mode, 0, 15),),
         )
         return dst
 
@@ -2362,8 +2413,11 @@ class MetalSession:
         miss_index: int,
         *,
         kernel: str = "moe_decode_gate",
+        want: int = 255,
+        tier: Any = None,
     ) -> Dev:
         dst = self.tmp(topk * cols)
+        tier_buf = self._tier_pad if tier is None else tier
         self.dispatch(
             self.act[kernel],
             (
@@ -2373,6 +2427,7 @@ class MetalSession:
                 _dev_bind(ids),
                 _dev_bind(dst),
                 (miss, 0),
+                (tier_buf, 0),
             ),
             (
                 struct.pack("<I", topk),
@@ -2382,6 +2437,7 @@ class MetalSession:
                 struct.pack("<I", weight_off),
                 struct.pack("<I", scale_off),
                 struct.pack("<I", miss_index),
+                struct.pack("<I", want),
             ),
             self._size(topk * cols),
             self._size(32),
@@ -2406,8 +2462,11 @@ class MetalSession:
         miss_index: int,
         *,
         kernel: str = "moe_decode_down",
+        want: int = 255,
+        tier: Any = None,
     ) -> Dev:
         dst = self.tmp(cols)
+        tier_buf = self._tier_pad if tier is None else tier
         self.dispatch(
             self.act[kernel],
             (
@@ -2419,6 +2478,7 @@ class MetalSession:
                 _dev_bind(shared),
                 _dev_bind(dst),
                 (miss, 0),
+                (tier_buf, 0),
             ),
             (
                 struct.pack("<I", topk),
@@ -2428,6 +2488,7 @@ class MetalSession:
                 struct.pack("<I", weight_off),
                 struct.pack("<I", scale_off),
                 struct.pack("<I", miss_index),
+                struct.pack("<I", want),
             ),
             self._size(cols),
             self._size(32),

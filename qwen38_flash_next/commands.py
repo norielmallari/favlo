@@ -25,9 +25,11 @@ from qwen38_flash_next.runtime import Qwen38Runtime
 from qwen38_flash_next.session import _append_transcript, _log, _prompt_text
 from qwen38_flash_next.tools import (
     ContentGate,
+    ThinkStream,
     call_closes,
     parse_tool_calls,
     required_function,
+    split_thinking,
     tool_names,
 )
 
@@ -205,6 +207,17 @@ def serve(args: Any) -> int:
                     runtime.tool_names = tool_names(tools)
                     runtime.required_function = required_function(body.get("tool_choice"))
                     runtime.required_closes = call_closes(tools, runtime.required_function)
+                    close = runtime.tokenizer.encode("</think>").ids
+                    if enable_thinking and len(close) == 1:
+                        runtime._avoid_token = int(close[0])
+                        runtime._avoid_until = 8
+                    else:
+                        runtime._avoid_token = None
+                        runtime._avoid_until = 0
+                    penalty = body.get("presence_penalty")
+                    runtime._presence_penalty = 0.0 if penalty is None else float(penalty)
+                    frequency = body.get("frequency_penalty")
+                    runtime._frequency_penalty = 0.0 if frequency is None else float(frequency)
                     try:
                         prompt = runtime.encode_chat(messages, tools, enable_thinking)
                         _log(f"prompt tokens {len(prompt)}")
@@ -216,23 +229,33 @@ def serve(args: Any) -> int:
                                 top_p,
                                 top_k,
                                 _prompt_text(messages),
+                                enable_thinking,
                             )
                         else:
                             tokens = runtime.generate(
                                 prompt, max_tokens, temperature, top_p, top_k
                             )
                             text = runtime.decode(tokens)
-                            content, calls = parse_tool_calls(text)
+                            reasoning, reply = split_thinking(text, enable_thinking)
+                            content, calls = parse_tool_calls(reply if enable_thinking else text)
                             _log(f"completion: {text}")
                             _append_transcript(args.transcript, _prompt_text(messages), text)
                             if calls:
                                 reason = "tool_calls"
                             else:
                                 reason = "length" if runtime._hit_limit else "stop"
-                                content = text
+                                if not enable_thinking:
+                                    content = text
                             self._json(
                                 200,
-                                _completion(content, len(prompt), len(tokens), reason, calls),
+                                _completion(
+                                    content,
+                                    len(prompt),
+                                    len(tokens),
+                                    reason,
+                                    calls,
+                                    reasoning if enable_thinking else "",
+                                ),
                             )
                     finally:
                         runtime.tool_names = []
@@ -252,6 +275,7 @@ def serve(args: Any) -> int:
             top_p: float,
             top_k: int,
             prompt_text: str,
+            enable_thinking: bool,
         ) -> None:
             self._started = True
             self.send_response(200)
@@ -273,27 +297,37 @@ def serve(args: Any) -> int:
                 logits = runtime.forward(prompt[start:])
 
             gate = ContentGate()
+            thinking = ThinkStream(enable_thinking)
+
+            def emit_channel(channel: str, visible: str) -> None:
+                if channel == "content":
+                    visible = gate.push(visible)
+                if not visible:
+                    return
+                field = "reasoning_content" if channel == "reasoning" else "content"
+                self._event(
+                    {
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {field: visible},
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                )
 
             def emit(piece: str) -> None:
-                visible = gate.push(piece)
-                if visible:
-                    self._event(
-                        {
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {"content": visible},
-                                    "finish_reason": None,
-                                }
-                            ]
-                        }
-                    )
+                for channel, visible in thinking.push(piece):
+                    emit_channel(channel, visible)
 
             previous = _drain_stream(
                 runtime,
                 runtime._new_tokens(logits, max_tokens, temperature, top_p, top_k),
                 emit,
             )
+            for channel, visible in thinking.finish():
+                emit_channel(channel, visible)
             tail = gate.finish()
             if tail:
                 emit_content = {
@@ -472,8 +506,11 @@ def _completion(
     completion_tokens: int,
     finish_reason: str,
     tool_calls: list[dict[str, Any]] | None = None,
+    reasoning: str = "",
 ) -> dict[str, Any]:
     message: dict[str, Any] = {"role": "assistant", "content": text}
+    if reasoning:
+        message["reasoning_content"] = reasoning
     if tool_calls:
         message["tool_calls"] = tool_calls
         finish_reason = "tool_calls"
