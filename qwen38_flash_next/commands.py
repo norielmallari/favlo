@@ -96,6 +96,7 @@ def bf16_complete(args: Any) -> int:
         else:
             messages = [{"role": "user", "content": args.prompt}]
             prompt = runtime.encode_chat(messages, None, enable_thinking=args.thinking)
+        _arm_cli(runtime, args)
         _log(f"prompt tokens {len(prompt)} ids {prompt}")
         logits = runtime.forward(prompt)
         order = np.argsort(logits)[::-1]
@@ -139,6 +140,7 @@ def complete(args: Any) -> int:
         else:
             messages = [{"role": "user", "content": args.prompt}]
             prompt = runtime.encode_chat(messages, None, enable_thinking=args.thinking)
+        _arm_cli(runtime, args)
         _log(f"prompt tokens {len(prompt)} ids {prompt}")
         logits = runtime.forward(prompt)
         order = np.argsort(logits)[::-1]
@@ -231,25 +233,14 @@ def serve(args: Any) -> int:
                     runtime.tool_names = tool_names(tools)
                     runtime.required_function = required_function(body.get("tool_choice"))
                     runtime.required_closes = call_closes(tools, runtime.required_function)
-                    close = runtime.tokenizer.encode("</think>").ids
-                    opened = runtime.tokenizer.encode("<think>").ids
-                    if enable_thinking and len(close) == 1:
-                        runtime._avoid_token = int(close[0])
-                        runtime._avoid_until = 8
-                        runtime._block_tokens = set()
-                    elif not enable_thinking and len(opened) == 1:
-                        runtime._avoid_token = None
-                        runtime._avoid_until = 0
-                        runtime._block_tokens = {int(opened[0])}
-                    else:
-                        runtime._avoid_token = None
-                        runtime._avoid_until = 0
-                        runtime._block_tokens = set()
-                    penalty = body.get("presence_penalty")
-                    runtime._presence_penalty = 0.0 if penalty is None else float(penalty)
                     frequency = body.get("frequency_penalty")
-                    runtime._frequency_penalty = 0.0 if frequency is None else float(frequency)
-                    runtime._penalty_window = _penalty_window(body)
+                    _arm_sampler(
+                        runtime,
+                        thinking=enable_thinking,
+                        presence=_presence(body, enable_thinking),
+                        frequency=0.0 if frequency is None else float(frequency),
+                        window=_penalty_window(body),
+                    )
                     try:
                         prompt = runtime.encode_chat(messages, tools, enable_thinking)
                         _log(f"prompt tokens {len(prompt)}")
@@ -437,6 +428,7 @@ THINKING_TOP_K = 20
 INSTRUCT_TEMPERATURE = 0.7
 INSTRUCT_TOP_P = 0.8
 INSTRUCT_TOP_K = 20
+INSTRUCT_PRESENCE = 1.5
 
 
 def _drain_stream(runtime: Any, tokens: Iterator[int], emit: Any) -> str:
@@ -491,6 +483,61 @@ def _enable_thinking(body: dict[str, Any]) -> bool:
     if isinstance(kwargs, dict) and kwargs.get("enable_thinking") is not None:
         return bool(kwargs["enable_thinking"])
     return True
+
+
+def _presence(body: dict[str, Any], thinking: bool) -> float:
+    """Model-card presence. Thinking omits it at 0. Instruct omits it at 1.5.
+
+    An explicit value is kept, including 0. The card uses 1.5 in instruct mode
+    to cut endless repetition, and 0 while thinking.
+    """
+    penalty = body.get("presence_penalty")
+    if penalty is None:
+        return 0.0 if thinking else INSTRUCT_PRESENCE
+    return float(penalty)
+
+
+def _arm_sampler(
+    runtime: Any,
+    *,
+    thinking: bool,
+    presence: float,
+    frequency: float,
+    window: int,
+) -> None:
+    """Think-tag mask and penalties for one completion."""
+    close = runtime.tokenizer.encode("</think>").ids
+    opened = runtime.tokenizer.encode("<think>").ids
+    runtime._answer_mode = not thinking
+    if thinking and len(close) == 1:
+        runtime._avoid_token = int(close[0])
+        runtime._avoid_until = 8
+        runtime._block_tokens = set()
+    elif not thinking and len(opened) == 1:
+        runtime._avoid_token = None
+        runtime._avoid_until = 0
+        runtime._block_tokens = {int(opened[0])}
+    else:
+        runtime._avoid_token = None
+        runtime._avoid_until = 0
+        runtime._block_tokens = set()
+    runtime._presence_penalty = presence
+    runtime._frequency_penalty = frequency
+    runtime._penalty_window = window
+
+
+def _arm_cli(runtime: Any, args: Any) -> None:
+    """Same draw as serve. A raw prompt keeps the runtime defaults."""
+    if args.raw:
+        return
+    thinking = bool(args.thinking)
+    _arm_sampler(
+        runtime,
+        thinking=thinking,
+        presence=0.0 if thinking else INSTRUCT_PRESENCE,
+        frequency=0.0,
+        window=PENALTY_WINDOW,
+    )
 
 
 def _sampling(body: dict[str, Any], thinking: bool) -> tuple[float, float, int]:

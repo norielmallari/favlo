@@ -123,7 +123,6 @@ def complete(
             "max_tokens": max_tokens,
             "temperature": 0,
             "enable_thinking": False,
-            "presence_penalty": 0,
         }
     ).encode()
     request = urllib.request.Request(

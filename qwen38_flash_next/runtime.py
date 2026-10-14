@@ -60,6 +60,7 @@ from qwen38_flash_next.session import (
     _tok_s,
 )
 from qwen38_flash_next.tools import (
+    answer_repeat_id,
     canonical_continuation,
     continuing_ids,
     forced_call_options,
@@ -139,6 +140,7 @@ class Qwen38Runtime:
         self._avoid_token: int | None = None
         self._avoid_until = 0
         self._block_tokens: set[int] = set()
+        self._answer_mode = False
         self._presence_penalty = 0.0
         self._frequency_penalty = 0.0
         self._penalty_window = 20
@@ -405,6 +407,7 @@ class Qwen38Runtime:
             return self._avoid_token
         banned = repeated_cycle(produced)
         narrow = stuck_ids(produced)
+        repeat = answer_repeat_id(produced) if self._answer_mode else None
         penalized: list[int] = []
         penalty = 0.0
         if self._frequency_penalty and produced:
@@ -430,6 +433,8 @@ class Qwen38Runtime:
             for token in narrow:
                 if token < logits.n:
                     self.gpu.suppress_logit(logits, token)
+            if repeat is not None and repeat < logits.n:
+                self.gpu.suppress_logit(logits, repeat)
             if self._avoid_token is not None:
                 answered = 0
                 closed = self._avoid_token in produced
@@ -440,7 +445,7 @@ class Qwen38Runtime:
                     for stop in self.stop_ids:
                         if stop < logits.n:
                             self.gpu.suppress_logit(logits, stop)
-        elif penalized or banned is not None or narrow or self._block_tokens:
+        elif penalized or banned is not None or narrow or self._block_tokens or repeat is not None:
             logits = np.array(logits, copy=True)
             for token in penalized:
                 if token < int(logits.size):
@@ -453,6 +458,8 @@ class Qwen38Runtime:
             for token in self._block_tokens:
                 if token < int(logits.size):
                     logits[int(token)] = -1.0e30
+            if repeat is not None and repeat < int(logits.size):
+                logits[int(repeat)] = -1.0e30
         if isinstance(logits, Dev):
             return self.gpu.sample(logits, temperature, top_p, top_k, self.rng)
         return _sample(logits, temperature, top_p, top_k, self.rng)

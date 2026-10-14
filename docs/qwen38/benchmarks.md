@@ -1,6 +1,6 @@
 # Benchmarks
 
-The harness scores three published sets against `serve`. Thinking is off, and the open think tag stays out of the draw. The draw is greedy, temperature 0. Each request is one chat completion. A leading close tag is removed, and the checker reads the reply that follows. The sample is the first 100 rows of each file, in file order. The full run keeps those rows and continues through the rest. Responses resume from `artifacts/benchmarks`.
+The harness scores three published sets against `serve`. Thinking is off, and the open think tag stays out of the draw. The draw is greedy, temperature 0. Presence is omitted, so instruct mode uses the model card value of 1.5. Each request is one chat completion. A leading close tag is removed, and the checker reads the reply that follows. The sample is the first 100 rows of each file, in file order. The full run keeps those rows and continues through the rest. Responses resume from `artifacts/benchmarks`.
 
 ## Sets
 
@@ -18,7 +18,7 @@ uv run python -m harness.benchmarks --sample-only
 ## Sample of 100
 
 <!-- sample -->
-The run was stopped during HumanEval. IFEval and GSM8K are the first 100 rows. HumanEval is the first 40.
+The run was stopped during HumanEval. IFEval and GSM8K are the first 100 rows. HumanEval is the first 40. Those requests sent presence 0.
 
 - IFEval: n=100  prompt strict 0.320  prompt loose 0.340  instruction strict 0.436  instruction loose 0.448
 - GSM8K: n=100  59/100  0.590

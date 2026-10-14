@@ -233,6 +233,16 @@ def test_omitted_sampling_follows_the_model_card() -> None:
     )
 
 
+def test_omitted_presence_follows_the_model_card() -> None:
+    import qwen38_flash_next.commands as commands
+
+    assert commands._presence({}, thinking=True) == 0.0
+    assert commands._presence({}, thinking=False) == 1.5
+    assert commands._presence({"presence_penalty": None}, thinking=False) == 1.5
+    assert commands._presence({"presence_penalty": 0}, thinking=False) == 0.0
+    assert commands._presence({"presence_penalty": 1.5}, thinking=True) == 1.5
+
+
 def test_grove_file_stores_the_greedy_completion(tmp_path) -> None:
     import qwen38_flash_next.grove as grove
 

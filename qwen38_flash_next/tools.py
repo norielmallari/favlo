@@ -145,6 +145,17 @@ def looped_span(ids: Sequence[int], length: int = 12) -> bool:
     return False
 
 
+def answer_repeat_id(ids: Sequence[int], length: int = 12) -> int | None:
+    """First id of a span that has already occurred three times.
+
+    Instruct mode removes that id from the next draw. An open think uses
+    ``looped_span`` to close the block instead.
+    """
+    if not looped_span(ids, length):
+        return None
+    return int(ids[-length])
+
+
 def repeated_cycle(ids: Sequence[int]) -> int | None:
     """The next id of a token span that has already been emitted three times."""
     count = len(ids)
