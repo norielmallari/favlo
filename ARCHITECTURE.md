@@ -17,7 +17,7 @@ Layouts are in [docs/qwen38/record.md](docs/qwen38/record.md). The n-gram hash i
 - Tool calls. The template renders `tools` and tool results. A completion that contains `<tool_call>` blocks is returned as OpenAI `tool_calls`, on the JSON response and as stream deltas. While a function name is open, the sampler keeps only tokens that continue a name from that request. A `tool_choice` that names one function forces the opening `<tool_call><function=name>` before the arguments. Those opening tokens are the tokenizer's encoding of that text, so a later render of the same opening is the same ids. A function with no parameters forces the closing tags the same way. Generation stops when that call's `</tool_call>` has closed.
 - A prefix cache so a continuation prefills only the new tokens.
 - Expert streaming from SSD into a resident atlas. Consecutive expert ids are one sequential Metal IO. The shader reads the live image from that atlas.
-- The harness scores IFEval, GSM8K, and HumanEval against `serve`. The intelligence smoke is the first 30 rows of each set. IFEval leaves thinking off. GSM8K and HumanEval turn thinking on at reasoning effort low. The draw is greedy. The note is [docs/qwen38/benchmarks.md](docs/qwen38/benchmarks.md).
+- The harness scores IFEval, GSM8K, and HumanEval against `serve`. The intelligence smoke is the first 30 rows of each set. IFEval, GSM8K, and HumanEval turn thinking on at reasoning effort low. IFEval sends presence 1.5 and scores the reply after the think block. The draw is greedy. The note is [docs/qwen38/benchmarks.md](docs/qwen38/benchmarks.md).
 
 ## Out of scope
 

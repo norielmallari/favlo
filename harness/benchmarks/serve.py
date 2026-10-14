@@ -113,6 +113,25 @@ def reply_text(content: str) -> str:
     return content
 
 
+def scored_reply(content: str, reasoning: str, *, reply_only: bool) -> str:
+    """The text a benchmark checker reads.
+
+    A close tag still in the reply marks the end of the trace. IFEval scores
+    that reply alone. An empty reply stays empty. HumanEval may read the trace
+    when the function is there and the reply is empty.
+    """
+    text = reply_text(content)
+    if "</think>" in text:
+        text = text.split("</think>", 1)[-1].lstrip()
+    if reply_only:
+        return text
+    if reasoning and not _has_code(text) and _has_code(reasoning):
+        return reasoning
+    if not text.strip():
+        return reasoning
+    return text
+
+
 def complete(
     port: int,
     messages: list[dict[str, str]],
@@ -122,6 +141,7 @@ def complete(
     effort: str | None = None,
     presence: float | None = None,
     continue_final: bool = False,
+    reply_only: bool = False,
 ) -> tuple[str, str, int]:
     """Greedy reply. Returns content, finish reason, and completion tokens."""
     payload: dict[str, object] = {
@@ -149,11 +169,10 @@ def complete(
         payload = json.loads(response.read().decode("utf-8"))
     choice = payload["choices"][0]
     message = choice.get("message") or {}
-    content = reply_text(message.get("content") or "")
-    reasoning = message.get("reasoning_content") or ""
-    if reasoning and not _has_code(content) and _has_code(reasoning):
-        content = reasoning
-    elif not content.strip():
-        content = reasoning
+    content = scored_reply(
+        message.get("content") or "",
+        message.get("reasoning_content") or "",
+        reply_only=reply_only,
+    )
     usage = payload.get("usage") or {}
     return content, str(choice.get("finish_reason") or ""), int(usage.get("completion_tokens") or 0)

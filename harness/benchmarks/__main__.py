@@ -84,6 +84,7 @@ def _ask(
     effort: str | None = None,
     presence: float | None = None,
     continue_final: bool = False,
+    reply_only: bool = False,
 ):
     last = "the server closed the connection"
     for _attempt in range(3):
@@ -96,6 +97,7 @@ def _ask(
                 effort=effort,
                 presence=presence,
                 continue_final=continue_final,
+                reply_only=reply_only,
             )
         except (OSError, json.JSONDecodeError) as exc:
             last = f"{type(exc).__name__}: {exc}"
@@ -113,12 +115,19 @@ def _run_rows(
 ) -> list[dict[str, Any]]:
     done = _load_jsonl(path)
     max_tokens = _MAX_TOKENS[name]
-    thinking = name in {"gsm8k", "humaneval"}
+    thinking = name in {"ifeval", "gsm8k", "humaneval"}
     effort = "low" if thinking else None
     # A function body repeats indentation and keywords. The instruct presence
     # penalty suppresses those repeats, so HumanEval leaves presence at 0.
-    # Thinking stays on so the analysis is not the reply the tests execute.
-    presence = 0.0 if name == "humaneval" else None
+    # IFEval sends that same 1.5 while thinking, so the trace does not loop,
+    # and the checker reads the reply rather than the trace.
+    if name == "humaneval":
+        presence = 0.0
+    elif name == "ifeval":
+        presence = 1.5
+    else:
+        presence = None
+    reply_only = name == "ifeval"
     continue_final = False
     scored: list[dict[str, Any]] = []
     for index, row in enumerate(rows, start=1):
@@ -133,6 +142,7 @@ def _run_rows(
                 effort=effort,
                 presence=presence,
                 continue_final=continue_final,
+                reply_only=reply_only,
             )
             if reason == "error":
                 outcome = _failed(name, str(row["id"]), str(tokens))

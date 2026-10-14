@@ -18,6 +18,15 @@ def test_reply_text_drops_a_leading_close_tag() -> None:
     assert reply_text("The answer is 4.") == "The answer is 4."
 
 
+def test_scored_reply_keeps_the_answer_after_the_trace() -> None:
+    from harness.benchmarks.serve import scored_reply
+
+    raw = "Let me draft, with a comma.\n</think>\n\nThe reply has no comma."
+    assert scored_reply(raw, "", reply_only=True) == "The reply has no comma."
+    assert scored_reply("", "def f():\n    return 1\n", reply_only=False).startswith("def ")
+    assert scored_reply("", "the plan", reply_only=True) == ""
+
+
 def test_gsm8k_matches_the_published_number() -> None:
     rows = gsm8k.load()
     assert len(rows) == 1319
