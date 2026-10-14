@@ -113,6 +113,23 @@ class ThinkStream:
         return [(channel, emit)]
 
 
+PENALTY_WINDOW = 20
+
+
+def penalty_ids(ids: Sequence[int], window: int, *, once: bool) -> list[int]:
+    """Ids a presence or frequency penalty subtracts from.
+
+    A positive window is the last that many tokens. Zero is the whole completion.
+    Presence keeps one copy of each id. Frequency keeps every copy.
+    """
+    if not ids:
+        return []
+    span = list(ids) if window <= 0 else list(ids[-int(window) :])
+    if once:
+        return list(dict.fromkeys(int(token) for token in span))
+    return [int(token) for token in span]
+
+
 def repeated_cycle(ids: Sequence[int]) -> int | None:
     """The next id of a token span that has already been emitted three times."""
     count = len(ids)

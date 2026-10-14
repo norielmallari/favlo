@@ -24,6 +24,7 @@ from qwen38_flash_next.probe import matmul, probe
 from qwen38_flash_next.runtime import Qwen38Runtime
 from qwen38_flash_next.session import _append_transcript, _log, _prompt_text
 from qwen38_flash_next.tools import (
+    PENALTY_WINDOW,
     ContentGate,
     ThinkStream,
     call_closes,
@@ -218,6 +219,7 @@ def serve(args: Any) -> int:
                     runtime._presence_penalty = 0.0 if penalty is None else float(penalty)
                     frequency = body.get("frequency_penalty")
                     runtime._frequency_penalty = 0.0 if frequency is None else float(frequency)
+                    runtime._penalty_window = _penalty_window(body)
                     try:
                         prompt = runtime.encode_chat(messages, tools, enable_thinking)
                         _log(f"prompt tokens {len(prompt)}")
@@ -489,6 +491,14 @@ def _cli_sampling(args: Any) -> tuple[float, float, int]:
     if args.top_k is not None:
         body["top_k"] = args.top_k
     return _sampling(body, bool(args.thinking))
+
+
+def _penalty_window(body: dict[str, Any]) -> int:
+    """Last tokens a presence or frequency penalty sees. Zero is the whole completion."""
+    window = body.get("penalty_window")
+    if window is None:
+        return PENALTY_WINDOW
+    return int(window)
 
 
 def _request_limit(body: dict[str, Any]) -> int | None:

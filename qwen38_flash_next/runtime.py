@@ -65,6 +65,7 @@ from qwen38_flash_next.tools import (
     forced_call_options,
     function_name_options,
     normalize_messages,
+    penalty_ids,
     repeated_cycle,
     stuck_ids,
 )
@@ -138,6 +139,7 @@ class Qwen38Runtime:
         self._avoid_until = 0
         self._presence_penalty = 0.0
         self._frequency_penalty = 0.0
+        self._penalty_window = 20
         self._predicted: dict[int, list[int]] = {}
         self._prefetch_events: dict[int, int] = {}
         self._prefetch_protect: set[tuple[int, int]] = set()
@@ -392,11 +394,17 @@ class Qwen38Runtime:
                 return constrained
         banned = repeated_cycle(produced)
         narrow = stuck_ids(produced)
+        penalized: list[int] = []
+        penalty = 0.0
+        if self._frequency_penalty and produced:
+            penalized = penalty_ids(produced, self._penalty_window, once=False)
+            penalty = self._frequency_penalty
+        elif self._presence_penalty and produced:
+            penalized = penalty_ids(produced, self._penalty_window, once=True)
+            penalty = self._presence_penalty
         if isinstance(logits, Dev):
-            if self._frequency_penalty and produced:
-                self.gpu.presence(logits, produced, self._frequency_penalty)
-            elif self._presence_penalty and produced:
-                self.gpu.presence(logits, dict.fromkeys(produced), self._presence_penalty)
+            if penalized:
+                self.gpu.presence(logits, penalized, penalty)
             if (
                 self._avoid_token is not None
                 and len(produced) < self._avoid_until
@@ -418,8 +426,11 @@ class Qwen38Runtime:
                     for stop in self.stop_ids:
                         if stop < logits.n:
                             self.gpu.suppress_logit(logits, stop)
-        elif banned is not None or narrow:
+        elif penalized or banned is not None or narrow:
             logits = np.array(logits, copy=True)
+            for token in penalized:
+                if token < int(logits.size):
+                    logits[int(token)] -= penalty
             if banned is not None and banned < int(logits.size):
                 logits[int(banned)] = -1.0e30
             for token in narrow:

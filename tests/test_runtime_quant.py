@@ -209,6 +209,14 @@ def test_omitted_enable_thinking_leaves_the_block_open() -> None:
     assert commands._enable_thinking({"enable_thinking": False, "chat_template_kwargs": {"enable_thinking": True}}) is False
 
 
+def test_penalty_window_defaults_to_the_last_twenty_tokens() -> None:
+    import qwen38_flash_next.commands as commands
+
+    assert commands._penalty_window({}) == 20
+    assert commands._penalty_window({"penalty_window": 64}) == 64
+    assert commands._penalty_window({"penalty_window": 0}) == 0
+
+
 def test_omitted_sampling_follows_the_model_card() -> None:
     import qwen38_flash_next.commands as commands
 

@@ -3,6 +3,7 @@
 The system text is about 24,000 characters and states a few checkable facts.
 Each turn asks the persona about itself. Thinking stays on. Sampling is the
 Qwen3.8-Flash-Next thinking card: temperature 1.0, top-p 0.95, top-k 20.
+Presence is 1.5, subtracted once inside a token window that defaults to 20.
 Reasoning tokens print as they arrive, then the reply.
 """
 
@@ -166,7 +167,13 @@ def _wait_listening(proc: subprocess.Popen[str], log: Log) -> None:
     raise TimeoutError(log.text()[-4000:])
 
 
-def _stream(port: int, messages: list[dict[str, str]]) -> tuple[str, str, bool]:
+def _stream(
+    port: int,
+    messages: list[dict[str, str]],
+    *,
+    presence: float,
+    window: int,
+) -> tuple[str, str, bool]:
     """Print reasoning, then the reply. Returns both and whether reasoning led."""
     body = json.dumps(
         {
@@ -177,6 +184,8 @@ def _stream(port: int, messages: list[dict[str, str]]) -> tuple[str, str, bool]:
             "temperature": 1.0,
             "top_p": 0.95,
             "top_k": 20,
+            "presence_penalty": presence,
+            "penalty_window": window,
             "enable_thinking": True,
         }
     ).encode()
@@ -224,20 +233,35 @@ def _prompt_count(log: Log, previous: int) -> int | None:
     return int(matches[previous])
 
 
-def run(port: int, log: Log) -> list[str]:
+def _print_decode(log: Log, previous: int) -> int:
+    lines = [line for line in log.text().splitlines() if line.startswith("decode ")]
+    for line in lines[previous:]:
+        print(line, flush=True)
+    return len(lines)
+
+
+def run(
+    port: int,
+    log: Log,
+    *,
+    presence: float = 1.5,
+    window: int = 20,
+) -> list[str]:
     """Two turns. Problems are returned; the caller prints them."""
     system = persona()
-    print(f"persona characters {len(system)}", flush=True)
+    print(f"persona characters {len(system)} presence {presence} window {window}", flush=True)
     messages: list[dict[str, str]] = [
         {"role": "system", "content": system},
         {"role": "user", "content": TURN_ONE},
     ]
     print("--- turn 1 reasoning ---", flush=True)
     before = len(_PROMPT_TOKENS.findall(log.text()))
-    reasoning, content, led = _stream(port, messages)
+    decode_lines = 0
+    reasoning, content, led = _stream(port, messages, presence=presence, window=window)
     tokens = _prompt_count(log, before)
     if tokens is not None:
         print(f"turn 1 prompt tokens {tokens}", flush=True)
+    decode_lines = _print_decode(log, decode_lines)
     problems = judge_turn(content, reasoning, which=1)
     if not led:
         problems.append("turn 1 sent the reply before reasoning")
@@ -251,10 +275,11 @@ def run(port: int, log: Log) -> list[str]:
     messages.append({"role": "user", "content": TURN_TWO})
     print("--- turn 2 reasoning ---", flush=True)
     before = len(_PROMPT_TOKENS.findall(log.text()))
-    reasoning, content, led = _stream(port, messages)
+    reasoning, content, led = _stream(port, messages, presence=presence, window=window)
     tokens = _prompt_count(log, before)
     if tokens is not None:
         print(f"turn 2 prompt tokens {tokens}", flush=True)
+    _print_decode(log, decode_lines)
     problems.extend(judge_turn(content, reasoning, which=2))
     if not led:
         problems.append("turn 2 sent the reply before reasoning")
@@ -267,6 +292,8 @@ def run(port: int, log: Log) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Thinking-mode persona coherence.")
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--presence-penalty", type=float, default=1.5)
+    parser.add_argument("--penalty-window", type=int, default=20)
     args = parser.parse_args(argv)
     port = args.port or _free_port()
     proc = subprocess.Popen(
@@ -290,7 +317,12 @@ def main(argv: list[str] | None = None) -> int:
     threading.Thread(target=_read_log, args=(proc, log), daemon=True).start()
     try:
         _wait_listening(proc, log)
-        problems = run(port, log)
+        problems = run(
+            port,
+            log,
+            presence=args.presence_penalty,
+            window=args.penalty_window,
+        )
     except (
         OSError,
         TimeoutError,

@@ -9,6 +9,7 @@ from qwen38_flash_next.tools import (
     ThinkStream,
     normalize_messages,
     parse_tool_calls,
+    penalty_ids,
     repeated_cycle,
     split_thinking,
 )
@@ -223,6 +224,14 @@ def test_think_stream_closed_request_is_content() -> None:
     stream = ThinkStream(False)
     assert stream.push("Mara Ellison Voss") == [("content", "Mara Ellison Voss")]
     assert stream.finish() == []
+
+
+def test_penalty_ids_use_the_recent_window() -> None:
+    ids = list(range(30))
+    assert penalty_ids(ids, 20, once=True) == list(range(10, 30))
+    assert penalty_ids([1, 2, 1, 2], 20, once=True) == [1, 2]
+    assert penalty_ids([1, 2, 1, 2], 20, once=False) == [1, 2, 1, 2]
+    assert penalty_ids(ids, 0, once=True) == ids
 
 
 def test_repeated_cycle_is_the_next_token_of_the_span() -> None:
