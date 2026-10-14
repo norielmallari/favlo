@@ -467,6 +467,7 @@ class MetalSession:
             "moe_add_weighted",
             "moe_decode_gate",
             "moe_decode_down",
+            "moe_grouped_int8",
             "moe_grouped_int2",
             "moe_decode_gate_int2",
             "moe_decode_down_int2",
@@ -2494,6 +2495,9 @@ class MetalSession:
             self._size(32),
         )
         return dst
+
+    def moe_grouped_int8(self, *args: Any, **kwargs: Any) -> None:
+        self.moe_grouped(*args, kernel="moe_grouped_int8", **kwargs)
 
     def moe_grouped_int2(self, *args: Any, **kwargs: Any) -> None:
         self.moe_grouped(*args, kernel="moe_grouped_int2", **kwargs)

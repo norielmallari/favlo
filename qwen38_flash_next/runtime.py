@@ -64,6 +64,7 @@ from qwen38_flash_next.tools import (
     continuing_ids,
     forced_call_options,
     function_name_options,
+    looped_span,
     normalize_messages,
     penalty_ids,
     repeated_cycle,
@@ -206,6 +207,8 @@ class Qwen38Runtime:
             self._load_bf16()
         else:
             self.files = QuantRecord(root)
+            self._hot = expert_planes(self.files.hot_bits, self.hidden, self.moe)
+            self._cold = expert_planes(self.files.cold_bits, self.hidden, self.moe)
             self._load_record()
             self._load_supers()
             self._upload_tiers()
@@ -392,6 +395,13 @@ class Qwen38Runtime:
             constrained = self._constrained_name(logits, temperature, produced)
             if constrained is not None:
                 return constrained
+        if (
+            self._avoid_token is not None
+            and self._avoid_token not in produced
+            and len(produced) >= 512
+            and looped_span(produced)
+        ):
+            return self._avoid_token
         banned = repeated_cycle(produced)
         narrow = stuck_ids(produced)
         penalized: list[int] = []
@@ -1261,12 +1271,17 @@ class Qwen38Runtime:
             )
             choice = Dev(self._choice_ids, self.top_k, slot)
         self._choice[layer] = choice
+        legacy_tiers = (
+            isinstance(self.files, QuantRecord)
+            and self.files.hot_bits == 4
+            and self.files.cold_bits == 2
+        )
         if (
             count == 1
             and self._decoding
             and self._atlas_trusted
             and self._tier is not None
-            and isinstance(self.files, QuantRecord)
+            and legacy_tiers
         ):
             shared = self._shared_expert(bundle, xs, count)
             return self._moe_decode_trusted(layer, xs, weight, shared)
@@ -1361,20 +1376,11 @@ class Qwen38Runtime:
         xs = Dev(self._hold_xs, count * self.hidden)
         weight = Dev(self._hold_w, count * self.top_k)
         running = Dev(self._hold_out, count * self.hidden)
-        running = self._moe_int4_matmul(layer, xs, weight, running, host_ids, count)
-        running = self._moe_tier_batched(
-            layer,
-            xs,
-            weight,
-            running,
-            host_ids,
-            count,
-            self.files.cold_set(layer),
-            self._cold,
-            self._stage[layer % 2],
-            self._stage_table,
-            0,
-            self._stage_miss,
+        running = self._prefill_tier(
+            layer, xs, weight, running, host_ids, count, self.files.hot_set(layer), self._hot
+        )
+        running = self._prefill_tier(
+            layer, xs, weight, running, host_ids, count, self.files.cold_set(layer), self._cold
         )
         running = self._prefill_super(layer, xs, weight, running, host_ids, count)
         running = self._keep_mixed(running, count)
@@ -1427,6 +1433,39 @@ class Qwen38Runtime:
             self.gpu.barrier()
         self.gpu.flush()
 
+    def _prefill_tier(
+        self,
+        layer: int,
+        xs: Dev,
+        weight: Dev,
+        running: Dev,
+        host_ids: np.ndarray,
+        count: int,
+        members: set[int],
+        planes: ExpertPlanes,
+    ) -> Dev:
+        if self._stage is None or self._stage_table is None or self._stage_miss is None:
+            message = "prefill stream has no staging buffer"
+            raise RuntimeError(message)
+        if planes.bits == 4:
+            return self._moe_int4_matmul(
+                layer, xs, weight, running, host_ids, count, members, planes
+            )
+        return self._moe_tier_batched(
+            layer,
+            xs,
+            weight,
+            running,
+            host_ids,
+            count,
+            members,
+            planes,
+            self._stage[layer % 2],
+            self._stage_table,
+            0,
+            self._stage_miss,
+        )
+
     def _moe_int4_matmul(
         self,
         layer: int,
@@ -1435,11 +1474,15 @@ class Qwen38Runtime:
         running: Dev,
         host_ids: np.ndarray,
         count: int,
+        members: set[int],
+        planes: ExpertPlanes,
     ) -> Dev:
+        if planes.bits != 4:
+            message = "the wide int4 path was given another plane width"
+            raise RuntimeError(message)
         if not isinstance(self.files, QuantRecord) or self._stage is None:
             message = "prefill stream has no staging buffer"
             raise RuntimeError(message)
-        members = self.files.hot_set(layer)
         flat = np.asarray(host_ids, dtype=np.uint32).reshape(count, self.top_k)
         chosen: dict[int, list[tuple[int, int]]] = {}
         for token in range(count):
@@ -1507,7 +1550,7 @@ class Qwen38Runtime:
                 host_ids,
                 count,
                 small,
-                self._hot,
+                planes,
                 stage if large else self._stage[layer % 2],
                 table,
                 0,
@@ -1547,7 +1590,8 @@ class Qwen38Runtime:
         running = shared
         batch: set[int] = set()
         assigned = 0
-        cap = 65536
+        # int8 walks one token at a time. Keep one command buffer inside the GPU timeout.
+        cap = 2048 if planes.bits == 8 else 65536
         for expert, size in sizes.items():
             if batch and assigned + size > cap:
                 running = self._moe_tier(
@@ -1740,6 +1784,50 @@ class Qwen38Runtime:
             self.gpu.axpy_matching(running, down, weight, choice, expert)
         return running
 
+    def _decode_int8_atlas(
+        self,
+        layer: int,
+        row: Dev,
+        shared_row: Dev,
+        ids: list[int],
+        weight: Dev,
+        slots: list[int],
+        planes: ExpertPlanes,
+    ) -> Dev:
+        if self.atlas is None:
+            message = "decode has no expert atlas"
+            raise RuntimeError(message)
+        running = self.gpu.copy_dev(shared_row)
+        atlas = self.atlas.atlas
+        for expert, slot in zip(ids, slots, strict=True):
+            base = self.atlas.resident.get((layer, expert))
+            if base is None:
+                message = f"layer {layer} expert {expert} is not in the atlas"
+                raise RuntimeError(message)
+            gate = self.gpu.gemv_int8(
+                row,
+                atlas,
+                planes.gate_rows,
+                planes.gate_inner,
+                base,
+                base + planes.gate_scale,
+                self.hidden,
+                half=False,
+            )
+            activated = self.gpu.moe_activate(gate, 1, self.moe, planes.down_inner)
+            down = self.gpu.gemv_int8(
+                activated,
+                atlas,
+                self.hidden,
+                planes.down_inner,
+                base + planes.down_weight,
+                base + planes.down_scale,
+                self.moe,
+                half=True,
+            )
+            self.gpu.axpy(running, down, weight, slot)
+        return running
+
     def _decode_tier(
         self,
         layer: int,
@@ -1753,6 +1841,8 @@ class Qwen38Runtime:
         if self.atlas is None:
             message = "decode has no expert atlas"
             raise RuntimeError(message)
+        if planes.bits == 8:
+            return self._decode_int8_atlas(layer, row, shared_row, ids, weight, slots, planes)
         choice = self.gpu.dev_u32(ids)
         compact = self.gpu.tmp(len(slots))
         self.gpu.gather_f32(weight, self.gpu.dev_u32(slots), compact, len(slots))
@@ -1875,7 +1965,12 @@ class Qwen38Runtime:
         inverse_buf = self._upload_u32(inverse)
         gathered = self.gpu.gather_half(xs, token_buf, n_assign, self.hidden, self.hidden)
         gate = self.gpu.span(n_assign * planes.gate_rows * 4)
-        gemm = self.gpu.moe_grouped if planes.bits == 4 else self.gpu.moe_grouped_int2
+        if planes.bits == 8:
+            gemm = self.gpu.moe_grouped_int8
+        elif planes.bits == 2:
+            gemm = self.gpu.moe_grouped_int2
+        else:
+            gemm = self.gpu.moe_grouped
         gemm(
             gathered,
             weights,

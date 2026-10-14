@@ -503,6 +503,64 @@ static float dot_int2_half(device const uchar* packed, uint chunk, float scale, 
     return acc;
 }
 
+kernel void moe_grouped_int8(
+    device const half* activation [[buffer(0)]],
+    device const uchar* atlas [[buffer(1)]],
+    device const long* table [[buffer(2)]],
+    device const uint* group_expert [[buffer(3)]],
+    device const uint* group_offset [[buffer(4)]],
+    device float* destination [[buffer(5)]],
+    device uint* miss [[buffer(6)]],
+    constant uint& table_base [[buffer(7)]],
+    constant uint& cols [[buffer(8)]],
+    constant uint& inner [[buffer(9)]],
+    constant uint& weight_off [[buffer(10)]],
+    constant uint& scale_off [[buffer(11)]],
+    constant uint& miss_index [[buffer(12)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint tg [[threadgroup_position_in_grid]])
+{
+    uint group = tg / cols;
+    uint row = tg - group * cols;
+    uint begin = group_offset[group];
+    uint end = group_offset[group + 1u];
+    uint n = end - begin;
+    long base = table[table_base + group_expert[group]];
+    if (base < 0) {
+        if (row == 0u && lane == 0u) {
+            miss[miss_index] = 1u;
+        }
+        if (lane == 0u) {
+            for (uint local = 0u; local < n; ++local) {
+                destination[(begin + local) * cols + row] = 0.0f;
+            }
+        }
+        return;
+    }
+    device const uchar* image = atlas + base;
+    device const uchar* packed = image + weight_off + (ulong)row * inner;
+    device const uchar* row_scale = image + scale_off + (ulong)row * (inner >> 5);
+    uint blocks = inner >> 5;
+    // One token at a time. The dot matches gemv_int8_half: a register accumulator
+    // and a uniform simd_sum.
+    for (uint token = begin; token < end; ++token) {
+        float acc = 0.0f;
+        device const half* act = activation + (ulong)token * inner;
+        for (uint block = lane; block < blocks; block += 32u) {
+            float factor = e8m0_scale(row_scale[block]);
+            device const uchar* codes = packed + block * 32u;
+            device const half* avec = act + (block << 5);
+            for (uint i = 0u; i < 32u; ++i) {
+                acc += float(int8_code(codes[i])) * factor * float(avec[i]);
+            }
+        }
+        float sum = simd_sum(acc);
+        if (lane == 0u) {
+            destination[token * cols + row] = sum;
+        }
+    }
+}
+
 kernel void moe_grouped_int2(
     device const half* activation [[buffer(0)]],
     device const uchar* atlas [[buffer(1)]],

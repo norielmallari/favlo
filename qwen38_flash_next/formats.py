@@ -19,13 +19,13 @@ NGRAM_SLOT = 128
 NGRAM_WIDTH = 160
 IO_CHUNK = 256 * 1024 * 1024
 RECORD_VERSION = 4
-# Hugging Face model name, then -madmetal-, then each tier. s is the int8 pin,
-# h is the int4 keep set, c is the int2 complement. Five int8 experts are lifted
-# out of the 384 keep-set, so four layers have a shorter hot list.
+# Hugging Face model name, then -madmetal-, then each tier. h is the hot file,
+# c is the cold file. The plane after the count is that file's data width.
+# A manifest that omits hot_bits and cold_bits is hot int4 and cold int2.
 DEFAULT_RECORD = (
     Path(__file__).resolve().parents[1]
     / "models"
-    / "Qwen3.8-Flash-Next-madmetal-s5-int8-h384-int4-c128-int2"
+    / "Qwen3.8-Flash-Next-madmetal-h128-int8-c384-int4"
 )
 
 # MTLTensorDataType values from the macOS 27 SDK headers.
@@ -487,8 +487,20 @@ def expert_live_bytes() -> int:
 
 
 def expert_slot_bytes() -> int:
-    """On-disk stride of one hot expert. The live int4 image, so a run contains no hole."""
+    """On-disk stride of one int4 expert. The live image, so a run contains no hole."""
     return expert_live_bytes()
+
+
+def tier_image_bytes(bits: int) -> tuple[int, int]:
+    """Live image and on-disk stride for one expert at this data-plane width."""
+    if bits == 8:
+        return super_live_bytes(), super_slot_bytes()
+    if bits == 4:
+        return expert_live_bytes(), expert_slot_bytes()
+    if bits == 2:
+        return cold_live_bytes(), cold_slot_bytes()
+    message = f"expert width {bits} is not 2, 4, or 8"
+    raise ValueError(message)
 
 
 def stored_k_int2(inner: int) -> int:

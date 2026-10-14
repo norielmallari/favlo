@@ -130,6 +130,21 @@ def penalty_ids(ids: Sequence[int], window: int, *, once: bool) -> list[int]:
     return [int(token) for token in span]
 
 
+def looped_span(ids: Sequence[int], length: int = 12) -> bool:
+    """Whether the last `length` tokens have already occurred three times."""
+    count = len(ids)
+    if length < 1 or count < length * 3:
+        return False
+    tail = tuple(ids[-length:])
+    found = 0
+    for start in range(count - length + 1):
+        if tuple(ids[start : start + length]) == tail:
+            found += 1
+            if found >= 3:
+                return True
+    return False
+
+
 def repeated_cycle(ids: Sequence[int]) -> int | None:
     """The next id of a token span that has already been emitted three times."""
     count = len(ids)

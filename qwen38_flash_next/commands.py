@@ -17,7 +17,7 @@ from typing import Any
 import numpy as np
 
 from qwen38_flash_next.checks import check_state_kernels
-from qwen38_flash_next.convert import quantize_checkpoint
+from qwen38_flash_next.convert import importance_hot_ids, quantize_checkpoint
 from qwen38_flash_next.formats import DEFAULT_RECORD
 from qwen38_flash_next.grove import write_grove
 from qwen38_flash_next.probe import matmul, probe
@@ -51,8 +51,31 @@ def _record(path: Path | None) -> Path:
 
 def quantize_main(args: Any) -> int:
     try:
+        source = _checkpoint(args.source)
+        hot = args.hot
+        if args.importance is not None:
+            if hot is not None:
+                message = "pass either --hot or --importance"
+                raise RuntimeError(message)
+            config = json.loads((source / "config.json").read_text())
+            text = config["text_config"]
+            graph = json.loads(args.importance.read_text())
+            chosen = importance_hot_ids(
+                graph,
+                len(text["layer_types"]),
+                int(text["num_experts"]),
+                int(args.hot_count),
+            )
+            args.output.mkdir(parents=True, exist_ok=True)
+            hot = args.output / "hot-ids.json"
+            hot.write_text(json.dumps({str(layer): row for layer, row in enumerate(chosen)}))
         packed = quantize_checkpoint(
-            _checkpoint(args.source), args.output, args.hot, args.super
+            source,
+            args.output,
+            hot,
+            args.super,
+            hot_bits=int(args.hot_bits),
+            cold_bits=int(args.cold_bits),
         )
         write_grove(args.output, replace=packed)
     except Exception as exc:
@@ -573,6 +596,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     quant_parser.add_argument("--source", type=Path, default=None)
     quant_parser.add_argument("--output", type=Path, default=DEFAULT_RECORD)
     quant_parser.add_argument("--hot", type=Path, default=None)
+    quant_parser.add_argument("--importance", type=Path, default=None)
+    quant_parser.add_argument("--hot-count", type=int, default=128)
+    quant_parser.add_argument("--hot-bits", type=int, default=4)
+    quant_parser.add_argument("--cold-bits", type=int, default=2)
     quant_parser.add_argument("--super", type=Path, default=None)
     serve_parser = sub.add_parser("serve", help="serve the quantized record")
     serve_parser.add_argument("--host", default="127.0.0.1")

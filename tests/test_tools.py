@@ -7,6 +7,7 @@ from qwen38_flash_next.formats import DEFAULT_RECORD
 from qwen38_flash_next.tools import (
     ContentGate,
     ThinkStream,
+    looped_span,
     normalize_messages,
     parse_tool_calls,
     penalty_ids,
@@ -241,6 +242,13 @@ def test_repeated_cycle_is_the_next_token_of_the_span() -> None:
     assert repeated_cycle([1, 1, 1]) == 1
     assert repeated_cycle([1, 1]) is None
     assert repeated_cycle([7, 8, 7, 8, 7, 8]) == 7
+
+
+def test_looped_span_needs_three_copies() -> None:
+    phrase = list(range(12))
+    assert looped_span(phrase * 2) is False
+    assert looped_span(phrase * 3) is True
+    assert looped_span(list(range(40))) is False
 
 
 def test_stuck_ids_are_the_small_recent_set() -> None:

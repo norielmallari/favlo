@@ -3,7 +3,8 @@
 The system text is about 24,000 characters and states a few checkable facts.
 Each turn asks the persona about itself. Thinking stays on. Sampling is the
 Qwen3.8-Flash-Next thinking card: temperature 1.0, top-p 0.95, top-k 20.
-Presence is 1.5, subtracted once inside a token window that defaults to 20.
+Presence stays at 0, the thinking-card value. A penalty on recent tokens
+pushes a quote off the date and the buoy color.
 Reasoning tokens print as they arrive, then the reply.
 """
 
@@ -244,7 +245,7 @@ def run(
     port: int,
     log: Log,
     *,
-    presence: float = 1.5,
+    presence: float = 0.0,
     window: int = 20,
 ) -> list[str]:
     """Two turns. Problems are returned; the caller prints them."""
@@ -292,7 +293,7 @@ def run(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Thinking-mode persona coherence.")
     parser.add_argument("--port", type=int, default=0)
-    parser.add_argument("--presence-penalty", type=float, default=1.5)
+    parser.add_argument("--presence-penalty", type=float, default=0.0)
     parser.add_argument("--penalty-window", type=int, default=20)
     args = parser.parse_args(argv)
     port = args.port or _free_port()
