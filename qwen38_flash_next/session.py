@@ -597,6 +597,8 @@ class MetalSession:
             "presence_logits",
             "sample_topk_partial",
             "sample_topk_draw",
+            "spec_topk_accept",
+            "spec_f32_accept",
             "copy_bytes",
             "gemv_f32_batch",
             "gemv_f16_batch",
@@ -613,6 +615,7 @@ class MetalSession:
             "qsa_attend",
             "qsa_attend_selected",
             "gather_f32",
+            "gather_rows_f32",
             "gather_half",
             "moe_grouped",
             "moe_activate",
@@ -624,6 +627,10 @@ class MetalSession:
             "moe_grouped_int2",
             "moe_decode_gate_int2",
             "moe_decode_down_int2",
+            "moe_span_fp4_gate",
+            "moe_span_fp4_down",
+            "moe_span_fp8_gate",
+            "moe_span_fp8_down",
             "gemv_int4_f32",
             "gemv_int8_f32",
             "gemv_int8_half",
@@ -635,6 +642,11 @@ class MetalSession:
         self._argmax_out = self.alloc(4)
         self._sample_top_s = self.alloc(1024 * 32 * 4)
         self._sample_top_i = self.alloc(1024 * 32 * 4)
+        self._spec_draft_s = self.alloc(1024 * 32 * 4)
+        self._spec_draft_i = self.alloc(1024 * 32 * 4)
+        self._spec_out = self.alloc(8)
+        self._spec_scratch = None
+        self.force_gemv = False
         self._topk_probs = self.alloc(512 * 4)
         self._sample_scratch = None
         self._ngram_pages: dict[int, Any] = {}
@@ -1544,6 +1556,94 @@ class MetalSession:
         raw = _buffer_bytes(self._argmax_out, 4)
         return int(np.frombuffer(raw, dtype=np.uint32)[0])
 
+    def _topk_partial(
+        self, logits: Dev, scores: Any, ids: Any, temperature: float, keep: int
+    ) -> None:
+        grid = 1024
+        self.dispatch(
+            self.act["sample_topk_partial"],
+            (_dev_bind(logits), (scores, 0), (ids, 0)),
+            (
+                struct.pack("<I", logits.n),
+                struct.pack("<I", keep),
+                struct.pack("<f", float(temperature)),
+                struct.pack("<I", grid),
+            ),
+            self._size(grid // 256),
+            self._size(256),
+        )
+
+    def spec_accept(
+        self,
+        target: Dev,
+        draft_logits: Dev,
+        draft: int,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        rng: Any,
+    ) -> tuple[int, bool]:
+        """Keep ``draft`` with probability min(1, p/q), else draw the residual on device."""
+        if temperature <= 0.0:
+            chosen = self.argmax(target)
+            return (int(draft) if chosen == int(draft) else chosen), chosen == int(draft)
+        keep = int(top_k)
+        u_accept = float(rng.random())
+        u_residual = float(rng.random())
+        if keep <= 0 or keep > 32:
+            words = target.n * 2 * 4
+            if self._spec_scratch is None or self._spec_scratch.length() < words:
+                self._spec_scratch = self.alloc(words)
+            self.dispatch(
+                self.act["spec_f32_accept"],
+                (
+                    _dev_bind(target),
+                    _dev_bind(draft_logits),
+                    (self._spec_scratch, 0),
+                    (self._spec_out, 0),
+                ),
+                (
+                    struct.pack("<I", target.n),
+                    struct.pack("<f", float(temperature)),
+                    struct.pack("<f", float(top_p)),
+                    struct.pack("<I", keep),
+                    struct.pack("<I", int(draft)),
+                    struct.pack("<f", u_accept),
+                    struct.pack("<f", u_residual),
+                ),
+                self._size(1),
+                self._size(1),
+            )
+        else:
+            self._topk_partial(target, self._sample_top_s, self._sample_top_i, temperature, keep)
+            self._topk_partial(
+                draft_logits, self._spec_draft_s, self._spec_draft_i, temperature, keep
+            )
+            self.dispatch(
+                self.act["spec_topk_accept"],
+                (
+                    (self._sample_top_s, 0),
+                    (self._sample_top_i, 0),
+                    (self._spec_draft_s, 0),
+                    (self._spec_draft_i, 0),
+                    (self._spec_out, 0),
+                ),
+                (
+                    struct.pack("<I", 1024),
+                    struct.pack("<I", keep),
+                    struct.pack("<f", float(top_p)),
+                    struct.pack("<I", int(draft)),
+                    struct.pack("<f", u_accept),
+                    struct.pack("<f", u_residual),
+                ),
+                self._size(1),
+                self._size(1),
+            )
+        self.flush()
+        raw = _buffer_bytes(self._spec_out, 8)
+        token, flag = np.frombuffer(raw, dtype=np.uint32)
+        return int(token), bool(flag)
+
     def suppress_logit(self, logits: Dev, index: int, value: float = -1.0e30) -> None:
         self._ew(
             "suppress_logit",
@@ -1632,6 +1732,22 @@ class MetalSession:
             raise ValueError(message)
         if count == 1 and isinstance(matrix, Int4Matrix):
             return self._gemv_int4(matrix, src, epilogue, epilogue_scale)
+        # A short decode span uses the one-token GEMV on each row. The tiled
+        # matmul does not match that dot closely enough for an argmax.
+        if (
+            self.force_gemv
+            and count > 1
+            and isinstance(matrix, Int4Matrix)
+            and matrix.inner == inner
+        ):
+            rows = int(matrix.rows)
+            dst = self.tmp(count * rows)
+            for index in range(count):
+                part = self._gemv_int4(
+                    matrix, src.view(index * inner, inner), epilogue, epilogue_scale
+                )
+                self.copy_into(part, dst, index * rows)
+            return dst
         gemm = (
             count > 1
             and isinstance(matrix, Int4Matrix)
@@ -2512,6 +2628,20 @@ class MetalSession:
         )
         return dst
 
+    def gather_rows_f32(self, src: Dev, tokens: Any, n: int, logical: int, stored: int) -> Span:
+        dst = self.span(max(n, 1) * stored * 4)
+        self._ew(
+            "gather_rows_f32",
+            (_dev_bind(src), _bind_any(tokens), (dst.buf, dst.offset)),
+            (
+                struct.pack("<I", n),
+                struct.pack("<I", logical),
+                struct.pack("<I", stored),
+            ),
+            max(n * stored, 1),
+        )
+        return dst
+
     def gather_half(self, src: Dev, tokens: Any, n: int, logical: int, stored: int) -> Span:
         dst = self.span(max(n, 1) * stored * 2)
         self._ew(
@@ -2552,9 +2682,20 @@ class MetalSession:
         miss_index: int,
         *,
         kernel: str = "moe_grouped",
+        logical: int | None = None,
     ) -> None:
         if n_groups < 1:
             return
+        constants = [
+            struct.pack("<I", table_base),
+            struct.pack("<I", cols),
+            struct.pack("<I", inner),
+            struct.pack("<I", weight_off),
+            struct.pack("<I", scale_off),
+            struct.pack("<I", miss_index),
+        ]
+        if logical is not None:
+            constants.append(struct.pack("<I", int(logical)))
         self.dispatch(
             self.act[kernel],
             (
@@ -2566,14 +2707,7 @@ class MetalSession:
                 _bind_any(destination),
                 (miss, 0),
             ),
-            (
-                struct.pack("<I", table_base),
-                struct.pack("<I", cols),
-                struct.pack("<I", inner),
-                struct.pack("<I", weight_off),
-                struct.pack("<I", scale_off),
-                struct.pack("<I", miss_index),
-            ),
+            constants,
             self._size(n_groups * cols),
             self._size(32),
         )

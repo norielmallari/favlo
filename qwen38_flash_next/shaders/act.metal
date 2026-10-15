@@ -1003,3 +1003,342 @@ kernel void sample_f32(
     }
     out[0] = n - 1u;
 }
+
+// Same top-k list as sample_topk_draw, including the id sort and nucleus cutoff.
+static void merge_support(
+    device const float* top_scores,
+    device const uint* top_ids,
+    uint grid,
+    uint keep,
+    float top_p,
+    thread float* probs,
+    thread uint* ids,
+    thread float& sum)
+{
+    float scores[32];
+    for (uint s = 0u; s < 32u; ++s) {
+        scores[s] = -INFINITY;
+        ids[s] = 0u;
+        probs[s] = 0.0f;
+    }
+    for (uint g = 0u; g < grid; ++g) {
+        for (uint s = 0u; s < keep; ++s) {
+            float score = top_scores[g * 32u + s];
+            uint id = top_ids[g * 32u + s];
+            if (!(score > scores[keep - 1u])) {
+                continue;
+            }
+            uint pos = keep - 1u;
+            while (pos > 0u && score > scores[pos - 1u]) {
+                scores[pos] = scores[pos - 1u];
+                ids[pos] = ids[pos - 1u];
+                pos -= 1u;
+            }
+            scores[pos] = score;
+            ids[pos] = id;
+        }
+    }
+    float peak = scores[0];
+    sum = 0.0f;
+    for (uint s = 0u; s < keep; ++s) {
+        float prob = exp(scores[s] - peak);
+        probs[s] = prob;
+        sum += prob;
+    }
+    if (top_p < 1.0f && sum > 0.0f) {
+        float cursor = 0.0f;
+        uint kept = keep;
+        for (uint s = 0u; s < keep; ++s) {
+            cursor += probs[s] / sum;
+            if (cursor > top_p) {
+                kept = s + 1u;
+                break;
+            }
+        }
+        sum = 0.0f;
+        for (uint s = 0u; s < keep; ++s) {
+            if (s >= kept) {
+                probs[s] = 0.0f;
+            }
+            sum += probs[s];
+        }
+    }
+    for (uint a = 1u; a < keep; ++a) {
+        float prob = probs[a];
+        uint id = ids[a];
+        uint b = a;
+        while (b > 0u && ids[b - 1u] > id) {
+            probs[b] = probs[b - 1u];
+            ids[b] = ids[b - 1u];
+            b -= 1u;
+        }
+        probs[b] = prob;
+        ids[b] = id;
+    }
+    if (!(sum > 0.0f)) {
+        for (uint s = 0u; s < keep; ++s) {
+            probs[s] = 0.0f;
+        }
+        probs[0] = 1.0f;
+        sum = 1.0f;
+    }
+}
+
+static float support_prob(
+    thread const float* probs,
+    thread const uint* ids,
+    uint keep,
+    float sum,
+    uint want)
+{
+    if (!(sum > 0.0f)) {
+        return 0.0f;
+    }
+    for (uint s = 0u; s < keep; ++s) {
+        if (ids[s] == want && probs[s] > 0.0f) {
+            return probs[s] / sum;
+        }
+    }
+    return 0.0f;
+}
+
+// Leviathan ratio test on the two sample_topk_draw distributions.
+// out[0] is the token. out[1] is 1 when the draft is kept.
+kernel void spec_topk_accept(
+    device const float* target_scores [[buffer(0)]],
+    device const uint* target_ids [[buffer(1)]],
+    device const float* draft_scores [[buffer(2)]],
+    device const uint* draft_ids [[buffer(3)]],
+    device uint* out [[buffer(4)]],
+    constant uint& grid [[buffer(5)]],
+    constant uint& k [[buffer(6)]],
+    constant float& top_p [[buffer(7)]],
+    constant uint& draft [[buffer(8)]],
+    constant float& u_accept [[buffer(9)]],
+    constant float& u_residual [[buffer(10)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid != 0u) {
+        return;
+    }
+    float p_probs[32];
+    uint p_ids[32];
+    float q_probs[32];
+    uint q_ids[32];
+    float p_sum = 0.0f;
+    float q_sum = 0.0f;
+    uint keep = k > 32u ? 32u : k;
+    merge_support(target_scores, target_ids, grid, keep, top_p, p_probs, p_ids, p_sum);
+    merge_support(draft_scores, draft_ids, grid, keep, top_p, q_probs, q_ids, q_sum);
+    float p = support_prob(p_probs, p_ids, keep, p_sum, draft);
+    float q = support_prob(q_probs, q_ids, keep, q_sum, draft);
+    bool accept = false;
+    if (q > 0.0f) {
+        float ratio = min(1.0f, p / q);
+        accept = u_accept < ratio;
+    } else if (p > 0.0f) {
+        accept = true;
+    }
+    if (accept) {
+        out[0] = draft;
+        out[1] = 1u;
+        return;
+    }
+    float mass[32];
+    float total = 0.0f;
+    for (uint s = 0u; s < keep; ++s) {
+        float pi = 0.0f;
+        if (p_probs[s] > 0.0f && p_sum > 0.0f) {
+            pi = p_probs[s] / p_sum;
+        }
+        float qi = support_prob(q_probs, q_ids, keep, q_sum, p_ids[s]);
+        float gap = pi - qi;
+        if (gap < 0.0f) {
+            gap = 0.0f;
+        }
+        mass[s] = gap;
+        total += gap;
+    }
+    if (!(total > 0.0f)) {
+        out[0] = p_ids[0];
+        out[1] = 0u;
+        return;
+    }
+    float cursor = 0.0f;
+    for (uint s = 0u; s < keep; ++s) {
+        cursor += mass[s] / total;
+        if (u_residual < cursor) {
+            out[0] = p_ids[s];
+            out[1] = 0u;
+            return;
+        }
+    }
+    out[0] = p_ids[keep - 1u];
+    out[1] = 0u;
+}
+
+// Full-vocabulary twin of sample_f32, used when top-k is 0 or above 32.
+static void distribution_f32(
+    device const float* logits,
+    device float* scratch,
+    uint n,
+    float temperature,
+    float top_p,
+    uint top_k)
+{
+    float peak = -INFINITY;
+    for (uint i = 0u; i < n; ++i) {
+        float score = logits[i] / temperature;
+        scratch[i] = score;
+        peak = max(peak, score);
+    }
+    if (top_k > 0u && top_k < n) {
+        float previous = INFINITY;
+        float cutoff = peak;
+        for (uint nth = 0u; nth < top_k; ++nth) {
+            float next = -INFINITY;
+            for (uint i = 0u; i < n; ++i) {
+                float value = scratch[i];
+                if (value < previous && value > next) {
+                    next = value;
+                }
+            }
+            cutoff = next;
+            previous = next;
+        }
+        for (uint i = 0u; i < n; ++i) {
+            if (scratch[i] < cutoff) {
+                scratch[i] = -INFINITY;
+            }
+        }
+        peak = cutoff;
+    }
+    float sum = 0.0f;
+    for (uint i = 0u; i < n; ++i) {
+        float prob = 0.0f;
+        if (scratch[i] > -INFINITY) {
+            prob = exp(scratch[i] - peak);
+        }
+        scratch[i] = prob;
+        sum += prob;
+    }
+    if (!(sum > 0.0f)) {
+        uint best = 0u;
+        float best_v = logits[0];
+        for (uint i = 1u; i < n; ++i) {
+            if (logits[i] > best_v) {
+                best_v = logits[i];
+                best = i;
+            }
+        }
+        for (uint i = 0u; i < n; ++i) {
+            scratch[i] = 0.0f;
+        }
+        scratch[best] = 1.0f;
+        return;
+    }
+    for (uint i = 0u; i < n; ++i) {
+        scratch[i] /= sum;
+    }
+    if (top_p < 1.0f) {
+        float cursor = 0.0f;
+        while (true) {
+            uint best = 0u;
+            float best_p = 0.0f;
+            for (uint i = 0u; i < n; ++i) {
+                if (scratch[i] > best_p) {
+                    best_p = scratch[i];
+                    best = i;
+                }
+            }
+            if (!(best_p > 0.0f)) {
+                break;
+            }
+            scratch[best] = -best_p;
+            cursor += best_p;
+            if (cursor > top_p) {
+                break;
+            }
+        }
+        sum = 0.0f;
+        for (uint i = 0u; i < n; ++i) {
+            if (scratch[i] < 0.0f) {
+                scratch[i] = -scratch[i];
+                sum += scratch[i];
+            } else {
+                scratch[i] = 0.0f;
+            }
+        }
+        float norm = sum > 0.0f ? sum : 1.0f;
+        for (uint i = 0u; i < n; ++i) {
+            scratch[i] /= norm;
+        }
+    }
+}
+
+kernel void spec_f32_accept(
+    device const float* target [[buffer(0)]],
+    device const float* draft_logits [[buffer(1)]],
+    device float* scratch [[buffer(2)]],
+    device uint* out [[buffer(3)]],
+    constant uint& n [[buffer(4)]],
+    constant float& temperature [[buffer(5)]],
+    constant float& top_p [[buffer(6)]],
+    constant uint& top_k [[buffer(7)]],
+    constant uint& draft [[buffer(8)]],
+    constant float& u_accept [[buffer(9)]],
+    constant float& u_residual [[buffer(10)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid != 0u) {
+        return;
+    }
+    distribution_f32(target, scratch, n, temperature, top_p, top_k);
+    distribution_f32(draft_logits, scratch + n, n, temperature, top_p, top_k);
+    float p = draft < n ? scratch[draft] : 0.0f;
+    float q = draft < n ? scratch[n + draft] : 0.0f;
+    bool accept = false;
+    if (q > 0.0f) {
+        accept = u_accept < min(1.0f, p / q);
+    } else if (p > 0.0f) {
+        accept = true;
+    }
+    if (accept) {
+        out[0] = draft;
+        out[1] = 1u;
+        return;
+    }
+    float total = 0.0f;
+    for (uint i = 0u; i < n; ++i) {
+        float gap = scratch[i] - scratch[n + i];
+        if (gap < 0.0f) {
+            gap = 0.0f;
+        }
+        scratch[i] = gap;
+        total += gap;
+    }
+    if (!(total > 0.0f)) {
+        uint best = 0u;
+        float best_v = target[0];
+        for (uint i = 1u; i < n; ++i) {
+            if (target[i] > best_v) {
+                best_v = target[i];
+                best = i;
+            }
+        }
+        out[0] = best;
+        out[1] = 0u;
+        return;
+    }
+    float cursor = 0.0f;
+    for (uint i = 0u; i < n; ++i) {
+        cursor += scratch[i] / total;
+        if (u_residual < cursor) {
+            out[0] = i;
+            out[1] = 0u;
+            return;
+        }
+    }
+    out[0] = n - 1u;
+    out[1] = 0u;
+}

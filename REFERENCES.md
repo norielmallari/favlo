@@ -122,13 +122,19 @@ Apple. WWDC22 session 10104, *Load resources faster with Metal 3.* An IO command
 
 Apple. WWDC22 session 10066, *Discover Metal 3.* Many small loads are the case that fast resource loading adds. A long sequential file is the bulk transfer.
 
-The plan that uses these is [docs/prefill-decode-split/prefill-decode-split.md](docs/prefill-decode-split/prefill-decode-split.md). It is not the as-built forward.
+The plan that uses these is a local note under `artifacts/implementation-plan/docs/prefill-decode-split/` (gitignored). It is not the as-built forward.
 
 ## Decode
 
 Mohamed Amine Bergach. *When Quantization Is Free: An int4 KV Cache That Outruns fp16 on Apple Silicon.* [arXiv:2605.05699](https://arxiv.org/abs/2605.05699), May 2026. A fused int4 key/value cache can transfer less per decode step than fp16 on unified memory. The measured models are not this checkpoint.
 
-Options 1, 2, and 3 in [docs/decode-options/decode-options.md](docs/decode-options/decode-options.md) are the as-built decode. Options 4 and 5 in that note are still a plan. The int4 cache in the paper above is not one of those options.
+Options 1, 2, and 3 in the local `artifacts/implementation-plan/docs/decode-options/` note (gitignored) are the as-built decode. Option 4 in that note is still a plan. Option 5 is the as-built MTP decode. The int4 cache in the paper above is not one of those options.
+
+Yaniv Leviathan, Matan Kalman, and Yossi Matias. *Fast Inference from Transformers via Speculative Decoding.* ICML 2023. [arXiv:2211.17192](https://arxiv.org/abs/2211.17192). One target call scores the drafted span. A drafted token \(x\) is kept with probability \(\min(1, p(x)/q(x))\). A rejection draws from \(\mathrm{norm}(\max(0, p-q))\). The output distribution is the target's, at every temperature. Temperature 0 is that rule when \(p\) is a point mass on the argmax.
+
+Charlie Chen, Sebastian Borgeaud, Geoffrey Irving, Jean-Baptiste Lespiau, Laurent Sifre, and John Jumper. *Accelerating Large Language Model Decoding with Speculative Sampling.* [arXiv:2302.01318](https://arxiv.org/abs/2302.01318), 2023. Temperature, nucleus, and top-k are applied to both distributions before the same test. Scoring a short continuation costs about one sample when the call is bound by reading the weights.
+
+The decode that uses these is documented in [docs/qwen38/schedule.md](docs/qwen38/schedule.md) and the local `artifacts/implementation-plan/docs/mtp/` note (gitignored).
 
 ## Prompt text
 

@@ -485,8 +485,8 @@ static void load_kv8(
 }
 
 // Phase 0 writes completed E4M3 blocks, or every new token when mode is BF16.
-// Phase 1 writes the unfinished BF16 tail after those blocks. The two phases
-// are separate dispatches so a tail write cannot race the read of the old tail.
+// Phase 1 writes the unfinished BF16 tail after those blocks. The host orders
+// the two dispatches so phase 1 does not replace the tail phase 0 still reads.
 kernel void kv_store(
     device const float* key [[buffer(0)]],
     device const float* value [[buffer(1)]],

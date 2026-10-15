@@ -1,5 +1,7 @@
 # Benchmarks
 
+As-built harness scores for Qwen3.8-Flash-Next. Scope is in [ARCHITECTURE.md](../../ARCHITECTURE.md). If this note disagrees with that file, ARCHITECTURE.md wins.
+
 The harness scores three published sets against `serve`. IFEval, GSM8K, and HumanEval turn thinking on at reasoning effort low. The draw is greedy, temperature 0. IFEval sends presence 1.5 so the trace does not repeat itself, and the checker reads the reply after the think block. GSM8K omits presence, so thinking mode uses 0. HumanEval sends presence 0. Each request is one chat completion. A leading close tag is removed. An empty HumanEval reply, or a reply with no function, is scored from the reasoning text when that text contains the function. The intelligence smoke is the first 30 rows of each file, in file order. The full run keeps those rows and continues through the rest. Responses resume from `artifacts/benchmarks`.
 
 ## Sets

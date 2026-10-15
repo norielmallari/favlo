@@ -1,6 +1,6 @@
 # Console
 
-As-built status row for Qwen3.8-Flash-Next. The standard this binding follows is [docs/console-improvements/console-improvements.md](../console-improvements/console-improvements.md). [ARCHITECTURE.md](../../ARCHITECTURE.md) wins if they disagree.
+As-built status row for Qwen3.8-Flash-Next. Scope is in [ARCHITECTURE.md](../../ARCHITECTURE.md). If this note disagrees with that file, ARCHITECTURE.md wins.
 
 `qwen38_flash_next/console.py` owns the row. It does not import the forward. A handle is a `Progress` value: phase, done, total, unit, and an optional gauge. The request thread writes those integers. A daemon thread samples them at 10 Hz. Registration takes a lock. The sample does not.
 

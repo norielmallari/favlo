@@ -20,6 +20,17 @@ build/
 *.log
 artifacts/
 
+# Implementation plans (keep under artifacts/implementation-plan/, not docs/)
+docs/console-improvements/
+docs/decode-options/
+docs/dynamic-quantization/
+docs/mtp/
+docs/parallel-quantize/
+docs/prefill-decode-split/
+docs/prefix-cache-ssd/
+docs/qwen38-27b/
+docs/qwen38-flash-next/
+
 # Weights and records stay outside the tree
 *.safetensors
 *.bin

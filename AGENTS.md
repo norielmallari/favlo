@@ -26,7 +26,7 @@ The runtime does not call into a multi-model server to run the forward.
 - A second model until that model is explicitly added.
 - Affine group-64 packing and per-layer bit allocation.
 - Batching, the Neural Engine, and the vision tower.
-- A second output head, or a hot/cold split of the MTP expert file. Greedy decode runs the packed MTP layer for three draft steps and keeps the prefix the backbone matches.
+- A second output head, or a hot/cold split of the MTP expert file. An int2 span kernel. Publishing an accept length.
 - Fusing a whole layer into one kernel. The runtime is a layered loop. Shaders share a command buffer until the host needs an expert file offset or the sampled token id.
 - Using another application's source, tests, comments, or design notes as the reference for a profiler, quantizer, kernel, or forward.
 - A host GEMV, a CPU matmul of activations, or any stand-in forward that runs because a Metal kernel is missing. Prefill, decode, and the calibration prefill are Metal shaders on Apple Silicon.
@@ -53,7 +53,8 @@ qwen38_flash_next/         this model's pipeline
 src/madmetal/              process entry; selects one pipeline and stops
   registry.py              flavor folders, aliases, and sampling variants
 harness/                   file-agent client, coherence, and the three benchmarks
-docs/qwen38/               record, n-gram, schedule, probe, and console notes
+docs/                      as-built notes only; see docs/README.md
+docs/qwen38/               record, n-gram, schedule, probe, console, benchmarks
 pyproject.toml
 ```
 
@@ -74,7 +75,7 @@ The calibration prompt strings are data in a bucket JSON: `tool_calling`, `chat`
 3. Weights on disk for this model are the Metal records in [docs/qwen38/record.md](docs/qwen38/record.md). The tier rules are in ARCHITECTURE.md.
 4. The key/value cache defaults to E4M3 for completed blocks of four. The unfinished tail stays BF16. `--kv-cache bf16` stores every K and V token as BF16. The indexer key stays BF16.
 5. Do not invent routing hits, calibration energies, or hidden-state errors. The device roundtrip in [docs/qwen38/probe.md](docs/qwen38/probe.md) measures nibble order and int4 endpoints before the expert table is packed.
-6. Keep ARCHITECTURE.md current in the same change that alters the pipeline, the records, the cache, the endpoint, or the scope. Update the note in `docs/qwen38/` that owns a layout, the n-gram hash, the kernel schedule, or the probe. ARCHITECTURE.md wins if they disagree.
+6. Keep ARCHITECTURE.md current in the same change that alters the pipeline, the records, the cache, the endpoint, or the scope. Update the note in `docs/qwen38/` that owns a layout, the n-gram hash, the kernel schedule, or the probe. ARCHITECTURE.md wins if they disagree. `docs/` is as-built only. Implementation plans live under `artifacts/implementation-plan/` (gitignored). Do not commit plan or option-comparison notes under `docs/`.
 7. This process is the runtime. Re-implement from public research documents. Do not use another application's source as the reference, and do not launch another application's environment.
 8. Prefill, decode, and the calibration prefill map onto Metal. The endpoint serves tokens those shaders produced. A missing kernel stays missing. It is not replaced by a slower forward. A weight plane is a Metal tensor format whose op compiles and whose dispatch completes. half × int8 does not complete, so the hot plane is fp8 E4M3 and the cold plane is fp4 E2M1.
 

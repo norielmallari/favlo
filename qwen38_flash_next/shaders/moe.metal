@@ -102,6 +102,28 @@ kernel void gather_f32(
     dst[tid] = src[index[tid]];
 }
 
+kernel void gather_rows_f32(
+    device const float* src [[buffer(0)]],
+    device const uint* tokens [[buffer(1)]],
+    device float* dst [[buffer(2)]],
+    constant uint& n [[buffer(3)]],
+    constant uint& logical [[buffer(4)]],
+    constant uint& stored [[buffer(5)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint total = n * stored;
+    if (tid >= total) {
+        return;
+    }
+    uint row = tid / stored;
+    uint col = tid - row * stored;
+    float value = 0.0f;
+    if (col < logical && row < n) {
+        value = src[tokens[row] * logical + col];
+    }
+    dst[tid] = value;
+}
+
 kernel void gather_half(
     device const float* src [[buffer(0)]],
     device const uint* tokens [[buffer(1)]],
@@ -740,5 +762,296 @@ kernel void moe_decode_down_int2(
     }
     if (lane == 0u) {
         destination[row] = acc;
+    }
+}
+
+// Short decode span. One expert image is loaded once and applied to every
+// selected row. The dot is moe_decode_gate / moe_decode_down, not the grouped
+// prefill tile. fp4 E2M1 only; the fp8 twins are below. int2 has no span kernel.
+kernel void moe_span_fp4_gate(
+    device const float* activation [[buffer(0)]],
+    device const uchar* atlas [[buffer(1)]],
+    device const long* table [[buffer(2)]],
+    device const uint* group_expert [[buffer(3)]],
+    device const uint* group_offset [[buffer(4)]],
+    device float* destination [[buffer(5)]],
+    device uint* miss [[buffer(6)]],
+    constant uint& table_base [[buffer(7)]],
+    constant uint& cols [[buffer(8)]],
+    constant uint& inner [[buffer(9)]],
+    constant uint& weight_off [[buffer(10)]],
+    constant uint& scale_off [[buffer(11)]],
+    constant uint& miss_index [[buffer(12)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint tg [[threadgroup_position_in_grid]])
+{
+    uint group = tg / cols;
+    uint row = tg - group * cols;
+    uint begin = group_offset[group];
+    uint end = group_offset[group + 1u];
+    uint n = end - begin;
+    long base = table[table_base + group_expert[group]];
+    if (base < 0) {
+        if (row == 0u && lane == 0u) {
+            miss[miss_index] = 1u;
+        }
+        if (lane == 0u) {
+            for (uint local = 0u; local < n; ++local) {
+                destination[(begin + local) * cols + row] = 0.0f;
+            }
+        }
+        return;
+    }
+    device const uchar* image = atlas + base;
+    device const uchar* packed = image + weight_off + row * (inner >> 1);
+    device const uchar* row_scale = image + scale_off + row * (inner >> 5);
+    uint blocks = inner >> 5;
+    uint niter = (blocks + 31u) >> 5;
+    for (uint tile = 0u; tile < n; tile += 8u) {
+        uint nt = min(n - tile, 8u);
+        float part[8];
+        for (uint t = 0u; t < 8u; ++t) {
+            part[t] = 0.0f;
+        }
+        for (uint iter = 0u; iter < niter; ++iter) {
+            uint chunk = lane + iter * 32u;
+            if (chunk >= blocks) {
+                continue;
+            }
+            uint4 weight = load_chunk(packed, chunk);
+            float scale = e8m0_scale(row_scale[chunk]);
+            device const float* act = activation + ((begin + tile) * inner + (chunk << 5));
+            for (uint t = 0u; t < nt; ++t) {
+                part[t] += dot_chunk_f32(weight, scale, act + t * inner);
+            }
+        }
+        for (uint t = 0u; t < nt; ++t) {
+            float sum = simd_sum(part[t]);
+            if (lane == 0u) {
+                destination[(begin + tile + t) * cols + row] = sum;
+            }
+        }
+    }
+}
+
+kernel void moe_span_fp4_down(
+    device const half* activation [[buffer(0)]],
+    device const uchar* atlas [[buffer(1)]],
+    device const long* table [[buffer(2)]],
+    device const uint* group_expert [[buffer(3)]],
+    device const uint* group_offset [[buffer(4)]],
+    device float* destination [[buffer(5)]],
+    device uint* miss [[buffer(6)]],
+    constant uint& table_base [[buffer(7)]],
+    constant uint& cols [[buffer(8)]],
+    constant uint& inner [[buffer(9)]],
+    constant uint& weight_off [[buffer(10)]],
+    constant uint& scale_off [[buffer(11)]],
+    constant uint& miss_index [[buffer(12)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint tg [[threadgroup_position_in_grid]])
+{
+    uint group = tg / cols;
+    uint row = tg - group * cols;
+    uint begin = group_offset[group];
+    uint end = group_offset[group + 1u];
+    uint n = end - begin;
+    long base = table[table_base + group_expert[group]];
+    if (base < 0) {
+        if (row == 0u && lane == 0u) {
+            miss[miss_index] = 1u;
+        }
+        if (lane == 0u) {
+            for (uint local = 0u; local < n; ++local) {
+                destination[(begin + local) * cols + row] = 0.0f;
+            }
+        }
+        return;
+    }
+    device const uchar* image = atlas + base;
+    device const uchar* packed = image + weight_off + row * (inner >> 1);
+    device const uchar* row_scale = image + scale_off + row * (inner >> 5);
+    uint blocks = inner >> 5;
+    uint niter = (blocks + 31u) >> 5;
+    for (uint tile = 0u; tile < n; tile += 8u) {
+        uint nt = min(n - tile, 8u);
+        float part[8];
+        for (uint t = 0u; t < 8u; ++t) {
+            part[t] = 0.0f;
+        }
+        for (uint iter = 0u; iter < niter; ++iter) {
+            uint chunk = lane + iter * 32u;
+            if (chunk >= blocks) {
+                continue;
+            }
+            uint4 weight = load_chunk(packed, chunk);
+            float scale = e8m0_scale(row_scale[chunk]);
+            device const half* act = activation + ((begin + tile) * inner + (chunk << 5));
+            for (uint t = 0u; t < nt; ++t) {
+                part[t] += dot_chunk_half(weight, scale, act + t * inner);
+            }
+        }
+        for (uint t = 0u; t < nt; ++t) {
+            float sum = simd_sum(part[t]);
+            if (lane == 0u) {
+                destination[(begin + tile + t) * cols + row] = sum;
+            }
+        }
+    }
+}
+
+// fp8 E4M3. The decoded weight block stays in the lane and is applied to every
+// row in the tile. The element loop matches gemv_int8_f32 / gemv_int8_half.
+kernel void moe_span_fp8_gate(
+    device const float* activation [[buffer(0)]],
+    device const uchar* atlas [[buffer(1)]],
+    device const long* table [[buffer(2)]],
+    device const uint* group_expert [[buffer(3)]],
+    device const uint* group_offset [[buffer(4)]],
+    device float* destination [[buffer(5)]],
+    device uint* miss [[buffer(6)]],
+    constant uint& table_base [[buffer(7)]],
+    constant uint& cols [[buffer(8)]],
+    constant uint& inner [[buffer(9)]],
+    constant uint& weight_off [[buffer(10)]],
+    constant uint& scale_off [[buffer(11)]],
+    constant uint& miss_index [[buffer(12)]],
+    constant uint& logical [[buffer(13)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint tg [[threadgroup_position_in_grid]])
+{
+    uint group = tg / cols;
+    uint row = tg - group * cols;
+    uint begin = group_offset[group];
+    uint end = group_offset[group + 1u];
+    uint n = end - begin;
+    long base = table[table_base + group_expert[group]];
+    if (base < 0) {
+        if (row == 0u && lane == 0u) {
+            miss[miss_index] = 1u;
+        }
+        if (lane == 0u) {
+            for (uint local = 0u; local < n; ++local) {
+                destination[(begin + local) * cols + row] = 0.0f;
+            }
+        }
+        return;
+    }
+    device const uchar* image = atlas + base;
+    device const uchar* packed = image + weight_off + (ulong)row * inner;
+    device const uchar* row_scale = image + scale_off + (ulong)row * (inner >> 5);
+    uint blocks = inner >> 5;
+    for (uint tile = 0u; tile < n; tile += 8u) {
+        uint nt = min(n - tile, 8u);
+        float part[8];
+        for (uint t = 0u; t < 8u; ++t) {
+            part[t] = 0.0f;
+        }
+        for (uint block = lane; block < blocks; block += 32u) {
+            uint elem0 = block << 5;
+            if (elem0 >= logical) {
+                continue;
+            }
+            float factor = e8m0_scale(row_scale[block]);
+            uchar code[32];
+            device const uchar* codes = packed + block * 32u;
+            for (uint i = 0u; i < 32u; ++i) {
+                code[i] = codes[i];
+            }
+            for (uint t = 0u; t < nt; ++t) {
+                device const float* act = activation + (ulong)(begin + tile + t) * inner + elem0;
+                float dot = 0.0f;
+                for (uint i = 0u; i < 32u; ++i) {
+                    if (elem0 + i >= logical) {
+                        break;
+                    }
+                    dot += e4m3_to_f32(code[i]) * factor * act[i];
+                }
+                part[t] += dot;
+            }
+        }
+        for (uint t = 0u; t < nt; ++t) {
+            float sum = simd_sum(part[t]);
+            if (lane == 0u) {
+                destination[(begin + tile + t) * cols + row] = sum;
+            }
+        }
+    }
+}
+
+kernel void moe_span_fp8_down(
+    device const half* activation [[buffer(0)]],
+    device const uchar* atlas [[buffer(1)]],
+    device const long* table [[buffer(2)]],
+    device const uint* group_expert [[buffer(3)]],
+    device const uint* group_offset [[buffer(4)]],
+    device float* destination [[buffer(5)]],
+    device uint* miss [[buffer(6)]],
+    constant uint& table_base [[buffer(7)]],
+    constant uint& cols [[buffer(8)]],
+    constant uint& inner [[buffer(9)]],
+    constant uint& weight_off [[buffer(10)]],
+    constant uint& scale_off [[buffer(11)]],
+    constant uint& miss_index [[buffer(12)]],
+    constant uint& logical [[buffer(13)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint tg [[threadgroup_position_in_grid]])
+{
+    uint group = tg / cols;
+    uint row = tg - group * cols;
+    uint begin = group_offset[group];
+    uint end = group_offset[group + 1u];
+    uint n = end - begin;
+    long base = table[table_base + group_expert[group]];
+    if (base < 0) {
+        if (row == 0u && lane == 0u) {
+            miss[miss_index] = 1u;
+        }
+        if (lane == 0u) {
+            for (uint local = 0u; local < n; ++local) {
+                destination[(begin + local) * cols + row] = 0.0f;
+            }
+        }
+        return;
+    }
+    device const uchar* image = atlas + base;
+    device const uchar* packed = image + weight_off + (ulong)row * inner;
+    device const uchar* row_scale = image + scale_off + (ulong)row * (inner >> 5);
+    uint blocks = inner >> 5;
+    for (uint tile = 0u; tile < n; tile += 8u) {
+        uint nt = min(n - tile, 8u);
+        float part[8];
+        for (uint t = 0u; t < 8u; ++t) {
+            part[t] = 0.0f;
+        }
+        for (uint block = lane; block < blocks; block += 32u) {
+            uint elem0 = block << 5;
+            if (elem0 >= logical) {
+                continue;
+            }
+            float factor = e8m0_scale(row_scale[block]);
+            uchar code[32];
+            device const uchar* codes = packed + block * 32u;
+            for (uint i = 0u; i < 32u; ++i) {
+                code[i] = codes[i];
+            }
+            for (uint t = 0u; t < nt; ++t) {
+                device const half* act = activation + (ulong)(begin + tile + t) * inner + elem0;
+                float dot = 0.0f;
+                for (uint i = 0u; i < 32u; ++i) {
+                    if (elem0 + i >= logical) {
+                        break;
+                    }
+                    dot += e4m3_to_f32(code[i]) * factor * float(act[i]);
+                }
+                part[t] += dot;
+            }
+        }
+        for (uint t = 0u; t < nt; ++t) {
+            float sum = simd_sum(part[t]);
+            if (lane == 0u) {
+                destination[(begin + tile + t) * cols + row] = sum;
+            }
+        }
     }
 }
