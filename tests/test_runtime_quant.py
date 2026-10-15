@@ -1,8 +1,11 @@
+import io
 import mmap
 import os
 
 import numpy as np
 import pytest
+from qwen38_flash_next.console import Console
+from qwen38_flash_next.runtime import RequestClosed
 
 from test_packing import pipeline
 
@@ -885,3 +888,46 @@ def test_prefill_table_places_cold_after_the_hot_file() -> None:
         assert "super" in str(exc)
     else:
         raise AssertionError("a super id in the hot file was accepted")
+
+
+def _decode_runtime() -> tuple[object, Console, io.StringIO]:
+    runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
+    stream = io.StringIO()
+    console = Console(
+        "pretty",
+        pipeline="qwen38-flash-next",
+        stream=stream,
+        width=160,
+        color=0,
+        start_thread=False,
+    )
+    runtime.console = console
+    runtime._decode_progress = None
+    runtime._decode_reported = True
+    runtime._request_id = 4
+    runtime._decode_tokens = 129
+    runtime._decode_seconds = 40.0
+    runtime._output_ids = [1] * 129
+    return runtime, console, stream
+
+
+def test_a_closed_stream_ends_the_decode_row() -> None:
+    runtime, console, stream = _decode_runtime()
+    runtime._stop = lambda: True
+    with pytest.raises(RequestClosed):
+        list(runtime._new_tokens(None, None, 0.0, 1.0, 0))
+    assert console._handles == []
+    assert "decode 0 tok/s" in stream.getvalue()
+
+
+def test_the_next_request_does_not_keep_the_previous_decode_row() -> None:
+    runtime, console, stream = _decode_runtime()
+    runtime._begin_decode(None)
+    runtime._request_id = 6
+    runtime._begin_decode(None)
+    assert [item.request for item in console._handles] == [6]
+    assert "decode 3.23 tok/s (129 tok in 40.00s)" in stream.getvalue()
+    runtime._log_decode()
+    runtime._close_decode_row()
+    runtime.console.begin("prefill", total=8, unit="tok", detail="req #6", request=6)
+    assert [item.phase for item in console._handles] == ["prefill"]

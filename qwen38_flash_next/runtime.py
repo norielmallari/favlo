@@ -122,6 +122,7 @@ class Qwen38Runtime:
         self.console = console
         self._prefill_progress = None
         self._decode_progress = None
+        self._decode_reported = True
         self._load_progress = None
         self._request_id = None
         self._cached_tokens = 0
@@ -361,6 +362,7 @@ class Qwen38Runtime:
         self._drop_prefill_progress()
         progress = getattr(self, "_decode_progress", None)
         self._decode_progress = None
+        self._decode_reported = True
         console = getattr(self, "console", None)
         if progress is not None and console is not None and not progress.closed:
             console.end(progress, "")
@@ -716,6 +718,7 @@ class Qwen38Runtime:
         top_p: float,
         top_k: int,
     ):
+        self._close_decode_row()
         self._decode_tokens = 0
         self._decode_seconds = 0.0
         self._decode_steps = []
@@ -726,28 +729,31 @@ class Qwen38Runtime:
         self._atlas_trusted = False
         produced_ids: list[int] = []
         produced = 0
-        while True:
-            self._check_stop()
-            if max_tokens is not None and produced >= max_tokens:
-                self._hit_limit = True
-                return
-            if len(self.tokens) + 1 > self.prompt_limit:
-                self._hit_limit = True
-                return
-            token = self._pick(logits, temperature, top_p, top_k, produced_ids)
-            if token in self.stop_ids:
-                return
-            self._output_ids.append(token)
-            yield token
-            produced += 1
-            produced_ids.append(token)
-            if self.required_function and "</tool_call>" in self.decode(produced_ids):
-                return
-            # The prefill logits keep that scratch alive. Release them before the
-            # decode arenas are allocated.
-            self.last_logits = None
-            logits = None
-            logits = self.forward([token], decode=True)
+        try:
+            while True:
+                self._check_stop()
+                if max_tokens is not None and produced >= max_tokens:
+                    self._hit_limit = True
+                    return
+                if len(self.tokens) + 1 > self.prompt_limit:
+                    self._hit_limit = True
+                    return
+                token = self._pick(logits, temperature, top_p, top_k, produced_ids)
+                if token in self.stop_ids:
+                    return
+                self._output_ids.append(token)
+                yield token
+                produced += 1
+                produced_ids.append(token)
+                if self.required_function and "</tool_call>" in self.decode(produced_ids):
+                    return
+                # The prefill logits keep that scratch alive. Release them before the
+                # decode arenas are allocated.
+                self.last_logits = None
+                logits = None
+                logits = self.forward([token], decode=True)
+        finally:
+            self._log_decode()
 
     def _drop_prefill_progress(self) -> None:
         progress = getattr(self, "_prefill_progress", None)
@@ -756,7 +762,14 @@ class Qwen38Runtime:
         if progress is not None and console is not None and not progress.closed:
             console.end(progress, "")
 
+    def _close_decode_row(self) -> None:
+        """End a decode row left open when the request stopped early."""
+        if not self._decode_reported:
+            self._log_decode()
+
     def _begin_decode(self, max_tokens: int | None) -> None:
+        self._close_decode_row()
+        self._decode_reported = False
         console = self.console
         if console is None or not console.live_decode:
             self._decode_progress = None
@@ -787,6 +800,9 @@ class Qwen38Runtime:
             progress.done = done
 
     def _log_decode(self) -> None:
+        if self._decode_reported:
+            return
+        self._decode_reported = True
         summary = _tok_s("decode", self._decode_tokens, self._decode_seconds)
         progress = self._decode_progress
         self._decode_progress = None
@@ -936,6 +952,8 @@ class Qwen38Runtime:
         return self._token_pieces
 
     def forward(self, tokens: list[int], *, decode: bool = False) -> Dev:
+        if not decode:
+            self._close_decode_row()
         self._check_stop()
         started = time.perf_counter()
         gpu_at = self.gpu.gpu_seconds
