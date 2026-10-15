@@ -42,6 +42,7 @@ class _Runtime:
         self.halted = False
         self.watch_cancel = False
         self.hold = False
+        self.persisted = 0
 
     def encode_chat(
         self,
@@ -88,6 +89,9 @@ class _Runtime:
     def close(self) -> None:
         self.closed = True
         self.release.set()
+
+    def _persist_prefix(self) -> None:
+        self.persisted += 1
 
     def _hold(self) -> None:
         deadline = time.monotonic() + 5
@@ -253,6 +257,7 @@ def test_dropped_client_stops_the_request_and_the_next_one_runs() -> None:
         follow = _exchange(port, "next")
         assert follow.startswith(b"HTTP/1.1 200")
         assert b'"content": "ok"' in follow
+        assert runtime.persisted == 1
         with runtime.lock:
             assert runtime.order == [("start", "next"), ("end", "next")]
     finally:
@@ -273,6 +278,7 @@ def test_closed_post_stops_generation() -> None:
         follow = _exchange(port, "after")
         assert follow.startswith(b"HTTP/1.1 200")
         assert b'"content": "ok"' in follow
+        assert runtime.persisted == 1
     finally:
         runtime.release.set()
         _stop_background(state, thread)

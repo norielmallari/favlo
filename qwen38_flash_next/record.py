@@ -78,6 +78,7 @@ class QuantRecord:
         self.cold_io: list[Any] = []
         self.resident_io: Any = None
         self.ngram_io: Any = None
+        self.mtp_io: Any = None
         try:
             self._open(root)
         except BaseException:
@@ -169,6 +170,8 @@ class QuantRecord:
 
         self.resident_io = handle(self.root / "resident.bin")
         self.ngram_io = handle(self.root / "ngram.bin")
+        mtp_path = self.root / "mtp-experts.bin"
+        self.mtp_io = handle(mtp_path) if mtp_path.is_file() else None
         layers = int(self.manifest["layers"])
         self.hot_io = [
             handle(self.root / "experts" / f"{layer:02d}-hot.bin") for layer in range(layers)
@@ -247,6 +250,7 @@ class QuantRecord:
         self.cold_io = []
         self.resident_io = None
         self.ngram_io = None
+        self.mtp_io = None
 
     def close(self) -> None:
         """Close record fds and scratch mappings. A second call does nothing."""

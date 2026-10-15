@@ -215,6 +215,85 @@ def test_flush_releases_the_atlas_before_the_prefix_write() -> None:
     assert order == ["flush", "state", "release", "save"]
 
 
+def test_persist_writes_the_live_prefix_once() -> None:
+    runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
+    runtime.tokens = [1, 2]
+    runtime._prefix_dirty = True
+    runtime.gpu = type("Gpu", (), {"flush": staticmethod(lambda: None)})()
+    runtime._prefix_state = lambda: object()
+    runtime._release_atlas = lambda: None
+    writes: list[int] = []
+
+    class Prefixes:
+        def save(self, state: object) -> object:
+            writes.append(len(runtime.tokens))
+            return object()
+
+    runtime.prefixes = Prefixes()
+    runtime._persist_prefix()
+    runtime._persist_prefix()
+    runtime.tokens = [1, 2, 3]
+    runtime._prefix_dirty = True
+    runtime._persist_prefix()
+    assert writes == [2, 3]
+
+
+def test_close_writes_the_live_prefix_before_the_device_is_released() -> None:
+    runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
+    runtime._closed = False
+    order: list[str] = []
+    runtime._persist_prefix = lambda: order.append("persist")
+    runtime.gpu = type("Gpu", (), {"close": lambda self: order.append("close")})()
+    runtime.files = None
+    runtime.store = None
+    runtime.close()
+    runtime.close()
+    assert order == ["persist", "close"]
+
+
+def test_cancel_restores_the_snapshot_then_writes_the_prefix() -> None:
+    runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
+    runtime.tokens = [7, 8]
+    runtime._streaming_prefill = False
+    runtime.atlas = None
+    runtime._kv_snap = {0: object()}
+    runtime._forward_open = True
+    order: list[str] = []
+    runtime.gpu = type("Gpu", (), {"flush": lambda self: order.append("flush")})()
+    runtime._restore_recurrent = lambda: order.append("restore")
+    runtime.reset = lambda: order.append("reset")
+    runtime._persist_prefix = lambda: order.append("persist")
+    runtime._cancel_forward()
+    assert runtime.tokens == [7, 8]
+    assert runtime._kv_snap is None
+    assert runtime._forward_open is False
+    assert order == ["flush", "restore", "persist"]
+
+
+def test_shutdown_restores_an_open_forward_before_the_prefix_write() -> None:
+    runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
+    runtime.tokens = [4, 5]
+    runtime._forward_open = True
+    runtime._kv_snap = {0: 1}
+    runtime._prefix_dirty = True
+    order: list[str] = []
+    runtime.gpu = type("Gpu", (), {"flush": lambda self: order.append("flush")})()
+    runtime._restore_recurrent = lambda: order.append("restore")
+    runtime._prefix_state = lambda: object()
+    runtime._release_atlas = lambda: order.append("release")
+
+    class Prefixes:
+        def save(self, state: object) -> object:
+            order.append("save")
+            return object()
+
+    runtime.prefixes = Prefixes()
+    runtime._persist_prefix()
+    assert runtime._forward_open is False
+    assert runtime._kv_snap is None
+    assert order == ["flush", "restore", "flush", "release", "save"]
+
+
 def test_flush_continues_when_the_volume_refuses_the_prefix() -> None:
     runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
     runtime.tokens = [1]

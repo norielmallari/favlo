@@ -704,6 +704,43 @@ def check_act_kernels() -> None:
     _close("gemm", gpu.read_f32(got), expect.reshape(-1))
 
 
+def mtp_mix(
+    residual: np.ndarray,
+    embed: np.ndarray,
+    norm_hidden: np.ndarray,
+    norm_embed: np.ndarray,
+    fc_hidden: np.ndarray,
+    fc_embed: np.ndarray,
+    eps: float,
+) -> np.ndarray:
+    """Project one MTP token the way the packed shapes line up.
+
+    The hidden norm is four branches. Each branch is a Gemma RMS (``1 + w``),
+    then the branch mean. The embedding is one Gemma RMS. The two square
+    projections add. A concatenated mix would need a wider matrix than the
+    record stores.
+    """
+    branches, hidden = residual.shape
+    if norm_hidden.shape != (branches * hidden,) or embed.shape != (hidden,):
+        message = "MTP mix shapes do not match the residual"
+        raise ValueError(message)
+    if fc_hidden.shape != (hidden, hidden) or fc_embed.shape != (hidden, hidden):
+        message = "MTP projections are not hidden by hidden"
+        raise ValueError(message)
+
+    def gemma(row: np.ndarray, gain: np.ndarray) -> np.ndarray:
+        inv = 1.0 / np.sqrt(np.mean(row * row) + eps)
+        return row * inv * (1.0 + gain)
+
+    rows = []
+    for branch in range(branches):
+        gain = norm_hidden[branch * hidden : (branch + 1) * hidden]
+        rows.append(gemma(residual[branch], gain))
+    reduced = np.mean(rows, axis=0)
+    mixed = fc_hidden @ reduced + fc_embed @ gemma(embed, norm_embed)
+    return np.asarray(mixed, dtype=np.float32)
+
+
 def _topk(logits: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
     shifted = logits.astype(np.float64) - float(np.max(logits))
     probs = np.exp(shifted)

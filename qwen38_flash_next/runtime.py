@@ -71,6 +71,7 @@ from qwen38_flash_next.session import (
     _fill_buffer,
     _log,
     _tok_s,
+    _write_u32,
     commit_pages,
     discard_buffer,
     release_buffer,
@@ -104,6 +105,11 @@ def after_atlas_load(resident: Sequence[int]) -> int:
 
 class RequestClosed(Exception):
     """The client closed the socket while a forward was still running."""
+
+
+def _poke_u32(buffer: Any, index: int, value: int) -> None:
+    start = index * 4
+    _buffer_view(buffer, start + 4)[start : start + 4] = int(value).to_bytes(4, "little")
 
 
 class Qwen38Runtime:
@@ -257,6 +263,10 @@ class Qwen38Runtime:
         self.kv_k_tail = {index: self.gpu.alloc(tail) for index in attention}
         self.kv_v_tail = {index: self.gpu.alloc(tail) for index in attention}
         self.indexer_buf = {index: self.gpu.alloc(INDEX_BF16_BYTES) for index in attention}
+        self._mtp_on = False
+        self._mtp_layer = len(self.kinds)
+        self._mtp_index_n = 0
+        self._mtp_hidden: Any = None
         self._bundle: dict[int, dict[str, Any]] = {}
         self._final: dict[str, Any] | None = None
         self._head: Int4Matrix | None = None
@@ -271,6 +281,7 @@ class Qwen38Runtime:
             self._cold = expert_planes(self.files.cold_bits, self.hidden, self.moe)
             self._super_planes = expert_planes(self.files.super_bits, self.hidden, self.moe)
             self._load_record()
+            self._load_mtp()
             self._load_supers()
             self._upload_tiers()
             state_bytes = 48 * 128 * 128 * 4
@@ -310,6 +321,9 @@ class Qwen38Runtime:
         staging = 0
         if isinstance(self.files, QuantRecord):
             fixed += (self.files.root / "resident.bin").stat().st_size
+            if self._mtp_on:
+                attention += 1
+                fixed += (self.files.root / "mtp-experts.bin").stat().st_size
             hot = sum(os.fstat(fd).st_size for fd in self.files.hot_fds)
             self.resident_candidates = resident_candidates(hot, resident_percent)
             self.resident_budget = self.resident_candidates[0]
@@ -355,9 +369,10 @@ class Qwen38Runtime:
         self._stop = lambda: True
 
     def close(self) -> None:
-        """Wait for the GPU, then release the device, the atlas, and the record."""
+        """Write the live prefix, then release the device, the atlas, and the record."""
         if self._closed:
             return
+        self._persist_prefix()
         self._closed = True
         self._drop_prefill_progress()
         progress = getattr(self, "_decode_progress", None)
@@ -440,17 +455,25 @@ class Qwen38Runtime:
 
     def _cancel_forward(self) -> None:
         try:
-            self.gpu.flush()
+            if self.gpu is not None:
+                self.gpu.flush()
         finally:
             if self._streaming_prefill:
                 self._end_prefill_stream()
             elif self.atlas is not None:
                 self.atlas.release_unused()
-            self.reset()
+            if getattr(self, "_kv_snap", None):
+                self._restore_recurrent()
+                self._kv_snap = None
+            else:
+                self.reset()
+            self._forward_open = False
+            self._persist_prefix()
 
     def reset(self) -> None:
         self.tokens = []
         self.last_logits = None
+        self._prefix_dirty = True
         for buffer in self.gdn_state.values():
             _fill_buffer(buffer, 48 * 128 * 128 * 4, 0)
         for history in self.conv_hist.values():
@@ -491,7 +514,36 @@ class Qwen38Runtime:
             _log(f"prefix store failed {exc}")
             return
         if path is not None:
+            self._prefix_dirty = False
             _log(f"prefix store {len(self.tokens)} tokens")
+
+    def _persist_prefix(self) -> None:
+        """Write the last consistent sequence. A client drop and shutdown both call this."""
+        if getattr(self, "_forward_open", False):
+            if not getattr(self, "_kv_snap", None):
+                return
+            try:
+                if getattr(self, "gpu", None) is not None:
+                    self.gpu.flush()
+                self._restore_recurrent()
+            except Exception as exc:
+                _log(f"prefix store failed {exc}")
+                return
+            self._kv_snap = None
+            self._forward_open = False
+        tokens = getattr(self, "tokens", None)
+        if (
+            not tokens
+            or getattr(self, "gpu", None) is None
+            or getattr(self, "prefixes", None) is None
+        ):
+            return
+        if getattr(self, "_prefix_dirty", True) is False:
+            return
+        try:
+            self._flush_prefix()
+        except Exception as exc:
+            _log(f"prefix store failed {exc}")
 
     def _prefix_state(self) -> PrefixState:
         count = len(self.tokens)
@@ -558,6 +610,7 @@ class Qwen38Runtime:
                 _log(f"prefix load failed {exc}")
                 self.reset()
                 continue
+            self._prefix_dirty = False
             _log(f"prefix load {len(header.tokens)} tokens")
             return len(header.tokens)
         return 0
@@ -741,17 +794,32 @@ class Qwen38Runtime:
                 token = self._pick(logits, temperature, top_p, top_k, produced_ids)
                 if token in self.stop_ids:
                     return
-                self._output_ids.append(token)
-                yield token
-                produced += 1
-                produced_ids.append(token)
-                if self.required_function and "</tool_call>" in self.decode(produced_ids):
+                room = self.prompt_limit - len(self.tokens)
+                if max_tokens is not None:
+                    room = min(room, max_tokens - produced)
+                if room <= 0:
+                    self._hit_limit = True
                     return
-                # The prefill logits keep that scratch alive. Release them before the
-                # decode arenas are allocated.
+                # Prefill logits keep that scratch alive. Drop them before decode arenas.
                 self.last_logits = None
                 logits = None
-                logits = self.forward([token], decode=True)
+                if self._mtp_on:
+                    draft_room = room if temperature <= 0.0 else 1
+                    pending = self._mtp_cycle(
+                        token, produced_ids, draft_room, top_p, top_k
+                    )
+                    logits = self.last_logits
+                else:
+                    pending = [token]
+                    logits = self.forward([token], decode=True)
+                for item in pending:
+                    self._check_stop()
+                    self._output_ids.append(item)
+                    yield item
+                    produced += 1
+                    produced_ids.append(item)
+                    if self.required_function and "</tool_call>" in self.decode(produced_ids):
+                        return
         finally:
             self._log_decode()
 
@@ -981,34 +1049,37 @@ class Qwen38Runtime:
             _fill_buffer(self.atlas.miss, self.layers * 4, 0)
         if decode and self.atlas is not None:
             self._prefetch_decode()
-            self._capture_recurrent()
+        self._capture_recurrent()
+        self._forward_open = bool(getattr(self, "_kv_snap", None))
         resident_before = self.atlas.resident_count if decode and self.atlas is not None else 0
         try:
             logits = self._forward_body(tokens)
             self.gpu.flush()
+            if self._streaming_prefill:
+                missed = self._stage_missed()
+                self._end_prefill_stream()
+                if missed:
+                    message = "prefill referenced an expert that was not loaded"
+                    raise RuntimeError(message)
+                self._ensure_atlas()
+            elif self.atlas is not None and self._expert_miss():
+                if not decode:
+                    message = "prefill referenced an expert that was not loaded"
+                    raise RuntimeError(message)
+                self._atlas_trusted = False
+                logits = self._rerun_decode(tokens)
         except RequestClosed:
             self._cancel_forward()
             self._drop_prefill_progress()
             raise
-        if self._streaming_prefill:
-            missed = self._stage_missed()
-            self._end_prefill_stream()
-            if missed:
-                message = "prefill referenced an expert that was not loaded"
-                raise RuntimeError(message)
-            self._ensure_atlas()
-        elif self.atlas is not None and self._expert_miss():
-            if not decode:
-                message = "prefill referenced an expert that was not loaded"
-                raise RuntimeError(message)
-            self._atlas_trusted = False
-            logits = self._rerun_decode(tokens)
         if decode and self.atlas is not None and not self._expert_miss():
             self._note_routes()
             # A token that loaded experts is still filling the atlas. Trusting
             # the next one would compute it twice, once before the miss replay.
             self._atlas_trusted = self.atlas.resident_count == resident_before
         self.tokens.extend(tokens)
+        self._prefix_dirty = True
+        self._forward_open = False
         self.last_logits = logits
         elapsed = time.perf_counter() - started
         gpu_elapsed = self.gpu.gpu_seconds - gpu_at
@@ -1035,6 +1106,392 @@ class Qwen38Runtime:
         if self.atlas is not None:
             self.atlas.release_unused()
         return logits
+
+    def _load_mtp(self) -> None:
+        """Keep the MTP expert file resident and give that layer its own cache."""
+        if not isinstance(self.files, QuantRecord) or self.files.mtp_io is None:
+            return
+        if "mtp.fc_hidden.weight" not in self.weights:
+            return
+        if "mtp.layers.0.mlp.gate.weight" not in self.f16_weights:
+            return
+        path = self.files.root / "mtp-experts.bin"
+        size = path.stat().st_size
+        slot = int(self.files.manifest.get("mtp_slot") or 0)
+        if slot <= 0 or size % slot:
+            return
+        bits = int(self.files.manifest.get("mtp_bits") or 4)
+        buffer = self.gpu.alloc(size)
+        if buffer is None:
+            message = "MTP expert file was not allocated"
+            raise RuntimeError(message)
+        self.gpu.io_read(self.files.mtp_io, [(buffer, 0, size, 0)])
+        self._mtp_experts = buffer
+        self._mtp_slot = slot
+        self._mtp_planes = expert_planes(bits, self.hidden, self.moe)
+        self._mtp_members = set(range(self.experts))
+        table = (np.arange(self.experts, dtype=np.int64) * slot).tobytes()
+        self._mtp_table = self.gpu.upload(table)
+        self._mtp_miss = self.gpu.zeros(4)
+        self._mtp_indices = self.gpu.zeros(INDEX_STRIDE * 4)
+        self._mtp_count = self.gpu.zeros(4)
+        span = self.branches * self.hidden
+        self._mtp_hidden = self.gpu.zeros(span * 4)
+        self._mtp_hidden_snap = self.gpu.zeros(span * 4)
+        self._mtp_backbone = self.gpu.zeros(span * 4)
+        self._mtp_in = self.gpu.alloc(PREFILL_CHUNK * span * 4)
+        self._mtp_proj = self.gpu.alloc(PREFILL_CHUNK * span * 4)
+        ones = np.ones(PREFILL_CHUNK * span, dtype=np.float32)
+        self._mtp_ones = self.gpu.upload(ones.tobytes())
+        held = (
+            self._mtp_table,
+            self._mtp_miss,
+            self._mtp_indices,
+            self._mtp_count,
+            self._mtp_hidden,
+            self._mtp_hidden_snap,
+            self._mtp_backbone,
+            self._mtp_in,
+            self._mtp_proj,
+            self._mtp_ones,
+        )
+        if any(buf is None for buf in held):
+            message = "MTP scratch was not allocated"
+            raise RuntimeError(message)
+        body = KV_BF16_BYTES if self.kv_cache == "bf16" else KV_E4M3_BYTES
+        tail = KV_TAIL_TOKENS * KV_BF16_BYTES
+        layer = self._mtp_layer
+        self.kv_len[layer] = 0
+        self.kv_k[layer] = self.gpu.alloc(body)
+        self.kv_v[layer] = self.gpu.alloc(body)
+        self.kv_k_tail[layer] = self.gpu.alloc(tail)
+        self.kv_v_tail[layer] = self.gpu.alloc(tail)
+        self.indexer_buf[layer] = self.gpu.alloc(INDEX_BF16_BYTES)
+        self._mtp_on = True
+        self._mtp_pack: dict[str, Any] | None = None
+        self._mtp_logit_buf: Any = None
+        self._mtp_logit_n = 0
+
+    def _mtp_bundle(self) -> dict[str, Any]:
+        if self._mtp_pack is not None:
+            return self._mtp_pack
+        prefix = "mtp.layers.0"
+        mixer = "mtp.hyper_connection_mixer"
+        self._mtp_pack = {
+            "attn_norm": self._weight(f"{prefix}.attn_hyper_connection.hc_norm.weight"),
+            "attn_down": self._int4(f"{prefix}.attn_hyper_connection.input_mix_weight_down.weight"),
+            "attn_up": self._int4(f"{prefix}.attn_hyper_connection.input_mix_weight_up.weight"),
+            "attn_inject": self._int4(f"{prefix}.attn_hyper_connection.block_inject_weight.weight"),
+            "mlp_norm": self._weight(f"{prefix}.mlp_hyper_connection.hc_norm.weight"),
+            "mlp_down": self._int4(f"{prefix}.mlp_hyper_connection.input_mix_weight_down.weight"),
+            "mlp_up": self._int4(f"{prefix}.mlp_hyper_connection.input_mix_weight_up.weight"),
+            "mlp_inject": self._int4(f"{prefix}.mlp_hyper_connection.block_inject_weight.weight"),
+            "shared_gate": self._int4(f"{prefix}.mlp.shared_expert.gate_proj.weight"),
+            "shared_up": self._int4(f"{prefix}.mlp.shared_expert.up_proj.weight"),
+            "shared_down": self._int4(f"{prefix}.mlp.shared_expert.down_proj.weight"),
+            "shared_coeff": self._int4(f"{prefix}.mlp.shared_expert_gate.weight"),
+            "q_proj": self._int4(f"{prefix}.self_attn.q_proj.weight"),
+            "k_proj": self._int4(f"{prefix}.self_attn.k_proj.weight"),
+            "v_proj": self._int4(f"{prefix}.self_attn.v_proj.weight"),
+            "o_proj": self._int4(f"{prefix}.self_attn.o_proj.weight"),
+            "q_norm": self._weight(f"{prefix}.self_attn.q_norm.weight"),
+            "k_norm": self._weight(f"{prefix}.self_attn.k_norm.weight"),
+            "index_qk": self._int4(f"{prefix}.self_attn.indexer.index_qk_proj.weight"),
+            "pre_h": self._weight("mtp.pre_fc_norm_hidden.weight"),
+            "pre_e": self._weight("mtp.pre_fc_norm_embedding.weight"),
+            "fc_h": self._int4("mtp.fc_hidden.weight"),
+            "fc_e": self._int4("mtp.fc_embedding.weight"),
+            "final_norm": self._weight(f"{mixer}.hc_norm.weight"),
+            "final_down": self._int4(f"{mixer}.input_mix_weight_down.weight"),
+            "final_up": self._int4(f"{mixer}.input_mix_weight_up.weight"),
+        }
+        return self._mtp_pack
+
+    def _mtp_copy(self, src: Any, dst: Any, n: int) -> None:
+        self.gpu.copy_bytes(src, 0, dst, 0, n * 4)
+
+    def _mtp_keep_residual(self, residual: Dev, count: int) -> None:
+        span = self.branches * self.hidden
+        last = residual.view((count - 1) * span, span)
+        self.gpu.copy_span(last, 0, self._mtp_hidden, 0, span)
+
+    def _mtp_snap_kv(self) -> None:
+        layer = self._mtp_layer
+        self._mtp_kv = (
+            self.kv_k[layer],
+            self.kv_v[layer],
+            self.kv_k_tail[layer],
+            self.kv_v_tail[layer],
+            self.indexer_buf[layer],
+            self.kv_len[layer],
+        )
+
+    def _mtp_restore_kv(self) -> None:
+        layer = self._mtp_layer
+        key, value, key_tail, value_tail, indexer, length = self._mtp_kv
+        self.kv_k[layer] = key
+        self.kv_v[layer] = value
+        self.kv_k_tail[layer] = key_tail
+        self.kv_v_tail[layer] = value_tail
+        self.indexer_buf[layer] = indexer
+        self.kv_len[layer] = length
+
+    def _mtp_attend(
+        self,
+        query: Dev,
+        gate: Dev,
+        key: Any,
+        value: Any,
+        count: int,
+        mode: int,
+        complete: int,
+        layer: int,
+    ) -> Dev:
+        return self.gpu.qsa_attend_selected(
+            query,
+            gate,
+            key,
+            value,
+            Dev(self._mtp_indices, INDEX_STRIDE),
+            Dev(self._mtp_count, 1),
+            count,
+            INDEX_STRIDE,
+            mode=mode,
+            complete=complete,
+            key_tail=self.kv_k_tail[layer],
+            value_tail=self.kv_v_tail[layer],
+        )
+
+    def _mtp_project(self, hidden: Dev, tokens: list[int]) -> Dev:
+        """Norm the residual and the token embedding, then add the two projections."""
+        count = len(tokens)
+        bundle = self._mtp_bundle()
+        span = self.branches * self.hidden
+        hats = self._rms_branches(hidden, bundle["pre_h"], count)
+        reduced = self.gpu.branch_mean(
+            Dev(self._mtp_ones, count * span), hats, count, self.branches, self.hidden
+        )
+        from_hidden = self.gpu.linear(bundle["fc_h"], reduced, count, self.hidden)
+        packed = self.gpu.tmp(count * self.hidden)
+        meta = self._embed_meta
+        stored = int(meta["stored_inner"])
+        self.gpu.embed_gather(
+            self._resident,
+            int(meta["offset"]),
+            self.gpu.dev_u32(tokens),
+            packed,
+            count,
+            self.hidden,
+            stored // 2,
+            stored // BLOCK,
+            int(meta["data"]),
+            1,
+        )
+        weight, offset = bundle["pre_e"]
+        normed = self.gpu.rms(packed, weight, offset, self.hidden, count, self.eps, True, 0)
+        from_embed = self.gpu.linear(bundle["fc_e"], normed, count, self.hidden)
+        mixed = self.gpu.add(from_hidden, from_embed)
+        dst = Dev(self._mtp_proj, count * span)
+        for index in range(count):
+            row = mixed.view(index * self.hidden, self.hidden)
+            self.gpu.broadcast(row, dst, index * span, self.branches, self.hidden)
+        return dst
+
+    def _mtp_moe(self, bundle: dict[str, Any], xs: Dev, count: int) -> Dev:
+        router = self.f16_weights["mtp.layers.0.mlp.gate.weight"]
+        choice, weight = self.gpu.topk_batch(
+            self.gpu.linear(router, xs, count, self.hidden), count, self.experts, self.top_k
+        )
+        host_ids = np.asarray(self.gpu.read_u32(choice), dtype=np.uint32)
+        shared = self._shared_expert(bundle, xs, count)
+        return self._moe_tier(
+            0,
+            xs,
+            weight,
+            shared,
+            host_ids,
+            count,
+            self._mtp_members,
+            self._mtp_planes,
+            self._mtp_experts,
+            self._mtp_table,
+            0,
+            self._mtp_miss,
+        )
+
+    def _mtp_layer_pass(self, residual: Dev, count: int, base: int, *, reuse: bool) -> None:
+        bundle = self._mtp_bundle()
+        self.gpu.flush()
+        self.gpu.rewind_scratch()
+        with objc.autorelease_pool():
+            hats = self._rms_branches(residual, bundle["attn_norm"], count)
+            xs = self._gr_dev(bundle["attn_down"], bundle["attn_up"], hats, count)
+            mixed = self._qsa_dev(
+                self._mtp_layer, bundle, xs, count, base=base, reuse=reuse
+            )
+            self._inject_dev(residual, hats, mixed, bundle["attn_inject"], count)
+            hats = self._rms_branches(residual, bundle["mlp_norm"], count)
+            xs = self._gr_dev(bundle["mlp_down"], bundle["mlp_up"], hats, count)
+            mixed = self._mtp_moe(bundle, xs, count)
+            self._inject_dev(residual, hats, mixed, bundle["mlp_inject"], count)
+
+    def _mtp_head(self, residual: Dev) -> Dev:
+        bundle = self._mtp_bundle()
+        hat = self._rms_branches(residual, bundle["final_norm"], 1)
+        hidden = self._gr_dev(bundle["final_down"], bundle["final_up"], hat, 1)
+        return self.gpu.linear(self._lm_head(), hidden, 1, self.hidden)
+
+    def _mtp_step(self, token: int, *, reuse: bool, head: bool) -> Dev | None:
+        self.gpu.flush()
+        span = self.branches * self.hidden
+        projected = self._mtp_project(Dev(self._mtp_hidden, span), [token])
+        self._mtp_layer_pass(projected, 1, self.kv_len[self._mtp_layer], reuse=reuse)
+        self._mtp_copy(self._mtp_proj, self._mtp_hidden, span)
+        self.gpu.flush()
+        self.gpu.rewind_scratch()
+        if not head:
+            return None
+        logits = self._mtp_head(Dev(self._mtp_proj, span))
+        self.gpu.flush()
+        return logits
+
+    def _mtp_shift(self, residual: Dev, offset: int, count: int, base: int) -> None:
+        span = self.branches * self.hidden
+        dst = self._mtp_in
+        if offset == 0 and base == 0:
+            _fill_buffer(dst, span * 4, 0)
+            if count > 1:
+                self.gpu.copy_bytes(
+                    residual.buf,
+                    residual.offset * 4,
+                    dst,
+                    span * 4,
+                    (count - 1) * span * 4,
+                )
+            return
+        if offset == 0:
+            self._mtp_copy(self._mtp_hidden, dst, span)
+            if count > 1:
+                self.gpu.copy_bytes(
+                    residual.buf,
+                    residual.offset * 4,
+                    dst,
+                    span * 4,
+                    (count - 1) * span * 4,
+                )
+            return
+        start = (offset - 1) * span
+        self.gpu.copy_bytes(
+            residual.buf,
+            (residual.offset + start) * 4,
+            dst,
+            0,
+            count * span * 4,
+        )
+
+    def _mtp_prefill(self, residual: Dev, tokens: list[int]) -> None:
+        """Write one MTP cache entry per prompt token before the first draft."""
+        count = len(tokens)
+        origin = len(self.tokens)
+        span = self.branches * self.hidden
+        self.gpu.rewind_scratch()
+        for offset in range(0, count, self.prefill_chunk):
+            self._check_stop()
+            n = min(self.prefill_chunk, count - offset)
+            self._mtp_shift(residual, offset, n, origin)
+            ids = tokens[offset : offset + n]
+            projected = self._mtp_project(Dev(self._mtp_in, n * span), ids)
+            self._mtp_layer_pass(projected, n, origin + offset, reuse=False)
+
+    def _mtp_propose(
+        self,
+        first: int,
+        produced: list[int],
+        extras: int,
+        top_p: float,
+        top_k: int,
+    ) -> list[int]:
+        drafts: list[int] = []
+        chosen = [first]
+        for _step in range(min(3, extras)):
+            self._check_stop()
+            logits = self._mtp_step(chosen[-1], reuse=True, head=True)
+            if logits is None:
+                break
+            guess = self._pick(logits, 0.0, top_p, top_k, produced + chosen)
+            if guess in self.stop_ids:
+                break
+            drafts.append(guess)
+            chosen.append(guess)
+            if self.required_function and "</tool_call>" in self.decode(produced + chosen):
+                break
+        return drafts
+
+    def _mtp_replay(self, kept: list[int]) -> None:
+        span = self.branches * self.hidden
+        self._mtp_copy(self._mtp_hidden, self._mtp_backbone, span)
+        self._mtp_restore_kv()
+        self._mtp_copy(self._mtp_hidden_snap, self._mtp_hidden, span)
+        self._mtp_index_n = 0
+        for token in kept:
+            self._mtp_step(token, reuse=False, head=False)
+        self._mtp_copy(self._mtp_backbone, self._mtp_hidden, span)
+
+    def _mtp_cycle(
+        self,
+        first: int,
+        produced: list[int],
+        room: int,
+        top_p: float,
+        top_k: int,
+    ) -> list[int]:
+        """Draft up to three tokens, keep the prefix the backbone argmax matches."""
+        span_n = self.branches * self.hidden
+        self._mtp_copy(self._mtp_hidden, self._mtp_hidden_snap, span_n)
+        self._mtp_snap_kv()
+        self._mtp_index_n = 0
+        drafts: list[int] = []
+        opened = produced + [first]
+        closed = bool(self.required_function) and "</tool_call>" in self.decode(opened)
+        if room > 1 and not closed:
+            drafts = self._mtp_propose(first, produced, room - 1, top_p, top_k)
+        span = [first, *drafts]
+        kept: list[int] = []
+        for index, token in enumerate(span):
+            self.forward([token], decode=True)
+            self._mtp_hold_logits()
+            kept.append(token)
+            if index + 1 >= len(span):
+                break
+            if self._mtp_guess(produced + kept, top_p, top_k) != span[index + 1]:
+                break
+        self._mtp_replay(kept)
+        return kept
+
+    def _mtp_guess(self, produced: list[int], top_p: float, top_k: int) -> int:
+        logits = self.last_logits
+        if not isinstance(logits, Dev):
+            message = "MTP verify has no logits"
+            raise RuntimeError(message)
+        work = self.gpu.copy_dev(logits)
+        self.gpu.flush()
+        return self._pick(work, 0.0, top_p, top_k, produced)
+
+    def _mtp_hold_logits(self) -> None:
+        """Keep the backbone logits off the scratch arena the draft reuses."""
+        logits = self.last_logits
+        if not isinstance(logits, Dev):
+            return
+        if self._mtp_logit_buf is None or self._mtp_logit_n < logits.n:
+            buf = self.gpu.alloc(logits.n * 4)
+            if buf is None:
+                message = "MTP logit buffer was not allocated"
+                raise RuntimeError(message)
+            self._mtp_logit_buf = buf
+            self._mtp_logit_n = logits.n
+        self.gpu.copy_span(logits, 0, self._mtp_logit_buf, 0, logits.n)
+        self.gpu.flush()
+        self.last_logits = Dev(self._mtp_logit_buf, logits.n)
 
     def _forward_body(self, tokens: list[int]) -> Dev:
         count = len(tokens)
@@ -1112,6 +1569,10 @@ class Qwen38Runtime:
                     message = "prefill layer had no tokens"
                     raise RuntimeError(message)
                 self._moe_wide(layer, bundle, residual, count)
+        if self._mtp_on and not self._decoding and tokens:
+            self._mtp_prefill(residual, tokens)
+        if self._mtp_on and tokens:
+            self._mtp_keep_residual(residual, count)
         self.gpu.rewind_scratch()
         final = self._final_bundle()
         last = residual.view(
@@ -1349,6 +1810,9 @@ class Qwen38Runtime:
             self._prefetch_events[layer] = self.atlas.stage(layer, ids, protect)
 
     def _capture_recurrent(self) -> None:
+        if not getattr(self, "_gdn_shadow", None):
+            self._kv_snap = None
+            return
         self._kv_snap = {
             index: (
                 self.kv_k[index],
@@ -1763,7 +2227,14 @@ class Qwen38Runtime:
         return grown
 
     def _qsa_dev(
-        self, layer: int, bundle: dict[str, Any], xs: Dev, count: int, *, base: int
+        self,
+        layer: int,
+        bundle: dict[str, Any],
+        xs: Dev,
+        count: int,
+        *,
+        base: int,
+        reuse: bool = False,
     ) -> Dev:
         hidden = self.hidden
         query = self.gpu.linear(bundle["q_proj"], xs, count, hidden)
@@ -1787,7 +2258,11 @@ class Qwen38Runtime:
         self.gpu.indexer_write(index_qk, i_buf, count, length)
         complete = 0 if self.kv_cache == "bf16" else ((length + count) // 4) * 4
         mode = 0 if self.kv_cache == "bf16" else 1
-        if base + count <= DENSE_LIMIT:
+        dense = base + count <= DENSE_LIMIT
+        saved = reuse and 0 < self._mtp_index_n < INDEX_STRIDE and not dense
+        if dense:
+            if reuse:
+                self._mtp_index_n = 0
             gated = self.gpu.qsa_attend(
                 q,
                 gate_pre,
@@ -1800,6 +2275,17 @@ class Qwen38Runtime:
                 key_tail=self.kv_k_tail[layer],
                 value_tail=self.kv_v_tail[layer],
             )
+        elif saved:
+            self.gpu.flush()
+            for pos in range(base, base + count):
+                if self._mtp_index_n >= INDEX_STRIDE:
+                    break
+                _poke_u32(self._mtp_indices, self._mtp_index_n, pos)
+                self._mtp_index_n += 1
+            _write_u32(self._mtp_count, self._mtp_index_n)
+            gated = self._mtp_attend(
+                q, gate_pre, k_buf, v_buf, count, mode, complete, layer
+            )
         else:
             n_blocks = max((base + count - 1) // INDEX_BLOCK, 1)
             scores = self.gpu.tmp(count * n_blocks)
@@ -1809,20 +2295,34 @@ class Qwen38Runtime:
             self.gpu.indexer_select(
                 scores, indices, selected, count, length, n_blocks, INDEX_STRIDE
             )
-            gated = self.gpu.qsa_attend_selected(
-                q,
-                gate_pre,
-                k_buf,
-                v_buf,
-                indices,
-                selected,
-                count,
-                INDEX_STRIDE,
-                mode=mode,
-                complete=complete,
-                key_tail=self.kv_k_tail[layer],
-                value_tail=self.kv_v_tail[layer],
-            )
+            if reuse:
+                self.gpu.copy_bytes(
+                    indices.buf,
+                    indices.offset * 4,
+                    self._mtp_indices,
+                    0,
+                    INDEX_STRIDE * 4,
+                )
+                self._mtp_index_n = int(self.gpu.read_u32(selected)[0])
+                _write_u32(self._mtp_count, self._mtp_index_n)
+                gated = self._mtp_attend(
+                    q, gate_pre, k_buf, v_buf, count, mode, complete, layer
+                )
+            else:
+                gated = self.gpu.qsa_attend_selected(
+                    q,
+                    gate_pre,
+                    k_buf,
+                    v_buf,
+                    indices,
+                    selected,
+                    count,
+                    INDEX_STRIDE,
+                    mode=mode,
+                    complete=complete,
+                    key_tail=self.kv_k_tail[layer],
+                    value_tail=self.kv_v_tail[layer],
+                )
         return self.gpu.linear(bundle["o_proj"], gated, count, 6144)
 
     def _moe_dev(

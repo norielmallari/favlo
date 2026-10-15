@@ -584,6 +584,10 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
             except RequestClosed:
                 self.close_connection = True
                 _log("client closed")
+                live = state.get("runtime")
+                persist = getattr(live, "_persist_prefix", None)
+                if persist is not None:
+                    persist()
             except KeyError as exc:
                 self.close_connection = True
                 if self._started:
