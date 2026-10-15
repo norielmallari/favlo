@@ -66,6 +66,25 @@ class QuantRecord:
     """The file the shaders read. It does not contain BF16 weights."""
 
     def __init__(self, root: Path) -> None:
+        self._closed = False
+        self.hot_fds: list[int] = []
+        self.cold_fds: list[int] = []
+        self.super_fds: list[int | None] = []
+        self.ngram_fd: int | None = None
+        self.expert_scratch: mmap.mmap | None = None
+        self.page_scratch: mmap.mmap | None = None
+        self.pages: dict[int, bytes] = {}
+        self.hot_io: list[Any] = []
+        self.cold_io: list[Any] = []
+        self.resident_io: Any = None
+        self.ngram_io: Any = None
+        try:
+            self._open(root)
+        except BaseException:
+            self.close()
+            raise
+
+    def _open(self, root: Path) -> None:
         manifest_path = root / "manifest.json"
         if not manifest_path.is_file():
             message = (
@@ -106,15 +125,10 @@ class QuantRecord:
                 cold_row += 1
             self._tier_row.append(mapping)
             self._cold_sets.append(cold)
-        self.hot_fds = [
-            os.open(root / "experts" / f"{layer:02d}-hot.bin", os.O_RDONLY)
-            for layer in range(layers)
-        ]
-        self.cold_fds = [
-            os.open(root / "experts" / f"{layer:02d}-cold.bin", os.O_RDONLY)
-            for layer in range(layers)
-        ]
-        self.super_fds: list[int | None] = []
+        for layer in range(layers):
+            self.hot_fds.append(os.open(root / "experts" / f"{layer:02d}-hot.bin", os.O_RDONLY))
+        for layer in range(layers):
+            self.cold_fds.append(os.open(root / "experts" / f"{layer:02d}-cold.bin", os.O_RDONLY))
         for layer, pin in enumerate(self.super):
             if not pin:
                 self.super_fds.append(None)
@@ -136,7 +150,6 @@ class QuantRecord:
         self.super_slot = int(self.manifest.get("super_slot") or 0)
         self.expert_scratch = mmap.mmap(-1, max(self.live, self.cold_live, self.super_live))
         self.page_scratch = mmap.mmap(-1, PAGE)
-        self.pages: dict[int, bytes] = {}
         self.gate_up_bytes = sum(int4_plane_sizes(1280, stored_k_int4(2560, align_k=True)))
 
     def open_io(self, gpu: MetalSession) -> None:
@@ -226,6 +239,40 @@ class QuantRecord:
         local = slot_off - page
         slot = cached[local : local + NGRAM_SLOT]
         return dequant_int4(slot[:80], slot[80:85], 1, NGRAM_WIDTH)[0]
+
+    def release_io(self) -> None:
+        """Drop Metal IO handles while the device is still alive."""
+        self.hot_io = []
+        self.cold_io = []
+        self.resident_io = None
+        self.ngram_io = None
+
+    def close(self) -> None:
+        """Close record fds and scratch mappings. A second call does nothing."""
+        if self._closed:
+            return
+        self._closed = True
+        self.release_io()
+        fds = [
+            fd
+            for fd in (*self.hot_fds, *self.cold_fds, *self.super_fds, self.ngram_fd)
+            if isinstance(fd, int)
+        ]
+        self.hot_fds = []
+        self.cold_fds = []
+        self.super_fds = []
+        self.ngram_fd = None
+        for fd in fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        for name in ("expert_scratch", "page_scratch"):
+            scratch = getattr(self, name, None)
+            if scratch is not None:
+                scratch.close()
+                setattr(self, name, None)
+        self.pages.clear()
 
 
 class _Bf16Ngram:

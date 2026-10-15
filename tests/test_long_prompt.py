@@ -19,17 +19,17 @@ from qwen38_flash_next.tools import canonical_continuation, forced_call_options,
 _LOG = """\
 listening on http://127.0.0.1:9
 prompt tokens 100
-prefix hit 0
+cache miss
+incoming tokens 100
 prefill 50.00 tok/s (100 tok in 2.00s)
-prefill after load 55.00 tok/s (100 tok in 1.82s gpu)
+output tokens 20
 decode 10.00 tok/s (20 tok in 2.00s)
-decode after atlas load: atlas still filling
-completion: call
 prompt tokens 180
-prefix hit 120
+cache hit 120
+incoming tokens 60
 prefill 100.00 tok/s (60 tok in 0.60s)
+output tokens 4
 decode 8.00 tok/s (4 tok in 0.50s)
-decode after atlas load 8.00 tok/s (4 tok in 0.50s)
 """
 
 
@@ -55,16 +55,17 @@ def test_source_files_skip_models_and_read_largest_first(tmp_path: Path) -> None
 def test_parse_requests_and_prefix_extension() -> None:
     requests = parse_requests(_LOG)
     assert len(requests) == 2
-    assert requests[0].prefix_hit == 0
+    assert requests[0].missed
+    assert requests[0].prefix_hit is None
     assert requests[0].decode_tokens == 20
-    assert requests[0].prefill_gpu.startswith("prefill after load ")
-    assert requests[0].steady == ("decode after atlas load: atlas still filling",)
+    assert requests[0].prefill.startswith("prefill ")
+    assert requests[0].steady == ()
     assert requests[1].prefix_hit == 120
     assert requests[1].prompt_tokens == 180
     assert extensions_hold(requests)
-    missed = parse_requests(_LOG.replace("prefix hit 120", "prefix miss"))
+    missed = parse_requests(_LOG.replace("cache hit 120", "cache miss"))
     assert not extensions_hold(missed)
-    short = parse_requests(_LOG.replace("prefix hit 120", "prefix hit 100"))
+    short = parse_requests(_LOG.replace("cache hit 120", "cache hit 100"))
     assert not extensions_hold(short)
 
 

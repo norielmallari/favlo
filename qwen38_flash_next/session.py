@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import math
 import struct
@@ -235,7 +236,7 @@ def _log(message: str) -> None:
 
 def _tok_s(label: str, tokens: int, seconds: float) -> str:
     if tokens <= 0 or seconds <= 0:
-        return f"{label} 0 tok"
+        return f"{label} 0 tok/s"
     return f"{label} {tokens / seconds:.2f} tok/s ({tokens} tok in {seconds:.2f}s)"
 
 
@@ -379,6 +380,7 @@ class MetalSession:
     """Decode dots, prefill matmul2d, the GDN delta, and grouped-query attention."""
 
     def __init__(self) -> None:
+        self._closed = False
         self.gemm = Int4Gemm()
         self.device = self.gemm.device
         self.metal = self.gemm.metal
@@ -884,6 +886,46 @@ class MetalSession:
         if self._encoder is None:
             return
         self._encoder.memoryBarrierWithScope_(self.metal.MTLBarrierScopeBuffers)
+
+    def finish_io(self) -> None:
+        """Wait for Metal IO that flush left in flight."""
+        pending = self._io_pending
+        self._io_pending = []
+        for command, _value in pending:
+            try:
+                if int(command.status()) == 0:
+                    command.waitUntilCompleted()
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        """Wait for the device, then drop the queue and its buffers."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.flush()
+        except Exception:
+            pass
+        self.finish_io()
+        self._encoder = None
+        self._command = None
+        self._inflight.clear()
+        self._retain.clear()
+        self._held_constants.clear()
+        self._spare.clear()
+        self._arena = None
+        self._arenas = []
+        self._io = None
+        self._event = None
+        self._tier_pad = None
+        self._cache_mode = None
+        self._presence_ids = None
+        gc.collect()
+        self.queue = None
+        self.gemm = None
+        self.device = None
+        gc.collect()
 
     def flush(self) -> None:
         self._enqueue_open()

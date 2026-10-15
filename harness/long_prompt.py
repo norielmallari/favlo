@@ -95,7 +95,7 @@ class RequestRate:
 
 
 def token_count(line: str) -> int:
-    if line.endswith(" 0 tok"):
+    if line.endswith(" 0 tok") or line.endswith(" 0 tok/s"):
         return 0
     match = _TOKENS.search(line)
     if match is None:
@@ -133,11 +133,10 @@ def parse_requests(text: str) -> list[RequestRate]:
     for raw in text.splitlines():
         line = raw.strip()
         if line.startswith("prompt tokens "):
-            finish()
             parts = line.split()
             if len(parts) != 3 or not parts[2].isdigit():
-                current = None
                 continue
+            finish()
             current = {
                 "prompt_tokens": int(parts[2]),
                 "prefix_hit": None,
@@ -150,14 +149,16 @@ def parse_requests(text: str) -> list[RequestRate]:
                 "steady": [],
             }
             continue
+        if line.startswith("incoming tokens"):
+            continue
         if current is None:
             continue
         steady = current["steady"]
         assert isinstance(steady, list)
-        if line == "prefix miss":
+        if line in {"prefix miss", "cache miss"}:
             current["missed"] = True
             current["prefix_hit"] = None
-        elif line.startswith("prefix hit "):
+        elif line.startswith("cache hit ") or line.startswith("prefix hit "):
             hit = line.split()[-1]
             if hit.isdigit():
                 current["prefix_hit"] = int(hit)
@@ -177,8 +178,16 @@ def parse_requests(text: str) -> list[RequestRate]:
 
 
 def extensions_hold(requests: list[RequestRate]) -> bool:
-    """True when every request after the first continues the cached token ids."""
-    if not requests or requests[0].missed or requests[0].prefix_hit != 0:
+    """True when every request after the first continues the cached token ids.
+
+    The first request may be a miss. An empty cache reuses nothing.
+    """
+    if not requests:
+        return False
+    first = requests[0]
+    if first.prefix_hit not in (None, 0):
+        return False
+    if first.prefix_hit is None and not first.missed:
         return False
     for previous, current in zip(requests, requests[1:], strict=False):
         if current.missed or current.prefix_hit is None:
@@ -203,7 +212,7 @@ def summed_rate(lines: list[str]) -> tuple[int, float] | None:
 
 
 def format_request(index: int, request: RequestRate) -> str:
-    prefix = "prefix miss" if request.missed else f"prefix hit {request.prefix_hit}"
+    prefix = "cache miss" if request.missed else f"cache hit {request.prefix_hit}"
     parts = [
         f"{index} prompt {request.prompt_tokens}",
         prefix,
@@ -304,13 +313,26 @@ def _completions(log: Log) -> str:
     index = 0
     while index < len(lines):
         line = lines[index]
+        if line.startswith("output tokens"):
+            blocks.append(line[len("output tokens") :].strip()[:800])
+            index += 1
+            continue
         if not line.startswith("completion:"):
             index += 1
             continue
         block = [line[len("completion:") :].lstrip()]
         index += 1
         while index < len(lines) and not lines[index].startswith(
-            ("prompt tokens ", "prefix ", "prefill ", "decode ", "layer ", "listening ")
+            (
+                "incoming tokens",
+                "prompt tokens ",
+                "cache ",
+                "prefix ",
+                "prefill ",
+                "decode ",
+                "output tokens",
+                "listening ",
+            )
         ):
             block.append(lines[index])
             index += 1

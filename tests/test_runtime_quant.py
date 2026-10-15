@@ -147,9 +147,17 @@ def test_gdn_and_attention_shaders_match() -> None:
     pipeline.check_state_kernels()
 
 
+def test_prompt_call_releases_the_decode_atlas() -> None:
+    runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
+    runtime.atlas = object()
+    runtime.files = None
+    runtime._begin_prefill_stream()
+    assert runtime.atlas is None
+
+
 def test_tok_rate_line() -> None:
-    assert pipeline._tok_s("prefill", 0, 1.0) == "prefill 0 tok"
-    assert pipeline._tok_s("decode", 4, 0.0) == "decode 0 tok"
+    assert pipeline._tok_s("prefill", 0, 1.0) == "prefill 0 tok/s"
+    assert pipeline._tok_s("decode", 4, 0.0) == "decode 0 tok/s"
     assert pipeline._tok_s("prefill", 58, 12.5) == "prefill 4.64 tok/s (58 tok in 12.50s)"
 
 
@@ -317,6 +325,186 @@ def test_stream_detokenize_runs_off_the_step_thread() -> None:
     text = commands._drain_stream(Runtime(), iter((0, 1, 2)), pieces.append)
     assert pieces == ["a", "b", "c"]
     assert text == "abc"
+
+
+def test_stream_holds_a_partial_character_until_it_resolves() -> None:
+    import qwen38_flash_next.commands as commands
+
+    class Runtime:
+        def decode(self, token_ids: list[int]) -> str:
+            if len(token_ids) < 3:
+                return "\ufffd"
+            return "你"
+
+    pieces: list[str] = []
+    text = commands._drain_stream(Runtime(), iter((0, 1, 2)), pieces.append)
+    assert pieces == ["你"]
+    assert text == "你"
+    assert "\ufffd" not in text
+
+
+def test_stream_flushes_a_finished_replacement_character() -> None:
+    import qwen38_flash_next.commands as commands
+
+    class Runtime:
+        def decode(self, token_ids: list[int]) -> str:
+            return "\ufffd"
+
+    pieces: list[str] = []
+    text = commands._drain_stream(Runtime(), iter((0,)), pieces.append)
+    assert pieces == ["\ufffd"]
+    assert text == "\ufffd"
+
+
+def test_peer_closed_after_the_client_disconnects() -> None:
+    import socket
+
+    import qwen38_flash_next.commands as commands
+
+    server, client = socket.socketpair()
+    try:
+        assert commands._peer_closed(server) is False
+        client.close()
+        assert commands._peer_closed(server) is True
+    finally:
+        server.close()
+
+
+def test_closed_client_stops_the_forward() -> None:
+    from qwen38_flash_next.runtime import Qwen38Runtime, RequestClosed
+
+    runtime = object.__new__(Qwen38Runtime)
+    runtime._stop = None
+    runtime._check_stop()
+    runtime._stop = lambda: False
+    runtime._check_stop()
+    runtime._stop = lambda: True
+    try:
+        runtime._check_stop()
+    except RequestClosed:
+        return
+    raise AssertionError("closed client kept the forward running")
+
+
+def test_stream_write_failure_ends_the_request() -> None:
+    import qwen38_flash_next.commands as commands
+    from qwen38_flash_next.runtime import RequestClosed
+
+    class Runtime:
+        def decode(self, token_ids: list[int]) -> str:
+            return "x" * len(token_ids)
+
+    def emit(_piece: str) -> None:
+        raise RequestClosed()
+
+    try:
+        commands._drain_stream(Runtime(), iter((0, 1, 2)), emit)
+    except RequestClosed:
+        return
+    raise AssertionError("failed stream write kept the request open")
+
+
+def test_record_close_releases_the_files(tmp_path) -> None:
+    from qwen38_flash_next.record import QuantRecord
+
+    record = object.__new__(QuantRecord)
+    path = tmp_path / "tier.bin"
+    path.write_bytes(b"abcd")
+    record._closed = False
+    record.hot_fds = [os.open(path, os.O_RDONLY)]
+    record.cold_fds = []
+    record.super_fds = []
+    record.ngram_fd = os.open(path, os.O_RDONLY)
+    record.expert_scratch = mmap.mmap(-1, 4096)
+    record.page_scratch = mmap.mmap(-1, 4096)
+    record.pages = {0: b"abcd"}
+    record.hot_io = []
+    record.cold_io = []
+    record.resident_io = None
+    record.ngram_io = None
+    held = record.hot_fds[0]
+    record.close()
+    record.close()
+    try:
+        os.fstat(held)
+    except OSError:
+        return
+    raise AssertionError("record close left the file open")
+
+
+def test_signal_stops_the_runtime_once() -> None:
+    import signal
+
+    import qwen38_flash_next.commands as commands
+    from qwen38_flash_next.runtime import Qwen38Runtime, RequestClosed
+
+    runtime = object.__new__(Qwen38Runtime)
+    runtime._stop = None
+    runtime.halt()
+    try:
+        runtime._check_stop()
+    except RequestClosed:
+        pass
+    else:
+        raise AssertionError("halt did not stop the forward")
+
+    shutdown = commands._Shutdown()
+    shutdown.runtime = runtime
+    try:
+        shutdown.handle(signal.SIGINT, None)
+    except KeyboardInterrupt:
+        pass
+    else:
+        raise AssertionError("signal did not interrupt the process")
+    assert shutdown.signaled
+    shutdown.closing = True
+    shutdown.handle(signal.SIGTERM, None)
+
+
+def test_partial_runtime_close_is_idempotent() -> None:
+    from qwen38_flash_next.runtime import Qwen38Runtime
+
+    runtime = object.__new__(Qwen38Runtime)
+    runtime._closed = False
+    runtime.gpu = None
+    runtime.files = None
+    runtime.store = None
+    runtime.close()
+    runtime.close()
+
+
+def test_session_close_releases_the_device() -> None:
+    from qwen38_flash_next.session import MetalSession
+
+    session = MetalSession()
+    session.close()
+    session.close()
+    assert session.device is None
+
+
+def test_release_closes_the_listening_socket() -> None:
+    import socket
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    import qwen38_flash_next.commands as commands
+
+    class Quiet(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *log_args: object) -> None:
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), Quiet)
+    port = int(server.server_address[1])
+    shutdown = commands._Shutdown()
+    shutdown.signaled = True
+    commands._release(None, shutdown, server)
+    probe = socket.socket()
+    try:
+        probe.connect(("127.0.0.1", port))
+    except OSError:
+        return
+    finally:
+        probe.close()
+    raise AssertionError("listening socket stayed open")
 
 
 def test_omitted_max_tokens_runs_until_stop() -> None:

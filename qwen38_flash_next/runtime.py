@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import time
@@ -86,10 +87,32 @@ def after_atlas_load(resident: Sequence[int]) -> int:
     return len(resident)
 
 
+class RequestClosed(Exception):
+    """The client closed the socket while a forward was still running."""
+
+
 class Qwen38Runtime:
     """One sequence of Qwen3.8-Flash-Next. Linear maps are Metal shader dots."""
 
     def __init__(
+        self,
+        root: Path,
+        *,
+        bf16: bool = False,
+        resident_percent: float | None = None,
+        kv_cache: str = DEFAULT_KV_CACHE,
+    ) -> None:
+        self._closed = False
+        self.gpu = None
+        self.store = None
+        self.files = None
+        try:
+            self._open(root, bf16=bf16, resident_percent=resident_percent, kv_cache=kv_cache)
+        except BaseException:
+            self.close()
+            raise
+
+    def _open(
         self,
         root: Path,
         *,
@@ -151,6 +174,7 @@ class Qwen38Runtime:
         self._residual_n = 0
         self._decoding = False
         self._force_sync = False
+        self._stop = None
         self.atlas: ExpertAtlas | None = None
         self._streaming_prefill = False
         self._stage: list[Any] | None = None
@@ -174,6 +198,7 @@ class Qwen38Runtime:
         self._decode_tokens = 0
         self._decode_seconds = 0.0
         self._decode_steps: list[tuple[float, float, int]] = []
+        self._output_ids: list[int] = []
         self.rng = np.random.default_rng()
         self.tool_names: list[str] = []
         self.required_function: str | None = None
@@ -288,6 +313,91 @@ class Qwen38Runtime:
         if len(encoded) == 1:
             self.stop_ids.add(int(encoded[0]))
 
+    def halt(self) -> None:
+        """The next layer boundary ends the forward."""
+        self._stop = lambda: True
+
+    def close(self) -> None:
+        """Wait for the GPU, then release the device, the atlas, and the record."""
+        if self._closed:
+            return
+        self._closed = True
+        gpu = getattr(self, "gpu", None)
+        if gpu is not None:
+            try:
+                gpu.flush()
+                gpu.finish_io()
+            except Exception:
+                pass
+        if getattr(self, "_streaming_prefill", False):
+            try:
+                self._end_prefill_stream()
+            except Exception:
+                pass
+        files = getattr(self, "files", None)
+        if isinstance(files, QuantRecord):
+            files.release_io()
+        self.atlas = None
+        self._stage = None
+        self._stage_table = None
+        self._stage_miss = None
+        self._resident = None
+        self._hot_keep = None
+        self._hold_xs = None
+        self._hold_out = None
+        self._hold_ids = None
+        self._hold_w = None
+        self.weights = {}
+        self.f16_weights = {}
+        self.expert_cache = {}
+        self.gdn_state = {}
+        self.conv_hist = {}
+        self.kv_k = {}
+        self.kv_v = {}
+        self.kv_k_tail = {}
+        self.kv_v_tail = {}
+        self.indexer_buf = {}
+        self._bundle = {}
+        self._final = None
+        self._head = None
+        self._ple = None
+        self._super_images = {}
+        self._f32_uploaded = {}
+        self._choice = {}
+        self.last_logits = None
+        self._gdn_shadow = {}
+        self._conv_shadow = {}
+        self._ple_shadow = None
+        gc.collect()
+        if gpu is not None:
+            try:
+                gpu.close()
+            except Exception:
+                pass
+            self.gpu = None
+        if isinstance(files, QuantRecord):
+            files.close()
+        store = getattr(self, "store", None)
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
+            self.store = None
+
+    def _check_stop(self) -> None:
+        stop = self._stop
+        if stop is not None and stop():
+            raise RequestClosed()
+
+    def _cancel_forward(self) -> None:
+        try:
+            self.gpu.flush()
+        finally:
+            if self._streaming_prefill:
+                self._end_prefill_stream()
+            self.reset()
+
     def reset(self) -> None:
         self.tokens = []
         self.last_logits = None
@@ -300,12 +410,17 @@ class Qwen38Runtime:
             self.kv_len[index] = 0
 
     def align(self, prompt: list[int]) -> int:
-        if prompt[: len(self.tokens)] != self.tokens:
-            _log("prefix miss")
+        hit = prompt[: len(self.tokens)] == self.tokens
+        cached = len(self.tokens) if hit else 0
+        if not hit:
             self.reset()
-            return 0
-        _log(f"prefix hit {len(self.tokens)}")
-        return len(self.tokens)
+        _log(f"prompt tokens {len(prompt)}")
+        if cached:
+            _log(f"cache hit {cached}")
+        else:
+            _log("cache miss")
+        _log(f"incoming tokens {len(prompt) - cached}")
+        return cached
 
     def generate(
         self,
@@ -321,7 +436,7 @@ class Qwen38Runtime:
                 message = "the cached prefix has no logits"
                 raise RuntimeError(message)
             logits = self.last_logits
-            _log("prefill 0 tok")
+            _log("prefill 0 tok/s")
         else:
             logits = self.forward(prompt[start:])
         tokens = list(self._new_tokens(logits, max_tokens, temperature, top_p, top_k))
@@ -339,12 +454,14 @@ class Qwen38Runtime:
         self._decode_tokens = 0
         self._decode_seconds = 0.0
         self._decode_steps = []
+        self._output_ids = []
         self._hit_limit = False
         # The first sampled token fills the atlas. Later tokens reuse it.
         self._atlas_trusted = False
         produced_ids: list[int] = []
         produced = 0
         while True:
+            self._check_stop()
             if max_tokens is not None and produced >= max_tokens:
                 self._hit_limit = True
                 return
@@ -354,6 +471,7 @@ class Qwen38Runtime:
             token = self._pick(logits, temperature, top_p, top_k, produced_ids)
             if token in self.stop_ids:
                 return
+            self._output_ids.append(token)
             yield token
             produced += 1
             produced_ids.append(token)
@@ -366,27 +484,8 @@ class Qwen38Runtime:
             logits = self.forward([token], decode=True)
 
     def _log_decode(self) -> None:
+        _log(f"output tokens {len(self._output_ids)}")
         _log(_tok_s("decode", self._decode_tokens, self._decode_seconds))
-        resident = [step[2] for step in self._decode_steps]
-        start = after_atlas_load(resident)
-        filled = self._decode_steps[:start]
-        steady = self._decode_steps[start:]
-        if filled:
-            _log(
-                "decode atlas load "
-                f"{len(filled)} tok in {sum(step[0] for step in filled):.2f}s"
-            )
-        if not steady:
-            _log("decode after atlas load: atlas still filling")
-            return
-        wall = sum(step[0] for step in steady)
-        gpu = sum(step[1] for step in steady)
-        _log(_tok_s("decode after atlas load", len(steady), wall))
-        if gpu > 0:
-            _log(
-                "decode after atlas load "
-                f"{len(steady) / gpu:.2f} tok/s ({len(steady)} tok in {gpu:.2f}s gpu)"
-            )
 
     def _pick(
         self,
@@ -526,10 +625,10 @@ class Qwen38Runtime:
         return self._token_pieces
 
     def forward(self, tokens: list[int], *, decode: bool = False) -> Dev:
+        self._check_stop()
         started = time.perf_counter()
         gpu_at = self.gpu.gpu_seconds
         self._decoding = decode
-        stage_bytes = 0
         total = len(self.tokens) + len(tokens)
         self._require_prompt_room(total)
         chunk = len(tokens) if decode else min(len(tokens), self.prefill_chunk)
@@ -543,18 +642,20 @@ class Qwen38Runtime:
                 self._ensure_atlas()
             else:
                 self._begin_prefill_stream()
-        streamed = self.atlas.streamed if self.atlas is not None else 0
         if self.atlas is not None:
             _fill_buffer(self.atlas.miss, self.layers * 4, 0)
         if decode and self.atlas is not None:
             self._prefetch_decode()
             self._capture_recurrent()
         resident_before = self.atlas.resident_count if decode and self.atlas is not None else 0
-        logits = self._forward_body(tokens)
-        self.gpu.flush()
+        try:
+            logits = self._forward_body(tokens)
+            self.gpu.flush()
+        except RequestClosed:
+            self._cancel_forward()
+            raise
         if self._streaming_prefill:
             missed = self._stage_missed()
-            stage_bytes = self._stage_bytes
             self._end_prefill_stream()
             if missed:
                 message = "prefill referenced an expert that was not loaded"
@@ -582,20 +683,6 @@ class Qwen38Runtime:
             self._decode_steps.append((elapsed, gpu_elapsed, resident))
         else:
             _log(_tok_s("prefill", len(tokens), elapsed))
-            if gpu_elapsed > 0 and len(tokens) > 0:
-                _log(
-                    "prefill after load "
-                    f"{len(tokens) / gpu_elapsed:.2f} tok/s "
-                    f"({len(tokens)} tok in {gpu_elapsed:.2f}s gpu)"
-                )
-            if stage_bytes:
-                _log(f"experts streamed {stage_bytes >> 20} MiB")
-            elif self.atlas is not None:
-                delta = self.atlas.streamed - streamed
-                _log(
-                    f"experts resident {self.atlas.resident_count}"
-                    f" streamed {delta >> 20} MiB"
-                )
         return logits
 
     def _forward_body(self, tokens: list[int]) -> Dev:
@@ -608,8 +695,7 @@ class Qwen38Runtime:
         if wide:
             self._ensure_hold(count)
         for layer in range(self.layers):
-            layer_started = time.perf_counter()
-            held = 0
+            self._check_stop()
             submitted = False
             bundle = None
             if wide and layer + 1 < self.layers:
@@ -660,7 +746,6 @@ class Qwen38Runtime:
                         )
                         submitted = True
                         if self._bf16:
-                            held = len(self.expert_cache)
                             self.expert_cache.clear()
                         self._inject_dev(view, hats, mixed, bundle["mlp_inject"], n)
                     if self._decoding and self.atlas is not None:
@@ -674,11 +759,6 @@ class Qwen38Runtime:
                     message = "prefill layer had no tokens"
                     raise RuntimeError(message)
                 self._moe_wide(layer, bundle, residual, count)
-            if self._bf16:
-                _log(f"layer {layer} stepped {count} experts {held}")
-            elif count > DENSE_LIMIT:
-                elapsed = time.perf_counter() - layer_started
-                _log(f"layer {layer} {elapsed:.2f}s")
         self.gpu.rewind_scratch()
         final = self._final_bundle()
         last = residual.view(
@@ -737,22 +817,33 @@ class Qwen38Runtime:
             budget = max(budget, hot_bytes + cold_bytes)
         return budget
 
+    def _release_atlas(self) -> None:
+        """Drop the decode atlas so the next allocation can use that memory."""
+        atlas = self.atlas
+        self.atlas = None
+        if atlas is None:
+            return
+        for name in ("atlas", "table", "miss"):
+            if hasattr(atlas, name):
+                setattr(atlas, name, None)
+        gc.collect()
+
     def _begin_prefill_stream(self) -> None:
-        """Two staging buffers. The decode atlas stays when those buffers fit beside it."""
+        """Two staging buffers. A resident decode atlas is released first.
+
+        Keeping that atlas beside the staging buffers makes the next reply
+        fail to continue the chat. The atlas is allocated again after the call.
+        """
+        self._release_atlas()
         if not isinstance(self.files, QuantRecord):
             return
         self._end_prefill_stream()
-        # Copying every hot file into RAM drops the atlas, and the next decode
-        # cannot allocate that atlas until the copy is released.
         self._hot_keep = None
         budget = 0
         for layer in range(self.layers):
             hot_bytes, cold_bytes, _table = self._prefill_layout(layer)
             budget = max(budget, hot_bytes + cold_bytes)
         self._stage = [self.gpu.alloc(budget), self.gpu.alloc(budget)]
-        if (self._stage[0] is None or self._stage[1] is None) and self.atlas is not None:
-            self.atlas = None
-            self._stage = [self.gpu.alloc(budget), self.gpu.alloc(budget)]
         if (self._stage[0] is None or self._stage[1] is None) and self._hot_keep is not None:
             self._stage = None
             self._hot_keep = None
@@ -768,8 +859,6 @@ class Qwen38Runtime:
         self._stage_bytes = 0
         self._streaming_prefill = True
         self._submit_prefill_layer(0)
-        resident = "hot resident" if self._hot_keep is not None else "hot streamed"
-        _log(f"prefill stage {budget >> 20} MiB x2, {resident}")
 
     def _prefill_layout(self, layer: int) -> tuple[int, int, np.ndarray]:
         """Offsets in the staging buffer. A resident hot file is omitted from that buffer."""

@@ -5,6 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import queue
+import select
+import signal
+import socket
 import sys
 import threading
 import time
@@ -14,14 +17,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 from qwen38_flash_next.checks import check_state_kernels
 from qwen38_flash_next.convert import importance_hot_ids, quantize_checkpoint
 from qwen38_flash_next.formats import DEFAULT_RECORD
 from qwen38_flash_next.grove import write_grove
 from qwen38_flash_next.probe import matmul, probe
-from qwen38_flash_next.runtime import Qwen38Runtime
+from qwen38_flash_next.runtime import Qwen38Runtime, RequestClosed
 from qwen38_flash_next.session import _append_transcript, _log, _prompt_text
 from qwen38_flash_next.tools import (
     PENALTY_WINDOW,
@@ -87,88 +88,110 @@ def quantize_main(args: Any) -> int:
 
 def bf16_complete(args: Any) -> int:
     """Same forward as complete, with Metal dots of the checkpoint BF16 values."""
+    shutdown = _Shutdown()
+    shutdown.arm()
+    runtime: Qwen38Runtime | None = None
     try:
         runtime = Qwen38Runtime(
             _checkpoint(args.source), bf16=True, kv_cache=args.kv_cache
         )
+        shutdown.runtime = runtime
         if args.raw:
             prompt = list(runtime.tokenizer.encode(args.prompt).ids)
         else:
             messages = [{"role": "user", "content": args.prompt}]
             prompt = runtime.encode_chat(messages, None, enable_thinking=args.thinking)
         _arm_cli(runtime, args)
-        _log(f"prompt tokens {len(prompt)} ids {prompt}")
-        logits = runtime.forward(prompt)
-        order = np.argsort(logits)[::-1]
-        top = " ".join(
-            f"{float(logits[i]):.2f}:{int(i)}:{runtime.decode([int(i)])!r}" for i in order[:8]
-        )
-        _log(f"top {top}")
-        four = runtime.tokenizer.encode("4").ids
-        if len(four) == 1:
-            rank = int(np.flatnonzero(order == four[0])[0])
-            _log(f"4 rank {rank} logit {float(logits[four[0]]):.2f}")
+        start = runtime.align(prompt)
+        if start == len(prompt):
+            if runtime.last_logits is None:
+                message = "the cached prefix has no logits"
+                raise RuntimeError(message)
+            logits = runtime.last_logits
+            _log("prefill 0 tok/s")
+        else:
+            logits = runtime.forward(prompt[start:])
         produced: list[int] = []
         shown = ""
         temperature, top_p, top_k = _cli_sampling(args)
         for token in runtime._new_tokens(logits, args.max_tokens, temperature, top_p, top_k):
             produced.append(token)
-            text = runtime.decode(produced)
-            sys.stdout.write(text[len(shown) :])
-            sys.stdout.flush()
-            shown = text
+            piece, shown = _stream_delta(runtime.decode(produced), shown, final=False)
+            if piece:
+                sys.stdout.write(piece)
+                sys.stdout.flush()
+        if produced:
+            piece, shown = _stream_delta(runtime.decode(produced), shown, final=True)
+            if piece:
+                sys.stdout.write(piece)
         sys.stdout.write("\n")
         sys.stdout.flush()
         runtime._log_decode()
         _append_transcript(args.transcript, args.prompt, shown)
+    except KeyboardInterrupt:
+        _log("shutting down")
+        return 0
     except Exception as exc:
         traceback.print_exc()
         sys.stderr.write(f"{type(exc).__name__}: {exc}\n")
         return 1
+    finally:
+        _release(runtime, shutdown)
     return 0
 
 
 def complete(args: Any) -> int:
+    shutdown = _Shutdown()
+    shutdown.arm()
+    runtime: Qwen38Runtime | None = None
     try:
         runtime = Qwen38Runtime(
             _record(args.record),
             resident_percent=args.resident_percent,
             kv_cache=args.kv_cache,
         )
+        shutdown.runtime = runtime
         if args.raw:
             prompt = list(runtime.tokenizer.encode(args.prompt).ids)
         else:
             messages = [{"role": "user", "content": args.prompt}]
             prompt = runtime.encode_chat(messages, None, enable_thinking=args.thinking)
         _arm_cli(runtime, args)
-        _log(f"prompt tokens {len(prompt)} ids {prompt}")
-        logits = runtime.forward(prompt)
-        order = np.argsort(logits)[::-1]
-        top = " ".join(
-            f"{float(logits[i]):.2f}:{int(i)}:{runtime.decode([int(i)])!r}" for i in order[:8]
-        )
-        _log(f"top {top}")
-        four = runtime.tokenizer.encode("4").ids
-        if len(four) == 1:
-            rank = int(np.flatnonzero(order == four[0])[0])
-            _log(f"4 rank {rank} logit {float(logits[four[0]]):.2f}")
+        start = runtime.align(prompt)
+        if start == len(prompt):
+            if runtime.last_logits is None:
+                message = "the cached prefix has no logits"
+                raise RuntimeError(message)
+            logits = runtime.last_logits
+            _log("prefill 0 tok/s")
+        else:
+            logits = runtime.forward(prompt[start:])
         produced: list[int] = []
         shown = ""
         temperature, top_p, top_k = _cli_sampling(args)
         for token in runtime._new_tokens(logits, args.max_tokens, temperature, top_p, top_k):
             produced.append(token)
-            text = runtime.decode(produced)
-            sys.stdout.write(text[len(shown) :])
-            sys.stdout.flush()
-            shown = text
+            piece, shown = _stream_delta(runtime.decode(produced), shown, final=False)
+            if piece:
+                sys.stdout.write(piece)
+                sys.stdout.flush()
+        if produced:
+            piece, shown = _stream_delta(runtime.decode(produced), shown, final=True)
+            if piece:
+                sys.stdout.write(piece)
         sys.stdout.write("\n")
         sys.stdout.flush()
         runtime._log_decode()
         _append_transcript(args.transcript, args.prompt, shown)
+    except KeyboardInterrupt:
+        _log("shutting down")
+        return 0
     except Exception as exc:
         traceback.print_exc()
         sys.stderr.write(f"{type(exc).__name__}: {exc}\n")
         return 1
+    finally:
+        _release(runtime, shutdown)
     return 0
 
 
@@ -178,24 +201,123 @@ class _SingleRequestServer(HTTPServer):
     request_queue_size = 128
 
 
-def serve(args: Any) -> int:
-    try:
-        runtime = Qwen38Runtime(
-            _record(args.record),
-            resident_percent=args.resident_percent,
-            kv_cache=args.kv_cache,
+class _Shutdown:
+    """SIGINT and SIGTERM stop the forward and leave the process able to release."""
+
+    def __init__(self) -> None:
+        self.runtime: Qwen38Runtime | None = None
+        self.closing = False
+        self.signaled = False
+
+    def arm(self) -> None:
+        self._previous = (
+            signal.getsignal(signal.SIGINT),
+            signal.getsignal(signal.SIGTERM),
         )
-    except Exception as exc:
-        traceback.print_exc()
-        sys.stderr.write(f"{type(exc).__name__}: {exc}\n")
-        return 1
+        signal.signal(signal.SIGINT, self.handle)
+        signal.signal(signal.SIGTERM, self.handle)
+
+    def disarm(self) -> None:
+        previous = getattr(self, "_previous", None)
+        if previous is None:
+            return
+        signal.signal(signal.SIGINT, previous[0])
+        signal.signal(signal.SIGTERM, previous[1])
+        self._previous = None
+
+    def handle(self, _signum: int, _frame: Any) -> None:
+        if self.closing:
+            return
+        self.signaled = True
+        runtime = self.runtime
+        if runtime is not None:
+            runtime.halt()
+        raise KeyboardInterrupt
+
+
+def _release(runtime: Qwen38Runtime | None, shutdown: _Shutdown, server: Any = None) -> None:
+    """Close the listening socket and the runtime. A signal during this returns."""
+    shutdown.closing = True
+    try:
+        if server is not None:
+            try:
+                server.server_close()
+            except OSError:
+                pass
+        if runtime is not None:
+            runtime.close()
+        if shutdown.signaled and (runtime is not None or server is not None):
+            _log("released")
+    finally:
+        shutdown.disarm()
+
+
+# A client that stops reading fills the send buffer. This bounds that write.
+_STREAM_WRITE_TIMEOUT = 2.0
+
+
+def _peer_closed(sock: socket.socket) -> bool:
+    """True when the client has closed its side or the socket is already dead."""
+    try:
+        readable, _, _ = select.select([sock], [], [], 0)
+    except (OSError, ValueError):
+        return True
+    if not readable:
+        return False
+    try:
+        peeked = sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+    except BlockingIOError:
+        return False
+    except OSError:
+        return True
+    return peeked == b""
+
+
+def serve(args: Any) -> int:
+    shutdown = _Shutdown()
+    shutdown.arm()
+    state: dict[str, Any] = {"runtime": None, "server": None}
+    try:
+        try:
+            state["runtime"] = Qwen38Runtime(
+                _record(args.record),
+                resident_percent=args.resident_percent,
+                kv_cache=args.kv_cache,
+            )
+        except Exception as exc:
+            traceback.print_exc()
+            sys.stderr.write(f"{type(exc).__name__}: {exc}\n")
+            return 1
+        shutdown.runtime = state["runtime"]
+        return _run_until_stopped(args, state, shutdown)
+    except KeyboardInterrupt:
+        _log("shutting down")
+        return 0
+    finally:
+        if not shutdown.closing:
+            _release(state["runtime"], shutdown, state.get("server"))
+
+
+def _run_until_stopped(args: Any, state: dict[str, Any], shutdown: _Shutdown) -> int:
+    """Serve until SIGINT or SIGTERM. Then close the socket and the runtime."""
+    try:
+        return _serve_loop(args, state)
+    except KeyboardInterrupt:
+        _log("shutting down")
+        return 0
+    finally:
+        _release(state["runtime"], shutdown, state.get("server"))
+
+
+def _serve_loop(args: Any, state: dict[str, Any]) -> int:
+    runtime = state["runtime"]
     lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
         def log_message(self, fmt: str, *log_args: Any) -> None:
-            _log(fmt % log_args)
+            del fmt, log_args
 
         def do_GET(self) -> None:  # noqa: N802
             if self.path.split("?", 1)[0] != "/v1/models":
@@ -220,6 +342,7 @@ def serve(args: Any) -> int:
                 self._json(404, {"error": {"message": "not found"}})
                 return
             self._started = False
+            self._gone = False
             length = int(self.headers.get("Content-Length", "0"))
             try:
                 body = json.loads(self.rfile.read(length) or b"{}")
@@ -230,6 +353,7 @@ def serve(args: Any) -> int:
                 temperature, top_p, top_k = _sampling(body, enable_thinking)
                 stream = bool(body.get("stream", False))
                 with lock:
+                    runtime._stop = self._client_stopped
                     runtime.tool_names = tool_names(tools)
                     runtime.required_function = required_function(body.get("tool_choice"))
                     runtime.required_closes = call_closes(tools, runtime.required_function)
@@ -249,7 +373,6 @@ def serve(args: Any) -> int:
                             reasoning_effort=_reasoning_effort(body),
                             continue_final=bool(body.get("continue_final_message")),
                         )
-                        _log(f"prompt tokens {len(prompt)}")
                         if stream:
                             self._stream(
                                 prompt,
@@ -267,7 +390,6 @@ def serve(args: Any) -> int:
                             text = runtime.decode(tokens)
                             reasoning, reply = split_thinking(text, enable_thinking)
                             content, calls = parse_tool_calls(reply if reply else text)
-                            _log(f"completion: {text}")
                             _append_transcript(args.transcript, _prompt_text(messages), text)
                             if calls:
                                 reason = "tool_calls"
@@ -287,11 +409,16 @@ def serve(args: Any) -> int:
                                 ),
                             )
                     finally:
+                        runtime._stop = None
                         runtime.tool_names = []
                         runtime.required_function = None
                         runtime.required_closes = False
+            except RequestClosed:
+                self.close_connection = True
+                _log("client closed")
             except Exception as exc:
                 traceback.print_exc()
+                self.close_connection = True
                 if self._started:
                     return
                 self._json(500, {"error": {"message": str(exc), "type": type(exc).__name__}})
@@ -307,11 +434,17 @@ def serve(args: Any) -> int:
             enable_thinking: bool,
         ) -> None:
             self._started = True
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "close")
-            self.end_headers()
+            self.close_connection = True
+            self.connection.settimeout(_STREAM_WRITE_TIMEOUT)
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                self.end_headers()
+            except OSError:
+                self._gone = True
+                raise RequestClosed() from None
             self._event(
                 {"choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]}
             )
@@ -321,7 +454,7 @@ def serve(args: Any) -> int:
                     message = "the cached prefix has no logits"
                     raise RuntimeError(message)
                 logits = runtime.last_logits
-                _log("prefill 0 tok")
+                _log("prefill 0 tok/s")
             else:
                 logits = runtime.forward(prompt[start:])
 
@@ -399,30 +532,51 @@ def serve(args: Any) -> int:
             else:
                 reason = "length" if runtime._hit_limit else "stop"
             self._event({"choices": [{"index": 0, "delta": {}, "finish_reason": reason}]})
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
+            self._send(b"data: [DONE]\n\n")
             runtime._log_decode()
             _append_transcript(args.transcript, prompt_text, previous)
 
+        def _client_stopped(self) -> bool:
+            if self._gone:
+                return True
+            if _peer_closed(self.connection):
+                self._gone = True
+                return True
+            return False
+
         def _event(self, payload: dict[str, Any]) -> None:
             blob = json.dumps(payload).encode()
-            self.wfile.write(b"data: " + blob + b"\n\n")
-            self.wfile.flush()
+            self._send(b"data: " + blob + b"\n\n")
+
+        def _send(self, data: bytes) -> None:
+            try:
+                self.wfile.write(data)
+                self.wfile.flush()
+            except OSError:
+                self._gone = True
+                raise RequestClosed() from None
 
         def _json(self, status: int, payload: dict[str, Any]) -> None:
             blob = json.dumps(payload).encode()
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(blob)))
-            self.end_headers()
-            self.wfile.write(blob)
+            previous = self.connection.gettimeout()
+            self.connection.settimeout(_STREAM_WRITE_TIMEOUT)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(blob)))
+                self.end_headers()
+                self.wfile.write(blob)
+                self.wfile.flush()
+            except OSError:
+                self.close_connection = True
+                _log("client closed")
+            else:
+                self.connection.settimeout(previous)
 
     server = _SingleRequestServer((args.host, args.port), Handler)
+    state["server"] = server
     _log(f"listening on http://{args.host}:{args.port}")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        server.shutdown()
+    server.serve_forever()
     return 0
 
 
@@ -435,6 +589,18 @@ INSTRUCT_TEMPERATURE = 0.7
 INSTRUCT_TOP_P = 0.8
 INSTRUCT_TOP_K = 20
 INSTRUCT_PRESENCE = 1.5
+
+
+def _stream_delta(decoded: str, shown: str, *, final: bool) -> tuple[str, str]:
+    """Text that is safe to send, and the piece after ``shown``.
+
+    The tokenizer writes U+FFFD when a token is only some of the bytes of a
+    character. The next token often replaces that mark with the character, and
+    the two strings have the same length, so a slice would drop the character.
+    """
+    if not final and decoded.endswith("\ufffd"):
+        decoded = decoded[:-1]
+    return decoded[len(shown) :], decoded
 
 
 def _drain_stream(runtime: Any, tokens: Iterator[int], emit: Any) -> str:
@@ -450,19 +616,20 @@ def _drain_stream(runtime: Any, tokens: Iterator[int], emit: Any) -> str:
         try:
             while True:
                 token = pending.get()
-                if token is None:
-                    break
-                produced.append(token)
-                decoded = runtime.decode(produced)
-                piece = decoded[len(previous) :]
-                previous = decoded
+                final = token is None
+                if not final:
+                    produced.append(token)
+                decoded = runtime.decode(produced) if produced else ""
+                piece, previous = _stream_delta(decoded, previous, final=final)
                 if piece:
                     emit(piece)
+                if final:
+                    break
         except BaseException as exc:
             failed.append(exc)
         text = previous
 
-    writer = threading.Thread(target=write, name="madmetal-stream")
+    writer = threading.Thread(target=write, name="madmetal-stream", daemon=True)
     writer.start()
     try:
         for token in tokens:

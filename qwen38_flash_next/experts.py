@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 
 from qwen38_flash_next.formats import PAGE
-from qwen38_flash_next.session import _buffer_view, _fill_buffer, _log
+from qwen38_flash_next.session import _buffer_view, _fill_buffer
 
 RESIDENT_CANDIDATES = (24 << 30, 20 << 30, 16 << 30, 12 << 30, 8 << 30)
 
@@ -123,10 +123,6 @@ class ExpertAtlas:
         self.holes: list[tuple[int, int]] = []
         self.bump = 0
         self.streamed = 0
-        _log(
-            f"expert atlas {self.budget >> 20} MiB, "
-            f"hot {files.stride(0)} cold {files.stride(1)}"
-        )
 
     @property
     def resident_count(self) -> int:
