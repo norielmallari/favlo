@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 
 from qwen38_flash_next.formats import PAGE
-from qwen38_flash_next.session import _buffer_view, _fill_buffer
+from qwen38_flash_next.session import _buffer_view, _fill_buffer, commit_pages, release_pages
 
 RESIDENT_CANDIDATES = (24 << 30, 20 << 30, 16 << 30, 12 << 30, 8 << 30)
 
@@ -168,6 +168,7 @@ class ExpertAtlas:
                 if offset % PAGE or span % PAGE:
                     message = f"expert load {offset}+{span} is not a multiple of {PAGE}"
                     raise RuntimeError(message)
+                commit_pages(self.atlas, offset, span)
                 members = tuple(expert for _row, expert in run)
                 key = (layer, tier, first_row, last_row)
                 for index, (_row, expert) in enumerate(run):
@@ -179,6 +180,19 @@ class ExpertAtlas:
             if loads:
                 groups.append((self.files.io_handle(layer, tier), loads))
         return self.gpu.io_submit_mixed(groups)
+
+    def release_unused(self) -> None:
+        """Discard atlas pages that do not hold a live expert image.
+
+        The GPU is finished with this buffer before this runs. Evicted runs
+        and the never-filled tail are a cache of the expert files, so they
+        are not kept as swap.
+        """
+        for offset, size in self.holes:
+            release_pages(self.atlas, offset, size)
+        tail = self.budget - self.bump
+        if tail:
+            release_pages(self.atlas, self.bump, tail)
 
     def _touch(self, layer: int, expert: int) -> None:
         key = self.expert_run.get((layer, expert))
@@ -274,6 +288,7 @@ def _allocate(gpu: Any, candidates: tuple[int, ...]) -> tuple[Any, int]:
             nbytes, gpu.metal.MTLResourceStorageModeShared
         )
         if buffer is not None:
+            release_pages(buffer, 0, nbytes)
             return buffer, nbytes
     message = "unable to allocate a resident expert atlas"
     raise RuntimeError(message)

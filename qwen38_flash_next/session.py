@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ctypes
 import gc
 import json
 import math
+import os
 import struct
 import sys
 import time
@@ -43,6 +45,69 @@ def _metal():
 
 def _buffer_view(buffer: Any, count: int) -> memoryview:
     return memoryview(buffer.contents().as_buffer(count))
+
+
+# Darwin <sys/mman.h>. Reusable pages are not written to swap; the kernel may
+# discard them. Reuse those pages before the CPU or the GPU reads them again.
+MADV_FREE_REUSABLE = 7
+MADV_FREE_REUSE = 8
+
+_LIBC = ctypes.CDLL(None, use_errno=True)
+_LIBC.madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+_LIBC.madvise.restype = ctypes.c_int
+
+
+def _contents_address(buffer: Any) -> int:
+    length = int(buffer.length())
+    if length < PAGE:
+        message = f"buffer length {length} is shorter than {PAGE}"
+        raise ValueError(message)
+    view = _buffer_view(buffer, PAGE)
+    holder = ctypes.c_char.from_buffer(view)
+    try:
+        return ctypes.addressof(holder)
+    finally:
+        del holder
+
+
+def advise_pages(buffer: Any, offset: int, nbytes: int, advice: int) -> None:
+    """Apply Darwin page advice to a shared buffer span.
+
+    ``offset`` and ``nbytes`` are multiples of the VM page. The buffer stays
+    allocated; only the swap backing of this span changes.
+    """
+    if nbytes == 0:
+        return
+    if offset < 0 or nbytes < 0 or offset % PAGE or nbytes % PAGE:
+        message = f"page advice {offset}+{nbytes} is not a multiple of {PAGE}"
+        raise ValueError(message)
+    length = int(buffer.length())
+    if offset + nbytes > length:
+        message = f"page advice {offset}+{nbytes} exceeds buffer length {length}"
+        raise ValueError(message)
+    address = _contents_address(buffer) + offset
+    rc = _LIBC.madvise(ctypes.c_void_p(address), ctypes.c_size_t(nbytes), ctypes.c_int(advice))
+    if rc != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, f"madvise {offset}+{nbytes}: {os.strerror(err)}")
+
+
+def release_pages(buffer: Any, offset: int, nbytes: int) -> None:
+    """Let the kernel discard this span instead of keeping it in swap."""
+    advise_pages(buffer, offset, nbytes, MADV_FREE_REUSABLE)
+
+
+def commit_pages(buffer: Any, offset: int, nbytes: int) -> None:
+    """Make a previously released span readable before it is filled or used."""
+    advise_pages(buffer, offset, nbytes, MADV_FREE_REUSE)
+
+
+def release_buffer(buffer: Any) -> None:
+    """Release every whole page of a shared buffer."""
+    length = int(buffer.length())
+    aligned = length - (length % PAGE)
+    if aligned:
+        release_pages(buffer, 0, aligned)
 
 
 def _fill_buffer(buffer: Any, count: int, value: int) -> None:

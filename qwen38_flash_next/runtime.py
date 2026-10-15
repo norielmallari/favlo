@@ -39,6 +39,7 @@ from qwen38_flash_next.formats import (
     KV_E4M3_BYTES,
     KV_TAIL_TOKENS,
     NGRAM_WIDTH,
+    PAGE,
     ExpertPlanes,
     expert_planes,
     int4_plane_sizes,
@@ -70,6 +71,9 @@ from qwen38_flash_next.session import (
     _fill_buffer,
     _log,
     _tok_s,
+    commit_pages,
+    release_buffer,
+    release_pages,
 )
 from qwen38_flash_next.tools import (
     answer_repeat_id,
@@ -413,6 +417,8 @@ class Qwen38Runtime:
         finally:
             if self._streaming_prefill:
                 self._end_prefill_stream()
+            elif self.atlas is not None:
+                self.atlas.release_unused()
             self.reset()
 
     def reset(self) -> None:
@@ -906,6 +912,8 @@ class Qwen38Runtime:
             self._decode_steps.append((elapsed, gpu_elapsed, resident))
         else:
             _log(_tok_s("prefill", len(tokens), elapsed))
+        if self.atlas is not None:
+            self.atlas.release_unused()
         return logits
 
     def _forward_body(self, tokens: list[int]) -> Dev:
@@ -1052,6 +1060,8 @@ class Qwen38Runtime:
             return
         self.gpu.flush()
         self.gpu.finish_io()
+        if atlas.atlas is not None and atlas.budget:
+            release_pages(atlas.atlas, 0, atlas.budget)
         for name in ("atlas", "table", "miss"):
             if hasattr(atlas, name):
                 setattr(atlas, name, None)
@@ -1083,6 +1093,8 @@ class Qwen38Runtime:
         if self._stage[0] is None or self._stage[1] is None:
             message = f"prefill stage of {budget} bytes was not allocated"
             raise RuntimeError(message)
+        release_buffer(self._stage[0])
+        release_buffer(self._stage[1])
         self._stage_table = self.gpu.alloc(self.experts * 8)
         self._stage_miss = self.gpu.zeros(self.layers * 4)
         self._stage_event = [0, 0]
@@ -1124,8 +1136,12 @@ class Qwen38Runtime:
             return
         # The layer loads were submitted into these buffers. Finish that IO
         # before dropping them, or the next atlas is allocated beside them.
+        # Discard the pages first so the dirty staging window is not swapped.
         self.gpu.flush()
         self.gpu.finish_io()
+        for buf in stage:
+            if buf is not None:
+                release_buffer(buf)
         del stage
         gc.collect()
 
@@ -1140,6 +1156,12 @@ class Qwen38Runtime:
         if hot_size < hot_bytes or cold_size < cold_bytes:
             message = f"layer {layer} tier file is shorter than the image table"
             raise RuntimeError(message)
+        used = hot_bytes + cold_bytes
+        if used % PAGE:
+            message = f"layer {layer} stage of {used} bytes is not a multiple of {PAGE}"
+            raise RuntimeError(message)
+        if used:
+            commit_pages(buf, 0, used)
         groups: list[tuple[Any, list[tuple[Any, int, int, int]]]] = []
         if hot_bytes:
             groups.append((self.files.hot_io[layer], [(buf, 0, hot_bytes, 0)]))
