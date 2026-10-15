@@ -72,8 +72,8 @@ from qwen38_flash_next.session import (
     _log,
     _tok_s,
     commit_pages,
+    discard_buffer,
     release_buffer,
-    release_pages,
 )
 from qwen38_flash_next.tools import (
     answer_repeat_id,
@@ -218,6 +218,10 @@ class Qwen38Runtime:
         self._cold = expert_planes(2, self.hidden, self.moe)
         self._super_planes = expert_planes(8, self.hidden, self.moe)
         self._super_images: dict[tuple[int, int], Any] = {}
+        self._int2_ids: Any = None
+        self._int2_table: Any = None
+        self._int2_miss: Any = None
+        self._int2_one: Any = None
         self.tokens: list[int] = []
         self.last_logits: Dev | None = None
         self._decode_tokens = 0
@@ -264,6 +268,7 @@ class Qwen38Runtime:
             self.files = QuantRecord(root)
             self._hot = expert_planes(self.files.hot_bits, self.hidden, self.moe)
             self._cold = expert_planes(self.files.cold_bits, self.hidden, self.moe)
+            self._super_planes = expert_planes(self.files.super_bits, self.hidden, self.moe)
             self._load_record()
             self._load_supers()
             self._upload_tiers()
@@ -474,7 +479,15 @@ class Qwen38Runtime:
         if not self.tokens:
             return
         self.gpu.flush()
-        path = self.prefixes.save(self._prefix_state())
+        state = self._prefix_state()
+        # The atlas is tens of gigabytes of expert images. Drop it before the
+        # volume reserves the prefix file, then the new prompt builds what it needs.
+        self._release_atlas()
+        try:
+            path = self.prefixes.save(state)
+        except OSError as exc:
+            _log(f"prefix store failed {exc}")
+            return
         if path is not None:
             _log(f"prefix store {len(self.tokens)} tokens")
 
@@ -945,11 +958,7 @@ class Qwen38Runtime:
             blocks = max(total // INDEX_BLOCK, 1)
             scratch += chunk * blocks * 4 + chunk * INDEX_STRIDE * 4
         self.gpu.begin_scratch(scratch, copies=2 if decode else 1)
-        if not self._bf16:
-            if decode:
-                self._ensure_atlas()
-            else:
-                self._begin_prefill_stream()
+        self._prepare_experts(decode=decode, count=len(tokens))
         if self.atlas is not None:
             _fill_buffer(self.atlas.miss, self.layers * 4, 0)
         if decode and self.atlas is not None:
@@ -1119,6 +1128,25 @@ class Qwen38Runtime:
             raise RuntimeError(message)
         return logits
 
+    def _prepare_experts(self, *, decode: bool, count: int) -> None:
+        if self._bf16:
+            return
+        if decode or self._suffix_on_atlas(count):
+            self._ensure_atlas()
+            return
+        self._begin_prefill_stream()
+
+    def _suffix_on_atlas(self, count: int) -> bool:
+        """A short live continuation keeps the atlas the previous decode filled.
+
+        Streaming every layer file again charges that read to a few new tokens.
+        The atlas stages only the experts this suffix routes to. A suffix longer
+        than one chunk still streams, so that read overlaps ``matmul2d``.
+        """
+        if count > self.prefill_chunk or not self.tokens or self.atlas is None:
+            return False
+        return True
+
     def _ensure_atlas(self) -> None:
         if self._bf16 or self.atlas is not None:
             return
@@ -1158,8 +1186,9 @@ class Qwen38Runtime:
             return
         gpu.flush()
         gpu.finish_io()
-        if atlas.atlas is not None and atlas.budget:
-            release_pages(atlas.atlas, 0, atlas.budget)
+        discard_buffer(getattr(atlas, "atlas", None))
+        discard_buffer(getattr(atlas, "table", None))
+        discard_buffer(getattr(atlas, "miss", None))
         for name in ("atlas", "table", "miss"):
             if hasattr(atlas, name):
                 setattr(atlas, name, None)
@@ -1239,7 +1268,7 @@ class Qwen38Runtime:
         self.gpu.finish_io()
         for buf in stage:
             if buf is not None:
-                release_buffer(buf)
+                discard_buffer(buf)
         del stage
         gc.collect()
 
@@ -2297,7 +2326,7 @@ class Qwen38Runtime:
         planes = self._super_planes
         for expert in pins:
             image = self._super_images[(layer, expert)]
-            gate = self.gpu.gemv_int8(
+            gate = self._super_gemv(
                 row,
                 image,
                 planes.gate_rows,
@@ -2308,7 +2337,7 @@ class Qwen38Runtime:
                 half=False,
             )
             activated = self.gpu.moe_activate(gate, 1, self.moe, planes.down_inner)
-            down = self.gpu.gemv_int8(
+            down = self._super_gemv(
                 activated,
                 image,
                 self.hidden,
@@ -2568,6 +2597,95 @@ class Qwen38Runtime:
         for layer in range(self.layers):
             self._predicted[layer] = [int(expert) for expert in ids[layer]]
 
+    def _super_gemv(
+        self,
+        activation: Any,
+        image: Any,
+        cols: int,
+        stored: int,
+        weight_off: int,
+        scale_off: int,
+        logical: int,
+        *,
+        half: bool,
+    ) -> Dev:
+        planes = self._super_planes
+        if planes.bits == 8:
+            return self.gpu.gemv_int8(
+                activation,
+                image,
+                cols,
+                stored,
+                weight_off,
+                scale_off,
+                logical,
+                half=half,
+            )
+        if planes.bits == 4:
+            return self.gpu.gemv_fp4(
+                activation,
+                image,
+                cols,
+                stored,
+                weight_off,
+                scale_off,
+                logical,
+                half=half,
+            )
+        if planes.bits != 2:
+            message = f"super width {planes.bits} is not 2, 4, or 8"
+            raise RuntimeError(message)
+        return self._super_int2(activation, image, cols, stored, weight_off, scale_off, half=half)
+
+    def _super_int2(
+        self,
+        activation: Any,
+        image: Any,
+        cols: int,
+        stored: int,
+        weight_off: int,
+        scale_off: int,
+        *,
+        half: bool,
+    ) -> Dev:
+        if self._int2_ids is None:
+            self._int2_ids = self.gpu.dev_u32([0])
+            self._int2_table = self.gpu.zeros(8)
+            self._int2_miss = self.gpu.zeros(4)
+            self._int2_one = self.gpu.dev_from(np.array([1.0], dtype=np.float32))
+        if half:
+            shared = self.gpu.zeros(cols * 4)
+            return self.gpu.moe_decode_down_int2(
+                activation,
+                image,
+                self._int2_table,
+                self._int2_ids,
+                self._int2_one,
+                shared,
+                1,
+                0,
+                cols,
+                stored,
+                weight_off,
+                scale_off,
+                self._int2_miss,
+                0,
+            )
+        return self.gpu.moe_decode_gate_int2(
+            activation,
+            image,
+            self._int2_table,
+            self._int2_ids,
+            1,
+            0,
+            cols,
+            stored,
+            weight_off,
+            scale_off,
+            self._int2_miss,
+            0,
+        )
+
     def _load_supers(self) -> None:
         if not isinstance(self.files, QuantRecord):
             return
@@ -2586,7 +2704,7 @@ class Qwen38Runtime:
         planes = self._super_planes
         for slot in hits:
             image = self._super_images[(layer, ids[slot])]
-            gate = self.gpu.gemv_int8(
+            gate = self._super_gemv(
                 row,
                 image,
                 planes.gate_rows,
@@ -2597,7 +2715,7 @@ class Qwen38Runtime:
                 half=False,
             )
             activated = self.gpu.moe_activate(gate, 1, self.moe, planes.down_inner)
-            down = self.gpu.gemv_int8(
+            down = self._super_gemv(
                 activated,
                 image,
                 self.hidden,
@@ -2636,7 +2754,7 @@ class Qwen38Runtime:
             for assign in range(start, stop):
                 token = int(tokens[assign])
                 token_row = xs.view(token * self.hidden, self.hidden)
-                gate = self.gpu.gemv_int8(
+                gate = self._super_gemv(
                     token_row,
                     image,
                     planes.gate_rows,
@@ -2647,7 +2765,7 @@ class Qwen38Runtime:
                     half=False,
                 )
                 activated = self.gpu.moe_activate(gate, 1, self.moe, planes.down_inner)
-                down = self.gpu.gemv_int8(
+                down = self._super_gemv(
                     activated,
                     image,
                     self.hidden,

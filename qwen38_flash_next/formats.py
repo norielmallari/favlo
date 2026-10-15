@@ -21,11 +21,12 @@ IO_CHUNK = 256 * 1024 * 1024
 RECORD_VERSION = 5
 # Hugging Face model name, then -madmetal-, then each tier. h is the hot file,
 # c is the cold file. The plane after the count is that file's data width.
-# Version 5 stores hot experts as fp8 E4M3 and cold experts as fp4 E2M1.
+# Version 5. Widths come from --hot-bits, --cold-bits, --super-bits, and --mtp-bits.
+# This directory was packed with all four of those at 4.
 DEFAULT_RECORD = (
     Path(__file__).resolve().parents[1]
     / "models"
-    / "Qwen3.8-Flash-Next-madmetal-h128-fp8-c384-fp4"
+    / "Qwen3.8-Flash-Next-madmetal-h128-fp4-c384-fp4"
 )
 
 # MTLTensorDataType values from the macOS 27 SDK headers.

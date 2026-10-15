@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 PIPELINE = "qwen38-flash-next"
-TIER = "madmetal-h128-fp8-c384-fp4"
+TIER = "madmetal-h128-fp4-c384-fp4"
 VARIANTS = ("thinking", "instruct")
 
 # Qwen3.8-Flash-Next model card. commands.py keeps the same numbers.

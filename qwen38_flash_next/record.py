@@ -142,6 +142,7 @@ class QuantRecord:
         _bypass_cache(self.ngram_fd)
         self.hot_bits = int(self.manifest.get("hot_bits") or 4)
         self.cold_bits = int(self.manifest.get("cold_bits") or 2)
+        self.super_bits = int(self.manifest.get("super_bits") or 8)
         self.live = int(self.manifest["expert_live"])
         self.slot = int(self.manifest["expert_slot"])
         self.cold_live = int(self.manifest["cold_live"])

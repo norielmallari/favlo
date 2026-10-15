@@ -9,7 +9,13 @@ from typing import Any
 import numpy as np
 
 from qwen38_flash_next.formats import PAGE
-from qwen38_flash_next.session import _buffer_view, _fill_buffer, commit_pages, release_pages
+from qwen38_flash_next.session import (
+    _buffer_view,
+    _fill_buffer,
+    commit_pages,
+    loosen_buffer,
+    release_pages,
+)
 
 RESIDENT_CANDIDATES = (24 << 30, 20 << 30, 16 << 30, 12 << 30, 8 << 30)
 
@@ -288,7 +294,7 @@ def _allocate(gpu: Any, candidates: tuple[int, ...]) -> tuple[Any, int]:
             nbytes, gpu.metal.MTLResourceStorageModeShared
         )
         if buffer is not None:
-            release_pages(buffer, 0, nbytes)
+            loosen_buffer(buffer)
             return buffer, nbytes
     message = "unable to allocate a resident expert atlas"
     raise RuntimeError(message)

@@ -117,6 +117,8 @@ def quantize_main(args: Any) -> int:
             args.super,
             hot_bits=int(args.hot_bits),
             cold_bits=int(args.cold_bits),
+            super_bits=int(args.super_bits),
+            mtp_bits=int(args.mtp_bits),
         )
         write_grove(args.output, replace=packed)
         register_quantized(output.name, source=source, alias=getattr(args, "alias", None))
@@ -1187,8 +1189,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     quant_parser.add_argument("--hot", type=Path, default=None)
     quant_parser.add_argument("--importance", type=Path, default=None)
     quant_parser.add_argument("--hot-count", type=int, default=128)
-    quant_parser.add_argument("--hot-bits", type=int, default=8)
-    quant_parser.add_argument("--cold-bits", type=int, default=4)
+    quant_parser.add_argument("--hot-bits", type=int, default=8, choices=(8, 4, 2))
+    quant_parser.add_argument("--cold-bits", type=int, default=4, choices=(8, 4, 2))
+    quant_parser.add_argument("--super-bits", type=int, default=8, choices=(8, 4, 2))
+    quant_parser.add_argument("--mtp-bits", type=int, default=4, choices=(8, 4, 2))
     quant_parser.add_argument("--super", type=Path, default=None)
     _add_console(quant_parser)
     models_parser = sub.add_parser("models", help="list or edit the flavor registry")

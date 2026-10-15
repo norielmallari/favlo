@@ -24,8 +24,19 @@ def test_prompt_budget_leaves_six_gibibytes() -> None:
     assert HEADROOM == 6 << 30
 
 
-def test_unset_percent_keeps_the_ladder() -> None:
-    assert resident_candidates(50 << 30, None) == DEFAULT_LADDER
+def test_unset_percent_keeps_the_ladder_when_it_fits() -> None:
+    assert resident_candidates(50 << 30, None, memory=64 << 30) == DEFAULT_LADDER
+
+
+def test_unset_percent_skips_a_step_larger_than_the_hot_tier_or_ram() -> None:
+    memory = 48 << 30
+    steps = resident_candidates(50 << 30, None, memory=memory)
+    assert steps[0] == 24 << 30
+    assert (32 << 30) not in steps
+    hot = 16 << 30
+    fitted = resident_candidates(hot, None, memory=memory)
+    assert fitted[0] == hot
+    assert fitted == (16 << 30, 12 << 30, 8 << 30)
 
 
 def test_percent_steps_down_to_the_floor() -> None:

@@ -36,7 +36,7 @@ SCRATCH_FLOOR = 256 << 20
 SCRATCH_PER_TOKEN = 2 << 20
 RESIDENT_FLOOR = 8 << 30
 RESIDENT_STEP = 4 << 30
-DEFAULT_LADDER = (32 << 30, 28 << 30, 24 << 30, 20 << 30, 16 << 30, 12 << 30, 8 << 30)
+DEFAULT_LADDER = (24 << 30, 20 << 30, 16 << 30, 12 << 30, 8 << 30)
 DEFAULT_PROMPT_LIMIT = 128 << 10
 
 
@@ -78,16 +78,36 @@ def _page_down(nbytes: int) -> int:
     return nbytes - (nbytes % PAGE)
 
 
+def _ladder_cap(hot_bytes: int, memory: int) -> int:
+    """Largest atlas that leaves room for the OS, both decode arenas, and weights."""
+    reserve = HEADROOM + 2 * scratch_bytes(PREFILL_CHUNK) + (4 << 30)
+    cap = _page_down(memory - reserve) if memory > reserve else RESIDENT_FLOOR
+    if hot_bytes > 0:
+        cap = min(cap, _page_down(hot_bytes))
+    if cap < PAGE:
+        return PAGE
+    return cap
+
+
 def resident_candidates(
-    hot_bytes: int, percent: float | None, ladder: tuple[int, ...] = DEFAULT_LADDER
+    hot_bytes: int,
+    percent: float | None,
+    ladder: tuple[int, ...] = DEFAULT_LADDER,
+    memory: int | None = None,
 ) -> tuple[int, ...]:
     """Atlas sizes to try, largest first.
 
-    ``percent is None`` keeps the device ladder. A percent is that share of the
+    ``percent is None`` keeps the device ladder, dropping a step larger than the
+    hot tier or larger than the memory left after headroom, both decode scratch
+    arenas, and the resident weight file. A percent is that share of the
     hot-tier bytes, page-aligned, then 4 GiB smaller down to 8 GiB.
     """
     if percent is None:
-        return ladder
+        cap = _ladder_cap(hot_bytes, machine_memory() if memory is None else memory)
+        picked = tuple(size for size in ladder if size <= cap)
+        if picked:
+            return picked
+        return (min(ladder[-1], cap),)
     try:
         number = float(percent)
     except (TypeError, ValueError) as exc:

@@ -22,15 +22,11 @@ from qwen38_flash_next.formats import (
     NGRAM_WIDTH,
     PAGE,
     RECORD_VERSION,
-    expert_live_bytes,
-    expert_slot_bytes,
     int4_plane_sizes,
     ngram_slots,
     quantize_int2_image,
     quantize_int4_image,
     quantize_int8_image,
-    super_live_bytes,
-    super_slot_bytes,
     tier_image_bytes,
 )
 from qwen38_flash_next.session import _log, bf16_to_f32
@@ -297,7 +293,7 @@ def load_hot_ids(path: Path, layers: int, experts: int) -> list[list[int]]:
 
 
 def load_super_ids(path: Path | None, layers: int, experts: int) -> list[list[int]]:
-    """Layer index to the int8 pin. A missing file leaves every layer empty."""
+    """Layer index to the super pin. A missing file leaves every layer empty."""
     rows: list[list[int]] = [[] for _ in range(layers)]
     if path is None:
         return rows
@@ -319,7 +315,7 @@ def load_super_ids(path: Path | None, layers: int, experts: int) -> list[list[in
 def split_keep(
     hot: Sequence[int], supers: Sequence[int], experts: int
 ) -> tuple[list[int], list[int], list[int]]:
-    """Lift the int8 pin out of the keep-set. Cold is every id outside that keep-set."""
+    """Lift the super pin out of the keep-set. Cold is every id outside that keep-set."""
     keep = [int(expert) for expert in hot]
     pin = [int(expert) for expert in supers]
     keep_set = set(keep)
@@ -381,9 +377,10 @@ def _expert_start(
     inflight_key: int | str,
     path: Path,
     experts: int,
+    slot: int,
 ) -> int:
     """First expert still to write. ``experts`` means the file is finished."""
-    full = experts * expert_slot_bytes()
+    full = experts * slot
     size = path.stat().st_size if path.is_file() else 0
     if done and size >= full:
         return experts
@@ -519,6 +516,7 @@ def _layer_ready(
     super_count: int,
     hot_slot: int,
     cold_slot: int,
+    super_slot: int,
 ) -> bool:
     root = dest / "experts"
     hot = root / f"{layer:02d}-hot.bin"
@@ -530,7 +528,7 @@ def _layer_ready(
     if super_count == 0:
         return True
     super_file = root / f"{layer:02d}-super.bin"
-    return super_file.is_file() and super_file.stat().st_size >= super_count * super_slot_bytes()
+    return super_file.is_file() and super_file.stat().st_size >= super_count * super_slot
 
 
 def pack_expert_layer(
@@ -542,8 +540,9 @@ def pack_expert_layer(
     experts: int,
     hot_bits: int = 8,
     cold_bits: int = 4,
+    super_bits: int = 8,
 ) -> int:
-    """Pack one layer. Super rows are int8. Hot and cold use the requested widths."""
+    """Pack one layer. Hot, cold, and the super pin use the requested widths."""
     store = ShardStore(Path(source))
     prefix = f"model.language_model.layers.{layer}.mlp.experts"
     gate_key = f"{prefix}.gate_up_proj"
@@ -555,8 +554,7 @@ def pack_expert_layer(
     pin_at = {expert: row for row, expert in enumerate(pin)}
     hot_live, hot_slot = tier_image_bytes(hot_bits)
     cold_live, cold_slot = tier_image_bytes(cold_bits)
-    pin_slot = super_slot_bytes()
-    pin_live = super_live_bytes()
+    pin_live, pin_slot = tier_image_bytes(super_bits)
     hot_fd = _open_tier(root / f"{layer:02d}-hot.bin", len(hot_ids), hot_slot)
     cold_fd = _open_tier(root / f"{layer:02d}-cold.bin", len(cold), cold_slot)
     pin_fd = _open_tier(root / f"{layer:02d}-super.bin", len(pin), pin_slot) if pin else None
@@ -569,7 +567,7 @@ def pack_expert_layer(
                 message = f"{gate_key} shapes {gate.shape} {down.shape}"
                 raise RuntimeError(message)
             if expert in pin_at:
-                image = _expert_image(gate, down, 8)
+                image = _expert_image(gate, down, super_bits)
                 if len(image) != pin_live or pin_fd is None:
                     message = f"super image is {len(image)} bytes, expected {pin_live}"
                     raise RuntimeError(message)
@@ -655,9 +653,9 @@ def _write_expert_file(
     experts: int,
     start: int = 0,
     commit: Callable[[int], None] | None = None,
+    bits: int = 4,
 ) -> None:
-    live = expert_live_bytes()
-    slot = expert_slot_bytes()
+    live, slot = tier_image_bytes(bits)
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
         full = experts * slot
@@ -669,7 +667,7 @@ def _write_expert_file(
             if gate.shape != (1280, 2560) or down.shape != (2560, 640):
                 message = f"{gate_key} shapes {gate.shape} {down.shape}"
                 raise RuntimeError(message)
-            image = quantize_int4_image(gate)[0] + quantize_int4_image(down)[0]
+            image = _expert_image(gate, down, bits)
             if len(image) != live:
                 message = f"expert image is {len(image)} bytes, expected {live}"
                 raise RuntimeError(message)
@@ -690,6 +688,8 @@ def quantize_checkpoint(
     supers: Path | None = None,
     hot_bits: int = 8,
     cold_bits: int = 4,
+    super_bits: int = 8,
+    mtp_bits: int = 4,
 ) -> bool:
     """Write the Metal record once. A later run continues from quantize_progress.json.
 
@@ -719,8 +719,14 @@ def quantize_checkpoint(
     experts = int(text["num_experts"])
     hot_ids = load_hot_ids(hot, len(kinds), experts)
     super_ids = load_super_ids(supers, len(kinds), experts)
+    _plane_format(hot_bits)
+    _plane_format(cold_bits)
+    _plane_format(super_bits)
+    _plane_format(mtp_bits)
     hot_live, hot_slot = tier_image_bytes(hot_bits)
     cold_live, cold_slot = tier_image_bytes(cold_bits)
+    super_live, super_slot = tier_image_bytes(super_bits)
+    _mtp_live, mtp_slot = tier_image_bytes(mtp_bits)
     saved_hot = progress.get("hot")
     saved_super = progress.get("super")
     if saved_hot is None:
@@ -728,12 +734,16 @@ def quantize_checkpoint(
         progress["super"] = super_ids
         progress["hot_bits"] = hot_bits
         progress["cold_bits"] = cold_bits
+        progress["super_bits"] = super_bits
+        progress["mtp_bits"] = mtp_bits
         _save_progress(dest, progress)
     elif (
         saved_hot != hot_ids
         or saved_super != super_ids
         or int(progress.get("hot_bits") or 4) != hot_bits
         or int(progress.get("cold_bits") or 2) != cold_bits
+        or int(progress.get("super_bits") or 8) != super_bits
+        or int(progress.get("mtp_bits") or 4) != mtp_bits
     ):
         message = "hot set does not match this partial record"
         raise RuntimeError(message)
@@ -830,6 +840,7 @@ def quantize_checkpoint(
             len(super_ids[layer]),
             hot_slot,
             cold_slot,
+            super_slot,
         ):
             continue
         if layer in done_layers:
@@ -851,6 +862,7 @@ def quantize_checkpoint(
                     experts,
                     hot_bits,
                     cold_bits,
+                    super_bits,
                 )
                 for layer in pending_layers
             ]
@@ -867,6 +879,7 @@ def quantize_checkpoint(
         inflight_key="mtp",
         path=mtp_path,
         experts=experts,
+        slot=mtp_slot,
     )
     if mtp_start >= experts:
         if not progress["mtp"]:
@@ -894,6 +907,7 @@ def quantize_checkpoint(
             experts,
             mtp_start,
             commit_mtp,
+            mtp_bits,
         )
         progress["mtp"] = True
         _clear_inflight(progress)
@@ -913,8 +927,13 @@ def quantize_checkpoint(
         "hot_count": [len(row) for row in hot_only],
         "cold_count": cold_count,
         "super_count": [len(row) for row in super_ids],
-        "super_slot": super_slot_bytes(),
-        "super_live": super_live_bytes(),
+        "super_bits": super_bits,
+        "super_format": _plane_format(super_bits),
+        "super_slot": super_slot,
+        "super_live": super_live,
+        "mtp_bits": mtp_bits,
+        "mtp_format": _plane_format(mtp_bits),
+        "mtp_slot": mtp_slot,
         "hot": hot_only,
         "super": super_ids,
         "experts": experts,

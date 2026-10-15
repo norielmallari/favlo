@@ -578,6 +578,17 @@ kernel void argmax_final(
     out[0] = best_i;
 }
 
+kernel void cast_half_f32(
+    device const half* src [[buffer(0)]],
+    device float* dst [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid < count) {
+        dst[tid] = float(src[tid]);
+    }
+}
+
 kernel void cast_f16_pad(
     device const float* src [[buffer(0)]],
     device half* dst [[buffer(1)]],

@@ -2,6 +2,7 @@ import mmap
 import os
 
 import numpy as np
+import pytest
 
 from test_packing import pipeline
 
@@ -83,7 +84,12 @@ def test_expert_start_skips_a_finished_layer(tmp_path) -> None:
     _full_expert_file(path, 2)
     progress = {"layers": [0]}
     start = pipeline._expert_start(
-        progress, done=True, inflight_key=0, path=path, experts=2
+        progress,
+        done=True,
+        inflight_key=0,
+        path=path,
+        experts=2,
+        slot=pipeline.expert_slot_bytes(),
     )
     assert start == 2
 
@@ -93,7 +99,12 @@ def test_expert_start_resumes_after_the_last_committed_expert(tmp_path) -> None:
     _full_expert_file(path, 4)
     progress = {"inflight_key": 1, "inflight_expert": 2}
     start = pipeline._expert_start(
-        progress, done=False, inflight_key=1, path=path, experts=4
+        progress,
+        done=False,
+        inflight_key=1,
+        path=path,
+        experts=4,
+        slot=pipeline.expert_slot_bytes(),
     )
     assert start == 3
 
@@ -106,6 +117,7 @@ def test_expert_start_rewrites_a_marked_layer_whose_file_is_missing(tmp_path) ->
         inflight_key=0,
         path=tmp_path / "missing.bin",
         experts=4,
+        slot=pipeline.expert_slot_bytes(),
     )
     assert start == 0
 
@@ -155,6 +167,66 @@ def test_prompt_call_releases_the_decode_atlas() -> None:
     assert runtime.atlas is None
 
 
+def test_short_suffix_prefill_keeps_the_atlas() -> None:
+    runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
+    runtime._bf16 = False
+    runtime.tokens = [7]
+    runtime.atlas = object()
+    runtime.prefill_chunk = 2048
+    streamed: list[bool] = []
+    runtime._ensure_atlas = lambda: None
+    runtime._begin_prefill_stream = lambda: streamed.append(True)
+    runtime._prepare_experts(decode=False, count=32)
+    assert streamed == []
+    runtime._prepare_experts(decode=False, count=2049)
+    assert streamed == [True]
+    runtime.tokens = []
+    runtime._prepare_experts(decode=False, count=32)
+    assert streamed == [True, True]
+
+
+def test_flush_releases_the_atlas_before_the_prefix_write() -> None:
+    runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
+    runtime.tokens = [1, 2]
+    order: list[str] = []
+
+    def flush() -> None:
+        order.append("flush")
+
+    def state() -> object:
+        order.append("state")
+        return object()
+
+    def release() -> None:
+        order.append("release")
+
+    class Prefixes:
+        def save(self, state: object) -> None:
+            order.append("save")
+
+    runtime.gpu = type("Gpu", (), {"flush": staticmethod(flush)})()
+    runtime._prefix_state = state
+    runtime._release_atlas = release
+    runtime.prefixes = Prefixes()
+    runtime._flush_prefix()
+    assert order == ["flush", "state", "release", "save"]
+
+
+def test_flush_continues_when_the_volume_refuses_the_prefix() -> None:
+    runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
+    runtime.tokens = [1]
+    runtime.gpu = type("Gpu", (), {"flush": staticmethod(lambda: None)})()
+    runtime._prefix_state = lambda: object()
+    runtime._release_atlas = lambda: None
+
+    class Prefixes:
+        def save(self, state: object) -> None:
+            raise OSError(28, "preallocate failed for 4096 bytes")
+
+    runtime.prefixes = Prefixes()
+    runtime._flush_prefix()
+
+
 def test_tok_rate_line() -> None:
     assert pipeline._tok_s("prefill", 0, 1.0) == "prefill 0 tok/s"
     assert pipeline._tok_s("decode", 4, 0.0) == "decode 0 tok/s"
@@ -188,6 +260,50 @@ def test_preallocate_covers_the_file_in_one_extent(tmp_path) -> None:
     contig, device = allocate.contiguous_bytes(path, 0, nbytes)
     assert device >= 0
     assert contig >= nbytes
+
+
+def test_preallocate_splits_a_refused_piece(tmp_path, monkeypatch) -> None:
+    import qwen38_flash_next.allocate as allocate
+
+    real = allocate._alloc_piece
+
+    def refuse_large(fd: int, nbytes: int, *, contig: bool) -> int | None:
+        if nbytes > 4 * pipeline.PAGE:
+            return 28
+        return real(fd, nbytes, contig=contig)
+
+    monkeypatch.setattr(allocate, "_alloc_piece", refuse_large)
+    monkeypatch.setattr(allocate, "_CHUNK", 8 * pipeline.PAGE)
+    monkeypatch.setattr(allocate, "_FALLBACK", 4 * pipeline.PAGE)
+    path = tmp_path / "slices"
+    nbytes = 8 * pipeline.PAGE
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        allocate.preallocate(fd, nbytes)
+    finally:
+        os.close(fd)
+    assert path.stat().st_size == nbytes
+    for offset in (0, 4 * pipeline.PAGE):
+        contig, device = allocate.contiguous_bytes(path, offset, 4 * pipeline.PAGE)
+        assert device >= 0
+        assert contig >= 4 * pipeline.PAGE
+
+
+def test_preallocate_reports_the_errno(tmp_path, monkeypatch) -> None:
+    import qwen38_flash_next.allocate as allocate
+
+    def refuse(fd: int, nbytes: int, *, contig: bool) -> int | None:
+        return 28
+
+    monkeypatch.setattr(allocate, "_alloc_piece", refuse)
+    path = tmp_path / "refused"
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        with pytest.raises(OSError) as raised:
+            allocate.preallocate(fd, 4 * pipeline.PAGE)
+    finally:
+        os.close(fd)
+    assert raised.value.errno == 28
 
 
 def test_preallocate_claims_each_chunk(tmp_path, monkeypatch) -> None:

@@ -102,6 +102,33 @@ def commit_pages(buffer: Any, offset: int, nbytes: int) -> None:
     advise_pages(buffer, offset, nbytes, MADV_FREE_REUSE)
 
 
+# MTLPurgeableStateNonVolatile and MTLPurgeableStateEmpty.
+_PURGEABLE_NONVOLATILE = 2
+_PURGEABLE_EMPTY = 4
+
+
+def loosen_buffer(buffer: Any) -> None:
+    """Drop the wired zero-fill of a shared buffer that has not been written yet."""
+    if buffer is None:
+        return
+    try:
+        buffer.setPurgeableState_(_PURGEABLE_EMPTY)
+        buffer.setPurgeableState_(_PURGEABLE_NONVOLATILE)
+    except Exception:
+        pass
+    release_buffer(buffer)
+
+
+def discard_buffer(buffer: Any) -> None:
+    """Mark a shared buffer empty so a lingering Metal reference can be reclaimed."""
+    if buffer is None:
+        return
+    try:
+        buffer.setPurgeableState_(_PURGEABLE_EMPTY)
+    except Exception:
+        release_buffer(buffer)
+
+
 def release_buffer(buffer: Any) -> None:
     """Release every whole page of a shared buffer."""
     length = int(buffer.length())
@@ -557,6 +584,7 @@ class MetalSession:
             "topk_softmax",
             "argmax_partial",
             "argmax_final",
+            "cast_half_f32",
             "cast_f16_pad",
             "cast_prefill",
             "compact_rows",
@@ -651,8 +679,11 @@ class MetalSession:
         if not ready:
             # Drop the previous arenas before the new allocation. A long prefill
             # scratch kept alive across this call does not fit beside the atlas.
+            old = list(self._arenas)
             self._arena = None
             self._arenas = []
+            for buf in old:
+                discard_buffer(buf)
             arenas = [self.alloc(nbytes) for _ in range(copies)]
             if any(buf is None for buf in arenas):
                 message = f"scratch arena of {nbytes} bytes was not allocated"
@@ -1796,6 +1827,51 @@ class MetalSession:
             count * matrix.rows,
         )
         return packed
+
+    def cast_half_f32(self, src: Any, count: int) -> Dev:
+        dst = self.tmp(count)
+        self._ew(
+            "cast_half_f32",
+            (_bind_any(src), _dev_bind(dst)),
+            (struct.pack("<I", count),),
+            max(count, 1),
+        )
+        return dst
+
+    def gemv_fp4(
+        self,
+        activation: Any,
+        image: Any,
+        cols: int,
+        stored: int,
+        weight_off: int,
+        scale_off: int,
+        logical: int,
+        *,
+        half: bool,
+    ) -> Dev:
+        """fp4 E2M1 GEMV. A half activation is widened to float first."""
+        act = self.cast_half_f32(activation, stored) if half else activation
+        dst = self.tmp(cols)
+        self.dispatch(
+            self.act["gemv_int4_f32"],
+            (
+                _bind_any(act),
+                (image, weight_off),
+                (image, scale_off),
+                _dev_bind(dst),
+            ),
+            (
+                struct.pack("<I", cols),
+                struct.pack("<I", stored),
+                struct.pack("<I", logical),
+                struct.pack("<I", 0),
+                struct.pack("<f", 1.0),
+            ),
+            self._size((cols + 15) // 16),
+            self._size(128),
+        )
+        return dst
 
     def gemv_int8(
         self,
