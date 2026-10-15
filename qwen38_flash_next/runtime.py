@@ -45,6 +45,17 @@ from qwen38_flash_next.formats import (
     kv_cache_name,
     stored_k_int4,
 )
+from qwen38_flash_next.prefix_store import (
+    DEFAULT_BUDGET,
+    AttentionImage,
+    FixedImage,
+    PrefixHeader,
+    PrefixState,
+    PrefixStore,
+    checkpoint_digest,
+    default_prefix_dir,
+    stored_bytes,
+)
 from qwen38_flash_next.record import QuantRecord, _Bf16Ngram, prefill_image_table
 from qwen38_flash_next.session import (
     Dev,
@@ -263,6 +274,12 @@ class Qwen38Runtime:
                 self.stop_ids.add(eos_ids)
             elif isinstance(eos_ids, list):
                 self.stop_ids.update(int(item) for item in eos_ids)
+        self.prefixes = PrefixStore(
+            default_prefix_dir(),
+            digest=checkpoint_digest(root),
+            tag=self.kv_cache,
+            budget=DEFAULT_BUDGET,
+        )
         self._set_prompt_limit(resident_percent)
 
     def _set_prompt_limit(self, resident_percent: float | None) -> None:
@@ -410,10 +427,12 @@ class Qwen38Runtime:
             self.kv_len[index] = 0
 
     def align(self, prompt: list[int]) -> int:
-        hit = prompt[: len(self.tokens)] == self.tokens
-        cached = len(self.tokens) if hit else 0
-        if not hit:
+        if self.tokens and prompt[: len(self.tokens)] == self.tokens:
+            cached = len(self.tokens)
+        else:
+            self._flush_prefix()
             self.reset()
+            cached = self._load_prefix(prompt)
         _log(f"prompt tokens {len(prompt)}")
         if cached:
             _log(f"cache hit {cached}")
@@ -421,6 +440,207 @@ class Qwen38Runtime:
             _log("cache miss")
         _log(f"incoming tokens {len(prompt) - cached}")
         return cached
+
+    def _flush_prefix(self) -> None:
+        if not self.tokens:
+            return
+        self.gpu.flush()
+        path = self.prefixes.save(self._prefix_state())
+        if path is not None:
+            _log(f"prefix store {len(self.tokens)} tokens")
+
+    def _prefix_state(self) -> PrefixState:
+        count = len(self.tokens)
+        body, _stride = self._kv_span(count)
+        tail = KV_TAIL_TOKENS * KV_BF16_BYTES
+        attention: list[AttentionImage] = []
+        for layer, length in self.kv_len.items():
+            if length != count:
+                message = f"attention cache length {length} does not match {count} tokens"
+                raise RuntimeError(message)
+            attention.append(
+                AttentionImage(
+                    layer,
+                    self._span_view(self.kv_k[layer], 0, body),
+                    self._span_view(self.kv_v[layer], 0, body),
+                    self._span_view(self.kv_k_tail[layer], 0, tail),
+                    self._span_view(self.kv_v_tail[layer], 0, tail),
+                    self._span_view(self.indexer_buf[layer], 0, count * INDEX_BF16_BYTES),
+                )
+            )
+        state_bytes = 48 * 128 * 128 * 4
+        gdn = [
+            FixedImage(layer, self._span_view(buf, 0, state_bytes))
+            for layer, buf in self.gdn_state.items()
+        ]
+        conv = [
+            FixedImage(layer, self._span_view(buf, 0, self._conv_bytes))
+            for layer, buf in self.conv_hist.items()
+        ]
+        if self.last_logits is None:
+            logits: bytes | memoryview = b""
+        else:
+            if self.last_logits.n != self.vocab:
+                message = "cached logits do not match the vocabulary"
+                raise RuntimeError(message)
+            logits = self._span_view(
+                self.last_logits.buf, self.last_logits.offset * 4, self.vocab * 4
+            )
+        return PrefixState(
+            list(self.tokens),
+            attention,
+            gdn,
+            conv,
+            self._span_view(self.ple_hist, 0, self._ple_bytes),
+            logits,
+        )
+
+    def _span_view(self, buf: Any, byte_off: int, nbytes: int) -> memoryview:
+        if nbytes <= 0:
+            return memoryview(b"")
+        if int(buf.length()) < byte_off + nbytes:
+            message = f"cache buffer is {int(buf.length())} bytes, need {byte_off + nbytes}"
+            raise RuntimeError(message)
+        view = _buffer_view(buf, byte_off + nbytes)
+        return view[byte_off : byte_off + nbytes]
+
+    def _load_prefix(self, prompt: list[int]) -> int:
+        for header in self.prefixes.matches(prompt):
+            if not self._prefix_fits(header):
+                continue
+            try:
+                self._read_prefix(header)
+            except (OSError, RuntimeError) as exc:
+                _log(f"prefix load failed {exc}")
+                self.reset()
+                continue
+            _log(f"prefix load {len(header.tokens)} tokens")
+            return len(header.tokens)
+        return 0
+
+    def _prefix_fits(self, header: PrefixHeader) -> bool:
+        count = len(header.tokens)
+        attention = {image.layer: image for image in header.attention}
+        if set(attention) != set(self.kv_len):
+            return False
+        body, _stride = self._kv_span(count)
+        tail = KV_TAIL_TOKENS * KV_BF16_BYTES
+        index = count * INDEX_BF16_BYTES
+        for image in attention.values():
+            if (
+                image.key.length != body
+                or image.value.length != body
+                or image.key_tail.length != tail
+                or image.value_tail.length != tail
+                or image.indexer.length != index
+            ):
+                return False
+        gdn = {image.layer: image for image in header.gdn}
+        if set(gdn) != set(self.gdn_state):
+            return False
+        state_bytes = 48 * 128 * 128 * 4
+        if any(image.blob.length != state_bytes for image in gdn.values()):
+            return False
+        conv = {image.layer: image for image in header.conv}
+        if set(conv) != set(self.conv_hist):
+            return False
+        if any(image.blob.length != self._conv_bytes for image in conv.values()):
+            return False
+        if header.ple.length != self._ple_bytes:
+            return False
+        return header.logits.length in (0, self.vocab * 4)
+
+    def _read_prefix(self, header: PrefixHeader) -> None:
+        loads: list[tuple[Any, int, int, int]] = []
+        for image in header.attention:
+            self.kv_k[image.layer] = self._stage_prefix(
+                self.kv_k, image.layer, image.key, loads
+            )
+            self.kv_v[image.layer] = self._stage_prefix(
+                self.kv_v, image.layer, image.value, loads
+            )
+            self.kv_k_tail[image.layer] = self._stage_prefix(
+                self.kv_k_tail, image.layer, image.key_tail, loads
+            )
+            self.kv_v_tail[image.layer] = self._stage_prefix(
+                self.kv_v_tail, image.layer, image.value_tail, loads
+            )
+            self.indexer_buf[image.layer] = self._stage_prefix(
+                self.indexer_buf, image.layer, image.indexer, loads
+            )
+        for image in header.gdn:
+            self.gdn_state[image.layer] = self._stage_prefix(
+                self.gdn_state, image.layer, image.blob, loads
+            )
+        for image in header.conv:
+            self.conv_hist[image.layer] = self._stage_prefix(
+                self.conv_hist, image.layer, image.blob, loads
+            )
+        self.ple_hist = self._stage_one(self.ple_hist, header.ple, loads)
+        logits = self._stage_one(None, header.logits, loads)
+        handle = self._prefix_io(header.path)
+        try:
+            if loads:
+                self.gpu.io_read(handle, loads)
+        finally:
+            del handle
+        self.tokens = list(header.tokens)
+        for layer in self.kv_len:
+            self.kv_len[layer] = len(self.tokens)
+        if header.logits.length:
+            self.last_logits = Dev(logits, self.vocab)
+        else:
+            self.last_logits = None
+
+    def _stage_prefix(
+        self,
+        table: dict[int, Any],
+        layer: int,
+        ref: Any,
+        loads: list[tuple[Any, int, int, int]],
+    ) -> Any:
+        stored = stored_bytes(ref.length)
+        if stored == 0:
+            return table[layer]
+        buf = self._replace_cache(table, layer, stored)
+        loads.append((buf, 0, stored, ref.offset))
+        return buf
+
+    def _stage_one(
+        self, buf: Any, ref: Any, loads: list[tuple[Any, int, int, int]]
+    ) -> Any:
+        stored = stored_bytes(ref.length)
+        if stored == 0:
+            return buf
+        if buf is None or int(buf.length()) < stored:
+            buf = self.gpu.alloc(stored)
+            if buf is None:
+                message = f"prefix buffer of {stored} bytes was not allocated"
+                raise RuntimeError(message)
+        loads.append((buf, 0, stored, ref.offset))
+        return buf
+
+    def _replace_cache(self, table: dict[int, Any], layer: int, nbytes: int) -> Any:
+        current = table[layer]
+        if current is not None and int(current.length()) >= nbytes:
+            return current
+        allocated = self.gpu.alloc(nbytes)
+        if allocated is None:
+            message = f"prefix buffer of {nbytes} bytes was not allocated"
+            raise RuntimeError(message)
+        table[layer] = allocated
+        return allocated
+
+    def _prefix_io(self, path: Path) -> Any:
+        import Foundation
+
+        self.gpu.ensure_io()
+        url = Foundation.NSURL.fileURLWithPath_(str(path))
+        opened = self.gpu.device.newUncachedIOHandleWithURL_error_(url, None)
+        if opened is None:
+            message = f"prefix IO handle failed for {path.name}"
+            raise RuntimeError(message)
+        return opened
 
     def generate(
         self,
