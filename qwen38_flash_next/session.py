@@ -294,7 +294,20 @@ class Int4Gemm:
         command.waitUntilCompleted()
 
 
+_log_sink: Any = None
+
+
+def bind_log(sink: Any) -> None:
+    """Route durable lines through the console. ``None`` restores stderr."""
+    global _log_sink
+    _log_sink = sink
+
+
 def _log(message: str) -> None:
+    sink = _log_sink
+    if sink is not None:
+        sink(message)
+        return
     sys.stderr.write(message + "\n")
     sys.stderr.flush()
 

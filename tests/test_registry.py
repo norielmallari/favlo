@@ -1,0 +1,162 @@
+"""Flavor registry. Directories are temporary. No device."""
+
+import json
+
+import pytest
+
+from madmetal.registry import (
+    PIPELINE,
+    TIER,
+    add_model,
+    adopt_existing,
+    choose_complete,
+    format_listing,
+    list_unregistered,
+    load_registry,
+    model_objects,
+    record_name,
+    refuse_conflicting_destination,
+    register_quantized,
+    resolve,
+    save_registry,
+    set_alias,
+)
+
+
+def _record(root, name: str) -> None:
+    path = root / "models" / name
+    path.mkdir(parents=True)
+    (path / "manifest.json").write_text(json.dumps({"complete": True}))
+
+
+def test_pipeline_id_resolves_to_the_default(tmp_path) -> None:
+    folder = "Qwen-madmetal-h128-fp8-c384-fp4"
+    _record(tmp_path, folder)
+    add_model(folder, alias="qwen38-flash-next", root=tmp_path)
+    selection = resolve(PIPELINE, root=tmp_path)
+    assert selection.folder == folder
+    assert selection.requested_id == PIPELINE
+    thinking = resolve("qwen38-flash-next:thinking", root=tmp_path)
+    assert thinking.folder == folder
+    assert thinking.enable_thinking is True
+    assert thinking.sampling is not None
+    assert thinking.sampling["temperature"] == 1.0
+    instruct = resolve(f"{folder}:instruct", root=tmp_path)
+    assert instruct.enable_thinking is False
+    assert instruct.parent == folder
+    assert instruct.sampling is not None
+    assert instruct.sampling["presence_penalty"] == 1.5
+
+
+def test_unknown_suffix_names_the_registered_ids(tmp_path) -> None:
+    _record(tmp_path, "packed")
+    add_model("packed", alias="short", root=tmp_path)
+    with pytest.raises(LookupError, match="short") as raised:
+        resolve("short:draft", root=tmp_path)
+    assert "packed" in str(raised.value)
+
+
+def test_listing_includes_folder_alias_and_variants(tmp_path) -> None:
+    _record(tmp_path, "packed")
+    add_model("packed", alias="short", root=tmp_path)
+    rows = model_objects(tmp_path, resident="packed")
+    ids = [row["id"] for row in rows]
+    assert ids == [
+        "packed",
+        "packed:thinking",
+        "packed:instruct",
+        "short",
+        "short:thinking",
+        "short:instruct",
+    ]
+    assert all(row["loaded"] for row in rows)
+    assert rows[0]["owned_by"] == "madmetal"
+    assert rows[0]["object"] == "model"
+    thinking = rows[1]
+    assert thinking["variant"] == "thinking"
+    assert thinking["parent"] == "packed"
+    assert thinking["sampling"]["top_k"] == 20
+
+
+def test_adopt_existing_registers_the_packed_record_once(tmp_path) -> None:
+    folder = f"Qwen3.8-Flash-Next-{TIER}"
+    _record(tmp_path, folder)
+    source = tmp_path / "models" / "qwen38-flash-next-bf16"
+    source.mkdir()
+    data = adopt_existing(tmp_path)
+    entry = data["models"][folder]
+    assert data["default"] == folder
+    assert entry["alias"] == "qwen38-flash-next"
+    assert entry["source"] == str(source)
+    assert entry["kv_cache"] == "e4m3"
+    assert entry["resident_percent"] is None
+    assert entry["variants"]["thinking"]["temperature"] == 1.0
+    again = adopt_existing(tmp_path)
+    assert again["models"][folder]["alias"] == "qwen38-flash-next"
+    assert not (tmp_path / "models" / "registry.json.tmp").exists()
+
+
+def test_incomplete_manifest_is_not_adopted(tmp_path) -> None:
+    folder = f"Qwen3.8-Flash-Next-{TIER}"
+    path = tmp_path / "models" / folder
+    path.mkdir(parents=True)
+    (path / "manifest.json").write_text(json.dumps({"complete": False}))
+    data = adopt_existing(tmp_path)
+    assert data["models"] == {}
+
+
+def test_choose_complete_lists_models_when_default_is_unset(tmp_path) -> None:
+    with pytest.raises(LookupError, match="no registered model"):
+        choose_complete(model=None, record=None, root=tmp_path)
+    _record(tmp_path, "one")
+    add_model("one", root=tmp_path)
+    path, selection = choose_complete(model=None, record=None, root=tmp_path)
+    assert path.name == "one"
+    assert selection is not None
+    _record(tmp_path, "two")
+    add_model("two", alias="second", root=tmp_path)
+    data = load_registry(tmp_path)
+    data["default"] = None
+    data["extra"] = {"kept": True}
+    save_registry(data, tmp_path)
+    with pytest.raises(LookupError, match="pass --model"):
+        choose_complete(model=None, record=None, root=tmp_path)
+    explicit, none = choose_complete(model=None, record=path, root=tmp_path)
+    assert explicit == path
+    assert none is None
+    set_alias("one", "first", root=tmp_path)
+    assert load_registry(tmp_path)["extra"] == {"kept": True}
+
+
+def test_alias_must_be_one_unused_name(tmp_path) -> None:
+    _record(tmp_path, "one")
+    _record(tmp_path, "two")
+    add_model("one", alias="short", root=tmp_path)
+    with pytest.raises(ValueError, match="folder"):
+        add_model("two", alias="one", root=tmp_path)
+    with pytest.raises(ValueError, match="already used"):
+        add_model("two", alias="short", root=tmp_path)
+    with pytest.raises(ValueError, match="single name"):
+        set_alias("one", "bad:name", root=tmp_path)
+    set_alias("one", "renamed", root=tmp_path)
+    assert resolve("renamed", root=tmp_path).folder == "one"
+
+
+def test_unregistered_complete_directory_is_listed(tmp_path) -> None:
+    _record(tmp_path, "loose")
+    assert list_unregistered(tmp_path) == ["loose"]
+    listing = format_listing(tmp_path)
+    assert listing == "unregistered loose"
+
+
+def test_quantize_registration_refuses_a_different_source(tmp_path) -> None:
+    source = tmp_path / "bf16"
+    source.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    register_quantized("packed", source=source, alias="short", root=tmp_path)
+    register_quantized("packed", source=source, alias="short", root=tmp_path)
+    with pytest.raises(ValueError, match="different source"):
+        refuse_conflicting_destination("packed", other, root=tmp_path)
+    name = record_name(source, 128, 384, 8, 4)
+    assert name == f"{source.name}-madmetal-h128-fp8-c384-fp4"

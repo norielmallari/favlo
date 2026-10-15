@@ -517,7 +517,7 @@ def test_omitted_max_tokens_runs_until_stop() -> None:
     assert commands._request_limit({"max_completion_tokens": 16}) == 16
 
 
-def test_complete_thinking_flag_enables_thinking(monkeypatch) -> None:
+def test_complete_thinking_flag_enables_thinking(monkeypatch, tmp_path) -> None:
     import qwen38_flash_next.commands as commands
 
     seen: list[bool] = []
@@ -534,6 +534,12 @@ def test_complete_thinking_flag_enables_thinking(monkeypatch) -> None:
             seen.append(enable_thinking)
             return [1]
 
+        def align(self, prompt: list[int]) -> int:
+            return 0
+
+        def close(self) -> None:
+            return None
+
         def forward(self, prompt: list[int]) -> np.ndarray:
             return np.zeros(8, dtype=np.float32)
 
@@ -547,8 +553,11 @@ def test_complete_thinking_flag_enables_thinking(monkeypatch) -> None:
             return None
 
     monkeypatch.setattr(commands, "Qwen38Runtime", Runtime)
-    assert pipeline.main(["complete", "--prompt", "2+2", "--thinking"]) == 0
-    assert pipeline.main(["complete", "--prompt", "2+2"]) == 0
+    record = tmp_path / "record"
+    thinking = ["complete", "--prompt", "2+2", "--thinking", "--record", str(record)]
+    plain = ["complete", "--prompt", "2+2", "--record", str(record)]
+    assert pipeline.main(thinking) == 0
+    assert pipeline.main(plain) == 0
     assert seen == [True, False]
 
 

@@ -48,10 +48,12 @@ qwen38_flash_next/         this model's pipeline
   tools.py                 tool-call text parsed into OpenAI messages
   experts.py               resident expert atlas
   runtime.py               the forward
-  commands.py              quantize, bf16, complete, serve
+  console.py               status row; no pipeline imports
+  commands.py              quantize, bf16, complete, and the serve handler
 src/madmetal/              process entry; selects one pipeline and stops
+  registry.py              flavor folders, aliases, and sampling variants
 harness/                   file-agent client, coherence, and the three benchmarks
-docs/qwen38/               record, n-gram, schedule, and probe notes
+docs/qwen38/               record, n-gram, schedule, probe, and console notes
 pyproject.toml
 ```
 
@@ -101,7 +103,7 @@ uv run madmetal --qwen38-flash-next probe
 uv run madmetal --qwen38-flash-next matmul
 uv run madmetal --qwen38-flash-next kernels
 uv run madmetal --qwen38-flash-next quantize
-uv run madmetal --qwen38-flash-next serve
+uv run madmetal serve
 uv run python -m harness --base-url http://127.0.0.1:8129/v1 --workspace ./note-workspace
 uv run python -m harness.long_prompt --tokens 65536
 uv run python -m harness.benchmarks

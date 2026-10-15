@@ -17,10 +17,10 @@ from types import ModuleType
 PIPELINES = ("qwen38-flash-next",)
 
 HELP = """\
-usage: madmetal --qwen38-flash-next [args]
+usage: madmetal serve
+       madmetal --qwen38-flash-next [args]
 
-Select one model pipeline. The flag is the pipeline filename without .py.
-
+  serve                  listen, then load the model a request names
   --qwen38-flash-next    Qwen3.8-Flash-Next
 """
 
@@ -66,6 +66,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args[0] in {"-h", "--help"}:
         sys.stdout.write(HELP)
         return 0
+    if args[0] == "serve":
+        try:
+            load_pipeline("qwen38-flash-next")
+        except (FileNotFoundError, ImportError) as exc:
+            sys.stderr.write(f"{exc}\n")
+            return 2
+        from qwen38_flash_next.commands import serve_main
+
+        return int(serve_main(args[1:]))
     flag = args[0]
     if not flag.startswith("--") or flag == "--":
         sys.stderr.write(HELP)

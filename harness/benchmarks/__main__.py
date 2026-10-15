@@ -189,11 +189,18 @@ def _fmt(summary: dict[str, Any] | None) -> str:
     return f"n={summary['n']}  {summary['correct']}/{summary['n']}  {summary['accuracy']:.3f}"
 
 
-def _write_doc(smoke: dict[str, Any] | None, full: dict[str, Any] | None) -> None:
+def _write_doc(
+    smoke: dict[str, Any] | None,
+    full: dict[str, Any] | None,
+    sample: dict[str, Any] | None = None,
+) -> None:
     text = _DOC.read_text()
     if smoke is not None:
         smoke_block = "\n".join(f"- {name}: {_fmt(summary)}" for name, summary in smoke.items())
         text = _replace(text, "smoke", smoke_block)
+    if sample is not None:
+        sample_block = "\n".join(f"- {name}: {_fmt(summary)}" for name, summary in sample.items())
+        text = _replace(text, "sample", sample_block)
     if full is not None:
         full_block = "\n".join(f"- {name}: {_fmt(summary)}" for name, summary in full.items())
         text = _replace(text, "full", full_block)
@@ -264,7 +271,13 @@ def _suite(
     return summary
 
 
-def run(output: Path, *, sample_only: bool, only: set[str] | None = None) -> int:
+def run(
+    output: Path,
+    *,
+    sample_only: bool,
+    only: set[str] | None = None,
+    limit: int | None = None,
+) -> int:
     server = Server()
     server.start()
     try:
@@ -276,6 +289,15 @@ def run(output: Path, *, sample_only: bool, only: set[str] | None = None) -> int
         )
         if only:
             suites = tuple(item for item in suites if item[0] in only)
+        if limit is not None:
+            sample: dict[str, Any] = {}
+            for name, items, score_row, summarize in suites:
+                sample[name] = _suite(name, server, items, output, score_row, summarize, limit)
+            (output / "sample.json").write_text(json.dumps(sample, indent=2) + "\n")
+            if only is None:
+                _write_doc(None, None, sample)
+            print("sample recorded", flush=True)
+            return 0
         smoke: dict[str, Any] = {}
         for name, items, score_row, summarize in suites:
             smoke[name] = _suite(name, server, items, output, score_row, summarize, _SMOKE)
@@ -313,6 +335,12 @@ def main(argv: list[str] | None = None) -> int:
         help="score the first 30 of each set and stop",
     )
     parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="score the first N rows of each set and stop",
+    )
+    parser.add_argument(
         "--only",
         nargs="+",
         choices=("ifeval", "gsm8k", "humaneval"),
@@ -320,7 +348,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     only = set(args.only) if args.only else None
-    return run(args.output, sample_only=args.sample_only, only=only)
+    return run(args.output, sample_only=args.sample_only, only=only, limit=args.limit)
 
 
 if __name__ == "__main__":

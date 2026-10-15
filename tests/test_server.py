@@ -345,6 +345,70 @@ def _signal_server(sig: int, *, during_request: bool) -> None:
         assert ("end", "held") not in runtime.order
 
 
+def test_usage_excludes_the_cached_prefix() -> None:
+    runtime = SimpleNamespace(_cached_tokens=900, _prefill_seconds=2.0, _decode_seconds=4.0)
+    usage = commands._usage(runtime, 1187, 480, "qwen38-flash-next")
+    timings = usage["timings"]
+    assert usage["prompt_tokens"] == 1187
+    assert timings["prompt_n"] == 287
+    assert timings["predicted_n"] == 480
+    assert timings["prompt_per_second"] == 143.5
+    assert timings["predicted_per_second"] == 120.0
+    idle = commands._usage(SimpleNamespace(), 10, 4, "qwen38-flash-next")
+    assert idle["timings"]["prompt_per_second"] == 0.0
+    assert idle["timings"]["predicted_per_second"] == 0.0
+    assert idle["timings"]["prompt_n"] == 10
+
+
+def test_lazy_stream_uses_the_runtime_loaded_for_the_request(monkeypatch) -> None:
+    runtime = _Runtime()
+    state: dict = {"runtime": None, "server": None, "record": None, "requests": 0}
+
+    def bind(body, bound_state, bound_args):
+        del body, bound_args
+        bound_state["runtime"] = runtime
+        bound_state["record"] = "packed"
+        return SimpleNamespace(requested_id="packed", enable_thinking=None, sampling=None)
+
+    monkeypatch.setattr(commands, "_bind_request", bind)
+    args = _args()
+    args.lazy = True
+    thread = threading.Thread(target=commands._serve_loop, args=(args, state), daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 5
+    while state["server"] is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    server = state["server"]
+    assert server is not None
+    port = int(server.server_address[1])
+    try:
+        body = _exchange(port, "lazy", stream=True)
+    finally:
+        _stop_background(state, thread)
+    assert body.startswith(b"HTTP/1.1 200")
+    assert b"data: [DONE]" in body
+    assert b"AttributeError" not in body
+
+
+def test_streamed_completion_reports_timings() -> None:
+    runtime = _Runtime()
+    runtime._cached_tokens = 1
+    runtime._prefill_seconds = 2.0
+    runtime._decode_seconds = 4.0
+    runtime._output_ids = [7, 8]
+    state, thread = _serve_background(runtime)
+    port = int(state["server"].server_address[1])
+    try:
+        body = _exchange(port, "timed", stream=True)
+    finally:
+        _stop_background(state, thread)
+    assert body.startswith(b"HTTP/1.1 200")
+    assert b'"prompt_n": 0' in body
+    assert b'"predicted_n": 2' in body
+    assert b'"predicted_per_second": 0.5' in body
+    assert b"data: [DONE]" in body
+
+
 def test_sigint_during_a_request_releases_the_server() -> None:
     import signal
 

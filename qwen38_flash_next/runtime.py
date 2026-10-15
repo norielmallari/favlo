@@ -116,8 +116,18 @@ class Qwen38Runtime:
         bf16: bool = False,
         resident_percent: float | None = None,
         kv_cache: str = DEFAULT_KV_CACHE,
+        console: Any = None,
     ) -> None:
         self._closed = False
+        self.console = console
+        self._prefill_progress = None
+        self._decode_progress = None
+        self._load_progress = None
+        self._request_id = None
+        self._cached_tokens = 0
+        self._prompt_tokens = 0
+        self._prefill_tokens = 0
+        self._prefill_seconds = 0.0
         self.gpu = None
         self.store = None
         self.files = None
@@ -343,6 +353,16 @@ class Qwen38Runtime:
         if self._closed:
             return
         self._closed = True
+        self._drop_prefill_progress()
+        progress = getattr(self, "_decode_progress", None)
+        self._decode_progress = None
+        console = getattr(self, "console", None)
+        if progress is not None and console is not None and not progress.closed:
+            console.end(progress, "")
+        load = getattr(self, "_load_progress", None)
+        self._load_progress = None
+        if load is not None and console is not None and not load.closed:
+            console.end(load, "")
         gpu = getattr(self, "gpu", None)
         if gpu is not None:
             try:
@@ -439,12 +459,15 @@ class Qwen38Runtime:
             self._flush_prefix()
             self.reset()
             cached = self._load_prefix(prompt)
-        _log(f"prompt tokens {len(prompt)}")
-        if cached:
-            _log(f"cache hit {cached}")
-        else:
-            _log("cache miss")
-        _log(f"incoming tokens {len(prompt) - cached}")
+        self._cached_tokens = cached
+        self._prompt_tokens = len(prompt)
+        if self.console is None or self.console.keeps_lines:
+            _log(f"prompt tokens {len(prompt)}")
+            if cached:
+                _log(f"cache hit {cached}")
+            else:
+                _log("cache miss")
+            _log(f"incoming tokens {len(prompt) - cached}")
         return cached
 
     def _flush_prefix(self) -> None:
@@ -685,6 +708,7 @@ class Qwen38Runtime:
         self._decode_steps = []
         self._output_ids = []
         self._hit_limit = False
+        self._begin_decode(max_tokens)
         # The first sampled token fills the atlas. Later tokens reuse it.
         self._atlas_trusted = False
         produced_ids: list[int] = []
@@ -712,9 +736,54 @@ class Qwen38Runtime:
             logits = None
             logits = self.forward([token], decode=True)
 
+    def _drop_prefill_progress(self) -> None:
+        progress = getattr(self, "_prefill_progress", None)
+        self._prefill_progress = None
+        console = getattr(self, "console", None)
+        if progress is not None and console is not None and not progress.closed:
+            console.end(progress, "")
+
+    def _begin_decode(self, max_tokens: int | None) -> None:
+        console = self.console
+        if console is None or not console.live_decode:
+            self._decode_progress = None
+            return
+        detail = f"req #{self._request_id}" if self._request_id else ""
+        self._decode_progress = console.begin(
+            "decode",
+            total=0 if max_tokens is None else max_tokens,
+            unit="tok",
+            detail=detail,
+            request=self._request_id,
+        )
+
+    def _note_decode(self, resident: int) -> None:
+        progress = self._decode_progress
+        if progress is None:
+            return
+        progress.done = len(self._output_ids)
+        progress.gauge = ("resident", resident)
+
+    def _note_prefill(self, layer: int, seen: int, count: int) -> None:
+        progress = self._prefill_progress
+        if progress is None or count <= 0 or self.layers <= 0:
+            return
+        frac = (layer + seen / count) / self.layers
+        done = min(progress.total, int(frac * progress.total))
+        if done > progress.done:
+            progress.done = done
+
     def _log_decode(self) -> None:
+        summary = _tok_s("decode", self._decode_tokens, self._decode_seconds)
+        progress = self._decode_progress
+        self._decode_progress = None
+        if progress is not None and self.console is not None:
+            if self.console.keeps_lines:
+                _log(f"output tokens {len(self._output_ids)}")
+            self.console.end(progress, summary)
+            return
         _log(f"output tokens {len(self._output_ids)}")
-        _log(_tok_s("decode", self._decode_tokens, self._decode_seconds))
+        _log(summary)
 
     def _pick(
         self,
@@ -858,6 +927,16 @@ class Qwen38Runtime:
         started = time.perf_counter()
         gpu_at = self.gpu.gpu_seconds
         self._decoding = decode
+        self._prefill_progress = None
+        if self.console is not None and not decode and tokens:
+            detail = f"req #{self._request_id}" if self._request_id else ""
+            self._prefill_progress = self.console.begin(
+                "prefill",
+                total=len(tokens),
+                unit="tok",
+                detail=detail,
+                request=self._request_id,
+            )
         total = len(self.tokens) + len(tokens)
         self._require_prompt_room(total)
         chunk = len(tokens) if decode else min(len(tokens), self.prefill_chunk)
@@ -882,6 +961,7 @@ class Qwen38Runtime:
             self.gpu.flush()
         except RequestClosed:
             self._cancel_forward()
+            self._drop_prefill_progress()
             raise
         if self._streaming_prefill:
             missed = self._stage_missed()
@@ -910,8 +990,21 @@ class Qwen38Runtime:
             self._decode_seconds += elapsed
             resident = self.atlas.resident_count if self.atlas is not None else 0
             self._decode_steps.append((elapsed, gpu_elapsed, resident))
+            self._note_decode(resident)
         else:
-            _log(_tok_s("prefill", len(tokens), elapsed))
+            self._prefill_tokens = len(tokens)
+            self._prefill_seconds = elapsed
+            summary = _tok_s("prefill", len(tokens), elapsed)
+            progress = self._prefill_progress
+            self._prefill_progress = None
+            if progress is not None and self.console is not None:
+                progress.done = len(tokens)
+                if self.console.fold_turns:
+                    self.console.end(progress, "")
+                else:
+                    self.console.end(progress, summary)
+            else:
+                _log(summary)
         if self.atlas is not None:
             self.atlas.release_unused()
         return logits
@@ -979,6 +1072,8 @@ class Qwen38Runtime:
                         if self._bf16:
                             self.expert_cache.clear()
                         self._inject_dev(view, hats, mixed, bundle["mlp_inject"], n)
+                    if not self._decoding:
+                        self._note_prefill(layer, offset + n, count)
                     if self._decoding and self.atlas is not None:
                         self.gpu.submit()
                 # Packed n-gram loads land in this scratch arena. The next rewind
@@ -1054,12 +1149,15 @@ class Qwen38Runtime:
         A pending Metal IO command retains its destination. Wait for those
         commands before the Python reference is the last one.
         """
-        atlas = self.atlas
+        atlas = getattr(self, "atlas", None)
         self.atlas = None
         if atlas is None:
             return
-        self.gpu.flush()
-        self.gpu.finish_io()
+        gpu = getattr(self, "gpu", None)
+        if gpu is None:
+            return
+        gpu.flush()
+        gpu.finish_io()
         if atlas.atlas is not None and atlas.budget:
             release_pages(atlas.atlas, 0, atlas.budget)
         for name in ("atlas", "table", "miss"):
@@ -1251,15 +1349,23 @@ class Qwen38Runtime:
             self.gpu.io_fence(event)
 
     def _load_record(self) -> None:
-        _log("loading quantized record")
         if not isinstance(self.files, QuantRecord):
             message = "quantized load has no record"
             raise RuntimeError(message)
+        size = (self.files.root / "resident.bin").stat().st_size
+        progress = None
+        if self.console is not None and not self.console.keeps_lines:
+            detail = getattr(self.console, "load_detail", "") or "record"
+            progress = self.console.begin("load", total=size, unit="bytes", detail=detail)
+            self._load_progress = progress
+        else:
+            _log("loading quantized record")
         self.files.open_io(self.gpu)
         manifest = self.files.manifest
-        size = (self.files.root / "resident.bin").stat().st_size
         self._resident = self.gpu.alloc(size)
         self.gpu.io_read(self.files.resident_io, [(self._resident, 0, size, 0)])
+        if progress is not None:
+            progress.done = size
         for key, meta in manifest["int4"].items():
             if key == manifest["embed_key"]:
                 self._embed_meta = meta
@@ -1287,7 +1393,12 @@ class Qwen38Runtime:
             # already placed these bytes in the shared buffer.
             blob = _buffer_slice(self._resident, int(meta["offset"]), count * 8)
             self.i64[key] = np.frombuffer(blob, dtype=np.int64).copy().reshape(meta["shape"])
-        _log(f"loaded {len(self.weights)} fp4 matrices")
+        summary = f"loaded {len(self.weights)} fp4 matrices"
+        if progress is not None and self.console is not None:
+            self._load_progress = None
+            self.console.end(progress, summary)
+        else:
+            _log(summary)
 
     def _load_bf16(self) -> None:
         """Upload the checkpoint's own values. Experts and n-gram rows stay on disk."""
@@ -1296,7 +1407,14 @@ class Qwen38Runtime:
             message = "BF16 load has no shard store"
             raise RuntimeError(message)
         _check_f32_gemv(self.gpu)
-        _log("loading BF16 checkpoint onto Metal")
+        progress = None
+        if self.console is not None and not self.console.keeps_lines:
+            progress = self.console.begin(
+                "load", total=len(self.kinds), unit="layers", detail="bf16"
+            )
+            self._load_progress = progress
+        else:
+            _log("loading BF16 checkpoint onto Metal")
         self._head = self.gpu.load_f32(store.matrix("lm_head.weight"))
         for layer, kind in enumerate(self.kinds):
             prefix = f"model.language_model.layers.{layer}"
@@ -1306,7 +1424,10 @@ class Qwen38Runtime:
             self.f16_weights[gate_key] = self.gpu.load_f32(store.matrix(gate_key))
             for key in _layer_f32_keys(prefix, kind):
                 self.f32[key] = store.matrix(key)
-            _log(f"bf16 layer {layer}")
+            if progress is not None:
+                progress.done = layer + 1
+            else:
+                _log(f"bf16 layer {layer}")
         ple = "model.language_model.layers.1.ple"
         table = f"{ple}.ple_embedding"
         for key in (f"{ple}.key_proj.weight", f"{ple}.value_proj.weight"):
@@ -1331,7 +1452,12 @@ class Qwen38Runtime:
             f"{mixer}.input_mix_weight_up.weight",
         ):
             self.weights[key] = self.gpu.load_f32(store.matrix(key))
-        _log(f"loaded {len(self.weights)} bf16 matrices")
+        summary = f"loaded {len(self.weights)} bf16 matrices"
+        if progress is not None and self.console is not None:
+            self._load_progress = None
+            self.console.end(progress, summary)
+        else:
+            _log(summary)
 
     def _embed_dev(self, tokens: list[int]) -> Dev:
         count = len(tokens)

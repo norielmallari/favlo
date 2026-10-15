@@ -14,7 +14,7 @@ The first pipeline is Qwen3.8-Flash-Next on an M5 Pro: native Metal tensor recor
 
 ```text
 uv sync --extra dev
-uv run madmetal --qwen38-flash-next serve
+uv run madmetal serve
 uv run python -m harness --workspace ./note-workspace
 ```
 

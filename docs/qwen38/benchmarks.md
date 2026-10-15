@@ -13,6 +13,7 @@ HumanEval is Chen et al., MIT, 164 problems, checker commit `37c4dd63798c`. Thin
 ```text
 uv run python -m harness.benchmarks
 uv run python -m harness.benchmarks --sample-only
+uv run python -m harness.benchmarks --limit 100
 uv run python -m harness.benchmarks --sample-only --only humaneval
 ```
 

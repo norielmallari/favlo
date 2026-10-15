@@ -46,7 +46,6 @@ def test_file_agent_creates_edits_and_confirms(tmp_path: Path) -> None:
             sys.executable,
             "-m",
             "madmetal",
-            "--qwen38-flash-next",
             "serve",
             "--host",
             "127.0.0.1",

@@ -40,7 +40,6 @@ def start_server(port: int) -> tuple[subprocess.Popen[str], Log]:
             sys.executable,
             "-m",
             "madmetal",
-            "--qwen38-flash-next",
             "serve",
             "--host",
             "127.0.0.1",
