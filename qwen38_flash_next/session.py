@@ -694,6 +694,16 @@ class MetalSession:
         self._arena_used = 0
 
     def rewind_scratch(self) -> None:
+        """Reuse this arena from offset zero.
+
+        Decode keeps two arenas and ``submit`` commits one before encoding into
+        the other. Prefill has one. The next host write aliases bytes the open
+        command buffer has not read, so that buffer finishes first.
+        """
+        if len(self._arenas) < 2 and (
+            self._encoder is not None or self._command is not None or self._inflight
+        ):
+            self.flush()
         self._arena_used = 0
 
     def _bump(self, nbytes: int, *, align: int = 256) -> int:

@@ -2,7 +2,6 @@
 
 import io
 import json
-import math
 
 import pytest
 from qwen38_flash_next.console import PHASES, UNITS, VERSION, Console, Progress
@@ -234,7 +233,7 @@ def test_every_phase_ends_in_every_mode(mode: str, phase: str) -> None:
         assert f"{phase} done" in text
 
 
-def test_prefill_tok_rate_is_exponentially_smoothed() -> None:
+def test_prefill_tok_rate_is_the_cumulative_average() -> None:
     ui, stream, clock = _ui("json")
     progress = ui.begin("prefill", total=5000, unit="tok")
     progress.done = 0
@@ -248,11 +247,10 @@ def test_prefill_tok_rate_is_exponentially_smoothed() -> None:
     clock.now += 0.1
     ui.sample()
     ticks = [json.loads(line) for line in stream.getvalue().splitlines() if '"tick"' in line]
-    alpha = 1.0 - math.exp(-1.0)
-    smoothed = alpha * 100 + (1.0 - alpha) * 1000
+    assert ticks[0]["rate"] is None
     assert ticks[1]["rate"] == pytest.approx(1000)
-    assert ticks[2]["rate"] == pytest.approx(smoothed)
-    assert ticks[3]["rate"] == pytest.approx(smoothed)
+    assert ticks[2]["rate"] == pytest.approx(1100 / 2)
+    assert ticks[3]["rate"] == pytest.approx(1100 / 2.1)
     ui.end(progress, "")
 
 

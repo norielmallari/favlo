@@ -61,6 +61,7 @@ def check_state_kernels() -> None:
         raise RuntimeError(message)
     _check_qsa(session, rng)
     _check_submit_keeps_scratch(session)
+    _check_rewind_keeps_scratch(session)
 
 
 def _check_qsa(session: MetalSession, rng: np.random.Generator) -> None:
@@ -144,6 +145,24 @@ def _check_qsa_selected(session: MetalSession, rng: np.random.Generator) -> None
             expect[token, head] = probs @ value[ids, kv] * _sigmoid(gate[token, head])
     if not np.allclose(got, expect, rtol=1e-4, atol=1e-4):
         message = "selected attention shader diverged"
+        raise RuntimeError(message)
+
+
+def _check_rewind_keeps_scratch(session: MetalSession) -> None:
+    """One arena finishes the open buffer before a host write reuses those bytes."""
+    session.begin_scratch(1 << 20, copies=1)
+    src = session.tmp(4)
+    raw = np.arange(4, dtype=np.float32)
+    _buffer_bytes_write(src, raw)
+    dst = session.alloc(16)
+    session.copy_bytes(src.buf, src.offset * 4, dst, 0, 16)
+    session.rewind_scratch()
+    other = session.tmp(4)
+    _buffer_bytes_write(other, np.full(4, 9, dtype=np.float32))
+    session.flush()
+    got = np.frombuffer(_buffer_bytes(dst, 16), dtype=np.float32)
+    if not np.array_equal(got, raw):
+        message = "rewound scratch was overwritten before the GPU read it"
         raise RuntimeError(message)
 
 

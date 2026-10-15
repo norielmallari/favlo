@@ -7,7 +7,6 @@ pipeline. A second pipeline moves this file to process entry unchanged.
 from __future__ import annotations
 
 import json
-import math
 import os
 import sys
 import threading
@@ -33,7 +32,6 @@ _PLATE_BOT = "▕█████████████████████
 _TICK = 0.1
 _WINDOW = 5.0
 _WINDOW_MIN = 0.5
-_PREFILL_TAU = 1.0
 
 
 @dataclass
@@ -81,7 +79,6 @@ class Console:
         self._lock = threading.Lock()
         self._handles: list[Progress] = []
         self._windows: dict[int, list[tuple[float, int]]] = {}
-        self._smooth: dict[int, tuple[float, int, float | None]] = {}
         self._drawn = 0
         self._cursor_hidden = False
         self._stop = threading.Event()
@@ -183,7 +180,6 @@ class Console:
             if progress in self._handles:
                 self._handles.remove(progress)
             self._windows.pop(id(progress), None)
-            self._smooth.pop(id(progress), None)
             remaining = len(self._handles)
         if self.mode == "pretty":
             self._erase()
@@ -215,7 +211,6 @@ class Console:
             raise ValueError(message)
         if progress.unit != unit:
             self._windows.pop(id(progress), None)
-            self._smooth.pop(id(progress), None)
         progress.total = total
         progress.unit = unit
         progress.detail = detail
@@ -313,7 +308,7 @@ class Console:
     ) -> tuple[float | None, float | None, float | None]:
         with self._lock:
             if progress.phase == "prefill" and progress.unit == "tok":
-                rate, done, aged = self._smooth_prefill(progress, now)
+                rate, done, aged = self._cumulative_prefill(progress, now)
             else:
                 rate, done, aged = self._window_rate(progress, now)
         display: float | None = None
@@ -324,30 +319,15 @@ class Console:
                 eta = display
         return rate, display, eta
 
-    def _smooth_prefill(
+    def _cumulative_prefill(
         self, progress: Progress, now: float
     ) -> tuple[float | None, int, bool]:
-        """Exponential smooth of tokens gained since the previous increase.
-
-        A sample that adds no tokens keeps the last rate. The time since that
-        increase is the interval the next gain is divided by.
-        """
+        """Tokens completed divided by the time since prefill started."""
         done = progress.done
-        slot = self._smooth.get(id(progress))
-        if slot is None:
-            self._smooth[id(progress)] = (now, done, None)
+        elapsed = now - progress.started
+        if done <= 0 or elapsed <= 0:
             return None, done, False
-        last_time, last_done, ema = slot
-        if done > last_done and now > last_time:
-            instant = (done - last_done) / (now - last_time)
-            if ema is None:
-                ema = instant
-            else:
-                alpha = 1.0 - math.exp(-(now - last_time) / _PREFILL_TAU)
-                ema = alpha * instant + (1.0 - alpha) * ema
-            self._smooth[id(progress)] = (now, done, ema)
-        aged = ema is not None and now - progress.started >= _WINDOW_MIN
-        return ema, done, aged
+        return done / elapsed, done, elapsed >= _WINDOW_MIN
 
     def _window_rate(
         self, progress: Progress, now: float
