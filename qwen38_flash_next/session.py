@@ -104,7 +104,8 @@ class Int4Gemm:
             raise RuntimeError(message)
         self.metal = metal
         self.device = device
-        self.prefill = self._pipeline(library, "prefill_int4_e8m0")
+        self.prefill = self._pipeline(library, "prefill_fp4_e8m0")
+        self.prefill_fp8 = self._pipeline(library, "prefill_fp8_e8m0")
         self.decode = self._pipeline(library, "decode_int4_e8m0")
 
     def _pipeline(self, library: Any, name: str) -> Any:
@@ -120,12 +121,36 @@ class Int4Gemm:
     def prefill_int4(
         self, activation: bytes, weights: bytes, scales: bytes, rows: int, cols: int, inner: int
     ) -> bytes:
-        """rows×inner half activation times cols×inner int4. Returns rows×cols float32."""
+        """rows×inner half activation times cols×inner fp4. Returns rows×cols float32."""
+        return self._prefill_bytes(
+            self.prefill, activation, weights, scales, rows, cols, inner
+        )
+
+    def run_prefill_fp8(
+        self, activation: bytes, weights: bytes, scales: bytes, rows: int, cols: int, inner: int
+    ) -> bytes:
+        """rows×inner half activation times cols×inner fp8 E4M3. Returns rows×cols float32."""
+        return self._prefill_bytes(
+            self.prefill_fp8, activation, weights, scales, rows, cols, inner
+        )
+
+    def _prefill_bytes(
+        self,
+        pipeline: Any,
+        activation: bytes,
+        weights: bytes,
+        scales: bytes,
+        rows: int,
+        cols: int,
+        inner: int,
+    ) -> bytes:
         if rows % 64 or cols % 32 or inner % 32:
             message = "prefill tile requires rows multiple of 64 and cols, inner multiple of 32"
             raise ValueError(message)
         destination = _shared_buffer(self.device, b"\x00" * (rows * cols * 4))
-        self._dispatch_prefill(activation, weights, scales, destination, rows, cols, inner)
+        self._dispatch_prefill(
+            activation, weights, scales, destination, rows, cols, inner, pipeline
+        )
         return _buffer_bytes(destination, rows * cols * 4)
 
     def decode_int4(
@@ -148,6 +173,7 @@ class Int4Gemm:
         rows: int,
         cols: int,
         inner: int,
+        pipeline: Any = None,
     ) -> None:
         buffers = (
             _shared_buffer(self.device, activation),
@@ -160,7 +186,7 @@ class Int4Gemm:
         )
         width = self.prefill.threadExecutionWidth()
         self._encode(
-            self.prefill,
+            pipeline if pipeline is not None else self.prefill,
             buffers,
             self.metal.MTLSize(cols // 32, rows // 64, 1),
             self.metal.MTLSize(width * 4, 1, 1),
@@ -1585,8 +1611,10 @@ class MetalSession:
         )
         return packed
 
-    def gemm_int4_half(self, matrix: Int4Matrix, act: Span, count: int) -> Dev:
-        """int4 matmul whose activation is already half, one row per token."""
+    def gemm_int4_half(
+        self, matrix: Int4Matrix, act: Span, count: int, *, fp8: bool = False
+    ) -> Dev:
+        """Quantized matmul whose activation is already half, one row per token."""
         if count < 1 or matrix.rows % 32 != 0:
             message = f"matmul count {count} rows {matrix.rows} cannot use the prefill tile"
             raise RuntimeError(message)
@@ -1600,8 +1628,9 @@ class MetalSession:
             act = wide_act
         cols = matrix.rows
         wide = self.tmp(padded * cols)
+        _zero_dev(wide)
         self.dispatch(
-            self.gemm.prefill,
+            self.gemm.prefill_fp8 if fp8 else self.gemm.prefill,
             (
                 (act.buf, act.offset),
                 (matrix.weights, matrix.weight_off),

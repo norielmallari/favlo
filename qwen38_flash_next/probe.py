@@ -530,20 +530,21 @@ def summarize(report: dict[str, Any]) -> str:
 
 
 def matmul_reference_tile() -> dict[str, Any]:
-    """One 64×32×32 int4 tile. Activation is 1 on inner 0. Column n stores code (n%7)-3."""
+    """One 64×32×32 fp4 tile. Activation is 1 on inner 0. Column n stores magnitude n%8."""
 
     rows, cols, inner = 64, 32, 32
     activation = np.zeros((rows, inner), dtype=np.float16)
     activation[:, 0] = np.float16(1.0)
-    codes = np.zeros((cols, inner), dtype=np.int8)
-    column = np.array([(index % 7) - 3 for index in range(cols)], dtype=np.int8)
-    codes[:, 0] = column
+    magnitudes = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
+    column = magnitudes[np.arange(cols) % 8]
+    codes = np.zeros((cols, inner), dtype=np.uint8)
+    codes[:, 0] = np.arange(cols, dtype=np.uint8) % 8
     packed = bytearray()
-    flat = codes.reshape(-1).astype(np.uint8)
+    flat = codes.reshape(-1)
     for index in range(0, flat.size, 2):
         packed.append(int(flat[index] & 0xF) | (int(flat[index + 1] & 0xF) << 4))
     scales = bytes([130]) * (cols * (inner // BLOCK))
-    expected = column.astype(np.float32) * np.float32(8.0)
+    expected = column * np.float32(8.0)
     return {
         "rows": rows,
         "cols": cols,
@@ -581,13 +582,31 @@ def check_int4_gemm() -> dict[str, Any]:
     prefill_ok = bool((prefill == expected).all())
     decode_ok = bool((decode == expected).all())
     wide_ok = _wide_prefill_matches(gemm)
+    fp8_ok = _fp8_prefill_matches(gemm)
     return {
         "device": _device_name(gemm.device),
-        "ok": prefill_ok and decode_ok and wide_ok,
+        "ok": prefill_ok and decode_ok and wide_ok and fp8_ok,
         "prefill": prefill_ok,
         "decode": decode_ok,
         "wide": wide_ok,
+        "fp8": fp8_ok,
     }
+
+
+def _fp8_prefill_matches(gemm: Int4Gemm) -> bool:
+    """One fp8 E4M3 tile. Code 0x38 is 1.0 and scale byte 127 is 2^0."""
+
+    rows, cols, inner = 64, 32, 32
+    activation = np.zeros((rows, inner), dtype=np.float16)
+    activation[:, 0] = np.float16(1.0)
+    weights = bytearray(cols * inner)
+    for row in range(cols):
+        weights[row * inner] = 0x38
+    scales = bytes([127]) * (cols * (inner // BLOCK))
+    got = np_from_f32(
+        gemm.run_prefill_fp8(activation.tobytes(), bytes(weights), scales, rows, cols, inner)
+    ).reshape(rows, cols)
+    return bool(np.allclose(got, np.float32(1.0), rtol=1e-3, atol=1e-3))
 
 
 def _wide_prefill_matches(gemm: Int4Gemm) -> bool:
@@ -633,8 +652,9 @@ def matmul() -> int:
         return 1
     sys.stdout.write(
         f"device: {report['device']}\n"
-        f"prefill matmul2d int4 e8m0: {'ok' if report['prefill'] else 'mismatch'}\n"
+        f"prefill matmul2d fp4 e8m0: {'ok' if report['prefill'] else 'mismatch'}\n"
+        f"prefill matmul2d fp8 e8m0: {'ok' if report['fp8'] else 'mismatch'}\n"
         f"prefill matmul2d 128x64x64: {'ok' if report['wide'] else 'mismatch'}\n"
-        f"decode shader dot int4 e8m0: {'ok' if report['decode'] else 'mismatch'}\n"
+        f"decode shader dot fp4 e8m0: {'ok' if report['decode'] else 'mismatch'}\n"
     )
     return 0 if report["ok"] else 1

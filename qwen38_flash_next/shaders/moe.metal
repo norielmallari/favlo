@@ -10,16 +10,7 @@ static float int4_weight(
     float factor = e8m0_scale(row_scale[block]);
     uchar byte = packed[element >> 1];
     uint nibble = (element & 1u) ? (byte >> 4) : (byte & 0x0Fu);
-    int code = int(nibble);
-    if (code > 7) {
-        code -= 16;
-    }
-    return float(code) * factor;
-}
-
-static int int8_code(uchar byte) {
-    int code = int(byte);
-    return code > 127 ? code - 256 : code;
+    return fp4_e2m1(nibble) * factor;
 }
 
 kernel void gemv_int8_f32(
@@ -51,7 +42,7 @@ kernel void gemv_int8_f32(
             if (elem >= logical) {
                 break;
             }
-            acc += float(int8_code(packed[elem])) * factor * activation[elem];
+            acc += e4m3_to_f32(packed[elem]) * factor * activation[elem];
         }
     }
     float sum = simd_sum(acc);
@@ -89,7 +80,7 @@ kernel void gemv_int8_half(
             if (elem >= logical) {
                 break;
             }
-            acc += float(int8_code(packed[elem])) * factor * float(activation[elem]);
+            acc += e4m3_to_f32(packed[elem]) * factor * float(activation[elem]);
         }
     }
     float sum = simd_sum(acc);
@@ -146,14 +137,14 @@ static void codes8(
     thread float& c6,
     thread float& c7)
 {
-    c0 = float(int4_code(word & 0x0fu)) * scale;
-    c1 = float(int4_code((word >> 4) & 0x0fu)) * scale;
-    c2 = float(int4_code((word >> 8) & 0x0fu)) * scale;
-    c3 = float(int4_code((word >> 12) & 0x0fu)) * scale;
-    c4 = float(int4_code((word >> 16) & 0x0fu)) * scale;
-    c5 = float(int4_code((word >> 20) & 0x0fu)) * scale;
-    c6 = float(int4_code((word >> 24) & 0x0fu)) * scale;
-    c7 = float(int4_code((word >> 28) & 0x0fu)) * scale;
+    c0 = fp4_e2m1(word & 0x0fu) * scale;
+    c1 = fp4_e2m1((word >> 4) & 0x0fu) * scale;
+    c2 = fp4_e2m1((word >> 8) & 0x0fu) * scale;
+    c3 = fp4_e2m1((word >> 12) & 0x0fu) * scale;
+    c4 = fp4_e2m1((word >> 16) & 0x0fu) * scale;
+    c5 = fp4_e2m1((word >> 20) & 0x0fu) * scale;
+    c6 = fp4_e2m1((word >> 24) & 0x0fu) * scale;
+    c7 = fp4_e2m1((word >> 28) & 0x0fu) * scale;
 }
 
 static float apply8(
@@ -551,7 +542,7 @@ kernel void moe_grouped_int8(
             device const uchar* codes = packed + block * 32u;
             device const half* avec = act + (block << 5);
             for (uint i = 0u; i < 32u; ++i) {
-                acc += float(int8_code(codes[i])) * factor * float(avec[i]);
+                acc += e4m3_to_f32(codes[i]) * factor * float(avec[i]);
             }
         }
         float sum = simd_sum(acc);

@@ -242,12 +242,11 @@ def serve(args: Any) -> int:
                         window=_penalty_window(body),
                     )
                     try:
-                        effort = body.get("reasoning_effort")
                         prompt = runtime.encode_chat(
                             messages,
                             tools,
                             enable_thinking,
-                            reasoning_effort=effort if isinstance(effort, str) else None,
+                            reasoning_effort=_reasoning_effort(body),
                             continue_final=bool(body.get("continue_final_message")),
                         )
                         _log(f"prompt tokens {len(prompt)}")
@@ -267,7 +266,7 @@ def serve(args: Any) -> int:
                             )
                             text = runtime.decode(tokens)
                             reasoning, reply = split_thinking(text, enable_thinking)
-                            content, calls = parse_tool_calls(reply if enable_thinking else text)
+                            content, calls = parse_tool_calls(reply if reply else text)
                             _log(f"completion: {text}")
                             _append_transcript(args.transcript, _prompt_text(messages), text)
                             if calls:
@@ -478,6 +477,14 @@ def _drain_stream(runtime: Any, tokens: Iterator[int], emit: Any) -> str:
     return text
 
 
+def _reasoning_effort(body: dict[str, Any]) -> str | None:
+    """Template effort. ``none`` is omitted, so the template keeps xhigh."""
+    effort = body.get("reasoning_effort")
+    if not isinstance(effort, str) or effort.strip().lower() == "none":
+        return None
+    return effort
+
+
 def _enable_thinking(body: dict[str, Any]) -> bool:
     """Leave `<think>` open unless the request closes it.
 
@@ -659,8 +666,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     quant_parser.add_argument("--hot", type=Path, default=None)
     quant_parser.add_argument("--importance", type=Path, default=None)
     quant_parser.add_argument("--hot-count", type=int, default=128)
-    quant_parser.add_argument("--hot-bits", type=int, default=4)
-    quant_parser.add_argument("--cold-bits", type=int, default=2)
+    quant_parser.add_argument("--hot-bits", type=int, default=8)
+    quant_parser.add_argument("--cold-bits", type=int, default=4)
     quant_parser.add_argument("--super", type=Path, default=None)
     serve_parser = sub.add_parser("serve", help="serve the quantized record")
     serve_parser.add_argument("--host", default="127.0.0.1")

@@ -36,6 +36,17 @@ from qwen38_flash_next.formats import (
 from qwen38_flash_next.session import _log, bf16_to_f32
 
 
+def _plane_format(bits: int) -> str:
+    if bits == 8:
+        return "fp8_e4m3"
+    if bits == 4:
+        return "fp4_e2m1"
+    if bits == 2:
+        return "int2"
+    message = f"expert width {bits} is not 2, 4, or 8"
+    raise ValueError(message)
+
+
 class ShardStore:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -529,8 +540,8 @@ def pack_expert_layer(
     hot: list[int],
     supers: list[int],
     experts: int,
-    hot_bits: int = 4,
-    cold_bits: int = 2,
+    hot_bits: int = 8,
+    cold_bits: int = 4,
 ) -> int:
     """Pack one layer. Super rows are int8. Hot and cold use the requested widths."""
     store = ShardStore(Path(source))
@@ -677,8 +688,8 @@ def quantize_checkpoint(
     dest: Path,
     hot: Path | None = None,
     supers: Path | None = None,
-    hot_bits: int = 4,
-    cold_bits: int = 2,
+    hot_bits: int = 8,
+    cold_bits: int = 4,
 ) -> bool:
     """Write the Metal record once. A later run continues from quantize_progress.json.
 
@@ -897,6 +908,8 @@ def quantize_checkpoint(
         "cold_live": cold_live,
         "hot_bits": hot_bits,
         "cold_bits": cold_bits,
+        "hot_format": _plane_format(hot_bits),
+        "cold_format": _plane_format(cold_bits),
         "hot_count": [len(row) for row in hot_only],
         "cold_count": cold_count,
         "super_count": [len(row) for row in super_ids],

@@ -275,7 +275,7 @@ def _read_tool(root: Path, allowed: set[str], loaded: list[str], queue: list[str
 
 
 def _wait_requests(log: Log, previous: int, proc: subprocess.Popen[str]) -> list[RequestRate]:
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 1800
     stable_at: float | None = None
     last = previous
     while time.monotonic() < deadline:
@@ -358,6 +358,8 @@ async def run_long_prompt(
         "tool_choice": {"mode": "required", "required_function_name": "read_file"},
         "allow_multiple_tool_calls": False,
         "tools": [read],
+        # Thinking left open does not reproduce the forced tool-call tokens on the next turn.
+        "extra_body": {"enable_thinking": False},
     }
     for path in files:
         if requests and requests[-1].prompt_tokens >= target:

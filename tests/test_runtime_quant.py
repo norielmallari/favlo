@@ -7,20 +7,21 @@ from test_packing import pipeline
 
 
 def test_quantize_matrix_matches_block() -> None:
-    rng = np.random.default_rng(1)
-    matrix = rng.normal(size=(3, 32)).astype(np.float32)
-    matrix[1] = 0
-    matrix[2, 0] = 7
-    matrix[2, 1] = 0.5
-    matrix[2, 2] = -1.5
+    row = np.zeros(32, dtype=np.float32)
+    row[0] = 6.0
+    row[1] = 1.0
+    row[2] = -0.5
+    row[3] = 1.5
+    matrix = row[None, :]
     packed, scales = pipeline.quantize_matrix(matrix)
-    for row in range(matrix.shape[0]):
-        codes, scale = pipeline.quantize_block(matrix[row].tolist(), 4)
-        assert scales[row] == scale
-        start = row * 16
-        got = pipeline.unpack_int4(packed[start : start + 16], low_nibble_first=True)
-        signed = [pipeline.sign_extend(code, 4) for code in got]
-        assert signed == codes
+    restored = pipeline.dequant_int4(packed, scales, 1, 32)
+    assert restored[0, 0] == np.float32(6.0)
+    assert restored[0, 1] == np.float32(1.0)
+    assert restored[0, 2] == np.float32(-0.5)
+    assert restored[0, 3] == np.float32(1.5)
+    assert np.all(restored[0, 4:] == 0)
+    again, _again_scales = pipeline.quantize_matrix(restored)
+    assert again == packed
 
 
 def test_int4_image_matches_quantize_matrix() -> None:
@@ -196,6 +197,17 @@ def test_preallocate_claims_each_chunk(tmp_path, monkeypatch) -> None:
         contig, device = allocate.contiguous_bytes(path, offset, 4 * pipeline.PAGE)
         assert device >= 0
         assert contig >= 4 * pipeline.PAGE
+
+
+def test_reasoning_effort_none_uses_the_template_default() -> None:
+    import qwen38_flash_next.commands as commands
+
+    assert commands._reasoning_effort({}) is None
+    assert commands._reasoning_effort({"reasoning_effort": None}) is None
+    assert commands._reasoning_effort({"reasoning_effort": "none"}) is None
+    assert commands._reasoning_effort({"reasoning_effort": "None"}) is None
+    assert commands._reasoning_effort({"reasoning_effort": "low"}) == "low"
+    assert commands._reasoning_effort({"reasoning_effort": "xhigh"}) == "xhigh"
 
 
 def test_omitted_enable_thinking_leaves_the_block_open() -> None:

@@ -22,6 +22,28 @@ static float softplus_f(float v) {
     return log(1.0f + exp(-fabs(v))) + max(v, 0.0f);
 }
 
+// metal_fp4_e2m1. Bit 3 is the sign. The low three bits are 0, 0.5, 1, 1.5, 2, 3, 4, 6.
+static float fp4_e2m1(uint nibble) {
+    uint mag = nibble & 7u;
+    float value = 0.0f;
+    if (mag == 1u) {
+        value = 0.5f;
+    } else if (mag == 2u) {
+        value = 1.0f;
+    } else if (mag == 3u) {
+        value = 1.5f;
+    } else if (mag == 4u) {
+        value = 2.0f;
+    } else if (mag == 5u) {
+        value = 3.0f;
+    } else if (mag == 6u) {
+        value = 4.0f;
+    } else if (mag == 7u) {
+        value = 6.0f;
+    }
+    return (nibble & 8u) != 0u ? -value : value;
+}
+
 kernel void silu_f32(
     device const float* x [[buffer(0)]],
     device float* y [[buffer(1)]],
@@ -636,12 +658,8 @@ kernel void embed_gather(
     device const uchar* scales = image + data_base + token * scale_row;
     uchar byte = data[col >> 1];
     uint nibble = (col & 1u) != 0u ? (byte >> 4) : (byte & 0x0Fu);
-    int code = int(nibble);
-    if (code > 7) {
-        code -= 16;
-    }
     int exponent = int(scales[col >> 5]) - 127;
-    float value = float(code) * ldexp(1.0f, exponent);
+    float value = fp4_e2m1(nibble) * ldexp(1.0f, exponent);
     for (uint branch = 0u; branch < branches; ++branch) {
         uint at = (token_i * branches + branch) * logical + col;
         residual[at] = value;
@@ -664,12 +682,8 @@ kernel void dequant_ngram(
     device const uchar* slot = slots + row * slot_bytes;
     uchar byte = slot[col >> 1];
     uint nibble = (col & 1u) != 0u ? (byte >> 4) : (byte & 0x0Fu);
-    int code = int(nibble);
-    if (code > 7) {
-        code -= 16;
-    }
     int exponent = int(slot[80u + (col >> 5)]) - 127;
-    out[tid] = float(code) * ldexp(1.0f, exponent);
+    out[tid] = fp4_e2m1(nibble) * ldexp(1.0f, exponent);
 }
 
 // Same nibble expand as dequant_ngram. ``row_off`` is the byte offset of each
@@ -690,12 +704,8 @@ kernel void dequant_ngram_packed(
     device const uchar* slot = pack + row_off[row];
     uchar byte = slot[col >> 1];
     uint nibble = (col & 1u) != 0u ? (byte >> 4) : (byte & 0x0Fu);
-    int code = int(nibble);
-    if (code > 7) {
-        code -= 16;
-    }
     int exponent = int(slot[80u + (col >> 5)]) - 127;
-    out[tid] = float(code) * ldexp(1.0f, exponent);
+    out[tid] = fp4_e2m1(nibble) * ldexp(1.0f, exponent);
 }
 
 kernel void broadcast_rows(

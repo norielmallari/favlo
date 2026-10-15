@@ -158,6 +158,8 @@ class Qwen38Runtime:
         self._stage_miss: Any = None
         self._stage_event = [0, 0]
         self._stage_bytes = 0
+        self._hot_keep: list[Any] | None = None
+        self._hot_fence = 0
         self._hold_xs: Any = None
         self._hold_out: Any = None
         self._hold_ids: Any = None
@@ -736,14 +738,26 @@ class Qwen38Runtime:
         return budget
 
     def _begin_prefill_stream(self) -> None:
-        """Two layer buffers. A warm atlas stays allocated beside them."""
+        """Two staging buffers. The decode atlas stays when those buffers fit beside it."""
         if not isinstance(self.files, QuantRecord):
             return
         self._end_prefill_stream()
-        budget = self._stage_budget()
+        # Copying every hot file into RAM drops the atlas, and the next decode
+        # cannot allocate that atlas until the copy is released.
+        self._hot_keep = None
+        budget = 0
+        for layer in range(self.layers):
+            hot_bytes, cold_bytes, _table = self._prefill_layout(layer)
+            budget = max(budget, hot_bytes + cold_bytes)
         self._stage = [self.gpu.alloc(budget), self.gpu.alloc(budget)]
         if (self._stage[0] is None or self._stage[1] is None) and self.atlas is not None:
             self.atlas = None
+            self._stage = [self.gpu.alloc(budget), self.gpu.alloc(budget)]
+        if (self._stage[0] is None or self._stage[1] is None) and self._hot_keep is not None:
+            self._stage = None
+            self._hot_keep = None
+            self._hot_fence = 0
+            budget = self._stage_budget()
             self._stage = [self.gpu.alloc(budget), self.gpu.alloc(budget)]
         if self._stage[0] is None or self._stage[1] is None:
             message = f"prefill stage of {budget} bytes was not allocated"
@@ -754,7 +768,29 @@ class Qwen38Runtime:
         self._stage_bytes = 0
         self._streaming_prefill = True
         self._submit_prefill_layer(0)
-        _log(f"prefill stage {budget >> 20} MiB x2")
+        resident = "hot resident" if self._hot_keep is not None else "hot streamed"
+        _log(f"prefill stage {budget >> 20} MiB x2, {resident}")
+
+    def _prefill_layout(self, layer: int) -> tuple[int, int, np.ndarray]:
+        """Offsets in the staging buffer. A resident hot file is omitted from that buffer."""
+        if not isinstance(self.files, QuantRecord):
+            message = "prefill layout requires a quantized record"
+            raise RuntimeError(message)
+        hot_bytes, cold_bytes, table = prefill_image_table(
+            self.files.hot[layer],
+            self.files.super[layer],
+            self.experts,
+            self.files.slot,
+            self.files.cold_slot,
+        )
+        if self._hot_keep is None:
+            return hot_bytes, cold_bytes, table
+        adjusted = np.array(table, copy=True)
+        hot_here = (adjusted >= 0) & (adjusted < hot_bytes)
+        adjusted[hot_here] = -1
+        cold_here = adjusted >= hot_bytes
+        adjusted[cold_here] = adjusted[cold_here] - hot_bytes
+        return 0, cold_bytes, adjusted
 
     def _end_prefill_stream(self) -> None:
         self._streaming_prefill = False
@@ -762,18 +798,14 @@ class Qwen38Runtime:
         self._stage_table = None
         self._stage_miss = None
         self._stage_event = [0, 0]
+        self._hot_keep = None
+        self._hot_fence = 0
 
     def _submit_prefill_layer(self, layer: int) -> None:
         if not isinstance(self.files, QuantRecord) or self._stage is None:
             message = "prefill stream has no tier files"
             raise RuntimeError(message)
-        hot_bytes, cold_bytes, _table = prefill_image_table(
-            self.files.hot[layer],
-            self.files.super[layer],
-            self.experts,
-            self.files.slot,
-            self.files.cold_slot,
-        )
+        hot_bytes, cold_bytes, _table = self._prefill_layout(layer)
         buf = self._stage[layer % 2]
         hot_size = os.fstat(self.files.hot_fds[layer]).st_size
         cold_size = os.fstat(self.files.cold_fds[layer]).st_size
@@ -792,13 +824,7 @@ class Qwen38Runtime:
         if not isinstance(self.files, QuantRecord) or self._stage_table is None:
             message = "prefill stream has no offset table"
             raise RuntimeError(message)
-        _hot, _cold, table = prefill_image_table(
-            self.files.hot[layer],
-            self.files.super[layer],
-            self.experts,
-            self.files.slot,
-            self.files.cold_slot,
-        )
+        _hot, _cold, table = self._prefill_layout(layer)
         raw = np.ascontiguousarray(table, dtype=np.int64).tobytes()
         _buffer_view(self._stage_table, len(raw))[: len(raw)] = raw
 
@@ -911,7 +937,7 @@ class Qwen38Runtime:
             # already placed these bytes in the shared buffer.
             blob = _buffer_slice(self._resident, int(meta["offset"]), count * 8)
             self.i64[key] = np.frombuffer(blob, dtype=np.int64).copy().reshape(meta["shape"])
-        _log(f"loaded {len(self.weights)} int4 matrices")
+        _log(f"loaded {len(self.weights)} fp4 matrices")
 
     def _load_bf16(self) -> None:
         """Upload the checkpoint's own values. Experts and n-gram rows stay on disk."""
@@ -1474,7 +1500,7 @@ class Qwen38Runtime:
         if self._stage is None or self._stage_table is None or self._stage_miss is None:
             message = "prefill stream has no staging buffer"
             raise RuntimeError(message)
-        if planes.bits == 4:
+        if planes.bits in (4, 8):
             return self._moe_int4_matmul(
                 layer, xs, weight, running, host_ids, count, members, planes
             )
@@ -1504,8 +1530,8 @@ class Qwen38Runtime:
         members: set[int],
         planes: ExpertPlanes,
     ) -> Dev:
-        if planes.bits != 4:
-            message = "the wide int4 path was given another plane width"
+        if planes.bits not in (4, 8):
+            message = "the wide matmul path was given another plane width"
             raise RuntimeError(message)
         if not isinstance(self.files, QuantRecord) or self._stage is None:
             message = "prefill stream has no staging buffer"
@@ -1520,23 +1546,31 @@ class Qwen38Runtime:
                     chosen.setdefault(expert, []).append((token, slot))
         large: list[tuple[int, list[tuple[int, int]]]] = []
         small: set[int] = set()
+        wide_hot = self._hot_keep is not None and planes.bits == 8
+        threshold = 1 if wide_hot else 64
         for expert, pairs in chosen.items():
-            if len(pairs) >= 64:
+            if len(pairs) >= threshold:
                 large.append((expert, pairs))
             else:
                 small.add(expert)
         if large:
-            _hot_bytes, _cold_bytes, image = prefill_image_table(
-                self.files.hot[layer],
-                self.files.super[layer],
-                self.experts,
-                self.files.slot,
-                self.files.cold_slot,
-            )
-            stage = self._stage[layer % 2]
+            if self._hot_fence:
+                self.gpu.io_fence(self._hot_fence)
+                self._hot_fence = 0
+            if wide_hot:
+                order = {expert: row for row, expert in enumerate(self.files.hot[layer])}
+                image = None
+                stage = self._hot_keep[layer]
+            else:
+                order = {}
+                _hot_bytes, _cold_bytes, image = self._prefill_layout(layer)
+                stage = self._stage[layer % 2]
             for expert, pairs in large:
                 self._room_for_expert()
-                base = int(image[expert])
+                if wide_hot:
+                    base = order[expert] * self.files.slot
+                else:
+                    base = int(image[expert])
                 if base < 0:
                     message = f"layer {layer} expert {expert} is not in the staging buffer"
                     raise RuntimeError(message)
@@ -1545,19 +1579,19 @@ class Qwen38Runtime:
                 n = int(tokens.size)
                 token_buf = self._upload_u32(tokens)
                 slot_buf = self._upload_u32(slots)
-                gate, down = self._expert_views(stage)
+                gate, down = self._plane_views(stage, planes)
                 gate.weight_off += base
                 gate.scale_off += base
                 down.weight_off += base
                 down.scale_off += base
                 gathered = self.gpu.gather_half(xs, token_buf, n, self.hidden, gate.stored_inner)
                 activated = self.gpu.moe_activate(
-                    self.gpu.gemm_int4_half(gate, gathered, n),
+                    self.gpu.gemm_int4_half(gate, gathered, n, fp8=planes.bits == 8),
                     n,
                     self.moe,
                     down.stored_inner,
                 )
-                mixed = self.gpu.gemm_int4_half(down, activated, n)
+                mixed = self.gpu.gemm_int4_half(down, activated, n, fp8=planes.bits == 8)
                 self.gpu.moe_add_weighted(
                     mixed, token_buf, slot_buf, weight, running, n, self.hidden, self.top_k
                 )
@@ -2187,6 +2221,29 @@ class Qwen38Runtime:
         self.gpu.io_read(self.files.hot_io[layer], loads, gpu_wait=True)
         for expert, buf in buffers:
             self.expert_cache[(layer, expert)] = self._expert_views(buf)
+
+    def _plane_views(self, buf: Any, planes: ExpertPlanes) -> tuple[Int4Matrix, Int4Matrix]:
+        gate = Int4Matrix(
+            planes.gate_rows,
+            self.hidden,
+            planes.gate_rows,
+            buf,
+            buf,
+            planes.gate_inner,
+            0,
+            planes.gate_scale,
+        )
+        down = Int4Matrix(
+            self.hidden,
+            self.moe,
+            self.hidden,
+            buf,
+            buf,
+            planes.down_inner,
+            planes.down_weight,
+            planes.down_scale,
+        )
+        return gate, down
 
     def _expert_views(self, buf: Any) -> tuple[Int4Matrix, Int4Matrix]:
         stored_down = stored_k_int4(self.moe, align_k=True)

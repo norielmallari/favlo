@@ -18,14 +18,14 @@ PREFERRED_IO = 1 << 20
 NGRAM_SLOT = 128
 NGRAM_WIDTH = 160
 IO_CHUNK = 256 * 1024 * 1024
-RECORD_VERSION = 4
+RECORD_VERSION = 5
 # Hugging Face model name, then -madmetal-, then each tier. h is the hot file,
 # c is the cold file. The plane after the count is that file's data width.
-# A manifest that omits hot_bits and cold_bits is hot int4 and cold int2.
+# Version 5 stores hot experts as fp8 E4M3 and cold experts as fp4 E2M1.
 DEFAULT_RECORD = (
     Path(__file__).resolve().parents[1]
     / "models"
-    / "Qwen3.8-Flash-Next-madmetal-h128-int8-c384-int4"
+    / "Qwen3.8-Flash-Next-madmetal-h128-fp8-c384-fp4"
 )
 
 # MTLTensorDataType values from the macOS 27 SDK headers.
@@ -129,6 +129,12 @@ def decode_e8m0(byte: int) -> float:
 
 # Positive endpoint of the signed code. int4 is −8..7, int8 is −128..127, int2 is −2..1.
 QMAX = {2: 1, 4: 7, 8: 127}
+FP4_QMAX = 6.0
+FP4_MAGNITUDE = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float64)
+FP4_DECODE = np.array(
+    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+    dtype=np.float32,
+)
 
 
 def ceil_log2(value: float) -> int:
@@ -284,6 +290,38 @@ def encode_e4m3(value: float) -> int:
     return sign | best
 
 
+def encode_e4m3_array(values: np.ndarray) -> np.ndarray:
+    """Nearest finite OCP E4M3FN codes. Ties keep the even mantissa bit."""
+    flat = np.ascontiguousarray(values, dtype=np.float32).reshape(-1)
+    out = np.zeros(flat.shape, dtype=np.uint8)
+    sign = np.where(np.signbit(flat), np.uint8(0x80), np.uint8(0))
+    magnitude = np.abs(flat)
+    nan = np.isnan(flat)
+    saturated = (~np.isfinite(flat) | (magnitude >= np.float32(E4M3_MAX))) & ~nan
+    out[nan] = np.uint8(0x7F)
+    out[saturated] = sign[saturated] | np.uint8(0x7E)
+    rest = ~(nan | saturated)
+    if not np.any(rest):
+        return out.reshape(np.shape(values))
+    codes = np.array([code for code, _decoded in _E4M3_POSITIVE], dtype=np.uint16)
+    levels = np.array([decoded for _code, decoded in _E4M3_POSITIVE], dtype=np.float32)
+    chosen = np.empty(int(np.count_nonzero(rest)), dtype=np.uint8)
+    piece_mag = magnitude[rest]
+    step = 65536
+    for start in range(0, piece_mag.size, step):
+        piece = piece_mag[start : start + step]
+        distance = np.abs(piece[:, None] - levels[None, :])
+        index = np.argmin(distance, axis=1)
+        nxt = np.minimum(index + 1, levels.size - 1)
+        rows = np.arange(piece.shape[0])
+        tie = distance[rows, index] == distance[rows, nxt]
+        prefer_even = tie & ((index & 1) == 1) & ((nxt & 1) == 0) & (nxt != index)
+        index = np.where(prefer_even, nxt, index)
+        chosen[start : start + piece.shape[0]] = codes[index].astype(np.uint8)
+    out[rest] = sign[rest] | chosen
+    return out.reshape(np.shape(values))
+
+
 def encode_bf16(value: float) -> int:
     """Round-ties-to-even into the top 16 bits. Matches Metal `bfloat`."""
     number = np.float32(value)
@@ -361,33 +399,30 @@ def json_number(value: float) -> float | str:
     return value
 
 
-def quantize_matrix(weight: np.ndarray) -> tuple[bytes, bytes]:
-    """Pack [rows, inner] float32 as int4, low nibble first, with one E8M0 byte per 32."""
-    matrix = np.ascontiguousarray(weight, dtype=np.float32)
-    rows, inner = matrix.shape
-    if inner % BLOCK:
-        message = f"inner dimension {inner} is not a multiple of {BLOCK}"
-        raise ValueError(message)
-    blocks = matrix.reshape(rows, inner // BLOCK, BLOCK).astype(np.float64)
-    amax = np.max(np.abs(blocks), axis=-1)
-    ratio = amax / QMAX[4]
+def _biased_e8m0(amax: np.ndarray, qmax: float) -> tuple[np.ndarray, np.ndarray]:
+    ratio = amax / qmax
     mantissa, exponent = np.frexp(np.maximum(ratio, np.finfo(np.float64).tiny))
     power = exponent.astype(np.int32) - (mantissa == 0.5).astype(np.int32)
     power = np.where(amax <= 0.0, np.int32(-127), power)
     biased = np.clip(power + 127, 0, 254).astype(np.uint8)
-    scale = np.ldexp(np.ones(amax.shape, dtype=np.float64), biased.astype(np.int32) - 127)
-    codes = np.rint(blocks / scale[..., None])
-    codes = np.clip(codes, -8, 7).astype(np.int32)
-    nibbles = (codes & 0xF).astype(np.uint8)
-    packed = nibbles[..., 0::2] | (nibbles[..., 1::2] << 4)
-    return (
-        np.ascontiguousarray(packed).tobytes(),
-        np.ascontiguousarray(biased).tobytes(),
-    )
+    scale = np.ldexp(np.ones(amax.shape, dtype=np.float32), biased.astype(np.int32) - 127)
+    return biased, scale
+
+
+def quantize_matrix(weight: np.ndarray) -> tuple[bytes, bytes]:
+    """Pack [rows, inner] float32 as fp4 E2M1, low nibble first, one E8M0 byte per 32."""
+    matrix = np.ascontiguousarray(weight, dtype=np.float32)
+    _rows, inner = matrix.shape
+    if inner % BLOCK:
+        message = f"inner dimension {inner} is not a multiple of {BLOCK}"
+        raise ValueError(message)
+    packed, biased = quantize_rows(matrix)
+    return packed.tobytes(), biased.tobytes()
 
 
 def dequant_int8(packed: bytes, scales: bytes, rows: int, inner: int) -> np.ndarray:
-    codes = np.frombuffer(packed, dtype=np.int8).reshape(rows, inner).astype(np.float32)
+    raw = np.frombuffer(packed, dtype=np.uint8).reshape(rows, inner)
+    codes = _decode_e4m3_array(raw)
     factors = np.frombuffer(scales, dtype=np.uint8).astype(np.int32).reshape(rows, inner // BLOCK)
     restored = codes.reshape(rows, inner // BLOCK, BLOCK)
     restored *= np.ldexp(np.ones(factors.shape, dtype=np.float32), factors - 127)[..., None]
@@ -396,14 +431,33 @@ def dequant_int8(packed: bytes, scales: bytes, rows: int, inner: int) -> np.ndar
 
 def dequant_int4(packed: bytes, scales: bytes, rows: int, inner: int) -> np.ndarray:
     raw = np.frombuffer(packed, dtype=np.uint8).reshape(rows, inner // 2)
-    codes = np.empty((rows, inner), dtype=np.int32)
+    codes = np.empty((rows, inner), dtype=np.uint8)
     codes[:, 0::2] = raw & 0xF
     codes[:, 1::2] = raw >> 4
-    codes = np.where(codes > 7, codes - 16, codes)
+    values = FP4_DECODE[codes]
     factors = np.frombuffer(scales, dtype=np.uint8).astype(np.int32).reshape(rows, inner // BLOCK)
-    restored = codes.reshape(rows, inner // BLOCK, BLOCK).astype(np.float32)
+    restored = values.reshape(rows, inner // BLOCK, BLOCK)
     restored *= np.ldexp(np.ones(factors.shape, dtype=np.float32), factors - 127)[..., None]
     return restored.reshape(rows, inner)
+
+
+def _decode_e4m3_array(raw: np.ndarray) -> np.ndarray:
+    value = raw.astype(np.uint32)
+    sign = np.where(value & 0x80, np.float32(-1.0), np.float32(1.0))
+    exponent = (value >> 3) & 0xF
+    mantissa = (value & 0x7).astype(np.float32)
+    out = np.empty(value.shape, dtype=np.float32)
+    sub = exponent == 0
+    nan = (exponent == 0xF) & ((value & 0x7) == 0x7)
+    normal = ~(sub | nan)
+    out[sub] = sign[sub] * (mantissa[sub] / np.float32(8.0)) * np.float32(2.0**-6)
+    out[nan] = np.float32(np.nan)
+    out[normal] = (
+        sign[normal]
+        * (np.float32(1.0) + mantissa[normal] / np.float32(8.0))
+        * np.exp2(exponent[normal].astype(np.float32) - np.float32(7.0))
+    )
+    return out
 
 
 def stored_k_int4(inner: int, *, align_k: bool) -> int:
@@ -421,19 +475,16 @@ def int4_plane_sizes(rows: int, stored_inner: int) -> tuple[int, int]:
 
 
 def quantize_rows(block: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Pack [rows, stored_k] float32. Same rule as ``quantize_matrix``."""
-    rows, inner = block.shape
-    blocks = block.reshape(rows, inner // BLOCK, BLOCK)
-    amax = np.max(np.abs(blocks), axis=-1).astype(np.float64)
-    ratio = amax / QMAX[4]
-    mantissa, exponent = np.frexp(np.maximum(ratio, np.finfo(np.float64).tiny))
-    power = exponent.astype(np.int32) - (mantissa == 0.5).astype(np.int32)
-    power = np.where(amax <= 0.0, np.int32(-127), power)
-    biased = np.clip(power + 127, 0, 254).astype(np.uint8)
-    scale = np.ldexp(np.ones(amax.shape, dtype=np.float32), biased.astype(np.int32) - 127)
-    codes = np.rint(blocks / scale[..., None])
-    codes = np.clip(codes, -8, 7).astype(np.int32)
-    nibbles = (codes & 0xF).astype(np.uint8)
+    """Pack [rows, stored_k] float32 as fp4 E2M1. Same rule as ``quantize_matrix``."""
+    _rows, inner = block.shape
+    blocks = block.reshape(_rows, inner // BLOCK, BLOCK).astype(np.float64)
+    amax = np.max(np.abs(blocks), axis=-1)
+    biased, scale = _biased_e8m0(amax, FP4_QMAX)
+    scaled = blocks / scale[..., None]
+    distance = np.abs(np.abs(scaled)[..., None] - FP4_MAGNITUDE)
+    choice = np.argmin(distance, axis=-1).astype(np.uint8)
+    sign = np.signbit(scaled).astype(np.uint8) << np.uint8(3)
+    nibbles = choice | sign
     packed = nibbles[..., 0::2] | (nibbles[..., 1::2] << 4)
     return np.ascontiguousarray(packed), np.ascontiguousarray(biased)
 
@@ -606,22 +657,17 @@ def int8_plane_sizes(rows: int, stored_inner: int) -> tuple[int, int]:
 
 
 def quantize_int8_rows(block: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Pack [rows, stored_k] float32 as signed int8, one E8M0 byte per 32."""
+    """Pack [rows, stored_k] float32 as fp8 E4M3, one E8M0 byte per 32."""
     rows, inner = block.shape
     if inner % BLOCK:
         message = f"inner dimension {inner} is not a multiple of {BLOCK}"
         raise ValueError(message)
-    blocks = block.reshape(rows, inner // BLOCK, BLOCK)
-    amax = np.max(np.abs(blocks), axis=-1).astype(np.float64)
-    ratio = amax / QMAX[8]
-    mantissa, exponent = np.frexp(np.maximum(ratio, np.finfo(np.float64).tiny))
-    power = exponent.astype(np.int32) - (mantissa == 0.5).astype(np.int32)
-    power = np.where(amax <= 0.0, np.int32(-127), power)
-    biased = np.clip(power + 127, 0, 254).astype(np.uint8)
-    scale = np.ldexp(np.ones(amax.shape, dtype=np.float32), biased.astype(np.int32) - 127)
-    codes = np.rint(blocks / scale[..., None])
-    codes = np.clip(codes, -128, 127).astype(np.int8)
-    return np.ascontiguousarray(codes.view(np.uint8)), np.ascontiguousarray(biased)
+    blocks = block.reshape(rows, inner // BLOCK, BLOCK).astype(np.float64)
+    amax = np.max(np.abs(blocks), axis=-1)
+    biased, scale = _biased_e8m0(amax, E4M3_MAX)
+    scaled = (blocks / scale[..., None]).astype(np.float32)
+    codes = encode_e4m3_array(scaled)
+    return np.ascontiguousarray(codes), np.ascontiguousarray(biased)
 
 
 def quantize_int8_image(weight: np.ndarray, *, align_k: bool = True) -> tuple[bytes, int]:

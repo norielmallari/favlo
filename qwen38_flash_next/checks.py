@@ -468,6 +468,7 @@ def _check_int2_expert(gpu: MetalSession) -> None:
 def check_routed_expert() -> None:
     """The fused expert kernels match the per-row int4 dot, including a shared slot."""
     gpu = MetalSession()
+    gpu.begin_scratch(1 << 20)
     rng = np.random.default_rng(2)
     hidden, moe, stored = 64, 32, 64
     gate_w = rng.normal(size=(moe * 2, hidden)).astype(np.float32) * 0.05
@@ -529,6 +530,7 @@ def check_routed_expert() -> None:
 def check_gdn_scan() -> None:
     """The chunk scan matches the per-token convolution and delta update."""
     gpu = MetalSession()
+    gpu.begin_scratch(1 << 20)
     rng = np.random.default_rng(3)
     eps = 1e-6
     count = 2
@@ -602,6 +604,7 @@ def check_gdn_scan() -> None:
 def check_act_kernels() -> None:
     """Elementwise and reduction shaders match the host formulas on one draw."""
     gpu = MetalSession()
+    gpu.begin_scratch(1 << 20)
     rng = np.random.default_rng(1)
     values = rng.normal(size=128).astype(np.float32)
     src = gpu.dev_from(values)

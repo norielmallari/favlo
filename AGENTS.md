@@ -73,7 +73,7 @@ The calibration prompt strings are data in a bucket JSON: `tool_calling`, `chat`
 5. Do not invent routing hits, calibration energies, or hidden-state errors. The device roundtrip in [docs/qwen38/probe.md](docs/qwen38/probe.md) measures nibble order and int4 endpoints before the expert table is packed.
 6. Keep ARCHITECTURE.md current in the same change that alters the pipeline, the records, the cache, the endpoint, or the scope. Update the note in `docs/qwen38/` that owns a layout, the n-gram hash, the kernel schedule, or the probe. ARCHITECTURE.md wins if they disagree.
 7. This process is the runtime. Re-implement from public research documents. Do not use another application's source as the reference, and do not launch another application's environment.
-8. Prefill, decode, and the calibration prefill map onto Metal. The endpoint serves tokens those shaders produced. A missing kernel stays missing. It is not replaced by a slower forward.
+8. Prefill, decode, and the calibration prefill map onto Metal. The endpoint serves tokens those shaders produced. A missing kernel stays missing. It is not replaced by a slower forward. A weight plane is a Metal tensor format whose op compiles and whose dispatch completes. half × int8 does not complete, so the hot plane is fp8 E4M3 and the cold plane is fp4 E2M1.
 
 ## Commits
 
@@ -108,8 +108,8 @@ uv run python -m harness.benchmarks
 
 `python -m harness.benchmarks` scores IFEval, GSM8K, and HumanEval. The intelligence smoke is the first 30 rows of each, then the run continues through the full sets. `--sample-only` stops after those 30. That run is not part of `pytest`.
 
-`quantize` reads the Hugging Face BF16 shards once and writes the record. `--hot` selects the int4 keep set. `--super` lifts listed ids out of that keep set into resident int8. The complement of the keep set is int2. Running it again on the same output continues from `quantize_progress.json`. After the manifest is written it stores one greedy grove completion in `grove.json`. `serve` reads that record. A request does not quantize a weight. `pytest` includes the file agent: it starts `serve` and checks that create, edit, and confirm land in the workspace. `python -m harness` is that client against an already running server. `python -m harness.long_prompt` starts `serve`, reads repository files one turn at a time until the prompt reaches the token target, and prints the server's prefill and decode rates. That run is not part of `pytest`.
+`quantize` reads the Hugging Face BF16 shards once and writes the record. `--hot` selects the fp8 keep set. `--super` lifts listed ids out of that keep set into resident fp8. The complement of the keep set is fp4. Running it again on the same output continues from `quantize_progress.json`. After the manifest is written it stores one greedy grove completion in `grove.json`. `serve` reads that record. A request does not quantize a weight. `pytest` includes the file agent: it starts `serve` and checks that create, edit, and confirm land in the workspace. `python -m harness` is that client against an already running server. `python -m harness.long_prompt` starts `serve`, reads repository files one turn at a time until the prompt reaches the token target, and prints the server's prefill and decode rates. That run is not part of `pytest`.
 
 `probe` writes one block of 32 and reads it back on the GPU. It is the measurement in [docs/qwen38/probe.md](docs/qwen38/probe.md). It does not pack an expert.
 
-`matmul` runs one int4 E8M0 tile through `matmul2d` and the decode shader dot. Those are the prefill and decode primitives. They do not load the checkpoint.
+`matmul` runs one fp4 E2M1 tile and one fp8 E4M3 tile through `matmul2d`, and the fp4 tile through the decode shader dot. Those are the prefill and decode primitives. They do not load the checkpoint.

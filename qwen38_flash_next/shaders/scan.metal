@@ -13,11 +13,7 @@ static float int4_from_chunk(uint4 chunk, uint lane) {
     uint wordv = word_i == 0u ? chunk.x : word_i == 1u ? chunk.y : word_i == 2u ? chunk.z : chunk.w;
     uint byte = (wordv >> shift) & 0xffu;
     uint nibble = (lane & 1u) ? (byte >> 4) : (byte & 0x0fu);
-    int code = int(nibble);
-    if (code > 7) {
-        code -= 16;
-    }
-    return float(code);
+    return fp4_e2m1(nibble);
 }
 
 // One lane owns one 32-wide block. Consecutive lanes read consecutive blocks.
@@ -26,21 +22,16 @@ static uint4 load_chunk(device const uchar* packed, uint chunk) {
     return uint4(words[0], words[1], words[2], words[3]);
 }
 
-static int int4_code(uint nibble) {
-    int code = int(nibble);
-    return code - ((code >> 3) << 4);
-}
-
 static float dot_word_f32(uint word, float scale, device const float* act) {
     float acc = 0.0f;
     uint elem = 0u;
     for (uint b = 0u; b < 4u; ++b) {
         uint byte = (word >> (b * 8u)) & 0xffu;
-        int lo = int4_code(byte & 0x0fu);
-        int hi = int4_code(byte >> 4);
+        float lo = fp4_e2m1(byte & 0x0fu);
+        float hi = fp4_e2m1(byte >> 4);
         float v0 = clamp(act[elem], -65504.0f, 65504.0f);
         float v1 = clamp(act[elem + 1u], -65504.0f, 65504.0f);
-        acc += (float(lo) * float(half(v0)) + float(hi) * float(half(v1))) * scale;
+        acc += (lo * float(half(v0)) + hi * float(half(v1))) * scale;
         elem += 2u;
     }
     return acc;
@@ -58,9 +49,9 @@ static float dot_word_half(uint word, float scale, device const half* act) {
     uint elem = 0u;
     for (uint b = 0u; b < 4u; ++b) {
         uint byte = (word >> (b * 8u)) & 0xffu;
-        int lo = int4_code(byte & 0x0fu);
-        int hi = int4_code(byte >> 4);
-        acc += (float(lo) * float(act[elem]) + float(hi) * float(act[elem + 1u])) * scale;
+        float lo = fp4_e2m1(byte & 0x0fu);
+        float hi = fp4_e2m1(byte >> 4);
+        acc += (lo * float(act[elem]) + hi * float(act[elem + 1u])) * scale;
         elem += 2u;
     }
     return acc;
@@ -164,11 +155,7 @@ kernel void decode_int4_batch(
         uint element = (block << 5) + lane;
         uchar byte = packed[element >> 1];
         uint nibble = (element & 1u) ? (byte >> 4) : (byte & 0x0Fu);
-        int code = int(nibble);
-        if (code > 7) {
-            code -= 16;
-        }
-        acc += float(code) * factor * float(act[element]);
+        acc += fp4_e2m1(nibble) * factor * float(act[element]);
     }
     float sum = simd_sum(acc);
     if (lane == 0u) {
