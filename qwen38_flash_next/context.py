@@ -29,7 +29,9 @@ BLOCK = 4
 INDEX_STRIDE = KEEP_BLOCKS * BLOCK + BLOCK
 DENSE_LIMIT = INDEX_STRIDE - 1
 PREFILL_CHUNK = 2048
-HEADROOM = 4 << 30
+# Physical memory kept for the rest of the machine. The prompt budget is the
+# remainder.
+HEADROOM = 6 << 30
 SCRATCH_FLOOR = 256 << 20
 SCRATCH_PER_TOKEN = 2 << 20
 RESIDENT_FLOOR = 8 << 30

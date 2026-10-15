@@ -430,18 +430,21 @@ class Qwen38Runtime:
         top_p: float,
         top_k: int,
     ) -> list[int]:
-        start = self.align(prompt)
-        if start == len(prompt):
-            if self.last_logits is None:
-                message = "the cached prefix has no logits"
-                raise RuntimeError(message)
-            logits = self.last_logits
-            _log("prefill 0 tok/s")
-        else:
-            logits = self.forward(prompt[start:])
-        tokens = list(self._new_tokens(logits, max_tokens, temperature, top_p, top_k))
-        self._log_decode()
-        return tokens
+        # Drain Objective-C temporaries at the end of the request. The process
+        # has no AppKit run loop to do that.
+        with objc.autorelease_pool():
+            start = self.align(prompt)
+            if start == len(prompt):
+                if self.last_logits is None:
+                    message = "the cached prefix has no logits"
+                    raise RuntimeError(message)
+                logits = self.last_logits
+                _log("prefill 0 tok/s")
+            else:
+                logits = self.forward(prompt[start:])
+            tokens = list(self._new_tokens(logits, max_tokens, temperature, top_p, top_k))
+            self._log_decode()
+            return tokens
 
     def _new_tokens(
         self,
@@ -818,14 +821,21 @@ class Qwen38Runtime:
         return budget
 
     def _release_atlas(self) -> None:
-        """Drop the decode atlas so the next allocation can use that memory."""
+        """Drop the decode atlas so the next allocation can use that memory.
+
+        A pending Metal IO command retains its destination. Wait for those
+        commands before the Python reference is the last one.
+        """
         atlas = self.atlas
         self.atlas = None
         if atlas is None:
             return
+        self.gpu.flush()
+        self.gpu.finish_io()
         for name in ("atlas", "table", "miss"):
             if hasattr(atlas, name):
                 setattr(atlas, name, None)
+        del atlas
         gc.collect()
 
     def _begin_prefill_stream(self) -> None:
@@ -882,6 +892,7 @@ class Qwen38Runtime:
         return 0, cold_bytes, adjusted
 
     def _end_prefill_stream(self) -> None:
+        stage = self._stage
         self._streaming_prefill = False
         self._stage = None
         self._stage_table = None
@@ -889,6 +900,14 @@ class Qwen38Runtime:
         self._stage_event = [0, 0]
         self._hot_keep = None
         self._hot_fence = 0
+        if stage is None:
+            return
+        # The layer loads were submitted into these buffers. Finish that IO
+        # before dropping them, or the next atlas is allocated beside them.
+        self.gpu.flush()
+        self.gpu.finish_io()
+        del stage
+        gc.collect()
 
     def _submit_prefill_layer(self, layer: int) -> None:
         if not isinstance(self.files, QuantRecord) or self._stage is None:

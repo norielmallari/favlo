@@ -8,6 +8,7 @@ from qwen38_flash_next.context import (
     DEFAULT_LADDER,
     DEFAULT_PROMPT_LIMIT,
     DENSE_LIMIT,
+    HEADROOM,
     INDEX_STRIDE,
     KEEP_BLOCKS,
     block_score,
@@ -17,6 +18,10 @@ from qwen38_flash_next.context import (
     select_query_tokens,
     top_blocks,
 )
+
+
+def test_prompt_budget_leaves_six_gibibytes() -> None:
+    assert HEADROOM == 6 << 30
 
 
 def test_unset_percent_keeps_the_ladder() -> None:

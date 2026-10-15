@@ -3,7 +3,7 @@
 import numpy as np
 from qwen38_flash_next.checks import _ngram_row, ngram_rows
 from qwen38_flash_next.formats import PAGE
-from qwen38_flash_next.session import _aligned_offset
+from qwen38_flash_next.session import _aligned_offset, trim_page_cache
 
 
 def test_ngram_rows_match_scan_across_eos():
@@ -31,3 +31,11 @@ def test_packed_ngram_destination_is_page_aligned() -> None:
     assert off % PAGE == 0
     assert off >= used
     assert off - used < PAGE
+
+
+def test_page_cache_drops_pages_after_a_protected_oldest() -> None:
+    order = [1, 2, 3, 4]
+    pages = {1: "a", 2: "b", 3: "c", 4: "d"}
+    trim_page_cache(order, pages, {1}, 2)
+    assert pages == {4: "d", 1: "a"}
+    assert order[-1] == 1

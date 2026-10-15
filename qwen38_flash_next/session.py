@@ -376,6 +376,25 @@ def _zero_dev(src: Dev) -> None:
     _buffer_view(src.buf, start + nbytes)[start : start + nbytes] = bytes(nbytes)
 
 
+def trim_page_cache(
+    order: list[int], pages: dict[int, Any], needed: set[int], limit: int
+) -> None:
+    """Drop cached pages past ``limit``.
+
+    A page in ``needed`` stays. It is moved to the end and does not stop the
+    rest of the cache from being dropped.
+    """
+    scanned = 0
+    while len(order) > limit and scanned < len(order):
+        old = order.pop(0)
+        if old in needed:
+            order.append(old)
+            scanned += 1
+            continue
+        pages.pop(old, None)
+        scanned = 0
+
+
 class MetalSession:
     """Decode dots, prefill matmul2d, the GDN delta, and grouped-query attention."""
 
@@ -1988,12 +2007,7 @@ class MetalSession:
                 loads.append((buf, 0, PAGE, page * PAGE))
                 needed.add(page)
             copies.append((buf, local, index * NGRAM_SLOT))
-        while len(self._ngram_order) > 4096:
-            old = self._ngram_order.pop(0)
-            if old in needed:
-                self._ngram_order.append(old)
-                break
-            self._ngram_pages.pop(old, None)
+        trim_page_cache(self._ngram_order, self._ngram_pages, needed, 4096)
         if loads:
             self.io_read(handle, loads, gpu_wait=True)
         for buf, local, dest in copies:
