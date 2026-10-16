@@ -11,13 +11,68 @@ from qwen38_flash_next.context import (
     HEADROOM,
     INDEX_STRIDE,
     KEEP_BLOCKS,
+    PREFILL_CHUNK,
+    atlas_budget,
+    atlas_fallbacks,
     block_score,
+    cache_growth_bytes,
+    process_footprint,
     prompt_token_limit,
     resident_candidates,
     score_bits,
     select_query_tokens,
     top_blocks,
 )
+
+
+def test_process_footprint_is_positive() -> None:
+    assert process_footprint() > 0
+
+
+def test_cache_growth_reserves_the_live_copy_once_it_is_larger() -> None:
+    per_token = 16
+    assert cache_growth_bytes(10, per_token) == 2 * PREFILL_CHUNK * per_token
+    assert cache_growth_bytes(100_000, per_token) == 100_000 * per_token
+
+
+def test_short_sequence_leaves_a_larger_atlas() -> None:
+    memory = 48 << 30
+    content = 64 << 30
+    footprint = 10 << 30
+    short = atlas_budget(
+        memory=memory, content_bytes=content, footprint=footprint, growth=1 << 20
+    )
+    long = atlas_budget(
+        memory=memory,
+        content_bytes=content,
+        footprint=footprint + (1 << 30),
+        growth=1 << 30,
+    )
+    assert short > long
+    assert short - long == (2 << 30) - (1 << 20)
+
+
+def test_atlas_budget_keeps_headroom_and_the_expert_files() -> None:
+    memory = 48 << 30
+    footprint = 8 << 30
+    growth = 1 << 30
+    capped = atlas_budget(
+        memory=memory, content_bytes=16 << 30, footprint=footprint, growth=growth
+    )
+    assert capped == 16 << 30
+    open_budget = atlas_budget(
+        memory=memory, content_bytes=0, footprint=footprint, growth=growth
+    )
+    assert open_budget == memory - HEADROOM - footprint - growth
+
+
+def test_atlas_fallbacks_start_at_the_budget() -> None:
+    budget = (30 << 30) + (512 << 20)
+    steps = atlas_fallbacks(budget)
+    assert steps[0] == budget
+    assert steps[1] == budget - (1 << 30)
+    assert steps[2] == steps[1] - (4 << 30)
+    assert steps[-1] == 8 << 30
 
 
 def test_prompt_budget_leaves_six_gibibytes() -> None:
@@ -37,6 +92,10 @@ def test_unset_percent_skips_a_step_larger_than_the_hot_tier_or_ram() -> None:
     fitted = resident_candidates(hot, None, memory=memory)
     assert fitted[0] == hot
     assert fitted == (16 << 30, 12 << 30, 8 << 30)
+    # Cold experts share the atlas. Counting those files uses the RAM step.
+    both = resident_candidates(hot, None, memory=memory, cold_bytes=48 << 30)
+    assert both[0] == 24 << 30
+    assert both == DEFAULT_LADDER
 
 
 def test_percent_steps_down_to_the_floor() -> None:

@@ -145,6 +145,17 @@ def _console(args: Any, *, fold: bool = False) -> Console:
     return ui
 
 
+def _report_failure(console: Any) -> None:
+    """Write a traceback under the live rows, not through them."""
+    text = traceback.format_exc()
+    report = getattr(console, "report", None)
+    if report is None:
+        sys.stderr.write(text)
+        sys.stderr.flush()
+        return
+    report(text)
+
+
 def _quantize_output(args: Any, source: Path) -> Path:
     if args.output is not None:
         return args.output
@@ -214,7 +225,6 @@ def bf16_complete(args: Any) -> int:
                 message = "the cached prefix has no logits"
                 raise RuntimeError(message)
             logits = runtime.last_logits
-            _log("prefill 0 tok/s")
         else:
             logits = runtime.forward(prompt[start:])
         produced: list[int] = []
@@ -242,7 +252,7 @@ def bf16_complete(args: Any) -> int:
         _log(str(exc))
         return 1
     except Exception as exc:
-        traceback.print_exc()
+        _report_failure(ui)
         sys.stderr.write(f"{type(exc).__name__}: {exc}\n")
         return 1
     finally:
@@ -280,7 +290,6 @@ def complete(args: Any) -> int:
                 message = "the cached prefix has no logits"
                 raise RuntimeError(message)
             logits = runtime.last_logits
-            _log("prefill 0 tok/s")
         else:
             logits = runtime.forward(prompt[start:])
         produced: list[int] = []
@@ -308,7 +317,7 @@ def complete(args: Any) -> int:
         _log(str(exc))
         return 1
     except Exception as exc:
-        traceback.print_exc()
+        _report_failure(ui)
         sys.stderr.write(f"{type(exc).__name__}: {exc}\n")
         return 1
     finally:
@@ -321,6 +330,12 @@ class _SingleRequestServer(HTTPServer):
     """Accept the next connection only after the current request returns."""
 
     request_queue_size = 128
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """A peer that closes mid-response is not a server failure."""
+        if isinstance(sys.exception(), ConnectionError):
+            return
+        super().handle_error(request, client_address)
 
 
 class _Shutdown:
@@ -583,7 +598,7 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
                     return
                 self._json(404, {"error": {"message": str(exc), "type": "not_found"}})
             except Exception as exc:
-                traceback.print_exc()
+                _report_failure(getattr(state.get("runtime"), "console", None))
                 self.close_connection = True
                 if self._started:
                     return
@@ -621,7 +636,6 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
                     message = "the cached prefix has no logits"
                     raise RuntimeError(message)
                 logits = runtime.last_logits
-                _log("prefill 0 tok/s")
             else:
                 logits = runtime.forward(prompt[start:])
 

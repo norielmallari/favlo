@@ -5,7 +5,7 @@ import os
 import numpy as np
 import pytest
 from qwen38_flash_next.console import Console
-from qwen38_flash_next.runtime import RequestClosed
+from qwen38_flash_next.runtime import RequestClosed, mtp_holds, mtp_starts
 
 from test_packing import pipeline
 
@@ -234,6 +234,71 @@ def test_completed_prefill_writes_without_releasing_the_atlas() -> None:
     runtime._persist_prefix(release_atlas=False)
     assert runtime._prefix_dirty is False
     assert order == ["flush", "state", "save"]
+
+
+def test_uncommitted_draft_span_is_rewound_before_the_prefix_write() -> None:
+    runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
+    runtime.tokens = list(range(415))
+    runtime.vocab = 100
+    runtime._mtp_layer = 48
+    runtime.kv_len = {0: 419, 48: 419}
+    runtime._kv_snap = {
+        0: (None, None, None, None, None, 415),
+        48: (None, None, None, None, None, 419),
+    }
+    runtime._mtp_kv = (None, None, None, None, None, 415)
+    runtime._prefix_dirty = True
+    runtime._forward_open = False
+    runtime.last_logits = type("Logits", (), {"n": 400})()
+    runtime.gpu = type("Gpu", (), {"flush": lambda self: None})()
+    seen: dict[str, object] = {}
+
+    def restore_recurrent() -> None:
+        for index, item in runtime._kv_snap.items():
+            runtime.kv_len[index] = item[5]
+
+    def restore_mtp() -> None:
+        runtime.kv_len[runtime._mtp_layer] = runtime._mtp_kv[5]
+
+    def state() -> object:
+        seen["lengths"] = dict(runtime.kv_len)
+        seen["logits"] = runtime.last_logits
+        return object()
+
+    runtime._restore_recurrent = restore_recurrent
+    runtime._mtp_restore_kv = restore_mtp
+    runtime._prefix_state = state
+    runtime._release_atlas = lambda: None
+
+    class Prefixes:
+        def save(self, state: object) -> object:
+            del state
+            return object()
+
+    runtime.prefixes = Prefixes()
+    runtime._persist_prefix(release_atlas=False)
+    assert seen["lengths"] == {0: 415, 48: 415}
+    assert seen["logits"] is None
+    assert runtime._prefix_dirty is False
+
+
+def test_prefix_flush_logs_a_cache_mismatch_and_returns() -> None:
+    runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
+    runtime.tokens = [1, 2]
+    runtime.kv_len = {0: 6}
+    runtime._kv_snap = None
+    runtime._mtp_kv = None
+    runtime.gpu = type("Gpu", (), {"flush": lambda self: None})()
+
+    def state() -> object:
+        message = "attention cache length 6 does not match 2 tokens"
+        raise RuntimeError(message)
+
+    runtime._prefix_state = state
+    released: list[str] = []
+    runtime._release_atlas = lambda: released.append("release")
+    runtime._flush_prefix()
+    assert released == []
 
 
 def test_persist_writes_the_live_prefix_once() -> None:
@@ -726,6 +791,29 @@ def test_release_closes_the_listening_socket() -> None:
     raise AssertionError("listening socket stayed open")
 
 
+def test_a_closed_client_does_not_print_a_traceback(capsys: pytest.CaptureFixture[str]) -> None:
+    import qwen38_flash_next.commands as commands
+
+    server = commands._SingleRequestServer(("127.0.0.1", 0), type("Quiet", (), {}))
+    try:
+        try:
+            raise BrokenPipeError(32, "Broken pipe")
+        except BrokenPipeError:
+            server.handle_error(None, ("127.0.0.1", 1))
+        quiet = capsys.readouterr().err
+        assert "Traceback" not in quiet
+        assert "Exception occurred" not in quiet
+        try:
+            raise RuntimeError("boom")
+        except RuntimeError:
+            server.handle_error(None, ("127.0.0.1", 1))
+        logged = capsys.readouterr().err
+        assert "Traceback" in logged
+        assert "boom" in logged
+    finally:
+        server.server_close()
+
+
 def test_omitted_max_tokens_runs_until_stop() -> None:
     import qwen38_flash_next.commands as commands
 
@@ -1031,3 +1119,62 @@ def test_the_next_request_does_not_keep_the_previous_decode_row() -> None:
     runtime._close_decode_row()
     runtime.console.begin("prefill", total=8, unit="tok", detail="req #6", request=6)
     assert [item.phase for item in console._handles] == ["prefill"]
+
+
+def test_one_token_decode_steps_the_mtp_cache() -> None:
+    runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
+    runtime.tokens = list(range(3000))
+    runtime._mtp_on = True
+    runtime.stop_ids = {9}
+    runtime.required_function = None
+    runtime._decode_reported = True
+    runtime._begin_drafts = lambda: setattr(runtime, "_mtp_drafts", False)
+    runtime._close_decode_row = lambda: None
+    runtime._begin_decode = lambda _max_tokens: None
+    runtime._check_stop = lambda: None
+    runtime._log_decode = lambda: None
+    picks = iter((7, 9))
+    runtime._pick = lambda *_args: next(picks)
+    calls: list[tuple[object, ...]] = []
+
+    def forward(tokens: list[int], decode: bool = False) -> object:
+        del decode
+        calls.append(("forward", tuple(tokens)))
+        return object()
+
+    def step(token: int, *, reuse: bool, head: bool) -> None:
+        calls.append(("step", token, reuse, head))
+
+    runtime.forward = forward
+    runtime._mtp_step = step
+    produced = list(runtime._new_tokens(object(), None, 0.0, 1.0, 0))
+    assert produced == [7]
+    assert calls == [("forward", (7,)), ("step", 7, False, False)]
+
+
+def test_drafts_start_on_a_short_sequence_and_not_a_long_one() -> None:
+    assert mtp_starts(58, loaded=True) is True
+    assert mtp_starts(2048, loaded=True) is True
+    assert mtp_starts(2049, loaded=True) is False
+    assert mtp_starts(16, loaded=False) is False
+
+
+def test_drafts_hold_until_the_recent_window_falls_behind() -> None:
+    assert mtp_holds([12.0, 12.0, 12.0, 12.0]) is True
+    assert mtp_holds([5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0]) is True
+    assert mtp_holds([12.0, 12.0, 12.0, 12.0, 4.0, 4.0, 4.0, 4.0]) is False
+
+
+def test_a_slow_window_stops_drafts_for_the_rest_of_the_request() -> None:
+    runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
+    runtime.tokens = [1, 2, 3]
+    runtime._mtp_on = True
+    runtime._decode_progress = None
+    runtime._begin_drafts()
+    assert runtime._mtp_drafts is True
+    for rate in (12.0, 12.0, 12.0, 12.0, 4.0, 4.0, 4.0, 4.0):
+        runtime._note_draft_rate(rate, 1.0)
+    assert runtime._mtp_drafts is False
+    runtime.tokens = list(range(4096))
+    runtime._begin_drafts()
+    assert runtime._mtp_drafts is False

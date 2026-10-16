@@ -76,7 +76,7 @@ class Console:
         self._sleep = sleep or time.sleep
         self._width = width
         self._color = self._resolve_color() if color is None else color
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._handles: list[Progress] = []
         self._windows: dict[int, list[tuple[float, int]]] = {}
         self._drawn = 0
@@ -181,15 +181,16 @@ class Console:
                 self._handles.remove(progress)
             self._windows.pop(id(progress), None)
             remaining = len(self._handles)
-        if self.mode == "pretty":
-            self._erase()
-            if summary:
-                self._write(self._dim(summary) + "\n")
-            if remaining == 0:
-                self._show_cursor()
-            else:
-                self._redraw()
-        elif self.mode == "json":
+            if self.mode == "pretty":
+                self._erase()
+                if summary:
+                    self._write(self._dim(summary) + "\n")
+                if remaining == 0:
+                    self._show_cursor()
+                else:
+                    self._redraw()
+                return
+        if self.mode == "json":
             event = self._boundary("end", progress)
             event["summary"] = summary
             self._event(event)
@@ -225,22 +226,40 @@ class Console:
             if not progress.closed:
                 self.end(progress, progress.summary)
 
+    def report(self, text: str) -> None:
+        """Clear the live rows, then write ``text``.
+
+        A traceback written straight to the terminal is painted over by the
+        next row tick. This finishes the rows first.
+        """
+        with self._lock:
+            for progress in self._handles:
+                progress.closed = True
+            self._handles.clear()
+            self._windows.clear()
+            if self.mode == "pretty":
+                self._erase()
+                self._show_cursor()
+            if text:
+                self._write(text if text.endswith("\n") else text + "\n")
+
     def sample(self) -> None:
         """One renderer tick. Tests call this with the thread left off."""
         now = self._clock()
         with self._lock:
             handles = list(self._handles)
-        if not handles:
-            return
-        if self.mode == "json":
-            for progress in handles:
-                self._event(self._tick(progress, now))
-            return
-        if self.mode != "pretty":
-            return
-        width = self._terminal_width()
-        rows = [self._fit(self._row(progress, now), width) for progress in handles]
-        self._paint_rows(rows)
+            if not handles:
+                return
+            if self.mode == "pretty":
+                width = self._terminal_width()
+                rows = [self._fit(self._row(progress, now), width) for progress in handles]
+                self._paint_rows(rows)
+                return
+            if self.mode != "json":
+                return
+            events = [self._tick(progress, now) for progress in handles]
+        for event in events:
+            self._event(event)
 
     def close(self) -> None:
         self._stop.set()

@@ -16,7 +16,7 @@ The first pipeline is Qwen3.8-Flash-Next. `madmetal --qwen38-flash-next` loads `
 - `madmetal` command that dispatches one model flag onto one pipeline entry. `serve` is the listener for every registered pipeline. One record is resident. A different pipeline closes the resident record before it loads.
 - OpenAI-compatible `GET /v1/models` and `POST /v1/chat/completions`, one request at a time, with streaming and tools. `GET /v1/models` lists every registered pipeline. While a function name is open, the sampler keeps only tokens that continue a name from the request. A `tool_choice` that names one function forces that call's opening as the tokenizer's encoding of that text.
 - Prefix cache of that model's full state. The live sequence stays in memory. A request that does not extend it writes the sequence into the prefix directory and loads the longest stored prefix.
-- Expert records streamed from SSD by Metal IO into a resident atlas. Consecutive ids are one sequential load of the live images. `--resident-percent` on `serve` and `complete` sets that atlas as a percent of the hot tier. Omitting it keeps the 24 GiB ladder. The prompt length is the tokens that fit after that budget, and at most 131,072. The indexer attends at most 512 blocks of 4, plus the unfinished tail.
+- Expert records streamed from SSD by Metal IO into a resident atlas. Consecutive ids are one sequential load of the live images. `--resident-percent` on `serve` and `complete` sets that atlas as a percent of the hot tier. Omitting it sizes the atlas from the memory the live sequence leaves. A shorter sequence keeps a larger atlas. The indexer attends at most 512 blocks of 4, plus the unfinished tail.
 
 ## Out of scope
 

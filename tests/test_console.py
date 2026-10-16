@@ -30,6 +30,18 @@ def _ui(mode: str, *, width: int = 120, color: int = 0) -> tuple[Console, io.Str
     return ui, stream, clock
 
 
+def test_a_traceback_is_not_painted_over() -> None:
+    ui, stream, _clock = _ui("pretty", color=0)
+    progress = ui.begin("prefill", total=50, unit="tok")
+    progress.done = 3
+    ui.sample()
+    ui.report("Traceback (most recent call last):\nRuntimeError: boom\n")
+    ui.sample()
+    text = stream.getvalue()
+    assert text.rstrip().endswith("RuntimeError: boom")
+    assert "\x1b[" not in text.split("RuntimeError: boom")[-1]
+
+
 def test_pretty_listening_line_has_no_mark() -> None:
     ui, stream, _clock = _ui("pretty", color=0)
     ui.log("listening on http://127.0.0.1:8129")

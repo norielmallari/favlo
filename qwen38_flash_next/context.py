@@ -1,7 +1,8 @@
-"""Prompt length and the resident hot-expert budget.
+"""Resident expert budget.
 
-The prompt limit is the tokens that fit, and at most 131,072. The indexer window is separate:
-a query attends at most 512 complete blocks of 4, plus the unfinished tail.
+The atlas takes the memory the live sequence does not. A shorter sequence leaves
+a larger atlas. The indexer window is separate: a query attends at most 512
+complete blocks of 4, plus the unfinished tail.
 """
 
 from __future__ import annotations
@@ -38,6 +39,104 @@ RESIDENT_FLOOR = 8 << 30
 RESIDENT_STEP = 4 << 30
 DEFAULT_LADDER = (24 << 30, 20 << 30, 16 << 30, 12 << 30, 8 << 30)
 DEFAULT_PROMPT_LIMIT = 128 << 10
+
+
+class _RUsageInfoV0(ctypes.Structure):
+    _fields_ = [
+        ("ri_uuid", ctypes.c_uint8 * 16),
+        ("ri_user_time", ctypes.c_uint64),
+        ("ri_system_time", ctypes.c_uint64),
+        ("ri_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_interrupt_wkups", ctypes.c_uint64),
+        ("ri_pageins", ctypes.c_uint64),
+        ("ri_wired_size", ctypes.c_uint64),
+        ("ri_resident_size", ctypes.c_uint64),
+        ("ri_phys_footprint", ctypes.c_uint64),
+        ("ri_proc_start_abstime", ctypes.c_uint64),
+        ("ri_proc_exit_abstime", ctypes.c_uint64),
+        ("ri_child_user_time", ctypes.c_uint64),
+        ("ri_child_system_time", ctypes.c_uint64),
+        ("ri_child_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_child_interrupt_wkups", ctypes.c_uint64),
+        ("ri_child_pageins", ctypes.c_uint64),
+        ("ri_child_elapsed_abstime", ctypes.c_uint64),
+        ("ri_diskio_bytesread", ctypes.c_uint64),
+        ("ri_diskio_byteswritten", ctypes.c_uint64),
+    ]
+
+
+def process_footprint() -> int:
+    """Physical footprint of this process.
+
+    Jetsam uses this number. It includes the resident weights and the live
+    cache, and it does not include an atlas that has not been allocated yet.
+    """
+    if sys.platform != "darwin":
+        import resource
+
+        return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+    libc = ctypes.CDLL("/usr/lib/libSystem.dylib", use_errno=True)
+    info = _RUsageInfoV0()
+    if libc.proc_pid_rusage(os.getpid(), 0, ctypes.byref(info)) != 0:
+        raise OSError(ctypes.get_errno(), "proc_pid_rusage")
+    return int(info.ri_phys_footprint)
+
+
+def cache_growth_bytes(tokens: int, per_token: int) -> int:
+    """Bytes the next cache growth holds while the previous copy is still mapped.
+
+    A short cache doubles until it passes one prefill chunk. Past that, the
+    next growth keeps the live copy. The larger of those two is the reserve.
+    """
+    if per_token <= 0:
+        raise ValueError("per_token")
+    live = max(0, tokens) * per_token
+    doubling = 2 * PREFILL_CHUNK * per_token
+    return max(live, doubling)
+
+
+def atlas_budget(
+    *,
+    memory: int,
+    content_bytes: int,
+    footprint: int,
+    growth: int,
+) -> int:
+    """Largest atlas that leaves headroom, the live process, and one cache growth.
+
+    ``content_bytes`` is the hot and cold expert files. The atlas is not larger
+    than the bytes it can hold.
+    """
+    reserve = HEADROOM + max(0, growth)
+    room = memory - max(0, footprint) - reserve
+    if room < PAGE:
+        return PAGE
+    cap = _page_down(room)
+    if content_bytes > 0:
+        cap = min(cap, _page_down(content_bytes))
+    if cap < PAGE:
+        return PAGE
+    return cap
+
+
+def atlas_fallbacks(budget: int, *, floor: int = RESIDENT_FLOOR) -> tuple[int, ...]:
+    """``budget`` first, then 1 GiB smaller, then 4 GiB steps down to ``floor``."""
+    budget = _page_down(budget) if budget >= PAGE else PAGE
+    if budget <= floor:
+        return (max(budget, PAGE),)
+    steps = [budget]
+    size = budget
+    step = 1 << 30
+    while size > floor:
+        nxt = _page_down(size - step)
+        if floor <= nxt < size:
+            steps.append(nxt)
+            size = nxt
+            step = RESIDENT_STEP
+            continue
+        steps.append(floor)
+        break
+    return tuple(steps)
 
 
 def machine_memory() -> int:
@@ -78,12 +177,16 @@ def _page_down(nbytes: int) -> int:
     return nbytes - (nbytes % PAGE)
 
 
-def _ladder_cap(hot_bytes: int, memory: int) -> int:
-    """Largest atlas that leaves room for the OS, both decode arenas, and weights."""
+def _ladder_cap(content_bytes: int, memory: int) -> int:
+    """Largest atlas that leaves room for the OS, both decode arenas, and weights.
+
+    ``content_bytes`` is the hot and cold expert files. Both tiers are copied
+    into the atlas, so the cap is that sum, not the hot files alone.
+    """
     reserve = HEADROOM + 2 * scratch_bytes(PREFILL_CHUNK) + (4 << 30)
     cap = _page_down(memory - reserve) if memory > reserve else RESIDENT_FLOOR
-    if hot_bytes > 0:
-        cap = min(cap, _page_down(hot_bytes))
+    if content_bytes > 0:
+        cap = min(cap, _page_down(content_bytes))
     if cap < PAGE:
         return PAGE
     return cap
@@ -94,16 +197,19 @@ def resident_candidates(
     percent: float | None,
     ladder: tuple[int, ...] = DEFAULT_LADDER,
     memory: int | None = None,
+    cold_bytes: int = 0,
 ) -> tuple[int, ...]:
     """Atlas sizes to try, largest first.
 
     ``percent is None`` keeps the device ladder, dropping a step larger than the
-    hot tier or larger than the memory left after headroom, both decode scratch
-    arenas, and the resident weight file. A percent is that share of the
-    hot-tier bytes, page-aligned, then 4 GiB smaller down to 8 GiB.
+    hot and cold expert files together, or larger than the memory left after
+    headroom, both decode scratch arenas, and the resident weight file. A
+    percent is that share of the hot-tier bytes only, page-aligned, then 4 GiB
+    smaller down to 8 GiB.
     """
     if percent is None:
-        cap = _ladder_cap(hot_bytes, machine_memory() if memory is None else memory)
+        content = hot_bytes + max(0, cold_bytes)
+        cap = _ladder_cap(content, machine_memory() if memory is None else memory)
         picked = tuple(size for size in ladder if size <= cap)
         if picked:
             return picked

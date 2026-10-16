@@ -4,6 +4,7 @@ import time
 
 import pytest
 
+from decode_rate import billed_decode
 from test_packing import pipeline
 
 
@@ -48,6 +49,7 @@ def test_grove_matches_the_record() -> None:
         )
     )
     runtime._log_decode()
+    decode_rate = billed_decode(runtime)
     wall = time.perf_counter() - started
     text = runtime.decode(produced).rstrip()
     gpu = runtime.gpu.gpu_seconds
@@ -66,3 +68,4 @@ def test_grove_matches_the_record() -> None:
         f"ngram-rows {io['rows']} in {io['ngram']:.2f}s"
     )
     assert text == stored["output"]
+    assert decode_rate > 0

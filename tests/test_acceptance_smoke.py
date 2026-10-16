@@ -71,4 +71,6 @@ def test_higher_acceptance_raises_decode_rate() -> None:
     )
     assert kept_full > 0 and kept_partial == 0
     assert rejected_partial > 0 and rejected_full == 0
+    assert kept > 0
+    assert rejected > 0
     assert kept > rejected

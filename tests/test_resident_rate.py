@@ -88,4 +88,5 @@ def test_resident_kept_span_exceeds_10_tok_s() -> None:
     assert full == MEASURED
     assert partial == 0
     assert billed_tokens == MEASURED * 4
+    assert billed_seconds > 0
     assert rate > 10

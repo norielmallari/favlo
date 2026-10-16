@@ -19,14 +19,15 @@ from qwen38_flash_next.context import (
 )
 from qwen38_flash_next.context import (
     DENSE_LIMIT,
-    HEADROOM,
     INDEX_STRIDE,
     PREFILL_CHUNK,
+    atlas_budget,
+    atlas_fallbacks,
+    cache_growth_bytes,
     kv_bytes_per_token,
     machine_memory,
-    prompt_token_limit,
+    process_footprint,
     resident_candidates,
-    residual_bytes_per_token,
     scratch_bytes,
 )
 from qwen38_flash_next.convert import ShardStore, _layer_f32_keys, _layer_int4_keys
@@ -88,6 +89,28 @@ from qwen38_flash_next.tools import (
     repeated_cycle,
     stuck_ids,
 )
+
+
+def mtp_starts(sequence: int, *, loaded: bool, limit: int = PREFILL_CHUNK) -> bool:
+    """Drafts start on a short sequence when the MTP layer is loaded."""
+    return bool(loaded) and sequence <= limit
+
+
+def mtp_holds(rates: Sequence[float], *, window: int = 4, ratio: float = 0.5) -> bool:
+    """The latest window is still at least ``ratio`` of the best window.
+
+    Fewer than two windows has no earlier rate to fall behind, so drafts stay.
+    """
+    if window < 1 or len(rates) < window * 2:
+        return True
+    means = [
+        sum(rates[index : index + window]) / window
+        for index in range(len(rates) - window + 1)
+    ]
+    best = max(means)
+    if best <= 0:
+        return True
+    return means[-1] >= best * ratio
 
 
 def after_atlas_load(resident: Sequence[int]) -> int:
@@ -331,45 +354,25 @@ class Qwen38Runtime:
     def _set_prompt_limit(self, resident_percent: float | None) -> None:
         self.resident_percent = resident_percent
         self.prefill_chunk = PREFILL_CHUNK
-        attention = sum(kind == "full_attention" for kind in self.kinds)
-        fixed = HEADROOM
-        staging = 0
+        self._tier_bytes = 0
+        self._hot_bytes = 0
         if isinstance(self.files, QuantRecord):
-            fixed += (self.files.root / "resident.bin").stat().st_size
-            if self._mtp_on:
-                attention += 1
-                fixed += (self.files.root / "mtp-experts.bin").stat().st_size
-            hot = sum(os.fstat(fd).st_size for fd in self.files.hot_fds)
-            self.resident_candidates = resident_candidates(hot, resident_percent)
-            self.resident_budget = self.resident_candidates[0]
-            staging = self._stage_budget() * 2
+            self._hot_bytes = sum(os.fstat(fd).st_size for fd in self.files.hot_fds)
+            cold = sum(os.fstat(fd).st_size for fd in self.files.cold_fds)
+            self._tier_bytes = self._hot_bytes + cold
+            if resident_percent is not None:
+                self.resident_candidates = resident_candidates(self._hot_bytes, resident_percent)
+                self.resident_budget = self.resident_candidates[0]
+            else:
+                self.resident_candidates = ()
+                self.resident_budget = 0
         else:
             self.resident_candidates = ()
             self.resident_budget = 0
-        index_row = PREFILL_CHUNK * INDEX_STRIDE * 4
-        self.prompt_limit = prompt_token_limit(
-            memory=machine_memory(),
-            resident_hot=self.resident_budget,
-            kv_per_token=kv_bytes_per_token(attention, cache=self.kv_cache),
-            residual_per_token=residual_bytes_per_token(self.branches, self.hidden),
-            scratch=scratch_bytes(PREFILL_CHUNK) + index_row,
-            staging=staging,
-            fixed=fixed,
-            score_per_token=PREFILL_CHUNK,
-        )
-        _log(
-            f"prompt limit {self.prompt_limit} tokens, kv {self.kv_cache}, "
-            f"resident budget {self.resident_budget >> 20} MiB"
-        )
-
-    def _require_prompt_room(self, total: int) -> None:
-        if total <= self.prompt_limit:
-            return
-        message = (
-            f"prompt of {total} tokens exceeds the limit of {self.prompt_limit} "
-            f"(resident experts {self.resident_budget >> 20} MiB)"
-        )
-        raise RuntimeError(message)
+        if self.resident_candidates:
+            _log(f"kv {self.kv_cache}, resident budget {self.resident_budget >> 20} MiB")
+        else:
+            _log(f"kv {self.kv_cache}, resident atlas follows the live sequence")
 
     def _add_stop_token(self, piece: Any) -> None:
         """A single-id end marker stops generation. The n-gram boundary stays `eos`."""
@@ -515,13 +518,21 @@ class Qwen38Runtime:
             else:
                 _log("cache miss")
             _log(f"incoming tokens {len(prompt) - cached}")
+        elif cached and cached == len(prompt):
+            # Pretty mode has no prefill row when every token was cached.
+            _log(f"cache hit {cached}")
         return cached
 
     def _flush_prefix(self, *, release_atlas: bool = True) -> None:
         if not self.tokens:
             return
         self.gpu.flush()
-        state = self._prefix_state()
+        self._rewind_uncommitted()
+        try:
+            state = self._prefix_state()
+        except RuntimeError as exc:
+            _log(f"prefix store failed {exc}")
+            return
         # Replacing the sequence, or stopping the process, drops the atlas
         # before the volume reserves the prefix file. A finished prefill keeps
         # it: decode still needs those expert images.
@@ -535,6 +546,40 @@ class Qwen38Runtime:
         if path is not None:
             self._prefix_dirty = False
             _log(f"prefix store {len(self.tokens)} tokens")
+
+    def _rewind_uncommitted(self) -> None:
+        """Drop a draft span that reached the cache and not the token list.
+
+        The verify forward writes the span before those tokens are committed.
+        A client that leaves during that window still has the committed
+        sequence. The snapshot from before the span is that sequence.
+        """
+        lengths = getattr(self, "kv_len", None)
+        tokens = getattr(self, "tokens", None)
+        if not lengths or not tokens:
+            return
+        count = len(tokens)
+        if all(length == count for length in lengths.values()):
+            return
+        layer = getattr(self, "_mtp_layer", None)
+        snap = getattr(self, "_kv_snap", None)
+        if snap:
+            backbone = {index: item for index, item in snap.items() if index != layer}
+            if backbone and all(item[5] == count for item in backbone.values()):
+                self._restore_recurrent()
+        mtp = getattr(self, "_mtp_kv", None)
+        if (
+            mtp is not None
+            and layer in self.kv_len
+            and mtp[5] == count
+            and self.kv_len[layer] != count
+        ):
+            self._mtp_restore_kv()
+        if any(length != count for length in self.kv_len.values()):
+            return
+        logits = getattr(self, "last_logits", None)
+        if logits is not None and getattr(logits, "n", None) != getattr(self, "vocab", None):
+            self.last_logits = None
 
     def _persist_prefix(self, *, release_atlas: bool = True) -> None:
         """Write the last consistent sequence.
@@ -780,7 +825,6 @@ class Qwen38Runtime:
                     message = "the cached prefix has no logits"
                     raise RuntimeError(message)
                 logits = self.last_logits
-                _log("prefill 0 tok/s")
             else:
                 logits = self.forward(prompt[start:])
             tokens = list(self._new_tokens(logits, max_tokens, temperature, top_p, top_k))
@@ -802,6 +846,7 @@ class Qwen38Runtime:
         self._output_ids = []
         self._hit_limit = False
         self._begin_decode(max_tokens)
+        self._begin_drafts()
         # The first sampled token fills the atlas. Later tokens reuse it.
         self._atlas_trusted = False
         produced_ids: list[int] = []
@@ -812,22 +857,19 @@ class Qwen38Runtime:
                 if max_tokens is not None and produced >= max_tokens:
                     self._hit_limit = True
                     return
-                if len(self.tokens) + 1 > self.prompt_limit:
-                    self._hit_limit = True
-                    return
                 token = self._pick(logits, temperature, top_p, top_k, produced_ids)
                 if token in self.stop_ids:
                     return
-                room = self.prompt_limit - len(self.tokens)
+                room = getattr(self, "_draft_limit", 3) + 1
                 if max_tokens is not None:
-                    room = min(room, max_tokens - produced)
+                    room = max_tokens - produced
                 if room <= 0:
                     self._hit_limit = True
                     return
                 # Prefill logits keep that scratch alive. Drop them before decode arenas.
                 self.last_logits = None
                 logits = None
-                if self._mtp_on:
+                if self._mtp_drafts:
                     pending = self._mtp_cycle(
                         token, produced_ids, room, temperature, top_p, top_k
                     )
@@ -836,6 +878,10 @@ class Qwen38Runtime:
                 else:
                     pending = [token]
                     logits = self.forward([token], decode=True)
+                    # The backbone cache advanced with this token. The MTP
+                    # layer has to follow, or the next prefill finds it behind.
+                    if self._mtp_on:
+                        self._mtp_step(token, reuse=False, head=False)
                     stopped = False
                 for item in pending:
                     self._check_stop()
@@ -849,6 +895,25 @@ class Qwen38Runtime:
                     return
         finally:
             self._log_decode()
+
+    def _begin_drafts(self) -> None:
+        self._mtp_rates: list[float] = []
+        self._mtp_drafts = mtp_starts(len(self.tokens), loaded=bool(self._mtp_on))
+
+    def _note_draft_rate(self, tokens: int, seconds: float) -> None:
+        if not getattr(self, "_mtp_drafts", False) or tokens <= 0 or seconds <= 0:
+            return
+        rates = getattr(self, "_mtp_rates", None)
+        if rates is None:
+            return
+        rates.append(tokens / seconds)
+        if mtp_holds(rates):
+            return
+        self._mtp_drafts = False
+        progress = getattr(self, "_decode_progress", None)
+        if progress is not None and "mtp off" not in progress.detail:
+            progress.detail = f"{progress.detail} · mtp off" if progress.detail else "mtp off"
+        _log("mtp off")
 
     def _drop_prefill_progress(self) -> None:
         progress = getattr(self, "_prefill_progress", None)
@@ -1077,13 +1142,15 @@ class Qwen38Runtime:
                 request=self._request_id,
             )
         total = len(self.tokens) + len(tokens)
-        self._require_prompt_room(total)
         chunk = len(tokens) if decode else min(len(tokens), self.prefill_chunk)
         scratch = scratch_bytes(max(chunk, 1))
         if not decode and total > DENSE_LIMIT:
             blocks = max(total // INDEX_BLOCK, 1)
             scratch += chunk * blocks * 4 + chunk * INDEX_STRIDE * 4
+        self._rewind_uncommitted()
         self.gpu.begin_scratch(scratch, copies=2 if decode else 1)
+        if decode:
+            self._make_room_for_cache(len(tokens))
         self._prepare_experts(decode=decode, count=len(tokens))
         if self.atlas is not None:
             _fill_buffer(self.atlas.miss, self.layers * 4, 0)
@@ -1101,7 +1168,6 @@ class Qwen38Runtime:
                 if missed:
                     message = "prefill referenced an expert that was not loaded"
                     raise RuntimeError(message)
-                self._ensure_atlas()
             elif self.atlas is not None and self._expert_miss():
                 if not decode:
                     message = "prefill referenced an expert that was not loaded"
@@ -1620,6 +1686,7 @@ class Qwen38Runtime:
             gpu_elapsed = getattr(self, "_last_gpu", 0.0)
             self._decode_steps.append((elapsed, gpu_elapsed, resident))
             self._note_decode(resident)
+            self._note_draft_rate(count, elapsed)
 
         if len(drafts) == 0:
             self.forward([first], decode=True, account=False)
@@ -1849,13 +1916,69 @@ class Qwen38Runtime:
             return False
         return True
 
+    def _cache_covers(self, tokens: int) -> bool:
+        if tokens <= 0 or not self.kv_k:
+            return True
+        for layer, buf in self.kv_k.items():
+            need, _stride = self._kv_span(tokens)
+            value = self.kv_v.get(layer)
+            indexer = self.indexer_buf.get(layer)
+            if buf is None or int(buf.length()) < need:
+                return False
+            if value is None or int(value.length()) < need:
+                return False
+            if indexer is None or int(indexer.length()) < tokens * INDEX_BF16_BYTES:
+                return False
+        return True
+
+    def _make_room_for_cache(self, extra: int) -> None:
+        """Grow the cache before the atlas takes the memory that growth needs.
+
+        A sequence that no longer fits drops the atlas first. The next decode
+        allocates a smaller one from what remains.
+        """
+        end = len(self.tokens) + max(0, extra)
+        if self._cache_covers(end):
+            return
+        if self.atlas is not None:
+            self._release_atlas()
+        for layer in list(self.kv_k):
+            length = int(self.kv_len.get(layer, 0))
+            target = max(end, length)
+            if target > length:
+                self._grow_kv(layer, length, target - length)
+
+    def _live_atlas_candidates(self) -> tuple[int, ...]:
+        self.gpu.flush()
+        gc.collect()
+        layers = sum(kind == "full_attention" for kind in self.kinds)
+        if self._mtp_on:
+            layers += 1
+        per_token = kv_bytes_per_token(layers, cache=self.kv_cache)
+        growth = cache_growth_bytes(len(self.tokens), per_token)
+        budget = atlas_budget(
+            memory=machine_memory(),
+            content_bytes=getattr(self, "_tier_bytes", 0),
+            footprint=process_footprint(),
+            growth=growth,
+        )
+        return atlas_fallbacks(budget)
+
     def _ensure_atlas(self) -> None:
         if self._bf16 or self.atlas is not None:
             return
         if not isinstance(self.files, QuantRecord):
             return
+        candidates = self.resident_candidates
+        if not candidates:
+            candidates = self._live_atlas_candidates()
+            self.resident_budget = candidates[0]
+            _log(
+                f"resident atlas {self.resident_budget >> 20} MiB "
+                f"for {len(self.tokens)} tokens"
+            )
         self.atlas = ExpertAtlas(
-            self.gpu, self.files, self.layers, self.experts, self.resident_candidates
+            self.gpu, self.files, self.layers, self.experts, candidates
         )
 
     def _stage_budget(self) -> int:
