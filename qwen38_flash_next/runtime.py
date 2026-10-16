@@ -80,16 +80,12 @@ from qwen38_flash_next.session import (
     release_buffer,
 )
 from qwen38_flash_next.tools import (
-    answer_repeat_id,
     canonical_continuation,
     continuing_ids,
     forced_call_options,
     function_name_options,
-    looped_span,
     normalize_messages,
     penalty_ids,
-    repeated_cycle,
-    stuck_ids,
 )
 
 
@@ -245,10 +241,6 @@ class Qwen38Runtime:
         self._tier: Any = None
         self._narrow: ExpertPlanes | None = None
         self._atlas_trusted = False
-        self._avoid_token: int | None = None
-        self._avoid_until = 0
-        self._block_tokens: set[int] = set()
-        self._answer_mode = False
         self._presence_penalty = 0.0
         self._frequency_penalty = 0.0
         self._penalty_window = 20
@@ -277,8 +269,6 @@ class Qwen38Runtime:
         self._hold_cap = 0
         self._hot = expert_planes(4, self.hidden, self.moe)
         self._cold = expert_planes(2, self.hidden, self.moe)
-        self._super_planes = expert_planes(8, self.hidden, self.moe)
-        self._super_images: dict[tuple[int, int], Any] = {}
         self._int2_ids: Any = None
         self._int2_table: Any = None
         self._int2_miss: Any = None
@@ -337,6 +327,10 @@ class Qwen38Runtime:
             self._load_bf16()
         else:
             self.files = QuantRecord(root)
+            if self.files.hot_bits != 4 or self.files.cold_bits != 4 or self.files.narrow_bits:
+                self.files.close()
+                message = "this pipeline serves fp4 experts"
+                raise RuntimeError(message)
             self._hot = expert_planes(self.files.hot_bits, self.hidden, self.moe)
             self._cold = expert_planes(self.files.cold_bits, self.hidden, self.moe)
             self._narrow = (
@@ -344,10 +338,8 @@ class Qwen38Runtime:
                 if self.files.narrow_bits in (2, 4, 8)
                 else None
             )
-            self._super_planes = expert_planes(self.files.super_bits, self.hidden, self.moe)
             self._load_record()
             self._load_mtp()
-            self._load_supers()
             self._upload_tiers()
             self.routes = RouteScratch(self.layers, self.experts)
             state_bytes = 48 * 128 * 128 * 4
@@ -467,7 +459,6 @@ class Qwen38Runtime:
             "kv_v_tail",
             "indexer_buf",
             "_bundle",
-            "_super_images",
             "_f32_uploaded",
             "_gdn_shadow",
             "_conv_shadow",
@@ -551,7 +542,6 @@ class Qwen38Runtime:
         self._final = None
         self._head = None
         self._ple = None
-        self._super_images = {}
         self._f32_uploaded = {}
         self._choice = {}
         self.last_logits = None
@@ -1067,7 +1057,7 @@ class Qwen38Runtime:
         if not self._decode_reported:
             self._log_decode()
 
-    def _begin_decode(self, max_tokens: int | None) -> None:
+    def _begin_decode(self, _max_tokens: int | None) -> None:
         self._close_decode_row()
         self._decode_reported = False
         console = self.console
@@ -1077,7 +1067,7 @@ class Qwen38Runtime:
         detail = f"req #{self._request_id}" if self._request_id else ""
         self._decode_progress = console.begin(
             "decode",
-            total=0 if max_tokens is None else max_tokens,
+            total=0,
             unit="tok",
             detail=detail,
             request=self._request_id,
@@ -1134,25 +1124,6 @@ class Qwen38Runtime:
             constrained = self._constrained_name(logits, temperature, produced)
             if constrained is not None:
                 return constrained
-        if (
-            self._avoid_token is not None
-            and self._avoid_token not in produced
-            and len(produced) >= 512
-            and looped_span(produced)
-        ):
-            return self._avoid_token
-        fence_open = False
-        if (
-            self._avoid_token is not None
-            and self._avoid_token in produced
-            and len(produced) >= 16
-        ):
-            reply = self.decode(produced).split("</think>", 1)[-1]
-            fence_open = reply.count("```") % 2 == 1
-        banned = repeated_cycle(produced)
-        narrow = stuck_ids(produced)
-        closed = self._avoid_token is not None and self._avoid_token in produced
-        repeat = answer_repeat_id(produced) if self._answer_mode or closed else None
         penalized: list[int] = []
         penalty = 0.0
         if self._frequency_penalty and produced:
@@ -1161,55 +1132,16 @@ class Qwen38Runtime:
         elif self._presence_penalty and produced:
             penalized = penalty_ids(produced, self._penalty_window, once=True)
             penalty = self._presence_penalty
+        if not penalized:
+            return logits
         if isinstance(logits, Dev):
-            if penalized:
-                self.gpu.presence(logits, penalized, penalty)
-            if (
-                self._avoid_token is not None
-                and len(produced) < self._avoid_until
-                and self._avoid_token < logits.n
-            ):
-                self.gpu.suppress_logit(logits, self._avoid_token)
-            for token in self._block_tokens:
-                if token < logits.n:
-                    self.gpu.suppress_logit(logits, token)
-            if banned is not None and banned < logits.n:
-                self.gpu.suppress_logit(logits, banned)
-            for token in narrow:
-                if token < logits.n:
-                    self.gpu.suppress_logit(logits, token)
-            if repeat is not None and repeat < logits.n:
-                self.gpu.suppress_logit(logits, repeat)
-            if self._avoid_token is not None:
-                answered = 0
-                closed = self._avoid_token in produced
-                if closed:
-                    answered = len(produced) - 1 - produced.index(self._avoid_token)
-                hold_stop = (
-                    fence_open
-                    or (not closed and len(produced) < 64)
-                    or (closed and answered < 16)
-                )
-                if hold_stop:
-                    for stop in self.stop_ids:
-                        if stop < logits.n:
-                            self.gpu.suppress_logit(logits, stop)
-        elif penalized or banned is not None or narrow or self._block_tokens or repeat is not None:
-            logits = np.array(logits, copy=True)
-            for token in penalized:
-                if token < int(logits.size):
-                    logits[int(token)] -= penalty
-            if banned is not None and banned < int(logits.size):
-                logits[int(banned)] = -1.0e30
-            for token in narrow:
-                if token < int(logits.size):
-                    logits[int(token)] = -1.0e30
-            for token in self._block_tokens:
-                if token < int(logits.size):
-                    logits[int(token)] = -1.0e30
-            if repeat is not None and repeat < int(logits.size):
-                logits[int(repeat)] = -1.0e30
-        return logits
+            self.gpu.presence(logits, penalized, penalty)
+            return logits
+        adjusted = np.array(logits, copy=True)
+        for token in penalized:
+            if token < int(adjusted.size):
+                adjusted[int(token)] -= penalty
+        return adjusted
 
     def _constrained_name(self, logits: Dev, temperature: float, produced: list[int]) -> int | None:
         """The next id of a required opening, or a token that continues a declared name.
@@ -1708,14 +1640,7 @@ class Qwen38Runtime:
         return bool(options)
 
     def _draft_blocked(self, produced: list[int]) -> bool:
-        if self._name_constrained(produced):
-            return True
-        return bool(
-            self._avoid_token is not None
-            and self._avoid_token not in produced
-            and len(produced) >= 512
-            and looped_span(produced)
-        )
+        return self._name_constrained(produced)
 
     def _mtp_alloc(self, name: str, words: int) -> Any:
         buf = self.gpu.alloc(words * 4)
@@ -2271,6 +2196,7 @@ class Qwen38Runtime:
         if self.atlas is not None:
             self._refit_atlas()
             if self.atlas is not None:
+                self._seat_pins()
                 return
         candidates = self.resident_candidates
         if not candidates:
@@ -2285,6 +2211,26 @@ class Qwen38Runtime:
         self.atlas = ExpertAtlas(
             self.gpu, self.files, self.layers, self.experts, candidates
         )
+        self._seat_pins()
+
+    def _seat_pins(self) -> None:
+        """Load the pin list into the atlas and leave those images there.
+
+        They are fp4 experts in the layer file. The atlas does not evict them.
+        """
+        if self.atlas is None or not isinstance(self.files, QuantRecord):
+            return
+        pins = [
+            (layer, int(expert))
+            for layer, row in enumerate(self.files.super)
+            for expert in row
+        ]
+        if not pins:
+            return
+        self.atlas.pins.update(pins)
+        for layer, expert in pins:
+            if (layer, expert) not in self.atlas.resident:
+                self.atlas.stage(layer, [expert])
 
     def _prefill_workspace(self) -> int:
         """Residual and expert-hold bytes the upcoming prefill allocates beside the atlas."""
@@ -3374,7 +3320,6 @@ class Qwen38Runtime:
             running = self._prefill_tier(
                 layer, xs, weight, running, host_ids, count, members, planes
             )
-        running = self._prefill_super(layer, xs, weight, running, host_ids, count)
         running = self._keep_mixed(running, count)
         span = self.branches * self.hidden
         for offset in range(0, count, self.prefill_chunk):
@@ -3727,7 +3672,7 @@ class Qwen38Runtime:
                 slots,
                 planes,
             )
-        return self._decode_super(layer, row, running, ids, weight)
+        return running
 
     def _moe_decode_trusted(self, layer: int, xs: Dev, weight: Dev, shared: Dev) -> Dev:
         """Expert GEMVs from the device ids. The host does not read them between layers."""
@@ -3737,9 +3682,10 @@ class Qwen38Runtime:
         choice = Dev(self._choice_ids, self.top_k, layer * self.top_k)
         row = xs if xs.n == self.hidden else xs.view(0, self.hidden)
         shared_row = shared if shared.n == self.hidden else shared.view(0, self.hidden)
-        running = self._decode_tier_ids(layer, row, shared_row, choice, weight, self._hot, 0)
-        running = self._decode_tier_ids(layer, row, running, choice, weight, self._cold, 1)
-        return self._decode_super_trusted(layer, row, running, choice, weight)
+        running = shared_row
+        if self.files.hot_set(layer):
+            running = self._decode_tier_ids(layer, row, running, choice, weight, self._hot, 0)
+        return self._decode_tier_ids(layer, row, running, choice, weight, self._cold, 1)
 
     def _decode_tier_ids(
         self,
@@ -3792,41 +3738,6 @@ class Qwen38Runtime:
             tier=self._tier,
         )
 
-    def _decode_super_trusted(
-        self, layer: int, row: Dev, running: Dev, choice: Dev, weight: Dev
-    ) -> Dev:
-        if not isinstance(self.files, QuantRecord):
-            return running
-        pins = self.files.super[layer]
-        if not pins:
-            return running
-        running = self.gpu.copy_dev(running)
-        planes = self._super_planes
-        for expert in pins:
-            image = self._super_images[(layer, expert)]
-            gate = self._super_gemv(
-                row,
-                image,
-                planes.gate_rows,
-                planes.gate_inner,
-                0,
-                planes.gate_scale,
-                self.hidden,
-                half=False,
-            )
-            activated = self.gpu.moe_activate(gate, 1, self.moe, planes.down_inner)
-            down = self._super_gemv(
-                activated,
-                image,
-                self.hidden,
-                planes.down_inner,
-                planes.down_weight,
-                planes.down_scale,
-                self.moe,
-                half=True,
-            )
-            self.gpu.axpy_matching(running, down, weight, choice, expert)
-        return running
 
     def _decode_int8_atlas(
         self,
@@ -3938,13 +3849,14 @@ class Qwen38Runtime:
         if self.atlas is None:
             message = "span decode has no expert atlas"
             raise RuntimeError(message)
-        running = self._span_device_tier(
-            layer, xs, weight, shared, choice, count, self._hot, self.atlas.atlas, 0
-        )
-        running = self._span_device_tier(
+        running = shared
+        if self.files.hot_set(layer):
+            running = self._span_device_tier(
+                layer, xs, weight, running, choice, count, self._hot, self.atlas.atlas, 0
+            )
+        return self._span_device_tier(
             layer, xs, weight, running, choice, count, self._cold, self.atlas.atlas, 1
         )
-        return self._span_super_pins(layer, xs, weight, running, choice, count)
 
     def _span_device_tier(
         self,
@@ -4033,51 +3945,6 @@ class Qwen38Runtime:
         )
         return self.gpu.moe_scatter(shared, down, inverse, weight, count, self.top_k, self.hidden)
 
-    def _span_super_pins(
-        self,
-        layer: int,
-        xs: Dev,
-        weight: Dev,
-        running: Dev,
-        choice: Dev,
-        count: int,
-    ) -> Dev:
-        if not isinstance(self.files, QuantRecord):
-            return running
-        pins = self.files.super[layer]
-        if not pins:
-            return running
-        planes = self._super_planes
-        for token in range(count):
-            row = xs.view(token * self.hidden, self.hidden)
-            acc = running.view(token * self.hidden, self.hidden)
-            ids = choice.view(token * self.top_k, self.top_k)
-            scales = weight.view(token * self.top_k, self.top_k)
-            for expert in pins:
-                image = self._super_images[(layer, int(expert))]
-                gate = self._super_gemv(
-                    row,
-                    image,
-                    planes.gate_rows,
-                    planes.gate_inner,
-                    0,
-                    planes.gate_scale,
-                    self.hidden,
-                    half=False,
-                )
-                activated = self.gpu.moe_activate(gate, 1, self.moe, planes.down_inner)
-                down = self._super_gemv(
-                    activated,
-                    image,
-                    self.hidden,
-                    planes.down_inner,
-                    planes.down_weight,
-                    planes.down_scale,
-                    self.moe,
-                    half=True,
-                )
-                self.gpu.axpy_matching(acc, down, scales, ids, int(expert))
-        return running
 
     def _moe_span(
         self,
@@ -4145,7 +4012,7 @@ class Qwen38Runtime:
                 table_base,
                 miss,
             )
-        return self._span_super(layer, xs, weight, running, host_ids, count)
+        return running
 
     def _span_tier(
         self,
@@ -4257,93 +4124,6 @@ class Qwen38Runtime:
             shared, down, inverse_buf, weight, count, self.top_k, self.hidden
         )
 
-    def _span_super(
-        self,
-        layer: int,
-        xs: Dev,
-        weight: Dev,
-        shared: Dev,
-        host_ids: np.ndarray,
-        count: int,
-    ) -> Dev:
-        if not isinstance(self.files, QuantRecord) or not self.files.super_set(layer):
-            return shared
-        experts, offsets, tokens, inverse = group_tier(
-            host_ids, count, self.top_k, self.files.super_set(layer)
-        )
-        if int(experts.size) == 0:
-            return shared
-        planes = self._super_planes
-        if planes.bits not in (4, 8):
-            message = f"span decode does not support width {planes.bits}"
-            raise RuntimeError(message)
-        if self.atlas is None:
-            message = "span decode has no expert atlas"
-            raise RuntimeError(message)
-        if getattr(self, "_span_base", None) is None:
-            self._span_base = self.gpu.zeros(8)
-        n_assign = int(tokens.size)
-        partial = self.gpu.tmp(n_assign * self.hidden)
-        gate_kernel = "moe_span_fp4_gate" if planes.bits == 4 else "moe_span_fp8_gate"
-        down_kernel = "moe_span_fp4_down" if planes.bits == 4 else "moe_span_fp8_down"
-        logical = None if planes.bits == 4 else self.hidden
-        down_logical = None if planes.bits == 4 else self.moe
-        one = self._upload_u32(np.asarray([0], dtype=np.uint32))
-        for index, expert in enumerate(experts.tolist()):
-            start = int(offsets[index])
-            stop = int(offsets[index + 1])
-            picked = np.asarray(tokens[start:stop], dtype=np.uint32)
-            n = int(picked.size)
-            token_buf = self._upload_u32(picked)
-            bounds = self._upload_u32(np.asarray([0, n], dtype=np.uint32))
-            image = self._super_images[(layer, int(expert))]
-            gathered = self.gpu.gather_rows_f32(
-                xs, token_buf, n, self.hidden, planes.gate_inner
-            )
-            gate = self.gpu.span(n * planes.gate_rows * 4)
-            self.gpu.moe_grouped(
-                gathered,
-                image,
-                self._span_base,
-                one,
-                bounds,
-                gate,
-                self.atlas.miss,
-                1,
-                0,
-                planes.gate_rows,
-                planes.gate_inner,
-                0,
-                planes.gate_scale,
-                layer,
-                kernel=gate_kernel,
-                logical=logical,
-            )
-            activated = self.gpu.moe_activate(gate, n, self.moe, planes.down_inner)
-            down = self.gpu.span(n * self.hidden * 4)
-            self.gpu.moe_grouped(
-                activated,
-                image,
-                self._span_base,
-                one,
-                bounds,
-                down,
-                self.atlas.miss,
-                1,
-                0,
-                self.hidden,
-                planes.down_inner,
-                planes.down_weight,
-                planes.down_scale,
-                layer,
-                kernel=down_kernel,
-                logical=down_logical,
-            )
-            placed = Dev(down.buf, n * self.hidden, down.offset // 4)
-            self.gpu.copy_into(placed, partial, start * self.hidden)
-        return self.gpu.moe_scatter(
-            shared, partial, self._upload_u32(inverse), weight, count, self.top_k, self.hidden
-        )
 
     def _moe_grouped(
         self,
@@ -4389,7 +4169,7 @@ class Qwen38Runtime:
                 table_base,
                 miss,
             )
-        return self._prefill_super(layer, xs, weight, mixed, host_ids, count)
+        return mixed
 
     def _moe_tier(
         self,
@@ -4473,7 +4253,8 @@ class Qwen38Runtime:
             for expert in self.files.cold_set(layer):
                 raw[base + expert] = 1
             for expert in self.files.super_set(layer):
-                raw[base + expert] = 2
+                if expert not in self.files.cold_set(layer):
+                    raw[base + expert] = 2
             for expert in self.files.narrow_set(layer):
                 raw[base + expert] = 3
         self._tier = self.gpu.upload(bytes(raw))
@@ -4506,188 +4287,6 @@ class Qwen38Runtime:
         if self.routes is not None:
             self.routes.note_decode(ids.reshape(self.layers, 1, self.top_k))
 
-    def _super_gemv(
-        self,
-        activation: Any,
-        image: Any,
-        cols: int,
-        stored: int,
-        weight_off: int,
-        scale_off: int,
-        logical: int,
-        *,
-        half: bool,
-    ) -> Dev:
-        planes = self._super_planes
-        if planes.bits == 8:
-            return self.gpu.gemv_int8(
-                activation,
-                image,
-                cols,
-                stored,
-                weight_off,
-                scale_off,
-                logical,
-                half=half,
-            )
-        if planes.bits == 4:
-            return self.gpu.gemv_fp4(
-                activation,
-                image,
-                cols,
-                stored,
-                weight_off,
-                scale_off,
-                logical,
-                half=half,
-            )
-        if planes.bits != 2:
-            message = f"super width {planes.bits} is not 2, 4, or 8"
-            raise RuntimeError(message)
-        return self._super_int2(activation, image, cols, stored, weight_off, scale_off, half=half)
-
-    def _super_int2(
-        self,
-        activation: Any,
-        image: Any,
-        cols: int,
-        stored: int,
-        weight_off: int,
-        scale_off: int,
-        *,
-        half: bool,
-    ) -> Dev:
-        if self._int2_ids is None:
-            self._int2_ids = self.gpu.dev_u32([0])
-            self._int2_table = self.gpu.zeros(8)
-            self._int2_miss = self.gpu.zeros(4)
-            self._int2_one = self.gpu.dev_from(np.array([1.0], dtype=np.float32))
-        if half:
-            shared = self.gpu.zeros(cols * 4)
-            return self.gpu.moe_decode_down_int2(
-                activation,
-                image,
-                self._int2_table,
-                self._int2_ids,
-                self._int2_one,
-                shared,
-                1,
-                0,
-                cols,
-                stored,
-                weight_off,
-                scale_off,
-                self._int2_miss,
-                0,
-            )
-        return self.gpu.moe_decode_gate_int2(
-            activation,
-            image,
-            self._int2_table,
-            self._int2_ids,
-            1,
-            0,
-            cols,
-            stored,
-            weight_off,
-            scale_off,
-            self._int2_miss,
-            0,
-        )
-
-    def _load_supers(self) -> None:
-        if not isinstance(self.files, QuantRecord):
-            return
-        for layer, row in enumerate(self.files.super):
-            for expert in row:
-                image = self.files.expert_image(layer, expert)
-                self._super_images[(layer, expert)] = self.gpu.upload_resident(image)
-
-    def _decode_super(
-        self, layer: int, row: Dev, running: Dev, ids: list[int], weight: Dev
-    ) -> Dev:
-        hits = [slot for slot, expert in enumerate(ids) if (layer, expert) in self._super_images]
-        if not hits:
-            return running
-        running = self.gpu.copy_dev(running)
-        planes = self._super_planes
-        for slot in hits:
-            image = self._super_images[(layer, ids[slot])]
-            gate = self._super_gemv(
-                row,
-                image,
-                planes.gate_rows,
-                planes.gate_inner,
-                0,
-                planes.gate_scale,
-                self.hidden,
-                half=False,
-            )
-            activated = self.gpu.moe_activate(gate, 1, self.moe, planes.down_inner)
-            down = self._super_gemv(
-                activated,
-                image,
-                self.hidden,
-                planes.down_inner,
-                planes.down_weight,
-                planes.down_scale,
-                self.moe,
-                half=True,
-            )
-            self.gpu.axpy(running, down, weight, slot)
-        return running
-
-    def _prefill_super(
-        self,
-        layer: int,
-        xs: Dev,
-        weight: Dev,
-        shared: Dev,
-        host_ids: np.ndarray,
-        count: int,
-    ) -> Dev:
-        if not isinstance(self.files, QuantRecord) or not self.files.super_set(layer):
-            return shared
-        experts, offsets, tokens, inverse = group_tier(
-            host_ids, count, self.top_k, self.files.super_set(layer)
-        )
-        if int(experts.size) == 0:
-            return shared
-        planes = self._super_planes
-        n_assign = int(tokens.size)
-        partial = self.gpu.tmp(n_assign * self.hidden)
-        for index, expert in enumerate(experts.tolist()):
-            start = int(offsets[index])
-            stop = int(offsets[index + 1])
-            image = self._super_images[(layer, int(expert))]
-            for assign in range(start, stop):
-                token = int(tokens[assign])
-                token_row = xs.view(token * self.hidden, self.hidden)
-                gate = self._super_gemv(
-                    token_row,
-                    image,
-                    planes.gate_rows,
-                    planes.gate_inner,
-                    0,
-                    planes.gate_scale,
-                    self.hidden,
-                    half=False,
-                )
-                activated = self.gpu.moe_activate(gate, 1, self.moe, planes.down_inner)
-                down = self._super_gemv(
-                    activated,
-                    image,
-                    self.hidden,
-                    planes.down_inner,
-                    planes.down_weight,
-                    planes.down_scale,
-                    self.moe,
-                    half=True,
-                )
-                self.gpu.copy_into(down, partial, assign * self.hidden)
-        return self.gpu.moe_scatter(
-            shared, partial, self._upload_u32(inverse), weight, count, self.top_k, self.hidden
-        )
 
     def _upload_u32(self, values: np.ndarray) -> Any:
         raw = np.ascontiguousarray(values, dtype=np.uint32).tobytes()

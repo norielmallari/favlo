@@ -75,6 +75,7 @@ class Selection:
     kv_cache: str
     resident_percent: float | None
     enable_thinking: bool | None
+    max_prompt_tokens: int | None
 
 
 def load_registry(root: Path | None = None) -> dict[str, Any]:
@@ -145,6 +146,7 @@ def add_model(
     root: Path | None = None,
     pipeline: str,
     variants: dict[str, dict[str, float | int]] | None = None,
+    max_prompt_tokens: int | None = None,
 ) -> dict[str, Any]:
     data = load_registry(root)
     path = models_dir(root) / folder
@@ -154,7 +156,11 @@ def add_model(
         message = f"{folder} is already registered"
         raise ValueError(message)
     data["models"][folder] = _entry(
-        alias=alias, source=source, pipeline=pipeline, variants=variants
+        alias=alias,
+        source=source,
+        pipeline=pipeline,
+        variants=variants,
+        max_prompt_tokens=max_prompt_tokens,
     )
     save_registry(data, root)
     return data
@@ -180,6 +186,7 @@ def register_quantized(
     root: Path | None = None,
     pipeline: str,
     variants: dict[str, dict[str, float | int]] | None = None,
+    max_prompt_tokens: int | None = None,
 ) -> None:
     """Write or update the entry for a record this quantize just produced."""
     data = load_registry(root)
@@ -189,14 +196,25 @@ def register_quantized(
     if current is not None:
         stored = current.get("source")
         if stored and _same_path(stored, source):
+            changed = False
             if alias is not None:
                 current["alias"] = alias
+                changed = True
+            if max_prompt_tokens is not None:
+                current["max_prompt_tokens"] = max_prompt_tokens
+                current.pop("max_tokens", None)
+                changed = True
+            if changed:
                 save_registry(data, root)
             return
         message = f"{folder} is already registered for a different source"
         raise ValueError(message)
     data["models"][folder] = _entry(
-        alias=alias, source=source_text, pipeline=pipeline, variants=variants
+        alias=alias,
+        source=source_text,
+        pipeline=pipeline,
+        variants=variants,
+        max_prompt_tokens=max_prompt_tokens,
     )
     save_registry(data, root)
 
@@ -301,6 +319,13 @@ def choose_complete(
     raise LookupError(message)
 
 
+def _max_prompt_tokens(entry: dict[str, Any]) -> int | None:
+    cap = entry.get("max_prompt_tokens")
+    if isinstance(cap, bool) or not isinstance(cap, int):
+        return None
+    return cap
+
+
 def _pipeline_name(entry: dict[str, Any], folder: str) -> str:
     pipeline = entry.get("pipeline")
     if not isinstance(pipeline, str) or not pipeline:
@@ -315,8 +340,9 @@ def _entry(
     source: str | None,
     pipeline: str,
     variants: dict[str, dict[str, float | int]] | None = None,
+    max_prompt_tokens: int | None = None,
 ) -> dict[str, Any]:
-    return {
+    entry = {
         "pipeline": pipeline,
         "alias": alias,
         "source": source,
@@ -324,6 +350,9 @@ def _entry(
         "resident_percent": None,
         "variants": card_variants() if variants is None else variants,
     }
+    if max_prompt_tokens is not None:
+        entry["max_prompt_tokens"] = max_prompt_tokens
+    return entry
 
 
 def _require_complete(path: Path) -> None:
@@ -411,6 +440,7 @@ def _selection(
         kv_cache=str(entry.get("kv_cache") or "e4m3"),
         resident_percent=None if percent is None else float(percent),
         enable_thinking=thinking,
+        max_prompt_tokens=_max_prompt_tokens(entry),
     )
 
 
@@ -436,6 +466,9 @@ def _object(
         "pipeline": _pipeline_name(entry, folder),
         "loaded": resident == folder,
     }
+    cap = _max_prompt_tokens(entry)
+    if cap is not None:
+        row["max_prompt_tokens"] = cap
     if variant is not None:
         row["parent"] = parent if ":" not in model_id else model_id.split(":", 1)[0]
         row["variant"] = variant

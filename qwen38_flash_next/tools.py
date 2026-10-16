@@ -130,68 +130,6 @@ def penalty_ids(ids: Sequence[int], window: int, *, once: bool) -> list[int]:
     return [int(token) for token in span]
 
 
-def looped_span(ids: Sequence[int], length: int = 12) -> bool:
-    """Whether the last `length` tokens have already occurred three times."""
-    count = len(ids)
-    if length < 1 or count < length * 3:
-        return False
-    tail = tuple(ids[-length:])
-    found = 0
-    for start in range(count - length + 1):
-        if tuple(ids[start : start + length]) == tail:
-            found += 1
-            if found >= 3:
-                return True
-    return False
-
-
-def answer_repeat_id(ids: Sequence[int], length: int = 12) -> int | None:
-    """First id of a span that has already occurred three times.
-
-    Instruct mode removes that id from the next draw. An open think uses
-    ``looped_span`` to close the block instead.
-    """
-    if not looped_span(ids, length):
-        return None
-    return int(ids[-length])
-
-
-def repeated_cycle(ids: Sequence[int]) -> int | None:
-    """The next id of a token span that has already been emitted three times."""
-    count = len(ids)
-    for length in range(48, 0, -1):
-        if count < length * 3:
-            continue
-        cycle = ids[-length:]
-        if ids[-2 * length : -length] != cycle:
-            continue
-        if ids[-3 * length : -2 * length] != cycle:
-            continue
-        return int(cycle[0])
-    return None
-
-
-def stuck_ids(ids: Sequence[int]) -> list[int]:
-    """Ids in a recent window that uses only a handful of distinct tokens."""
-    if len(ids) < 24:
-        return []
-    window = list(ids[-24:])
-    distinct = set(window)
-    if len(distinct) > 8:
-        return []
-        return []
-    return [int(token) for token in distinct]
-
-
-def tail_repeats(text: str) -> bool:
-    """Whether the last 80 characters already appeared in the recent text."""
-    compact = " ".join(text.split())
-    if len(compact) < 160:
-        return False
-    tail = compact[-80:]
-    return tail in compact[-800:-80]
-
-
 def split_thinking(text: str, thinking: bool) -> tuple[str, str]:
     """Reasoning and reply from one completion string."""
     gate = ThinkStream(thinking)

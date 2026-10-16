@@ -103,6 +103,7 @@ def quantize_main(args: Any) -> int:
             source=source,
             alias=getattr(args, "alias", None),
             pipeline=PIPELINE,
+            max_prompt_tokens=DEFAULT_MAX_PROMPT_TOKENS,
         )
         finished = True
     except Exception as exc:
@@ -363,6 +364,7 @@ INSTRUCT_TEMPERATURE = 0.7
 INSTRUCT_TOP_P = 0.8
 INSTRUCT_TOP_K = 20
 INSTRUCT_PRESENCE = 1.5
+DEFAULT_MAX_PROMPT_TOKENS = 65536
 
 
 def _stream_delta(decoded: str, shown: str, *, final: bool) -> tuple[str, str]:
@@ -457,27 +459,11 @@ def _presence(body: dict[str, Any], thinking: bool, default: float | None = None
 def _arm_sampler(
     runtime: Any,
     *,
-    thinking: bool,
     presence: float,
     frequency: float,
     window: int,
 ) -> None:
-    """Think-tag mask and penalties for one completion."""
-    close = runtime.tokenizer.encode("</think>").ids
-    opened = runtime.tokenizer.encode("<think>").ids
-    runtime._answer_mode = not thinking
-    if thinking and len(close) == 1:
-        runtime._avoid_token = int(close[0])
-        runtime._avoid_until = 8
-        runtime._block_tokens = set()
-    elif not thinking and len(opened) == 1:
-        runtime._avoid_token = None
-        runtime._avoid_until = 0
-        runtime._block_tokens = {int(opened[0])}
-    else:
-        runtime._avoid_token = None
-        runtime._avoid_until = 0
-        runtime._block_tokens = set()
+    """Penalties from the request. The draw is otherwise the model's."""
     runtime._presence_penalty = presence
     runtime._frequency_penalty = frequency
     runtime._penalty_window = window
@@ -490,7 +476,6 @@ def _arm_cli(runtime: Any, args: Any) -> None:
     thinking = bool(args.thinking)
     _arm_sampler(
         runtime,
-        thinking=thinking,
         presence=0.0 if thinking else INSTRUCT_PRESENCE,
         frequency=0.0,
         window=PENALTY_WINDOW,
@@ -546,7 +531,7 @@ def _penalty_window(body: dict[str, Any]) -> int:
 
 
 def _request_limit(body: dict[str, Any]) -> int | None:
-    """A missing cap runs until a stop id. Zero is a cap of zero, not a missing cap."""
+    """Output tokens the request asked for. An omission leaves generation uncapped."""
     if "max_tokens" in body and body["max_tokens"] is not None:
         return int(body["max_tokens"])
     if "max_completion_tokens" in body and body["max_completion_tokens"] is not None:
@@ -563,6 +548,7 @@ def _completion(
     reasoning: str = "",
     runtime: Any = None,
     model: str = "qwen38-flash-next",
+    max_prompt_tokens: int | None = None,
 ) -> dict[str, Any]:
     message: dict[str, Any] = {"role": "assistant", "content": text}
     if reasoning:
@@ -570,7 +556,7 @@ def _completion(
     if tool_calls:
         message["tool_calls"] = tool_calls
         finish_reason = "tool_calls"
-    return {
+    body = {
         "id": "chatcmpl-madmetal",
         "object": "chat.completion",
         "created": int(time.time()),
@@ -582,17 +568,24 @@ def _completion(
                 "finish_reason": finish_reason,
             }
         ],
-        "usage": _usage(runtime, prompt_tokens, completion_tokens, model),
+        "usage": _usage(runtime, prompt_tokens, completion_tokens, max_prompt_tokens),
     }
+    if max_prompt_tokens is not None:
+        body["max_prompt_tokens"] = max_prompt_tokens
+    return body
 
 
-def _usage(runtime: Any, prompt_tokens: int, completion_tokens: int, model: str) -> dict[str, Any]:
-    del model
+def _usage(
+    runtime: Any,
+    prompt_tokens: int,
+    completion_tokens: int,
+    max_prompt_tokens: int | None = None,
+) -> dict[str, Any]:
     cached = int(getattr(runtime, "_cached_tokens", 0) or 0)
     prompt_n = max(0, prompt_tokens - cached)
     prefill_s = float(getattr(runtime, "_prefill_seconds", 0.0) or 0.0)
     decode_s = float(getattr(runtime, "_decode_seconds", 0.0) or 0.0)
-    return {
+    usage = {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": prompt_tokens + completion_tokens,
@@ -603,6 +596,9 @@ def _usage(runtime: Any, prompt_tokens: int, completion_tokens: int, model: str)
             "predicted_n": completion_tokens,
         },
     }
+    if max_prompt_tokens is not None:
+        usage["max_prompt_tokens"] = max_prompt_tokens
+    return usage
 
 
 def _finish_turn(ui: Console, runtime: Qwen38Runtime) -> None:
@@ -690,6 +686,11 @@ def handle_chat(
         else:
             enable_thinking = _enable_thinking(body)
         max_tokens = _request_limit(body)
+        prompt_cap = DEFAULT_MAX_PROMPT_TOKENS
+        if selection is not None:
+            stored = getattr(selection, "max_prompt_tokens", None)
+            if isinstance(stored, int):
+                prompt_cap = stored
         variant = selection.sampling if selection is not None else None
         temperature, top_p, top_k = _sampling(body, enable_thinking, variant)
         presence_default = None
@@ -703,7 +704,6 @@ def handle_chat(
         frequency = body.get("frequency_penalty")
         _arm_sampler(
             runtime,
-            thinking=enable_thinking,
             presence=_presence(body, enable_thinking, presence_default),
             frequency=0.0 if frequency is None else float(frequency),
             window=_penalty_window(body),
@@ -728,6 +728,7 @@ def handle_chat(
                     _prompt_text(messages),
                     enable_thinking,
                     args,
+                    prompt_cap,
                 )
             else:
                 tokens = runtime.generate(prompt, max_tokens, temperature, top_p, top_k)
@@ -752,6 +753,7 @@ def handle_chat(
                         reasoning if enable_thinking else "",
                         runtime,
                         handler._model_id,
+                        prompt_cap,
                     ),
                 )
             finished = True
@@ -780,6 +782,7 @@ def _stream_chat(
     prompt_text: str,
     enable_thinking: bool,
     args: Any,
+    max_prompt_tokens: int | None = None,
 ) -> None:
     handler._started = True
     handler.close_connection = True
@@ -880,11 +883,12 @@ def _stream_chat(
     event(
         {
             "choices": [],
+            "max_prompt_tokens": max_prompt_tokens,
             "usage": _usage(
                 runtime,
                 len(prompt),
                 len(getattr(runtime, "_output_ids", []) or []),
-                handler._model_id,
+                max_prompt_tokens,
             ),
         }
     )
@@ -900,7 +904,13 @@ def models_main(args: Any) -> int:
     command = getattr(args, "models_command", None)
     try:
         if command == "add":
-            add_model(args.folder, alias=args.alias, source=args.source, pipeline=PIPELINE)
+            add_model(
+                args.folder,
+                alias=args.alias,
+                source=args.source,
+                pipeline=PIPELINE,
+                max_prompt_tokens=DEFAULT_MAX_PROMPT_TOKENS,
+            )
         elif command == "alias":
             set_alias(args.folder, args.alias)
         listing = format_listing()

@@ -214,9 +214,6 @@ class QuantRecord:
             mapping: dict[int, tuple[int, int]] = {}
             cold: set[int] = set()
             for expert in range(experts):
-                if expert in pin_set:
-                    mapping[expert] = (2, expert)
-                    continue
                 mapping[expert] = (1, expert)
                 cold.add(expert)
             self._super_sets.append(pin_set)

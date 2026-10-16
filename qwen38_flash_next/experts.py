@@ -125,6 +125,7 @@ class ExpertAtlas:
         self.table = gpu.alloc(layers * experts * 8)
         _fill_buffer(self.table, layers * experts * 8, 0xFF)
         self.miss = gpu.zeros(layers * 4)
+        self.pins: set[tuple[int, int]] = set()
         self.resident: dict[tuple[int, int], int] = {}
         self.expert_run: dict[tuple[int, int], tuple[int, int, int, int]] = {}
         self.runs: OrderedDict[tuple[int, int, int, int], tuple[int, int]] = OrderedDict()
@@ -217,7 +218,7 @@ class ExpertAtlas:
         """
         if nbytes <= 0 or self.atlas is None:
             return 0
-        held = set(protect or ())
+        held = self._guard(protect)
         freed = 0
         for _ in range(len(self.runs) + 1):
             if freed >= nbytes:
@@ -301,8 +302,15 @@ class ExpertAtlas:
             return offset
         return -1
 
+    def _guard(self, protect: set[tuple[int, int]] | None) -> set[tuple[int, int]]:
+        """Pinned experts stay. A caller can protect more for this load."""
+        held = set(self.pins)
+        if protect:
+            held.update(protect)
+        return held
+
     def _evict(self, protect: set[tuple[int, int]], span: int) -> bool:
-        key = self.eviction.victim(protect, self.run_members, span)
+        key = self.eviction.victim(self._guard(protect), self.run_members, span)
         if key is None or key not in self.runs:
             return False
         self._free_run(key)
@@ -311,7 +319,7 @@ class ExpertAtlas:
     def _relieve(self) -> None:
         """Apply quick demotion while the byte budget still has room."""
         for _ in range(len(self.runs) + 1):
-            key = self.eviction.relieve(set(), self.run_members)
+            key = self.eviction.relieve(self._guard(None), self.run_members)
             if key is None or key not in self.runs:
                 return
             self._free_run(key)

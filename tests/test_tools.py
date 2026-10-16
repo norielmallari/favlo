@@ -7,12 +7,9 @@ from qwen38_flash_next.formats import DEFAULT_RECORD
 from qwen38_flash_next.tools import (
     ContentGate,
     ThinkStream,
-    answer_repeat_id,
-    looped_span,
     normalize_messages,
     parse_tool_calls,
     penalty_ids,
-    repeated_cycle,
     split_thinking,
 )
 
@@ -234,39 +231,6 @@ def test_penalty_ids_use_the_recent_window() -> None:
     assert penalty_ids([1, 2, 1, 2], 20, once=True) == [1, 2]
     assert penalty_ids([1, 2, 1, 2], 20, once=False) == [1, 2, 1, 2]
     assert penalty_ids(ids, 0, once=True) == ids
-
-
-def test_repeated_cycle_is_the_next_token_of_the_span() -> None:
-    cycle = [4, 5, 6, 7, 8, 9]
-    assert repeated_cycle(cycle * 3) == 4
-    assert repeated_cycle(cycle * 2 + [4]) is None
-    assert repeated_cycle([1, 1, 1]) == 1
-    assert repeated_cycle([1, 1]) is None
-    assert repeated_cycle([7, 8, 7, 8, 7, 8]) == 7
-
-
-def test_looped_span_needs_three_copies() -> None:
-    phrase = list(range(12))
-    assert looped_span(phrase * 2) is False
-    assert looped_span(phrase * 3) is True
-    assert looped_span(list(range(40))) is False
-    assert answer_repeat_id(phrase * 2) is None
-    assert answer_repeat_id(phrase * 3) == 0
-
-
-def test_stuck_ids_are_the_small_recent_set() -> None:
-    from qwen38_flash_next.tools import stuck_ids
-
-    assert set(stuck_ids([1, 2, 3] * 8)) == {1, 2, 3}
-    assert stuck_ids(list(range(24))) == []
-
-
-def test_tail_repeats_when_the_ending_already_appeared() -> None:
-    from qwen38_flash_next.tools import tail_repeats
-
-    phrase = "The question is from Mara Voss and the buoy stays blue. "
-    assert tail_repeats(phrase * 4)
-    assert not tail_repeats("The ninth buoy is blue and the name is Mara Ellison Voss.")
 
 
 def test_split_thinking_keeps_reasoning_when_the_tag_is_missing() -> None:

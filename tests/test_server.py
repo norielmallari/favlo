@@ -358,14 +358,15 @@ def _signal_server(sig: int, *, during_request: bool) -> None:
 
 def test_usage_excludes_the_cached_prefix() -> None:
     runtime = SimpleNamespace(_cached_tokens=900, _prefill_seconds=2.0, _decode_seconds=4.0)
-    usage = commands._usage(runtime, 1187, 480, "qwen38-flash-next")
+    usage = commands._usage(runtime, 1187, 480, commands.DEFAULT_MAX_PROMPT_TOKENS)
     timings = usage["timings"]
     assert usage["prompt_tokens"] == 1187
     assert timings["prompt_n"] == 287
     assert timings["predicted_n"] == 480
     assert timings["prompt_per_second"] == 143.5
     assert timings["predicted_per_second"] == 120.0
-    idle = commands._usage(SimpleNamespace(), 10, 4, "qwen38-flash-next")
+    assert usage["max_prompt_tokens"] == commands.DEFAULT_MAX_PROMPT_TOKENS
+    idle = commands._usage(SimpleNamespace(), 10, 4)
     assert idle["timings"]["prompt_per_second"] == 0.0
     assert idle["timings"]["predicted_per_second"] == 0.0
     assert idle["timings"]["prompt_n"] == 10
@@ -441,8 +442,8 @@ def test_sigterm_releases_the_listening_socket() -> None:
 def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
     opened: list[_Runtime] = []
 
-    def opener(selection, console):
-        del console
+    def opener(selection, console, max_memory=None):
+        del console, max_memory
         runtime = _Runtime()
         runtime._name = selection.pipeline
         opened.append(runtime)

@@ -825,7 +825,7 @@ def test_a_closed_client_does_not_print_a_traceback(capsys: pytest.CaptureFixtur
         server.server_close()
 
 
-def test_omitted_max_tokens_runs_until_stop() -> None:
+def test_omitted_output_limit_is_uncapped() -> None:
     import qwen38_flash_next.commands as commands
 
     assert commands._request_limit({}) is None
@@ -1129,8 +1129,9 @@ def test_the_next_request_does_not_keep_the_previous_decode_row() -> None:
     runtime, console, stream = _decode_runtime()
     runtime._begin_decode(None)
     runtime._request_id = 6
-    runtime._begin_decode(None)
+    runtime._begin_decode(65536)
     assert [item.request for item in console._handles] == [6]
+    assert console._handles[0].total == 0
     assert "decode 3.23 tok/s (129 tok in 40.00s)" in stream.getvalue()
     runtime._log_decode()
     runtime._close_decode_row()
@@ -1256,11 +1257,11 @@ def test_quant_layout_reads_an_expert_at_its_id(tmp_path) -> None:
     record = QuantRecord(tmp_path)
     try:
         assert record.tier_row(0, 0) == (1, 0)
-        assert record.tier_row(0, 1) == (2, 1)
+        assert record.tier_row(0, 1) == (1, 1)
         assert record.expert_image(0, 0)[:4] == b"aaaa"
         assert record.expert_image(0, 1)[:4] == b"bbbb"
         assert record.hot_set(0) == set()
-        assert 0 in record.cold_set(0)
+        assert record.cold_set(0) == {0, 1}
         assert 1 in record.super_set(0)
     finally:
         record.close()

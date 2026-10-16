@@ -82,6 +82,36 @@ def test_listing_includes_folder_alias_and_variants(tmp_path) -> None:
     assert thinking["sampling"]["top_k"] == 20
 
 
+def test_registration_stores_the_passed_max_prompt_tokens(tmp_path) -> None:
+    _record(tmp_path, "packed")
+    add_model("packed", root=tmp_path, pipeline=PIPELINE, max_prompt_tokens=65536)
+    assert load_registry(tmp_path)["models"]["packed"]["max_prompt_tokens"] == 65536
+    source = tmp_path / "bf16"
+    source.mkdir()
+    _record(tmp_path, "again")
+    register_quantized(
+        "again",
+        source=source,
+        alias=None,
+        root=tmp_path,
+        pipeline=PIPELINE,
+        max_prompt_tokens=65536,
+    )
+    assert load_registry(tmp_path)["models"]["again"]["max_prompt_tokens"] == 65536
+
+
+def test_model_row_includes_configured_max_prompt_tokens(tmp_path) -> None:
+    _record(tmp_path, "packed")
+    add_model("packed", alias="short", root=tmp_path, pipeline=PIPELINE)
+    data = load_registry(tmp_path)
+    data["models"]["packed"]["max_prompt_tokens"] = 65536
+    save_registry(data, tmp_path)
+    rows = model_objects(tmp_path)
+    assert rows
+    assert all(row["max_prompt_tokens"] == 65536 for row in rows)
+    assert resolve("short", root=tmp_path).max_prompt_tokens == 65536
+
+
 def test_a_finished_record_stays_unregistered(tmp_path) -> None:
     folder = "Qwen3.8-Flash-Next-madmetal-h128-fp4-c384-fp4"
     _record(tmp_path, folder)

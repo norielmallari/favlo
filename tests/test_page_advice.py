@@ -95,6 +95,23 @@ def test_atlas_unused_bytes_can_be_released_and_filled_again() -> None:
     assert bytes(view[0:4]) == b"img!"
 
 
+def test_a_pinned_expert_stays_when_the_caller_does_not_protect_it() -> None:
+    gpu = _Gpu(PAGE * 8)
+    atlas = ExpertAtlas(gpu, None, 1, 4, candidates=(PAGE * 8,))
+    atlas.pins.add((0, 1))
+    for expert in range(3):
+        offset = atlas._alloc_span(PAGE, set())
+        key = (0, 0, expert, expert)
+        atlas.runs[key] = (offset, PAGE)
+        atlas.run_members[key] = (expert,)
+        atlas.resident[(0, expert)] = offset
+        atlas.expert_run[(0, expert)] = key
+        atlas.eviction.insert(key, PAGE)
+    freed = atlas.evict_bytes(PAGE * 3, set())
+    assert freed >= PAGE
+    assert (0, 1) in atlas.resident
+
+
 def test_evict_bytes_drops_victims_and_keeps_the_atlas() -> None:
     gpu = _Gpu(PAGE * 8)
     atlas = ExpertAtlas(gpu, None, 1, 4, candidates=(PAGE * 8,))
