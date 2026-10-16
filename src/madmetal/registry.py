@@ -14,7 +14,8 @@ from typing import Any
 
 VARIANTS = ("thinking", "instruct")
 
-# Qwen3.8-Flash-Next model card. commands.py keeps the same numbers.
+# Flash Next model card, used when a pipeline does not pass its own.
+# Another runtime passes ``variants`` and does not replace these tables.
 THINKING = {
     "temperature": 1.0,
     "top_p": 0.95,
@@ -133,6 +134,7 @@ def add_model(
     source: str | None = None,
     root: Path | None = None,
     pipeline: str,
+    variants: dict[str, dict[str, float | int]] | None = None,
 ) -> dict[str, Any]:
     data = load_registry(root)
     path = models_dir(root) / folder
@@ -141,7 +143,9 @@ def add_model(
     if folder in data["models"]:
         message = f"{folder} is already registered"
         raise ValueError(message)
-    data["models"][folder] = _entry(alias=alias, source=source, pipeline=pipeline)
+    data["models"][folder] = _entry(
+        alias=alias, source=source, pipeline=pipeline, variants=variants
+    )
     save_registry(data, root)
     return data
 
@@ -165,6 +169,7 @@ def register_quantized(
     alias: str | None,
     root: Path | None = None,
     pipeline: str,
+    variants: dict[str, dict[str, float | int]] | None = None,
 ) -> None:
     """Write or update the entry for a record this quantize just produced."""
     data = load_registry(root)
@@ -180,7 +185,9 @@ def register_quantized(
             return
         message = f"{folder} is already registered for a different source"
         raise ValueError(message)
-    data["models"][folder] = _entry(alias=alias, source=source_text, pipeline=pipeline)
+    data["models"][folder] = _entry(
+        alias=alias, source=source_text, pipeline=pipeline, variants=variants
+    )
     save_registry(data, root)
 
 
@@ -297,6 +304,7 @@ def _entry(
     alias: str | None,
     source: str | None,
     pipeline: str,
+    variants: dict[str, dict[str, float | int]] | None = None,
 ) -> dict[str, Any]:
     return {
         "pipeline": pipeline,
@@ -304,7 +312,7 @@ def _entry(
         "source": source,
         "kv_cache": "e4m3",
         "resident_percent": None,
-        "variants": card_variants(),
+        "variants": card_variants() if variants is None else variants,
     }
 
 
@@ -463,7 +471,8 @@ def _repo_root() -> Path:
     if override:
         return Path(override)
     for parent in Path(__file__).resolve().parents:
-        if (parent / "pyproject.toml").is_file() and (parent / "qwen38-flash-next.py").is_file():
+        marker = parent / "src" / "madmetal" / "cli.py"
+        if (parent / "pyproject.toml").is_file() and marker.is_file():
             return parent
-    message = "models/ is not next to the madmetal package"
+    message = "madmetal package is not inside a checkout"
     raise FileNotFoundError(message)

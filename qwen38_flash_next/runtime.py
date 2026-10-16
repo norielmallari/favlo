@@ -28,6 +28,7 @@ from qwen38_flash_next.context import (
     machine_memory,
     process_footprint,
     resident_candidates,
+    residual_bytes_per_token,
     scratch_bytes,
 )
 from qwen38_flash_next.convert import ShardStore, _layer_f32_keys, _layer_int4_keys
@@ -638,12 +639,15 @@ class Qwen38Runtime:
             self._prefix_dirty = False
             _log(f"prefix store {len(self.tokens)} tokens")
 
-    def _rewind_uncommitted(self) -> None:
+    def _rewind_uncommitted(self, *, keep_mtp: int = 0) -> None:
         """Drop a draft span that reached the cache and not the token list.
 
         The verify forward writes the span before those tokens are committed.
         A client that leaves during that window still has the committed
         sequence. The snapshot from before the span is that sequence.
+
+        ``keep_mtp`` is the span whose MTP steps already ran. That cache stays.
+        The prefix write passes zero and rewinds it with the backbone.
         """
         lengths = getattr(self, "kv_len", None)
         tokens = getattr(self, "tokens", None)
@@ -653,11 +657,24 @@ class Qwen38Runtime:
         if all(length == count for length in lengths.values()):
             return
         layer = getattr(self, "_mtp_layer", None)
+        mtp_len = lengths.get(layer) if layer is not None else None
+        draft_kept = keep_mtp > 0 and mtp_len == count + keep_mtp
         snap = getattr(self, "_kv_snap", None)
         if snap:
             backbone = {index: item for index, item in snap.items() if index != layer}
-            if backbone and all(item[5] == count for item in backbone.values()):
-                self._restore_recurrent()
+            backbone_ahead = bool(backbone) and all(
+                item[5] == count for item in backbone.values()
+            )
+            backbone_ahead = backbone_ahead and any(
+                lengths.get(index) != count for index in backbone
+            )
+            if backbone_ahead:
+                if draft_kept and layer is not None:
+                    self._restore_recurrent(skip={layer})
+                else:
+                    self._restore_recurrent()
+        if draft_kept:
+            return
         mtp = getattr(self, "_mtp_kv", None)
         if (
             mtp is not None
@@ -1252,7 +1269,9 @@ class Qwen38Runtime:
         if not decode and total > DENSE_LIMIT:
             blocks = max(total // INDEX_BLOCK, 1)
             scratch += chunk * blocks * 4 + chunk * INDEX_STRIDE * 4
-        self._rewind_uncommitted()
+        # A clean draft has already stepped MTP for this span. Rewinding that
+        # cache here leaves it two tokens behind once the span is committed.
+        self._rewind_uncommitted(keep_mtp=0 if commit else len(tokens))
         self.gpu.begin_scratch(scratch, copies=2 if decode else 1)
         if decode:
             self._make_room_for_cache(len(tokens))
@@ -1943,8 +1962,14 @@ class Qwen38Runtime:
         residual = self._embed_dev(tokens)
         span = self.branches * self.hidden
         step = count if self._decoding else self.prefill_chunk
+        # Quant prefill keeps mixer rows for the whole layer, loads the routed
+        # experts into the atlas, then applies a large group with matmul2d.
+        wide = not self._decoding and self.atlas is not None
+        if wide and count:
+            self._ensure_hold(count)
         for layer in range(self.layers):
             self._check_stop()
+            bundle = None
             for offset in range(0, count, step):
                 n = min(step, count - offset)
                 view = residual.view(offset * span, n * span)
@@ -1971,14 +1996,29 @@ class Qwen38Runtime:
                     self._inject_dev(view, hats, mixed, bundle["attn_inject"], n)
                     hats = self._rms_branches(view, bundle["mlp_norm"], n)
                     xs = self._gr_dev(bundle["mlp_down"], bundle["mlp_up"], hats, n)
-                    mixed = self._moe_dev(layer, bundle, xs, n)
-                    if self._bf16:
-                        self.expert_cache.clear()
-                    self._inject_dev(view, hats, mixed, bundle["mlp_inject"], n)
+                    if wide:
+                        self.gpu.copy_bytes(
+                            xs.buf,
+                            xs.offset * 4,
+                            self._hold_xs,
+                            offset * self.hidden * 4,
+                            n * self.hidden * 4,
+                        )
+                        self.gpu.barrier()
+                    else:
+                        mixed = self._moe_dev(layer, bundle, xs, n)
+                        if self._bf16:
+                            self.expert_cache.clear()
+                        self._inject_dev(view, hats, mixed, bundle["mlp_inject"], n)
                     if not self._decoding:
                         self._note_prefill(layer, offset + n, count)
                     if self._decoding and self.atlas is not None:
                         self.gpu.submit()
+            if wide and count:
+                if bundle is None:
+                    message = "prefill layer had no tokens"
+                    raise RuntimeError(message)
+                self._moe_wide(layer, bundle, residual, count)
         if self._mtp_on and not self._decoding and tokens:
             self._mtp_prefill(residual, tokens)
         if self._mtp_on and tokens:
@@ -2039,6 +2079,9 @@ class Qwen38Runtime:
         """
         if self._bf16:
             return
+        self._pending_prefill = 0 if decode or count <= 0 else count
+        if self._pending_prefill and self.atlas is not None:
+            self._atlas_fit_tokens = -PREFILL_CHUNK
         if not decode and count > 0:
             end = len(self.tokens) + count
             try:
@@ -2127,7 +2170,7 @@ class Qwen38Runtime:
         if self._mtp_on:
             layers += 1
         per_token = kv_bytes_per_token(layers, cache=self.kv_cache)
-        growth = cache_growth_bytes(len(self.tokens), per_token)
+        growth = cache_growth_bytes(len(self.tokens), per_token) + self._prefill_workspace()
         budget = atlas_budget(
             memory=machine_memory(),
             content_bytes=getattr(self, "_tier_bytes", 0),
@@ -2155,7 +2198,7 @@ class Qwen38Runtime:
         if self._mtp_on:
             layers += 1
         per_token = kv_bytes_per_token(layers, cache=self.kv_cache)
-        growth = cache_growth_bytes(tokens, per_token)
+        growth = cache_growth_bytes(tokens, per_token) + self._prefill_workspace()
         # Physical footprint shrinks when the atlas is compressed, so subtracting
         # the buffer from it sizes the next atlas as if that RAM were free.
         # The footprint from before this buffer, plus the cache added since, is
@@ -2203,6 +2246,15 @@ class Qwen38Runtime:
         self.atlas = ExpertAtlas(
             self.gpu, self.files, self.layers, self.experts, candidates
         )
+
+    def _prefill_workspace(self) -> int:
+        """Residual and expert-hold bytes the upcoming prefill allocates beside the atlas."""
+        pending = int(getattr(self, "_pending_prefill", 0))
+        if pending <= 0:
+            return 0
+        residual = residual_bytes_per_token(self.branches, self.hidden) * pending
+        hold = 2 * pending * (self.hidden + self.top_k) * 4
+        return residual + hold
 
     def _stage_budget(self) -> int:
         if not isinstance(self.files, QuantRecord):
@@ -2436,8 +2488,11 @@ class Qwen38Runtime:
             self.gpu.copy_bytes(buf, 0, self._v_tail_shadow[index], 0, tail_bytes)
         self.gpu.barrier()
 
-    def _restore_recurrent(self) -> None:
+    def _restore_recurrent(self, *, skip: set[int] | None = None) -> None:
+        held = skip or set()
         for index, (key, value, key_tail, value_tail, indexer, length) in self._kv_snap.items():
+            if index in held:
+                continue
             self.kv_k[index] = key
             self.kv_v[index] = value
             self.kv_k_tail[index] = key_tail
@@ -2452,8 +2507,12 @@ class Qwen38Runtime:
         self.gpu.copy_bytes(self._ple_shadow, 0, self.ple_hist, 0, self._ple_bytes)
         tail_bytes = KV_TAIL_TOKENS * KV_BF16_BYTES
         for index, buf in self.kv_k_tail.items():
+            if index in held:
+                continue
             self.gpu.copy_bytes(self._k_tail_shadow[index], 0, buf, 0, tail_bytes)
         for index, buf in self.kv_v_tail.items():
+            if index in held:
+                continue
             self.gpu.copy_bytes(self._v_tail_shadow[index], 0, buf, 0, tail_bytes)
         self.gpu.barrier()
 
@@ -3250,21 +3309,21 @@ class Qwen38Runtime:
         return Dev(self._hold_out, n)
 
     def _moe_wide(self, layer: int, bundle: dict[str, Any], residual: Dev, count: int) -> None:
-        """Int4 experts for the whole layer, after every attention chunk."""
+        """Load this layer's routed experts into the atlas, then matmul the large groups."""
         self._route_hold(layer, bundle, count)
         if not isinstance(self.files, QuantRecord):
             message = "prefill has no expert record"
             raise RuntimeError(message)
-        if self._stage is None or self._stage_table is None or self._stage_miss is None:
-            message = "prefill stream has no staging buffer"
+        if self.atlas is None:
+            message = "prefill has no expert atlas"
             raise RuntimeError(message)
         raw = _buffer_bytes(self._hold_ids, count * self.top_k * 4)
         host_ids = np.frombuffer(raw, dtype=np.uint32).copy()
         rows = host_ids.reshape(count, self.top_k)
         self._predicted[layer] = [int(item) for item in rows[-1].tolist()]
         self._choice[layer] = Dev(self._hold_ids, self.top_k, (count - 1) * self.top_k)
-        self.gpu.io_fence(self._stage_event[layer % 2])
-        self._write_stage_table(layer)
+        event = self.atlas.stage(layer, host_ids.reshape(-1).tolist())
+        self.gpu.io_fence(event)
         xs = Dev(self._hold_xs, count * self.hidden)
         weight = Dev(self._hold_w, count * self.top_k)
         running = Dev(self._hold_out, count * self.hidden)
@@ -3336,7 +3395,10 @@ class Qwen38Runtime:
         members: set[int],
         planes: ExpertPlanes,
     ) -> Dev:
-        if self._stage is None or self._stage_table is None or self._stage_miss is None:
+        use_atlas = self.atlas is not None and not self._streaming_prefill
+        if not use_atlas and (
+            self._stage is None or self._stage_table is None or self._stage_miss is None
+        ):
             message = "prefill stream has no staging buffer"
             raise RuntimeError(message)
         if planes.bits in (4, 8):
@@ -3372,8 +3434,9 @@ class Qwen38Runtime:
         if planes.bits not in (4, 8):
             message = "the wide matmul path was given another plane width"
             raise RuntimeError(message)
-        if not isinstance(self.files, QuantRecord) or self._stage is None:
-            message = "prefill stream has no staging buffer"
+        use_atlas = self.atlas is not None and not self._streaming_prefill
+        if not isinstance(self.files, QuantRecord) or (not use_atlas and self._stage is None):
+            message = "prefill has no expert image"
             raise RuntimeError(message)
         flat = np.asarray(host_ids, dtype=np.uint32).reshape(count, self.top_k)
         chosen: dict[int, list[tuple[int, int]]] = {}
@@ -3396,22 +3459,27 @@ class Qwen38Runtime:
             if self._hot_fence:
                 self.gpu.io_fence(self._hot_fence)
                 self._hot_fence = 0
-            if wide_hot:
+            order: dict[int, int] = {}
+            image = None
+            if use_atlas:
+                stage = self.atlas.atlas
+            elif wide_hot:
                 order = {expert: row for row, expert in enumerate(self.files.hot[layer])}
-                image = None
                 stage = self._hot_keep[layer]
             else:
-                order = {}
                 _hot_bytes, _cold_bytes, image = self._prefill_layout(layer)
                 stage = self._stage[layer % 2]
             for expert, pairs in large:
                 self._room_for_expert()
-                if wide_hot:
+                if use_atlas:
+                    found = self.atlas.resident.get((layer, expert))
+                    base = -1 if found is None else int(found)
+                elif wide_hot:
                     base = order[expert] * self.files.slot
                 else:
                     base = int(image[expert])
                 if base < 0:
-                    message = f"layer {layer} expert {expert} is not in the staging buffer"
+                    message = f"layer {layer} expert {expert} is not resident"
                     raise RuntimeError(message)
                 gate, down = self._plane_views(stage, planes)
                 gate.weight_off += base
@@ -3449,10 +3517,18 @@ class Qwen38Runtime:
         if small:
             self.gpu.flush()
             self.gpu.rewind_scratch()
-            table = self._stage_table
-            miss = self._stage_miss
+            if use_atlas:
+                table = self.atlas.table
+                miss = self.atlas.miss
+                weights = self.atlas.atlas
+                table_base = layer * self.experts
+            else:
+                table = self._stage_table
+                miss = self._stage_miss
+                weights = stage if large else self._stage[layer % 2]
+                table_base = 0
             if table is None or miss is None:
-                message = "prefill stream has no offset table"
+                message = "prefill has no expert offset table"
                 raise RuntimeError(message)
             return self._moe_tier_batched(
                 layer,
@@ -3463,9 +3539,9 @@ class Qwen38Runtime:
                 count,
                 small,
                 planes,
-                stage if large else self._stage[layer % 2],
+                weights,
                 table,
-                0,
+                table_base,
                 miss,
             )
         if large:

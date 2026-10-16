@@ -271,6 +271,24 @@ def test_uncommitted_draft_span_is_rewound_before_the_prefix_write() -> None:
     assert runtime._prefix_dirty is False
 
 
+def test_verify_forward_keeps_the_clean_draft_cache() -> None:
+    runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
+    runtime.tokens = list(range(10))
+    runtime._mtp_layer = 48
+    runtime.kv_len = {0: 10, 48: 12}
+    runtime._kv_snap = {
+        0: (None, None, None, None, None, 10),
+        48: (None, None, None, None, None, 10),
+    }
+    runtime._mtp_kv = (None, None, None, None, None, 10)
+    called: list[str] = []
+    runtime._restore_recurrent = lambda skip=None: called.append("restore")
+    runtime._mtp_restore_kv = lambda: called.append("mtp")
+    runtime._rewind_uncommitted(keep_mtp=2)
+    assert called == []
+    assert runtime.kv_len == {0: 10, 48: 12}
+
+
 def test_prefix_flush_logs_a_cache_mismatch_and_returns() -> None:
     runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
     runtime.tokens = [1, 2]

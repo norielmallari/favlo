@@ -7,6 +7,7 @@ The hyphenated file is not an import.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import os
 import sys
@@ -14,28 +15,51 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import ModuleType
 
-PIPELINES = ("qwen38-flash-next", "qwen38-27b")
-
-HELP = """\
-usage: madmetal serve
-       madmetal --qwen38-flash-next [args]
-       madmetal --qwen38-27b [args]
-
-  serve                  listen, then load the model a request names
-  --qwen38-flash-next    Qwen3.8-Flash-Next
-  --qwen38-27b           Qwen3.8-27B
-"""
-
 
 def repo_root() -> Path:
     override = os.environ.get("MADMETAL_ROOT")
     if override:
         return Path(override)
     for parent in Path(__file__).resolve().parents:
-        if (parent / "pyproject.toml").is_file() and (parent / "qwen38-flash-next.py").is_file():
+        marker = parent / "src" / "madmetal" / "cli.py"
+        if (parent / "pyproject.toml").is_file() and marker.is_file():
             return parent
-    message = "qwen38-flash-next.py is not next to the madmetal package"
+    message = "madmetal package is not inside a checkout"
     raise FileNotFoundError(message)
+
+
+def pipeline_names(root: Path | None = None) -> tuple[str, ...]:
+    """Entry files at the checkout root. Each sets ``PIPELINE`` to its filename stem.
+
+    A new runtime is a new file. Discovering it does not edit this module.
+    """
+    found: list[str] = []
+    for path in sorted((root or repo_root()).glob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        for node in tree.body:
+            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                continue
+            target = node.targets[0]
+            if not isinstance(target, ast.Name) or target.id != "PIPELINE":
+                continue
+            if isinstance(node.value, ast.Constant) and node.value.value == path.stem:
+                found.append(path.stem)
+                break
+    return tuple(found)
+
+
+def _help(names: Sequence[str]) -> str:
+    lines = ["usage: madmetal serve"]
+    lines.extend(f"       madmetal --{name} [args]" for name in names)
+    lines.append("")
+    lines.append("  serve                  listen, then load the model a request names")
+    width = max((len(name) for name in names), default=0)
+    for name in names:
+        lines.append(f"  --{name.ljust(width)}    {name}")
+    return "\n".join(lines) + "\n"
 
 
 def load_pipeline(name: str, root: Path | None = None) -> ModuleType:
@@ -62,11 +86,12 @@ def pipeline_main(module: ModuleType) -> Callable[[Sequence[str]], int]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    names = pipeline_names()
     if not args:
-        sys.stderr.write(HELP)
+        sys.stderr.write(_help(names))
         return 2
     if args[0] in {"-h", "--help"}:
-        sys.stdout.write(HELP)
+        sys.stdout.write(_help(names))
         return 0
     if args[0] == "serve":
         from madmetal.listener import serve_main
@@ -74,12 +99,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return int(serve_main(args[1:]))
     flag = args[0]
     if not flag.startswith("--") or flag == "--":
-        sys.stderr.write(HELP)
+        sys.stderr.write(_help(names))
         sys.stderr.write(f"\nunknown argument: {flag}\n")
         return 2
     name = flag[2:]
-    if name not in PIPELINES:
-        known = ", ".join(f"--{item}" for item in PIPELINES)
+    if name not in names:
+        known = ", ".join(f"--{item}" for item in names)
         sys.stderr.write(f"unknown model flag: {flag}\nknown: {known}\n")
         return 2
     try:

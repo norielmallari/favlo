@@ -1,9 +1,15 @@
 import sys
 from pathlib import Path
 
-from madmetal.cli import main
+from madmetal.cli import main, pipeline_names
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_a_pipeline_entry_is_the_file_that_names_itself(tmp_path: Path) -> None:
+    (tmp_path / "demo-model.py").write_text('PIPELINE = "demo-model"\n', encoding="utf-8")
+    (tmp_path / "notes.py").write_text("PIPELINE = 'other'\n", encoding="utf-8")
+    assert pipeline_names(tmp_path) == ("demo-model",)
 
 
 def test_help_lists_the_model_flag(capsys) -> None:

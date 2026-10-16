@@ -18,8 +18,8 @@ A package name is an identifier. A hyphenated pipeline entry stays a path-loaded
 - Move large source strings, such as Metal shaders, into files the module reads as text. Compile them the same way as before.
 - Re-export the names callers already use from the package `__init__.py`. A path-loaded entry exposes those names, including `main`.
 - Use a regular package with `__init__.py`. A namespace package is for one name split across distributions.
-- A new model is a new entry file, a new package, and a new flag. It does not edit `qwen38_flash_next`, and it does not add a base class in `src/madmetal`.
-- Update AGENTS.md and ARCHITECTURE.md in the same change that moves a pipeline module.
+- A new model is a new entry file, a new package, and a `PIPELINE` assignment. It does not edit another pipeline, and it does not add a base class in `src/madmetal`.
+- Update that pipeline's `docs/<pipeline>/` note in the same change that moves one of its modules. Update root ARCHITECTURE.md only when the process contract or the runtime table changes.
 
 ## Examples
 

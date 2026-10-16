@@ -102,7 +102,7 @@ Apple. WWDC25 session 262, *Combine Metal 4 machine learning and graphics.* A te
 
 Apple. WWDC26 session 330, *Optimize custom machine learning operations with Metal tensors.* Quantized data and the E8M0 scale plane are one multi-plane tensor. `matmul2d` dequantizes that tensor. The scale block in the sample is 32 by 1.
 
-The probe in `qwen38-flash-next.py` is the measurement of those rules on this M5 Pro. It is recorded in [docs/qwen38/probe.md](docs/qwen38/probe.md).
+The probe in `qwen38-flash-next.py` is the measurement of those rules on this M5 Pro. It is recorded in [docs/qwen38-flash-next/probe.md](docs/qwen38-flash-next/probe.md).
 
 ## Phase split
 
@@ -134,7 +134,7 @@ Yaniv Leviathan, Matan Kalman, and Yossi Matias. *Fast Inference from Transforme
 
 Charlie Chen, Sebastian Borgeaud, Geoffrey Irving, Jean-Baptiste Lespiau, Laurent Sifre, and John Jumper. *Accelerating Large Language Model Decoding with Speculative Sampling.* [arXiv:2302.01318](https://arxiv.org/abs/2302.01318), 2023. Temperature, nucleus, and top-k are applied to both distributions before the same test. Scoring a short continuation costs about one sample when the call is bound by reading the weights.
 
-The decode that uses these is documented in [docs/qwen38/schedule.md](docs/qwen38/schedule.md) and the local `artifacts/implementation-plan/docs/mtp/` note (gitignored).
+The decode that uses these is documented in [docs/qwen38-flash-next/schedule.md](docs/qwen38-flash-next/schedule.md) and the local `artifacts/implementation-plan/docs/mtp/` note (gitignored).
 
 ## Prompt text
 
@@ -158,4 +158,4 @@ Karl Cobbe et al. *Training Verifiers to Solve Math Word Problems.* [arXiv:2110.
 
 Mark Chen et al. *Evaluating Large Language Models Trained on Code.* [arXiv:2107.03374](https://arxiv.org/abs/2107.03374), 2021. HumanEval. pass@1 is one sample against the published tests.
 
-The harness note is [docs/qwen38/benchmarks.md](docs/qwen38/benchmarks.md).
+The harness note is [docs/qwen38-flash-next/benchmarks.md](docs/qwen38-flash-next/benchmarks.md).

@@ -1,14 +1,16 @@
 # Documentation
 
-The public tree under `docs/` is **as-built** detail for what this repository ships today. Product scope and invariants are in [ARCHITECTURE.md](../ARCHITECTURE.md). If a note here disagrees with that file, ARCHITECTURE.md wins.
+The public tree under `docs/` is **as-built** detail. The process and the write set for each runtime are in [ARCHITECTURE.md](../ARCHITECTURE.md). That file wins for the listener and for which files an agent may edit. A pipeline directory wins for that pipeline.
 
 | Path | Contents |
 |---|---|
-| [qwen38/record.md](qwen38/record.md) | Metal record layout and tier rules |
-| [qwen38/ngram.md](qwen38/ngram.md) | n-gram hash and injection |
-| [qwen38/schedule.md](qwen38/schedule.md) | Prefill, decode, and quantize schedule |
-| [qwen38/probe.md](qwen38/probe.md) | Block-of-32 GPU probe |
-| [qwen38/console.md](qwen38/console.md) | Status row binding |
-| [qwen38/benchmarks.md](qwen38/benchmarks.md) | Harness scores against `serve` |
+| [qwen38-flash-next/architecture.md](qwen38-flash-next/architecture.md) | Qwen3.8-Flash-Next pipeline contract |
+| [qwen38-27b/README.md](qwen38-27b/README.md) | Qwen3.8-27B pipeline contract |
+| [qwen38-flash-next/record.md](qwen38-flash-next/record.md) | Metal record layout and tier rules |
+| [qwen38-flash-next/ngram.md](qwen38-flash-next/ngram.md) | n-gram hash and injection |
+| [qwen38-flash-next/schedule.md](qwen38-flash-next/schedule.md) | Prefill, decode, and quantize schedule |
+| [qwen38-flash-next/probe.md](qwen38-flash-next/probe.md) | Block-of-32 GPU probe |
+| [qwen38-flash-next/console.md](qwen38-flash-next/console.md) | Status row binding |
+| [qwen38-flash-next/benchmarks.md](qwen38-flash-next/benchmarks.md) | Harness scores against `serve` |
 
 Implementation plans, option comparisons, and design sketches are **not** committed here. They belong under `artifacts/implementation-plan/` (gitignored).
