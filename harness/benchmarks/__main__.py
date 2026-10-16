@@ -12,7 +12,7 @@ from harness.benchmarks import gsm8k, humaneval, ifeval
 from harness.benchmarks.serve import Server, complete
 
 _ROOT = Path(__file__).resolve().parents[2]
-_DOC = _ROOT / "docs" / "qwen38" / "benchmarks.md"
+_DOC = _ROOT / "docs" / "qwen38-flash-next" / "benchmarks.md"
 _SMOKE = 30
 _MAX_TOKENS = {"ifeval": 2048, "gsm8k": 1536, "humaneval": 1024}
 
@@ -199,6 +199,8 @@ def _write_doc(
     full: dict[str, Any] | None,
     sample: dict[str, Any] | None = None,
 ) -> None:
+    if not _DOC.is_file():
+        return
     text = _DOC.read_text()
     if smoke is not None:
         smoke_block = "\n".join(f"- {name}: {_fmt(summary)}" for name, summary in smoke.items())

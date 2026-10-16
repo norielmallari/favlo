@@ -1,9 +1,13 @@
 import io
+import json
 import mmap
 import os
 
 import numpy as np
 import pytest
+from qwen38_flash_next.formats import DEFAULT_QUANT_MAP, QUANT_LAYOUT_VERSION, quant_file
+from qwen38_flash_next.record import QuantRecord
+from qwen38_flash_next.repack import version5_place
 from qwen38_flash_next.runtime import RequestClosed, mtp_holds, mtp_starts
 
 from madmetal.console import Console
@@ -891,28 +895,28 @@ def test_super_image_is_page_aligned() -> None:
     assert len(image) == pipeline.super_live_bytes()
 
 
-def test_super_ids_leave_the_keep_set(tmp_path) -> None:
-    path = tmp_path / "super.json"
+def test_quant_map_names_the_super_pin(tmp_path) -> None:
+    path = tmp_path / "quant_map.json"
     path.write_text(
-        '{"super_experts": ['
-        '{"layer": 2, "expert": 322},'
-        '{"layer": 4, "expert": 108},'
-        '{"layer": 4, "expert": 373},'
-        '{"layer": 6, "expert": 223},'
-        '{"layer": 10, "expert": 107}'
-        "]}"
+        json.dumps(
+            {
+                "experts": [[4] * 512 for _ in range(48)],
+                "super": [
+                    {"layer": 2, "expert": 322},
+                    {"layer": 4, "expert": 108},
+                    {"layer": 4, "expert": 373},
+                    {"layer": 6, "expert": 223},
+                    {"layer": 10, "expert": 107},
+                ],
+            }
+        )
     )
-    rows = pipeline.load_super_ids(path, 48, 512)
+    _grid, rows = pipeline.load_quant_map(path, 48, 512)
     assert rows[2] == [322]
     assert rows[4] == [108, 373]
+    assert rows[6] == [223]
+    assert rows[10] == [107]
     assert rows[0] == []
-    keep = list(range(384))
-    hot, cold, pin = pipeline.split_keep(keep, [108, 373], 512)
-    assert pin == [108, 373]
-    assert len(hot) == 382
-    assert 108 not in hot and 373 not in hot
-    assert len(cold) == 128
-    assert set(cold).isdisjoint(keep)
 
 
 def test_int8_kernels_match_dequant() -> None:
@@ -998,17 +1002,17 @@ def test_group_tier_skips_the_other_bank() -> None:
     assert int(tokens.size) == 4
 
 
-def test_hot_ids_require_the_same_count(tmp_path) -> None:
-    path = tmp_path / "hot.json"
-    path.write_text('{"0": [0, 1], "1": [2]}')
-    try:
-        pipeline.load_hot_ids(path, 2, 4)
-    except RuntimeError as exc:
-        assert "differ" in str(exc)
-    else:
-        raise AssertionError("expected hot counts to differ")
-    path.write_text('{"0": [0, 1], "1": [1, 2]}')
-    assert pipeline.load_hot_ids(path, 2, 4) == [[0, 1], [1, 2]]
+def test_quant_map_lists_every_expert(tmp_path) -> None:
+    path = tmp_path / "quant_map.json"
+    path.write_text(
+        json.dumps({"experts": [[4, 4, 4, 4], [4, 4, 8, 4]], "super": [{"layer": 1, "expert": 2}]})
+    )
+    grid, pins = pipeline.load_quant_map(path, 2, 4)
+    assert grid == [[4, 4, 4, 4], [4, 4, 8, 4]]
+    assert pins == [[], [2]]
+    path.write_text(json.dumps({"experts": [[8, 2, 4]], "super": []}))
+    with pytest.raises(RuntimeError, match="two widths"):
+        pipeline.load_quant_map(path, 1, 3)
 
 
 def test_tier_file_and_resume_set(tmp_path) -> None:
@@ -1218,3 +1222,99 @@ def test_a_slow_window_stops_drafts_for_the_rest_of_the_request() -> None:
     runtime.tokens = list(range(4096))
     runtime._begin_drafts()
     assert runtime._mtp_drafts is True
+
+
+def test_version5_place_keeps_the_pin_out_of_the_hot_file() -> None:
+    placed = version5_place([0], [2], 4)
+    assert placed == [("hot", 0), ("cold", 0), ("super", 0), ("cold", 1)]
+
+
+def test_quant_layout_reads_an_expert_at_its_id(tmp_path) -> None:
+    slot = pipeline.PAGE
+    live = 16
+    experts = tmp_path / "experts"
+    experts.mkdir()
+    blob = bytearray(slot * 2)
+    blob[:4] = b"aaaa"
+    blob[slot : slot + 4] = b"bbbb"
+    (experts / quant_file(0, 4)).write_bytes(blob)
+    (tmp_path / "ngram.bin").write_bytes(b"\x00")
+    body = {
+        "version": QUANT_LAYOUT_VERSION,
+        "complete": True,
+        "layers": 1,
+        "experts": 2,
+        "expert_quant": 4,
+        "expert_slot": slot,
+        "expert_live": live,
+        "super": [[1]],
+        "super_bits": 4,
+        "ngram_rows": 1,
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(body))
+    record = QuantRecord(tmp_path)
+    try:
+        assert record.tier_row(0, 0) == (1, 0)
+        assert record.tier_row(0, 1) == (2, 1)
+        assert record.expert_image(0, 0)[:4] == b"aaaa"
+        assert record.expert_image(0, 1)[:4] == b"bbbb"
+        assert record.hot_set(0) == set()
+        assert 0 in record.cold_set(0)
+        assert 1 in record.super_set(0)
+    finally:
+        record.close()
+
+
+def test_shipped_quant_map_is_fp4() -> None:
+    grid, pins = pipeline.load_quant_map(DEFAULT_QUANT_MAP, 48, 512)
+    assert len(grid) == 48
+    assert len(grid[0]) == 512
+    assert {bits for row in grid for bits in row} == {4}
+    assert pins[2] == [322]
+    assert pins[4] == [108, 373]
+    assert pins[6] == [223]
+    assert pins[10] == [107]
+    assert sum(len(row) for row in pins) == 5
+
+
+def test_two_widths_read_each_quant_file(tmp_path) -> None:
+    root = tmp_path / "record"
+    experts = root / "experts"
+    experts.mkdir(parents=True)
+    slot = pipeline.PAGE
+    live = 16
+    (experts / quant_file(0, 8)).write_bytes(b"hhhh" + b"\x00" * (slot - 4))
+    (experts / quant_file(0, 4)).write_bytes(b"cccc" + b"\x00" * (slot - 4))
+    manifest = {
+        "version": QUANT_LAYOUT_VERSION,
+        "complete": True,
+        "layers": 1,
+        "experts": 2,
+        "expert_quant": [[8, 4]],
+        "quants": {
+            "8": {"format": "fp8_e4m3", "live": live, "slot": slot},
+            "4": {"format": "fp4_e2m1", "live": live, "slot": slot},
+        },
+        "super": [[]],
+        "super_bits": 4,
+        "super_live": live,
+        "super_slot": slot,
+        "mtp_experts": 0,
+        "mtp_slot": slot,
+        "ngram_rows": 1,
+        "ngram_format": "int4",
+        "ngram_live": 16,
+        "ngram_slot": slot,
+        "embed_key": "model.language_model.embed_tokens.weight",
+        "head_key": "lm_head.weight",
+    }
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    (root / "ngram.bin").write_bytes(b"\x00" * slot)
+    record = QuantRecord(root)
+    try:
+        assert record.tier_row(0, 0) == (0, 0)
+        assert record.tier_row(0, 1) == (1, 0)
+        assert record.expert_image(0, 0)[:4] == b"hhhh"
+        assert record.expert_image(0, 1)[:4] == b"cccc"
+    finally:
+        record.close()

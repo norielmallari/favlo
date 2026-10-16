@@ -382,8 +382,10 @@ class Qwen38Runtime:
         self._tier_bytes = 0
         self._hot_bytes = 0
         if isinstance(self.files, QuantRecord):
-            self._hot_bytes = sum(os.fstat(fd).st_size for fd in self.files.hot_fds)
-            cold = sum(os.fstat(fd).st_size for fd in self.files.cold_fds)
+            self._hot_bytes = sum(
+                os.fstat(fd).st_size for fd in self.files.hot_fds if isinstance(fd, int)
+            )
+            cold = sum(os.fstat(fd).st_size for fd in self.files.cold_fds if isinstance(fd, int))
             self._tier_bytes = self._hot_bytes + cold
             if resident_percent is not None:
                 self.resident_candidates = resident_candidates(self._hot_bytes, resident_percent)

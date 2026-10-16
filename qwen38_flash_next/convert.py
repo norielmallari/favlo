@@ -21,9 +21,11 @@ from qwen38_flash_next.formats import (
     NGRAM_SLOT,
     NGRAM_WIDTH,
     PAGE,
+    QUANT_LAYOUT_VERSION,
     RECORD_VERSION,
     int4_plane_sizes,
     ngram_slots,
+    quant_file,
     quantize_int2_image,
     quantize_int4_image,
     quantize_int8_image,
@@ -232,77 +234,60 @@ def ngram_byte_offset(shard: int, local: int) -> int:
     return (shard * NGRAM_ROWS_PER_SHARD + local) * NGRAM_SLOT
 
 
-def importance_hot_ids(
-    graph: dict[str, Any], layers: int, experts: int, keep: int
-) -> list[list[int]]:
-    """The ``keep`` experts with the highest frequency in each layer.
-
-    A missing expert scores zero. Ties keep the lower id. The returned row is
-    sorted so neighboring ids pack into consecutive file rows.
-    """
-    if keep < 1 or keep >= experts:
-        message = f"hot count {keep} does not leave a cold complement of {experts}"
-        raise ValueError(message)
-    bank = graph.get("experts")
-    if not isinstance(bank, dict):
-        message = "importance graph has no experts object"
-        raise ValueError(message)
-    rows: list[list[int]] = []
-    for layer in range(layers):
-        scores = bank.get(str(layer)) or {}
-        if not isinstance(scores, dict):
-            message = f"importance graph layer {layer} is not an object"
-            raise ValueError(message)
-
-        def rank(expert: int, scores: dict[str, Any] = scores) -> tuple[float, int]:
-            item = scores.get(str(expert)) or {}
-            return (-float(item.get("frequency") or 0.0), expert)
-
-        chosen = sorted(range(experts), key=rank)[:keep]
-        rows.append(sorted(chosen))
-    return rows
-
-
-def cold_ids(hot: Sequence[int], experts: int) -> list[int]:
-    chosen = {int(expert) for expert in hot}
-    return [expert for expert in range(experts) if expert not in chosen]
-
-
-def load_hot_ids(path: Path, layers: int, experts: int) -> list[list[int]]:
-    """Layer index to the hot expert ids. Every layer has the same count."""
+def load_quant_map(
+    path: Path, layers: int, experts: int
+) -> tuple[list[list[int]], list[list[int]]]:
+    """Read a quant map. One width per expert, and the super pin. At most two widths."""
     raw = json.loads(path.read_text())
-    banks: list[list[int]] = []
-    for layer in range(layers):
-        key = str(layer)
-        if key not in raw:
-            message = f"hot set is missing layer {layer}"
-            raise RuntimeError(message)
-        ids = [int(item) for item in raw[key]]
-        if len(ids) != len(set(ids)) or any(item < 0 or item >= experts for item in ids):
-            message = f"hot set for layer {layer} is not ids in 0..{experts - 1}"
-            raise RuntimeError(message)
-        if not ids or len(ids) == experts:
-            message = f"hot set for layer {layer} leaves no cold experts"
-            raise RuntimeError(message)
-        banks.append(ids)
-    counts = {len(ids) for ids in banks}
-    if len(counts) != 1:
-        message = "hot keep-set counts differ by layer"
+    if not isinstance(raw, dict) or "experts" not in raw or "super" not in raw:
+        message = "quant map lists experts and super"
         raise RuntimeError(message)
-    return banks
+    rows = raw["experts"]
+    if not isinstance(rows, list) or len(rows) != layers:
+        found = len(rows) if isinstance(rows, list) else "no"
+        message = f"quant map has {found} layers, the checkpoint has {layers}"
+        raise RuntimeError(message)
+    grid: list[list[int]] = []
+    for layer, row in enumerate(rows):
+        if not isinstance(row, list) or len(row) != experts:
+            message = f"quant map layer {layer} does not list {experts} experts"
+            raise RuntimeError(message)
+        widths: list[int] = []
+        for expert, bits in enumerate(row):
+            if isinstance(bits, bool) or int(bits) not in (2, 4, 8):
+                message = f"quant map {layer}:{expert} is not a width in 2, 4, 8"
+                raise RuntimeError(message)
+            widths.append(int(bits))
+        grid.append(widths)
+    used = {bits for row in grid for bits in row}
+    if len(used) > 2:
+        message = "a quant map uses at most two widths"
+        raise RuntimeError(message)
+    return grid, _super_rows(raw["super"], layers, experts)
 
 
-def load_super_ids(path: Path | None, layers: int, experts: int) -> list[list[int]]:
-    """Layer index to the super pin. A missing file leaves every layer empty."""
+def _super_rows(items: Any, layers: int, experts: int) -> list[list[int]]:
+    """Layer index to the super pin, in the order the map lists them."""
+    if not isinstance(items, list):
+        message = "quant map super is not a list"
+        raise RuntimeError(message)
     rows: list[list[int]] = [[] for _ in range(layers)]
-    if path is None:
-        return rows
-    raw = json.loads(path.read_text())
-    items = raw["super_experts"] if isinstance(raw, dict) else raw
     for item in items:
-        layer = int(item["layer"])
-        expert = int(item["expert"])
-        if layer < 0 or layer >= layers or expert < 0 or expert >= experts:
+        if not isinstance(item, dict):
+            message = "quant map super entry is not a layer and expert"
+            raise RuntimeError(message)
+        layer = item.get("layer")
+        expert = item.get("expert")
+        if (
+            isinstance(layer, bool)
+            or isinstance(expert, bool)
+            or not isinstance(layer, int)
+            or not isinstance(expert, int)
+            or layer < 0
+            or layer >= layers
+            or expert < 0
+            or expert >= experts
+        ):
             message = f"super expert {layer}:{expert} is outside the model"
             raise RuntimeError(message)
         if expert in rows[layer]:
@@ -312,34 +297,30 @@ def load_super_ids(path: Path | None, layers: int, experts: int) -> list[list[in
     return rows
 
 
-def split_keep(
-    hot: Sequence[int], supers: Sequence[int], experts: int
-) -> tuple[list[int], list[int], list[int]]:
-    """Lift the super pin out of the keep-set. Cold is every id outside that keep-set."""
-    keep = [int(expert) for expert in hot]
-    pin = [int(expert) for expert in supers]
-    keep_set = set(keep)
-    pin_set = set(pin)
-    if not pin_set <= keep_set:
-        message = "a super expert is outside the hot keep-set"
-        raise RuntimeError(message)
-    hot_only = [expert for expert in keep if expert not in pin_set]
-    cold = [expert for expert in range(experts) if expert not in keep_set]
-    return hot_only, cold, pin
+def quant_groups(widths: Sequence[int]) -> dict[int, list[int]]:
+    """Expert ids of each width, in id order. That order is the file row."""
+    groups: dict[int, list[int]] = {}
+    for expert, bits in enumerate(widths):
+        width = int(bits)
+        if width not in (2, 4, 8):
+            message = f"expert quant {width} is not 2, 4, or 8"
+            raise RuntimeError(message)
+        groups.setdefault(width, []).append(expert)
+    return groups
 
 
 def _load_progress(dest: Path) -> dict[str, Any]:
     path = _progress_path(dest)
     if not path.is_file():
         return {
-            "version": RECORD_VERSION,
+            "version": QUANT_LAYOUT_VERSION,
             "resident": False,
             "layers": [],
             "mtp": False,
             "ngram_shards": [],
         }
     progress = json.loads(path.read_text())
-    if progress.get("version") != RECORD_VERSION:
+    if int(progress.get("version") or 0) not in (RECORD_VERSION, QUANT_LAYOUT_VERSION):
         message = f"delete {dest}; it was started with record version {progress.get('version')}"
         raise RuntimeError(message)
     return progress
@@ -508,93 +489,50 @@ def _expert_image(gate: np.ndarray, down: np.ndarray, bits: int) -> bytes:
     return pack(gate)[0] + pack(down)[0]
 
 
-def _layer_ready(
-    dest: Path,
-    layer: int,
-    hot_count: int,
-    cold_count: int,
-    super_count: int,
-    hot_slot: int,
-    cold_slot: int,
-    super_slot: int,
-) -> bool:
+def _layer_ready(dest: Path, layer: int, widths: Sequence[int]) -> bool:
     root = dest / "experts"
-    hot = root / f"{layer:02d}-hot.bin"
-    cold = root / f"{layer:02d}-cold.bin"
-    if not hot.is_file() or hot.stat().st_size < hot_count * hot_slot:
-        return False
-    if not cold.is_file() or cold.stat().st_size < cold_count * cold_slot:
-        return False
-    if super_count == 0:
-        return True
-    super_file = root / f"{layer:02d}-super.bin"
-    return super_file.is_file() and super_file.stat().st_size >= super_count * super_slot
+    for bits, ids in quant_groups(widths).items():
+        _live, slot = tier_image_bytes(bits)
+        path = root / quant_file(layer, bits)
+        if not path.is_file() or path.stat().st_size < len(ids) * slot:
+            return False
+    return True
 
 
-def pack_expert_layer(
-    source: str,
-    dest: str,
-    layer: int,
-    hot: list[int],
-    supers: list[int],
-    experts: int,
-    hot_bits: int = 8,
-    cold_bits: int = 4,
-    super_bits: int = 8,
-) -> int:
-    """Pack one layer. Hot, cold, and the super pin use the requested widths."""
+def pack_expert_layer(source: str, dest: str, layer: int, widths: list[int]) -> int:
+    """Pack one layer. Each width is its own file, experts of that width in id order."""
     store = ShardStore(Path(source))
     prefix = f"model.language_model.layers.{layer}.mlp.experts"
     gate_key = f"{prefix}.gate_up_proj"
     down_key = f"{prefix}.down_proj"
     root = Path(dest) / "experts"
-    hot_ids, cold, pin = split_keep(hot, supers, experts)
-    hot_at = {expert: row for row, expert in enumerate(hot_ids)}
-    cold_at = {expert: row for row, expert in enumerate(cold)}
-    pin_at = {expert: row for row, expert in enumerate(pin)}
-    hot_live, hot_slot = tier_image_bytes(hot_bits)
-    cold_live, cold_slot = tier_image_bytes(cold_bits)
-    pin_live, pin_slot = tier_image_bytes(super_bits)
-    hot_fd = _open_tier(root / f"{layer:02d}-hot.bin", len(hot_ids), hot_slot)
-    cold_fd = _open_tier(root / f"{layer:02d}-cold.bin", len(cold), cold_slot)
-    pin_fd = _open_tier(root / f"{layer:02d}-super.bin", len(pin), pin_slot) if pin else None
+    groups = quant_groups(widths)
+    opened: list[tuple[int, dict[int, int], int, int]] = []
     try:
         _log(f"quantize experts layer {layer}")
-        for expert in range(experts):
+        for bits, ids in groups.items():
+            live, slot = tier_image_bytes(bits)
+            fd = _open_tier(root / quant_file(layer, bits), len(ids), slot)
+            opened.append((fd, {expert: row for row, expert in enumerate(ids)}, live, slot))
+        for expert, bits in enumerate(widths):
             gate = _expert_matrix(store, gate_key, expert)
             down = _expert_matrix(store, down_key, expert)
             if gate.shape != (1280, 2560) or down.shape != (2560, 640):
                 message = f"{gate_key} shapes {gate.shape} {down.shape}"
                 raise RuntimeError(message)
-            if expert in pin_at:
-                image = _expert_image(gate, down, super_bits)
-                if len(image) != pin_live or pin_fd is None:
-                    message = f"super image is {len(image)} bytes, expected {pin_live}"
-                    raise RuntimeError(message)
-                os.pwrite(pin_fd, image, pin_at[expert] * pin_slot)
-            elif expert in hot_at:
-                image = _expert_image(gate, down, hot_bits)
-                if len(image) != hot_live:
-                    message = f"hot image is {len(image)} bytes, expected {hot_live}"
-                    raise RuntimeError(message)
-                os.pwrite(hot_fd, image, hot_at[expert] * hot_slot)
-            else:
-                image = _expert_image(gate, down, cold_bits)
-                if len(image) != cold_live:
-                    message = f"cold image is {len(image)} bytes, expected {cold_live}"
-                    raise RuntimeError(message)
-                os.pwrite(cold_fd, image, cold_at[expert] * cold_slot)
+            image = _expert_image(gate, down, int(bits))
+            fd, rows, live, slot = next(item for item in opened if expert in item[1])
+            if len(image) != live:
+                message = f"expert image is {len(image)} bytes, expected {live}"
+                raise RuntimeError(message)
+            os.pwrite(fd, image, rows[expert] * slot)
             if expert % 64 == 0:
                 _log(f"layer {layer} expert {expert}")
-        os.fsync(hot_fd)
-        os.fsync(cold_fd)
-        if pin_fd is not None:
-            os.fsync(pin_fd)
+        for fd, _rows, _live, _slot in opened:
+            os.fsync(fd)
     finally:
-        os.close(hot_fd)
-        os.close(cold_fd)
-        if pin_fd is not None:
-            os.close(pin_fd)
+        for fd, _rows, _live, _slot in opened:
+            os.close(fd)
     return layer
 
 
@@ -684,21 +622,16 @@ def _write_expert_file(
 def quantize_checkpoint(
     source: Path,
     dest: Path,
-    hot: Path | None = None,
-    supers: Path | None = None,
-    hot_bits: int = 8,
-    cold_bits: int = 4,
-    super_bits: int = 8,
+    quants: list[list[int]],
+    supers: list[list[int]],
     mtp_bits: int = 4,
 ) -> bool:
     """Write the Metal record once. A later run continues from quantize_progress.json.
 
     Returns true when this call wrote the manifest. A record that is already complete
-    returns false and leaves the packed files in place.
+    returns false and leaves the packed files in place. ``quants`` is the width of
+    every expert. ``supers`` is the pin, and those images stay in the file for their width.
     """
-    if hot is None:
-        message = "pass --hot with the keep-set JSON"
-        raise RuntimeError(message)
     if not (source / "config.json").is_file():
         message = f"checkpoint config is missing: {source}"
         raise FileNotFoundError(message)
@@ -706,50 +639,51 @@ def quantize_checkpoint(
     manifest_path = dest / "manifest.json"
     if manifest_path.is_file():
         done = json.loads(manifest_path.read_text())
-        if done.get("complete") and done.get("version") == RECORD_VERSION:
+        if done.get("complete") and int(done.get("version") or 0) == QUANT_LAYOUT_VERSION:
             _log(f"record already complete: {dest}")
             return False
+        if done.get("complete"):
+            message = f"delete {dest}; it is record version {done.get('version')}"
+            raise RuntimeError(message)
     for name in ("config.json", "tokenizer.json", "tokenizer_config.json"):
         shutil.copyfile(source / name, dest / name)
     progress = _load_progress(dest)
+    if int(progress.get("version") or 0) != QUANT_LAYOUT_VERSION:
+        message = f"delete {dest}; it was started with record version {progress.get('version')}"
+        raise RuntimeError(message)
     store = ShardStore(source)
     config = json.loads((source / "config.json").read_text())
     text = config["text_config"]
     kinds = list(text["layer_types"])
     experts = int(text["num_experts"])
-    hot_ids = load_hot_ids(hot, len(kinds), experts)
-    super_ids = load_super_ids(supers, len(kinds), experts)
-    _plane_format(hot_bits)
-    _plane_format(cold_bits)
-    _plane_format(super_bits)
+    if len(quants) != len(kinds) or any(len(row) != experts for row in quants):
+        message = "quant map does not match the checkpoint"
+        raise RuntimeError(message)
+    if len(supers) != len(kinds):
+        message = "quant map super does not match the checkpoint"
+        raise RuntimeError(message)
+    super_ids = supers
+    pin_widths = {
+        int(quants[layer][expert])
+        for layer, row in enumerate(super_ids)
+        for expert in row
+    }
+    if len(pin_widths) > 1:
+        message = "super experts do not share one quant"
+        raise RuntimeError(message)
     _plane_format(mtp_bits)
-    hot_live, hot_slot = tier_image_bytes(hot_bits)
-    cold_live, cold_slot = tier_image_bytes(cold_bits)
-    super_live, super_slot = tier_image_bytes(super_bits)
     _mtp_live, mtp_slot = tier_image_bytes(mtp_bits)
-    saved_hot = progress.get("hot")
-    saved_super = progress.get("super")
-    if saved_hot is None:
-        progress["hot"] = hot_ids
+    saved_quant = progress.get("quant")
+    if saved_quant is None:
+        progress["quant"] = quants
         progress["super"] = super_ids
-        progress["hot_bits"] = hot_bits
-        progress["cold_bits"] = cold_bits
-        progress["super_bits"] = super_bits
         progress["mtp_bits"] = mtp_bits
         _save_progress(dest, progress)
-    elif (
-        saved_hot != hot_ids
-        or saved_super != super_ids
-        or int(progress.get("hot_bits") or 4) != hot_bits
-        or int(progress.get("cold_bits") or 2) != cold_bits
-        or int(progress.get("super_bits") or 8) != super_bits
-        or int(progress.get("mtp_bits") or 4) != mtp_bits
-    ):
-        message = "hot set does not match this partial record"
+    elif saved_quant != quants or progress.get("super") != super_ids or int(
+        progress.get("mtp_bits") or 4
+    ) != mtp_bits:
+        message = "quant map does not match this partial record"
         raise RuntimeError(message)
-    split = [split_keep(row, pin, experts) for row, pin in zip(hot_ids, super_ids, strict=True)]
-    hot_only = [row[0] for row in split]
-    cold_count = len(split[0][1])
     if progress["resident"] and not (dest / "resident.bin").is_file():
         progress["resident"] = False
     if not progress["resident"]:
@@ -832,16 +766,7 @@ def quantize_checkpoint(
     done_layers = {int(layer) for layer in progress["layers"]}
     pending_layers: list[int] = []
     for layer in range(len(kinds)):
-        if layer in done_layers and _layer_ready(
-            dest,
-            layer,
-            len(hot_only[layer]),
-            cold_count,
-            len(super_ids[layer]),
-            hot_slot,
-            cold_slot,
-            super_slot,
-        ):
+        if layer in done_layers and _layer_ready(dest, layer, quants[layer]):
             continue
         if layer in done_layers:
             progress["layers"] = [item for item in progress["layers"] if int(item) != layer]
@@ -852,18 +777,7 @@ def quantize_checkpoint(
         _log(f"quantize experts, {len(pending_layers)} layers, {LAYER_WORKERS} workers")
         with ProcessPoolExecutor(max_workers=LAYER_WORKERS) as pool:
             futures = [
-                pool.submit(
-                    pack_expert_layer,
-                    str(source),
-                    str(dest),
-                    layer,
-                    hot_ids[layer],
-                    super_ids[layer],
-                    experts,
-                    hot_bits,
-                    cold_bits,
-                    super_bits,
-                )
+                pool.submit(pack_expert_layer, str(source), str(dest), layer, quants[layer])
                 for layer in pending_layers
             ]
             for future in as_completed(futures):
@@ -913,29 +827,20 @@ def quantize_checkpoint(
         _clear_inflight(progress)
         _save_progress(dest, progress)
     _write_ngram(store, dest, progress)
-    manifest = {
-        "version": RECORD_VERSION,
+    widths = sorted({bits for row in quants for bits in row}, reverse=True)
+    pin_bits = next(iter(pin_widths)) if pin_widths else widths[-1]
+    pin_live, pin_slot = tier_image_bytes(pin_bits)
+    manifest: dict[str, Any] = {
+        "version": QUANT_LAYOUT_VERSION,
         "complete": True,
-        "expert_slot": hot_slot,
-        "expert_live": hot_live,
-        "cold_slot": cold_slot,
-        "cold_live": cold_live,
-        "hot_bits": hot_bits,
-        "cold_bits": cold_bits,
-        "hot_format": _plane_format(hot_bits),
-        "cold_format": _plane_format(cold_bits),
-        "hot_count": [len(row) for row in hot_only],
-        "cold_count": cold_count,
-        "super_count": [len(row) for row in super_ids],
-        "super_bits": super_bits,
-        "super_format": _plane_format(super_bits),
-        "super_slot": super_slot,
-        "super_live": super_live,
+        "super": super_ids,
+        "super_bits": pin_bits,
+        "super_format": _plane_format(pin_bits),
+        "super_live": pin_live,
+        "super_slot": pin_slot,
         "mtp_bits": mtp_bits,
         "mtp_format": _plane_format(mtp_bits),
         "mtp_slot": mtp_slot,
-        "hot": hot_only,
-        "super": super_ids,
         "experts": experts,
         "layers": len(kinds),
         "ngram_rows": NGRAM_SHARD_COUNT * NGRAM_ROWS_PER_SHARD,
@@ -945,6 +850,23 @@ def quantize_checkpoint(
         "head_key": "lm_head.weight",
         **catalog,
     }
+    if len(widths) == 1:
+        live, slot = tier_image_bytes(widths[0])
+        manifest["expert_quant"] = widths[0]
+        manifest["expert_format"] = _plane_format(widths[0])
+        manifest["expert_live"] = live
+        manifest["expert_slot"] = slot
+    else:
+        described: dict[str, Any] = {}
+        for bits in widths:
+            live, slot = tier_image_bytes(bits)
+            described[str(bits)] = {
+                "format": _plane_format(bits),
+                "live": live,
+                "slot": slot,
+            }
+        manifest["expert_quant"] = quants
+        manifest["quants"] = described
     tmp = manifest_path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(manifest))
     manifest_fd = os.open(tmp, os.O_RDONLY)

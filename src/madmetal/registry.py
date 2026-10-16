@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -42,14 +43,23 @@ def registry_path(root: Path | None = None) -> Path:
     return models_dir(root) / "registry.json"
 
 
-def tier_suffix(hot_count: int, cold_count: int, hot_bits: int, cold_bits: int) -> str:
-    return f"madmetal-h{hot_count}-{_plane(hot_bits)}-c{cold_count}-{_plane(cold_bits)}"
-
-
-def record_name(
-    source: Path, hot_count: int, cold_count: int, hot_bits: int, cold_bits: int
-) -> str:
-    return f"{source.name}-{tier_suffix(hot_count, cold_count, hot_bits, cold_bits)}"
+def record_name(source: Path, widths: Sequence[int]) -> str:
+    """Directory stem from the quants that contain experts. Wider quants come first."""
+    tags: list[str] = []
+    for bits in sorted({int(item) for item in widths}, reverse=True):
+        if bits == 8:
+            tags.append("fp8")
+        elif bits == 4:
+            tags.append("fp4")
+        elif bits == 2:
+            tags.append("int2")
+        else:
+            message = f"expert quant {bits} is not 2, 4, or 8"
+            raise ValueError(message)
+    if not tags:
+        message = "quant map has no widths"
+        raise ValueError(message)
+    return f"{source.name}-madmetal-" + "-".join(tags)
 
 
 @dataclass
@@ -456,14 +466,6 @@ def _created(root: Path | None) -> int:
 
 def _same_path(stored: str, source: Path) -> bool:
     return Path(stored).expanduser().resolve() == source.expanduser().resolve()
-
-
-def _plane(bits: int) -> str:
-    if bits == 8:
-        return "fp8"
-    if bits == 4:
-        return "fp4"
-    return f"b{bits}"
 
 
 def _repo_root() -> Path:

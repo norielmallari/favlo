@@ -30,10 +30,10 @@ from qwen38_flash_next.checks import check_state_kernels
 from qwen38_flash_next.convert import (
     LAYER_WORKERS,
     NGRAM_SHARD_COUNT,
-    importance_hot_ids,
+    load_quant_map,
     quantize_checkpoint,
 )
-from qwen38_flash_next.formats import DEFAULT_RECORD
+from qwen38_flash_next.formats import DEFAULT_QUANT_MAP, DEFAULT_RECORD
 from qwen38_flash_next.grove import write_grove
 from qwen38_flash_next.probe import matmul, probe
 from qwen38_flash_next.runtime import Qwen38Runtime, RequestClosed
@@ -74,43 +74,26 @@ def quantize_main(args: Any) -> int:
     finished = False
     try:
         source = _checkpoint(args.source)
-        output = _quantize_output(args, source)
+        layers = _source_layers(source)
+        experts = _source_experts(source)
+        quant_map = args.quant_map or DEFAULT_QUANT_MAP
+        quants, supers = load_quant_map(quant_map, layers, experts)
+        output = _quantize_output(source, quants, args.output)
         args.output = output
         refuse_conflicting_destination(output.name, source)
         if not ui.keeps_lines:
             progress = ui.begin("quantize", total=0, unit="layers", detail="resident")
-            layers = _source_layers(source)
             watcher = threading.Thread(
                 target=_watch_quantize,
                 args=(output, layers, progress, ui, stop),
                 daemon=True,
             )
             watcher.start()
-        hot = args.hot
-        if args.importance is not None:
-            if hot is not None:
-                message = "pass either --hot or --importance"
-                raise RuntimeError(message)
-            config = json.loads((source / "config.json").read_text())
-            text = config["text_config"]
-            graph = json.loads(args.importance.read_text())
-            chosen = importance_hot_ids(
-                graph,
-                len(text["layer_types"]),
-                int(text["num_experts"]),
-                int(args.hot_count),
-            )
-            args.output.mkdir(parents=True, exist_ok=True)
-            hot = args.output / "hot-ids.json"
-            hot.write_text(json.dumps({str(layer): row for layer, row in enumerate(chosen)}))
         packed = quantize_checkpoint(
             source,
             args.output,
-            hot,
-            args.super,
-            hot_bits=int(args.hot_bits),
-            cold_bits=int(args.cold_bits),
-            super_bits=int(args.super_bits),
+            quants,
+            supers,
             mtp_bits=int(args.mtp_bits),
         )
         write_grove(args.output, replace=packed)
@@ -155,12 +138,11 @@ def _report_failure(console: Any) -> None:
     report(text)
 
 
-def _quantize_output(args: Any, source: Path) -> Path:
-    if args.output is not None:
-        return args.output
-    cold = _source_experts(source) - int(args.hot_count)
-    name = record_name(source, int(args.hot_count), cold, int(args.hot_bits), int(args.cold_bits))
-    return models_dir() / name
+def _quantize_output(source: Path, quants: list[list[int]], output: Path | None) -> Path:
+    if output is not None:
+        return output
+    widths = [bits for row in quants for bits in row]
+    return models_dir() / record_name(source, widths)
 
 
 def _source_layers(source: Path) -> int:
@@ -964,14 +946,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     quant_parser.add_argument("--source", type=Path, default=None)
     quant_parser.add_argument("--output", type=Path, default=None)
     quant_parser.add_argument("--alias", default=None)
-    quant_parser.add_argument("--hot", type=Path, default=None)
-    quant_parser.add_argument("--importance", type=Path, default=None)
-    quant_parser.add_argument("--hot-count", type=int, default=128)
-    quant_parser.add_argument("--hot-bits", type=int, default=8, choices=(8, 4, 2))
-    quant_parser.add_argument("--cold-bits", type=int, default=4, choices=(8, 4, 2))
-    quant_parser.add_argument("--super-bits", type=int, default=8, choices=(8, 4, 2))
+    quant_parser.add_argument("--quant-map", type=Path, default=None)
     quant_parser.add_argument("--mtp-bits", type=int, default=4, choices=(8, 4, 2))
-    quant_parser.add_argument("--super", type=Path, default=None)
     _add_console(quant_parser)
     models_parser = sub.add_parser("models", help="list or edit the flavor registry")
     models_sub = models_parser.add_subparsers(dest="models_command")

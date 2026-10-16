@@ -19,15 +19,28 @@ NGRAM_SLOT = 128
 NGRAM_WIDTH = 160
 IO_CHUNK = 256 * 1024 * 1024
 RECORD_VERSION = 5
-# Hugging Face model name, then -madmetal-, then each tier. h is the hot file,
-# c is the cold file. The plane after the count is that file's data width.
-# Version 5. Widths come from --hot-bits, --cold-bits, --super-bits, and --mtp-bits.
-# This directory was packed with all four of those at 4.
+# One file per quant. The packer still writes version 5.
+QUANT_LAYOUT_VERSION = 6
+_QUANT_TAG = {8: "fp8", 4: "fp4", 2: "int2"}
+# Version 6. One file per quant. This directory is uniform fp4.
 DEFAULT_RECORD = (
     Path(__file__).resolve().parents[1]
     / "models"
-    / "Qwen3.8-Flash-Next-madmetal-h128-fp4-c384-fp4"
+    / "Qwen3.8-Flash-Next-madmetal-fp4"
 )
+
+
+DEFAULT_QUANT_MAP = Path(__file__).with_name("quant_map.json")
+
+
+def quant_file(layer: int, bits: int) -> str:
+    """``experts/`` name for one layer at this quant. The quant names the file."""
+    try:
+        tag = _QUANT_TAG[int(bits)]
+    except KeyError as exc:
+        message = f"expert quant {bits} is not 2, 4, or 8"
+        raise ValueError(message) from exc
+    return f"{layer:02d}-{tag}.bin"
 
 # MTLTensorDataType values from the macOS 27 SDK headers.
 TENSOR_INT8 = 45

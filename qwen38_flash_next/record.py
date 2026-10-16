@@ -15,9 +15,11 @@ from qwen38_flash_next.formats import (
     NGRAM_SLOT,
     NGRAM_WIDTH,
     PAGE,
+    QUANT_LAYOUT_VERSION,
     RECORD_VERSION,
     dequant_int4,
     int4_plane_sizes,
+    quant_file,
     stored_k_int4,
 )
 from qwen38_flash_next.session import MetalSession
@@ -95,7 +97,15 @@ class QuantRecord:
             raise FileNotFoundError(message)
         self.root = root
         self.manifest = json.loads(manifest_path.read_text())
-        if self.manifest.get("version") != RECORD_VERSION or not self.manifest.get("complete"):
+        if not self.manifest.get("complete"):
+            message = f"quantized record is incomplete: {root}"
+            raise RuntimeError(message)
+        self._quant_grid = None
+        version = int(self.manifest.get("version") or 0)
+        if version == QUANT_LAYOUT_VERSION:
+            self._open_quant_files()
+            return
+        if version != RECORD_VERSION:
             message = f"quantized record is incomplete: {root}"
             raise RuntimeError(message)
         layers = int(self.manifest["layers"])
@@ -154,6 +164,177 @@ class QuantRecord:
         self.page_scratch = mmap.mmap(-1, PAGE)
         self.gate_up_bytes = sum(int4_plane_sizes(1280, stored_k_int4(2560, align_k=True)))
 
+    def _open_quant_files(self) -> None:
+        """One file per quant. Expert ``e`` of that quant sits at ``e × stride``."""
+        layers = int(self.manifest["layers"])
+        experts = int(self.manifest["experts"])
+        quant = self.manifest.get("expert_quant")
+        if isinstance(quant, list):
+            self._open_quant_grid(quant)
+            return
+        if isinstance(quant, bool) or not isinstance(quant, int) or quant not in (2, 4, 8):
+            message = f"expert quant {quant} is not 2, 4, or 8"
+            raise RuntimeError(message)
+        raw_super = self.manifest.get("super") or [[] for _ in range(layers)]
+        self.super = [[int(expert) for expert in row] for row in raw_super]
+        if len(self.super) != layers:
+            message = f"super list does not match {layers} layers"
+            raise RuntimeError(message)
+        self.hot = [[] for _ in range(layers)]
+        self._hot_sets = [set() for _ in range(layers)]
+        self._super_sets = []
+        self._cold_sets = []
+        self._tier_row = []
+        for pin in self.super:
+            if len(pin) != len(set(pin)) or any(expert < 0 or expert >= experts for expert in pin):
+                message = f"super pin is not ids in 0..{experts - 1}"
+                raise RuntimeError(message)
+            pin_set = set(pin)
+            mapping: dict[int, tuple[int, int]] = {}
+            cold: set[int] = set()
+            for expert in range(experts):
+                if expert in pin_set:
+                    mapping[expert] = (2, expert)
+                    continue
+                mapping[expert] = (1, expert)
+                cold.add(expert)
+            self._super_sets.append(pin_set)
+            self._tier_row.append(mapping)
+            self._cold_sets.append(cold)
+        slot = int(self.manifest["expert_slot"])
+        live = int(self.manifest["expert_live"])
+        if slot < live or slot % PAGE:
+            message = f"expert stride {slot} does not hold a {live}-byte image"
+            raise RuntimeError(message)
+        self.super_fds = [None] * layers
+        for layer in range(layers):
+            path = self.root / "experts" / quant_file(layer, quant)
+            fd = os.open(path, os.O_RDONLY)
+            self.cold_fds.append(fd)
+            if os.fstat(fd).st_size < experts * slot:
+                message = f"{path.name} is shorter than {experts} experts"
+                raise RuntimeError(message)
+        for fd in self.cold_fds:
+            _bypass_cache(fd)
+        self.ngram_fd = os.open(self.root / "ngram.bin", os.O_RDONLY)
+        _bypass_cache(self.ngram_fd)
+        pin_quant = int(self.manifest.get("super_bits") or quant)
+        if pin_quant != quant:
+            message = "a super pin quant differs from the expert file"
+            raise RuntimeError(message)
+        self.hot_bits = quant
+        self.cold_bits = quant
+        self.super_bits = pin_quant
+        self.live = live
+        self.slot = slot
+        self.cold_live = live
+        self.cold_slot = slot
+        self.super_live = live
+        self.super_slot = slot
+        self.expert_scratch = mmap.mmap(-1, live)
+        self.page_scratch = mmap.mmap(-1, PAGE)
+        self.gate_up_bytes = sum(int4_plane_sizes(1280, stored_k_int4(2560, align_k=True)))
+
+    def _open_quant_grid(self, quant: list[Any]) -> None:
+        """Two widths. The wider file is tier 0 and the other is tier 1."""
+        layers = int(self.manifest["layers"])
+        experts = int(self.manifest["experts"])
+        if len(quant) != layers or any(len(row) != experts for row in quant):
+            message = "expert quant does not match the checkpoint"
+            raise RuntimeError(message)
+        grid = [[int(bits) for bits in row] for row in quant]
+        described = self.manifest.get("quants") or {}
+        widths = sorted({bits for row in grid for bits in row}, reverse=True)
+        if len(widths) > 2 or any(bits not in (2, 4, 8) for bits in widths):
+            message = "expert quant uses more than two widths"
+            raise RuntimeError(message)
+        raw_super = self.manifest.get("super") or [[] for _ in range(layers)]
+        self.super = [[int(expert) for expert in row] for row in raw_super]
+        if len(self.super) != layers:
+            message = f"super list does not match {layers} layers"
+            raise RuntimeError(message)
+        self.hot = [[] for _ in range(layers)]
+        self._hot_sets = []
+        self._cold_sets = []
+        self._super_sets = []
+        self._tier_row = []
+        self._quant_grid = grid
+        self._quant_row = []
+        self._quant_live = {}
+        self._quant_slot = {}
+        self._quant_fds: dict[int, list[int | None]] = {bits: [] for bits in widths}
+        for bits in widths:
+            meta = described.get(str(bits)) or {}
+            live = int(meta.get("live") or 0)
+            slot = int(meta.get("slot") or 0)
+            if live < 1 or slot < live or slot % PAGE:
+                message = f"quant {bits} stride {slot} does not hold a {live}-byte image"
+                raise RuntimeError(message)
+            self._quant_live[bits] = live
+            self._quant_slot[bits] = slot
+        high = widths[0]
+        low = widths[-1]
+        for row, pin in zip(grid, self.super, strict=True):
+            if len(pin) != len(set(pin)) or any(expert < 0 or expert >= experts for expert in pin):
+                message = f"super pin is not ids in 0..{experts - 1}"
+                raise RuntimeError(message)
+            pin_set = set(pin)
+            ranks = {bits: 0 for bits in widths}
+            mapping: dict[int, tuple[int, int]] = {}
+            placed: list[int] = []
+            hot: set[int] = set()
+            cold: set[int] = set()
+            for expert, bits in enumerate(row):
+                row_index = ranks[bits]
+                ranks[bits] += 1
+                placed.append(row_index)
+                if expert in pin_set:
+                    mapping[expert] = (2, row_index)
+                    continue
+                if bits == high and len(widths) == 2:
+                    mapping[expert] = (0, row_index)
+                    hot.add(expert)
+                else:
+                    mapping[expert] = (1, row_index)
+                    cold.add(expert)
+            self._quant_row.append(placed)
+            self._tier_row.append(mapping)
+            self._hot_sets.append(hot)
+            self._cold_sets.append(cold)
+            self._super_sets.append(pin_set)
+        for bits in widths:
+            for layer, row in enumerate(grid):
+                count = sum(1 for item in row if item == bits)
+                path = self.root / "experts" / quant_file(layer, bits)
+                if count == 0:
+                    self._quant_fds[bits].append(None)
+                    continue
+                fd = os.open(path, os.O_RDONLY)
+                if os.fstat(fd).st_size < count * self._quant_slot[bits]:
+                    os.close(fd)
+                    message = f"{path.name} is shorter than {count} experts"
+                    raise RuntimeError(message)
+                _bypass_cache(fd)
+                self._quant_fds[bits].append(fd)
+        self.hot_fds = list(self._quant_fds[high]) if len(widths) == 2 else []
+        self.cold_fds = list(self._quant_fds[low])
+        self.super_fds = [None] * layers
+        self.ngram_fd = os.open(self.root / "ngram.bin", os.O_RDONLY)
+        _bypass_cache(self.ngram_fd)
+        pin_quant = int(self.manifest.get("super_bits") or low)
+        self.hot_bits = high if len(widths) == 2 else low
+        self.cold_bits = low
+        self.super_bits = pin_quant
+        self.live = self._quant_live[high if len(widths) == 2 else low]
+        self.slot = self._quant_slot[high if len(widths) == 2 else low]
+        self.cold_live = self._quant_live[low]
+        self.cold_slot = self._quant_slot[low]
+        self.super_live = self._quant_live.get(pin_quant, self.cold_live)
+        self.super_slot = self._quant_slot.get(pin_quant, self.cold_slot)
+        self.expert_scratch = mmap.mmap(-1, max(self._quant_live.values()))
+        self.page_scratch = mmap.mmap(-1, PAGE)
+        self.gate_up_bytes = sum(int4_plane_sizes(1280, stored_k_int4(2560, align_k=True)))
+
     def open_io(self, gpu: MetalSession) -> None:
         """File handles for loads that land in the buffer a shader reads."""
         import Foundation
@@ -173,12 +354,34 @@ class QuantRecord:
         mtp_path = self.root / "mtp-experts.bin"
         self.mtp_io = handle(mtp_path) if mtp_path.is_file() else None
         layers = int(self.manifest["layers"])
+        if int(self.manifest.get("version") or 0) == QUANT_LAYOUT_VERSION:
+            quant = self.manifest["expert_quant"]
+            if isinstance(quant, list):
+                self.hot_io = [
+                    self._io_or_none(handle, layer, self.hot_bits) for layer in range(layers)
+                ]
+                self.cold_io = [
+                    self._io_or_none(handle, layer, self.cold_bits) for layer in range(layers)
+                ]
+                return
+            self.hot_io = []
+            self.cold_io = [
+                handle(self.root / "experts" / quant_file(layer, int(quant)))
+                for layer in range(layers)
+            ]
+            return
         self.hot_io = [
             handle(self.root / "experts" / f"{layer:02d}-hot.bin") for layer in range(layers)
         ]
         self.cold_io = [
             handle(self.root / "experts" / f"{layer:02d}-cold.bin") for layer in range(layers)
         ]
+
+    def _io_or_none(self, handle: Any, layer: int, bits: int) -> Any:
+        path = self.root / "experts" / quant_file(layer, bits)
+        if not path.is_file():
+            return None
+        return handle(path)
 
     def hot_set(self, layer: int) -> set[int]:
         return self._hot_sets[layer]
@@ -212,17 +415,32 @@ class QuantRecord:
             raise RuntimeError(message)
         return self.hot_io[layer] if tier == 0 else self.cold_io[layer]
 
+    def _image_fd(self, layer: int, tier: int) -> int:
+        if tier == 2 and self.super_fds[layer] is not None:
+            return int(self.super_fds[layer])
+        if tier == 0:
+            return self.hot_fds[layer]
+        return self.cold_fds[layer]
+
     def expert_image(self, layer: int, expert: int) -> bytes:
+        if self._quant_grid is not None:
+            bits = self._quant_grid[layer][int(expert)]
+            row = self._quant_row[layer][int(expert)]
+            fd = self._quant_fds[bits][layer]
+            if fd is None:
+                message = f"layer {layer} has no quant {bits} file"
+                raise RuntimeError(message)
+            view = pread_exact(
+                fd,
+                self._quant_live[bits],
+                row * self._quant_slot[bits],
+                self.expert_scratch,
+            )
+            blob = bytes(view)
+            del view
+            return blob
         tier, row = self.tier_row(layer, expert)
-        if tier == 2:
-            fd = self.super_fds[layer]
-        elif tier == 0:
-            fd = self.hot_fds[layer]
-        else:
-            fd = self.cold_fds[layer]
-        if fd is None:
-            message = f"layer {layer} has no super file"
-            raise RuntimeError(message)
+        fd = self._image_fd(layer, tier)
         view = pread_exact(fd, self.payload(tier), row * self.stride(tier), self.expert_scratch)
         blob = bytes(view)
         del view
@@ -258,14 +476,19 @@ class QuantRecord:
             return
         self._closed = True
         self.release_io()
-        fds = [
-            fd
-            for fd in (*self.hot_fds, *self.cold_fds, *self.super_fds, self.ngram_fd)
-            if isinstance(fd, int)
-        ]
+        extra: list[int | None] = []
+        for group in getattr(self, "_quant_fds", {}).values():
+            extra.extend(group)
+        fds: list[int] = []
+        seen: set[int] = set()
+        for fd in (*self.hot_fds, *self.cold_fds, *self.super_fds, self.ngram_fd, *extra):
+            if isinstance(fd, int) and fd not in seen:
+                seen.add(fd)
+                fds.append(fd)
         self.hot_fds = []
         self.cold_fds = []
         self.super_fds = []
+        self._quant_fds = {}
         self.ngram_fd = None
         for fd in fds:
             try:

@@ -175,5 +175,5 @@ def test_quantize_registration_refuses_a_different_source(tmp_path) -> None:
     register_quantized("packed", source=source, alias="short", root=tmp_path, pipeline=PIPELINE)
     with pytest.raises(ValueError, match="different source"):
         refuse_conflicting_destination("packed", other, root=tmp_path)
-    name = record_name(source, 128, 384, 8, 4)
-    assert name == f"{source.name}-madmetal-h128-fp8-c384-fp4"
+    name = record_name(source, [8, 4])
+    assert name == f"{source.name}-madmetal-fp8-fp4"

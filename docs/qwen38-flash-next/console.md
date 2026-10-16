@@ -12,4 +12,4 @@ Prefill `done` is `(layers completed + the fraction of the current layer) / laye
 
 The usage object carries `timings.prompt_per_second`, `timings.predicted_per_second`, `timings.prompt_n`, and `timings.predicted_n`. `prompt_n` is the prompt length minus the cached prefix. `prompt_tokens` remains the full prompt.
 
-`complete` and `bf16` take `--model` as a folder or an alias. `--record` is still a direct path and wins when it is set. `quantize --alias` stores the alias on the directory it writes. The derived directory name is `{source name}-madmetal-h{hot}-{plane}-c{cold}-{plane}`.
+`complete` and `bf16` take `--model` as a folder or an alias. `--record` is still a direct path and wins when it is set. `quantize --alias` stores the alias on the directory it writes. The derived directory name is `{source name}-madmetal-` plus each quant in the map, wider first: `fp8`, `fp4`, or `int2`.
