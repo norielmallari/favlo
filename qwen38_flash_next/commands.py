@@ -26,6 +26,7 @@ from madmetal.registry import (
     register_quantized,
     set_alias,
 )
+from qwen38_flash_next.adapt import finish_request, open_request
 from qwen38_flash_next.checks import check_state_kernels
 from qwen38_flash_next.convert import (
     LAYER_WORKERS,
@@ -679,7 +680,8 @@ def handle_chat(
     state: dict[str, Any],
 ) -> None:
     """One chat completion on a runtime this pipeline opened."""
-    del state
+    open_request(runtime)
+    finished = False
     try:
         messages = body["messages"]
         tools = body.get("tools")
@@ -752,6 +754,7 @@ def handle_chat(
                         handler._model_id,
                     ),
                 )
+            finished = True
         except (RequestClosed, OSError):
             handler.close_connection = True
             _log("client closed")
@@ -759,6 +762,7 @@ def handle_chat(
             if persist is not None:
                 persist()
     finally:
+        finish_request(runtime, selection, complete=finished)
         runtime._stop = None
         runtime.tool_names = []
         runtime.required_function = None

@@ -169,7 +169,7 @@ class ExpertAtlas:
         if not missing:
             return 0
         groups: list[tuple[Any, list[tuple[Any, int, int, int]]]] = []
-        for tier in (0, 1):
+        for tier in (0, 1, 3):
             indexed = []
             for expert in missing:
                 expert_tier, row = self.files.tier_row(layer, expert)

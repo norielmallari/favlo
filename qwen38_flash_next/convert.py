@@ -237,7 +237,7 @@ def ngram_byte_offset(shard: int, local: int) -> int:
 def load_quant_map(
     path: Path, layers: int, experts: int
 ) -> tuple[list[list[int]], list[list[int]]]:
-    """Read a quant map. One width per expert, and the super pin. At most two widths."""
+    """Read a quant map. One width per expert, and the super pin. At most three widths."""
     raw = json.loads(path.read_text())
     if not isinstance(raw, dict) or "experts" not in raw or "super" not in raw:
         message = "quant map lists experts and super"
@@ -260,8 +260,8 @@ def load_quant_map(
             widths.append(int(bits))
         grid.append(widths)
     used = {bits for row in grid for bits in row}
-    if len(used) > 2:
-        message = "a quant map uses at most two widths"
+    if len(used) > 3:
+        message = "a quant map uses at most three widths"
         raise RuntimeError(message)
     return grid, _super_rows(raw["super"], layers, experts)
 

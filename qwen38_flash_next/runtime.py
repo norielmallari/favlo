@@ -33,6 +33,7 @@ from qwen38_flash_next.context import (
 )
 from qwen38_flash_next.convert import ShardStore, _layer_f32_keys, _layer_int4_keys
 from qwen38_flash_next.experts import ExpertAtlas, group_tier
+from qwen38_flash_next.firing import RouteScratch
 from qwen38_flash_next.formats import (
     BLOCK,
     DEFAULT_KV_CACHE,
@@ -146,8 +147,12 @@ def after_atlas_load(resident: Sequence[int]) -> int:
 
 
 def span_expert_bits(hot: int, cold: int, super_bits: int) -> bool:
-    """Short-span decode dots are fp8 E4M3 (8) and fp4 E2M1 (4)."""
-    return hot in (4, 8) and cold in (4, 8) and super_bits in (4, 8)
+    """fp8 and fp4 span kernels stay on when another routed plane is int2.
+
+    The super pin still has to be fp8 or fp4. An int2 super has no span kernel.
+    """
+    routed = hot in (4, 8) or cold in (4, 8)
+    return routed and super_bits in (4, 8)
 
 
 class RequestClosed(Exception):
@@ -238,6 +243,7 @@ class Qwen38Runtime:
         self._choice: dict[int, Dev] = {}
         self._choice_ids = self.gpu.alloc(self.layers * self.top_k * 4)
         self._tier: Any = None
+        self._narrow: ExpertPlanes | None = None
         self._atlas_trusted = False
         self._avoid_token: int | None = None
         self._avoid_until = 0
@@ -324,6 +330,7 @@ class Qwen38Runtime:
         self._final: dict[str, Any] | None = None
         self._head: Int4Matrix | None = None
         self._ple: dict[str, Any] | None = None
+        self.routes: RouteScratch | None = None
         if bf16:
             self.store = ShardStore(root)
             self.files = _Bf16Ngram(self.store)
@@ -332,11 +339,17 @@ class Qwen38Runtime:
             self.files = QuantRecord(root)
             self._hot = expert_planes(self.files.hot_bits, self.hidden, self.moe)
             self._cold = expert_planes(self.files.cold_bits, self.hidden, self.moe)
+            self._narrow = (
+                expert_planes(self.files.narrow_bits, self.hidden, self.moe)
+                if self.files.narrow_bits in (2, 4, 8)
+                else None
+            )
             self._super_planes = expert_planes(self.files.super_bits, self.hidden, self.moe)
             self._load_record()
             self._load_mtp()
             self._load_supers()
             self._upload_tiers()
+            self.routes = RouteScratch(self.layers, self.experts)
             state_bytes = 48 * 128 * 128 * 4
             self._gdn_shadow = {
                 index: self.gpu.alloc(state_bytes) for index in self.gdn_state
@@ -386,7 +399,10 @@ class Qwen38Runtime:
                 os.fstat(fd).st_size for fd in self.files.hot_fds if isinstance(fd, int)
             )
             cold = sum(os.fstat(fd).st_size for fd in self.files.cold_fds if isinstance(fd, int))
-            self._tier_bytes = self._hot_bytes + cold
+            narrow = sum(
+                os.fstat(fd).st_size for fd in self.files.narrow_fds if isinstance(fd, int)
+            )
+            self._tier_bytes = self._hot_bytes + cold + narrow
             if resident_percent is not None:
                 self.resident_candidates = resident_candidates(self._hot_bytes, resident_percent)
                 self.resident_budget = self.resident_candidates[0]
@@ -1314,6 +1330,8 @@ class Qwen38Runtime:
         if commit:
             self.tokens.extend(tokens)
             self._prefix_dirty = True
+            if decode and self.routes is not None:
+                self.routes.take_decode(len(tokens))
         self._forward_open = False
         self.last_logits = logits
         elapsed = time.perf_counter() - started
@@ -1665,6 +1683,19 @@ class Qwen38Runtime:
             return False
         return span_expert_bits(self.files.hot_bits, self.files.cold_bits, self.files.super_bits)
 
+    def _routed_planes(self, layer: int) -> list[tuple[set[int], ExpertPlanes]]:
+        """Hot, cold, and the int2 plane when this record has three widths."""
+        if not isinstance(self.files, QuantRecord):
+            message = "routed planes need a quant record"
+            raise RuntimeError(message)
+        rows = [
+            (self.files.hot_set(layer), self._hot),
+            (self.files.cold_set(layer), self._cold),
+        ]
+        if self._narrow is not None:
+            rows.append((self.files.narrow_set(layer), self._narrow))
+        return rows
+
     def _name_constrained(self, produced: list[int]) -> bool:
         if not self.tool_names:
             return False
@@ -1881,6 +1912,8 @@ class Qwen38Runtime:
                 break
             kept.append(draft)
         if correction is None and len(kept) == len(span):
+            if self.routes is not None:
+                self.routes.take_decode(len(span))
             self.tokens.extend(span)
             self._prefix_dirty = True
             self.last_logits = held.view((len(span) - 1) * self.vocab, self.vocab)
@@ -1901,6 +1934,8 @@ class Qwen38Runtime:
         snapped = self._span_snap_count == len(span) and len(kept) >= 1
         deferred = False
         if snapped and correction is not None and self._can_carry(stopped):
+            if self.routes is not None:
+                self.routes.take_decode(len(kept))
             self._restore_span_prefix(len(kept))
             self.tokens.extend(kept)
             self._prefix_dirty = True
@@ -1917,6 +1952,8 @@ class Qwen38Runtime:
             self._carry_yielded = False
             deferred = True
         elif snapped:
+            if self.routes is not None:
+                self.routes.take_decode(len(kept))
             self._restore_span_prefix(len(kept))
             self.tokens.extend(kept)
             self._prefix_dirty = True
@@ -3237,6 +3274,8 @@ class Qwen38Runtime:
         # every later route, so the token would have to be replayed.
         host_ids = self.gpu.read_u32(choice)
         rows = np.asarray(host_ids, dtype=np.uint32).reshape(count, self.top_k)
+        if self.routes is not None and not self._decoding and self.atlas is None:
+            self.routes.add_prefill(layer, rows)
         # A decode span is at most four tokens. A prefill chunk can route
         # thousands of ids; the next token only follows the last row.
         chosen = rows.reshape(-1) if self._decoding and count <= 4 else rows[-1]
@@ -3324,17 +3363,17 @@ class Qwen38Runtime:
         rows = host_ids.reshape(count, self.top_k)
         self._predicted[layer] = [int(item) for item in rows[-1].tolist()]
         self._choice[layer] = Dev(self._hold_ids, self.top_k, (count - 1) * self.top_k)
+        if self.routes is not None:
+            self.routes.add_prefill(layer, rows)
         event = self.atlas.stage(layer, host_ids.reshape(-1).tolist())
         self.gpu.io_fence(event)
         xs = Dev(self._hold_xs, count * self.hidden)
         weight = Dev(self._hold_w, count * self.top_k)
         running = Dev(self._hold_out, count * self.hidden)
-        running = self._prefill_tier(
-            layer, xs, weight, running, host_ids, count, self.files.hot_set(layer), self._hot
-        )
-        running = self._prefill_tier(
-            layer, xs, weight, running, host_ids, count, self.files.cold_set(layer), self._cold
-        )
+        for members, planes in self._routed_planes(layer):
+            running = self._prefill_tier(
+                layer, xs, weight, running, host_ids, count, members, planes
+            )
         running = self._prefill_super(layer, xs, weight, running, host_ids, count)
         running = self._keep_mixed(running, count)
         span = self.branches * self.hidden
@@ -3406,6 +3445,24 @@ class Qwen38Runtime:
         if planes.bits in (4, 8):
             return self._moe_int4_matmul(
                 layer, xs, weight, running, host_ids, count, members, planes
+            )
+        if use_atlas:
+            if self.atlas is None or self.atlas.table is None or self.atlas.miss is None:
+                message = "prefill has no expert atlas"
+                raise RuntimeError(message)
+            return self._moe_tier_batched(
+                layer,
+                xs,
+                weight,
+                running,
+                host_ids,
+                count,
+                members,
+                planes,
+                self.atlas.atlas,
+                self.atlas.table,
+                layer * self.experts,
+                self.atlas.miss,
             )
         return self._moe_tier_batched(
             layer,
@@ -3657,10 +3714,7 @@ class Qwen38Runtime:
         shared_row = shared if shared.n == self.hidden else shared.view(0, self.hidden)
         ids = [int(expert) for expert in np.asarray(host_ids).reshape(-1).tolist()]
         running = shared_row
-        for members, planes in (
-            (self.files.hot_set(layer), self._hot),
-            (self.files.cold_set(layer), self._cold),
-        ):
+        for members, planes in self._routed_planes(layer):
             slots = [index for index, expert in enumerate(ids) if expert in members]
             if not slots:
                 continue
@@ -4037,34 +4091,60 @@ class Qwen38Runtime:
         if self.atlas is None or not isinstance(self.files, QuantRecord):
             message = "span decode has no expert atlas"
             raise RuntimeError(message)
-        running = self._span_tier(
-            layer,
-            xs,
-            weight,
-            shared,
-            host_ids,
-            count,
-            self.files.hot_set(layer),
-            self._hot,
-            self.atlas.atlas,
-            self.atlas.table,
-            layer * self.experts,
-            self.atlas.miss,
-        )
-        running = self._span_tier(
-            layer,
-            xs,
-            weight,
-            running,
-            host_ids,
-            count,
-            self.files.cold_set(layer),
-            self._cold,
-            self.atlas.atlas,
-            self.atlas.table,
-            layer * self.experts,
-            self.atlas.miss,
-        )
+        weights = self.atlas.atlas
+        table = self.atlas.table
+        table_base = layer * self.experts
+        miss = self.atlas.miss
+        running = shared
+        for members, planes in (
+            (self.files.hot_set(layer), self._hot),
+            (self.files.cold_set(layer), self._cold),
+        ):
+            if planes.bits in (4, 8):
+                running = self._span_tier(
+                    layer,
+                    xs,
+                    weight,
+                    running,
+                    host_ids,
+                    count,
+                    members,
+                    planes,
+                    weights,
+                    table,
+                    table_base,
+                    miss,
+                )
+            else:
+                running = self._moe_tier(
+                    layer,
+                    xs,
+                    weight,
+                    running,
+                    host_ids,
+                    count,
+                    members,
+                    planes,
+                    weights,
+                    table,
+                    table_base,
+                    miss,
+                )
+        if self._narrow is not None:
+            running = self._moe_tier(
+                layer,
+                xs,
+                weight,
+                running,
+                host_ids,
+                count,
+                self.files.narrow_set(layer),
+                self._narrow,
+                weights,
+                table,
+                table_base,
+                miss,
+            )
         return self._span_super(layer, xs, weight, running, host_ids, count)
 
     def _span_tier(
@@ -4293,34 +4373,22 @@ class Qwen38Runtime:
             table = self.atlas.table
             table_base = layer * self.experts
             miss = self.atlas.miss
-        mixed = self._moe_tier(
-            layer,
-            xs,
-            weight,
-            shared,
-            host_ids,
-            count,
-            self.files.hot_set(layer),
-            self._hot,
-            weights,
-            table,
-            table_base,
-            miss,
-        )
-        mixed = self._moe_tier(
-            layer,
-            xs,
-            weight,
-            mixed,
-            host_ids,
-            count,
-            self.files.cold_set(layer),
-            self._cold,
-            weights,
-            table,
-            table_base,
-            miss,
-        )
+        mixed = shared
+        for members, planes in self._routed_planes(layer):
+            mixed = self._moe_tier(
+                layer,
+                xs,
+                weight,
+                mixed,
+                host_ids,
+                count,
+                members,
+                planes,
+                weights,
+                table,
+                table_base,
+                miss,
+            )
         return self._prefill_super(layer, xs, weight, mixed, host_ids, count)
 
     def _moe_tier(
@@ -4394,7 +4462,7 @@ class Qwen38Runtime:
         )
 
     def _upload_tiers(self) -> None:
-        """One byte per expert: 0 hot, 1 cold, 2 super."""
+        """One byte per expert: 0 fp8, 1 fp4, 2 super, 3 int2."""
         if not isinstance(self.files, QuantRecord):
             return
         raw = bytearray(self.layers * self.experts)
@@ -4406,6 +4474,8 @@ class Qwen38Runtime:
                 raw[base + expert] = 1
             for expert in self.files.super_set(layer):
                 raw[base + expert] = 2
+            for expert in self.files.narrow_set(layer):
+                raw[base + expert] = 3
         self._tier = self.gpu.upload(bytes(raw))
 
     def _remember_ids(self, layer: int, values: Sequence[int]) -> None:
@@ -4426,11 +4496,15 @@ class Qwen38Runtime:
             ids = np.frombuffer(raw, dtype=np.uint32).reshape(self.layers, 4, self.top_k)
             for layer in range(self.layers):
                 self._remember_ids(layer, ids[layer, :rows].reshape(-1).tolist())
+            if self.routes is not None:
+                self.routes.note_decode(ids[:, :rows, :])
             return
         raw = _buffer_bytes(self._choice_ids, self.layers * self.top_k * 4)
         ids = np.frombuffer(raw, dtype=np.uint32).reshape(self.layers, self.top_k)
         for layer in range(self.layers):
             self._predicted[layer] = [int(expert) for expert in ids[layer]]
+        if self.routes is not None:
+            self.routes.note_decode(ids.reshape(self.layers, 1, self.top_k))
 
     def _super_gemv(
         self,

@@ -64,6 +64,19 @@ def prefill_image_table(
     return hot_bytes, cold_bytes, table
 
 
+def routed_tier(bits: int, widths: list[int]) -> int:
+    """Plane of one routed expert. Three widths keep int2 on tier 3."""
+    if len(widths) == 3:
+        plane = {8: 0, 4: 1, 2: 3}.get(int(bits))
+        if plane is None:
+            message = f"expert quant {bits} is not 2, 4, or 8"
+            raise RuntimeError(message)
+        return plane
+    if len(widths) == 2 and int(bits) == int(widths[0]):
+        return 0
+    return 1
+
+
 class QuantRecord:
     """The file the shaders read. It does not contain BF16 weights."""
 
@@ -71,13 +84,19 @@ class QuantRecord:
         self._closed = False
         self.hot_fds: list[int] = []
         self.cold_fds: list[int] = []
+        self.narrow_fds: list[int | None] = []
         self.super_fds: list[int | None] = []
+        self.narrow_bits = 0
+        self.narrow_live = 0
+        self.narrow_slot = 0
+        self._narrow_sets: list[set[int]] = []
         self.ngram_fd: int | None = None
         self.expert_scratch: mmap.mmap | None = None
         self.page_scratch: mmap.mmap | None = None
         self.pages: dict[int, bytes] = {}
         self.hot_io: list[Any] = []
         self.cold_io: list[Any] = []
+        self.narrow_io: list[Any] = []
         self.resident_io: Any = None
         self.ngram_io: Any = None
         self.mtp_io: Any = None
@@ -136,6 +155,7 @@ class QuantRecord:
                 cold_row += 1
             self._tier_row.append(mapping)
             self._cold_sets.append(cold)
+        self._narrow_sets = [set() for _ in range(layers)]
         for layer in range(layers):
             self.hot_fds.append(os.open(root / "experts" / f"{layer:02d}-hot.bin", os.O_RDONLY))
         for layer in range(layers):
@@ -184,6 +204,7 @@ class QuantRecord:
         self._hot_sets = [set() for _ in range(layers)]
         self._super_sets = []
         self._cold_sets = []
+        self._narrow_sets = [set() for _ in range(layers)]
         self._tier_row = []
         for pin in self.super:
             if len(pin) != len(set(pin)) or any(expert < 0 or expert >= experts for expert in pin):
@@ -236,7 +257,7 @@ class QuantRecord:
         self.gate_up_bytes = sum(int4_plane_sizes(1280, stored_k_int4(2560, align_k=True)))
 
     def _open_quant_grid(self, quant: list[Any]) -> None:
-        """Two widths. The wider file is tier 0 and the other is tier 1."""
+        """Up to three widths. fp8 is tier 0, fp4 is tier 1, and int2 is tier 3."""
         layers = int(self.manifest["layers"])
         experts = int(self.manifest["experts"])
         if len(quant) != layers or any(len(row) != experts for row in quant):
@@ -245,8 +266,8 @@ class QuantRecord:
         grid = [[int(bits) for bits in row] for row in quant]
         described = self.manifest.get("quants") or {}
         widths = sorted({bits for row in grid for bits in row}, reverse=True)
-        if len(widths) > 2 or any(bits not in (2, 4, 8) for bits in widths):
-            message = "expert quant uses more than two widths"
+        if len(widths) > 3 or any(bits not in (2, 4, 8) for bits in widths):
+            message = "expert quant uses more than three widths"
             raise RuntimeError(message)
         raw_super = self.manifest.get("super") or [[] for _ in range(layers)]
         self.super = [[int(expert) for expert in row] for row in raw_super]
@@ -256,6 +277,7 @@ class QuantRecord:
         self.hot = [[] for _ in range(layers)]
         self._hot_sets = []
         self._cold_sets = []
+        self._narrow_sets = []
         self._super_sets = []
         self._tier_row = []
         self._quant_grid = grid
@@ -284,6 +306,7 @@ class QuantRecord:
             placed: list[int] = []
             hot: set[int] = set()
             cold: set[int] = set()
+            narrow: set[int] = set()
             for expert, bits in enumerate(row):
                 row_index = ranks[bits]
                 ranks[bits] += 1
@@ -291,16 +314,19 @@ class QuantRecord:
                 if expert in pin_set:
                     mapping[expert] = (2, row_index)
                     continue
-                if bits == high and len(widths) == 2:
-                    mapping[expert] = (0, row_index)
+                plane = routed_tier(bits, widths)
+                mapping[expert] = (plane, row_index)
+                if plane == 0:
                     hot.add(expert)
+                elif plane == 3:
+                    narrow.add(expert)
                 else:
-                    mapping[expert] = (1, row_index)
                     cold.add(expert)
             self._quant_row.append(placed)
             self._tier_row.append(mapping)
             self._hot_sets.append(hot)
             self._cold_sets.append(cold)
+            self._narrow_sets.append(narrow)
             self._super_sets.append(pin_set)
         for bits in widths:
             for layer, row in enumerate(grid):
@@ -316,19 +342,38 @@ class QuantRecord:
                     raise RuntimeError(message)
                 _bypass_cache(fd)
                 self._quant_fds[bits].append(fd)
-        self.hot_fds = list(self._quant_fds[high]) if len(widths) == 2 else []
-        self.cold_fds = list(self._quant_fds[low])
+        if len(widths) == 3:
+            self.hot_bits = 8
+            self.cold_bits = 4
+            self.narrow_bits = 2
+            self.hot_fds = list(self._quant_fds[8])
+            self.cold_fds = list(self._quant_fds[4])
+            self.narrow_fds = list(self._quant_fds[2])
+        elif len(widths) == 2:
+            self.hot_bits = high
+            self.cold_bits = low
+            self.narrow_bits = 0
+            self.hot_fds = list(self._quant_fds[high])
+            self.cold_fds = list(self._quant_fds[low])
+            self.narrow_fds = []
+        else:
+            self.hot_bits = low
+            self.cold_bits = low
+            self.narrow_bits = 0
+            self.hot_fds = []
+            self.cold_fds = list(self._quant_fds[low])
+            self.narrow_fds = []
         self.super_fds = [None] * layers
         self.ngram_fd = os.open(self.root / "ngram.bin", os.O_RDONLY)
         _bypass_cache(self.ngram_fd)
-        pin_quant = int(self.manifest.get("super_bits") or low)
-        self.hot_bits = high if len(widths) == 2 else low
-        self.cold_bits = low
+        pin_quant = int(self.manifest.get("super_bits") or self.cold_bits)
         self.super_bits = pin_quant
-        self.live = self._quant_live[high if len(widths) == 2 else low]
-        self.slot = self._quant_slot[high if len(widths) == 2 else low]
-        self.cold_live = self._quant_live[low]
-        self.cold_slot = self._quant_slot[low]
+        self.live = self._quant_live[self.hot_bits]
+        self.slot = self._quant_slot[self.hot_bits]
+        self.cold_live = self._quant_live[self.cold_bits]
+        self.cold_slot = self._quant_slot[self.cold_bits]
+        self.narrow_live = self._quant_live.get(self.narrow_bits, 0)
+        self.narrow_slot = self._quant_slot.get(self.narrow_bits, 0)
         self.super_live = self._quant_live.get(pin_quant, self.cold_live)
         self.super_slot = self._quant_slot.get(pin_quant, self.cold_slot)
         self.expert_scratch = mmap.mmap(-1, max(self._quant_live.values()))
@@ -363,8 +408,13 @@ class QuantRecord:
                 self.cold_io = [
                     self._io_or_none(handle, layer, self.cold_bits) for layer in range(layers)
                 ]
+                self.narrow_io = [
+                    self._io_or_none(handle, layer, self.narrow_bits) if self.narrow_bits else None
+                    for layer in range(layers)
+                ]
                 return
             self.hot_io = []
+            self.narrow_io = []
             self.cold_io = [
                 handle(self.root / "experts" / quant_file(layer, int(quant)))
                 for layer in range(layers)
@@ -373,6 +423,7 @@ class QuantRecord:
         self.hot_io = [
             handle(self.root / "experts" / f"{layer:02d}-hot.bin") for layer in range(layers)
         ]
+        self.narrow_io = []
         self.cold_io = [
             handle(self.root / "experts" / f"{layer:02d}-cold.bin") for layer in range(layers)
         ]
@@ -389,6 +440,9 @@ class QuantRecord:
     def cold_set(self, layer: int) -> set[int]:
         return self._cold_sets[layer]
 
+    def narrow_set(self, layer: int) -> set[int]:
+        return self._narrow_sets[layer]
+
     def super_set(self, layer: int) -> set[int]:
         return self._super_sets[layer]
 
@@ -400,6 +454,8 @@ class QuantRecord:
             return self.slot
         if tier == 2:
             return self.super_slot
+        if tier == 3:
+            return self.narrow_slot
         return self.cold_slot
 
     def payload(self, tier: int) -> int:
@@ -407,19 +463,31 @@ class QuantRecord:
             return self.live
         if tier == 2:
             return self.super_live
+        if tier == 3:
+            return self.narrow_live
         return self.cold_live
 
     def io_handle(self, layer: int, tier: int) -> Any:
         if tier == 2:
             message = "a super expert is resident and is not staged from SSD"
             raise RuntimeError(message)
-        return self.hot_io[layer] if tier == 0 else self.cold_io[layer]
+        if tier == 0:
+            return self.hot_io[layer]
+        if tier == 3:
+            return self.narrow_io[layer]
+        return self.cold_io[layer]
 
     def _image_fd(self, layer: int, tier: int) -> int:
         if tier == 2 and self.super_fds[layer] is not None:
             return int(self.super_fds[layer])
         if tier == 0:
             return self.hot_fds[layer]
+        if tier == 3:
+            fd = self.narrow_fds[layer]
+            if fd is None:
+                message = f"layer {layer} has no int2 file"
+                raise RuntimeError(message)
+            return fd
         return self.cold_fds[layer]
 
     def expert_image(self, layer: int, expert: int) -> bytes:
@@ -466,6 +534,7 @@ class QuantRecord:
         """Drop Metal IO handles while the device is still alive."""
         self.hot_io = []
         self.cold_io = []
+        self.narrow_io = []
         self.resident_io = None
         self.ngram_io = None
         self.mtp_io = None
@@ -487,6 +556,7 @@ class QuantRecord:
                 fds.append(fd)
         self.hot_fds = []
         self.cold_fds = []
+        self.narrow_fds = []
         self.super_fds = []
         self._quant_fds = {}
         self.ngram_fd = None

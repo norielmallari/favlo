@@ -1011,8 +1011,9 @@ def test_quant_map_lists_every_expert(tmp_path) -> None:
     assert grid == [[4, 4, 4, 4], [4, 4, 8, 4]]
     assert pins == [[], [2]]
     path.write_text(json.dumps({"experts": [[8, 2, 4]], "super": []}))
-    with pytest.raises(RuntimeError, match="two widths"):
-        pipeline.load_quant_map(path, 1, 3)
+    grid, pins = pipeline.load_quant_map(path, 1, 3)
+    assert grid == [[8, 2, 4]]
+    assert pins == [[]]
 
 
 def test_tier_file_and_resume_set(tmp_path) -> None:
@@ -1316,5 +1317,60 @@ def test_two_widths_read_each_quant_file(tmp_path) -> None:
         assert record.tier_row(0, 1) == (1, 0)
         assert record.expert_image(0, 0)[:4] == b"hhhh"
         assert record.expert_image(0, 1)[:4] == b"cccc"
+        assert record.narrow_set(0) == set()
+    finally:
+        record.close()
+
+
+def test_three_widths_put_int2_on_tier_3(tmp_path) -> None:
+    root = tmp_path / "record"
+    experts = root / "experts"
+    experts.mkdir(parents=True)
+    slot = pipeline.PAGE
+    live = 16
+    (experts / quant_file(0, 8)).write_bytes(b"hhhh" + b"\x00" * (slot - 4))
+    (experts / quant_file(0, 4)).write_bytes(b"cccc" + b"\x00" * (slot - 4))
+    (experts / quant_file(0, 2)).write_bytes(b"nnnn" + b"\x00" * (slot - 4))
+    manifest = {
+        "version": QUANT_LAYOUT_VERSION,
+        "complete": True,
+        "layers": 1,
+        "experts": 3,
+        "expert_quant": [[8, 4, 2]],
+        "quants": {
+            "8": {"format": "fp8_e4m3", "live": live, "slot": slot},
+            "4": {"format": "fp4_e2m1", "live": live, "slot": slot},
+            "2": {"format": "int2", "live": live, "slot": slot},
+        },
+        "super": [[1]],
+        "super_bits": 4,
+        "super_live": live,
+        "super_slot": slot,
+        "mtp_experts": 0,
+        "mtp_slot": slot,
+        "ngram_rows": 1,
+        "ngram_format": "int4",
+        "ngram_live": 16,
+        "ngram_slot": slot,
+        "embed_key": "model.language_model.embed_tokens.weight",
+        "head_key": "lm_head.weight",
+    }
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    (root / "ngram.bin").write_bytes(b"\x00" * slot)
+    record = QuantRecord(root)
+    try:
+        assert record.tier_row(0, 0) == (0, 0)
+        assert record.tier_row(0, 1) == (2, 0)
+        assert record.tier_row(0, 2) == (3, 0)
+        assert record.hot_set(0) == {0}
+        assert record.cold_set(0) == set()
+        assert record.narrow_set(0) == {2}
+        assert record.hot_bits == 8
+        assert record.cold_bits == 4
+        assert record.narrow_bits == 2
+        assert record.stride(3) == slot
+        assert record.expert_image(0, 0)[:4] == b"hhhh"
+        assert record.expert_image(0, 1)[:4] == b"cccc"
+        assert record.expert_image(0, 2)[:4] == b"nnnn"
     finally:
         record.close()
