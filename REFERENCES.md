@@ -140,6 +140,16 @@ The decode that uses these is documented in [docs/qwen38/schedule.md](docs/qwen3
 
 The calibration strings are data, not an algorithm. They are a bucket JSON: `tool_calling`, `chat`, `mixed`, `reasoning`, `code`, `en`, `ko`, `zh`, `ja`. `tool_calling` and `chat` are already chat-templated.
 
+## Expert cache
+
+Juncheng Yang, Yazhuo Zhang, Ziyue Qiu, Yao Yue, and K. V. Rashmi. *FIFO Queues are All You Need for Cache Eviction.* Symposium on Operating Systems Principles, 2023. [doi:10.1145/3600006.3613147](https://doi.org/10.1145/3600006.3613147). S3-FIFO is a selectable atlas strategy. A new run enters a FIFO of one tenth of the atlas. A run requested only once leaves that queue. A run requested again moves to the main FIFO.
+
+Leyang Xue, Yao Fu, Zhan Lu, Chuanhao Sun, Luo Mai, and Mahesh Marina. *MoE-Infinity: Efficient MoE Inference on Personal Machines with Sparsity-Aware Expert Cache.* [arXiv:2401.14361](https://arxiv.org/abs/2401.14361), 2024. Expert replacement follows how often each expert is activated.
+
+Hanfei Yu, Xingqi Cui, Hong Zhang, Hao Wang, and Hao Wang. *fMoE: Fine-Grained Expert Offloading for Large Mixture-of-Experts Serving.* [arXiv:2502.05370](https://arxiv.org/abs/2502.05370), 2025. The expert cache is LFU. A layer-sequential pass makes recency the wrong signal.
+
+Kexin Li, Wenkan Huang, Qinggang Wang, Long Zheng, Xiaofei Liao, Hai Jin, and Jingling Xue. *Diff-MoE: Efficient Batched MoE Inference with Priority-Driven Differential Expert Caching.* Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis, 2025. [doi:10.1145/3712285.3759903](https://doi.org/10.1145/3712285.3759903). Cold experts are the first victims. That split plus LFU is the selectable ``cold_lfu`` strategy. The atlas default is S3-FIFO.
+
 ## Benchmarks
 
 Jeffrey Zhou et al. *Instruction-Following Evaluation for Large Language Models.* [arXiv:2311.07911](https://arxiv.org/abs/2311.07911), 2023. IFEval. Prompt-level and instruction-level accuracy, strict and loose.

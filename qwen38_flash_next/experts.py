@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 
+from qwen38_flash_next.eviction import DEFAULT_EVICTION, make_eviction
 from qwen38_flash_next.formats import PAGE
 from qwen38_flash_next.session import (
     _buffer_view,
@@ -112,6 +113,7 @@ class ExpertAtlas:
         layers: int,
         experts: int,
         candidates: tuple[int, ...] | None = None,
+        strategy: str = DEFAULT_EVICTION,
     ) -> None:
         self.gpu = gpu
         self.files = files
@@ -119,6 +121,7 @@ class ExpertAtlas:
         self.experts = experts
         chosen = RESIDENT_CANDIDATES if candidates is None else candidates
         self.atlas, self.budget = _allocate(gpu, chosen)
+        self.eviction = make_eviction(strategy, self.budget)
         self.table = gpu.alloc(layers * experts * 8)
         _fill_buffer(self.table, layers * experts * 8, 0xFF)
         self.miss = gpu.zeros(layers * 4)
@@ -203,7 +206,7 @@ class ExpertAtlas:
     def _touch(self, layer: int, expert: int) -> None:
         key = self.expert_run.get((layer, expert))
         if key is not None:
-            self.runs.move_to_end(key)
+            self.eviction.hit(key)
 
     def _publish(
         self,
@@ -218,7 +221,10 @@ class ExpertAtlas:
         if key not in self.runs:
             self.runs[key] = (offset, span)
             self.run_members[key] = members
-        self.runs.move_to_end(key)
+            self.eviction.insert(key, span)
+            self._relieve()
+        else:
+            self.eviction.hit(key)
         self.resident[(layer, expert)] = image
         self.expert_run[(layer, expert)] = key
         self._write_table(layer, expert, image)
@@ -228,7 +234,7 @@ class ExpertAtlas:
             found = self._try_alloc(span)
             if found >= 0:
                 return found
-            if not self._evict(protect):
+            if not self._evict(protect, span):
                 break
         message = "resident expert budget cannot hold the experts for this layer"
         raise RuntimeError(message)
@@ -247,16 +253,23 @@ class ExpertAtlas:
             return offset
         return -1
 
-    def _evict(self, protect: set[tuple[int, int]]) -> bool:
-        for key in list(self.runs):
-            layer = key[0]
-            if any((layer, expert) in protect for expert in self.run_members[key]):
-                continue
+    def _evict(self, protect: set[tuple[int, int]], span: int) -> bool:
+        key = self.eviction.victim(protect, self.run_members, span)
+        if key is None or key not in self.runs:
+            return False
+        self._free_run(key)
+        return True
+
+    def _relieve(self) -> None:
+        """Apply quick demotion while the byte budget still has room."""
+        for _ in range(len(self.runs) + 1):
+            key = self.eviction.relieve(set(), self.run_members)
+            if key is None or key not in self.runs:
+                return
             self._free_run(key)
-            return True
-        return False
 
     def _free_run(self, key: tuple[int, int, int, int]) -> None:
+        self.eviction.remove(key)
         offset, span = self.runs.pop(key)
         layer = key[0]
         for expert in self.run_members.pop(key):
