@@ -202,6 +202,9 @@ kernel void moe_grouped(
     uint begin = group_offset[group];
     uint end = group_offset[group + 1u];
     uint n = end - begin;
+    if (n == 0u) {
+        return;
+    }
     long base = table[table_base + group_expert[group]];
     if (base < 0) {
         if (row == 0u && lane == 0u) {
@@ -538,6 +541,9 @@ kernel void moe_grouped_int8(
     uint begin = group_offset[group];
     uint end = group_offset[group + 1u];
     uint n = end - begin;
+    if (n == 0u) {
+        return;
+    }
     long base = table[table_base + group_expert[group]];
     if (base < 0) {
         if (row == 0u && lane == 0u) {
@@ -596,6 +602,9 @@ kernel void moe_grouped_int2(
     uint begin = group_offset[group];
     uint end = group_offset[group + 1u];
     uint n = end - begin;
+    if (n == 0u) {
+        return;
+    }
     long base = table[table_base + group_expert[group]];
     if (base < 0) {
         if (row == 0u && lane == 0u) {
@@ -790,6 +799,9 @@ kernel void moe_span_fp4_gate(
     uint begin = group_offset[group];
     uint end = group_offset[group + 1u];
     uint n = end - begin;
+    if (n == 0u) {
+        return;
+    }
     long base = table[table_base + group_expert[group]];
     if (base < 0) {
         if (row == 0u && lane == 0u) {
@@ -856,6 +868,9 @@ kernel void moe_span_fp4_down(
     uint begin = group_offset[group];
     uint end = group_offset[group + 1u];
     uint n = end - begin;
+    if (n == 0u) {
+        return;
+    }
     long base = table[table_base + group_expert[group]];
     if (base < 0) {
         if (row == 0u && lane == 0u) {
@@ -925,6 +940,9 @@ kernel void moe_span_fp8_gate(
     uint begin = group_offset[group];
     uint end = group_offset[group + 1u];
     uint n = end - begin;
+    if (n == 0u) {
+        return;
+    }
     long base = table[table_base + group_expert[group]];
     if (base < 0) {
         if (row == 0u && lane == 0u) {
@@ -1002,6 +1020,9 @@ kernel void moe_span_fp8_down(
     uint begin = group_offset[group];
     uint end = group_offset[group + 1u];
     uint n = end - begin;
+    if (n == 0u) {
+        return;
+    }
     long base = table[table_base + group_expert[group]];
     if (base < 0) {
         if (row == 0u && lane == 0u) {
@@ -1053,5 +1074,74 @@ kernel void moe_span_fp8_down(
                 destination[(begin + tile + t) * cols + row] = sum;
             }
         }
+    }
+}
+
+// One thread. Assignments of one tier become contiguous groups. Unused groups are empty.
+kernel void group_span(
+    device const uint* ids [[buffer(0)]],
+    device const uchar* tier [[buffer(1)]],
+    device uint* experts_out [[buffer(2)]],
+    device uint* offsets [[buffer(3)]],
+    device uint* token_out [[buffer(4)]],
+    device uint* inverse [[buffer(5)]],
+    constant uint& count [[buffer(6)]],
+    constant uint& topk [[buffer(7)]],
+    constant uint& table_base [[buffer(8)]],
+    constant uint& want [[buffer(9)]],
+    constant uint& slots [[buffer(10)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid != 0u || count == 0u || topk == 0u || slots == 0u) {
+        return;
+    }
+    uint experts[64];
+    uint n_exp = 0u;
+    uint total = count * topk;
+    for (uint i = 0u; i < total; ++i) {
+        inverse[i] = 0xffffffffu;
+    }
+    for (uint token = 0u; token < count; ++token) {
+        for (uint slot = 0u; slot < topk; ++slot) {
+            uint expert = ids[token * topk + slot];
+            if (uint(tier[table_base + expert]) != want) {
+                continue;
+            }
+            uint seen = 0u;
+            for (uint e = 0u; e < n_exp; ++e) {
+                if (experts[e] == expert) {
+                    seen = 1u;
+                    break;
+                }
+            }
+            if (seen == 0u && n_exp < 64u) {
+                experts[n_exp] = expert;
+                n_exp += 1u;
+            }
+        }
+    }
+    uint cursor = 0u;
+    offsets[0] = 0u;
+    for (uint e = 0u; e < n_exp; ++e) {
+        experts_out[e] = experts[e];
+        for (uint token = 0u; token < count; ++token) {
+            for (uint slot = 0u; slot < topk; ++slot) {
+                uint expert = ids[token * topk + slot];
+                if (expert != experts[e] || uint(tier[table_base + expert]) != want) {
+                    continue;
+                }
+                token_out[cursor] = token;
+                inverse[token * topk + slot] = cursor;
+                cursor += 1u;
+            }
+        }
+        offsets[e + 1u] = cursor;
+    }
+    for (uint i = cursor; i < slots; ++i) {
+        token_out[i] = 0u;
+    }
+    for (uint e = n_exp; e < slots; ++e) {
+        experts_out[e] = 0u;
+        offsets[e + 1u] = cursor;
     }
 }

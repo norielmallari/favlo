@@ -631,7 +631,9 @@ class MetalSession:
             "moe_span_fp4_down",
             "moe_span_fp8_gate",
             "moe_span_fp8_down",
+            "group_span",
             "gemv_int4_f32",
+            "gemv_int4_span",
             "gemv_int8_f32",
             "gemv_int8_half",
         )
@@ -1732,22 +1734,15 @@ class MetalSession:
             raise ValueError(message)
         if count == 1 and isinstance(matrix, Int4Matrix):
             return self._gemv_int4(matrix, src, epilogue, epilogue_scale)
-        # A short decode span uses the one-token GEMV on each row. The tiled
-        # matmul does not match that dot closely enough for an argmax.
+        # A short decode span dots each weight chunk once against every token.
+        # The chunk dot is the one-token GEMV, so the argmax stays that dot.
         if (
             self.force_gemv
-            and count > 1
+            and 1 < count <= 4
             and isinstance(matrix, Int4Matrix)
             and matrix.inner == inner
         ):
-            rows = int(matrix.rows)
-            dst = self.tmp(count * rows)
-            for index in range(count):
-                part = self._gemv_int4(
-                    matrix, src.view(index * inner, inner), epilogue, epilogue_scale
-                )
-                self.copy_into(part, dst, index * rows)
-            return dst
+            return self._gemv_int4_span(matrix, src, count, epilogue, epilogue_scale)
         gemm = (
             count > 1
             and isinstance(matrix, Int4Matrix)
@@ -1797,6 +1792,32 @@ class MetalSession:
                 struct.pack("<f", float(scale)),
             ),
             self._size((rows + 15) // 16),
+            self._size(128),
+        )
+        return dst
+
+    def _gemv_int4_span(
+        self, matrix: Int4Matrix, src: Dev, count: int, epilogue: int, scale: float
+    ) -> Dev:
+        rows = int(matrix.rows)
+        dst = self.tmp(count * rows)
+        self.dispatch(
+            self.act["gemv_int4_span"],
+            (
+                _dev_bind(src),
+                (matrix.weights, matrix.weight_off),
+                (matrix.scales, matrix.scale_off),
+                _dev_bind(dst),
+            ),
+            (
+                struct.pack("<I", count),
+                struct.pack("<I", rows),
+                struct.pack("<I", int(matrix.stored_inner)),
+                struct.pack("<I", int(matrix.inner)),
+                struct.pack("<I", int(epilogue)),
+                struct.pack("<f", float(scale)),
+            ),
+            self._size((rows + 3) // 4),
             self._size(128),
         )
         return dst
@@ -2709,6 +2730,41 @@ class MetalSession:
             ),
             constants,
             self._size(n_groups * cols),
+            self._size(32),
+        )
+
+    def group_span(
+        self,
+        ids: Dev,
+        tier: Any,
+        experts: Any,
+        offsets: Any,
+        tokens: Any,
+        inverse: Any,
+        count: int,
+        topk: int,
+        table_base: int,
+        want: int,
+        slots: int,
+    ) -> None:
+        self.dispatch(
+            self.act["group_span"],
+            (
+                _dev_bind(ids),
+                (tier, 0),
+                _bind_any(experts),
+                _bind_any(offsets),
+                _bind_any(tokens),
+                _bind_any(inverse),
+            ),
+            (
+                struct.pack("<I", count),
+                struct.pack("<I", topk),
+                struct.pack("<I", table_base),
+                struct.pack("<I", want),
+                struct.pack("<I", slots),
+            ),
+            self._size(1),
             self._size(32),
         )
 

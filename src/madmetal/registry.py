@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 PIPELINE = "qwen38-flash-next"
-TIER = "madmetal-h128-fp4-c384-fp4"
 VARIANTS = ("thinking", "instruct")
 
 # Qwen3.8-Flash-Next model card. commands.py keeps the same numbers.
@@ -71,13 +70,13 @@ class Selection:
 def load_registry(root: Path | None = None) -> dict[str, Any]:
     path = registry_path(root)
     if not path.is_file():
-        return {"version": 1, "default": None, "models": {}}
+        return {"version": 1, "models": {}}
     data = json.loads(path.read_text())
     if not isinstance(data, dict):
         message = "registry.json is not an object"
         raise ValueError(message)
     data.setdefault("version", 1)
-    data.setdefault("default", None)
+    data.pop("default", None)
     data.setdefault("models", {})
     if not isinstance(data["models"], dict):
         message = "registry models is not an object"
@@ -91,32 +90,6 @@ def save_registry(data: dict[str, Any], root: Path | None = None) -> None:
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(data, indent=2) + "\n")
     os.replace(tmp, path)
-
-
-def adopt_existing(root: Path | None = None) -> dict[str, Any]:
-    """Register the packed default record when the machine has no registry yet."""
-    data = load_registry(root)
-    if data["models"]:
-        return data
-    folder = f"Qwen3.8-Flash-Next-{TIER}"
-    path = models_dir(root) / folder
-    manifest = path / "manifest.json"
-    if not manifest.is_file():
-        return data
-    try:
-        body = json.loads(manifest.read_text())
-    except json.JSONDecodeError:
-        return data
-    if not body.get("complete"):
-        return data
-    source = models_dir(root) / "qwen38-flash-next-bf16"
-    data["default"] = folder
-    data["models"][folder] = _entry(
-        alias="qwen38-flash-next",
-        source=str(source) if source.is_dir() else None,
-    )
-    save_registry(data, root)
-    return data
 
 
 def list_unregistered(root: Path | None = None) -> list[str]:
@@ -170,8 +143,6 @@ def add_model(
         message = f"{folder} is already registered"
         raise ValueError(message)
     data["models"][folder] = _entry(alias=alias, source=source, pipeline=pipeline)
-    if data.get("default") is None and len(data["models"]) == 1:
-        data["default"] = folder
     save_registry(data, root)
     return data
 
@@ -211,8 +182,6 @@ def register_quantized(
         message = f"{folder} is already registered for a different source"
         raise ValueError(message)
     data["models"][folder] = _entry(alias=alias, source=source_text, pipeline=pipeline)
-    if data.get("default") is None:
-        data["default"] = folder
     save_registry(data, root)
 
 
@@ -235,16 +204,6 @@ def resolve(model: str, *, root: Path | None = None, resident: str | None = None
     if not text:
         message = "model id is empty"
         raise LookupError(message)
-    if text == PIPELINE:
-        folder = data.get("default")
-        entry = data["models"].get(folder) if isinstance(folder, str) else None
-        if not isinstance(folder, str) or entry is None or entry.get("pipeline") != PIPELINE:
-            known = _known_names(data)
-            message = "no default model for qwen38-flash-next"
-            if known:
-                message = f"{message}; known: {', '.join(known)}"
-            raise LookupError(message)
-        return _selection(data, folder, text, None, root)
     base, variant = _split_variant(text)
     folder = _folder_for(data, base)
     if folder is None or variant is False:
@@ -298,7 +257,6 @@ def choose_complete(
     """The record ``complete`` and ``bf16`` open. ``record`` wins when passed."""
     if record is not None:
         return record, None
-    adopt_existing(root)
     data = load_registry(root)
     entries = [
         (folder, entry)
@@ -308,6 +266,9 @@ def choose_complete(
     if model:
         selection = resolve(model, root=root)
         return selection.path, selection
+    if len(entries) == 1:
+        folder = entries[0][0]
+        return models_dir(root) / folder, _selection(data, folder, folder, None, root)
     if not entries:
         message = (
             "no registered model\n"
@@ -315,14 +276,6 @@ def choose_complete(
             "or register a record: madmetal --qwen38-flash-next models add <folder>"
         )
         raise LookupError(message)
-    default = data.get("default")
-    if len(entries) == 1 and (default is None or default == entries[0][0]):
-        folder = entries[0][0]
-        return models_dir(root) / folder, _selection(data, folder, folder, None, root)
-    if isinstance(default, str) and any(folder == default for folder, _entry_body in entries):
-        entry = data["models"][default]
-        if entry.get("pipeline") == PIPELINE:
-            return models_dir(root) / default, _selection(data, default, default, None, root)
     listing = format_listing(root)
     message = f"pass --model\n{listing}"
     raise LookupError(message)

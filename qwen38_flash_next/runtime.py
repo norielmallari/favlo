@@ -269,6 +269,8 @@ class Qwen38Runtime:
         self.kv_v_tail = {index: self.gpu.alloc(tail) for index in attention}
         self.indexer_buf = {index: self.gpu.alloc(INDEX_BF16_BYTES) for index in attention}
         self._mtp_on = False
+        self._span_snap = False
+        self._span_snap_count = 0
         self._mtp_stopped = False
         self._mtp_layer = len(self.kinds)
         self._mtp_index_n = 0
@@ -515,14 +517,16 @@ class Qwen38Runtime:
             _log(f"incoming tokens {len(prompt) - cached}")
         return cached
 
-    def _flush_prefix(self) -> None:
+    def _flush_prefix(self, *, release_atlas: bool = True) -> None:
         if not self.tokens:
             return
         self.gpu.flush()
         state = self._prefix_state()
-        # The atlas is tens of gigabytes of expert images. Drop it before the
-        # volume reserves the prefix file, then the new prompt builds what it needs.
-        self._release_atlas()
+        # Replacing the sequence, or stopping the process, drops the atlas
+        # before the volume reserves the prefix file. A finished prefill keeps
+        # it: decode still needs those expert images.
+        if release_atlas:
+            self._release_atlas()
         try:
             path = self.prefixes.save(state)
         except OSError as exc:
@@ -532,8 +536,13 @@ class Qwen38Runtime:
             self._prefix_dirty = False
             _log(f"prefix store {len(self.tokens)} tokens")
 
-    def _persist_prefix(self) -> None:
-        """Write the last consistent sequence. A client drop and shutdown both call this."""
+    def _persist_prefix(self, *, release_atlas: bool = True) -> None:
+        """Write the last consistent sequence.
+
+        A finished prefill passes ``release_atlas=False`` so the reply keeps
+        the resident experts. Replacing the sequence, a client drop, and
+        shutdown release the atlas first.
+        """
         if getattr(self, "_forward_open", False):
             if not getattr(self, "_kv_snap", None):
                 return
@@ -556,7 +565,7 @@ class Qwen38Runtime:
         if getattr(self, "_prefix_dirty", True) is False:
             return
         try:
-            self._flush_prefix()
+            self._flush_prefix(release_atlas=release_atlas)
         except Exception as exc:
             _log(f"prefix store failed {exc}")
 
@@ -1057,7 +1066,6 @@ class Qwen38Runtime:
         started = time.perf_counter()
         gpu_at = self.gpu.gpu_seconds
         self._decoding = decode
-        self.gpu.force_gemv = bool(decode and 1 < len(tokens) <= 4)
         self._prefill_progress = None
         if self.console is not None and not decode and tokens:
             detail = f"req #{self._request_id}" if self._request_id else ""
@@ -1138,6 +1146,8 @@ class Qwen38Runtime:
                     self.console.end(progress, summary)
             else:
                 _log(summary)
+            if commit:
+                self._persist_prefix(release_atlas=False)
         if self.atlas is not None:
             self.atlas.release_unused()
         return logits
@@ -1376,8 +1386,11 @@ class Qwen38Runtime:
 
     def _mtp_layer_pass(self, residual: Dev, count: int, base: int, *, reuse: bool) -> None:
         bundle = self._mtp_bundle()
-        self.gpu.flush()
-        self.gpu.rewind_scratch()
+        # Commit the projection into the other scratch arena. A flush here would
+        # wait out the draft before the layer is even encoded.
+        self.gpu.submit()
+        if len(self.gpu._arenas) < 2:
+            self.gpu.rewind_scratch()
         with objc.autorelease_pool():
             hats = self._rms_branches(residual, bundle["attn_norm"], count)
             xs = self._gr_dev(bundle["attn_down"], bundle["attn_up"], hats, count)
@@ -1397,18 +1410,13 @@ class Qwen38Runtime:
         return self.gpu.linear(self._lm_head(), hidden, 1, self.hidden)
 
     def _mtp_step(self, token: int, *, reuse: bool, head: bool) -> Dev | None:
-        self.gpu.flush()
         span = self.branches * self.hidden
         projected = self._mtp_project(Dev(self._mtp_hidden, span), [token])
         self._mtp_layer_pass(projected, 1, self.kv_len[self._mtp_layer], reuse=reuse)
         self._mtp_copy(self._mtp_proj, self._mtp_hidden, span)
-        self.gpu.flush()
-        self.gpu.rewind_scratch()
         if not head:
             return None
-        logits = self._mtp_head(Dev(self._mtp_proj, span))
-        self.gpu.flush()
-        return logits
+        return self._mtp_head(Dev(self._mtp_proj, span))
 
     def _mtp_shift(self, residual: Dev, offset: int, count: int, base: int) -> None:
         span = self.branches * self.hidden
@@ -1496,7 +1504,6 @@ class Qwen38Runtime:
         if getattr(self, "_mtp_draft_buf", None) is None:
             self._mtp_draft_buf = self._mtp_alloc("draft", words)
         self.gpu.copy_span(logits, 0, self._mtp_draft_buf, index * self.vocab, self.vocab)
-        self.gpu.flush()
         return Dev(self._mtp_draft_buf, self.vocab, index * self.vocab)
 
     def _mtp_hold_rows(self, logits: Dev, count: int) -> Dev:
@@ -1525,9 +1532,11 @@ class Qwen38Runtime:
     ) -> tuple[list[int], list[Dev]]:
         drafts: list[int] = []
         views: list[Dev] = []
+        self._mtp_draft_clean = False
+        self.gpu.begin_scratch(scratch_bytes(1), copies=2)
         try:
             chosen = [first]
-            for _step in range(min(3, extras)):
+            for _step in range(min(getattr(self, "_draft_limit", 3), extras)):
                 self._check_stop()
                 if self._draft_blocked(produced + chosen):
                     break
@@ -1546,15 +1555,20 @@ class Qwen38Runtime:
                 chosen.append(guess)
                 if self.required_function and "</tool_call>" in self.decode(produced + chosen):
                     break
+            else:
+                # Every drafted step was kept. One more step records the last
+                # guess, so an accepted span does not replay the draft.
+                if drafts:
+                    self._mtp_step(drafts[-1], reuse=True, head=False)
+                self._mtp_draft_clean = True
             return drafts, views
         finally:
-            # A draft writes the MTP cache past the committed tokens. Put that
-            # cache back before the backbone forward, including when the request
-            # stops during the draft.
-            self._mtp_restore_kv()
+            if not self._mtp_draft_clean:
+                self._mtp_restore_kv()
             span = self.branches * self.hidden
             self._mtp_copy(self._mtp_hidden_snap, self._mtp_hidden, span)
             self._mtp_index_n = 0
+            # The backbone forward may replace this scratch. Finish the draft first.
             self.gpu.flush()
 
     def _mtp_replay(self, kept: list[int]) -> None:
@@ -1566,6 +1580,7 @@ class Qwen38Runtime:
         for token in kept:
             self._mtp_step(token, reuse=False, head=False)
         self._mtp_copy(self._mtp_backbone, self._mtp_hidden, span)
+        self.gpu.flush()
 
     def _mtp_cycle(
         self,
@@ -1577,7 +1592,12 @@ class Qwen38Runtime:
         top_k: int,
     ) -> list[int]:
         """One backbone forward of the drafted span. Rejected tokens are not committed."""
+        started = time.perf_counter()
         self._mtp_stopped = False
+        self._mtp_draft_clean = False
+        if not hasattr(self, "_mtp_full"):
+            self._mtp_full = 0
+            self._mtp_partial = 0
         span_n = self.branches * self.hidden
         self._mtp_copy(self._mtp_hidden, self._mtp_hidden_snap, span_n)
         self._mtp_snap_kv()
@@ -1591,13 +1611,23 @@ class Qwen38Runtime:
                 first, produced, room - 1, temperature, top_p, top_k
             )
         span = [first, *drafts]
+
+        def bill(count: int) -> None:
+            elapsed = time.perf_counter() - started
+            self._decode_tokens += count
+            self._decode_seconds += elapsed
+            resident = self.atlas.resident_count if self.atlas is not None else 0
+            gpu_elapsed = getattr(self, "_last_gpu", 0.0)
+            self._decode_steps.append((elapsed, gpu_elapsed, resident))
+            self._note_decode(resident)
+
         if len(drafts) == 0:
-            self.forward([first], decode=True)
+            self.forward([first], decode=True, account=False)
             self._mtp_hold_logits()
             self._mtp_replay([first])
+            bill(1)
             return [first]
         logits = self.forward(span, decode=True, commit=False, account=False)
-        spec_elapsed = self._last_elapsed
         held = self._mtp_hold_rows(logits, len(span))
         kept = [first]
         correction: int | None = None
@@ -1620,25 +1650,39 @@ class Qwen38Runtime:
         if correction is None and len(kept) == len(span):
             self.tokens.extend(span)
             self._prefix_dirty = True
-            self._decode_tokens += len(span)
-            self._decode_seconds += spec_elapsed
-            resident = self.atlas.resident_count if self.atlas is not None else 0
-            self._decode_steps.append((spec_elapsed, self._last_gpu, resident))
-            self._note_decode(resident)
             self.last_logits = held.view((len(span) - 1) * self.vocab, self.vocab)
             self._mtp_hold_logits()
-            self._mtp_replay(span)
+            if not self._mtp_draft_clean:
+                self._mtp_replay(span)
+            self._mtp_full += 1
+            bill(len(span))
             return span
-        self._restore_recurrent()
         commit = list(kept)
         if correction is not None and correction in self.stop_ids:
             self._mtp_stopped = True
         elif correction is not None:
             commit.append(correction)
-        self.forward(commit, decode=True)
-        self._decode_seconds += spec_elapsed
+        # The span already applied the kept tokens. Put that state back and
+        # forward only the token that replaced a rejected guess.
+        if (
+            correction is not None
+            and correction not in self.stop_ids
+            and self._span_snap_count == len(span)
+            and len(kept) >= 1
+        ):
+            self._restore_span_prefix(len(kept))
+            self.tokens.extend(kept)
+            self._prefix_dirty = True
+            self.forward([correction], decode=True, account=False)
+        else:
+            if self._mtp_draft_clean:
+                self._mtp_restore_kv()
+            self._restore_recurrent()
+            self.forward(commit, decode=True, account=False)
         self._mtp_hold_logits()
         self._mtp_replay(commit)
+        self._mtp_partial += 1
+        bill(len(commit))
         return commit
 
     def _mtp_hold_logits(self) -> None:
@@ -1662,6 +1706,12 @@ class Qwen38Runtime:
 
     def _forward_body(self, tokens: list[int]) -> Dev:
         count = len(tokens)
+        self._span_snap_count = 0
+        self._span_snap = False
+        if self._span_snap:
+            self._span_snap = self._ensure_tok_snaps()
+        if self._span_snap:
+            self._tok_kv_seen = set()
         self._reserve_caches(len(self.tokens) + count)
         residual = self._embed_dev(tokens)
         span = self.branches * self.hidden
@@ -1751,6 +1801,8 @@ class Qwen38Runtime:
             last = residual
         hat = self._rms_branches(last, final["norm"], positions)
         hidden = self._gr_dev(final["down"], final["up"], hat, positions)
+        if self._span_snap:
+            self._span_snap_count = count
         return self.gpu.linear(self._lm_head(), hidden, positions, self.hidden)
 
     def _rerun_decode(self, tokens: list[int]) -> Dev:
@@ -2294,6 +2346,80 @@ class Qwen38Runtime:
     def _int4(self, key: str) -> Int4Matrix:
         return self.weights[key]
 
+    def _span_choice_buf(self) -> Any:
+        words = self.layers * 4 * self.top_k
+        buf = getattr(self, "_span_choice", None)
+        if buf is None:
+            buf = self.gpu.alloc(words * 4)
+            if buf is None:
+                message = "span expert ids were not allocated"
+                raise RuntimeError(message)
+            self._span_choice = buf
+        return buf
+
+    def _ensure_tok_snaps(self) -> bool:
+        # Four copies of the gated-delta state are about 432 MiB. That does not
+        # fit beside the resident atlas on a 48 GiB machine.
+        return False
+
+    def _mark_gdn_token(self, layer: int, token: int) -> None:
+        self.gpu.barrier()
+        state_bytes = 48 * 128 * 128 * 4
+        self.gpu.copy_bytes(self.gdn_state[layer], 0, self._tok_gdn[layer][token], 0, state_bytes)
+        self.gpu.copy_bytes(
+            self.conv_hist[layer], 0, self._tok_conv[layer][token], 0, self._conv_bytes
+        )
+        self.gpu.barrier()
+
+    def _mark_kv_token(self, layer: int, token: int, origin: int) -> None:
+        need = ((origin & ~3) + 4) * KV_E4M3_BYTES
+        if int(self.kv_k[layer].length()) < need or int(self.kv_v[layer].length()) < need:
+            self._span_snap = False
+            return
+        self.gpu.barrier()
+        tail_bytes = KV_TAIL_TOKENS * KV_BF16_BYTES
+        body_bytes = 4 * KV_E4M3_BYTES
+        key_tail, value_tail, key_body, value_body = self._tok_kv[layer][token]
+        self.gpu.copy_bytes(self.kv_k_tail[layer], 0, key_tail, 0, tail_bytes)
+        self.gpu.copy_bytes(self.kv_v_tail[layer], 0, value_tail, 0, tail_bytes)
+        start = (origin & ~3) * KV_E4M3_BYTES
+        self.gpu.copy_bytes(self.kv_k[layer], start, key_body, 0, body_bytes)
+        self.gpu.copy_bytes(self.kv_v[layer], start, value_body, 0, body_bytes)
+        self._tok_kv_len[layer][token] = self.kv_len[layer]
+        self._tok_origin[layer] = origin
+        self._tok_kv_seen.add(layer)
+        self.gpu.barrier()
+
+    def _mark_ple_token(self, token: int) -> None:
+        if not getattr(self, "_span_snap", False):
+            return
+        self.gpu.barrier()
+        self.gpu.copy_bytes(self.ple_hist, 0, self._tok_ple[token], 0, self._ple_bytes)
+        self.gpu.barrier()
+
+    def _restore_span_prefix(self, tokens: int) -> None:
+        """Recurrent state after the first ``tokens`` positions of the span."""
+        index = tokens - 1
+        state_bytes = 48 * 128 * 128 * 4
+        for layer, buf in self.gdn_state.items():
+            self.gpu.copy_bytes(self._tok_gdn[layer][index], 0, buf, 0, state_bytes)
+            self.gpu.copy_bytes(
+                self._tok_conv[layer][index], 0, self.conv_hist[layer], 0, self._conv_bytes
+            )
+        self.gpu.copy_bytes(self._tok_ple[index], 0, self.ple_hist, 0, self._ple_bytes)
+        tail_bytes = KV_TAIL_TOKENS * KV_BF16_BYTES
+        body_bytes = 4 * KV_E4M3_BYTES
+        for layer in self._tok_kv_seen:
+            slots = self._tok_kv[layer]
+            key_tail, value_tail, key_body, value_body = slots[index]
+            self.gpu.copy_bytes(key_tail, 0, self.kv_k_tail[layer], 0, tail_bytes)
+            self.gpu.copy_bytes(value_tail, 0, self.kv_v_tail[layer], 0, tail_bytes)
+            start = (self._tok_origin[layer] & ~3) * KV_E4M3_BYTES
+            self.gpu.copy_bytes(key_body, 0, self.kv_k[layer], start, body_bytes)
+            self.gpu.copy_bytes(value_body, 0, self.kv_v[layer], start, body_bytes)
+            self.kv_len[layer] = self._tok_kv_len[layer][index]
+        self.gpu.barrier()
+
     def _gdn_dev(self, layer: int, bundle: dict[str, Any], xs: Dev, count: int) -> Dev:
         hidden = self.hidden
         qkv = self.gpu.linear(bundle["qkv"], xs, count, hidden)
@@ -2305,24 +2431,52 @@ class Qwen38Runtime:
         a_w, a_off = bundle["a_log"]
         norm_w, norm_off = bundle["norm"]
         mixed = self.gpu.tmp(count * 10240)
-        self.gpu.gdn_conv_scan(self.conv_hist[layer], qkv, conv_w, conv_off, mixed, count)
         heads = self.gpu.tmp(count * 6144)
-        self.gpu.gdn_state_scan(
-            self.gdn_state[layer],
-            mixed,
-            raw_a,
-            raw_b,
-            z,
-            dt_w,
-            dt_off,
-            a_w,
-            a_off,
-            norm_w,
-            norm_off,
-            heads,
-            count,
-            self.eps,
-        )
+        if self._span_snap and count > 1:
+            for token in range(count):
+                self.gpu.gdn_conv_scan(
+                    self.conv_hist[layer],
+                    qkv.view(token * 10240, 10240),
+                    conv_w,
+                    conv_off,
+                    mixed.view(token * 10240, 10240),
+                    1,
+                )
+                self.gpu.gdn_state_scan(
+                    self.gdn_state[layer],
+                    mixed.view(token * 10240, 10240),
+                    raw_a.view(token * 48, 48),
+                    raw_b.view(token * 48, 48),
+                    z.view(token * 6144, 6144),
+                    dt_w,
+                    dt_off,
+                    a_w,
+                    a_off,
+                    norm_w,
+                    norm_off,
+                    heads.view(token * 6144, 6144),
+                    1,
+                    self.eps,
+                )
+                self._mark_gdn_token(layer, token)
+        else:
+            self.gpu.gdn_conv_scan(self.conv_hist[layer], qkv, conv_w, conv_off, mixed, count)
+            self.gpu.gdn_state_scan(
+                self.gdn_state[layer],
+                mixed,
+                raw_a,
+                raw_b,
+                z,
+                dt_w,
+                dt_off,
+                a_w,
+                a_off,
+                norm_w,
+                norm_off,
+                heads,
+                count,
+                self.eps,
+            )
         return self.gpu.linear(bundle["out"], heads, count, 6144)
 
     def _grow_slot(
@@ -2453,8 +2607,22 @@ class Qwen38Runtime:
             message = f"attention cache length {length} does not match position {base}"
             raise RuntimeError(message)
         k_buf, v_buf, i_buf = self._grow_kv(layer, length, count)
-        self._store_kv(k, value, layer, count, length)
-        self.kv_len[layer] = length + count
+        if self._span_snap and count > 1:
+            k_stride = k.n // count
+            v_stride = value.n // count
+            for token in range(count):
+                self._store_kv(
+                    k.view(token * k_stride, k_stride),
+                    value.view(token * v_stride, v_stride),
+                    layer,
+                    1,
+                    self.kv_len[layer],
+                )
+                self.kv_len[layer] += 1
+                self._mark_kv_token(layer, token, length)
+        else:
+            self._store_kv(k, value, layer, count, length)
+            self.kv_len[layer] = length + count
         self.gpu.indexer_write(index_qk, i_buf, count, length)
         # The attend in this encoder reads the keys and values just stored.
         self.gpu.barrier()
@@ -2558,23 +2726,34 @@ class Qwen38Runtime:
                 slot * 4,
                 self.top_k * 4,
             )
+            if count <= 4:
+                kept = self._span_choice_buf()
+                base = layer * 4 * self.top_k
+                self.gpu.copy_bytes(
+                    choice.buf,
+                    choice.offset * 4,
+                    kept,
+                    base * 4,
+                    count * self.top_k * 4,
+                )
+                choice = Dev(kept, count * self.top_k, base)
         self._choice[layer] = choice
-        legacy_tiers = (
+        fp4_tiers = (
             isinstance(self.files, QuantRecord)
             and self.files.hot_bits == 4
-            and self.files.cold_bits == 2
+            and self.files.cold_bits in (2, 4)
         )
         if (
             count == 1
             and self._decoding
             and self._atlas_trusted
             and self._tier is not None
-            and legacy_tiers
+            and fp4_tiers
         ):
             shared = self._shared_expert(bundle, xs, count)
             return self._moe_decode_trusted(layer, xs, weight, shared)
-        # Stage before the expert kernels. A miss would zero that layer and
-        # change every later route, so the token would have to be replayed.
+        # The host reads the route. A miss would zero that layer and change
+        # every later route, so the token would have to be replayed.
         host_ids = self.gpu.read_u32(choice)
         rows = np.asarray(host_ids, dtype=np.uint32).reshape(count, self.top_k)
         self._predicted[layer] = [int(item) for item in rows[-1].tolist()]
@@ -2811,27 +2990,39 @@ class Qwen38Runtime:
                 if base < 0:
                     message = f"layer {layer} expert {expert} is not in the staging buffer"
                     raise RuntimeError(message)
-                tokens = np.asarray([item[0] for item in pairs], dtype=np.uint32)
-                slots = np.asarray([item[1] for item in pairs], dtype=np.uint32)
-                n = int(tokens.size)
-                token_buf = self._upload_u32(tokens)
-                slot_buf = self._upload_u32(slots)
                 gate, down = self._plane_views(stage, planes)
                 gate.weight_off += base
                 gate.scale_off += base
                 down.weight_off += base
                 down.scale_off += base
-                gathered = self.gpu.gather_half(xs, token_buf, n, self.hidden, gate.stored_inner)
-                activated = self.gpu.moe_activate(
-                    self.gpu.gemm_int4_half(gate, gathered, n, fp8=planes.bits == 8),
-                    n,
-                    self.moe,
-                    down.stored_inner,
-                )
-                mixed = self.gpu.gemm_int4_half(down, activated, n, fp8=planes.bits == 8)
-                self.gpu.moe_add_weighted(
-                    mixed, token_buf, slot_buf, weight, running, n, self.hidden, self.top_k
-                )
+                # One expert can be selected by every token of a long prompt.
+                # The scratch arena is sized for one prefill chunk, so the
+                # matmul is split there instead of growing the arena.
+                for start in range(0, len(pairs), self.prefill_chunk):
+                    if start:
+                        self.gpu.flush()
+                        self.gpu.rewind_scratch()
+                    part = pairs[start : start + self.prefill_chunk]
+                    tokens = np.asarray([item[0] for item in part], dtype=np.uint32)
+                    slots = np.asarray([item[1] for item in part], dtype=np.uint32)
+                    n = int(tokens.size)
+                    token_buf = self._upload_u32(tokens)
+                    slot_buf = self._upload_u32(slots)
+                    gathered = self.gpu.gather_half(
+                        xs, token_buf, n, self.hidden, gate.stored_inner
+                    )
+                    activated = self.gpu.moe_activate(
+                        self.gpu.gemm_int4_half(gate, gathered, n, fp8=planes.bits == 8),
+                        n,
+                        self.moe,
+                        down.stored_inner,
+                    )
+                    mixed = self.gpu.gemm_int4_half(
+                        down, activated, n, fp8=planes.bits == 8
+                    )
+                    self.gpu.moe_add_weighted(
+                        mixed, token_buf, slot_buf, weight, running, n, self.hidden, self.top_k
+                    )
         if small:
             self.gpu.flush()
             self.gpu.rewind_scratch()
@@ -3178,6 +3369,160 @@ class Qwen38Runtime:
             self.atlas.miss,
             layer,
         )
+
+    def _moe_span_device(
+        self,
+        layer: int,
+        xs: Dev,
+        weight: Dev,
+        shared: Dev,
+        choice: Dev,
+        count: int,
+    ) -> Dev:
+        """Grouped experts from device ids. The host does not read the routes."""
+        if self.atlas is None:
+            message = "span decode has no expert atlas"
+            raise RuntimeError(message)
+        running = self._span_device_tier(
+            layer, xs, weight, shared, choice, count, self._hot, self.atlas.atlas, 0
+        )
+        running = self._span_device_tier(
+            layer, xs, weight, running, choice, count, self._cold, self.atlas.atlas, 1
+        )
+        return self._span_super_pins(layer, xs, weight, running, choice, count)
+
+    def _span_device_tier(
+        self,
+        layer: int,
+        xs: Dev,
+        weight: Dev,
+        shared: Dev,
+        choice: Dev,
+        count: int,
+        planes: ExpertPlanes,
+        weights: Any,
+        want: int,
+    ) -> Dev:
+        if self.atlas is None or planes.bits not in (4, 8):
+            return shared
+        slots = count * self.top_k
+        experts = self.gpu.span(slots * 4)
+        offsets = self.gpu.span((slots + 1) * 4)
+        tokens = self.gpu.span(slots * 4)
+        inverse = self.gpu.span(slots * 4)
+        for buf, nbytes in (
+            (experts, slots * 4),
+            (offsets, (slots + 1) * 4),
+            (tokens, slots * 4),
+            (inverse, slots * 4),
+        ):
+            view = _buffer_view(buf.buf, buf.offset + nbytes)
+            view[buf.offset : buf.offset + nbytes] = bytes(nbytes)
+        self.gpu.group_span(
+            choice,
+            self._tier,
+            experts,
+            offsets,
+            tokens,
+            inverse,
+            count,
+            self.top_k,
+            layer * self.experts,
+            want,
+            slots,
+        )
+        self.gpu.barrier()
+        gate_kernel = "moe_span_fp4_gate" if planes.bits == 4 else "moe_span_fp8_gate"
+        down_kernel = "moe_span_fp4_down" if planes.bits == 4 else "moe_span_fp8_down"
+        logical = None if planes.bits == 4 else self.hidden
+        gathered = self.gpu.gather_rows_f32(xs, tokens, slots, self.hidden, planes.gate_inner)
+        gate = self.gpu.span(max(slots, 1) * planes.gate_rows * 4)
+        self.gpu.moe_grouped(
+            gathered,
+            weights,
+            self.atlas.table,
+            experts,
+            offsets,
+            gate,
+            self.atlas.miss,
+            slots,
+            layer * self.experts,
+            planes.gate_rows,
+            planes.gate_inner,
+            0,
+            planes.gate_scale,
+            layer,
+            kernel=gate_kernel,
+            logical=logical,
+        )
+        activated = self.gpu.moe_activate(gate, slots, self.moe, planes.down_inner)
+        down = self.gpu.span(max(slots, 1) * self.hidden * 4)
+        down_logical = None if planes.bits == 4 else self.moe
+        self.gpu.moe_grouped(
+            activated,
+            weights,
+            self.atlas.table,
+            experts,
+            offsets,
+            down,
+            self.atlas.miss,
+            slots,
+            layer * self.experts,
+            self.hidden,
+            planes.down_inner,
+            planes.down_weight,
+            planes.down_scale,
+            layer,
+            kernel=down_kernel,
+            logical=down_logical,
+        )
+        return self.gpu.moe_scatter(shared, down, inverse, weight, count, self.top_k, self.hidden)
+
+    def _span_super_pins(
+        self,
+        layer: int,
+        xs: Dev,
+        weight: Dev,
+        running: Dev,
+        choice: Dev,
+        count: int,
+    ) -> Dev:
+        if not isinstance(self.files, QuantRecord):
+            return running
+        pins = self.files.super[layer]
+        if not pins:
+            return running
+        planes = self._super_planes
+        for token in range(count):
+            row = xs.view(token * self.hidden, self.hidden)
+            acc = running.view(token * self.hidden, self.hidden)
+            ids = choice.view(token * self.top_k, self.top_k)
+            scales = weight.view(token * self.top_k, self.top_k)
+            for expert in pins:
+                image = self._super_images[(layer, int(expert))]
+                gate = self._super_gemv(
+                    row,
+                    image,
+                    planes.gate_rows,
+                    planes.gate_inner,
+                    0,
+                    planes.gate_scale,
+                    self.hidden,
+                    half=False,
+                )
+                activated = self.gpu.moe_activate(gate, 1, self.moe, planes.down_inner)
+                down = self._super_gemv(
+                    activated,
+                    image,
+                    self.hidden,
+                    planes.down_inner,
+                    planes.down_weight,
+                    planes.down_scale,
+                    self.moe,
+                    half=True,
+                )
+                self.gpu.axpy_matching(acc, down, scales, ids, int(expert))
+        return running
 
     def _moe_span(
         self,
@@ -3904,6 +4249,7 @@ class Qwen38Runtime:
                 self.ple_hist, normed, conv_w, conv_off, span, 4, self.ngram_size
             )
             self.gpu.add_into(slot, self.gpu.add(updated, self.gpu.silu(conv)))
+            self._mark_ple_token(index)
 
     def _ple_chunk(
         self,

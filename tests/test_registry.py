@@ -6,9 +6,7 @@ import pytest
 
 from madmetal.registry import (
     PIPELINE,
-    TIER,
     add_model,
-    adopt_existing,
     choose_complete,
     format_listing,
     list_unregistered,
@@ -29,7 +27,7 @@ def _record(root, name: str) -> None:
     (path / "manifest.json").write_text(json.dumps({"complete": True}))
 
 
-def test_pipeline_id_resolves_to_the_default(tmp_path) -> None:
+def test_pipeline_id_names_the_only_row_of_that_pipeline(tmp_path) -> None:
     folder = "Qwen-madmetal-h128-fp8-c384-fp4"
     _record(tmp_path, folder)
     add_model(folder, alias="qwen38-flash-next", root=tmp_path)
@@ -46,6 +44,11 @@ def test_pipeline_id_resolves_to_the_default(tmp_path) -> None:
     assert instruct.parent == folder
     assert instruct.sampling is not None
     assert instruct.sampling["presence_penalty"] == 1.5
+    _record(tmp_path, "other")
+    add_model("other", alias="other-name", root=tmp_path)
+    with pytest.raises(LookupError, match="unknown model"):
+        resolve(PIPELINE, root=tmp_path)
+    assert resolve("qwen38-flash-next", root=tmp_path).folder == folder
 
 
 def test_unknown_suffix_names_the_registered_ids(tmp_path) -> None:
@@ -78,31 +81,18 @@ def test_listing_includes_folder_alias_and_variants(tmp_path) -> None:
     assert thinking["sampling"]["top_k"] == 20
 
 
-def test_adopt_existing_registers_the_packed_record_once(tmp_path) -> None:
-    folder = f"Qwen3.8-Flash-Next-{TIER}"
+def test_a_finished_record_stays_unregistered(tmp_path) -> None:
+    folder = "Qwen3.8-Flash-Next-madmetal-h128-fp4-c384-fp4"
     _record(tmp_path, folder)
-    source = tmp_path / "models" / "qwen38-flash-next-bf16"
-    source.mkdir()
-    data = adopt_existing(tmp_path)
-    entry = data["models"][folder]
-    assert data["default"] == folder
-    assert entry["alias"] == "qwen38-flash-next"
-    assert entry["source"] == str(source)
-    assert entry["kv_cache"] == "e4m3"
-    assert entry["resident_percent"] is None
-    assert entry["variants"]["thinking"]["temperature"] == 1.0
-    again = adopt_existing(tmp_path)
-    assert again["models"][folder]["alias"] == "qwen38-flash-next"
-    assert not (tmp_path / "models" / "registry.json.tmp").exists()
-
-
-def test_incomplete_manifest_is_not_adopted(tmp_path) -> None:
-    folder = f"Qwen3.8-Flash-Next-{TIER}"
-    path = tmp_path / "models" / folder
-    path.mkdir(parents=True)
+    data = load_registry(tmp_path)
+    assert data == {"version": 1, "models": {}}
+    assert list_unregistered(tmp_path) == [folder]
+    with pytest.raises(LookupError, match="unknown model"):
+        resolve(PIPELINE, root=tmp_path)
+    path = tmp_path / "models" / "partial"
+    path.mkdir()
     (path / "manifest.json").write_text(json.dumps({"complete": False}))
-    data = adopt_existing(tmp_path)
-    assert data["models"] == {}
+    assert list_unregistered(tmp_path) == [folder]
 
 
 def test_choose_complete_lists_models_when_default_is_unset(tmp_path) -> None:
@@ -116,7 +106,7 @@ def test_choose_complete_lists_models_when_default_is_unset(tmp_path) -> None:
     _record(tmp_path, "two")
     add_model("two", alias="second", root=tmp_path)
     data = load_registry(tmp_path)
-    data["default"] = None
+    assert "default" not in data
     data["extra"] = {"kept": True}
     save_registry(data, tmp_path)
     with pytest.raises(LookupError, match="pass --model"):
@@ -142,7 +132,7 @@ def test_alias_must_be_one_unused_name(tmp_path) -> None:
     assert resolve("renamed", root=tmp_path).folder == "one"
 
 
-def test_a_second_pipeline_is_listed_and_does_not_replace_the_default(tmp_path) -> None:
+def test_a_second_pipeline_is_listed_without_a_default(tmp_path) -> None:
     flash = "Qwen-madmetal-h128-fp8-c384-fp4"
     dense = "Qwen3.8-27B-madmetal-fp8-fp4"
     _record(tmp_path, flash)
@@ -150,7 +140,7 @@ def test_a_second_pipeline_is_listed_and_does_not_replace_the_default(tmp_path) 
     add_model(flash, alias="qwen38-flash-next", root=tmp_path)
     add_model(dense, alias="qwen38-27b", root=tmp_path, pipeline="qwen38-27b")
     data = load_registry(tmp_path)
-    assert data["default"] == flash
+    assert "default" not in data
     assert resolve("qwen38-flash-next", root=tmp_path).folder == flash
     assert resolve("qwen38-flash-next", root=tmp_path).pipeline == "qwen38-flash-next"
     selected = resolve("qwen38-27b", root=tmp_path)
@@ -178,6 +168,9 @@ def test_quantize_registration_refuses_a_different_source(tmp_path) -> None:
     other = tmp_path / "other"
     other.mkdir()
     register_quantized("packed", source=source, alias="short", root=tmp_path)
+    stored = load_registry(tmp_path)
+    assert "default" not in stored
+    assert list(stored["models"]) == ["packed"]
     register_quantized("packed", source=source, alias="short", root=tmp_path)
     with pytest.raises(ValueError, match="different source"):
         refuse_conflicting_destination("packed", other, root=tmp_path)

@@ -1288,3 +1288,97 @@ kernel void gemv_int4_f32(
         }
     }
 }
+
+// One weight row, up to four tokens. One row per simdgroup keeps the weight
+// chunk in registers so the tokens share that load.
+kernel void gemv_int4_span(
+    device const float* activation [[buffer(0)]],
+    device const uchar* weights [[buffer(1)]],
+    device const uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    constant uint& cols [[buffer(5)]],
+    constant uint& inner [[buffer(6)]],
+    constant uint& logical [[buffer(7)]],
+    constant uint& epilogue [[buffer(8)]],
+    constant float& epi_scale [[buffer(9)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint tg [[threadgroup_position_in_grid]])
+{
+    uint row = tg * 4u + simd;
+    if (row >= cols || count == 0u || count > 4u) {
+        return;
+    }
+    uint blocks = inner >> 5;
+    uint stride = inner >> 1;
+    uint niter = (blocks + 31u) >> 5;
+    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+    for (uint iter = 0u; iter < niter; ++iter) {
+        uint chunk = lane + iter * 32u;
+        uint base = chunk << 5;
+        if (chunk < blocks && base < logical) {
+            uint4 w = load_chunk(weights + (ulong)row * stride, chunk);
+            float scale = e8m0_scale((scales + (ulong)row * blocks)[chunk]);
+            if (base + 32u <= logical) {
+                if (count > 0u) {
+                    acc0 += dot_chunk_f32(w, scale, activation + base);
+                }
+                if (count > 1u) {
+                    acc1 += dot_chunk_f32(w, scale, activation + logical + base);
+                }
+                if (count > 2u) {
+                    acc2 += dot_chunk_f32(w, scale, activation + 2u * logical + base);
+                }
+                if (count > 3u) {
+                    acc3 += dot_chunk_f32(w, scale, activation + 3u * logical + base);
+                }
+            } else {
+                for (uint sub = 0u; sub < 32u; ++sub) {
+                    if (base + sub >= logical) {
+                        break;
+                    }
+                    float code = int4_from_chunk(w, sub) * scale;
+                    float v0 = clamp(activation[base + sub], -65504.0f, 65504.0f);
+                    acc0 += code * float(half(v0));
+                    if (count > 1u) {
+                        float v1 = clamp(activation[logical + base + sub], -65504.0f, 65504.0f);
+                        acc1 += code * float(half(v1));
+                    }
+                    if (count > 2u) {
+                        float v2 = clamp(
+                            activation[2u * logical + base + sub], -65504.0f, 65504.0f
+                        );
+                        acc2 += code * float(half(v2));
+                    }
+                    if (count > 3u) {
+                        float v3 = clamp(
+                            activation[3u * logical + base + sub], -65504.0f, 65504.0f
+                        );
+                        acc3 += code * float(half(v3));
+                    }
+                }
+            }
+        }
+    }
+    float s0 = simd_sum(acc0);
+    float s1 = simd_sum(acc1);
+    float s2 = simd_sum(acc2);
+    float s3 = simd_sum(acc3);
+    if (lane == 0u) {
+        float sums[4] = {s0, s1, s2, s3};
+        for (uint t = 0u; t < count; ++t) {
+            float sum = sums[t];
+            if (epilogue == 1u) {
+                sum = silu_f(sum);
+            } else if (epilogue == 2u) {
+                sum = sigmoid_f(sum);
+            } else if (epilogue == 3u) {
+                sum = silu_f(sum * epi_scale);
+            } else if (epilogue == 4u) {
+                sum = 2.0f * sigmoid_f(sum * 0.25f);
+            }
+            destination[(ulong)t * cols + row] = sum;
+        }
+    }
+}

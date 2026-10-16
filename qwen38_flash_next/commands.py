@@ -21,7 +21,6 @@ from typing import Any
 from madmetal.registry import (
     PIPELINE,
     add_model,
-    adopt_existing,
     choose_complete,
     format_listing,
     load_registry,
@@ -452,31 +451,16 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
         def do_GET(self) -> None:  # noqa: N802
             path = urllib.parse.unquote(self.path.split("?", 1)[0])
             if path == "/v1/models":
-                if getattr(args, "lazy", False):
-                    self._json(
-                        200,
-                        {
-                            "object": "list",
-                            "data": model_objects(resident=state.get("record")),
-                        },
-                    )
-                    return
                 self._json(
                     200,
                     {
                         "object": "list",
-                        "data": [
-                            {
-                                "id": "qwen38-flash-next",
-                                "object": "model",
-                                "owned_by": "madmetal",
-                            }
-                        ],
+                        "data": model_objects(resident=state.get("record")),
                     },
                 )
                 return
             prefix = "/v1/models/"
-            if getattr(args, "lazy", False) and path.startswith(prefix):
+            if path.startswith(prefix):
                 try:
                     row = one_model(path[len(prefix) :], resident=state.get("record"))
                 except LookupError as exc:
@@ -492,7 +476,7 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
                 return
             self._started = False
             self._gone = False
-            self._model_id = "qwen38-flash-next"
+            self._model_id = ""
             length = int(self.headers.get("Content-Length", "0"))
             try:
                 body = json.loads(self.rfile.read(length) or b"{}")
@@ -1071,7 +1055,6 @@ def _bind_request(body: dict[str, Any], state: dict[str, Any], args: Any) -> Any
     """Load the requested folder when serve was started with an empty process."""
     if not getattr(args, "lazy", False):
         return None
-    adopt_existing()
     model = body.get("model")
     if not isinstance(model, str) or not model:
         message = "model is required"
@@ -1149,7 +1132,6 @@ def serve_main(argv: Sequence[str] | None = None) -> int:
     args.record = None
     args.resident_percent = None
     args.kv_cache = "e4m3"
-    adopt_existing()
     try:
         return serve(args)
     finally:

@@ -215,6 +215,27 @@ def test_flush_releases_the_atlas_before_the_prefix_write() -> None:
     assert order == ["flush", "state", "release", "save"]
 
 
+def test_completed_prefill_writes_without_releasing_the_atlas() -> None:
+    runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
+    runtime.tokens = [1, 2, 3]
+    runtime._prefix_dirty = True
+    runtime._forward_open = False
+    order: list[str] = []
+    runtime.gpu = type("Gpu", (), {"flush": lambda self: order.append("flush")})()
+    runtime._prefix_state = lambda: order.append("state") or object()
+    runtime._release_atlas = lambda: order.append("release")
+
+    class Prefixes:
+        def save(self, state: object) -> object:
+            order.append("save")
+            return object()
+
+    runtime.prefixes = Prefixes()
+    runtime._persist_prefix(release_atlas=False)
+    assert runtime._prefix_dirty is False
+    assert order == ["flush", "state", "save"]
+
+
 def test_persist_writes_the_live_prefix_once() -> None:
     runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
     runtime.tokens = [1, 2]
