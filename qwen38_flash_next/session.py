@@ -2585,8 +2585,8 @@ class MetalSession:
                 struct.pack("<I", mode),
                 struct.pack("<I", complete),
             ),
-            self._size(24, max(count, 1)),
-            self._size(512),
+            self._size(2, max(count, 1)),
+            self._size(32, 12),
         )
         return dst
 
@@ -2669,8 +2669,8 @@ class MetalSession:
                 struct.pack("<I", mode),
                 struct.pack("<I", complete),
             ),
-            self._size(24, max(count, 1)),
-            self._size(512),
+            self._size(2, max(count, 1)),
+            self._size(32, 12),
             ((self._cache_mode, 0, 15),),
         )
         return dst
@@ -2905,8 +2905,12 @@ class MetalSession:
                 struct.pack("<I", miss_index),
                 struct.pack("<I", want),
             ),
-            self._size(topk * cols),
-            self._size(32),
+            self._size(
+                max(topk, 1) * ((cols + 15) // 16)
+                if kernel == "moe_decode_gate"
+                else topk * cols
+            ),
+            self._size(128 if kernel == "moe_decode_gate" else 32),
         )
         return dst
 
@@ -2956,8 +2960,8 @@ class MetalSession:
                 struct.pack("<I", miss_index),
                 struct.pack("<I", want),
             ),
-            self._size(cols),
-            self._size(32),
+            self._size((cols + 15) // 16 if kernel == "moe_decode_down" else cols),
+            self._size(128 if kernel == "moe_decode_down" else 32),
         )
         return dst
 

@@ -3682,10 +3682,7 @@ class Qwen38Runtime:
         choice = Dev(self._choice_ids, self.top_k, layer * self.top_k)
         row = xs if xs.n == self.hidden else xs.view(0, self.hidden)
         shared_row = shared if shared.n == self.hidden else shared.view(0, self.hidden)
-        running = shared_row
-        if self.files.hot_set(layer):
-            running = self._decode_tier_ids(layer, row, running, choice, weight, self._hot, 0)
-        return self._decode_tier_ids(layer, row, running, choice, weight, self._cold, 1)
+        return self._decode_tier_ids(layer, row, shared_row, choice, weight, self._cold, 255)
 
     def _decode_tier_ids(
         self,

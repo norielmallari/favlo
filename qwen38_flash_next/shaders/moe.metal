@@ -360,46 +360,75 @@ kernel void moe_decode_gate(
     constant uint& miss_index [[buffer(13)]],
     constant uint& want [[buffer(14)]],
     uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
     uint tg [[threadgroup_position_in_grid]])
 {
-    uint slot = tg / cols;
-    uint row = tg - slot * cols;
-    if (slot >= topk) {
+    uint row_groups = (cols + 15u) >> 4;
+    uint slot = tg / row_groups;
+    uint row0 = ((tg - slot * row_groups) * 4u + simd) * 4u;
+    if (slot >= topk || row0 >= cols) {
         return;
     }
+    bool m1 = row0 + 1u < cols;
+    bool m2 = row0 + 2u < cols;
+    bool m3 = row0 + 3u < cols;
     if (!tier_accepts(want, tier, table_base + ids[slot])) {
         if (lane == 0u) {
-            destination[slot * cols + row] = 0.0f;
+            destination[slot * cols + row0] = 0.0f;
+            if (m1) destination[slot * cols + row0 + 1u] = 0.0f;
+            if (m2) destination[slot * cols + row0 + 2u] = 0.0f;
+            if (m3) destination[slot * cols + row0 + 3u] = 0.0f;
         }
         return;
     }
     long base = table[table_base + ids[slot]];
     if (base < 0) {
-        if (row == 0u && lane == 0u) {
+        if (row0 == 0u && lane == 0u) {
             miss[miss_index] = 1u;
         }
         if (lane == 0u) {
-            destination[slot * cols + row] = 0.0f;
+            destination[slot * cols + row0] = 0.0f;
+            if (m1) destination[slot * cols + row0 + 1u] = 0.0f;
+            if (m2) destination[slot * cols + row0 + 2u] = 0.0f;
+            if (m3) destination[slot * cols + row0 + 3u] = 0.0f;
         }
         return;
     }
     device const uchar* image = atlas + base;
-    device const uchar* packed = image + weight_off + row * (inner >> 1);
-    device const uchar* row_scale = image + scale_off + row * (inner >> 5);
+    uint stride = inner >> 1;
     uint blocks = inner >> 5;
     uint niter = (blocks + 31u) >> 5;
-    float acc = 0.0f;
+    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
     for (uint iter = 0u; iter < niter; ++iter) {
         uint chunk = lane + iter * 32u;
         if (chunk < blocks) {
-            uint4 weight = load_chunk(packed, chunk);
-            float scale = e8m0_scale(row_scale[chunk]);
-            acc += dot_chunk_f32(weight, scale, activation + (chunk << 5));
+            device const float* act = activation + (chunk << 5);
+            uint4 w0 = load_chunk(image + weight_off + row0 * stride, chunk);
+            float s0 = e8m0_scale((image + scale_off + row0 * blocks)[chunk]);
+            acc0 += dot_chunk_f32(w0, s0, act);
+            if (m1) {
+                uint4 w1 = load_chunk(image + weight_off + (row0 + 1u) * stride, chunk);
+                float s1 = e8m0_scale((image + scale_off + (row0 + 1u) * blocks)[chunk]);
+                acc1 += dot_chunk_f32(w1, s1, act);
+            }
+            if (m2) {
+                uint4 w2 = load_chunk(image + weight_off + (row0 + 2u) * stride, chunk);
+                float s2 = e8m0_scale((image + scale_off + (row0 + 2u) * blocks)[chunk]);
+                acc2 += dot_chunk_f32(w2, s2, act);
+            }
+            if (m3) {
+                uint4 w3 = load_chunk(image + weight_off + (row0 + 3u) * stride, chunk);
+                float s3 = e8m0_scale((image + scale_off + (row0 + 3u) * blocks)[chunk]);
+                acc3 += dot_chunk_f32(w3, s3, act);
+            }
         }
     }
-    float sum = simd_sum(acc);
+    float sums[4] = {simd_sum(acc0), simd_sum(acc1), simd_sum(acc2), simd_sum(acc3)};
     if (lane == 0u) {
-        destination[slot * cols + row] = sum;
+        destination[slot * cols + row0] = sums[0];
+        if (m1) destination[slot * cols + row0 + 1u] = sums[1];
+        if (m2) destination[slot * cols + row0 + 2u] = sums[2];
+        if (m3) destination[slot * cols + row0 + 3u] = sums[3];
     }
 }
 
@@ -422,42 +451,72 @@ kernel void moe_decode_down(
     constant uint& miss_index [[buffer(15)]],
     constant uint& want [[buffer(16)]],
     uint lane [[thread_index_in_simdgroup]],
-    uint row [[threadgroup_position_in_grid]])
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint tg [[threadgroup_position_in_grid]])
 {
-    if (row >= cols) {
+    uint row0 = (tg * 4u + simd) * 4u;
+    if (row0 >= cols) {
         return;
     }
-    float acc = shared[row];
+    bool m1 = row0 + 1u < cols;
+    bool m2 = row0 + 2u < cols;
+    bool m3 = row0 + 3u < cols;
+    float acc0 = shared[row0];
+    float acc1 = m1 ? shared[row0 + 1u] : 0.0f;
+    float acc2 = m2 ? shared[row0 + 2u] : 0.0f;
+    float acc3 = m3 ? shared[row0 + 3u] : 0.0f;
     for (uint slot = 0u; slot < topk; ++slot) {
         if (!tier_accepts(want, tier, table_base + ids[slot])) {
             continue;
         }
         long base = table[table_base + ids[slot]];
         if (base < 0) {
-            if (row == 0u && lane == 0u) {
+            if (row0 == 0u && lane == 0u) {
                 miss[miss_index] = 1u;
             }
             continue;
         }
         device const uchar* image = atlas + base;
-        device const uchar* packed = image + weight_off + row * (inner >> 1);
-        device const uchar* row_scale = image + scale_off + row * (inner >> 5);
+        uint stride = inner >> 1;
         uint blocks = inner >> 5;
         uint niter = (blocks + 31u) >> 5;
         device const half* act = activation + slot * inner;
-        float dot = 0.0f;
+        float dot0 = 0.0f, dot1 = 0.0f, dot2 = 0.0f, dot3 = 0.0f;
         for (uint iter = 0u; iter < niter; ++iter) {
             uint chunk = lane + iter * 32u;
             if (chunk < blocks) {
-                uint4 weight = load_chunk(packed, chunk);
-                float scale = e8m0_scale(row_scale[chunk]);
-                dot += dot_chunk_half(weight, scale, act + (chunk << 5));
+                device const half* src = act + (chunk << 5);
+                uint4 w0 = load_chunk(image + weight_off + row0 * stride, chunk);
+                float s0 = e8m0_scale((image + scale_off + row0 * blocks)[chunk]);
+                dot0 += dot_chunk_half(w0, s0, src);
+                if (m1) {
+                    uint4 w1 = load_chunk(image + weight_off + (row0 + 1u) * stride, chunk);
+                    float s1 = e8m0_scale((image + scale_off + (row0 + 1u) * blocks)[chunk]);
+                    dot1 += dot_chunk_half(w1, s1, src);
+                }
+                if (m2) {
+                    uint4 w2 = load_chunk(image + weight_off + (row0 + 2u) * stride, chunk);
+                    float s2 = e8m0_scale((image + scale_off + (row0 + 2u) * blocks)[chunk]);
+                    dot2 += dot_chunk_half(w2, s2, src);
+                }
+                if (m3) {
+                    uint4 w3 = load_chunk(image + weight_off + (row0 + 3u) * stride, chunk);
+                    float s3 = e8m0_scale((image + scale_off + (row0 + 3u) * blocks)[chunk]);
+                    dot3 += dot_chunk_half(w3, s3, src);
+                }
             }
         }
-        acc += weights[slot] * simd_sum(dot);
+        float scale_w = weights[slot];
+        acc0 += scale_w * simd_sum(dot0);
+        acc1 += scale_w * simd_sum(dot1);
+        acc2 += scale_w * simd_sum(dot2);
+        acc3 += scale_w * simd_sum(dot3);
     }
     if (lane == 0u) {
-        destination[row] = acc;
+        destination[row0] = acc0;
+        if (m1) destination[row0 + 1u] = acc1;
+        if (m2) destination[row0 + 2u] = acc2;
+        if (m3) destination[row0 + 3u] = acc3;
     }
 }
 
