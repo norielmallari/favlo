@@ -2404,11 +2404,24 @@ class MetalSession:
         weight_byte: int,
         mixed: Dev,
         count: int,
+        snap: Any = None,
+        save: int = 0,
     ) -> None:
         self._ew(
             "gdn_conv_scan",
-            ((history, 0), _dev_bind(qkv), (weight, weight_byte), _dev_bind(mixed)),
-            (struct.pack("<I", count), struct.pack("<I", 10240), struct.pack("<I", 4)),
+            (
+                (history, 0),
+                _dev_bind(qkv),
+                (weight, weight_byte),
+                _dev_bind(mixed),
+                (history if snap is None else snap, 0),
+            ),
+            (
+                struct.pack("<I", count),
+                struct.pack("<I", 10240),
+                struct.pack("<I", 4),
+                struct.pack("<I", save),
+            ),
             10240,
         )
 
@@ -2428,6 +2441,8 @@ class MetalSession:
         heads: Dev,
         count: int,
         eps: float,
+        snap: Any = None,
+        save: int = 0,
     ) -> None:
         self.dispatch(
             self.act["gdn_state_scan"],
@@ -2441,8 +2456,13 @@ class MetalSession:
                 (a_log, a_byte),
                 (norm, norm_byte),
                 _dev_bind(heads),
+                (state if snap is None else snap, 0),
             ),
-            (struct.pack("<I", count), struct.pack("<f", float(eps))),
+            (
+                struct.pack("<I", count),
+                struct.pack("<f", float(eps)),
+                struct.pack("<I", save),
+            ),
             self._size(48),
             self._size(128),
         )

@@ -220,9 +220,11 @@ kernel void gdn_conv_scan(
     device const float* qkv [[buffer(1)]],
     device const float* weight [[buffer(2)]],
     device float* mixed [[buffer(3)]],
-    constant uint& count [[buffer(4)]],
-    constant uint& channels [[buffer(5)]],
-    constant uint& taps [[buffer(6)]],
+    device float* snap [[buffer(4)]],
+    constant uint& count [[buffer(5)]],
+    constant uint& channels [[buffer(6)]],
+    constant uint& taps [[buffer(7)]],
+    constant uint& save [[buffer(8)]],
     uint tid [[thread_position_in_grid]])
 {
     if (tid >= channels) {
@@ -243,6 +245,11 @@ kernel void gdn_conv_scan(
         if (hist > 0u) {
             history[(hist - 1u) * channels + tid] = current[tid];
         }
+        if (save != 0u && token < 4u) {
+            for (uint tap = 0u; tap < hist; ++tap) {
+                snap[(token * hist + tap) * channels + tid] = history[tap * channels + tid];
+            }
+        }
     }
 }
 
@@ -256,8 +263,10 @@ kernel void gdn_state_scan(
     device const float* a_log [[buffer(6)]],
     device const float* norm_w [[buffer(7)]],
     device float* heads [[buffer(8)]],
-    constant uint& count [[buffer(9)]],
-    constant float& eps [[buffer(10)]],
+    device float* snap [[buffer(9)]],
+    constant uint& count [[buffer(10)]],
+    constant float& eps [[buffer(11)]],
+    constant uint& save [[buffer(12)]],
     uint head [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]])
 {
@@ -302,6 +311,12 @@ kernel void gdn_state_scan(
         for (uint dk = 0u; dk < 128u; ++dk) {
             uint index = dk * 128u + tid;
             shard[index] = decay * shard[index] + write * key_h[dk] * error;
+        }
+        if (save != 0u && token < 4u) {
+            device float* dst = snap + (token * 48u + head) * 128u * 128u;
+            for (uint dk = 0u; dk < 128u; ++dk) {
+                dst[dk * 128u + tid] = shard[dk * 128u + tid];
+            }
         }
         float acc = 0.0f;
         for (uint dk = 0u; dk < 128u; ++dk) {

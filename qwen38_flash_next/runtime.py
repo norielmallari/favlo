@@ -349,6 +349,9 @@ class Qwen38Runtime:
             self._v_tail_shadow = {
                 index: self.gpu.alloc(tail_bytes) for index in self.kv_v_tail
             }
+            # Reserved before the atlas so a partial accept can restore one
+            # position of the span. The atlas budget then sees this footprint.
+            self._ensure_tok_snaps()
         tok_cfg = json.loads((root / "tokenizer_config.json").read_text())
         self.chat_template = tok_cfg["chat_template"]
         from tokenizers import Tokenizer
@@ -449,6 +452,10 @@ class Qwen38Runtime:
             "_conv_shadow",
             "_k_tail_shadow",
             "_v_tail_shadow",
+            "_tok_gdn",
+            "_tok_conv",
+            "_tok_ple",
+            "_tok_kv",
             "_stage",
             "_stage_table",
             "_stage_miss",
@@ -1822,18 +1829,14 @@ class Qwen38Runtime:
             self._mtp_stopped = True
         elif correction is not None:
             commit.append(correction)
-        # The span already applied the kept tokens. Put that state back and
+        # The span already applied the kept tokens. Restore that position and
         # forward only the token that replaced a rejected guess.
-        if (
-            correction is not None
-            and correction not in self.stop_ids
-            and self._span_snap_count == len(span)
-            and len(kept) >= 1
-        ):
+        if self._span_snap_count == len(span) and len(kept) >= 1:
             self._restore_span_prefix(len(kept))
             self.tokens.extend(kept)
             self._prefix_dirty = True
-            self.forward([correction], decode=True, account=False)
+            if correction is not None and correction not in self.stop_ids:
+                self.forward([correction], decode=True, account=False)
         else:
             if self._mtp_draft_clean:
                 self._mtp_restore_kv()
@@ -1868,7 +1871,7 @@ class Qwen38Runtime:
         count = len(tokens)
         self._span_snap_count = 0
         self._span_snap = False
-        if self._span_snap:
+        if self._decoding and 1 < count <= 4 and self.kv_cache == "e4m3":
             self._span_snap = self._ensure_tok_snaps()
         if self._span_snap:
             self._tok_kv_seen = set()
@@ -2631,27 +2634,78 @@ class Qwen38Runtime:
         return buf
 
     def _ensure_tok_snaps(self) -> bool:
-        # Four copies of the gated-delta state are about 432 MiB. That does not
-        # fit beside the resident atlas on a 48 GiB machine.
-        return False
+        """Four positions of recurrent state, allocated before the atlas.
 
-    def _mark_gdn_token(self, layer: int, token: int) -> None:
-        self.gpu.barrier()
+        A partial accept restores one of these and forwards only the corrected
+        token. The copies are about 450 MiB. Reserving them first lets the
+        atlas shrink by that much instead of failing beside a full atlas.
+        """
+        if self.kv_cache != "e4m3":
+            return False
+        if getattr(self, "_tok_gdn", None):
+            return True
+        slots = 4
+        kept: list[Any] = []
+
+        def alloc(nbytes: int) -> Any:
+            buf = self.gpu.alloc(nbytes)
+            if buf is not None:
+                kept.append(buf)
+            return buf
+
         state_bytes = 48 * 128 * 128 * 4
-        self.gpu.copy_bytes(self.gdn_state[layer], 0, self._tok_gdn[layer][token], 0, state_bytes)
-        self.gpu.copy_bytes(
-            self.conv_hist[layer], 0, self._tok_conv[layer][token], 0, self._conv_bytes
-        )
-        self.gpu.barrier()
+        gdn: dict[int, Any] = {}
+        conv: dict[int, Any] = {}
+        for layer in self.gdn_state:
+            gdn_buf = alloc(state_bytes * slots)
+            conv_buf = alloc(self._conv_bytes * slots)
+            if gdn_buf is None or conv_buf is None:
+                for buf in kept:
+                    discard_buffer(buf)
+                return False
+            gdn[layer] = gdn_buf
+            conv[layer] = conv_buf
+        ple = [alloc(self._ple_bytes) for _ in range(slots)]
+        if any(buf is None for buf in ple):
+            for buf in kept:
+                discard_buffer(buf)
+            return False
+        tail_bytes = KV_TAIL_TOKENS * KV_BF16_BYTES
+        body_bytes = 8 * KV_E4M3_BYTES
+        kv: dict[int, list[tuple[Any, Any, Any, Any]]] = {}
+        kv_len: dict[int, list[int]] = {}
+        for layer in self.kv_k:
+            layer_slots: list[tuple[Any, Any, Any, Any]] = []
+            for _ in range(slots):
+                key_tail = alloc(tail_bytes)
+                value_tail = alloc(tail_bytes)
+                key_body = alloc(body_bytes)
+                value_body = alloc(body_bytes)
+                if any(buf is None for buf in (key_tail, value_tail, key_body, value_body)):
+                    for buf in kept:
+                        discard_buffer(buf)
+                    return False
+                layer_slots.append((key_tail, value_tail, key_body, value_body))
+            kv[layer] = layer_slots
+            kv_len[layer] = [0] * slots
+        self._tok_gdn = gdn
+        self._tok_conv = conv
+        self._tok_ple = ple
+        self._tok_kv = kv
+        self._tok_kv_len = kv_len
+        self._tok_origin = {}
+        self._tok_kv_seen = set()
+        return True
 
     def _mark_kv_token(self, layer: int, token: int, origin: int) -> None:
-        need = ((origin & ~3) + 4) * KV_E4M3_BYTES
+        # A span of four can cross one block boundary, so the copy covers two.
+        need = ((origin & ~3) + 8) * KV_E4M3_BYTES
         if int(self.kv_k[layer].length()) < need or int(self.kv_v[layer].length()) < need:
             self._span_snap = False
             return
         self.gpu.barrier()
         tail_bytes = KV_TAIL_TOKENS * KV_BF16_BYTES
-        body_bytes = 4 * KV_E4M3_BYTES
+        body_bytes = 8 * KV_E4M3_BYTES
         key_tail, value_tail, key_body, value_body = self._tok_kv[layer][token]
         self.gpu.copy_bytes(self.kv_k_tail[layer], 0, key_tail, 0, tail_bytes)
         self.gpu.copy_bytes(self.kv_v_tail[layer], 0, value_tail, 0, tail_bytes)
@@ -2675,13 +2729,17 @@ class Qwen38Runtime:
         index = tokens - 1
         state_bytes = 48 * 128 * 128 * 4
         for layer, buf in self.gdn_state.items():
-            self.gpu.copy_bytes(self._tok_gdn[layer][index], 0, buf, 0, state_bytes)
+            self.gpu.copy_bytes(self._tok_gdn[layer], index * state_bytes, buf, 0, state_bytes)
             self.gpu.copy_bytes(
-                self._tok_conv[layer][index], 0, self.conv_hist[layer], 0, self._conv_bytes
+                self._tok_conv[layer],
+                index * self._conv_bytes,
+                self.conv_hist[layer],
+                0,
+                self._conv_bytes,
             )
         self.gpu.copy_bytes(self._tok_ple[index], 0, self.ple_hist, 0, self._ple_bytes)
         tail_bytes = KV_TAIL_TOKENS * KV_BF16_BYTES
-        body_bytes = 4 * KV_E4M3_BYTES
+        body_bytes = 8 * KV_E4M3_BYTES
         for layer in self._tok_kv_seen:
             slots = self._tok_kv[layer]
             key_tail, value_tail, key_body, value_body = slots[index]
@@ -2705,51 +2763,35 @@ class Qwen38Runtime:
         norm_w, norm_off = bundle["norm"]
         mixed = self.gpu.tmp(count * 10240)
         heads = self.gpu.tmp(count * 6144)
-        if self._span_snap and count > 1:
-            for token in range(count):
-                self.gpu.gdn_conv_scan(
-                    self.conv_hist[layer],
-                    qkv.view(token * 10240, 10240),
-                    conv_w,
-                    conv_off,
-                    mixed.view(token * 10240, 10240),
-                    1,
-                )
-                self.gpu.gdn_state_scan(
-                    self.gdn_state[layer],
-                    mixed.view(token * 10240, 10240),
-                    raw_a.view(token * 48, 48),
-                    raw_b.view(token * 48, 48),
-                    z.view(token * 6144, 6144),
-                    dt_w,
-                    dt_off,
-                    a_w,
-                    a_off,
-                    norm_w,
-                    norm_off,
-                    heads.view(token * 6144, 6144),
-                    1,
-                    self.eps,
-                )
-                self._mark_gdn_token(layer, token)
-        else:
-            self.gpu.gdn_conv_scan(self.conv_hist[layer], qkv, conv_w, conv_off, mixed, count)
-            self.gpu.gdn_state_scan(
-                self.gdn_state[layer],
-                mixed,
-                raw_a,
-                raw_b,
-                z,
-                dt_w,
-                dt_off,
-                a_w,
-                a_off,
-                norm_w,
-                norm_off,
-                heads,
-                count,
-                self.eps,
-            )
+        save = self._span_snap and 1 < count <= 4
+        self.gpu.gdn_conv_scan(
+            self.conv_hist[layer],
+            qkv,
+            conv_w,
+            conv_off,
+            mixed,
+            count,
+            snap=self._tok_conv[layer] if save else None,
+            save=1 if save else 0,
+        )
+        self.gpu.gdn_state_scan(
+            self.gdn_state[layer],
+            mixed,
+            raw_a,
+            raw_b,
+            z,
+            dt_w,
+            dt_off,
+            a_w,
+            a_off,
+            norm_w,
+            norm_off,
+            heads,
+            count,
+            self.eps,
+            snap=self._tok_gdn[layer] if save else None,
+            save=1 if save else 0,
+        )
         return self.gpu.linear(bundle["out"], heads, count, 6144)
 
     def _grow_slot(
