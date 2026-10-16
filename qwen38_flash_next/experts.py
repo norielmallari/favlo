@@ -143,14 +143,23 @@ class ExpertAtlas:
         ids: Sequence[int],
         protect: set[tuple[int, int]] | None = None,
     ) -> int:
-        """Load missing experts. The returned event is 0 when nothing was read."""
-        wanted = sorted({int(expert) for expert in ids})
+        """Load missing experts. The returned event is 0 when nothing was read.
+
+        Repeated ids are separate token selections. A repeated expert is marked
+        reused so S3-FIFO keeps it; a one-hit stays in the small FIFO.
+        """
+        counts: dict[int, int] = {}
+        for expert in ids:
+            value = int(expert)
+            counts[value] = counts.get(value, 0) + 1
+        wanted = sorted(counts)
         held = {(layer, expert) for expert in wanted}
         if protect:
             held.update(protect)
         protect = held
         for expert in wanted:
-            self._touch(layer, expert)
+            for _ in range(min(counts[expert], 3)):
+                self._touch(layer, expert)
         missing = []
         for expert in wanted:
             if self.files.tier_row(layer, expert)[0] == 2:
@@ -180,15 +189,49 @@ class ExpertAtlas:
                 commit_pages(self.atlas, offset, span)
                 members = tuple(expert for _row, expert in run)
                 key = (layer, tier, first_row, last_row)
+                reuse = min(max(counts[expert] for expert in members) - 1, 3)
                 for index, (_row, expert) in enumerate(run):
                     self._publish(
-                        layer, expert, offset + index * slot, key, offset, span, members
+                        layer,
+                        expert,
+                        offset + index * slot,
+                        key,
+                        offset,
+                        span,
+                        members,
+                        reuse=reuse if index == 0 else 0,
                     )
                 loads.append((self.atlas, offset, span, first_row * slot))
                 self.streamed += span
             if loads:
                 groups.append((self.files.io_handle(layer, tier), loads))
         return self.gpu.io_submit_mixed(groups)
+
+    def evict_bytes(
+        self, nbytes: int, protect: set[tuple[int, int]] | None = None
+    ) -> int:
+        """Discard victim runs until ``nbytes`` of expert images are released.
+
+        The atlas allocation stays. ``protect`` is skipped while another victim
+        exists. The caller has finished GPU use of this buffer.
+        """
+        if nbytes <= 0 or self.atlas is None:
+            return 0
+        held = set(protect or ())
+        freed = 0
+        for _ in range(len(self.runs) + 1):
+            if freed >= nbytes:
+                break
+            key = self.eviction.victim(held, self.run_members, self.budget)
+            if key is None or key not in self.runs:
+                break
+            offset, span = self.runs[key]
+            self._free_run(key)
+            if offset % PAGE == 0 and span % PAGE == 0:
+                release_pages(self.atlas, offset, span)
+            freed += span
+        self.release_unused()
+        return freed
 
     def release_unused(self) -> None:
         """Discard atlas pages that do not hold a live expert image.
@@ -217,12 +260,17 @@ class ExpertAtlas:
         offset: int,
         span: int,
         members: tuple[int, ...],
+        reuse: int = 0,
     ) -> None:
         if key not in self.runs:
             self.runs[key] = (offset, span)
             self.run_members[key] = members
             self.eviction.insert(key, span)
+            for _ in range(max(0, reuse)):
+                self.eviction.hit(key)
             self._relieve()
+            if key not in self.runs:
+                return
         else:
             self.eviction.hit(key)
         self.resident[(layer, expert)] = image

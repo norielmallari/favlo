@@ -1,0 +1,395 @@
+"""The one listener. A request names a pipeline, and that pipeline loads.
+
+This module does not import a pipeline. ``open_runtime`` and ``handle_chat``
+come from the entry file the registry row names.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import select
+import signal
+import socket
+import sys
+import threading
+import traceback
+import urllib.parse
+from collections.abc import Sequence
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from typing import Any
+
+from madmetal.console import Console
+from madmetal.registry import model_objects, one_model, resolve
+
+_STREAM_WRITE_TIMEOUT = 2.0
+_log_sink: Any = None
+
+
+def bind_log(sink: Any) -> None:
+    """Route listener lines through the console. ``None`` restores stderr."""
+    global _log_sink
+    _log_sink = sink
+
+
+def _log(message: str) -> None:
+    sink = _log_sink
+    if sink is not None:
+        sink(message)
+        return
+    sys.stderr.write(message + "\n")
+    sys.stderr.flush()
+
+
+def _report_failure(console: Any) -> None:
+    """Write a traceback under the live rows, not through them."""
+    text = traceback.format_exc()
+    report = getattr(console, "report", None)
+    if report is None:
+        sys.stderr.write(text)
+        sys.stderr.flush()
+        return
+    report(text)
+
+
+class _SingleRequestServer(HTTPServer):
+    """Accept the next connection only after the current request returns."""
+
+    request_queue_size = 128
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """A peer that closes mid-response is not a server failure."""
+        if isinstance(sys.exception(), ConnectionError):
+            return
+        super().handle_error(request, client_address)
+
+
+class _Shutdown:
+    """SIGINT and SIGTERM stop the forward and leave the process able to release."""
+
+    def __init__(self) -> None:
+        self.runtime: Any = None
+        self.closing = False
+        self.signaled = False
+
+    def arm(self) -> None:
+        self._previous = (
+            signal.getsignal(signal.SIGINT),
+            signal.getsignal(signal.SIGTERM),
+        )
+        signal.signal(signal.SIGINT, self.handle)
+        signal.signal(signal.SIGTERM, self.handle)
+
+    def disarm(self) -> None:
+        previous = getattr(self, "_previous", None)
+        if previous is None:
+            return
+        signal.signal(signal.SIGINT, previous[0])
+        signal.signal(signal.SIGTERM, previous[1])
+        self._previous = None
+
+    def handle(self, _signum: int, _frame: Any) -> None:
+        if self.closing:
+            return
+        self.signaled = True
+        runtime = self.runtime
+        if runtime is not None:
+            runtime.halt()
+        raise KeyboardInterrupt
+
+
+def _release(runtime: Any, shutdown: _Shutdown, server: Any = None) -> None:
+    """Close the listening socket and the runtime. A signal during this returns."""
+    shutdown.closing = True
+    try:
+        if server is not None:
+            try:
+                server.server_close()
+            except OSError:
+                pass
+        if runtime is not None:
+            runtime.close()
+        if shutdown.signaled and (runtime is not None or server is not None):
+            _log("released")
+    finally:
+        shutdown.disarm()
+
+
+def _peer_closed(sock: socket.socket) -> bool:
+    """True when the client has closed its side or the socket is already dead."""
+    try:
+        readable, _, _ = select.select([sock], [], [], 0)
+    except (OSError, ValueError):
+        return True
+    if not readable:
+        return False
+    try:
+        peeked = sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+    except BlockingIOError:
+        return False
+    except OSError:
+        return True
+    return peeked == b""
+
+
+def _pipeline_module(name: str) -> Any:
+    from madmetal.cli import load_pipeline
+
+    return load_pipeline(name)
+
+
+def _open_runtime(selection: Any, console: Any) -> Any:
+    """The pipeline named on the registry row. The previous runtime is already closed."""
+    module = _pipeline_module(selection.pipeline)
+    opener = getattr(module, "open_runtime", None)
+    if not callable(opener):
+        message = f"{selection.pipeline} does not open a runtime"
+        raise RuntimeError(message)
+    return opener(
+        selection.path,
+        kv_cache=selection.kv_cache,
+        console=console,
+        resident_percent=selection.resident_percent,
+    )
+
+
+def _install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
+    if (
+        state.get("runtime") is not None
+        and state.get("record") == selection.folder
+        and state.get("pipeline") == selection.pipeline
+    ):
+        return
+    old = state.get("runtime")
+    state["runtime"] = None
+    state["record"] = None
+    state["pipeline"] = None
+    state["module"] = None
+    if old is not None:
+        old.close()
+    ui = getattr(args, "console_ui", None)
+    if ui is not None:
+        ui.pipeline = selection.pipeline
+        ui.load_detail = selection.alias or selection.folder
+    runtime = _open_runtime(selection, ui)
+    state["runtime"] = runtime
+    state["record"] = selection.folder
+    state["pipeline"] = selection.pipeline
+    state["module"] = _pipeline_module(selection.pipeline)
+    shutdown = getattr(args, "shutdown", None)
+    if shutdown is not None:
+        shutdown.runtime = runtime
+    if ui is not None and ui.keeps_lines:
+        label = selection.alias or selection.folder
+        _log(f"loaded {label} {selection.folder}")
+
+
+def _bind_request(body: dict[str, Any], state: dict[str, Any], args: Any) -> Any:
+    """Load the requested folder when serve was started with an empty process."""
+    if not getattr(args, "lazy", False):
+        return None
+    model = body.get("model")
+    if not isinstance(model, str) or not model:
+        message = "model is required"
+        raise LookupError(message)
+    selection = resolve(model, resident=state.get("record"))
+    _install_runtime(state, args, selection)
+    runtime = state.get("runtime")
+    state["requests"] = int(state.get("requests") or 0) + 1
+    if runtime is not None:
+        runtime._request_id = state["requests"]
+    return selection
+
+
+def serve(args: Any) -> int:
+    shutdown = _Shutdown()
+    shutdown.arm()
+    args.shutdown = shutdown
+    state: dict[str, Any] = {
+        "runtime": None,
+        "server": None,
+        "record": None,
+        "module": None,
+        "pipeline": None,
+        "requests": 0,
+    }
+    try:
+        return _run_until_stopped(args, state, shutdown)
+    except KeyboardInterrupt:
+        _log("shutting down")
+        return 0
+    finally:
+        if not shutdown.closing:
+            _release(state["runtime"], shutdown, state.get("server"))
+
+
+def _run_until_stopped(args: Any, state: dict[str, Any], shutdown: _Shutdown) -> int:
+    """Serve until SIGINT or SIGTERM. Then close the socket and the runtime."""
+    try:
+        return _serve_loop(args, state)
+    except KeyboardInterrupt:
+        _log("shutting down")
+        return 0
+    finally:
+        _release(state["runtime"], shutdown, state.get("server"))
+
+
+def _serve_loop(args: Any, state: dict[str, Any]) -> int:
+    lock = threading.Lock()
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, fmt: str, *log_args: Any) -> None:
+            del fmt, log_args
+
+        def do_GET(self) -> None:  # noqa: N802
+            path = urllib.parse.unquote(self.path.split("?", 1)[0])
+            if path == "/v1/models":
+                self._json(
+                    200,
+                    {
+                        "object": "list",
+                        "data": model_objects(resident=state.get("record")),
+                    },
+                )
+                return
+            prefix = "/v1/models/"
+            if path.startswith(prefix):
+                try:
+                    row = one_model(path[len(prefix) :], resident=state.get("record"))
+                except LookupError as exc:
+                    self._json(404, {"error": {"message": str(exc), "type": "not_found"}})
+                    return
+                self._json(200, row)
+                return
+            self._json(404, {"error": {"message": "not found"}})
+
+        def do_POST(self) -> None:  # noqa: N802
+            if self.path.split("?", 1)[0] != "/v1/chat/completions":
+                self._json(404, {"error": {"message": "not found"}})
+                return
+            self._started = False
+            self._gone = False
+            self._model_id = ""
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+                selection = _bind_request(body, state, args)
+                if selection is not None:
+                    self._model_id = selection.requested_id
+                runtime = state.get("runtime")
+                module = state.get("module")
+                if runtime is None or module is None:
+                    self._json(
+                        404,
+                        {"error": {"message": "no model is loaded", "type": "not_found"}},
+                    )
+                    return
+                chat = getattr(module, "handle_chat", None)
+                if not callable(chat):
+                    name = state.get("pipeline") or "pipeline"
+                    self._json(
+                        500,
+                        {
+                            "error": {
+                                "message": f"{name} does not complete a chat",
+                                "type": "RuntimeError",
+                            }
+                        },
+                    )
+                    return
+                with lock:
+                    chat(self, runtime, body, selection, args, state)
+            except KeyError as exc:
+                self.close_connection = True
+                if self._started:
+                    return
+                self._json(404, {"error": {"message": str(exc), "type": "not_found"}})
+            except LookupError as exc:
+                self.close_connection = True
+                if self._started:
+                    return
+                self._json(404, {"error": {"message": str(exc), "type": "not_found"}})
+            except Exception as exc:
+                _report_failure(getattr(state.get("runtime"), "console", None))
+                self.close_connection = True
+                if self._started:
+                    return
+                self._json(500, {"error": {"message": str(exc), "type": type(exc).__name__}})
+
+        def _client_stopped(self) -> bool:
+            if self._gone:
+                return True
+            if _peer_closed(self.connection):
+                self._gone = True
+                return True
+            return False
+
+        def _event(self, payload: dict[str, Any]) -> None:
+            blob = json.dumps(payload).encode()
+            self._send(b"data: " + blob + b"\n\n")
+
+        def _send(self, data: bytes) -> None:
+            try:
+                self.wfile.write(data)
+                self.wfile.flush()
+            except OSError:
+                self._gone = True
+                message = "client closed"
+                raise OSError(message) from None
+
+        def _json(self, status: int, payload: dict[str, Any]) -> None:
+            blob = json.dumps(payload).encode()
+            previous = self.connection.gettimeout()
+            self.connection.settimeout(_STREAM_WRITE_TIMEOUT)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(blob)))
+                self.end_headers()
+                self.wfile.write(blob)
+                self.wfile.flush()
+            except OSError:
+                self.close_connection = True
+                _log("client closed")
+            else:
+                self.connection.settimeout(previous)
+
+    server = _SingleRequestServer((args.host, args.port), Handler)
+    state["server"] = server
+    _log(f"listening on http://{args.host}:{args.port}")
+    server.serve_forever()
+    return 0
+
+
+def _console(args: Any) -> Console:
+    ui = Console.from_env(getattr(args, "console", None), pipeline="")
+    bind_log(ui.log)
+    ui.live_decode = ui.mode == "pretty"
+    ui.plate()
+    return ui
+
+
+def serve_main(argv: Sequence[str] | None = None) -> int:
+    """``madmetal serve``. Nothing is loaded until a request names a model."""
+    parser = argparse.ArgumentParser(prog="madmetal serve")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8129)
+    parser.add_argument("--console", choices=("auto", "pretty", "plain", "json"), default="auto")
+    parser.add_argument("--transcript", type=Path, default=None)
+    try:
+        args = parser.parse_args(list(argv) if argv is not None else None)
+    except SystemExit as exc:
+        return int(exc.code or 0)
+    ui = _console(args)
+    args.lazy = True
+    args.console_ui = ui
+    args.record = None
+    args.resident_percent = None
+    args.kv_cache = "e4m3"
+    try:
+        return serve(args)
+    finally:
+        ui.close()

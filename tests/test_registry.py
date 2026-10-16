@@ -5,7 +5,6 @@ import json
 import pytest
 
 from madmetal.registry import (
-    PIPELINE,
     add_model,
     choose_complete,
     format_listing,
@@ -20,6 +19,8 @@ from madmetal.registry import (
     set_alias,
 )
 
+PIPELINE = "qwen38-flash-next"
+
 
 def _record(root, name: str) -> None:
     path = root / "models" / name
@@ -30,7 +31,7 @@ def _record(root, name: str) -> None:
 def test_pipeline_id_names_the_only_row_of_that_pipeline(tmp_path) -> None:
     folder = "Qwen-madmetal-h128-fp8-c384-fp4"
     _record(tmp_path, folder)
-    add_model(folder, alias="qwen38-flash-next", root=tmp_path)
+    add_model(folder, alias="qwen38-flash-next", root=tmp_path, pipeline=PIPELINE)
     selection = resolve(PIPELINE, root=tmp_path)
     assert selection.folder == folder
     assert selection.requested_id == PIPELINE
@@ -45,7 +46,7 @@ def test_pipeline_id_names_the_only_row_of_that_pipeline(tmp_path) -> None:
     assert instruct.sampling is not None
     assert instruct.sampling["presence_penalty"] == 1.5
     _record(tmp_path, "other")
-    add_model("other", alias="other-name", root=tmp_path)
+    add_model("other", alias="other-name", root=tmp_path, pipeline=PIPELINE)
     with pytest.raises(LookupError, match="unknown model"):
         resolve(PIPELINE, root=tmp_path)
     assert resolve("qwen38-flash-next", root=tmp_path).folder == folder
@@ -53,7 +54,7 @@ def test_pipeline_id_names_the_only_row_of_that_pipeline(tmp_path) -> None:
 
 def test_unknown_suffix_names_the_registered_ids(tmp_path) -> None:
     _record(tmp_path, "packed")
-    add_model("packed", alias="short", root=tmp_path)
+    add_model("packed", alias="short", root=tmp_path, pipeline=PIPELINE)
     with pytest.raises(LookupError, match="short") as raised:
         resolve("short:draft", root=tmp_path)
     assert "packed" in str(raised.value)
@@ -61,7 +62,7 @@ def test_unknown_suffix_names_the_registered_ids(tmp_path) -> None:
 
 def test_listing_includes_folder_alias_and_variants(tmp_path) -> None:
     _record(tmp_path, "packed")
-    add_model("packed", alias="short", root=tmp_path)
+    add_model("packed", alias="short", root=tmp_path, pipeline=PIPELINE)
     rows = model_objects(tmp_path, resident="packed")
     ids = [row["id"] for row in rows]
     assert ids == [
@@ -97,20 +98,20 @@ def test_a_finished_record_stays_unregistered(tmp_path) -> None:
 
 def test_choose_complete_lists_models_when_default_is_unset(tmp_path) -> None:
     with pytest.raises(LookupError, match="no registered model"):
-        choose_complete(model=None, record=None, root=tmp_path)
+        choose_complete(model=None, record=None, root=tmp_path, pipeline=PIPELINE)
     _record(tmp_path, "one")
-    add_model("one", root=tmp_path)
-    path, selection = choose_complete(model=None, record=None, root=tmp_path)
+    add_model("one", root=tmp_path, pipeline=PIPELINE)
+    path, selection = choose_complete(model=None, record=None, root=tmp_path, pipeline=PIPELINE)
     assert path.name == "one"
     assert selection is not None
     _record(tmp_path, "two")
-    add_model("two", alias="second", root=tmp_path)
+    add_model("two", alias="second", root=tmp_path, pipeline=PIPELINE)
     data = load_registry(tmp_path)
     assert "default" not in data
     data["extra"] = {"kept": True}
     save_registry(data, tmp_path)
     with pytest.raises(LookupError, match="pass --model"):
-        choose_complete(model=None, record=None, root=tmp_path)
+        choose_complete(model=None, record=None, root=tmp_path, pipeline=PIPELINE)
     explicit, none = choose_complete(model=None, record=path, root=tmp_path)
     assert explicit == path
     assert none is None
@@ -121,11 +122,11 @@ def test_choose_complete_lists_models_when_default_is_unset(tmp_path) -> None:
 def test_alias_must_be_one_unused_name(tmp_path) -> None:
     _record(tmp_path, "one")
     _record(tmp_path, "two")
-    add_model("one", alias="short", root=tmp_path)
+    add_model("one", alias="short", root=tmp_path, pipeline=PIPELINE)
     with pytest.raises(ValueError, match="folder"):
-        add_model("two", alias="one", root=tmp_path)
+        add_model("two", alias="one", root=tmp_path, pipeline=PIPELINE)
     with pytest.raises(ValueError, match="already used"):
-        add_model("two", alias="short", root=tmp_path)
+        add_model("two", alias="short", root=tmp_path, pipeline=PIPELINE)
     with pytest.raises(ValueError, match="single name"):
         set_alias("one", "bad:name", root=tmp_path)
     set_alias("one", "renamed", root=tmp_path)
@@ -137,7 +138,7 @@ def test_a_second_pipeline_is_listed_without_a_default(tmp_path) -> None:
     dense = "Qwen3.8-27B-madmetal-fp8-fp4"
     _record(tmp_path, flash)
     _record(tmp_path, dense)
-    add_model(flash, alias="qwen38-flash-next", root=tmp_path)
+    add_model(flash, alias="qwen38-flash-next", root=tmp_path, pipeline=PIPELINE)
     add_model(dense, alias="qwen38-27b", root=tmp_path, pipeline="qwen38-27b")
     data = load_registry(tmp_path)
     assert "default" not in data
@@ -167,11 +168,11 @@ def test_quantize_registration_refuses_a_different_source(tmp_path) -> None:
     source.mkdir()
     other = tmp_path / "other"
     other.mkdir()
-    register_quantized("packed", source=source, alias="short", root=tmp_path)
+    register_quantized("packed", source=source, alias="short", root=tmp_path, pipeline=PIPELINE)
     stored = load_registry(tmp_path)
     assert "default" not in stored
     assert list(stored["models"]) == ["packed"]
-    register_quantized("packed", source=source, alias="short", root=tmp_path)
+    register_quantized("packed", source=source, alias="short", root=tmp_path, pipeline=PIPELINE)
     with pytest.raises(ValueError, match="different source"):
         refuse_conflicting_destination("packed", other, root=tmp_path)
     name = record_name(source, 128, 384, 8, 4)

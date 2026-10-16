@@ -14,6 +14,13 @@ def test_grove_matches_the_record() -> None:
         pytest.skip("quantized record is not installed")
     stored = pipeline.load_grove(root)
     runtime = pipeline.Qwen38Runtime(root)
+    try:
+        _assert_grove(runtime, stored)
+    finally:
+        runtime.close()
+
+
+def _assert_grove(runtime: pipeline.Qwen38Runtime, stored: dict) -> None:
     io = {"expert": 0.0, "experts": 0, "ngram": 0.0, "rows": 0}
     expert_image = runtime.files.expert_image
     ngram_vector = runtime.files.ngram_vector
@@ -67,5 +74,11 @@ def test_grove_matches_the_record() -> None:
         f"experts {io['experts']} in {io['expert']:.2f}s "
         f"ngram-rows {io['rows']} in {io['ngram']:.2f}s"
     )
+    steps = runtime._decode_steps
+    full = runtime._mtp_full if hasattr(runtime, "_mtp_full") else 0
+    partial = runtime._mtp_partial if hasattr(runtime, "_mtp_partial") else 0
+    first = steps[0][2] if steps else 0
+    last = steps[-1][2] if steps else 0
+    print(f"mtp full {full} partial {partial} steps {len(steps)} resident {first}→{last}")
     assert text == stored["output"]
     assert decode_rate > 0

@@ -4,7 +4,8 @@ import io
 import json
 
 import pytest
-from qwen38_flash_next.console import PHASES, UNITS, VERSION, Console, Progress
+
+from madmetal.console import PHASES, UNITS, VERSION, Console, Progress
 
 
 class Clock:

@@ -46,12 +46,13 @@ qwen38_flash_next/         this model's pipeline
   tools.py                 tool-call text parsed into OpenAI messages
   experts.py               resident expert atlas
   runtime.py               the forward
-  console.py               status row; no pipeline imports
-  commands.py              quantize, bf16, complete, and the serve handler
+  commands.py              quantize, bf16, complete, and this pipeline's chat completion
 qwen38-27b.py              command entry; loads the package by path
 qwen38_27b/                Qwen3.8-27B. It does not import Flash Next.
 src/madmetal/              process entry; the listener loads the pipeline a request names
   registry.py              flavor folders, aliases, pipelines, and sampling variants
+  listener.py              the HTTP listener; it does not import a pipeline
+  console.py               status row; no pipeline imports
 harness/                   file-agent client, coherence, and the three benchmarks
 docs/                      as-built notes only; see docs/README.md
 docs/qwen38/               record, n-gram, schedule, probe, console, benchmarks

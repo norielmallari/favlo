@@ -4,9 +4,9 @@ import os
 
 import numpy as np
 import pytest
-from qwen38_flash_next.console import Console
 from qwen38_flash_next.runtime import RequestClosed, mtp_holds, mtp_starts
 
+from madmetal.console import Console
 from test_packing import pipeline
 
 
@@ -162,12 +162,12 @@ def test_gdn_and_attention_shaders_match() -> None:
     pipeline.check_state_kernels()
 
 
-def test_prompt_call_releases_the_decode_atlas() -> None:
+def test_prompt_call_keeps_the_decode_atlas() -> None:
     runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
     runtime.atlas = object()
     runtime.files = None
     runtime._begin_prefill_stream()
-    assert runtime.atlas is None
+    assert runtime.atlas is not None
 
 
 def test_short_suffix_prefill_keeps_the_atlas() -> None:
@@ -185,10 +185,10 @@ def test_short_suffix_prefill_keeps_the_atlas() -> None:
     assert streamed == [True]
     runtime.tokens = []
     runtime._prepare_experts(decode=False, count=32)
-    assert streamed == [True, True]
+    assert streamed == [True]
 
 
-def test_flush_releases_the_atlas_before_the_prefix_write() -> None:
+def test_flush_keeps_the_atlas_across_the_prefix_write() -> None:
     runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
     runtime.tokens = [1, 2]
     order: list[str] = []
@@ -212,7 +212,7 @@ def test_flush_releases_the_atlas_before_the_prefix_write() -> None:
     runtime._release_atlas = release
     runtime.prefixes = Prefixes()
     runtime._flush_prefix()
-    assert order == ["flush", "state", "release", "save"]
+    assert order == ["flush", "state", "save"]
 
 
 def test_completed_prefill_writes_without_releasing_the_atlas() -> None:
@@ -377,7 +377,7 @@ def test_shutdown_restores_an_open_forward_before_the_prefix_write() -> None:
     runtime._persist_prefix()
     assert runtime._forward_open is False
     assert runtime._kv_snap is None
-    assert order == ["flush", "restore", "flush", "release", "save"]
+    assert order == ["flush", "restore", "flush", "save"]
 
 
 def test_flush_continues_when_the_volume_refuses_the_prefix() -> None:
@@ -643,13 +643,13 @@ def test_stream_flushes_a_finished_replacement_character() -> None:
 def test_peer_closed_after_the_client_disconnects() -> None:
     import socket
 
-    import qwen38_flash_next.commands as commands
+    from madmetal.listener import _peer_closed
 
     server, client = socket.socketpair()
     try:
-        assert commands._peer_closed(server) is False
+        assert _peer_closed(server) is False
         client.close()
-        assert commands._peer_closed(server) is True
+        assert _peer_closed(server) is True
     finally:
         server.close()
 
@@ -792,9 +792,9 @@ def test_release_closes_the_listening_socket() -> None:
 
 
 def test_a_closed_client_does_not_print_a_traceback(capsys: pytest.CaptureFixture[str]) -> None:
-    import qwen38_flash_next.commands as commands
+    from madmetal.listener import _SingleRequestServer
 
-    server = commands._SingleRequestServer(("127.0.0.1", 0), type("Quiet", (), {}))
+    server = _SingleRequestServer(("127.0.0.1", 0), type("Quiet", (), {}))
     try:
         try:
             raise BrokenPipeError(32, "Broken pipe")
@@ -849,6 +849,9 @@ def test_complete_thinking_flag_enables_thinking(monkeypatch, tmp_path) -> None:
 
         def forward(self, prompt: list[int]) -> np.ndarray:
             return np.zeros(8, dtype=np.float32)
+
+        def _prompt_logits(self, prompt: list[int]) -> np.ndarray:
+            return self.forward(prompt)
 
         def decode(self, ids: list[int]) -> str:
             return ""
@@ -1101,6 +1104,8 @@ def _decode_runtime() -> tuple[object, Console, io.StringIO]:
 
 def test_a_closed_stream_ends_the_decode_row() -> None:
     runtime, console, stream = _decode_runtime()
+    runtime.tokens = [1]
+    runtime._mtp_on = False
     runtime._stop = lambda: True
     with pytest.raises(RequestClosed):
         list(runtime._new_tokens(None, None, 0.0, 1.0, 0))
@@ -1152,10 +1157,30 @@ def test_one_token_decode_steps_the_mtp_cache() -> None:
     assert calls == [("forward", (7,)), ("step", 7, False, False)]
 
 
-def test_drafts_start_on_a_short_sequence_and_not_a_long_one() -> None:
+def test_prefetch_stops_when_the_atlas_cannot_hold_the_layer() -> None:
+    runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
+    runtime._predicted = {0: [1], 1: [2]}
+    runtime._prefetch_events = {}
+
+    class Atlas:
+        def stage(self, layer: int, ids: list[int], protect: set[tuple[int, int]]) -> int:
+            del ids, protect
+            if layer == 1:
+                message = "resident expert budget cannot hold the experts for this layer"
+                raise RuntimeError(message)
+            return 3
+
+    runtime.atlas = Atlas()
+    runtime._prefetch_decode()
+    assert runtime._prefetch_protect == set()
+    assert runtime._prefetch_events[0] == 3
+
+
+def test_drafts_start_whenever_the_mtp_layer_is_loaded() -> None:
     assert mtp_starts(58, loaded=True) is True
     assert mtp_starts(2048, loaded=True) is True
-    assert mtp_starts(2049, loaded=True) is False
+    assert mtp_starts(2049, loaded=True) is True
+    assert mtp_starts(28776, loaded=True) is True
     assert mtp_starts(16, loaded=False) is False
 
 
@@ -1177,4 +1202,4 @@ def test_a_slow_window_stops_drafts_for_the_rest_of_the_request() -> None:
     assert runtime._mtp_drafts is False
     runtime.tokens = list(range(4096))
     runtime._begin_drafts()
-    assert runtime._mtp_drafts is False
+    assert runtime._mtp_drafts is True

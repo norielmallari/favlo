@@ -1,7 +1,6 @@
 """Status row, durable lines, and the versioned event stream.
 
-This is the console standard's first binding. It imports nothing from the
-pipeline. A second pipeline moves this file to process entry unchanged.
+The process entry owns this module. It imports nothing from a pipeline.
 """
 
 from __future__ import annotations

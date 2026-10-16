@@ -1062,6 +1062,12 @@ class MetalSession:
         self.finish_io()
         self._encoder = None
         self._command = None
+        held: list[Any] = [self._arena, *self._arenas, *self._spare, *self._retain]
+        for item in self._inflight:
+            if isinstance(item, tuple) and len(item) > 1 and isinstance(item[1], list):
+                held.extend(item[1])
+        for buf in held:
+            discard_buffer(buf)
         self._inflight.clear()
         self._retain.clear()
         self._held_constants.clear()

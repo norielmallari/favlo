@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-PIPELINE = "qwen38-flash-next"
 VARIANTS = ("thinking", "instruct")
 
 # Qwen3.8-Flash-Next model card. commands.py keeps the same numbers.
@@ -117,7 +116,7 @@ def format_listing(root: Path | None = None) -> str:
     data = load_registry(root)
     lines: list[str] = []
     for folder, entry in data["models"].items():
-        pipeline = entry.get("pipeline") or PIPELINE
+        pipeline = _pipeline_name(entry, folder)
         alias = entry.get("alias") or ""
         kv = entry.get("kv_cache") or "e4m3"
         alias_text = f"alias {alias}" if alias else "alias"
@@ -133,7 +132,7 @@ def add_model(
     alias: str | None = None,
     source: str | None = None,
     root: Path | None = None,
-    pipeline: str = PIPELINE,
+    pipeline: str,
 ) -> dict[str, Any]:
     data = load_registry(root)
     path = models_dir(root) / folder
@@ -165,7 +164,7 @@ def register_quantized(
     source: Path,
     alias: str | None,
     root: Path | None = None,
-    pipeline: str = PIPELINE,
+    pipeline: str,
 ) -> None:
     """Write or update the entry for a record this quantize just produced."""
     data = load_registry(root)
@@ -253,15 +252,19 @@ def choose_complete(
     model: str | None,
     record: Path | None,
     root: Path | None = None,
+    pipeline: str | None = None,
 ) -> tuple[Path, Selection | None]:
     """The record ``complete`` and ``bf16`` open. ``record`` wins when passed."""
     if record is not None:
         return record, None
+    if not pipeline:
+        message = "pass the pipeline that owns this command"
+        raise LookupError(message)
     data = load_registry(root)
     entries = [
         (folder, entry)
         for folder, entry in data["models"].items()
-        if entry.get("pipeline") == PIPELINE
+        if entry.get("pipeline") == pipeline
     ]
     if model:
         selection = resolve(model, root=root)
@@ -272,8 +275,8 @@ def choose_complete(
     if not entries:
         message = (
             "no registered model\n"
-            "pack a checkpoint: madmetal --qwen38-flash-next quantize --source <dir>\n"
-            "or register a record: madmetal --qwen38-flash-next models add <folder>"
+            f"pack a checkpoint: madmetal --{pipeline} quantize --source <dir>\n"
+            f"or register a record: madmetal --{pipeline} models add <folder>"
         )
         raise LookupError(message)
     listing = format_listing(root)
@@ -281,11 +284,19 @@ def choose_complete(
     raise LookupError(message)
 
 
+def _pipeline_name(entry: dict[str, Any], folder: str) -> str:
+    pipeline = entry.get("pipeline")
+    if not isinstance(pipeline, str) or not pipeline:
+        message = f"{folder} has no pipeline"
+        raise LookupError(message)
+    return pipeline
+
+
 def _entry(
     *,
     alias: str | None,
     source: str | None,
-    pipeline: str = PIPELINE,
+    pipeline: str,
 ) -> dict[str, Any]:
     return {
         "pipeline": pipeline,
@@ -373,7 +384,7 @@ def _selection(
     return Selection(
         folder=folder,
         path=models_dir(root) / folder,
-        pipeline=str(entry.get("pipeline") or PIPELINE),
+        pipeline=_pipeline_name(entry, folder),
         alias=alias_text,
         requested_id=requested,
         parent=str(parent),
@@ -404,7 +415,7 @@ def _object(
         "created": created,
         "owned_by": "madmetal",
         "root": folder,
-        "pipeline": entry.get("pipeline") or PIPELINE,
+        "pipeline": _pipeline_name(entry, folder),
         "loaded": resident == folder,
     }
     if variant is not None:

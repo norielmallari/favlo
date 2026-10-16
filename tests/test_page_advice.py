@@ -54,6 +54,10 @@ class _Gpu:
     def zeros(self, nbytes: int) -> _Buffer:
         return _Buffer(nbytes)
 
+    def io_submit_mixed(self, groups: object) -> int:
+        del groups
+        return 1
+
 
 def test_release_then_commit_keeps_the_mapping_writable() -> None:
     buf = _Buffer(PAGE * 2)
@@ -89,3 +93,44 @@ def test_atlas_unused_bytes_can_be_released_and_filled_again() -> None:
     view = memoryview(atlas.atlas.contents().as_buffer(PAGE))
     view[0:4] = b"img!"
     assert bytes(view[0:4]) == b"img!"
+
+
+def test_evict_bytes_drops_victims_and_keeps_the_atlas() -> None:
+    gpu = _Gpu(PAGE * 8)
+    atlas = ExpertAtlas(gpu, None, 1, 4, candidates=(PAGE * 8,))
+    for expert in range(3):
+        offset = atlas._alloc_span(PAGE, set())
+        key = (0, 0, expert, expert)
+        atlas.runs[key] = (offset, PAGE)
+        atlas.run_members[key] = (expert,)
+        atlas.resident[(0, expert)] = offset
+        atlas.expert_run[(0, expert)] = key
+        atlas.eviction.insert(key, PAGE)
+    freed = atlas.evict_bytes(PAGE, {(0, 0)})
+    assert freed >= PAGE
+    assert atlas.atlas is gpu.device.buffer
+    assert (0, 0) in atlas.resident
+    assert len(atlas.resident) < 3
+
+
+class _Files:
+    def tier_row(self, layer: int, expert: int) -> tuple[int, int]:
+        del layer
+        return 0, expert
+
+    def stride(self, tier: int) -> int:
+        del tier
+        return PAGE
+
+    def io_handle(self, layer: int, tier: int) -> object:
+        del layer, tier
+        return object()
+
+
+def test_a_repeated_expert_stays_in_the_atlas_and_a_one_hit_does_not() -> None:
+    gpu = _Gpu(PAGE * 16)
+    atlas = ExpertAtlas(gpu, _Files(), 1, 8, candidates=(PAGE * 16,))
+    atlas.stage(0, [0, 4, 4, 4], set())
+    assert (0, 0) not in atlas.resident
+    assert (0, 4) in atlas.resident
+    assert atlas.eviction._freq[(0, 0, 4, 4)] >= 1

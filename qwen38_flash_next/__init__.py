@@ -6,7 +6,7 @@ from qwen38_flash_next.checks import (
     check_routed_expert,
     check_state_kernels,
 )
-from qwen38_flash_next.commands import main
+from qwen38_flash_next.commands import handle_chat, main, open_runtime
 from qwen38_flash_next.convert import (
     _expert_start,
     _load_progress,
@@ -89,6 +89,7 @@ __all__ = [
     "check_routed_expert",
     "check_state_kernels",
     "group_assignments",
+    "handle_chat",
     "classify_subbyte",
     "cold_live_bytes",
     "cold_slot_bytes",
@@ -110,6 +111,7 @@ __all__ = [
     "load_hot_ids",
     "load_super_ids",
     "main",
+    "open_runtime",
     "ngram_byte_offset",
     "ngram_file_groups",
     "ngram_resume_row",

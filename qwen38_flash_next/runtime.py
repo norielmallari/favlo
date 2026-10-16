@@ -92,8 +92,15 @@ from qwen38_flash_next.tools import (
 
 
 def mtp_starts(sequence: int, *, loaded: bool, limit: int = PREFILL_CHUNK) -> bool:
-    """Drafts start on a short sequence when the MTP layer is loaded."""
-    return bool(loaded) and sequence <= limit
+    """Drafts start whenever the MTP layer is loaded.
+
+    One token cannot clear the rate a kept span reaches, so a long sequence
+    drafts too. The rate window turns drafts off when they fall behind.
+    ``limit`` stays for callers that still pass the prefill chunk.
+    """
+    if sequence < 0 or limit < 0:
+        return False
+    return bool(loaded)
 
 
 def mtp_holds(rates: Sequence[float], *, window: int = 4, ratio: float = 0.5) -> bool:
@@ -111,6 +118,17 @@ def mtp_holds(rates: Sequence[float], *, window: int = 4, ratio: float = 0.5) ->
     if best <= 0:
         return True
     return means[-1] >= best * ratio
+
+
+def _growth_alloc(buf: Any, need: int, stride: int) -> int:
+    """Bytes ``_reserve_bytes`` will request when ``buf`` is shorter than ``need``."""
+    if need <= 0 or stride <= 0:
+        return 0
+    if buf is not None and int(buf.length()) >= need:
+        return 0
+    chunk = PREFILL_CHUNK * stride
+    slack = 64 * stride
+    return max(need * 2, stride) if need <= chunk else need + slack
 
 
 def after_atlas_load(resident: Sequence[int]) -> int:
@@ -228,6 +246,7 @@ class Qwen38Runtime:
         self._frequency_penalty = 0.0
         self._penalty_window = 20
         self._predicted: dict[int, list[int]] = {}
+        self._span_rows = 1
         self._prefetch_events: dict[int, int] = {}
         self._prefetch_protect: set[tuple[int, int]] = set()
         self._residual_buf: Any = None
@@ -386,6 +405,66 @@ class Qwen38Runtime:
         """The next layer boundary ends the forward."""
         self._stop = lambda: True
 
+    def _discard_device_buffers(self) -> None:
+        """Mark shared buffers empty so the next runtime can size a new atlas."""
+        seen: set[int] = set()
+
+        def walk(value: Any) -> None:
+            if value is None or isinstance(value, (str, bytes, int, float, np.ndarray)):
+                return
+            identity = id(value)
+            if identity in seen:
+                return
+            seen.add(identity)
+            if hasattr(value, "setPurgeableState_"):
+                discard_buffer(value)
+                return
+            if isinstance(value, dict):
+                for child in value.values():
+                    walk(child)
+                return
+            if isinstance(value, (list, tuple)):
+                for child in value:
+                    walk(child)
+                return
+            for name in ("buf", "weights", "scales", "atlas", "table", "miss"):
+                walk(getattr(value, name, None))
+
+        walk(getattr(self, "atlas", None))
+        for name in (
+            "weights",
+            "f16_weights",
+            "expert_cache",
+            "gdn_state",
+            "conv_hist",
+            "kv_k",
+            "kv_v",
+            "kv_k_tail",
+            "kv_v_tail",
+            "indexer_buf",
+            "_bundle",
+            "_super_images",
+            "_f32_uploaded",
+            "_gdn_shadow",
+            "_conv_shadow",
+            "_k_tail_shadow",
+            "_v_tail_shadow",
+            "_stage",
+            "_stage_table",
+            "_stage_miss",
+            "_resident",
+            "_hot_keep",
+            "_hold_xs",
+            "_hold_out",
+            "_hold_ids",
+            "_hold_w",
+            "_final",
+            "_head",
+            "_ple",
+            "_ple_shadow",
+        ):
+            walk(getattr(self, name, None))
+
     def close(self) -> None:
         """Write the live prefix, then release the device, the atlas, and the record."""
         if self._closed:
@@ -418,6 +497,7 @@ class Qwen38Runtime:
         files = getattr(self, "files", None)
         if isinstance(files, QuantRecord):
             files.release_io()
+        self._discard_device_buffers()
         self.atlas = None
         self._stage = None
         self._stage_table = None
@@ -506,7 +586,9 @@ class Qwen38Runtime:
         if self.tokens and prompt[: len(self.tokens)] == self.tokens:
             cached = len(self.tokens)
         else:
-            self._flush_prefix()
+            # A cache hit decodes with the experts already mapped. A streamed
+            # prefill evicts the atlas tail until its staging buffers fit.
+            self._flush_prefix(release_atlas=False)
             self.reset()
             cached = self._load_prefix(prompt)
         self._cached_tokens = cached
@@ -523,7 +605,7 @@ class Qwen38Runtime:
             _log(f"cache hit {cached}")
         return cached
 
-    def _flush_prefix(self, *, release_atlas: bool = True) -> None:
+    def _flush_prefix(self, *, release_atlas: bool = False) -> None:
         if not self.tokens:
             return
         self.gpu.flush()
@@ -533,9 +615,8 @@ class Qwen38Runtime:
         except RuntimeError as exc:
             _log(f"prefix store failed {exc}")
             return
-        # Replacing the sequence, or stopping the process, drops the atlas
-        # before the volume reserves the prefix file. A finished prefill keeps
-        # it: decode still needs those expert images.
+        # The atlas stays mapped across the prefix write. Decode still needs
+        # those expert images. Stopping the process drops the device.
         if release_atlas:
             self._release_atlas()
         try:
@@ -581,13 +662,8 @@ class Qwen38Runtime:
         if logits is not None and getattr(logits, "n", None) != getattr(self, "vocab", None):
             self.last_logits = None
 
-    def _persist_prefix(self, *, release_atlas: bool = True) -> None:
-        """Write the last consistent sequence.
-
-        A finished prefill passes ``release_atlas=False`` so the reply keeps
-        the resident experts. Replacing the sequence, a client drop, and
-        shutdown release the atlas first.
-        """
+    def _persist_prefix(self, *, release_atlas: bool = False) -> None:
+        """Write the last consistent sequence. The atlas stays mapped."""
         if getattr(self, "_forward_open", False):
             if not getattr(self, "_kv_snap", None):
                 return
@@ -808,6 +884,21 @@ class Qwen38Runtime:
             raise RuntimeError(message)
         return opened
 
+    def _prompt_logits(self, prompt: list[int]) -> Dev:
+        """Logits for ``prompt``. A boundary with no logits is prefilled again."""
+        start = self.align(prompt)
+        if start == len(prompt) and self.last_logits is None:
+            _log("prefix has no logits")
+            self.reset()
+            start = 0
+        if start == len(prompt):
+            logits = self.last_logits
+            if not isinstance(logits, Dev):
+                message = "the cached prefix has no logits"
+                raise RuntimeError(message)
+            return logits
+        return self.forward(prompt[start:])
+
     def generate(
         self,
         prompt: list[int],
@@ -819,14 +910,7 @@ class Qwen38Runtime:
         # Drain Objective-C temporaries at the end of the request. The process
         # has no AppKit run loop to do that.
         with objc.autorelease_pool():
-            start = self.align(prompt)
-            if start == len(prompt):
-                if self.last_logits is None:
-                    message = "the cached prefix has no logits"
-                    raise RuntimeError(message)
-                logits = self.last_logits
-            else:
-                logits = self.forward(prompt[start:])
+            logits = self._prompt_logits(prompt)
             tokens = list(self._new_tokens(logits, max_tokens, temperature, top_p, top_k))
             self._log_decode()
             return tokens
@@ -1154,6 +1238,8 @@ class Qwen38Runtime:
         self._prepare_experts(decode=decode, count=len(tokens))
         if self.atlas is not None:
             _fill_buffer(self.atlas.miss, self.layers * 4, 0)
+        if decode:
+            self._span_rows = len(tokens) if 1 < len(tokens) <= 4 else 1
         if decode and self.atlas is not None:
             self._prefetch_decode()
         self._capture_recurrent()
@@ -1659,6 +1745,13 @@ class Qwen38Runtime:
     ) -> list[int]:
         """One backbone forward of the drafted span. Rejected tokens are not committed."""
         started = time.perf_counter()
+        # The previous span's experts load while the draft steps run. Grow the
+        # cache first so that load is not issued into an atlas about to drop.
+        span_room = min(max(room, 1), getattr(self, "_draft_limit", 3) + 1)
+        if self._predicted:
+            self._make_room_for_cache(span_room)
+            if self.atlas is not None:
+                self._prefetch_decode()
         self._mtp_stopped = False
         self._mtp_draft_clean = False
         if not hasattr(self, "_mtp_full"):
@@ -1900,21 +1993,12 @@ class Qwen38Runtime:
     def _prepare_experts(self, *, decode: bool, count: int) -> None:
         if self._bf16:
             return
-        if decode or self._suffix_on_atlas(count):
+        if decode or count <= self.prefill_chunk:
+            # Cold and warm prompts that fit in one chunk miss into the atlas.
+            # Decode then reads those images from RAM.
             self._ensure_atlas()
             return
         self._begin_prefill_stream()
-
-    def _suffix_on_atlas(self, count: int) -> bool:
-        """A short live continuation keeps the atlas the previous decode filled.
-
-        Streaming every layer file again charges that read to a few new tokens.
-        The atlas stages only the experts this suffix routes to. A suffix longer
-        than one chunk still streams, so that read overlaps ``matmul2d``.
-        """
-        if count > self.prefill_chunk or not self.tokens or self.atlas is None:
-            return False
-        return True
 
     def _cache_covers(self, tokens: int) -> bool:
         if tokens <= 0 or not self.kv_k:
@@ -1932,21 +2016,58 @@ class Qwen38Runtime:
         return True
 
     def _make_room_for_cache(self, extra: int) -> None:
-        """Grow the cache before the atlas takes the memory that growth needs.
+        """Grow the cache beside the atlas.
 
-        A sequence that no longer fits drops the atlas first. The next decode
-        allocates a smaller one from what remains.
+        When the new cache buffers do not fit, victim runs are discarded and
+        the atlas stays mapped.
         """
         end = len(self.tokens) + max(0, extra)
         if self._cache_covers(end):
             return
-        if self.atlas is not None:
-            self._release_atlas()
+        try:
+            self._grow_cache_to(end)
+        except RuntimeError:
+            if self.atlas is None:
+                raise
+            self._evict_atlas_victims(end)
+            self._grow_cache_to(end)
+
+    def _grow_cache_to(self, end: int) -> None:
         for layer in list(self.kv_k):
             length = int(self.kv_len.get(layer, 0))
             target = max(end, length)
             if target > length:
                 self._grow_kv(layer, length, target - length)
+
+    def _evict_atlas_victims(self, end: int) -> None:
+        need = self._pending_cache_bytes(end)
+        protect: set[tuple[int, int]] = set(getattr(self, "_prefetch_protect", ()) or ())
+        for layer, ids in getattr(self, "_predicted", {}).items():
+            protect.update((layer, int(expert)) for expert in ids)
+        self.gpu.flush()
+        self.gpu.finish_io()
+        if self.atlas is None:
+            return
+        self.atlas.release_unused()
+        freed = self.atlas.evict_bytes(need, protect)
+        if freed < need:
+            self.atlas.evict_bytes(need - freed, set())
+
+    def _pending_cache_bytes(self, end: int) -> int:
+        total = 0
+        for layer in list(self.kv_k):
+            length = int(self.kv_len.get(layer, 0))
+            target = max(end, length)
+            _used, stride = self._kv_span(length)
+            need, _stride = self._kv_span(target)
+            total += _growth_alloc(self.kv_k.get(layer), need, stride)
+            total += _growth_alloc(self.kv_v.get(layer), need, stride)
+            total += _growth_alloc(
+                self.indexer_buf.get(layer),
+                target * INDEX_BF16_BYTES,
+                INDEX_BF16_BYTES,
+            )
+        return total
 
     def _live_atlas_candidates(self) -> tuple[int, ...]:
         self.gpu.flush()
@@ -2020,13 +2141,31 @@ class Qwen38Runtime:
         del atlas
         gc.collect()
 
-    def _begin_prefill_stream(self) -> None:
-        """Two staging buffers. A resident decode atlas is released first.
+    def _shrink_atlas(self, nbytes: int) -> None:
+        """Evict the least-fired tail until ``nbytes`` of images are released.
 
-        Keeping that atlas beside the staging buffers makes the next reply
-        fail to continue the chat. The atlas is allocated again after the call.
+        The atlas buffer stays. Runs that have been routed again stay until the
+        tail is gone.
         """
-        self._release_atlas()
+        if self.atlas is None or nbytes <= 0:
+            return
+        self.gpu.flush()
+        self.gpu.finish_io()
+        self.atlas.release_unused()
+        self.atlas.evict_bytes(nbytes, set())
+
+    def _alloc_stage_pair(self, budget: int) -> list[Any]:
+        stage = [self.gpu.alloc(budget), self.gpu.alloc(budget)]
+        if stage[0] is None or stage[1] is None:
+            for buf in stage:
+                if buf is not None:
+                    discard_buffer(buf)
+            gc.collect()
+            return [None, None]
+        return stage
+
+    def _begin_prefill_stream(self) -> None:
+        """Two staging buffers. The atlas stays, and its tail is evicted until they fit."""
         if not isinstance(self.files, QuantRecord):
             return
         self._end_prefill_stream()
@@ -2035,13 +2174,13 @@ class Qwen38Runtime:
         for layer in range(self.layers):
             hot_bytes, cold_bytes, _table = self._prefill_layout(layer)
             budget = max(budget, hot_bytes + cold_bytes)
-        self._stage = [self.gpu.alloc(budget), self.gpu.alloc(budget)]
-        if (self._stage[0] is None or self._stage[1] is None) and self._hot_keep is not None:
-            self._stage = None
-            self._hot_keep = None
-            self._hot_fence = 0
-            budget = self._stage_budget()
-            self._stage = [self.gpu.alloc(budget), self.gpu.alloc(budget)]
+        self._stage = self._alloc_stage_pair(budget)
+        if self._stage[0] is None and self.atlas is not None:
+            self._shrink_atlas(budget * 2)
+            self._stage = self._alloc_stage_pair(budget)
+        if self._stage[0] is None and self.atlas is not None and self.atlas.resident_count:
+            self._shrink_atlas(self.atlas.budget)
+            self._stage = self._alloc_stage_pair(budget)
         if self._stage[0] is None or self._stage[1] is None:
             message = f"prefill stage of {budget} bytes was not allocated"
             raise RuntimeError(message)
@@ -2143,7 +2282,8 @@ class Qwen38Runtime:
         return bool(np.frombuffer(raw, dtype=np.uint32).any())
 
     def _prefetch_decode(self) -> None:
-        """Queue the previous token's experts before this token's shaders start."""
+        """Queue the previous span's experts before this token's shaders start."""
+        earlier = dict(getattr(self, "_prefetch_events", {}))
         self._prefetch_events = {}
         if self.atlas is None or not self._predicted:
             self._prefetch_protect = set()
@@ -2153,7 +2293,17 @@ class Qwen38Runtime:
         }
         self._prefetch_protect = protect
         for layer, ids in self._predicted.items():
-            self._prefetch_events[layer] = self.atlas.stage(layer, ids, protect)
+            try:
+                event = self.atlas.stage(layer, ids, protect)
+            except RuntimeError:
+                # The forward stages what it needs and can evict the tail.
+                # Pinning every predicted id here is what fills the atlas.
+                self._prefetch_protect = set()
+                return
+            queued = earlier.get(layer, 0)
+            if queued > event:
+                event = queued
+            self._prefetch_events[layer] = event
 
     def _capture_recurrent(self) -> None:
         if not getattr(self, "_gdn_shadow", None):
@@ -2879,7 +3029,10 @@ class Qwen38Runtime:
         # every later route, so the token would have to be replayed.
         host_ids = self.gpu.read_u32(choice)
         rows = np.asarray(host_ids, dtype=np.uint32).reshape(count, self.top_k)
-        self._predicted[layer] = [int(item) for item in rows[-1].tolist()]
+        # A decode span is at most four tokens. A prefill chunk can route
+        # thousands of ids; the next token only follows the last row.
+        chosen = rows.reshape(-1) if self._decoding and count <= 4 else rows[-1]
+        self._remember_ids(layer, chosen.tolist())
         if self._streaming_prefill:
             return self._moe_from_stage(
                 layer, bundle, xs, count, weight, host_ids, submit_next=submit_next
@@ -4030,8 +4183,25 @@ class Qwen38Runtime:
                 raw[base + expert] = 2
         self._tier = self.gpu.upload(bytes(raw))
 
+    def _remember_ids(self, layer: int, values: Sequence[int]) -> None:
+        seen: list[int] = []
+        for expert in values:
+            value = int(expert)
+            if value not in seen:
+                seen.append(value)
+        self._predicted[layer] = seen
+
     def _note_routes(self) -> None:
-        """The router ids of this token, read after the command buffer has finished."""
+        """The router ids of this span, read after the command buffer has finished."""
+        rows = int(getattr(self, "_span_rows", 1))
+        span_buf = getattr(self, "_span_choice", None)
+        if rows > 1 and span_buf is not None:
+            width = 4 * self.top_k
+            raw = _buffer_bytes(span_buf, self.layers * width * 4)
+            ids = np.frombuffer(raw, dtype=np.uint32).reshape(self.layers, 4, self.top_k)
+            for layer in range(self.layers):
+                self._remember_ids(layer, ids[layer, :rows].reshape(-1).tolist())
+            return
         raw = _buffer_bytes(self._choice_ids, self.layers * self.top_k * 4)
         ids = np.frombuffer(raw, dtype=np.uint32).reshape(self.layers, self.top_k)
         for layer in range(self.layers):

@@ -1,40 +1,32 @@
-"""quantize, bf16, complete, and serve."""
+"""quantize, bf16, complete, and one chat completion."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import queue
-import select
 import signal
-import socket
 import sys
 import threading
 import time
 import traceback
-import urllib.parse
 from collections.abc import Iterator, Sequence
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
+from madmetal.console import Console
 from madmetal.registry import (
-    PIPELINE,
     add_model,
     choose_complete,
     format_listing,
     load_registry,
-    model_objects,
     models_dir,
-    one_model,
     record_name,
     refuse_conflicting_destination,
     register_quantized,
-    resolve,
     set_alias,
 )
 from qwen38_flash_next.checks import check_state_kernels
-from qwen38_flash_next.console import Console
 from qwen38_flash_next.convert import (
     LAYER_WORKERS,
     NGRAM_SHARD_COUNT,
@@ -56,6 +48,8 @@ from qwen38_flash_next.tools import (
     split_thinking,
     tool_names,
 )
+
+PIPELINE = "qwen38-flash-next"
 
 
 def _checkpoint(path: Path | None) -> Path:
@@ -120,7 +114,12 @@ def quantize_main(args: Any) -> int:
             mtp_bits=int(args.mtp_bits),
         )
         write_grove(args.output, replace=packed)
-        register_quantized(output.name, source=source, alias=getattr(args, "alias", None))
+        register_quantized(
+            output.name,
+            source=source,
+            alias=getattr(args, "alias", None),
+            pipeline=PIPELINE,
+        )
         finished = True
     except Exception as exc:
         traceback.print_exc()
@@ -219,14 +218,7 @@ def bf16_complete(args: Any) -> int:
             messages = [{"role": "user", "content": args.prompt}]
             prompt = runtime.encode_chat(messages, None, enable_thinking=args.thinking)
         _arm_cli(runtime, args)
-        start = runtime.align(prompt)
-        if start == len(prompt):
-            if runtime.last_logits is None:
-                message = "the cached prefix has no logits"
-                raise RuntimeError(message)
-            logits = runtime.last_logits
-        else:
-            logits = runtime.forward(prompt[start:])
+        logits = runtime._prompt_logits(prompt)
         produced: list[int] = []
         shown = ""
         temperature, top_p, top_k = _cli_sampling(args)
@@ -267,7 +259,11 @@ def complete(args: Any) -> int:
     shutdown.arm()
     runtime: Qwen38Runtime | None = None
     try:
-        record, selection = choose_complete(model=getattr(args, "model", None), record=args.record)
+        record, selection = choose_complete(
+            model=getattr(args, "model", None),
+            record=args.record,
+            pipeline=PIPELINE,
+        )
         resident = args.resident_percent
         if resident is None and selection is not None:
             resident = selection.resident_percent
@@ -284,14 +280,7 @@ def complete(args: Any) -> int:
             messages = [{"role": "user", "content": args.prompt}]
             prompt = runtime.encode_chat(messages, None, enable_thinking=args.thinking)
         _arm_cli(runtime, args)
-        start = runtime.align(prompt)
-        if start == len(prompt):
-            if runtime.last_logits is None:
-                message = "the cached prefix has no logits"
-                raise RuntimeError(message)
-            logits = runtime.last_logits
-        else:
-            logits = runtime.forward(prompt[start:])
+        logits = runtime._prompt_logits(prompt)
         produced: list[int] = []
         shown = ""
         temperature, top_p, top_k = _cli_sampling(args)
@@ -324,18 +313,6 @@ def complete(args: Any) -> int:
         _release(runtime, shutdown)
         ui.close()
     return 0
-
-
-class _SingleRequestServer(HTTPServer):
-    """Accept the next connection only after the current request returns."""
-
-    request_queue_size = 128
-
-    def handle_error(self, request: Any, client_address: Any) -> None:
-        """A peer that closes mid-response is not a server failure."""
-        if isinstance(sys.exception(), ConnectionError):
-            return
-        super().handle_error(request, client_address)
 
 
 class _Shutdown:
@@ -392,384 +369,6 @@ def _release(runtime: Qwen38Runtime | None, shutdown: _Shutdown, server: Any = N
 # A client that stops reading fills the send buffer. This bounds that write.
 _STREAM_WRITE_TIMEOUT = 2.0
 
-
-def _peer_closed(sock: socket.socket) -> bool:
-    """True when the client has closed its side or the socket is already dead."""
-    try:
-        readable, _, _ = select.select([sock], [], [], 0)
-    except (OSError, ValueError):
-        return True
-    if not readable:
-        return False
-    try:
-        peeked = sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
-    except BlockingIOError:
-        return False
-    except OSError:
-        return True
-    return peeked == b""
-
-
-def serve(args: Any) -> int:
-    shutdown = _Shutdown()
-    shutdown.arm()
-    args.shutdown = shutdown
-    state: dict[str, Any] = {
-        "runtime": None,
-        "server": None,
-        "record": None,
-        "requests": 0,
-    }
-    try:
-        if not getattr(args, "lazy", False):
-            try:
-                state["runtime"] = Qwen38Runtime(
-                    _record(args.record),
-                    resident_percent=args.resident_percent,
-                    kv_cache=args.kv_cache or "e4m3",
-                    console=getattr(args, "console_ui", None),
-                )
-            except Exception as exc:
-                traceback.print_exc()
-                sys.stderr.write(f"{type(exc).__name__}: {exc}\n")
-                return 1
-            shutdown.runtime = state["runtime"]
-        return _run_until_stopped(args, state, shutdown)
-    except KeyboardInterrupt:
-        _log("shutting down")
-        return 0
-    finally:
-        if not shutdown.closing:
-            _release(state["runtime"], shutdown, state.get("server"))
-
-
-def _run_until_stopped(args: Any, state: dict[str, Any], shutdown: _Shutdown) -> int:
-    """Serve until SIGINT or SIGTERM. Then close the socket and the runtime."""
-    try:
-        return _serve_loop(args, state)
-    except KeyboardInterrupt:
-        _log("shutting down")
-        return 0
-    finally:
-        _release(state["runtime"], shutdown, state.get("server"))
-
-
-def _serve_loop(args: Any, state: dict[str, Any]) -> int:
-    lock = threading.Lock()
-
-    class Handler(BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"
-
-        def log_message(self, fmt: str, *log_args: Any) -> None:
-            del fmt, log_args
-
-        def do_GET(self) -> None:  # noqa: N802
-            path = urllib.parse.unquote(self.path.split("?", 1)[0])
-            if path == "/v1/models":
-                self._json(
-                    200,
-                    {
-                        "object": "list",
-                        "data": model_objects(resident=state.get("record")),
-                    },
-                )
-                return
-            prefix = "/v1/models/"
-            if path.startswith(prefix):
-                try:
-                    row = one_model(path[len(prefix) :], resident=state.get("record"))
-                except LookupError as exc:
-                    self._json(404, {"error": {"message": str(exc), "type": "not_found"}})
-                    return
-                self._json(200, row)
-                return
-            self._json(404, {"error": {"message": "not found"}})
-
-        def do_POST(self) -> None:  # noqa: N802
-            if self.path.split("?", 1)[0] != "/v1/chat/completions":
-                self._json(404, {"error": {"message": "not found"}})
-                return
-            self._started = False
-            self._gone = False
-            self._model_id = ""
-            length = int(self.headers.get("Content-Length", "0"))
-            try:
-                body = json.loads(self.rfile.read(length) or b"{}")
-                messages = body["messages"]
-                tools = body.get("tools")
-                selection = _bind_request(body, state, args)
-                if selection is not None:
-                    self._model_id = selection.requested_id
-                runtime = state["runtime"]
-                if runtime is None:
-                    self._json(
-                        404,
-                        {"error": {"message": "no model is loaded", "type": "not_found"}},
-                    )
-                    return
-                if selection is not None and selection.enable_thinking is not None:
-                    enable_thinking = selection.enable_thinking
-                else:
-                    enable_thinking = _enable_thinking(body)
-                max_tokens = _request_limit(body)
-                variant = selection.sampling if selection is not None else None
-                temperature, top_p, top_k = _sampling(body, enable_thinking, variant)
-                presence_default = None
-                if isinstance(variant, dict) and "presence_penalty" in variant:
-                    presence_default = float(variant["presence_penalty"])
-                stream = bool(body.get("stream", False))
-                with lock:
-                    runtime._stop = self._client_stopped
-                    runtime.tool_names = tool_names(tools)
-                    runtime.required_function = required_function(body.get("tool_choice"))
-                    runtime.required_closes = call_closes(tools, runtime.required_function)
-                    frequency = body.get("frequency_penalty")
-                    _arm_sampler(
-                        runtime,
-                        thinking=enable_thinking,
-                        presence=_presence(body, enable_thinking, presence_default),
-                        frequency=0.0 if frequency is None else float(frequency),
-                        window=_penalty_window(body),
-                    )
-                    try:
-                        prompt = runtime.encode_chat(
-                            messages,
-                            tools,
-                            enable_thinking,
-                            reasoning_effort=_reasoning_effort(body),
-                            continue_final=bool(body.get("continue_final_message")),
-                        )
-                        if stream:
-                            self._stream(
-                                runtime,
-                                prompt,
-                                max_tokens,
-                                temperature,
-                                top_p,
-                                top_k,
-                                _prompt_text(messages),
-                                enable_thinking,
-                            )
-                        else:
-                            tokens = runtime.generate(prompt, max_tokens, temperature, top_p, top_k)
-                            text = runtime.decode(tokens)
-                            reasoning, reply = split_thinking(text, enable_thinking)
-                            content, calls = parse_tool_calls(reply if reply else text)
-                            _append_transcript(args.transcript, _prompt_text(messages), text)
-                            if calls:
-                                reason = "tool_calls"
-                            else:
-                                reason = "length" if runtime._hit_limit else "stop"
-                                if not enable_thinking:
-                                    content = text
-                            self._json(
-                                200,
-                                _completion(
-                                    content,
-                                    len(prompt),
-                                    len(tokens),
-                                    reason,
-                                    calls,
-                                    reasoning if enable_thinking else "",
-                                    runtime,
-                                    self._model_id,
-                                ),
-                            )
-                    finally:
-                        runtime._stop = None
-                        runtime.tool_names = []
-                        runtime.required_function = None
-                        runtime.required_closes = False
-            except RequestClosed:
-                self.close_connection = True
-                _log("client closed")
-                live = state.get("runtime")
-                persist = getattr(live, "_persist_prefix", None)
-                if persist is not None:
-                    persist()
-            except KeyError as exc:
-                self.close_connection = True
-                if self._started:
-                    return
-                self._json(404, {"error": {"message": str(exc), "type": "not_found"}})
-            except LookupError as exc:
-                self.close_connection = True
-                if self._started:
-                    return
-                self._json(404, {"error": {"message": str(exc), "type": "not_found"}})
-            except Exception as exc:
-                _report_failure(getattr(state.get("runtime"), "console", None))
-                self.close_connection = True
-                if self._started:
-                    return
-                self._json(500, {"error": {"message": str(exc), "type": type(exc).__name__}})
-
-        def _stream(
-            self,
-            runtime: Any,
-            prompt: list[int],
-            max_tokens: int | None,
-            temperature: float,
-            top_p: float,
-            top_k: int,
-            prompt_text: str,
-            enable_thinking: bool,
-        ) -> None:
-            self._started = True
-            self.close_connection = True
-            self.connection.settimeout(_STREAM_WRITE_TIMEOUT)
-            try:
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "close")
-                self.end_headers()
-            except OSError:
-                self._gone = True
-                raise RequestClosed() from None
-            self._event(
-                {"choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]}
-            )
-            start = runtime.align(prompt)
-            if start == len(prompt):
-                if runtime.last_logits is None:
-                    message = "the cached prefix has no logits"
-                    raise RuntimeError(message)
-                logits = runtime.last_logits
-            else:
-                logits = runtime.forward(prompt[start:])
-
-            gate = ContentGate()
-            thinking = ThinkStream(enable_thinking)
-
-            def emit_channel(channel: str, visible: str) -> None:
-                if channel == "content":
-                    visible = gate.push(visible)
-                if not visible:
-                    return
-                field = "reasoning_content" if channel == "reasoning" else "content"
-                self._event(
-                    {
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {field: visible},
-                                "finish_reason": None,
-                            }
-                        ]
-                    }
-                )
-
-            def emit(piece: str) -> None:
-                for channel, visible in thinking.push(piece):
-                    emit_channel(channel, visible)
-
-            previous = _drain_stream(
-                runtime,
-                runtime._new_tokens(logits, max_tokens, temperature, top_p, top_k),
-                emit,
-            )
-            for channel, visible in thinking.finish():
-                emit_channel(channel, visible)
-            tail = gate.finish()
-            if tail:
-                emit_content = {
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": tail},
-                            "finish_reason": None,
-                        }
-                    ]
-                }
-                self._event(emit_content)
-            _content, calls = parse_tool_calls(previous)
-            if calls:
-                for index, call in enumerate(calls):
-                    self._event(
-                        {
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {
-                                        "tool_calls": [
-                                            {
-                                                "index": index,
-                                                "id": call["id"],
-                                                "type": "function",
-                                                "function": {
-                                                    "name": call["function"]["name"],
-                                                    "arguments": call["function"]["arguments"],
-                                                },
-                                            }
-                                        ]
-                                    },
-                                    "finish_reason": None,
-                                }
-                            ]
-                        }
-                    )
-                reason = "tool_calls"
-            else:
-                reason = "length" if runtime._hit_limit else "stop"
-            self._event({"choices": [{"index": 0, "delta": {}, "finish_reason": reason}]})
-            self._event(
-                {
-                    "choices": [],
-                    "usage": _usage(
-                        runtime,
-                        len(prompt),
-                        len(getattr(runtime, "_output_ids", []) or []),
-                        self._model_id,
-                    ),
-                }
-            )
-            self._send(b"data: [DONE]\n\n")
-            runtime._log_decode()
-            _append_transcript(args.transcript, prompt_text, previous)
-
-        def _client_stopped(self) -> bool:
-            if self._gone:
-                return True
-            if _peer_closed(self.connection):
-                self._gone = True
-                return True
-            return False
-
-        def _event(self, payload: dict[str, Any]) -> None:
-            blob = json.dumps(payload).encode()
-            self._send(b"data: " + blob + b"\n\n")
-
-        def _send(self, data: bytes) -> None:
-            try:
-                self.wfile.write(data)
-                self.wfile.flush()
-            except OSError:
-                self._gone = True
-                raise RequestClosed() from None
-
-        def _json(self, status: int, payload: dict[str, Any]) -> None:
-            blob = json.dumps(payload).encode()
-            previous = self.connection.gettimeout()
-            self.connection.settimeout(_STREAM_WRITE_TIMEOUT)
-            try:
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(blob)))
-                self.end_headers()
-                self.wfile.write(blob)
-                self.wfile.flush()
-            except OSError:
-                self.close_connection = True
-                _log("client closed")
-            else:
-                self.connection.settimeout(previous)
-
-    server = _SingleRequestServer((args.host, args.port), Handler)
-    state["server"] = server
-    _log(f"listening on http://{args.host}:{args.port}")
-    server.serve_forever()
-    return 0
 
 
 # Qwen team, Qwen3.8-Flash-Next model card.
@@ -1053,7 +652,11 @@ def _kv_choice(args: Any, selection: Any) -> str:
 def _bf16_source(args: Any) -> tuple[Path, Any]:
     if args.source is not None:
         return _checkpoint(args.source), None
-    _record, selection = choose_complete(model=getattr(args, "model", None), record=None)
+    _record, selection = choose_complete(
+        model=getattr(args, "model", None),
+        record=None,
+        pipeline=PIPELINE,
+    )
     if selection is None:
         message = "pass --source with the checkpoint directory"
         raise LookupError(message)
@@ -1065,98 +668,253 @@ def _bf16_source(args: Any) -> tuple[Path, Any]:
     return _checkpoint(Path(source).expanduser()), selection
 
 
-def _bind_request(body: dict[str, Any], state: dict[str, Any], args: Any) -> Any:
-    """Load the requested folder when serve was started with an empty process."""
-    if not getattr(args, "lazy", False):
-        return None
-    model = body.get("model")
-    if not isinstance(model, str) or not model:
-        message = "model is required"
-        raise LookupError(message)
-    selection = resolve(model, resident=state.get("record"))
-    _install_runtime(state, args, selection)
-    runtime = state.get("runtime")
-    state["requests"] = int(state.get("requests") or 0) + 1
-    if runtime is not None:
-        runtime._request_id = state["requests"]
-    return selection
+def open_runtime(
+    path: Path,
+    *,
+    kv_cache: str = "e4m3",
+    console: Any = None,
+    resident_percent: float | None = None,
+) -> Qwen38Runtime:
+    """Open this pipeline's record. The listener calls this and no other loader."""
+    if console is not None:
+        bind_log(console.log)
+        if not getattr(console, "pipeline", None):
+            console.pipeline = PIPELINE
+    return Qwen38Runtime(
+        path,
+        resident_percent=resident_percent,
+        kv_cache=kv_cache or "e4m3",
+        console=console,
+    )
 
 
-def _install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
-    if (
-        state.get("runtime") is not None
-        and state.get("record") == selection.folder
-        and state.get("pipeline") == selection.pipeline
-    ):
-        return
-    old = state.get("runtime")
-    state["runtime"] = None
-    state["record"] = None
-    state["pipeline"] = None
-    if old is not None:
-        old.close()
-    ui = getattr(args, "console_ui", None)
-    if ui is not None:
-        ui.load_detail = selection.alias or selection.folder
-    runtime = _open_runtime(selection, ui)
-    state["runtime"] = runtime
-    state["record"] = selection.folder
-    state["pipeline"] = selection.pipeline
-    shutdown = getattr(args, "shutdown", None)
-    if shutdown is not None:
-        shutdown.runtime = runtime
-    if ui is not None and ui.keeps_lines:
-        label = selection.alias or selection.folder
-        _log(f"loaded {label} {selection.folder}")
-
-
-def _open_runtime(selection: Any, console: Any) -> Any:
-    """The pipeline named on the registry row. The previous runtime is already closed."""
-    if selection.pipeline == "qwen38-flash-next":
-        return Qwen38Runtime(
-            selection.path,
-            resident_percent=selection.resident_percent,
-            kv_cache=selection.kv_cache,
-            console=console,
+def handle_chat(
+    handler: Any,
+    runtime: Any,
+    body: dict[str, Any],
+    selection: Any,
+    args: Any,
+    state: dict[str, Any],
+) -> None:
+    """One chat completion on a runtime this pipeline opened."""
+    del state
+    try:
+        messages = body["messages"]
+        tools = body.get("tools")
+        if selection is not None and selection.enable_thinking is not None:
+            enable_thinking = selection.enable_thinking
+        else:
+            enable_thinking = _enable_thinking(body)
+        max_tokens = _request_limit(body)
+        variant = selection.sampling if selection is not None else None
+        temperature, top_p, top_k = _sampling(body, enable_thinking, variant)
+        presence_default = None
+        if isinstance(variant, dict) and "presence_penalty" in variant:
+            presence_default = float(variant["presence_penalty"])
+        stream = bool(body.get("stream", False))
+        runtime._stop = handler._client_stopped
+        runtime.tool_names = tool_names(tools)
+        runtime.required_function = required_function(body.get("tool_choice"))
+        runtime.required_closes = call_closes(tools, runtime.required_function)
+        frequency = body.get("frequency_penalty")
+        _arm_sampler(
+            runtime,
+            thinking=enable_thinking,
+            presence=_presence(body, enable_thinking, presence_default),
+            frequency=0.0 if frequency is None else float(frequency),
+            window=_penalty_window(body),
         )
-    from madmetal.cli import load_pipeline
-
-    module = load_pipeline(selection.pipeline)
-    opener = getattr(module, "open_runtime", None)
-    if not callable(opener):
-        message = f"{selection.pipeline} does not open a runtime"
-        raise RuntimeError(message)
-    return opener(selection.path, kv_cache=selection.kv_cache, console=console)
-
-
-def serve_main(argv: Sequence[str] | None = None) -> int:
-    """``madmetal serve``. Nothing is loaded until a request names a model."""
-    parser = argparse.ArgumentParser(prog="madmetal serve")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8129)
-    parser.add_argument("--console", choices=("auto", "pretty", "plain", "json"), default="auto")
-    parser.add_argument("--transcript", type=Path, default=None)
-    try:
-        args = parser.parse_args(list(argv) if argv is not None else None)
-    except SystemExit as exc:
-        return int(exc.code or 0)
-    ui = _console(args)
-    args.lazy = True
-    args.console_ui = ui
-    args.record = None
-    args.resident_percent = None
-    args.kv_cache = "e4m3"
-    try:
-        return serve(args)
+        try:
+            prompt = runtime.encode_chat(
+                messages,
+                tools,
+                enable_thinking,
+                reasoning_effort=_reasoning_effort(body),
+                continue_final=bool(body.get("continue_final_message")),
+            )
+            if stream:
+                _stream_chat(
+                    handler,
+                    runtime,
+                    prompt,
+                    max_tokens,
+                    temperature,
+                    top_p,
+                    top_k,
+                    _prompt_text(messages),
+                    enable_thinking,
+                    args,
+                )
+            else:
+                tokens = runtime.generate(prompt, max_tokens, temperature, top_p, top_k)
+                text = runtime.decode(tokens)
+                reasoning, reply = split_thinking(text, enable_thinking)
+                content, calls = parse_tool_calls(reply if reply else text)
+                _append_transcript(args.transcript, _prompt_text(messages), text)
+                if calls:
+                    reason = "tool_calls"
+                else:
+                    reason = "length" if runtime._hit_limit else "stop"
+                    if not enable_thinking:
+                        content = text
+                handler._json(
+                    200,
+                    _completion(
+                        content,
+                        len(prompt),
+                        len(tokens),
+                        reason,
+                        calls,
+                        reasoning if enable_thinking else "",
+                        runtime,
+                        handler._model_id,
+                    ),
+                )
+        except (RequestClosed, OSError):
+            handler.close_connection = True
+            _log("client closed")
+            persist = getattr(runtime, "_persist_prefix", None)
+            if persist is not None:
+                persist()
     finally:
-        ui.close()
+        runtime._stop = None
+        runtime.tool_names = []
+        runtime.required_function = None
+        runtime.required_closes = False
+
+
+def _stream_chat(
+    handler: Any,
+    runtime: Any,
+    prompt: list[int],
+    max_tokens: int | None,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    prompt_text: str,
+    enable_thinking: bool,
+    args: Any,
+) -> None:
+    handler._started = True
+    handler.close_connection = True
+    handler.connection.settimeout(2.0)
+    try:
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("Connection", "close")
+        handler.end_headers()
+    except OSError:
+        handler._gone = True
+        raise RequestClosed() from None
+
+    def event(payload: dict[str, Any]) -> None:
+        try:
+            handler._event(payload)
+        except OSError as exc:
+            raise RequestClosed() from exc
+
+    event({"choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]})
+    logits = runtime._prompt_logits(prompt)
+    gate = ContentGate()
+    thinking = ThinkStream(enable_thinking)
+
+    def emit_channel(channel: str, visible: str) -> None:
+        if channel == "content":
+            visible = gate.push(visible)
+        if not visible:
+            return
+        field = "reasoning_content" if channel == "reasoning" else "content"
+        event(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {field: visible},
+                        "finish_reason": None,
+                    }
+                ]
+            }
+        )
+
+    def emit(piece: str) -> None:
+        for channel, visible in thinking.push(piece):
+            emit_channel(channel, visible)
+
+    previous = _drain_stream(
+        runtime,
+        runtime._new_tokens(logits, max_tokens, temperature, top_p, top_k),
+        emit,
+    )
+    for channel, visible in thinking.finish():
+        emit_channel(channel, visible)
+    tail = gate.finish()
+    if tail:
+        event(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": tail},
+                        "finish_reason": None,
+                    }
+                ]
+            }
+        )
+    _content, calls = parse_tool_calls(previous)
+    if calls:
+        for index, call in enumerate(calls):
+            event(
+                {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": index,
+                                        "id": call["id"],
+                                        "type": "function",
+                                        "function": {
+                                            "name": call["function"]["name"],
+                                            "arguments": call["function"]["arguments"],
+                                        },
+                                    }
+                                ]
+                            },
+                            "finish_reason": None,
+                        }
+                    ]
+                }
+            )
+        reason = "tool_calls"
+    else:
+        reason = "length" if runtime._hit_limit else "stop"
+    event({"choices": [{"index": 0, "delta": {}, "finish_reason": reason}]})
+    event(
+        {
+            "choices": [],
+            "usage": _usage(
+                runtime,
+                len(prompt),
+                len(getattr(runtime, "_output_ids", []) or []),
+                handler._model_id,
+            ),
+        }
+    )
+    try:
+        handler._send(b"data: [DONE]\n\n")
+    except OSError as exc:
+        raise RequestClosed() from exc
+    runtime._log_decode()
+    _append_transcript(args.transcript, prompt_text, previous)
 
 
 def models_main(args: Any) -> int:
     command = getattr(args, "models_command", None)
     try:
         if command == "add":
-            add_model(args.folder, alias=args.alias, source=args.source)
+            add_model(args.folder, alias=args.alias, source=args.source, pipeline=PIPELINE)
         elif command == "alias":
             set_alias(args.folder, args.alias)
         listing = format_listing()

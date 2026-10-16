@@ -69,12 +69,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stdout.write(HELP)
         return 0
     if args[0] == "serve":
-        try:
-            load_pipeline("qwen38-flash-next")
-        except (FileNotFoundError, ImportError) as exc:
-            sys.stderr.write(f"{exc}\n")
-            return 2
-        from qwen38_flash_next.commands import serve_main
+        from madmetal.listener import serve_main
 
         return int(serve_main(args[1:]))
     flag = args[0]

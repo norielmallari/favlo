@@ -10,6 +10,8 @@ from types import SimpleNamespace
 import qwen38_flash_next.commands as commands
 from qwen38_flash_next.runtime import RequestClosed
 
+from madmetal import listener
+
 
 class _Encoded:
     def __init__(self, ids: list[int]) -> None:
@@ -67,6 +69,9 @@ class _Runtime:
 
     def align(self, prompt):
         return 0
+
+    def _prompt_logits(self, prompt):
+        return self.forward(prompt)
 
     def forward(self, tokens):
         if self.watch_cancel:
@@ -164,9 +169,9 @@ def _open_request(port: int, content: str, *, stream: bool) -> socket.socket:
 
 
 def _serve_background(runtime: _Runtime):
-    state: dict = {"runtime": runtime, "server": None}
+    state: dict = {"runtime": runtime, "server": None, "module": commands}
     thread = threading.Thread(
-        target=commands._serve_loop,
+        target=listener._serve_loop,
         args=(_args(), state),
         daemon=True,
     )
@@ -287,9 +292,9 @@ def test_closed_post_stops_generation() -> None:
 def _signal_server(sig: int, *, during_request: bool) -> None:
     runtime = _Runtime()
     runtime.hold = during_request
-    shutdown = commands._Shutdown()
+    shutdown = listener._Shutdown()
     shutdown.runtime = runtime
-    state: dict = {"runtime": runtime, "server": None}
+    state: dict = {"runtime": runtime, "server": None, "module": commands}
     ports: list[int] = []
     done = threading.Event()
 
@@ -334,13 +339,13 @@ def _signal_server(sig: int, *, during_request: bool) -> None:
         client = threading.Thread(target=post)
         client.start()
     try:
-        code = commands._run_until_stopped(_args(), state, shutdown)
+        code = listener._run_until_stopped(_args(), state, shutdown)
     finally:
         done.set()
         if client is not None:
             client.join(timeout=5)
         if not shutdown.closing:
-            commands._release(runtime, shutdown, state.get("server"))
+            listener._release(runtime, shutdown, state.get("server"))
     assert code == 0
     assert shutdown.signaled
     assert runtime.halted
@@ -368,7 +373,13 @@ def test_usage_excludes_the_cached_prefix() -> None:
 
 def test_lazy_stream_uses_the_runtime_loaded_for_the_request(monkeypatch) -> None:
     runtime = _Runtime()
-    state: dict = {"runtime": None, "server": None, "record": None, "requests": 0}
+    state: dict = {
+        "runtime": None,
+        "server": None,
+        "record": None,
+        "requests": 0,
+        "module": commands,
+    }
 
     def bind(body, bound_state, bound_args):
         del body, bound_args
@@ -376,10 +387,10 @@ def test_lazy_stream_uses_the_runtime_loaded_for_the_request(monkeypatch) -> Non
         bound_state["record"] = "packed"
         return SimpleNamespace(requested_id="packed", enable_thinking=None, sampling=None)
 
-    monkeypatch.setattr(commands, "_bind_request", bind)
+    monkeypatch.setattr(listener, "_bind_request", bind)
     args = _args()
     args.lazy = True
-    thread = threading.Thread(target=commands._serve_loop, args=(args, state), daemon=True)
+    thread = threading.Thread(target=listener._serve_loop, args=(args, state), daemon=True)
     thread.start()
     deadline = time.monotonic() + 5
     while state["server"] is None and time.monotonic() < deadline:
@@ -437,7 +448,7 @@ def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
         opened.append(runtime)
         return runtime
 
-    monkeypatch.setattr(commands, "_open_runtime", opener)
+    monkeypatch.setattr(listener, "_open_runtime", opener)
     state: dict = {"runtime": None, "record": None, "pipeline": None}
     args = _args()
     first = SimpleNamespace(
@@ -456,11 +467,11 @@ def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
         kv_cache="e4m3",
         path="dense",
     )
-    commands._install_runtime(state, args, first)
-    commands._install_runtime(state, args, first)
+    listener._install_runtime(state, args, first)
+    listener._install_runtime(state, args, first)
     assert len(opened) == 1
     assert state["pipeline"] == "qwen38-flash-next"
-    commands._install_runtime(state, args, second)
+    listener._install_runtime(state, args, second)
     assert opened[0].closed
     assert state["runtime"] is opened[1]
     assert state["record"] == "dense"
