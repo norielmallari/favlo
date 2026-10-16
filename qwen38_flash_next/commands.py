@@ -1086,30 +1086,50 @@ def _bind_request(body: dict[str, Any], state: dict[str, Any], args: Any) -> Any
 
 
 def _install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
-    if state.get("runtime") is not None and state.get("record") == selection.folder:
+    if (
+        state.get("runtime") is not None
+        and state.get("record") == selection.folder
+        and state.get("pipeline") == selection.pipeline
+    ):
         return
     old = state.get("runtime")
     state["runtime"] = None
     state["record"] = None
+    state["pipeline"] = None
     if old is not None:
         old.close()
     ui = getattr(args, "console_ui", None)
     if ui is not None:
         ui.load_detail = selection.alias or selection.folder
-    runtime = Qwen38Runtime(
-        selection.path,
-        resident_percent=selection.resident_percent,
-        kv_cache=selection.kv_cache,
-        console=ui,
-    )
+    runtime = _open_runtime(selection, ui)
     state["runtime"] = runtime
     state["record"] = selection.folder
+    state["pipeline"] = selection.pipeline
     shutdown = getattr(args, "shutdown", None)
     if shutdown is not None:
         shutdown.runtime = runtime
     if ui is not None and ui.keeps_lines:
         label = selection.alias or selection.folder
         _log(f"loaded {label} {selection.folder}")
+
+
+def _open_runtime(selection: Any, console: Any) -> Any:
+    """The pipeline named on the registry row. The previous runtime is already closed."""
+    if selection.pipeline == "qwen38-flash-next":
+        return Qwen38Runtime(
+            selection.path,
+            resident_percent=selection.resident_percent,
+            kv_cache=selection.kv_cache,
+            console=console,
+        )
+    from madmetal.cli import load_pipeline
+
+    module = load_pipeline(selection.pipeline)
+    opener = getattr(module, "open_runtime", None)
+    if not callable(opener):
+        message = f"{selection.pipeline} does not open a runtime"
+        raise RuntimeError(message)
+    return opener(selection.path, kv_cache=selection.kv_cache, console=console)
 
 
 def serve_main(argv: Sequence[str] | None = None) -> int:

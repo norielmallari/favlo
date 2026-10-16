@@ -174,11 +174,12 @@ def _stream(
     *,
     presence: float,
     window: int,
+    model: str = "qwen38-flash-next",
 ) -> tuple[str, str, bool]:
     """Print reasoning, then the reply. Returns both and whether reasoning led."""
     body = json.dumps(
         {
-            "model": "qwen38-flash-next",
+            "model": model,
             "messages": messages,
             "stream": True,
             "max_tokens": MAX_TOKENS,
@@ -247,6 +248,7 @@ def run(
     *,
     presence: float = 0.0,
     window: int = 20,
+    model: str = "qwen38-flash-next",
 ) -> list[str]:
     """Two turns. Problems are returned; the caller prints them."""
     system = persona()
@@ -258,7 +260,9 @@ def run(
     print("--- turn 1 reasoning ---", flush=True)
     before = len(_PROMPT_TOKENS.findall(log.text()))
     decode_lines = 0
-    reasoning, content, led = _stream(port, messages, presence=presence, window=window)
+    reasoning, content, led = _stream(
+        port, messages, presence=presence, window=window, model=model
+    )
     tokens = _prompt_count(log, before)
     if tokens is not None:
         print(f"turn 1 prompt tokens {tokens}", flush=True)
@@ -276,7 +280,9 @@ def run(
     messages.append({"role": "user", "content": TURN_TWO})
     print("--- turn 2 reasoning ---", flush=True)
     before = len(_PROMPT_TOKENS.findall(log.text()))
-    reasoning, content, led = _stream(port, messages, presence=presence, window=window)
+    reasoning, content, led = _stream(
+        port, messages, presence=presence, window=window, model=model
+    )
     tokens = _prompt_count(log, before)
     if tokens is not None:
         print(f"turn 2 prompt tokens {tokens}", flush=True)
@@ -295,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--presence-penalty", type=float, default=0.0)
     parser.add_argument("--penalty-window", type=int, default=20)
+    parser.add_argument("--model", default="qwen38-flash-next")
     args = parser.parse_args(argv)
     port = args.port or _free_port()
     proc = subprocess.Popen(
@@ -322,6 +329,7 @@ def main(argv: list[str] | None = None) -> int:
             log,
             presence=args.presence_penalty,
             window=args.penalty_window,
+            model=args.model,
         )
     except (
         OSError,

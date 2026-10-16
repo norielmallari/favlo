@@ -142,6 +142,29 @@ def test_alias_must_be_one_unused_name(tmp_path) -> None:
     assert resolve("renamed", root=tmp_path).folder == "one"
 
 
+def test_a_second_pipeline_is_listed_and_does_not_replace_the_default(tmp_path) -> None:
+    flash = "Qwen-madmetal-h128-fp8-c384-fp4"
+    dense = "Qwen3.8-27B-madmetal-fp8-fp4"
+    _record(tmp_path, flash)
+    _record(tmp_path, dense)
+    add_model(flash, alias="qwen38-flash-next", root=tmp_path)
+    add_model(dense, alias="qwen38-27b", root=tmp_path, pipeline="qwen38-27b")
+    data = load_registry(tmp_path)
+    assert data["default"] == flash
+    assert resolve("qwen38-flash-next", root=tmp_path).folder == flash
+    assert resolve("qwen38-flash-next", root=tmp_path).pipeline == "qwen38-flash-next"
+    selected = resolve("qwen38-27b", root=tmp_path)
+    assert selected.folder == dense
+    assert selected.pipeline == "qwen38-27b"
+    ids = [row["id"] for row in model_objects(tmp_path)]
+    assert "qwen38-flash-next" in ids
+    assert "qwen38-27b" in ids
+    assert "qwen38-27b:thinking" in ids
+    listing = format_listing(tmp_path)
+    assert "pipeline qwen38-27b" in listing
+    assert "pipeline qwen38-flash-next" in listing
+
+
 def test_unregistered_complete_directory_is_listed(tmp_path) -> None:
     _record(tmp_path, "loose")
     assert list_unregistered(tmp_path) == ["loose"]

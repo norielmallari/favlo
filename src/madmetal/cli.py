@@ -14,14 +14,16 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import ModuleType
 
-PIPELINES = ("qwen38-flash-next",)
+PIPELINES = ("qwen38-flash-next", "qwen38-27b")
 
 HELP = """\
 usage: madmetal serve
        madmetal --qwen38-flash-next [args]
+       madmetal --qwen38-27b [args]
 
   serve                  listen, then load the model a request names
   --qwen38-flash-next    Qwen3.8-Flash-Next
+  --qwen38-27b           Qwen3.8-27B
 """
 
 

@@ -346,6 +346,8 @@ async def run_long_prompt(
     target: int,
     log: Log,
     proc: subprocess.Popen[str],
+    *,
+    model: str = "qwen38-flash-next",
 ) -> RunResult:
     """Read source files until ``prompt tokens`` reaches ``target``."""
     root = root.resolve()
@@ -361,7 +363,7 @@ async def run_long_prompt(
         timeout=3600.0,
     )
     client = OpenAIChatCompletionClient(
-        model="qwen38-flash-next",
+        model=model,
         api_key="madmetal",
         base_url=base_url,
         async_client=http,
@@ -450,6 +452,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tokens", type=int, default=TARGET_TOKENS)
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--model", default="qwen38-flash-next")
     args = parser.parse_args(argv)
     if args.tokens < 1:
         print("token target must be positive")
@@ -482,6 +485,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.tokens,
                 log,
                 proc,
+                model=args.model,
             )
         )
     except Exception as exc:

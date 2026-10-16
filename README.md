@@ -10,7 +10,7 @@ The first pipeline is Qwen3.8-Flash-Next on an M5 Pro: native Metal tensor recor
 
 ## Running the Server
 
-`serve` listens on `127.0.0.1:8129`.
+`serve` listens on `127.0.0.1:8129`. A request's `model` field selects a row in `models/registry.json`. One pipeline is resident. A different pipeline releases the resident record before it loads.
 
 ```text
 uv sync --extra dev

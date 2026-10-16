@@ -10,6 +10,7 @@ def test_help_lists_the_model_flag(capsys) -> None:
     assert main(["--help"]) == 0
     captured = capsys.readouterr()
     assert "--qwen38-flash-next" in captured.out
+    assert "--qwen38-27b" in captured.out
 
 
 def test_missing_flag_is_an_error(capsys) -> None:
@@ -56,3 +57,6 @@ def test_pipeline_help_comes_from_the_hyphenated_file(capsys) -> None:
     assert main(["--qwen38-flash-next", "--help"]) == 0
     captured = capsys.readouterr()
     assert "probe" in captured.out
+    assert main(["--qwen38-27b", "--help"]) == 0
+    captured = capsys.readouterr()
+    assert "quantize" in captured.out

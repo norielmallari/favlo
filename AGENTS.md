@@ -8,22 +8,20 @@ Read this file first. Then read [ARCHITECTURE.md](ARCHITECTURE.md). The record, 
 
 MADMetal Accelerated Decoding on Metal. Each model is its own inference pipeline, written for that model's shapes and for the Metal tensor types on Apple Silicon.
 
-The first pipeline is Qwen3.8-Flash-Next. `madmetal --qwen38-flash-next` loads `qwen38-flash-next.py`, which loads the `qwen38_flash_next` package.
-
-The runtime does not call into a multi-model server to run the forward.
+The first pipeline is Qwen3.8-Flash-Next. `madmetal --qwen38-flash-next` loads `qwen38-flash-next.py`, which loads the `qwen38_flash_next` package. `madmetal --qwen38-27b` loads `qwen38-27b.py`, which loads the `qwen38_27b` package. `madmetal serve` is the one listener. A request names a registry row, and that row's pipeline loads. The resident pipeline releases itself before a different pipeline loads.
 
 ## In scope
 
 - `qwen38_flash_next`: BF16 calibration prefill, converter to native records, and the text runtime for that model. `qwen38-flash-next.py` is the entry the command loads.
-- `madmetal` command that dispatches one model flag onto one pipeline entry.
-- OpenAI-compatible `GET /v1/models` and `POST /v1/chat/completions`, one request at a time, with streaming and tools. While a function name is open, the sampler keeps only tokens that continue a name from the request. A `tool_choice` that names one function forces that call's opening as the tokenizer's encoding of that text.
+- `madmetal` command that dispatches one model flag onto one pipeline entry. `serve` is the listener for every registered pipeline. One record is resident. A different pipeline closes the resident record before it loads.
+- OpenAI-compatible `GET /v1/models` and `POST /v1/chat/completions`, one request at a time, with streaming and tools. `GET /v1/models` lists every registered pipeline. While a function name is open, the sampler keeps only tokens that continue a name from the request. A `tool_choice` that names one function forces that call's opening as the tokenizer's encoding of that text.
 - Prefix cache of that model's full state. The live sequence stays in memory. A request that does not extend it writes the sequence into the prefix directory and loads the longest stored prefix.
 - Expert records streamed from SSD by Metal IO into a resident atlas. Consecutive ids are one sequential load of the live images. `--resident-percent` on `serve` and `complete` sets that atlas as a percent of the hot tier. Omitting it keeps the 24 GiB ladder. The prompt length is the tokens that fit after that budget, and at most 131,072. The indexer attends at most 512 blocks of 4, plus the unfinished tail.
 
 ## Out of scope
 
 - A shared model runner, a base class that every model subclasses, or a kernel that branches on model type.
-- A second model until that model is explicitly added.
+- Both records resident, or a second listener.
 - Affine group-64 packing and per-layer bit allocation.
 - Batching, the Neural Engine, and the vision tower.
 - A second output head, or a hot/cold split of the MTP expert file. An int2 span kernel. Publishing an accept length.
@@ -50,8 +48,10 @@ qwen38_flash_next/         this model's pipeline
   runtime.py               the forward
   console.py               status row; no pipeline imports
   commands.py              quantize, bf16, complete, and the serve handler
-src/madmetal/              process entry; selects one pipeline and stops
-  registry.py              flavor folders, aliases, and sampling variants
+qwen38-27b.py              command entry; loads the package by path
+qwen38_27b/                Qwen3.8-27B. It does not import Flash Next.
+src/madmetal/              process entry; the listener loads the pipeline a request names
+  registry.py              flavor folders, aliases, pipelines, and sampling variants
 harness/                   file-agent client, coherence, and the three benchmarks
 docs/                      as-built notes only; see docs/README.md
 docs/qwen38/               record, n-gram, schedule, probe, console, benchmarks
@@ -70,8 +70,8 @@ The calibration prompt strings are data in a bucket JSON: `tool_calling`, `chat`
 
 ## Invariants
 
-1. One process, one model flag, one pipeline package. The command loads that package through one hyphenated entry file.
-2. The pipeline package owns the math. Shared code is limited to process entry and pieces that are not the model, and only when a second pipeline exists to share them.
+1. One process, one listener. A model flag loads one pipeline package through one hyphenated entry file. `serve` keeps one of those pipelines resident.
+2. The pipeline package owns the math. Shared code is the process entry, the registry, and the listener. There is no model base class.
 3. Weights on disk for this model are the Metal records in [docs/qwen38/record.md](docs/qwen38/record.md). The tier rules are in ARCHITECTURE.md.
 4. The key/value cache defaults to E4M3 for completed blocks of four. The unfinished tail stays BF16. `--kv-cache bf16` stores every K and V token as BF16. The indexer key stays BF16.
 5. Do not invent routing hits, calibration energies, or hidden-state errors. The device roundtrip in [docs/qwen38/probe.md](docs/qwen38/probe.md) measures nibble order and int4 endpoints before the expert table is packed.
@@ -104,6 +104,7 @@ uv run madmetal --qwen38-flash-next probe
 uv run madmetal --qwen38-flash-next matmul
 uv run madmetal --qwen38-flash-next kernels
 uv run madmetal --qwen38-flash-next quantize
+uv run madmetal --qwen38-27b quantize
 uv run madmetal serve
 uv run python -m harness --base-url http://127.0.0.1:8129/v1 --workspace ./note-workspace
 uv run python -m harness.long_prompt --tokens 65536

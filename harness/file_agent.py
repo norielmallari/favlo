@@ -87,7 +87,9 @@ def calls_in_order(calls: list[str]) -> bool:
     return False
 
 
-async def run_file_task(base_url: str, workspace: Path) -> tuple[list[str], str]:
+async def run_file_task(
+    base_url: str, workspace: Path, *, model: str = "qwen38-flash-next"
+) -> tuple[list[str], str]:
     """Run one agent step per tool. Returns the tool order and the file text.
 
     Each step sees only the tool for that step. The sampler then has one legal
@@ -111,7 +113,7 @@ async def run_file_task(base_url: str, workspace: Path) -> tuple[list[str], str]
         ),
     ]
     client = OpenAIChatCompletionClient(
-        model="qwen38-flash-next",
+        model=model,
         api_key="madmetal",
         base_url=base_url,
     )
@@ -142,8 +144,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Create, edit, and confirm one file.")
     parser.add_argument("--base-url", default="http://127.0.0.1:8129/v1")
     parser.add_argument("--workspace", type=Path, required=True)
+    parser.add_argument("--model", default="qwen38-flash-next")
     args = parser.parse_args(argv)
-    calls, text = asyncio.run(run_file_task(args.base_url, args.workspace))
+    calls, text = asyncio.run(
+        run_file_task(args.base_url, args.workspace, model=args.model)
+    )
     if calls_in_order(calls) and text == EDITED:
         print(f"confirmed {FILENAME}")
         return 0

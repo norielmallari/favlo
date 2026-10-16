@@ -39,14 +39,14 @@ def _append(path: Path, row: dict[str, Any]) -> None:
         handle.flush()
 
 
-def _smoke(port: int) -> None:
+def _smoke(port: int, model: str) -> None:
     checks = (
         ("What is 2+2? Answer with one number.", "4"),
         ("What is 3+3? Answer with one number.", "6"),
     )
     for prompt, expect in checks:
         text, reason, tokens = complete(
-            port, [{"role": "user", "content": prompt}], 32
+            port, [{"role": "user", "content": prompt}], 32, model=model
         )
         print(f"smoke {prompt!r} -> {text!r} ({reason}, {tokens} tok)", flush=True)
         if expect not in text:
@@ -85,6 +85,7 @@ def _ask(
     presence: float | None = None,
     continue_final: bool = False,
     reply_only: bool = False,
+    model: str = "qwen38-flash-next",
 ):
     last = "the server closed the connection"
     for _attempt in range(3):
@@ -98,6 +99,7 @@ def _ask(
                 presence=presence,
                 continue_final=continue_final,
                 reply_only=reply_only,
+                model=model,
             )
         except (OSError, json.JSONDecodeError) as exc:
             last = f"{type(exc).__name__}: {exc}"
@@ -112,6 +114,8 @@ def _run_rows(
     rows: list[dict[str, Any]],
     path: Path,
     score_row,
+    *,
+    model: str,
 ) -> list[dict[str, Any]]:
     done = _load_jsonl(path)
     max_tokens = _MAX_TOKENS[name]
@@ -143,6 +147,7 @@ def _run_rows(
                 presence=presence,
                 continue_final=continue_final,
                 reply_only=reply_only,
+                model=model,
             )
             if reason == "error":
                 outcome = _failed(name, str(row["id"]), str(tokens))
@@ -263,9 +268,10 @@ def _suite(
     score_row,
     summarize,
     limit: int | None,
+    model: str,
 ) -> dict[str, Any]:
     chosen = items if limit is None else items[:limit]
-    rows = _run_rows(name, server, chosen, out / f"{name}.jsonl", score_row)
+    rows = _run_rows(name, server, chosen, out / f"{name}.jsonl", score_row, model=model)
     summary = summarize(rows)
     print(f"{name} {_fmt(summary)}", flush=True)
     return summary
@@ -277,11 +283,12 @@ def run(
     sample_only: bool,
     only: set[str] | None = None,
     limit: int | None = None,
+    model: str = "qwen38-flash-next",
 ) -> int:
     server = Server()
     server.start()
     try:
-        _smoke(server.port)
+        _smoke(server.port, model)
         suites = (
             ("ifeval", _ifeval_items(), _score_ifeval, _ifeval_summary),
             ("gsm8k", _gsm_items(), _score_gsm, lambda rows: _rate(rows, "correct")),
@@ -292,7 +299,9 @@ def run(
         if limit is not None:
             sample: dict[str, Any] = {}
             for name, items, score_row, summarize in suites:
-                sample[name] = _suite(name, server, items, output, score_row, summarize, limit)
+                sample[name] = _suite(
+                    name, server, items, output, score_row, summarize, limit, model
+                )
             (output / "sample.json").write_text(json.dumps(sample, indent=2) + "\n")
             if only is None:
                 _write_doc(None, None, sample)
@@ -300,7 +309,9 @@ def run(
             return 0
         smoke: dict[str, Any] = {}
         for name, items, score_row, summarize in suites:
-            smoke[name] = _suite(name, server, items, output, score_row, summarize, _SMOKE)
+            smoke[name] = _suite(
+                name, server, items, output, score_row, summarize, _SMOKE, model
+            )
         (output / "smoke.json").write_text(json.dumps(smoke, indent=2) + "\n")
         if only is None:
             _write_doc(smoke, None)
@@ -309,7 +320,9 @@ def run(
             return 0
         full: dict[str, Any] = {}
         for name, items, score_row, summarize in suites:
-            full[name] = _suite(name, server, items, output, score_row, summarize, None)
+            full[name] = _suite(
+                name, server, items, output, score_row, summarize, None, model
+            )
         (output / "full.json").write_text(json.dumps(full, indent=2) + "\n")
         _write_doc(None, full)
         print("full recorded", flush=True)
@@ -346,9 +359,16 @@ def main(argv: list[str] | None = None) -> int:
         choices=("ifeval", "gsm8k", "humaneval"),
         help="score these sets and leave the others unread",
     )
+    parser.add_argument("--model", default="qwen38-flash-next")
     args = parser.parse_args(argv)
     only = set(args.only) if args.only else None
-    return run(args.output, sample_only=args.sample_only, only=only, limit=args.limit)
+    return run(
+        args.output,
+        sample_only=args.sample_only,
+        only=only,
+        limit=args.limit,
+        model=args.model,
+    )
 
 
 if __name__ == "__main__":

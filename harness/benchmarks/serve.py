@@ -141,10 +141,11 @@ def complete(
     presence: float | None = None,
     continue_final: bool = False,
     reply_only: bool = False,
+    model: str = "qwen38-flash-next",
 ) -> tuple[str, str, int]:
     """Greedy reply. Returns content, finish reason, and completion tokens."""
     payload: dict[str, object] = {
-        "model": "qwen38-flash-next",
+        "model": model,
         "messages": messages,
         "stream": False,
         "max_tokens": max_tokens,

@@ -425,3 +425,43 @@ def test_sigterm_releases_the_listening_socket() -> None:
     import signal
 
     _signal_server(signal.SIGTERM, during_request=False)
+
+
+def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
+    opened: list[_Runtime] = []
+
+    def opener(selection, console):
+        del console
+        runtime = _Runtime()
+        runtime._name = selection.pipeline
+        opened.append(runtime)
+        return runtime
+
+    monkeypatch.setattr(commands, "_open_runtime", opener)
+    state: dict = {"runtime": None, "record": None, "pipeline": None}
+    args = _args()
+    first = SimpleNamespace(
+        folder="flash",
+        pipeline="qwen38-flash-next",
+        alias=None,
+        resident_percent=None,
+        kv_cache="e4m3",
+        path="flash",
+    )
+    second = SimpleNamespace(
+        folder="dense",
+        pipeline="qwen38-27b",
+        alias="qwen38-27b",
+        resident_percent=None,
+        kv_cache="e4m3",
+        path="dense",
+    )
+    commands._install_runtime(state, args, first)
+    commands._install_runtime(state, args, first)
+    assert len(opened) == 1
+    assert state["pipeline"] == "qwen38-flash-next"
+    commands._install_runtime(state, args, second)
+    assert opened[0].closed
+    assert state["runtime"] is opened[1]
+    assert state["record"] == "dense"
+    assert state["pipeline"] == "qwen38-27b"

@@ -144,12 +144,11 @@ def format_listing(root: Path | None = None) -> str:
     data = load_registry(root)
     lines: list[str] = []
     for folder, entry in data["models"].items():
-        if entry.get("pipeline") != PIPELINE:
-            continue
+        pipeline = entry.get("pipeline") or PIPELINE
         alias = entry.get("alias") or ""
         kv = entry.get("kv_cache") or "e4m3"
         alias_text = f"alias {alias}" if alias else "alias"
-        lines.append(f"{folder} {alias_text} kv {kv}")
+        lines.append(f"{folder} pipeline {pipeline} {alias_text} kv {kv}")
     for folder in list_unregistered(root):
         lines.append(f"unregistered {folder}")
     return "\n".join(lines)
@@ -195,6 +194,7 @@ def register_quantized(
     source: Path,
     alias: str | None,
     root: Path | None = None,
+    pipeline: str = PIPELINE,
 ) -> None:
     """Write or update the entry for a record this quantize just produced."""
     data = load_registry(root)
@@ -210,7 +210,7 @@ def register_quantized(
             return
         message = f"{folder} is already registered for a different source"
         raise ValueError(message)
-    data["models"][folder] = _entry(alias=alias, source=source_text)
+    data["models"][folder] = _entry(alias=alias, source=source_text, pipeline=pipeline)
     if data.get("default") is None:
         data["default"] = folder
     save_registry(data, root)
@@ -261,8 +261,6 @@ def model_objects(root: Path | None = None, *, resident: str | None = None) -> l
     created = _created(root)
     rows: list[dict[str, Any]] = []
     for folder, entry in data["models"].items():
-        if entry.get("pipeline") != PIPELINE:
-            continue
         names = [folder]
         alias = entry.get("alias")
         if isinstance(alias, str) and alias:
@@ -384,11 +382,16 @@ def _split_variant(text: str) -> tuple[str, str | None | bool]:
 
 
 def _folder_for(data: dict[str, Any], base: str) -> str | None:
-    if base in data["models"] and data["models"][base].get("pipeline") == PIPELINE:
+    if base in data["models"]:
         return base
+    pipeline_hits: list[str] = []
     for folder, entry in data["models"].items():
-        if entry.get("pipeline") == PIPELINE and entry.get("alias") == base:
+        if entry.get("alias") == base:
             return folder
+        if entry.get("pipeline") == base:
+            pipeline_hits.append(folder)
+    if len(pipeline_hits) == 1:
+        return pipeline_hits[0]
     return None
 
 
@@ -462,12 +465,13 @@ def _object(
 def _known_names(data: dict[str, Any]) -> list[str]:
     names: list[str] = []
     for folder, entry in data["models"].items():
-        if entry.get("pipeline") != PIPELINE:
-            continue
         names.append(folder)
         alias = entry.get("alias")
-        if isinstance(alias, str) and alias:
+        if isinstance(alias, str) and alias and alias not in names:
             names.append(alias)
+        pipeline = entry.get("pipeline")
+        if isinstance(pipeline, str) and pipeline and pipeline not in names:
+            names.append(pipeline)
     return names
 
 
