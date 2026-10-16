@@ -162,30 +162,19 @@ def test_gdn_and_attention_shaders_match() -> None:
     pipeline.check_state_kernels()
 
 
-def test_prompt_call_keeps_the_decode_atlas() -> None:
-    runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
-    runtime.atlas = object()
-    runtime.files = None
-    runtime._begin_prefill_stream()
-    assert runtime.atlas is not None
-
-
-def test_short_suffix_prefill_keeps_the_atlas() -> None:
+def test_prefill_always_uses_the_atlas() -> None:
     runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
     runtime._bf16 = False
     runtime.tokens = [7]
     runtime.atlas = object()
-    runtime.prefill_chunk = 2048
-    streamed: list[bool] = []
-    runtime._ensure_atlas = lambda: None
-    runtime._begin_prefill_stream = lambda: streamed.append(True)
+    runtime.kv_len = {}
+    runtime.resident_candidates = ()
+    seen: list[str] = []
+    runtime._ensure_atlas = lambda: seen.append("atlas")
     runtime._prepare_experts(decode=False, count=32)
-    assert streamed == []
-    runtime._prepare_experts(decode=False, count=2049)
-    assert streamed == [True]
-    runtime.tokens = []
-    runtime._prepare_experts(decode=False, count=32)
-    assert streamed == [True]
+    runtime._prepare_experts(decode=False, count=4096)
+    assert seen == ["atlas", "atlas"]
+    assert runtime.atlas is not None
 
 
 def test_flush_keeps_the_atlas_across_the_prefix_write() -> None:
@@ -1126,7 +1115,7 @@ def test_the_next_request_does_not_keep_the_previous_decode_row() -> None:
     assert [item.phase for item in console._handles] == ["prefill"]
 
 
-def test_one_token_decode_steps_the_mtp_cache() -> None:
+def test_decode_always_uses_the_mtp_cycle() -> None:
     runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
     runtime.tokens = list(range(3000))
     runtime._mtp_on = True
@@ -1140,21 +1129,29 @@ def test_one_token_decode_steps_the_mtp_cache() -> None:
     runtime._log_decode = lambda: None
     picks = iter((7, 9))
     runtime._pick = lambda *_args: next(picks)
-    calls: list[tuple[object, ...]] = []
+    seen: list[tuple[int, bool]] = []
 
-    def forward(tokens: list[int], decode: bool = False) -> object:
-        del decode
-        calls.append(("forward", tuple(tokens)))
-        return object()
+    def cycle(
+        first: int,
+        produced: list[int],
+        room: int,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        *,
+        echo: bool,
+    ) -> list[int]:
+        del produced, room, temperature, top_p, top_k
+        seen.append((first, echo))
+        runtime._mtp_stopped = False
+        runtime.last_logits = object()
+        return [first] if echo else []
 
-    def step(token: int, *, reuse: bool, head: bool) -> None:
-        calls.append(("step", token, reuse, head))
-
-    runtime.forward = forward
-    runtime._mtp_step = step
+    runtime._mtp_cycle = cycle
     produced = list(runtime._new_tokens(object(), None, 0.0, 1.0, 0))
     assert produced == [7]
-    assert calls == [("forward", (7,)), ("step", 7, False, False)]
+    assert seen == [(7, True)]
+    assert runtime._mtp_drafts is False
 
 
 def test_prefetch_stops_when_the_atlas_cannot_hold_the_layer() -> None:

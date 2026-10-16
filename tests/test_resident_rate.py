@@ -18,6 +18,9 @@ def test_resident_kept_span_exceeds_10_tok_s() -> None:
     if not (root / "manifest.json").is_file():
         pytest.skip("quantized record is not installed")
     runtime = pipeline.Qwen38Runtime(root)
+    # This check is a kept span of four. Decode's own draft depth is one.
+    runtime._draft_limit = 3
+    runtime._mtp_drafts = True
     try:
         prompt = runtime.encode_chat(
             [{"role": "user", "content": "Count to four."}],

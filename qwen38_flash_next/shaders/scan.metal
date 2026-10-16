@@ -768,6 +768,7 @@ kernel void indexer_block_score(
         return;
     }
     threadgroup float pooled[128];
+    threadgroup float warp[4];
     for (uint d = lane; d < 128u; d += tg_size) {
         float sum = 0.0f;
         uint token = block * 4u;
@@ -778,34 +779,39 @@ kernel void indexer_block_score(
         pooled[d] = sum * 0.25f;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    // One query: every lane owns one dimension, and lane 0 adds them in
-    // dimension order so the dot matches the serial sum.
-    if (count <= 1u) {
-        uint pos = base;
-        if (block >= pos / 4u) {
-            if (lane == 0u) {
-                scores[block] = 0.0f;
+    // A decode span is at most four queries. Every lane owns one channel and
+    // the head dot is a simd sum. A prefill chunk keeps one query per lane.
+    if (count <= 4u) {
+        for (uint query = 0u; query < count; ++query) {
+            uint pos = base + query;
+            uint slot = query * n_blocks + block;
+            if (block >= pos / 4u) {
+                if (lane == 0u) {
+                    scores[slot] = 0.0f;
+                }
+                continue;
             }
-            return;
-        }
-        threadgroup float parts[4][128];
-        if (lane < 128u) {
-            for (uint head = 0u; head < 4u; ++head) {
-                float q = index_qk[head * 128u + lane];
-                parts[head][lane] = q * pooled[lane];
-            }
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (lane == 0u) {
             float acc = 0.0f;
             for (uint head = 0u; head < 4u; ++head) {
-                float dot = 0.0f;
-                for (uint d = 0u; d < 128u; ++d) {
-                    dot += parts[head][d];
+                float product = 0.0f;
+                if (lane < 128u) {
+                    uint q = query * 640u + head * 128u + lane;
+                    product = index_qk[q] * pooled[lane];
                 }
-                acc += max(dot, 0.0f);
+                float partial = simd_sum(product);
+                if ((lane & 31u) == 0u && lane < 128u) {
+                    warp[lane >> 5u] = partial;
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                if (lane == 0u) {
+                    float dot = warp[0] + warp[1] + warp[2] + warp[3];
+                    acc += max(dot, 0.0f);
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
             }
-            scores[block] = acc;
+            if (lane == 0u) {
+                scores[slot] = acc;
+            }
         }
         return;
     }

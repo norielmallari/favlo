@@ -311,6 +311,8 @@ class Qwen38Runtime:
         self.kv_v_tail = {index: self.gpu.alloc(tail) for index in attention}
         self.indexer_buf = {index: self.gpu.alloc(INDEX_BF16_BYTES) for index in attention}
         self._mtp_on = False
+        self._mtp_drafts = False
+        self._draft_limit = 1
         self._span_snap = False
         self._span_snap_count = 0
         self._mtp_stopped = False
@@ -456,6 +458,7 @@ class Qwen38Runtime:
             "_tok_conv",
             "_tok_ple",
             "_tok_kv",
+            "_tok_residual",
             "_stage",
             "_stage_table",
             "_stage_miss",
@@ -940,6 +943,8 @@ class Qwen38Runtime:
         self._begin_drafts()
         # The first sampled token fills the atlas. Later tokens reuse it.
         self._atlas_trusted = False
+        self._carry = None
+        self._carry_yielded = False
         produced_ids: list[int] = []
         produced = 0
         try:
@@ -948,10 +953,17 @@ class Qwen38Runtime:
                 if max_tokens is not None and produced >= max_tokens:
                     self._hit_limit = True
                     return
-                token = self._pick(logits, temperature, top_p, top_k, produced_ids)
+                carried = self._carry
+                if carried is not None:
+                    token = carried
+                    self._carry = None
+                    echo = False
+                else:
+                    token = self._pick(logits, temperature, top_p, top_k, produced_ids)
+                    echo = True
                 if token in self.stop_ids:
                     return
-                room = getattr(self, "_draft_limit", 3) + 1
+                room = getattr(self, "_draft_limit", 1) + 1
                 if max_tokens is not None:
                     room = max_tokens - produced
                 if room <= 0:
@@ -960,31 +972,33 @@ class Qwen38Runtime:
                 # Prefill logits keep that scratch alive. Drop them before decode arenas.
                 self.last_logits = None
                 logits = None
-                if self._mtp_drafts:
-                    pending = self._mtp_cycle(
-                        token, produced_ids, room, temperature, top_p, top_k
-                    )
-                    logits = self.last_logits
-                    stopped = self._mtp_stopped
-                else:
-                    pending = [token]
-                    logits = self.forward([token], decode=True)
-                    # The backbone cache advanced with this token. The MTP
-                    # layer has to follow, or the next prefill finds it behind.
-                    if self._mtp_on:
-                        self._mtp_step(token, reuse=False, head=False)
-                    stopped = False
-                for item in pending:
+                pending = self._mtp_cycle(
+                    token,
+                    produced_ids,
+                    room,
+                    temperature,
+                    top_p,
+                    top_k,
+                    echo=echo,
+                )
+                logits = self.last_logits
+                stopped = self._mtp_stopped
+                carry_pending = self._carry is not None
+                pending_count = len(pending)
+                for index, item in enumerate(pending):
                     self._check_stop()
                     self._output_ids.append(item)
                     yield item
                     produced += 1
                     produced_ids.append(item)
+                    if carry_pending and index == pending_count - 1:
+                        self._carry_yielded = True
                     if self.required_function and "</tool_call>" in self.decode(produced_ids):
                         return
                 if stopped:
                     return
         finally:
+            self._flush_carry()
             self._log_decode()
 
     def _begin_drafts(self) -> None:
@@ -1695,7 +1709,7 @@ class Qwen38Runtime:
         self.gpu.begin_scratch(scratch_bytes(1), copies=2)
         try:
             chosen = [first]
-            for _step in range(min(getattr(self, "_draft_limit", 3), extras)):
+            for _step in range(min(getattr(self, "_draft_limit", 1), extras)):
                 self._check_stop()
                 if self._draft_blocked(produced + chosen):
                     break
@@ -1741,6 +1755,27 @@ class Qwen38Runtime:
         self._mtp_copy(self._mtp_backbone, self._mtp_hidden, span)
         self.gpu.flush()
 
+    def _flush_carry(self) -> None:
+        """Forward a corrected token the request yielded and did not span."""
+        token = getattr(self, "_carry", None)
+        if token is None:
+            return
+        yielded = getattr(self, "_carry_yielded", False)
+        self._carry = None
+        if not yielded or token in self.stop_ids:
+            return
+        self._mtp_cycle(token, [], 1, 0.0, 1.0, 0, echo=False)
+
+    def _visible_commit(self, tokens: list[int], echo: bool) -> list[int]:
+        if echo or not tokens:
+            return tokens
+        return tokens[1:]
+
+    def _can_carry(self, stopped: bool) -> bool:
+        if stopped or not self._mtp_on or self._mtp_hidden is None:
+            return False
+        return getattr(self, "_tok_residual", None) is not None
+
     def _mtp_cycle(
         self,
         first: int,
@@ -1749,12 +1784,14 @@ class Qwen38Runtime:
         temperature: float,
         top_p: float,
         top_k: int,
+        *,
+        echo: bool = True,
     ) -> list[int]:
-        """One backbone forward of the drafted span. Rejected tokens are not committed."""
+        """One backbone forward. Drafts run only while MTP is enabled."""
         started = time.perf_counter()
         # The previous span's experts load while the draft steps run. Grow the
         # cache first so that load is not issued into an atlas about to drop.
-        span_room = min(max(room, 1), getattr(self, "_draft_limit", 3) + 1)
+        span_room = min(max(room, 1), getattr(self, "_draft_limit", 1) + 1)
         if self._predicted:
             self._make_room_for_cache(span_room)
             if self.atlas is not None:
@@ -1764,15 +1801,22 @@ class Qwen38Runtime:
         if not hasattr(self, "_mtp_full"):
             self._mtp_full = 0
             self._mtp_partial = 0
-        span_n = self.branches * self.hidden
-        self._mtp_copy(self._mtp_hidden, self._mtp_hidden_snap, span_n)
-        self._mtp_snap_kv()
+        if self._mtp_on:
+            span_n = self.branches * self.hidden
+            self._mtp_copy(self._mtp_hidden, self._mtp_hidden_snap, span_n)
+            self._mtp_snap_kv()
         self._mtp_index_n = 0
         drafts: list[int] = []
         views: list[Dev] = []
         opened = produced + [first]
         closed = bool(self.required_function) and "</tool_call>" in self.decode(opened)
-        if room > 1 and not closed and self._span_experts() and not self._draft_blocked(opened):
+        if (
+            self._mtp_drafts
+            and room > 1
+            and not closed
+            and self._span_experts()
+            and not self._draft_blocked(opened)
+        ):
             drafts, views = self._mtp_propose(
                 first, produced, room - 1, temperature, top_p, top_k
             )
@@ -1791,9 +1835,10 @@ class Qwen38Runtime:
         if len(drafts) == 0:
             self.forward([first], decode=True, account=False)
             self._mtp_hold_logits()
-            self._mtp_replay([first])
+            if self._mtp_on:
+                self._mtp_replay([first])
             bill(1)
-            return [first]
+            return self._visible_commit([first], echo)
         logits = self.forward(span, decode=True, commit=False, account=False)
         held = self._mtp_hold_rows(logits, len(span))
         kept = [first]
@@ -1823,30 +1868,49 @@ class Qwen38Runtime:
                 self._mtp_replay(span)
             self._mtp_full += 1
             bill(len(span))
-            return span
+            return self._visible_commit(span, echo)
         commit = list(kept)
-        if correction is not None and correction in self.stop_ids:
+        stopped = correction is not None and correction in self.stop_ids
+        if stopped:
             self._mtp_stopped = True
         elif correction is not None:
             commit.append(correction)
-        # The span already applied the kept tokens. Restore that position and
-        # forward only the token that replaced a rejected guess.
-        if self._span_snap_count == len(span) and len(kept) >= 1:
+        # The span already applied the kept tokens. The corrected token is the
+        # first token of the next span, so it is forwarded once.
+        snapped = self._span_snap_count == len(span) and len(kept) >= 1
+        deferred = False
+        if snapped and correction is not None and self._can_carry(stopped):
             self._restore_span_prefix(len(kept))
             self.tokens.extend(kept)
             self._prefix_dirty = True
-            if correction is not None and correction not in self.stop_ids:
-                self.forward([correction], decode=True, account=False)
+            span_n = self.branches * self.hidden
+            self.gpu.copy_bytes(
+                self._tok_residual,
+                (len(kept) - 1) * span_n * 4,
+                self._mtp_hidden,
+                0,
+                span_n * 4,
+            )
+            self._mtp_replay(kept)
+            self._carry = int(correction)
+            self._carry_yielded = False
+            deferred = True
+        elif snapped:
+            self._restore_span_prefix(len(kept))
+            self.tokens.extend(kept)
+            self._prefix_dirty = True
+            self._mtp_hold_logits()
+            self._mtp_replay(commit)
         else:
             if self._mtp_draft_clean:
                 self._mtp_restore_kv()
             self._restore_recurrent()
             self.forward(commit, decode=True, account=False)
-        self._mtp_hold_logits()
-        self._mtp_replay(commit)
+            self._mtp_hold_logits()
+            self._mtp_replay(commit)
         self._mtp_partial += 1
-        bill(len(commit))
-        return commit
+        bill(len(kept) if deferred else len(commit))
+        return self._visible_commit(commit, echo)
 
     def _mtp_hold_logits(self) -> None:
         """Keep the backbone logits off the scratch arena the draft reuses."""
@@ -1879,16 +1943,8 @@ class Qwen38Runtime:
         residual = self._embed_dev(tokens)
         span = self.branches * self.hidden
         step = count if self._decoding else self.prefill_chunk
-        wide = self._streaming_prefill and count > self.prefill_chunk
-        if wide:
-            self._ensure_hold(count)
         for layer in range(self.layers):
             self._check_stop()
-            submitted = False
-            bundle = None
-            if wide and layer + 1 < self.layers:
-                self._submit_prefill_layer(layer + 1)
-                submitted = True
             for offset in range(0, count, step):
                 n = min(step, count - offset)
                 view = residual.view(offset * span, n * span)
@@ -1915,44 +1971,26 @@ class Qwen38Runtime:
                     self._inject_dev(view, hats, mixed, bundle["attn_inject"], n)
                     hats = self._rms_branches(view, bundle["mlp_norm"], n)
                     xs = self._gr_dev(bundle["mlp_down"], bundle["mlp_up"], hats, n)
-                    if wide:
-                        self.gpu.copy_bytes(
-                            xs.buf,
-                            xs.offset * 4,
-                            self._hold_xs,
-                            offset * self.hidden * 4,
-                            n * self.hidden * 4,
-                        )
-                        self.gpu.barrier()
-                    else:
-                        mixed = self._moe_dev(
-                            layer,
-                            bundle,
-                            xs,
-                            n,
-                            submit_next=self._streaming_prefill and not submitted,
-                        )
-                        submitted = True
-                        if self._bf16:
-                            self.expert_cache.clear()
-                        self._inject_dev(view, hats, mixed, bundle["mlp_inject"], n)
+                    mixed = self._moe_dev(layer, bundle, xs, n)
+                    if self._bf16:
+                        self.expert_cache.clear()
+                    self._inject_dev(view, hats, mixed, bundle["mlp_inject"], n)
                     if not self._decoding:
                         self._note_prefill(layer, offset + n, count)
                     if self._decoding and self.atlas is not None:
                         self.gpu.submit()
-                # Packed n-gram loads land in this scratch arena. The next rewind
-                # reuses those offsets, so this chunk finishes before that rewind.
-                if wide and (layer + 1) in self.ple_layers:
-                    self.gpu.flush()
-            if wide:
-                if bundle is None:
-                    message = "prefill layer had no tokens"
-                    raise RuntimeError(message)
-                self._moe_wide(layer, bundle, residual, count)
         if self._mtp_on and not self._decoding and tokens:
             self._mtp_prefill(residual, tokens)
         if self._mtp_on and tokens:
             self._mtp_keep_residual(residual, count)
+        if self._span_snap and getattr(self, "_tok_residual", None) is not None:
+            self.gpu.copy_bytes(
+                residual.buf,
+                residual.offset * 4,
+                self._tok_residual,
+                0,
+                count * span * 4,
+            )
         self.gpu.rewind_scratch()
         final = self._final_bundle()
         positions = count if self._decoding and count > 1 else 1
@@ -1994,14 +2032,24 @@ class Qwen38Runtime:
         return logits
 
     def _prepare_experts(self, *, decode: bool, count: int) -> None:
+        """One expert path. Prefill and decode both miss into the atlas.
+
+        The prompt cache is reserved first, so the atlas is the RAM that
+        sequence leaves. A later chunk reads an expert that is already resident.
+        """
         if self._bf16:
             return
-        if decode or count <= self.prefill_chunk:
-            # Cold and warm prompts that fit in one chunk miss into the atlas.
-            # Decode then reads those images from RAM.
-            self._ensure_atlas()
-            return
-        self._begin_prefill_stream()
+        if not decode and count > 0:
+            end = len(self.tokens) + count
+            try:
+                self._reserve_caches(end)
+            except RuntimeError:
+                if self.atlas is None:
+                    raise
+                self._release_atlas()
+                self.resident_candidates = ()
+                self._reserve_caches(end)
+        self._ensure_atlas()
 
     def _cache_covers(self, tokens: int) -> bool:
         if tokens <= 0 or not self.kv_k:
@@ -2088,11 +2136,60 @@ class Qwen38Runtime:
         )
         return atlas_fallbacks(budget)
 
+    def _refit_atlas(self) -> None:
+        """Release an atlas that was sized for a shorter sequence.
+
+        The buffer stays mapped across a long suffix. Once the cache has grown,
+        a buffer more than 1 GiB above the budget for this length is released.
+        The next allocation uses the budget the live sequence leaves. A fixed
+        resident percent is left as requested.
+        """
+        if self.atlas is None or self.resident_percent is not None:
+            return
+        tokens = len(self.tokens)
+        checked = int(getattr(self, "_atlas_fit_tokens", -PREFILL_CHUNK))
+        if tokens < checked + PREFILL_CHUNK:
+            return
+        self._atlas_fit_tokens = tokens
+        layers = sum(kind == "full_attention" for kind in self.kinds)
+        if self._mtp_on:
+            layers += 1
+        per_token = kv_bytes_per_token(layers, cache=self.kv_cache)
+        growth = cache_growth_bytes(tokens, per_token)
+        # Physical footprint shrinks when the atlas is compressed, so subtracting
+        # the buffer from it sizes the next atlas as if that RAM were free.
+        # The footprint from before this buffer, plus the cache added since, is
+        # the working set the next budget has to leave in place.
+        base = getattr(self, "_atlas_base_footprint", None)
+        if base is None:
+            return
+        base_tokens = int(getattr(self, "_atlas_base_tokens", 0))
+        added = max(0, tokens - base_tokens) * per_token
+        budget = atlas_budget(
+            memory=machine_memory(),
+            content_bytes=getattr(self, "_tier_bytes", 0),
+            footprint=int(base) + added,
+            growth=growth,
+        )
+        if int(self.atlas.budget) <= budget + (1 << 30):
+            return
+        candidates = atlas_fallbacks(budget)
+        self._release_atlas()
+        self.resident_candidates = candidates
+        self.resident_budget = candidates[0]
+        _log(
+            f"resident atlas refit {self.resident_budget >> 20} MiB for {tokens} tokens"
+        )
+
     def _ensure_atlas(self) -> None:
-        if self._bf16 or self.atlas is not None:
+        if self._bf16:
             return
         if not isinstance(self.files, QuantRecord):
             return
+        if self.atlas is not None:
+            self._refit_atlas()
+            if self.atlas is not None:
+                return
         candidates = self.resident_candidates
         if not candidates:
             candidates = self._live_atlas_candidates()
@@ -2101,6 +2198,8 @@ class Qwen38Runtime:
                 f"resident atlas {self.resident_budget >> 20} MiB "
                 f"for {len(self.tokens)} tokens"
             )
+        self._atlas_base_footprint = process_footprint()
+        self._atlas_base_tokens = len(self.tokens)
         self.atlas = ExpertAtlas(
             self.gpu, self.files, self.layers, self.experts, candidates
         )
@@ -2636,9 +2735,9 @@ class Qwen38Runtime:
     def _ensure_tok_snaps(self) -> bool:
         """Four positions of recurrent state, allocated before the atlas.
 
-        A partial accept restores one of these and forwards only the corrected
-        token. The copies are about 450 MiB. Reserving them first lets the
-        atlas shrink by that much instead of failing beside a full atlas.
+        A partial accept restores one of these. The corrected token is forwarded
+        with the next span. The copies are about 450 MiB. Reserving them first
+        lets the atlas shrink by that much instead of failing beside a full atlas.
         """
         if self.kv_cache != "e4m3":
             return False
@@ -2688,6 +2787,12 @@ class Qwen38Runtime:
                 layer_slots.append((key_tail, value_tail, key_body, value_body))
             kv[layer] = layer_slots
             kv_len[layer] = [0] * slots
+        residual = alloc(slots * self.branches * self.hidden * 4)
+        if residual is None:
+            for buf in kept:
+                discard_buffer(buf)
+            return False
+        self._tok_residual = residual
         self._tok_gdn = gdn
         self._tok_conv = conv
         self._tok_ple = ple
