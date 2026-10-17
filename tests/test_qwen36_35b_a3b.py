@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
+import pytest
 from qwen36_35b_a3b.atlas import atlas_slots
 from qwen36_35b_a3b.cache import kv_buffer_bytes, kv_mode, max_position, parse_memory
 from qwen36_35b_a3b.checks import run_checks
 from qwen36_35b_a3b.formats import EXPERT_IMAGE, dequant_fp4, fp4_image, quantize_fp4
-from qwen36_35b_a3b.tools import function_has_parameters, parse_tool_calls, required_function
+from qwen36_35b_a3b.tools import (
+    StreamText,
+    function_has_parameters,
+    parse_tool_calls,
+    required_function,
+)
 
 
 def test_fp4_tie_picks_the_even_code() -> None:
@@ -26,6 +35,225 @@ def test_expert_image_is_two_fp4_planes() -> None:
     gate = np.zeros((1024, 2048), dtype=np.float32)
     down = np.zeros((2048, 512), dtype=np.float32)
     assert len(fp4_image(gate) + fp4_image(down)) == EXPERT_IMAGE
+
+
+def test_stream_delta_holds_a_partial_character() -> None:
+    from qwen36_35b_a3b.chat import _stream_delta
+
+    piece, shown = _stream_delta("hello\ufffd", "", final=False)
+    assert piece == "hello"
+    assert shown == "hello"
+    piece, shown = _stream_delta("hello世", shown, final=False)
+    assert piece == "世"
+    assert shown == "hello世"
+
+
+def test_stream_chunks_carry_reasoning_then_the_reply() -> None:
+    from types import SimpleNamespace
+
+    from qwen36_35b_a3b.chat import _stream
+
+    class _Handler:
+        _model_id = "qwen36-35b-a3b"
+        _started = False
+        close_connection = False
+        events: list[dict] = []
+        sent: list[bytes] = []
+        connection = SimpleNamespace(settimeout=lambda *_args, **_kwargs: None)
+
+        def send_response(self, _code: int) -> None:
+            return None
+
+        def send_header(self, *_args: object) -> None:
+            return None
+
+        def end_headers(self) -> None:
+            return None
+
+        def _event(self, payload: dict) -> None:
+            self.events.append(payload)
+
+        def _send(self, data: bytes) -> None:
+            self.sent.append(data)
+
+    class _Runtime:
+        _hit_limit = False
+        _cached_tokens = 2
+        _prefill_seconds = 2.0
+        _decode_seconds = 4.0
+        _output_ids: list[int] = []
+
+        def decode(self, ids: list[int]) -> str:
+            words = {1: "Need", 2: " to", 3: "</think>", 4: "4"}
+            return "".join(words[token] for token in ids)
+
+        def generate(self, prompt, limit, temperature, top_p, top_k, presence, stop, **kwargs):
+            del prompt, limit, temperature, top_p, top_k, presence, stop
+            ids = [1, 2, 3, 4]
+            on_token = kwargs["on_token"]
+            for token in ids:
+                on_token(token)
+            self._output_ids = ids
+            return ids
+
+    handler = _Handler()
+    handler.events = []
+    handler.sent = []
+    _stream(handler, _Runtime(), [9, 9, 9], [], False, 8, 0.0, 1.0, 1, 0.0, True)
+    assert handler.sent == [b"data: [DONE]\n\n"]
+    seen: list[tuple[str, object]] = []
+    for payload in handler.events:
+        assert payload["object"] == "chat.completion.chunk"
+        assert payload["id"] == "chatcmpl-madmetal"
+        assert payload["model"] == "qwen36-35b-a3b"
+        assert isinstance(payload["created"], int)
+        choices = payload["choices"]
+        if not choices:
+            seen.append(("usage", payload["usage"]["timings"]["predicted_n"]))
+            assert payload["usage"]["timings"]["prompt_n"] == 1
+            assert payload["usage"]["timings"]["predicted_per_second"] == 1.0
+            continue
+        delta = choices[0]["delta"]
+        if "reasoning_content" in delta:
+            seen.append(("reasoning", delta["reasoning_content"]))
+        elif "content" in delta:
+            seen.append(("content", delta["content"]))
+        elif choices[0].get("finish_reason"):
+            seen.append(("finish", choices[0]["finish_reason"]))
+    assert seen == [
+        ("reasoning", "Need"),
+        ("reasoning", " to"),
+        ("content", "4"),
+        ("finish", "stop"),
+        ("usage", 4),
+    ]
+
+
+def _qwen36_record() -> Path | None:
+    from madmetal.registry import load_registry, models_dir
+
+    root = models_dir()
+    for folder, entry in load_registry()["models"].items():
+        if entry.get("pipeline") != "qwen36-35b-a3b":
+            continue
+        path = root / folder
+        if (path / "tokenizer.json").is_file() and (path / "chat_template.jinja").is_file():
+            return path
+    return None
+
+
+def test_openai_client_streams_the_completion(monkeypatch: pytest.MonkeyPatch) -> None:
+    openai = pytest.importorskip("openai")
+    from qwen36_35b_a3b.chat import handle_chat
+    from tokenizers import Tokenizer
+
+    from madmetal import listener
+
+    root = _qwen36_record()
+    if root is None:
+        pytest.skip("qwen36 record is not registered")
+    tokenizer = Tokenizer.from_file(str(root / "tokenizer.json"))
+    ids = tokenizer.encode("Need to").ids + [248069] + tokenizer.encode("4").ids
+    rendered = tokenizer.decode(ids)
+    reasoning_expect, _, content_expect = rendered.partition("</think>")
+    content_expect = content_expect.lstrip("\n")
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.root = root
+            self._hit_limit = False
+            self._halted = False
+            self._stop = None
+            self._cached_tokens = 0
+            self._prefill_seconds = 0.5
+            self._decode_seconds = 0.25
+            self._output_ids: list[int] = []
+
+        def generate(self, prompt, limit, temperature, top_p, top_k, presence, stop, **kwargs):
+            del prompt, limit, temperature, top_p, top_k, presence, stop
+            on_token = kwargs["on_token"]
+            for token in ids:
+                on_token(int(token))
+            self._output_ids = [int(token) for token in ids]
+            return list(self._output_ids)
+
+    state: dict = {
+        "runtime": _Runtime(),
+        "server": None,
+        "record": None,
+        "module": SimpleNamespace(handle_chat=handle_chat),
+        "pipeline": "qwen36-35b-a3b",
+        "requests": 0,
+    }
+
+    def bind(body, bound_state, bound_args):
+        del body, bound_state, bound_args
+        return SimpleNamespace(requested_id="qwen36-35b-a3b", variant=None, sampling=None)
+
+    monkeypatch.setattr(listener, "_bind_request", bind)
+    args = SimpleNamespace(host="127.0.0.1", port=0, lazy=False, transcript=None)
+    thread = threading.Thread(target=listener._serve_loop, args=(args, state), daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 5
+    while state["server"] is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    server = state["server"]
+    assert server is not None
+    port = int(server.server_address[1])
+    try:
+        client = openai.OpenAI(
+            base_url=f"http://127.0.0.1:{port}/v1",
+            api_key="local",
+        )
+        stream = client.chat.completions.create(
+            model="qwen36-35b-a3b",
+            messages=[{"role": "user", "content": "2+2"}],
+            max_tokens=8,
+            stream=True,
+            extra_body={"enable_thinking": True},
+        )
+        reasoning: list[str] = []
+        content: list[str] = []
+        finish = None
+        for chunk in stream:
+            assert chunk.id == "chatcmpl-madmetal"
+            assert chunk.object == "chat.completion.chunk"
+            assert chunk.model == "qwen36-35b-a3b"
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            delta = choice.delta
+            piece = getattr(delta, "reasoning_content", None)
+            if piece is None and isinstance(getattr(delta, "model_extra", None), dict):
+                piece = delta.model_extra.get("reasoning_content")
+            if piece:
+                reasoning.append(piece)
+            if delta.content:
+                content.append(delta.content)
+            if choice.finish_reason:
+                finish = choice.finish_reason
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+    assert "".join(reasoning) == reasoning_expect
+    assert "".join(content) == content_expect
+    assert finish == "stop"
+
+
+def test_stream_text_emits_reasoning_then_reply() -> None:
+    gate = StreamText(True)
+    pieces = ("rea", "son</thi", "nk>\nans", "wer<tool_ca", "ll>")
+    emitted: list[tuple[str, str]] = []
+    for piece in pieces:
+        emitted.extend(gate.push(piece))
+    emitted.extend(gate.finish())
+    assert emitted == [
+        ("reasoning", "rea"),
+        ("reasoning", "son"),
+        ("content", "ans"),
+        ("content", "wer"),
+    ]
 
 
 def test_tool_call_text_becomes_an_openai_call() -> None:

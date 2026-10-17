@@ -114,6 +114,82 @@ def _normalize_call(call: dict[str, Any]) -> dict[str, Any]:
     return {"name": function.get("name") or "", "arguments": arguments}
 
 
+_THINK_CLOSE = "</think>"
+_TOOL_OPEN = "<tool_call>"
+
+
+def _held_suffix(text: str, marker: str) -> int:
+    """How many trailing characters of ``text`` are a proper prefix of ``marker``."""
+    limit = min(len(text), len(marker) - 1)
+    for size in range(limit, 0, -1):
+        if marker.startswith(text[-size:]):
+            return size
+    return 0
+
+
+class StreamText:
+    """Reasoning and reply as tokens arrive.
+
+    Thinking stays open until ``</think>``. A reply suffix that may still grow
+    into ``<tool_call>`` is held back so the client does not see the call XML.
+    """
+
+    def __init__(self, thinking: bool) -> None:
+        self._reasoning = thinking
+        self._held = ""
+        self._in_call = False
+
+    def push(self, piece: str) -> list[tuple[str, str]]:
+        if piece == "" or self._in_call:
+            return []
+        self._held += piece
+        if self._reasoning:
+            return self._push_reasoning()
+        return self._push_reply()
+
+    def finish(self) -> list[tuple[str, str]]:
+        if self._in_call or not self._held:
+            self._held = ""
+            return []
+        channel = "reasoning" if self._reasoning else "content"
+        emit = self._held
+        self._held = ""
+        return [(channel, emit)]
+
+    def _push_reasoning(self) -> list[tuple[str, str]]:
+        at = self._held.find(_THINK_CLOSE)
+        if at < 0:
+            keep = _held_suffix(self._held, _THINK_CLOSE)
+            emit = self._held[:-keep] if keep else self._held
+            self._held = self._held[-keep:] if keep else ""
+            return [("reasoning", emit)] if emit else []
+        reasoning = self._held[:at]
+        rest = self._held[at + len(_THINK_CLOSE) :]
+        self._held = ""
+        self._reasoning = False
+        out: list[tuple[str, str]] = []
+        if reasoning:
+            out.append(("reasoning", reasoning))
+        out.extend(self.push(rest.lstrip("\n")))
+        return out
+
+    def _push_reply(self) -> list[tuple[str, str]]:
+        at = self._held.find(_TOOL_OPEN)
+        if at >= 0:
+            emit = self._held[:at]
+            self._held = ""
+            self._in_call = True
+            return [("content", emit)] if emit else []
+        keep = _held_suffix(self._held, _TOOL_OPEN)
+        if keep == 0:
+            emit = self._held
+            self._held = ""
+            return [("content", emit)] if emit else []
+        emit = self._held[:-keep]
+        self._held = self._held[-keep:]
+        return [("content", emit)] if emit else []
+
+
 def split_thinking(text: str, thinking: bool) -> tuple[str, str]:
     """Reasoning and reply. A closed think block in the prompt leaves only the reply."""
     if not thinking:

@@ -89,6 +89,10 @@ def _file_buffer(session: Session, path: Path) -> Any:
     return buffer
 
 
+class RequestClosed(Exception):
+    """The client closed, or the listener asked the forward to stop."""
+
+
 class Qwen36Runtime:
     """One resident record. ``close`` drops its buffers."""
 
@@ -107,6 +111,8 @@ class Qwen36Runtime:
         self.kv_cache = kv_mode(kv_cache)
         self._request_id = 0
         self._hit_limit = False
+        self._halted = False
+        self._stop = None
         manifest_path = self.root / "manifest.json"
         if not manifest_path.is_file():
             message = f"{self.root.name} has no manifest.json"
@@ -164,7 +170,13 @@ class Qwen36Runtime:
             bind_plane(self)
         self.filled = 0
         self._prefill = None
+        self._prefill_progress = None
+        self._prefill_base = 0
         self._cached: list[int] = []
+        self._cached_tokens = 0
+        self._prefill_seconds = 0.0
+        self._decode_seconds = 0.0
+        self._output_ids: list[int] = []
         used = reserved + self.atlas.slots * self.atlas.file_bytes
         print(
             f"loaded {self.root.name} kv {self.kv_cache} context {self.max_pos} "
@@ -181,6 +193,17 @@ class Qwen36Runtime:
             *self.v_cache,
         ]
 
+    def halt(self) -> None:
+        """Stop at the next layer. The listener calls this on SIGINT and SIGTERM."""
+        self._halted = True
+
+    def _check_stop(self) -> None:
+        if self._halted:
+            raise RequestClosed()
+        stop = self._stop
+        if stop is not None and stop():
+            raise RequestClosed()
+
     def close(self) -> None:
         self._prefill = None
         self._held.clear()
@@ -196,6 +219,8 @@ class Qwen36Runtime:
         restart = self.session._recording
         if restart:
             self.session.end()
+        else:
+            self.session.wait_inflight()
         found = self.atlas.load(layer)
         if restart:
             self.session.begin()
@@ -474,6 +499,7 @@ class Qwen36Runtime:
         )
 
     def step(self, token: int, pos: int, *, logits: bool) -> np.ndarray | None:
+        self._check_stop()
         if pos >= self.max_pos:
             message = f"position {pos} is past {self.max_pos}"
             raise RuntimeError(message)
@@ -515,66 +541,144 @@ class Qwen36Runtime:
         stop: set[int],
         forced: list[int] | None = None,
         stop_after_forced: bool = False,
+        on_token: Any = None,
     ) -> list[int]:
         self._hit_limit = False
+        self._output_ids = []
+        self._prefill_seconds = 0.0
+        self._decode_seconds = 0.0
         if not prompt:
+            self._cached_tokens = 0
             return []
         prompt = [int(token) for token in prompt]
-        print(f"prompt tokens {len(prompt)}", flush=True)
+        self._status(f"prompt tokens {len(prompt)}")
         cached = self._cached
         self._cached = []
         if cached and prompt[: len(cached)] == cached and len(prompt) > len(cached):
             hit = len(cached)
-            print(f"cache hit {hit}", flush=True)
+            self._status(f"cache hit {hit}")
         else:
             hit = 0
             self.reset()
-            print("cache miss", flush=True)
+            self._status("cache miss")
+        self._cached_tokens = hit
         suffix = prompt[hit:]
-        started = time.perf_counter()
-        if len(suffix) > 1:
-            from qwen36_35b_a3b.prefill import prefill_ids
+        prefill_row = None
+        decode_row = None
+        try:
+            prefill_row = self._begin_phase("prefill", len(suffix))
+            self._prefill_progress = prefill_row
+            started = time.perf_counter()
+            if len(suffix) > 1:
+                from qwen36_35b_a3b.prefill import prefill_ids
 
-            prefill_ids(self, suffix[:-1], hit)
-        logits = self.step(suffix[-1], len(prompt) - 1, logits=True)
-        assert logits is not None
-        elapsed = time.perf_counter() - started
-        print(
-            f"prefill {len(suffix) / elapsed:.2f} tok/s ({len(suffix)} tok in {elapsed:.2f}s)",
-            flush=True,
-        )
-        pending = list(forced or [])
-        close_after = bool(stop_after_forced) and bool(pending)
-        seen: set[int] = set()
-        out: list[int] = []
-        decode_started = time.perf_counter()
-        for count in range(max_tokens):
-            if pending:
-                nxt = int(pending.pop(0))
-                finished_forced = close_after and not pending
-            else:
-                nxt = _sample(logits, temperature, top_p, top_k, presence, seen)
-                finished_forced = False
-            if nxt in stop:
-                break
-            out.append(nxt)
-            seen.add(nxt)
-            if finished_forced:
-                self.step(nxt, len(prompt) + count, logits=False)
-                break
-            if count + 1 == max_tokens:
-                self._hit_limit = True
-                break
-            logits = self.step(nxt, len(prompt) + count, logits=True)
+                self._prefill_base = 0
+                prefill_ids(self, suffix[:-1], hit)
+            logits = self.step(suffix[-1], len(prompt) - 1, logits=True)
             assert logits is not None
-        decode_elapsed = max(time.perf_counter() - decode_started, 1e-9)
-        print(
-            f"decode {len(out) / decode_elapsed:.2f} tok/s "
-            f"({len(out)} tok in {decode_elapsed:.2f}s)",
-            flush=True,
-        )
+            self._note_prefill(len(suffix))
+            elapsed = max(time.perf_counter() - started, 1e-9)
+            self._prefill_seconds = elapsed
+            self._prefill_progress = None
+            self._end_phase(
+                prefill_row,
+                f"prefill {len(suffix) / elapsed:.2f} tok/s ({len(suffix)} tok in {elapsed:.2f}s)",
+            )
+            prefill_row = None
+            pending = list(forced or [])
+            close_after = bool(stop_after_forced) and bool(pending)
+            seen: set[int] = set()
+            out: list[int] = []
+            decode_row = self._begin_phase("decode", max_tokens, live=True)
+            decode_started = time.perf_counter()
+            for count in range(max_tokens):
+                self._check_stop()
+                if pending:
+                    nxt = int(pending.pop(0))
+                    finished_forced = close_after and not pending
+                else:
+                    nxt = _sample(logits, temperature, top_p, top_k, presence, seen)
+                    finished_forced = False
+                if nxt in stop:
+                    break
+                out.append(nxt)
+                seen.add(nxt)
+                if decode_row is not None:
+                    decode_row.done = len(out)
+                if on_token is not None:
+                    on_token(nxt)
+                if finished_forced:
+                    self.step(nxt, len(prompt) + count, logits=False)
+                    break
+                if count + 1 == max_tokens:
+                    self._hit_limit = True
+                    break
+                logits = self.step(nxt, len(prompt) + count, logits=True)
+                assert logits is not None
+            decode_elapsed = max(time.perf_counter() - decode_started, 1e-9)
+            self._decode_seconds = decode_elapsed
+            self._output_ids = list(out)
+            self._end_phase(
+                decode_row,
+                f"decode {len(out) / decode_elapsed:.2f} tok/s "
+                f"({len(out)} tok in {decode_elapsed:.2f}s)",
+            )
+            decode_row = None
+        finally:
+            self._prefill_progress = None
+            self._end_phase(prefill_row, "")
+            self._end_phase(decode_row, "")
         self._cached = prompt + out
         return out
+
+    def _status(self, line: str) -> None:
+        console = self.console
+        if console is None:
+            print(line, flush=True)
+            return
+        console.log(line)
+
+    def _begin_phase(self, phase: str, total: int, *, live: bool = False) -> Any:
+        console = self.console
+        if console is None:
+            return None
+        if live:
+            if not getattr(console, "live_decode", False):
+                return None
+            # An open-ended count. A fraction of max_tokens stays empty.
+            total = 0
+        elif total <= 0:
+            return None
+        detail = f"req #{self._request_id}" if self._request_id else ""
+        return console.begin(
+            phase,
+            total=total,
+            unit="tok",
+            detail=detail,
+            request=self._request_id or None,
+        )
+
+    def _end_phase(self, progress: Any, summary: str) -> None:
+        if progress is None:
+            if summary:
+                self._status(summary)
+            return
+        if progress.closed:
+            return
+        console = self.console
+        if console is None:
+            if summary:
+                print(summary, flush=True)
+            return
+        console.end(progress, summary)
+
+    def _note_prefill(self, done: int) -> None:
+        progress = self._prefill_progress
+        if progress is None:
+            return
+        capped = min(progress.total, done)
+        if capped > progress.done:
+            progress.done = capped
 
 
 def _sample(
@@ -585,28 +689,37 @@ def _sample(
     presence: float,
     seen: set[int],
 ) -> int:
-    scores = logits.astype(np.float64, copy=True)
-    if presence:
+    scores = logits
+    if presence and seen:
+        scores = np.array(logits, copy=True)
+        penalty = np.float32(presence)
         for token in seen:
-            scores[token] -= presence
+            scores[token] -= penalty
     if temperature == 0.0:
         return int(np.argmax(scores))
     if top_k > 0 and top_k < scores.size:
         keep = np.argpartition(scores, -top_k)[-top_k:]
-        banned = np.full(scores.shape, -np.inf)
-        banned[keep] = scores[keep]
-        scores = banned
-    scores = scores / temperature
-    scores -= np.max(scores)
-    probs = np.exp(scores)
-    total = np.sum(probs)
-    if not np.isfinite(total) or total <= 0:
-        return int(np.argmax(logits))
+        chosen = np.asarray(scores[keep], dtype=np.float64)
+        return int(keep[_draw(chosen, temperature, top_p)])
+    chosen = np.asarray(scores, dtype=np.float64)
+    return _draw(chosen, temperature, top_p)
+
+
+def _draw(chosen: np.ndarray, temperature: float, top_p: float) -> int:
+    """Sample one index from ``chosen``. ``top_p`` drops the tail of that vector."""
+    scaled = chosen / temperature
+    scaled -= np.max(scaled)
+    probs = np.exp(scaled)
+    total = float(np.sum(probs))
+    if not np.isfinite(total) or total <= 0.0:
+        return int(np.argmax(chosen))
     probs /= total
     if 0.0 < top_p < 1.0:
         order = np.argsort(probs)[::-1]
         running = np.cumsum(probs[order])
         cut = int(np.searchsorted(running, top_p) + 1)
-        probs[order[cut:]] = 0.0
-        probs /= np.sum(probs)
-    return int(np.random.choice(scores.size, p=probs))
+        order = order[:cut]
+        probs = probs[order]
+        probs /= float(np.sum(probs))
+        return int(order[int(np.random.choice(order.size, p=probs))])
+    return int(np.random.choice(chosen.size, p=probs))

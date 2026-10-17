@@ -1,8 +1,11 @@
 """Chunked prompt prefill. Projections are fp4 matmul2d tiles of 64 rows.
 
 Decode stays a GEMV. A chunk is at most 2048 tokens so a routed expert's
-group is large enough for that tile. The Gated DeltaNet scan is one dispatch
-per layer. Float attention is one dispatch per layer. fp8 and fp4 attention
+group is large enough for that tile. The groups are built on device, and the
+layer stays one command buffer. The Gated DeltaNet scan is chunks of 64,
+with the state update and the outputs dispatched across the chunk and the 32
+heads. The short convolution is one thread per token and channel. Float
+attention is one dispatch per layer. fp8 and fp4 attention
 scores and value mixes are ``matmul2d`` tiles. Expert groups are gathered,
 multiplied, and scattered back onto the token rows.
 """
@@ -22,10 +25,14 @@ CHUNK = 2048
 HIDDEN = 2048
 HEAD = 256
 EPS = 1e-6
+_GDN_CHUNK = 64
 _GATE_SCALE = 1_048_576
 _DOWN_SCALE = 524_288
-_WAVE = 32
-_MAX_PAD = 128
+_EXPERTS = 256
+# Pad each expert to 64 rows. The bound is every route in its own expert.
+_MAX_ROWS = CHUNK * 8 + 63 * _EXPERTS
+_JOBS = (_MAX_ROWS + 63) // 64
+_SLACK = 1024
 
 
 def _u32(value: int) -> bytes:
@@ -50,6 +57,7 @@ class _Workspace:
         self.normed = zeros(cap * HIDDEN * 4)
         self.half = zeros(cap * 4096 * 2)
         self.wide = zeros(cap * 8192 * 4)
+        self.mixed = zeros(cap * 8192 * 4)
         self.z = zeros(cap * 4096 * 4)
         self.ab = zeros(cap * 32 * 4)
         self.ab2 = zeros(cap * 32 * 4)
@@ -67,20 +75,29 @@ class _Workspace:
         self.gated = zeros(cap * 512 * 4)
         self.down = zeros(cap * HIDDEN * 4)
         self.pack = zeros(cap * HIDDEN * 2)
-        self.expert_pack = zeros(_WAVE * _MAX_PAD * HIDDEN * 2)
-        self.expert_out = zeros(_WAVE * _MAX_PAD * HIDDEN * 4)
-        self.expert_gated = zeros(_WAVE * _MAX_PAD * 512 * 4)
-        # Every wave's jobs stay live until the command buffer commits.
-        self.jobs = zeros(256 * (_MAX_PAD // 64) * 2 * 4 + 256)
-        self.expert_of = zeros(8 * _WAVE * 4)
-        self.slot_n = zeros(8 * _WAVE * 4)
-        self.slot_csr = zeros(8 * _WAVE * 4)
+        self.expert_pack = zeros(_MAX_ROWS * HIDDEN * 2 + _SLACK)
+        self.expert_out = zeros(_MAX_ROWS * 1024 * 4 + _SLACK)
+        self.expert_down = zeros(_MAX_ROWS * HIDDEN * 4 + _SLACK)
+        self.expert_gated = zeros(_MAX_ROWS * 512 * 4 + _SLACK)
+        self.jobs = zeros(_JOBS * 2 * 4)
+        self.expert_of = zeros(_EXPERTS * 4)
+        self.slot_n = zeros(_EXPERTS * 4)
+        self.slot_csr = zeros(_EXPERTS * 4)
+        self.row_base = zeros(_EXPERTS * 4)
+        self.group = zeros(8 * 16)
+        self.pack_row = zeros(cap * 8 * 4)
         self.tokens = zeros(cap * 4)
         # Alignment padding between experts can add up to three slots each.
         self.csr_i = zeros((cap * 8 + 1024) * 4)
         self.csr_w = zeros((cap * 8 + 1024) * 4)
+        self.csr_lane = zeros((cap * 8 + 1024) * 4)
         self.iota = zeros(cap * 4)
         _write(self.iota, np.arange(cap, dtype=np.uint32).tobytes())
+        self.gdn_kkt = zeros(32 * _GDN_CHUNK * _GDN_CHUNK * 4)
+        self.gdn_w = zeros(32 * _GDN_CHUNK * 128 * 4)
+        self.gdn_u = zeros(32 * _GDN_CHUNK * 128 * 4)
+        self.gdn_vbar = zeros(32 * _GDN_CHUNK * 128 * 4)
+        self.gdn_logg = zeros(32 * _GDN_CHUNK * 4)
 
 
 def workspace_bytes() -> int:
@@ -90,6 +107,7 @@ def workspace_bytes() -> int:
         cap * HIDDEN * 4
         + cap * HIDDEN * 4
         + cap * 4096 * 2
+        + cap * 8192 * 4
         + cap * 8192 * 4
         + cap * 4096 * 4
         + cap * 32 * 4
@@ -108,19 +126,32 @@ def workspace_bytes() -> int:
         + cap * 512 * 4
         + cap * HIDDEN * 4
         + cap * HIDDEN * 2
-        + _WAVE * _MAX_PAD * HIDDEN * 2
-        + _WAVE * _MAX_PAD * HIDDEN * 4
-        + _WAVE * _MAX_PAD * 512 * 4
-        + 256 * (_MAX_PAD // 64) * 2 * 4
-        + 256
-        + 8 * _WAVE * 4
-        + 8 * _WAVE * 4
-        + 8 * _WAVE * 4
+        + _MAX_ROWS * HIDDEN * 2
+        + _SLACK
+        + _MAX_ROWS * 1024 * 4
+        + _SLACK
+        + _MAX_ROWS * HIDDEN * 4
+        + _SLACK
+        + _MAX_ROWS * 512 * 4
+        + _SLACK
+        + _JOBS * 2 * 4
+        + _EXPERTS * 4
+        + _EXPERTS * 4
+        + _EXPERTS * 4
+        + _EXPERTS * 4
+        + 8 * 16
+        + cap * 8 * 4
         + cap * 4
         + (cap * 8 + 1024) * 4
         + (cap * 8 + 1024) * 4
+        + (cap * 8 + 1024) * 4
         + cap * 4
+        + _gdn_scratch_bytes()
     )
+
+
+def _gdn_scratch_bytes() -> int:
+    return 32 * _GDN_CHUNK * (_GDN_CHUNK + 128 * 3) * 4 + 32 * _GDN_CHUNK * 4
 
 
 def prefill_ids(runtime: Any, ids: list[int], pos0: int = 0) -> None:
@@ -138,9 +169,21 @@ def prefill_ids(runtime: Any, ids: list[int], pos0: int = 0) -> None:
     remaining = ids
     while remaining:
         take = min(CHUNK, len(remaining))
+        runtime._prefill_base = cursor - pos0
         _chunk(runtime, workspace, remaining[:take], cursor)
         cursor += take
         remaining = remaining[take:]
+        note = getattr(runtime, "_note_prefill", None)
+        if note is not None:
+            note(cursor - pos0)
+
+
+def _note_chunk(runtime: Any, finished: int, count: int) -> None:
+    note = getattr(runtime, "_note_prefill", None)
+    if note is None:
+        return
+    base = int(getattr(runtime, "_prefill_base", 0))
+    note(base + finished * count // 40)
 
 
 def _chunk(runtime: Any, work: _Workspace, ids: list[int], pos0: int) -> None:
@@ -151,19 +194,34 @@ def _chunk(runtime: Any, work: _Workspace, ids: list[int], pos0: int) -> None:
     _zero(runtime, work.hidden, rows * HIDDEN)
     _embed(runtime, work, count)
     runtime.session.end()
-    for layer in range(40):
-        runtime.session.begin()
-        _zero(runtime, work.normed, rows * HIDDEN)
-        _rms(runtime, work.hidden, _input_norm(layer), work.normed, count)
-        if layer % 4 == 3:
-            _attend(runtime, work, layer, count, rows, pos0)
-        else:
-            _gdn(runtime, work, layer, count, rows)
-        _zero(runtime, work.normed, rows * HIDDEN)
-        _rms(runtime, work.hidden, _post_norm(layer), work.normed, count)
-        _route(runtime, work, layer, count, rows)
-        runtime.session.end()
-        _experts(runtime, work, layer, count, rows)
+    finished = 0
+    try:
+        for layer in range(40):
+            check = getattr(runtime, "_check_stop", None)
+            if check is not None:
+                check()
+            runtime.session.begin()
+            _zero(runtime, work.normed, rows * HIDDEN)
+            _rms(runtime, work.hidden, _input_norm(layer), work.normed, count)
+            if layer % 4 == 3:
+                _attend(runtime, work, layer, count, rows, pos0)
+            else:
+                _gdn(runtime, work, layer, count, rows)
+            _zero(runtime, work.normed, rows * HIDDEN)
+            _rms(runtime, work.hidden, _post_norm(layer), work.normed, count)
+            _route(runtime, work, layer, count, rows)
+            _experts(runtime, work, layer, count, rows)
+            runtime.session.commit()
+            if runtime.session.inflight() > 1:
+                runtime.session.wait_oldest()
+                finished += 1
+                _note_chunk(runtime, finished, count)
+        runtime.session.wait_inflight()
+        _note_chunk(runtime, 40, count)
+    finally:
+        if runtime.session._recording:
+            runtime.session.abort()
+        runtime.session.wait_inflight()
 
 
 def _embed(runtime: Any, work: _Workspace, count: int) -> None:
@@ -195,10 +253,17 @@ def _gdn(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) -> N
     weight, woff, _entry = runtime._loc(base + "conv1d.weight")
     runtime.session.encode(
         "gdn_conv_rows",
-        [(runtime.history, hist), (work.wide, 0), (weight, woff), (work.wide, 0)],
+        [(runtime.history, hist), (work.wide, 0), (weight, woff), (work.mixed, 0)],
         [_u32(count), _u32(8192)],
-        (8192, 1, 1),
-        (1, 1, 1),
+        (count, 32, 1),
+        (256, 1, 1),
+    )
+    runtime.session.encode(
+        "gdn_conv_keep",
+        [(runtime.history, hist), (work.wide, 0)],
+        [_u32(count), _u32(8192)],
+        (32, 1, 1),
+        (256, 1, 1),
     )
     along, aoff, _entry = runtime._loc(base + "A_log")
     bias, boff, _entry = runtime._loc(base + "dt_bias")
@@ -206,25 +271,84 @@ def _gdn(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) -> N
     state = slot * 32 * 128 * 128 * 4
     _zero(runtime, work.y, rows * 4096)
     runtime.session.encode(
-        "gdn_state_rows",
-        [
-            (runtime.state, state),
-            (work.wide, 0),
-            (work.ab, 0),
-            (work.ab2, 0),
-            (work.z, 0),
-            (along, aoff),
-            (bias, boff),
-            (norm, noff),
-            (work.y, 0),
-        ],
+        "gdn_l2_rows",
+        [(work.mixed, 0)],
         [_f32(EPS), _u32(count)],
-        (32, 1, 1),
+        (count, 16, 1),
+        (128, 1, 1),
+    )
+    cursor = 0
+    while cursor < count:
+        clen = min(_GDN_CHUNK, count - cursor)
+        _gdn_chunk(runtime, work, state, along, aoff, bias, boff, cursor, clen)
+        cursor += clen
+    runtime.session.encode(
+        "gdn_y_norm",
+        [(work.y, 0), (work.z, 0), (norm, noff)],
+        [_f32(EPS), _u32(count)],
+        (count, 32, 1),
         (128, 1, 1),
     )
     _cast(runtime, work.y, work.half, rows * 4096)
     _matmul(runtime, work.half, base + "out_proj.weight", work.down, rows)
     _add(runtime, work, count)
+
+
+def _gdn_chunk(
+    runtime: Any,
+    work: _Workspace,
+    state: int,
+    along: Any,
+    aoff: int,
+    bias: Any,
+    boff: int,
+    c0: int,
+    clen: int,
+) -> None:
+    runtime.session.encode(
+        "gdn_chunk_solve",
+        [
+            (runtime.state, state),
+            (work.mixed, 0),
+            (work.ab, 0),
+            (work.ab2, 0),
+            (along, aoff),
+            (bias, boff),
+            (work.gdn_kkt, 0),
+            (work.gdn_w, 0),
+            (work.gdn_u, 0),
+            (work.gdn_vbar, 0),
+            (work.gdn_logg, 0),
+        ],
+        [_u32(c0), _u32(clen)],
+        (32, 1, 1),
+        (128, 1, 1),
+    )
+    runtime.session.encode(
+        "gdn_chunk_out",
+        [
+            (runtime.state, state),
+            (work.mixed, 0),
+            (work.gdn_vbar, 0),
+            (work.gdn_logg, 0),
+            (work.y, 0),
+        ],
+        [_u32(c0), _u32(clen)],
+        (32, clen, 1),
+        (128, 1, 1),
+    )
+    runtime.session.encode(
+        "gdn_chunk_state",
+        [
+            (runtime.state, state),
+            (work.mixed, 0),
+            (work.gdn_vbar, 0),
+            (work.gdn_logg, 0),
+        ],
+        [_u32(c0), _u32(clen)],
+        (32, 128, 1),
+        (128, 1, 1),
+    )
 
 
 def _attend(
@@ -328,44 +452,9 @@ def _route(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) ->
 
 
 def _experts(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) -> None:
-    chosen = np.frombuffer(
-        runtime.session.download(work.ids, count * 8 * 4), dtype=np.uint32
-    ).reshape(count, 8)
-    mix = runtime.session.download_f32(work.mix, count * 8).reshape(count, 8)
-    flat_e = np.ascontiguousarray(chosen).reshape(-1)
-    flat_w = np.ascontiguousarray(mix).reshape(-1)
-    flat_t = np.repeat(np.arange(count, dtype=np.uint32), 8)
-    order = np.argsort(flat_e, kind="stable")
-    flat_e = flat_e[order]
-    flat_t = flat_t[order]
-    flat_w = flat_w[order]
-    counts = np.bincount(flat_e, minlength=256)
-    offsets: list[int] = []
-    chunks_i: list[np.ndarray] = []
-    chunks_w: list[np.ndarray] = []
-    cursor = 0
-    begin = 0
-    for expert in range(256):
-        pad = (4 - cursor % 4) % 4
-        if pad:
-            chunks_i.append(np.zeros(pad, dtype=np.uint32))
-            chunks_w.append(np.zeros(pad, dtype=np.float32))
-            cursor += pad
-        offsets.append(cursor)
-        n = int(counts[expert])
-        if n:
-            chunks_i.append(flat_t[begin : begin + n])
-            chunks_w.append(flat_w[begin : begin + n].astype(np.float32))
-            cursor += n
-        begin += n
-    tokens_np = np.concatenate(chunks_i) if chunks_i else np.zeros(0, dtype=np.uint32)
-    weights_np = np.concatenate(chunks_w) if chunks_w else np.zeros(0, dtype=np.float32)
-    if tokens_np.size:
-        _write(work.csr_i, tokens_np.tobytes())
-        _write(work.csr_w, weights_np.tobytes())
+    """Shared expert, then routed experts. Groups are built on device."""
     prefix = f"model.language_model.layers.{layer}.mlp."
     file = runtime.expert_buffer(layer)
-    runtime.session.begin()
     _cast(runtime, work.normed, work.half, rows * HIDDEN)
     _matmul(runtime, work.half, prefix + "shared_expert.gate_up", work.gate_up, rows)
     runtime.session.encode(
@@ -384,105 +473,97 @@ def _experts(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) 
         (count, 1, 1),
         (256, 1, 1),
     )
-    small: list[int] = []
-    big: list[int] = []
-    for expert in range(256):
-        n = int(counts[expert])
-        if n == 0:
-            continue
-        pad = ((n + 63) // 64) * 64
-        (big if pad > _MAX_PAD else small).append(expert)
-    waves = [small[start : start + _WAVE] for start in range(0, len(small), _WAVE)]
-    job_words: list[int] = []
-    owners = np.zeros((max(len(waves), 1), _WAVE), dtype=np.uint32)
-    slot_n = np.zeros((max(len(waves), 1), _WAVE), dtype=np.uint32)
-    slot_csr = np.zeros((max(len(waves), 1), _WAVE), dtype=np.uint32)
-    wave_job_off: list[int] = []
-    wave_njobs: list[int] = []
-    for wave_index, wave in enumerate(waves):
-        while len(job_words) % 4:
-            job_words.append(0)
-        wave_job_off.append(len(job_words) * 4)
-        before = len(job_words)
-        for slot, expert in enumerate(wave):
-            owners[wave_index, slot] = expert
-            slot_n[wave_index, slot] = int(counts[expert])
-            slot_csr[wave_index, slot] = offsets[expert]
-            pad = ((int(counts[expert]) + 63) // 64) * 64
-            for tile in range(pad // 64):
-                job_words.extend((slot, tile))
-        wave_njobs.append((len(job_words) - before) // 2)
-    if job_words:
-        _write(work.jobs, np.asarray(job_words, dtype=np.uint32).tobytes())
-        _write(work.expert_of, np.ascontiguousarray(owners).tobytes())
-        _write(work.slot_n, np.ascontiguousarray(slot_n).tobytes())
-        _write(work.slot_csr, np.ascontiguousarray(slot_csr).tobytes())
-    for expert in big:
-        _expert_one(runtime, work, file, expert, int(counts[expert]), offsets[expert])
-    for wave_index, wave in enumerate(waves):
-        n_slots = len(wave)
-        meta = wave_index * _WAVE * 4
-        _zero(runtime, work.expert_pack, n_slots * _MAX_PAD * (HIDDEN // 2))
-        runtime.session.encode(
-            "gather_half_slots",
-            [
-                (work.normed, 0),
-                (work.csr_i, 0),
-                (work.expert_pack, 0),
-                (work.slot_n, meta),
-                (work.slot_csr, meta),
-            ],
-            [_u32(_MAX_PAD), _u32(HIDDEN)],
-            (_MAX_PAD, n_slots, 1),
-            (256, 1, 1),
-        )
-        _expert_tiles(
-            runtime,
-            work,
-            file,
-            wave_njobs[wave_index],
-            wave_job_off[wave_index],
-            wave_index * _WAVE * 4,
-            1024,
-            HIDDEN,
-            0,
-            _GATE_SCALE,
-        )
-        span = n_slots * _MAX_PAD * 512
-        runtime.session.encode(
-            "silu_wave",
-            [(work.expert_out, 0), (work.expert_gated, 0)],
-            [_u32(_MAX_PAD)],
-            (span // 256, 1, 1),
-            (256, 1, 1),
-        )
-        _cast(runtime, work.expert_gated, work.expert_pack, span)
-        _expert_tiles(
-            runtime,
-            work,
-            file,
-            wave_njobs[wave_index],
-            wave_job_off[wave_index],
-            wave_index * _WAVE * 4,
-            HIDDEN,
-            512,
-            GATE_UP_BYTES,
-            GATE_UP_BYTES + _DOWN_SCALE,
-        )
-        for slot, expert in enumerate(wave):
-            runtime.session.encode(
-                "scatter_add_rows",
-                [
-                    (work.hidden, 0),
-                    (work.expert_out, slot * _MAX_PAD * HIDDEN * 4),
-                    (work.csr_i, offsets[expert] * 4),
-                    (work.csr_w, offsets[expert] * 4),
-                ],
-                [_u32(int(counts[expert])), _u32(HIDDEN)],
-                (int(counts[expert]), 1, 1),
-                (256, 1, 1),
-            )
-    runtime.session.end()
+    runtime.session.encode(
+        "moe_group",
+        [
+            (work.ids, 0),
+            (work.mix, 0),
+            (work.csr_i, 0),
+            (work.csr_w, 0),
+            (work.expert_of, 0),
+            (work.slot_n, 0),
+            (work.slot_csr, 0),
+            (work.row_base, 0),
+            (work.jobs, 0),
+            (work.group, 0),
+            (work.csr_lane, 0),
+            (work.pack_row, 0),
+        ],
+        [_u32(count)],
+        (1, 1, 1),
+        (256, 1, 1),
+    )
+    runtime.session.split()
+    threads = (256, 1, 1)
+    _indirect(
+        runtime,
+        work.group,
+        "zero_f32",
+        [(work.expert_pack, 0)],
+        [],
+        1,
+        threads,
+    )
+    _indirect(
+        runtime,
+        work.group,
+        "gather_half_grouped",
+        [
+            (work.normed, 0),
+            (work.csr_i, 0),
+            (work.expert_pack, 0),
+            (work.slot_n, 0),
+            (work.slot_csr, 0),
+            (work.row_base, 0),
+            (work.jobs, 0),
+            (work.group, 0),
+        ],
+        [_u32(HIDDEN)],
+        0,
+        threads,
+    )
+    _grouped_tiles(runtime, work, file, work.expert_out, 1024, HIDDEN, 0, _GATE_SCALE, 2)
+    _indirect(
+        runtime,
+        work.group,
+        "silu_mul_grouped",
+        [(work.expert_out, 0), (work.expert_gated, 0), (work.group, 0)],
+        [],
+        3,
+        threads,
+    )
+    _indirect(
+        runtime,
+        work.group,
+        "cast_f32_f16_n",
+        [(work.expert_gated, 0), (work.expert_pack, 0), (work.group, 0)],
+        [],
+        4,
+        threads,
+    )
+    _grouped_tiles(
+        runtime,
+        work,
+        file,
+        work.expert_down,
+        HIDDEN,
+        512,
+        GATE_UP_BYTES,
+        GATE_UP_BYTES + _DOWN_SCALE,
+        5,
+    )
+    runtime.session.encode(
+        "scatter_add_grouped",
+        [
+            (work.hidden, 0),
+            (work.expert_down, 0),
+            (work.pack_row, 0),
+            (work.mix, 0),
+        ],
+        [_u32(HIDDEN), _u32(count)],
+        (count, 1, 1),
+        threads,
+    )
 
 
 def _matmul(runtime: Any, half: Any, name: str, dest: Any, rows: int) -> None:
@@ -512,94 +593,58 @@ def _fp4(
     )
 
 
-def _expert_tiles(
+def _indirect(
+    runtime: Any,
+    group: Any,
+    name: str,
+    bindings: list[tuple[Any, int]],
+    constants: list[bytes],
+    record: int,
+    threads: tuple[int, int, int],
+) -> None:
+    runtime.session.encode_indirect(
+        name,
+        bindings,
+        constants,
+        group,
+        16 + record * 16,
+        threads,
+    )
+
+
+def _grouped_tiles(
     runtime: Any,
     work: _Workspace,
     file: Any,
-    n_jobs: int,
-    job_off: int,
-    owner_off: int,
+    dest: Any,
     cols: int,
     inner: int,
     image_data: int,
     image_scale: int,
+    record: int,
 ) -> None:
-    runtime.session.encode(
+    _indirect(
+        runtime,
+        work.group,
         "prefill_fp4_expert_tile",
         [
             (work.expert_pack, 0),
             (file, 0),
-            (work.expert_out, 0),
-            (work.jobs, job_off),
-            (work.expert_of, owner_off),
+            (dest, 0),
+            (work.jobs, 0),
+            (work.expert_of, 0),
+            (work.row_base, 0),
+            (work.group, 0),
         ],
         [
             _u32(inner),
             _u32(cols),
-            _u32(_MAX_PAD),
             _u32(image_data),
             _u32(image_scale),
             _u32(EXPERT_IMAGE),
         ],
-        (cols // 64, n_jobs, 1),
+        record,
         _tile_threads(runtime),
-    )
-
-
-def _expert_one(
-    runtime: Any, work: _Workspace, file: Any, expert: int, n: int, start: int
-) -> None:
-    pad = ((n + 63) // 64) * 64
-    _zero(runtime, work.pack, pad * (HIDDEN // 2))
-    runtime.session.encode(
-        "gather_half_rows",
-        [(work.normed, 0), (work.csr_i, start * 4), (work.pack, 0)],
-        [_u32(n), _u32(HIDDEN), _u32(HIDDEN)],
-        (n, 1, 1),
-        (256, 1, 1),
-    )
-    _fp4(
-        runtime,
-        work.pack,
-        file,
-        expert * EXPERT_IMAGE,
-        expert * EXPERT_IMAGE + _GATE_SCALE,
-        work.gate_up,
-        pad,
-        1024,
-        HIDDEN,
-    )
-    runtime.session.encode(
-        "silu_mul_rows",
-        [(work.gate_up, 0), (work.gated, 0)],
-        [_u32(pad)],
-        (pad * 2, 1, 1),
-        (256, 1, 1),
-    )
-    _cast(runtime, work.gated, work.pack, pad * 512)
-    down = expert * EXPERT_IMAGE + GATE_UP_BYTES
-    _fp4(
-        runtime,
-        work.pack,
-        file,
-        down,
-        down + _DOWN_SCALE,
-        work.down,
-        pad,
-        HIDDEN,
-        512,
-    )
-    runtime.session.encode(
-        "scatter_add_rows",
-        [
-            (work.hidden, 0),
-            (work.down, 0),
-            (work.csr_i, start * 4),
-            (work.csr_w, start * 4),
-        ],
-        [_u32(n), _u32(HIDDEN)],
-        (n, 1, 1),
-        (256, 1, 1),
     )
 
 

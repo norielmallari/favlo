@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import queue
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -9,8 +11,10 @@ from typing import Any
 from jinja2 import Environment
 from tokenizers import Tokenizer
 
+from qwen36_35b_a3b.forward import RequestClosed
 from qwen36_35b_a3b.sampling import VARIANTS, mode_card, requested_thinking
 from qwen36_35b_a3b.tools import (
+    StreamText,
     function_has_parameters,
     normalize_messages,
     parse_tool_calls,
@@ -115,6 +119,23 @@ def handle_chat(
 ) -> None:
     """One non-streaming or streaming chat completion."""
     del args, state
+    runtime._halted = False
+    runtime._stop = getattr(handler, "_client_stopped", None)
+    try:
+        _handle_chat(handler, runtime, body, selection)
+    except RequestClosed:
+        handler.close_connection = True
+        runtime._status("client closed")
+    except OSError as exc:
+        handler.close_connection = True
+        if str(exc) != "client closed":
+            raise
+        runtime._status("client closed")
+    finally:
+        runtime._stop = None
+
+
+def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: Any) -> None:
     messages = body["messages"]
     requested = requested_thinking(body)
     required = required_function(body.get("tool_choice"))
@@ -179,6 +200,55 @@ def handle_chat(
     )
 
 
+def _stream_delta(decoded: str, shown: str, *, final: bool) -> tuple[str, str]:
+    """Text that is safe to send, and the piece after ``shown``.
+
+    The tokenizer writes U+FFFD when a token is only some of the bytes of a
+    character. That mark is held back. The next token replaces it, and the
+    slice is the new suffix.
+    """
+    if not final and decoded.endswith("\ufffd"):
+        decoded = decoded[:-1]
+    return decoded[len(shown) :], decoded
+
+
+def _usage(runtime: Any, prompt_tokens: int, completion_tokens: int) -> dict[str, Any]:
+    cached = int(getattr(runtime, "_cached_tokens", 0) or 0)
+    prompt_n = max(0, prompt_tokens - cached)
+    prefill_s = float(getattr(runtime, "_prefill_seconds", 0.0) or 0.0)
+    decode_s = float(getattr(runtime, "_decode_seconds", 0.0) or 0.0)
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+        "timings": {
+            "prompt_per_second": 0.0 if prefill_s <= 0 else prompt_n / prefill_s,
+            "predicted_per_second": 0.0 if decode_s <= 0 else completion_tokens / decode_s,
+            "prompt_n": prompt_n,
+            "predicted_n": completion_tokens,
+        },
+    }
+
+
+def _frame(
+    handler: Any,
+    choices: list[dict[str, Any]],
+    created: int,
+    usage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """One ``chat.completion.chunk``. The id, object, created, and model fields are required."""
+    payload: dict[str, Any] = {
+        "id": "chatcmpl-madmetal",
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": getattr(handler, "_model_id", "") or "",
+        "choices": choices,
+    }
+    if usage is not None:
+        payload["usage"] = usage
+    return payload
+
+
 def _stream(
     handler: Any,
     runtime: Any,
@@ -192,48 +262,141 @@ def _stream(
     presence: float,
     thinking: bool,
 ) -> None:
+    decode = getattr(runtime, "decode", None)
+    if not callable(decode):
+        decode = load_tokenizer(runtime.root).decode
+    created = int(time.time())
     handler._started = True
     handler.close_connection = True
-    handler.send_response(200)
-    handler.send_header("Content-Type", "text/event-stream")
-    handler.send_header("Cache-Control", "no-cache")
-    handler.send_header("Connection", "close")
-    handler.end_headers()
-    handler._event(
-        {"choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]}
-    )
-    tokens = runtime.generate(
-        prompt,
-        limit,
-        temperature,
-        top_p,
-        top_k,
-        presence,
-        STOP,
-        forced=forced,
-        stop_after_forced=stop_after_forced,
-    )
-    text = decode_text(runtime.root, tokens)
-    reasoning, reply = split_thinking(text, thinking)
-    content, calls = parse_tool_calls(reply if reply else text)
-    if thinking and reasoning:
-        handler._event(
-            {
-                "choices": [
-                    {"index": 0, "delta": {"reasoning_content": reasoning}, "finish_reason": None}
-                ]
-            }
+    handler.connection.settimeout(2.0)
+    try:
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("Connection", "close")
+        handler.end_headers()
+    except OSError:
+        raise RequestClosed() from None
+
+    def event(payload: dict[str, Any]) -> None:
+        try:
+            handler._event(payload)
+        except OSError as exc:
+            raise RequestClosed() from exc
+
+    event(
+        _frame(
+            handler,
+            [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+            created,
         )
-    if content:
-        handler._event(
-            {"choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None}]}
+    )
+    pending: queue.Queue[int | None] = queue.Queue()
+    failed: list[BaseException] = []
+    text = ""
+
+    def write() -> None:
+        nonlocal text
+        produced: list[int] = []
+        previous = ""
+        gate = StreamText(thinking)
+        try:
+            while True:
+                token = pending.get()
+                final = token is None
+                if not final:
+                    produced.append(int(token))
+                decoded = decode(produced) if produced else ""
+                piece, previous = _stream_delta(decoded, previous, final=final)
+                for channel, visible in gate.push(piece):
+                    _emit(event, handler, channel, visible, created)
+                if final:
+                    for channel, visible in gate.finish():
+                        _emit(event, handler, channel, visible, created)
+                    break
+        except BaseException as exc:
+            failed.append(exc)
+        text = previous
+
+    writer = threading.Thread(target=write, name="madmetal-stream", daemon=True)
+    writer.start()
+
+    def enqueue(token: int) -> None:
+        if failed:
+            raise RequestClosed()
+        pending.put(token)
+
+    try:
+        runtime.generate(
+            prompt,
+            limit,
+            temperature,
+            top_p,
+            top_k,
+            presence,
+            STOP,
+            forced=forced,
+            stop_after_forced=stop_after_forced,
+            on_token=enqueue,
         )
-    reason = "tool_calls" if calls else ("length" if runtime._hit_limit else "stop")
-    delta: dict[str, Any] = {}
+    finally:
+        pending.put(None)
+        writer.join()
+    if failed:
+        raise failed[0]
+    _reasoning, reply = split_thinking(text, thinking)
+    _content, calls = parse_tool_calls(reply if reply else text)
     if calls:
-        delta["tool_calls"] = calls
-    handler._event({"choices": [{"index": 0, "delta": delta, "finish_reason": reason}]})
-    handler._send(b"data: [DONE]\n\n")
+        for index, call in enumerate(calls):
+            event(
+                _frame(
+                    handler,
+                    [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": index,
+                                        "id": call["id"],
+                                        "type": "function",
+                                        "function": {
+                                            "name": call["function"]["name"],
+                                            "arguments": call["function"]["arguments"],
+                                        },
+                                    }
+                                ]
+                            },
+                            "finish_reason": None,
+                        }
+                    ],
+                    created,
+                )
+            )
+        reason = "tool_calls"
+    else:
+        reason = "length" if runtime._hit_limit else "stop"
+    event(_frame(handler, [{"index": 0, "delta": {}, "finish_reason": reason}], created))
+    produced = getattr(runtime, "_output_ids", None)
+    completion_tokens = len(produced) if isinstance(produced, list) else 0
+    event(_frame(handler, [], created, _usage(runtime, len(prompt), completion_tokens)))
+    try:
+        handler._send(b"data: [DONE]\n\n")
+    except OSError as exc:
+        raise RequestClosed() from exc
+
+
+def _emit(event: Any, handler: Any, channel: str, visible: str, created: int) -> None:
+    if not visible:
+        return
+    field = "reasoning_content" if channel == "reasoning" else "content"
+    event(
+        _frame(
+            handler,
+            [{"index": 0, "delta": {field: visible}, "finish_reason": None}],
+            created,
+        )
+    )
 
 
 def _completion(

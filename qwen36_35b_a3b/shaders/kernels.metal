@@ -137,21 +137,27 @@ kernel void prefill_fp4_expert_tile(
     device float* destination [[buffer(2)]],
     device const uint* jobs [[buffer(3)]],
     device const uint* expert_of [[buffer(4)]],
-    constant uint& inner [[buffer(5)]],
-    constant uint& cols [[buffer(6)]],
-    constant uint& max_pad [[buffer(7)]],
-    constant uint& image_data [[buffer(8)]],
-    constant uint& image_scale [[buffer(9)]],
-    constant uint& image_bytes [[buffer(10)]],
+    device const uint* row_base [[buffer(5)]],
+    device const uint* info [[buffer(6)]],
+    constant uint& inner [[buffer(7)]],
+    constant uint& cols [[buffer(8)]],
+    constant uint& image_data [[buffer(9)]],
+    constant uint& image_scale [[buffer(10)]],
+    constant uint& image_bytes [[buffer(11)]],
     uint2 tgid [[threadgroup_position_in_grid]])
 {
+    uint n_jobs = info[1];
+    if (tgid.y >= n_jobs) {
+        return;
+    }
     uint slot = jobs[tgid.y * 2u];
     uint row0 = jobs[tgid.y * 2u + 1u] * 64u;
     uint expert = expert_of[slot];
     uint col0 = tgid.x * 64u;
-    device half* act = pack + (slot * max_pad + row0) * inner;
+    uint base_row = row_base[slot] + row0;
+    device half* act = pack + base_row * inner;
     device uchar* base = file + expert * image_bytes;
-    device float* out = destination + (slot * max_pad + row0) * cols;
+    device float* out = destination + base_row * cols;
     tensor<device half, dextents<int, 2>, tensor_inline> left(
         act, dextents<int, 2>(int(inner), 64), array<int, 2>{1, int(inner)});
     tensor<device metal_fp4_e2m1_format, dextents<int, 2>, tensor_inline, scales_plane> right(
@@ -1660,30 +1666,64 @@ kernel void residual_rows(
     }
 }
 
+// Causal width-4 convolution. Each thread is one token and one channel.
+// The delay line is the three inputs before this token, then the current one.
 kernel void gdn_conv_rows(
-    device half* history [[buffer(0)]],
+    device const half* history [[buffer(0)]],
     device const float* qkv [[buffer(1)]],
     device const half* weight [[buffer(2)]],
     device float* mixed [[buffer(3)]],
     constant uint& count [[buffer(4)]],
     constant uint& channels [[buffer(5)]],
-    uint tid [[thread_position_in_grid]])
+    uint3 tid [[thread_position_in_threadgroup]],
+    uint3 tgid [[threadgroup_position_in_grid]])
 {
-    if (tid >= channels) {
+    uint token = tgid.x;
+    uint channel = tgid.y * 256u + tid.x;
+    if (token >= count || channel >= channels) {
         return;
     }
-    for (uint token = 0u; token < count; ++token) {
-        device const float* current = qkv + token * channels;
-        float raw = current[tid];
-        float acc = raw * float(weight[tid * 4u + 3u]);
-        for (uint tap = 0u; tap < 3u; ++tap) {
-            acc += float(history[tap * channels + tid]) * float(weight[tid * 4u + tap]);
+    float tap[4];
+    tap[3] = qkv[token * channels + channel];
+    for (uint age = 1u; age <= 3u; ++age) {
+        int index = int(token) - int(age);
+        if (index >= 0) {
+            tap[3u - age] = qkv[uint(index) * channels + channel];
+        } else {
+            tap[3u - age] = float(history[(uint(index + 3)) * channels + channel]);
         }
-        mixed[token * channels + tid] = silu_f(acc);
-        history[tid] = history[channels + tid];
-        history[channels + tid] = history[2u * channels + tid];
-        history[2u * channels + tid] = half(raw);
     }
+    float acc = 0.0f;
+    for (uint i = 0u; i < 4u; ++i) {
+        acc += tap[i] * float(weight[channel * 4u + i]);
+    }
+    mixed[token * channels + channel] = silu_f(acc);
+}
+
+kernel void gdn_conv_keep(
+    device half* history [[buffer(0)]],
+    device const float* qkv [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    constant uint& channels [[buffer(3)]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint tgid [[threadgroup_position_in_grid]])
+{
+    uint channel = tgid * 256u + tid;
+    if (channel >= channels || count == 0u) {
+        return;
+    }
+    float kept[3];
+    for (uint age = 0u; age < 3u; ++age) {
+        int index = int(count) - 3 + int(age);
+        if (index >= 0) {
+            kept[age] = qkv[uint(index) * channels + channel];
+        } else {
+            kept[age] = float(history[(uint(index + 3)) * channels + channel]);
+        }
+    }
+    history[channel] = half(kept[0]);
+    history[channels + channel] = half(kept[1]);
+    history[2u * channels + channel] = half(kept[2]);
 }
 
 kernel void gdn_state_rows(
@@ -1783,6 +1823,217 @@ kernel void gdn_state_rows(
         device const float* z = gate + token * 4096u;
         destination[token * 4096u + head * 128u + tid] = gated * silu_f(z[head * 128u + tid]);
     }
+}
+
+// L2-normalize query and key for every token. Query is scaled by 1/sqrt(128).
+kernel void gdn_l2_rows(
+    device float* mixed [[buffer(0)]],
+    constant float& eps [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    if (tgid.x >= count) {
+        return;
+    }
+    threadgroup float red[4];
+    device float* q = mixed + tgid.x * 8192u + tgid.y * 128u;
+    device float* k = mixed + tgid.x * 8192u + 2048u + tgid.y * 128u;
+    float qv = q[tid];
+    float kv = k[tid];
+    float qpart = simd_sum(qv * qv);
+    float kpart = simd_sum(kv * kv);
+    if (lane == 0u) {
+        red[simd] = qpart;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float qtot = red[0] + red[1] + red[2] + red[3];
+    if (lane == 0u) {
+        red[simd] = kpart;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float ktot = red[0] + red[1] + red[2] + red[3];
+    q[tid] = qv * rsqrt(qtot + eps) * INV_SQRT_128;
+    k[tid] = kv * rsqrt(ktot + eps);
+}
+
+// One chunk of the gated delta rule (Yang et al., arXiv:2412.06464, §3.3).
+// W is the ungated Householder factor. U carries the cumulative decay.
+// The chunk state is gamma_last * S + Vbar^T K_right, with
+// Vbar = U - (gamma * W) S^T.
+kernel void gdn_chunk_solve(
+    device const float* state [[buffer(0)]],
+    device const float* mixed [[buffer(1)]],
+    device const float* raw_a [[buffer(2)]],
+    device const float* raw_b [[buffer(3)]],
+    device const half* a_log [[buffer(4)]],
+    device const half* dt_bias [[buffer(5)]],
+    device float* kkt [[buffer(6)]],
+    device float* wbuf [[buffer(7)]],
+    device float* ubuf [[buffer(8)]],
+    device float* vbar [[buffer(9)]],
+    device float* logg [[buffer(10)]],
+    constant uint& c0 [[buffer(11)]],
+    constant uint& clen [[buffer(12)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint head [[threadgroup_position_in_grid]])
+{
+    uint qhead = head >> 1;
+    device float* gram = kkt + head * 64u * 64u;
+    device float* ww = wbuf + head * 64u * 128u;
+    device float* uu = ubuf + head * 64u * 128u;
+    device float* vv = vbar + head * 64u * 128u;
+    device float* lg = logg + head * 64u;
+    if (tid < clen) {
+        float along = float(a_log[head]);
+        float aval = raw_a[(c0 + tid) * 32u + head];
+        lg[tid] = -exp(along) * softplus_f(aval + float(dt_bias[head]));
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+    if (tid == 0u) {
+        float acc = 0.0f;
+        for (uint r = 0u; r < clen; ++r) {
+            acc += lg[r];
+            lg[r] = acc;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+    if (tid < clen) {
+        for (uint r = 0u; r < clen; ++r) {
+            device const float* kr = mixed + (c0 + r) * 8192u + 2048u + qhead * 128u;
+            device const float* ki = mixed + (c0 + tid) * 8192u + 2048u + qhead * 128u;
+            float dot = 0.0f;
+            for (uint j = 0u; j < 128u; ++j) {
+                dot += kr[j] * ki[j];
+            }
+            gram[r * 64u + tid] = dot;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+    for (uint r = 0u; r < clen; ++r) {
+        float beta = sigmoid_f(raw_b[(c0 + r) * 32u + head]);
+        device const float* vr = mixed + (c0 + r) * 8192u + 4096u + head * 128u;
+        device const float* kr = mixed + (c0 + r) * 8192u + 2048u + qhead * 128u;
+        float acc_u = beta * vr[tid];
+        float acc_w = beta * kr[tid];
+        for (uint i = 0u; i < r; ++i) {
+            float kk = gram[r * 64u + i];
+            float decay = exp(lg[r] - lg[i]);
+            acc_u -= beta * decay * kk * uu[i * 128u + tid];
+            acc_w -= beta * kk * ww[i * 128u + tid];
+        }
+        uu[r * 128u + tid] = acc_u;
+        ww[r * 128u + tid] = acc_w;
+        threadgroup_barrier(mem_flags::mem_device);
+    }
+    device const float* srow = state + (head * 128u + tid) * 128u;
+    for (uint r = 0u; r < clen; ++r) {
+        float dot = 0.0f;
+        device const float* wr = ww + r * 128u;
+        for (uint j = 0u; j < 128u; ++j) {
+            dot += srow[j] * wr[j];
+        }
+        vv[r * 128u + tid] = uu[r * 128u + tid] - exp(lg[r]) * dot;
+    }
+}
+
+kernel void gdn_chunk_out(
+    device const float* state [[buffer(0)]],
+    device const float* mixed [[buffer(1)]],
+    device const float* vbar [[buffer(2)]],
+    device const float* logg [[buffer(3)]],
+    device float* destination [[buffer(4)]],
+    constant uint& c0 [[buffer(5)]],
+    constant uint& clen [[buffer(6)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    uint head = tgid.x;
+    uint r = tgid.y;
+    if (r >= clen) {
+        return;
+    }
+    uint qhead = head >> 1;
+    threadgroup float scores[64];
+    if (tid < clen) {
+        device const float* qq = mixed + (c0 + r) * 8192u + qhead * 128u;
+        device const float* kk = mixed + (c0 + tid) * 8192u + 2048u + qhead * 128u;
+        float dot = 0.0f;
+        for (uint j = 0u; j < 128u; ++j) {
+            dot += qq[j] * kk[j];
+        }
+        scores[tid] = dot;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    device const float* lg = logg + head * 64u;
+    device const float* vv = vbar + head * 64u * 128u;
+    device const float* srow = state + (head * 128u + tid) * 128u;
+    device const float* qq = mixed + (c0 + r) * 8192u + qhead * 128u;
+    float acc = 0.0f;
+    for (uint j = 0u; j < 128u; ++j) {
+        acc += srow[j] * qq[j];
+    }
+    acc *= exp(lg[r]);
+    for (uint i = 0u; i <= r; ++i) {
+        acc += exp(lg[r] - lg[i]) * scores[i] * vv[i * 128u + tid];
+    }
+    destination[(c0 + r) * 4096u + head * 128u + tid] = acc;
+}
+
+kernel void gdn_chunk_state(
+    device float* state [[buffer(0)]],
+    device const float* mixed [[buffer(1)]],
+    device const float* vbar [[buffer(2)]],
+    device const float* logg [[buffer(3)]],
+    constant uint& c0 [[buffer(4)]],
+    constant uint& clen [[buffer(5)]],
+    uint col [[thread_index_in_threadgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    uint head = tgid.x;
+    uint row = tgid.y;
+    uint qhead = head >> 1;
+    device const float* lg = logg + head * 64u;
+    device const float* vv = vbar + (head * 64u + 0u) * 128u + row;
+    device float* srow = state + (head * 128u + row) * 128u;
+    float acc = exp(lg[clen - 1u]) * srow[col];
+    for (uint r = 0u; r < clen; ++r) {
+        float key = mixed[(c0 + r) * 8192u + 2048u + qhead * 128u + col];
+        key *= exp(lg[clen - 1u] - lg[r]);
+        acc += vv[r * 128u] * key;
+    }
+    srow[col] = acc;
+}
+
+kernel void gdn_y_norm(
+    device float* y [[buffer(0)]],
+    device const float* gate [[buffer(1)]],
+    device const half* norm_w [[buffer(2)]],
+    constant float& eps [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    if (tgid.x >= count) {
+        return;
+    }
+    threadgroup float red[4];
+    device float* row = y + tgid.x * 4096u + tgid.y * 128u;
+    float value = row[tid];
+    float part = simd_sum(value * value);
+    if (lane == 0u) {
+        red[simd] = part;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float ytot = red[0] + red[1] + red[2] + red[3];
+    float inv = rsqrt(ytot / 128.0f + eps);
+    float gated = value * inv * (1.0f + float(norm_w[tid]));
+    device const float* z = gate + tgid.x * 4096u + tgid.y * 128u;
+    row[tid] = gated * silu_f(z[tid]);
 }
 
 kernel void split_q_gate_rows(
@@ -2295,6 +2546,207 @@ kernel void silu_wave(
     float gate = gate_up[span_row * 1024u + row];
     float up = gate_up[span_row * 1024u + 512u + row];
     gated[span_row * 512u + row] = silu_f(gate) * up;
+}
+
+kernel void moe_group(
+    device const uint* ids [[buffer(0)]],
+    device const float* mix [[buffer(1)]],
+    device uint* csr_i [[buffer(2)]],
+    device float* csr_w [[buffer(3)]],
+    device uint* expert_of [[buffer(4)]],
+    device uint* slot_n [[buffer(5)]],
+    device uint* slot_csr [[buffer(6)]],
+    device uint* row_base [[buffer(7)]],
+    device uint* jobs [[buffer(8)]],
+    device uint* info [[buffer(9)]],
+    device uint* csr_lane [[buffer(10)]],
+    device uint* pack_row [[buffer(11)]],
+    constant uint& count [[buffer(12)]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    // One thread keeps the stable token order. The other threads only fill the group.
+    if (tid != 0u) {
+        return;
+    }
+    uint counts[256];
+    uint filled[256];
+    uint offsets[256];
+    for (uint expert = 0u; expert < 256u; ++expert) {
+        counts[expert] = 0u;
+        filled[expert] = 0u;
+    }
+    uint nassign = count * 8u;
+    for (uint index = 0u; index < nassign; ++index) {
+        counts[ids[index]] += 1u;
+    }
+    uint cursor = 0u;
+    for (uint expert = 0u; expert < 256u; ++expert) {
+        uint align = (4u - (cursor & 3u)) & 3u;
+        cursor += align;
+        offsets[expert] = cursor;
+        cursor += counts[expert];
+    }
+    for (uint token = 0u; token < count; ++token) {
+        for (uint lane = 0u; lane < 8u; ++lane) {
+            uint expert = ids[token * 8u + lane];
+            uint at = offsets[expert] + filled[expert];
+            filled[expert] += 1u;
+            csr_i[at] = token;
+            csr_w[at] = mix[token * 8u + lane];
+            csr_lane[at] = lane;
+        }
+    }
+    uint slot = 0u;
+    uint row = 0u;
+    uint job = 0u;
+    for (uint expert = 0u; expert < 256u; ++expert) {
+        uint n = counts[expert];
+        if (n == 0u) {
+            continue;
+        }
+        uint pad = (n + 63u) & ~63u;
+        expert_of[slot] = expert;
+        slot_n[slot] = n;
+        slot_csr[slot] = offsets[expert];
+        row_base[slot] = row;
+        uint tiles = pad >> 6u;
+        for (uint tile = 0u; tile < tiles; ++tile) {
+            jobs[job * 2u] = slot;
+            jobs[job * 2u + 1u] = tile;
+            job += 1u;
+        }
+        for (uint local = 0u; local < n; ++local) {
+            uint at = offsets[expert] + local;
+            pack_row[csr_i[at] * 8u + csr_lane[at]] = row + local;
+        }
+        row += pad;
+        slot += 1u;
+    }
+    info[0] = slot;
+    info[1] = job;
+    info[2] = row;
+    info[3] = 0u;
+    // Each record is 4 uints, 16 bytes. [0]=gather [1]=zero [2]=gate [3]=silu [4]=cast [5]=down.
+    uint jobs_y = job == 0u ? 1u : job;
+    uint rows_g = row == 0u ? 1u : row * 2u;
+    uint zero_g = row == 0u ? 1u : row * 4u;
+    info[4] = jobs_y;
+    info[5] = 1u;
+    info[6] = 1u;
+    info[7] = 0u;
+    info[8] = zero_g;
+    info[9] = 1u;
+    info[10] = 1u;
+    info[11] = 0u;
+    info[12] = 16u;
+    info[13] = jobs_y;
+    info[14] = 1u;
+    info[15] = 0u;
+    info[16] = rows_g;
+    info[17] = 1u;
+    info[18] = 1u;
+    info[19] = 0u;
+    info[20] = rows_g;
+    info[21] = 1u;
+    info[22] = 1u;
+    info[23] = 0u;
+    info[24] = 32u;
+    info[25] = jobs_y;
+    info[26] = 1u;
+    info[27] = 0u;
+}
+
+kernel void gather_half_grouped(
+    device const float* source [[buffer(0)]],
+    device const uint* index [[buffer(1)]],
+    device half* pack [[buffer(2)]],
+    device const uint* slot_n [[buffer(3)]],
+    device const uint* slot_csr [[buffer(4)]],
+    device const uint* row_base [[buffer(5)]],
+    device const uint* jobs [[buffer(6)]],
+    device const uint* info [[buffer(7)]],
+    constant uint& inner [[buffer(8)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint job [[threadgroup_position_in_grid]])
+{
+    if (job >= info[1]) {
+        return;
+    }
+    uint slot = jobs[job * 2u];
+    uint tile = jobs[job * 2u + 1u];
+    uint n = slot_n[slot];
+    uint begin = tile * 64u;
+    uint end = begin + 64u;
+    if (end > n) {
+        end = n;
+    }
+    uint csr = slot_csr[slot] + begin;
+    uint base = row_base[slot] + begin;
+    for (uint row = begin; row < end; ++row) {
+        uint token = index[csr];
+        device const float* src = source + token * inner;
+        device half* dest = pack + base * inner;
+        for (uint i = tid; i < inner; i += 256u) {
+            dest[i] = half(src[i]);
+        }
+        csr += 1u;
+        base += 1u;
+    }
+}
+
+kernel void silu_mul_grouped(
+    device const float* gate_up [[buffer(0)]],
+    device float* gated [[buffer(1)]],
+    device const uint* info [[buffer(2)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint rows = info[2];
+    uint span = rows * 512u;
+    if (tid >= span) {
+        return;
+    }
+    uint token = tid >> 9u;
+    uint row = tid & 511u;
+    float gate = gate_up[token * 1024u + row];
+    float up = gate_up[token * 1024u + 512u + row];
+    gated[tid] = silu_f(gate) * up;
+}
+
+kernel void cast_f32_f16_n(
+    device const float* source [[buffer(0)]],
+    device half* destination [[buffer(1)]],
+    device const uint* info [[buffer(2)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint n = info[2] * 512u;
+    if (tid >= n) {
+        return;
+    }
+    destination[tid] = half(source[tid]);
+}
+
+kernel void scatter_add_grouped(
+    device float* hidden [[buffer(0)]],
+    device const float* partial [[buffer(1)]],
+    device const uint* pack_row [[buffer(2)]],
+    device const float* mix [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& count [[buffer(5)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint token [[threadgroup_position_in_grid]])
+{
+    if (token >= count) {
+        return;
+    }
+    device float* dest = hidden + token * cols;
+    for (uint lane = 0u; lane < 8u; ++lane) {
+        uint row = pack_row[token * 8u + lane];
+        float weight = mix[token * 8u + lane];
+        device const float* src = partial + row * cols;
+        for (uint i = tid; i < cols; i += 256u) {
+            dest[i] += weight * src[i];
+        }
+    }
 }
 
 kernel void scatter_add_rows(

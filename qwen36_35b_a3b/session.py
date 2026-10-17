@@ -79,7 +79,13 @@ KERNELS = (
     "embed_fp4_rows",
     "residual_rows",
     "gdn_conv_rows",
+    "gdn_conv_keep",
     "gdn_state_rows",
+    "gdn_l2_rows",
+    "gdn_chunk_solve",
+    "gdn_chunk_out",
+    "gdn_chunk_state",
+    "gdn_y_norm",
     "split_q_gate_rows",
     "qk_norm_rope_rows",
     "store_kv_rows",
@@ -92,6 +98,11 @@ KERNELS = (
     "silu_mul_rows",
     "gather_half_rows",
     "gather_half_slots",
+    "gather_half_grouped",
+    "moe_group",
+    "silu_mul_grouped",
+    "cast_f32_f16_n",
+    "scatter_add_grouped",
     "silu_wave",
     "prefill_fp4_expert_tile",
     "prefill_f16",
@@ -155,6 +166,7 @@ class Session:
         self.shared = metal.MTLResourceStorageModeShared
         self.pipes: dict[str, Any] = {}
         self._recording = False
+        self._inflight: list[tuple[Any, list[Any]]] = []
         for name in KERNELS:
             function = library.newFunctionWithName_(name)
             if function is None:
@@ -260,15 +272,86 @@ class Session:
             self.metal.MTLSize(*threads),
         )
 
-    def end(self) -> None:
+    def split(self) -> None:
+        """End this encoder and open another on the same command buffer.
+
+        A kernel can fill an indirect-dispatch buffer, and the next encoder
+        reads that buffer when the command buffer runs.
+        """
+        self._pass_encoder.endEncoding()
+        self._pass_encoder = self._pass_command.computeCommandEncoder()
+
+    def encode_indirect(
+        self,
+        name: str,
+        bindings: list[tuple[Any, int]],
+        constants: list[bytes],
+        indirect: Any,
+        indirect_offset: int,
+        threads: tuple[int, int, int],
+    ) -> None:
+        """Dispatch ``name``. The grid is three uints at ``indirect_offset``."""
+        encoder = self._pass_encoder
+        encoder.setComputePipelineState_(self.pipes[name])
+        for index, (buffer, offset) in enumerate(bindings):
+            self._pass_held.append(buffer)
+            encoder.setBuffer_offset_atIndex_(buffer, int(offset), index)
+        base = len(bindings)
+        for index, blob in enumerate(constants):
+            self._pass_held.append(blob)
+            encoder.setBytes_length_atIndex_(blob, len(blob), base + index)
+        self._pass_held.append(indirect)
+        encoder.dispatchThreadgroupsWithIndirectBuffer_indirectBufferOffset_threadsPerThreadgroup_(
+            indirect,
+            int(indirect_offset),
+            self.metal.MTLSize(*threads),
+        )
+
+    def commit(self) -> None:
+        """Commit the open encoder and leave it in flight."""
+        if not self._recording:
+            message = "commit without an open command buffer"
+            raise RuntimeError(message)
         self._recording = False
         self._pass_encoder.endEncoding()
         command = self._pass_command
         command.commit()
-        command.waitUntilCompleted()
-        self._pass_held.clear()
+        self._inflight.append((command, self._pass_held))
+        self._pass_held = []
         self._pass_encoder = None
         self._pass_command = None
+
+    def abort(self) -> None:
+        """Drop the open encoder. A buffer already in flight stays in flight."""
+        if not self._recording:
+            return
+        self._recording = False
+        self._pass_encoder.endEncoding()
+        self._pass_encoder = None
+        self._pass_command = None
+        self._pass_held = []
+
+    def inflight(self) -> int:
+        return len(self._inflight)
+
+    def wait_oldest(self) -> None:
+        if not self._inflight:
+            return
+        command, held = self._inflight.pop(0)
+        self._finish(command, held)
+
+    def wait_inflight(self) -> None:
+        while self._inflight:
+            self.wait_oldest()
+
+    def end(self) -> None:
+        if self._recording:
+            self.commit()
+        self.wait_inflight()
+
+    def _finish(self, command: Any, held: list[Any]) -> None:
+        command.waitUntilCompleted()
+        del held
         if int(command.status()) != 4:
             message = f"command status {command.status()} {command.error()}"
             raise RuntimeError(message)
