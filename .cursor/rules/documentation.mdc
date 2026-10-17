@@ -7,6 +7,8 @@ alwaysApply: true
 
 This repository is public. Anyone can read the tree, the history, issues, and pull requests. Write docs, commits, comments, and examples as if they will stay public.
 
+An exemption to this rule is when a documentation line starts with `>`, which may contain author hand-written documentation.
+
 ## No personal data
 
 Do not commit personal data or secrets. That includes names, email addresses, phone numbers, account handles, home directories, hostnames, serial numbers, local network addresses, tokens, keys, passwords, and private URLs. Logs, screenshots, and sample output follow the same rule.

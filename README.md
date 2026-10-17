@@ -1,8 +1,8 @@
 # MADMetal
 
-**MADMetal Accelerated Decoding on Metal.**
+>Author's Note: This app is directly inspired by [oMLX](https://github.com/jundot/omlx). It's an amazing app - I recommend trying that first for general purpose inference before using my more specialized runtime.
 
-The author admires the work of the authors of [oMLX](https://github.com/jundot/omlx) and recommends their app before trying MADMetal.
+**MADMetal Accelerated Decoding on Metal.**
 
 One model, one inference pipeline. MADMetal does not host a family of models behind a shared runner. Each model owns its forward, its weight records, and its Metal kernels. `madmetal serve` is the entry point for inference. A client selects a model with the OpenAI `model` field. Quantize and the other non-serve commands use that model's flag, as in `madmetal --qwen38-flash-next quantize`.
 
@@ -20,13 +20,9 @@ uv run python -m harness --workspace ./note-workspace
 
 The harness is a [Microsoft Agent Framework](https://github.com/microsoft/agent-framework) client. It creates a file, replaces its text, and confirms the result. `python -m harness.long_prompt` reads repository files across turns until the prompt reaches the `--tokens` target and prints prefill and decode rates. The server keeps that live conversation in memory. A request that does not extend it is written under `~/.madmetal/prefix` and loaded again when those token ids return.
 
-## Milestone
-
-The first milestone is that agentic loop on this server.
-
 ## Development
 
-Code in this repository is written with AI assistance and reviewed before it is kept. This note is disclosure only. It does not replace the license, and it does not grant or limit any rights under the license.
+MADMetal is an AI-first application. Agentic software delivery is how this repository is built: agents design the change, write the code, and land it. The author directs the work.
 
 ## Problems
 
