@@ -62,6 +62,42 @@ def check_state_kernels() -> None:
     _check_qsa(session, rng)
     _check_submit_keeps_scratch(session)
     _check_rewind_keeps_scratch(session)
+    _check_router_topk(session, rng)
+
+
+def _router_topk(row: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
+    peak = float(row.max())
+    prob = np.exp(row - peak)
+    prob /= prob.sum()
+    work = prob.copy()
+    ids = np.empty(k, dtype=np.uint32)
+    weights = np.empty(k, dtype=np.float32)
+    for slot in range(k):
+        choice = int(np.argmax(work))
+        ids[slot] = choice
+        weights[slot] = work[choice]
+        work[choice] = -1.0
+    weights /= weights.sum()
+    return ids, weights
+
+
+def _check_router_topk(session: MetalSession, rng: np.random.Generator) -> None:
+    session.begin_scratch(1 << 20, copies=1)
+    count, n, k = 2, 512, 10
+    logits = rng.normal(size=(count, n)).astype(np.float32)
+    logits[0, 3] = 40.0
+    logits[0, 17] = 40.0
+    got_i, got_w = session.topk_batch(session.dev_from(logits), count, n, k)
+    indices = session.read_u32(got_i).reshape(count, k)
+    weights = session.read_f32(got_w).reshape(count, k)
+    for token in range(count):
+        expect_i, expect_w = _router_topk(logits[token], k)
+        if not np.array_equal(indices[token], expect_i):
+            message = "router top-k ids diverged"
+            raise RuntimeError(message)
+        if not np.allclose(weights[token], expect_w, rtol=1e-4, atol=1e-5):
+            message = "router top-k weights diverged"
+            raise RuntimeError(message)
 
 
 def _check_qsa(session: MetalSession, rng: np.random.Generator) -> None:

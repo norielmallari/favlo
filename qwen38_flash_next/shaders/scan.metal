@@ -208,7 +208,8 @@ kernel void topk_batch(
     constant uint& count [[buffer(4)]],
     constant uint& n [[buffer(5)]],
     constant uint& k [[buffer(6)]],
-    uint token [[thread_position_in_grid]])
+    uint token [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]])
 {
     if (token >= count) {
         return;
@@ -217,38 +218,54 @@ kernel void topk_batch(
     device float* scratch = probs + token * n;
     device uint* out_i = index + token * k;
     device float* out_w = weight + token * k;
-    float peak = row[0];
-    for (uint i = 1u; i < n; ++i) {
+    float peak = -INFINITY;
+    for (uint i = lane; i < n; i += 32u) {
         peak = max(peak, row[i]);
     }
+    peak = simd_max(peak);
     float sum = 0.0f;
-    for (uint i = 0u; i < n; ++i) {
+    for (uint i = lane; i < n; i += 32u) {
         float prob = exp(row[i] - peak);
         scratch[i] = prob;
         sum += prob;
     }
-    for (uint i = 0u; i < n; ++i) {
-        scratch[i] /= sum;
+    sum = simd_sum(sum);
+    float inv = 1.0f / sum;
+    for (uint i = lane; i < n; i += 32u) {
+        scratch[i] *= inv;
     }
     for (uint slot = 0u; slot < k; ++slot) {
-        uint best_i = 0u;
-        float best = -1.0f;
-        for (uint i = 0u; i < n; ++i) {
-            if (scratch[i] > best) {
-                best = scratch[i];
+        float best = -INFINITY;
+        uint best_i = 0xffffffffu;
+        for (uint i = lane; i < n; i += 32u) {
+            float value = scratch[i];
+            if (value > best) {
+                best = value;
                 best_i = i;
             }
         }
-        out_i[slot] = best_i;
-        out_w[slot] = best;
-        scratch[best_i] = -1.0f;
+        float vmax = simd_max(best);
+        uint winner = best == vmax ? best_i : 0xffffffffu;
+        uint chosen_i = simd_min(winner);
+        float chosen_v = best_i == chosen_i ? best : -INFINITY;
+        chosen_v = simd_max(chosen_v);
+        if (lane == 0u) {
+            out_i[slot] = chosen_i;
+            out_w[slot] = chosen_v;
+        }
+        if (chosen_i != 0xffffffffu && (chosen_i & 31u) == lane) {
+            scratch[chosen_i] = -1.0f;
+        }
     }
-    float chosen = 0.0f;
-    for (uint slot = 0u; slot < k; ++slot) {
-        chosen += out_w[slot];
-    }
-    for (uint slot = 0u; slot < k; ++slot) {
-        out_w[slot] /= chosen;
+    if (lane == 0u) {
+        float chosen = 0.0f;
+        for (uint slot = 0u; slot < k; ++slot) {
+            chosen += out_w[slot];
+        }
+        float inv_chosen = 1.0f / chosen;
+        for (uint slot = 0u; slot < k; ++slot) {
+            out_w[slot] *= inv_chosen;
+        }
     }
 }
 
@@ -637,7 +654,7 @@ kernel void indexer_write(
 
 // One threadgroup owns one key/value head and one token. Twelve simdgroups are
 // the query heads that share it, so the key and the value are loaded once.
-static void publish_kv(
+static void store_kv8(
     threadgroup float* tile,
     device const uchar* body,
     device const ushort* tail,
@@ -645,18 +662,43 @@ static void publish_kv(
     uint kv,
     uint mode,
     uint complete,
-    uint lane,
-    uint simd)
+    uint lane)
 {
-    if (simd == 0u) {
-        float tmp[8];
-        load_kv8(body, tail, token, kv * 256u + lane * 8u, mode, complete, tmp);
-        uint local = lane * 8u;
-        for (uint i = 0u; i < 8u; ++i) {
-            tile[local + i] = tmp[i];
-        }
+    float tmp[8];
+    load_kv8(body, tail, token, kv * 256u + lane * 8u, mode, complete, tmp);
+    uint local = lane * 8u;
+    for (uint i = 0u; i < 8u; ++i) {
+        tile[local + i] = tmp[i];
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+static void fold_online(
+    float score,
+    threadgroup const float* value,
+    thread float& running_max,
+    thread float& running_sum,
+    thread float& acc0,
+    thread float& acc1,
+    thread float& acc2,
+    thread float& acc3,
+    thread float& acc4,
+    thread float& acc5,
+    thread float& acc6,
+    thread float& acc7)
+{
+    float next_max = max(running_max, score);
+    float decay = running_max == -INFINITY ? 0.0f : exp(running_max - next_max);
+    float add = exp(score - next_max);
+    running_sum = running_sum * decay + add;
+    acc0 = acc0 * decay + add * value[0];
+    acc1 = acc1 * decay + add * value[1];
+    acc2 = acc2 * decay + add * value[2];
+    acc3 = acc3 * decay + add * value[3];
+    acc4 = acc4 * decay + add * value[4];
+    acc5 = acc5 * decay + add * value[5];
+    acc6 = acc6 * decay + add * value[6];
+    acc7 = acc7 * decay + add * value[7];
+    running_max = next_max;
 }
 
 kernel void qsa_attend(
@@ -677,8 +719,8 @@ kernel void qsa_attend(
     uint lane [[thread_index_in_simdgroup]],
     uint simd [[simdgroup_index_in_threadgroup]])
 {
-    threadgroup float shared_k[256];
-    threadgroup float shared_v[256];
+    threadgroup float shared_k[8 * 256];
+    threadgroup float shared_v[8 * 256];
     uint kv = gid.x;
     uint token = gid.y;
     if (kv >= 2u || token >= count) {
@@ -700,27 +742,26 @@ kernel void qsa_attend(
     float running_sum = 0.0f;
     float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
     float acc4 = 0.0f, acc5 = 0.0f, acc6 = 0.0f, acc7 = 0.0f;
-    for (uint t = 0u; t < visible; ++t) {
-        publish_kv(shared_k, key, key_tail, t, kv, mode, complete, lane, simd);
-        float partial = q0 * shared_k[ch] + q1 * shared_k[ch + 1u];
-        partial += q2 * shared_k[ch + 2u] + q3 * shared_k[ch + 3u];
-        partial += q4 * shared_k[ch + 4u] + q5 * shared_k[ch + 5u];
-        partial += q6 * shared_k[ch + 6u] + q7 * shared_k[ch + 7u];
-        float score = simd_sum(partial) * scale;
-        publish_kv(shared_v, value, value_tail, t, kv, mode, complete, lane, simd);
-        float next_max = max(running_max, score);
-        float decay = running_max == -INFINITY ? 0.0f : exp(running_max - next_max);
-        float add = exp(score - next_max);
-        running_sum = running_sum * decay + add;
-        acc0 = acc0 * decay + add * shared_v[ch];
-        acc1 = acc1 * decay + add * shared_v[ch + 1u];
-        acc2 = acc2 * decay + add * shared_v[ch + 2u];
-        acc3 = acc3 * decay + add * shared_v[ch + 3u];
-        acc4 = acc4 * decay + add * shared_v[ch + 4u];
-        acc5 = acc5 * decay + add * shared_v[ch + 5u];
-        acc6 = acc6 * decay + add * shared_v[ch + 6u];
-        acc7 = acc7 * decay + add * shared_v[ch + 7u];
-        running_max = next_max;
+    for (uint t0 = 0u; t0 < visible; t0 += 8u) {
+        uint ntile = min(8u, visible - t0);
+        if (simd == 0u) {
+            for (uint s = 0u; s < ntile; ++s) {
+                store_kv8(shared_k + s * 256u, key, key_tail, t0 + s, kv, mode, complete, lane);
+                store_kv8(shared_v + s * 256u, value, value_tail, t0 + s, kv, mode, complete, lane);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint s = 0u; s < ntile; ++s) {
+            threadgroup const float* ks = shared_k + s * 256u + ch;
+            float partial = q0 * ks[0] + q1 * ks[1] + q2 * ks[2] + q3 * ks[3];
+            partial += q4 * ks[4] + q5 * ks[5] + q6 * ks[6] + q7 * ks[7];
+            fold_online(
+                simd_sum(partial) * scale,
+                shared_v + s * 256u + ch,
+                running_max,
+                running_sum,
+                acc0, acc1, acc2, acc3, acc4, acc5, acc6, acc7);
+        }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
     float inv = running_sum == 0.0f ? 0.0f : 1.0f / running_sum;
@@ -1084,8 +1125,8 @@ kernel void qsa_attend_selected(
     uint lane [[thread_index_in_simdgroup]],
     uint simd [[simdgroup_index_in_threadgroup]])
 {
-    threadgroup float shared_k[256];
-    threadgroup float shared_v[256];
+    threadgroup float shared_k[8 * 256];
+    threadgroup float shared_v[8 * 256];
     uint kv = gid.x;
     uint token = gid.y;
     if (kv >= 2u || token >= count) {
@@ -1113,28 +1154,27 @@ kernel void qsa_attend_selected(
     float running_sum = 0.0f;
     float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
     float acc4 = 0.0f, acc5 = 0.0f, acc6 = 0.0f, acc7 = 0.0f;
-    for (uint slot = 0u; slot < nsel; ++slot) {
-        uint picked = ids[slot];
-        publish_kv(shared_k, key, key_tail, picked, kv, kv_load, complete, lane, simd);
-        float partial = q0 * shared_k[ch] + q1 * shared_k[ch + 1u];
-        partial += q2 * shared_k[ch + 2u] + q3 * shared_k[ch + 3u];
-        partial += q4 * shared_k[ch + 4u] + q5 * shared_k[ch + 5u];
-        partial += q6 * shared_k[ch + 6u] + q7 * shared_k[ch + 7u];
-        float score = simd_sum(partial) * scale;
-        publish_kv(shared_v, value, value_tail, picked, kv, kv_load, complete, lane, simd);
-        float next_max = max(running_max, score);
-        float decay = running_max == -INFINITY ? 0.0f : exp(running_max - next_max);
-        float add = exp(score - next_max);
-        running_sum = running_sum * decay + add;
-        acc0 = acc0 * decay + add * shared_v[ch];
-        acc1 = acc1 * decay + add * shared_v[ch + 1u];
-        acc2 = acc2 * decay + add * shared_v[ch + 2u];
-        acc3 = acc3 * decay + add * shared_v[ch + 3u];
-        acc4 = acc4 * decay + add * shared_v[ch + 4u];
-        acc5 = acc5 * decay + add * shared_v[ch + 5u];
-        acc6 = acc6 * decay + add * shared_v[ch + 6u];
-        acc7 = acc7 * decay + add * shared_v[ch + 7u];
-        running_max = next_max;
+    for (uint slot0 = 0u; slot0 < nsel; slot0 += 8u) {
+        uint ntile = min(8u, nsel - slot0);
+        if (simd == 0u) {
+            for (uint s = 0u; s < ntile; ++s) {
+                uint picked = ids[slot0 + s];
+                store_kv8(shared_k + s * 256u, key, key_tail, picked, kv, kv_load, complete, lane);
+                store_kv8(shared_v + s * 256u, value, value_tail, picked, kv, kv_load, complete, lane);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint s = 0u; s < ntile; ++s) {
+            threadgroup const float* ks = shared_k + s * 256u + ch;
+            float partial = q0 * ks[0] + q1 * ks[1] + q2 * ks[2] + q3 * ks[3];
+            partial += q4 * ks[4] + q5 * ks[5] + q6 * ks[6] + q7 * ks[7];
+            fold_online(
+                simd_sum(partial) * scale,
+                shared_v + s * 256u + ch,
+                running_max,
+                running_sum,
+                acc0, acc1, acc2, acc3, acc4, acc5, acc6, acc7);
+        }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
     float inv = running_sum == 0.0f ? 0.0f : 1.0f / running_sum;

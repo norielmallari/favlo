@@ -2391,8 +2391,8 @@ class MetalSession:
             self.act["topk_batch"],
             (_dev_bind(logits), _dev_bind(index), _dev_bind(weight), (scratch.buf, scratch.offset)),
             (struct.pack("<I", count), struct.pack("<I", n), struct.pack("<I", k)),
-            self._size(count),
-            self._size(1),
+            self._size(max(count, 1)),
+            self._size(32),
         )
         return index, weight
 
