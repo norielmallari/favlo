@@ -45,7 +45,7 @@ uv run madmetal --<pipeline> matmul
 uv run madmetal --<pipeline> kernels
 ```
 
-3. After those pass, the long prompt. It starts its own server. Do not point it at a listener already on `8129`.
+3. After those pass, the long prompt. It starts its own server, stops it after the first turn, and starts another so the second turn loads the prefix from disk. Do not point it at a listener already on `8129`.
 
 ```text
 uv run python -m harness.long_prompt --model <pipeline>

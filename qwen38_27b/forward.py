@@ -44,6 +44,7 @@ from qwen38_27b.layout import (
     Z_WIDTH,
 )
 from qwen38_27b.prefill import workspace_bytes
+from qwen38_27b.prefix import open_session
 from qwen38_27b.session import Session
 
 
@@ -180,7 +181,6 @@ class Qwen38Runtime:
         self._prefill_seconds = 0.0
         self._decode_seconds = 0.0
         self._cached_tokens = 0
-        self._cached = []
         self.session = None
         self.resident = None
         summary = ""
@@ -211,6 +211,7 @@ class Qwen38Runtime:
             self.best_v = zeros(_ARGMAX_GROUPS * 4)
             self.best_i = zeros(_ARGMAX_GROUPS * 4)
             self._held = [self.resident, self.history, self.state, *self.k_cache, *self.v_cache]
+            self.prefix = open_session(self)
             summary = (
                 f"loaded {self.root.name} kv {self.kv_cache} context {self.max_pos} "
                 f"weights {resident_bytes} cache {cache_bytes(self.max_pos)}"
@@ -226,6 +227,12 @@ class Qwen38Runtime:
                 self._status(summary)
 
     def close(self) -> None:
+        prefix = getattr(self, "prefix", None)
+        if prefix is not None and self.session is not None:
+            try:
+                prefix.flush()
+            except OSError:
+                pass
         self._prefill = None
         self._held.clear()
         self.resident = None
@@ -553,19 +560,16 @@ class Qwen38Runtime:
             message = f"prompt length {len(prompt)} is past {self.max_pos}"
             raise RuntimeError(message)
         self._status(f"prompt tokens {len(prompt)}")
-        cached = self._cached
-        self._cached = []
-        if cached and prompt[: len(cached)] == cached and len(prompt) > len(cached):
-            hit = len(cached)
-            self._status(f"cache hit {hit}")
-        else:
-            hit = 0
-            self.reset()
-            self._status("cache miss")
+        hit = self.prefix.align(prompt)
+        if self.prefix.loaded:
+            self._status(f"prefix load {hit} tokens")
+        self._status(f"cache hit {hit}" if hit else "cache miss")
         self._cached_tokens = hit
         suffix = prompt[hit:]
         prefill_row = None
         decode_row = None
+        boundary = False
+        out: list[int] = []
         try:
             prefill_row = self._begin_phase("prefill", len(suffix))
             self._prefill_progress = prefill_row
@@ -576,6 +580,9 @@ class Qwen38Runtime:
                 prefill_ids(self, suffix[:-1], hit)
             nxt = self.step(suffix[-1], len(prompt) - 1, logits=True)
             assert nxt is not None
+            self.prefix.note(prompt)
+            self._store_prefix()
+            boundary = True
             self._note_prefill(len(suffix))
             elapsed = max(time.perf_counter() - started, 1e-9)
             self._prefill_seconds = elapsed
@@ -589,7 +596,6 @@ class Qwen38Runtime:
             prefill_row = None
             pending = list(forced or [])
             close_after = bool(stop_after_forced) and bool(pending)
-            out: list[int] = []
             decode_row = self._begin_phase("decode", max_tokens, live=True)
             decode_started = time.perf_counter()
             chosen = nxt
@@ -627,13 +633,32 @@ class Qwen38Runtime:
             self._end_phase(decode_row, decode_summary)
             print(decode_summary, flush=True)
             decode_row = None
+            self.prefix.note((prompt + out)[: self.filled])
+            self._store_prefix()
+        except RequestClosed:
+            if boundary:
+                self.prefix.note((prompt + out)[: self.filled])
+                self._store_prefix()
+            else:
+                self.prefix.tokens = []
+                self.prefix.dirty = False
+                self.reset()
+            raise
         finally:
             self._on_prefill = None
             self._prefill_progress = None
             self._end_phase(prefill_row, "")
             self._end_phase(decode_row, "")
-        self._cached = prompt + out
         return out
+
+    def _store_prefix(self) -> None:
+        try:
+            path = self.prefix.flush()
+        except OSError as exc:
+            self._status(f"prefix store failed {exc}")
+            return
+        if path is not None:
+            self._status(f"prefix store {len(self.prefix.tokens)} tokens")
 
     def _status(self, line: str) -> None:
         console = self.console

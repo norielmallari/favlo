@@ -1,9 +1,10 @@
 """Read repository files until the prompt reaches a token target.
 
 One Microsoft Agent Framework client calls ``read_file`` once per turn.
-That call is the whole completion. The file text is the next turn's new
-tokens, so the server's in-memory prefix cache extends. A turn that does
-not extend the cache stops the run.
+That call is the whole completion. The server stops after the first turn
+and starts again, so the second turn loads the prefix from disk. Later
+turns keep that server. A turn that does not extend the stored token ids
+stops the run.
 """
 
 from __future__ import annotations
@@ -92,6 +93,7 @@ class RequestRate:
     decode_tokens: int
     atlas: str
     steady: tuple[str, ...]
+    prefix_load: int | None = None
 
 
 def token_count(line: str) -> int:
@@ -103,10 +105,22 @@ def token_count(line: str) -> int:
     return int(match.group(1))
 
 
+def _load_count(line: str) -> int | None:
+    parts = line.split()
+    if len(parts) >= 3 and parts[2].isdigit():
+        return int(parts[2])
+    return None
+
+
 def parse_requests(text: str) -> list[RequestRate]:
-    """Group server log lines into one record per chat request."""
+    """Group server log lines into one record per chat request.
+
+    A ``prefix load`` line before ``prompt tokens`` belongs to that request.
+    One after ``prompt tokens`` and before decode belongs to the open request.
+    """
     requests: list[RequestRate] = []
     current: dict[str, object] | None = None
+    pending_load: int | None = None
 
     def finish() -> None:
         nonlocal current
@@ -115,6 +129,7 @@ def parse_requests(text: str) -> list[RequestRate]:
         steady = current["steady"]
         assert isinstance(steady, list)
         hit = current["prefix_hit"]
+        loaded = current["prefix_load"]
         requests.append(
             RequestRate(
                 prompt_tokens=int(current["prompt_tokens"]),
@@ -126,12 +141,22 @@ def parse_requests(text: str) -> list[RequestRate]:
                 decode_tokens=int(current["decode_tokens"]),
                 atlas=str(current["atlas"]),
                 steady=tuple(steady),
+                prefix_load=loaded if isinstance(loaded, int) else None,
             )
         )
         current = None
 
     for raw in text.splitlines():
         line = raw.strip()
+        if line.startswith("prefix load "):
+            loaded = _load_count(line)
+            if loaded is None:
+                continue
+            if current is not None and current["decode"] == "":
+                current["prefix_load"] = loaded
+            else:
+                pending_load = loaded
+            continue
         if line.startswith("prompt tokens "):
             parts = line.split()
             if len(parts) != 3 or not parts[2].isdigit():
@@ -147,7 +172,9 @@ def parse_requests(text: str) -> list[RequestRate]:
                 "decode_tokens": 0,
                 "atlas": "",
                 "steady": [],
+                "prefix_load": pending_load,
             }
+            pending_load = None
             continue
         if line.startswith("incoming tokens"):
             continue
@@ -177,24 +204,48 @@ def parse_requests(text: str) -> list[RequestRate]:
     return requests
 
 
-def extensions_hold(requests: list[RequestRate]) -> bool:
-    """True when every request after the first continues the cached token ids.
+def _cold_start(request: RequestRate) -> bool:
+    if request.prefix_load is not None:
+        return False
+    if request.prefix_hit not in (None, 0):
+        return False
+    return request.prefix_hit is not None or request.missed
 
-    The first request may be a miss. An empty cache reuses nothing.
+
+def _applied(request: RequestRate) -> int:
+    return request.prompt_tokens + request.decode_tokens
+
+
+def _extends(previous: RequestRate, current: RequestRate) -> bool:
+    return (
+        not current.missed
+        and current.prefix_hit == _applied(previous)
+        and current.prefix_load is None
+    )
+
+
+def prefix_so_far(requests: list[RequestRate]) -> bool:
+    """True while the turns so far can still finish as a disk load then extensions.
+
+    The first request misses. One request is not yet a failure. The second
+    loads that applied prefix from disk. Every later request extends it in memory.
     """
-    if not requests:
+    if not requests or not _cold_start(requests[0]):
         return False
-    first = requests[0]
-    if first.prefix_hit not in (None, 0):
+    if len(requests) == 1:
+        return True
+    second = requests[1]
+    if second.missed or second.prefix_hit != _applied(requests[0]):
         return False
-    if first.prefix_hit is None and not first.missed:
+    if second.prefix_load != second.prefix_hit:
         return False
-    for previous, current in zip(requests, requests[1:], strict=False):
-        if current.missed or current.prefix_hit is None:
-            return False
-        if current.prefix_hit != previous.prompt_tokens + previous.decode_tokens:
-            return False
-    return True
+    pairs = zip(requests[1:], requests[2:], strict=False)
+    return all(_extends(previous, current) for previous, current in pairs)
+
+
+def extensions_hold(requests: list[RequestRate]) -> bool:
+    """True when the second request loaded the first from disk and later turns extended it."""
+    return len(requests) >= 2 and prefix_so_far(requests)
 
 
 def summed_rate(lines: list[str]) -> tuple[int, float] | None:
@@ -213,12 +264,16 @@ def summed_rate(lines: list[str]) -> tuple[int, float] | None:
 
 def format_request(index: int, request: RequestRate) -> str:
     prefix = "cache miss" if request.missed else f"cache hit {request.prefix_hit}"
-    parts = [
-        f"{index} prompt {request.prompt_tokens}",
-        prefix,
-        request.prefill or "prefill pending",
-        request.decode or "decode pending",
-    ]
+    parts = [f"{index} prompt {request.prompt_tokens}"]
+    if request.prefix_load is not None:
+        parts.append(f"prefix load {request.prefix_load}")
+    parts.extend(
+        [
+            prefix,
+            request.prefill or "prefill pending",
+            request.decode or "decode pending",
+        ]
+    )
     if request.prefill_gpu:
         parts.append(request.prefill_gpu)
     if request.atlas:
@@ -283,11 +338,18 @@ def _read_tool(root: Path, allowed: set[str], loaded: list[str], queue: list[str
     return read_file
 
 
-def _wait_requests(log: Log, previous: int, proc: subprocess.Popen[str]) -> list[RequestRate]:
+@dataclass
+class Server:
+    proc: subprocess.Popen[str]
+    port: int
+
+
+def _wait_requests(log: Log, previous: int, server: Server) -> list[RequestRate]:
     deadline = time.monotonic() + 1800
     stable_at: float | None = None
     last = previous
     while time.monotonic() < deadline:
+        proc = server.proc
         if proc.poll() is not None:
             message = "server exited\n" + log.text()[-4000:]
             raise RuntimeError(message)
@@ -340,28 +402,8 @@ def _completions(log: Log) -> str:
     return "\n---\n".join(blocks[-2:])
 
 
-async def run_long_prompt(
-    base_url: str,
-    root: Path,
-    target: int,
-    log: Log,
-    proc: subprocess.Popen[str],
-    *,
-    model: str = "qwen38-flash-next",
-) -> RunResult:
-    """Read source files until ``prompt tokens`` reaches ``target``."""
-    root = root.resolve()
-    files = source_files(root)
-    if not files:
-        return RunResult([], False, False, "no source files")
-    allowed = {path.relative_to(root).as_posix() for path in files}
-    queue = [path.relative_to(root).as_posix() for path in files]
-    loaded: list[str] = []
-    http = AsyncOpenAI(
-        api_key="madmetal",
-        base_url=base_url,
-        timeout=3600.0,
-    )
+def _open_client(base_url: str, model: str) -> tuple[AsyncOpenAI, OpenAIChatCompletionClient]:
+    http = AsyncOpenAI(api_key="madmetal", base_url=base_url, timeout=3600.0)
     client = OpenAIChatCompletionClient(
         model=model,
         api_key="madmetal",
@@ -372,9 +414,34 @@ async def run_long_prompt(
     # its tokens are whatever the sampler drew, and the next render of that
     # text is the tokenizer's own encoding.
     client.function_invocation_configuration["enabled"] = False
+    return http, client
+
+
+async def run_long_prompt(
+    root: Path,
+    target: int,
+    log: Log,
+    server: Server,
+    *,
+    model: str = "qwen38-flash-next",
+) -> RunResult:
+    """Read source files until ``prompt tokens`` reaches ``target``.
+
+    The server in ``server`` is stopped after the first turn and replaced.
+    The second turn, and every turn after it, uses that new process.
+    """
+    root = root.resolve()
+    files = source_files(root)
+    if not files:
+        return RunResult([], False, False, "no source files")
+    allowed = {path.relative_to(root).as_posix() for path in files}
+    queue = [path.relative_to(root).as_posix() for path in files]
+    loaded: list[str] = []
+    http, client = _open_client(f"http://127.0.0.1:{server.port}/v1", model)
     read = _read_tool(root, allowed, loaded, queue)
     messages: list[Message] = [Message("system", [INSTRUCTIONS])]
     seen = 0
+    turn = 0
     requests: list[RequestRate] = []
     options = {
         "temperature": 0,
@@ -385,39 +452,56 @@ async def run_long_prompt(
         # Thinking left open does not reproduce the forced tool-call tokens on the next turn.
         "extra_body": {"enable_thinking": False},
     }
-    for path in files:
-        if requests and requests[-1].prompt_tokens >= target:
-            break
-        rel = path.relative_to(root).as_posix()
-        messages.append(Message("user", [read_prompt(rel)]))
-        before_requests = len(parse_requests(log.text()))
-        await client.get_response(messages, options=options)
-        requests = _wait_requests(log, before_requests, proc)
-        for index, request in enumerate(requests[seen:], start=seen + 1):
-            print(format_request(index, request), flush=True)
-        seen = len(requests)
-        if not extensions_hold(requests):
-            note = "prefix did not extend\n" + _completions(log)
-            return RunResult(requests, False, False, note)
-        text = read_repository_file(root, rel, allowed)
-        loaded.append(rel)
-        messages.append(
-            Message(
-                "assistant",
-                [Content.from_function_call("call_0", "read_file", arguments="{}")],
+    try:
+        for index, path in enumerate(files):
+            if turn >= 2 and requests and requests[-1].prompt_tokens >= target:
+                break
+            rel = path.relative_to(root).as_posix()
+            messages.append(Message("user", [read_prompt(rel)]))
+            before_requests = len(parse_requests(log.text()))
+            await client.get_response(messages, options=options)
+            requests = _wait_requests(log, before_requests, server)
+            for row, request in enumerate(requests[seen:], start=seen + 1):
+                print(format_request(row, request), flush=True)
+            seen = len(requests)
+            if not prefix_so_far(requests):
+                note = "prefix did not extend\n" + _completions(log)
+                return RunResult(requests, False, False, note)
+            text = read_repository_file(root, rel, allowed)
+            loaded.append(rel)
+            messages.append(
+                Message(
+                    "assistant",
+                    [Content.from_function_call("call_0", "read_file", arguments="{}")],
+                )
             )
-        )
-        messages.append(
-            Message(
-                "tool",
-                [Content.from_function_result("call_0", result=text)],
+            messages.append(
+                Message(
+                    "tool",
+                    [Content.from_function_result("call_0", result=text)],
+                )
             )
-        )
-        print(f"read {rel}", flush=True)
+            print(f"read {rel}", flush=True)
+            turn += 1
+            if turn == 1 and index + 1 < len(files):
+                print("restarting server", flush=True)
+                await http.close()
+                http = None
+                _restart(server, log)
+                http, client = _open_client(f"http://127.0.0.1:{server.port}/v1", model)
+    finally:
+        if http is not None:
+            await http.close()
     context = requests[-1].prompt_tokens if requests else 0
     reached = context >= target
-    note = "" if reached else f"source files ended at {context} tokens"
-    return RunResult(requests, reached, extensions_hold(requests), note)
+    extended = extensions_hold(requests)
+    if not reached:
+        note = f"source files ended at {context} tokens"
+    elif not extended:
+        note = "prefix was not loaded from disk"
+    else:
+        note = ""
+    return RunResult(requests, reached, extended, note)
 
 
 def _free_port() -> int:
@@ -432,10 +516,10 @@ def _read_log(proc: subprocess.Popen[str], log: Log) -> None:
         log.append(line)
 
 
-def _wait_listening(proc: subprocess.Popen[str], log: Log) -> None:
+def _wait_listening(proc: subprocess.Popen[str], log: Log, seen: int) -> None:
     deadline = time.monotonic() + 300
     while time.monotonic() < deadline:
-        if "listening on" in log.text():
+        if log.text().count("listening on") > seen:
             return
         if proc.poll() is not None:
             message = log.text()[-4000:]
@@ -445,19 +529,7 @@ def _wait_listening(proc: subprocess.Popen[str], log: Log) -> None:
     raise TimeoutError(message)
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Read repository files until the prompt reaches a token target."
-    )
-    parser.add_argument("--tokens", type=int, default=TARGET_TOKENS)
-    parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--port", type=int, default=0)
-    parser.add_argument("--model", default="qwen38-flash-next")
-    args = parser.parse_args(argv)
-    if args.tokens < 1:
-        print("token target must be positive")
-        return 1
-    port = args.port or _free_port()
+def _spawn(port: int, log: Log) -> subprocess.Popen[str]:
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -474,30 +546,56 @@ def main(argv: list[str] | None = None) -> int:
         stderr=subprocess.STDOUT,
         text=True,
     )
-    log = Log()
     threading.Thread(target=_read_log, args=(proc, log), daemon=True).start()
+    return proc
+
+
+def _stop_server(proc: subprocess.Popen[str]) -> None:
+    """SIGTERM so the process can write the live prefix, then wait for that exit."""
+    if proc.poll() is not None:
+        return
+    proc.terminate()
     try:
-        _wait_listening(proc, log)
+        proc.wait(timeout=300)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=30)
+
+
+def _restart(server: Server, log: Log) -> None:
+    _stop_server(server.proc)
+    seen = log.text().count("listening on")
+    server.port = _free_port()
+    server.proc = _spawn(server.port, log)
+    _wait_listening(server.proc, log, seen)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Read repository files until the prompt reaches a token target."
+    )
+    parser.add_argument("--tokens", type=int, default=TARGET_TOKENS)
+    parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--model", default="qwen38-flash-next")
+    args = parser.parse_args(argv)
+    if args.tokens < 1:
+        print("token target must be positive")
+        return 1
+    log = Log()
+    port = args.port or _free_port()
+    server = Server(_spawn(port, log), port)
+    try:
+        _wait_listening(server.proc, log, 0)
         result = asyncio.run(
-            run_long_prompt(
-                f"http://127.0.0.1:{port}/v1",
-                args.repo,
-                args.tokens,
-                log,
-                proc,
-                model=args.model,
-            )
+            run_long_prompt(args.repo, args.tokens, log, server, model=args.model)
         )
     except Exception as exc:
         print(exc)
         print(log.text()[-3000:])
         return 1
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        _stop_server(server.proc)
     print(format_summary(result.requests, args.tokens))
     if result.note:
         print(result.note)

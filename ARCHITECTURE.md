@@ -20,7 +20,7 @@ The entry file sets `PIPELINE` to its filename stem. The command discovers those
 
 A runtime's write set is the entry file, the package, `docs/<pipeline>/`, and tests that import only that package. A new runtime adds a row to the table above and its own doc directory. It does not edit another row's package, shaders, tests, or docs.
 
-Shared code is `src/madmetal/`: the process entry, the registry, and the listener. There is no model base class and no kernel that branches on the pipeline. `src/madmetal/` changes when the listener, the registry, or the console changes. A pipeline task does not change it to reach into another runtime.
+Shared code is `src/madmetal/`: the process entry, the registry, the listener, and the SSD prefix store. There is no model base class and no kernel that branches on the pipeline. `src/madmetal/` changes when the listener, the registry, the console, or the prefix store changes. A pipeline task does not change it to reach into another runtime. A pipeline imports the prefix store and adapts its own buffers. It does not import another pipeline.
 
 The registry stores a sampling card on each row. Registration loads `VARIANTS` and `DEFAULT_VARIANT` from that pipeline's `sampling.py` and writes them on the row. The stored names are the `:suffix` ids. A bare model id selects no row. The pipeline applies its default variant, or the row the request selects.
 
@@ -35,3 +35,9 @@ Tests for the listener, the registry, and the console live in `tests/test_cli.py
 ## Console
 
 Status goes through `src/madmetal/console.py`. The module imports nothing from a pipeline. The listener does not import a pipeline until a request names one. That row's entry file provides `open_runtime` and `handle_chat`. `--console auto` is pretty when stderr is a terminal, and plain when it is a pipe, when `NO_COLOR` is set, or when `TERM` is `dumb`. `plain` prints the lines the harness parses. `pretty` draws one row per open phase at 10 Hz. `json` writes one NDJSON object per event, schema version 1. How a pipeline binds those phases is that pipeline's note.
+
+## Prefix cache
+
+`src/madmetal/prefix.py` stores one sequence as token ids plus named regions under `~/.madmetal/prefix/<model>/<checkpoint>/<hash>.bin`. The checkpoint id is the hex SHA-256 of `manifest.json`, or of `config.json` when the record has no manifest. The file name is the hex SHA-256 of the format, the model id, that digest, the cache tag, and the token ids. The store does not know a key/value layout. Each pipeline packs its own buffers into regions and copies a matching file back.
+
+A prompt that extends the live tokens keeps the device. Any other prompt writes the live sequence, clears the device, and loads the longest stored prefix that pipeline accepts. Regions start on a 16 KB page. The write replaces the destination after the header hash is in place. A region whose stored bytes are a prefix of the new blob is copied forward. One model and one checkpoint stay within 32 GiB. Past that, the oldest files are deleted and the file just written stays. What a pipeline puts in the regions, and whether an exact-length file can be sampled, is that pipeline's note.

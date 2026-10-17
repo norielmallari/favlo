@@ -18,7 +18,7 @@ uv run madmetal serve
 uv run python -m harness --workspace ./note-workspace
 ```
 
-The harness is a [Microsoft Agent Framework](https://github.com/microsoft/agent-framework) client. It creates a file, replaces its text, and confirms the result. `python -m harness.long_prompt` reads repository files across turns until the prompt reaches the `--tokens` target and prints prefill and decode rates. The server keeps that live conversation in memory. A request that does not extend it is written under `~/.madmetal/prefix` and loaded again when those token ids return.
+The harness is a [Microsoft Agent Framework](https://github.com/microsoft/agent-framework) client. It creates a file, replaces its text, and confirms the result. `python -m harness.long_prompt` reads repository files across turns until the prompt reaches the `--tokens` target and prints prefill and decode rates. The server stops after the first turn and starts again, so the second turn loads the prefix from disk. Later turns stay on that server. A request that does not extend the stored token ids stops the run.
 
 ## Development
 

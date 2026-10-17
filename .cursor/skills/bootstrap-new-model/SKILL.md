@@ -41,7 +41,7 @@ No personal data: no names, home directories, hostnames, or volume paths. A clai
 
 ## Isolation
 
-Leave every other pipeline's entry, package, shaders, tests, and docs untouched. Do not import another pipeline. Do not add a base class, a shared runner, or a kernel that branches on the pipeline. Do not change `src/madmetal/` unless the task is the listener, the registry, or the console.
+Leave every other pipeline's entry, package, shaders, tests, and docs untouched. Do not import another pipeline. Do not add a base class, a shared runner, or a kernel that branches on the pipeline. Do not change `src/madmetal/` unless the task is the listener, the registry, the console, or the prefix store. A pipeline that keeps a sequence cache imports that store. Load [prefix-caching](../prefix-caching/SKILL.md) before writing the adapter.
 
 Re-implement the math from this model's papers, model card, and the vendor documents. Another pipeline's source, tests, comments, and design notes are not a reference. Another application's tree is not a reference.
 
@@ -49,7 +49,7 @@ Prefill, decode, and calibration are Metal shaders. A missing kernel stays missi
 
 ## Smoke, then the long prompt
 
-Run the smoke checks before any long generation. Stop if one fails. Do not start `madmetal serve` yourself, and do not leave another model resident. The long-prompt harness starts its own server.
+Run the smoke checks before any long generation. Stop if one fails. Do not start `madmetal serve` yourself, and do not leave another model resident. The long-prompt harness starts its own server, stops it after the first turn, and starts another so the second turn loads the prefix from disk.
 
 1. `uv run pytest` on the tests that import only `<package>`.
 2. `uv run madmetal --<pipeline> kernels` when this pipeline has that command. It compiles the shader library and runs that package's dispatch checks.

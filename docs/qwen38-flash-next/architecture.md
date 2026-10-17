@@ -79,22 +79,22 @@ A completed prefill writes that token list before decode starts and leaves the e
 
 Any other request writes the live sequence, clears it, and loads the longest stored token list that is a prefix of the new prompt. The suffix is what gets prefilled. A shared system prompt hits when some earlier request stored a boundary at that prompt. A boundary that was never stored is not implied by a longer file. An exact-length hit samples from the stored logits. A file with no logits is prefilled again.
 
-The directory is `~/.madmetal/prefix/<model>/<checkpoint>/<hash>.bin`. The model id is `qwen38-flash-next`. The checkpoint id is the hex SHA-256 of `manifest.json`, or of `config.json` when the record has no manifest. The file name is the hex SHA-256 of the format version, the model id, that digest, the cache tag, and the token ids. The tag is the active key/value mode, `e4m3` or `bf16`. A file whose header hash, model, digest, or tag does not match is ignored.
+The bytes are the shared prefix record in `src/madmetal/prefix.py`. The directory is `~/.madmetal/prefix/qwen38-flash-next/<checkpoint>/<hash>.bin`. The checkpoint id is the hex SHA-256 of `manifest.json`, or of `config.json` when the record has no manifest. The tag is the active key/value mode, `e4m3` or `bf16`. A file whose header hash, model, digest, or tag does not match is ignored. An exact-length file is used only when its `logits` region holds one vocabulary vector. A file with an empty `logits` region is a prefix for a longer prompt and is prefilled again when the prompt is the same length.
 
 Each file stores, at that boundary:
 
 - the token ids
-- K and V for every cached token in the active format, the unfinished tail, and the indexer key for every cached token
-- the Gated DeltaNet recurrent state once, not once per token
-- the Gated DeltaNet depthwise convolution history (kernel 4), once
-- the n-gram convolution state, once
-- the last logits, one vocabulary vector
+- `attn.{layer}.key`, `attn.{layer}.value`, `attn.{layer}.key_tail`, `attn.{layer}.value_tail`, and `attn.{layer}.indexer` for every cached layer
+- `gdn.{layer}`, the Gated DeltaNet recurrent state once, not once per token
+- `conv.{layer}`, the Gated DeltaNet depthwise convolution history (kernel 4), once
+- `ple`, the n-gram convolution state, once
+- `logits`, the last vocabulary vector, or empty when that boundary has no distribution
 
 Grammar state is not stored. It starts again on the new generation. Expert images stay in the weight record.
 
-Regions that Metal reads start on a 16 KB page. A load larger than 256 MB is split into 256 MB pieces. The write goes to a temporary name in the same directory and replaces the destination after the header hash is in place. A crash leaves the previous complete file. When the new token list extends a file already in the directory, that file's K, V, and indexer bytes are copied forward and the new tokens' bytes are written after them. The recurrent state, the convolution histories, the tail, and the last logits are written from the live buffers. The shorter file stays until eviction.
+Regions that Metal reads start on a 16 KB page. A load larger than 256 MB is split into 256 MB pieces. The write goes to a temporary name in the same directory and replaces the destination after the header hash is in place. A crash leaves the previous complete file. When the new token list extends a file already in the directory, a region whose stored bytes are a prefix of the new blob is copied forward and the new tail is written after it. A region that does not match is written from the live buffer. The shorter file stays until eviction.
 
-The partition for one model and one checkpoint is kept to 32 GiB. Past that, the oldest files are deleted. The file just written stays. Replacing the live sequence keeps the mapped experts. A prefix write leaves the atlas mapped. Stopping the process drops the device, and the atlas with it. A volume that refuses it is logged, and the new request still runs; the boundary that could not be written is not stored. When RAM is short, drop the live prefix before the resident expert tiers. A short prefix can be cheaper to prefill again than a cold expert read.
+The partition for one model and one checkpoint is kept to 32 GiB. Past that, the oldest files are deleted. The file just written stays. Replacing the live sequence keeps the mapped experts. A prefix write leaves the atlas mapped. Stopping the process drops the device, and the atlas with it. A volume that refuses the write is logged, and the new request still runs; the boundary that could not be written is not stored. When RAM is short, drop the live prefix before the resident expert tiers. A short prefix can be cheaper to prefill again than a cold expert read.
 
 ## Endpoint
 

@@ -21,6 +21,7 @@ from qwen36_35b_a3b.cache import (
 )
 from qwen36_35b_a3b.formats import EXPERT_IMAGE
 from qwen36_35b_a3b.prefill import workspace_bytes
+from qwen36_35b_a3b.prefix import open_session
 from qwen36_35b_a3b.session import Session, _clear
 
 HIDDEN = 2048
@@ -169,6 +170,7 @@ class Qwen36Runtime:
         if plane:
             bind_plane(self)
         self.filled = 0
+        self.prefix = open_session(self)
         self._prefill = None
         self._prefill_progress = None
         self._prefill_base = 0
@@ -205,6 +207,12 @@ class Qwen36Runtime:
             raise RequestClosed()
 
     def close(self) -> None:
+        prefix = getattr(self, "prefix", None)
+        if prefix is not None and self.session is not None:
+            try:
+                prefix.flush()
+            except OSError:
+                pass
         self._prefill = None
         self._held.clear()
         self.atlas.close()
@@ -552,19 +560,16 @@ class Qwen36Runtime:
             return []
         prompt = [int(token) for token in prompt]
         self._status(f"prompt tokens {len(prompt)}")
-        cached = self._cached
-        self._cached = []
-        if cached and prompt[: len(cached)] == cached and len(prompt) > len(cached):
-            hit = len(cached)
-            self._status(f"cache hit {hit}")
-        else:
-            hit = 0
-            self.reset()
-            self._status("cache miss")
+        hit = self.prefix.align(prompt)
+        if self.prefix.loaded:
+            self._status(f"prefix load {hit} tokens")
+        self._status(f"cache hit {hit}" if hit else "cache miss")
         self._cached_tokens = hit
         suffix = prompt[hit:]
         prefill_row = None
         decode_row = None
+        boundary = False
+        out: list[int] = []
         try:
             prefill_row = self._begin_phase("prefill", len(suffix))
             self._prefill_progress = prefill_row
@@ -576,6 +581,9 @@ class Qwen36Runtime:
                 prefill_ids(self, suffix[:-1], hit)
             logits = self.step(suffix[-1], len(prompt) - 1, logits=True)
             assert logits is not None
+            self.prefix.note(prompt)
+            self._store_prefix()
+            boundary = True
             self._note_prefill(len(suffix))
             elapsed = max(time.perf_counter() - started, 1e-9)
             self._prefill_seconds = elapsed
@@ -588,7 +596,6 @@ class Qwen36Runtime:
             pending = list(forced or [])
             close_after = bool(stop_after_forced) and bool(pending)
             seen: set[int] = set()
-            out: list[int] = []
             decode_row = self._begin_phase("decode", max_tokens, live=True)
             decode_started = time.perf_counter()
             for count in range(max_tokens):
@@ -624,12 +631,31 @@ class Qwen36Runtime:
                 f"({len(out)} tok in {decode_elapsed:.2f}s)",
             )
             decode_row = None
+            self.prefix.note((prompt + out)[: self.filled])
+            self._store_prefix()
+        except RequestClosed:
+            if boundary:
+                self.prefix.note((prompt + out)[: self.filled])
+                self._store_prefix()
+            else:
+                self.prefix.tokens = []
+                self.prefix.dirty = False
+                self.reset()
+            raise
         finally:
             self._prefill_progress = None
             self._end_phase(prefill_row, "")
             self._end_phase(decode_row, "")
-        self._cached = prompt + out
         return out
+
+    def _store_prefix(self) -> None:
+        try:
+            path = self.prefix.flush()
+        except OSError as exc:
+            self._status(f"prefix store failed {exc}")
+            return
+        if path is not None:
+            self._status(f"prefix store {len(self.prefix.tokens)} tokens")
 
     def _status(self, line: str) -> None:
         console = self.console

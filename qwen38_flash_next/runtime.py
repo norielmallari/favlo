@@ -13,6 +13,16 @@ from typing import Any
 import numpy as np
 import objc
 
+from madmetal.prefix import (
+    DEFAULT_BUDGET,
+    PrefixHeader,
+    PrefixRecord,
+    PrefixStore,
+    Region,
+    checkpoint_digest,
+    default_prefix_dir,
+    stored_bytes,
+)
 from qwen38_flash_next.checks import _ngram_row, _sample, ngram_rows
 from qwen38_flash_next.context import (
     BLOCK as INDEX_BLOCK,
@@ -48,17 +58,6 @@ from qwen38_flash_next.formats import (
     int4_plane_sizes,
     kv_cache_name,
     stored_k_int4,
-)
-from qwen38_flash_next.prefix_store import (
-    DEFAULT_BUDGET,
-    AttentionImage,
-    FixedImage,
-    PrefixHeader,
-    PrefixState,
-    PrefixStore,
-    checkpoint_digest,
-    default_prefix_dir,
-    stored_bytes,
 )
 from qwen38_flash_next.record import QuantRecord, _Bf16Ngram, prefill_image_table
 from qwen38_flash_next.session import (
@@ -375,6 +374,7 @@ class Qwen38Runtime:
                 self.stop_ids.update(int(item) for item in eos_ids)
         self.prefixes = PrefixStore(
             default_prefix_dir(),
+            model="qwen38-flash-next",
             digest=checkpoint_digest(root),
             tag=self.kv_cache,
             budget=DEFAULT_BUDGET,
@@ -725,34 +725,39 @@ class Qwen38Runtime:
         except Exception as exc:
             _log(f"prefix store failed {exc}")
 
-    def _prefix_state(self) -> PrefixState:
+    def _prefix_state(self) -> PrefixRecord:
         count = len(self.tokens)
         body, _stride = self._kv_span(count)
         tail = KV_TAIL_TOKENS * KV_BF16_BYTES
-        attention: list[AttentionImage] = []
+        regions: list[Region] = []
         for layer, length in self.kv_len.items():
             if length != count:
                 message = f"attention cache length {length} does not match {count} tokens"
                 raise RuntimeError(message)
-            attention.append(
-                AttentionImage(
-                    layer,
-                    self._span_view(self.kv_k[layer], 0, body),
-                    self._span_view(self.kv_v[layer], 0, body),
-                    self._span_view(self.kv_k_tail[layer], 0, tail),
-                    self._span_view(self.kv_v_tail[layer], 0, tail),
+            regions.append(
+                Region(f"attn.{layer}.key", self._span_view(self.kv_k[layer], 0, body))
+            )
+            regions.append(
+                Region(f"attn.{layer}.value", self._span_view(self.kv_v[layer], 0, body))
+            )
+            regions.append(
+                Region(f"attn.{layer}.key_tail", self._span_view(self.kv_k_tail[layer], 0, tail))
+            )
+            regions.append(
+                Region(f"attn.{layer}.value_tail", self._span_view(self.kv_v_tail[layer], 0, tail))
+            )
+            regions.append(
+                Region(
+                    f"attn.{layer}.indexer",
                     self._span_view(self.indexer_buf[layer], 0, count * INDEX_BF16_BYTES),
                 )
             )
         state_bytes = 48 * 128 * 128 * 4
-        gdn = [
-            FixedImage(layer, self._span_view(buf, 0, state_bytes))
-            for layer, buf in self.gdn_state.items()
-        ]
-        conv = [
-            FixedImage(layer, self._span_view(buf, 0, self._conv_bytes))
-            for layer, buf in self.conv_hist.items()
-        ]
+        for layer, buf in self.gdn_state.items():
+            regions.append(Region(f"gdn.{layer}", self._span_view(buf, 0, state_bytes)))
+        for layer, buf in self.conv_hist.items():
+            regions.append(Region(f"conv.{layer}", self._span_view(buf, 0, self._conv_bytes)))
+        regions.append(Region("ple", self._span_view(self.ple_hist, 0, self._ple_bytes)))
         if self.last_logits is None:
             logits: bytes | memoryview = b""
         else:
@@ -762,14 +767,8 @@ class Qwen38Runtime:
             logits = self._span_view(
                 self.last_logits.buf, self.last_logits.offset * 4, self.vocab * 4
             )
-        return PrefixState(
-            list(self.tokens),
-            attention,
-            gdn,
-            conv,
-            self._span_view(self.ple_hist, 0, self._ple_bytes),
-            logits,
-        )
+        regions.append(Region("logits", logits))
+        return PrefixRecord(list(self.tokens), regions)
 
     def _span_view(self, buf: Any, byte_off: int, nbytes: int) -> memoryview:
         if nbytes <= 0:
@@ -782,7 +781,7 @@ class Qwen38Runtime:
 
     def _load_prefix(self, prompt: list[int]) -> int:
         for header in self.prefixes.matches(prompt):
-            if not self._prefix_fits(header):
+            if not self._prefix_fits(header, prompt):
                 continue
             try:
                 self._read_prefix(header)
@@ -795,66 +794,70 @@ class Qwen38Runtime:
             return len(header.tokens)
         return 0
 
-    def _prefix_fits(self, header: PrefixHeader) -> bool:
+    def _prefix_fits(self, header: PrefixHeader, prompt: list[int]) -> bool:
         count = len(header.tokens)
-        attention = {image.layer: image for image in header.attention}
-        if set(attention) != set(self.kv_len):
+        logits = header.region("logits")
+        if count == len(prompt) and (logits is None or logits.length == 0):
             return False
         body, _stride = self._kv_span(count)
         tail = KV_TAIL_TOKENS * KV_BF16_BYTES
         index = count * INDEX_BF16_BYTES
-        for image in attention.values():
-            if (
-                image.key.length != body
-                or image.value.length != body
-                or image.key_tail.length != tail
-                or image.value_tail.length != tail
-                or image.indexer.length != index
-            ):
+        for layer in self.kv_len:
+            if not self._region_is(header, f"attn.{layer}.key", body):
                 return False
-        gdn = {image.layer: image for image in header.gdn}
-        if set(gdn) != set(self.gdn_state):
-            return False
+            if not self._region_is(header, f"attn.{layer}.value", body):
+                return False
+            if not self._region_is(header, f"attn.{layer}.key_tail", tail):
+                return False
+            if not self._region_is(header, f"attn.{layer}.value_tail", tail):
+                return False
+            if not self._region_is(header, f"attn.{layer}.indexer", index):
+                return False
         state_bytes = 48 * 128 * 128 * 4
-        if any(image.blob.length != state_bytes for image in gdn.values()):
+        for layer in self.gdn_state:
+            if not self._region_is(header, f"gdn.{layer}", state_bytes):
+                return False
+        for layer in self.conv_hist:
+            if not self._region_is(header, f"conv.{layer}", self._conv_bytes):
+                return False
+        if not self._region_is(header, "ple", self._ple_bytes):
             return False
-        conv = {image.layer: image for image in header.conv}
-        if set(conv) != set(self.conv_hist):
-            return False
-        if any(image.blob.length != self._conv_bytes for image in conv.values()):
-            return False
-        if header.ple.length != self._ple_bytes:
-            return False
-        return header.logits.length in (0, self.vocab * 4)
+        return logits is not None and logits.length in (0, self.vocab * 4)
+
+    def _region_is(self, header: PrefixHeader, name: str, length: int) -> bool:
+        ref = header.region(name)
+        return ref is not None and ref.length == length
 
     def _read_prefix(self, header: PrefixHeader) -> None:
         loads: list[tuple[Any, int, int, int]] = []
-        for image in header.attention:
-            self.kv_k[image.layer] = self._stage_prefix(
-                self.kv_k, image.layer, image.key, loads
+        for layer in self.kv_len:
+            self.kv_k[layer] = self._stage_prefix(
+                self.kv_k, layer, header.region(f"attn.{layer}.key"), loads
             )
-            self.kv_v[image.layer] = self._stage_prefix(
-                self.kv_v, image.layer, image.value, loads
+            self.kv_v[layer] = self._stage_prefix(
+                self.kv_v, layer, header.region(f"attn.{layer}.value"), loads
             )
-            self.kv_k_tail[image.layer] = self._stage_prefix(
-                self.kv_k_tail, image.layer, image.key_tail, loads
+            self.kv_k_tail[layer] = self._stage_prefix(
+                self.kv_k_tail, layer, header.region(f"attn.{layer}.key_tail"), loads
             )
-            self.kv_v_tail[image.layer] = self._stage_prefix(
-                self.kv_v_tail, image.layer, image.value_tail, loads
+            self.kv_v_tail[layer] = self._stage_prefix(
+                self.kv_v_tail, layer, header.region(f"attn.{layer}.value_tail"), loads
             )
-            self.indexer_buf[image.layer] = self._stage_prefix(
-                self.indexer_buf, image.layer, image.indexer, loads
+            self.indexer_buf[layer] = self._stage_prefix(
+                self.indexer_buf, layer, header.region(f"attn.{layer}.indexer"), loads
             )
-        for image in header.gdn:
-            self.gdn_state[image.layer] = self._stage_prefix(
-                self.gdn_state, image.layer, image.blob, loads
+        for layer in self.gdn_state:
+            self.gdn_state[layer] = self._stage_prefix(
+                self.gdn_state, layer, header.region(f"gdn.{layer}"), loads
             )
-        for image in header.conv:
-            self.conv_hist[image.layer] = self._stage_prefix(
-                self.conv_hist, image.layer, image.blob, loads
+        for layer in self.conv_hist:
+            self.conv_hist[layer] = self._stage_prefix(
+                self.conv_hist, layer, header.region(f"conv.{layer}"), loads
             )
-        self.ple_hist = self._stage_one(self.ple_hist, header.ple, loads)
-        logits = self._stage_one(None, header.logits, loads)
+        ple = header.region("ple")
+        logits_ref = header.region("logits")
+        self.ple_hist = self._stage_one(self.ple_hist, ple, loads)
+        logits = self._stage_one(None, logits_ref, loads)
         handle = self._prefix_io(header.path)
         try:
             if loads:
@@ -864,7 +867,7 @@ class Qwen38Runtime:
         self.tokens = list(header.tokens)
         for layer in self.kv_len:
             self.kv_len[layer] = len(self.tokens)
-        if header.logits.length:
+        if logits_ref is not None and logits_ref.length:
             self.last_logits = Dev(logits, self.vocab)
         else:
             self.last_logits = None

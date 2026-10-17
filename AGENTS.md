@@ -48,7 +48,7 @@ pyproject.toml
 
 A model entry filename may contain hyphens. The command loads it by path. It is not an importable module name. The package beside it uses underscores. The entry sets `PIPELINE` to that filename stem. The command discovers those files.
 
-Adding a model means adding an entry file, a package, a `docs/<pipeline>/` note, and one row in the runtime table in [ARCHITECTURE.md](ARCHITECTURE.md). It does not mean editing another pipeline's package, shaders, tests, or docs, and it does not mean editing `src/madmetal/cli.py`. Load [bootstrap-new-model](.cursor/skills/bootstrap-new-model/SKILL.md) before creating one.
+Adding a model means adding an entry file, a package, a `docs/<pipeline>/` note, and one row in the runtime table in [ARCHITECTURE.md](ARCHITECTURE.md). It does not mean editing another pipeline's package, shaders, tests, or docs, and it does not mean editing `src/madmetal/cli.py`. Load [bootstrap-new-model](.cursor/skills/bootstrap-new-model/SKILL.md) before creating one. Load [prefix-caching](.cursor/skills/prefix-caching/SKILL.md) before wiring that pipeline to the shared prefix store.
 
 ## Re-implementation
 
@@ -103,4 +103,4 @@ uv run python -m harness.benchmarks
 
 `python -m harness.benchmarks` scores IFEval, GSM8K, and HumanEval. The intelligence smoke is the first 30 rows of each, then the run continues through the full sets. `--sample-only` stops after those 30. That run is not part of `pytest`. Scores are written into `docs/<pipeline>/benchmarks.md` when that file exists for the requested model id.
 
-`pytest` includes the file agent: it starts `serve` and checks that create, edit, and confirm land in the workspace. `python -m harness` is that client against an already running server. `python -m harness.long_prompt` starts `serve`, reads repository files one turn at a time until the prompt reaches the token target, and prints the server's prefill and decode rates. That run is not part of `pytest`. A pipeline's quantize, probe, and matmul commands are that pipeline's note.
+`pytest` includes the file agent: it starts `serve` and checks that create, edit, and confirm land in the workspace. `python -m harness` is that client against an already running server. `python -m harness.long_prompt` starts `serve`, reads repository files one turn at a time until the prompt reaches the token target, and prints the server's prefill and decode rates. It stops that server after the first turn and starts another, so the second turn loads the prefix from disk. Later turns stay on that server. That run is not part of `pytest`. A pipeline's quantize, probe, and matmul commands are that pipeline's note.

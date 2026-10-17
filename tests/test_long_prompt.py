@@ -24,10 +24,17 @@ incoming tokens 100
 prefill 50.00 tok/s (100 tok in 2.00s)
 output tokens 20
 decode 10.00 tok/s (20 tok in 2.00s)
+prefix load 120 tokens
 prompt tokens 180
 cache hit 120
 incoming tokens 60
 prefill 100.00 tok/s (60 tok in 0.60s)
+output tokens 4
+decode 8.00 tok/s (4 tok in 0.50s)
+prompt tokens 300
+cache hit 184
+incoming tokens 116
+prefill 80.00 tok/s (116 tok in 1.45s)
 output tokens 4
 decode 8.00 tok/s (4 tok in 0.50s)
 """
@@ -54,19 +61,45 @@ def test_source_files_skip_models_and_read_largest_first(tmp_path: Path) -> None
 
 def test_parse_requests_and_prefix_extension() -> None:
     requests = parse_requests(_LOG)
-    assert len(requests) == 2
+    assert len(requests) == 3
     assert requests[0].missed
     assert requests[0].prefix_hit is None
+    assert requests[0].prefix_load is None
     assert requests[0].decode_tokens == 20
     assert requests[0].prefill.startswith("prefill ")
     assert requests[0].steady == ()
+    assert requests[1].prefix_load == 120
     assert requests[1].prefix_hit == 120
     assert requests[1].prompt_tokens == 180
+    assert requests[2].prefix_load is None
+    assert requests[2].prefix_hit == 184
     assert extensions_hold(requests)
+    assert not extensions_hold(requests[:1])
     missed = parse_requests(_LOG.replace("cache hit 120", "cache miss"))
     assert not extensions_hold(missed)
     short = parse_requests(_LOG.replace("cache hit 120", "cache hit 100"))
     assert not extensions_hold(short)
+    memory = parse_requests(_LOG.replace("prefix load 120 tokens\n", ""))
+    assert not extensions_hold(memory)
+    later = _LOG.replace(
+        "prompt tokens 300\ncache hit 184",
+        "prefix load 184 tokens\nprompt tokens 300\ncache hit 184",
+    )
+    assert not extensions_hold(parse_requests(later))
+    after_prompt = """\
+prompt tokens 10
+cache miss
+prefill 1.00 tok/s (10 tok in 10.00s)
+decode 1.00 tok/s (2 tok in 2.00s)
+prompt tokens 20
+prefix load 12 tokens
+cache hit 12
+prefill 1.00 tok/s (8 tok in 8.00s)
+decode 1.00 tok/s (1 tok in 1.00s)
+"""
+    loaded = parse_requests(after_prompt)
+    assert loaded[1].prefix_load == 12
+    assert extensions_hold(loaded)
 
 
 def _encode(
