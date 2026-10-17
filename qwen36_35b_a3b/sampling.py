@@ -9,6 +9,8 @@ third variant name.
 from typing import Any
 
 DEFAULT_VARIANT = "thinking"
+# Completion tokens drawn inside an open think block before the close is forced.
+THINKING_BUDGET = 512
 
 VARIANTS = {
     "thinking": {

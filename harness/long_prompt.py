@@ -1,10 +1,14 @@
 """Read repository files until the prompt reaches a token target.
 
-One Microsoft Agent Framework client calls ``read_file`` once per turn.
-That call is the whole completion. The server stops after the first turn
-and starts again, so the second turn loads the prefix from disk. Later
-turns keep that server. A turn that does not extend the stored token ids
-stops the run.
+A Microsoft Agent Framework agent calls ``read_file`` on the OpenAI chat
+endpoint, then analyzes the file it got back. The model id is the thinking
+variant, so the thinking sampling row is used and ``<think>`` stays open.
+Reasoning comes back on ``reasoning_content``, and the next request sends
+that field with the reply text. The first completion of each task is required
+to call ``read_file``. Thinking stays open.
+The server stops after the first task and starts again, so the next task
+loads the prefix from disk. Later tasks keep that server. A request that
+does not extend the stored token ids stops the run.
 """
 
 from __future__ import annotations
@@ -19,16 +23,22 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Annotated
 
-from agent_framework import Content, Message, tool
+from agent_framework import Agent, Content, tool
 from agent_framework.openai import OpenAIChatCompletionClient
 from openai import AsyncOpenAI
+from pydantic import Field
 
 TARGET_TOKENS = 65536
 INSTRUCTIONS = (
-    "Call read_file once with the path the user gives. "
-    "After the tool result, reply with the single word read."
+    "You are a repository agent. Call read_file with the path the user names. "
+    "Think through the files already returned before that call. "
+    "After the file comes back, think through what it does and how it relates "
+    "to those files, then reply with that analysis."
 )
+# Past this point the analysis paraphrase is not the canonical encoding of its text.
+MAX_TOKENS = 128
 SKIP_PARTS = frozenset(
     {
         ".git",
@@ -55,6 +65,13 @@ def read_prompt(path: str) -> str:
     return f"Call read_file with path {path}."
 
 
+def thinking_model(model: str) -> str:
+    """The thinking sampling row, unless the id already names a variant."""
+    if ":" in model:
+        return model
+    return f"{model}:thinking"
+
+
 def source_files(root: Path) -> list[Path]:
     """UTF-8 source files, largest first. Models, artifacts, and caches are omitted."""
     base = root.resolve()
@@ -69,13 +86,28 @@ def source_files(root: Path) -> list[Path]:
     return found
 
 
-def read_repository_file(root: Path, path: str, allowed: set[str]) -> str:
-    """Return one allowed source file. Any other path is refused."""
+def read_repository_file(
+    root: Path, path: str, allowed: set[str], task: str | None = None
+) -> str:
+    """Return one allowed source file. Any other path is refused.
+
+    A path that matches one allowed file regardless of case is that file.
+    ``task`` is the file this turn asked for. A call whose path does not
+    resolve still returns that file, so the tool result is the named source.
+    """
+    chosen = path
     if path not in allowed:
-        message = "path is not a repository source file"
-        raise ValueError(message)
+        folded = path.casefold()
+        matches = [item for item in allowed if item.casefold() == folded]
+        if len(matches) == 1:
+            chosen = matches[0]
+        elif task in allowed:
+            chosen = task
+        else:
+            message = "path is not a repository source file"
+            raise ValueError(message)
     base = root.resolve()
-    target = (base / path).resolve()
+    target = (base / chosen).resolve()
     if not target.is_relative_to(base) or not target.is_file():
         message = "path is not a repository source file"
         raise ValueError(message)
@@ -225,27 +257,35 @@ def _extends(previous: RequestRate, current: RequestRate) -> bool:
 
 
 def prefix_so_far(requests: list[RequestRate]) -> bool:
-    """True while the turns so far can still finish as a disk load then extensions.
+    """True while these requests can still finish as one disk load and in-memory extensions.
 
-    The first request misses. One request is not yet a failure. The second
-    loads that applied prefix from disk. Every later request extends it in memory.
+    The first request misses. A tool follow-up on that same server extends it in
+    memory. After the server restarts, one request loads the applied prefix from
+    disk. Every other later request extends the previous one in memory.
     """
     if not requests or not _cold_start(requests[0]):
         return False
-    if len(requests) == 1:
-        return True
-    second = requests[1]
-    if second.missed or second.prefix_hit != _applied(requests[0]):
-        return False
-    if second.prefix_load != second.prefix_hit:
-        return False
-    pairs = zip(requests[1:], requests[2:], strict=False)
-    return all(_extends(previous, current) for previous, current in pairs)
+    loaded = False
+    for previous, current in zip(requests, requests[1:], strict=False):
+        if current.prefix_load is not None:
+            if loaded or current.missed or current.prefix_hit != _applied(previous):
+                return False
+            if current.prefix_load != current.prefix_hit:
+                return False
+            loaded = True
+            continue
+        if not _extends(previous, current):
+            return False
+    return True
 
 
 def extensions_hold(requests: list[RequestRate]) -> bool:
-    """True when the second request loaded the first from disk and later turns extended it."""
-    return len(requests) >= 2 and prefix_so_far(requests)
+    """True when one later request loaded the prefix from disk and the others extended it."""
+    return (
+        len(requests) >= 2
+        and prefix_so_far(requests)
+        and any(request.prefix_load is not None for request in requests[1:])
+    )
 
 
 def summed_rate(lines: list[str]) -> tuple[int, float] | None:
@@ -323,17 +363,15 @@ class RunResult:
     note: str
 
 
-def _read_tool(root: Path, allowed: set[str], loaded: list[str], queue: list[str]):
+def _read_tool(root: Path, allowed: set[str], loaded: list[str], task: dict[str, str]):
     @tool(approval_mode="never_require")
-    def read_file() -> str:
-        """Return the next repository source file."""
-        if not queue:
-            message = "no file left"
-            raise ValueError(message)
-        path = queue.pop(0)
-        text = read_repository_file(root, path, allowed)
+    def read_file(
+        path: Annotated[str, Field(description="Repository-relative path of the source file.")],
+    ) -> str:
+        """Return one repository source file."""
+        text = read_repository_file(root, path, allowed, task.get("path"))
         loaded.append(path)
-        return text
+        return text + "\n\nThe file is above. Reply with the analysis of this file."
 
     return read_file
 
@@ -402,19 +440,95 @@ def _completions(log: Log) -> str:
     return "\n---\n".join(blocks[-2:])
 
 
-def _open_client(base_url: str, model: str) -> tuple[AsyncOpenAI, OpenAIChatCompletionClient]:
+def _content_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict) and item.get("type") == "text":
+            parts.append(str(item.get("text") or ""))
+    return "".join(parts)
+
+
+def read_reasoning(message: object, contents: list[Content]) -> list[Content]:
+    """Keep a ``reasoning_content`` delta as reasoning, not as the reply."""
+    extra = getattr(message, "model_extra", None) or {}
+    text = extra.get("reasoning_content") if isinstance(extra, dict) else None
+    if not isinstance(text, str) or text == "":
+        found = getattr(message, "reasoning_content", None)
+        text = found if isinstance(found, str) else ""
+    if text == "":
+        return contents
+    return [*contents, Content.from_text_reasoning(text=text)]
+
+
+def echo_reasoning(message: object, built: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Put reasoning back on ``reasoning_content`` for the chat template.
+
+    The chat client copies reasoning into ``content``. The template then writes
+    an empty think block. A reply that already contains the call XML is left
+    as that text, so the template does not write the call a second time.
+    """
+    if getattr(message, "role", None) != "assistant":
+        return built
+    reasoning = "".join(
+        part.text or ""
+        for part in getattr(message, "contents", ())
+        if getattr(part, "type", None) == "text_reasoning"
+        and not getattr(part, "protected_data", None)
+    )
+    if not reasoning:
+        return built
+    kept: list[dict[str, object]] = []
+    placed = False
+    for item in built:
+        if item.get("role") != "assistant":
+            kept.append(item)
+            continue
+        text = _content_text(item.get("content"))
+        if text == reasoning and "tool_calls" not in item:
+            continue
+        copied = dict(item)
+        if not placed:
+            copied["reasoning_content"] = reasoning
+            placed = True
+        if "<tool_call>" in text:
+            copied.pop("tool_calls", None)
+        kept.append(copied)
+    if not placed:
+        kept.append({"role": "assistant", "reasoning_content": reasoning, "content": ""})
+    return kept
+
+
+def _open_agent(base_url: str, model: str, read: object) -> tuple[AsyncOpenAI, Agent]:
     http = AsyncOpenAI(api_key="madmetal", base_url=base_url, timeout=3600.0)
     client = OpenAIChatCompletionClient(
-        model=model,
+        model=thinking_model(model),
         api_key="madmetal",
         base_url=base_url,
         async_client=http,
+        response_parser=read_reasoning,
+        message_preparer=echo_reasoning,
     )
-    # One completion per turn. A second free-text reply is not sent back:
-    # its tokens are whatever the sampler drew, and the next render of that
-    # text is the tokenizer's own encoding.
-    client.function_invocation_configuration["enabled"] = False
-    return http, client
+    # One tool call, then the framework asks for a reply with tools disabled.
+    client.function_invocation_configuration["max_iterations"] = 1
+    agent = Agent(
+        client=client,
+        name="long-prompt",
+        instructions=INSTRUCTIONS,
+        tools=[read],
+        default_options={
+            "max_tokens": MAX_TOKENS,
+            "temperature": 0.0,
+            "tool_choice": {"mode": "required", "required_function_name": "read_file"},
+            "extra_body": {"enable_thinking": True},
+        },
+    )
+    return http, agent
 
 
 async def run_long_prompt(
@@ -427,39 +541,33 @@ async def run_long_prompt(
 ) -> RunResult:
     """Read source files until ``prompt tokens`` reaches ``target``.
 
-    The server in ``server`` is stopped after the first turn and replaced.
-    The second turn, and every turn after it, uses that new process.
+    Each task is one agent run: the model calls ``read_file``, the framework
+    returns the file, and the model analyzes it. The server is stopped after
+    the first task and replaced. Later tasks use that new process and the
+    same session.
     """
     root = root.resolve()
     files = source_files(root)
     if not files:
         return RunResult([], False, False, "no source files")
     allowed = {path.relative_to(root).as_posix() for path in files}
-    queue = [path.relative_to(root).as_posix() for path in files]
     loaded: list[str] = []
-    http, client = _open_client(f"http://127.0.0.1:{server.port}/v1", model)
-    read = _read_tool(root, allowed, loaded, queue)
-    messages: list[Message] = [Message("system", [INSTRUCTIONS])]
+    task = {"path": ""}
+    read = _read_tool(root, allowed, loaded, task)
+    base_url = f"http://127.0.0.1:{server.port}/v1"
+    http, agent = _open_agent(base_url, model, read)
+    session = agent.create_session()
     seen = 0
     turn = 0
     requests: list[RequestRate] = []
-    options = {
-        "temperature": 0,
-        "max_tokens": 32,
-        "tool_choice": {"mode": "required", "required_function_name": "read_file"},
-        "allow_multiple_tool_calls": False,
-        "tools": [read],
-        # Thinking left open does not reproduce the forced tool-call tokens on the next turn.
-        "extra_body": {"enable_thinking": False},
-    }
     try:
         for index, path in enumerate(files):
             if turn >= 2 and requests and requests[-1].prompt_tokens >= target:
                 break
             rel = path.relative_to(root).as_posix()
-            messages.append(Message("user", [read_prompt(rel)]))
+            task["path"] = rel
             before_requests = len(parse_requests(log.text()))
-            await client.get_response(messages, options=options)
+            await agent.run(read_prompt(rel), session=session)
             requests = _wait_requests(log, before_requests, server)
             for row, request in enumerate(requests[seen:], start=seen + 1):
                 print(format_request(row, request), flush=True)
@@ -467,20 +575,6 @@ async def run_long_prompt(
             if not prefix_so_far(requests):
                 note = "prefix did not extend\n" + _completions(log)
                 return RunResult(requests, False, False, note)
-            text = read_repository_file(root, rel, allowed)
-            loaded.append(rel)
-            messages.append(
-                Message(
-                    "assistant",
-                    [Content.from_function_call("call_0", "read_file", arguments="{}")],
-                )
-            )
-            messages.append(
-                Message(
-                    "tool",
-                    [Content.from_function_result("call_0", result=text)],
-                )
-            )
             print(f"read {rel}", flush=True)
             turn += 1
             if turn == 1 and index + 1 < len(files):
@@ -488,7 +582,7 @@ async def run_long_prompt(
                 await http.close()
                 http = None
                 _restart(server, log)
-                http, client = _open_client(f"http://127.0.0.1:{server.port}/v1", model)
+                http, agent = _open_agent(f"http://127.0.0.1:{server.port}/v1", model, read)
     finally:
         if http is not None:
             await http.close()
@@ -588,7 +682,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         _wait_listening(server.proc, log, 0)
         result = asyncio.run(
-            run_long_prompt(args.repo, args.tokens, log, server, model=args.model)
+            run_long_prompt(args.repo, args.tokens, log, server, model=thinking_model(args.model))
         )
     except Exception as exc:
         print(exc)

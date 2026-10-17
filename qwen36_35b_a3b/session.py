@@ -111,6 +111,7 @@ KERNELS = (
     "scatter_add_rows",
     "silu_mul_slots",
     "router8",
+    "remap_expert_ids",
     "mix_experts",
 )
 

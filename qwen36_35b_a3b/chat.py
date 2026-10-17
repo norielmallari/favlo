@@ -12,7 +12,7 @@ from jinja2 import Environment
 from tokenizers import Tokenizer
 
 from qwen36_35b_a3b.forward import RequestClosed
-from qwen36_35b_a3b.sampling import VARIANTS, mode_card, requested_thinking
+from qwen36_35b_a3b.sampling import THINKING_BUDGET, VARIANTS, mode_card, requested_thinking
 from qwen36_35b_a3b.tools import (
     StreamText,
     function_has_parameters,
@@ -91,6 +91,15 @@ def encode_text(root: Path, text: str) -> list[int]:
     return list(load_tokenizer(root).encode(text).ids)
 
 
+def think_close_ids(root: Path) -> tuple[list[int], int]:
+    """Token ids of the template close ``\\n</think>\\n\\n``, and the ``</think>`` id."""
+    close = encode_text(root, "\n</think>\n\n")
+    end = encode_text(root, "</think>")
+    if len(end) != 1 or end[0] not in close:
+        raise RuntimeError("the think close is not one token")
+    return close, end[0]
+
+
 def _forced_call(root: Path, tools: Any, required: str | None) -> tuple[list[int], bool]:
     """Opening of a named call, or the whole call when that function takes no arguments."""
     if not required:
@@ -148,6 +157,8 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
     presence = _presence(body, thinking, card)
     prompt = encode_chat(runtime.root, messages, body.get("tools"), thinking)
     forced, stop_after_forced = _forced_call(runtime.root, body.get("tools"), required)
+    close, end = think_close_ids(runtime.root) if thinking else ([], None)
+    emit_tools = body.get("tool_choice") != "none"
     stream = bool(body.get("stream", False))
     if stream:
         _stream(
@@ -162,6 +173,9 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
             top_k,
             presence,
             thinking,
+            close,
+            end,
+            emit_tools,
         )
         return
     started = time.perf_counter()
@@ -175,10 +189,16 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
         STOP,
         forced=forced,
         stop_after_forced=stop_after_forced,
+        think_close=close,
+        think_end=end,
+        thinking_budget=THINKING_BUDGET if thinking else 0,
     )
     text = decode_text(runtime.root, tokens)
     reasoning, reply = split_thinking(text, thinking)
     content, calls = parse_tool_calls(reply if reply else text)
+    if not emit_tools:
+        calls = []
+        content = reply if reply else text
     if calls:
         reason = "tool_calls"
     else:
@@ -261,6 +281,9 @@ def _stream(
     top_k: int,
     presence: float,
     thinking: bool,
+    think_close: list[int],
+    think_end: int | None,
+    emit_tools: bool = True,
 ) -> None:
     decode = getattr(runtime, "decode", None)
     if not callable(decode):
@@ -338,6 +361,9 @@ def _stream(
             forced=forced,
             stop_after_forced=stop_after_forced,
             on_token=enqueue,
+            think_close=think_close,
+            think_end=think_end,
+            thinking_budget=THINKING_BUDGET if thinking else 0,
         )
     finally:
         pending.put(None)
@@ -346,7 +372,7 @@ def _stream(
         raise failed[0]
     _reasoning, reply = split_thinking(text, thinking)
     _content, calls = parse_tool_calls(reply if reply else text)
-    if calls:
+    if emit_tools and calls:
         for index, call in enumerate(calls):
             event(
                 _frame(

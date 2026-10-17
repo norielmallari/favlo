@@ -6,9 +6,11 @@ from pathlib import Path
 import pytest
 from harness.long_prompt import (
     INSTRUCTIONS,
+    echo_reasoning,
     extensions_hold,
     parse_requests,
     read_prompt,
+    read_reasoning,
     read_repository_file,
     source_files,
     tool_call_text,
@@ -53,6 +55,8 @@ def test_source_files_skip_models_and_read_largest_first(tmp_path: Path) -> None
     assert [path.name for path in found] == ["b.metal", "a.py"]
     allowed = {path.relative_to(tmp_path).as_posix() for path in found}
     assert read_repository_file(tmp_path, "b.metal", allowed) == "b" * 30
+    assert read_repository_file(tmp_path, "B.METAL", allowed) == "b" * 30
+    assert read_repository_file(tmp_path, "missing.py", allowed, "b.metal") == "b" * 30
     with pytest.raises(ValueError):
         read_repository_file(tmp_path, "../secret.txt", allowed)
     with pytest.raises(ValueError):
@@ -100,6 +104,26 @@ decode 1.00 tok/s (1 tok in 1.00s)
     loaded = parse_requests(after_prompt)
     assert loaded[1].prefix_load == 12
     assert extensions_hold(loaded)
+    followed = """\
+prompt tokens 10
+cache miss
+prefill 1.00 tok/s (10 tok in 10.00s)
+decode 1.00 tok/s (2 tok in 2.00s)
+prompt tokens 20
+cache hit 12
+prefill 1.00 tok/s (8 tok in 8.00s)
+decode 1.00 tok/s (4 tok in 4.00s)
+prefix load 24 tokens
+prompt tokens 40
+cache hit 24
+prefill 1.00 tok/s (16 tok in 16.00s)
+decode 1.00 tok/s (3 tok in 3.00s)
+"""
+    agent = parse_requests(followed)
+    assert agent[1].prefix_load is None
+    assert agent[1].prefix_hit == 12
+    assert agent[2].prefix_load == 24
+    assert extensions_hold(agent)
 
 
 def _encode(
@@ -195,3 +219,50 @@ def test_forced_opening_matches_the_tokenizer() -> None:
     closed = walk(True)
     assert tokenizer.decode(closed) == tool_call_text()
     assert closed == list(tokenizer.encode(tool_call_text()).ids)
+
+
+class _Part:
+    def __init__(self, kind: str, text: str) -> None:
+        self.type = kind
+        self.text = text
+        self.protected_data = None
+
+
+class _Message:
+    def __init__(self, contents: list[_Part]) -> None:
+        self.role = "assistant"
+        self.contents = contents
+
+
+def test_reasoning_returns_on_its_own_field() -> None:
+    message = _Message(
+        [
+            _Part("text_reasoning", "look\n"),
+            _Part("text", "<tool_call>\n<function=read_file>\n"),
+        ]
+    )
+    built = [
+        {"role": "assistant", "content": [{"type": "text", "text": "look\n"}]},
+        {
+            "role": "assistant",
+            "content": "<tool_call>\n<function=read_file>\n",
+            "tool_calls": [{"id": "call_0"}],
+        },
+    ]
+    echoed = echo_reasoning(message, built)
+    assert echoed == [
+        {
+            "role": "assistant",
+            "content": "<tool_call>\n<function=read_file>\n",
+            "reasoning_content": "look\n",
+        }
+    ]
+
+
+def test_reasoning_delta_is_not_reply_text() -> None:
+    class _Delta:
+        model_extra = {"reasoning_content": "look"}
+
+    parsed = read_reasoning(_Delta(), [])
+    assert parsed[0].type == "text_reasoning"
+    assert parsed[0].text == "look"

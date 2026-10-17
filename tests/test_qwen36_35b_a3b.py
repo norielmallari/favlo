@@ -12,7 +12,9 @@ import pytest
 from qwen36_35b_a3b.atlas import atlas_slots
 from qwen36_35b_a3b.cache import kv_buffer_bytes, kv_mode, max_position, parse_memory
 from qwen36_35b_a3b.checks import run_checks
+from qwen36_35b_a3b.convert import expert_slot_map
 from qwen36_35b_a3b.formats import EXPERT_IMAGE, dequant_fp4, fp4_image, quantize_fp4
+from qwen36_35b_a3b.forward import ThinkBudget, _sample
 from qwen36_35b_a3b.tools import (
     StreamText,
     function_has_parameters,
@@ -29,6 +31,53 @@ def test_fp4_tie_picks_the_even_code() -> None:
     restored = dequant_fp4(packed, scales, 1, 32)
     assert restored[0, 0] == np.float32(6.0)
     assert restored[0, 1] == np.float32(1.0)
+
+
+def test_expert_slots_follow_the_median_scale() -> None:
+    gate = [bytes([10]), bytes([10]), bytes([10]), bytes([10])]
+    down = [bytes([10]), bytes([1]), bytes([40]), bytes([10])]
+    mapping = expert_slot_map(gate, down)
+    assert mapping.tolist() == [1, 0, 3, 2]
+
+
+def test_a_repeated_span_is_not_drawn_again() -> None:
+    produced = [1, 2, 3, 4, 5, 6, 7, 9, 1, 2, 3, 4, 5, 6, 7]
+    logits = np.full(16, -10.0, dtype=np.float32)
+    logits[9] = np.float32(10.0)
+    logits[8] = np.float32(3.0)
+    drawn = _sample(logits, 0.0, 1.0, 0, 0.0, set(produced), None, produced)
+    assert drawn == 8
+
+
+def test_thinking_budget_forces_the_close_then_drops_that_token() -> None:
+    budget = ThinkBudget([2, 9, 3], 9, 2)
+    assert budget.take(4) == 4
+    assert budget.take(5) == 5
+    assert budget.take(8) == 2
+    assert budget.forced() == 9
+    assert budget.forced() == 3
+    assert budget.closed
+    logits = np.full(16, -10.0, dtype=np.float32)
+    logits[9] = np.float32(10.0)
+    logits[8] = np.float32(3.0)
+    assert _sample(logits, 0.0, 1.0, 0, 0.0, set(), {9}) == 8
+
+
+def test_a_stop_inside_an_open_think_starts_the_close() -> None:
+    budget = ThinkBudget([2, 9, 3], 9, 8)
+    assert budget.instead_of_stop(7, {7}) == 2
+    assert budget.forcing
+    assert budget.instead_of_stop(7, {7}) is None
+    assert budget.forced() == 9
+    assert budget.forced() == 3
+    assert budget.instead_of_stop(7, {7}) is None
+
+
+def test_a_natural_close_ends_the_budget() -> None:
+    budget = ThinkBudget([2, 9, 3], 9, 8)
+    assert budget.take(9) == 9
+    assert budget.closed
+    assert budget.take(4) == 4
 
 
 def test_expert_image_is_two_fp4_planes() -> None:
@@ -99,7 +148,7 @@ def test_stream_chunks_carry_reasoning_then_the_reply() -> None:
     handler = _Handler()
     handler.events = []
     handler.sent = []
-    _stream(handler, _Runtime(), [9, 9, 9], [], False, 8, 0.0, 1.0, 1, 0.0, True)
+    _stream(handler, _Runtime(), [9, 9, 9], [], False, 8, 0.0, 1.0, 1, 0.0, True, [], None)
     assert handler.sent == [b"data: [DONE]\n\n"]
     seen: list[tuple[str, object]] = []
     for payload in handler.events:
@@ -253,6 +302,7 @@ def test_stream_text_emits_reasoning_then_reply() -> None:
         ("reasoning", "son"),
         ("content", "ans"),
         ("content", "wer"),
+        ("content", "<tool_call>"),
     ]
 
 

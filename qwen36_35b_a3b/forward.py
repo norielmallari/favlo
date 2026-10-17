@@ -19,6 +19,7 @@ from qwen36_35b_a3b.cache import (
     max_position,
     parse_memory,
 )
+from qwen36_35b_a3b.convert import LANGUAGE_LAYERS, SLOT_MAP_BYTES
 from qwen36_35b_a3b.formats import EXPERT_IMAGE
 from qwen36_35b_a3b.prefill import workspace_bytes
 from qwen36_35b_a3b.prefix import open_session
@@ -32,6 +33,8 @@ KV = 2
 EPS = 1e-6
 # Each head stores query then gate. The other split is the flat halves.
 GATE_PER_HEAD = 1
+# Paulus, Xiong, and Socher block a repeated n-gram. Eight tokens is one short clause.
+_REPEAT_SPAN = 8
 
 
 def _reserved_bytes(resident: int, kv_one: int, plane: int) -> int:
@@ -158,6 +161,12 @@ class Qwen36Runtime:
         self.gated = self.session.zeros(8 * 512 * 4)
         self.partial = self.session.zeros(8 * HIDDEN * 4)
         self.ids = self.session.zeros(8 * 4)
+        order_path = self.root / "experts" / "order.bin"
+        order = order_path.read_bytes()
+        if len(order) != SLOT_MAP_BYTES:
+            message = f"expert slot map is {len(order)} bytes"
+            raise RuntimeError(message)
+        self.expert_order = self.session.upload(order)
         self.mix_w = self.session.zeros(8 * 4)
         self.acc = self.session.zeros(HIDDEN * 4)
         self.router = self.session.zeros(256 * 4)
@@ -470,6 +479,16 @@ class Qwen36Runtime:
             (1, 1, 1),
             (1, 1, 1),
         )
+        if layer >= LANGUAGE_LAYERS:
+            message = f"layer {layer} has no expert slot map"
+            raise RuntimeError(message)
+        self.session.encode(
+            "remap_expert_ids",
+            [(self.ids, 0), (self.expert_order, 0)],
+            [_u32(8), _u32(layer)],
+            (1, 1, 1),
+            (32, 1, 1),
+        )
         gate_w, gate_s = self._weight(prefix + "shared_expert.gate_up")
         down_w, down_s = self._weight(prefix + "shared_expert.down_proj.weight")
         experts = self.expert_buffer(layer)
@@ -550,6 +569,9 @@ class Qwen36Runtime:
         forced: list[int] | None = None,
         stop_after_forced: bool = False,
         on_token: Any = None,
+        think_close: list[int] | None = None,
+        think_end: int | None = None,
+        thinking_budget: int = 0,
     ) -> list[int]:
         self._hit_limit = False
         self._output_ids = []
@@ -596,6 +618,9 @@ class Qwen36Runtime:
             pending = list(forced or [])
             close_after = bool(stop_after_forced) and bool(pending)
             seen: set[int] = set()
+            budget = None
+            if think_close and think_end is not None and thinking_budget > 0:
+                budget = ThinkBudget(think_close, think_end, thinking_budget)
             decode_row = self._begin_phase("decode", max_tokens, live=True)
             decode_started = time.perf_counter()
             for count in range(max_tokens):
@@ -603,11 +628,22 @@ class Qwen36Runtime:
                 if pending:
                     nxt = int(pending.pop(0))
                     finished_forced = close_after and not pending
+                elif budget is not None and budget.forcing:
+                    nxt = budget.forced()
+                    finished_forced = False
                 else:
-                    nxt = _sample(logits, temperature, top_p, top_k, presence, seen)
+                    banned = {budget.end} if budget is not None and budget.closed else None
+                    nxt = _sample(
+                        logits, temperature, top_p, top_k, presence, seen, banned, out
+                    )
+                    if budget is not None:
+                        nxt = budget.take(nxt)
                     finished_forced = False
                 if nxt in stop:
-                    break
+                    replaced = None if budget is None else budget.instead_of_stop(nxt, stop)
+                    if replaced is None:
+                        break
+                    nxt = replaced
                 out.append(nxt)
                 seen.add(nxt)
                 if decode_row is not None:
@@ -619,6 +655,7 @@ class Qwen36Runtime:
                     break
                 if count + 1 == max_tokens:
                     self._hit_limit = True
+                    self.step(nxt, len(prompt) + count, logits=False)
                     break
                 logits = self.step(nxt, len(prompt) + count, logits=True)
                 assert logits is not None
@@ -707,6 +744,78 @@ class Qwen36Runtime:
             progress.done = capped
 
 
+class ThinkBudget:
+    """Close an open think block after ``budget`` completion tokens.
+
+    The prompt already opened ``<think>``. Drawn tokens count until
+    ``</think>``. At the budget, the next tokens are ``close``, one id at a
+    time. After that sequence, ``end`` is removed from the logits.
+    """
+
+    def __init__(self, close: list[int], end: int, budget: int) -> None:
+        self.close = [int(token) for token in close]
+        self.end = int(end)
+        self.budget = int(budget)
+        self.counted = 0
+        self.force_at: int | None = None
+        self.closed = False
+
+    @property
+    def forcing(self) -> bool:
+        return self.force_at is not None
+
+    def take(self, sampled: int) -> int:
+        if self.closed:
+            return sampled
+        if self.counted >= self.budget:
+            return self._start()
+        if sampled == self.end:
+            self.closed = True
+            return sampled
+        self.counted += 1
+        return sampled
+
+    def forced(self) -> int:
+        assert self.force_at is not None
+        token = self.close[self.force_at]
+        self.force_at += 1
+        if self.force_at >= len(self.close):
+            self.force_at = None
+            self.closed = True
+        return token
+
+    def instead_of_stop(self, token: int, stop: set[int]) -> int | None:
+        """The first close id when ``token`` would end an open think block."""
+        if token not in stop or self.closed or self.forcing:
+            return None
+        return self._start()
+
+    def _start(self) -> int:
+        token = self.close[0]
+        if len(self.close) == 1:
+            self.closed = True
+        else:
+            self.force_at = 1
+        return token
+
+
+def _blocked_tokens(produced: list[int], span: int) -> set[int]:
+    """Tokens that would repeat an n-gram already present in ``produced``.
+
+    Paulus, Xiong, and Socher, "A Deep Reinforced Model for Abstractive
+    Summarization", block a repeated n-gram by forbidding the token that
+    would complete it.
+    """
+    if span < 2 or len(produced) < span:
+        return set()
+    prefix = tuple(produced[-(span - 1) :])
+    blocked: set[int] = set()
+    for start in range(len(produced) - span + 1):
+        if tuple(produced[start : start + span - 1]) == prefix:
+            blocked.add(produced[start + span - 1])
+    return blocked
+
+
 def _sample(
     logits: np.ndarray,
     temperature: float,
@@ -714,13 +823,22 @@ def _sample(
     top_k: int,
     presence: float,
     seen: set[int],
+    banned: set[int] | None = None,
+    produced: list[int] | None = None,
 ) -> int:
     scores = logits
-    if presence and seen:
+    blocked = _blocked_tokens(produced or [], _REPEAT_SPAN)
+    if (presence and seen) or banned or blocked:
         scores = np.array(logits, copy=True)
-        penalty = np.float32(presence)
-        for token in seen:
-            scores[token] -= penalty
+        if presence and seen:
+            penalty = np.float32(presence)
+            for token in seen:
+                scores[token] -= penalty
+        if banned:
+            for token in banned:
+                scores[token] = np.float32(-np.inf)
+        for token in blocked:
+            scores[token] = np.float32(-np.inf)
     if temperature == 0.0:
         return int(np.argmax(scores))
     if top_k > 0 and top_k < scores.size:

@@ -2,13 +2,13 @@
 
 One run of the file-reading prompt for `qwen36-35b-a3b`. Kernel and bandwidth ceilings are in [ceilings.md](ceilings.md). The pipeline contract is [README.md](README.md).
 
-The harness starts `madmetal serve` and sends chat completions until the prompt reaches 65536 tokens. It reads repository source, largest file first, and each turn asks for `read_file`. Temperature is 0, `max_tokens` is 32, and thinking is off. The server stops after the first turn and starts again, so the second turn loads the stored prefix and prefills the new suffix. Later turns stay on that server. The command is:
+The harness starts `madmetal serve` and runs an agent until the prompt reaches 65536 tokens. The model id is the thinking variant. The agent calls `read_file` for the next repository source, largest file first, then analyzes that file. The server stops after the first task and starts again, so the next task loads the stored prefix and prefills the new suffix. Later tasks stay on that server. The command is:
 
 ```text
 uv run python -m harness.long_prompt --model qwen36-35b-a3b
 ```
 
-The printed summary is the measurement. This run stopped at 85667 prompt tokens over three requests. Prefill is the summed suffix time. Decode is the summed sampled-token time. Each decode line is 13 tokens.
+The printed summary is the measurement. The run below closed thinking and stopped each completion at the forced tool call, 13 tokens. It stopped at 85667 prompt tokens over three requests. Prefill is the summed suffix time. Decode is the summed sampled-token time.
 
 | Request | Prompt tokens | Cache | Prefill | Decode |
 |---|---:|---|---|---|

@@ -900,6 +900,25 @@ def check_grouped_expert(session: Session) -> None:
         _close(f"grouped mix {token}", got_hidden[token], expect, atol=2e-3)
 
 
+def check_remap_expert_ids(session: Session) -> None:
+    ids = np.array([2, 0, 5, 1], dtype=np.uint32)
+    order = np.arange(256, dtype=np.uint8)
+    order[2] = np.uint8(9)
+    order[0] = np.uint8(4)
+    order[5] = np.uint8(7)
+    order[1] = np.uint8(3)
+    source = session.upload(ids)
+    session.dispatch(
+        "remap_expert_ids",
+        [source, session.upload(order.tobytes())],
+        [np.uint32(4).tobytes(), np.uint32(0).tobytes()],
+        (1, 1, 1),
+        (32, 1, 1),
+    )
+    got = np.frombuffer(session.download(source, 16), dtype=np.uint32)
+    assert got.tolist() == [9, 4, 7, 3]
+
+
 def check_gather_and_attend(session: Session) -> None:
     table = np.arange(32, dtype=np.float32).reshape(4, 8)
     destination = session.zeros(8 * 4)
@@ -956,6 +975,7 @@ CHECKS = (
     ("elementwise", check_elementwise),
     ("norms", check_norms),
     ("gather", check_gather_and_attend),
+    ("expert slots", check_remap_expert_ids),
     ("moe group", check_moe_group),
     ("grouped expert", check_grouped_expert),
 )

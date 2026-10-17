@@ -1232,6 +1232,20 @@ kernel void router8(
     }
 }
 
+// Checkpoint router rows become file slots. ``order`` is 256 bytes per layer.
+kernel void remap_expert_ids(
+    device uint* ids [[buffer(0)]],
+    device const uchar* order [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    constant uint& layer [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= count) {
+        return;
+    }
+    ids[tid] = order[layer * 256u + ids[tid]];
+}
+
 kernel void mix_experts(
     device float* destination [[buffer(0)]],
     device const float* partial [[buffer(1)]],

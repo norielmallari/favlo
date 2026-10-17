@@ -449,6 +449,14 @@ def _route(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) ->
         (count, 1, 1),
         (1, 1, 1),
     )
+    assignments = count * 8
+    runtime.session.encode(
+        "remap_expert_ids",
+        [(work.ids, 0), (runtime.expert_order, 0)],
+        [_u32(assignments), _u32(layer)],
+        ((assignments + 255) // 256, 1, 1),
+        (256, 1, 1),
+    )
 
 
 def _experts(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) -> None:
