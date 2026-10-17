@@ -248,7 +248,10 @@ class PrefixSession:
             and len(wanted) > len(self.tokens)
         ):
             return len(self.tokens)
-        self.flush()
+        try:
+            self.flush()
+        except OSError:
+            pass
         self.adapter.reset()
         self.tokens = []
         self.dirty = False
@@ -600,6 +603,8 @@ class _PageWriter:
             self.filled += take
             if self.filled == PREFERRED_IO or self.written + self.filled == self.stored:
                 self._emit(self.filled)
+        if self.filled:
+            self._emit(self.filled)
         if self.written != self.stored:
             message = "prefix region ended short"
             raise OSError(message)

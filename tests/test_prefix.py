@@ -119,6 +119,36 @@ def test_page_aligned_regions_and_wide_blob(tmp_path: Path) -> None:
     assert _blob(loaded, "k") == key
 
 
+def test_page_exact_region_is_written(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    exact = b"e" * PAGE
+    tail = b"t" * (PREFERRED_IO + PAGE)
+    path = store.save(_record([1, 2], history=exact, state=tail))
+    assert path is not None
+    hit = store.longest([1, 2, 3])
+    assert hit is not None
+    assert _blob(hit, "history") == exact
+    assert _blob(hit, "state") == tail
+
+
+def test_align_continues_when_the_prefix_write_fails() -> None:
+    class _Broken:
+        def save(self, record: PrefixRecord) -> None:
+            raise OSError("prefix region ended short")
+
+        def matches(self, wanted: list[int]) -> list[PrefixHeader]:
+            return []
+
+    memory = _Memory()
+    session = PrefixSession(_Broken(), memory)  # type: ignore[arg-type]
+    memory.regions = [Region("k", b"aaaa")]
+    session.note([1, 2])
+    assert session.align([9]) == 0
+    assert memory.resets == 1
+    assert session.dirty is False
+    assert session.tokens == []
+
+
 def test_region_names_stay_distinct(tmp_path: Path) -> None:
     store = _store(tmp_path)
     path = store.save(
