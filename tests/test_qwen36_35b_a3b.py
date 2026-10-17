@@ -295,6 +295,15 @@ def test_empty_function_has_no_parameters() -> None:
     assert function_has_parameters(with_path, "read_file") is True
 
 
+def test_record_name_is_the_source_model_plus_fp4() -> None:
+    from qwen36_35b_a3b.convert import record_name
+
+    plain = Path("models/Example-Model")
+    assert record_name(plain) == "Example-Model-fp4"
+    snapshot = Path("hub/models--org--Example-Model/snapshots/abc123")
+    assert record_name(snapshot) == "Example-Model-fp4"
+
+
 def test_kv_widths_and_atlas_budget() -> None:
     assert kv_mode(None) == "e4m3"
     assert kv_mode("fp4") == "e2m1"
@@ -315,7 +324,7 @@ def test_kv_widths_and_atlas_budget() -> None:
         pass
     else:
         raise AssertionError("a cap below one layer file must fail")
-    root = Path("models/Qwen3.6-35B-A3B-madmetal-c256-fp4")
+    root = Path("models/Qwen3.6-35B-A3B-fp4")
     if (root / "config.json").is_file():
         assert max_position(root) == 262144
 

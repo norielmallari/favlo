@@ -1740,14 +1740,9 @@ class MetalSession:
             raise ValueError(message)
         if count == 1 and isinstance(matrix, Int4Matrix):
             return self._gemv_int4(matrix, src, epilogue, epilogue_scale)
-        # A short decode span dots each weight chunk once against every token.
-        # The chunk dot is the one-token GEMV, so the argmax stays that dot.
-        if (
-            self.force_gemv
-            and 1 < count <= 4
-            and isinstance(matrix, Int4Matrix)
-            and matrix.inner == inner
-        ):
+        # A span of at most four tokens uses the span GEMV. One read of the
+        # weight is dotted with each token. Longer chunks use matmul2d.
+        if 1 < count <= 4 and isinstance(matrix, Int4Matrix) and matrix.inner == inner:
             return self._gemv_int4_span(matrix, src, count, epilogue, epilogue_scale)
         gemm = (
             count > 1

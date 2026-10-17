@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from madmetal.console import Console
+from madmetal.logs import attach_process_log
 from madmetal.registry import model_objects, one_model, resolve
 
 _STREAM_WRITE_TIMEOUT = 2.0
@@ -374,6 +375,7 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
 
 def _console(args: Any) -> Console:
     ui = Console.from_env(getattr(args, "console", None), pipeline="")
+    attach_process_log(ui)
     bind_log(ui.log)
     ui.live_decode = ui.mode == "pretty"
     ui.plate()

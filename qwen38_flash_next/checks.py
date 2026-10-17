@@ -737,7 +737,7 @@ def check_act_kernels() -> None:
     batch = rng.normal(size=(2, 64)).astype(np.float32)
     expect = gpu.int4_rows(loaded, batch)
     got = gpu.linear(loaded, gpu.dev_from(batch), 2, 64)
-    _close("gemm", gpu.read_f32(got), expect.reshape(-1))
+    _close("span", gpu.read_f32(got), expect.reshape(-1))
 
 
 def mtp_mix(

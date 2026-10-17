@@ -8,6 +8,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from madmetal.hf_cache import snapshot_dir
 from madmetal.registry import (
     add_model,
     choose_complete,
@@ -25,7 +26,7 @@ GROVE_PROMPT = (
     "There are 15 trees in the grove. Grove workers will plant trees in the grove today. "
     "After they are done, there will be 21 trees. How many trees did the grove workers plant today?"
 )
-_BF16 = Path("models/Qwen3.8-27B-bf16")
+_BF16_REPO = "Qwen/Qwen3.8-27B"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -65,7 +66,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _quantize(args: argparse.Namespace) -> int:
-    src = args.src or _BF16
+    src = args.src or snapshot_dir(_BF16_REPO)
     output = args.output or Path("models") / RECORD_NAME
     try:
         quantize(src, output)

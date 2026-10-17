@@ -2,7 +2,7 @@
 
 Starting point for coding agents in **MADMetal**.
 
-Read this file first. Then read [ARCHITECTURE.md](ARCHITECTURE.md) for the process and the write set. The pipeline you are editing has its own note: [docs/qwen38-flash-next/architecture.md](docs/qwen38-flash-next/architecture.md) for Flash Next, [docs/qwen38-27b/README.md](docs/qwen38-27b/README.md) for 27B, [docs/qwen36-35b-a3b/README.md](docs/qwen36-35b-a3b/README.md) for Qwen3.6-35B-A3B. The papers and specifications the math is taken from are [REFERENCES.md](REFERENCES.md). A pipeline's own citations live in its note. Product name and the one-pipeline rule are [README.md](README.md). Root [ARCHITECTURE.md](ARCHITECTURE.md) wins for the listener and for which files an agent may edit. A pipeline note wins for that pipeline's kernels.
+Read this file first. Changes stay in this repository. Edit another repository only when the user asks for that repository. Then read [ARCHITECTURE.md](ARCHITECTURE.md) for the process and the write set. The pipeline you are editing has its own note: [docs/qwen38-flash-next/architecture.md](docs/qwen38-flash-next/architecture.md) for Flash Next, [docs/qwen38-27b/README.md](docs/qwen38-27b/README.md) for 27B, [docs/qwen36-35b-a3b/README.md](docs/qwen36-35b-a3b/README.md) for Qwen3.6-35B-A3B. The papers and specifications the math is taken from are [REFERENCES.md](REFERENCES.md). A pipeline's own citations live in its note. Product name and the one-pipeline rule are [README.md](README.md). Root [ARCHITECTURE.md](ARCHITECTURE.md) wins for the listener and for which files an agent may edit. A pipeline note wins for that pipeline's kernels.
 
 ## What this repo is
 
@@ -38,6 +38,7 @@ src/madmetal/              process entry; the listener loads the pipeline a requ
   registry.py              flavor folders, aliases, pipelines, and sampling variants
   listener.py              the HTTP listener; it does not import a pipeline
   console.py               status row; no pipeline imports
+  logs.py                  rolling server log; size is settings.json log_max_bytes
 harness/                   file-agent client, coherence, and the three benchmarks
 docs/                      one directory per pipeline; see docs/README.md
 docs/qwen38-flash-next/    Flash Next record, n-gram, schedule, probe
@@ -65,7 +66,8 @@ A pipeline's calibration strings are data, not an algorithm. The bucket for Flas
 5. Do not invent routing hits, calibration energies, or hidden-state errors. A measurement belongs in that pipeline's note.
 6. A pipeline change updates that pipeline's `docs/<pipeline>/` note in the same change. A process change (listener, registry, console, or the write set) updates [ARCHITECTURE.md](ARCHITECTURE.md). Do not edit another pipeline's note to describe this one. `docs/` is as-built only. Implementation plans live under `artifacts/implementation-plan/` (gitignored). Do not commit plan or option-comparison notes under `docs/`.
 7. This process is the runtime. Re-implement from public research documents. Do not use another application's source as the reference, and do not launch another application's environment.
-8. Prefill, decode, and the calibration prefill map onto Metal. The endpoint serves tokens those shaders produced. A missing kernel stays missing. It is not replaced by a slower forward. A weight plane is a Metal tensor format whose op compiles and whose dispatch completes. The formats a pipeline stores are that pipeline's note.
+8. Changes stay in this repository. Another repository stays untouched unless the user asks for that repository.
+9. Prefill, decode, and the calibration prefill map onto Metal. The endpoint serves tokens those shaders produced. A missing kernel stays missing. It is not replaced by a slower forward. A weight plane is a Metal tensor format whose op compiles and whose dispatch completes. The formats a pipeline stores are that pipeline's note.
 
 ## Commits
 

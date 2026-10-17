@@ -13,7 +13,10 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, TextIO
+
+from madmetal.logs import RollingLog
 
 PHASES = ("load", "quantize", "prefill", "decode")
 UNITS = ("tok", "layers", "bytes", "shards", "experts")
@@ -85,6 +88,7 @@ class Console:
         self._start_thread = start_thread and mode in {"pretty", "json"}
         self.fold_turns = False
         self.live_decode = mode == "pretty"
+        self._recorder: Callable[[str], None] | None = None
 
     @classmethod
     def from_env(
@@ -107,6 +111,16 @@ class Console:
             mode = "plain" if dumb or not tty else "pretty"
         return cls(mode, pipeline=pipeline, stream=target)
 
+    def attach_log(self, path: Path, max_bytes: int) -> None:
+        """Copy durable lines into a rolling file. The row itself is not copied."""
+        self._recorder = RollingLog(path, max_bytes).write
+
+    def _record(self, text: str) -> None:
+        recorder = self._recorder
+        if recorder is None or not text:
+            return
+        recorder(text)
+
     @property
     def keeps_lines(self) -> bool:
         """Plain and json keep today's durable lines. Pretty replaces them with the row."""
@@ -114,6 +128,7 @@ class Console:
 
     def plate(self) -> None:
         """The Ingot Plate, once, before any other output."""
+        self._record(f"madmetal {VERSION}")
         if self.mode == "plain":
             self._write(f"madmetal {VERSION}\n")
             return
@@ -126,6 +141,7 @@ class Console:
 
     def log(self, line: str) -> None:
         """A durable line. The listening line stays plain text in every mode."""
+        self._record(line)
         if self.mode == "json":
             self._event({"type": "log", "line": line})
             return
@@ -173,6 +189,8 @@ class Console:
     def end(self, progress: Progress, summary: str) -> None:
         if progress.closed:
             return
+        if summary:
+            self._record(summary)
         progress.summary = summary
         progress.closed = True
         with self._lock:
@@ -231,6 +249,8 @@ class Console:
         A traceback written straight to the terminal is painted over by the
         next row tick. This finishes the rows first.
         """
+        if text:
+            self._record(text)
         with self._lock:
             for progress in self._handles:
                 progress.closed = True

@@ -8,7 +8,7 @@ A 2 GiB streaming read finished in 8043 µs, 267.0 GB/s. A copy of that buffer f
 
 ## Decode
 
-One token, experts resident, fp4 weights, fp8 E4M3 K and V. The forward is 36 Gated DeltaNet layers, 12 sparse-attention layers, the MTP layer, the final mixer, one PLE injection, and one head. Top 10. The MTP layer is the cycle that runs when a draft is not taken. A draft repeats that layer and the head; those two dispatches are not in the totals below.
+One token, experts resident, fp4 weights, fp8 E4M3 K and V. A span of two to four tokens uses `gemv_int4_span` for the int4 projections. The totals below stay the one-token GEMV. The forward is 36 Gated DeltaNet layers, 12 sparse-attention layers, the MTP layer, the final mixer, one PLE injection, and one head. Top 10. The MTP layer is the cycle that runs when a draft is not taken. A draft repeats that layer and the head; those two dispatches are not in the totals below.
 
 `gemv_int4_f32` is the one-token projection. The router is `gemv_f16` with the half cast in the same buffer. Routed experts are `moe_decode_gate` and `moe_decode_down` at top 10. `rms_rows` is the branch norm, including the final norm.
 

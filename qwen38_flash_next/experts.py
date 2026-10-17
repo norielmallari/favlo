@@ -154,10 +154,21 @@ class ExpertAtlas:
             value = int(expert)
             counts[value] = counts.get(value, 0) + 1
         wanted = sorted(counts)
+        if protect:
+            for layer_id, expert in protect:
+                self._touch(int(layer_id), int(expert))
         held = {(layer, expert) for expert in wanted}
         if protect:
             held.update(protect)
-        protect = held
+        return self._stage_missing(layer, counts, wanted, held)
+
+    def _stage_missing(
+        self,
+        layer: int,
+        counts: dict[int, int],
+        wanted: list[int],
+        protect: set[tuple[int, int]],
+    ) -> int:
         for expert in wanted:
             for _ in range(min(counts[expert], 3)):
                 self._touch(layer, expert)

@@ -36,6 +36,8 @@ Tests for the listener, the registry, and the console live in `tests/test_cli.py
 
 Status goes through `src/madmetal/console.py`. The module imports nothing from a pipeline. The listener does not import a pipeline until a request names one. That row's entry file provides `open_runtime` and `handle_chat`. `--console auto` is pretty when stderr is a terminal, and plain when it is a pipe, when `NO_COLOR` is set, or when `TERM` is `dumb`. `plain` prints the lines the harness parses. `pretty` draws one row per open phase at 10 Hz. `json` writes one NDJSON object per event, schema version 1. How a pipeline binds those phases is that pipeline's note.
 
+`madmetal serve` also appends those durable lines, phase summaries, and tracebacks to `~/.madmetal/logs/madmetal.log`. The live row is not written there. `~/.madmetal/settings.json` key `log_max_bytes` is the most bytes that file may hold. The default is 1048576. The first serve creates that file when it is missing. A line that would pass the cap leaves the newest bytes that still fit, starting at the next line when one fits.
+
 ## Prefix cache
 
 `src/madmetal/prefix.py` stores one sequence as token ids plus named regions under `~/.madmetal/prefix/<model>/<checkpoint>/<hash>.bin`. The checkpoint id is the hex SHA-256 of `manifest.json`, or of `config.json` when the record has no manifest. The file name is the hex SHA-256 of the format, the model id, that digest, the cache tag, and the token ids. The store does not know a key/value layout. Each pipeline packs its own buffers into regions and copies a matching file back.

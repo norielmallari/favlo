@@ -10,9 +10,21 @@ import numpy as np
 
 from qwen36_35b_a3b.formats import EXPERT_IMAGE, pack_fp4_matrix, quantize_fp4
 
-RECORD_NAME = "Qwen3.6-35B-A3B-madmetal-c256-fp4"
 GATE_UP_BYTES = 1_114_112
 DOWN_BYTES = 557_056
+
+
+def record_name(source: Path) -> str:
+    """`<model>-fp4`. A hub snapshot uses the repository name, not the commit."""
+    name = source.name
+    for parent in (source, *source.parents):
+        folder = parent.name
+        if not folder.startswith("models--"):
+            continue
+        pieces = folder.removeprefix("models--").split("--")
+        name = "--".join(pieces[1:]) if len(pieces) > 1 else pieces[0]
+        break
+    return f"{name}-fp4"
 
 
 def _align(value: int) -> int:

@@ -17,7 +17,7 @@ from madmetal.registry import (
 )
 from qwen36_35b_a3b.chat import STOP, decode_text, encode_chat
 from qwen36_35b_a3b.checks import format_report, run_checks
-from qwen36_35b_a3b.convert import RECORD_NAME, quantize
+from qwen36_35b_a3b.convert import quantize, record_name
 from qwen36_35b_a3b.forward import Qwen36Runtime
 
 PIPELINE = "qwen36-35b-a3b"
@@ -26,6 +26,7 @@ GROVE_PROMPT = (
     "After they are done, there will be 21 trees. How many trees did the grove workers plant today?"
 )
 _BF16 = Path("models/Qwen3.6-35B-A3B-bf16")
+_BF16_REPO = "Qwen/Qwen3.6-35B-A3B"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -75,7 +76,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _quantize(args: argparse.Namespace) -> int:
     src = args.src or _BF16
-    output = args.output or Path("models") / RECORD_NAME
+    if args.output is not None:
+        output = args.output
+    elif args.src is not None:
+        output = Path("models") / record_name(Path(args.src))
+    else:
+        output = Path("models") / f"{_BF16_REPO.split('/')[-1]}-fp4"
     try:
         quantize(src, output)
         register_quantized(

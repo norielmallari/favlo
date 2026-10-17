@@ -2022,11 +2022,13 @@ class Qwen38Runtime:
             if self.atlas is not None:
                 _fill_buffer(self.atlas.miss, self.layers * 4, 0)
             self._restore_recurrent()
+            self._atlas_trusted = True
             logits = self._forward_body(tokens)
             self.gpu.flush()
             if not self._expert_miss():
                 return logits
         self._force_sync = True
+        self._atlas_trusted = False
         if self.atlas is not None:
             _fill_buffer(self.atlas.miss, self.layers * 4, 0)
         self._restore_recurrent()
@@ -3211,14 +3213,16 @@ class Qwen38Runtime:
             and self.files.cold_bits in (2, 4)
         )
         if (
-            count == 1
-            and self._decoding
+            self._decoding
+            and 1 <= count <= 4
             and self._atlas_trusted
             and self._tier is not None
             and fp4_tiers
         ):
             shared = self._shared_expert(bundle, xs, count)
-            return self._moe_decode_trusted(layer, xs, weight, shared)
+            if count == 1:
+                return self._moe_decode_trusted(layer, xs, weight, shared)
+            return self._moe_decode_trusted_rows(layer, xs, weight, shared, count)
         # The host reads the route. A miss would zero that layer and change
         # every later route, so the token would have to be replayed.
         host_ids = self.gpu.read_u32(choice)
@@ -3676,6 +3680,27 @@ class Qwen38Runtime:
                 planes,
             )
         return running
+
+    def _moe_decode_trusted_rows(
+        self, layer: int, xs: Dev, weight: Dev, shared: Dev, count: int
+    ) -> Dev:
+        """One trusted GEMV per token. The host does not read the span's ids."""
+        hidden = self.hidden
+        out = self.gpu.tmp(count * hidden)
+        choice_buf = self._span_choice_buf()
+        base = layer * 4 * self.top_k
+        for index in range(count):
+            mixed = self._decode_tier_ids(
+                layer,
+                xs.view(index * hidden, hidden),
+                shared.view(index * hidden, hidden),
+                Dev(choice_buf, self.top_k, base + index * self.top_k),
+                weight.view(index * self.top_k, self.top_k),
+                self._cold,
+                255,
+            )
+            self.gpu.copy_into(mixed, out, index * hidden)
+        return out
 
     def _moe_decode_trusted(self, layer: int, xs: Dev, weight: Dev, shared: Dev) -> Dev:
         """Expert GEMVs from the device ids. The host does not read them between layers."""
