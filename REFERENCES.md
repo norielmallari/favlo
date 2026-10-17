@@ -4,6 +4,28 @@ Public documents this process is built from. A pipeline's papers live in that pi
 
 Qwen3.8-Flash-Next citations are [docs/qwen38-flash-next/references.md](docs/qwen38-flash-next/references.md).
 
+## Qwen3.8-27B
+
+Qwen Team. *Qwen3.8-27B.* The 64-layer 3:1 mix of Gated DeltaNet and full attention, 24 query heads over 4 key/value heads, head size 256, and the 262,144-token context. The as-built note is [docs/qwen38-27b/README.md](docs/qwen38-27b/README.md).
+
+Qwen Team. *On the Design of Qwen3.8-Next Architecture: Evaluation, Efficiency, and Training Stability.* Alibaba Group, August 2026. [arXiv:2608.30320](https://arxiv.org/abs/2608.30320). Equations (9) and (10) for the Gated DeltaNet gate.
+
+The step in this pipeline decays the \(128 \times 128\) state by \(\alpha\), then writes \(\beta(v - S k) k^\top\), then reads with the query. \(\alpha = \exp(-\exp(A_{\log})\mathrm{softplus}(a + \mathrm{dt\_bias}))\) and \(\beta = \mathrm{sigmoid}(b)\). Decode applies that step once per token. Prefill uses the same recurrence over a chunk of at most 2048 tokens. The output gate is SiLU. The head norm multiplies by the stored gain, \(x / \mathrm{rms} \cdot w\). The residual stream, the final norm, and the query and key norms are zero-centered, \(x / \mathrm{rms} \cdot (1 + w)\). A BF16 step on the stored weights still has to accept this layout.
+
+Yang, Kautz, and Hatamizadeh. *Gated Delta Networks: Improving Mamba2 with Delta Rule.* [arXiv:2412.06464](https://arxiv.org/abs/2412.06464), 2024.
+
+Ashish Vaswani et al. *Attention Is All You Need.* 2017. The scaled dot-product on the full-attention layers.
+
+Tri Dao et al. *FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness.* 2022. The tiled score and value mix.
+
+Noam Shazeer. *GLU Variants Improve Transformer.* 2020. SwiGLU on the feed-forward.
+
+Jianlin Su et al. *RoFormer: Enhanced Transformer with Rotary Position Embedding.* 2021. Partial RoPE on the first 64 of 256 channels, \(\theta = 10^{7}\).
+
+Peng Wang et al. *Qwen2-VL: Enhancing Vision-Language Model's Perception of the World at Any Resolution.* 2024. Text writes the same position on every mRoPE axis, so the rotation is plain RoPE.
+
+Zihan Qiu et al. *Gated Attention for Large Language Models.* [arXiv:2505.06708](https://arxiv.org/abs/2505.06708), 2025. The sigmoid that multiplies the softmax output.
+
 ## Qwen3.6-35B-A3B
 
 Qwen Team. *Qwen3.6-35B-A3B.* Model card, April 2026. [Hugging Face](https://huggingface.co/Qwen/Qwen3.6-35B-A3B). The 40-layer 3:1 mix, 256 routed experts plus one shared expert, the sampling card, and the 262,144-token default RoPE. The YaRN factor-4 extension in that card is not enabled. The as-built note is [docs/qwen36-35b-a3b/README.md](docs/qwen36-35b-a3b/README.md).

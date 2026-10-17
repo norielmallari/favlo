@@ -1,9 +1,12 @@
-"""Load a packed Qwen3.8-27B record. The language forward is this package's."""
+"""Open the packed record for ``madmetal serve``."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+
+from qwen38_27b.chat import handle_chat
+from qwen38_27b.forward import Qwen38Runtime
 
 
 def open_runtime(
@@ -12,19 +15,16 @@ def open_runtime(
     kv_cache: str = "e4m3",
     console: Any = None,
     resident_percent: float | None = None,
-) -> Any:
-    """Open the record at ``path``. One pipeline is resident in the process."""
-    del kv_cache, console, resident_percent
-    root = Path(path)
-    manifest = root / "manifest.json"
-    if not manifest.is_file():
-        message = f"{root.name} has no manifest.json"
-        raise FileNotFoundError(message)
-    message = "qwen38-27b forward is not available for this record"
-    raise RuntimeError(message)
+    max_memory: str | int | None = None,
+) -> Qwen38Runtime:
+    """Load the resident fp4 record and the fp8 key/value cache."""
+    del resident_percent
+    return Qwen38Runtime(
+        path,
+        kv_cache=kv_cache,
+        console=console,
+        max_memory=max_memory,
+    )
 
 
-def handle_chat(*_args: Any, **_kwargs: Any) -> None:
-    """Chat completion. The language forward is not available yet."""
-    message = "qwen38-27b forward is not available for this record"
-    raise RuntimeError(message)
+__all__ = ["handle_chat", "open_runtime"]

@@ -8,19 +8,37 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from madmetal.registry import add_model, format_listing, set_alias
+from madmetal.registry import (
+    add_model,
+    choose_complete,
+    format_listing,
+    register_quantized,
+    set_alias,
+)
+from qwen38_27b.chat import STOP, decode_text, encode_chat
+from qwen38_27b.checks import format_report, run_checks
+from qwen38_27b.convert import RECORD_NAME, quantize
+from qwen38_27b.forward import Qwen38Runtime
 
 PIPELINE = "qwen38-27b"
+GROVE_PROMPT = (
+    "There are 15 trees in the grove. Grove workers will plant trees in the grove today. "
+    "After they are done, there will be 21 trees. How many trees did the grove workers plant today?"
+)
+_BF16 = Path("models/Qwen3.8-27B-bf16")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="madmetal --qwen38-27b")
     sub = parser.add_subparsers(dest="command", required=True)
-    quant = sub.add_parser("quantize", help="write the Metal record from BF16 shards")
+    quant = sub.add_parser("quantize", help="write the uniform fp4 record from BF16 shards")
     quant.add_argument("--src", type=Path, default=None)
     quant.add_argument("--output", type=Path, default=None)
     sub.add_parser("bf16", help="run this package's shaders on stored BF16 values")
-    sub.add_parser("complete", help="complete from the packed record")
+    complete = sub.add_parser("complete", help="argmax completion from the packed record")
+    complete.add_argument("--kv-cache", choices=("e4m3",), default="e4m3")
+    complete.add_argument("--max-memory", default=None, help="maximum bytes, such as 32GiB")
+    sub.add_parser("kernels", help="compile the shader library and run the dispatch checks")
     models = sub.add_parser("models", help="list or edit the flavor registry")
     models_sub = models.add_subparsers(dest="models_command")
     add = models_sub.add_parser("add", help="register a finished record directory")
@@ -36,20 +54,65 @@ def main(argv: Sequence[str] | None = None) -> int:
         return int(exc.code or 0)
     if args.command == "models":
         return _models(args)
-    sys.stderr.write("qwen38-27b forward is not available for this record\n")
+    if args.command == "kernels":
+        return _kernels()
+    if args.command == "quantize":
+        return _quantize(args)
+    if args.command == "complete":
+        return _complete(args)
+    sys.stderr.write("qwen38-27b bf16 layer check is not this command\n")
     return 1
+
+
+def _quantize(args: argparse.Namespace) -> int:
+    src = args.src or _BF16
+    output = args.output or Path("models") / RECORD_NAME
+    try:
+        quantize(src, output)
+        register_quantized(output.name, source=src, alias="qwen38-27b", pipeline=PIPELINE)
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError, KeyError) as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
+    sys.stdout.write(f"{output}\n")
+    return 0
+
+
+def _complete(args: argparse.Namespace) -> int:
+    try:
+        path, _selection = choose_complete(model=None, record=None, pipeline=PIPELINE)
+        runtime = Qwen38Runtime(path, kv_cache=args.kv_cache, max_memory=args.max_memory)
+        try:
+            messages = [{"role": "user", "content": GROVE_PROMPT}]
+            prompt = encode_chat(runtime.root, messages, None, False)
+            tokens = runtime.generate(prompt, 128, STOP)
+            text = decode_text(runtime.root, tokens)
+        finally:
+            runtime.close()
+        body = {"prompt": GROVE_PROMPT, "text": text}
+        target = path / "grove.json"
+        target.write_text(json.dumps(body, indent=2) + "\n")
+    except (OSError, RuntimeError, LookupError, ValueError, KeyError) as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
+    sys.stdout.write(text + "\n")
+    return 0
+
+
+def _kernels() -> int:
+    try:
+        report = run_checks()
+    except (OSError, RuntimeError) as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
+    sys.stdout.write(format_report(report) + "\n")
+    return 0 if report["ok"] else 1
 
 
 def _models(args: argparse.Namespace) -> int:
     command = getattr(args, "models_command", None)
     try:
         if command == "add":
-            add_model(
-                args.folder,
-                alias=args.alias,
-                source=args.source,
-                pipeline=PIPELINE,
-            )
+            add_model(args.folder, alias=args.alias, source=args.source, pipeline=PIPELINE)
         elif command == "alias":
             set_alias(args.folder, args.alias)
         listing = format_listing()

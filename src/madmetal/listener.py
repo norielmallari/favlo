@@ -336,6 +336,11 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
 
         def _send(self, data: bytes) -> None:
             try:
+                if getattr(self, "_chunked", False):
+                    if data:
+                        data = f"{len(data):X}\r\n".encode() + data + b"\r\n"
+                    else:
+                        data = b"0\r\n\r\n"
                 self.wfile.write(data)
                 self.wfile.flush()
             except OSError:
