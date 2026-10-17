@@ -23,25 +23,13 @@ static float softplus_f(float v) {
 }
 
 // metal_fp4_e2m1. Bit 3 is the sign. The low three bits are 0, 0.5, 1, 1.5, 2, 3, 4, 6.
+constant float k_fp4_e2m1[16] = {
+    0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
+    -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f
+};
+
 static float fp4_e2m1(uint nibble) {
-    uint mag = nibble & 7u;
-    float value = 0.0f;
-    if (mag == 1u) {
-        value = 0.5f;
-    } else if (mag == 2u) {
-        value = 1.0f;
-    } else if (mag == 3u) {
-        value = 1.5f;
-    } else if (mag == 4u) {
-        value = 2.0f;
-    } else if (mag == 5u) {
-        value = 3.0f;
-    } else if (mag == 6u) {
-        value = 4.0f;
-    } else if (mag == 7u) {
-        value = 6.0f;
-    }
-    return (nibble & 8u) != 0u ? -value : value;
+    return k_fp4_e2m1[nibble & 15u];
 }
 
 kernel void silu_f32(

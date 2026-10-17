@@ -37,11 +37,35 @@ static float dot_word_f32(uint word, float scale, device const float* act) {
     return acc;
 }
 
+static float dot_ready_word(uint word, thread const float* act) {
+    float acc = k_fp4_e2m1[word & 15u] * act[0];
+    acc += k_fp4_e2m1[(word >> 4) & 15u] * act[1];
+    acc += k_fp4_e2m1[(word >> 8) & 15u] * act[2];
+    acc += k_fp4_e2m1[(word >> 12) & 15u] * act[3];
+    acc += k_fp4_e2m1[(word >> 16) & 15u] * act[4];
+    acc += k_fp4_e2m1[(word >> 20) & 15u] * act[5];
+    acc += k_fp4_e2m1[(word >> 24) & 15u] * act[6];
+    acc += k_fp4_e2m1[(word >> 28) & 15u] * act[7];
+    return acc;
+}
+
+static float dot_ready(uint4 chunk, thread const float* act) {
+    return dot_ready_word(chunk.x, act)
+        + dot_ready_word(chunk.y, act + 8)
+        + dot_ready_word(chunk.z, act + 16)
+        + dot_ready_word(chunk.w, act + 24);
+}
+
+static void ready_block(device const float* act, thread float ready[32]) {
+    for (uint i = 0u; i < 32u; ++i) {
+        ready[i] = float(half(clamp(act[i], -65504.0f, 65504.0f)));
+    }
+}
+
 static float dot_chunk_f32(uint4 chunk, float scale, device const float* act) {
-    return dot_word_f32(chunk.x, scale, act)
-        + dot_word_f32(chunk.y, scale, act + 8)
-        + dot_word_f32(chunk.z, scale, act + 16)
-        + dot_word_f32(chunk.w, scale, act + 24);
+    float ready[32];
+    ready_block(act, ready);
+    return scale * dot_ready(chunk, ready);
 }
 
 static float dot_word_half(uint word, float scale, device const half* act) {
@@ -57,11 +81,24 @@ static float dot_word_half(uint word, float scale, device const half* act) {
     return acc;
 }
 
+static float dot_half_word(uint word, device const half* act) {
+    float acc = k_fp4_e2m1[word & 15u] * float(act[0]);
+    acc += k_fp4_e2m1[(word >> 4) & 15u] * float(act[1]);
+    acc += k_fp4_e2m1[(word >> 8) & 15u] * float(act[2]);
+    acc += k_fp4_e2m1[(word >> 12) & 15u] * float(act[3]);
+    acc += k_fp4_e2m1[(word >> 16) & 15u] * float(act[4]);
+    acc += k_fp4_e2m1[(word >> 20) & 15u] * float(act[5]);
+    acc += k_fp4_e2m1[(word >> 24) & 15u] * float(act[6]);
+    acc += k_fp4_e2m1[(word >> 28) & 15u] * float(act[7]);
+    return acc;
+}
+
 static float dot_chunk_half(uint4 chunk, float scale, device const half* act) {
-    return dot_word_half(chunk.x, scale, act)
-        + dot_word_half(chunk.y, scale, act + 8)
-        + dot_word_half(chunk.z, scale, act + 16)
-        + dot_word_half(chunk.w, scale, act + 24);
+    float acc = dot_half_word(chunk.x, act);
+    acc += dot_half_word(chunk.y, act + 8);
+    acc += dot_half_word(chunk.z, act + 16);
+    acc += dot_half_word(chunk.w, act + 24);
+    return acc * scale;
 }
 
 kernel void copy_bytes(
@@ -1148,21 +1185,23 @@ kernel void gemv_int4_f32(
             uint4 w0 = load_chunk(weights + (ulong)row0 * stride, chunk);
             float s0 = e8m0_scale((scales + (ulong)row0 * blocks)[chunk]);
             if (base + 32u <= logical) {
-                acc0 += dot_chunk_f32(w0, s0, act);
+                float ready[32];
+                ready_block(act, ready);
+                acc0 += s0 * dot_ready(w0, ready);
                 if (m1) {
                     uint4 w1 = load_chunk(weights + (ulong)(row0 + 1u) * stride, chunk);
                     float s1 = e8m0_scale((scales + (ulong)(row0 + 1u) * blocks)[chunk]);
-                    acc1 += dot_chunk_f32(w1, s1, act);
+                    acc1 += s1 * dot_ready(w1, ready);
                 }
                 if (m2) {
                     uint4 w2 = load_chunk(weights + (ulong)(row0 + 2u) * stride, chunk);
                     float s2 = e8m0_scale((scales + (ulong)(row0 + 2u) * blocks)[chunk]);
-                    acc2 += dot_chunk_f32(w2, s2, act);
+                    acc2 += s2 * dot_ready(w2, ready);
                 }
                 if (m3) {
                     uint4 w3 = load_chunk(weights + (ulong)(row0 + 3u) * stride, chunk);
                     float s3 = e8m0_scale((scales + (ulong)(row0 + 3u) * blocks)[chunk]);
-                    acc3 += dot_chunk_f32(w3, s3, act);
+                    acc3 += s3 * dot_ready(w3, ready);
                 }
             } else {
                 for (uint sub = 0u; sub < 32u; ++sub) {

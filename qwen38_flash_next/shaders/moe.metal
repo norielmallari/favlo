@@ -403,23 +403,25 @@ kernel void moe_decode_gate(
         uint chunk = lane + iter * 32u;
         if (chunk < blocks) {
             device const float* act = activation + (chunk << 5);
+            float ready[32];
+            ready_block(act, ready);
             uint4 w0 = load_chunk(image + weight_off + row0 * stride, chunk);
             float s0 = e8m0_scale((image + scale_off + row0 * blocks)[chunk]);
-            acc0 += dot_chunk_f32(w0, s0, act);
+            acc0 += s0 * dot_ready(w0, ready);
             if (m1) {
                 uint4 w1 = load_chunk(image + weight_off + (row0 + 1u) * stride, chunk);
                 float s1 = e8m0_scale((image + scale_off + (row0 + 1u) * blocks)[chunk]);
-                acc1 += dot_chunk_f32(w1, s1, act);
+                acc1 += s1 * dot_ready(w1, ready);
             }
             if (m2) {
                 uint4 w2 = load_chunk(image + weight_off + (row0 + 2u) * stride, chunk);
                 float s2 = e8m0_scale((image + scale_off + (row0 + 2u) * blocks)[chunk]);
-                acc2 += dot_chunk_f32(w2, s2, act);
+                acc2 += s2 * dot_ready(w2, ready);
             }
             if (m3) {
                 uint4 w3 = load_chunk(image + weight_off + (row0 + 3u) * stride, chunk);
                 float s3 = e8m0_scale((image + scale_off + (row0 + 3u) * blocks)[chunk]);
-                acc3 += dot_chunk_f32(w3, s3, act);
+                acc3 += s3 * dot_ready(w3, ready);
             }
         }
     }
