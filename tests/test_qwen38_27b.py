@@ -5,11 +5,11 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from qwen38_27b.cache import cache_bytes, plane_bytes
+from qwen38_27b.cache import cache_bytes, plane_bytes, sequence_cache_bytes
 from qwen38_27b.chat import _reasoning_effort, _stream
 from qwen38_27b.checks import run_checks
 from qwen38_27b.formats import dequant_fp4, quantize_fp4, text_shapes
-from qwen38_27b.forward import Qwen38Runtime, startup_bytes
+from qwen38_27b.forward import Qwen38Runtime, repeated_tail, startup_bytes
 from qwen38_27b.layout import FULL_LAYERS
 from qwen38_27b.prefill import prefill_ids
 from qwen38_27b.tools import StreamText, parse_tool_calls
@@ -73,6 +73,14 @@ def test_one_token_cache_is_33792_bytes() -> None:
     assert plane_bytes(1) == 4 * 264
     assert cache_bytes(1) == 33792
     assert cache_bytes(262144) == 33792 * 262144
+    assert sequence_cache_bytes(1, 17) == 35904
+
+
+def test_repeated_tail_catches_a_copied_span() -> None:
+    block = list(range(16))
+    assert repeated_tail(block + block[:-1]) is False
+    assert repeated_tail(block + block) is True
+    assert repeated_tail([7] * 8) is False
 
 
 def test_fp4_round_ties_to_even() -> None:

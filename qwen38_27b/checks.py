@@ -85,6 +85,34 @@ def check_fp4_x4(session: Session) -> None:
     _close("fp4 x4", session.download_f32(destination, cols), expect.astype(np.float32), atol=1e-4)
 
 
+def check_fp4_span2(session: Session) -> None:
+    rng = np.random.default_rng(1)
+    cols, inner = 8, 256
+    act0 = rng.normal(scale=0.05, size=inner).astype(np.float32)
+    act1 = rng.normal(scale=0.05, size=inner).astype(np.float32)
+    weight = rng.normal(scale=0.05, size=(cols, inner)).astype(np.float32)
+    data, scales = quantize_fp4(weight)
+    dest0 = session.zeros(cols * 4)
+    dest1 = session.zeros(cols * 4)
+    session.dispatch(
+        "gemv_fp4_span2",
+        [
+            session.upload(act0),
+            session.upload(act1),
+            session.upload(data),
+            session.upload(scales),
+            dest0,
+            dest1,
+        ],
+        [np.uint32(cols).tobytes(), np.uint32(inner).tobytes()],
+        (cols // 4, 1, 1),
+        (32, 1, 1),
+    )
+    matrix = dequant_fp4(data, scales, cols, inner)
+    _close("fp4 span2 a", session.download_f32(dest0, cols), (matrix @ act0).astype(np.float32), atol=1e-4)
+    _close("fp4 span2 b", session.download_f32(dest1, cols), (matrix @ act1).astype(np.float32), atol=1e-4)
+
+
 def check_rms(session: Session) -> None:
     width = 5120
     values = np.ones(width, dtype=np.float32)
@@ -273,6 +301,7 @@ CHECKS = (
     ("fp4 tile", check_fp4_tile),
     ("fp4 gemv", check_fp4_gemv),
     ("fp4 x4", check_fp4_x4),
+    ("fp4 span2", check_fp4_span2),
     ("rms", check_rms),
     ("swiglu", check_swiglu),
     ("deltanet", check_deltanet),

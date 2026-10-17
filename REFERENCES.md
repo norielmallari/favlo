@@ -26,6 +26,8 @@ Peng Wang et al. *Qwen2-VL: Enhancing Vision-Language Model's Perception of the 
 
 Zihan Qiu et al. *Gated Attention for Large Language Models.* [arXiv:2505.06708](https://arxiv.org/abs/2505.06708), 2025. The sigmoid that multiplies the softmax output.
 
+DeepSeek-AI. *DeepSeek-V3 Technical Report.* 2024. [arXiv:2412.19437](https://arxiv.org/abs/2412.19437). Multi-token prediction, equation (21): RMSNorm of the backbone residual and RMSNorm of the next token's embedding, concatenated, projected back to the hidden size, one transformer layer, and the shared head. The equation writes the residual half first. This checkpoint matches the embedding half first.
+
 ## Qwen3.6-35B-A3B
 
 Qwen Team. *Qwen3.6-35B-A3B.* Model card, April 2026. [Hugging Face](https://huggingface.co/Qwen/Qwen3.6-35B-A3B). The 40-layer 3:1 mix, 256 routed experts plus one shared expert, the sampling card, and the 262,144-token default RoPE. The YaRN factor-4 extension in that card is not enabled. The as-built note is [docs/qwen36-35b-a3b/README.md](docs/qwen36-35b-a3b/README.md).

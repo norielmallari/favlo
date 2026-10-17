@@ -124,6 +124,37 @@ static void fp4_rows4(
     a3 = acc3;
 }
 
+// One weight row, two activations. The weight bytes are loaded once.
+static void fp4_span2_row(
+    device const float* act0,
+    device const float* act1,
+    device const uchar* weights,
+    device const uchar* scales,
+    uint row,
+    uint inner,
+    uint lane,
+    thread float& out0,
+    thread float& out1)
+{
+    uint words = inner >> 3;
+    device const uint* packed = (device const uint*)(weights + row * (inner >> 1));
+    device const uchar* row_scale = scales + row * (inner >> 5);
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    for (uint i = lane; i < words; i += 32u) {
+        uint word = packed[i];
+        float factor = exp2(float(row_scale[i >> 2]) - 127.0f);
+        uint base = i << 3;
+        for (uint n = 0u; n < 8u; ++n) {
+            uint nibble = (word >> (n * 4u)) & 0xFu;
+            acc0 += fp4_e2m1(nibble) * factor * act0[base + n];
+            acc1 += fp4_e2m1(nibble) * factor * act1[base + n];
+        }
+    }
+    out0 = simd_sum(acc0);
+    out1 = simd_sum(acc1);
+}
+
 static float e4m3_fn(uint code) {
     uint sign = code & 0x80u;
     uint exponent = (code >> 3) & 0xFu;
@@ -378,6 +409,91 @@ kernel void gemv_fp4_x4(
     }
 }
 
+// Four output rows, two activations. Each weight row is read once.
+kernel void gemv_fp4_span2(
+    device const float* act0 [[buffer(0)]],
+    device const float* act1 [[buffer(1)]],
+    device const uchar* weights [[buffer(2)]],
+    device const uchar* scales [[buffer(3)]],
+    device float* dest0 [[buffer(4)]],
+    device float* dest1 [[buffer(5)]],
+    constant uint& cols [[buffer(6)]],
+    constant uint& inner [[buffer(7)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint group [[threadgroup_position_in_grid]])
+{
+    uint row0 = group << 2;
+    if (row0 >= cols) {
+        return;
+    }
+    uint words = inner >> 3;
+    uint stride = inner >> 1;
+    uint blocks = inner >> 5;
+    device const uint* p0 = (device const uint*)(weights + row0 * stride);
+    device const uint* p1 = (device const uint*)(weights + (row0 + 1u) * stride);
+    device const uint* p2 = (device const uint*)(weights + (row0 + 2u) * stride);
+    device const uint* p3 = (device const uint*)(weights + (row0 + 3u) * stride);
+    device const uchar* s0 = scales + row0 * blocks;
+    device const uchar* s1 = scales + (row0 + 1u) * blocks;
+    device const uchar* s2 = scales + (row0 + 2u) * blocks;
+    device const uchar* s3 = scales + (row0 + 3u) * blocks;
+    float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+    float b0 = 0.0f, b1 = 0.0f, b2 = 0.0f, b3 = 0.0f;
+    for (uint i = lane; i < words; i += 32u) {
+        uint w0 = p0[i];
+        uint w1 = p1[i];
+        uint w2 = p2[i];
+        uint w3 = p3[i];
+        float f0 = exp2(float(s0[i >> 2]) - 127.0f);
+        float f1 = exp2(float(s1[i >> 2]) - 127.0f);
+        float f2 = exp2(float(s2[i >> 2]) - 127.0f);
+        float f3 = exp2(float(s3[i >> 2]) - 127.0f);
+        uint base = i << 3;
+        for (uint n = 0u; n < 8u; ++n) {
+            float x0 = act0[base + n];
+            float x1 = act1[base + n];
+            uint shift = n * 4u;
+            a0 += fp4_e2m1((w0 >> shift) & 0xFu) * f0 * x0;
+            a1 += fp4_e2m1((w1 >> shift) & 0xFu) * f1 * x0;
+            a2 += fp4_e2m1((w2 >> shift) & 0xFu) * f2 * x0;
+            a3 += fp4_e2m1((w3 >> shift) & 0xFu) * f3 * x0;
+            b0 += fp4_e2m1((w0 >> shift) & 0xFu) * f0 * x1;
+            b1 += fp4_e2m1((w1 >> shift) & 0xFu) * f1 * x1;
+            b2 += fp4_e2m1((w2 >> shift) & 0xFu) * f2 * x1;
+            b3 += fp4_e2m1((w3 >> shift) & 0xFu) * f3 * x1;
+        }
+    }
+    float o0 = simd_sum(a0);
+    float o1 = simd_sum(a1);
+    float o2 = simd_sum(a2);
+    float o3 = simd_sum(a3);
+    float p0s = simd_sum(b0);
+    float p1s = simd_sum(b1);
+    float p2s = simd_sum(b2);
+    float p3s = simd_sum(b3);
+    if (lane == 0u) {
+        dest0[row0] = o0;
+        dest0[row0 + 1u] = o1;
+        dest0[row0 + 2u] = o2;
+        dest0[row0 + 3u] = o3;
+        dest1[row0] = p0s;
+        dest1[row0 + 1u] = p1s;
+        dest1[row0 + 2u] = p2s;
+        dest1[row0 + 3u] = p3s;
+    }
+}
+
+kernel void copy_f32(
+    device const float* source [[buffer(0)]],
+    device float* destination [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid < count) {
+        destination[tid] = source[tid];
+    }
+}
+
 // Qwen3.5 RMSNorm: x / rms * (1 + w). The stored vector is centered at zero.
 kernel void rmsnorm_f32(
     device const float* x [[buffer(0)]],
@@ -468,6 +584,24 @@ kernel void residual_rows(
 {
     if (tid < count) {
         destination[tid] = left[tid] + right[tid];
+    }
+}
+
+kernel void concat_pair(
+    device const float* left [[buffer(0)]],
+    device const float* right [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& width [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    if (row >= rows) {
+        return;
+    }
+    for (uint col = tid; col < width; col += 256u) {
+        destination[row * width * 2u + col] = left[row * width + col];
+        destination[row * width * 2u + width + col] = right[row * width + col];
     }
 }
 
@@ -647,6 +781,138 @@ kernel void ffn_gate_up(
         float sum = fp4_vec_dot(activation, up_w, up_s, row, inner, lane);
         if (lane == 0u) {
             up[row] = sum;
+        }
+    }
+}
+
+// Same projections as gdn_in_proj. Two activations, one read of each weight row.
+kernel void gdn_in_proj_span2(
+    device const float* act0 [[buffer(0)]],
+    device const float* act1 [[buffer(1)]],
+    device const uchar* qkv_w [[buffer(2)]],
+    device const uchar* qkv_s [[buffer(3)]],
+    device const uchar* z_w [[buffer(4)]],
+    device const uchar* z_s [[buffer(5)]],
+    device const uchar* a_w [[buffer(6)]],
+    device const uchar* a_s [[buffer(7)]],
+    device const uchar* b_w [[buffer(8)]],
+    device const uchar* b_s [[buffer(9)]],
+    device float* qkv [[buffer(10)]],
+    device float* z [[buffer(11)]],
+    device float* a [[buffer(12)]],
+    device float* b [[buffer(13)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint job [[threadgroup_position_in_grid]])
+{
+    float s0, s1;
+    if (job < MIX) {
+        fp4_span2_row(act0, act1, qkv_w, qkv_s, job, 5120u, lane, s0, s1);
+        if (lane == 0u) {
+            qkv[job] = s0;
+            qkv[MIX + job] = s1;
+        }
+        return;
+    }
+    if (job < MIX + Z_WIDTH) {
+        uint row = job - MIX;
+        fp4_span2_row(act0, act1, z_w, z_s, row, 5120u, lane, s0, s1);
+        if (lane == 0u) {
+            z[row] = s0;
+            z[Z_WIDTH + row] = s1;
+        }
+        return;
+    }
+    if (job < MIX + Z_WIDTH + AB_STRIDE) {
+        uint row = job - MIX - Z_WIDTH;
+        fp4_span2_row(act0, act1, a_w, a_s, row, 5120u, lane, s0, s1);
+        if (lane == 0u) {
+            a[row] = s0;
+            a[AB_STRIDE + row] = s1;
+        }
+        return;
+    }
+    uint row = job - MIX - Z_WIDTH - AB_STRIDE;
+    if (row < AB_STRIDE) {
+        fp4_span2_row(act0, act1, b_w, b_s, row, 5120u, lane, s0, s1);
+        if (lane == 0u) {
+            b[row] = s0;
+            b[AB_STRIDE + row] = s1;
+        }
+    }
+}
+
+kernel void attn_qkv_span2(
+    device const float* act0 [[buffer(0)]],
+    device const float* act1 [[buffer(1)]],
+    device const uchar* q_w [[buffer(2)]],
+    device const uchar* q_s [[buffer(3)]],
+    device const uchar* k_w [[buffer(4)]],
+    device const uchar* k_s [[buffer(5)]],
+    device const uchar* v_w [[buffer(6)]],
+    device const uchar* v_s [[buffer(7)]],
+    device float* query [[buffer(8)]],
+    device float* key [[buffer(9)]],
+    device float* value [[buffer(10)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint job [[threadgroup_position_in_grid]])
+{
+    float s0, s1;
+    if (job < 12288u) {
+        fp4_span2_row(act0, act1, q_w, q_s, job, 5120u, lane, s0, s1);
+        if (lane == 0u) {
+            query[job] = s0;
+            query[12288u + job] = s1;
+        }
+        return;
+    }
+    if (job < 13312u) {
+        uint row = job - 12288u;
+        fp4_span2_row(act0, act1, k_w, k_s, row, 5120u, lane, s0, s1);
+        if (lane == 0u) {
+            key[row] = s0;
+            key[1024u + row] = s1;
+        }
+        return;
+    }
+    if (job < 14336u) {
+        uint row = job - 13312u;
+        fp4_span2_row(act0, act1, v_w, v_s, row, 5120u, lane, s0, s1);
+        if (lane == 0u) {
+            value[row] = s0;
+            value[1024u + row] = s1;
+        }
+    }
+}
+
+kernel void ffn_gate_up_span2(
+    device const float* act0 [[buffer(0)]],
+    device const float* act1 [[buffer(1)]],
+    device const uchar* gate_w [[buffer(2)]],
+    device const uchar* gate_s [[buffer(3)]],
+    device const uchar* up_w [[buffer(4)]],
+    device const uchar* up_s [[buffer(5)]],
+    device float* gate [[buffer(6)]],
+    device float* up [[buffer(7)]],
+    constant uint& rows [[buffer(8)]],
+    constant uint& inner [[buffer(9)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint job [[threadgroup_position_in_grid]])
+{
+    float s0, s1;
+    if (job < rows) {
+        fp4_span2_row(act0, act1, gate_w, gate_s, job, inner, lane, s0, s1);
+        if (lane == 0u) {
+            gate[job] = s0;
+            gate[rows + job] = s1;
+        }
+        return;
+    }
+    uint row = job - rows;
+    if (row < rows) {
+        fp4_span2_row(act0, act1, up_w, up_s, row, inner, lane, s0, s1);
+        if (lane == 0u) {
+            up[row] = s0;
+            up[rows + row] = s1;
         }
     }
 }

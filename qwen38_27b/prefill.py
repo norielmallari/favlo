@@ -20,6 +20,7 @@ from qwen38_27b.layout import (
     INTERMEDIATE,
     KV_PROJ,
     MIX,
+    MTP_SLOT,
     Q_HEADS,
     Q_PROJ,
     THETA,
@@ -27,10 +28,10 @@ from qwen38_27b.layout import (
 )
 
 
-def workspace_bytes() -> int:
+def workspace_bytes(*, drafts: bool = False) -> int:
     """Bytes of the chunk workspace, reserved before the cache is sized."""
     cap = CHUNK
-    return (
+    total = (
         cap * HIDDEN * 4
         + cap * HIDDEN * 4
         + cap * INTERMEDIATE * 2
@@ -44,10 +45,13 @@ def workspace_bytes() -> int:
         + cap * AB * 4
         + cap * 4
     )
+    if drafts:
+        total += cap * MIX * 4
+    return total
 
 
 class _Workspace:
-    def __init__(self, session: Any) -> None:
+    def __init__(self, session: Any, *, drafts: bool = False) -> None:
         cap = CHUNK
         zeros = session.zeros
         self.hidden = zeros(cap * HIDDEN * 4)
@@ -62,10 +66,23 @@ class _Workspace:
         self.ab = zeros(cap * AB * 4)
         self.ab2 = zeros(cap * AB * 4)
         self.tokens = zeros(cap * 4)
+        self.mix = zeros(cap * MIX * 4) if drafts else None
 
 
-def prefill_ids(runtime: Any, ids: list[int], pos0: int = 0) -> None:
-    """Advance state and the key/value cache through ``ids``."""
+def prefill_ids(
+    runtime: Any,
+    ids: list[int],
+    pos0: int = 0,
+    *,
+    follow: int | None = None,
+    mtp: bool = True,
+    progress: bool = True,
+) -> None:
+    """Advance state and the key/value cache through ``ids``.
+
+    ``follow`` is the token after the last id. The MTP layer at each position
+    reads that position's residual and the embedding of the next token.
+    """
     if not ids:
         return
     if pos0 + len(ids) > runtime.max_pos:
@@ -73,7 +90,7 @@ def prefill_ids(runtime: Any, ids: list[int], pos0: int = 0) -> None:
         raise RuntimeError(message)
     workspace = getattr(runtime, "_prefill", None)
     if workspace is None:
-        workspace = _Workspace(runtime.session)
+        workspace = _Workspace(runtime.session, drafts=bool(getattr(runtime, "drafts", False)))
         runtime._prefill = workspace
     cursor = pos0
     remaining = ids
@@ -82,15 +99,23 @@ def prefill_ids(runtime: Any, ids: list[int], pos0: int = 0) -> None:
         if check is not None:
             check()
         take = min(CHUNK, len(remaining))
-        _chunk(runtime, workspace, remaining[:take], cursor)
+        nxt = remaining[take] if len(remaining) > take else follow
+        _chunk(runtime, workspace, remaining[:take], cursor, nxt, mtp)
         cursor += take
         remaining = remaining[take:]
         note = getattr(runtime, "_note_prefill", None)
-        if note is not None:
+        if progress and note is not None:
             note(cursor - pos0)
 
 
-def _chunk(runtime: Any, work: _Workspace, ids: list[int], pos0: int) -> None:
+def _chunk(
+    runtime: Any,
+    work: _Workspace,
+    ids: list[int],
+    pos0: int,
+    follow: int | None = None,
+    mtp: bool = True,
+) -> None:
     count = len(ids)
     rows = (count + 63) // 64 * 64
     _write(work.tokens, _pack_u32(ids))
@@ -113,10 +138,49 @@ def _chunk(runtime: Any, work: _Workspace, ids: list[int], pos0: int) -> None:
             count,
         )
         _ffn(runtime, work, layer, count, rows)
+    if mtp and getattr(runtime, "drafts", False):
+        _mtp_rows(runtime, work, ids, pos0, follow, rows)
     runtime.session.end()
 
 
-def _embed(runtime: Any, work: _Workspace, count: int) -> None:
+def _mtp_rows(
+    runtime: Any,
+    work: _Workspace,
+    ids: list[int],
+    pos0: int,
+    follow: int | None,
+    rows: int,
+) -> None:
+    """One MTP layer. Each row mixes that residual with the next token's embedding."""
+    shifted = [int(token) for token in ids[1:]]
+    if follow is not None:
+        shifted.append(int(follow))
+    count = len(shifted)
+    if count < 1 or work.mix is None:
+        return
+    _write(work.tokens, _pack_u32(shifted))
+    _zero(runtime, work.mix, rows * MIX)
+    _embed(runtime, work, count, work.big0)
+    _rms(runtime, work.hidden, "mtp.pre_fc_norm_hidden.weight", work.normed, count)
+    _rms(runtime, work.big0, "mtp.pre_fc_norm_embedding.weight", work.big1, count)
+    runtime.session.encode(
+        "concat_pair",
+        [(work.big1, 0), (work.normed, 0), (work.mix, 0)],
+        [_u32(HIDDEN), _u32(count)],
+        (count, 1, 1),
+        (256, 1, 1),
+    )
+    _cast_half(runtime, work, work.mix, rows * MIX, rows, MIX)
+    _matmul(runtime, work.half, "mtp.fc.weight", work.hidden, rows)
+    _zero(runtime, work.normed, rows * HIDDEN)
+    _rms(runtime, work.hidden, "mtp.layers.0.input_layernorm.weight", work.normed, count)
+    _attend(runtime, work, None, count, rows, pos0, prefix="mtp.layers.0", slot=MTP_SLOT)
+    _zero(runtime, work.normed, rows * HIDDEN)
+    _rms(runtime, work.hidden, "mtp.layers.0.post_attention_layernorm.weight", work.normed, count)
+    _ffn(runtime, work, None, count, rows, prefix="mtp.layers.0")
+
+
+def _embed(runtime: Any, work: _Workspace, count: int, dest: Any = None) -> None:
     buf, offset, entry = runtime.locate("model.language_model.embed_tokens.weight", "model.embed_tokens.weight")
     _rows, inner = entry["stored_shape"]
     runtime.session.encode(
@@ -125,7 +189,7 @@ def _embed(runtime: Any, work: _Workspace, count: int) -> None:
             (buf, offset),
             (buf, runtime.scale_offset(entry, offset)),
             (work.tokens, 0),
-            (work.hidden, 0),
+            (work.hidden if dest is None else dest, 0),
         ],
         [_u32(count), _u32(int(inner))],
         (count, 1, 1),
@@ -176,12 +240,27 @@ def _gdn(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) -> N
 
 
 def _attend(
-    runtime: Any, work: _Workspace, layer: int, count: int, rows: int, pos0: int
+    runtime: Any,
+    work: _Workspace,
+    layer: int | None,
+    count: int,
+    rows: int,
+    pos0: int,
+    *,
+    prefix: str | None = None,
+    slot: int | None = None,
 ) -> None:
+    def weight(rest: str) -> str:
+        if prefix is None:
+            return runtime.weight(layer, rest)
+        return f"{prefix}.{rest}"
+
+    if slot is None:
+        slot = runtime.full_slot[layer]
     _cast_half(runtime, work, work.normed, count * HIDDEN, rows, HIDDEN)
-    _matmul(runtime, work.half, runtime.weight(layer, "self_attn.q_proj.weight"), work.big0, rows)
-    _matmul(runtime, work.half, runtime.weight(layer, "self_attn.k_proj.weight"), work.kv, rows)
-    _matmul(runtime, work.half, runtime.weight(layer, "self_attn.v_proj.weight"), work.vv, rows)
+    _matmul(runtime, work.half, weight("self_attn.q_proj.weight"), work.big0, rows)
+    _matmul(runtime, work.half, weight("self_attn.k_proj.weight"), work.kv, rows)
+    _matmul(runtime, work.half, weight("self_attn.v_proj.weight"), work.vv, rows)
     runtime.session.encode(
         "split_q_gate_rows",
         [(work.big0, 0), (work.big2, 0), (work.gate, 0)],
@@ -189,8 +268,8 @@ def _attend(
         (count * Q_HEADS, 1, 1),
         (256, 1, 1),
     )
-    q_buf, q_off, _entry = runtime.locate_weight(layer, "self_attn.q_norm.weight")
-    k_buf, k_off, _entry = runtime.locate_weight(layer, "self_attn.k_norm.weight")
+    q_buf, q_off, _entry = runtime.locate(weight("self_attn.q_norm.weight"))
+    k_buf, k_off, _entry = runtime.locate(weight("self_attn.k_norm.weight"))
     runtime.session.encode(
         "qk_norm_rope_rows",
         [(work.big2, 0), (work.kv, 0), (q_buf, q_off), (k_buf, k_off)],
@@ -207,17 +286,30 @@ def _attend(
         dest=work.big0,
         pos0=pos0,
         count=count,
-        slot=runtime.full_slot[layer],
+        slot=slot,
     )
     _cast_half(runtime, work, work.big0, count * ATTN_OUT, rows, ATTN_OUT)
-    _matmul(runtime, work.half, runtime.weight(layer, "self_attn.o_proj.weight"), work.big1, rows)
+    _matmul(runtime, work.half, weight("self_attn.o_proj.weight"), work.big1, rows)
     _add(runtime, work, count, work.big1)
 
 
-def _ffn(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) -> None:
+def _ffn(
+    runtime: Any,
+    work: _Workspace,
+    layer: int | None,
+    count: int,
+    rows: int,
+    *,
+    prefix: str | None = None,
+) -> None:
+    def weight(rest: str) -> str:
+        if prefix is None:
+            return runtime.weight(layer, rest)
+        return f"{prefix}.{rest}"
+
     _cast_half(runtime, work, work.normed, count * HIDDEN, rows, HIDDEN)
-    _matmul(runtime, work.half, runtime.weight(layer, "mlp.gate_proj.weight"), work.big0, rows)
-    _matmul(runtime, work.half, runtime.weight(layer, "mlp.up_proj.weight"), work.big1, rows)
+    _matmul(runtime, work.half, weight("mlp.gate_proj.weight"), work.big0, rows)
+    _matmul(runtime, work.half, weight("mlp.up_proj.weight"), work.big1, rows)
     runtime.session.encode(
         "swiglu_f32",
         [(work.big0, 0), (work.big1, 0), (work.big2, 0)],
@@ -226,7 +318,7 @@ def _ffn(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) -> N
         (256, 1, 1),
     )
     _cast_half(runtime, work, work.big2, rows * INTERMEDIATE, rows, INTERMEDIATE)
-    _matmul(runtime, work.half, runtime.weight(layer, "mlp.down_proj.weight"), work.big0, rows)
+    _matmul(runtime, work.half, weight("mlp.down_proj.weight"), work.big0, rows)
     _add(runtime, work, count, work.big0)
 
 

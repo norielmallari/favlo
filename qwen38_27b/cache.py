@@ -43,13 +43,19 @@ def cache_bytes(positions: int) -> int:
     return FULL_LAYERS * layer_cache_bytes(positions)
 
 
-def fit_positions(budget: int, resident: int, scratch: int) -> int:
+def sequence_cache_bytes(positions: int, slots: int = FULL_LAYERS) -> int:
+    """Key and value planes for ``slots`` full-attention layers, including MTP when present."""
+    return slots * layer_cache_bytes(positions)
+
+
+def fit_positions(budget: int, resident: int, scratch: int, slots: int = FULL_LAYERS) -> int:
     """Largest context, a multiple of 2048, whose cache fits in ``budget``.
 
-    ``cache_bytes(1)`` is 33,792: one token across the 16 full-attention layers.
+    ``cache_bytes(1)`` is 33,792: one token across the 16 language layers. A drafted
+    record adds the MTP plane and passes ``slots`` 17, which is 35,904 bytes per token.
     """
     room = budget - resident - scratch
-    per_token = cache_bytes(1)
+    per_token = sequence_cache_bytes(1, slots)
     if room < per_token * 2048:
         message = f"maximum memory leaves {room} bytes for the key/value cache"
         raise RuntimeError(message)

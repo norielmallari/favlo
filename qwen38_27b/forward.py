@@ -1,8 +1,8 @@
 """Text forward. Weights are uniform fp4. The key/value cache is fp8.
 
 Generation is an argmax. The sampling card is stored for the registry and is
-not applied. The MTP block is packed and is not drafted. A text request does
-not run the vision tower.
+not applied. A repeated span of 16 or more tokens ends the completion. A text
+request does not run the vision tower.
 """
 
 from __future__ import annotations
@@ -18,13 +18,13 @@ import numpy as np
 from qwen38_27b.attn import bind_plane, scratch_bytes
 from qwen38_27b.cache import (
     available_bytes,
-    cache_bytes,
     fit_positions,
     kv_mode,
     layer_cache_bytes,
     max_position,
     parse_memory,
     plane_bytes,
+    sequence_cache_bytes,
 )
 from qwen38_27b.layout import (
     AB,
@@ -32,6 +32,7 @@ from qwen38_27b.layout import (
     EPS,
     FULL_LAYERS,
     HIDDEN,
+    MTP_SLOT,
     INTERMEDIATE,
     KV_PROJ,
     LINEAR_LAYERS,
@@ -87,7 +88,13 @@ def _file_buffer(session: Session, path: Path) -> Any:
     return buffer
 
 
-def startup_bytes(resident: int, positions: int) -> int:
+_STATE_BYTES = LINEAR_LAYERS * LINEAR_V * 128 * 128 * 4
+_HISTORY_BYTES = LINEAR_LAYERS * 3 * MIX * 2
+
+
+def startup_bytes(
+    resident: int, positions: int, *, slots: int = FULL_LAYERS, drafts: bool = False
+) -> int:
     """Bytes copied or cleared before the first token: the record, the cache, and scratch."""
     one = plane_bytes(positions)
     decode = (
@@ -105,12 +112,21 @@ def startup_bytes(resident: int, positions: int) -> int:
         + VOCAB * 4
         + _ARGMAX_GROUPS * 8
     )
-    state = LINEAR_LAYERS * LINEAR_V * 128 * 128 * 4
-    history = LINEAR_LAYERS * 3 * MIX * 2
-    return resident + one * FULL_LAYERS * 2 + state + history + decode + scratch_bytes(positions)
+    state = _STATE_BYTES
+    history = _HISTORY_BYTES
+    hold = HIDDEN * 4 if drafts else 0
+    return (
+        resident
+        + one * slots * 2
+        + state
+        + history
+        + hold
+        + decode
+        + scratch_bytes(positions, slots)
+    )
 
 
-def _fixed_bytes(positions: int) -> int:
+def _fixed_bytes(positions: int, *, drafts: bool = False, slots: int = FULL_LAYERS) -> int:
     """Bytes besides the resident file and the key/value cache."""
     decode = (
         HIDDEN * 4 * 4
@@ -122,9 +138,15 @@ def _fixed_bytes(positions: int) -> int:
         + VOCAB * 4
         + _ARGMAX_GROUPS * 8
     )
-    state = LINEAR_LAYERS * LINEAR_V * 128 * 128 * 4
-    history = LINEAR_LAYERS * 3 * MIX * 2
-    return workspace_bytes() + scratch_bytes(positions) + decode + state + history
+    hold = HIDDEN * 4 if drafts else 0
+    return (
+        workspace_bytes(drafts=drafts)
+        + scratch_bytes(positions, slots)
+        + decode
+        + _STATE_BYTES
+        + _HISTORY_BYTES
+        + hold
+    )
 
 
 class Qwen38Runtime:
@@ -156,6 +178,8 @@ class Qwen38Runtime:
             message = f"{self.root.name} is not a finished record"
             raise RuntimeError(message)
         self.tensors: dict[str, dict] = self.manifest["tensors"]
+        self.drafts = "mtp.fc.weight" in self.tensors
+        self.kv_slots = FULL_LAYERS + (1 if self.drafts else 0)
         self.layer_types = tuple(self.manifest.get("layer_types") or _default_layers())
         self.linear_slot = _slots(self.layer_types, "linear_attention")
         self.full_slot = _slots(self.layer_types, "full_attention")
@@ -165,7 +189,10 @@ class Qwen38Runtime:
         cap = parse_memory(max_memory)
         self.max_memory = available_bytes() if cap is None else cap
         self.max_pos = fit_positions(
-            self.max_memory, resident_bytes, _fixed_bytes(card_limit)
+            self.max_memory,
+            resident_bytes,
+            _fixed_bytes(card_limit, drafts=self.drafts, slots=self.kv_slots),
+            slots=self.kv_slots,
         )
         self.max_pos = min(self.max_pos, card_limit)
         if self.max_pos < 2048:
@@ -184,20 +211,25 @@ class Qwen38Runtime:
         self.session = None
         self.resident = None
         summary = ""
-        self._load_progress = self._begin_load(startup_bytes(resident_bytes, self.max_pos))
+        self._load_progress = self._begin_load(
+            startup_bytes(
+                resident_bytes, self.max_pos, slots=self.kv_slots, drafts=self.drafts
+            )
+        )
         try:
             self.session = Session()
             self.session._load_note = self._note_load
             self.resident = _file_buffer(self.session, resident_path)
             zeros = self.session.zeros
             one = plane_bytes(self.max_pos)
-            self.k_cache = [zeros(one) for _ in range(FULL_LAYERS)]
-            self.v_cache = [zeros(one) for _ in range(FULL_LAYERS)]
+            self.k_cache = [zeros(one) for _ in range(self.kv_slots)]
+            self.v_cache = [zeros(one) for _ in range(self.kv_slots)]
             bind_plane(self)
-            self.history = zeros(LINEAR_LAYERS * 3 * MIX * 2)
-            self.state = zeros(LINEAR_LAYERS * LINEAR_V * 128 * 128 * 4)
+            self.history = zeros(_HISTORY_BYTES)
+            self.state = zeros(_STATE_BYTES)
             self.hidden = zeros(HIDDEN * 4)
             self.normed = zeros(HIDDEN * 4)
+            self.hold = zeros(HIDDEN * 4) if self.drafts else None
             self.wide = zeros(max(MIX, Q_PROJ, INTERMEDIATE) * 4)
             self.z = zeros(max(Z_WIDTH, INTERMEDIATE) * 4)
             self.y = zeros(max(Z_WIDTH, ATTN_OUT, INTERMEDIATE) * 4)
@@ -214,7 +246,7 @@ class Qwen38Runtime:
             self.prefix = open_session(self)
             summary = (
                 f"loaded {self.root.name} kv {self.kv_cache} context {self.max_pos} "
-                f"weights {resident_bytes} cache {cache_bytes(self.max_pos)}"
+                f"weights {resident_bytes} cache {sequence_cache_bytes(self.max_pos, self.kv_slots)}"
             )
         finally:
             if self.session is not None:
@@ -252,13 +284,13 @@ class Qwen38Runtime:
     def reset(self) -> None:
         session = self.session
         for buffer, nbytes in (
-            (self.history, LINEAR_LAYERS * 3 * MIX * 2),
-            (self.state, LINEAR_LAYERS * LINEAR_V * 128 * 128 * 4),
+            (self.history, _HISTORY_BYTES),
+            (self.state, _STATE_BYTES),
         ):
             _wipe(buffer, nbytes)
         for cache in (*self.k_cache, *self.v_cache):
             _wipe(cache, plane_bytes(self.max_pos))
-        _wipe(self.plane_tail, FULL_LAYERS * 4 * 32 * 256 * 4)
+        _wipe(self.plane_tail, self.kv_slots * 4 * 32 * 256 * 4)
         self.filled = 0
         del session
 
@@ -400,12 +432,12 @@ class Qwen38Runtime:
             (256, 1, 1),
         )
 
-    def _attend(self, layer: int, pos: int) -> None:
+    def _attend(self, layer: int | None, pos: int) -> None:
         from qwen38_27b.attn import attend_plane
 
-        q_w, q_s = self._pair(self.weight(layer, "self_attn.q_proj.weight"))
-        k_w, k_s = self._pair(self.weight(layer, "self_attn.k_proj.weight"))
-        v_w, v_s = self._pair(self.weight(layer, "self_attn.v_proj.weight"))
+        q_w, q_s = self._pair(self._w(layer, "self_attn.q_proj.weight"))
+        k_w, k_s = self._pair(self._w(layer, "self_attn.k_proj.weight"))
+        v_w, v_s = self._pair(self._w(layer, "self_attn.v_proj.weight"))
         self.session.encode(
             "attn_qkv",
             [
@@ -431,8 +463,8 @@ class Qwen38Runtime:
             (Q_HEADS, 1, 1),
             (256, 1, 1),
         )
-        q_buf, q_off, _entry = self.locate_weight(layer, "self_attn.q_norm.weight")
-        k_buf, k_off, _entry = self.locate_weight(layer, "self_attn.k_norm.weight")
+        q_buf, q_off, _entry = self.locate(self._w(layer, "self_attn.q_norm.weight"))
+        k_buf, k_off, _entry = self.locate(self._w(layer, "self_attn.k_norm.weight"))
         self.session.encode(
             "qk_norm_rope",
             [(self.query, 0), (self.kv, 0), (q_buf, q_off), (k_buf, k_off)],
@@ -449,9 +481,9 @@ class Qwen38Runtime:
             dest=self.y,
             pos0=pos,
             count=1,
-            slot=self.full_slot[layer],
+            slot=MTP_SLOT if layer is None else self.full_slot[layer],
         )
-        self._gemv(self.y, self.weight(layer, "self_attn.o_proj.weight"), self.wide)
+        self._gemv(self.y, self._w(layer, "self_attn.o_proj.weight"), self.wide)
         self.session.encode(
             "residual_rows",
             [(self.hidden, 0), (self.wide, 0), (self.hidden, 0)],
@@ -460,9 +492,9 @@ class Qwen38Runtime:
             (256, 1, 1),
         )
 
-    def _ffn(self, layer: int) -> None:
-        gate_w, gate_s = self._pair(self.weight(layer, "mlp.gate_proj.weight"))
-        up_w, up_s = self._pair(self.weight(layer, "mlp.up_proj.weight"))
+    def _ffn(self, layer: int | None) -> None:
+        gate_w, gate_s = self._pair(self._w(layer, "mlp.gate_proj.weight"))
+        up_w, up_s = self._pair(self._w(layer, "mlp.up_proj.weight"))
         self.session.encode(
             "ffn_gate_up",
             [
@@ -485,7 +517,7 @@ class Qwen38Runtime:
             (INTERMEDIATE // 256, 1, 1),
             (256, 1, 1),
         )
-        self._gemv(self.y, self.weight(layer, "mlp.down_proj.weight"), self.wide)
+        self._gemv(self.y, self._w(layer, "mlp.down_proj.weight"), self.wide)
         self.session.encode(
             "residual_rows",
             [(self.hidden, 0), (self.wide, 0), (self.hidden, 0)],
@@ -493,6 +525,11 @@ class Qwen38Runtime:
             (HIDDEN // 256, 1, 1),
             (256, 1, 1),
         )
+
+    def _w(self, layer: int | None, rest: str) -> str:
+        if layer is None:
+            return f"mtp.layers.0.{rest}"
+        return self.weight(layer, rest)
 
     def _pair(self, name: str) -> tuple[tuple[Any, int], tuple[Any, int]]:
         buf, offset, entry = self.locate(name)
@@ -537,6 +574,40 @@ class Qwen38Runtime:
             return None
         return _best(self)
 
+    def _mtp_body(self, token: int, pos: int) -> None:
+        """MTP layer at ``pos``. ``hidden`` is the backbone residual. Embeds ``token``."""
+        self._rms(self.hidden, "mtp.pre_fc_norm_hidden.weight", self.hold)
+        self._embed(token)
+        self._rms(self.hidden, "mtp.pre_fc_norm_embedding.weight", self.normed)
+        self.session.encode(
+            "concat_pair",
+            [(self.normed, 0), (self.hold, 0), (self.wide, 0)],
+            [_u32(HIDDEN), _u32(1)],
+            (1, 1, 1),
+            (256, 1, 1),
+        )
+        self._gemv(self.wide, "mtp.fc.weight", self.hidden)
+        self._rms(self.hidden, self._w(None, "input_layernorm.weight"), self.normed)
+        self._attend(None, pos)
+        self._rms(self.hidden, self._w(None, "post_attention_layernorm.weight"), self.normed)
+        self._ffn(None)
+
+    def _draft(self, token: int, pos: int) -> int:
+        self.session.begin()
+        self._mtp_body(token, pos)
+        self._rms(self.hidden, "mtp.norm.weight", self.normed)
+        head_name = self._resolve("lm_head.weight", "model.language_model.lm_head.weight")
+        self._gemv(self.normed, head_name, self.logits)
+        self.session.encode(
+            "argmax_partial",
+            [(self.logits, 0), (self.best_v, 0), (self.best_i, 0)],
+            [_u32(VOCAB)],
+            (_ARGMAX_GROUPS, 1, 1),
+            (256, 1, 1),
+        )
+        self.session.end()
+        return _best(self)
+
     def generate(
         self,
         prompt: list[int],
@@ -577,7 +648,7 @@ class Qwen38Runtime:
             if len(suffix) > 1:
                 from qwen38_27b.prefill import prefill_ids
 
-                prefill_ids(self, suffix[:-1], hit)
+                prefill_ids(self, suffix[:-1], hit, follow=suffix[-1])
             nxt = self.step(suffix[-1], len(prompt) - 1, logits=True)
             assert nxt is not None
             self.prefix.note(prompt)
@@ -598,32 +669,43 @@ class Qwen38Runtime:
             close_after = bool(stop_after_forced) and bool(pending)
             decode_row = self._begin_phase("decode", max_tokens, live=True)
             decode_started = time.perf_counter()
-            chosen = nxt
-            for count in range(max_tokens):
+            self._mtp_accepts = 0
+            self._mtp_tries = 0
+            chosen = int(nxt)
+            emitted = 0
+            while emitted < max_tokens:
                 self._check_stop()
                 if pending:
                     chosen = int(pending.pop(0))
                     finished_forced = close_after and not pending
                 else:
                     finished_forced = False
-                if chosen in stop:
+                if chosen in stop or repeated_tail(out):
                     break
                 out.append(chosen)
+                emitted += 1
                 self._output_ids = list(out)
                 if decode_row is not None:
                     decode_row.done = len(out)
                 if on_token is not None:
                     on_token(chosen)
-                if finished_forced or count + 1 == max_tokens:
-                    self.step(chosen, len(prompt) + count, logits=False)
-                    if count + 1 == max_tokens:
+                pos = len(prompt) + emitted - 1
+                if finished_forced or emitted == max_tokens:
+                    self.step(chosen, pos, logits=False)
+                    if emitted == max_tokens:
                         self._hit_limit = True
                     break
-                if len(prompt) + count + 1 >= self.max_pos:
+                if pos + 1 >= self.max_pos:
                     self._hit_limit = True
                     break
-                chosen = self.step(chosen, len(prompt) + count, logits=True)
-                assert chosen is not None
+                if repeated_tail(out):
+                    self.step(chosen, pos, logits=False)
+                    break
+                nxt_id = self.step(chosen, pos, logits=True)
+                assert nxt_id is not None
+                chosen = int(nxt_id)
+            if self._mtp_tries:
+                self._status(f"mtp {self._mtp_accepts}/{self._mtp_tries}")
             decode_elapsed = max(time.perf_counter() - decode_started, 1e-9)
             self._decode_seconds = decode_elapsed
             decode_summary = (
@@ -724,9 +806,26 @@ class Qwen38Runtime:
             hook(noted)
 
 
+def repeated_tail(tokens: list[int], *, minimum: int = 16) -> bool:
+    """True when the tail copies the span before it.
+
+    The span is at least ``minimum`` tokens and at most 64. A greedy copy of
+    the previous paragraph trips this and the completion stops.
+    """
+    count = len(tokens)
+    for period in range(minimum, min(64, count // 2) + 1):
+        if tokens[-period:] == tokens[-2 * period : -period]:
+            return True
+    return False
+
+
 def _best(runtime: Qwen38Runtime) -> int:
-    values = runtime.session.download_f32(runtime.best_v, _ARGMAX_GROUPS)
-    raw = runtime.session.download(runtime.best_i, _ARGMAX_GROUPS * 4)
+    return _best_from(runtime, runtime.best_v, runtime.best_i)
+
+
+def _best_from(runtime: Qwen38Runtime, values_buf: Any, index_buf: Any) -> int:
+    values = runtime.session.download_f32(values_buf, _ARGMAX_GROUPS)
+    raw = runtime.session.download(index_buf, _ARGMAX_GROUPS * 4)
     indices = np.frombuffer(raw, dtype=np.uint32).copy()
     choice = 0
     for index in range(1, _ARGMAX_GROUPS):

@@ -2,8 +2,9 @@
 
 The shared store in ``madmetal.prefix`` owns the file. This module packs the
 used key and value positions off the context stride, plus the DeltaNet state
-and the convolution history. A stored file is accepted when it is a strict
-prefix of the new prompt, so the next token is still stepped.
+and the convolution history. A drafted record also packs the MTP plane. A
+stored file is accepted when it is a strict prefix of the new prompt, so the
+next token is still stepped. A file without the MTP plane is not installed.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from madmetal.prefix import (
     read_regions,
 )
 from qwen38_27b.cache import plane_bytes
-from qwen38_27b.layout import FULL_LAYERS, HEAD, KV_HEADS, LINEAR_LAYERS, LINEAR_V, MIX
+from qwen38_27b.layout import HEAD, KV_HEADS, LINEAR_LAYERS, LINEAR_V, MIX
 
 _HISTORY_BYTES = LINEAR_LAYERS * 3 * MIX * 2
 _STATE_BYTES = LINEAR_LAYERS * LINEAR_V * 128 * 128 * 4
@@ -55,7 +56,7 @@ class CacheAdapter:
             Region("history", _read(self.runtime.history, _HISTORY_BYTES)),
             Region("state", _read(self.runtime.state, _STATE_BYTES)),
         ]
-        for slot in range(FULL_LAYERS):
+        for slot in range(int(self.runtime.kv_slots)):
             regions.append(
                 Region(
                     f"k.{slot}",
@@ -74,19 +75,20 @@ class CacheAdapter:
         count = len(header.tokens)
         if count < 1 or count >= len(prompt):
             return False
-        return _fits(header, count)
+        return _fits(header, count, int(self.runtime.kv_slots))
 
     def install(self, header: PrefixHeader) -> bool:
         count = len(header.tokens)
-        if not _fits(header, count):
+        if not _fits(header, count, int(self.runtime.kv_slots)):
             return False
         names = ["history", "state"]
-        names.extend(f"k.{slot}" for slot in range(FULL_LAYERS))
-        names.extend(f"v.{slot}" for slot in range(FULL_LAYERS))
+        slots = int(self.runtime.kv_slots)
+        names.extend(f"k.{slot}" for slot in range(slots))
+        names.extend(f"v.{slot}" for slot in range(slots))
         blobs = read_regions(header, names)
         if blobs is None:
             return False
-        for slot in range(FULL_LAYERS):
+        for slot in range(slots):
             _unpack(
                 self.runtime.k_cache[slot],
                 self.runtime.max_pos,
@@ -130,14 +132,14 @@ def unpack_plane(buffer: np.ndarray, max_pos: int, count: int, packed: bytes, *,
     scales[:] = np.frombuffer(packed[data_bytes:], dtype=np.uint8).reshape(scales.shape)
 
 
-def _fits(header: PrefixHeader, count: int) -> bool:
+def _fits(header: PrefixHeader, count: int, slots: int) -> bool:
     history = header.region("history")
     state = header.region("state")
     if history is None or history.length != _HISTORY_BYTES:
         return False
     if state is None or state.length != _STATE_BYTES:
         return False
-    for slot in range(FULL_LAYERS):
+    for slot in range(slots):
         key = header.region(f"k.{slot}")
         value = header.region(f"v.{slot}")
         if key is None or value is None:
