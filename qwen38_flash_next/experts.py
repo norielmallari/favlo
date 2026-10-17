@@ -21,6 +21,15 @@ from qwen38_flash_next.session import (
 RESIDENT_CANDIDATES = (24 << 30, 20 << 30, 16 << 30, 12 << 30, 8 << 30)
 
 
+def _pin_file_tier(bits: int) -> int:
+    """File tier of a pin. The image stays in the file for that width."""
+    tier = {8: 0, 4: 1, 2: 3}.get(int(bits))
+    if tier is None:
+        message = f"pin width {bits} is not 2, 4, or 8"
+        raise RuntimeError(message)
+    return tier
+
+
 def group_assignments(
     ids: np.ndarray, count: int, topk: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -174,8 +183,6 @@ class ExpertAtlas:
                 self._touch(layer, expert)
         missing = []
         for expert in wanted:
-            if self.files.tier_row(layer, expert)[0] == 2:
-                continue
             if (layer, expert) not in self.resident:
                 missing.append(expert)
         if not missing:
@@ -185,6 +192,8 @@ class ExpertAtlas:
             indexed = []
             for expert in missing:
                 expert_tier, row = self.files.tier_row(layer, expert)
+                if expert_tier == 2:
+                    expert_tier = _pin_file_tier(self.files.expert_bits(layer, expert))
                 if expert_tier == tier:
                     indexed.append((row, expert))
             indexed.sort()

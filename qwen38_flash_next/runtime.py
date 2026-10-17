@@ -326,10 +326,6 @@ class Qwen38Runtime:
             self._load_bf16()
         else:
             self.files = QuantRecord(root)
-            if self.files.hot_bits != 4 or self.files.cold_bits != 4 or self.files.narrow_bits:
-                self.files.close()
-                message = "this pipeline serves fp4 experts"
-                raise RuntimeError(message)
             self._hot = expert_planes(self.files.hot_bits, self.hidden, self.moe)
             self._cold = expert_planes(self.files.cold_bits, self.hidden, self.moe)
             self._narrow = (
@@ -1619,16 +1615,20 @@ class Qwen38Runtime:
         return span_expert_bits(self.files.hot_bits, self.files.cold_bits, self.files.super_bits)
 
     def _routed_planes(self, layer: int) -> list[tuple[set[int], ExpertPlanes]]:
-        """Hot, cold, and the int2 plane when this record has three widths."""
+        """Each width in this layer, including a pin stored in that width's file."""
         if not isinstance(self.files, QuantRecord):
             message = "routed planes need a quant record"
             raise RuntimeError(message)
-        rows = [
-            (self.files.hot_set(layer), self._hot),
-            (self.files.cold_set(layer), self._cold),
-        ]
+        by_bits = {self._hot.bits: self._hot, self._cold.bits: self._cold}
         if self._narrow is not None:
-            rows.append((self.files.narrow_set(layer), self._narrow))
+            by_bits[self._narrow.bits] = self._narrow
+        rows: list[tuple[set[int], ExpertPlanes]] = []
+        for bits, members in self.files.routed_ids(layer):
+            planes = by_bits.get(bits)
+            if planes is None:
+                message = f"layer {layer} width {bits} has no expert plane"
+                raise RuntimeError(message)
+            rows.append((members, planes))
         return rows
 
     def _name_constrained(self, produced: list[int]) -> bool:
@@ -2221,7 +2221,7 @@ class Qwen38Runtime:
     def _seat_pins(self) -> None:
         """Load the pin list into the atlas and leave those images there.
 
-        They are fp4 experts in the layer file. The atlas does not evict them.
+        A pin stays in the file for its width. The atlas does not evict it.
         """
         if self.atlas is None or not isinstance(self.files, QuantRecord):
             return
@@ -3210,7 +3210,8 @@ class Qwen38Runtime:
         fp4_tiers = (
             isinstance(self.files, QuantRecord)
             and self.files.hot_bits == 4
-            and self.files.cold_bits in (2, 4)
+            and self.files.cold_bits == 4
+            and not self.files.narrow_bits
         )
         if (
             self._decoding
@@ -3988,10 +3989,7 @@ class Qwen38Runtime:
         table_base = layer * self.experts
         miss = self.atlas.miss
         running = shared
-        for members, planes in (
-            (self.files.hot_set(layer), self._hot),
-            (self.files.cold_set(layer), self._cold),
-        ):
+        for members, planes in self._routed_planes(layer):
             if planes.bits in (4, 8):
                 running = self._span_tier(
                     layer,
@@ -4022,21 +4020,6 @@ class Qwen38Runtime:
                     table_base,
                     miss,
                 )
-        if self._narrow is not None:
-            running = self._moe_tier(
-                layer,
-                xs,
-                weight,
-                running,
-                host_ids,
-                count,
-                self.files.narrow_set(layer),
-                self._narrow,
-                weights,
-                table,
-                table_base,
-                miss,
-            )
         return running
 
     def _span_tier(

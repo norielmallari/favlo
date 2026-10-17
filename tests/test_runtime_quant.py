@@ -1398,5 +1398,6 @@ def test_three_widths_put_int2_on_tier_3(tmp_path) -> None:
         assert record.expert_image(0, 0)[:4] == b"hhhh"
         assert record.expert_image(0, 1)[:4] == b"cccc"
         assert record.expert_image(0, 2)[:4] == b"nnnn"
+        assert record.routed_ids(0) == [(8, {0}), (4, {1}), (2, {2})]
     finally:
         record.close()

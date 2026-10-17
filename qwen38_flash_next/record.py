@@ -443,6 +443,36 @@ class QuantRecord:
     def super_set(self, layer: int) -> set[int]:
         return self._super_sets[layer]
 
+    def expert_bits(self, layer: int, expert: int) -> int:
+        """Width of one expert. A uniform record uses the single stored width."""
+        if self._quant_grid is not None:
+            return int(self._quant_grid[layer][int(expert)])
+        return int(self.cold_bits)
+
+    def routed_ids(self, layer: int) -> list[tuple[int, set[int]]]:
+        """Ids on each width, a pin included with the file that stores it."""
+        groups: dict[int, set[int]] = {}
+
+        def add(bits: int, ids: set[int]) -> None:
+            if not bits:
+                return
+            groups.setdefault(int(bits), set()).update(ids)
+
+        add(self.hot_bits, self.hot_set(layer))
+        add(self.cold_bits, self.cold_set(layer))
+        add(self.narrow_bits, self.narrow_set(layer))
+        covered: set[int] = set()
+        for ids in groups.values():
+            covered |= ids
+        for expert in self.super_set(layer) - covered:
+            add(self.expert_bits(layer, expert), {expert})
+        order: list[int] = []
+        for bits in (self.hot_bits, self.cold_bits, self.narrow_bits, 8, 4, 2):
+            width = int(bits)
+            if width and width not in order and groups.get(width):
+                order.append(width)
+        return [(bits, groups[bits]) for bits in order]
+
     def tier_row(self, layer: int, expert: int) -> tuple[int, int]:
         return self._tier_row[layer][int(expert)]
 
