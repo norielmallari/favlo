@@ -2,7 +2,7 @@
 
 Keys are stored ``[head, token, channel]`` with an E8M0 scale every 32 channels.
 Values are stored ``[head, channel, token]`` with an E8M0 scale every 32 tokens.
-Prefill scores 2048 keys at a time: one 64 by 64 ``matmul2d`` for the scores,
+Prefill scores up to 4096 keys at a time: one 64 by 64 ``matmul2d`` for the scores,
 a parallel softmax over 256-key chunks, and one strided value mix.
 A one-token fp8 step packs the eight live query rows into one 8-row
 ``matmul2d``, softmaxes 256-key chunks in parallel, and splits the value mix
@@ -17,7 +17,7 @@ import struct
 from typing import Any
 
 TILE = 256
-SCORE = 2048
+SCORE = 4096
 BLOCK = 512
 HEAD = 256
 CHUNK = 2048
@@ -200,10 +200,14 @@ def _mix_tiles(
     limit = pos0 + count
     start = 0
     while start < limit:
-        if limit - start >= SCORE and mode == 0:
-            _mix_score(runtime, strided, head, rows, pad, pos0, count, mode, slot, start)
-            start += SCORE
-            continue
+        if mode == 0:
+            width = min(SCORE, limit - start) // TILE * TILE
+            if width >= TILE:
+                _mix_score(
+                    runtime, strided, head, rows, pad, pos0, count, mode, slot, start, width
+                )
+                start += width
+                continue
         _mix_one_tile(runtime, dense, strided, head, rows, pad, pos0, count, mode, slot, start)
         start += TILE
 
@@ -219,6 +223,7 @@ def _mix_score(
     mode: int,
     slot: int,
     start: int,
+    cols: int,
 ) -> None:
     data_off, scale_off = _key_tile(runtime, head, start, mode)
     _matmul(
@@ -230,10 +235,10 @@ def _mix_score(
         scale_off,
         runtime.plane_scores,
         rows,
-        SCORE,
+        cols,
         HEAD,
     )
-    _softmax_rows(runtime, SCORE, pad, count, pos0, start)
+    _softmax_rows(runtime, cols, pad, count, pos0, start)
     data_off, scale_off = _value_window(runtime, head, start, mode)
     _matmul_stride(
         runtime,
@@ -245,7 +250,7 @@ def _mix_score(
         runtime.plane_partial,
         rows,
         HEAD,
-        SCORE,
+        cols,
         runtime.max_pos,
     )
     _acc_add(runtime, rows)

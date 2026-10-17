@@ -167,6 +167,7 @@ class Session:
         self.pipes: dict[str, Any] = {}
         self._recording = False
         self._inflight: list[tuple[Any, list[Any]]] = []
+        self._sizes: dict[tuple[int, int, int], Any] = {}
         for name in KERNELS:
             function = library.newFunctionWithName_(name)
             if function is None:
@@ -233,8 +234,8 @@ class Session:
         for index, blob in enumerate(constants):
             encoder.setBytes_length_atIndex_(blob, len(blob), base + index)
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(
-            self.metal.MTLSize(*groups),
-            self.metal.MTLSize(*threads),
+            self._size(groups),
+            self._size(threads),
         )
         encoder.endEncoding()
         command.commit()
@@ -268,9 +269,16 @@ class Session:
             self._pass_held.append(blob)
             encoder.setBytes_length_atIndex_(blob, len(blob), base + index)
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(
-            self.metal.MTLSize(*groups),
-            self.metal.MTLSize(*threads),
+            self._size(groups),
+            self._size(threads),
         )
+
+    def _size(self, value: tuple[int, int, int]) -> Any:
+        cached = self._sizes.get(value)
+        if cached is None:
+            cached = self.metal.MTLSize(*value)
+            self._sizes[value] = cached
+        return cached
 
     def split(self) -> None:
         """End this encoder and open another on the same command buffer.
@@ -304,7 +312,7 @@ class Session:
         encoder.dispatchThreadgroupsWithIndirectBuffer_indirectBufferOffset_threadsPerThreadgroup_(
             indirect,
             int(indirect_offset),
-            self.metal.MTLSize(*threads),
+            self._size(threads),
         )
 
     def commit(self) -> None:

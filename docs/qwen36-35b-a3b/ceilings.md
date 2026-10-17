@@ -49,7 +49,7 @@ The embed, the query/gate split, RoPE, the top-8 pick, and the key/value store a
 
 ## Prefill
 
-One chunk of 2048 tokens, then a prompt of 65536 tokens as 32 of those chunks. Projections are `prefill_fp4_n64` where the output width is a multiple of 64, and `prefill_fp4_e8m0` for the 32-wide a and b projections. Routed experts are one 64-row tile for each of the 256 experts. `moe_group` is one thread over the 16384 assignments. The Gated DeltaNet recurrence is 32 sub-chunks of 64 tokens (Yang et al., §3.3). A score window is 16384 query rows by 2048 keys. The value product uses token stride 65536. Chunk c of the long prompt, counting from 1, walks c windows per key/value head. The 32 chunks walk 528 windows per head.
+One chunk of 2048 tokens, then a prompt of 65536 tokens as 32 of those chunks. Projections are `prefill_fp4_n64` where the output width is a multiple of 64, and `prefill_fp4_e8m0` for the 32-wide a and b projections. Routed experts are one 64-row tile for each of the 256 experts. `moe_group` is one thread over the 16384 assignments. The Gated DeltaNet recurrence is 32 sub-chunks of 64 tokens (Yang et al., §3.3). A score window is 16384 query rows by up to 4096 keys. The first chunk's limit is 2048 keys, so that chunk is the one 2048-key window per head in the table. A later chunk walks 4096-key windows and, when the limit is not a multiple of 4096, one 2048-key tail. The value product uses token stride 262144.
 
 | Kernel | Count in one chunk | µs per call |
 |---|---:|---:|
@@ -89,6 +89,6 @@ One chunk of 2048 tokens, then a prompt of 65536 tokens as 32 of those chunks. P
 | `scatter_add_grouped` | 40 | 609.1 |
 | `residual_rows` | 40 | 55.9 |
 
-The first chunk, one window per head, is 1315.2 ms, 1557.15 tok/s. The 65536-token prompt is 65978.4 ms, 993.29 tok/s. That is the kernel ceiling for prefill. The byte count repeats the projections, all 256 expert images, and the float16 routers on every chunk, and adds the GDN state read and write, the K and V bytes of each window, and the score and probability writes. One first chunk is 22,077,235,200 bytes. The 65536-token prompt is 2,714,358,251,520 bytes, 8.97 s at 302.74 GB/s, 7309.45 tok/s. The 90% test for prefill uses the kernel ceiling.
+The first chunk, one 2048-key window per head, is 1315.2 ms, 1557.15 tok/s. A 4096-key window is `prefill_fp8_n64` 1295.8 µs, `kv_softmax_max_rows` 370.5 µs, `kv_softmax_prob_rows` 789.6 µs, `kv_softmax_close` 63.9 µs, `prefill_fp8_n64_stride` 1570.1 µs, and `kv_acc_add` 177.7 µs, 4267.6 µs together. The 65536-token prompt, composed with those windows, is 62542.7 ms, 1047.86 tok/s. That is the kernel ceiling for prefill. The byte count repeats the projections, all 256 expert images, and the float16 routers on every chunk, and adds the GDN state read and write, the K and V bytes of each window, and the score and probability writes. One first chunk is 22,077,235,200 bytes. The 65536-token prompt is 2,714,358,251,520 bytes, 8.96 s at 303.13 GB/s, 7318.91 tok/s. The 90% test for prefill uses the kernel ceiling.
 
 The embed, the coefficient row, the top-8 pick, the query/gate split, RoPE, the key/value store, and the grouped SiLU after the expert tile are not in this total.
