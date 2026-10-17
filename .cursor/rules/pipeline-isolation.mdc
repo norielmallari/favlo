@@ -1,11 +1,11 @@
 ---
-description: One write set per runtime so agents can develop pipelines in parallel
+description: One write set per runtime, and one machine lock while a pipeline test is running
 alwaysApply: true
 ---
 
 # Pipeline isolation
 
-Edit one runtime. Leave every other runtime's files untouched.
+Edit one runtime. Leave every other runtime's files untouched. Pipeline tests share one machine lock so several agents can edit different pipelines at the same time and only one of them runs on the GPU.
 
 `madmetal serve` is the entry point for inference. The client selects one model through the OpenAI endpoints: `GET /v1/models` lists the registry, and the `model` field on `POST /v1/chat/completions` loads that row's pipeline. Quantize and the other non-serve commands require `madmetal --<pipeline>`. A new runtime keeps that flag.
 
@@ -16,3 +16,30 @@ A new runtime adds those files and one row in the runtime table in `ARCHITECTURE
 Do not edit another pipeline's package, shaders, tests, or docs. Do not add a base class or a kernel that branches on the pipeline. Do not change `src/madmetal/` unless the task is the listener, the registry, or the console. Registration loads `sampling.py` from the pipeline that owns the row. Do not pass a sampling card into the registry.
 
 A pipeline's kernels, records, and cache are described in that pipeline's `docs/<pipeline>/` note. Root `ARCHITECTURE.md` is the process and the write set.
+
+## Machine lock
+
+Wait until the machine is free before a test command. That includes `pytest`, `kernels`, `quantize`, `complete`, `bf16`, `probe`, `matmul`, and `python -m harness.long_prompt`: any command that compiles shaders, dispatches Metal, loads a checkpoint, quantizes, or starts `madmetal serve`. Editing the write set does not wait. Reading another pipeline does not.
+
+The machine is busy when either of these is true:
+
+- `artifacts/pipeline-test.lock` exists and the `pid` in it is still running.
+- A `madmetal serve` process is running.
+
+Do not start the test while either is true. Do not kill the server, and do not kill the process that holds the lock. Wait, then check again. A lock whose `pid` is gone is stale. Remove that file and check again. The `madmetal serve` a test starts itself is that test's process. The wait is before the test starts.
+
+When the machine is free, take the lock. The lock is one JSON object and nothing else:
+
+```json
+{"pipeline": "qwen38-27b", "pid": 12345, "command": "kernels"}
+```
+
+`pipeline` is the flag stem. `pid` is the shell that owns the test. `command` is the short name of that test. Do not write a name, home directory, hostname, or device path.
+
+Create the file with exclusive create (`noclobber`, or `O_CREAT|O_EXCL`). If the create fails, another agent holds the machine:
+
+- Read `pid`. If that process is still running, do not start the test. Wait and try the create again.
+- If that process is gone, the lock is stale. Remove it and try the create again.
+- After a successful create, confirm the file still contains this agent's `pid` before starting the test.
+
+Release the lock when the testing stretch ends, including when the command fails. Remove the file only when its `pid` is this agent's. Do not delete a lock another live process holds. The file lives under `artifacts/`, which is gitignored. Do not commit it.
