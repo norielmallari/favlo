@@ -11,7 +11,7 @@ from typing import Any
 from jinja2 import Environment
 from tokenizers import Tokenizer
 
-from qwen36_35b_a3b.forward import RequestClosed
+from qwen36_35b_a3b.forward import RequestClosed, long_token_ids
 from qwen36_35b_a3b.sampling import THINKING_BUDGET, VARIANTS, mode_card, requested_thinking
 from qwen36_35b_a3b.tools import (
     StreamText,
@@ -23,6 +23,15 @@ from qwen36_35b_a3b.tools import (
 )
 
 STOP = {248046, 248044}
+_LONG_IDS: dict[Path, frozenset[int]] = {}
+
+
+def _long_ids(root: Path) -> frozenset[int]:
+    cached = _LONG_IDS.get(root)
+    if cached is None:
+        cached = long_token_ids(load_tokenizer(root).get_vocab())
+        _LONG_IDS[root] = cached
+    return cached
 
 
 def _sampling(
@@ -158,6 +167,8 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
     prompt = encode_chat(runtime.root, messages, body.get("tools"), thinking)
     forced, stop_after_forced = _forced_call(runtime.root, body.get("tools"), required)
     close, end = think_close_ids(runtime.root) if thinking else ([], None)
+    tool_open = encode_text(runtime.root, "<tool_call>")[0] if thinking else None
+    long_ids = _long_ids(runtime.root) if thinking else None
     emit_tools = body.get("tool_choice") != "none"
     stream = bool(body.get("stream", False))
     if stream:
@@ -175,7 +186,9 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
             thinking,
             close,
             end,
+            tool_open,
             emit_tools,
+            long_ids,
         )
         return
     started = time.perf_counter()
@@ -192,6 +205,8 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
         think_close=close,
         think_end=end,
         thinking_budget=THINKING_BUDGET if thinking else 0,
+        tool_open=tool_open,
+        long_ids=long_ids,
     )
     text = decode_text(runtime.root, tokens)
     reasoning, reply = split_thinking(text, thinking)
@@ -283,7 +298,9 @@ def _stream(
     thinking: bool,
     think_close: list[int],
     think_end: int | None,
+    tool_open: int | None = None,
     emit_tools: bool = True,
+    long_ids: set[int] | None = None,
 ) -> None:
     decode = getattr(runtime, "decode", None)
     if not callable(decode):
@@ -364,6 +381,8 @@ def _stream(
             think_close=think_close,
             think_end=think_end,
             thinking_budget=THINKING_BUDGET if thinking else 0,
+            tool_open=tool_open,
+            long_ids=long_ids,
         )
     finally:
         pending.put(None)

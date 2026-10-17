@@ -34,7 +34,13 @@ EPS = 1e-6
 # Each head stores query then gate. The other split is the flat halves.
 GATE_PER_HEAD = 1
 # Paulus, Xiong, and Socher block a repeated n-gram. Eight tokens is one short clause.
+# While think is open, a five-token repeat starts the close and ends the turn.
+# The same token with one token between the copies does the same.
+# A token whose piece has seven or more letters, drawn again, does the same.
+# Masking that token lets the same clause continue with a synonym.
 _REPEAT_SPAN = 8
+_THINK_REPEAT_SPAN = 5
+_LONG_LETTERS = 7
 
 
 def _reserved_bytes(resident: int, kv_one: int, plane: int) -> int:
@@ -572,6 +578,8 @@ class Qwen36Runtime:
         think_close: list[int] | None = None,
         think_end: int | None = None,
         thinking_budget: int = 0,
+        tool_open: int | None = None,
+        long_ids: set[int] | None = None,
     ) -> list[int]:
         self._hit_limit = False
         self._output_ids = []
@@ -625,17 +633,34 @@ class Qwen36Runtime:
             decode_started = time.perf_counter()
             for count in range(max_tokens):
                 self._check_stop()
-                if pending:
-                    nxt = int(pending.pop(0))
-                    finished_forced = close_after and not pending
-                elif budget is not None and budget.forcing:
+                if budget is not None and budget.forcing:
                     nxt = budget.forced()
                     finished_forced = False
+                elif pending:
+                    nxt = int(pending.pop(0))
+                    revised = revise_think_draw(budget, out, nxt, tool_open, long_ids)
+                    if revised is None:
+                        break
+                    nxt = revised
+                    if budget is not None:
+                        nxt = budget.take(nxt)
+                    finished_forced = close_after and not pending
                 else:
                     banned = {budget.end} if budget is not None and budget.closed else None
                     nxt = _sample(
-                        logits, temperature, top_p, top_k, presence, seen, banned, out
+                        logits,
+                        temperature,
+                        top_p,
+                        top_k,
+                        presence,
+                        seen,
+                        banned,
+                        out,
                     )
+                    revised = revise_think_draw(budget, out, nxt, tool_open, long_ids)
+                    if revised is None:
+                        break
+                    nxt = revised
                     if budget is not None:
                         nxt = budget.take(nxt)
                     finished_forced = False
@@ -650,7 +675,13 @@ class Qwen36Runtime:
                     decode_row.done = len(out)
                 if on_token is not None:
                     on_token(nxt)
-                if finished_forced:
+                repeat_done = (
+                    budget is not None
+                    and budget.stop_after
+                    and budget.closed
+                    and not budget.forcing
+                )
+                if finished_forced or repeat_done:
                     self.step(nxt, len(prompt) + count, logits=False)
                     break
                 if count + 1 == max_tokens:
@@ -759,6 +790,7 @@ class ThinkBudget:
         self.counted = 0
         self.force_at: int | None = None
         self.closed = False
+        self.stop_after = False
 
     @property
     def forcing(self) -> bool:
@@ -790,13 +822,171 @@ class ThinkBudget:
             return None
         return self._start()
 
-    def _start(self) -> int:
+    def _start(self, stop_after: bool = False) -> int:
+        if stop_after:
+            self.stop_after = True
         token = self.close[0]
         if len(self.close) == 1:
             self.closed = True
         else:
             self.force_at = 1
         return token
+
+
+def _tool_call_started(produced: list[int], tool_open: int | None) -> bool:
+    """True once ``tool_open`` has been drawn in this completion."""
+    return tool_open is not None and tool_open in produced
+
+
+def _stutter(produced: list[int], drawn: int) -> bool:
+    """True when ``drawn`` repeats the token two positions back.
+
+    The recorded analysis drew `` messy``, a comma, and `` messy`` again.
+    """
+    return len(produced) >= 2 and produced[-2] == drawn
+
+
+def long_token_ids(vocab: dict[str, int]) -> frozenset[int]:
+    """Token ids whose stored piece contains at least seven letters."""
+    return frozenset(
+        token
+        for text, token in vocab.items()
+        if sum(character.isalpha() for character in text) >= _LONG_LETTERS
+    )
+
+
+def _long_repeat(produced: list[int], drawn: int, long_ids: set[int] | None) -> bool:
+    """True when ``drawn`` is a long token already present in ``produced``.
+
+    `` heavily`` is one token of eight letters. The analysis drew it again at
+    the start of the same clause.
+    """
+    return long_ids is not None and drawn in long_ids and drawn in produced
+
+
+def revise_think_draw(
+    budget: ThinkBudget | None,
+    produced: list[int],
+    drawn: int,
+    tool_open: int | None,
+    long_ids: set[int] | None = None,
+) -> int | None:
+    """The token to emit, or None when ``drawn`` would continue a repeated clause.
+
+    While ``<think>`` is open, a 5-token span already drawn starts the close and
+    ends the turn after that close. The same token with one token between the
+    copies does the same, as does a second draw of a token whose piece has
+    seven or more letters. After the close, any of those repeats ends the turn.
+    A tool call is left as drawn, and a repeated span inside it stays. A second
+    call in the same completion is not drawn. An 8-token block still applies
+    to the draw itself.
+    """
+    if (
+        budget is not None
+        and tool_open is not None
+        and drawn == tool_open
+        and tool_open in produced
+    ):
+        return None
+    if budget is None or budget.forcing or _tool_call_started(produced, tool_open):
+        return drawn
+    if tool_open is not None and drawn == tool_open:
+        return drawn
+    repeated = (
+        _stutter(produced, drawn)
+        or _long_repeat(produced, drawn, long_ids)
+        or drawn in _blocked_tokens(produced, _THINK_REPEAT_SPAN)
+    )
+    if not budget.closed:
+        if repeated:
+            return budget._start(stop_after=True)
+        return drawn
+    if repeated:
+        return None
+    return drawn
+
+
+def assert_think_repeat_cases() -> None:
+    """The clauses that looped, as token ids, do not get drawn again.
+
+    The analysis repeated "many lines of code that are". A 7-token block
+    missed it and an 8-token block missed it. "obfuscated or corrupted" did
+    the same. The tool parameter repeats a shorter path from the think text,
+    and that draw has to stay.
+    """
+    close = [20, 21, 22]
+    clause = [1, 2, 3, 4, 5, 6]
+    produced = [*clause, 8, *clause[:-1]]
+    budget = ThinkBudget(close, 21, 64)
+    got = revise_think_draw(budget, produced, clause[-1], None)
+    if got != close[0] or not budget.stop_after or got == clause[-1]:
+        message = "a repeated think clause was drawn"
+        raise AssertionError(message)
+    if clause[-1] in _blocked_tokens(produced, 7):
+        message = "the recorded clause is not a 7-token repeat"
+        raise AssertionError(message)
+
+    reply = ThinkBudget(close, 21, 64)
+    reply.closed = True
+    paraphrased = [*clause, 21, *clause[:-1]]
+    if revise_think_draw(reply, paraphrased, clause[-1], 50) is not None:
+        message = "the reply drew the think clause again"
+        raise AssertionError(message)
+
+    opening = ThinkBudget(close, 21, 64)
+    if revise_think_draw(opening, [], 50, 50) != 50:
+        message = "a tool call was replaced"
+        raise AssertionError(message)
+    if revise_think_draw(opening, [50, 7, 8], 50, 50) is not None:
+        message = "a second tool call was drawn"
+        raise AssertionError(message)
+
+    path = [11, 12, 13, 14, 15, 16]
+    tool = ThinkBudget(close, 21, 64)
+    parameter = [*path, 50, *path[:-1]]
+    if revise_think_draw(tool, parameter, path[-1], 50) != path[-1]:
+        message = "the tool path was removed"
+        raise AssertionError(message)
+
+    # " contains many lines of code" is five tokens. A 6-token block missed it.
+    five = [5435, 1599, 4965, 314, 1970]
+    five_produced = [*five, 8, *five[:-1]]
+    five_budget = ThinkBudget(close, 21, 64)
+    if revise_think_draw(five_budget, five_produced, five[-1], None) != close[0]:
+        message = "contains many lines of code was drawn again"
+        raise AssertionError(message)
+    if five[-1] in _blocked_tokens(five_produced, 6):
+        message = "the recorded clause is a 6-token repeat"
+        raise AssertionError(message)
+
+    # " messy, messy" is that token, a comma, and the same token.
+    stutter_budget = ThinkBudget(close, 21, 64)
+    if revise_think_draw(stutter_budget, [760, 44318, 11], 44318, None) != close[0]:
+        message = "messy, messy was drawn"
+        raise AssertionError(message)
+    distant = ThinkBudget(close, 21, 64)
+    if revise_think_draw(distant, [44318, 1, 2, 3], 44318, None) != 44318:
+        message = "a distant token was treated as a stutter"
+        raise AssertionError(message)
+    inside = ThinkBudget(close, 21, 64)
+    if revise_think_draw(inside, [50, 44318, 11], 44318, 50) != 44318:
+        message = "a stutter inside a tool call was removed"
+        raise AssertionError(message)
+
+    # " heavily" is one token. Drawing it again closes think. " file" stays.
+    long_ids = {16421}
+    word = ThinkBudget(close, 21, 64)
+    if revise_think_draw(word, [16, 16421, 20], 16421, None, long_ids) != close[0]:
+        message = "heavily was drawn again"
+        raise AssertionError(message)
+    short = ThinkBudget(close, 21, 64)
+    if revise_think_draw(short, [999, 1, 2], 999, None, long_ids) != 999:
+        message = "file was treated as a long repeat"
+        raise AssertionError(message)
+    kept = ThinkBudget(close, 21, 64)
+    if revise_think_draw(kept, [50, 16421], 16421, 50, long_ids) != 16421:
+        message = "a long token inside a tool call was removed"
+        raise AssertionError(message)
 
 
 def _blocked_tokens(produced: list[int], span: int) -> set[int]:

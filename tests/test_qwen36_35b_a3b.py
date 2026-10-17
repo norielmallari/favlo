@@ -14,7 +14,7 @@ from qwen36_35b_a3b.cache import kv_buffer_bytes, kv_mode, max_position, parse_m
 from qwen36_35b_a3b.checks import run_checks
 from qwen36_35b_a3b.convert import expert_slot_map
 from qwen36_35b_a3b.formats import EXPERT_IMAGE, dequant_fp4, fp4_image, quantize_fp4
-from qwen36_35b_a3b.forward import ThinkBudget, _sample
+from qwen36_35b_a3b.forward import ThinkBudget, _sample, assert_think_repeat_cases
 from qwen36_35b_a3b.tools import (
     StreamText,
     function_has_parameters,
@@ -47,6 +47,21 @@ def test_a_repeated_span_is_not_drawn_again() -> None:
     logits[8] = np.float32(3.0)
     drawn = _sample(logits, 0.0, 1.0, 0, 0.0, set(produced), None, produced)
     assert drawn == 8
+
+
+def test_recorded_think_clauses_are_not_drawn_again() -> None:
+    assert_think_repeat_cases()
+
+
+def test_a_repeated_clause_ends_after_the_close() -> None:
+    budget = ThinkBudget([2, 9, 3], 9, 8)
+    assert budget._start(stop_after=True) == 2
+    assert budget.stop_after
+    assert not budget.closed
+    assert budget.forced() == 9
+    assert budget.forced() == 3
+    assert budget.closed
+    assert not budget.forcing
 
 
 def test_thinking_budget_forces_the_close_then_drops_that_token() -> None:
