@@ -11,7 +11,6 @@ from madmetal.registry import (
     list_unregistered,
     load_registry,
     model_objects,
-    record_name,
     refuse_conflicting_destination,
     register_quantized,
     resolve,
@@ -37,11 +36,11 @@ def test_pipeline_id_names_the_only_row_of_that_pipeline(tmp_path) -> None:
     assert selection.requested_id == PIPELINE
     thinking = resolve("qwen38-flash-next:thinking", root=tmp_path)
     assert thinking.folder == folder
-    assert thinking.enable_thinking is True
+    assert thinking.variant == "thinking"
     assert thinking.sampling is not None
     assert thinking.sampling["temperature"] == 1.0
     instruct = resolve(f"{folder}:instruct", root=tmp_path)
-    assert instruct.enable_thinking is False
+    assert instruct.variant == "instruct"
     assert instruct.parent == folder
     assert instruct.sampling is not None
     assert instruct.sampling["presence_penalty"] == 1.5
@@ -205,5 +204,55 @@ def test_quantize_registration_refuses_a_different_source(tmp_path) -> None:
     register_quantized("packed", source=source, alias="short", root=tmp_path, pipeline=PIPELINE)
     with pytest.raises(ValueError, match="different source"):
         refuse_conflicting_destination("packed", other, root=tmp_path)
-    name = record_name(source, [8, 4])
-    assert name == f"{source.name}-madmetal-fp8-fp4"
+
+
+def test_registration_copies_the_pipeline_card(tmp_path) -> None:
+    _record(tmp_path, "packed")
+    add_model("packed", root=tmp_path, pipeline=PIPELINE)
+    flash = load_registry(tmp_path)["models"]["packed"]
+    assert flash["default_variant"] == "thinking"
+    assert flash["variants"]["thinking"]["presence_penalty"] == 0.0
+    assert flash["variants"]["instruct"]["presence_penalty"] == 1.5
+    bare = resolve("packed", root=tmp_path)
+    assert bare.sampling is None
+    assert bare.variant is None
+    assert bare.default_variant == "thinking"
+    assert bare.variants is not None
+    assert bare.variants["thinking"]["presence_penalty"] == 0.0
+    assert bare.variants["instruct"]["presence_penalty"] == 1.5
+
+
+def test_qwen36_registration_uses_that_pipeline_card(tmp_path) -> None:
+    _record(tmp_path, "a3b")
+    add_model("a3b", alias="qwen36-35b-a3b", root=tmp_path, pipeline="qwen36-35b-a3b")
+    entry = load_registry(tmp_path)["models"]["a3b"]
+    assert entry["default_variant"] == "thinking"
+    assert entry["variants"]["thinking"]["presence_penalty"] == 1.5
+    assert entry["variants"]["thinking"]["temperature"] == 1.0
+    assert entry["variants"]["instruct"]["temperature"] == 0.7
+    assert entry["variants"]["instruct"]["presence_penalty"] == 1.5
+    bare = resolve("qwen36-35b-a3b", root=tmp_path)
+    assert bare.sampling is None
+    assert bare.variant is None
+    assert bare.default_variant == "thinking"
+    assert bare.variants is not None
+    assert bare.variants["thinking"]["presence_penalty"] == 1.5
+    forced = resolve("qwen36-35b-a3b:instruct", root=tmp_path)
+    assert forced.variant == "instruct"
+    assert forced.sampling is not None
+    assert forced.sampling["temperature"] == 0.7
+    assert forced.sampling["presence_penalty"] == 1.5
+
+
+def test_reregister_refreshes_the_card_from_the_pipeline(tmp_path) -> None:
+    source = tmp_path / "bf16"
+    source.mkdir()
+    register_quantized("packed", source=source, alias="short", root=tmp_path, pipeline=PIPELINE)
+    data = load_registry(tmp_path)
+    data["models"]["packed"]["variants"]["thinking"]["presence_penalty"] = 9
+    data["models"]["packed"]["default_variant"] = "instruct"
+    save_registry(data, tmp_path)
+    register_quantized("packed", source=source, alias="short", root=tmp_path, pipeline=PIPELINE)
+    entry = load_registry(tmp_path)["models"]["packed"]
+    assert entry["default_variant"] == "thinking"
+    assert entry["variants"]["thinking"]["presence_penalty"] == 0.0

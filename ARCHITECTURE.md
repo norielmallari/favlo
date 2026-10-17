@@ -14,6 +14,7 @@ Each runtime is a separate write set. An agent developing one runtime edits that
 |---|---|---|---|
 | `qwen38-flash-next` | `qwen38-flash-next.py` | `qwen38_flash_next/` | [docs/qwen38-flash-next/architecture.md](docs/qwen38-flash-next/architecture.md) |
 | `qwen38-27b` | `qwen38-27b.py` | `qwen38_27b/` | [docs/qwen38-27b/README.md](docs/qwen38-27b/README.md) |
+| `qwen36-35b-a3b` | `qwen36-35b-a3b.py` | `qwen36_35b_a3b/` | [docs/qwen36-35b-a3b/README.md](docs/qwen36-35b-a3b/README.md) |
 
 The entry file sets `PIPELINE` to its filename stem. The command discovers those files. Adding a runtime does not edit `src/madmetal/cli.py`.
 
@@ -21,15 +22,15 @@ A runtime's write set is the entry file, the package, `docs/<pipeline>/`, and te
 
 Shared code is `src/madmetal/`: the process entry, the registry, and the listener. There is no model base class and no kernel that branches on the pipeline. `src/madmetal/` changes when the listener, the registry, or the console changes. A pipeline task does not change it to reach into another runtime.
 
-The registry stores a sampling card on each row. The pipeline that registers the row supplies that card. The card in `src/madmetal/registry.py` is the Flash Next model card, used when a caller omits one. Another runtime passes its own card and does not replace that default.
+The registry stores a sampling card on each row. Registration loads `VARIANTS` and `DEFAULT_VARIANT` from that pipeline's `sampling.py` and writes them on the row. The stored names are the `:suffix` ids. A bare model id selects no row. The pipeline applies its default variant, or the row the request selects.
 
 Tests for the listener, the registry, and the console live in `tests/test_cli.py`, `tests/test_server.py`, `tests/test_registry.py`, and `tests/test_console.py`. A pipeline's tests do not import another pipeline.
 
 ## Listener
 
-`madmetal serve` listens on `127.0.0.1:8129` with nothing loaded. `GET /v1/models` lists every registered row. `POST /v1/chat/completions` loads the pipeline that row names, one request at a time. A connection that arrives while a request is open waits until that request has returned. A different folder or a different pipeline unloads the previous record first. An unknown id is 404. `serve` does not register a record it finds on disk.
+`madmetal serve` listens on `127.0.0.1:8129` with nothing loaded. `--max-memory` is passed to a pipeline whose `open_runtime` accepts it, as the maximum bytes that runtime may allocate. `GET /v1/models` lists every registered row. `POST /v1/chat/completions` loads the pipeline that row names, one request at a time. A connection that arrives while a request is open waits until that request has returned. A different folder or a different pipeline unloads the previous record first. An unknown id is 404. `serve` does not register a record it finds on disk.
 
-`models/registry.json` is gitignored. It stores folder names, the pipeline entry, an alias, the BF16 source path, the key/value mode, the resident percent, and the thinking and instruct sampling rows. A fresh tree has no rows.
+`models/registry.json` is gitignored. It stores folder names, the pipeline entry, an alias, the BF16 source path, the key/value mode, the resident percent, and the sampling rows copied from that pipeline. A fresh tree has no rows.
 
 ## Console
 

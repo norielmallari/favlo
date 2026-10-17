@@ -33,6 +33,21 @@ DEFAULT_RECORD = (
 DEFAULT_QUANT_MAP = Path(__file__).with_name("quant_map.json")
 
 
+def record_name(source: Path, widths: Sequence[int]) -> str:
+    """Directory stem from the quants that contain experts. Wider quants come first."""
+    tags: list[str] = []
+    for bits in sorted({int(item) for item in widths}, reverse=True):
+        try:
+            tags.append(_QUANT_TAG[int(bits)])
+        except KeyError as exc:
+            message = f"expert quant {bits} is not 2, 4, or 8"
+            raise ValueError(message) from exc
+    if not tags:
+        message = "quant map has no widths"
+        raise ValueError(message)
+    return f"{source.name}-madmetal-" + "-".join(tags)
+
+
 def quant_file(layer: int, bits: int) -> str:
     """``experts/`` name for one layer at this quant. The quant names the file."""
     try:

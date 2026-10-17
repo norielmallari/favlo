@@ -7,6 +7,7 @@ come from the entry file the registry row names.
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import select
 import signal
@@ -139,19 +140,21 @@ def _pipeline_module(name: str) -> Any:
     return load_pipeline(name)
 
 
-def _open_runtime(selection: Any, console: Any) -> Any:
+def _open_runtime(selection: Any, console: Any, max_memory: str | None) -> Any:
     """The pipeline named on the registry row. The previous runtime is already closed."""
     module = _pipeline_module(selection.pipeline)
     opener = getattr(module, "open_runtime", None)
     if not callable(opener):
         message = f"{selection.pipeline} does not open a runtime"
         raise RuntimeError(message)
-    return opener(
-        selection.path,
-        kv_cache=selection.kv_cache,
-        console=console,
-        resident_percent=selection.resident_percent,
-    )
+    kwargs: dict[str, Any] = {
+        "kv_cache": selection.kv_cache,
+        "console": console,
+        "resident_percent": selection.resident_percent,
+    }
+    if "max_memory" in inspect.signature(opener).parameters:
+        kwargs["max_memory"] = max_memory
+    return opener(selection.path, **kwargs)
 
 
 def _install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
@@ -172,7 +175,7 @@ def _install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
     if ui is not None:
         ui.pipeline = selection.pipeline
         ui.load_detail = selection.alias or selection.folder
-    runtime = _open_runtime(selection, ui)
+    runtime = _open_runtime(selection, ui, getattr(args, "max_memory", None))
     state["runtime"] = runtime
     state["record"] = selection.folder
     state["pipeline"] = selection.pipeline
@@ -379,6 +382,11 @@ def serve_main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8129)
     parser.add_argument("--console", choices=("auto", "pretty", "plain", "json"), default="auto")
     parser.add_argument("--transcript", type=Path, default=None)
+    parser.add_argument(
+        "--max-memory",
+        default=None,
+        help="maximum bytes for a pipeline that caps its runtime, such as 32GiB",
+    )
     try:
         args = parser.parse_args(list(argv) if argv is not None else None)
     except SystemExit as exc:
@@ -388,7 +396,6 @@ def serve_main(argv: Sequence[str] | None = None) -> int:
     args.console_ui = ui
     args.record = None
     args.resident_percent = None
-    args.kv_cache = "e4m3"
     try:
         return serve(args)
     finally:

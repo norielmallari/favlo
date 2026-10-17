@@ -521,7 +521,12 @@ def test_omitted_enable_thinking_leaves_the_block_open() -> None:
     assert commands._enable_thinking({"enable_thinking": False}) is False
     assert commands._enable_thinking({"enable_thinking": None}) is True
     assert commands._enable_thinking({"chat_template_kwargs": {"enable_thinking": False}}) is False
-    assert commands._enable_thinking({"enable_thinking": False, "chat_template_kwargs": {"enable_thinking": True}}) is False
+    assert (
+        commands._enable_thinking(
+            {"enable_thinking": False, "chat_template_kwargs": {"enable_thinking": True}}
+        )
+        is False
+    )
 
 
 def test_penalty_window_defaults_to_the_last_twenty_tokens() -> None:
@@ -530,6 +535,26 @@ def test_penalty_window_defaults_to_the_last_twenty_tokens() -> None:
     assert commands._penalty_window({}) == 20
     assert commands._penalty_window({"penalty_window": 64}) == 64
     assert commands._penalty_window({"penalty_window": 0}) == 0
+
+
+def test_record_name_orders_wider_quants_first(tmp_path) -> None:
+    from qwen38_flash_next.formats import record_name
+
+    source = tmp_path / "bf16"
+    assert record_name(source, [8, 4]) == f"{source.name}-madmetal-fp8-fp4"
+
+
+def test_bare_id_uses_this_pipeline_card() -> None:
+    from qwen38_flash_next.sampling import mode_card
+
+    thinking, card = mode_card(None, None)
+    assert thinking is True
+    assert card is not None
+    assert card["presence_penalty"] == 0.0
+    closed, instruct = mode_card(None, False)
+    assert closed is False
+    assert instruct is not None
+    assert instruct["presence_penalty"] == 1.5
 
 
 def test_omitted_sampling_follows_the_model_card() -> None:

@@ -21,7 +21,6 @@ from madmetal.registry import (
     format_listing,
     load_registry,
     models_dir,
-    record_name,
     refuse_conflicting_destination,
     register_quantized,
     set_alias,
@@ -34,10 +33,12 @@ from qwen38_flash_next.convert import (
     load_quant_map,
     quantize_checkpoint,
 )
-from qwen38_flash_next.formats import DEFAULT_QUANT_MAP, DEFAULT_RECORD
+from qwen38_flash_next.formats import DEFAULT_QUANT_MAP, DEFAULT_RECORD, record_name
 from qwen38_flash_next.grove import write_grove
 from qwen38_flash_next.probe import matmul, probe
 from qwen38_flash_next.runtime import Qwen38Runtime, RequestClosed
+from qwen38_flash_next.sampling import VARIANTS as _SAMPLING
+from qwen38_flash_next.sampling import mode_card, requested_thinking
 from qwen38_flash_next.session import _append_transcript, _log, _prompt_text, bind_log
 from qwen38_flash_next.tools import (
     PENALTY_WINDOW,
@@ -357,13 +358,13 @@ _STREAM_WRITE_TIMEOUT = 2.0
 
 # Qwen team, Qwen3.8-Flash-Next model card.
 # https://huggingface.co/Qwen/Qwen3.8-Flash-Next
-THINKING_TEMPERATURE = 1.0
-THINKING_TOP_P = 0.95
-THINKING_TOP_K = 20
-INSTRUCT_TEMPERATURE = 0.7
-INSTRUCT_TOP_P = 0.8
-INSTRUCT_TOP_K = 20
-INSTRUCT_PRESENCE = 1.5
+THINKING_TEMPERATURE = float(_SAMPLING["thinking"]["temperature"])
+THINKING_TOP_P = float(_SAMPLING["thinking"]["top_p"])
+THINKING_TOP_K = int(_SAMPLING["thinking"]["top_k"])
+INSTRUCT_TEMPERATURE = float(_SAMPLING["instruct"]["temperature"])
+INSTRUCT_TOP_P = float(_SAMPLING["instruct"]["top_p"])
+INSTRUCT_TOP_K = int(_SAMPLING["instruct"]["top_k"])
+INSTRUCT_PRESENCE = float(_SAMPLING["instruct"]["presence_penalty"])
 DEFAULT_MAX_PROMPT_TOKENS = 65536
 
 
@@ -681,21 +682,18 @@ def handle_chat(
     try:
         messages = body["messages"]
         tools = body.get("tools")
-        if selection is not None and selection.enable_thinking is not None:
-            enable_thinking = selection.enable_thinking
-        else:
-            enable_thinking = _enable_thinking(body)
+        requested = requested_thinking(body)
+        enable_thinking, card = mode_card(selection, requested)
         max_tokens = _request_limit(body)
         prompt_cap = DEFAULT_MAX_PROMPT_TOKENS
         if selection is not None:
             stored = getattr(selection, "max_prompt_tokens", None)
             if isinstance(stored, int):
                 prompt_cap = stored
-        variant = selection.sampling if selection is not None else None
-        temperature, top_p, top_k = _sampling(body, enable_thinking, variant)
+        temperature, top_p, top_k = _sampling(body, enable_thinking, card)
         presence_default = None
-        if isinstance(variant, dict) and "presence_penalty" in variant:
-            presence_default = float(variant["presence_penalty"])
+        if isinstance(card, dict) and "presence_penalty" in card:
+            presence_default = float(card["presence_penalty"])
         stream = bool(body.get("stream", False))
         runtime._stop = handler._client_stopped
         runtime.tool_names = tool_names(tools)

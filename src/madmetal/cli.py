@@ -1,7 +1,7 @@
 """Select one pipeline file and run it.
 
-A model flag is the filename without ``.py``. ``--qwen38-flash-next`` loads
-``qwen38-flash-next.py`` by path, and that file loads the model's package.
+A model flag is the filename without ``.py``. ``--<pipeline>`` loads
+``<pipeline>.py`` by path, and that file loads the model's package.
 The hyphenated file is not an import.
 """
 

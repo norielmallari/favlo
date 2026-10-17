@@ -13,6 +13,6 @@ The write set for a runtime is its entry file (`<pipeline>.py`, which sets `PIPE
 
 A new runtime adds those files and one row in the runtime table in `ARCHITECTURE.md`. The command discovers the entry. Do not edit `src/madmetal/cli.py` to register it.
 
-Do not edit another pipeline's package, shaders, tests, or docs. Do not add a base class or a kernel that branches on the pipeline. Do not change `src/madmetal/` unless the task is the listener, the registry, or the console. The sampling tables in `registry.py` are the Flash Next card. Pass `variants` from the pipeline that owns the row.
+Do not edit another pipeline's package, shaders, tests, or docs. Do not add a base class or a kernel that branches on the pipeline. Do not change `src/madmetal/` unless the task is the listener, the registry, or the console. Registration loads `sampling.py` from the pipeline that owns the row. Do not pass a sampling card into the registry.
 
 A pipeline's kernels, records, and cache are described in that pipeline's `docs/<pipeline>/` note. Root `ARCHITECTURE.md` is the process and the write set.

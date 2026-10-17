@@ -9,7 +9,7 @@ Every equation in a pipeline comes from a public paper, spec, or vendor document
 
 Score a formula on this runtime's own forward. An int4 argmax is not evidence the equation is right. Check the BF16 shader dot of the checkpoint values.
 
-Record the citation in REFERENCES.md and the as-built form in ARCHITECTURE.md.
+Record a pipeline citation in that pipeline's references note, and a process citation in REFERENCES.md. The as-built form goes in that pipeline's note, or in ARCHITECTURE.md when the change is the listener, the registry, or the console.
 
 ## Examples
 

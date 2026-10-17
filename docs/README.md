@@ -5,7 +5,9 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | Path | Contents |
 |---|---|
 | [qwen38-flash-next/architecture.md](qwen38-flash-next/architecture.md) | Qwen3.8-Flash-Next pipeline contract |
+| [qwen38-flash-next/references.md](qwen38-flash-next/references.md) | Papers and specifications for that pipeline |
 | [qwen38-27b/README.md](qwen38-27b/README.md) | Qwen3.8-27B pipeline contract |
+| [qwen36-35b-a3b/README.md](qwen36-35b-a3b/README.md) | Qwen3.6-35B-A3B pipeline contract |
 | [qwen38-flash-next/record.md](qwen38-flash-next/record.md) | Metal record layout and tier rules |
 | [qwen38-flash-next/ngram.md](qwen38-flash-next/ngram.md) | n-gram hash and injection |
 | [qwen38-flash-next/schedule.md](qwen38-flash-next/schedule.md) | Prefill, decode, and quantize schedule |

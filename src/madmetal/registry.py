@@ -6,33 +6,14 @@ directory. A variant is a sampling row on the same record.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
-VARIANTS = ("thinking", "instruct")
-
-# Flash Next model card, used when a pipeline does not pass its own.
-# Another runtime passes ``variants`` and does not replace these tables.
-THINKING = {
-    "temperature": 1.0,
-    "top_p": 0.95,
-    "top_k": 20,
-    "presence_penalty": 0.0,
-}
-INSTRUCT = {
-    "temperature": 0.7,
-    "top_p": 0.8,
-    "top_k": 20,
-    "presence_penalty": 1.5,
-}
-
-
-def card_variants() -> dict[str, dict[str, float | int]]:
-    return {"thinking": dict(THINKING), "instruct": dict(INSTRUCT)}
+_CARD_FIELDS = ("temperature", "top_p", "top_k", "presence_penalty")
 
 
 def models_dir(root: Path | None = None) -> Path:
@@ -41,25 +22,6 @@ def models_dir(root: Path | None = None) -> Path:
 
 def registry_path(root: Path | None = None) -> Path:
     return models_dir(root) / "registry.json"
-
-
-def record_name(source: Path, widths: Sequence[int]) -> str:
-    """Directory stem from the quants that contain experts. Wider quants come first."""
-    tags: list[str] = []
-    for bits in sorted({int(item) for item in widths}, reverse=True):
-        if bits == 8:
-            tags.append("fp8")
-        elif bits == 4:
-            tags.append("fp4")
-        elif bits == 2:
-            tags.append("int2")
-        else:
-            message = f"expert quant {bits} is not 2, 4, or 8"
-            raise ValueError(message)
-    if not tags:
-        message = "quant map has no widths"
-        raise ValueError(message)
-    return f"{source.name}-madmetal-" + "-".join(tags)
 
 
 @dataclass
@@ -74,8 +36,9 @@ class Selection:
     sampling: dict[str, float | int] | None
     kv_cache: str
     resident_percent: float | None
-    enable_thinking: bool | None
     max_prompt_tokens: int | None
+    variants: dict[str, dict[str, float | int]] | None = None
+    default_variant: str | None = None
 
 
 def load_registry(root: Path | None = None) -> dict[str, Any]:
@@ -145,7 +108,6 @@ def add_model(
     source: str | None = None,
     root: Path | None = None,
     pipeline: str,
-    variants: dict[str, dict[str, float | int]] | None = None,
     max_prompt_tokens: int | None = None,
 ) -> dict[str, Any]:
     data = load_registry(root)
@@ -159,7 +121,6 @@ def add_model(
         alias=alias,
         source=source,
         pipeline=pipeline,
-        variants=variants,
         max_prompt_tokens=max_prompt_tokens,
     )
     save_registry(data, root)
@@ -185,27 +146,25 @@ def register_quantized(
     alias: str | None,
     root: Path | None = None,
     pipeline: str,
-    variants: dict[str, dict[str, float | int]] | None = None,
     max_prompt_tokens: int | None = None,
 ) -> None:
     """Write or update the entry for a record this quantize just produced."""
     data = load_registry(root)
     _check_alias(data, alias, folder)
     source_text = str(source)
+    variants, default_variant = pipeline_sampling(pipeline)
     current = data["models"].get(folder)
     if current is not None:
         stored = current.get("source")
         if stored and _same_path(stored, source):
-            changed = False
+            current["variants"] = variants
+            current["default_variant"] = default_variant
             if alias is not None:
                 current["alias"] = alias
-                changed = True
             if max_prompt_tokens is not None:
                 current["max_prompt_tokens"] = max_prompt_tokens
                 current.pop("max_tokens", None)
-                changed = True
-            if changed:
-                save_registry(data, root)
+            save_registry(data, root)
             return
         message = f"{folder} is already registered for a different source"
         raise ValueError(message)
@@ -213,7 +172,6 @@ def register_quantized(
         alias=alias,
         source=source_text,
         pipeline=pipeline,
-        variants=variants,
         max_prompt_tokens=max_prompt_tokens,
     )
     save_registry(data, root)
@@ -239,13 +197,12 @@ def resolve(model: str, *, root: Path | None = None, resident: str | None = None
         message = "model id is empty"
         raise LookupError(message)
     base, variant = _split_variant(text)
-    folder = _folder_for(data, base)
-    if folder is None or variant is False:
-        known = _known_names(data)
-        message = f"unknown model {text}"
-        if known:
-            message = f"{message}; known: {', '.join(known)}"
-        raise LookupError(message)
+    folder = _folder_for(data, base if variant is not None else text)
+    if folder is None:
+        _unknown(text, data)
+    names = _variant_names(data["models"][folder])
+    if variant is not None and variant not in names:
+        _unknown(text, data)
     return _selection(data, folder, text, variant, root)
 
 
@@ -260,7 +217,7 @@ def model_objects(root: Path | None = None, *, resident: str | None = None) -> l
             names.append(alias)
         for name in names:
             rows.append(_object(name, folder, None, entry, created, resident))
-            for variant in VARIANTS:
+            for variant in _variant_names(entry):
                 rows.append(_object(f"{name}:{variant}", folder, variant, entry, created, resident))
     return rows
 
@@ -339,16 +296,17 @@ def _entry(
     alias: str | None,
     source: str | None,
     pipeline: str,
-    variants: dict[str, dict[str, float | int]] | None = None,
     max_prompt_tokens: int | None = None,
 ) -> dict[str, Any]:
+    variants, default_variant = pipeline_sampling(pipeline)
     entry = {
         "pipeline": pipeline,
         "alias": alias,
         "source": source,
         "kv_cache": "e4m3",
         "resident_percent": None,
-        "variants": card_variants() if variants is None else variants,
+        "variants": variants,
+        "default_variant": default_variant,
     }
     if max_prompt_tokens is not None:
         entry["max_prompt_tokens"] = max_prompt_tokens
@@ -383,13 +341,21 @@ def _check_alias(data: dict[str, Any], alias: str | None, folder: str) -> None:
             raise ValueError(message)
 
 
-def _split_variant(text: str) -> tuple[str, str | None | bool]:
+def _split_variant(text: str) -> tuple[str, str | None]:
     if ":" not in text:
         return text, None
     base, _, suffix = text.rpartition(":")
-    if suffix in VARIANTS and base:
+    if base and suffix:
         return base, suffix
-    return text, False
+    return text, None
+
+
+def _unknown(text: str, data: dict[str, Any]) -> NoReturn:
+    known = _known_names(data)
+    message = f"unknown model {text}"
+    if known:
+        message = f"{message}; known: {', '.join(known)}"
+    raise LookupError(message)
 
 
 def _folder_for(data: dict[str, Any], base: str) -> str | None:
@@ -414,14 +380,11 @@ def _selection(
     root: Path | None,
 ) -> Selection:
     entry = data["models"][folder]
+    stored = _stored_variants(entry)
     sampling = None
-    thinking: bool | None = None
-    if variant == "thinking":
-        sampling = dict(entry.get("variants", {}).get("thinking") or THINKING)
-        thinking = True
-    elif variant == "instruct":
-        sampling = dict(entry.get("variants", {}).get("instruct") or INSTRUCT)
-        thinking = False
+    if variant is not None:
+        row = stored.get(variant)
+        sampling = dict(row) if isinstance(row, dict) and row else None
     alias = entry.get("alias")
     alias_text = alias if isinstance(alias, str) and alias else None
     parent = alias_text or folder
@@ -439,8 +402,9 @@ def _selection(
         sampling=sampling,
         kv_cache=str(entry.get("kv_cache") or "e4m3"),
         resident_percent=None if percent is None else float(percent),
-        enable_thinking=thinking,
         max_prompt_tokens=_max_prompt_tokens(entry),
+        variants=stored,
+        default_variant=_default_variant(entry),
     )
 
 
@@ -499,6 +463,69 @@ def _created(root: Path | None) -> int:
 
 def _same_path(stored: str, source: Path) -> bool:
     return Path(stored).expanduser().resolve() == source.expanduser().resolve()
+
+
+def pipeline_sampling(pipeline: str) -> tuple[dict[str, dict[str, float | int]], str]:
+    """Load ``VARIANTS`` and ``DEFAULT_VARIANT`` from ``<package>/sampling.py``.
+
+    The module is loaded by path so registration does not import the pipeline.
+    """
+    package = pipeline.replace("-", "_")
+    path = _repo_root() / package / "sampling.py"
+    if not path.is_file():
+        message = f"{pipeline} has no sampling card at {package}/sampling.py"
+        raise ValueError(message)
+    spec = importlib.util.spec_from_file_location(f"{package}.sampling", path)
+    if spec is None or spec.loader is None:
+        message = f"{pipeline} sampling card could not be loaded"
+        raise ValueError(message)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    raw = getattr(module, "VARIANTS", None)
+    default = getattr(module, "DEFAULT_VARIANT", None)
+    if not isinstance(raw, dict) or not raw:
+        message = f"{pipeline} sampling card must define VARIANTS"
+        raise ValueError(message)
+    if not isinstance(default, str) or default not in raw:
+        message = f"{pipeline} DEFAULT_VARIANT must name a row in VARIANTS"
+        raise ValueError(message)
+    variants: dict[str, dict[str, float | int]] = {}
+    for name, row in raw.items():
+        if not isinstance(name, str) or not name or ":" in name:
+            message = f"{pipeline} variant name must be a single token"
+            raise ValueError(message)
+        if not isinstance(row, dict) or set(row) != set(_CARD_FIELDS):
+            message = f"{pipeline} {name} row must set {', '.join(_CARD_FIELDS)}"
+            raise ValueError(message)
+        variants[name] = {
+            "temperature": float(row["temperature"]),
+            "top_p": float(row["top_p"]),
+            "top_k": int(row["top_k"]),
+            "presence_penalty": float(row["presence_penalty"]),
+        }
+    return variants, default
+
+
+def _variant_names(entry: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(_stored_variants(entry))
+
+
+def _stored_variants(entry: dict[str, Any]) -> dict[str, dict[str, float | int]]:
+    raw = entry.get("variants")
+    if not isinstance(raw, dict):
+        return {}
+    stored: dict[str, dict[str, float | int]] = {}
+    for name, row in raw.items():
+        if isinstance(name, str) and isinstance(row, dict):
+            stored[name] = dict(row)
+    return stored
+
+
+def _default_variant(entry: dict[str, Any]) -> str | None:
+    name = entry.get("default_variant")
+    if isinstance(name, str) and name in _stored_variants(entry):
+        return name
+    return None
 
 
 def _repo_root() -> Path:

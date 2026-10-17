@@ -1,0 +1,35 @@
+# Qwen3.6-35B-A3B
+
+As-built note for the `qwen36-35b-a3b` pipeline. The process contract is [../../ARCHITECTURE.md](../../ARCHITECTURE.md). This directory wins for this pipeline's records and kernels. Another pipeline does not edit it.
+
+Clients reach this pipeline through `madmetal serve`. `GET /v1/models` lists it once a record is registered, and the `model` field on `POST /v1/chat/completions` loads it. `kernels`, `quantize`, `bf16`, `complete`, and `models` require `madmetal --qwen36-35b-a3b`. That flag loads `qwen36-35b-a3b.py`, which loads `qwen36_35b_a3b`. The package does not import `qwen38_flash_next` or `qwen38_27b`.
+
+## Kernels
+
+`kernels` compiles this package's shader library and fails if any kernel in that library does not produce a pipeline. It then dispatches the fp4 and fp8 `matmul2d` tiles, the fp4 GEMV, the 32-row projection, the float16 GEMV at 1 row and at 256 rows, one fp4 expert image of 1,671,168 bytes, the vision `linear_fc1` pad (4320 by 1280, 16 rows dropped), the head-72 online softmax, the tanh GELU, one Gated DeltaNet step, and the 8192-channel convolution. The host formulas for those dispatches live in `qwen36_35b_a3b/checks.py`.
+
+The DeltaNet state is float32, 32 heads of `128×128`. The step decays the state by \(\alpha\), writes \(\beta(v - Sk)k^\top\), and reads with the query. The output gate is SiLU. Query repeat is 2, the mixed vector is 8192 wide, and the gate is 4096 wide. Float16 vectors are cast to float in the shader that reads them. This form is what `kernels` checks. A BF16 layer step has not accepted it.
+
+## Record
+
+`quantize` streams a Hugging Face BF16 checkout into `models/`. Routed experts, the shared expert, and the MTP expert block are uniform fp4 E2M1 with an E8M0 scale every 32 along K. Each routed expert is one 1,671,168-byte image: gate-up `[1024, 2048]` then down `[2048, 512]`. Language experts are `experts/<layer>.bin`. MTP routed experts are `experts/mtp.bin`. The shared expert is the concatenation of gate and up, stored in `resident.bin` with the other resident matrices.
+
+Routers, the shared-expert coefficient, norms, `A_log`, `dt_bias`, and the convolution taps stay float16. Every other matrix, including the embedding and `lm_head`, is fp4. A finished directory has `manifest.json` with `complete: true`. Running quantize again on that directory returns it. An unfinished directory resumes from `quantize_progress.json`.
+
+`bf16` does not run a layer against the stored BF16 values.
+
+## Forward
+
+`serve` and `complete` apply the prompt in chunks of at most 2048 tokens, then sample one token at a time. A chunk's projections are fp4 `matmul2d` tiles: 64 by 64 where the output width is a multiple of 64, and 64 by 32 otherwise. The router is a float16 matrix product. Routed experts in the chunk are gathered into groups, multiplied, and scattered back onto the token rows. The sampled token is a GEMV.
+
+The position limit is the checkpoint's `max_position_embeddings` (262,144). The live key/value cache covers that limit for the 10 full-attention layers. The default width is fp8 E4M3. A key is one byte per channel with an E8M0 scale every 32 channels, contiguous across tokens. A value is one byte per channel along the token axis, with an E8M0 scale every 32 tokens. Prefill scores 2048 keys at a time on the 64 by 64 `matmul2d`, softmaxes those keys in parallel 256-key chunks, and mixes the values in one strided product. A one-token fp8 step packs the eight live query rows of a key/value head into one 8-row `matmul2d`, softmaxes 256-key chunks in parallel, and reduces the value mix in blocks of 512 keys. The value plane is read with the context length as its token stride. Softmax runs on the score tile. `e2m1` stores those planes as fp4 and uses the fp4 `matmul2d`. `f32` stores the float32 values with no quantization and keeps the float attention kernels. `serve` reads the registry row's `kv_cache`. `complete` takes `--kv-cache e4m3`, `--kv-cache e2m1`, or `--kv-cache f32`. A later prompt that begins with the tokens already in that cache continues from the first new token. The record does not store that cache.
+
+The runtime has one memory maximum. `serve --max-memory` and `complete --max-memory` set it, as a byte count or a `GiB` or `MiB` size. Omitting it uses the reclaimable memory at load. The resident record, the key/value cache, the state, and the chunk workspace are allocated inside that maximum. Language expert files stay on SSD. The atlas keeps as many whole layer files as the remaining bytes hold, and never more than the 40 layer files. A layer that does not fit is read into the least recently used slot when that layer runs. The shared expert stays in `resident.bin`.
+
+The MTP block is packed and is not drafted, so the sampled token is the backbone token. Vision weights are packed when the checkout has them. A text request does not run the tower. An audio part is not accepted by the template.
+
+Full attention splits each head's 512 `q_proj` rows into 256 query rows and 256 gate rows. Expert gate-up uses the first 512 rows as the gate and the next 512 as the up projection. Those two splits are the kernel defaults. A BF16 layer has not accepted them.
+
+The chat template is the checkout's `chat_template.jinja`. Thinking stays open unless the request sets `enable_thinking` false, which closes an empty think block in the prompt. Temperature 0 is an argmax. Stop ids are 248046 and 248044. A `tool_choice` that names one function closes thinking when the request did not set it. A function with parameters forces `<tool_call><function=name>` as the start of the completion. A function with no parameters forces that call closed and does not sample past it. Earlier assistant turns keep the closed think block, so a later prompt can continue from the cached tokens. The reply parser turns a finished call into an OpenAI `tool_calls` message.
+
+`complete` writes one greedy grove completion to `grove.json` in the record directory. `models` reads the shared registry. Registration copies the thinking and instruct rows from `sampling.py`: thinking temperature 1.0, top-p 0.95, top-k 20, presence penalty 1.5; instruct temperature 0.7, top-p 0.8, top-k 20, presence penalty 1.5. A request that omits the variant uses the thinking row, including presence penalty 1.5. `enable_thinking` false uses the instruct row from that card. The precise-coding preset (temperature 0.6, top-p 0.95, top-k 20, presence penalty 0) stays in `sampling.py`. The registry has no third variant name, so registration does not store it.

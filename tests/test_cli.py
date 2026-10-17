@@ -17,6 +17,7 @@ def test_help_lists_the_model_flag(capsys) -> None:
     captured = capsys.readouterr()
     assert "--qwen38-flash-next" in captured.out
     assert "--qwen38-27b" in captured.out
+    assert "--qwen36-35b-a3b" in captured.out
 
 
 def test_missing_flag_is_an_error(capsys) -> None:

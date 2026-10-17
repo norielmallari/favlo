@@ -12,7 +12,6 @@ from harness.benchmarks import gsm8k, humaneval, ifeval
 from harness.benchmarks.serve import Server, complete
 
 _ROOT = Path(__file__).resolve().parents[2]
-_DOC = _ROOT / "docs" / "qwen38-flash-next" / "benchmarks.md"
 _SMOKE = 30
 _MAX_TOKENS = {"ifeval": 2048, "gsm8k": 1536, "humaneval": 1024}
 
@@ -194,14 +193,25 @@ def _fmt(summary: dict[str, Any] | None) -> str:
     return f"n={summary['n']}  {summary['correct']}/{summary['n']}  {summary['accuracy']:.3f}"
 
 
+def _benchmarks_note(model: str) -> Path | None:
+    """The pipeline note for this model id, when that pipeline records scores."""
+    name = model.split(":", 1)[0]
+    path = _ROOT / "docs" / name / "benchmarks.md"
+    if path.is_file():
+        return path
+    return None
+
+
 def _write_doc(
+    model: str,
     smoke: dict[str, Any] | None,
     full: dict[str, Any] | None,
     sample: dict[str, Any] | None = None,
 ) -> None:
-    if not _DOC.is_file():
+    note = _benchmarks_note(model)
+    if note is None:
         return
-    text = _DOC.read_text()
+    text = note.read_text()
     if smoke is not None:
         smoke_block = "\n".join(f"- {name}: {_fmt(summary)}" for name, summary in smoke.items())
         text = _replace(text, "smoke", smoke_block)
@@ -211,7 +221,7 @@ def _write_doc(
     if full is not None:
         full_block = "\n".join(f"- {name}: {_fmt(summary)}" for name, summary in full.items())
         text = _replace(text, "full", full_block)
-    _DOC.write_text(text)
+    note.write_text(text)
 
 
 def _replace(text: str, name: str, body: str) -> str:
@@ -306,7 +316,7 @@ def run(
                 )
             (output / "sample.json").write_text(json.dumps(sample, indent=2) + "\n")
             if only is None:
-                _write_doc(None, None, sample)
+                _write_doc(model, None, None, sample)
             print("sample recorded", flush=True)
             return 0
         smoke: dict[str, Any] = {}
@@ -316,7 +326,7 @@ def run(
             )
         (output / "smoke.json").write_text(json.dumps(smoke, indent=2) + "\n")
         if only is None:
-            _write_doc(smoke, None)
+            _write_doc(model, smoke, None)
         print("smoke recorded", flush=True)
         if sample_only:
             return 0
@@ -326,7 +336,7 @@ def run(
                 name, server, items, output, score_row, summarize, None, model
             )
         (output / "full.json").write_text(json.dumps(full, indent=2) + "\n")
-        _write_doc(None, full)
+        _write_doc(model, None, full)
         print("full recorded", flush=True)
     except Exception as exc:
         print(exc, flush=True)
