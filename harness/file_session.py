@@ -1,20 +1,22 @@
 """Read repository files until the prompt reaches a token target.
 
-A Microsoft Agent Framework agent calls ``read_file`` on the OpenAI chat
-endpoint, then analyzes the file it got back. The model id is the thinking
-variant, so the thinking sampling row is used and ``<think>`` stays open.
-Reasoning comes back on ``reasoning_content``, and the next request sends
-that field with the reply text. The first completion of each task is required
-to call ``read_file``. Thinking stays open.
-The server stops after the first task and starts again, so the next task
-loads the prefix from disk. Later tasks keep that server. A request that
-does not extend the stored token ids stops the run.
+The file agent calls ``read_file`` on the OpenAI chat endpoint, then analyzes
+the file it got back. The model id is the pipeline name. The request sets
+``enable_thinking`` false and leaves every other sampling field unset, so the
+listener fills the instruct card. The first completion of each task is required
+to call ``read_file``. The server stops after the first task and starts again,
+so the next task loads the prefix from disk. Later tasks keep that server. A
+request that does not extend the stored token ids stops the run. Each request
+prints the server's prefill and decode lines. Those lines are the instruct
+series.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import os
 import re
 import socket
 import subprocess
@@ -63,11 +65,9 @@ def read_prompt(path: str) -> str:
     return f"Call read_file with path {path}."
 
 
-def thinking_model(model: str) -> str:
-    """The thinking sampling row, unless the id already names a variant."""
-    if ":" in model:
-        return model
-    return f"{model}:thinking"
+def model_stem(model: str) -> str:
+    """The listener selects the instruct card when the id has no variant suffix."""
+    return model.partition(":")[0]
 
 
 def source_files(root: Path) -> list[Path]:
@@ -515,7 +515,7 @@ def echo_reasoning(message: object, built: list[dict[str, object]]) -> list[dict
 def _open_agent(base_url: str, model: str, read: object) -> tuple[AsyncOpenAI, Agent]:
     http = AsyncOpenAI(api_key="madmetal", base_url=base_url, timeout=3600.0)
     client = OpenAIChatCompletionClient(
-        model=thinking_model(model),
+        model=model_stem(model),
         api_key="madmetal",
         base_url=base_url,
         async_client=http,
@@ -526,25 +526,24 @@ def _open_agent(base_url: str, model: str, read: object) -> tuple[AsyncOpenAI, A
     client.function_invocation_configuration["max_iterations"] = 1
     agent = Agent(
         client=client,
-        name="long-prompt",
+        name="file-agent",
         instructions=INSTRUCTIONS,
         tools=[read],
         default_options={
-            "temperature": 0.0,
             "tool_choice": {"mode": "required", "required_function_name": "read_file"},
-            "extra_body": {"enable_thinking": True},
+            "extra_body": {"enable_thinking": False},
         },
     )
     return http, agent
 
 
-async def run_long_prompt(
+async def run_file_agent(
     root: Path,
     target: int,
     log: Log,
     server: Server,
     *,
-    model: str = "qwen38-flash-next",
+    model: str,
 ) -> RunResult:
     """Read source files until ``prompt tokens`` reaches ``target``.
 
@@ -671,6 +670,59 @@ def _restart(server: Server, log: Log) -> None:
     _wait_listening(server.proc, log, seen)
 
 
+_LOCK = Path(__file__).resolve().parents[1] / "artifacts" / "pipeline-test.lock"
+
+
+def take_lock(pipeline: str) -> None:
+    """Exclusive machine lock. A live holder is left alone."""
+    _LOCK.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        {"pipeline": pipeline, "pid": os.getpid(), "command": "file-agent"}
+    ).encode()
+    while True:
+        if _LOCK.exists() and not _stale_lock():
+            time.sleep(5)
+            continue
+        try:
+            fd = os.open(_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            continue
+        os.write(fd, payload)
+        os.close(fd)
+        try:
+            current = json.loads(_LOCK.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if current.get("pid") == os.getpid():
+            return
+
+
+def release_lock() -> None:
+    if not _LOCK.exists():
+        return
+    try:
+        current = json.loads(_LOCK.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if current.get("pid") == os.getpid():
+        _LOCK.unlink()
+
+
+def _stale_lock() -> bool:
+    try:
+        current = json.loads(_LOCK.read_text(encoding="utf-8"))
+        pid = int(current["pid"])
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Read repository files until the prompt reaches a token target."
@@ -678,25 +730,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tokens", type=int, default=TARGET_TOKENS)
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--port", type=int, default=0)
-    parser.add_argument("--model", default="qwen38-flash-next")
+    parser.add_argument("--model", required=True)
     args = parser.parse_args(argv)
     if args.tokens < 1:
         print("token target must be positive")
         return 1
+    stem = model_stem(args.model)
+    take_lock(stem)
     log = Log()
-    port = args.port or _free_port()
-    server = Server(_spawn(port, log), port)
+    server: Server | None = None
     try:
+        port = args.port or _free_port()
+        server = Server(_spawn(port, log), port)
         _wait_listening(server.proc, log, 0)
         result = asyncio.run(
-            run_long_prompt(args.repo, args.tokens, log, server, model=thinking_model(args.model))
+            run_file_agent(args.repo, args.tokens, log, server, model=stem)
         )
     except Exception as exc:
         print(exc)
         print(log.text()[-3000:])
         return 1
     finally:
-        _stop_server(server.proc)
+        if server is not None:
+            _stop_server(server.proc)
+        release_lock()
     print(format_summary(result.requests, args.tokens))
     if result.note:
         print(result.note)

@@ -1,6 +1,6 @@
 ---
 name: optimization-loop
-description: Run the MADMetal optimization loop for one pipeline. Establish ceilings from theoretical computations on the designed kernels, cache them in that pipeline's docs, and reuse them when the kernels are unchanged. Then modify the pipeline and run full smoke tests through the long prompt. Use when optimizing a pipeline, raising prefill or decode rate, closing a kernel gap, or when the user asks for an optimization loop. The whole process is non-HITL until 90% of the ceiling is achieved. Once the long prompt passes, commit the related code on the current branch, including main.
+description: Run the MADMetal optimization loop for one pipeline. Establish ceilings from theoretical computations on the designed kernels, cache them in that pipeline's docs, and reuse them when the kernels are unchanged. Then modify the pipeline and run the smoke-testing skill. Use when optimizing a pipeline, raising prefill or decode rate, closing a kernel gap, or when the user asks for an optimization loop. The whole process is non-HITL until 90% of the ceiling is achieved. Once the agent smokes pass, commit the related code on the current branch, including main.
 ---
 
 # Optimization loop
@@ -32,9 +32,9 @@ Change this pipeline's kernels or the forward that launches them. Update `docs/<
 
 Take `artifacts/pipeline-test.lock` before any command that compiles shaders, dispatches Metal, loads a checkpoint, quantizes, or starts `madmetal serve`. The lock is one JSON object: `pipeline` (the flag stem), `pid` (this shell), `command` (the short test name). Create it with exclusive create. If a live `pid` holds it, wait. Release it when the testing stretch ends, including on failure. Remove the file only when its `pid` is this agent's.
 
-## 3. Smoke, then the long prompt
+## 3. Smoke
 
-After a modification, run the full smoke list, then the long prompt. Stop the iteration on the first failure, fix it, and rerun from that step. Do not start the long prompt while a smoke is failing.
+After a modification, run this package's checks, then load [smoke-testing](../smoke-testing/SKILL.md) and follow it. Stop the iteration on the first failure, fix it, and rerun from that step. Do not start agent smoke while a pipeline smoke is failing.
 
 1. `uv run pytest` on the tests that import only this package.
 2. The smoke commands this pipeline's `--help` lists, in this order when present: `probe`, `matmul`, `kernels`.
@@ -45,28 +45,22 @@ uv run madmetal --<pipeline> matmul
 uv run madmetal --<pipeline> kernels
 ```
 
-3. After those pass, the long prompt. It starts its own server, stops it after the first turn, and starts another so the second turn loads the prefix from disk. Do not point it at a listener already on `8129`.
-
-```text
-uv run python -m harness.long_prompt --model <pipeline>
-```
-
-The default target is 65536 tokens. Pass `--tokens` when this pipeline's prompt limit is different. The command prints prefill and decode rates. Those printed rates are the measurement.
+3. After those pass, the smoke-testing skill: pipeline smoke, then the file agent, then the coding agent.
 
 ## 4. Commit
 
-Once the long prompt passes, commit the related code on the current branch, including `main`.
+Once the agent smokes pass, commit the related code on the current branch, including `main`.
 
-Related code is this iteration's write set: the pipeline entry, package, `docs/<pipeline>/`, and tests that import only this package. When the printed rate is at least 90% of the kernel ceiling, record that rate in the pipeline note before the commit.
+Related code is this iteration's write set: the pipeline entry, package, `docs/<pipeline>/`, and tests that import only this package. When a printed series for the phase being optimized is at least 90% of the kernel ceiling, record that rate in the pipeline note before the commit.
 
 Leave models, artifacts, the machine lock, and other pipelines out of the commit. Use a Conventional Commit. Do not push.
 
-A failed smoke or a failed long prompt is not a commit.
+A failed pipeline smoke or a failed agent smoke is not a commit.
 
 ## 5. Compare
 
-A phase is done when its printed long-prompt rate is at least 90% of the kernel ceiling for that phase.
+A phase is done when its printed rate on the series for that phase is at least 90% of the kernel ceiling. The file-agent series and the coding-agent series stay separate.
 
-If it is short, modify again and run the smokes through the long prompt. Reuse the saved ceiling unless a designed kernel changed. Each long prompt is a new run. Commit again when that run passes.
+If it is short, modify again and run section 3. Reuse the saved ceiling unless a designed kernel changed. Each agent smoke is a new run. Commit again when that run passes.
 
 When 90% is met, report the ceiling and the printed rate. Do not write that rate into another pipeline's note.

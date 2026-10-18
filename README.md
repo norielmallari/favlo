@@ -15,10 +15,10 @@ Each runtime keeps its own package, kernels, and as-built note. The pipelines ar
 ```text
 uv sync --extra dev
 uv run madmetal serve
-uv run python -m harness --workspace ./note-workspace
+uv run python -m harness.file_agent --base-url http://127.0.0.1:8129/v1 --workspace ./note-workspace
 ```
 
-The harness is a [Microsoft Agent Framework](https://github.com/microsoft/agent-framework) client. It creates a file, replaces its text, and confirms the result. `python -m harness.long_prompt` reads repository files across turns until the prompt reaches the `--tokens` target and prints prefill and decode rates. The server stops after the first turn and starts again, so the second turn loads the prefix from disk. Later turns stay on that server. A request that does not extend the stored token ids stops the run.
+The harness is a [Microsoft Agent Framework](https://github.com/microsoft/agent-framework) client. `python -m harness.file_agent` creates a file, replaces its text, and confirms the result against a server that is already listening. `python -m harness --model <pipeline>` starts `serve`, reads repository files until the prompt reaches the `--tokens` target (default 65536), and prints prefill and decode rates. The request sets `enable_thinking` false. The server stops after the first turn and starts again, so the second turn loads the prefix from disk. Later turns stay on that server. A request that does not extend the stored token ids stops the run. `python -m harness.coding --model <pipeline>` sets `enable_thinking` true. The model writes `ledger.py`. Exit 0 is a pass, and the command prints that run's prefill and decode lines.
 
 ## Development
 

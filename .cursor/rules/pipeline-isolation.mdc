@@ -19,7 +19,7 @@ A pipeline's kernels, records, and cache are described in that pipeline's `docs/
 
 ## Machine lock
 
-Wait until the machine is free before a test command. That includes `pytest`, `kernels`, `quantize`, `complete`, `bf16`, `probe`, `matmul`, and `python -m harness.long_prompt`: any command that compiles shaders, dispatches Metal, loads a checkpoint, quantizes, or starts `madmetal serve`. Editing the write set does not wait. Reading another pipeline does not.
+Wait until the machine is free before a test command. That includes `pytest`, `kernels`, `quantize`, `complete`, `bf16`, `probe`, `matmul`, `python -m harness`, and `python -m harness.coding`: any command that compiles shaders, dispatches Metal, loads a checkpoint, quantizes, or starts `madmetal serve`. Editing the write set does not wait. Reading another pipeline does not.
 
 The machine is busy when either of these is true:
 

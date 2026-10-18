@@ -16,8 +16,14 @@ SESSION_ROUNDS = 8
 
 
 def chat_body(model: str, messages: list[dict[str, Any]], request: Request) -> dict[str, object]:
-    """One completion body. Sampling comes from the thinking card."""
-    body = completion_body(model, messages, None, request)
+    """Bare model id and ``enable_thinking``. The listener fills the thinking card."""
+    del request
+    body = completion_body(
+        model.partition(":")[0],
+        messages,
+        None,
+        Request(enable_thinking=True),
+    )
     body["tools"] = TOOLS
     return body
 

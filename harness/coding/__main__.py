@@ -1,6 +1,8 @@
 """Build one Python module through ``serve`` and grade it.
 
-The request uses the model's thinking card. The hidden suite is the result.
+The model id is the pipeline name. The request sets ``enable_thinking`` true
+and leaves every other sampling field unset. The hidden suite is the result.
+Each request's server prefill and decode lines are the thinking series.
 
     uv run python -m harness.coding --model qwen38-27b
 """
@@ -14,15 +16,10 @@ import sys
 import time
 from pathlib import Path
 
-from harness.benchmarks.serve import (
-    Request,
-    Server,
-    apply_sampling,
-    card_model_id,
-    fetch_sampling,
-)
+from harness.benchmarks.serve import Request, Server
 from harness.coding.grade import grade
 from harness.coding.loop import run_session
+from harness.file_session import format_request, format_summary, parse_requests
 
 _ROOT = Path(__file__).resolve().parents[2]
 _LOCK = _ROOT / "artifacts" / "pipeline-test.lock"
@@ -45,9 +42,8 @@ def main(argv: list[str] | None = None) -> int:
     server = Server()
     try:
         server.start()
-        sampling = fetch_sampling(server.port, card_model_id(args.model, thinking=True))
-        request = apply_sampling(Request(enable_thinking=True), sampling)
-        run_session(server.port, args.model, request, workspace)
+        run_session(server.port, stem, Request(enable_thinking=True), workspace)
+        _print_rates(server.log.text())
         result = grade(workspace)
     finally:
         server.stop()
@@ -57,6 +53,13 @@ def main(argv: list[str] | None = None) -> int:
     if result.returncode == 0:
         print("passed")
     return result.returncode
+
+
+def _print_rates(log_text: str) -> None:
+    requests = parse_requests(log_text)
+    for index, request in enumerate(requests, start=1):
+        print(format_request(index, request), flush=True)
+    print(format_summary(requests, 0), flush=True)
 
 
 def take_lock(pipeline: str) -> None:

@@ -1,6 +1,6 @@
 ---
 name: bootstrap-new-model
-description: Add one MADMetal inference pipeline without editing any other model. Use when creating, bootstrapping, or scaffolding a new model or pipeline, when the user asks to isolate a model from the others, or when checking that a new model works with its smoke tests and long prompt.
+description: Add one MADMetal inference pipeline without editing any other model. Use when creating, bootstrapping, or scaffolding a new model or pipeline, when the user asks to isolate a model from the others, or when checking that a new model works with its pipeline smokes and agent smokes.
 ---
 
 # Bootstrap a new model
@@ -47,23 +47,19 @@ Re-implement the math from this model's papers, model card, and the vendor docum
 
 Prefill, decode, and calibration are Metal shaders. A missing kernel stays missing. A weight plane is a format whose op compiles and whose dispatch completes. Do not invent routing hits, energies, or token rates.
 
-## Smoke, then the long prompt
+## Smoke
 
-Run the smoke checks before any long generation. Stop if one fails. Do not start `madmetal serve` yourself, and do not leave another model resident. The long-prompt harness starts its own server, stops it after the first turn, and starts another so the second turn loads the prefix from disk.
+Run this package's checks, then load [smoke-testing](../smoke-testing/SKILL.md) and follow it. Stop if one fails. Do not start `madmetal serve` yourself, and do not leave another model resident.
 
 1. `uv run pytest` on the tests that import only `<package>`.
 2. `uv run madmetal --<pipeline> kernels` when this pipeline has that command. It compiles the shader library and runs that package's dispatch checks.
-3. After both have passed, run the long prompt against this model:
+3. After both have passed, the smoke-testing skill on this model: pipeline smoke, then the file agent, then the coding agent.
 
-```text
-uv run python -m harness.long_prompt --model <pipeline>
-```
-
-The default target is 65536 tokens. Pass `--tokens` when this pipeline's prompt limit is different. The command prints prefill and decode rates. Record those measured rates in this pipeline's note. Do not invent them, and do not write them into another pipeline's note.
+Record the printed file-agent series and coding-agent series in this pipeline's note. Do not invent them, and do not write them into another pipeline's note.
 
 ## Done when
 
 - `uv run madmetal --<pipeline> --help` lists this pipeline's commands.
-- The smoke checks above passed, and the long prompt then finished on this model.
+- The pipeline smokes and both agent smokes passed on this model.
 - The runtime table and `docs/README.md` each have one new row.
 - `git diff` does not touch another pipeline.
