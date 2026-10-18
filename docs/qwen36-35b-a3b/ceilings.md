@@ -1,6 +1,6 @@
 # Ceilings
 
-Kernel and bandwidth ceilings for the kernels this pipeline runs. Reuse these figures while those kernels are unchanged. Recompute this note when one of them changes. The value mix now reads float32 attention weights. The times below were measured when those weights were float16.
+Kernel and bandwidth ceilings for the kernels this pipeline runs. Reuse these figures while those kernels are unchanged. Recompute this note when one of them changes. Projection times are the earlier measurement. The attention rows were measured again after softmax began writing float32 weights.
 
 Each time is one command buffer, then a wait. Overlapping command buffers are not added. The times are the median of four samples after one discarded sample.
 
@@ -8,7 +8,7 @@ A 2 GiB streaming read finished in 7093.5 µs, 302.74 GB/s. The bandwidth ceilin
 
 ## Decode
 
-One token. Weights are fp4. K and V are fp8 E4M3. The forward is 30 Gated DeltaNet layers, 10 attention layers, and the head. Top 8 routed experts. `gdn_in_proj` is the fused qkv, z, a, and b projection. `gemv_fp4_vec` is the output projection, the attention output, the shared expert, and the head. `router_coeff` is the float16 router and the shared-expert coefficient. `moe_gate_silu` and `moe_down_mix` read eight expert images. `rmsnorm_f32` is the layer norm, including the final norm. Attention is two key/value heads: `prefill_fp8_m8` scores the span, the three softmax kernels reduce it, and `kv_pv_split8` with `kv_part_sum` mixes values in blocks of 512.
+One token. Weights are fp4. K and V are fp8 E4M3. The forward is 30 Gated DeltaNet layers, 10 attention layers, and the head. Top 8 routed experts. `gdn_in_proj` is the fused qkv, z, a, and b projection. `gemv_fp4_vec` is the output projection, the attention output, the shared expert, and the head. `router_coeff` is the float16 router and the shared-expert coefficient. `moe_gate_silu` and `moe_down_mix` read eight expert images. `rmsnorm_f32` is the layer norm, including the final norm. Attention is two key/value heads: `prefill_fp8_m8` scores the span and the three softmax kernels reduce it. The value mix encodes `kv_cast_probs`, `kv_pv_split8`, `kv_scale_partial`, and `kv_acc_add` once per 512-key block, all in one command buffer for that head.
 
 | Kernel | Shape | Count | µs |
 |---|---|---:|---:|
@@ -27,23 +27,23 @@ One token. Weights are fp4. K and V are fp8 E4M3. The forward is 30 Gated DeltaN
 | `gemv_fp4_vec` head | 248320×2048 | 1 | 929.3 |
 | `prefill_fp8_m8` | 8×2048, inner 256 | 20 | 28.4 |
 | `kv_softmax_max` | 2048 keys, 8 rows | 20 | 4.1 |
-| `kv_softmax_prob` | 2048 keys, 8 rows | 20 | 4.4 |
+| `kv_softmax_prob` | 2048 keys, 8 rows | 20 | 15.7 |
 | `kv_softmax_close` | 8 rows | 20 | 4.1 |
-| `kv_pv_split8` | 512-key blocks, span 2048 | 20 | 7.7 |
-| `kv_part_sum` | 4 blocks | 20 | 2.8 |
+| value mix | 4 blocks of 512 keys | 20 | 46.3 |
 
-That sum is 8.99 ms, 111.24 tok/s. A context of 65536 tokens uses the same projections and replaces the attention rows:
+That sum is 9.93 ms, 100.68 tok/s. A context of 65536 tokens uses the same projections and replaces the attention rows:
 
 | Kernel | Shape | Count | µs |
 |---|---|---:|---:|
 | `prefill_fp8_m8` | 8×65536, inner 256 | 20 | 110.3 |
 | `kv_softmax_max` | 65536 keys, 8 rows | 20 | 7.4 |
-| `kv_softmax_prob` | 65536 keys, 8 rows | 20 | 9.0 |
+| `kv_softmax_prob` | 65536 keys, 8 rows | 20 | 36.1 |
 | `kv_softmax_close` | 8 rows | 20 | 5.2 |
-| `kv_pv_split8` | 512-key blocks, span 65536 | 20 | 47.3 |
-| `kv_part_sum` | 128 blocks | 20 | 25.4 |
+| value mix | 128 blocks of 512 keys | 20 | 1788.3 |
 
-That token is 12.05 ms, 82.97 tok/s. The byte count is the resident projections, eight expert images per layer, the float16 routers and coefficients, the head, the GDN state read and write, K and V across the visible tokens, and the score and probability writes. Context 2048 is 1,745,018,880 bytes, 5.76 ms, 173.49 tok/s. Context 65536 is 2,476,400,640 bytes, 8.18 ms, 122.25 tok/s. The 90% test for decode uses the kernel ceiling.
+That token is 46.91 ms, 21.32 tok/s. One 512-key block in its own command buffer is `kv_cast_probs` 22.1 µs, `kv_pv_split8` 30.3 µs, `kv_scale_partial` 7.1 µs, and `kv_acc_add` 7.0 µs. Those four figures are not multiplied. The value-mix row is the block loop in the one buffer the forward encodes.
+
+The byte count is the resident projections, eight expert images per layer, the float16 routers and coefficients, the head, the GDN state read and write, K and V across the visible tokens, the float32 score and probability writes, the float16 probability scratch, and one float scale per row per block. Context 2048 is 1,746,332,160 bytes, 5.77 ms, 173.36 tok/s. Context 65536 is 2,518,425,600 bytes, 8.32 ms, 120.21 tok/s. The 90% test for decode uses the kernel ceiling.
 
 The embed, the query/gate split, RoPE, the top-8 pick, and the key/value store are not in this total.
 
@@ -70,9 +70,11 @@ One chunk of 2048 tokens, then a prompt of 65536 tokens as 32 of those chunks. P
 | `prefill_fp4_n64` o | 10 | 1411.7 |
 | `prefill_fp8_n64` score | 20 | 651.8 |
 | `kv_softmax_max_rows` | 20 | 245.5 |
-| `kv_softmax_prob_rows` | 20 | 512.3 |
+| `kv_softmax_prob_rows` | 20 | 1074.5 |
 | `kv_softmax_close` | 20 | 61.9 |
+| `kv_cast_probs` | 20 | 923.4 |
 | `prefill_fp8_n64_stride` | 20 | 775.9 |
+| `kv_scale_partial` | 20 | 60.6 |
 | `kv_acc_add` | 20 | 161.0 |
 | `prefill_fp4_n64` shared up | 40 | 362.3 |
 | `prefill_fp4_n64` shared down | 40 | 180.8 |
@@ -89,6 +91,10 @@ One chunk of 2048 tokens, then a prompt of 65536 tokens as 32 of those chunks. P
 | `scatter_add_grouped` | 40 | 609.1 |
 | `residual_rows` | 40 | 55.9 |
 
-The first chunk, one 2048-key window per head, is 1315.2 ms, 1557.15 tok/s. A 4096-key window is `prefill_fp8_n64` 1295.8 µs, `kv_softmax_max_rows` 370.5 µs, `kv_softmax_prob_rows` 789.6 µs, `kv_softmax_close` 63.9 µs, `prefill_fp8_n64_stride` 1570.1 µs, and `kv_acc_add` 177.7 µs, 4267.6 µs together. The 65536-token prompt, composed with those windows, is 62542.7 ms, 1047.86 tok/s. That is the kernel ceiling for prefill. The byte count repeats the projections, all 256 expert images, and the float16 routers on every chunk, and adds the GDN state read and write, the K and V bytes of each window, and the score and probability writes. One first chunk is 22,077,235,200 bytes. The 65536-token prompt is 2,714,358,251,520 bytes, 8.96 s at 303.13 GB/s, 7318.91 tok/s. The 90% test for prefill uses the kernel ceiling.
+The attention window is the only part of a chunk that changes with the keys already stored. Without that window, one chunk is 1267.066 ms. A 2048-key window is `prefill_fp8_n64` 651.8 µs, `kv_softmax_max_rows` 245.5 µs, `kv_softmax_prob_rows` 1074.5 µs, `kv_softmax_close` 61.9 µs, `kv_cast_probs` 923.4 µs, `prefill_fp8_n64_stride` 775.9 µs, `kv_scale_partial` 60.6 µs, and `kv_acc_add` 161.0 µs, 3954.6 µs together. A 4096-key window is `prefill_fp8_n64` 1295.8 µs, `kv_softmax_max_rows` 370.5 µs, `kv_softmax_prob_rows` 1564.6 µs, `kv_softmax_close` 63.9 µs, `kv_cast_probs` 2422.4 µs, `prefill_fp8_n64_stride` 1570.1 µs, `kv_scale_partial` 60.6 µs, and `kv_acc_add` 177.7 µs, 7525.6 µs together. The first chunk, one 2048-key window per head, is 1346.2 ms, 1521.37 tok/s.
+
+A prompt of 65536 tokens is 32 chunks. Chunk n sees n×2048 keys: the floor of n/2 windows of 4096 keys, and one 2048-key window when n is odd. One head walks 256 windows of 4096 keys and 16 windows of 2048 keys. Ten layers and two heads make 20 of each. That prompt is 80342.7 ms, 815.71 tok/s. That is the kernel ceiling for prefill.
+
+The byte count repeats the projections, all 256 expert images, and the float16 routers on every chunk, and adds the GDN state read and write, the K and V bytes of each window, the float32 score and probability writes, the float16 probability scratch, and one float scale per row per window. One first chunk is 24,762,900,480 bytes. The 65536-token prompt is 4,132,053,975,040 bytes, 13.65 s at 302.74 GB/s, 4801.58 tok/s. The 90% test for prefill uses the kernel ceiling.
 
 The embed, the coefficient row, the top-8 pick, the query/gate split, RoPE, the key/value store, and the grouped SiLU after the expert tile are not in this total.
