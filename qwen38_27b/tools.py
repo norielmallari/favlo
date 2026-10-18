@@ -131,8 +131,9 @@ class StreamText:
     argument pieces concatenate to one JSON object.
     """
 
-    def __init__(self, thinking: bool) -> None:
+    def __init__(self, thinking: bool, *, tools: bool = True) -> None:
         self._reasoning = thinking
+        self._tools = tools
         self._held = ""
         self._in_call = False
         self._tool = ""
@@ -179,6 +180,10 @@ class StreamText:
         return out
 
     def _push_reply(self) -> list[tuple[str, Any]]:
+        if not self._tools:
+            emit = self._held
+            self._held = ""
+            return [("content", emit)] if emit else []
         at = self._held.find(_TOOL_OPEN)
         if at >= 0:
             emit = self._held[:at]

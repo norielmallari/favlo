@@ -492,38 +492,51 @@ def _matmul_stride(
 def _pv_split8(
     runtime: Any, data_off: int, scale_off: int, rows: int, span: int, slot: int
 ) -> None:
-    """Mix each 512-key block with its own float16 scale, then add it."""
+    """Mix every 512-key block of this head in one dispatch."""
+    blocks = span // BLOCK
+    _cast_probs(runtime, runtime.plane_probs, rows, BLOCK, span, 0, blocks)
     name = "kv_pv_split8"
     width = int(runtime.session.pipes[name].threadExecutionWidth())
-    for index in range(span // BLOCK):
-        _cast_probs(runtime, runtime.plane_probs, rows, BLOCK, span, index * BLOCK)
-        _encode(
-            runtime,
-            name,
-            [
-                (runtime.plane_prob_half, 0),
-                (runtime.v_cache[slot], data_off + index * BLOCK),
-                (runtime.v_cache[slot], scale_off + (index * BLOCK) // 32),
-                (runtime.plane_partial, 0),
-            ],
-            [
-                _u32(rows),
-                _u32(HEAD),
-                _u32(BLOCK),
-                _u32(BLOCK),
-                _u32(runtime.max_pos),
-            ],
-            (HEAD // 64, 1, 1),
-            (width * 4, 1, 1),
-        )
-        _scale_partial(runtime, runtime.plane_partial, rows, HEAD)
-        _acc_add(runtime, rows)
+    _encode(
+        runtime,
+        name,
+        [
+            (runtime.plane_prob_half, 0),
+            (runtime.v_cache[slot], data_off),
+            (runtime.v_cache[slot], scale_off),
+            (runtime.plane_parts, 0),
+            (runtime.plane_row_scale, 0),
+        ],
+        [
+            _u32(rows),
+            _u32(HEAD),
+            _u32(BLOCK),
+            _u32(BLOCK),
+            _u32(runtime.max_pos),
+        ],
+        (HEAD // 64, blocks, 1),
+        (width * 4, 1, 1),
+    )
+    _encode(
+        runtime,
+        "kv_part_sum",
+        [(runtime.plane_parts, 0), (runtime.plane_acc, 0)],
+        [_u32(blocks), _u32(rows * HEAD)],
+        ((rows * HEAD + 255) // 256, 1, 1),
+        (256, 1, 1),
+    )
 
 
 def _cast_probs(
-    runtime: Any, source: Any, rows: int, cols: int, src_stride: int, src_col: int
+    runtime: Any,
+    source: Any,
+    rows: int,
+    cols: int,
+    src_stride: int,
+    src_col: int,
+    blocks: int = 1,
 ) -> None:
-    """Pack one window of float32 weights into float16, one scale per row."""
+    """Pack float32 weights into float16, one scale per row of each block."""
     _encode(
         runtime,
         "kv_cast_probs",
@@ -532,20 +545,22 @@ def _cast_probs(
             (runtime.plane_prob_half, 0),
             (runtime.plane_row_scale, 0),
         ],
-        [_u32(cols), _u32(src_stride), _u32(src_col)],
-        (rows, 1, 1),
+        [_u32(cols), _u32(src_stride), _u32(src_col), _u32(rows)],
+        (rows, blocks, 1),
         (32, 1, 1),
     )
 
 
-def _scale_partial(runtime: Any, dest: Any, rows: int, channels: int) -> None:
+def _scale_partial(
+    runtime: Any, dest: Any, rows: int, channels: int, blocks: int = 1
+) -> None:
     """Undo the per-row scale after the float16 value mix."""
     _encode(
         runtime,
         "kv_scale_partial",
         [(dest, 0), (runtime.plane_row_scale, 0)],
-        [_u32(channels)],
-        (rows, 1, 1),
+        [_u32(channels), _u32(rows)],
+        (rows, blocks, 1),
         (channels, 1, 1),
     )
 

@@ -354,6 +354,11 @@ def test_tool_call_arguments_join_as_json() -> None:
     )
     assert arguments == '{"count": "6"}'
     assert events[0] == ("tool_start", {"index": 0, "id": "call_0", "name": "grove"})
+    plain = StreamText(False, tools=False)
+    pieces: list[tuple[str, object]] = []
+    pieces.extend(plain.push(text))
+    pieces.extend(plain.finish())
+    assert pieces == [("content", text)]
 
 
 def test_openai_client_receives_a_token_before_generation_ends(monkeypatch: pytest.MonkeyPatch) -> None:

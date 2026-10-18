@@ -32,20 +32,20 @@ A warm language step, projections and mixers in one command buffer, measured 63.
 
 ## Attention weights
 
-Softmax writes float32 weights. `matmul2d` does not accept a float activation against fp8 values, so each value-mix window divides by that row's peak, multiplies in float16, and restores the peak. These times are one command buffer each, the median of five dispatches after one discarded sample. The value stride is 262144. `kv_pv_split8` is one 512-key block and eight query rows. The streaming bandwidth above is 254.6 GB/s.
+Softmax writes float32 weights. `matmul2d` does not accept a float activation against fp8 values, so each 512-key block divides by that row's peak, multiplies in float16, and restores the peak in the same dispatch. One decode head runs `kv_softmax_max`, `kv_softmax_prob`, `kv_softmax_close`, then `kv_cast_probs` over every block, `kv_pv_split8` over every block, and `kv_part_sum`. These times are one command buffer each, the median of five dispatches after one discarded sample. The value stride is 262144. The streaming bandwidth above is 254.6 GB/s.
 
-| Context | `kv_softmax_max` | `kv_softmax_prob` | `kv_softmax_close` | `kv_cast_probs` | `kv_pv_split8` | `kv_scale_partial` |
+| Context | `kv_softmax_max` | `kv_softmax_prob` | `kv_softmax_close` | `kv_cast_probs` | `kv_pv_split8` | `kv_part_sum` |
 |---|---:|---:|---:|---:|---:|---:|
-| 2048 | 8.4 | 15.6 | 15.1 | 21.8 | 30.2 | 7.1 |
-| 8192 | 8.8 | 15.8 | 15.1 | 21.9 | 30.3 | 7.5 |
-| 32768 | 12.0 | 22.2 | 17.2 | 22.0 | 30.3 | 7.0 |
-| 65536 | 5.2 | 13.3 | 7.6 | 7.6 | 10.4 | 2.9 |
-| 262144 | 10.9 | 59.6 | 13.2 | 7.6 | 11.0 | 2.7 |
+| 2048 | 9.7 | 15.6 | 15.4 | 22.1 | 32.7 | 10.7 |
+| 8192 | 8.8 | 15.9 | 5.8 | 7.8 | 12.7 | 3.6 |
+| 32768 | 4.1 | 7.9 | 6.1 | 8.9 | 30.2 | 5.5 |
+| 65536 | 4.7 | 11.9 | 7.0 | 12.1 | 54.9 | 8.0 |
+| 262144 | 8.8 | 39.0 | 9.7 | 27.5 | 344.8 | 16.8 |
 
-Times are microseconds. A figure under about 30 µs is dispatch and clock noise: the 512-key block does not get slower as the cache stride stays 262144.
+Times are microseconds. A figure under about 30 µs is dispatch and clock noise.
 
-One decode token uses one softmax span for the live context, then `context / 512` blocks of cast, value mix, and scale. That is one head. The language stack has 4 key/value heads and 16 full-attention layers, so 64 of those head steps. Each kernel is timed alone, so the sum counts one dispatch per block. At 65536 tokens the softmax is 26.1 µs and one block is 20.9 µs, and 128 blocks make 2.70 ms per head. Across 64 heads that isolated sum is 173 ms, 5.8 tok/s. A decode step encodes the blocks in one command buffer. This sum is not that step.
+One head at 65536 tokens is 98.6 µs. The language stack has 4 key/value heads and 16 full-attention layers, so 64 of those head steps, 6.31 ms, 158 tok/s. One head at 262144 tokens is 446.6 µs, and 64 heads are 28.6 ms, 35.0 tok/s. `kv_scale_partial` is the prefill restore. Decode applies the peak inside `kv_pv_split8`.
 
-The bytes of one head at context C are the float scores read twice (64 C), the float weight write (32 C), the cast reread (32 C), the float16 window write and read (32 C), the fp8 values and their scales (264 C), and the partial write plus the scale restore (48 C). That is 472 C bytes per head, 30208 C bytes for 64 heads. At 65536 tokens that is 1.844 GiB. Divided by 254.6 GB/s the bandwidth ceiling of this traffic is 7.78 ms, 129 tok/s. At 262144 tokens it is 31.1 ms, 32.2 tok/s.
+The bytes of one head at context C are the float scores read twice (64 C), the float weight write (32 C), the cast reread (32 C), the float16 window write and read (32 C), the fp8 values and their scales (264 C), the partial write and the in-place scale (48 C), and the block reduction's read of those partials (16 C). That is 488 C bytes per head, 31232 C bytes for 64 heads. At 65536 tokens that is 1.907 GiB. Divided by 254.6 GB/s the bandwidth ceiling of this traffic is 8.04 ms, 124 tok/s. At 262144 tokens it is 32.2 ms, 31.1 tok/s. The 65536 kernel sum sits under that line because most of its dispatches are under 30 µs. The 262144 sum is the one past that noise: 28.6 ms beside the 32.2 ms bandwidth ceiling.
 
 One prefill value-mix tile, `prefill_fp8_n64_stride`, is 12288 rows by 2048 keys by 256 channels and measured 614.6 µs. That is one head of one 2048-token chunk. Sixty-four such tiles, each in its own command buffer, are 39.3 ms.

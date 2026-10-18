@@ -297,6 +297,59 @@ def check_attention(session: Session) -> None:
     _close("attention", got, expect, atol=2e-3)
 
 
+def check_attention_blocks(session: Session) -> None:
+    """Decode across two 512-key blocks. Values 1 and 2 are exact in fp8."""
+    from qwen38_27b.attn import attend_plane, bind_plane
+    from qwen38_27b.cache import plane_bytes
+
+    class Runtime:
+        pass
+
+    runtime = Runtime()
+    runtime.session = session
+    runtime.max_pos = 2048
+    runtime.k_cache = [session.zeros(plane_bytes(2048))]
+    runtime.v_cache = [session.zeros(plane_bytes(2048))]
+    bind_plane(runtime)
+    count = 1024
+    query = np.ones((count, 24, 256), dtype=np.float32)
+    key = np.ones((count, 4, 256), dtype=np.float32)
+    value = np.ones((count, 4, 256), dtype=np.float32)
+    value[512:] = np.float32(2)
+    gate = np.zeros((count, 24, 256), dtype=np.float32)
+    session.begin()
+    attend_plane(
+        runtime,
+        query=session.upload(query),
+        key=session.upload(key),
+        value=session.upload(value),
+        gate=session.upload(gate),
+        dest=session.zeros(count * 24 * 256 * 4),
+        pos0=0,
+        count=count,
+        slot=0,
+    )
+    session.end()
+    one = 1
+    dest = session.zeros(one * 24 * 256 * 4)
+    session.begin()
+    attend_plane(
+        runtime,
+        query=session.upload(np.ones((one, 24, 256), dtype=np.float32)),
+        key=session.upload(np.ones((one, 4, 256), dtype=np.float32)),
+        value=session.upload(np.full((one, 4, 256), np.float32(2))),
+        gate=session.upload(np.zeros((one, 24, 256), dtype=np.float32)),
+        dest=dest,
+        pos0=count,
+        count=one,
+        slot=0,
+    )
+    session.end()
+    got = session.download_f32(dest, one * 24 * 256).reshape(one, 24, 256)
+    expect = np.full_like(got, np.float32(0.5 * (512 + 513 * 2) / 1025))
+    _close("attention blocks", got, expect, atol=2e-3)
+
+
 CHECKS = (
     ("fp4 tile", check_fp4_tile),
     ("fp4 gemv", check_fp4_gemv),
@@ -309,6 +362,7 @@ CHECKS = (
     ("e4m3", check_e4m3),
     ("rope", check_rope),
     ("attention", check_attention),
+    ("attention blocks", check_attention_blocks),
 )
 
 

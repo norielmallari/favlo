@@ -183,6 +183,7 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
     prompt = encode_chat(
         runtime.root, messages, body.get("tools"), thinking, _reasoning_effort(body)
     )
+    emit_tools = body.get("tool_choice") != "none"
     forced, stop_after_forced = _forced_call(runtime.root, body.get("tools"), required)
     if bool(body.get("stream", False)):
         _stream(
@@ -200,6 +201,7 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
             frequency=frequency,
             logit_bias=bias,
             rng=draw,
+            emit_tools=emit_tools,
         )
         return
     started = time.perf_counter()
@@ -220,6 +222,9 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
     text = decode_text(runtime.root, tokens)
     reasoning, reply = split_thinking(text, thinking)
     content, calls = parse_tool_calls(reply if reply else text)
+    if not emit_tools:
+        calls = []
+        content = text if not thinking else (reply if reply else text)
     if calls:
         reason = "tool_calls"
     else:
@@ -299,6 +304,7 @@ def _stream(
     limit: int,
     thinking: bool,
     *,
+    emit_tools: bool = True,
     temperature: float = 0.0,
     top_p: float = 1.0,
     top_k: int = 0,
@@ -361,7 +367,7 @@ def _stream(
     )
     produced: list[int] = []
     previous = ""
-    gate = StreamText(thinking)
+    gate = StreamText(thinking, tools=emit_tools)
 
     def on_token(token: int) -> None:
         nonlocal previous

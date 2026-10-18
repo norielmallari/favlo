@@ -1673,20 +1673,25 @@ kernel void kv_cast_probs(
     constant uint& cols [[buffer(3)]],
     constant uint& src_stride [[buffer(4)]],
     constant uint& src_col [[buffer(5)]],
-    uint row [[threadgroup_position_in_grid]],
+    constant uint& row_count [[buffer(6)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_simdgroup]])
 {
+    uint row = tgid.x;
+    uint block_i = tgid.y;
+    uint src = src_col + block_i * cols;
+    uint slot = block_i * row_count + row;
     float peak = 0.0f;
     for (uint col = lane; col < cols; col += 32u) {
-        peak = max(peak, fabs(probs[row * src_stride + src_col + col]));
+        peak = max(peak, fabs(probs[row * src_stride + src + col]));
     }
     peak = simd_max(peak);
     if (lane == 0u) {
-        scales[row] = peak;
+        scales[slot] = peak;
     }
     float inv = peak > 0.0f ? 1.0f / peak : 0.0f;
     for (uint col = lane; col < cols; col += 32u) {
-        packed[row * cols + col] = half(probs[row * src_stride + src_col + col] * inv);
+        packed[slot * cols + col] = half(probs[row * src_stride + src + col] * inv);
     }
 }
 
@@ -1694,13 +1699,16 @@ kernel void kv_scale_partial(
     device float* partial [[buffer(0)]],
     device const float* scales [[buffer(1)]],
     constant uint& channels [[buffer(2)]],
-    uint row [[threadgroup_position_in_grid]],
-    uint channel [[thread_position_in_threadgroup]])
+    constant uint& row_count [[buffer(3)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 lane [[thread_position_in_threadgroup]])
 {
+    uint channel = lane.x;
     if (channel >= channels) {
         return;
     }
-    partial[row * channels + channel] *= scales[row];
+    uint slot = tgid.y * row_count + tgid.x;
+    partial[slot * channels + channel] *= scales[slot];
 }
 
 kernel void kv_pv_split8(
@@ -1708,15 +1716,18 @@ kernel void kv_pv_split8(
     device uchar* weights [[buffer(1)]],
     device uchar* scales [[buffer(2)]],
     device float* destination [[buffer(3)]],
-    constant uint& rows [[buffer(4)]],
-    constant uint& channels [[buffer(5)]],
-    constant uint& block [[buffer(6)]],
-    constant uint& row_stride [[buffer(7)]],
-    constant uint& value_stride [[buffer(8)]],
-    uint2 tgid [[threadgroup_position_in_grid]])
+    device const float* row_scales [[buffer(4)]],
+    constant uint& rows [[buffer(5)]],
+    constant uint& channels [[buffer(6)]],
+    constant uint& block [[buffer(7)]],
+    constant uint& row_stride [[buffer(8)]],
+    constant uint& value_stride [[buffer(9)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 lane [[thread_position_in_threadgroup]],
+    uint2 group_size [[threads_per_threadgroup]])
 {
     uint k0 = tgid.y * block;
-    device half* act = activation + k0;
+    device half* act = activation + tgid.y * rows * block;
     device uchar* data = weights + k0;
     device uchar* scale = scales + (k0 >> 5);
     device float* dest = destination + (tgid.y * rows * channels);
@@ -1740,6 +1751,17 @@ kernel void kv_pv_split8(
     auto tile_right = right.slice(0, int(tgid.x) * 64);
     auto tile_out = out.slice(int(tgid.x) * 64, 0);
     op.run(tile_left, tile_right, tile_out);
+    threadgroup_barrier(mem_flags::mem_device);
+    uint local = lane.x;
+    uint stride = group_size.x;
+    uint tile = 64u;
+    uint outputs = rows * tile;
+    uint channel0 = tgid.x * tile;
+    for (uint item = local; item < outputs; item += stride) {
+        uint local_row = item / tile;
+        uint channel = channel0 + (item - local_row * tile);
+        dest[local_row * channels + channel] *= row_scales[tgid.y * rows + local_row];
+    }
 }
 
 kernel void kv_part_sum(
@@ -1752,8 +1774,27 @@ kernel void kv_part_sum(
     if (tid >= width) {
         return;
     }
-    float sum = 0.0f;
-    for (uint block = 0u; block < blocks; ++block) {
+    float s0 = 0.0f;
+    float s1 = 0.0f;
+    float s2 = 0.0f;
+    float s3 = 0.0f;
+    float s4 = 0.0f;
+    float s5 = 0.0f;
+    float s6 = 0.0f;
+    float s7 = 0.0f;
+    uint block = 0u;
+    for (; block + 8u <= blocks; block += 8u) {
+        s0 += parts[(block + 0u) * width + tid];
+        s1 += parts[(block + 1u) * width + tid];
+        s2 += parts[(block + 2u) * width + tid];
+        s3 += parts[(block + 3u) * width + tid];
+        s4 += parts[(block + 4u) * width + tid];
+        s5 += parts[(block + 5u) * width + tid];
+        s6 += parts[(block + 6u) * width + tid];
+        s7 += parts[(block + 7u) * width + tid];
+    }
+    float sum = (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7);
+    for (; block < blocks; ++block) {
         sum += parts[block * width + tid];
     }
     destination[tid] += sum;
