@@ -297,6 +297,7 @@ def test_openai_client_streams_the_completion(monkeypatch: pytest.MonkeyPatch) -
     class _Runtime:
         def __init__(self) -> None:
             self.root = root
+            self.max_pos = 262144
             self._hit_limit = False
             self._halted = False
             self._stop = None

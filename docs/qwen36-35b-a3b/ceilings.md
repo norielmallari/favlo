@@ -1,6 +1,6 @@
 # Ceilings
 
-Kernel and bandwidth ceilings for the kernels this pipeline runs. Reuse these figures while those kernels are unchanged. Recompute this note when one of them changes.
+Kernel and bandwidth ceilings for the kernels this pipeline runs. Reuse these figures while those kernels are unchanged. Recompute this note when one of them changes. The value mix now reads float32 attention weights. The times below were measured when those weights were float16.
 
 Each time is one command buffer, then a wait. Overlapping command buffers are not added. The times are the median of four samples after one discarded sample.
 
