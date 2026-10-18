@@ -1233,7 +1233,7 @@ class Qwen38Runtime:
             self._prefetch_decode()
         self._capture_recurrent()
         self._forward_open = bool(getattr(self, "_kv_snap", None))
-        resident_before = self.atlas.resident_count if decode and self.atlas is not None else 0
+        streamed_before = self.atlas.streamed if decode and self.atlas is not None else 0
         try:
             logits = self._forward_body(tokens)
             self.gpu.flush()
@@ -1255,9 +1255,9 @@ class Qwen38Runtime:
             raise
         if decode and self.atlas is not None and not self._expert_miss():
             self._note_routes()
-            # A token that loaded experts is still filling the atlas. Trusting
-            # the next one would compute it twice, once before the miss replay.
-            self._atlas_trusted = self.atlas.resident_count == resident_before
+            # A load changes which images the next token needs. Leaving the ids
+            # on the device would run that token, miss, and run it again.
+            self._atlas_trusted = self.atlas.streamed == streamed_before
         if commit:
             self.tokens.extend(tokens)
             self._prefix_dirty = True
@@ -2512,7 +2512,8 @@ class Qwen38Runtime:
         pending: list[tuple[int, list[int]]] = []
         protect: set[tuple[int, int]] = set()
         for layer, choice in self._choice.items():
-            ids = [int(expert) for expert in self.gpu.read_u32(choice).tolist()]
+            raw = _buffer_slice(choice.buf, choice.offset * 4, choice.n * 4)
+            ids = [int(expert) for expert in np.frombuffer(raw, dtype=np.uint32).tolist()]
             pending.append((layer, ids))
             protect.update((layer, expert) for expert in ids)
         for layer, ids in pending:
