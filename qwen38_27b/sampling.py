@@ -1,8 +1,8 @@
 """Sampling card for Qwen3.8-27B.
 
 Registration copies this module onto the registry row. A request that names
-no variant uses ``DEFAULT_VARIANT``. The language forward is an argmax and
-does not apply these numbers.
+no variant uses ``DEFAULT_VARIANT``. The language forward applies the row
+the request selects. A request field overrides that row.
 """
 
 from typing import Any
@@ -42,7 +42,7 @@ def mode_card(
 
     A ``:thinking`` or ``:instruct`` id keeps that row. A bare id uses
     ``requested`` when the body set it, and ``DEFAULT_VARIANT`` when the body
-    omitted it. The forward does not sample from the row.
+    omitted it. The forward samples from the returned card.
     """
     variant = getattr(selection, "variant", None) if selection is not None else None
     if variant in VARIANTS:

@@ -28,6 +28,10 @@ Zihan Qiu et al. *Gated Attention for Large Language Models.* [arXiv:2505.06708]
 
 DeepSeek-AI. *DeepSeek-V3 Technical Report.* 2024. [arXiv:2412.19437](https://arxiv.org/abs/2412.19437). Multi-token prediction, equation (21): RMSNorm of the backbone residual and RMSNorm of the next token's embedding, concatenated, projected back to the hidden size, one transformer layer, and the shared head. The equation writes the residual half first. This checkpoint matches the embedding half first.
 
+Ari Holtzman et al. *The Curious Case of Neural Text Degeneration.* ICLR 2020. [arXiv:1904.09751](https://arxiv.org/abs/1904.09751). Nucleus sampling: the smallest set of tokens whose cumulative probability exceeds top-p.
+
+OpenAI. *Text generation.* [Advanced usage](https://developers.openai.com/api/docs/guides/text-generation). The logit update is `mu[j] - c[j] * frequency_penalty - presence_penalty` when `c[j] > 0`. `c[j]` counts that token in the completion so far. Temperature 0 is an argmax of the adjusted logits. A positive temperature divides the logits, then top-k, then the nucleus.
+
 ## Qwen3.6-35B-A3B
 
 Qwen Team. *Qwen3.6-35B-A3B.* Model card, April 2026. [Hugging Face](https://huggingface.co/Qwen/Qwen3.6-35B-A3B). The 40-layer 3:1 mix, 256 routed experts plus one shared expert, the sampling card, and the 262,144-token default RoPE. The YaRN factor-4 extension in that card is not enabled. The as-built note is [docs/qwen36-35b-a3b/README.md](docs/qwen36-35b-a3b/README.md).
@@ -99,4 +103,4 @@ Karl Cobbe et al. *Training Verifiers to Solve Math Word Problems.* [arXiv:2110.
 
 Mark Chen et al. *Evaluating Large Language Models Trained on Code.* [arXiv:2107.03374](https://arxiv.org/abs/2107.03374), 2021. HumanEval. pass@1 is one sample against the published tests.
 
-The harness writes a score into `docs/<pipeline>/benchmarks.md` when that file exists for the requested model id.
+The harness writes each finished suite into `docs/<pipeline>/benchmarks.md`. The checker reads the server's `content`.

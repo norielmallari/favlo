@@ -3,28 +3,43 @@
 from __future__ import annotations
 
 from harness.benchmarks import gsm8k, humaneval, ifeval
-from harness.benchmarks.serve import reply_text
+from harness.benchmarks.serve import Request, completion_body, completion_text
 
 
-def test_code_detection_prefers_a_function() -> None:
-    from harness.benchmarks.serve import _has_code
+def test_completion_body_omits_unset_sampling_fields() -> None:
+    body = completion_body(
+        "example-model",
+        [{"role": "user", "content": "2+2"}],
+        32,
+        Request(temperature=0.0, enable_thinking=False),
+    )
+    assert body["model"] == "example-model"
+    assert body["temperature"] == 0.0
+    assert body["enable_thinking"] is False
+    assert body["max_tokens"] == 32
+    assert "presence_penalty" not in body
+    assert "reasoning_effort" not in body
+    assert "top_p" not in body
 
-    assert _has_code("def f():\n    return 1\n")
-    assert not _has_code("Let me analyze the docstring.")
 
-
-def test_reply_text_drops_a_leading_close_tag() -> None:
-    assert reply_text("</think>\n\nThe answer is 4.") == "The answer is 4."
-    assert reply_text("The answer is 4.") == "The answer is 4."
-
-
-def test_scored_reply_keeps_the_answer_after_the_trace() -> None:
-    from harness.benchmarks.serve import scored_reply
-
-    raw = "Let me draft, with a comma.\n</think>\n\nThe reply has no comma."
-    assert scored_reply(raw, "", reply_only=True) == "The reply has no comma."
-    assert scored_reply("", "def f():\n    return 1\n", reply_only=False).startswith("def ")
-    assert scored_reply("", "the plan", reply_only=True) == ""
+def test_completion_text_is_the_server_content() -> None:
+    text, reason, tokens = completion_text(
+        {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": "#### 4",
+                        "reasoning_content": "def f():\n    return 1\n",
+                    },
+                }
+            ],
+            "usage": {"completion_tokens": 3},
+        }
+    )
+    assert text == "#### 4"
+    assert reason == "stop"
+    assert tokens == 3
 
 
 def test_gsm8k_matches_the_published_number() -> None:

@@ -1,4 +1,4 @@
-"""One local server and one greedy chat completion at a time."""
+"""One local server and one chat completion at a time."""
 
 from __future__ import annotations
 
@@ -9,9 +9,161 @@ import sys
 import threading
 import time
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
+
+
+@dataclass(frozen=True)
+class Request:
+    """Fields the harness sends on ``POST /v1/chat/completions``.
+
+    An omitted sampling field is left out of the body, so the server applies
+    that model's card. ``max_tokens`` is per suite.
+    """
+
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    presence_penalty: float | None = None
+    enable_thinking: bool = False
+    reasoning_effort: str | None = None
+    max_tokens: dict[str, int] | None = None
+
+    def limit(self, suite: str) -> int:
+        limits = self.max_tokens or {}
+        if suite not in limits:
+            message = f"{suite} has no max_tokens"
+            raise KeyError(message)
+        return int(limits[suite])
+
+
+def card_model_id(model: str, *, thinking: bool) -> str:
+    """The registry row whose ``sampling`` object fills omitted request fields."""
+    stem, separator, named = model.partition(":")
+    if separator and named:
+        return model
+    return f"{stem}:{'thinking' if thinking else 'instruct'}"
+
+
+def apply_sampling(request: Request, sampling: dict[str, object]) -> Request:
+    """Copy card numbers into fields the caller left unset."""
+
+    def _number(name: str, current: float | int | None, cast):
+        if current is not None:
+            return current
+        value = sampling.get(name)
+        if value is None:
+            return None
+        return cast(value)
+
+    return Request(
+        temperature=_number("temperature", request.temperature, float),
+        top_p=_number("top_p", request.top_p, float),
+        top_k=_number("top_k", request.top_k, int),
+        presence_penalty=_number("presence_penalty", request.presence_penalty, float),
+        enable_thinking=request.enable_thinking,
+        reasoning_effort=request.reasoning_effort,
+        max_tokens=request.max_tokens,
+    )
+
+
+def select_sampling(rows: list[object], model_id: str) -> dict[str, object]:
+    """The sampling card for ``model_id``.
+
+    An id that is already listed wins. A pipeline name matches the row whose
+    ``pipeline`` and ``variant`` are that name and the requested suffix.
+    """
+    stem, separator, variant = model_id.partition(":")
+    for row in rows:
+        if isinstance(row, dict) and row.get("id") == model_id:
+            return _sampling_card(row, model_id)
+    if separator and variant:
+        for row in rows:
+            if (
+                isinstance(row, dict)
+                and row.get("pipeline") == stem
+                and row.get("variant") == variant
+            ):
+                return _sampling_card(row, model_id)
+    message = f"{model_id} is not listed by GET /v1/models"
+    raise RuntimeError(message)
+
+
+def _sampling_card(row: dict[str, object], model_id: str) -> dict[str, object]:
+    sampling = row.get("sampling")
+    if isinstance(sampling, dict) and "temperature" in sampling:
+        return sampling
+    message = f"{model_id} has no sampling card"
+    raise RuntimeError(message)
+
+
+def fetch_sampling(port: int, model_id: str) -> dict[str, object]:
+    """``sampling`` from ``GET /v1/models`` for one registry id."""
+    http = urllib.request.Request(f"http://127.0.0.1:{port}/v1/models", method="GET")
+    with urllib.request.urlopen(http, timeout=30) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    rows = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        message = "GET /v1/models did not return data"
+        raise RuntimeError(message)
+    return select_sampling(rows, model_id)
+
+
+def completion_body(
+    model: str,
+    messages: list[dict[str, str]],
+    max_tokens: int,
+    request: Request,
+) -> dict[str, object]:
+    """The JSON body for one completion. Unset sampling fields are omitted."""
+    body: dict[str, object] = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "max_tokens": max_tokens,
+        "enable_thinking": request.enable_thinking,
+    }
+    if request.temperature is not None:
+        body["temperature"] = request.temperature
+    if request.top_p is not None:
+        body["top_p"] = request.top_p
+    if request.top_k is not None:
+        body["top_k"] = request.top_k
+    if request.presence_penalty is not None:
+        body["presence_penalty"] = request.presence_penalty
+    if request.reasoning_effort:
+        body["reasoning_effort"] = request.reasoning_effort
+    return body
+
+
+def completion_text(payload: dict[str, object]) -> tuple[str, str, int]:
+    """``message.content``, the finish reason, and completion tokens.
+
+    The checker scores that content. Reasoning stays on the server.
+    """
+    choices = payload["choices"]
+    if not isinstance(choices, list) or not choices:
+        message = "completion has no choices"
+        raise RuntimeError(message)
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        message = "completion choice is not an object"
+        raise RuntimeError(message)
+    message_body = choice.get("message") or {}
+    if not isinstance(message_body, dict):
+        message = "completion message is not an object"
+        raise RuntimeError(message)
+    content = message_body.get("content") or ""
+    if not isinstance(content, str):
+        message = "completion content is not a string"
+        raise RuntimeError(message)
+    usage = payload.get("usage") or {}
+    tokens = 0
+    if isinstance(usage, dict):
+        tokens = int(usage.get("completion_tokens") or 0)
+    return content, str(choice.get("finish_reason") or ""), tokens
 
 
 class Log:
@@ -100,79 +252,25 @@ def stop_server(proc: subprocess.Popen[str]) -> None:
         proc.kill()
 
 
-def _has_code(text: str) -> bool:
-    return "def " in text or "```" in text
-
-
-def reply_text(content: str) -> str:
-    """Drop one leading close tag. The prompt already closed the think block."""
-    stripped = content.lstrip()
-    if stripped.startswith("</think>"):
-        return stripped[len("</think>") :].lstrip()
-    return content
-
-
-def scored_reply(content: str, reasoning: str, *, reply_only: bool) -> str:
-    """The text a benchmark checker reads.
-
-    A close tag still in the reply marks the end of the trace. IFEval scores
-    that reply alone. An empty reply stays empty. HumanEval may read the trace
-    when the function is there and the reply is empty.
-    """
-    text = reply_text(content)
-    if "</think>" in text:
-        text = text.split("</think>", 1)[-1].lstrip()
-    if reply_only:
-        return text
-    if reasoning and not _has_code(text) and _has_code(reasoning):
-        return reasoning
-    if not text.strip():
-        return reasoning
-    return text
-
-
 def complete(
     port: int,
     messages: list[dict[str, str]],
     max_tokens: int,
+    request: Request,
     *,
-    thinking: bool = False,
-    effort: str | None = None,
-    presence: float | None = None,
-    continue_final: bool = False,
-    reply_only: bool = False,
-    model: str = "qwen38-flash-next",
+    model: str,
 ) -> tuple[str, str, int]:
-    """Greedy reply. Returns content, finish reason, and completion tokens."""
-    payload: dict[str, object] = {
-        "model": model,
-        "messages": messages,
-        "stream": False,
-        "max_tokens": max_tokens,
-        "temperature": 0,
-        "enable_thinking": thinking,
-    }
-    if effort:
-        payload["reasoning_effort"] = effort
-    if presence is not None:
-        payload["presence_penalty"] = presence
-    if continue_final:
-        payload["continue_final_message"] = True
-    body = json.dumps(payload).encode()
-    request = urllib.request.Request(
+    """One completion. Returns content, finish reason, and completion tokens."""
+    encoded = json.dumps(completion_body(model, messages, max_tokens, request)).encode()
+    http = urllib.request.Request(
         f"http://127.0.0.1:{port}/v1/chat/completions",
-        data=body,
+        data=encoded,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=max(900, max_tokens)) as response:
+    with urllib.request.urlopen(http, timeout=max(900, max_tokens)) as response:
         payload = json.loads(response.read().decode("utf-8"))
-    choice = payload["choices"][0]
-    message = choice.get("message") or {}
-    content = scored_reply(
-        message.get("content") or "",
-        message.get("reasoning_content") or "",
-        reply_only=reply_only,
-    )
-    usage = payload.get("usage") or {}
-    return content, str(choice.get("finish_reason") or ""), int(usage.get("completion_tokens") or 0)
+    if not isinstance(payload, dict):
+        message = "completion response is not an object"
+        raise RuntimeError(message)
+    return completion_text(payload)

@@ -1,8 +1,9 @@
 """Text forward. Weights are uniform fp4. The key/value cache is fp8.
 
-Generation is an argmax. The sampling card is stored for the registry and is
-not applied. A repeated span of 16 or more tokens ends the completion. A text
-request does not run the vision tower.
+Temperature 0 is an argmax. A positive temperature samples with top-k and
+top-p. Presence, frequency, and logit bias follow the OpenAI logit update.
+A repeated span of 16 or more tokens ends the completion. A text request
+does not run the vision tower.
 """
 
 from __future__ import annotations
@@ -32,12 +33,12 @@ from qwen38_27b.layout import (
     EPS,
     FULL_LAYERS,
     HIDDEN,
-    MTP_SLOT,
     INTERMEDIATE,
     KV_PROJ,
     LINEAR_LAYERS,
     LINEAR_V,
     MIX,
+    MTP_SLOT,
     Q_HEADS,
     Q_PROJ,
     THETA,
@@ -617,8 +618,29 @@ class Qwen38Runtime:
         stop_after_forced: bool = False,
         on_token: Any = None,
         on_prefill: Any = None,
+        *,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+        top_k: int = 0,
+        presence: float = 0.0,
+        frequency: float = 0.0,
+        logit_bias: dict[int, float] | None = None,
+        rng: np.random.Generator | None = None,
     ) -> list[int]:
         self._hit_limit = False
+        self._temperature = float(temperature)
+        self._top_p = float(top_p)
+        self._top_k = int(top_k)
+        self._presence = float(presence)
+        self._frequency = float(frequency)
+        self._logit_bias = dict(logit_bias or {})
+        self._rng = rng or np.random.default_rng()
+        self._sample_host = (
+            self._temperature > 0.0
+            or self._presence != 0.0
+            or self._frequency != 0.0
+            or bool(self._logit_bias)
+        )
         self._output_ids = []
         self._prefill_seconds = 0.0
         self._decode_seconds = 0.0
@@ -658,8 +680,7 @@ class Qwen38Runtime:
             elapsed = max(time.perf_counter() - started, 1e-9)
             self._prefill_seconds = elapsed
             summary = (
-                f"prefill {len(suffix) / elapsed:.2f} tok/s "
-                f"({len(suffix)} tok in {elapsed:.2f}s)"
+                f"prefill {len(suffix) / elapsed:.2f} tok/s ({len(suffix)} tok in {elapsed:.2f}s)"
             )
             self._prefill_progress = None
             self._end_phase(prefill_row, summary)
@@ -667,11 +688,12 @@ class Qwen38Runtime:
             prefill_row = None
             pending = list(forced or [])
             close_after = bool(stop_after_forced) and bool(pending)
+            counts: dict[int, int] = {}
             decode_row = self._begin_phase("decode", max_tokens, live=True)
             decode_started = time.perf_counter()
             self._mtp_accepts = 0
             self._mtp_tries = 0
-            chosen = int(nxt)
+            chosen = self._pick(nxt, counts)
             emitted = 0
             while emitted < max_tokens:
                 self._check_stop()
@@ -683,6 +705,7 @@ class Qwen38Runtime:
                 if chosen in stop or repeated_tail(out):
                     break
                 out.append(chosen)
+                counts[chosen] = counts.get(chosen, 0) + 1
                 emitted += 1
                 self._output_ids = list(out)
                 if decode_row is not None:
@@ -703,7 +726,7 @@ class Qwen38Runtime:
                     break
                 nxt_id = self.step(chosen, pos, logits=True)
                 assert nxt_id is not None
-                chosen = int(nxt_id)
+                chosen = self._pick(nxt_id, counts)
             if self._mtp_tries:
                 self._status(f"mtp {self._mtp_accepts}/{self._mtp_tries}")
             decode_elapsed = max(time.perf_counter() - decode_started, 1e-9)
@@ -732,6 +755,24 @@ class Qwen38Runtime:
             self._end_phase(prefill_row, "")
             self._end_phase(decode_row, "")
         return out
+
+    def _logits(self) -> np.ndarray:
+        return self.session.download_f32(self.logits, VOCAB)
+
+    def _pick(self, argmax_id: int, counts: dict[int, int]) -> int:
+        if not self._sample_host:
+            return int(argmax_id)
+        return sample_token(
+            self._logits(),
+            self._temperature,
+            self._top_p,
+            self._top_k,
+            self._presence,
+            self._frequency,
+            counts,
+            self._logit_bias,
+            self._rng,
+        )
 
     def _store_prefix(self) -> None:
         try:
@@ -817,6 +858,68 @@ def repeated_tail(tokens: list[int], *, minimum: int = 16) -> bool:
         if tokens[-period:] == tokens[-2 * period : -period]:
             return True
     return False
+
+
+def sample_token(
+    logits: np.ndarray,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    presence: float,
+    frequency: float,
+    counts: dict[int, int],
+    logit_bias: dict[int, float],
+    rng: np.random.Generator,
+) -> int:
+    """One token from logits.
+
+    OpenAI's penalty update is ``logit - count * frequency - presence`` when
+    ``count > 0``. Temperature 0 is the argmax of those logits. A positive
+    temperature divides the logits, keeps the top-k scores, then drops the
+    nucleus tail (Holtzman et al.).
+    """
+    scores = np.asarray(logits, dtype=np.float64)
+    if logit_bias or ((presence or frequency) and counts):
+        scores = np.array(scores, copy=True)
+        for token, bias in logit_bias.items():
+            index = int(token)
+            if 0 <= index < scores.size:
+                scores[index] += float(bias)
+        for token, count in counts.items():
+            if count <= 0:
+                continue
+            index = int(token)
+            if 0 <= index < scores.size:
+                scores[index] -= float(count) * float(frequency) + float(presence)
+    if temperature <= 0.0:
+        return int(np.argmax(scores))
+    if 0 < top_k < scores.size:
+        keep = np.argpartition(scores, -top_k)[-top_k:]
+        chosen = scores[keep]
+        return int(keep[_nucleus(chosen, temperature, top_p, rng)])
+    return _nucleus(scores, temperature, top_p, rng)
+
+
+def _nucleus(scores: np.ndarray, temperature: float, top_p: float, rng: np.random.Generator) -> int:
+    scaled = np.asarray(scores, dtype=np.float64) / temperature
+    scaled -= np.max(scaled)
+    probs = np.exp(scaled)
+    total = float(np.sum(probs))
+    if not np.isfinite(total) or total <= 0.0:
+        return int(np.argmax(scores))
+    probs /= total
+    if 0.0 < top_p < 1.0:
+        order = np.argsort(probs)[::-1]
+        cumulative = np.cumsum(probs[order])
+        remove = cumulative > top_p
+        remove[1:] = remove[:-1].copy()
+        remove[0] = False
+        probs[order[remove]] = 0.0
+        total = float(np.sum(probs))
+        if total <= 0.0:
+            return int(np.argmax(scores))
+        probs /= total
+    return int(rng.choice(probs.size, p=probs))
 
 
 def _best(runtime: Qwen38Runtime) -> int:

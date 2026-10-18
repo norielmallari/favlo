@@ -1,7 +1,8 @@
-"""Chat template and an argmax completion.
+"""Chat template and one completion.
 
-The registry still stores the thinking and instruct card. This forward does
-not apply temperature, top-p, top-k, or a presence penalty.
+The registry stores the thinking and instruct card. A request field overrides
+that card. Temperature 0 is an argmax. Presence, frequency, and logit bias
+use the OpenAI logit update.
 """
 
 from __future__ import annotations
@@ -11,11 +12,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from jinja2 import Environment
 from tokenizers import Tokenizer
 
 from qwen38_27b.forward import RequestClosed
-from qwen38_27b.sampling import mode_card, requested_thinking
+from qwen38_27b.sampling import VARIANTS, mode_card, requested_thinking
 from qwen38_27b.tools import (
     StreamText,
     function_has_parameters,
@@ -81,6 +83,52 @@ def _reasoning_effort(body: dict[str, Any]) -> str | None:
     return effort
 
 
+def _sampling(
+    body: dict[str, Any], thinking: bool, variant: dict[str, Any] | None
+) -> tuple[float, float, int]:
+    """Card values unless the request sets the field. Temperature 0 is an argmax."""
+    card = variant if variant is not None else VARIANTS["thinking" if thinking else "instruct"]
+    temperature = body.get("temperature")
+    top_p = body.get("top_p")
+    top_k = body.get("top_k")
+    return (
+        float(card["temperature"]) if temperature is None else float(temperature),
+        float(card["top_p"]) if top_p is None else float(top_p),
+        int(card["top_k"]) if top_k is None else int(top_k),
+    )
+
+
+def _presence(body: dict[str, Any], thinking: bool, variant: dict[str, Any] | None) -> float:
+    penalty = body.get("presence_penalty")
+    if penalty is not None:
+        return float(penalty)
+    card = variant if variant is not None else VARIANTS["thinking" if thinking else "instruct"]
+    if "presence_penalty" in card:
+        return float(card["presence_penalty"])
+    return 0.0
+
+
+def _frequency(body: dict[str, Any]) -> float:
+    penalty = body.get("frequency_penalty")
+    if penalty is None:
+        return 0.0
+    return float(penalty)
+
+
+def _logit_bias(body: dict[str, Any]) -> dict[int, float]:
+    raw = body.get("logit_bias")
+    if not isinstance(raw, dict):
+        return {}
+    return {int(token): float(bias) for token, bias in raw.items()}
+
+
+def _rng(body: dict[str, Any]) -> np.random.Generator:
+    seed = body.get("seed")
+    if seed is None:
+        return np.random.default_rng()
+    return np.random.default_rng(int(seed))
+
+
 def _limit(body: dict[str, Any]) -> int:
     if body.get("max_tokens") is not None:
         return int(body["max_tokens"])
@@ -127,13 +175,33 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
         selection is None or getattr(selection, "variant", None) is None
     ):
         requested = False
-    thinking, _card = mode_card(selection, requested)
+    thinking, card = mode_card(selection, requested)
+    temperature, top_p, top_k = _sampling(body, thinking, card)
+    presence = _presence(body, thinking, card)
+    frequency = _frequency(body)
+    bias = _logit_bias(body)
+    draw = _rng(body)
     prompt = encode_chat(
         runtime.root, messages, body.get("tools"), thinking, _reasoning_effort(body)
     )
     forced, stop_after_forced = _forced_call(runtime.root, body.get("tools"), required)
     if bool(body.get("stream", False)):
-        _stream(handler, runtime, prompt, forced, stop_after_forced, _limit(body), thinking)
+        _stream(
+            handler,
+            runtime,
+            prompt,
+            forced,
+            stop_after_forced,
+            _limit(body),
+            thinking,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            presence=presence,
+            frequency=frequency,
+            logit_bias=bias,
+            rng=draw,
+        )
         return
     started = time.perf_counter()
     tokens = runtime.generate(
@@ -142,6 +210,13 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
         STOP,
         forced=forced,
         stop_after_forced=stop_after_forced,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        presence=presence,
+        frequency=frequency,
+        logit_bias=bias,
+        rng=draw,
     )
     text = decode_text(runtime.root, tokens)
     reasoning, reply = split_thinking(text, thinking)
@@ -224,6 +299,14 @@ def _stream(
     stop_after_forced: bool,
     limit: int,
     thinking: bool,
+    *,
+    temperature: float = 0.0,
+    top_p: float = 1.0,
+    top_k: int = 0,
+    presence: float = 0.0,
+    frequency: float = 0.0,
+    logit_bias: dict[int, float] | None = None,
+    rng: np.random.Generator | None = None,
 ) -> None:
     decode = getattr(runtime, "decode", None)
     if not callable(decode):
@@ -300,6 +383,13 @@ def _stream(
             stop_after_forced=stop_after_forced,
             on_token=on_token,
             on_prefill=on_prefill,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            presence=presence,
+            frequency=frequency,
+            logit_bias=logit_bias,
+            rng=rng,
         )
         decoded = decode(produced) if produced else ""
         piece, previous = _stream_delta(decoded, previous, final=True)

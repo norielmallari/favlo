@@ -22,9 +22,9 @@ from qwen38_27b.convert import RECORD_NAME, quantize
 from qwen38_27b.forward import Qwen38Runtime
 
 PIPELINE = "qwen38-27b"
-GROVE_PROMPT = (
-    "There are 15 trees in the grove. Grove workers will plant trees in the grove today. "
-    "After they are done, there will be 21 trees. How many trees did the grove workers plant today?"
+CARROT_PROMPT = (
+    "Amanda and Celestia have 15 carrots. They collect more carrots for Favlo the Horse. "
+    "After collecting, they have 21 carrots. How many carrots did they collect?"
 )
 _BF16_REPO = "Qwen/Qwen3.8-27B"
 
@@ -83,14 +83,14 @@ def _complete(args: argparse.Namespace) -> int:
         path, _selection = choose_complete(model=None, record=None, pipeline=PIPELINE)
         runtime = Qwen38Runtime(path, kv_cache=args.kv_cache, max_memory=args.max_memory)
         try:
-            messages = [{"role": "user", "content": GROVE_PROMPT}]
+            messages = [{"role": "user", "content": CARROT_PROMPT}]
             prompt = encode_chat(runtime.root, messages, None, False)
-            tokens = runtime.generate(prompt, 128, STOP)
+            tokens = runtime.generate(prompt, 384, STOP)
             text = decode_text(runtime.root, tokens)
         finally:
             runtime.close()
-        body = {"prompt": GROVE_PROMPT, "text": text}
-        target = path / "grove.json"
+        body = {"prompt": CARROT_PROMPT, "text": text}
+        target = path / "carrots.json"
         target.write_text(json.dumps(body, indent=2) + "\n")
     except (OSError, RuntimeError, LookupError, ValueError, KeyError) as exc:
         sys.stderr.write(f"{exc}\n")

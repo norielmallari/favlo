@@ -43,3 +43,7 @@ Status goes through `src/madmetal/console.py`. The module imports nothing from a
 `src/madmetal/prefix.py` stores one sequence as token ids plus named regions under `~/.madmetal/prefix/<model>/<checkpoint>/<hash>.bin`. The checkpoint id is the hex SHA-256 of `manifest.json`, or of `config.json` when the record has no manifest. The file name is the hex SHA-256 of the format, the model id, that digest, the cache tag, and the token ids. The store does not know a key/value layout. Each pipeline packs its own buffers into regions and copies a matching file back.
 
 A prompt that extends the live tokens keeps the device. Any other prompt writes the live sequence, clears the device, and loads the longest stored prefix that pipeline accepts. Regions start on a 16 KB page. The write replaces the destination after the header hash is in place. A region whose stored bytes are a prefix of the new blob is copied forward. One model and one checkpoint stay within 32 GiB. Past that, the oldest files are deleted and the file just written stays. What a pipeline puts in the regions, and whether an exact-length file can be sampled, is that pipeline's note.
+
+## Harness
+
+`python -m harness.coding --model <id>` is a client of `serve`. It loads the thinking sampling card for that id and sends `enable_thinking` true. The model writes `ledger.py` in a throwaway workspace. The suite that decides the run lives outside that workspace. Exit 0 is a pass. The file-agent check in `pytest` is a separate three-step tool check.
