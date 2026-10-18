@@ -72,6 +72,8 @@ KERNELS = (
     "kv_scale_partial",
     "kv_pv_split",
     "kv_pv_split8",
+    "kv_cast_blocks",
+    "kv_restore_sum",
     "kv_part_sum",
     "kv_acc_add",
     "kv_attend_write",

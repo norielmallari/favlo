@@ -8,7 +8,7 @@ A 2 GiB streaming read finished in 7093.5 µs, 302.74 GB/s. The bandwidth ceilin
 
 ## Decode
 
-One token. Weights are fp4. K and V are fp8 E4M3. The forward is 30 Gated DeltaNet layers, 10 attention layers, and the head. Top 8 routed experts. `gdn_in_proj` is the fused qkv, z, a, and b projection. `gemv_fp4_vec` is the output projection, the attention output, the shared expert, and the head. `router_coeff` is the float16 router and the shared-expert coefficient. `moe_gate_silu` and `moe_down_mix` read eight expert images. `rmsnorm_f32` is the layer norm, including the final norm. Attention is two key/value heads: `prefill_fp8_m8` scores the span and the three softmax kernels reduce it. The value mix encodes `kv_cast_probs`, `kv_pv_split8`, `kv_scale_partial`, and `kv_acc_add` once per 512-key block, all in one command buffer for that head.
+One token. Weights are fp4. K and V are fp8 E4M3. The forward is 30 Gated DeltaNet layers, 10 attention layers, and the head. Top 8 routed experts. `gdn_in_proj` is the fused qkv, z, a, and b projection. `gemv_fp4_vec` is the output projection, the attention output, the shared expert, and the head. `router_coeff` is the float16 router and the shared-expert coefficient. `moe_gate_silu` and `moe_down_mix` read eight expert images. `rmsnorm_f32` is the layer norm, including the final norm. Attention is two key/value heads: `prefill_fp8_m8` scores the span and the three softmax kernels reduce it. The value mix is `kv_cast_blocks`, `kv_pv_split8`, and `kv_restore_sum`, each in its own command buffer. `kv_cast_blocks` writes one float16 plane in span order and one peak per row per block. `kv_pv_split8` mixes every block. `kv_restore_sum` multiplies each partial by that peak.
 
 | Kernel | Shape | Count | µs |
 |---|---|---:|---:|
@@ -29,9 +29,11 @@ One token. Weights are fp4. K and V are fp8 E4M3. The forward is 30 Gated DeltaN
 | `kv_softmax_max` | 2048 keys, 8 rows | 20 | 4.1 |
 | `kv_softmax_prob` | 2048 keys, 8 rows | 20 | 15.7 |
 | `kv_softmax_close` | 8 rows | 20 | 4.1 |
-| value mix | 4 blocks of 512 keys | 20 | 46.3 |
+| `kv_cast_blocks` | 4 blocks of 512 keys, 8 rows | 20 | 21.6 |
+| `kv_pv_split8` | 4 blocks of 512 keys | 20 | 30.5 |
+| `kv_restore_sum` | 4 blocks, 8×256 | 20 | 11.7 |
 
-That sum is 9.93 ms, 100.68 tok/s. A context of 65536 tokens uses the same projections and replaces the attention rows:
+That sum is 10.28 ms, 97.25 tok/s. A context of 65536 tokens uses the same projections and replaces the attention rows:
 
 | Kernel | Shape | Count | µs |
 |---|---|---:|---:|
@@ -39,11 +41,11 @@ That sum is 9.93 ms, 100.68 tok/s. A context of 65536 tokens uses the same proje
 | `kv_softmax_max` | 65536 keys, 8 rows | 20 | 7.4 |
 | `kv_softmax_prob` | 65536 keys, 8 rows | 20 | 36.1 |
 | `kv_softmax_close` | 8 rows | 20 | 5.2 |
-| value mix | 128 blocks of 512 keys | 20 | 1788.3 |
+| `kv_cast_blocks` | 128 blocks of 512 keys, 8 rows | 20 | 33.3 |
+| `kv_pv_split8` | 128 blocks of 512 keys | 20 | 166.3 |
+| `kv_restore_sum` | 128 blocks, 8×256 | 20 | 102.1 |
 
-That token is 46.91 ms, 21.32 tok/s. One 512-key block in its own command buffer is `kv_cast_probs` 22.1 µs, `kv_pv_split8` 30.3 µs, `kv_scale_partial` 7.1 µs, and `kv_acc_add` 7.0 µs. Those four figures are not multiplied. The value-mix row is the block loop in the one buffer the forward encodes.
-
-The byte count is the resident projections, eight expert images per layer, the float16 routers and coefficients, the head, the GDN state read and write, K and V across the visible tokens, the float32 score and probability writes, the float16 probability scratch, and one float scale per row per block. Context 2048 is 1,746,332,160 bytes, 5.77 ms, 173.36 tok/s. Context 65536 is 2,518,425,600 bytes, 8.32 ms, 120.21 tok/s. The 90% test for decode uses the kernel ceiling.
+That token is 17.17 ms, 58.23 tok/s. The byte count is the resident projections, eight expert images per layer, the float16 routers and coefficients, the head, the GDN state read and write, K and V across the visible tokens, the float32 score and probability writes, the float16 probability scratch, and one float scale per row per block. Context 2048 is 1,746,332,160 bytes, 5.77 ms, 173.36 tok/s. Context 65536 is 2,518,425,600 bytes, 8.32 ms, 120.21 tok/s. The 90% test for decode uses the kernel ceiling.
 
 The embed, the query/gate split, RoPE, the top-8 pick, and the key/value store are not in this total.
 

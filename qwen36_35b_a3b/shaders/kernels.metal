@@ -3444,6 +3444,58 @@ kernel void kv_pv_split8(
     op.run(tile_left, tile_right, tile_out);
 }
 
+// One peak per 512-key block. The half values sit in span order so kv_pv_split8
+// can mix every block in one dispatch.
+kernel void kv_cast_blocks(
+    device const float* probs [[buffer(0)]],
+    device half* packed [[buffer(1)]],
+    device float* peaks [[buffer(2)]],
+    constant uint& block [[buffer(3)]],
+    constant uint& src_stride [[buffer(4)]],
+    constant uint& rows [[buffer(5)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 lane [[thread_position_in_threadgroup]])
+{
+    uint part = tgid.x;
+    uint row = tgid.y;
+    uint col0 = lane.x;
+    device const float* src = probs + row * src_stride + part * block;
+    float peak = 0.0f;
+    for (uint col = col0; col < block; col += 32u) {
+        peak = max(peak, fabs(src[col]));
+    }
+    peak = simd_max(peak);
+    float inv = peak > 0.0f ? 1.0f / peak : 0.0f;
+    for (uint col = col0; col < block; col += 32u) {
+        packed[row * src_stride + part * block + col] = half(src[col] * inv);
+    }
+    if (col0 == 0u) {
+        peaks[part * rows + row] = peak;
+    }
+}
+
+// Scale each block's partial by that block's peak and add it to the accumulator.
+kernel void kv_restore_sum(
+    device const float* parts [[buffer(0)]],
+    device const float* peaks [[buffer(1)]],
+    device float* acc [[buffer(2)]],
+    constant uint& blocks [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& channels [[buffer(5)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint width = rows * channels;
+    if (tid >= width) {
+        return;
+    }
+    uint row = tid / channels;
+    float sum = 0.0f;
+    for (uint part = 0u; part < blocks; ++part) {
+        sum += parts[part * width + tid] * peaks[part * rows + row];
+    }
+    acc[tid] += sum;
+}
+
 kernel void kv_part_sum(
     device const float* parts [[buffer(0)]],
     device float* destination [[buffer(1)]],

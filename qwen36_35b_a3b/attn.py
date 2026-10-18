@@ -649,7 +649,68 @@ def _pv_split8(
     rows: int,
     span: int,
 ) -> None:
-    _pv_blocks(runtime, "kv_pv_split8", data_off, scale_off, slot, rows, span)
+    """Cast every block, mix them in one dispatch, then restore the peaks."""
+    blocks = span // BLOCK
+    if blocks < 1 or rows > GROUP:
+        message = f"scaled value mix cannot cover {blocks} blocks of {rows} rows"
+        raise RuntimeError(message)
+    half_bytes = rows * span * 2
+    peak_bytes = blocks * rows * 4
+    part_bytes = blocks * rows * HEAD * 4
+    if half_bytes > GROUP * CHUNK * SCORE * 2:
+        message = f"scaled value mix half scratch {half_bytes} exceeds the plane"
+        raise RuntimeError(message)
+    if peak_bytes > GROUP * CHUNK * (SCORE // TILE) * 4:
+        message = f"scaled value mix peaks {peak_bytes} exceed the plane"
+        raise RuntimeError(message)
+    if part_bytes > (runtime.max_pos // BLOCK) * (GROUP * GROUP) * HEAD * 4:
+        message = f"scaled value mix parts {part_bytes} exceed the plane"
+        raise RuntimeError(message)
+    _encode(
+        runtime,
+        "kv_cast_blocks",
+        [
+            (runtime.plane_probs, 0),
+            (runtime.plane_prob_half, 0),
+            (runtime.plane_chunk_max, 0),
+        ],
+        [_u32(BLOCK), _u32(span), _u32(rows)],
+        (blocks, rows, 1),
+        (32, 1, 1),
+    )
+    name = "kv_pv_split8"
+    width = int(runtime.session.pipes[name].threadExecutionWidth())
+    _encode(
+        runtime,
+        name,
+        [
+            (runtime.plane_prob_half, 0),
+            (runtime.v_cache[slot], data_off),
+            (runtime.v_cache[slot], scale_off),
+            (runtime.plane_parts, 0),
+        ],
+        [
+            _u32(rows),
+            _u32(HEAD),
+            _u32(BLOCK),
+            _u32(span),
+            _u32(runtime.max_pos),
+        ],
+        (HEAD // 64, blocks, 1),
+        (width * 4, 1, 1),
+    )
+    _encode(
+        runtime,
+        "kv_restore_sum",
+        [
+            (runtime.plane_parts, 0),
+            (runtime.plane_chunk_max, 0),
+            (runtime.plane_acc, 0),
+        ],
+        [_u32(blocks), _u32(rows), _u32(HEAD)],
+        ((rows * HEAD) // 256, 1, 1),
+        (256, 1, 1),
+    )
 
 
 def _pv_split(
