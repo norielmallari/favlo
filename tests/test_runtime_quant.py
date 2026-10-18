@@ -583,8 +583,8 @@ def test_omitted_presence_follows_the_model_card() -> None:
     assert commands._presence({"presence_penalty": 1.5}, thinking=True) == 1.5
 
 
-def test_grove_file_stores_the_greedy_completion(tmp_path) -> None:
-    import qwen38_flash_next.grove as grove
+def test_carrot_file_stores_the_greedy_completion(tmp_path) -> None:
+    import qwen38_flash_next.carrot as carrot
 
     class Runtime:
         _hit_limit = False
@@ -592,7 +592,7 @@ def test_grove_file_stores_the_greedy_completion(tmp_path) -> None:
         def encode_chat(
             self, messages: list[dict[str, str]], tools: object, thinking: bool
         ) -> list[int]:
-            assert messages[0]["content"] == grove.GROVE_PROMPT
+            assert messages[0]["content"] == carrot.CARROT_PROMPT
             assert tools is None
             assert thinking is False
             return [1]
@@ -606,7 +606,7 @@ def test_grove_file_stores_the_greedy_completion(tmp_path) -> None:
             top_k: int,
         ) -> list[int]:
             assert prompt == [1]
-            assert max_tokens == grove.GROVE_MAX_TOKENS
+            assert max_tokens == carrot.CARROT_MAX_TOKENS
             assert temperature == 0.0
             assert top_p == 1.0
             assert top_k == 0
@@ -614,19 +614,19 @@ def test_grove_file_stores_the_greedy_completion(tmp_path) -> None:
 
         def decode(self, token_ids: list[int]) -> str:
             assert token_ids == [2]
-            return "six trees\n"
+            return "6 carrots\n"
 
-    grove.write_grove(tmp_path, replace=True, runtime=Runtime())
-    stored = grove.load_grove(tmp_path)
-    assert stored["output"] == "six trees"
+    carrot.write_carrot(tmp_path, replace=True, runtime=Runtime())
+    stored = carrot.load_carrot(tmp_path)
+    assert stored["output"] == "6 carrots"
     assert stored["thinking"] is False
 
     class Unused:
         def encode_chat(self, messages: object, tools: object, thinking: bool) -> list[int]:
-            raise AssertionError("existing grove file")
+            raise AssertionError("existing carrot file")
 
-    grove.write_grove(tmp_path, runtime=Unused())
-    assert grove.load_grove(tmp_path)["output"] == "six trees"
+    carrot.write_carrot(tmp_path, runtime=Unused())
+    assert carrot.load_carrot(tmp_path)["output"] == "6 carrots"
 
 
 def test_stream_detokenize_runs_off_the_step_thread() -> None:

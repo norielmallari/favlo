@@ -49,7 +49,7 @@ def test_higher_acceptance_raises_decode_rate() -> None:
     root = pipeline.DEFAULT_RECORD
     if not (root / "manifest.json").is_file():
         pytest.skip("quantized record is not installed")
-    stored = pipeline.load_grove(root)
+    stored = pipeline.load_carrot(root)
     runtime = pipeline.Qwen38Runtime(root)
     try:
         prompt = runtime.encode_chat(

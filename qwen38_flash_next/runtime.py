@@ -1123,23 +1123,31 @@ class Qwen38Runtime:
             constrained = self._constrained_name(logits, temperature, produced)
             if constrained is not None:
                 return constrained
-        penalized: list[int] = []
-        penalty = 0.0
-        if self._frequency_penalty and produced:
-            penalized = penalty_ids(produced, self._penalty_window, once=False)
-            penalty = self._frequency_penalty
-        elif self._presence_penalty and produced:
-            penalized = penalty_ids(produced, self._penalty_window, once=True)
-            penalty = self._presence_penalty
-        if not penalized:
+        frequency_ids = (
+            penalty_ids(produced, self._penalty_window, once=False)
+            if self._frequency_penalty and produced
+            else []
+        )
+        presence_ids = (
+            penalty_ids(produced, self._penalty_window, once=True)
+            if self._presence_penalty and produced
+            else []
+        )
+        if not frequency_ids and not presence_ids:
             return logits
         if isinstance(logits, Dev):
-            self.gpu.presence(logits, penalized, penalty)
+            if frequency_ids:
+                self.gpu.presence(logits, frequency_ids, self._frequency_penalty)
+            if presence_ids:
+                self.gpu.presence(logits, presence_ids, self._presence_penalty)
             return logits
         adjusted = np.array(logits, copy=True)
-        for token in penalized:
+        for token in frequency_ids:
             if token < int(adjusted.size):
-                adjusted[int(token)] -= penalty
+                adjusted[int(token)] -= self._frequency_penalty
+        for token in presence_ids:
+            if token < int(adjusted.size):
+                adjusted[int(token)] -= self._presence_penalty
         return adjusted
 
     def _constrained_name(self, logits: Dev, temperature: float, produced: list[int]) -> int | None:
@@ -2510,14 +2518,17 @@ class Qwen38Runtime:
         if self.atlas is None:
             return
         pending: list[tuple[int, list[int]]] = []
-        protect: set[tuple[int, int]] = set()
         for layer, choice in self._choice.items():
             raw = _buffer_slice(choice.buf, choice.offset * 4, choice.n * 4)
             ids = [int(expert) for expert in np.frombuffer(raw, dtype=np.uint32).tolist()]
             pending.append((layer, ids))
-            protect.update((layer, expert) for expert in ids)
         for layer, ids in pending:
-            event = self.atlas.stage(layer, ids, protect)
+            # One layer has to fit. Pinning every layer's ids is what fills the atlas.
+            protect = {(layer, expert) for expert in ids}
+            try:
+                event = self.atlas.stage(layer, ids, protect)
+            except RuntimeError:
+                event = self.atlas.stage(layer, ids)
             self.gpu.io_fence(event)
 
     def _load_record(self) -> None:
@@ -3320,12 +3331,19 @@ class Qwen38Runtime:
         self._choice[layer] = Dev(self._hold_ids, self.top_k, (count - 1) * self.top_k)
         if self.routes is not None:
             self.routes.add_prefill(layer, rows)
-        event = self.atlas.stage(layer, host_ids.reshape(-1).tolist())
-        self.gpu.io_fence(event)
         xs = Dev(self._hold_xs, count * self.hidden)
         weight = Dev(self._hold_w, count * self.top_k)
         running = Dev(self._hold_out, count * self.hidden)
+        flat = [int(item) for item in host_ids.reshape(-1).tolist()]
+        staged = False
         for members, planes in self._routed_planes(layer):
+            wanted = [expert for expert in flat if expert in members]
+            if wanted:
+                if staged:
+                    self.gpu.flush()
+                staged = True
+                event = self.atlas.stage(layer, wanted, {(layer, expert) for expert in wanted})
+                self.gpu.io_fence(event)
             running = self._prefill_tier(
                 layer, xs, weight, running, host_ids, count, members, planes
             )

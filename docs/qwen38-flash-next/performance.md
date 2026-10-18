@@ -8,12 +8,13 @@ The harness starts `madmetal serve` and runs an agent until the prompt reaches 6
 uv run python -m harness.long_prompt --model qwen38-flash-next
 ```
 
-The printed summary is the measurement. The run below closed thinking and stopped each completion at the forced tool call, 13 tokens. It stopped at 85930 prompt tokens over three requests. Prefill is the summed suffix time. Decode is the summed sampled-token time.
+The printed summary is the measurement. The request sets temperature 0 and leaves thinking on. The run below continued past 65536 prompt tokens and stopped at 92739 over four requests. Prefill is the summed suffix time. Decode is the summed sampled-token time.
 
 | Request | Prompt tokens | Cache | Prefill | Decode |
 |---|---:|---|---|---|
-| 1 | 301 | miss | 52.10 tok/s (301 tok in 5.78 s) | 9.10 tok/s (13 tok in 1.43 s) |
-| 2 | 46039 | hit 314 | 229.65 tok/s (45725 tok in 199.10 s) | 4.10 tok/s (13 tok in 3.17 s) |
-| 3 | 85930 | hit 46052 | 202.99 tok/s (39878 tok in 196.46 s) | 4.48 tok/s (13 tok in 2.90 s) |
+| 1 | 397 | hit 397 | prefix | 4.41 tok/s (31 tok in 7.03 s) |
+| 2 | 46485 | hit 428 | 214.86 tok/s (46057 tok in 214.36 s) | 5.18 tok/s (128 tok in 24.73 s) |
+| 3 | 46651 | hit 46613 | 7.21 tok/s (38 tok in 5.27 s) | 4.05 tok/s (31 tok in 7.65 s) |
+| 4 | 92739 | hit 46682 | 191.68 tok/s (46057 tok in 240.28 s) | 4.41 tok/s (128 tok in 29.01 s) |
 
-The summary is prefill 214.04 tok/s (85904 tok in 401.34 s) and decode 5.20 tok/s (39 tok in 7.50 s). The prefill kernel ceiling for one 2048-token chunk, routed experts excluded, is 518.4 tok/s. The decode kernel ceiling is 12.67 tok/s at 32768 tokens and 11.20 tok/s at 262144 tokens. Both assume the ten experts per layer are already resident.
+The summary is prefill 200.37 tok/s (92152 tok in 459.91 s) and decode 4.65 tok/s (318 tok in 68.42 s). The prefill kernel ceiling for one 2048-token chunk, routed experts excluded, is 518.4 tok/s. The decode kernel ceiling is 12.67 tok/s at 32768 tokens and 11.20 tok/s at 262144 tokens. Both assume the ten experts per layer are already resident.

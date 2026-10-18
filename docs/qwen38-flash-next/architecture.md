@@ -8,7 +8,7 @@ The target machine is an M5 Pro: 20 shader cores, a neural accelerator beside th
 
 Layouts are in [record.md](record.md). The n-gram hash is in [ngram.md](ngram.md). The kernel schedule is in [schedule.md](schedule.md). The long-prompt measurement is in [performance.md](performance.md). The probe is in [probe.md](probe.md). The papers are in [references.md](references.md). Implementation plans are not in this tree. This file wins if one of those notes disagrees with it.
 
-Registration copies `sampling.py` onto the registry row. The default variant is thinking. The harness defaults `--model` to `qwen38-flash-next`. A benchmarks run writes into [benchmarks.md](benchmarks.md) when the model id is this pipeline. `quantize` names the record directory from the expert widths in `formats.record_name`: wider quants first, `fp8`, `fp4`, then `int2`.
+Registration copies `sampling.py` onto the registry row. The default variant is thinking. A benchmarks run that names this pipeline writes [benchmarks.md](benchmarks.md). `quantize` names the record directory from the expert widths in `formats.record_name`: wider quants first, `fp8`, `fp4`, then `int2`.
 
 ## In scope
 
@@ -19,7 +19,8 @@ Registration copies `sampling.py` onto the registry row. The default variant is 
 - Tool calls. The template renders `tools` and tool results. A completion that contains `<tool_call>` blocks is returned as OpenAI `tool_calls`, on the JSON response and as stream deltas. While a function name is open, the sampler keeps only tokens that continue a name from that request. A `tool_choice` that names one function forces the opening `<tool_call><function=name>` before the arguments. Those opening tokens are the tokenizer's encoding of that text, so a later render of the same opening is the same ids. A function with no parameters forces the closing tags the same way. Generation stops when that call's `</tool_call>` has closed.
 - A prefix cache so a continuation prefills only the new tokens.
 - Expert streaming from SSD into a resident atlas. Consecutive expert ids are one sequential Metal IO. The shader reads the live image from that atlas.
-- The harness scores IFEval, GSM8K, and HumanEval against `serve`. The intelligence smoke is the first 30 rows of each set. IFEval, GSM8K, and HumanEval turn thinking on at reasoning effort low. IFEval sends presence 1.5 and scores the reply after the think block. The draw is greedy. The note is [benchmarks.md](benchmarks.md).
+- The harness scores IFEval, GSM8K, and HumanEval against `serve`. The checker reads `message.content`. Thinking stays off. Omitted sampling fields come from `GET /v1/models` row `<id>:instruct`. A harness flag overrides that field. The note is [benchmarks.md](benchmarks.md).
+- The carrot smoke is [tests/test_smoke.py](../../tests/test_smoke.py). The stored completion is greedy instruct, written to `carrots.json`. The reply collects 6 carrots. The other cases use this pipeline's instruct and thinking cards. A reasoning effort runs only when this checkpoint's template names it.
 
 ## Out of scope
 

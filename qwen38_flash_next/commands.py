@@ -26,6 +26,7 @@ from madmetal.registry import (
     set_alias,
 )
 from qwen38_flash_next.adapt import finish_request, open_request
+from qwen38_flash_next.carrot import write_carrot
 from qwen38_flash_next.checks import check_state_kernels
 from qwen38_flash_next.convert import (
     LAYER_WORKERS,
@@ -34,7 +35,6 @@ from qwen38_flash_next.convert import (
     quantize_checkpoint,
 )
 from qwen38_flash_next.formats import DEFAULT_QUANT_MAP, DEFAULT_RECORD, record_name
-from qwen38_flash_next.grove import write_grove
 from qwen38_flash_next.probe import matmul, probe
 from qwen38_flash_next.runtime import Qwen38Runtime, RequestClosed
 from qwen38_flash_next.sampling import VARIANTS as _SAMPLING
@@ -98,7 +98,7 @@ def quantize_main(args: Any) -> int:
             supers,
             mtp_bits=int(args.mtp_bits),
         )
-        write_grove(args.output, replace=packed)
+        write_carrot(args.output, replace=packed)
         register_quantized(
             output.name,
             source=source,

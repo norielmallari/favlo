@@ -1,5 +1,6 @@
 """Qwen3.8-Flash-Next pipeline. The hyphenated entry file loads this package."""
 
+from qwen38_flash_next.carrot import load_carrot
 from qwen38_flash_next.checks import (
     check_act_kernels,
     check_gdn_scan,
@@ -60,7 +61,6 @@ from qwen38_flash_next.formats import (
     unpack_int2,
     unpack_int4,
 )
-from qwen38_flash_next.grove import load_grove
 from qwen38_flash_next.probe import Roundtrip, check_int4_gemm, classify_subbyte
 from qwen38_flash_next.runtime import Qwen38Runtime
 from qwen38_flash_next.session import _append_transcript, _tok_s
@@ -105,7 +105,7 @@ __all__ = [
     "int2_plane_sizes",
     "int4_plane_sizes",
     "int8_plane_sizes",
-    "load_grove",
+    "load_carrot",
     "load_quant_map",
     "main",
     "open_runtime",
