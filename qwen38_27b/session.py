@@ -52,6 +52,8 @@ KERNELS = (
     "kv_softmax_max_rows",
     "kv_softmax_prob_rows",
     "kv_softmax_close",
+    "kv_cast_probs",
+    "kv_scale_partial",
     "kv_pv_split8",
     "kv_part_sum",
     "kv_acc_add",

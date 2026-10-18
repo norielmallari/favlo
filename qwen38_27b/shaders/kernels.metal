@@ -1343,7 +1343,7 @@ kernel void kv_row_init(
 
 kernel void kv_softmax_tile(
     device const float* scores [[buffer(0)]],
-    device half* probs [[buffer(1)]],
+    device float* probs [[buffer(1)]],
     device float* acc [[buffer(2)]],
     device float* row_max [[buffer(3)]],
     device float* row_sum [[buffer(4)]],
@@ -1358,7 +1358,7 @@ kernel void kv_softmax_tile(
     bool live = token < count;
     if (!live) {
         for (uint step = 0u; step < 8u; ++step) {
-            probs[row * 256u + lane + step * 32u] = half(0.0f);
+            probs[row * 256u + lane + step * 32u] = 0.0f;
         }
         return;
     }
@@ -1382,7 +1382,7 @@ kernel void kv_softmax_tile(
     tile_max = simd_max(tile_max);
     if (seen == 0u) {
         for (uint step = 0u; step < 8u; ++step) {
-            probs[row * 256u + lane + step * 32u] = half(0.0f);
+            probs[row * 256u + lane + step * 32u] = 0.0f;
         }
         return;
     }
@@ -1393,7 +1393,7 @@ kernel void kv_softmax_tile(
     for (uint step = 0u; step < 8u; ++step) {
         float prob = local[step] == -INFINITY ? 0.0f : exp(local[step] - new_m);
         psum += prob;
-        probs[row * 256u + lane + step * 32u] = half(prob);
+        probs[row * 256u + lane + step * 32u] = prob;
     }
     psum = simd_sum(psum);
     for (uint channel = lane; channel < 256u; channel += 32u) {
@@ -1407,7 +1407,7 @@ kernel void kv_softmax_tile(
 
 kernel void kv_softmax_span(
     device const float* scores [[buffer(0)]],
-    device half* probs [[buffer(1)]],
+    device float* probs [[buffer(1)]],
     device float* acc [[buffer(2)]],
     device float* row_max [[buffer(3)]],
     device float* row_sum [[buffer(4)]],
@@ -1423,7 +1423,7 @@ kernel void kv_softmax_span(
     bool live = token < count;
     if (!live) {
         for (uint col = lane; col < cols; col += 32u) {
-            probs[row * cols + col] = half(0.0f);
+            probs[row * cols + col] = 0.0f;
         }
         return;
     }
@@ -1444,7 +1444,7 @@ kernel void kv_softmax_span(
     tile_max = simd_max(tile_max);
     if (seen == 0u) {
         for (uint col = lane; col < cols; col += 32u) {
-            probs[row * cols + col] = half(0.0f);
+            probs[row * cols + col] = 0.0f;
         }
         return;
     }
@@ -1460,7 +1460,7 @@ kernel void kv_softmax_span(
             prob = exp(scores[row * cols + col] * INV_SQRT_256 - new_m);
         }
         psum += prob;
-        probs[row * cols + col] = half(prob);
+        probs[row * cols + col] = prob;
     }
     psum = simd_sum(psum);
     for (uint channel = lane; channel < 256u; channel += 32u) {
@@ -1504,7 +1504,7 @@ kernel void kv_softmax_max(
 
 kernel void kv_softmax_prob(
     device const float* scores [[buffer(0)]],
-    device half* probs [[buffer(1)]],
+    device float* probs [[buffer(1)]],
     device const float* partial_max [[buffer(2)]],
     device const float* row_max [[buffer(3)]],
     device float* partial_sum [[buffer(4)]],
@@ -1535,7 +1535,7 @@ kernel void kv_softmax_prob(
             if (seen && kpos <= pos0) {
                 prob = exp(scores[row * cols + col] * INV_SQRT_256 - new_m);
             }
-            probs[row * cols + col] = half(prob);
+            probs[row * cols + col] = prob;
         }
         psum += prob;
     }
@@ -1584,7 +1584,7 @@ kernel void kv_softmax_max_rows(
 
 kernel void kv_softmax_prob_rows(
     device const float* scores [[buffer(0)]],
-    device half* probs [[buffer(1)]],
+    device float* probs [[buffer(1)]],
     device const float* partial_max [[buffer(2)]],
     device const float* row_max [[buffer(3)]],
     device float* partial_sum [[buffer(4)]],
@@ -1623,7 +1623,7 @@ kernel void kv_softmax_prob_rows(
             if (seen && kpos <= qpos && kpos < limit) {
                 prob = exp(scores[row * cols + col] * INV_SQRT_256 - new_m);
             }
-            probs[row * cols + col] = half(prob);
+            probs[row * cols + col] = prob;
         }
         psum += prob;
     }
@@ -1664,6 +1664,43 @@ kernel void kv_softmax_close(
         row_sum[row] = row_sum[row] * alpha + psum;
         row_max[row] = new_m;
     }
+}
+
+kernel void kv_cast_probs(
+    device const float* probs [[buffer(0)]],
+    device half* packed [[buffer(1)]],
+    device float* scales [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    constant uint& src_stride [[buffer(4)]],
+    constant uint& src_col [[buffer(5)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]])
+{
+    float peak = 0.0f;
+    for (uint col = lane; col < cols; col += 32u) {
+        peak = max(peak, fabs(probs[row * src_stride + src_col + col]));
+    }
+    peak = simd_max(peak);
+    if (lane == 0u) {
+        scales[row] = peak;
+    }
+    float inv = peak > 0.0f ? 1.0f / peak : 0.0f;
+    for (uint col = lane; col < cols; col += 32u) {
+        packed[row * cols + col] = half(probs[row * src_stride + src_col + col] * inv);
+    }
+}
+
+kernel void kv_scale_partial(
+    device float* partial [[buffer(0)]],
+    device const float* scales [[buffer(1)]],
+    constant uint& channels [[buffer(2)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint channel [[thread_position_in_threadgroup]])
+{
+    if (channel >= channels) {
+        return;
+    }
+    partial[row * channels + channel] *= scales[row];
 }
 
 kernel void kv_pv_split8(
