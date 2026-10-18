@@ -25,12 +25,14 @@ from qwen36_35b_a3b.chat import (
 )
 from qwen36_35b_a3b.commands import CARROT_PROMPT
 from qwen36_35b_a3b.forward import Qwen36Runtime, letter_token_ids, long_token_ids
-from qwen36_35b_a3b.sampling import THINKING_BUDGET, VARIANTS
+from qwen36_35b_a3b.sampling import VARIANTS
 from qwen36_35b_a3b.tools import split_thinking
 
 _ROOT = Path("models/Qwen3.6-35B-A3B-fp4")
 _INSTRUCT_TOKENS = 384
 _THINK_TOKENS = 768
+# The test forces the close so the carrot reply is in the scored text.
+_THINK_BUDGET = 512
 _ANSWER = re.compile(
     r"(?:\*\*|__)?(?:6|six)(?:\*\*|__)?(?:\s+\w+){0,3}\s+carrots?\b",
     re.IGNORECASE,
@@ -109,7 +111,7 @@ def _complete(
         STOP,
         think_close=close,
         think_end=end,
-        thinking_budget=THINKING_BUDGET if thinking else 0,
+        thinking_budget=_THINK_BUDGET if thinking else 0,
         tool_open=tool_open,
         long_ids=long_ids,
         forbid=forbid,

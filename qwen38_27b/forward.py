@@ -612,7 +612,7 @@ class Qwen38Runtime:
     def generate(
         self,
         prompt: list[int],
-        max_tokens: int,
+        max_tokens: int | None,
         stop: set[int],
         forced: list[int] | None = None,
         stop_after_forced: bool = False,
@@ -689,13 +689,17 @@ class Qwen38Runtime:
             pending = list(forced or [])
             close_after = bool(stop_after_forced) and bool(pending)
             counts: dict[int, int] = {}
-            decode_row = self._begin_phase("decode", max_tokens, live=True)
+            room = max(0, self.max_pos - len(prompt))
+            decode_total = room if max_tokens is None else max(0, min(max_tokens, room))
+            decode_row = self._begin_phase("decode", decode_total, live=True)
             decode_started = time.perf_counter()
             self._mtp_accepts = 0
             self._mtp_tries = 0
             chosen = self._pick(nxt, counts)
             emitted = 0
-            while emitted < max_tokens:
+            if decode_total == 0:
+                self._hit_limit = True
+            while emitted < decode_total:
                 self._check_stop()
                 if pending:
                     chosen = int(pending.pop(0))
@@ -713,9 +717,10 @@ class Qwen38Runtime:
                 if on_token is not None:
                     on_token(chosen)
                 pos = len(prompt) + emitted - 1
-                if finished_forced or emitted == max_tokens:
+                at_cap = emitted == decode_total
+                if finished_forced or at_cap:
                     self.step(chosen, pos, logits=False)
-                    if emitted == max_tokens:
+                    if at_cap:
                         self._hit_limit = True
                     break
                 if pos + 1 >= self.max_pos:

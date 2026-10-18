@@ -532,12 +532,10 @@ def _penalty_window(body: dict[str, Any]) -> int:
 
 
 def _request_limit(body: dict[str, Any]) -> int | None:
-    """Output tokens the request asked for. An omission leaves generation uncapped."""
-    if "max_tokens" in body and body["max_tokens"] is not None:
-        return int(body["max_tokens"])
-    if "max_completion_tokens" in body and body["max_completion_tokens"] is not None:
-        return int(body["max_completion_tokens"])
-    return None
+    """Request or settings cap. An omission leaves generation uncapped."""
+    from madmetal.logs import output_token_limit
+
+    return output_token_limit(body)
 
 
 def _completion(
@@ -972,7 +970,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     alias_parser.add_argument("alias")
     bf16_parser = sub.add_parser("bf16", help="complete from the BF16 checkpoint with Metal dots")
     bf16_parser.add_argument("--prompt", required=True)
-    bf16_parser.add_argument("--max-tokens", type=int, default=8)
+    bf16_parser.add_argument("--max-tokens", type=int, default=None)
     bf16_parser.add_argument("--temperature", type=float, default=None)
     bf16_parser.add_argument("--top-p", type=float, default=None)
     bf16_parser.add_argument("--top-k", type=int, default=None)
@@ -994,7 +992,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     complete_parser = sub.add_parser("complete", help="print one completion from the record")
     complete_parser.add_argument("--prompt", required=True)
-    complete_parser.add_argument("--max-tokens", type=int, default=8)
+    complete_parser.add_argument("--max-tokens", type=int, default=None)
     complete_parser.add_argument("--temperature", type=float, default=None)
     complete_parser.add_argument("--top-p", type=float, default=None)
     complete_parser.add_argument("--top-k", type=int, default=None)

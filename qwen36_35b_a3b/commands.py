@@ -110,7 +110,7 @@ def _complete(args: argparse.Namespace) -> int:
             prompt = encode_chat(runtime.root, messages, None, False)
             tokens = runtime.generate(
                 prompt,
-                384,
+                max(0, runtime.max_pos - len(prompt)),
                 0.0,
                 1.0,
                 0,

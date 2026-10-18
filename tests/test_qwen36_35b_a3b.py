@@ -45,6 +45,19 @@ def test_expert_slots_follow_the_median_scale() -> None:
     assert mapping.tolist() == [1, 0, 3, 2]
 
 
+def test_an_omitted_completion_cap_is_the_context_room() -> None:
+    from qwen36_35b_a3b.chat import completion_limit, requested_limit
+
+    assert requested_limit({}) is None
+    assert requested_limit({"max_tokens": None, "max_completion_tokens": 16}) == 16
+    assert requested_limit({"max_tokens": 32}) == 32
+    assert requested_limit({"max_tokens": 0}) == 0
+    assert completion_limit(100, 40, None) == 60
+    assert completion_limit(100, 40, 10) == 10
+    assert completion_limit(100, 40, 80) == 60
+    assert completion_limit(100, 140, 10) == 0
+
+
 def test_a_closed_think_tool_call_is_a_prefix_of_the_next_prompt() -> None:
     root = Path("models/Qwen3.6-35B-A3B-fp4")
     if not (root / "chat_template.jinja").is_file():
@@ -113,6 +126,14 @@ def test_a_repeated_clause_ends_after_the_close() -> None:
     assert budget.forced() == 3
     assert budget.closed
     assert not budget.forcing
+
+
+def test_an_unset_thinking_budget_does_not_close_on_a_count() -> None:
+    budget = ThinkBudget([2, 9, 3], 9, None)
+    for _ in range(32):
+        assert budget.take(4) == 4
+    assert not budget.forcing
+    assert not budget.closed
 
 
 def test_thinking_budget_forces_the_close_then_drops_that_token() -> None:

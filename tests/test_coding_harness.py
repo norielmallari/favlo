@@ -28,6 +28,7 @@ def test_thinking_body_uses_the_card() -> None:
     assert body["top_p"] == 0.95
     assert body["top_k"] == 20
     assert body["presence_penalty"] == 0.0
+    assert "max_tokens" not in body
     assert body["tools"]
 
 

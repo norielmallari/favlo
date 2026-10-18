@@ -43,6 +43,34 @@ def load_settings(home: Path) -> dict[str, Any]:
     return raw
 
 
+def _configured_int(settings: dict[str, Any], key: str) -> int | None:
+    """An integer stored under ``key``, or None when the key is absent."""
+    if key not in settings or settings[key] is None:
+        return None
+    try:
+        return int(settings[key])
+    except (TypeError, ValueError):
+        return None
+
+
+def output_token_limit(
+    body: dict[str, Any], settings: dict[str, Any] | None = None
+) -> int | None:
+    """Completion cap from the request, then from settings. An omission is uncapped."""
+    if body.get("max_tokens") is not None:
+        return int(body["max_tokens"])
+    if body.get("max_completion_tokens") is not None:
+        return int(body["max_completion_tokens"])
+    source = load_settings(madmetal_home()) if settings is None else settings
+    return _configured_int(source, "max_tokens")
+
+
+def configured_thinking_budget(settings: dict[str, Any] | None = None) -> int | None:
+    """Think-token cap from settings. An omission does not close the think block on a count."""
+    source = load_settings(madmetal_home()) if settings is None else settings
+    return _configured_int(source, "thinking_budget")
+
+
 def log_max_bytes(settings: dict[str, Any]) -> int:
     """Positive ``log_max_bytes``, or the 1 MiB default."""
     value = settings.get("log_max_bytes", DEFAULT_LOG_MAX_BYTES)

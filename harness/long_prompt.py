@@ -37,8 +37,6 @@ INSTRUCTIONS = (
     "After the file comes back, think through what it does and how it relates "
     "to those files, then reply with that analysis."
 )
-# Past this point the analysis paraphrase is not the canonical encoding of its text.
-MAX_TOKENS = 128
 SKIP_PARTS = frozenset(
     {
         ".git",
@@ -532,7 +530,6 @@ def _open_agent(base_url: str, model: str, read: object) -> tuple[AsyncOpenAI, A
         instructions=INSTRUCTIONS,
         tools=[read],
         default_options={
-            "max_tokens": MAX_TOKENS,
             "temperature": 0.0,
             "tool_choice": {"mode": "required", "required_function_name": "read_file"},
             "extra_body": {"enable_thinking": True},

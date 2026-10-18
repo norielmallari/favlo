@@ -125,13 +125,12 @@ async def run_file_task(
             name="file-agent",
             instructions="Call the tool once. Then stop.",
             tools=[step_tool],
-            default_options={"temperature": 0, "max_tokens": 128},
+            default_options={"temperature": 0},
         )
         await agent.run(
             prompt,
             options={
                 "temperature": 0,
-                "max_tokens": 128,
                 "tool_choice": {"mode": "required", "required_function_name": name},
             },
         )

@@ -36,7 +36,7 @@ Tests for the listener, the registry, and the console live in `tests/test_cli.py
 
 Status goes through `src/madmetal/console.py`. The module imports nothing from a pipeline. The listener does not import a pipeline until a request names one. That row's entry file provides `open_runtime` and `handle_chat`. `--console auto` is pretty when stderr is a terminal, and plain when it is a pipe, when `NO_COLOR` is set, or when `TERM` is `dumb`. `plain` prints the lines the harness parses. `pretty` draws one row per open phase at 10 Hz. `json` writes one NDJSON object per event, schema version 1. How a pipeline binds those phases is that pipeline's note.
 
-`madmetal serve` also appends those durable lines, phase summaries, and tracebacks to `~/.madmetal/logs/madmetal.log`. The live row is not written there. `~/.madmetal/settings.json` key `log_max_bytes` is the most bytes that file may hold. The default is 1048576. The first serve creates that file when it is missing. A line that would pass the cap leaves the newest bytes that still fit, starting at the next line when one fits.
+`madmetal serve` also appends those durable lines, phase summaries, and tracebacks to `~/.madmetal/logs/madmetal.log`. The live row is not written there. `~/.madmetal/settings.json` key `log_max_bytes` is the most bytes that file may hold. The default is 1048576. Keys `max_tokens` and `thinking_budget` apply only when present. An omitted `max_tokens` on the request and in that file does not cap the completion. An omitted `thinking_budget` does not close a think block on a token count. The first serve creates that file when it is missing. A line that would pass the cap leaves the newest bytes that still fit, starting at the next line when one fits.
 
 ## Prefix cache
 

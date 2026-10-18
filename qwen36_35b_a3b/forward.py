@@ -600,7 +600,7 @@ class Qwen36Runtime:
         on_token: Any = None,
         think_close: list[int] | None = None,
         think_end: int | None = None,
-        thinking_budget: int = 0,
+        thinking_budget: int | None = 0,
         tool_open: int | None = None,
         long_ids: set[int] | None = None,
         forbid: set[int] | None = None,
@@ -654,7 +654,7 @@ class Qwen36Runtime:
             seen: set[int] = set()
             counts: dict[int, int] = {}
             budget = None
-            if think_close and think_end is not None and thinking_budget > 0:
+            if think_close and think_end is not None and thinking_budget != 0:
                 budget = ThinkBudget(think_close, think_end, thinking_budget)
             decode_row = self._begin_phase("decode", max_tokens, live=True)
             decode_started = time.perf_counter()
@@ -833,10 +833,10 @@ class ThinkBudget:
     time. After that sequence, ``end`` is removed from the logits.
     """
 
-    def __init__(self, close: list[int], end: int, budget: int) -> None:
+    def __init__(self, close: list[int], end: int, budget: int | None) -> None:
         self.close = [int(token) for token in close]
         self.end = int(end)
-        self.budget = int(budget)
+        self.budget = None if budget is None else int(budget)
         self.counted = 0
         self.force_at: int | None = None
         self.closed = False
@@ -849,7 +849,7 @@ class ThinkBudget:
     def take(self, sampled: int) -> int:
         if self.closed:
             return sampled
-        if self.counted >= self.budget:
+        if self.budget is not None and self.counted >= self.budget:
             return self._start()
         if sampled == self.end:
             self.closed = True

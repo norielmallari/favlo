@@ -7,9 +7,11 @@ from madmetal.console import Console
 from madmetal.logs import (
     DEFAULT_LOG_MAX_BYTES,
     RollingLog,
+    configured_thinking_budget,
     ensure_settings,
     log_max_bytes,
     log_path,
+    output_token_limit,
     settings_path,
 )
 
@@ -58,3 +60,16 @@ def test_console_lines_land_in_the_rolling_log(tmp_path) -> None:
     assert "listening on http://127.0.0.1:8129" in text
     assert "prefill 4 tok in 1.0s" in text
     assert "RuntimeError: boom" in text
+
+
+def test_omitted_output_limit_and_thinking_budget_stay_unset(tmp_path) -> None:
+    created = ensure_settings(tmp_path)
+    assert "max_tokens" not in created
+    assert "thinking_budget" not in created
+    settings = {"log_max_bytes": 1024}
+    assert output_token_limit({}, settings) is None
+    assert output_token_limit({"max_tokens": None, "max_completion_tokens": 16}, settings) == 16
+    assert output_token_limit({"max_tokens": 32}, {"max_tokens": 8}) == 32
+    assert output_token_limit({}, {"max_tokens": 64}) == 64
+    assert configured_thinking_budget(settings) is None
+    assert configured_thinking_budget({"thinking_budget": 512}) == 512

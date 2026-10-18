@@ -30,7 +30,6 @@ ESTUARIES = "128"
 FAVORITE = "Skeena"
 PASSPHRASE = "glass heron at dusk"
 PERSONA_CHARS = 24_000
-MAX_TOKENS = 2048
 TURN_ONE = (
     "What is your full name, what is your date and place of birth, "
     "and what color is the ninth buoy?"
@@ -182,7 +181,6 @@ def _stream(
             "model": model,
             "messages": messages,
             "stream": True,
-            "max_tokens": MAX_TOKENS,
             "temperature": 1.0,
             "top_p": 0.95,
             "top_k": 20,

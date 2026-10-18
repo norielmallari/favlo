@@ -114,7 +114,7 @@ def fetch_sampling(port: int, model_id: str) -> dict[str, object]:
 def completion_body(
     model: str,
     messages: list[dict[str, str]],
-    max_tokens: int,
+    max_tokens: int | None,
     request: Request,
 ) -> dict[str, object]:
     """The JSON body for one completion. Unset sampling fields are omitted."""
@@ -122,9 +122,10 @@ def completion_body(
         "model": model,
         "messages": messages,
         "stream": False,
-        "max_tokens": max_tokens,
         "enable_thinking": request.enable_thinking,
     }
+    if max_tokens is not None:
+        body["max_tokens"] = max_tokens
     if request.temperature is not None:
         body["temperature"] = request.temperature
     if request.top_p is not None:

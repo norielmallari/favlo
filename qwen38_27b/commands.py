@@ -85,7 +85,7 @@ def _complete(args: argparse.Namespace) -> int:
         try:
             messages = [{"role": "user", "content": CARROT_PROMPT}]
             prompt = encode_chat(runtime.root, messages, None, False)
-            tokens = runtime.generate(prompt, 384, STOP)
+            tokens = runtime.generate(prompt, None, STOP)
             text = decode_text(runtime.root, tokens)
         finally:
             runtime.close()

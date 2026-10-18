@@ -13,12 +13,11 @@ from harness.coding.workspace import PROMPT, TOOLS, arguments_of, dispatch
 
 # A stuck model ends here. The suite does not score this bound.
 SESSION_ROUNDS = 8
-MAX_TOKENS = 4096
 
 
 def chat_body(model: str, messages: list[dict[str, Any]], request: Request) -> dict[str, object]:
     """One completion body. Sampling comes from the thinking card."""
-    body = completion_body(model, messages, MAX_TOKENS, request)
+    body = completion_body(model, messages, None, request)
     body["tools"] = TOOLS
     return body
 

@@ -12,7 +12,7 @@ from jinja2 import Environment
 from tokenizers import Tokenizer
 
 from qwen36_35b_a3b.forward import RequestClosed, letter_token_ids, long_token_ids
-from qwen36_35b_a3b.sampling import THINKING_BUDGET, VARIANTS, mode_card, requested_thinking
+from qwen36_35b_a3b.sampling import VARIANTS, mode_card, requested_thinking
 from qwen36_35b_a3b.tools import (
     StreamText,
     function_has_parameters,
@@ -81,12 +81,31 @@ def _frequency(body: dict[str, Any]) -> float:
     return float(penalty)
 
 
-def _limit(body: dict[str, Any]) -> int:
-    if body.get("max_tokens") is not None:
-        return int(body["max_tokens"])
-    if body.get("max_completion_tokens") is not None:
-        return int(body["max_completion_tokens"])
-    return 2048
+def requested_limit(body: dict[str, Any]) -> int | None:
+    """Request or settings cap. None when neither set one."""
+    from madmetal.logs import output_token_limit
+
+    return output_token_limit(body)
+
+
+def thinking_token_budget(thinking: bool) -> int | None:
+    """Settings cap while thinking. None does not close the think block on a count.
+
+    Instruct passes 0 so the repeat guard stays off. The template already closed it.
+    """
+    if not thinking:
+        return 0
+    from madmetal.logs import configured_thinking_budget
+
+    return configured_thinking_budget()
+
+
+def completion_limit(max_position: int, prompt_tokens: int, requested: int | None) -> int:
+    """Tokens still available in the checkpoint context, cut by a request cap."""
+    room = max(0, int(max_position) - int(prompt_tokens))
+    if requested is None:
+        return room
+    return max(0, min(int(requested), room))
 
 
 def load_tokenizer(root: Path) -> Tokenizer:
@@ -211,6 +230,7 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
     forbid = None if thinking else instruct_forbid(runtime.root)
     emit_tools = body.get("tool_choice") != "none"
     stream = bool(body.get("stream", False))
+    limit = completion_limit(runtime.max_pos, len(prompt), requested_limit(body))
     if stream:
         _stream(
             handler,
@@ -218,7 +238,7 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
             prompt,
             forced,
             stop_after_forced,
-            _limit(body),
+            limit,
             temperature,
             top_p,
             top_k,
@@ -237,7 +257,7 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
     started = time.perf_counter()
     tokens = runtime.generate(
         prompt,
-        _limit(body),
+        limit,
         temperature,
         top_p,
         top_k,
@@ -247,7 +267,7 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
         stop_after_forced=stop_after_forced,
         think_close=close,
         think_end=end,
-        thinking_budget=THINKING_BUDGET if thinking else 0,
+        thinking_budget=thinking_token_budget(thinking),
         tool_open=tool_open,
         long_ids=long_ids,
         forbid=forbid,
@@ -429,7 +449,7 @@ def _stream(
             on_token=enqueue,
             think_close=think_close,
             think_end=think_end,
-            thinking_budget=THINKING_BUDGET if thinking else 0,
+            thinking_budget=thinking_token_budget(thinking),
             tool_open=tool_open,
             long_ids=long_ids,
             forbid=forbid,

@@ -129,12 +129,11 @@ def _rng(body: dict[str, Any]) -> np.random.Generator:
     return np.random.default_rng(int(seed))
 
 
-def _limit(body: dict[str, Any]) -> int:
-    if body.get("max_tokens") is not None:
-        return int(body["max_tokens"])
-    if body.get("max_completion_tokens") is not None:
-        return int(body["max_completion_tokens"])
-    return 2048
+def _limit(body: dict[str, Any]) -> int | None:
+    """Request or settings cap. None means decode until a stop or the context ends."""
+    from madmetal.logs import output_token_limit
+
+    return output_token_limit(body)
 
 
 def _forced_call(root: Path, tools: Any, required: str | None) -> tuple[list[int], bool]:
