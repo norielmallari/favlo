@@ -654,11 +654,12 @@ kernel void rope_partial(
     float angle = float(positions[axis]) * pow(theta, -float(pair) / 32.0f);
     float c = cos(angle);
     float s = sin(angle);
-    uint i0 = pair * 2u;
+    uint i0 = pair;
+    uint i1 = pair + 32u;
     float x0 = hidden[i0];
-    float x1 = hidden[i0 + 1u];
+    float x1 = hidden[i1];
     hidden[i0] = x0 * c - x1 * s;
-    hidden[i0 + 1u] = x0 * s + x1 * c;
+    hidden[i1] = x0 * s + x1 * c;
 }
 
 kernel void gdn_conv(
@@ -743,9 +744,9 @@ kernel void gdn_state(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float ytot = red[0] + red[1] + red[2] + red[3];
-    float inv = rsqrt(ytot / 128.0f + eps);
-    float gated = y * inv * (1.0f + float(norm_w[tid]));
-    destination[head * 128u + tid] = gated * silu_f(gate[head * 128u + tid]);
+        float inv = rsqrt(ytot / 128.0f + eps);
+        float gated = y * inv * float(norm_w[tid]);
+        destination[head * 128u + tid] = gated * silu_f(gate[head * 128u + tid]);
 }
 
 static float head_dot(
@@ -1480,11 +1481,12 @@ kernel void qk_norm_rope(
     float angle = float(positions[axis]) * pow(theta, -float(tid) / 32.0f);
     float c = cos(angle);
     float s = sin(angle);
-    uint i0 = tid * 2u;
+    uint i0 = tid;
+    uint i1 = tid + 32u;
     float x0 = row[i0];
-    float x1 = row[i0 + 1u];
+    float x1 = row[i1];
     row[i0] = x0 * c - x1 * s;
-    row[i0 + 1u] = x0 * s + x1 * c;
+    row[i1] = x0 * s + x1 * c;
 }
 
 kernel void store_kv(
@@ -1833,7 +1835,7 @@ kernel void gdn_state_rows(
         threadgroup_barrier(mem_flags::mem_threadgroup);
         float ytot = red[0] + red[1] + red[2] + red[3];
         float inv = rsqrt(ytot / 128.0f + eps);
-        float gated = y * inv * (1.0f + float(norm_w[tid]));
+        float gated = y * inv * float(norm_w[tid]);
         device const float* z = gate + token * 4096u;
         destination[token * 4096u + head * 128u + tid] = gated * silu_f(z[head * 128u + tid]);
     }
@@ -2045,7 +2047,7 @@ kernel void gdn_y_norm(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float ytot = red[0] + red[1] + red[2] + red[3];
     float inv = rsqrt(ytot / 128.0f + eps);
-    float gated = value * inv * (1.0f + float(norm_w[tid]));
+    float gated = value * inv * float(norm_w[tid]);
     device const float* z = gate + tgid.x * 4096u + tgid.y * 128u;
     row[tid] = gated * silu_f(z[tid]);
 }
@@ -2108,17 +2110,18 @@ kernel void qk_norm_rope_rows(
     if (tid >= 32u) {
         return;
     }
-    // Text puts the same position on every mRoPE axis, so the pair frequency
-    // is plain RoPE. mrope_axis is what a vision token would consult.
+    // Text puts the same position on every mRoPE axis. The first 64 channels
+    // rotate as two halves: channel i with channel i+32.
     float position = float(pos0 + token);
     float angle = position * pow(theta, -float(tid) / 32.0f);
     float c = cos(angle);
     float s = sin(angle);
-    uint i0 = tid * 2u;
+    uint i0 = tid;
+    uint i1 = tid + 32u;
     float x0 = row[i0];
-    float x1 = row[i0 + 1u];
+    float x1 = row[i1];
     row[i0] = x0 * c - x1 * s;
-    row[i0 + 1u] = x0 * s + x1 * c;
+    row[i1] = x0 * s + x1 * c;
 }
 
 kernel void store_kv_rows(

@@ -218,7 +218,7 @@ def check_deltanet(session: Session) -> None:
     gate = np.ones((32, 128), dtype=np.float32)
     a_log = np.zeros(32, dtype=np.float16)
     dt_bias = np.zeros(32, dtype=np.float16)
-    norm = np.zeros(128, dtype=np.float16)
+    norm = np.ones(128, dtype=np.float16)
     state0 = np.ones((32, 128, 128), dtype=np.float32)
     destination = session.zeros(32 * 128 * 4)
     session.dispatch(
@@ -255,7 +255,7 @@ def check_deltanet(session: Session) -> None:
         y = state @ qn[head // 2]
         inv = 1.0 / np.sqrt(np.mean(y * y) + EPS)
         silu = gate[head] * (1.0 / (1.0 + np.exp(-gate[head])))
-        out[head] = y * inv * silu
+        out[head] = y * inv * norm.astype(np.float32) * silu
     got = session.download_f32(destination, 32 * 128).reshape(32, 128)
     _close("deltanet", got, out, atol=1e-4)
 
@@ -374,7 +374,7 @@ def check_gdn_chunk(session: Session) -> None:
             inv = np.float32(1.0) / np.sqrt(np.mean(y * y) + EPS)
             z = gate[token, head * 128 : (head + 1) * 128]
             silu = z / (np.float32(1.0) + np.exp(-z))
-            expect[token, head] = y * inv * (np.float32(1.0) + norm.astype(np.float32)) * silu
+            expect[token, head] = y * inv * norm.astype(np.float32) * silu
     _close("gdn chunk", got, expect, atol=2e-3, rtol=2e-3)
 
 
@@ -491,11 +491,12 @@ def check_rope(session: Session) -> None:
         angle = theta ** (-pair / 32.0)
         c = np.cos(angle)
         s = np.sin(angle)
-        i0 = pair * 2
+        i0 = pair
+        i1 = pair + 32
         x0 = float(expect[i0])
-        x1 = float(expect[i0 + 1])
+        x1 = float(expect[i1])
         expect[i0] = x0 * c - x1 * s
-        expect[i0 + 1] = x0 * s + x1 * c
+        expect[i1] = x0 * s + x1 * c
     _close("rope", got[:64], expect[:64].astype(np.float32), atol=1e-5)
     _close("rope tail", got[64:], hidden[64:], atol=0.0)
 

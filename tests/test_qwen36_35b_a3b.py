@@ -14,7 +14,12 @@ from qwen36_35b_a3b.cache import kv_buffer_bytes, kv_mode, max_position, parse_m
 from qwen36_35b_a3b.checks import run_checks
 from qwen36_35b_a3b.convert import expert_slot_map
 from qwen36_35b_a3b.formats import EXPERT_IMAGE, dequant_fp4, fp4_image, quantize_fp4
-from qwen36_35b_a3b.forward import ThinkBudget, _sample, assert_think_repeat_cases
+from qwen36_35b_a3b.forward import (
+    ThinkBudget,
+    _sample,
+    assert_think_repeat_cases,
+    limit_keeps_piece,
+)
 from qwen36_35b_a3b.tools import (
     StreamText,
     function_has_parameters,
@@ -38,6 +43,52 @@ def test_expert_slots_follow_the_median_scale() -> None:
     down = [bytes([10]), bytes([1]), bytes([40]), bytes([10])]
     mapping = expert_slot_map(gate, down)
     assert mapping.tolist() == [1, 0, 3, 2]
+
+
+def test_a_closed_think_tool_call_is_a_prefix_of_the_next_prompt() -> None:
+    root = Path("models/Qwen3.6-35B-A3B-fp4")
+    if not (root / "chat_template.jinja").is_file():
+        pytest.skip("chat template is not installed")
+    from qwen36_35b_a3b.chat import encode_chat, encode_text
+
+    user = "Call read_file with path qwen38_flash_next/runtime.py."
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        }
+    ]
+    call = (
+        "<tool_call>\n<function=read_file>\n<parameter=path>\n"
+        "qwen38_flash_next/runtime.py\n</parameter>\n</function>\n</tool_call>"
+    )
+    prompt = encode_chat(root, [{"role": "user", "content": user}], tools, False, None)
+    joined = prompt + encode_text(root, call)
+    whole = encode_chat(
+        root,
+        [
+            {"role": "user", "content": user},
+            {"role": "assistant", "reasoning_content": "", "content": call},
+            {"role": "user", "content": "<tool_response>\nfile\n</tool_response>"},
+        ],
+        tools,
+        True,
+        None,
+    )
+    assert whole[: len(joined)] == joined
+
+
+def test_a_blank_piece_is_dropped_when_the_limit_cuts_an_open_think() -> None:
+    assert not limit_keeps_piece(True, True)
+    assert limit_keeps_piece(True, False)
+    assert limit_keeps_piece(False, True)
 
 
 def test_a_repeated_span_is_not_drawn_again() -> None:

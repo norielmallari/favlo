@@ -11,7 +11,7 @@ from typing import Any
 from jinja2 import Environment
 from tokenizers import Tokenizer
 
-from qwen36_35b_a3b.forward import RequestClosed, long_token_ids
+from qwen36_35b_a3b.forward import RequestClosed, letter_token_ids, long_token_ids
 from qwen36_35b_a3b.sampling import THINKING_BUDGET, VARIANTS, mode_card, requested_thinking
 from qwen36_35b_a3b.tools import (
     StreamText,
@@ -31,6 +31,17 @@ def _long_ids(root: Path) -> frozenset[int]:
     if cached is None:
         cached = long_token_ids(load_tokenizer(root).get_vocab())
         _LONG_IDS[root] = cached
+    return cached
+
+
+_WORD_IDS: dict[Path, frozenset[int]] = {}
+
+
+def _word_ids(root: Path) -> frozenset[int]:
+    cached = _WORD_IDS.get(root)
+    if cached is None:
+        cached = letter_token_ids(load_tokenizer(root).get_vocab())
+        _WORD_IDS[root] = cached
     return cached
 
 
@@ -63,6 +74,13 @@ def _presence(body: dict[str, Any], thinking: bool, variant: dict[str, Any] | No
     return 0.0 if thinking else 1.5
 
 
+def _frequency(body: dict[str, Any]) -> float:
+    penalty = body.get("frequency_penalty")
+    if penalty is None:
+        return 0.0
+    return float(penalty)
+
+
 def _limit(body: dict[str, Any]) -> int:
     if body.get("max_tokens") is not None:
         return int(body["max_tokens"])
@@ -80,24 +98,42 @@ def encode_chat(
     messages: list[dict[str, Any]],
     tools: Any,
     enable_thinking: bool,
+    reasoning_effort: str | None = None,
 ) -> list[int]:
     """Render the checkpoint template and encode it."""
     template = (root / "chat_template.jinja").read_text()
     env = Environment()
     env.globals["raise_exception"] = _raise
-    rendered = env.from_string(template).render(
-        messages=normalize_messages(messages),
-        tools=tools or None,
-        add_generation_prompt=True,
-        enable_thinking=enable_thinking,
-        add_vision_id=False,
-        preserve_thinking=True,
-    )
+    rendered_args: dict[str, Any] = {
+        "messages": normalize_messages(messages),
+        "tools": tools or None,
+        "add_generation_prompt": True,
+        "enable_thinking": enable_thinking,
+        "add_vision_id": False,
+        "preserve_thinking": True,
+    }
+    if reasoning_effort:
+        rendered_args["reasoning_effort"] = reasoning_effort
+    rendered = env.from_string(template).render(**rendered_args)
     return list(load_tokenizer(root).encode(rendered).ids)
 
 
 def encode_text(root: Path, text: str) -> list[int]:
     return list(load_tokenizer(root).encode(text).ids)
+
+
+def think_open_id(root: Path) -> int:
+    """Token id of ``<think>``. Instruct forbids drawing it again."""
+    opened = encode_text(root, "<think>")
+    if len(opened) != 1:
+        raise RuntimeError("the think open is not one token")
+    return opened[0]
+
+
+def instruct_forbid(root: Path) -> set[int]:
+    """Think markers. Instruct already closed the block, so neither is drawn."""
+    _close, end = think_close_ids(root)
+    return {think_open_id(root), end}
 
 
 def think_close_ids(root: Path) -> tuple[list[int], int]:
@@ -157,18 +193,22 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
     messages = body["messages"]
     requested = requested_thinking(body)
     required = required_function(body.get("tool_choice"))
-    if required and "enable_thinking" not in body and (
-        selection is None or getattr(selection, "variant", None) is None
-    ):
-        requested = False
     thinking, card = mode_card(selection, requested)
+    # A named call is the whole completion. The closed think is the template's
+    # empty reasoning turn, encoded with the prompt so the newline stays one token.
+    # A :thinking id would otherwise keep the block open around that call.
+    if required:
+        thinking = False
     temperature, top_p, top_k = _sampling(body, thinking, card)
     presence = _presence(body, thinking, card)
+    frequency = _frequency(body)
     prompt = encode_chat(runtime.root, messages, body.get("tools"), thinking)
     forced, stop_after_forced = _forced_call(runtime.root, body.get("tools"), required)
     close, end = think_close_ids(runtime.root) if thinking else ([], None)
     tool_open = encode_text(runtime.root, "<tool_call>")[0] if thinking else None
     long_ids = _long_ids(runtime.root) if thinking else None
+    word_ids = _word_ids(runtime.root) if thinking else None
+    forbid = None if thinking else instruct_forbid(runtime.root)
     emit_tools = body.get("tool_choice") != "none"
     stream = bool(body.get("stream", False))
     if stream:
@@ -189,6 +229,9 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
             tool_open,
             emit_tools,
             long_ids,
+            forbid,
+            word_ids,
+            frequency=frequency,
         )
         return
     started = time.perf_counter()
@@ -207,6 +250,9 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
         thinking_budget=THINKING_BUDGET if thinking else 0,
         tool_open=tool_open,
         long_ids=long_ids,
+        forbid=forbid,
+        word_ids=word_ids,
+        frequency=frequency,
     )
     text = decode_text(runtime.root, tokens)
     reasoning, reply = split_thinking(text, thinking)
@@ -301,6 +347,9 @@ def _stream(
     tool_open: int | None = None,
     emit_tools: bool = True,
     long_ids: set[int] | None = None,
+    forbid: set[int] | None = None,
+    word_ids: set[int] | None = None,
+    frequency: float = 0.0,
 ) -> None:
     decode = getattr(runtime, "decode", None)
     if not callable(decode):
@@ -383,6 +432,9 @@ def _stream(
             thinking_budget=THINKING_BUDGET if thinking else 0,
             tool_open=tool_open,
             long_ids=long_ids,
+            forbid=forbid,
+            word_ids=word_ids,
+            frequency=frequency,
         )
     finally:
         pending.put(None)
