@@ -124,6 +124,23 @@ decode 1.00 tok/s (3 tok in 3.00s)
     assert agent[1].prefix_hit == 12
     assert agent[2].prefix_load == 24
     assert extensions_hold(agent)
+    warm = """\
+prefix load 50 tokens
+prompt tokens 50
+cache hit 50
+prefill 1.00 tok/s (0 tok in 0.00s)
+decode 1.00 tok/s (2 tok in 2.00s)
+prompt tokens 80
+cache hit 52
+prefill 1.00 tok/s (28 tok in 2.00s)
+decode 1.00 tok/s (4 tok in 4.00s)
+prefix load 84 tokens
+prompt tokens 100
+cache hit 84
+prefill 1.00 tok/s (16 tok in 2.00s)
+decode 1.00 tok/s (1 tok in 1.00s)
+"""
+    assert extensions_hold(parse_requests(warm))
 
 
 def _encode(

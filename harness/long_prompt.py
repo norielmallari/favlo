@@ -256,21 +256,31 @@ def _extends(previous: RequestRate, current: RequestRate) -> bool:
     )
 
 
-def prefix_so_far(requests: list[RequestRate]) -> bool:
-    """True while these requests can still finish as one disk load and in-memory extensions.
+def _stored_load(request: RequestRate) -> bool:
+    return (
+        request.prefix_load is not None
+        and not request.missed
+        and request.prefix_hit == request.prefix_load
+    )
 
-    The first request misses. A tool follow-up on that same server extends it in
-    memory. After the server restarts, one request loads the applied prefix from
-    disk. Every other later request extends the previous one in memory.
+
+def prefix_so_far(requests: list[RequestRate]) -> bool:
+    """True while these requests can still finish as one restart load and in-memory extensions.
+
+    The first request misses, or loads a prefix that was already on disk. A tool
+    follow-up on that same server extends it in memory. After the server restarts,
+    one request loads the applied prefix from disk. Every other later request
+    extends the previous one in memory.
     """
-    if not requests or not _cold_start(requests[0]):
+    if not requests:
+        return False
+    first = requests[0]
+    if not (_cold_start(first) or _stored_load(first)):
         return False
     loaded = False
     for previous, current in zip(requests, requests[1:], strict=False):
         if current.prefix_load is not None:
-            if loaded or current.missed or current.prefix_hit != _applied(previous):
-                return False
-            if current.prefix_load != current.prefix_hit:
+            if loaded or not _stored_load(current) or current.prefix_hit != _applied(previous):
                 return False
             loaded = True
             continue
