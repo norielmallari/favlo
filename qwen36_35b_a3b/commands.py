@@ -15,15 +15,15 @@ from madmetal.registry import (
     register_quantized,
     set_alias,
 )
-from qwen36_35b_a3b.chat import STOP, decode_text, encode_chat
+from qwen36_35b_a3b.chat import STOP, decode_text, encode_chat, instruct_forbid
 from qwen36_35b_a3b.checks import format_report, run_checks
 from qwen36_35b_a3b.convert import quantize, record_name
 from qwen36_35b_a3b.forward import Qwen36Runtime
 
 PIPELINE = "qwen36-35b-a3b"
-GROVE_PROMPT = (
-    "There are 15 trees in the grove. Grove workers will plant trees in the grove today. "
-    "After they are done, there will be 21 trees. How many trees did the grove workers plant today?"
+CARROT_PROMPT = (
+    "Amanda and Celestia have 15 carrots. They collect more carrots for Favlo the Horse. "
+    "After collecting, they have 21 carrots. How many carrots did they collect?"
 )
 _BF16 = Path("models/Qwen3.6-35B-A3B-bf16")
 _BF16_REPO = "Qwen/Qwen3.6-35B-A3B"
@@ -106,14 +106,23 @@ def _complete(args: argparse.Namespace) -> int:
             max_memory=args.max_memory,
         )
         try:
-            messages = [{"role": "user", "content": GROVE_PROMPT}]
+            messages = [{"role": "user", "content": CARROT_PROMPT}]
             prompt = encode_chat(runtime.root, messages, None, False)
-            tokens = runtime.generate(prompt, 128, 0.0, 1.0, 0, 0.0, STOP)
+            tokens = runtime.generate(
+                prompt,
+                384,
+                0.0,
+                1.0,
+                0,
+                0.0,
+                STOP,
+                forbid=instruct_forbid(runtime.root),
+            )
             text = decode_text(runtime.root, tokens)
         finally:
             runtime.close()
-        body = {"prompt": GROVE_PROMPT, "text": text}
-        target = path / "grove.json"
+        body = {"prompt": CARROT_PROMPT, "text": text}
+        target = path / "carrots.json"
         target.write_text(json.dumps(body, indent=2) + "\n")
     except (OSError, RuntimeError, LookupError, ValueError) as exc:
         sys.stderr.write(f"{exc}\n")

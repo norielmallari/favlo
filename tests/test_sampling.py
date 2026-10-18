@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 from harness.benchmarks.serve import Request, apply_sampling, card_model_id, select_sampling
+from qwen36_35b_a3b.forward import _sample
 from qwen38_27b.forward import sample_token
 from qwen38_flash_next.runtime import Qwen38Runtime
 
@@ -34,6 +35,12 @@ def test_top_k_excludes_the_tail() -> None:
     for _ in range(20):
         drawn = sample_token(logits, 1.0, 1.0, 2, 0.0, 0.0, {}, {}, rng)
         assert drawn in (0, 2)
+
+
+def test_35b_frequency_and_presence_both_apply() -> None:
+    logits = np.array([1.0, 2.5], dtype=np.float32)
+    drawn = _sample(logits, 0.0, 1.0, 0, 0.5, {1}, None, None, 1.0, {1: 2})
+    assert drawn == 0
 
 
 def test_flash_applies_presence_and_frequency_together() -> None:

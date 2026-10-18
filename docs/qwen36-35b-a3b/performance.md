@@ -8,12 +8,14 @@ The harness starts `madmetal serve` and runs an agent until the prompt reaches 6
 uv run python -m harness.long_prompt --model qwen36-35b-a3b
 ```
 
-The printed summary is the measurement. The run below closed thinking and stopped each completion at the forced tool call, 13 tokens. It stopped at 85667 prompt tokens over three requests. Prefill is the summed suffix time. Decode is the summed sampled-token time.
+The printed summary is the measurement. The request sets temperature 0 and leaves thinking on. The run below continued past 65536 prompt tokens and stopped at 73810 over five requests. Prefill is the summed suffix time. Decode is the summed sampled-token time.
 
 | Request | Prompt tokens | Cache | Prefill | Decode |
 |---|---:|---|---|---|
-| 1 | 301 | miss | 165.29 tok/s (301 tok in 1.82 s) | 68.19 tok/s (13 tok in 0.19 s) |
-| 2 | 45776 | hit 314 | 956.06 tok/s (45462 tok in 47.55 s) | 55.16 tok/s (13 tok in 0.24 s) |
-| 3 | 85667 | hit 45789 | 615.28 tok/s (39878 tok in 64.81 s) | 47.39 tok/s (13 tok in 0.27 s) |
+| 1 | 359 | miss | 36.36 tok/s (359 tok in 9.87 s) | 12.16 tok/s (33 tok in 2.71 s) |
+| 2 | 46355 | hit 392 | 782.95 tok/s (45963 tok in 58.71 s) | 20.95 tok/s (84 tok in 4.01 s) |
+| 3 | 46474 | hit 46439 | 2.98 tok/s (35 tok in 11.73 s) | 13.74 tok/s (42 tok in 3.06 s) |
+| 4 | 46583 | hit 46516 | 6.21 tok/s (67 tok in 10.80 s) | 11.33 tok/s (34 tok in 3.00 s) |
+| 5 | 73810 | hit 46617 | 516.28 tok/s (27193 tok in 52.67 s) | 18.19 tok/s (70 tok in 3.85 s) |
 
-The summary is prefill 750.05 tok/s (85641 tok in 114.18 s) and decode 55.71 tok/s (39 tok in 0.70 s). The prefill kernel ceiling for 65536 tokens from position 0 is 1047.86 tok/s. The decode kernel ceiling at context 65536 is 82.97 tok/s.
+The summary is prefill 512.01 tok/s (73617 tok in 143.78 s) and decode 15.81 tok/s (263 tok in 16.63 s). The prefill kernel ceiling for 65536 tokens from position 0 is 1047.86 tok/s. The decode kernel ceiling at context 65536 is 82.97 tok/s.
