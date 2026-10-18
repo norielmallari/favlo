@@ -126,6 +126,30 @@ def piece_is_blank(root: Path, token: int) -> bool:
     return _piece_decoder[1](root, [token]).strip() == ""
 
 
+class _Pending:
+    """The next token's layers, recorded before that token is known."""
+
+    def __init__(self, session: Any, pos: int) -> None:
+        self.pos = pos
+        self.command = session.queue.commandBuffer()
+        self.encoder = self.command.computeCommandEncoder()
+        self.held: list[Any] = []
+
+    def commit(self, session: Any) -> None:
+        self.encoder.endEncoding()
+        self.encoder = None
+        self.command.commit()
+        session._inflight.append((self.command, self.held))
+        self.held = []
+
+    def discard(self) -> None:
+        if self.encoder is not None:
+            self.encoder.endEncoding()
+            self.encoder = None
+        self.command = None
+        self.held = []
+
+
 class Qwen36Runtime:
     """One resident record. ``close`` drops its buffers."""
 
@@ -210,6 +234,7 @@ class Qwen36Runtime:
         self.filled = 0
         self.prefix = open_session(self)
         self._prefill = None
+        self._pending: _Pending | None = None
         self._prefill_progress = None
         self._prefill_base = 0
         self._cached: list[int] = []
@@ -245,6 +270,7 @@ class Qwen36Runtime:
             raise RequestClosed()
 
     def close(self) -> None:
+        self._drop_pending()
         prefix = getattr(self, "prefix", None)
         if prefix is not None and self.session is not None:
             try:
@@ -280,6 +306,7 @@ class Qwen36Runtime:
             memoryview(buffer.contents().as_buffer(nbytes))[:] = b"\x00" * nbytes
         for cache in (*self.k_cache, *self.v_cache):
             _clear(cache, self.kv_bytes)
+        self._drop_pending()
         self.filled = 0
 
     def _loc(self, name: str) -> tuple[Any, int, dict]:
@@ -559,8 +586,28 @@ class Qwen36Runtime:
         if pos >= self.max_pos:
             message = f"position {pos} is past {self.max_pos}"
             raise RuntimeError(message)
-        self.session.begin()
-        self._embed(token)
+        pending = self._pending
+        self._pending = None
+        if pending is not None and pending.pos == pos:
+            self.session.begin()
+            self._embed(token)
+            self.session.commit()
+            pending.commit(self.session)
+        else:
+            if pending is not None:
+                pending.discard()
+            self.session.begin()
+            self._embed(token)
+            self._layers(pos, head=logits)
+            self.session.commit()
+        self._prepare_pending(pos + 1)
+        self.session.wait_inflight()
+        self.filled = pos + 1
+        if not logits:
+            return None
+        return self.session.download_f32(self.logits, VOCAB)
+
+    def _layers(self, pos: int, *, head: bool) -> None:
         for layer in range(40):
             norm = f"model.language_model.layers.{layer}.input_layernorm.weight"
             self._rms(self.hidden, 0, norm, HIDDEN, self.normed)
@@ -578,13 +625,29 @@ class Qwen36Runtime:
             )
             self._moe(layer, prefix)
         self._rms(self.hidden, 0, "model.language_model.norm.weight", HIDDEN, self.normed)
-        if logits:
+        if head:
             self._gemv_fp4(self.normed, 0, "lm_head.weight", self.logits)
-        self.session.end()
-        self.filled = pos + 1
-        if not logits:
-            return None
-        return self.session.download_f32(self.logits, VOCAB)
+
+    def _prepare_pending(self, pos: int) -> None:
+        """Record the next token's layers while this token's GPU work is in flight."""
+        if pos >= self.max_pos or self.session._inflight == []:
+            return
+        pending = _Pending(self.session, pos)
+        self.session._redirect = pending
+        try:
+            self._layers(pos, head=True)
+        except BaseException:
+            self.session._redirect = None
+            pending.discard()
+            raise
+        self.session._redirect = None
+        self._pending = pending
+
+    def _drop_pending(self) -> None:
+        pending = self._pending
+        self._pending = None
+        if pending is not None:
+            pending.discard()
 
     def generate(
         self,

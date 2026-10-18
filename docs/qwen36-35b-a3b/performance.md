@@ -26,16 +26,16 @@ Instruct card. `enable_thinking` is false. Omitted sampling fields come from tha
 uv run python -m harness --model qwen36-35b-a3b
 ```
 
-The server stops after the first turn and starts again, so the next turn loads the stored prefix. Later turns stay on that server. This run reached 87799 prompt tokens over four requests.
+The server stops after the first turn and starts again, so the next turn loads the stored prefix. Later turns stay on that server. This run reached 87769 prompt tokens over four requests.
 
 | Request | Prompt tokens | Cache | Prefill | Decode |
 |---|---:|---|---|---|
-| 1 | 361 | miss | 32.89 tok/s (361 tok in 10.98 s) | 10.81 tok/s (31 tok in 2.87 s) |
-| 2 | 46417 | hit 392 | 651.76 tok/s (46025 tok in 70.62 s) | 33.26 tok/s (397 tok in 11.94 s) |
-| 3 | 46851 | prefix load 46814, hit 46814 | 2.85 tok/s (37 tok in 12.97 s) | 11.64 tok/s (40 tok in 3.44 s) |
-| 4 | 87799 | hit 46891 | 407.56 tok/s (40908 tok in 100.37 s) | 36.39 tok/s (873 tok in 23.99 s) |
+| 1 | 361 | miss | 30.42 tok/s (361 tok in 11.87 s) | 10.80 tok/s (31 tok in 2.87 s) |
+| 2 | 46417 | hit 392 | 652.26 tok/s (46025 tok in 70.56 s) | 41.09 tok/s (367 tok in 8.93 s) |
+| 3 | 46821 | prefix load 46784, hit 46784 | 3.13 tok/s (37 tok in 11.81 s) | 12.57 tok/s (40 tok in 3.18 s) |
+| 4 | 87769 | hit 46861 | 402.46 tok/s (40908 tok in 101.64 s) | 39.79 tok/s (673 tok in 16.91 s) |
 
-The summary is prefill 447.99 tok/s (87331 tok in 194.94 s) and decode 31.75 tok/s (1341 tok in 42.24 s).
+The summary is prefill 445.84 tok/s (87331 tok in 195.88 s) and decode 34.84 tok/s (1111 tok in 31.89 s).
 
 ## Coding agent
 
@@ -45,11 +45,11 @@ Thinking card. `enable_thinking` is true. Omitted sampling fields come from that
 uv run python -m harness.coding --model qwen36-35b-a3b
 ```
 
-The hidden suite passed. The run used two requests and stopped at 612 prompt tokens.
+The hidden suite passed. The run used two requests and stopped at 637 prompt tokens.
 
 | Request | Prompt tokens | Cache | Prefill | Decode |
 |---|---:|---|---|---|
-| 1 | 399 | miss | 32.53 tok/s (399 tok in 12.26 s) | 33.64 tok/s (193 tok in 5.74 s) |
-| 2 | 612 | hit 592 | 1.63 tok/s (20 tok in 12.30 s) | 24.21 tok/s (114 tok in 4.71 s) |
+| 1 | 399 | miss | 36.41 tok/s (399 tok in 10.96 s) | 39.86 tok/s (218 tok in 5.47 s) |
+| 2 | 637 | hit 617 | 1.69 tok/s (20 tok in 11.83 s) | 21.51 tok/s (76 tok in 3.53 s) |
 
-The summary is prefill 17.06 tok/s (419 tok in 24.56 s) and decode 29.38 tok/s (307 tok in 10.45 s).
+The summary is prefill 18.39 tok/s (419 tok in 22.79 s) and decode 32.67 tok/s (294 tok in 9.00 s).

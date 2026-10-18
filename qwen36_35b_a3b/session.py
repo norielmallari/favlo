@@ -171,6 +171,7 @@ class Session:
         self.shared = metal.MTLResourceStorageModeShared
         self.pipes: dict[str, Any] = {}
         self._recording = False
+        self._redirect: Any = None
         self._inflight: list[tuple[Any, list[Any]]] = []
         self._sizes: dict[tuple[int, int, int], Any] = {}
         for name in KERNELS:
@@ -264,14 +265,20 @@ class Session:
         groups: tuple[int, int, int],
         threads: tuple[int, int, int],
     ) -> None:
-        encoder = self._pass_encoder
+        redirect = self._redirect
+        if redirect is None:
+            encoder = self._pass_encoder
+            held = self._pass_held
+        else:
+            encoder = redirect.encoder
+            held = redirect.held
         encoder.setComputePipelineState_(self.pipes[name])
         for index, (buffer, offset) in enumerate(bindings):
-            self._pass_held.append(buffer)
+            held.append(buffer)
             encoder.setBuffer_offset_atIndex_(buffer, int(offset), index)
         base = len(bindings)
         for index, blob in enumerate(constants):
-            self._pass_held.append(blob)
+            held.append(blob)
             encoder.setBytes_length_atIndex_(blob, len(blob), base + index)
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(
             self._size(groups),
