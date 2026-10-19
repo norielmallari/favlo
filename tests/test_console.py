@@ -488,6 +488,45 @@ def test_the_load_row_shows_before_the_reply() -> None:
     assert text.index("loaded record") < text.index("favlo: Hello")
 
 
+def test_another_clients_request_prints_the_prompt_again() -> None:
+    ui, stream, _clock = _ui("pretty", color=0)
+    ui.prompt()
+    ui.apply_event({"type": "log", "line": "request open"})
+    ui.apply_event(
+        {"type": "begin", "phase": "load", "total": 100, "unit": "bytes", "detail": "record"}
+    )
+    ui.apply_event({"type": "tick", "phase": "load", "done": 41, "total": 100, "unit": "bytes"})
+    ui.apply_event({"type": "end", "phase": "load", "summary": "loaded record"})
+    ui.apply_event({"type": "log", "line": "prefix store 10 tokens"})
+    assert not stream.getvalue().rstrip().endswith("you:")
+    ui.apply_event({"type": "log", "line": "request closed"})
+    text = stream.getvalue()
+    assert "request open" not in text
+    assert "request closed" not in text
+    assert text.index("41") < text.index("loaded record")
+    assert text.index("prefix store 10 tokens") < text.rindex("you:")
+    assert text.rstrip().endswith("you:")
+
+
+def test_a_closed_request_leaves_an_untouched_prompt() -> None:
+    ui, stream, _clock = _ui("pretty", color=0)
+    ui.prompt()
+    ui.apply_event({"type": "log", "line": "request open"})
+    ui.apply_event({"type": "log", "line": "request closed"})
+    assert stream.getvalue() == "you: "
+
+
+def test_a_held_turn_does_not_print_the_prompt_when_the_request_closes() -> None:
+    ui, stream, _clock = _ui("pretty", color=0)
+    ui.prompt()
+    ui.hold(True)
+    ui.apply_event({"type": "log", "line": "request open"})
+    ui.apply_event({"type": "begin", "phase": "decode", "total": 0, "unit": "tok"})
+    ui.apply_event({"type": "end", "phase": "decode", "summary": "decode settled"})
+    ui.apply_event({"type": "log", "line": "request closed"})
+    assert stream.getvalue().count("you:") == 1
+
+
 def test_the_prompt_starts_on_the_line_after_telemetry() -> None:
     ui, stream, _clock = _ui("pretty", color=0)
     progress = ui.begin("decode", total=0, unit="tok")

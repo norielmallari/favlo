@@ -6,4 +6,4 @@ As-built status row for the process. The map is [../ARCHITECTURE.md](../ARCHITEC
 
 `--console auto` is pretty when stderr is a terminal, and plain when it is a pipe, when `NO_COLOR` is set, or when `TERM` is `dumb`. `plain` prints the lines the harness parses. `pretty` draws the Ingot Plate once, then one row per open phase at 10 Hz. Phases are `load`, `download`, `quantize`, `prefill`, and `decode`. `json` writes one NDJSON object per event, schema version 1. The daemon console is JSON and emits those events, including ticks. A terminal `favlo serve` paints each open phase from that stream. The load row is painted while a completion reads the record. Plain does not open a row.
 
-A chat reply is printed after that turn's telemetry. The prompt `you:` starts on the next line.
+A chat reply is printed after that turn's telemetry. The prompt `you:` starts on the next line. A completion from another client paints on this terminal. When that request closes, `you:` is printed again.

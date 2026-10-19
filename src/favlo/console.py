@@ -106,6 +106,8 @@ class Console:
         self._closes = 0
         self._follower = False
         self._caught_at = 0.0
+        self._at_prompt = False
+        self._restore_prompt = False
 
     @classmethod
     def from_env(
@@ -169,6 +171,7 @@ class Console:
             return
         if self.mode == "pretty" and self._handles:
             return
+        self._note_prompt_displaced()
         self._erase()
         self._write(line + "\n")
         self._redraw()
@@ -241,6 +244,8 @@ class Console:
             if after_output and self._column != 0:
                 self._write("\n")
             self._write("you: ")
+            self._at_prompt = True
+            self._restore_prompt = False
 
     def note_caught_up(self) -> None:
         """The follower has applied every complete line now in the log."""
@@ -256,6 +261,8 @@ class Console:
                 self._opens = 0
                 self._closes = 0
                 self._reply = None
+                self._at_prompt = False
+                self._restore_prompt = False
             return
         self._release_frame()
 
@@ -285,6 +292,7 @@ class Console:
 
     def apply_event(self, event: dict[str, Any]) -> None:
         """Mirror one daemon event onto this console."""
+        restore = False
         with self._lock:
             line = _log_line(event)
             if line == "request open":
@@ -294,7 +302,14 @@ class Console:
             if line == "request closed":
                 if self._holding:
                     self._closes += 1
-                return
+                elif self._restore_prompt and not self._handles:
+                    self._restore_prompt = False
+                    restore = True
+                if not restore:
+                    return
+        if restore:
+            self.prompt(after_output=True)
+            return
         kind = event.get("type")
         if kind == "log":
             line = event.get("line")
@@ -338,6 +353,8 @@ class Console:
         )
         with self._lock:
             self._handles.append(progress)
+        if self.mode != "plain":
+            self._note_prompt_displaced()
         if self.mode == "json":
             self._event(self._boundary("begin", progress))
         if self.mode == "pretty":
@@ -364,6 +381,7 @@ class Console:
                 self._paint_status_below(self._status_rows())
                 return
             if self.mode == "pretty":
+                self._note_prompt_displaced()
                 self._erase()
                 if summary:
                     self._write(self._dim(summary) + "\n")
@@ -377,6 +395,7 @@ class Console:
             event["summary"] = summary
             self._event(event)
         elif summary:
+            self._note_prompt_displaced()
             self._write(summary + "\n")
 
     def retarget(
@@ -794,6 +813,18 @@ class Console:
         if self._wrap_off:
             self._write("\x1b[?7h")
             self._wrap_off = False
+
+    def _note_prompt_displaced(self) -> None:
+        """A foreign request is painting over ``you:``. Print it again when that request closes."""
+        with self._lock:
+            if not self._at_prompt or self._holding:
+                return
+            self._at_prompt = False
+            self._restore_prompt = True
+            if self.mode == "pretty" and not self._inline and self._drawn == 0:
+                self._write("\r\x1b[2K")
+            elif self.mode != "pretty" and self._column != 0:
+                self._write("\n")
 
     def _redraw(self) -> None:
         if self.mode == "pretty" and self._handles:
