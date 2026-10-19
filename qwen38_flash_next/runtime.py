@@ -2537,7 +2537,7 @@ class Qwen38Runtime:
             raise RuntimeError(message)
         size = (self.files.root / "resident.bin").stat().st_size
         progress = None
-        if self.console is not None and not self.console.keeps_lines:
+        if self.console is not None and getattr(self.console, "shows_bars", False):
             detail = getattr(self.console, "load_detail", "") or "record"
             progress = self.console.begin("load", total=size, unit="bytes", detail=detail)
             self._load_progress = progress
@@ -2591,7 +2591,7 @@ class Qwen38Runtime:
             raise RuntimeError(message)
         _check_f32_gemv(self.gpu)
         progress = None
-        if self.console is not None and not self.console.keeps_lines:
+        if self.console is not None and getattr(self.console, "shows_bars", False):
             progress = self.console.begin(
                 "load", total=len(self.kinds), unit="layers", detail="bf16"
             )
