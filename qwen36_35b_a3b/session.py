@@ -109,6 +109,7 @@ KERNELS = (
     "scatter_add_grouped",
     "silu_wave",
     "prefill_fp4_expert_tile",
+    "prefill_fp4_expert_tile_at",
     "prefill_f16",
     "prefill_fp4_n64",
     "prefill_fp4_n64_stride",

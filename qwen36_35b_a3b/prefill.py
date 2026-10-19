@@ -87,6 +87,7 @@ class _Workspace:
         self.group = zeros(8 * 16)
         self.pack_row = zeros(cap * 8 * 4)
         self.tokens = zeros(cap * 4)
+        self.offsets = zeros(_EXPERTS * 8)
         # Alignment padding between experts can add up to three slots each.
         self.csr_i = zeros((cap * 8 + 1024) * 4)
         self.csr_w = zeros((cap * 8 + 1024) * 4)
@@ -139,6 +140,7 @@ def workspace_bytes() -> int:
         + _EXPERTS * 4
         + _EXPERTS * 4
         + _EXPERTS * 4
+        + _EXPERTS * 8
         + 8 * 16
         + cap * 8 * 4
         + cap * 4
@@ -446,8 +448,8 @@ def _route(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) ->
         "router8_rows",
         [(work.router, 0), (work.ids, 0), (work.mix, 0)],
         [_u32(count)],
-        (count, 1, 1),
-        (1, 1, 1),
+        ((count + 255) // 256, 1, 1),
+        (256, 1, 1),
     )
     assignments = count * 8
     runtime.session.encode(
@@ -462,7 +464,12 @@ def _route(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) ->
 def _experts(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) -> None:
     """Shared expert, then routed experts. Groups are built on device."""
     prefix = f"model.language_model.layers.{layer}.mlp."
-    file = runtime.routed_layer(layer, work.ids, count * 8)
+    if runtime.atlas.complete:
+        file = runtime.atlas.layers[layer]
+        offsets = None
+    else:
+        file = runtime.routed_layer(layer, work.ids, count * 8, work.offsets)
+        offsets = work.offsets
     _cast(runtime, work.normed, work.half, rows * HIDDEN)
     _matmul(runtime, work.half, prefix + "shared_expert.gate_up", work.gate_up, rows)
     runtime.session.encode(
@@ -530,7 +537,7 @@ def _experts(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) 
         0,
         threads,
     )
-    _grouped_tiles(runtime, work, file, work.expert_out, 1024, HIDDEN, 0, _GATE_SCALE, 2)
+    _grouped_tiles(runtime, work, file, offsets, work.expert_out, 1024, HIDDEN, 0, _GATE_SCALE, 2)
     _indirect(
         runtime,
         work.group,
@@ -553,6 +560,7 @@ def _experts(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) 
         runtime,
         work,
         file,
+        offsets,
         work.expert_down,
         HIDDEN,
         512,
@@ -624,6 +632,7 @@ def _grouped_tiles(
     runtime: Any,
     work: _Workspace,
     file: Any,
+    offsets: Any,
     dest: Any,
     cols: int,
     inner: int,
@@ -631,19 +640,24 @@ def _grouped_tiles(
     image_scale: int,
     record: int,
 ) -> None:
+    bindings = [
+        (work.expert_pack, 0),
+        (file, 0),
+        (dest, 0),
+        (work.jobs, 0),
+        (work.expert_of, 0),
+        (work.row_base, 0),
+        (work.group, 0),
+    ]
+    name = "prefill_fp4_expert_tile"
+    if offsets is not None:
+        bindings.append((offsets, 0))
+        name = "prefill_fp4_expert_tile_at"
     _indirect(
         runtime,
         work.group,
-        "prefill_fp4_expert_tile",
-        [
-            (work.expert_pack, 0),
-            (file, 0),
-            (dest, 0),
-            (work.jobs, 0),
-            (work.expert_of, 0),
-            (work.row_base, 0),
-            (work.group, 0),
-        ],
+        name,
+        bindings,
         [
             _u32(inner),
             _u32(cols),

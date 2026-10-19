@@ -2,8 +2,9 @@
 
 Language expert files stay on SSD. Each file is 256 images of fixed size, and
 the atlas keeps as many of those images as fit under the runtime maximum after
-the resident record, the key/value cache, and the other buffers. A routed image
-that is not resident is read from its layer file. S3-FIFO (Yang, Zhang, Qiu,
+the resident record, the key/value cache, and the other buffers. When every
+image fits, each layer file is read once. A routed image that is not resident
+is read from its layer file. S3-FIFO (Yang, Zhang, Qiu,
 Yue, and Rashmi, SOSP 2023) keeps a second request and drops a one-hit. This
 pipeline does not promote or demote an expert to another quant.
 """
@@ -183,8 +184,23 @@ class S3Fifo:
             self._ghost_set.discard(old)
 
 
+def _read_file(buffer: Any, path: Path, nbytes: int) -> None:
+    view = memoryview(buffer.contents().as_buffer(nbytes))
+    with path.open("rb") as handle:
+        offset = 0
+        while offset < nbytes:
+            chunk = handle.read(8 << 20)
+            if not chunk:
+                break
+            view[offset : offset + len(chunk)] = chunk
+            offset += len(chunk)
+    if offset != nbytes:
+        message = f"{path.name} stopped at {offset} of {nbytes}"
+        raise OSError(message)
+
+
 class ExpertAtlas:
-    """A pool of expert images. ``stage`` loads a miss before the caller encodes."""
+    """Expert images. A full fit keeps every layer file. A short fit loads one image."""
 
     def __init__(
         self,
@@ -205,17 +221,23 @@ class ExpertAtlas:
             message = f"{root.name} has {present} language expert files"
             raise FileNotFoundError(message)
         self.max_memory = max_memory
-        self.pack = session.allocate(EXPERTS * EXPERT_IMAGE)
-        if self.pack is None:
-            message = f"expert pack could not allocate {EXPERTS * EXPERT_IMAGE} bytes"
-            raise RuntimeError(message)
-        pack_bytes = EXPERTS * EXPERT_IMAGE
-        self.slots = atlas_slots(
+        self.complete = False
+        self.layers: list[Any] = []
+        self.pack = None
+        self.buffer = None
+        self._fds: list[int] = []
+        self._resident: dict[_Image, int] = {}
+        self._free: list[int] = []
+        self._eviction: S3Fifo | None = None
+        images = atlas_slots(
             max_memory,
             EXPERT_IMAGE,
-            reserved + pack_bytes,
+            reserved,
             layers=LAYERS * EXPERTS,
         )
+        if images >= LAYERS * EXPERTS and self._load_layers(session):
+            return
+        self.slots = images
         if self.slots < EXPERTS:
             message = (
                 f"maximum memory {max_memory} bytes holds {self.slots} expert images, "
@@ -234,36 +256,41 @@ class ExpertAtlas:
         if self.buffer is None:
             message = f"expert atlas could not allocate {EXPERTS} images"
             raise RuntimeError(message)
-        self.buffers = [self.buffer, self.pack]
+        self.buffers = [self.buffer]
         self._atlas_view = memoryview(self.buffer.contents().as_buffer(self.slots * EXPERT_IMAGE))
-        self._pack_view = memoryview(self.pack.contents().as_buffer(pack_bytes))
-        self._resident: dict[_Image, int] = {}
         self._free = list(range(self.slots))
         self._eviction = S3Fifo(self.slots * EXPERT_IMAGE, EXPERT_IMAGE)
         self._fds = [
             os.open(self.root / "experts" / f"{layer}.bin", os.O_RDONLY) for layer in range(LAYERS)
         ]
 
+    def _load_layers(self, session: Any) -> bool:
+        """Read every layer file. The kernels index that buffer by file slot."""
+        made: list[Any] = []
+        for layer in range(LAYERS):
+            buffer = session.allocate(self.file_bytes)
+            if buffer is None:
+                self.layers = []
+                return False
+            _read_file(buffer, self.root / "experts" / f"{layer}.bin", self.file_bytes)
+            made.append(buffer)
+        self.layers = made
+        self.buffers = made
+        self.complete = True
+        self.slots = LAYERS * EXPERTS
+        return True
+
     @property
     def bytes(self) -> int:
-        return self.slots * EXPERT_IMAGE + EXPERTS * EXPERT_IMAGE
+        return self.slots * EXPERT_IMAGE
 
     def stage(self, layer: int, file_slots: list[int]) -> list[int]:
         """Load each file slot and return its atlas index."""
+        if self.complete:
+            message = "a resident layer does not stage images"
+            raise RuntimeError(message)
         self._ensure(layer, file_slots)
         return [self._resident[(layer, expert)] for expert in file_slots]
-
-    def stage_pack(self, layer: int, file_slots: list[int]) -> None:
-        """Load each file slot and copy it to the same slot in the pack buffer."""
-        self._ensure(layer, file_slots)
-        seen: set[int] = set()
-        for expert in file_slots:
-            if expert in seen:
-                continue
-            seen.add(expert)
-            src = self._resident[(layer, expert)] * EXPERT_IMAGE
-            dest = expert * EXPERT_IMAGE
-            self._pack_view[dest : dest + EXPERT_IMAGE] = self._atlas_view[src : src + EXPERT_IMAGE]
 
     def _ensure(self, layer: int, file_slots: list[int]) -> None:
         counts: dict[int, int] = {}
@@ -315,6 +342,7 @@ class ExpertAtlas:
             os.close(fd)
         self._fds.clear()
         self.buffers.clear()
+        self.layers.clear()
         self.buffer = None
         self.pack = None
         self._resident.clear()

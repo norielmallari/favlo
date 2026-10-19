@@ -26,16 +26,25 @@ Instruct card. `enable_thinking` is false. Omitted sampling fields come from tha
 uv run python -m harness --model qwen36-35b-a3b
 ```
 
-The server stops after the first turn and starts again, so the next turn loads the stored prefix. Later turns stay on that server. This run reached 87769 prompt tokens over four requests.
+The server stops after the first turn and starts again, so the next turn loads the stored prefix. Later turns stay on that server. This run reached 88443 prompt tokens over four requests. The prefill kernel ceiling for 65536 tokens from position 0 is 815.71 tok/s.
 
 | Request | Prompt tokens | Cache | Prefill | Decode |
 |---|---:|---|---|---|
-| 1 | 361 | miss | 30.42 tok/s (361 tok in 11.87 s) | 10.80 tok/s (31 tok in 2.87 s) |
-| 2 | 46417 | hit 392 | 652.26 tok/s (46025 tok in 70.56 s) | 41.09 tok/s (367 tok in 8.93 s) |
-| 3 | 46821 | prefix load 46784, hit 46784 | 3.13 tok/s (37 tok in 11.81 s) | 12.57 tok/s (40 tok in 3.18 s) |
-| 4 | 87769 | hit 46861 | 402.46 tok/s (40908 tok in 101.64 s) | 39.79 tok/s (673 tok in 16.91 s) |
+| 1 | 361 | miss | 500.50 tok/s (361 tok in 0.72 s) | 76.42 tok/s (31 tok in 0.41 s) |
+| 2 | 46417 | hit 392 | 811.33 tok/s (46025 tok in 56.73 s) | 57.99 tok/s (368 tok in 6.35 s) |
+| 3 | 46822 | prefix load 46785, hit 46785 | 37.59 tok/s (37 tok in 0.98 s) | 57.81 tok/s (40 tok in 0.69 s) |
+| 4 | 88443 | hit 46862 | 468.56 tok/s (41581 tok in 88.74 s) | 48.06 tok/s (859 tok in 17.87 s) |
 
-The summary is prefill 445.84 tok/s (87331 tok in 195.88 s) and decode 34.84 tok/s (1111 tok in 31.89 s).
+The summary is prefill 597.98 tok/s (88004 tok in 147.17 s) and decode 51.26 tok/s (1298 tok in 25.32 s).
+
+One resident load then applied four chunks in order. The first 2048-token chunk of a prompt, the kernel ceiling in [ceilings.md](ceilings.md), is 1521.37 tok/s.
+
+| Chunk | Position | Tokens | Prefill |
+|---|---:|---:|---|
+| 1 | 0 | 64 | 57.36 tok/s (64 tok in 1.12 s) |
+| 2 | 64 | 2048 | 1370.25 tok/s (2048 tok in 1.49 s) |
+| 3 | 2112 | 2048 | 1297.27 tok/s (2048 tok in 1.58 s) |
+| 4 | 4160 | 4096 | 1229.00 tok/s (4096 tok in 3.33 s) |
 
 ## Coding agent
 
@@ -45,11 +54,11 @@ Thinking card. `enable_thinking` is true. Omitted sampling fields come from that
 uv run python -m harness.coding --model qwen36-35b-a3b
 ```
 
-The hidden suite passed. The run used two requests and stopped at 637 prompt tokens.
+The hidden suite passed. The run used two requests and stopped at 563 prompt tokens.
 
 | Request | Prompt tokens | Cache | Prefill | Decode |
 |---|---:|---|---|---|
-| 1 | 399 | miss | 36.41 tok/s (399 tok in 10.96 s) | 39.86 tok/s (218 tok in 5.47 s) |
-| 2 | 637 | hit 617 | 1.69 tok/s (20 tok in 11.83 s) | 21.51 tok/s (76 tok in 3.53 s) |
+| 1 | 399 | miss | 470.49 tok/s (399 tok in 0.85 s) | 73.67 tok/s (144 tok in 1.95 s) |
+| 2 | 563 | hit 543 | 98.87 tok/s (20 tok in 0.20 s) | 74.83 tok/s (53 tok in 0.71 s) |
 
-The summary is prefill 18.39 tok/s (419 tok in 22.79 s) and decode 32.67 tok/s (294 tok in 9.00 s).
+The summary is prefill 399.05 tok/s (419 tok in 1.05 s) and decode 74.06 tok/s (197 tok in 2.66 s).

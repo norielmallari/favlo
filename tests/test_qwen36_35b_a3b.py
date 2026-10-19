@@ -473,6 +473,10 @@ def test_kv_widths_and_atlas_budget() -> None:
     reserved = 1 << 30
     assert atlas_slots(reserved + file_bytes * 40, file_bytes, reserved) == 40
     assert atlas_slots(reserved + file_bytes * 4, file_bytes, reserved) == 4
+    image = 1_671_168
+    images = 40 * 256
+    assert atlas_slots((16 << 30), image, 6 << 30, layers=images) < images
+    assert atlas_slots((32 << 30), image, 1 << 30, layers=images) == images
     assert parse_memory("32GiB") == 32 << 30
     assert parse_memory("512MiB") == 512 << 20
     try:

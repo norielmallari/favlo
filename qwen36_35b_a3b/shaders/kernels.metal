@@ -176,6 +176,53 @@ kernel void prefill_fp4_expert_tile(
     op.run(tile_left, tile_right, tile_out);
 }
 
+// Same tile. ``offsets[expert]`` is the byte offset when the images are not contiguous.
+kernel void prefill_fp4_expert_tile_at(
+    device half* pack [[buffer(0)]],
+    device uchar* file [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    device const uint* jobs [[buffer(3)]],
+    device const uint* expert_of [[buffer(4)]],
+    device const uint* row_base [[buffer(5)]],
+    device const uint* info [[buffer(6)]],
+    device const ulong* offsets [[buffer(7)]],
+    constant uint& inner [[buffer(8)]],
+    constant uint& cols [[buffer(9)]],
+    constant uint& image_data [[buffer(10)]],
+    constant uint& image_scale [[buffer(11)]],
+    constant uint& image_bytes [[buffer(12)]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    uint n_jobs = info[1];
+    if (tgid.y >= n_jobs) {
+        return;
+    }
+    uint slot = jobs[tgid.y * 2u];
+    uint row0 = jobs[tgid.y * 2u + 1u] * 64u;
+    uint expert = expert_of[slot];
+    uint col0 = tgid.x * 64u;
+    uint base_row = row_base[slot] + row0;
+    device half* act = pack + base_row * inner;
+    device uchar* base = file + offsets[expert];
+    device float* out = destination + base_row * cols;
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        act, dextents<int, 2>(int(inner), 64), array<int, 2>{1, int(inner)});
+    tensor<device metal_fp4_e2m1_format, dextents<int, 2>, tensor_inline, scales_plane> right(
+        base + image_data,
+        dextents<int, 2>(int(inner), int(cols)),
+        array<int, 2>{1, int(inner)},
+        scales_plane(base + image_scale));
+    tensor<device float, dextents<int, 2>, tensor_inline> dest(
+        out, dextents<int, 2>(int(cols), 64), array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(
+        64, 64, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, 0);
+    auto tile_right = right.slice(0, int(col0));
+    auto tile_out = dest.slice(int(col0), 0);
+    op.run(tile_left, tile_right, tile_out);
+}
+
 kernel void prefill_f16(
     device half* activation [[buffer(0)]],
     device half* weights [[buffer(1)]],
@@ -1165,7 +1212,7 @@ kernel void gemv_fp4_vec_slots(
         return;
     }
     uint id = ids[slot];
-    device const uchar* base = file + id * image;
+    device const uchar* base = file + (ulong)id * (ulong)image;
     device const uchar* weights = base + data_off;
     device const uchar* scales = base + scale_off;
     device const float* act = activation + (act_stride == 0u ? 0u : slot * act_stride);
@@ -1555,7 +1602,7 @@ kernel void moe_gate_silu(
     if (job < 4096u) {
         uint slot = job >> 9;
         uint row = job & 511u;
-        device const uchar* base = file + ids[slot] * image;
+        device const uchar* base = file + (ulong)ids[slot] * (ulong)image;
         float gate = fp4_vec_dot(activation, base, base + 1048576u, row, 2048u, lane);
         float up = fp4_vec_dot(activation, base, base + 1048576u, row + 512u, 2048u, lane);
         if (lane == 0u) {
@@ -1594,7 +1641,7 @@ kernel void moe_down_mix(
     }
     float acc = 0.0f;
     for (uint slot = 0u; slot < 8u; ++slot) {
-        device const uchar* down = file + ids[slot] * image + 1114112u;
+        device const uchar* down = file + (ulong)ids[slot] * (ulong)image + 1114112ul;
         float dot = fp4_vec_dot(gated + slot * 512u, down, down + 524288u, row, 512u, lane);
         acc += mix[slot] * dot;
     }

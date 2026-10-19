@@ -320,12 +320,27 @@ def stored_bytes(length: int) -> int:
 
 
 def read_header(path: Path) -> PrefixHeader | None:
+    """The header only. Region bytes stay on disk until a load reads them."""
     try:
-        blob = path.read_bytes()
+        file_size = path.stat().st_size
+        with path.open("rb") as handle:
+            lead = handle.read(12)
+            if len(lead) < 12 or lead[:4] != _MAGIC:
+                return None
+            version, header_size = struct.unpack_from("<II", lead, 4)
+            if (
+                version != _VERSION
+                or header_size < 44
+                or header_size > file_size
+                or header_size > 16 << 20
+            ):
+                return None
+            handle.seek(0)
+            blob = handle.read(header_size)
     except OSError:
         return None
     try:
-        return _parse_header(path, blob)
+        return _parse_header(path, blob, file_size)
     except (ValueError, struct.error, UnicodeDecodeError):
         return None
 
@@ -352,7 +367,7 @@ def read_regions(header: PrefixHeader, names: Sequence[str]) -> dict[str, bytes]
         os.close(fd)
 
 
-def _parse_header(path: Path, blob: bytes) -> PrefixHeader:
+def _parse_header(path: Path, blob: bytes, file_size: int) -> PrefixHeader:
     if len(blob) < 12 or blob[:4] != _MAGIC:
         message = "prefix magic does not match"
         raise ValueError(message)
@@ -376,10 +391,11 @@ def _parse_header(path: Path, blob: bytes) -> PrefixHeader:
     region_count = struct.unpack_from("<I", blob, pos)[0]
     pos += 4
     regions: list[RegionRef] = []
-    file_size = struct.unpack_from("<Q", blob, header_size - 40)[0]
-    if file_size != len(blob):
+    declared = struct.unpack_from("<Q", blob, header_size - 40)[0]
+    if declared != file_size:
         message = "prefix file size does not match the header"
         raise ValueError(message)
+    file_size = declared
     for _ in range(region_count):
         name, pos = _take_text(blob, pos)
         length, offset = struct.unpack_from("<QQ", blob, pos)
