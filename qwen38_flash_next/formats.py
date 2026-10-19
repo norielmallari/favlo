@@ -26,7 +26,7 @@ _QUANT_TAG = {8: "fp8", 4: "fp4", 2: "int2"}
 DEFAULT_RECORD = (
     Path(__file__).resolve().parents[1]
     / "models"
-    / "Qwen3.8-Flash-Next-madmetal-fp4"
+    / "Qwen3.8-Flash-Next-fp4"
 )
 
 
@@ -45,7 +45,7 @@ def record_name(source: Path, widths: Sequence[int]) -> str:
     if not tags:
         message = "quant map has no widths"
         raise ValueError(message)
-    return f"{source.name}-madmetal-" + "-".join(tags)
+    return f"{source.name}-" + "-".join(tags)
 
 
 def quant_file(layer: int, bits: int) -> str:

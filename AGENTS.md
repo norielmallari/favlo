@@ -1,18 +1,18 @@
 # AGENTS.md
 
-Starting point for coding agents in **MADMetal**.
+Starting point for coding agents in **Favlo**.
 
 Read this file first. Changes stay in this repository. Edit another repository only when the user asks for that repository. Then read [ARCHITECTURE.md](ARCHITECTURE.md) for the process and the write set. The pipeline you are editing has its own note: [docs/qwen38-flash-next/architecture.md](docs/qwen38-flash-next/architecture.md) for Flash Next, [docs/qwen38-27b/README.md](docs/qwen38-27b/README.md) for 27B, [docs/qwen36-35b-a3b/README.md](docs/qwen36-35b-a3b/README.md) for Qwen3.6-35B-A3B. The papers and specifications the math is taken from are [REFERENCES.md](REFERENCES.md). A pipeline's own citations live in its note. Product name and the one-pipeline rule are [README.md](README.md). Root [ARCHITECTURE.md](ARCHITECTURE.md) wins for the listener and for which files an agent may edit. A pipeline note wins for that pipeline's kernels.
 
 ## What this repo is
 
-MADMetal Accelerated Decoding on Metal. Each model is its own inference pipeline, written for that model's shapes and for the Metal tensor types on Apple Silicon.
+Each model is its own inference pipeline, written for that model's shapes and for the Metal tensor types on Apple Silicon.
 
-`madmetal serve` is the entry point for inference. It listens with nothing loaded. A client selects a model through the OpenAI endpoints: `GET /v1/models` lists the registry, and the `model` field on `POST /v1/chat/completions` names one row. That row's pipeline loads. The resident pipeline releases itself before a different pipeline loads. Quantize, probe, matmul, kernels, bf16, and complete stay on the model flag: `madmetal --qwen38-flash-next quantize`, `madmetal --qwen38-27b quantize`, and the same flag for that pipeline's other commands. A new pipeline keeps its own flag for those commands.
+`favlo serve` is the entry point for inference. It listens with nothing loaded. A client selects a model through the OpenAI endpoints: `GET /v1/models` lists the registry, and the `model` field on `POST /v1/chat/completions` names one row. That row's pipeline loads. The resident pipeline releases itself before a different pipeline loads. Quantize, probe, matmul, kernels, bf16, and complete stay on the model flag: `favlo --qwen38-flash-next quantize`, `favlo --qwen38-27b quantize`, and the same flag for that pipeline's other commands. A new pipeline keeps its own flag for those commands.
 
 ## In scope
 
-- `madmetal serve` loads the pipeline a request's `model` field names. One record is resident. A different pipeline closes the resident record before it loads. Quantize and the other non-serve commands require that pipeline's model flag.
+- `favlo serve` loads the pipeline a request's `model` field names. One record is resident. A different pipeline closes the resident record before it loads. Quantize and the other non-serve commands require that pipeline's model flag.
 - OpenAI-compatible `GET /v1/models` and `POST /v1/chat/completions`, one request at a time. `GET /v1/models` lists every registered row, including each sampling suffix that row stores.
 - A pipeline's record, cache, kernels, and sampling card are that pipeline's note. Flash Next is [docs/qwen38-flash-next/architecture.md](docs/qwen38-flash-next/architecture.md).
 
@@ -34,7 +34,7 @@ qwen38-27b.py              command entry; loads the package by path
 qwen38_27b/                Qwen3.8-27B. It does not import Flash Next.
 qwen36-35b-a3b.py          command entry; loads the package by path
 qwen36_35b_a3b/            Qwen3.6-35B-A3B. It does not import another pipeline.
-src/madmetal/              process entry; the listener loads the pipeline a request names
+src/favlo/              process entry; the listener loads the pipeline a request names
   registry.py              flavor folders, aliases, pipelines, and sampling variants
   listener.py              the HTTP listener; it does not import a pipeline
   console.py               status row; no pipeline imports
@@ -49,7 +49,7 @@ pyproject.toml
 
 A model entry filename may contain hyphens. The command loads it by path. It is not an importable module name. The package beside it uses underscores. The entry sets `PIPELINE` to that filename stem. The command discovers those files.
 
-Adding a model means adding an entry file, a package, a `docs/<pipeline>/` note, and one row in the runtime table in [ARCHITECTURE.md](ARCHITECTURE.md). It does not mean editing another pipeline's package, shaders, tests, or docs, and it does not mean editing `src/madmetal/cli.py`. Load [bootstrap-new-model](.cursor/skills/bootstrap-new-model/SKILL.md) before creating one. Load [prefix-caching](.cursor/skills/prefix-caching/SKILL.md) before wiring that pipeline to the shared prefix store.
+Adding a model means adding an entry file, a package, a `docs/<pipeline>/` note, and one row in the runtime table in [ARCHITECTURE.md](ARCHITECTURE.md). It does not mean editing another pipeline's package, shaders, tests, or docs, and it does not mean editing `src/favlo/cli.py`. Load [bootstrap-new-model](.cursor/skills/bootstrap-new-model/SKILL.md) before creating one. Load [prefix-caching](.cursor/skills/prefix-caching/SKILL.md) before wiring that pipeline to the shared prefix store.
 
 ## Re-implementation
 
@@ -59,7 +59,7 @@ A pipeline's calibration strings are data, not an algorithm. The bucket for Flas
 
 ## Invariants
 
-1. One process, one listener. `madmetal serve` is that listener. The OpenAI `model` field selects the registry row, and that row loads one pipeline through its entry file. Quantize and the other non-serve commands require that pipeline's model flag.
+1. One process, one listener. `favlo serve` is that listener. The OpenAI `model` field selects the registry row, and that row loads one pipeline through its entry file. Quantize and the other non-serve commands require that pipeline's model flag.
 2. The pipeline package owns the math. Shared code is the process entry, the registry, and the listener. There is no model base class.
 3. Weights on disk for a pipeline are the Metal records that pipeline's note describes.
 4. A pipeline's key/value layout is that pipeline's note.
@@ -71,7 +71,7 @@ A pipeline's calibration strings are data, not an algorithm. The bucket for Flas
 
 ## Commits
 
-Use [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): imperative summary` on the subject line. Common types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `chore`, `build`, `ci`. Scope is optional; prefer a short pipeline id such as `qwen38` or `madmetal` when the change is localized.
+Use [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): imperative summary` on the subject line. Common types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `chore`, `build`, `ci`. Scope is optional; prefer a short pipeline id such as `qwen38-flash-next` or `shared` when the change is localized.
 
 ```text
 feat(qwen38): stream experts from SSD into the resident atlas
@@ -90,14 +90,14 @@ git config core.hooksPath .githooks
 ```text
 uv sync --extra dev
 uv run pytest
-uv run madmetal --qwen38-flash-next probe
-uv run madmetal --qwen38-flash-next matmul
-uv run madmetal --qwen38-flash-next kernels
-uv run madmetal --qwen38-flash-next quantize
-uv run madmetal --qwen38-27b quantize
-uv run madmetal --qwen36-35b-a3b kernels
-uv run madmetal --qwen36-35b-a3b quantize
-uv run madmetal serve
+uv run favlo --qwen38-flash-next probe
+uv run favlo --qwen38-flash-next matmul
+uv run favlo --qwen38-flash-next kernels
+uv run favlo --qwen38-flash-next quantize
+uv run favlo --qwen38-27b quantize
+uv run favlo --qwen36-35b-a3b kernels
+uv run favlo --qwen36-35b-a3b quantize
+uv run favlo serve
 uv run python -m harness.file_agent --base-url http://127.0.0.1:8129/v1 --workspace ./note-workspace
 uv run python -m harness --model qwen38-27b
 uv run python -m harness.benchmarks --model qwen38-27b

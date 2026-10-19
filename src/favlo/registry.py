@@ -267,8 +267,8 @@ def choose_complete(
     if not entries:
         message = (
             "no registered model\n"
-            f"pack a checkpoint: madmetal --{pipeline} quantize --source <dir>\n"
-            f"or register a record: madmetal --{pipeline} models add <folder>"
+            f"pack a checkpoint: favlo --{pipeline} quantize --source <dir>\n"
+            f"or register a record: favlo --{pipeline} models add <folder>"
         )
         raise LookupError(message)
     listing = format_listing(root)
@@ -425,7 +425,7 @@ def _object(
         "id": model_id,
         "object": "model",
         "created": created,
-        "owned_by": "madmetal",
+        "owned_by": "favlo",
         "root": folder,
         "pipeline": _pipeline_name(entry, folder),
         "loaded": resident == folder,
@@ -529,12 +529,12 @@ def _default_variant(entry: dict[str, Any]) -> str | None:
 
 
 def _repo_root() -> Path:
-    override = os.environ.get("MADMETAL_ROOT")
+    override = os.environ.get("FAVLO_ROOT")
     if override:
         return Path(override)
     for parent in Path(__file__).resolve().parents:
-        marker = parent / "src" / "madmetal" / "cli.py"
+        marker = parent / "src" / "favlo" / "cli.py"
         if (parent / "pyproject.toml").is_file() and marker.is_file():
             return parent
-    message = "madmetal package is not inside a checkout"
+    message = "favlo package is not inside a checkout"
     raise FileNotFoundError(message)

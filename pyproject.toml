@@ -1,7 +1,7 @@
 [project]
-name = "madmetal"
+name = "favlo"
 version = "0.1.0"
-description = "MADMetal Accelerated Decoding on Metal"
+description = "Favlo AI Runtime: Your Local AI Workhorse"
 readme = "README.md"
 license = "Apache-2.0"
 authors = [{name = "Noriel Mallari"}]
@@ -33,7 +33,7 @@ harness = [
 ]
 
 [project.scripts]
-madmetal = "madmetal.cli:main"
+favlo = "favlo.cli:main"
 
 [build-system]
 requires = ["hatchling>=1.27"]

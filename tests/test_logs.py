@@ -3,8 +3,8 @@
 import io
 import json
 
-from madmetal.console import Console
-from madmetal.logs import (
+from favlo.console import Console
+from favlo.logs import (
     DEFAULT_LOG_MAX_BYTES,
     RollingLog,
     configured_thinking_budget,
@@ -56,7 +56,7 @@ def test_console_lines_land_in_the_rolling_log(tmp_path) -> None:
     ui.end(progress, "prefill 4 tok in 1.0s")
     ui.report("RuntimeError: boom\n")
     text = log_path(tmp_path).read_text(encoding="utf-8")
-    assert "madmetal 0.1.0" in text
+    assert "favlo 0.1.0" in text
     assert "listening on http://127.0.0.1:8129" in text
     assert "prefill 4 tok in 1.0s" in text
     assert "RuntimeError: boom" in text

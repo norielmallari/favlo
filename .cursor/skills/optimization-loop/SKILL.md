@@ -1,6 +1,6 @@
 ---
 name: optimization-loop
-description: Run the MADMetal optimization loop for one pipeline. Establish ceilings from theoretical computations on the designed kernels, cache them in that pipeline's docs, and reuse them when the kernels are unchanged. Then modify the pipeline and run the smoke-testing skill. Use when optimizing a pipeline, raising prefill or decode rate, closing a kernel gap, or when the user asks for an optimization loop. The whole process is non-HITL until 90% of the ceiling is achieved. Once the agent smokes pass, commit the related code on the current branch, including main.
+description: Run the Favlo optimization loop for one pipeline. Establish ceilings from theoretical computations on the designed kernels, cache them in that pipeline's docs, and reuse them when the kernels are unchanged. Then modify the pipeline and run the smoke-testing skill. Use when optimizing a pipeline, raising prefill or decode rate, closing a kernel gap, or when the user asks for an optimization loop. The whole process is non-HITL until 90% of the ceiling is achieved. Once the agent smokes pass, commit the related code on the current branch, including main.
 ---
 
 # Optimization loop
@@ -30,7 +30,7 @@ The ceiling used for the 90% test is the kernel ceiling. The bandwidth ceiling i
 
 Change this pipeline's kernels or the forward that launches them. Update `docs/<pipeline>/` in the same change when the kernels, records, or cache change.
 
-Take `artifacts/pipeline-test.lock` before any command that compiles shaders, dispatches Metal, loads a checkpoint, quantizes, or starts `madmetal serve`. The lock is one JSON object: `pipeline` (the flag stem), `pid` (this shell), `command` (the short test name). Create it with exclusive create. If a live `pid` holds it, wait. Release it when the testing stretch ends, including on failure. Remove the file only when its `pid` is this agent's.
+Take `artifacts/pipeline-test.lock` before any command that compiles shaders, dispatches Metal, loads a checkpoint, quantizes, or starts `favlo serve`. The lock is one JSON object: `pipeline` (the flag stem), `pid` (this shell), `command` (the short test name). Create it with exclusive create. If a live `pid` holds it, wait. Release it when the testing stretch ends, including on failure. Remove the file only when its `pid` is this agent's.
 
 ## 3. Smoke
 
@@ -40,9 +40,9 @@ After a modification, run this package's checks, then load [smoke-testing](../sm
 2. The smoke commands this pipeline's `--help` lists, in this order when present: `probe`, `matmul`, `kernels`.
 
 ```text
-uv run madmetal --<pipeline> probe
-uv run madmetal --<pipeline> matmul
-uv run madmetal --<pipeline> kernels
+uv run favlo --<pipeline> probe
+uv run favlo --<pipeline> matmul
+uv run favlo --<pipeline> kernels
 ```
 
 3. After those pass, the smoke-testing skill: pipeline smoke, then the file agent, then the coding agent.

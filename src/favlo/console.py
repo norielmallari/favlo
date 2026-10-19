@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
 
-from madmetal.logs import RollingLog
+from favlo.logs import RollingLog
 
 PHASES = ("load", "quantize", "prefill", "decode")
 UNITS = ("tok", "layers", "bytes", "shards", "experts")
@@ -128,12 +128,12 @@ class Console:
 
     def plate(self) -> None:
         """The Ingot Plate, once, before any other output."""
-        self._record(f"madmetal {VERSION}")
+        self._record(f"favlo {VERSION}")
         if self.mode == "plain":
-            self._write(f"madmetal {VERSION}\n")
+            self._write(f"favlo {VERSION}\n")
             return
         if self.mode == "json":
-            self._event({"type": "log", "line": f"madmetal {VERSION}"})
+            self._event({"type": "log", "line": f"favlo {VERSION}"})
             return
         rows = (_PLATE_TOP, _PLATE_MID, _PLATE_BOT)
         for row in rows:
@@ -297,7 +297,7 @@ class Console:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="madmetal-console", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="favlo-console", daemon=True)
         self._thread.start()
 
     def _run(self) -> None:

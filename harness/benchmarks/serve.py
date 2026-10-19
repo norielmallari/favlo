@@ -191,7 +191,7 @@ def start_server(port: int, max_memory: str | None = None) -> tuple[subprocess.P
     command = [
         sys.executable,
         "-m",
-        "madmetal",
+        "favlo",
         "serve",
         "--host",
         "127.0.0.1",

@@ -111,7 +111,7 @@ class QuantRecord:
         if not manifest_path.is_file():
             message = (
                 f"quantized record is missing: {manifest_path}\n"
-                "madmetal --qwen38-flash-next quantize writes it. The request does not quantize."
+                "favlo --qwen38-flash-next quantize writes it. The request does not quantize."
             )
             raise FileNotFoundError(message)
         self.root = root

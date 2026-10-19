@@ -1,6 +1,6 @@
 """Qwen3.8-Flash-Next pipeline.
 
-``madmetal --qwen38-flash-next`` loads this file by path. The model lives in
+``favlo --qwen38-flash-next`` loads this file by path. The model lives in
 the ``qwen38_flash_next`` package beside it.
 """
 

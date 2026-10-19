@@ -16,7 +16,7 @@ import numpy as np
 
 from qwen38_27b.formats import pack_fp4_matrix, stored_rows
 
-RECORD_NAME = "Qwen3.8-27B-madmetal-fp8-fp4"
+RECORD_NAME = "Qwen3.8-27B-fp4"
 
 
 def _align(value: int) -> int:

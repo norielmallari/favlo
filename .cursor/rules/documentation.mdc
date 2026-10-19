@@ -1,5 +1,5 @@
 ---
-description: Write public MADMetal docs in a neutral tone and keep personal data out of the repo
+description: Write public Favlo docs in a neutral tone and keep personal data out of the repo
 alwaysApply: true
 ---
 
@@ -13,7 +13,13 @@ An exemption to this rule is when a documentation line starts with `>`, which ma
 
 Do not commit personal data or secrets. That includes names, email addresses, phone numbers, account handles, home directories, hostnames, serial numbers, local network addresses, tokens, keys, passwords, and private URLs. Logs, screenshots, and sample output follow the same rule.
 
-Use a placeholder instead: `~/.madmetal`, `127.0.0.1`, `example-model`. If a secret was committed, remove it and rotate it. Deleting the file in a later commit leaves it in history.
+Use a placeholder instead: `~/.favlo`, `127.0.0.1`, `example-model`. If a secret was committed, remove it and rotate it. Deleting the file in a later commit leaves it in history.
+
+## Official base models
+
+A pipeline note names the official base model and its Hugging Face model card. A finetune, merge, or other derived checkpoint stays out of `docs/<pipeline>/`, even when this repo quantizes or serves that derived checkpoint.
+
+The directory stem in the note is the official repository name plus the weight quants, such as `Qwen3.6-35B-A3B-fp4`. The card link is the publisher's repository, such as `Qwen/Qwen3.6-35B-A3B`.
 
 ## Tone and shape
 
@@ -29,6 +35,10 @@ Wrong: "Fixed the crash on the user's M5 at `/Users/user/Models`. Email me at us
 
 Right: "The server listens on `127.0.0.1:8000`. A missing checkpoint path is reported and the process exits."
 
-Wrong: "I admire this work, and I recommend it before trying MADMetal."
+Wrong: "I admire this work, and I recommend it before trying Favlo."
 
-Right: "The author admires this work and recommends it before trying MADMetal."
+Right: "The author admires this work and recommends it before trying Favlo."
+
+Wrong: "Quantize writes `models/Example-Model-Uncensored-fp4` from `ExampleOrg/Example-Model-Uncensored`."
+
+Right: "Quantize writes `models/Qwen3.6-35B-A3B-fp4`. The model card is [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B)."

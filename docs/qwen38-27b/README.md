@@ -2,7 +2,7 @@
 
 As-built note for the `qwen38-27b` pipeline. The process contract is [../../ARCHITECTURE.md](../../ARCHITECTURE.md). This directory wins for this pipeline's records and kernels. Another pipeline does not edit it.
 
-Clients reach this pipeline through `madmetal serve`. `GET /v1/models` lists it once a record is registered, and the `model` field on `POST /v1/chat/completions` loads it. `kernels`, `quantize`, `bf16`, `complete`, and `models` require `madmetal --qwen38-27b`. That flag loads `qwen38-27b.py`, which loads `qwen38_27b`. The package does not import `qwen38_flash_next` or `qwen36_35b_a3b`.
+Clients reach this pipeline through `favlo serve`. `GET /v1/models` lists it once a record is registered, and the `model` field on `POST /v1/chat/completions` loads it. `kernels`, `quantize`, `bf16`, `complete`, and `models` require `favlo --qwen38-27b`. That flag loads `qwen38-27b.py`, which loads `qwen38_27b`. The package does not import `qwen38_flash_next` or `qwen36_35b_a3b`.
 
 ## Kernels
 
@@ -12,7 +12,7 @@ The DeltaNet state is float32, 48 heads of `128×128`. The step decays the state
 
 ## Record
 
-`quantize` streams a Hugging Face BF16 checkout into `models/Qwen3.8-27B-madmetal-fp8-fp4`. Every matrix is uniform fp4 E2M1 with an E8M0 scale every 32 along K. That includes the embedding, the projections, the feed-forward, `lm_head`, the MTP block, and the vision tower. Rows are stored as a multiple of 64 and K as a multiple of 256. One-dimensional parameters stay float16: RMSNorm gains, `A_log`, `dt_bias`, and biases. The depthwise convolution stays float16 with shape `[10240, 4]`. A finished directory has `manifest.json` with `complete: true`. Running quantize again on that directory returns it. An unfinished directory resumes from `quantize_progress.json`.
+`quantize` streams a Hugging Face BF16 checkout into `models/Qwen3.8-27B-fp4`. Every matrix is uniform fp4 E2M1 with an E8M0 scale every 32 along K. That includes the embedding, the projections, the feed-forward, `lm_head`, the MTP block, and the vision tower. Rows are stored as a multiple of 64 and K as a multiple of 256. One-dimensional parameters stay float16: RMSNorm gains, `A_log`, `dt_bias`, and biases. The depthwise convolution stays float16 with shape `[10240, 4]`. A finished directory has `manifest.json` with `complete: true`. Running quantize again on that directory returns it. An unfinished directory resumes from `quantize_progress.json`.
 
 `bf16` does not run a layer against the stored BF16 values.
 

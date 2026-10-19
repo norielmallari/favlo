@@ -255,7 +255,7 @@ def test_openai_chunk_streams_one_delta_per_token() -> None:
     seen: list[tuple[str, object]] = []
     for payload in handler.events:
         chunk = ChatCompletionChunk.model_validate(payload)
-        assert chunk.id == "chatcmpl-madmetal"
+        assert chunk.id == "chatcmpl-favlo"
         assert chunk.object == "chat.completion.chunk"
         assert chunk.model == "qwen38-27b"
         assert isinstance(chunk.created, int)
@@ -369,7 +369,7 @@ def test_openai_client_receives_a_token_before_generation_ends(monkeypatch: pyte
 
     from qwen38_27b.chat import _stream
 
-    from madmetal import listener
+    from favlo import listener
 
     def chat(handler, runtime, body, selection, args, bound_state):
         del body, selection, args, bound_state

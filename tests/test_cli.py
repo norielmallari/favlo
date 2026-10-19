@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 
-from madmetal.cli import main, pipeline_names
+from favlo.cli import main, pipeline_names
 
 ROOT = Path(__file__).resolve().parents[1]
 

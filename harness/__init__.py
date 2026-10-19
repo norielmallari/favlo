@@ -1,1 +1,1 @@
-"""A file agent that calls the MADMetal chat endpoint."""
+"""A file agent that calls the Favlo chat endpoint."""

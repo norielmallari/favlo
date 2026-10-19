@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from madmetal.console import PHASES, UNITS, VERSION, Console, Progress
+from favlo.console import PHASES, UNITS, VERSION, Console, Progress
 
 
 class Clock:
@@ -123,7 +123,7 @@ def test_palette_falls_back() -> None:
 def test_plain_plate_is_one_line() -> None:
     ui, stream, _clock = _ui("plain")
     ui.plate()
-    assert stream.getvalue() == f"madmetal {VERSION}\n"
+    assert stream.getvalue() == f"favlo {VERSION}\n"
 
 
 def test_every_unit_renders() -> None:

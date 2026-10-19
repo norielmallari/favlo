@@ -1,6 +1,6 @@
 """Rolling server log. The process entry owns this module.
 
-The file is ``~/.madmetal/logs/madmetal.log``. ``~/.madmetal/settings.json``
+The file is ``~/.favlo/logs/favlo.log``. ``~/.favlo/settings.json``
 key ``log_max_bytes`` is the most bytes that file may hold. The default is
 1 MiB. A line that would pass the cap leaves the newest bytes that still fit.
 """
@@ -14,11 +14,11 @@ from typing import Any
 
 DEFAULT_LOG_MAX_BYTES = 1024 * 1024
 _SETTINGS_NAME = "settings.json"
-_LOG_NAME = "madmetal.log"
+_LOG_NAME = "favlo.log"
 
 
-def madmetal_home() -> Path:
-    return Path.home() / ".madmetal"
+def favlo_home() -> Path:
+    return Path.home() / ".favlo"
 
 
 def settings_path(home: Path) -> Path:
@@ -61,13 +61,13 @@ def output_token_limit(
         return int(body["max_tokens"])
     if body.get("max_completion_tokens") is not None:
         return int(body["max_completion_tokens"])
-    source = load_settings(madmetal_home()) if settings is None else settings
+    source = load_settings(favlo_home()) if settings is None else settings
     return _configured_int(source, "max_tokens")
 
 
 def configured_thinking_budget(settings: dict[str, Any] | None = None) -> int | None:
     """Think-token cap from settings. An omission does not close the think block on a count."""
-    source = load_settings(madmetal_home()) if settings is None else settings
+    source = load_settings(favlo_home()) if settings is None else settings
     return _configured_int(source, "thinking_budget")
 
 
@@ -144,8 +144,8 @@ def _tail(blob: bytes, max_bytes: int) -> bytes:
 
 
 def attach_process_log(console: Any, home: Path | None = None) -> None:
-    """Point ``console`` at the rolling log for ``home`` (default ``~/.madmetal``)."""
-    root = madmetal_home() if home is None else home
+    """Point ``console`` at the rolling log for ``home`` (default ``~/.favlo``)."""
+    root = favlo_home() if home is None else home
     try:
         settings = ensure_settings(root)
         console.attach_log(log_path(root), log_max_bytes(settings))

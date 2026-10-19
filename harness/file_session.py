@@ -514,10 +514,10 @@ def echo_reasoning(message: object, built: list[dict[str, object]]) -> list[dict
 
 
 def _open_agent(base_url: str, model: str, read: object) -> tuple[AsyncOpenAI, Agent]:
-    http = AsyncOpenAI(api_key="madmetal", base_url=base_url, timeout=3600.0)
+    http = AsyncOpenAI(api_key="favlo", base_url=base_url, timeout=3600.0)
     client = OpenAIChatCompletionClient(
         model=model_stem(model),
-        api_key="madmetal",
+        api_key="favlo",
         base_url=base_url,
         async_client=http,
         response_parser=read_reasoning,
@@ -634,7 +634,7 @@ def _spawn(port: int, log: Log, max_memory: str | None = None) -> subprocess.Pop
     command = [
         sys.executable,
         "-m",
-        "madmetal",
+        "favlo",
         "serve",
         "--host",
         "127.0.0.1",

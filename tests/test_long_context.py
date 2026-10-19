@@ -1,6 +1,6 @@
 """A 65536-token prompt through the quantized runtime.
 
-Skipped unless MADMETAL_LONG_CONTEXT=1, so the default suite stays the short smoke.
+Skipped unless FAVLO_LONG_CONTEXT=1, so the default suite stays the short smoke.
 """
 
 import os
@@ -15,8 +15,8 @@ PROMPT = 65536
 
 
 @pytest.mark.skipif(
-    os.environ.get("MADMETAL_LONG_CONTEXT") != "1",
-    reason="set MADMETAL_LONG_CONTEXT=1",
+    os.environ.get("FAVLO_LONG_CONTEXT") != "1",
+    reason="set FAVLO_LONG_CONTEXT=1",
 )
 def test_dummy_64k_prompt_generates_one_token() -> None:
     if not (DEFAULT_RECORD / "manifest.json").is_file():

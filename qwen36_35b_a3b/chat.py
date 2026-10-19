@@ -83,7 +83,7 @@ def _frequency(body: dict[str, Any]) -> float:
 
 def requested_limit(body: dict[str, Any]) -> int | None:
     """Request or settings cap. None when neither set one."""
-    from madmetal.logs import output_token_limit
+    from favlo.logs import output_token_limit
 
     return output_token_limit(body)
 
@@ -95,7 +95,7 @@ def thinking_token_budget(thinking: bool) -> int | None:
     """
     if not thinking:
         return 0
-    from madmetal.logs import configured_thinking_budget
+    from favlo.logs import configured_thinking_budget
 
     return configured_thinking_budget()
 
@@ -339,7 +339,7 @@ def _frame(
 ) -> dict[str, Any]:
     """One ``chat.completion.chunk``. The id, object, created, and model fields are required."""
     payload: dict[str, Any] = {
-        "id": "chatcmpl-madmetal",
+        "id": "chatcmpl-favlo",
         "object": "chat.completion.chunk",
         "created": created,
         "model": getattr(handler, "_model_id", "") or "",
@@ -427,7 +427,7 @@ def _stream(
             failed.append(exc)
         text = previous
 
-    writer = threading.Thread(target=write, name="madmetal-stream", daemon=True)
+    writer = threading.Thread(target=write, name="favlo-stream", daemon=True)
     writer.start()
 
     def enqueue(token: int) -> None:
@@ -533,7 +533,7 @@ def _completion(
         message["tool_calls"] = tool_calls
         finish_reason = "tool_calls"
     return {
-        "id": "chatcmpl-madmetal",
+        "id": "chatcmpl-favlo",
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model,

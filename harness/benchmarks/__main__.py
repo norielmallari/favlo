@@ -1,4 +1,4 @@
-"""IFEval, GSM8K, and HumanEval against ``madmetal serve``."""
+"""IFEval, GSM8K, and HumanEval against ``favlo serve``."""
 
 from __future__ import annotations
 

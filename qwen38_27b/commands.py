@@ -1,4 +1,4 @@
-"""``madmetal --qwen38-27b`` commands. The listener stays ``madmetal serve``."""
+"""``favlo --qwen38-27b`` commands. The listener stays ``favlo serve``."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from madmetal.hf_cache import snapshot_dir
-from madmetal.registry import (
+from favlo.hf_cache import snapshot_dir
+from favlo.registry import (
     add_model,
     choose_complete,
     format_listing,
@@ -30,7 +30,7 @@ _BF16_REPO = "Qwen/Qwen3.8-27B"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="madmetal --qwen38-27b")
+    parser = argparse.ArgumentParser(prog="favlo --qwen38-27b")
     sub = parser.add_subparsers(dest="command", required=True)
     quant = sub.add_parser("quantize", help="write the uniform fp4 record from BF16 shards")
     quant.add_argument("--src", type=Path, default=None)

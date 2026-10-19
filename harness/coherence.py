@@ -306,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
         [
             sys.executable,
             "-m",
-            "madmetal",
+            "favlo",
             "serve",
             "--host",
             "127.0.0.1",

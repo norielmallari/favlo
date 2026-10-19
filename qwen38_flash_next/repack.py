@@ -16,7 +16,7 @@ from qwen38_flash_next.convert import pread_exact
 from qwen38_flash_next.formats import QUANT_LAYOUT_VERSION, RECORD_VERSION, quant_file
 
 _SKIP = {"manifest.json", "quantize_progress.json"}
-_DEST_NAME = "Qwen3.8-Flash-Next-madmetal-fp4"
+_DEST_NAME = "Qwen3.8-Flash-Next-fp4"
 
 
 def version5_place(hot: list[int], supers: list[int], experts: int) -> list[tuple[str, int]]:
@@ -234,7 +234,7 @@ def _compare(
 
 def main() -> int:
     root = Path(__file__).resolve().parents[1] / "models"
-    source = root / "Qwen3.8-Flash-Next-madmetal-h128-fp4-c384-fp4"
+    source = root / "Qwen3.8-Flash-Next-h128-fp4-c384-fp4"
     dest = rewrite_fp4(source)
     print(dest.name)
     return 0

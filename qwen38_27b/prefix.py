@@ -1,6 +1,6 @@
 """SSD prefix adapter for this pipeline.
 
-The shared store in ``madmetal.prefix`` owns the file. This module packs the
+The shared store in ``favlo.prefix`` owns the file. This module packs the
 used key and value positions off the context stride, plus the DeltaNet state
 and the convolution history. A drafted record also packs the MTP plane. A
 stored file is accepted when it is a strict prefix of the new prompt, so the
@@ -13,7 +13,7 @@ from typing import Any
 
 import numpy as np
 
-from madmetal.prefix import (
+from favlo.prefix import (
     DEFAULT_BUDGET,
     PrefixHeader,
     PrefixSession,

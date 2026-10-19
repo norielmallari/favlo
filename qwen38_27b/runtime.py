@@ -1,4 +1,4 @@
-"""Open the packed record for ``madmetal serve``."""
+"""Open the packed record for ``favlo serve``."""
 
 from __future__ import annotations
 

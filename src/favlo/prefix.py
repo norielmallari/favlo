@@ -4,7 +4,7 @@ The file stores token ids and named regions. A pipeline adapter packs that
 pipeline's device buffers into those regions and copies a matching file back.
 This module does not know a key/value layout, a recurrent state, or a model.
 
-One directory is ``~/.madmetal/prefix/<model>/<checkpoint>/<hash>.bin``. The
+One directory is ``~/.favlo/prefix/<model>/<checkpoint>/<hash>.bin``. The
 checkpoint id is the hex SHA-256 of ``manifest.json``, or of ``config.json``
 when the record has no manifest. The file name is the hex SHA-256 of the
 format, the model id, that digest, the cache tag, and the token ids. Regions
@@ -288,7 +288,7 @@ class PrefixSession:
 
 
 def default_prefix_dir() -> Path:
-    return Path.home() / ".madmetal" / "prefix"
+    return Path.home() / ".favlo" / "prefix"
 
 
 def checkpoint_digest(root: Path) -> bytes:

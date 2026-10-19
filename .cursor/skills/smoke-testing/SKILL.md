@@ -1,13 +1,13 @@
 ---
 name: smoke-testing
-description: Run MADMetal pipeline smoke and agent smoke for one pipeline. Pipeline smoke is greedy decode, the instruct card, the thinking card, and each reasoning effort. Agent smoke is the file agent (instruct context ladder) and the coding agent (thinking card). Use when running those smokes, after a pipeline change, or when another skill points here.
+description: Run Favlo pipeline smoke and agent smoke for one pipeline. Pipeline smoke is greedy decode, the instruct card, the thinking card, and each reasoning effort. Agent smoke is the file agent (instruct context ladder) and the coding agent (thinking card). Use when running those smokes, after a pipeline change, or when another skill points here.
 ---
 
 # Smoke testing
 
 One pipeline. Read this skill when another skill says to smoke. Do not copy these commands into that skill.
 
-Take `artifacts/pipeline-test.lock` before a command that loads a checkpoint or starts `madmetal serve`. The lock is one JSON object: `pipeline` (the flag stem), `pid` (this shell), `command` (the short test name). Create it with exclusive create. If a live `pid` holds it, wait. Release it when the testing stretch ends, including on failure. Remove the file only when its `pid` is this agent's. The file-agent and coding-agent commands take this lock themselves.
+Take `artifacts/pipeline-test.lock` before a command that loads a checkpoint or starts `favlo serve`. The lock is one JSON object: `pipeline` (the flag stem), `pid` (this shell), `command` (the short test name). Create it with exclusive create. If a live `pid` holds it, wait. Release it when the testing stretch ends, including on failure. Remove the file only when its `pid` is this agent's. The file-agent and coding-agent commands take this lock themselves.
 
 Stop at the first failure. Do not start agent smoke while a pipeline smoke is failing.
 

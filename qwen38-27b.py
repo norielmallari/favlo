@@ -1,6 +1,6 @@
 """Qwen3.8-27B pipeline.
 
-``madmetal --qwen38-27b`` loads this file by path. The model lives in the
+``favlo --qwen38-27b`` loads this file by path. The model lives in the
 ``qwen38_27b`` package beside it. This file does not import Flash Next.
 """
 

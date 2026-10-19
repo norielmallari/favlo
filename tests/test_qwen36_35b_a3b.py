@@ -240,7 +240,7 @@ def test_stream_chunks_carry_reasoning_then_the_reply() -> None:
     seen: list[tuple[str, object]] = []
     for payload in handler.events:
         assert payload["object"] == "chat.completion.chunk"
-        assert payload["id"] == "chatcmpl-madmetal"
+        assert payload["id"] == "chatcmpl-favlo"
         assert payload["model"] == "qwen36-35b-a3b"
         assert isinstance(payload["created"], int)
         choices = payload["choices"]
@@ -266,7 +266,7 @@ def test_stream_chunks_carry_reasoning_then_the_reply() -> None:
 
 
 def _qwen36_record() -> Path | None:
-    from madmetal.registry import load_registry, models_dir
+    from favlo.registry import load_registry, models_dir
 
     root = models_dir()
     for folder, entry in load_registry()["models"].items():
@@ -283,7 +283,7 @@ def test_openai_client_streams_the_completion(monkeypatch: pytest.MonkeyPatch) -
     from qwen36_35b_a3b.chat import handle_chat
     from tokenizers import Tokenizer
 
-    from madmetal import listener
+    from favlo import listener
 
     root = _qwen36_record()
     if root is None:
@@ -353,7 +353,7 @@ def test_openai_client_streams_the_completion(monkeypatch: pytest.MonkeyPatch) -
         content: list[str] = []
         finish = None
         for chunk in stream:
-            assert chunk.id == "chatcmpl-madmetal"
+            assert chunk.id == "chatcmpl-favlo"
             assert chunk.object == "chat.completion.chunk"
             assert chunk.model == "qwen36-35b-a3b"
             if not chunk.choices:

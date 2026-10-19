@@ -14,7 +14,7 @@ from qwen38_27b.cache import plane_bytes
 from qwen38_27b.prefix import pack_plane as pack_27
 from qwen38_27b.prefix import unpack_plane as unpack_27
 
-from madmetal.prefix import (
+from favlo.prefix import (
     PAGE,
     PREFERRED_IO,
     PrefixHeader,

@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 import objc
 
-from madmetal.prefix import (
+from favlo.prefix import (
     DEFAULT_BUDGET,
     PrefixHeader,
     PrefixRecord,

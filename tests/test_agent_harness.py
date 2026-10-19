@@ -1,4 +1,4 @@
-"""The file agent against a local MADMetal server."""
+"""The file agent against a local Favlo server."""
 
 import asyncio
 import socket
@@ -45,7 +45,7 @@ def test_file_agent_creates_edits_and_confirms(tmp_path: Path) -> None:
         [
             sys.executable,
             "-m",
-            "madmetal",
+            "favlo",
             "serve",
             "--host",
             "127.0.0.1",

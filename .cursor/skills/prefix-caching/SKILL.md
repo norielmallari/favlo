@@ -1,11 +1,11 @@
 ---
 name: prefix-caching
-description: Wire a MADMetal pipeline to the shared SSD prefix cache in src/madmetal/prefix.py. Use when building or changing a pipeline's sequence cache, prefix store, PrefixSession, or prefix adapter, or when a prompt should reuse tokens already applied on device or loaded from disk.
+description: Wire a Favlo pipeline to the shared SSD prefix cache in src/favlo/prefix.py. Use when building or changing a pipeline's sequence cache, prefix store, PrefixSession, or prefix adapter, or when a prompt should reuse tokens already applied on device or loaded from disk.
 ---
 
 # Prefix cache
 
-The file format lives in `src/madmetal/prefix.py`. Read the Prefix cache section of [ARCHITECTURE.md](../../../ARCHITECTURE.md) first. A pipeline imports that module. It does not copy the format, and it does not edit the module to special-case one model.
+The file format lives in `src/favlo/prefix.py`. Read the Prefix cache section of [ARCHITECTURE.md](../../../ARCHITECTURE.md) first. A pipeline imports that module. It does not copy the format, and it does not edit the module to special-case one model.
 
 Another pipeline's adapter, region names, and pack functions are not a reference. Pack this pipeline's own buffers.
 
@@ -13,13 +13,13 @@ Another pipeline's adapter, region names, and pack functions are not a reference
 
 | Piece | Owner |
 |---|---|
-| Directory, header hash, page alignment, atomic replace, longest token prefix, copy-forward, 32 GiB budget | `madmetal.prefix` |
+| Directory, header hash, page alignment, atomic replace, longest token prefix, copy-forward, 32 GiB budget | `favlo.prefix` |
 | Which bytes are a region, and whether a header can continue a prompt | this pipeline's adapter |
 | When the live sequence is written or loaded | `PrefixSession`, or this pipeline's `align` when it has extra device policy |
 
 `longest()` reads every region into memory. The request path uses `matches()` and the adapter. A region name is unique inside one record. The store sorts names when it writes.
 
-The directory is `~/.madmetal/prefix/<model>/<checkpoint>/<hash>.bin`. `<model>` is this pipeline's flag stem. The tag is the active key/value mode. The digest is `checkpoint_digest(root)`. Pass `budget=DEFAULT_BUDGET`. A file whose header does not parse is removed when the store opens. A file for another model, digest, or tag is ignored.
+The directory is `~/.favlo/prefix/<model>/<checkpoint>/<hash>.bin`. `<model>` is this pipeline's flag stem. The tag is the active key/value mode. The digest is `checkpoint_digest(root)`. Pass `budget=DEFAULT_BUDGET`. A file whose header does not parse is removed when the store opens. A file for another model, digest, or tag is ignored.
 
 ## Adapter
 

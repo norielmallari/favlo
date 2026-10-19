@@ -10,7 +10,7 @@ from qwen38_flash_next.record import QuantRecord
 from qwen38_flash_next.repack import version5_place
 from qwen38_flash_next.runtime import RequestClosed, mtp_holds, mtp_starts
 
-from madmetal.console import Console
+from favlo.console import Console
 from test_packing import pipeline
 
 
@@ -541,7 +541,7 @@ def test_record_name_orders_wider_quants_first(tmp_path) -> None:
     from qwen38_flash_next.formats import record_name
 
     source = tmp_path / "bf16"
-    assert record_name(source, [8, 4]) == f"{source.name}-madmetal-fp8-fp4"
+    assert record_name(source, [8, 4]) == f"{source.name}-fp8-fp4"
 
 
 def test_bare_id_uses_this_pipeline_card() -> None:
@@ -679,7 +679,7 @@ def test_stream_flushes_a_finished_replacement_character() -> None:
 def test_peer_closed_after_the_client_disconnects() -> None:
     import socket
 
-    from madmetal.listener import _peer_closed
+    from favlo.listener import _peer_closed
 
     server, client = socket.socketpair()
     try:
@@ -828,7 +828,7 @@ def test_release_closes_the_listening_socket() -> None:
 
 
 def test_a_closed_client_does_not_print_a_traceback(capsys: pytest.CaptureFixture[str]) -> None:
-    from madmetal.listener import _SingleRequestServer
+    from favlo.listener import _SingleRequestServer
 
     server = _SingleRequestServer(("127.0.0.1", 0), type("Quiet", (), {}))
     try:

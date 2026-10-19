@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from madmetal.hf_cache import hub_cache_dir, snapshot_dir
+from favlo.hf_cache import hub_cache_dir, snapshot_dir
 
 
 def test_snapshot_dir_reads_ref(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

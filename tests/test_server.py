@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import qwen38_flash_next.commands as commands
 from qwen38_flash_next.runtime import RequestClosed
 
-from madmetal import listener
+from favlo import listener
 
 
 class _Encoded:

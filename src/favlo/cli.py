@@ -17,14 +17,14 @@ from types import ModuleType
 
 
 def repo_root() -> Path:
-    override = os.environ.get("MADMETAL_ROOT")
+    override = os.environ.get("FAVLO_ROOT")
     if override:
         return Path(override)
     for parent in Path(__file__).resolve().parents:
-        marker = parent / "src" / "madmetal" / "cli.py"
+        marker = parent / "src" / "favlo" / "cli.py"
         if (parent / "pyproject.toml").is_file() and marker.is_file():
             return parent
-    message = "madmetal package is not inside a checkout"
+    message = "favlo package is not inside a checkout"
     raise FileNotFoundError(message)
 
 
@@ -52,8 +52,8 @@ def pipeline_names(root: Path | None = None) -> tuple[str, ...]:
 
 
 def _help(names: Sequence[str]) -> str:
-    lines = ["usage: madmetal serve"]
-    lines.extend(f"       madmetal --{name} [args]" for name in names)
+    lines = ["usage: favlo serve"]
+    lines.extend(f"       favlo --{name} [args]" for name in names)
     lines.append("")
     lines.append("  serve                  listen, then load the model a request names")
     width = max((len(name) for name in names), default=0)
@@ -94,7 +94,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stdout.write(_help(names))
         return 0
     if args[0] == "serve":
-        from madmetal.listener import serve_main
+        from favlo.listener import serve_main
 
         return int(serve_main(args[1:]))
     flag = args[0]

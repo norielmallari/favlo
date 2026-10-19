@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from madmetal.registry import load_registry
+from favlo.registry import load_registry
 from qwen38_flash_next.allocate import preallocate
 from qwen38_flash_next.convert import (
     ShardStore,
@@ -36,7 +36,7 @@ _warned: set[str] = set()
 
 
 def telemetry_dir(folder: str) -> Path:
-    return Path.home() / ".madmetal" / "telemetry" / folder
+    return Path.home() / ".favlo" / "telemetry" / folder
 
 
 def _store(folder: str) -> FiringStore:
@@ -354,7 +354,7 @@ def finish_request(runtime: Any, selection: Any, *, complete: bool) -> None:
     thread = threading.Thread(
         target=_lull,
         args=(runtime, folder, record, Path(runtime.files.root), token),
-        name="madmetal-firing",
+        name="favlo-firing",
         daemon=True,
     )
     thread.start()

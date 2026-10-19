@@ -14,8 +14,8 @@ from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
-from madmetal.console import Console
-from madmetal.registry import (
+from favlo.console import Console
+from favlo.registry import (
     add_model,
     choose_complete,
     format_listing,
@@ -406,7 +406,7 @@ def _drain_stream(runtime: Any, tokens: Iterator[int], emit: Any) -> str:
             failed.append(exc)
         text = previous
 
-    writer = threading.Thread(target=write, name="madmetal-stream", daemon=True)
+    writer = threading.Thread(target=write, name="favlo-stream", daemon=True)
     writer.start()
     try:
         for token in tokens:
@@ -533,7 +533,7 @@ def _penalty_window(body: dict[str, Any]) -> int:
 
 def _request_limit(body: dict[str, Any]) -> int | None:
     """Request or settings cap. An omission leaves generation uncapped."""
-    from madmetal.logs import output_token_limit
+    from favlo.logs import output_token_limit
 
     return output_token_limit(body)
 
@@ -556,7 +556,7 @@ def _completion(
         message["tool_calls"] = tool_calls
         finish_reason = "tool_calls"
     body = {
-        "id": "chatcmpl-madmetal",
+        "id": "chatcmpl-favlo",
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model,
@@ -946,7 +946,7 @@ def _add_resident_percent(parser: argparse.ArgumentParser) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="madmetal --qwen38-flash-next")
+    parser = argparse.ArgumentParser(prog="favlo --qwen38-flash-next")
     sub = parser.add_subparsers(dest="command", required=True)
     probe_parser = sub.add_parser("probe", help="measure one block of 32 on this GPU")
     probe_parser.add_argument("--json", action="store_true", help="print the measurement as JSON")

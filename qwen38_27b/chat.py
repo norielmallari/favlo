@@ -131,7 +131,7 @@ def _rng(body: dict[str, Any]) -> np.random.Generator:
 
 def _limit(body: dict[str, Any]) -> int | None:
     """Request or settings cap. None means decode until a stop or the context ends."""
-    from madmetal.logs import output_token_limit
+    from favlo.logs import output_token_limit
 
     return output_token_limit(body)
 
@@ -284,7 +284,7 @@ def _frame(
 ) -> dict[str, Any]:
     """One ``chat.completion.chunk``. ``id``, ``object``, ``created``, and ``model`` are required."""
     payload: dict[str, Any] = {
-        "id": "chatcmpl-madmetal",
+        "id": "chatcmpl-favlo",
         "object": "chat.completion.chunk",
         "created": created,
         "model": getattr(handler, "_model_id", "") or "",
@@ -472,7 +472,7 @@ def _completion(
         message["tool_calls"] = tool_calls
         finish_reason = "tool_calls"
     return {
-        "id": "chatcmpl-madmetal",
+        "id": "chatcmpl-favlo",
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model,

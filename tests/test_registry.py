@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from madmetal.registry import (
+from favlo.registry import (
     add_model,
     choose_complete,
     format_listing,
@@ -28,13 +28,13 @@ def _record(root, name: str) -> None:
 
 
 def test_pipeline_id_names_the_only_row_of_that_pipeline(tmp_path) -> None:
-    folder = "Qwen-madmetal-h128-fp8-c384-fp4"
+    folder = "Qwen-h128-fp8-c384-fp4"
     _record(tmp_path, folder)
-    add_model(folder, alias="qwen38-flash-next", root=tmp_path, pipeline=PIPELINE)
+    add_model(folder, alias="flash", root=tmp_path, pipeline=PIPELINE)
     selection = resolve(PIPELINE, root=tmp_path)
     assert selection.folder == folder
     assert selection.requested_id == PIPELINE
-    thinking = resolve("qwen38-flash-next:thinking", root=tmp_path)
+    thinking = resolve("flash:thinking", root=tmp_path)
     assert thinking.folder == folder
     assert thinking.variant == "thinking"
     assert thinking.sampling is not None
@@ -48,7 +48,7 @@ def test_pipeline_id_names_the_only_row_of_that_pipeline(tmp_path) -> None:
     add_model("other", alias="other-name", root=tmp_path, pipeline=PIPELINE)
     with pytest.raises(LookupError, match="unknown model"):
         resolve(PIPELINE, root=tmp_path)
-    assert resolve("qwen38-flash-next", root=tmp_path).folder == folder
+    assert resolve("flash", root=tmp_path).folder == folder
 
 
 def test_unknown_suffix_names_the_registered_ids(tmp_path) -> None:
@@ -73,7 +73,7 @@ def test_listing_includes_folder_alias_and_variants(tmp_path) -> None:
         "short:instruct",
     ]
     assert all(row["loaded"] for row in rows)
-    assert rows[0]["owned_by"] == "madmetal"
+    assert rows[0]["owned_by"] == "favlo"
     assert rows[0]["object"] == "model"
     thinking = rows[1]
     assert thinking["variant"] == "thinking"
@@ -112,7 +112,7 @@ def test_model_row_includes_configured_max_prompt_tokens(tmp_path) -> None:
 
 
 def test_a_finished_record_stays_unregistered(tmp_path) -> None:
-    folder = "Qwen3.8-Flash-Next-madmetal-h128-fp4-c384-fp4"
+    folder = "Qwen3.8-Flash-Next-h128-fp4-c384-fp4"
     _record(tmp_path, folder)
     data = load_registry(tmp_path)
     assert data == {"version": 1, "models": {}}
@@ -163,8 +163,8 @@ def test_alias_must_be_one_unused_name(tmp_path) -> None:
 
 
 def test_a_second_pipeline_is_listed_without_a_default(tmp_path) -> None:
-    flash = "Qwen-madmetal-h128-fp8-c384-fp4"
-    dense = "Qwen3.8-27B-madmetal-fp8-fp4"
+    flash = "Qwen-h128-fp8-c384-fp4"
+    dense = "Qwen3.8-27B-fp4"
     _record(tmp_path, flash)
     _record(tmp_path, dense)
     add_model(flash, alias="qwen38-flash-next", root=tmp_path, pipeline=PIPELINE)

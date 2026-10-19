@@ -6,7 +6,7 @@ Qwen3.8-Flash-Next citations are [docs/qwen38-flash-next/references.md](docs/qwe
 
 ## Qwen3.8-27B
 
-Qwen Team. *Qwen3.8-27B.* The 64-layer 3:1 mix of Gated DeltaNet and full attention, 24 query heads over 4 key/value heads, head size 256, and the 262,144-token context. The as-built note is [docs/qwen38-27b/README.md](docs/qwen38-27b/README.md).
+Qwen Team. *Qwen3.8-27B.* Model card. [Hugging Face](https://huggingface.co/Qwen/Qwen3.8-27B). The 64-layer 3:1 mix of Gated DeltaNet and full attention, 24 query heads over 4 key/value heads, head size 256, and the 262,144-token context. The as-built note is [docs/qwen38-27b/README.md](docs/qwen38-27b/README.md).
 
 Qwen Team. *On the Design of Qwen3.8-Next Architecture: Evaluation, Efficiency, and Training Stability.* Alibaba Group, August 2026. [arXiv:2608.30320](https://arxiv.org/abs/2608.30320). Equations (9) and (10) for the Gated DeltaNet gate.
 

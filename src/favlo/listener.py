@@ -21,9 +21,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
-from madmetal.console import Console
-from madmetal.logs import attach_process_log
-from madmetal.registry import model_objects, one_model, resolve
+from favlo.console import Console
+from favlo.logs import attach_process_log
+from favlo.registry import model_objects, one_model, resolve
 
 _STREAM_WRITE_TIMEOUT = 2.0
 _log_sink: Any = None
@@ -136,7 +136,7 @@ def _peer_closed(sock: socket.socket) -> bool:
 
 
 def _pipeline_module(name: str) -> Any:
-    from madmetal.cli import load_pipeline
+    from favlo.cli import load_pipeline
 
     return load_pipeline(name)
 
@@ -383,8 +383,8 @@ def _console(args: Any) -> Console:
 
 
 def serve_main(argv: Sequence[str] | None = None) -> int:
-    """``madmetal serve``. Nothing is loaded until a request names a model."""
-    parser = argparse.ArgumentParser(prog="madmetal serve")
+    """``favlo serve``. Nothing is loaded until a request names a model."""
+    parser = argparse.ArgumentParser(prog="favlo serve")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8129)
     parser.add_argument("--console", choices=("auto", "pretty", "plain", "json"), default="auto")

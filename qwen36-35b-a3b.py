@@ -1,6 +1,6 @@
 """Qwen3.6-35B-A3B pipeline.
 
-``madmetal --qwen36-35b-a3b`` loads this file by path. The model lives in the
+``favlo --qwen36-35b-a3b`` loads this file by path. The model lives in the
 ``qwen36_35b_a3b`` package beside it. This file does not import another pipeline.
 """
 

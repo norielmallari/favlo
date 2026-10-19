@@ -1,10 +1,8 @@
-# MADMetal
+# Favlo
 
 >Author's Note: This app is directly inspired by [oMLX](https://github.com/jundot/omlx). It's an amazing app - I recommend trying that first for general purpose inference before using my more specialized runtime.
 
-**MADMetal Accelerated Decoding on Metal.**
-
-One model, one inference pipeline. MADMetal does not host a family of models behind a shared runner. Each model owns its forward, its weight records, and its Metal kernels. `madmetal serve` is the entry point for inference. A client selects a model with the OpenAI `model` field. Quantize and the other non-serve commands use that model's flag, as in `madmetal --qwen38-flash-next quantize`.
+One model, one inference pipeline. Favlo does not host a family of models behind a shared runner. Each model owns its forward, its weight records, and its Metal kernels. `favlo serve` is the entry point for inference. A client selects a model with the OpenAI `model` field. Quantize and the other non-serve commands use that model's flag, as in `favlo --qwen38-flash-next quantize`.
 
 Each runtime keeps its own package, kernels, and as-built note. The pipelines are listed in [ARCHITECTURE.md](ARCHITECTURE.md). The papers and specifications are [REFERENCES.md](REFERENCES.md). Agents start at [AGENTS.md](AGENTS.md).
 
@@ -14,7 +12,7 @@ Each runtime keeps its own package, kernels, and as-built note. The pipelines ar
 
 ```text
 uv sync --extra dev
-uv run madmetal serve
+uv run favlo serve
 uv run python -m harness.file_agent --base-url http://127.0.0.1:8129/v1 --workspace ./note-workspace
 ```
 
@@ -22,7 +20,7 @@ The harness is a [Microsoft Agent Framework](https://github.com/microsoft/agent-
 
 ## Development
 
-MADMetal is an AI-first application. Agentic software delivery is how this repository is built: agents design the change, write the code, and land it. The author directs the work.
+Favlo is an AI-first application. Agentic software delivery is how this repository is built: agents design the change, write the code, and land it. The author directs the work.
 
 ## Local Inference First
 
@@ -40,4 +38,4 @@ Report a problem in this repository's issue tracker.
 
 Copyright 2026 Noriel Mallari
 
-MADMetal is licensed under the Apache License, Version 2.0. The terms are in [LICENSE.md](LICENSE.md).
+Favlo is licensed under the Apache License, Version 2.0. The terms are in [LICENSE.md](LICENSE.md).

@@ -1,4 +1,4 @@
-"""File tools driven by the MADMetal chat endpoint.
+"""File tools driven by the Favlo chat endpoint.
 
 The agent creates a note, replaces its text, and confirms the file. The
 workspace argument is the only directory the tools write.
@@ -114,7 +114,7 @@ async def run_file_task(
     ]
     client = OpenAIChatCompletionClient(
         model=model,
-        api_key="madmetal",
+        api_key="favlo",
         base_url=base_url,
     )
     client.function_invocation_configuration["max_iterations"] = 1
