@@ -62,3 +62,39 @@ The hidden suite passed. The run used two requests and stopped at 563 prompt tok
 | 2 | 563 | hit 543 | 98.87 tok/s (20 tok in 0.20 s) | 74.83 tok/s (53 tok in 0.71 s) |
 
 The summary is prefill 399.05 tok/s (419 tok in 1.05 s) and decode 74.06 tok/s (197 tok in 2.66 s).
+
+## File agent, 16GiB
+
+Same instruct card as the file agent above. The command passes a memory cap, so the atlas holds fewer than every expert image:
+
+```text
+uv run python -m harness --model qwen36-35b-a3b --max-memory 16GiB
+```
+
+This run reached 88347 prompt tokens over four requests.
+
+| Request | Prompt tokens | Cache | Prefill | Decode |
+|---|---:|---|---|---|
+| 1 | 361 | miss | 106.23 tok/s (361 tok in 3.40 s) | 27.55 tok/s (31 tok in 1.13 s) |
+| 2 | 46417 | hit 392 | 656.38 tok/s (46025 tok in 70.12 s) | 33.64 tok/s (272 tok in 8.09 s) |
+| 3 | 46726 | prefix load 46689, hit 46689 | 25.23 tok/s (37 tok in 1.47 s) | 22.27 tok/s (40 tok in 1.80 s) |
+| 4 | 88347 | hit 46766 | 402.77 tok/s (41581 tok in 103.24 s) | 29.08 tok/s (691 tok in 23.77 s) |
+
+The summary is prefill 493.77 tok/s (88004 tok in 178.23 s) and decode 29.72 tok/s (1034 tok in 34.79 s).
+
+## Coding agent, 16GiB
+
+Same thinking card as the coding agent above. The hidden suite passed. The command is:
+
+```text
+uv run python -m harness.coding --model qwen36-35b-a3b --max-memory 16GiB
+```
+
+The run used two requests and stopped at 611 prompt tokens.
+
+| Request | Prompt tokens | Cache | Prefill | Decode |
+|---|---:|---|---|---|
+| 1 | 399 | miss | 140.14 tok/s (399 tok in 2.85 s) | 33.02 tok/s (192 tok in 5.82 s) |
+| 2 | 611 | hit 591 | 74.87 tok/s (20 tok in 0.27 s) | 38.60 tok/s (60 tok in 1.55 s) |
+
+The summary is prefill 134.29 tok/s (419 tok in 3.12 s) and decode 34.19 tok/s (252 tok in 7.37 s).
