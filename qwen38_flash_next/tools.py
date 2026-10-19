@@ -15,6 +15,29 @@ _PARAM = re.compile(r"<parameter=([^\n>]+)>\n?(.*?)</parameter>", re.DOTALL)
 _MARKER = "<tool_call>"
 
 
+def split_completion(
+    text: str,
+    *,
+    enable_thinking: bool,
+    tool_choice: Any,
+) -> tuple[str | None, list[dict[str, Any]], str]:
+    """Content, tool calls, and reasoning for one completion.
+
+    ``tool_choice`` of ``none`` leaves the generated text in content. Parsing
+    the call out would drop those ids when the client cannot run another tool,
+    and a later render of the message would no longer extend the prefix.
+    """
+    reasoning, reply = split_thinking(text, enable_thinking)
+    visible = reply if reply else text
+    if tool_choice == "none":
+        content = text if not enable_thinking else visible
+        return content, [], reasoning if enable_thinking else ""
+    content, calls = parse_tool_calls(visible)
+    if not calls and not enable_thinking:
+        content = text
+    return content, calls, reasoning if enable_thinking else ""
+
+
 def parse_tool_calls(text: str) -> tuple[str | None, list[dict[str, Any]]]:
     """Split a completion into leading text and complete tool calls.
 

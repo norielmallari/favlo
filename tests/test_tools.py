@@ -10,6 +10,7 @@ from qwen38_flash_next.tools import (
     normalize_messages,
     parse_tool_calls,
     penalty_ids,
+    split_completion,
     split_thinking,
 )
 
@@ -54,6 +55,28 @@ def test_plain_text_is_not_a_tool_call() -> None:
     content, calls = parse_tool_calls("The harbor log is closed.")
     assert content == "The harbor log is closed."
     assert calls == []
+
+
+def test_tool_choice_none_keeps_the_call_in_content() -> None:
+    text = (
+        "The file has been read.\n\n"
+        "<tool_call>\n"
+        "<function=read_file>\n"
+        "<parameter=path>\nruntime.py\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    content, calls, reasoning = split_completion(
+        text, enable_thinking=False, tool_choice="none"
+    )
+    assert content == text
+    assert calls == []
+    assert reasoning == ""
+    content, calls, reasoning = split_completion(
+        text, enable_thinking=False, tool_choice="auto"
+    )
+    assert content == "The file has been read."
+    assert [call["function"]["name"] for call in calls] == ["read_file"]
+    assert reasoning == ""
 
 
 def test_content_gate_holds_a_partial_marker() -> None:

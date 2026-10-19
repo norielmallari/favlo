@@ -47,7 +47,7 @@ from qwen38_flash_next.tools import (
     call_closes,
     parse_tool_calls,
     required_function,
-    split_thinking,
+    split_completion,
     tool_names,
 )
 
@@ -725,19 +725,21 @@ def handle_chat(
                     enable_thinking,
                     args,
                     prompt_cap,
+                    tool_choice=body.get("tool_choice"),
                 )
             else:
                 tokens = runtime.generate(prompt, max_tokens, temperature, top_p, top_k)
                 text = runtime.decode(tokens)
-                reasoning, reply = split_thinking(text, enable_thinking)
-                content, calls = parse_tool_calls(reply if reply else text)
+                content, calls, reasoning = split_completion(
+                    text,
+                    enable_thinking=enable_thinking,
+                    tool_choice=body.get("tool_choice"),
+                )
                 _append_transcript(args.transcript, _prompt_text(messages), text)
                 if calls:
                     reason = "tool_calls"
                 else:
                     reason = "length" if runtime._hit_limit else "stop"
-                    if not enable_thinking:
-                        content = text
                 handler._json(
                     200,
                     _completion(
@@ -779,6 +781,7 @@ def _stream_chat(
     enable_thinking: bool,
     args: Any,
     max_prompt_tokens: int | None = None,
+    tool_choice: Any = None,
 ) -> None:
     handler._started = True
     handler.close_connection = True
@@ -804,8 +807,10 @@ def _stream_chat(
     gate = ContentGate()
     thinking = ThinkStream(enable_thinking)
 
+    keep_text = tool_choice == "none"
+
     def emit_channel(channel: str, visible: str) -> None:
-        if channel == "content":
+        if channel == "content" and not keep_text:
             visible = gate.push(visible)
         if not visible:
             return
@@ -846,7 +851,10 @@ def _stream_chat(
                 ]
             }
         )
-    _content, calls = parse_tool_calls(previous)
+    if keep_text:
+        calls = []
+    else:
+        _content, calls = parse_tool_calls(previous)
     if calls:
         for index, call in enumerate(calls):
             event(
