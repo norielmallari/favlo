@@ -1,14 +1,10 @@
-# Long prompt
+# Recorded rates
 
-One run of the file-reading prompt for `qwen38-flash-next`. Kernel and bandwidth ceilings are in [ceilings.md](ceilings.md). The pipeline contract is [architecture.md](architecture.md).
+Recorded prefill and decode for `qwen38-flash-next`. Kernel and bandwidth ceilings are in [ceilings.md](ceilings.md). The pipeline contract is [architecture.md](architecture.md).
 
-The harness starts `madmetal serve` and runs an agent until the prompt reaches 65536 tokens. The model id is the thinking variant. The agent calls `read_file` for the next repository source, largest file first, then analyzes that file. The server stops after the first task and starts again, so the next task loads the stored prefix and prefills the new suffix. Later tasks stay on that server. The command is:
+A file-agent run is the instruct series. The command is `uv run python -m harness --model qwen38-flash-next`. The request sets `enable_thinking` false and leaves the other sampling fields unset. A coding-agent run is the thinking series. The command is `uv run python -m harness.coding --model qwen38-flash-next`. The request sets `enable_thinking` true. The two series stay separate.
 
-```text
-uv run python -m harness.long_prompt --model qwen38-flash-next
-```
-
-The printed summary is the measurement. The request sets temperature 0 and leaves thinking on. The run below continued past 65536 prompt tokens and stopped at 92739 over four requests. Prefill is the summed suffix time. Decode is the summed sampled-token time.
+The table is one finished file-reading run. That request set temperature 0 and left thinking on. It continued past 65536 prompt tokens and stopped at 92739 over four requests. The server stopped after the first task and started again, so the next task loaded the stored prefix. Prefill is the summed suffix time. Decode is the summed sampled-token time.
 
 | Request | Prompt tokens | Cache | Prefill | Decode |
 |---|---:|---|---|---|

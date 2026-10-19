@@ -6,7 +6,7 @@ Clients reach this pipeline through `madmetal serve`. `GET /v1/models` lists it 
 
 The target machine is an M5 Pro: 20 shader cores, a neural accelerator beside the shader pipelines in each core, 307 GB/s unified DRAM, and an APFS volume whose device block and allocation block are 4096 bytes. Requires macOS 27 and the matching Metal SDK. The 16-core Neural Engine is not used. Sub-byte tensor planes also require 128-byte alignment inside the record. A 4 KB file offset does not by itself satisfy that.
 
-Layouts are in [record.md](record.md). The n-gram hash is in [ngram.md](ngram.md). The kernel schedule is in [schedule.md](schedule.md). The long-prompt measurement is in [performance.md](performance.md). The probe is in [probe.md](probe.md). The papers are in [references.md](references.md). Implementation plans are not in this tree. This file wins if one of those notes disagrees with it.
+Layouts are in [record.md](record.md). The n-gram hash is in [ngram.md](ngram.md). The kernel schedule is in [schedule.md](schedule.md). The recorded prefill and decode rates are in [performance.md](performance.md). The probe is in [probe.md](probe.md). The papers are in [references.md](references.md). Implementation plans are not in this tree. This file wins if one of those notes disagrees with it.
 
 Registration copies `sampling.py` onto the registry row. The default variant is thinking. A benchmarks run that names this pipeline writes [benchmarks.md](benchmarks.md). `quantize` names the record directory from the expert widths in `formats.record_name`: wider quants first, `fp8`, `fp4`, then `int2`.
 
