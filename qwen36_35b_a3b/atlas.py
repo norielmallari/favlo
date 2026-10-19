@@ -264,6 +264,23 @@ class ExpertAtlas:
             os.open(self.root / "experts" / f"{layer}.bin", os.O_RDONLY) for layer in range(LAYERS)
         ]
 
+    def retune(self, session: Any, reserved: int) -> None:
+        """Fit the atlas to the bytes left after ``reserved``. A full atlas stays put."""
+        images = atlas_slots(
+            self.max_memory,
+            EXPERT_IMAGE,
+            reserved,
+            layers=LAYERS * EXPERTS,
+        )
+        if self.complete and images >= LAYERS * EXPERTS:
+            return
+        if not self.complete and images == self.slots:
+            return
+        root = self.root
+        memory = self.max_memory
+        self.close()
+        self.__init__(session, root, max_memory=memory, reserved=reserved)
+
     def _load_layers(self, session: Any) -> bool:
         """Read every layer file. The kernels index that buffer by file slot."""
         made: list[Any] = []

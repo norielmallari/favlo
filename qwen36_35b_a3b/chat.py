@@ -112,6 +112,23 @@ def load_tokenizer(root: Path) -> Tokenizer:
     return Tokenizer.from_file(str(root / "tokenizer.json"))
 
 
+def _bridge_omitted_assistant(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Put an empty assistant turn where the previous prompt already closed thinking.
+
+    A follow-up that omits that turn renders the next user in its place, so the
+    stored tokens are no longer a prefix. The empty turn is the closed think.
+    """
+    bridged: list[dict[str, Any]] = []
+    previous: str | None = None
+    for message in messages:
+        role = message.get("role") if isinstance(message, dict) else None
+        if role == "user" and previous in {"user", "tool"}:
+            bridged.append({"role": "assistant", "content": ""})
+        bridged.append(message)
+        previous = role if isinstance(role, str) else None
+    return bridged
+
+
 def encode_chat(
     root: Path,
     messages: list[dict[str, Any]],
@@ -124,7 +141,7 @@ def encode_chat(
     env = Environment()
     env.globals["raise_exception"] = _raise
     rendered_args: dict[str, Any] = {
-        "messages": normalize_messages(messages),
+        "messages": _bridge_omitted_assistant(normalize_messages(messages)),
         "tools": tools or None,
         "add_generation_prompt": True,
         "enable_thinking": enable_thinking,
@@ -230,7 +247,10 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
     forbid = None if thinking else instruct_forbid(runtime.root)
     emit_tools = body.get("tool_choice") != "none"
     stream = bool(body.get("stream", False))
-    limit = completion_limit(runtime.max_pos, len(prompt), requested_limit(body))
+    # Grow happens inside generate. A cap taken from the previous cache is 0
+    # once the prompt is longer than that cache, and decode never samples.
+    requested = requested_limit(body)
+    limit = runtime._context_limit if requested is None else requested
     if stream:
         _stream(
             handler,

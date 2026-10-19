@@ -10,14 +10,17 @@ from typing import Any
 
 import numpy as np
 
-from qwen36_35b_a3b.atlas import ExpertAtlas, available_bytes
-from qwen36_35b_a3b.attn import attend_plane, bind_plane, plane_bytes
+from qwen36_35b_a3b.atlas import EXPERTS, ExpertAtlas, atlas_slots, available_bytes
+from qwen36_35b_a3b.attn import attend_plane, bind_plane, plane_bytes, resize_plane
 from qwen36_35b_a3b.cache import (
+    CONTEXT_STEP,
+    fit_positions,
     kv_buffer_bytes,
     kv_mode,
     kv_record_bytes,
     max_position,
     parse_memory,
+    repack_plane,
 )
 from qwen36_35b_a3b.convert import LANGUAGE_LAYERS, SLOT_MAP_BYTES
 from qwen36_35b_a3b.formats import EXPERT_IMAGE
@@ -105,6 +108,10 @@ class RequestClosed(Exception):
     """The client closed, or the listener asked the forward to stop."""
 
 
+class ContextFull(Exception):
+    """The next token does not fit, and the cache cannot grow any further."""
+
+
 def limit_keeps_piece(open_think: bool, blank: bool) -> bool:
     """A blank piece is dropped when the token limit cuts an open think.
 
@@ -178,16 +185,34 @@ class Qwen36Runtime:
         if not self.manifest.get("complete"):
             message = f"{self.root.name} is not a finished record"
             raise RuntimeError(message)
-        self.max_pos = max_position(self.root)
+        resident_bytes = (self.root / "resident.bin").stat().st_size
+        cap = parse_memory(max_memory)
+        self.max_memory = available_bytes() if cap is None else cap
+        self._resident_bytes = resident_bytes
+        card = max_position(self.root)
+        fixed = _reserved_bytes(resident_bytes, 0, 0)
+        one_layer = EXPERTS * EXPERT_IMAGE
+
+        def _plane(positions: int) -> int:
+            if self.kv_cache == "f32":
+                return 0
+            return plane_bytes(positions)
+
+        ceiling = fit_positions(
+            self.max_memory, fixed, self.kv_cache, card, _plane, keep=one_layer
+        )
+        if ceiling is None:
+            message = "the key/value cache does not fit a 2048-token context"
+            raise RuntimeError(message)
+        self._context_limit = ceiling
+        self._plane_at = _plane
+        self.max_pos = min(CONTEXT_STEP, ceiling)
         self.kv_record = kv_record_bytes(self.kv_cache)
         self.kv_bytes = kv_buffer_bytes(self.kv_cache, self.max_pos)
         self.session = Session()
         self.resident = _file_buffer(self.session, self.root / "resident.bin")
-        resident_bytes = (self.root / "resident.bin").stat().st_size
-        plane = 0 if self.kv_cache == "f32" else plane_bytes(self.max_pos)
+        plane = _plane(self.max_pos)
         reserved = _reserved_bytes(resident_bytes, self.kv_bytes, plane)
-        cap = parse_memory(max_memory)
-        self.max_memory = available_bytes() if cap is None else cap
         self.atlas = ExpertAtlas(
             self.session,
             self.root,
@@ -597,11 +622,89 @@ class Qwen36Runtime:
             (32, 1, 1),
         )
 
+    def _grow(self, length: int) -> bool:
+        """Widen the cache to cover ``length`` tokens and shrink the atlas to match."""
+        if length <= self.max_pos:
+            return True
+        target = ((length + CONTEXT_STEP - 1) // CONTEXT_STEP) * CONTEXT_STEP
+        target = min(target, self._context_limit)
+        if target < length:
+            return False
+        new_bytes = kv_buffer_bytes(self.kv_cache, target)
+        plane = self._plane_at(target)
+        reserved = _reserved_bytes(self._resident_bytes, new_bytes, plane)
+        images = atlas_slots(
+            self.max_memory,
+            EXPERT_IMAGE,
+            reserved,
+            layers=LANGUAGE_LAYERS * EXPERTS,
+        )
+        if images < EXPERTS:
+            return False
+        self._drop_pending()
+        count = min(self.filled, self.max_pos)
+        old_pos = self.max_pos
+        keys = [self._plane_bytes(buf, old_pos) for buf in self.k_cache]
+        values = [self._plane_bytes(buf, old_pos) for buf in self.v_cache]
+        self._release_held([*self.k_cache, *self.v_cache, *self.atlas.buffers])
+        self.k_cache = []
+        self.v_cache = []
+        self.atlas.retune(self.session, reserved)
+        self.k_cache = [
+            self._placed_plane(blob, old_pos, target, count, new_bytes, "key") for blob in keys
+        ]
+        self.v_cache = [
+            self._placed_plane(blob, old_pos, target, count, new_bytes, "value") for blob in values
+        ]
+        self.max_pos = target
+        self.kv_bytes = new_bytes
+        if plane:
+            resize_plane(self)
+        self._remember()
+        self._status(f"context {target} atlas {self.atlas.slots} images")
+        return True
+
+    def _plane_bytes(self, buf: Any, positions: int) -> np.ndarray:
+        return np.frombuffer(
+            self.session.download(buf, kv_buffer_bytes(self.kv_cache, positions)),
+            dtype=np.uint8,
+        ).copy()
+
+    def _placed_plane(
+        self,
+        src: np.ndarray,
+        old_pos: int,
+        new_pos: int,
+        count: int,
+        new_bytes: int,
+        kind: str,
+    ) -> Any:
+        made = self.session.zeros(new_bytes)
+        if count < 1:
+            return made
+        packed = repack_plane(src, old_pos, new_pos, count, self.kv_cache, kind)
+        memoryview(made.contents().as_buffer(new_bytes))[:] = packed.tobytes()
+        return made
+
+    def _release_held(self, buffers: list[Any]) -> None:
+        drop = {id(buf) for buf in buffers}
+        self._held = [buf for buf in self._held if id(buf) not in drop]
+
+    def _remember(self) -> None:
+        self._held = [
+            self.resident,
+            *self.atlas.buffers,
+            self.hidden,
+            self.history,
+            self.state,
+            *self.k_cache,
+            *self.v_cache,
+        ]
+
     def step(self, token: int, pos: int, *, logits: bool) -> np.ndarray | None:
         self._check_stop()
-        if pos >= self.max_pos:
-            message = f"position {pos} is past {self.max_pos}"
-            raise RuntimeError(message)
+        if pos >= self.max_pos and not self._grow(pos + 1):
+            raise ContextFull
         pending = self._pending
         self._pending = None
         if pending is not None and pending.pos == pos:
@@ -695,6 +798,12 @@ class Qwen36Runtime:
             return []
         prompt = [int(token) for token in prompt]
         self._status(f"prompt tokens {len(prompt)}")
+        if not self._grow(len(prompt)):
+            message = f"prompt length {len(prompt)} does not fit the memory budget"
+            raise RuntimeError(message)
+        # The caller passes the request cap, or the checkpoint ceiling when the
+        # request sets none. The room is this grown cache, not the previous one.
+        max_tokens = decode_steps(max_tokens, self.max_pos, len(prompt))
         hit = self.prefix.align(prompt)
         if self.prefix.loaded:
             self._status(f"prefix load {hit} tokens")
@@ -830,6 +939,11 @@ class Qwen36Runtime:
             decode_row = None
             self.prefix.note((prompt + out)[: self.filled])
             self._store_prefix()
+        except ContextFull:
+            self._hit_limit = True
+            if boundary:
+                self.prefix.note((prompt + out)[: self.filled])
+                self._store_prefix()
         except RequestClosed:
             if boundary:
                 self.prefix.note((prompt + out)[: self.filled])
@@ -1179,6 +1293,11 @@ def _blocked_tokens(produced: list[int], span: int) -> set[int]:
         if tuple(produced[start : start + span - 1]) == prefix:
             blocked.add(produced[start + span - 1])
     return blocked
+
+
+def decode_steps(max_tokens: int, max_pos: int, prompt_tokens: int) -> int:
+    """Completion steps that fit ``max_pos`` after the cache has grown."""
+    return min(int(max_tokens), max(0, int(max_pos) - int(prompt_tokens)))
 
 
 def _sample(

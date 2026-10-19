@@ -10,7 +10,14 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from qwen36_35b_a3b.atlas import atlas_slots
-from qwen36_35b_a3b.cache import kv_buffer_bytes, kv_mode, max_position, parse_memory
+from qwen36_35b_a3b.cache import (
+    fit_positions,
+    kv_buffer_bytes,
+    kv_mode,
+    max_position,
+    parse_memory,
+    repack_plane,
+)
 from qwen36_35b_a3b.checks import run_checks
 from qwen36_35b_a3b.convert import expert_slot_map
 from qwen36_35b_a3b.formats import EXPERT_IMAGE, dequant_fp4, fp4_image, quantize_fp4
@@ -18,6 +25,7 @@ from qwen36_35b_a3b.forward import (
     ThinkBudget,
     _sample,
     assert_think_repeat_cases,
+    decode_steps,
     limit_keeps_piece,
 )
 from qwen36_35b_a3b.tools import (
@@ -56,6 +64,10 @@ def test_an_omitted_completion_cap_is_the_context_room() -> None:
     assert completion_limit(100, 40, 10) == 10
     assert completion_limit(100, 40, 80) == 60
     assert completion_limit(100, 140, 10) == 0
+    # A prompt past the previous cache still draws once the cache has grown.
+    assert decode_steps(262144, 47104, 46417) == 687
+    assert decode_steps(32, 47104, 46417) == 32
+    assert decode_steps(262144, 2048, 46417) == 0
 
 
 def test_a_closed_think_tool_call_is_a_prefix_of_the_next_prompt() -> None:
@@ -96,6 +108,48 @@ def test_a_closed_think_tool_call_is_a_prefix_of_the_next_prompt() -> None:
         None,
     )
     assert whole[: len(joined)] == joined
+
+
+def test_an_omitted_assistant_turn_stays_a_prefix_of_the_next_prompt() -> None:
+    root = Path("models/Qwen3.6-35B-A3B-fp4")
+    if not (root / "chat_template.jinja").is_file():
+        pytest.skip("chat template is not installed")
+    from qwen36_35b_a3b.chat import encode_chat
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        }
+    ]
+    asked = [
+        {"role": "user", "content": "Call read_file with path a.py."},
+        {
+            "role": "assistant",
+            "content": (
+                "<tool_call>\n<function=read_file>\n<parameter=path>\n"
+                "a.py\n</parameter>\n</function>\n</tool_call>"
+            ),
+        },
+        {"role": "tool", "content": "print(1)\n"},
+        {"role": "user", "content": "Call read_file with path b.metal."},
+    ]
+    previous = encode_chat(root, asked, tools, False, None)
+    follow = encode_chat(
+        root,
+        [*asked, {"role": "user", "content": "Call read_file with path c.py."}],
+        tools,
+        False,
+        None,
+    )
+    assert follow[: len(previous)] == previous
 
 
 def test_a_blank_piece_is_dropped_when_the_limit_cuts_an_open_think() -> None:
@@ -459,6 +513,38 @@ def test_s3_evicts_a_one_hit_before_a_reused_expert() -> None:
     fifo.insert((0, 4))
     assert fifo.relieve(set()) == (0, 3)
     assert fifo.place(other) == "m"
+
+
+def test_a_longer_cache_keeps_the_tokens_already_stored() -> None:
+    mode = "e4m3"
+    old, new, count = 2048, 4096, 5
+    src = np.zeros(kv_buffer_bytes(mode, old), dtype=np.uint8)
+    src[: 2 * old * 256].reshape(2, old, 256)[1, 4, 9] = 77
+    src[2 * old * 256 :].reshape(2, old, 8)[1, 4, 2] = 13
+    packed = repack_plane(src, old, new, count, mode, "key")
+    assert packed[: 2 * new * 256].reshape(2, new, 256)[1, 4, 9] == 77
+    assert packed[2 * new * 256 :].reshape(2, new, 8)[1, 4, 2] == 13
+    value = np.zeros(kv_buffer_bytes(mode, old), dtype=np.uint8)
+    value[: 2 * old * 256].reshape(2, 256, old)[0, 3, 4] = 41
+    moved = repack_plane(value, old, new, count, mode, "value")
+    assert moved[: 2 * new * 256].reshape(2, 256, new)[0, 3, 4] == 41
+
+
+def test_context_shrinks_to_the_bytes_the_cache_can_hold() -> None:
+    mode = "e4m3"
+    limit = 8192
+    fixed = 1000
+    def nothing(_positions: int) -> int:
+        return 0
+    full = fixed + 20 * kv_buffer_bytes(mode, 8192)
+    assert fit_positions(full, fixed, mode, limit, nothing, keep=0) == 8192
+    one = 20 * kv_buffer_bytes(mode, 2048)
+    assert fit_positions(full, fixed, mode, limit, nothing, keep=one) == 6144
+    short = fixed + 20 * kv_buffer_bytes(mode, 4096) - 1
+    assert fit_positions(short, fixed, mode, limit, nothing, keep=0) == 2048
+    assert fit_positions(fixed, fixed, mode, limit, nothing, keep=0) is None
+    wider = fit_positions(full, fixed, "f32", limit, nothing, keep=0)
+    assert wider is not None and wider < 8192
 
 
 def test_kv_widths_and_atlas_budget() -> None:

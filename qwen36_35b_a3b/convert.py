@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -231,8 +232,22 @@ def _stage_expert(
     }
 
 
-def quantize(src: Path, output: Path) -> Path:
+def quantize(
+    src: Path,
+    output: Path,
+    on_bytes: Callable[[int, str], None] | None = None,
+) -> Path:
     """Pack ``src`` into ``output``. A finished manifest is left in place."""
+
+    def _notify(detail: str) -> None:
+        if on_bytes is None:
+            return
+        total = 0
+        for path in output.rglob("*"):
+            if path.is_file():
+                total += path.stat().st_size
+        on_bytes(total, detail)
+
     src = src.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
     manifest_path = output / "manifest.json"
@@ -253,10 +268,12 @@ def quantize(src: Path, output: Path) -> Path:
     pending: dict[str, dict[str, np.ndarray]] = {}
     staged: dict[Path, dict[str, tuple[str, list[tuple[bytes, bytes]]]]] = {}
     config = json.loads((src / "config.json").read_text())
+    _notify(output.name)
     for shard in sorted(shards):
         path = src / shard
         header, base = _header(path)
-        print(f"shard {shard}", flush=True)
+        if on_bytes is None:
+            print(f"shard {shard}", flush=True)
         for name in shards[shard]:
             if name in done:
                 continue
@@ -264,7 +281,8 @@ def quantize(src: Path, output: Path) -> Path:
             expert = _expert_file(output, name)
             if expert is not None:
                 kind = "gate_up" if name.endswith("gate_up_proj") else "down"
-                print(f"  {name}", flush=True)
+                if on_bytes is None:
+                    print(f"  {name}", flush=True)
                 committed = _stage_expert(staged, expert[0], name, array, kind, output)
                 if committed is None:
                     del array
@@ -307,6 +325,7 @@ def quantize(src: Path, output: Path) -> Path:
             tmp = progress_path.with_suffix(".json.tmp")
             tmp.write_text(json.dumps({"tensors": done}))
             os.replace(tmp, progress_path)
+            _notify(name)
     if pending:
         message = f"shared expert pair is incomplete: {sorted(pending)}"
         raise RuntimeError(message)

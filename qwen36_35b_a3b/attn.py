@@ -68,6 +68,14 @@ def bind_plane(runtime: Any) -> None:
     runtime.plane_chunk_sum = zeros(rows * (SCORE // TILE) * 4)
 
 
+def resize_plane(runtime: Any) -> None:
+    """Grow the value-mix scratch after the context length changes."""
+    if runtime.kv_cache == "f32":
+        return
+    blocks = max(runtime.max_pos, BLOCK) // BLOCK
+    runtime.plane_parts = runtime.session.zeros(blocks * (GROUP * GROUP) * HEAD * 4)
+
+
 def attend_plane(
     runtime: Any,
     *,
