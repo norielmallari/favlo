@@ -4,15 +4,10 @@ from __future__ import annotations
 
 import json
 import socket
-import subprocess
-import sys
 import threading
 import time
 import urllib.request
 from dataclasses import dataclass
-from pathlib import Path
-
-_ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass(frozen=True)
@@ -187,39 +182,28 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def start_server(port: int, max_memory: str | None = None) -> tuple[subprocess.Popen[str], Log]:
-    command = [
-        sys.executable,
-        "-m",
-        "favlo",
-        "serve",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        str(port),
-    ]
-    if max_memory:
-        command.extend(["--max-memory", max_memory])
-    proc = subprocess.Popen(
-        command,
-        cwd=_ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+def start_server(port: int, max_memory: str | None = None) -> tuple[int, threading.Event, Log]:
+    from favlo.cli import repo_root
+    from favlo.daemon import alive, ensure, follow, telemetry_path
+
     log = Log()
+    pid, _started = ensure(
+        "127.0.0.1",
+        port,
+        max_memory=max_memory,
+        root=repo_root(),
+    )
+    stop = threading.Event()
 
-    def _read() -> None:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            log.append(line)
+    def on_line(line: str) -> None:
+        log.append(line + "\n")
 
-    threading.Thread(target=_read, daemon=True).start()
+    follow(telemetry_path(port), on_line, stop, offset=0)
     deadline = time.monotonic() + 600
     while time.monotonic() < deadline:
         if "listening on" in log.text():
-            return proc, log
-        if proc.poll() is not None:
+            return pid, stop, log
+        if not alive(pid):
             raise RuntimeError(log.text()[-4000:])
         time.sleep(0.2)
     raise TimeoutError(log.text()[-4000:])
@@ -231,30 +215,32 @@ class Server:
     def __init__(self, max_memory: str | None = None) -> None:
         self.port = 0
         self.max_memory = max_memory
-        self.proc: subprocess.Popen[str] | None = None
+        self.pid: int | None = None
+        self.follow_stop: threading.Event | None = None
         self.log = Log()
 
     def start(self) -> None:
         self.port = free_port()
-        self.proc, self.log = start_server(self.port, self.max_memory)
+        self.pid, self.follow_stop, self.log = start_server(self.port, self.max_memory)
 
     def restart(self) -> None:
         self.stop()
         self.start()
 
     def stop(self) -> None:
-        if self.proc is None:
+        if self.pid is None:
             return
-        stop_server(self.proc)
-        self.proc = None
+        stop_server(self.pid, self.follow_stop)
+        self.pid = None
+        self.follow_stop = None
 
 
-def stop_server(proc: subprocess.Popen[str]) -> None:
-    proc.terminate()
-    try:
-        proc.wait(timeout=30)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+def stop_server(pid: int, follow_stop: threading.Event | None = None) -> None:
+    from favlo.daemon import stop_pid
+
+    if follow_stop is not None:
+        follow_stop.set()
+    stop_pid(pid)
 
 
 def complete(

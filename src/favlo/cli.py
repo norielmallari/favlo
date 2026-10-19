@@ -52,10 +52,12 @@ def pipeline_names(root: Path | None = None) -> tuple[str, ...]:
 
 
 def _help(names: Sequence[str]) -> str:
-    lines = ["usage: favlo serve"]
+    lines = ["usage: favlo serve [--non-interactive]"]
     lines.extend(f"       favlo --{name} [args]" for name in names)
     lines.append("")
-    lines.append("  serve                  listen, then load the model a request names")
+    lines.append("  serve                  chat on a terminal; the server is a daemon")
+    lines.append("  serve --non-interactive")
+    lines.append("                         start the server daemon and exit")
     width = max((len(name) for name in names), default=0)
     for name in names:
         lines.append(f"  --{name.ljust(width)}    {name}")

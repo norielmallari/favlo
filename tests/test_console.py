@@ -62,7 +62,7 @@ def test_plain_lines_match_the_harness_text() -> None:
 def test_pretty_bar_spinner_gauge_and_erase() -> None:
     ui, stream, clock = _ui("pretty", color=0)
     ui.plate()
-    assert "M A D M E T A L" in stream.getvalue()
+    assert "F A V L O" in stream.getvalue()
     progress = ui.begin("prefill", total=100, unit="tok")
     progress.done = 0
     ui.sample()
@@ -80,7 +80,7 @@ def test_pretty_bar_spinner_gauge_and_erase() -> None:
     ui.end(progress, "prefill 50.00 tok/s (50 tok in 1.00s)")
     finished = stream.getvalue()
     assert "prefill 50.00 tok/s (50 tok in 1.00s)" in finished
-    assert "\x1b[1F" in finished
+    assert "\r\x1b[2K" in finished
     open_row = ui.begin("decode", total=0, unit="tok", detail="req #7")
     open_row.done = 214
     open_row.gauge = ("resident", 9700)

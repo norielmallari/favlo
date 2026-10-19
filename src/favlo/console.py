@@ -18,7 +18,7 @@ from typing import Any, TextIO
 
 from favlo.logs import RollingLog
 
-PHASES = ("load", "quantize", "prefill", "decode")
+PHASES = ("load", "download", "quantize", "prefill", "decode")
 UNITS = ("tok", "layers", "bytes", "shards", "experts")
 VERSION = "0.1.0"
 SCHEMA = 1
@@ -29,7 +29,7 @@ _BAR_TRACK = "░"
 _BAR_LEFT = "▕"
 _BAR_RIGHT = "▏"
 _PLATE_TOP = "▕███████████████████████▏"
-_PLATE_MID = "▕██  M A D M E T A L  ██▏"
+_PLATE_MID = "▕██     F A V L O     ██▏"
 _PLATE_BOT = "▕███████████████████████▏"
 _TICK = 0.1
 _WINDOW = 5.0
@@ -82,6 +82,8 @@ class Console:
         self._handles: list[Progress] = []
         self._windows: dict[int, list[tuple[float, int]]] = {}
         self._drawn = 0
+        self._inline = False
+        self._wrap_off = False
         self._cursor_hidden = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -403,8 +405,10 @@ class Console:
         bar = _bar(ratio, 30)
         done = _count(progress.done, progress.unit)
         total = _count(progress.total, progress.unit)
-        count = f"{done}/{total} {progress.unit}"
+        count = f"{done}/{total}" if progress.unit == "bytes" else f"{done}/{total} {progress.unit}"
         parts = [progress.phase, bar, percent, count]
+        if progress.detail:
+            parts.append(progress.detail)
         rate_text = _rate_text(rate, progress.unit)
         if rate_text:
             parts.append(rate_text)
@@ -489,6 +493,20 @@ class Console:
         return f"\x1b[2m{text}\x1b[0m"
 
     def _paint_rows(self, rows: list[str]) -> None:
+        """One open row stays on the current line. A second row uses the line below."""
+        if len(rows) == 1:
+            if self._drawn:
+                self._write(f"\x1b[{self._drawn}F")
+                self._drawn = 0
+            if not self._wrap_off:
+                self._write("\x1b[?7l")
+                self._wrap_off = True
+            self._write("\r\x1b[2K" + rows[0])
+            self._inline = True
+            return
+        if self._inline:
+            self._write("\n")
+            self._inline = False
         if self._drawn:
             self._write(f"\x1b[{self._drawn}F")
         for row in rows:
@@ -496,13 +514,20 @@ class Console:
         self._drawn = len(rows)
 
     def _erase(self) -> None:
-        if self.mode != "pretty" or not self._drawn:
+        if self.mode != "pretty":
             return
-        self._write(f"\x1b[{self._drawn}F")
-        for _ in range(self._drawn):
-            self._write("\x1b[K\n")
-        self._write(f"\x1b[{self._drawn}F")
-        self._drawn = 0
+        if self._inline:
+            self._write("\r\x1b[2K")
+            self._inline = False
+        elif self._drawn:
+            self._write(f"\x1b[{self._drawn}F")
+            for _ in range(self._drawn):
+                self._write("\x1b[K\n")
+            self._write(f"\x1b[{self._drawn}F")
+            self._drawn = 0
+        if self._wrap_off:
+            self._write("\x1b[?7h")
+            self._wrap_off = False
 
     def _redraw(self) -> None:
         if self.mode == "pretty" and self._handles:

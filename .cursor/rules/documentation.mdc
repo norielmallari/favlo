@@ -7,7 +7,7 @@ alwaysApply: true
 
 This repository is public. Anyone can read the tree, the history, issues, and pull requests. Write docs, commits, comments, and examples as if they will stay public.
 
-An exemption to this rule is when a documentation line starts with `>`, which may contain author hand-written documentation.
+A block quote is a line that starts with `>`. The author wrote those lines, including the tone and the first person. Leave a block quote unchanged. Do not rephrase it, apply the tone rules to it, or move its wording into the surrounding prose. Update a block quote only when the user explicitly asks for that quote to be changed.
 
 ## No personal data
 
@@ -25,7 +25,7 @@ The directory stem in the note is the official repository name plus the weight q
 
 Use calm, neutral sentences. State what the project does and what the reader can run. Skip slogans, urgency, and notes about a particular machine.
 
-A claim by the author is in the third person. Write "the author", not "I", "me", or "my".
+Outside a block quote, a claim by the author is in the third person. Write "the author", not "I", "me", or "my".
 
 A public README says what the project is, how to install it, one minimal command, the license, and where to report a problem. Keep the as-built detail in linked docs such as ARCHITECTURE.md. Prefer relative links between files in the repo.
 
@@ -35,9 +35,9 @@ Wrong: "Fixed the crash on the user's M5 at `/Users/user/Models`. Email me at us
 
 Right: "The server listens on `127.0.0.1:8000`. A missing checkpoint path is reported and the process exits."
 
-Wrong: "I admire this work, and I recommend it before trying Favlo."
+Wrong, outside a block quote: "I admire this work, and I recommend it before trying Favlo."
 
-Right: "The author admires this work and recommends it before trying Favlo."
+Right, outside a block quote: "The author admires this work and recommends it before trying Favlo." A block quote that already says this in the first person stays as written.
 
 Wrong: "Quantize writes `models/Example-Model-Uncensored-fp4` from `ExampleOrg/Example-Model-Uncensored`."
 

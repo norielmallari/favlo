@@ -14,13 +14,10 @@ import argparse
 import json
 import re
 import socket
-import subprocess
-import sys
 import threading
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
 
 NAME = "Mara Ellison Voss"
 BORN = "14 March 1987"
@@ -150,18 +147,14 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _read_log(proc: subprocess.Popen[str], log: Log) -> None:
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        log.append(line)
+def _wait_listening(pid: int, log: Log) -> None:
+    from favlo.daemon import alive
 
-
-def _wait_listening(proc: subprocess.Popen[str], log: Log) -> None:
     deadline = time.monotonic() + 600
     while time.monotonic() < deadline:
         if "listening on" in log.text():
             return
-        if proc.poll() is not None:
+        if not alive(pid):
             raise RuntimeError(log.text()[-4000:])
         time.sleep(0.2)
     raise TimeoutError(log.text()[-4000:])
@@ -301,27 +294,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--penalty-window", type=int, default=20)
     parser.add_argument("--model", default="qwen38-flash-next")
     args = parser.parse_args(argv)
+    from favlo.cli import repo_root
+    from favlo.daemon import ensure, follow, stop_pid, telemetry_path
+
     port = args.port or _free_port()
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "favlo",
-            "serve",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-        ],
-        cwd=Path(__file__).resolve().parents[1],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
     log = Log()
-    threading.Thread(target=_read_log, args=(proc, log), daemon=True).start()
+    pid, _started = ensure("127.0.0.1", port, root=repo_root())
+    follow_stop = threading.Event()
+
+    def on_line(line: str) -> None:
+        log.append(line + "\n")
+
+    follow(telemetry_path(port), on_line, follow_stop, offset=0)
     try:
-        _wait_listening(proc, log)
+        _wait_listening(pid, log)
         problems = run(
             port,
             log,
@@ -340,11 +326,8 @@ def main(argv: list[str] | None = None) -> int:
         print(log.text()[-3000:])
         return 1
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        follow_stop.set()
+        stop_pid(pid)
     if problems:
         print("coherence failed:")
         for problem in problems:

@@ -1,0 +1,142 @@
+"""The serve daemon starts once and the terminal does not become that process."""
+
+import sys
+import threading
+from pathlib import Path
+
+import pytest
+
+from favlo import listener
+from favlo.daemon import (
+    DAEMON_ENV,
+    DaemonError,
+    ensure,
+    plain_text,
+    read_pid,
+    stop_pid,
+)
+from favlo.talk import Idle
+
+
+class _Proc:
+    def __init__(self, pid: int, code: int | None) -> None:
+        self.pid = pid
+        self._code = code
+
+    def poll(self) -> int | None:
+        return self._code
+
+
+def test_plain_text_keeps_log_lines_and_summaries() -> None:
+    blob = "\n".join(
+        [
+            '{"v":1,"type":"log","line":"listening on http://127.0.0.1:8129"}',
+            '{"v":1,"type":"tick","phase":"prefill","done":1}',
+            '{"v":1,"type":"end","summary":"prefill 10.00 tok/s (2 tok in 0.20s)"}',
+            "decode 3.00 tok/s (1 tok in 0.33s)",
+        ]
+    )
+    text = plain_text(blob)
+    assert "listening on http://127.0.0.1:8129" in text
+    assert "prefill 10.00 tok/s" in text
+    assert text.splitlines()[-1].startswith("decode ")
+    assert "tick" not in text
+
+
+def test_a_foreign_listener_is_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("favlo.daemon.port_open", lambda *_args, **_kwargs: True)
+    with pytest.raises(DaemonError, match="already in use"):
+        ensure("127.0.0.1", 8129, home=tmp_path, root=tmp_path)
+
+
+def test_ensure_starts_one_daemon(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    started: list[int] = []
+    open_port = {"up": False}
+
+    def spawn(*_args, **_kwargs) -> _Proc:
+        open_port["up"] = True
+        started.append(4242)
+        return _Proc(4242, None)
+
+    monkeypatch.setattr("favlo.daemon._spawn", spawn)
+    monkeypatch.setattr("favlo.daemon.port_open", lambda *_a, **_k: open_port["up"])
+    monkeypatch.setattr("favlo.daemon.alive", lambda pid: pid == 4242)
+    pid, created = ensure("127.0.0.1", 8129, home=tmp_path, root=tmp_path)
+    assert (pid, created) == (4242, True)
+    assert read_pid(8129, tmp_path) == 4242
+    again, started_again = ensure("127.0.0.1", 8129, home=tmp_path, root=tmp_path)
+    assert (again, started_again) == (4242, False)
+    assert started == [4242]
+
+
+def test_a_daemon_that_exits_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("favlo.daemon._spawn", lambda *_a, **_k: _Proc(4242, 1))
+    monkeypatch.setattr("favlo.daemon.port_open", lambda *_a, **_k: False)
+    monkeypatch.setattr("favlo.daemon.alive", lambda _pid: False)
+    monkeypatch.setattr("favlo.daemon.stop_pid", lambda _pid: None)
+    with pytest.raises(DaemonError, match="did not start"):
+        ensure("127.0.0.1", 8129, home=tmp_path, root=tmp_path)
+    assert read_pid(8129, tmp_path) is None
+
+
+def test_stop_pid_ignores_a_dead_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[int] = []
+    monkeypatch.setattr("favlo.daemon.alive", lambda _pid: False)
+    monkeypatch.setattr(
+        "favlo.daemon._signal",
+        lambda pid, _signum: calls.append(pid),
+    )
+    stop_pid(123)
+    assert calls == []
+
+
+def test_note_closed_ignores_a_close_without_an_open() -> None:
+    idle = Idle()
+    idle.note_closed()
+    assert idle.quiet(0)
+    idle.enter()
+    assert not idle.quiet(0)
+    idle.note_closed()
+    assert idle.quiet(0)
+
+
+def test_non_interactive_starts_the_daemon_and_exits(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("favlo.daemon.ensure", lambda *_a, **_k: (7, True))
+    assert listener.serve_main(["--non-interactive"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "listening on http://127.0.0.1:8129\n"
+    assert captured.err == ""
+
+
+def test_interactive_attaches_without_listening_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr("favlo.setup.prepare", lambda *_a, **_k: 0)
+    monkeypatch.setattr("favlo.daemon.ensure", lambda *_a, **_k: (7, False))
+    monkeypatch.setattr("favlo.daemon.follow", lambda *_a, **_k: None)
+    monkeypatch.setattr("favlo.daemon.stop_pid", lambda _pid: None)
+    started: list[str] = []
+
+    def start(*_args, **_kwargs) -> threading.Thread:
+        started.append("talk")
+        thread = threading.Thread(target=lambda: None)
+        thread.start()
+        return thread
+
+    monkeypatch.setattr("favlo.talk.start", start)
+    assert listener.serve_main(["--port", "8129"]) == 0
+    assert started == ["talk"]
+
+
+def test_daemon_process_does_not_spawn_another(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv(DAEMON_ENV, "1")
+    monkeypatch.setattr(listener, "attach_process_log", lambda _ui: None)
+    monkeypatch.setattr(listener, "serve", lambda _args: 0)
+    assert listener.serve_main(["--port", "9"]) == 0
+    captured = capsys.readouterr()
+    assert "listening on" not in captured.out

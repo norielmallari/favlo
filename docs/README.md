@@ -4,6 +4,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 
 | Path | Contents |
 |---|---|
+| [ai-assistance/README.md](ai-assistance/README.md) | AI-assisted features on `favlo serve` |
 | [qwen38-flash-next/architecture.md](qwen38-flash-next/architecture.md) | Qwen3.8-Flash-Next pipeline contract |
 | [qwen38-flash-next/performance.md](qwen38-flash-next/performance.md) | Qwen3.8-Flash-Next recorded prefill and decode rates |
 | [qwen38-flash-next/references.md](qwen38-flash-next/references.md) | Papers and specifications for that pipeline |

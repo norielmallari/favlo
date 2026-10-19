@@ -4,21 +4,32 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from favlo.hf_cache import snapshot_dir
 from favlo.registry import (
     add_model,
     choose_complete,
     format_listing,
+    models_dir,
     register_quantized,
     set_alias,
 )
 from qwen38_27b.chat import STOP, decode_text, encode_chat
 from qwen38_27b.checks import format_report, run_checks
 from qwen38_27b.convert import RECORD_NAME, quantize
+from qwen38_27b.fetch import (
+    CHECKOUT,
+    REPO,
+    download,
+    list_files,
+    remaining_download,
+    shortfall,
+)
 from qwen38_27b.forward import Qwen38Runtime
 
 PIPELINE = "qwen38-27b"
@@ -35,6 +46,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     quant = sub.add_parser("quantize", help="write the uniform fp4 record from BF16 shards")
     quant.add_argument("--src", type=Path, default=None)
     quant.add_argument("--output", type=Path, default=None)
+    fetch = sub.add_parser("download", help="download the official BF16 checkout")
+    fetch.add_argument("--check", action="store_true", help="report disk space and do not write")
+    fetch.add_argument("--console", choices=("auto", "pretty", "plain", "json"), default="auto")
     sub.add_parser("bf16", help="run this package's shaders on stored BF16 values")
     complete = sub.add_parser("complete", help="argmax completion from the packed record")
     complete.add_argument("--kv-cache", choices=("e4m3",), default="e4m3")
@@ -59,10 +73,62 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _kernels()
     if args.command == "quantize":
         return _quantize(args)
+    if args.command == "download":
+        return _download(args)
     if args.command == "complete":
         return _complete(args)
     sys.stderr.write("qwen38-27b bf16 layer check is not this command\n")
     return 1
+
+
+def _download(args: argparse.Namespace) -> int:
+    """Fetch Qwen/Qwen3.8-27B into ``models/Qwen3.8-27B-bf16``. Quantize is separate."""
+    dest = models_dir() / CHECKOUT
+    if not args.check and (dest / "fetch_complete.json").is_file():
+        sys.stdout.write(f"{dest}\n")
+        return 0
+    try:
+        files = list_files()
+        message = shortfall(remaining_download(dest, files), dest)
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
+    if message is not None:
+        sys.stderr.write(message + "\n")
+        return 1
+    if args.check:
+        sys.stdout.write("ok\n")
+        return 0
+    if (dest / "fetch_complete.json").is_file():
+        sys.stdout.write(f"{dest}\n")
+        return 0
+    from favlo.console import Console
+
+    ui = Console.from_env(getattr(args, "console", None), pipeline=PIPELINE)
+    if os.environ.get("FAVLO_SKIP_PLATE") != "1":
+        ui.plate()
+    bar = None
+    try:
+        total = sum(size for _name, size in files)
+        bar = ui.begin("download", total=total, unit="bytes", detail=REPO)
+        download(dest, files, lambda done, whole, _name: _move(bar, done, whole))
+        ui.end(bar, f"downloaded {REPO}")
+        bar = None
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        ui.report(f"{exc}\n")
+        ui.log("the next download continues from the files already written")
+        return 1
+    finally:
+        if bar is not None and not bar.closed:
+            ui.end(bar, "")
+        ui.close()
+    sys.stdout.write(f"{dest}\n")
+    return 0
+
+
+def _move(progress: Any, done: int, total: int) -> None:
+    progress.done = done
+    progress.total = total
 
 
 def _quantize(args: argparse.Namespace) -> int:

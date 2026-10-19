@@ -214,6 +214,33 @@ def _serial(order: list[tuple[str, str]]) -> list[str]:
     return names
 
 
+def test_a_silent_client_releases_the_request_slot(monkeypatch) -> None:
+    monkeypatch.setattr(listener, "_REQUEST_READ_TIMEOUT", 0.2)
+    runtime = _Runtime()
+    state, thread = _serve_background(runtime)
+    port = int(state["server"].server_address[1])
+    stuck = socket.create_connection(("127.0.0.1", port), timeout=2)
+    try:
+        sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+        sock.settimeout(2)
+        try:
+            sock.sendall(
+                b"GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            )
+            data = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        finally:
+            sock.close()
+    finally:
+        stuck.close()
+        _stop_background(state, thread)
+    assert b"200" in data.split(b"\r\n", 1)[0]
+
+
 def test_requests_wait_until_the_current_one_finishes() -> None:
     runtime = _Runtime()
     runtime.hold = True

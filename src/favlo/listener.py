@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import os
 import select
 import signal
 import socket
@@ -22,10 +23,12 @@ from pathlib import Path
 from typing import Any
 
 from favlo.console import Console
+from favlo.daemon import DAEMON_ENV
 from favlo.logs import attach_process_log
 from favlo.registry import model_objects, one_model, resolve
 
 _STREAM_WRITE_TIMEOUT = 2.0
+_REQUEST_READ_TIMEOUT = 10.0
 _log_sink: Any = None
 
 
@@ -62,7 +65,7 @@ class _SingleRequestServer(HTTPServer):
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         """A peer that closes mid-response is not a server failure."""
-        if isinstance(sys.exception(), ConnectionError):
+        if isinstance(sys.exception(), (ConnectionError, TimeoutError)):
             return
         super().handle_error(request, client_address)
 
@@ -244,11 +247,13 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        timeout = _REQUEST_READ_TIMEOUT
 
         def log_message(self, fmt: str, *log_args: Any) -> None:
             del fmt, log_args
 
         def do_GET(self) -> None:  # noqa: N802
+            self.connection.settimeout(None)
             path = urllib.parse.unquote(self.path.split("?", 1)[0])
             if path == "/v1/models":
                 self._json(
@@ -277,9 +282,16 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
             self._started = False
             self._gone = False
             self._model_id = ""
-            length = int(self.headers.get("Content-Length", "0"))
+            length = int(self.headers.get("Content-Length", "0") or "0")
             try:
-                body = json.loads(self.rfile.read(length) or b"{}")
+                raw = self.rfile.read(length) if length else b"{}"
+            except TimeoutError:
+                self.close_connection = True
+                return
+            self.connection.settimeout(None)
+            _log("request open")
+            try:
+                body = json.loads(raw or b"{}")
                 selection = _bind_request(body, state, args)
                 if selection is not None:
                     self._model_id = selection.requested_id
@@ -322,6 +334,8 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
                 if self._started:
                     return
                 self._json(500, {"error": {"message": str(exc), "type": type(exc).__name__}})
+            finally:
+                _log("request closed")
 
         def _client_stopped(self) -> bool:
             if self._gone:
@@ -373,22 +387,18 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
     return 0
 
 
-def _console(args: Any) -> Console:
-    ui = Console.from_env(getattr(args, "console", None), pipeline="")
-    attach_process_log(ui)
-    bind_log(ui.log)
-    ui.live_decode = ui.mode == "pretty"
-    ui.plate()
-    return ui
-
-
 def serve_main(argv: Sequence[str] | None = None) -> int:
-    """``favlo serve``. Nothing is loaded until a request names a model."""
+    """``favlo serve``. The daemon listens. A terminal runs the CLI."""
     parser = argparse.ArgumentParser(prog="favlo serve")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8129)
     parser.add_argument("--console", choices=("auto", "pretty", "plain", "json"), default="auto")
     parser.add_argument("--transcript", type=Path, default=None)
+    parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="start the server daemon and exit",
+    )
     parser.add_argument(
         "--max-memory",
         default=None,
@@ -398,7 +408,20 @@ def serve_main(argv: Sequence[str] | None = None) -> int:
         args = parser.parse_args(list(argv) if argv is not None else None)
     except SystemExit as exc:
         return int(exc.code or 0)
-    ui = _console(args)
+    if os.environ.get(DAEMON_ENV) == "1":
+        return _daemon_main(args)
+    if args.non_interactive:
+        return _start_daemon(args)
+    return _interactive(args)
+
+
+def _daemon_main(args: Any) -> int:
+    """The listener process. Telemetry is JSON on stdout. Stdin is closed."""
+    ui = Console("json", pipeline="", stream=sys.stdout, start_thread=False)
+    attach_process_log(ui)
+    bind_log(ui.log)
+    ui.live_decode = False
+    ui.plate()
     args.lazy = True
     args.console_ui = ui
     args.record = None
@@ -406,4 +429,82 @@ def serve_main(argv: Sequence[str] | None = None) -> int:
     try:
         return serve(args)
     finally:
+        bind_log(None)
         ui.close()
+        from favlo.daemon import release_pid
+
+        release_pid(args.port, os.getpid())
+
+
+def _start_daemon(args: Any) -> int:
+    """Spawn the daemon when this address is free, print the listening line, and return."""
+    from favlo.daemon import DaemonError, ensure
+
+    try:
+        ensure(
+            args.host,
+            args.port,
+            max_memory=args.max_memory,
+            transcript=args.transcript,
+        )
+    except DaemonError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
+    sys.stdout.write(f"listening on http://{args.host}:{args.port}\n")
+    sys.stdout.flush()
+    return 0
+
+
+def _interactive(args: Any) -> int:
+    """First-run setup on a terminal, then chat against the daemon."""
+    from favlo.cli import repo_root
+    from favlo.daemon import DaemonError, ensure, follow, stop_pid, telemetry_path
+    from favlo.setup import prepare
+    from favlo.talk import Idle, start
+
+    if sys.stdin.isatty():
+        code = prepare(repo_root(), stdin_tty=True, console=args.console)
+        if code != 0:
+            return code
+    try:
+        pid, created = ensure(
+            args.host,
+            args.port,
+            max_memory=args.max_memory,
+            transcript=args.transcript,
+        )
+    except DaemonError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
+    path = telemetry_path(args.port)
+    offset = 0 if created or not path.is_file() else path.stat().st_size
+    idle = Idle()
+    stopped = threading.Event()
+
+    def write(line: str) -> None:
+        sys.stderr.write(line + "\n")
+        sys.stderr.flush()
+
+    def on_line(line: str) -> None:
+        if line == "request open":
+            idle.enter()
+            return
+        if line == "request closed":
+            idle.note_closed()
+            return
+        write(line)
+
+    follow(path, on_line, stopped, offset=offset)
+
+    def stop() -> None:
+        stopped.set()
+        stop_pid(pid)
+
+    thread = start(args.host, args.port, sys.stdin, write, idle, stop)
+    try:
+        thread.join()
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        stopped.set()
+    return 0

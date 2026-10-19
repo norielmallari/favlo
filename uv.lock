@@ -101,6 +101,60 @@ wheels = [
 ]
 
 [[package]]
+name = "favlo"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "agent-framework-openai" },
+    { name = "jinja2" },
+    { name = "numpy" },
+    { name = "pyobjc-framework-metal" },
+    { name = "safetensors" },
+    { name = "tokenizers" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "absl-py" },
+    { name = "agent-framework-openai" },
+    { name = "immutabledict" },
+    { name = "langdetect" },
+    { name = "nltk" },
+    { name = "pytest" },
+    { name = "ruff" },
+]
+harness = [
+    { name = "absl-py" },
+    { name = "agent-framework-openai" },
+    { name = "immutabledict" },
+    { name = "langdetect" },
+    { name = "nltk" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "absl-py", marker = "extra == 'dev'", specifier = ">=2" },
+    { name = "absl-py", marker = "extra == 'harness'", specifier = ">=2" },
+    { name = "agent-framework-openai", specifier = ">=1" },
+    { name = "agent-framework-openai", marker = "extra == 'dev'", specifier = ">=1" },
+    { name = "agent-framework-openai", marker = "extra == 'harness'", specifier = ">=1" },
+    { name = "immutabledict", marker = "extra == 'dev'", specifier = ">=4" },
+    { name = "immutabledict", marker = "extra == 'harness'", specifier = ">=4" },
+    { name = "jinja2", specifier = ">=3.1" },
+    { name = "langdetect", marker = "extra == 'dev'", specifier = ">=1.0.9" },
+    { name = "langdetect", marker = "extra == 'harness'", specifier = ">=1.0.9" },
+    { name = "nltk", marker = "extra == 'dev'", specifier = ">=3.9" },
+    { name = "nltk", marker = "extra == 'harness'", specifier = ">=3.9" },
+    { name = "numpy", specifier = ">=2.1" },
+    { name = "pyobjc-framework-metal" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.12" },
+    { name = "safetensors", specifier = ">=0.6" },
+    { name = "tokenizers", specifier = ">=0.22" },
+]
+provides-extras = ["dev", "harness"]
+
+[[package]]
 name = "filelock"
 version = "4.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -364,58 +418,6 @@ dependencies = [
     { name = "six" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0e/72/a3add0e4eec4eb9e2569554f7c70f4a3c27712f40e3284d483e88094cc0e/langdetect-1.0.9.tar.gz", hash = "sha256:cbc1fef89f8d062739774bd51eda3da3274006b3661d199c2655f6b3f6d605a0", size = 981474, upload-time = "2021-05-07T07:54:13.562Z" }
-
-[[package]]
-name = "favlo"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "jinja2" },
-    { name = "numpy" },
-    { name = "pyobjc-framework-metal" },
-    { name = "safetensors" },
-    { name = "tokenizers" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "absl-py" },
-    { name = "agent-framework-openai" },
-    { name = "immutabledict" },
-    { name = "langdetect" },
-    { name = "nltk" },
-    { name = "pytest" },
-    { name = "ruff" },
-]
-harness = [
-    { name = "absl-py" },
-    { name = "agent-framework-openai" },
-    { name = "immutabledict" },
-    { name = "langdetect" },
-    { name = "nltk" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "absl-py", marker = "extra == 'dev'", specifier = ">=2" },
-    { name = "absl-py", marker = "extra == 'harness'", specifier = ">=2" },
-    { name = "agent-framework-openai", marker = "extra == 'dev'", specifier = ">=1" },
-    { name = "agent-framework-openai", marker = "extra == 'harness'", specifier = ">=1" },
-    { name = "immutabledict", marker = "extra == 'dev'", specifier = ">=4" },
-    { name = "immutabledict", marker = "extra == 'harness'", specifier = ">=4" },
-    { name = "jinja2", specifier = ">=3.1" },
-    { name = "langdetect", marker = "extra == 'dev'", specifier = ">=1.0.9" },
-    { name = "langdetect", marker = "extra == 'harness'", specifier = ">=1.0.9" },
-    { name = "nltk", marker = "extra == 'dev'", specifier = ">=3.9" },
-    { name = "nltk", marker = "extra == 'harness'", specifier = ">=3.9" },
-    { name = "numpy", specifier = ">=2.1" },
-    { name = "pyobjc-framework-metal" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.12" },
-    { name = "safetensors", specifier = ">=0.6" },
-    { name = "tokenizers", specifier = ">=0.22" },
-]
-provides-extras = ["dev", "harness"]
 
 [[package]]
 name = "markupsafe"

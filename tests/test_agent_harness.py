@@ -2,9 +2,6 @@
 
 import asyncio
 import socket
-import subprocess
-import sys
-import threading
 import time
 from pathlib import Path
 
@@ -22,12 +19,6 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _read_log(proc: subprocess.Popen[str], lines: list[str]) -> None:
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        lines.append(line)
-
-
 def test_calls_follow_create_edit_confirm() -> None:
     assert calls_in_order(["create", "edit", "confirm"])
     assert calls_in_order(["create", "create", "edit", "confirm"])
@@ -40,46 +31,33 @@ def test_file_agent_creates_edits_and_confirms(tmp_path: Path) -> None:
     if not (root / "manifest.json").is_file():
         pytest.skip("quantized record is not installed")
     pytest.importorskip("agent_framework.openai")
+    from favlo.daemon import DaemonError, alive, ensure, plain_text, stop_pid, telemetry_path
+
     port = _free_port()
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "favlo",
-            "serve",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-        ],
-        cwd=ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    lines: list[str] = []
-    reader = threading.Thread(target=_read_log, args=(proc, lines), daemon=True)
-    reader.start()
+    try:
+        pid, _started = ensure("127.0.0.1", port, root=ROOT)
+    except DaemonError as exc:
+        raise RuntimeError(str(exc)) from exc
     try:
         deadline = time.monotonic() + 180
-        while time.monotonic() < deadline and "listening on" not in "".join(lines):
-            if proc.poll() is not None:
-                raise RuntimeError("".join(lines))
+        logged = ""
+        while time.monotonic() < deadline and "listening on" not in logged:
+            path = telemetry_path(port)
+            blob = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+            logged = plain_text(blob)
+            if not alive(pid):
+                raise RuntimeError(logged)
             time.sleep(0.2)
-        if "listening on" not in "".join(lines):
-            raise TimeoutError("".join(lines))
+        if "listening on" not in logged:
+            raise TimeoutError(logged)
         try:
             calls, text = asyncio.run(run_file_task(f"http://127.0.0.1:{port}/v1", tmp_path))
         except Exception as exc:
-            message = "".join(lines[-80:])
+            message = plain_text(
+                telemetry_path(port).read_text(encoding="utf-8", errors="replace")
+            )
             raise RuntimeError(message) from exc
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=30)
-    reader.join(timeout=5)
-    assert calls_in_order(calls), (calls, text, "".join(lines[-50:]))
-    assert text == EDITED, (calls, text, "".join(lines[-50:]))
+        stop_pid(pid)
+    assert calls_in_order(calls), (calls, text, logged)
+    assert text == EDITED, (calls, text, logged)

@@ -19,8 +19,6 @@ import json
 import os
 import re
 import socket
-import subprocess
-import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -386,18 +384,20 @@ def _read_tool(root: Path, allowed: set[str], loaded: list[str], task: dict[str,
 
 @dataclass
 class Server:
-    proc: subprocess.Popen[str]
+    pid: int
     port: int
     max_memory: str | None = None
+    follow_stop: threading.Event | None = None
 
 
 def _wait_requests(log: Log, previous: int, server: Server) -> list[RequestRate]:
+    from favlo.daemon import alive
+
     deadline = time.monotonic() + 1800
     stable_at: float | None = None
     last = previous
     while time.monotonic() < deadline:
-        proc = server.proc
-        if proc.poll() is not None:
+        if not alive(server.pid):
             message = "server exited\n" + log.text()[-4000:]
             raise RuntimeError(message)
         requests = parse_requests(log.text())
@@ -611,18 +611,14 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _read_log(proc: subprocess.Popen[str], log: Log) -> None:
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        log.append(line)
+def _wait_listening(server: Server, log: Log, seen: int) -> None:
+    from favlo.daemon import alive
 
-
-def _wait_listening(proc: subprocess.Popen[str], log: Log, seen: int) -> None:
     deadline = time.monotonic() + 300
     while time.monotonic() < deadline:
         if log.text().count("listening on") > seen:
             return
-        if proc.poll() is not None:
+        if not alive(server.pid):
             message = log.text()[-4000:]
             raise RuntimeError(message)
         time.sleep(0.2)
@@ -630,48 +626,42 @@ def _wait_listening(proc: subprocess.Popen[str], log: Log, seen: int) -> None:
     raise TimeoutError(message)
 
 
-def _spawn(port: int, log: Log, max_memory: str | None = None) -> subprocess.Popen[str]:
-    command = [
-        sys.executable,
-        "-m",
-        "favlo",
-        "serve",
-        "--host",
+def _spawn(port: int, log: Log, max_memory: str | None = None) -> Server:
+    from favlo.cli import repo_root
+    from favlo.daemon import ensure, follow, telemetry_path
+
+    pid, _started = ensure(
         "127.0.0.1",
-        "--port",
-        str(port),
-    ]
-    if max_memory:
-        command.extend(["--max-memory", max_memory])
-    proc = subprocess.Popen(
-        command,
-        cwd=Path(__file__).resolve().parents[1],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
+        port,
+        max_memory=max_memory,
+        root=repo_root(),
     )
-    threading.Thread(target=_read_log, args=(proc, log), daemon=True).start()
-    return proc
+    stop = threading.Event()
+
+    def on_line(line: str) -> None:
+        log.append(line + "\n")
+
+    follow(telemetry_path(port), on_line, stop, offset=0)
+    return Server(pid, port, max_memory, stop)
 
 
-def _stop_server(proc: subprocess.Popen[str]) -> None:
-    """SIGTERM so the process can write the live prefix, then wait for that exit."""
-    if proc.poll() is not None:
-        return
-    proc.terminate()
-    try:
-        proc.wait(timeout=300)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=30)
+def _stop_server(server: Server) -> None:
+    """SIGTERM so the daemon can write the live prefix, then wait for that exit."""
+    from favlo.daemon import stop_pid
+
+    if server.follow_stop is not None:
+        server.follow_stop.set()
+    stop_pid(server.pid)
 
 
 def _restart(server: Server, log: Log) -> None:
-    _stop_server(server.proc)
+    _stop_server(server)
     seen = log.text().count("listening on")
     server.port = _free_port()
-    server.proc = _spawn(server.port, log, server.max_memory)
-    _wait_listening(server.proc, log, seen)
+    started = _spawn(server.port, log, server.max_memory)
+    server.pid = started.pid
+    server.follow_stop = started.follow_stop
+    _wait_listening(server, log, seen)
 
 
 _LOCK = Path(__file__).resolve().parents[1] / "artifacts" / "pipeline-test.lock"
@@ -746,8 +736,8 @@ def main(argv: list[str] | None = None) -> int:
     server: Server | None = None
     try:
         port = args.port or _free_port()
-        server = Server(_spawn(port, log, args.max_memory), port, args.max_memory)
-        _wait_listening(server.proc, log, 0)
+        server = _spawn(port, log, args.max_memory)
+        _wait_listening(server, log, 0)
         result = asyncio.run(
             run_file_agent(args.repo, args.tokens, log, server, model=stem)
         )
@@ -757,7 +747,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     finally:
         if server is not None:
-            _stop_server(server.proc)
+            _stop_server(server)
         release_lock()
     print(format_summary(result.requests, args.tokens))
     if result.note:
