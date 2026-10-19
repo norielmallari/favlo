@@ -245,3 +245,112 @@ def test_completion_carries_created() -> None:
     payload = _completion("hello", 3, 1, "stop")
     assert isinstance(payload["created"], int)
     assert payload["created"] > 0
+
+
+_AGENT = (
+    "You are a repository agent. Call read_file with the path the user names. "
+    "Think through the files already returned before that call. "
+    "After the file comes back, think through what it does and how it relates "
+    "to those files, then reply with that analysis."
+)
+_CLOSED_CALL = "<tool_call>\n<function=read_file>\n</function>\n</tool_call>"
+
+
+def _read_prompt(path: str) -> str:
+    return f"Call read_file with path {path}."
+
+
+def _render(
+    template: object,
+    tokenizer: object,
+    messages: list[dict[str, object]],
+    tools: list[object],
+) -> list[int]:
+    text = template.render(  # type: ignore[attr-defined]
+        messages=normalize_messages(messages),
+        tools=tools,
+        add_generation_prompt=True,
+        enable_thinking=False,
+        raise_exception=RuntimeError,
+    )
+    return list(tokenizer.encode(text).ids)  # type: ignore[attr-defined]
+
+
+def test_read_file_turns_extend_the_rendered_prefix() -> None:
+    config_path = DEFAULT_RECORD / "tokenizer_config.json"
+    tokenizer_path = DEFAULT_RECORD / "tokenizer.json"
+    if not config_path.is_file() or not tokenizer_path.is_file():
+        pytest.skip("quantized record is not installed")
+    from jinja2 import Environment
+    from tokenizers import Tokenizer
+
+    template = Environment().from_string(json.loads(config_path.read_text())["chat_template"])
+    tokenizer = Tokenizer.from_file(str(tokenizer_path))
+    tools = [{"type": "function", "function": {"name": "read_file"}}]
+    first_path = "qwen38_flash_next/runtime.py"
+    second_path = "qwen38_flash_next/session.py"
+    first = [
+        {"role": "system", "content": _AGENT},
+        {"role": "user", "content": _read_prompt(first_path)},
+    ]
+    call = {
+        "id": "call_0",
+        "type": "function",
+        "function": {"name": "read_file", "arguments": "{}"},
+    }
+    after_call = [
+        *first,
+        {"role": "assistant", "content": None, "tool_calls": [call]},
+        {"role": "tool", "tool_call_id": "call_0", "content": "def forward():\n    return 1\n"},
+    ]
+    ids1 = _render(template, tokenizer, first, tools)
+    completion = list(tokenizer.encode(_CLOSED_CALL).ids)
+    assert len(completion) < 64
+    ids2 = _render(template, tokenizer, after_call, tools)
+    assert ids2[: len(ids1) + len(completion)] == ids1 + completion
+    replied = [
+        *after_call,
+        {"role": "assistant", "content": "read"},
+        {"role": "user", "content": _read_prompt(second_path)},
+    ]
+    ids_reply = _render(template, tokenizer, after_call, tools)
+    reply_ids = list(tokenizer.encode("read").ids)
+    ids3 = _render(template, tokenizer, replied, tools)
+    assert ids3[: len(ids_reply) + len(reply_ids)] == ids_reply + reply_ids
+
+
+def test_forced_opening_matches_the_tokenizer() -> None:
+    tokenizer_path = DEFAULT_RECORD / "tokenizer.json"
+    if not tokenizer_path.is_file():
+        pytest.skip("quantized record is not installed")
+    from qwen38_flash_next.tools import canonical_continuation, forced_call_options
+    from tokenizers import Tokenizer
+
+    tokenizer = Tokenizer.from_file(str(tokenizer_path))
+    name = "read_file"
+
+    def walk(close: bool) -> list[int]:
+        produced: list[int] = []
+        while True:
+            text = tokenizer.decode(produced)
+            options = forced_call_options(text, name, close=close)
+            if options is None:
+                break
+            nxt = canonical_continuation(
+                produced,
+                options[0],
+                lambda piece: tokenizer.encode(piece).ids,
+                tokenizer.decode,
+            )
+            assert nxt is not None
+            produced.append(nxt)
+            assert len(produced) < 64
+        return produced
+
+    opening = f"<tool_call>\n<function={name}>\n"
+    opened = walk(False)
+    assert tokenizer.decode(opened) == opening
+    assert opened == list(tokenizer.encode(opening).ids)
+    closed = walk(True)
+    assert tokenizer.decode(closed) == _CLOSED_CALL
+    assert closed == list(tokenizer.encode(_CLOSED_CALL).ids)
