@@ -2,7 +2,8 @@
 
 Language expert files stay on SSD. Each file is 256 images of fixed size, and
 the atlas keeps as many of those images as fit under the runtime maximum after
-the resident record, the key/value cache, and the other buffers. When every
+the resident record, the key/value cache, and the other buffers. The cache
+grows ahead of the atlas: the atlas can shrink to eight images. When every
 image fits, each layer file is read once. A routed image that is not resident
 is read from its layer file. S3-FIFO (Yang, Zhang, Qiu,
 Yue, and Rashmi, SOSP 2023) keeps a second request and drops a one-hit. This
@@ -21,6 +22,8 @@ from qwen36_35b_a3b.formats import EXPERT_IMAGE
 
 LAYERS = 40
 EXPERTS = 256
+# One token routes eight experts. The atlas can shrink to that set.
+MIN_IMAGES = 8
 _Image = tuple[int, int]
 _FREQ_CAP = 3
 
@@ -240,23 +243,23 @@ class ExpertAtlas:
         if images >= LAYERS * EXPERTS and self._load_layers(session):
             return
         self.slots = images
-        if self.slots < EXPERTS:
+        if self.slots < MIN_IMAGES:
             message = (
                 f"maximum memory {max_memory} bytes holds {self.slots} expert images, "
-                f"below one layer of {EXPERTS}"
+                f"below {MIN_IMAGES}"
             )
             raise RuntimeError(message)
         self.buffer = None
-        while self.slots >= EXPERTS:
+        while self.slots >= MIN_IMAGES:
             made = session.allocate(self.slots * EXPERT_IMAGE)
             if made is not None:
                 self.buffer = made
                 break
-            if self.slots == EXPERTS:
+            if self.slots == MIN_IMAGES:
                 break
-            self.slots = max(EXPERTS, self.slots * 7 // 8)
+            self.slots = max(MIN_IMAGES, self.slots * 7 // 8)
         if self.buffer is None:
-            message = f"expert atlas could not allocate {EXPERTS} images"
+            message = f"expert atlas could not allocate {MIN_IMAGES} images"
             raise RuntimeError(message)
         self.buffers = [self.buffer]
         self._atlas_view = memoryview(self.buffer.contents().as_buffer(self.slots * EXPERT_IMAGE))

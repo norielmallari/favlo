@@ -461,33 +461,123 @@ def _route(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) ->
     )
 
 
+_ABSENT = np.uint32(0xFFFFFFFF)
+
+
+def masked_expert_passes(ids: np.ndarray, slots: int) -> list[np.ndarray] | None:
+    """One masked id list per atlas-sized group, or None when one pass fits.
+
+    An id of 0xFFFFFFFF is absent from that pass. The grouped kernels skip it.
+    """
+    if slots < 1:
+        message = "expert atlas has no images"
+        raise ValueError(message)
+    seen: list[int] = []
+    have: set[int] = set()
+    for expert in ids.tolist():
+        value = int(expert)
+        if value in have:
+            continue
+        have.add(value)
+        seen.append(value)
+    if len(seen) <= slots:
+        return None
+    passes: list[np.ndarray] = []
+    for start in range(0, len(seen), slots):
+        wave = set(seen[start : start + slots])
+        masked = np.array(ids, dtype=np.uint32, copy=True)
+        for index, expert in enumerate(masked.tolist()):
+            if int(expert) not in wave:
+                masked[index] = _ABSENT
+        passes.append(masked)
+    return passes
+
+
 def _experts(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) -> None:
     """Shared expert, then routed experts. Groups are built on device."""
     prefix = f"model.language_model.layers.{layer}.mlp."
     if runtime.atlas.complete:
-        file = runtime.atlas.layers[layer]
-        offsets = None
-    else:
+        _expert_pass(
+            runtime, work, layer, count, rows, prefix, runtime.atlas.layers[layer], None, True
+        )
+        return
+    runtime.session.end()
+    raw = np.frombuffer(
+        runtime.session.download(work.ids, count * 8 * 4), dtype=np.uint32
+    ).copy()
+    passes = masked_expert_passes(raw, runtime.atlas.slots)
+    if passes is None:
         file = runtime.routed_layer(layer, work.ids, count * 8, work.offsets)
-        offsets = work.offsets
-    _cast(runtime, work.normed, work.half, rows * HIDDEN)
-    _matmul(runtime, work.half, prefix + "shared_expert.gate_up", work.gate_up, rows)
-    runtime.session.encode(
-        "silu_mul_rows",
-        [(work.gate_up, 0), (work.gated, 0)],
-        [_u32(rows)],
-        (rows * 2, 1, 1),
-        (256, 1, 1),
-    )
-    _cast(runtime, work.gated, work.half, rows * 512)
-    _matmul(runtime, work.half, prefix + "shared_expert.down_proj.weight", work.down, rows)
-    runtime.session.encode(
-        "scatter_add_rows",
-        [(work.hidden, 0), (work.down, 0), (work.iota, 0), (work.coeff, 0)],
-        [_u32(count), _u32(HIDDEN)],
-        (count, 1, 1),
-        (256, 1, 1),
-    )
+        _expert_pass(runtime, work, layer, count, rows, prefix, file, work.offsets, True)
+        return
+    for index, masked in enumerate(passes):
+        _write(work.ids, masked.tobytes())
+        file = _stage_present(runtime, layer, masked, work.offsets)
+        runtime.session.begin()
+        _expert_pass(
+            runtime,
+            work,
+            layer,
+            count,
+            rows,
+            prefix,
+            file,
+            work.offsets,
+            index == 0,
+        )
+        if index + 1 < len(passes):
+            runtime.session.end()
+
+
+def _stage_present(runtime: Any, layer: int, ids: np.ndarray, offsets: Any) -> Any:
+    """Load the experts this pass keeps and write their byte offsets."""
+    present = [
+        int(value)
+        for value in dict.fromkeys(int(item) for item in ids.tolist())
+        if int(value) < 256
+    ]
+    placed = runtime.atlas.stage(layer, present)
+    table = np.zeros(256, dtype=np.uint64)
+    image = np.uint64(EXPERT_IMAGE)
+    for file_slot, atlas_slot in zip(present, placed, strict=True):
+        table[file_slot] = np.uint64(atlas_slot) * image
+    raw = table.tobytes()
+    memoryview(offsets.contents().as_buffer(len(raw)))[:] = raw
+    return runtime.atlas.buffer
+
+
+def _expert_pass(
+    runtime: Any,
+    work: _Workspace,
+    layer: int,
+    count: int,
+    rows: int,
+    prefix: str,
+    file: Any,
+    offsets: Any,
+    shared: bool,
+) -> None:
+    """One grouped expert pass. ``shared`` runs the shared expert on the first pass."""
+    del layer
+    if shared:
+        _cast(runtime, work.normed, work.half, rows * HIDDEN)
+        _matmul(runtime, work.half, prefix + "shared_expert.gate_up", work.gate_up, rows)
+        runtime.session.encode(
+            "silu_mul_rows",
+            [(work.gate_up, 0), (work.gated, 0)],
+            [_u32(rows)],
+            (rows * 2, 1, 1),
+            (256, 1, 1),
+        )
+        _cast(runtime, work.gated, work.half, rows * 512)
+        _matmul(runtime, work.half, prefix + "shared_expert.down_proj.weight", work.down, rows)
+        runtime.session.encode(
+            "scatter_add_rows",
+            [(work.hidden, 0), (work.down, 0), (work.iota, 0), (work.coeff, 0)],
+            [_u32(count), _u32(HIDDEN)],
+            (count, 1, 1),
+            (256, 1, 1),
+        )
     runtime.session.encode(
         "moe_group",
         [

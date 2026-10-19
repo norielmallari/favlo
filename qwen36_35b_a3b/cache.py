@@ -1,8 +1,8 @@
 """Context length and key/value width for this pipeline.
 
 The checkpoint cap is ``max_position_embeddings``. The live cache starts at one
-2048-token chunk and grows with the sequence, up to the longest multiple of
-2048 that still leaves one expert layer in the budget. The atlas then keeps
+2048-token chunk and grows with the prompt and with decode, up to the longest
+multiple of 2048 that still leaves eight expert images. The atlas then keeps
 as many images as the remaining bytes allow. The cache is E4M3 unless the
 caller asks for fp4 or for the float32 values with no quantization. Keys scale
 every 32 channels. Values lie along the token axis and scale every 32 tokens.

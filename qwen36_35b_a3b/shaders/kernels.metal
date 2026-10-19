@@ -2641,7 +2641,11 @@ kernel void moe_group(
     }
     uint nassign = count * 8u;
     for (uint index = 0u; index < nassign; ++index) {
-        counts[ids[index]] += 1u;
+        uint expert = ids[index];
+        if (expert >= 256u) {
+            continue;
+        }
+        counts[expert] += 1u;
     }
     uint cursor = 0u;
     for (uint expert = 0u; expert < 256u; ++expert) {
@@ -2653,6 +2657,10 @@ kernel void moe_group(
     for (uint token = 0u; token < count; ++token) {
         for (uint lane = 0u; lane < 8u; ++lane) {
             uint expert = ids[token * 8u + lane];
+            if (expert >= 256u) {
+                pack_row[token * 8u + lane] = 0xffffffffu;
+                continue;
+            }
             uint at = offsets[expert] + filled[expert];
             filled[expert] += 1u;
             csr_i[at] = token;
@@ -2805,6 +2813,9 @@ kernel void scatter_add_grouped(
     device float* dest = hidden + token * cols;
     for (uint lane = 0u; lane < 8u; ++lane) {
         uint row = pack_row[token * 8u + lane];
+        if (row == 0xffffffffu) {
+            continue;
+        }
         float weight = mix[token * 8u + lane];
         device const float* src = partial + row * cols;
         for (uint i = tid; i < cols; i += 256u) {

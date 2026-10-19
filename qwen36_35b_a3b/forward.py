@@ -10,7 +10,14 @@ from typing import Any
 
 import numpy as np
 
-from qwen36_35b_a3b.atlas import EXPERTS, LAYERS, ExpertAtlas, atlas_slots, available_bytes
+from qwen36_35b_a3b.atlas import (
+    EXPERTS,
+    LAYERS,
+    MIN_IMAGES,
+    ExpertAtlas,
+    atlas_slots,
+    available_bytes,
+)
 from qwen36_35b_a3b.attn import attend_plane, bind_plane, plane_bytes, resize_plane
 from qwen36_35b_a3b.cache import (
     CONTEXT_STEP,
@@ -198,7 +205,7 @@ class Qwen36Runtime:
         self._resident_bytes = resident_bytes
         card = max_position(self.root)
         fixed = _reserved_bytes(resident_bytes, 0, 0)
-        one_layer = EXPERTS * EXPERT_IMAGE
+        # Eight images is one token. A larger atlas is what remains after the cache.
 
         def _plane(positions: int) -> int:
             if self.kv_cache == "f32":
@@ -206,7 +213,7 @@ class Qwen36Runtime:
             return plane_bytes(positions)
 
         ceiling = fit_positions(
-            self.max_memory, fixed, self.kv_cache, card, _plane, keep=one_layer
+            self.max_memory, fixed, self.kv_cache, card, _plane, keep=MIN_IMAGES * EXPERT_IMAGE
         )
         if ceiling is None:
             message = "the key/value cache does not fit a 2048-token context"
@@ -661,13 +668,16 @@ class Qwen36Runtime:
         new_bytes = kv_buffer_bytes(self.kv_cache, target)
         plane = self._plane_at(target)
         reserved = _reserved_bytes(self._resident_bytes, new_bytes, plane)
-        images = atlas_slots(
-            self.max_memory,
-            EXPERT_IMAGE,
-            reserved,
-            layers=LANGUAGE_LAYERS * EXPERTS,
-        )
-        if images < EXPERTS:
+        try:
+            images = atlas_slots(
+                self.max_memory,
+                EXPERT_IMAGE,
+                reserved,
+                layers=LANGUAGE_LAYERS * EXPERTS,
+            )
+        except ValueError:
+            return False
+        if images < MIN_IMAGES:
             return False
         self._drop_pending()
         count = min(self.filled, self.max_pos)
@@ -830,8 +840,9 @@ class Qwen36Runtime:
             message = f"prompt length {len(prompt)} does not fit the memory budget"
             raise RuntimeError(message)
         # The caller passes the request cap, or the checkpoint ceiling when the
-        # request sets none. The room is this grown cache, not the previous one.
-        max_tokens = decode_steps(max_tokens, self.max_pos, len(prompt))
+        # request sets none. The room is the context ceiling. Decode grows the
+        # cache the same way the prompt does, and the atlas shrinks to fit.
+        max_tokens = decode_steps(max_tokens, self._context_limit, len(prompt))
         hit = self.prefix.align(prompt)
         if self.prefix.loaded:
             self._status(f"prefix load {hit} tokens")
@@ -1336,9 +1347,9 @@ def _blocked_tokens(produced: list[int], span: int) -> set[int]:
     return blocked
 
 
-def decode_steps(max_tokens: int, max_pos: int, prompt_tokens: int) -> int:
-    """Completion steps that fit ``max_pos`` after the cache has grown."""
-    return min(int(max_tokens), max(0, int(max_pos) - int(prompt_tokens)))
+def decode_steps(max_tokens: int, context_limit: int, prompt_tokens: int) -> int:
+    """Completion steps that fit the context ceiling, not the prompt-sized cache."""
+    return min(int(max_tokens), max(0, int(context_limit) - int(prompt_tokens)))
 
 
 def _sample(

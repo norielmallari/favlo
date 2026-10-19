@@ -93,10 +93,11 @@ def test_an_omitted_completion_cap_is_the_context_room() -> None:
     assert completion_limit(100, 40, 10) == 10
     assert completion_limit(100, 40, 80) == 60
     assert completion_limit(100, 140, 10) == 0
-    # A prompt past the previous cache still draws once the cache has grown.
-    assert decode_steps(262144, 47104, 46417) == 687
-    assert decode_steps(32, 47104, 46417) == 32
-    assert decode_steps(262144, 2048, 46417) == 0
+    # The room is the context ceiling. A 35k prompt is not cut at the cache
+    # that was grown only to hold the prompt.
+    assert decode_steps(262144, 262144, 35000) == 227144
+    assert decode_steps(32, 262144, 35000) == 32
+    assert decode_steps(262144, 36864, 35000) == 1864
 
 
 def test_a_closed_think_tool_call_is_a_prefix_of_the_next_prompt() -> None:
@@ -588,6 +589,35 @@ def test_context_shrinks_to_the_bytes_the_cache_can_hold() -> None:
     assert fit_positions(fixed, fixed, mode, limit, nothing, keep=0) is None
     wider = fit_positions(full, fixed, "f32", limit, nothing, keep=0)
     assert wider is not None and wider < 8192
+
+
+def test_a_tight_budget_keeps_context_by_shrinking_the_atlas() -> None:
+    mode = "e4m3"
+    limit = 8192
+    fixed = 1000
+
+    def nothing(_positions: int) -> int:
+        return 0
+
+    image = 1_671_168
+    eight = 8 * image
+    layer = 256 * image
+    budget = fixed + 20 * kv_buffer_bytes(mode, limit) + eight
+    assert fit_positions(budget, fixed, mode, limit, nothing, keep=eight) == limit
+    assert fit_positions(budget, fixed, mode, limit, nothing, keep=layer) is None
+
+
+def test_a_prefill_chunk_splits_experts_that_do_not_fit() -> None:
+    from qwen36_35b_a3b.prefill import masked_expert_passes
+
+    ids = np.arange(10, dtype=np.uint32)
+    assert masked_expert_passes(ids, 10) is None
+    passes = masked_expert_passes(ids, 8)
+    assert passes is not None and len(passes) == 2
+    assert passes[0].tolist()[:8] == list(range(8))
+    assert passes[0][8] == np.uint32(0xFFFFFFFF)
+    assert passes[1][0] == np.uint32(0xFFFFFFFF)
+    assert passes[1][8:].tolist() == [8, 9]
 
 
 def test_kv_widths_and_atlas_budget() -> None:
