@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         server.start()
         run_session(server.port, stem, Request(enable_thinking=True), workspace)
-        _print_rates(server.log.text())
+        _print_rates(server.log)
         result = grade(workspace)
     finally:
         server.stop()
@@ -56,8 +56,18 @@ def main(argv: list[str] | None = None) -> int:
     return result.returncode
 
 
-def _print_rates(log_text: str) -> None:
-    requests = parse_requests(log_text)
+def _print_rates(log: object) -> None:
+    """Print each request once its decode line is in the followed log."""
+    text = getattr(log, "text", None)
+    if not callable(text):
+        return
+    deadline = time.monotonic() + 2
+    requests = parse_requests(text())
+    while time.monotonic() < deadline:
+        requests = parse_requests(text())
+        if requests and requests[-1].decode:
+            break
+        time.sleep(0.05)
     for index, request in enumerate(requests, start=1):
         print(format_request(index, request), flush=True)
     print(format_summary(requests, 0), flush=True)
