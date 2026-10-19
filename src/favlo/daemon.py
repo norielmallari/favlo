@@ -17,6 +17,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from favlo.logs import favlo_home
 
@@ -109,15 +110,28 @@ def plain_text(blob: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def follow(
-    path: Path,
-    on_line: Callable[[str], None],
-    stop: threading.Event,
-    *,
-    offset: int = 0,
-) -> threading.Thread:
-    """Call ``on_line`` with each new durable line until ``stop`` is set."""
+def telemetry_event(raw: str) -> dict[str, Any] | None:
+    """One telemetry object. A plain line is a log event. Ticks stay in the object."""
+    text = raw.strip()
+    if not text:
+        return None
+    if not text.startswith("{"):
+        return {"type": "log", "line": text}
+    try:
+        event = json.loads(text)
+    except json.JSONDecodeError:
+        return {"type": "log", "line": text}
+    if isinstance(event, dict) and isinstance(event.get("type"), str):
+        return event
+    return None
 
+
+def _follow(
+    path: Path,
+    stop: threading.Event,
+    offset: int,
+    take: Callable[[str], None],
+) -> threading.Thread:
     def run() -> None:
         position = offset
         pending = b""
@@ -141,9 +155,7 @@ def follow(
                     pending += chunk
                     while b"\n" in pending:
                         raw, pending = pending.split(b"\n", 1)
-                        line = plain_line(raw.decode("utf-8", errors="replace"))
-                        if line:
-                            on_line(line)
+                        take(raw.decode("utf-8", errors="replace"))
             if stop.wait(0.05):
                 return
 
@@ -152,16 +164,53 @@ def follow(
     return thread
 
 
+def follow(
+    path: Path,
+    on_line: Callable[[str], None],
+    stop: threading.Event,
+    *,
+    offset: int = 0,
+) -> threading.Thread:
+    """Call ``on_line`` with each new durable line until ``stop`` is set."""
+
+    def take(raw: str) -> None:
+        line = plain_line(raw)
+        if line:
+            on_line(line)
+
+    return _follow(path, stop, offset, take)
+
+
+def follow_events(
+    path: Path,
+    on_event: Callable[[dict[str, Any]], None],
+    stop: threading.Event,
+    *,
+    offset: int = 0,
+) -> threading.Thread:
+    """Call ``on_event`` with each telemetry object, including ticks."""
+
+    def take(raw: str) -> None:
+        event = telemetry_event(raw)
+        if event is not None:
+            on_event(event)
+
+    return _follow(path, stop, offset, take)
+
+
 def stop_pid(pid: int) -> None:
     """SIGTERM the daemon process group, then SIGKILL if it stays up."""
     if not alive(pid):
         return
     _signal(pid, signal.SIGTERM)
     deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        if not alive(pid):
-            return
-        time.sleep(0.05)
+    try:
+        while time.monotonic() < deadline:
+            if not alive(pid):
+                return
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        pass
     if alive(pid):
         _signal(pid, signal.SIGKILL)
 

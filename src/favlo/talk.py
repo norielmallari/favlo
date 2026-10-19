@@ -3,14 +3,13 @@
 One Microsoft Agent Framework session talks to the serve daemon's chat
 completions endpoint. The session lives on the thread that reads stdin.
 A turn starts only when no request is open, including a turn already in
-flight. The first start has no saved line: a separate session asks the
-registered model to write one and call ``save_intro``. That request is the
-check that the model can complete a chat. The tool's first line is what
-gets printed. Later starts print that stored line and do not call the model
-until someone types. After 30 minutes with no request and no typing, one
-more session checks free disk and memory and may start the Qwen3.8-27B
-download. Five minutes is a pause in a conversation, and that turn would
-occupy the only request slot.
+flight. The first start has no saved line: one chat completion asks the
+registered model to call ``save_intro``. The load row opens when that
+request is sent. The stored first line is what gets printed. Later starts
+print that line and do not call the model until someone types. After 30
+minutes with no request and no typing, one more session checks free disk
+and memory and may start the Qwen3.8-27B download. Five minutes is a pause
+in a conversation, and that turn would occupy the only request slot.
 """
 
 from __future__ import annotations
@@ -30,7 +29,6 @@ from favlo.persona import (
     INSTRUCTIONS,
     blocked,
     intros_path,
-    load_intros,
     opening,
     refusal,
     save_intros,
@@ -124,15 +122,17 @@ def start(
     *,
     home: Path | None = None,
     introduce: Callable[[], str] | None = None,
+    on_call: Callable[[], Callable[[], None]] | None = None,
 ) -> threading.Thread:
     """Read stdin until it closes or the line is ``/quit``.
 
-    A saved opening is printed first. When none is saved, ``introduce`` runs
-    instead of the registered model. The default calls that model.
+    A saved opening is printed first. When none is saved, one chat completion
+    runs. ``on_call`` opens the load row for that request and returns the
+    closer. ``introduce`` replaces the completion in tests.
     """
     thread = threading.Thread(
         target=_run,
-        args=(host, port, stdin, write, idle, stop, home, introduce),
+        args=(host, port, stdin, write, idle, stop, home, introduce, on_call),
         name="favlo-talk",
         daemon=True,
     )
@@ -149,6 +149,7 @@ def _run(
     stop: Callable[[], None] | None,
     home: Path | None,
     introduce: Callable[[], str] | None,
+    on_call: Callable[[], Callable[[], None]] | None,
 ) -> None:
     path = intros_path(home)
     base = f"http://{host}:{port}/v1"
@@ -180,7 +181,7 @@ def _run(
     )
     try:
         asyncio.set_event_loop(loop)
-        _speak(path, base, loop, idle, write, introduce)
+        _speak(path, base, idle, write, introduce, on_call)
         idle.mark()
         beat_thread.start()
         _prompt()
@@ -270,9 +271,11 @@ def _heartbeat(base: str, home: Path | None) -> str:
 
 
 _INTRO_ASK = (
-    "This is the first start. Write a short introduction: you are Favlo, a small horse, "
-    "and you would like a carrot. Call save_intro with those lines. "
-    "The tool returns the line the terminal shows."
+    "This is the first start. Write the opening now. "
+    "Make it longer than a later reply: several flavorful sentences, with emojis, "
+    "as Favlo, a small horse who would like a carrot. "
+    "Call save_intro with those lines. "
+    "The terminal shows the first line, so put the whole introduction in that first line."
 )
 
 
@@ -288,10 +291,10 @@ def _saved_or_none(path: Path, write: Callable[[str], None]) -> str | None:
 def _speak(
     path: Path,
     base: str,
-    loop: asyncio.AbstractEventLoop,
     idle: Idle,
     write: Callable[[str], None],
     introduce: Callable[[], str] | None,
+    on_call: Callable[[], Callable[[], None]] | None,
 ) -> None:
     """Print the stored first line, or the line the first completion just saved."""
     try:
@@ -301,88 +304,148 @@ def _speak(
         return
     if line is None:
         idle.wait()
+        finish = on_call() if on_call is not None else None
         try:
-            if introduce is not None:
-                line = introduce()
-            else:
-                line = loop.run_until_complete(_introduce(base, path))
-        except Exception as exc:
-            line = _saved_or_none(path, write)
-            if line is None:
-                write(str(exc))
-                return
+            try:
+                if introduce is not None:
+                    line = introduce()
+                else:
+                    line = _introduce(base, path)
+            except Exception as exc:
+                line = _saved_or_none(path, write)
+                if line is None:
+                    write(str(exc))
+                    return
+        finally:
+            if finish is not None:
+                finish()
     if not isinstance(line, str) or not line.strip():
         write("the model did not save an introduction")
         return
     write(line.strip())
 
 
-async def _introduce(base: str, path: Path) -> str:
-    """Ask the registered model for the opening. The tool return is the stored first line."""
-    from agent_framework import Agent
-    from agent_framework.openai import OpenAIChatCompletionClient
-    from openai import AsyncOpenAI
+def intro_request(model: str) -> dict[str, Any]:
+    """One chat completion. ``tool_choice`` names ``save_intro``."""
+    return {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    f"{INSTRUCTIONS}\n\n"
+                    "This call writes the opening, before any later reply. "
+                    "Greet now. The opening is longer than those replies: "
+                    "several flavorful sentences, with emojis. "
+                    "Do not use violent, sexual, or obscene language. "
+                    "Call save_intro. The first line is what the terminal shows, "
+                    "so put the whole introduction in that first line."
+                ),
+            },
+            {"role": "user", "content": _INTRO_ASK},
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "save_intro",
+                    "description": (
+                        "Save the opening lines and return the first one. "
+                        "The first call stores the lines."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "lines": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": (
+                                    "Opening lines. The first is shown now and on later starts."
+                                ),
+                            }
+                        },
+                        "required": ["lines"],
+                    },
+                },
+            }
+        ],
+        "tool_choice": {"type": "function", "function": {"name": "save_intro"}},
+        "max_tokens": 800,
+        "enable_thinking": False,
+    }
 
-    model = _model_id(base, settle=True)
-    http = AsyncOpenAI(api_key="favlo", base_url=base, timeout=3600.0)
-    client = OpenAIChatCompletionClient(
-        model=model,
-        api_key="favlo",
-        base_url=base,
-        async_client=http,
-    )
-    client.function_invocation_configuration["max_iterations"] = 4
-    agent = Agent(
-        client=client,
-        name="favlo",
-        instructions=(
-            "You are Favlo, a small horse. This is the first start. "
-            "Write a short kind introduction and save it with save_intro. "
-            "Do not use violent, sexual, or obscene language."
-        ),
-        tools=[_intro_tool(path)],
-        default_options={
-            "max_tokens": 400,
-            "extra_body": {"enable_thinking": False},
-            "tool_choice": {"mode": "required", "required_function_name": "save_intro"},
-        },
-    )
-    try:
-        await agent.run(_INTRO_ASK, session=agent.create_session())
-    finally:
-        result = _close_client(client)
-        if asyncio.iscoroutine(result):
-            await result
-    stored = load_intros(path)
-    if not stored:
+
+def _introduce(base: str, path: Path) -> str:
+    """Ask the registered model for the opening and store the tool call."""
+    model = _model_id(base)
+    payload = _post_json(f"{base}/chat/completions", intro_request(model))
+    lines = _intro_lines(payload)
+    if not lines:
         message = "the model did not save an introduction"
         raise RuntimeError(message)
-    return stored[0]
+    return save_intros(lines, path)
 
 
-def _intro_tool(path: Path) -> object:
-    from typing import Annotated
+def _post_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    data = json.dumps(payload).encode()
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=3600) as response:
+            body = json.loads(response.read().decode())
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace").strip()
+        message = detail or f"the model call failed ({exc.code})"
+        raise RuntimeError(message) from exc
+    if not isinstance(body, dict):
+        message = "the model did not save an introduction"
+        raise RuntimeError(message)
+    return body
 
-    from agent_framework import tool
-    from pydantic import Field
 
-    @tool(approval_mode="never_require")
-    def save_intro(
-        lines: Annotated[
-            list[str],
-            Field(description="Opening lines. The first is shown now and on later starts."),
-        ],
-    ) -> str:
-        """Save the opening lines and return the first one.
-
-        The return value is the message the terminal shows. The first call stores the lines.
-        """
-        existing = load_intros(path)
-        if existing:
-            return existing[0]
-        return save_intros(lines, path)
-
-    return save_intro
+def _intro_lines(payload: dict[str, Any]) -> list[str] | None:
+    """``save_intro`` lines from one completion, when the tool call is present."""
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return None
+    message = choices[0].get("message")
+    if not isinstance(message, dict):
+        return None
+    calls = message.get("tool_calls")
+    if not isinstance(calls, list):
+        return None
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        function = call.get("function")
+        if not isinstance(function, dict) or function.get("name") != "save_intro":
+            continue
+        arguments = function.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                return None
+        if not isinstance(arguments, dict):
+            return None
+        lines = arguments.get("lines")
+        if isinstance(lines, str):
+            try:
+                parsed = json.loads(lines)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                lines = parsed
+        if (
+            isinstance(lines, list)
+            and lines
+            and all(isinstance(item, str) and item.strip() for item in lines)
+        ):
+            return [item.strip() for item in lines]
+    return None
 
 
 def _ask_again(text: str) -> str:

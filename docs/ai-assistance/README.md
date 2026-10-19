@@ -6,7 +6,7 @@ The guides the terminal reads are [../guides](../guides). The process contract i
 
 ## Terminal chat
 
-On a terminal, `favlo serve` is the CLI. The server is a daemon. The CLI reads stdin and answers through that daemon's `POST /v1/chat/completions`. One Microsoft Agent Framework session keeps that history. A turn waits until no other request is open. The prompt is `you:`. `/quit` stops the daemon. Closing the terminal leaves the daemon running. `favlo serve --non-interactive` starts the daemon and exits.
+On a terminal, `favlo serve` is the CLI. The server is a daemon. The CLI reads stdin and answers through that daemon's `POST /v1/chat/completions`. One Microsoft Agent Framework session keeps that history. A turn waits until no other request is open. The prompt is `you:`. `/quit` stops the daemon. Ctrl+C stops the daemon when this terminal started it. Closing the terminal leaves the daemon running. `favlo serve --non-interactive` starts the daemon and exits.
 
 ## Voice
 
@@ -14,7 +14,7 @@ The voice is a small horse who likes carrots. A line that matches the violent, s
 
 ## Opening line
 
-The first start, when `~/.favlo/intros.json` has no lines, asks the registered model to write an opening and call `save_intro`. The tool stores the lines and returns the first. That return is the line shown, and the request checks that the model can complete a chat. Later starts print that first line and do not call the model until someone types. The line is stored as the assistant's first turn.
+The first start, when `~/.favlo/intros.json` has no lines, sends one chat completion immediately. That request includes the persona and asks for a longer introduction with emojis. The first saved line is the one shown. `tool_choice` names `save_intro`. The load row opens when that request is sent, and a daemon load begin continues that row. The stored first line is what the terminal prints. The request checks that the model can complete a chat. Later starts print that first line and do not call the model until someone types. The line is stored as the assistant's first turn.
 
 ## Guides
 

@@ -17,12 +17,12 @@ import sys
 import threading
 import traceback
 import urllib.parse
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
-from favlo.console import Console
+from favlo.console import VERSION, Console
 from favlo.daemon import DAEMON_ENV
 from favlo.logs import attach_process_log
 from favlo.registry import model_objects, one_model, resolve
@@ -417,10 +417,10 @@ def serve_main(argv: Sequence[str] | None = None) -> int:
 
 def _daemon_main(args: Any) -> int:
     """The listener process. Telemetry is JSON on stdout. Stdin is closed."""
-    ui = Console("json", pipeline="", stream=sys.stdout, start_thread=False)
+    ui = Console("json", pipeline="", stream=sys.stdout)
     attach_process_log(ui)
     bind_log(ui.log)
-    ui.live_decode = False
+    ui.live_decode = True
     ui.plate()
     args.lazy = True
     args.console_ui = ui
@@ -458,7 +458,7 @@ def _start_daemon(args: Any) -> int:
 def _interactive(args: Any) -> int:
     """First-run setup on a terminal, then chat against the daemon."""
     from favlo.cli import repo_root
-    from favlo.daemon import DaemonError, ensure, follow, stop_pid, telemetry_path
+    from favlo.daemon import DaemonError, ensure, follow_events, stop_pid, telemetry_path
     from favlo.setup import prepare
     from favlo.talk import Idle, start
 
@@ -466,45 +466,62 @@ def _interactive(args: Any) -> int:
         code = prepare(repo_root(), stdin_tty=True, console=args.console)
         if code != 0:
             return code
+    ui = Console.from_env(args.console, pipeline="")
+    ui.plate()
     try:
-        pid, created = ensure(
-            args.host,
-            args.port,
-            max_memory=args.max_memory,
-            transcript=args.transcript,
-        )
-    except DaemonError as exc:
-        sys.stderr.write(f"{exc}\n")
-        return 1
-    path = telemetry_path(args.port)
-    offset = 0 if created or not path.is_file() else path.stat().st_size
-    idle = Idle()
-    stopped = threading.Event()
+        try:
+            pid, created = ensure(
+                args.host,
+                args.port,
+                max_memory=args.max_memory,
+                transcript=args.transcript,
+            )
+        except DaemonError as exc:
+            ui.log(str(exc))
+            return 1
+        path = telemetry_path(args.port)
+        offset = 0 if created or not path.is_file() else path.stat().st_size
+        idle = Idle()
+        stopped = threading.Event()
 
-    def write(line: str) -> None:
-        sys.stderr.write(line + "\n")
-        sys.stderr.flush()
+        def on_event(event: dict[str, Any]) -> None:
+            if event.get("type") == "log":
+                line = event.get("line")
+                if line == f"favlo {VERSION}":
+                    return
+                if line == "request open":
+                    idle.enter()
+                    return
+                if line == "request closed":
+                    idle.note_closed()
+                    return
+            ui.apply_event(event)
 
-    def on_line(line: str) -> None:
-        if line == "request open":
-            idle.enter()
-            return
-        if line == "request closed":
-            idle.note_closed()
-            return
-        write(line)
+        follow_events(path, on_event, stopped, offset=offset)
 
-    follow(path, on_line, stopped, offset=offset)
+        def stop() -> None:
+            stopped.set()
+            stop_pid(pid)
 
-    def stop() -> None:
-        stopped.set()
-        stop_pid(pid)
+        def on_call() -> Callable[[], None]:
+            progress = ui.begin("load", total=0, unit="bytes", detail="")
 
-    thread = start(args.host, args.port, sys.stdin, write, idle, stop)
-    try:
-        thread.join()
-    except KeyboardInterrupt:
+            def finish() -> None:
+                if progress.closed or progress.request is not None:
+                    return
+                ui.end(progress, "")
+
+            return finish
+
+        thread = start(args.host, args.port, sys.stdin, ui.say, idle, stop, on_call=on_call)
+        try:
+            thread.join()
+        except KeyboardInterrupt:
+            if created:
+                stop()
+            return 0
+        finally:
+            stopped.set()
         return 0
     finally:
-        stopped.set()
-    return 0
+        ui.close()

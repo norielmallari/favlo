@@ -18,8 +18,8 @@ curl http://127.0.0.1:8129/v1/chat/completions \
 
 A streaming client sets `"stream": true`. Each event is a `chat.completion.chunk`. The stream ends with `data: [DONE]`.
 
-`favlo serve` on a terminal is the CLI for that daemon. `favlo serve --non-interactive` starts the daemon and exits. Closing the terminal leaves the daemon running. Type in the CLI while no other request is open. `/quit` stops the daemon.
+`favlo serve` on a terminal is the CLI for that daemon. `favlo serve --non-interactive` starts the daemon and exits. Closing the terminal leaves the daemon running. Type in the CLI while no other request is open. `/quit` stops the daemon. Ctrl+C stops the daemon when this terminal started it.
 
-The first time that terminal starts, and `~/.favlo/intros.json` has no lines, Favlo asks the registered model for the opening through `save_intro`. The tool stores the lines and returns the first, which is the line shown. That request is the check that the model answers. Later starts show that same first line and do not call the model until someone types.
+The first time that terminal starts, and `~/.favlo/intros.json` has no lines, one chat completion is sent immediately. `tool_choice` names `save_intro`. The load row opens when that request is sent, and a daemon load begin continues that row. The stored first line is what the terminal prints. That request is the check that the model answers. Later starts show that same first line and do not call the model until someone types.
 
 After 30 minutes with no open request and no typing, Favlo checks physical memory and free disk. 30 minutes is the gap, because a shorter pause is still a conversation and the check uses the only request slot. When the machine has at least 16 GB and the volume can hold the files, Favlo starts the download of `Qwen/Qwen3.8-27B` into `models/Qwen3.8-27B-bf16` and asks whether to remind them again. A machine that cannot hold it, or a checkout that is already present, stays quiet. `download_suggestions` with enabled false stores that answer in `~/.favlo/suggestions.json` and later idle checks stay quiet. Enabled true turns the reminders back on.

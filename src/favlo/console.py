@@ -91,6 +91,7 @@ class Console:
         self.fold_turns = False
         self.live_decode = mode == "pretty"
         self._recorder: Callable[[str], None] | None = None
+        self._remote: dict[tuple[str, int | None], Progress] = {}
 
     @classmethod
     def from_env(
@@ -128,6 +129,11 @@ class Console:
         """Plain and json keep today's durable lines. Pretty replaces them with the row."""
         return self.mode != "pretty"
 
+    @property
+    def shows_bars(self) -> bool:
+        """Pretty paints a row. JSON emits the same phase. Plain does not."""
+        return self.mode != "plain"
+
     def plate(self) -> None:
         """The Ingot Plate, once, before any other output."""
         self._record(f"favlo {VERSION}")
@@ -152,6 +158,33 @@ class Console:
         self._erase()
         self._write(line + "\n")
         self._redraw()
+
+    def say(self, line: str) -> None:
+        """A line that stays on screen while a row is open."""
+        self._record(line)
+        if self.mode == "json":
+            self._event({"type": "log", "line": line})
+            return
+        self._erase()
+        self._write(line + "\n")
+        self._redraw()
+
+    def apply_event(self, event: dict[str, Any]) -> None:
+        """Mirror one daemon event onto this console."""
+        kind = event.get("type")
+        if kind == "log":
+            line = event.get("line")
+            if isinstance(line, str) and line:
+                self.log(line)
+            return
+        if kind == "begin":
+            self._mirror_begin(event)
+            return
+        if kind == "tick":
+            self._mirror_tick(event)
+            return
+        if kind == "end":
+            self._mirror_end(event)
 
     def begin(
         self,
@@ -185,6 +218,7 @@ class Console:
             self._event(self._boundary("begin", progress))
         if self.mode == "pretty":
             self._hide_cursor()
+            self.sample()
         self._ensure_thread()
         return progress
 
@@ -305,6 +339,85 @@ class Console:
     def _run(self) -> None:
         while not self._stop.wait(_TICK):
             self.sample()
+
+    def _mirror_key(self, event: dict[str, Any]) -> tuple[str, int | None]:
+        request = event.get("request")
+        phase = event.get("phase")
+        name = phase if isinstance(phase, str) else ""
+        return (name, request if isinstance(request, int) else None)
+
+    def _mirror_begin(self, event: dict[str, Any]) -> None:
+        phase = event.get("phase")
+        unit = event.get("unit")
+        if phase not in PHASES or unit not in UNITS:
+            return
+        key = self._mirror_key(event)
+        previous = self._remote.get(key)
+        if previous is not None and not previous.closed:
+            self.end(previous, "")
+        total = event.get("total")
+        request = event.get("request")
+        detail = event.get("detail")
+        placeholder = self._load_placeholder()
+        if phase == "load" and placeholder is not None and placeholder is not previous:
+            if isinstance(total, int):
+                placeholder.total = total
+            placeholder.unit = unit
+            if isinstance(detail, str):
+                placeholder.detail = detail
+            if isinstance(request, int):
+                placeholder.request = request
+            gauge = _event_gauge(event.get("gauge"))
+            if gauge is not None:
+                placeholder.gauge = gauge
+            self._remote[key] = placeholder
+            self.sample()
+            return
+        if placeholder is not None and phase != "load" and placeholder is not previous:
+            self.end(placeholder, "")
+        progress = self.begin(
+            phase,
+            total=total if isinstance(total, int) else 0,
+            unit=unit,
+            detail=detail if isinstance(detail, str) else "",
+            request=request if isinstance(request, int) else None,
+            gauge=_event_gauge(event.get("gauge")),
+        )
+        self._remote[key] = progress
+
+    def _load_placeholder(self) -> Progress | None:
+        """A load row opened before the daemon named the request."""
+        with self._lock:
+            for progress in self._handles:
+                if progress.phase == "load" and progress.request is None and not progress.closed:
+                    return progress
+        return None
+
+    def _mirror_tick(self, event: dict[str, Any]) -> None:
+        progress = self._remote.get(self._mirror_key(event))
+        if progress is None or progress.closed:
+            return
+        done = event.get("done")
+        if isinstance(done, int):
+            progress.done = done
+        total = event.get("total")
+        if isinstance(total, int):
+            progress.total = total
+        detail = event.get("detail")
+        if isinstance(detail, str):
+            progress.detail = detail
+        gauge = _event_gauge(event.get("gauge"))
+        if gauge is not None:
+            progress.gauge = gauge
+
+    def _mirror_end(self, event: dict[str, Any]) -> None:
+        progress = self._remote.pop(self._mirror_key(event), None)
+        summary = event.get("summary") if isinstance(event.get("summary"), str) else ""
+        if progress is None or progress.closed:
+            if summary:
+                self.log(summary)
+            return
+        self.end(progress, summary)
 
     def _boundary(self, kind: str, progress: Progress) -> dict[str, Any]:
         event: dict[str, Any] = {
@@ -572,6 +685,17 @@ class Console:
     def _write(self, text: str) -> None:
         self.stream.write(text)
         self.stream.flush()
+
+
+def _event_gauge(value: Any) -> tuple[str, int] | None:
+    if (
+        isinstance(value, list)
+        and len(value) == 2
+        and isinstance(value[0], str)
+        and isinstance(value[1], int)
+    ):
+        return (value[0], value[1])
+    return None
 
 
 def _is_tty(stream: TextIO) -> bool:

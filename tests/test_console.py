@@ -120,6 +120,68 @@ def test_palette_falls_back() -> None:
     assert "\x1b" not in plain_stream.getvalue()
 
 
+def test_a_daemon_tick_paints_the_row() -> None:
+    ui, stream, clock = _ui("pretty", color=0)
+    ui.apply_event(
+        {"type": "begin", "phase": "load", "total": 100, "unit": "bytes", "detail": "record"}
+    )
+    ui.apply_event({"type": "tick", "phase": "load", "done": 0, "total": 100, "unit": "bytes"})
+    ui.sample()
+    clock.now += 1
+    ui.apply_event({"type": "tick", "phase": "load", "done": 50, "total": 100, "unit": "bytes"})
+    ui.sample()
+    assert "50%" in stream.getvalue()
+    ui.apply_event({"type": "end", "phase": "load", "summary": "loaded record"})
+    assert "loaded record" in stream.getvalue()
+    assert ui.shows_bars
+    plain, _plain_stream, _clock = _ui("plain")
+    assert not plain.shows_bars
+    assert Console("json", pipeline="", stream=io.StringIO(), start_thread=False).shows_bars
+
+
+def test_a_local_load_row_takes_the_daemon_begin() -> None:
+    ui, stream, clock = _ui("pretty", color=0)
+    local = ui.begin("load", total=0, unit="bytes")
+    assert "load" in stream.getvalue()
+    ui.apply_event(
+        {
+            "type": "begin",
+            "phase": "load",
+            "total": 100,
+            "unit": "bytes",
+            "detail": "record",
+            "request": 1,
+        }
+    )
+    assert local.request == 1
+    assert [item for item in ui._handles if item.phase == "load"] == [local]
+    ui.apply_event(
+        {
+            "type": "tick",
+            "phase": "load",
+            "done": 40,
+            "total": 100,
+            "unit": "bytes",
+            "request": 1,
+        }
+    )
+    clock.now += 1
+    ui.sample()
+    assert "40%" in stream.getvalue()
+    ui.apply_event({"type": "end", "phase": "load", "summary": "loaded record", "request": 1})
+    assert local.closed
+    assert "loaded record" in stream.getvalue()
+
+
+def test_a_later_phase_closes_the_waiting_load_row() -> None:
+    ui, stream, _clock = _ui("pretty", color=0)
+    local = ui.begin("load", total=0, unit="bytes")
+    ui.apply_event({"type": "begin", "phase": "prefill", "total": 10, "unit": "tok", "request": 1})
+    assert local.closed
+    assert [item.phase for item in ui._handles] == ["prefill"]
+    assert "prefill" in stream.getvalue()
+
+
 def test_plain_plate_is_one_line() -> None:
     ui, stream, _clock = _ui("plain")
     ui.plate()

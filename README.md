@@ -48,9 +48,9 @@ uv run favlo serve --non-interactive
 
 ## Chat
 
-On a terminal, `favlo serve` reads stdin and talks to the daemon through its chat endpoint. A turn waits until no other request is open. The prompt is `you:`. Closing the terminal leaves the daemon running.
+On a terminal, `favlo serve` reads stdin and talks to the daemon through its chat endpoint. A turn waits until no other request is open. The prompt is `you:`. Ctrl+C stops the daemon when this terminal started it. Closing the terminal leaves the daemon running.
 
-The first start prints nothing until the registered model writes an opening and `save_intro` stores it in `~/.favlo/intros.json`. That request checks that the model answers. Later starts print the stored first line. The model runs again when someone types.
+The first start, when `~/.favlo/intros.json` has no lines, sends one chat completion. The load row opens when that request is sent. `save_intro` stores the opening, and the first line is what the terminal prints. Later starts print the stored first line. The model runs again when someone types.
 
 After 30 minutes with no request and no typing, Favlo checks memory and free disk. When the machine can hold [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B), Favlo starts that download and asks whether to remind them again. A no is remembered, and those reminders stay off until they are turned back on. A shorter idle gap would take the only request slot during a pause in the conversation.
 
