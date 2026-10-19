@@ -158,7 +158,7 @@ def test_load_row_counts_bytes_and_decode_has_no_bar() -> None:
     begun: list[dict] = []
 
     class _Console:
-        keeps_lines = False
+        shows_bars = True
         live_decode = True
         load_detail = "qwen38-27b"
 

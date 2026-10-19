@@ -797,7 +797,7 @@ class Qwen38Runtime:
 
     def _begin_load(self, total: int) -> Any:
         console = self.console
-        if console is None or total <= 0 or getattr(console, "keeps_lines", True):
+        if console is None or total <= 0 or not getattr(console, "shows_bars", False):
             return None
         detail = getattr(console, "load_detail", "") or self.root.name
         return console.begin("load", total=total, unit="bytes", detail=detail)
