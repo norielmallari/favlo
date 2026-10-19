@@ -131,6 +131,48 @@ def test_heartbeat_chooses_one_promotion_and_one_demotion() -> None:
     assert held == (None, None)
 
 
+def test_finish_request_leaves_the_lull_for_the_daemon(monkeypatch) -> None:
+    import threading
+    from types import SimpleNamespace
+
+    from qwen38_flash_next.adapt import finish_request, idle_heartbeat
+
+    class Routes:
+        def begin(self) -> None:
+            return None
+
+        def snapshot(self) -> str:
+            return "snap"
+
+    class Files:
+        root = "/tmp/record"
+
+    runtime = SimpleNamespace(
+        routes=Routes(),
+        files=Files(),
+        _firing_open=True,
+        _cached_tokens=0,
+        _prefill_seconds=0.0,
+        _decode_seconds=0.0,
+    )
+    selection = SimpleNamespace(folder="Qwen3.8-Flash-Next-fp4")
+    called: list[tuple[object, ...]] = []
+    monkeypatch.setattr("qwen38_flash_next.adapt._stamp_turn", lambda _routes, _runtime: None)
+    monkeypatch.setattr(
+        "qwen38_flash_next.adapt._lull",
+        lambda *args: called.append(args),
+    )
+    before = {thread.name for thread in threading.enumerate()}
+    finish_request(runtime, selection, complete=True)
+    started = {thread.name for thread in threading.enumerate()} - before
+    assert "favlo-firing" not in started
+    assert "favlo-pipeline-heartbeat" not in started
+    assert runtime._idle_heartbeat[0] == "Qwen3.8-Flash-Next-fp4"
+    idle_heartbeat(runtime, selection)
+    assert called
+    assert runtime._idle_heartbeat is None
+
+
 def test_width_counts_name_each_width() -> None:
     from qwen38_flash_next.adapt import _width_counts
 

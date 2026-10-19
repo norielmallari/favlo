@@ -104,7 +104,7 @@ def test_one_quiet_interval_runs_once_and_prints_the_offer() -> None:
         return False
 
     heartbeat_loop(idle, 5, threading.Event(), run, lines.append, pause)
-    assert lines == ["Qwen3.8-27B fits. I started the download."]
+    assert lines == ["favlo: Qwen3.8-27B fits. I started the download."]
 
 
 def test_a_quiet_reply_is_not_printed() -> None:

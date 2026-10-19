@@ -110,6 +110,26 @@ def test_stop_pid_ignores_a_dead_process(monkeypatch: pytest.MonkeyPatch) -> Non
     assert calls == []
 
 
+def test_the_daemon_starts_a_pipeline_heartbeat() -> None:
+    from types import SimpleNamespace
+
+    from favlo.listener import _schedule_pipeline_heartbeat
+
+    seen: list[tuple[object, object]] = []
+
+    def pump(runtime: object, selection: object) -> None:
+        seen.append((runtime, selection))
+
+    _schedule_pipeline_heartbeat(SimpleNamespace(idle_heartbeat=pump), "runtime", "row")
+    deadline = time.monotonic() + 1
+    while not seen and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert seen == [("runtime", "row")]
+    before = {thread.name for thread in threading.enumerate()}
+    _schedule_pipeline_heartbeat(SimpleNamespace(), "runtime", "row")
+    assert {thread.name for thread in threading.enumerate()} == before
+
+
 def test_note_closed_ignores_a_close_without_an_open() -> None:
     idle = Idle()
     idle.note_closed()
@@ -118,6 +138,17 @@ def test_note_closed_ignores_a_close_without_an_open() -> None:
     assert not idle.quiet(0)
     idle.note_closed()
     assert idle.quiet(0)
+
+
+def test_non_interactive_reports_a_daemon_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fail(*_args: object, **_kwargs: object) -> tuple[int, bool]:
+        raise DaemonError("not listening")
+
+    monkeypatch.setattr("favlo.daemon.ensure", fail)
+    assert listener.serve_main(["--non-interactive"]) == 1
+    assert "not listening" in capsys.readouterr().err
 
 
 def test_non_interactive_starts_the_daemon_and_exits(

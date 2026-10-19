@@ -32,6 +32,10 @@ _PLATE_TOP = "▕█████████████████████
 _PLATE_MID = "▕██     F A V L O     ██▏"
 _PLATE_BOT = "▕███████████████████████▏"
 _TICK = 0.1
+_PROMPT_QUIET = 0.25
+_CSI_FINAL = set(
+    "@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+)
 _WINDOW = 5.0
 _WINDOW_MIN = 0.5
 
@@ -92,6 +96,13 @@ class Console:
         self.live_decode = mode == "pretty"
         self._recorder: Callable[[str], None] | None = None
         self._remote: dict[tuple[str, int | None], Progress] = {}
+        self._draft: str | None = None
+        self._status_lines = 0
+        self._pending_summaries: list[str] = []
+        self._column = 0
+        self._activity = time.monotonic()
+        self._holding = False
+        self._held: list[dict[str, Any]] = []
 
     @classmethod
     def from_env(
@@ -159,18 +170,90 @@ class Console:
         self._write(line + "\n")
         self._redraw()
 
+    def draft(self, text: str) -> None:
+        """Show a reply that is still arriving. The terminal wraps it.
+
+        An open prefill or decode row stays on the line under the reply and
+        keeps its tok/s.
+        """
+        with self._lock:
+            if self.mode != "pretty":
+                self._draft = text
+                return
+            self._enable_wrap()
+            if self._draft is None:
+                self._erase()
+                self._write(text)
+            elif text.startswith(self._draft):
+                self._clear_status_below()
+                self._write(text[len(self._draft) :])
+            else:
+                self._clear_status_below()
+                self._write("\n")
+                self._write(text)
+            self._draft = text
+            self._paint_status_below(self._status_rows())
+
     def say(self, line: str) -> None:
         """A line that stays on screen while a row is open."""
         self._record(line)
         if self.mode == "json":
             self._event({"type": "log", "line": line})
+            self._draft = None
             return
-        self._erase()
-        self._write(line + "\n")
-        self._redraw()
+        with self._lock:
+            if self.mode == "pretty" and self._draft is not None:
+                self._clear_status_below()
+                same = line == self._draft or line == self._draft.rstrip()
+                if same:
+                    if not self._draft.endswith("\n"):
+                        self._write("\n\r")
+                else:
+                    if not self._draft.endswith("\n"):
+                        self._write("\n\r")
+                    self._enable_wrap()
+                    self._write(line + "\n")
+                self._draft = None
+                self._flush_summaries()
+                if self._handles:
+                    self._redraw()
+                else:
+                    self._show_cursor()
+                return
+            self._draft = None
+            self._erase()
+            self._enable_wrap()
+            self._write(line + "\n")
+            self._redraw()
+
+    def prompt(self, after_output: bool = False) -> None:
+        """``you:`` at the start of a line, after this turn's telemetry is drawn."""
+        if after_output:
+            self._wait_quiet(_PROMPT_QUIET)
+        with self._lock:
+            if after_output and self._column != 0:
+                self._write("\n")
+            self._write("you: ")
+
+    def hold(self, active: bool) -> None:
+        """Keep telemetry until the reply is finished, then print those lines."""
+        if active:
+            with self._lock:
+                self._holding = True
+            return
+        with self._lock:
+            queued = self._held
+            self._held = []
+            self._holding = False
+        for line in _telemetry_lines(queued):
+            self.log(line)
 
     def apply_event(self, event: dict[str, Any]) -> None:
         """Mirror one daemon event onto this console."""
+        with self._lock:
+            if self._holding:
+                self._held.append(event)
+                return
         kind = event.get("type")
         if kind == "log":
             line = event.get("line")
@@ -234,6 +317,11 @@ class Console:
                 self._handles.remove(progress)
             self._windows.pop(id(progress), None)
             remaining = len(self._handles)
+            if self.mode == "pretty" and self._draft is not None:
+                if summary:
+                    self._pending_summaries.append(summary)
+                self._paint_status_below(self._status_rows())
+                return
             if self.mode == "pretty":
                 self._erase()
                 if summary:
@@ -293,6 +381,8 @@ class Console:
             self._handles.clear()
             self._windows.clear()
             if self.mode == "pretty":
+                self._clear_status_below()
+                self._draft = None
                 self._erase()
                 self._show_cursor()
             if text:
@@ -303,6 +393,9 @@ class Console:
         now = self._clock()
         with self._lock:
             handles = list(self._handles)
+            if self.mode == "pretty" and self._draft is not None:
+                self._paint_status_below(self._status_rows())
+                return
             if not handles:
                 return
             if self.mode == "pretty":
@@ -358,23 +451,6 @@ class Console:
         total = event.get("total")
         request = event.get("request")
         detail = event.get("detail")
-        placeholder = self._load_placeholder()
-        if phase == "load" and placeholder is not None and placeholder is not previous:
-            if isinstance(total, int):
-                placeholder.total = total
-            placeholder.unit = unit
-            if isinstance(detail, str):
-                placeholder.detail = detail
-            if isinstance(request, int):
-                placeholder.request = request
-            gauge = _event_gauge(event.get("gauge"))
-            if gauge is not None:
-                placeholder.gauge = gauge
-            self._remote[key] = placeholder
-            self.sample()
-            return
-        if placeholder is not None and phase != "load" and placeholder is not previous:
-            self.end(placeholder, "")
         progress = self.begin(
             phase,
             total=total if isinstance(total, int) else 0,
@@ -384,14 +460,6 @@ class Console:
             gauge=_event_gauge(event.get("gauge")),
         )
         self._remote[key] = progress
-
-    def _load_placeholder(self) -> Progress | None:
-        """A load row opened before the daemon named the request."""
-        with self._lock:
-            for progress in self._handles:
-                if progress.phase == "load" and progress.request is None and not progress.closed:
-                    return progress
-        return None
 
     def _mirror_tick(self, event: dict[str, Any]) -> None:
         progress = self._remote.get(self._mirror_key(event))
@@ -605,6 +673,36 @@ class Console:
             return text
         return f"\x1b[2m{text}\x1b[0m"
 
+    def _status_rows(self) -> list[str]:
+        now = self._clock()
+        width = self._terminal_width()
+        return [self._fit(self._row(progress, now), width) for progress in self._handles]
+
+    def _clear_status_below(self) -> None:
+        """Erase the progress lines under the reply and return to the reply."""
+        if self._status_lines <= 0:
+            return
+        self._write("\x1b7\n")
+        for index in range(self._status_lines):
+            self._write("\r\x1b[2K")
+            if index + 1 < self._status_lines:
+                self._write("\n")
+        self._write("\x1b8")
+        self._status_lines = 0
+
+    def _paint_status_below(self, rows: list[str]) -> None:
+        """Draw the open rows under the reply. The cursor stays on the reply."""
+        self._clear_status_below()
+        if not rows:
+            return
+        self._write("\x1b7\n")
+        for index, row in enumerate(rows):
+            self._write("\r\x1b[2K" + row)
+            if index + 1 < len(rows):
+                self._write("\n")
+        self._status_lines = len(rows)
+        self._write("\x1b8")
+
     def _paint_rows(self, rows: list[str]) -> None:
         """One open row stays on the current line. A second row uses the line below."""
         if len(rows) == 1:
@@ -625,6 +723,19 @@ class Console:
         for row in rows:
             self._write(row + "\x1b[K\n")
         self._drawn = len(rows)
+
+    def _enable_wrap(self) -> None:
+        """Chat text uses the terminal's soft wrap. A progress row turns it off."""
+        if self.mode != "pretty" or not self._wrap_off:
+            return
+        self._write("\x1b[?7h")
+        self._wrap_off = False
+
+    def _flush_summaries(self) -> None:
+        pending = self._pending_summaries
+        self._pending_summaries = []
+        for summary in pending:
+            self._write(self._dim(summary) + "\n")
 
     def _erase(self) -> None:
         if self.mode != "pretty":
@@ -682,9 +793,57 @@ class Console:
         payload.setdefault("ts", self._clock())
         self._write(json.dumps(payload, separators=(",", ":")) + "\n")
 
+    def _wait_quiet(self, seconds: float) -> None:
+        """Return once no row is open and nothing has been drawn for ``seconds``."""
+        deadline = time.monotonic() + max(seconds * 4, 1.0)
+        while time.monotonic() < deadline:
+            with self._lock:
+                idle_for = time.monotonic() - self._activity
+                busy = bool(self._handles)
+            if not busy and idle_for >= seconds:
+                return
+            self._sleep(0.02)
+
     def _write(self, text: str) -> None:
+        if text:
+            self._activity = time.monotonic()
+            self._advance(text)
         self.stream.write(text)
         self.stream.flush()
+
+    def _advance(self, text: str) -> None:
+        index = 0
+        while index < len(text):
+            char = text[index]
+            if char == "\x1b":
+                index += 1
+                if index < len(text) and text[index] == "[":
+                    index += 1
+                    while index < len(text) and text[index] not in _CSI_FINAL:
+                        index += 1
+                index += 1
+                continue
+            if char in "\n\r":
+                self._column = 0
+            elif char >= " ":
+                self._column += 1
+            index += 1
+
+
+def _telemetry_lines(events: list[dict[str, Any]]) -> list[str]:
+    """The durable lines from one turn. Ticks stay off the reply."""
+    lines: list[str] = []
+    for event in events:
+        kind = event.get("type")
+        if kind == "log":
+            line = event.get("line")
+        elif kind == "end":
+            line = event.get("summary")
+        else:
+            continue
+        if isinstance(line, str) and line:
+            lines.append(line)
+    return lines
 
 
 def _event_gauge(value: Any) -> tuple[str, int] | None:

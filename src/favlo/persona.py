@@ -31,6 +31,8 @@ INSTRUCTIONS = (
     "Use clients for the server address, the model field, the first terminal line, "
     "the idle check, download reminders, and stopping the server with /quit. "
     "Use models for download, quantize, and registration. "
+    "When someone asks which models are registered, or which model id to send, "
+    "call list_models before you answer. Report only the lines it returns. "
     "When someone asks where your name came from, or who Amanda and Celestia are, "
     "call read_guide with history and tell that story. Do not add events it does not contain. "
     "Answer from that guide. If the guide does not say it, say you do not know. "
@@ -76,7 +78,7 @@ def load_intros(path: Path) -> tuple[str, ...]:
 
 
 def save_intros(lines: Sequence[str], path: Path) -> str:
-    """Store the opening lines and return the first. That first line is what serve shows."""
+    """Store the opening lines and return the first. A later start shows the next line."""
     if not isinstance(lines, (list, tuple)) or not lines:
         message = "the introduction needs at least one line"
         raise ValueError(message)
@@ -89,15 +91,27 @@ def save_intros(lines: Sequence[str], path: Path) -> str:
     if any(blocked(line) for line in cleaned):
         message = "the introduction was refused"
         raise ValueError(message)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(cleaned, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    _write_lines(cleaned, path)
     return cleaned[0]
 
 
+def rotate_opening(path: Path) -> None:
+    """Move the line just shown to the end. The next start shows the one after it."""
+    lines = load_intros(path)
+    if len(lines) < 2:
+        return
+    _write_lines(lines[1:] + (lines[0],), path)
+
+
+def _write_lines(lines: Sequence[str], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(list(lines), indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
 def opening(path: Path | None = None) -> str | None:
-    """The first saved line, or None when serve has not stored one yet."""
+    """The line this start shows, or None when serve has not stored one yet."""
     lines = load_intros(path if path is not None else intros_path())
     if not lines:
         return None

@@ -1,7 +1,8 @@
 """The one listener. A request names a pipeline, and that pipeline loads.
 
 This module does not import a pipeline. ``open_runtime`` and ``handle_chat``
-come from the entry file the registry row names.
+come from the entry file the registry row names. After the request closes,
+a pipeline that defines ``idle_heartbeat`` runs that function here.
 """
 
 from __future__ import annotations
@@ -17,8 +18,8 @@ import sys
 import threading
 import traceback
 import urllib.parse
-from collections.abc import Callable, Sequence
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from collections.abc import Sequence
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,7 @@ from favlo.registry import model_objects, one_model, resolve
 
 _STREAM_WRITE_TIMEOUT = 2.0
 _REQUEST_READ_TIMEOUT = 10.0
+_RELEASE_WAIT = 25.0
 _log_sink: Any = None
 
 
@@ -36,6 +38,19 @@ def bind_log(sink: Any) -> None:
     """Route listener lines through the console. ``None`` restores stderr."""
     global _log_sink
     _log_sink = sink
+
+
+def _schedule_pipeline_heartbeat(module: Any, runtime: Any, selection: Any) -> None:
+    """Run one pipeline lull in this process. The terminal does not call it."""
+    pump = getattr(module, "idle_heartbeat", None) if module is not None else None
+    if not callable(pump) or runtime is None:
+        return
+    threading.Thread(
+        target=pump,
+        args=(runtime, selection),
+        name="favlo-pipeline-heartbeat",
+        daemon=True,
+    ).start()
 
 
 def _log(message: str) -> None:
@@ -58,10 +73,16 @@ def _report_failure(console: Any) -> None:
     report(text)
 
 
-class _SingleRequestServer(HTTPServer):
-    """Accept the next connection only after the current request returns."""
+class _SingleRequestServer(ThreadingHTTPServer):
+    """Each connection has its own thread. One chat completion runs at a time.
+
+    A connection that holds its socket open, such as an editor probing the
+    port, does not hold the chat slot.
+    """
 
     request_queue_size = 128
+    daemon_threads = True
+    block_on_close = False
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         """A peer that closes mid-response is not a server failure."""
@@ -75,6 +96,7 @@ class _Shutdown:
 
     def __init__(self) -> None:
         self.runtime: Any = None
+        self.busy: threading.Lock | None = None
         self.closing = False
         self.signaled = False
 
@@ -114,7 +136,13 @@ def _release(runtime: Any, shutdown: _Shutdown, server: Any = None) -> None:
             except OSError:
                 pass
         if runtime is not None:
-            runtime.close()
+            busy = shutdown.busy
+            held = busy.acquire(timeout=_RELEASE_WAIT) if busy is not None else False
+            try:
+                runtime.close()
+            finally:
+                if held and busy is not None:
+                    busy.release()
         if shutdown.signaled and (runtime is not None or server is not None):
             _log("released")
     finally:
@@ -233,6 +261,7 @@ def serve(args: Any) -> int:
 
 def _run_until_stopped(args: Any, state: dict[str, Any], shutdown: _Shutdown) -> int:
     """Serve until SIGINT or SIGTERM. Then close the socket and the runtime."""
+    shutdown.busy = state.setdefault("lock", threading.Lock())
     try:
         return _serve_loop(args, state)
     except KeyboardInterrupt:
@@ -243,7 +272,7 @@ def _run_until_stopped(args: Any, state: dict[str, Any], shutdown: _Shutdown) ->
 
 
 def _serve_loop(args: Any, state: dict[str, Any]) -> int:
-    lock = threading.Lock()
+    lock = state.setdefault("lock", threading.Lock())
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -253,7 +282,6 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
             del fmt, log_args
 
         def do_GET(self) -> None:  # noqa: N802
-            self.connection.settimeout(None)
             path = urllib.parse.unquote(self.path.split("?", 1)[0])
             if path == "/v1/models":
                 self._json(
@@ -282,6 +310,7 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
             self._started = False
             self._gone = False
             self._model_id = ""
+            selection = None
             length = int(self.headers.get("Content-Length", "0") or "0")
             try:
                 raw = self.rfile.read(length) if length else b"{}"
@@ -289,6 +318,9 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
                 self.close_connection = True
                 return
             self.connection.settimeout(None)
+            if not lock.acquire(blocking=False):
+                _log("waiting for the open request")
+                lock.acquire()
             _log("request open")
             try:
                 body = json.loads(raw or b"{}")
@@ -316,8 +348,7 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
                         },
                     )
                     return
-                with lock:
-                    chat(self, runtime, body, selection, args, state)
+                chat(self, runtime, body, selection, args, state)
             except KeyError as exc:
                 self.close_connection = True
                 if self._started:
@@ -336,6 +367,14 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
                 self._json(500, {"error": {"message": str(exc), "type": type(exc).__name__}})
             finally:
                 _log("request closed")
+                module = state.get("module")
+                runtime = state.get("runtime")
+                lock.release()
+                _schedule_pipeline_heartbeat(module, runtime, selection)
+                try:
+                    self.connection.settimeout(_REQUEST_READ_TIMEOUT)
+                except OSError:
+                    self.close_connection = True
 
         def _client_stopped(self) -> bool:
             if self._gone:
@@ -489,11 +528,7 @@ def _interactive(args: Any) -> int:
                 line = event.get("line")
                 if line == f"favlo {VERSION}":
                     return
-                if line == "request open":
-                    idle.enter()
-                    return
-                if line == "request closed":
-                    idle.note_closed()
+                if line in {"request open", "request closed"}:
                     return
             ui.apply_event(event)
 
@@ -503,17 +538,17 @@ def _interactive(args: Any) -> int:
             stopped.set()
             stop_pid(pid)
 
-        def on_call() -> Callable[[], None]:
-            progress = ui.begin("load", total=0, unit="bytes", detail="")
-
-            def finish() -> None:
-                if progress.closed or progress.request is not None:
-                    return
-                ui.end(progress, "")
-
-            return finish
-
-        thread = start(args.host, args.port, sys.stdin, ui.say, idle, stop, on_call=on_call)
+        thread = start(
+            args.host,
+            args.port,
+            sys.stdin,
+            ui.say,
+            idle,
+            stop,
+            draft=ui.draft,
+            prompt=ui.prompt,
+            hold=ui.hold,
+        )
         try:
             thread.join()
         except KeyboardInterrupt:

@@ -1,5 +1,6 @@
 """Qwen3.8-Flash-Next pipeline. The hyphenated entry file loads this package."""
 
+from qwen38_flash_next.adapt import idle_heartbeat
 from qwen38_flash_next.carrot import load_carrot
 from qwen38_flash_next.checks import (
     check_act_kernels,
@@ -88,6 +89,7 @@ __all__ = [
     "check_state_kernels",
     "group_assignments",
     "handle_chat",
+    "idle_heartbeat",
     "classify_subbyte",
     "cold_live_bytes",
     "cold_slot_bytes",

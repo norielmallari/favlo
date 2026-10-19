@@ -64,6 +64,27 @@ def test_pipeline_help_comes_from_the_hyphenated_file(capsys) -> None:
     assert main(["--qwen38-flash-next", "--help"]) == 0
     captured = capsys.readouterr()
     assert "probe" in captured.out
+    assert "quantize" in captured.out
+    assert "complete" in captured.out
     assert main(["--qwen38-27b", "--help"]) == 0
     captured = capsys.readouterr()
+    assert "download" in captured.out
     assert "quantize" in captured.out
+    assert "kernels" in captured.out
+    assert main(["--qwen36-35b-a3b", "--help"]) == 0
+    captured = capsys.readouterr()
+    assert "setup" in captured.out
+    assert "quantize" in captured.out
+    assert "kernels" in captured.out
+
+
+def test_an_unknown_argument_is_an_error(capsys) -> None:
+    assert main(["serve-chat"]) == 2
+    captured = capsys.readouterr()
+    assert "unknown argument" in captured.err
+
+
+def test_an_unknown_serve_flag_is_an_error(capsys) -> None:
+    assert main(["serve", "--nope"]) == 2
+    captured = capsys.readouterr()
+    assert captured.err

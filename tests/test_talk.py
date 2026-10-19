@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import json
 import threading
-from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -32,6 +31,25 @@ def test_save_returns_the_first_line(tmp_path: Path) -> None:
     assert save_intros((_LINE, _MORE), path) == _LINE
     assert load_intros(path) == (_LINE, _MORE)
     assert opening(path) == _LINE
+
+
+def test_each_start_shows_the_next_line(tmp_path: Path) -> None:
+    path = tmp_path / "intros.json"
+    save_intros((_LINE, _MORE), path)
+
+    def once() -> list[str]:
+        lines: list[str] = []
+        thread = start(
+            "127.0.0.1", 9, io.StringIO(""), lines.append, Idle(), home=tmp_path, introduce=_boom
+        )
+        thread.join(2)
+        return lines
+
+    assert once() == [f"favlo: {_LINE}"]
+    assert opening(path) == _MORE
+    assert once() == [f"favlo: {_MORE}"]
+    assert once() == [f"favlo: {_LINE}"]
+    assert load_intros(path) == (_MORE, _LINE)
 
 
 def test_a_refused_introduction_is_not_stored(tmp_path: Path) -> None:
@@ -83,25 +101,15 @@ def test_a_closed_stdin_prints_only_the_saved_line(tmp_path: Path) -> None:
         "127.0.0.1", 9, io.StringIO(""), lines.append, Idle(), home=tmp_path, introduce=_boom
     )
     thread.join(2)
-    assert lines == [_LINE]
+    assert lines == [f"favlo: {_LINE}"]
 
 
-def test_a_missing_file_opens_the_load_row_before_the_line(tmp_path: Path) -> None:
+def test_a_missing_file_asks_for_the_line(tmp_path: Path) -> None:
     started = threading.Event()
     release = threading.Event()
     lines: list[str] = []
-    order: list[str] = []
-
-    def on_call() -> Callable[[], None]:
-        order.append("load")
-
-        def finish() -> None:
-            order.append("settle")
-
-        return finish
 
     def introduce() -> str:
-        order.append("call")
         started.set()
         assert release.wait(2)
         return save_intros((_LINE, _MORE), tmp_path / "intros.json")
@@ -114,25 +122,19 @@ def test_a_missing_file_opens_the_load_row_before_the_line(tmp_path: Path) -> No
         Idle(),
         home=tmp_path,
         introduce=introduce,
-        on_call=on_call,
     )
     assert started.wait(1)
     assert lines == []
-    assert order == ["load", "call"]
     release.set()
     thread.join(2)
-    assert lines == [_LINE]
-    assert order == ["load", "call", "settle"]
-    assert opening(tmp_path / "intros.json") == _LINE
+    assert lines == [f"favlo: {_LINE}"]
+    assert opening(tmp_path / "intros.json") == _MORE
+    assert load_intros(tmp_path / "intros.json") == (_MORE, _LINE)
 
 
-def test_a_saved_line_does_not_open_the_load_row(tmp_path: Path) -> None:
+def test_a_saved_line_does_not_ask_again(tmp_path: Path) -> None:
     save_intros((_LINE,), tmp_path / "intros.json")
     lines: list[str] = []
-
-    def on_call() -> Callable[[], None]:
-        raise AssertionError("the load row opened")
-
     thread = start(
         "127.0.0.1",
         9,
@@ -141,10 +143,83 @@ def test_a_saved_line_does_not_open_the_load_row(tmp_path: Path) -> None:
         Idle(),
         home=tmp_path,
         introduce=_boom,
-        on_call=on_call,
     )
     thread.join(2)
-    assert lines == [_LINE]
+    assert lines == [f"favlo: {_LINE}"]
+
+
+def test_registered_models_reads_the_registry(tmp_path: Path) -> None:
+    from favlo.talk import chat_model_id, registered_models
+
+    assert registered_models(tmp_path) == "no models are registered"
+    with pytest.raises(RuntimeError, match="no model is registered"):
+        chat_model_id(tmp_path)
+    registry = tmp_path / "models"
+    registry.mkdir()
+    (registry / "registry.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "models": {
+                    "Qwen3.6-35B-A3B-fp4": {
+                        "alias": "qwen36-35b-a3b",
+                        "pipeline": "qwen36-35b-a3b",
+                        "kv_cache": "e4m3",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert registered_models(tmp_path) == (
+        "Qwen3.6-35B-A3B-fp4 pipeline qwen36-35b-a3b alias qwen36-35b-a3b kv e4m3"
+    )
+    assert chat_model_id(tmp_path) == "Qwen3.6-35B-A3B-fp4"
+
+
+def test_a_tool_update_is_not_spoken() -> None:
+    from types import SimpleNamespace
+
+    from favlo.talk import assistant_piece, spoken_text
+
+    assert assistant_piece(SimpleNamespace(role="assistant", text="Hello")) == "Hello"
+    assert assistant_piece(SimpleNamespace(role="tool", text="guide text")) == ""
+    assert assistant_piece(SimpleNamespace(role=None, text="")) == ""
+    call = "<tool_call>\n<function=list_models>\n</function>\n</tool_call>"
+    assert spoken_text(call) == ""
+    assert spoken_text(f"Looking.\n{call}") == "Looking."
+    assert spoken_text("Here <tool") == "Here"
+    assert spoken_text(f"{call}\nQwen3.6-35B-A3B-fp4") == "Qwen3.6-35B-A3B-fp4"
+
+
+def test_quit_closes_a_stream_the_turn_left_open() -> None:
+    import asyncio
+    import warnings
+
+    from favlo.talk import _finish_loop
+
+    closed: list[str] = []
+    held: list[object] = []
+
+    async def events():
+        try:
+            yield "token"
+            await asyncio.sleep(0)
+        finally:
+            closed.append("stream")
+
+    async def start() -> None:
+        iterator = events()
+        held.append(iterator)
+        await iterator.__anext__()
+
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(start())
+    assert closed == []
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        _finish_loop(loop, {})
+    assert closed == ["stream"]
 
 
 def test_intro_request_names_save_intro() -> None:
@@ -157,7 +232,7 @@ def test_intro_request_names_save_intro() -> None:
     assert system.startswith(INSTRUCTIONS)
     assert "longer" in system
     assert "emojis" in system
-    assert "first line" in body["messages"][1]["content"]
+    assert "next line" in body["messages"][1]["content"]
 
 
 def test_a_missing_intro_is_one_completion(tmp_path: Path) -> None:
@@ -180,14 +255,6 @@ def test_a_missing_intro_is_one_completion(tmp_path: Path) -> None:
     }
 
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            body = json.dumps({"data": [{"id": "qwen36-35b-a3b"}]}).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
         def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length", "0"))
             posts.append(json.loads(self.rfile.read(length)))
@@ -206,12 +273,33 @@ def test_a_missing_intro_is_one_completion(tmp_path: Path) -> None:
     worker.start()
     try:
         port = server.server_address[1]
-        line = _introduce(f"http://127.0.0.1:{port}/v1", tmp_path / "intros.json")
+        registry = tmp_path / "models"
+        registry.mkdir()
+        (registry / "registry.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "models": {
+                        "Qwen3.6-35B-A3B-fp4": {
+                            "alias": "qwen36-35b-a3b",
+                            "pipeline": "qwen36-35b-a3b",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        line = _introduce(
+            f"http://127.0.0.1:{port}/v1",
+            tmp_path / "intros.json",
+            root=tmp_path,
+        )
     finally:
         server.shutdown()
         server.server_close()
     assert line == _LINE
     assert len(posts) == 1
+    assert posts[0]["model"] == "Qwen3.6-35B-A3B-fp4"
     assert posts[0]["tool_choice"] == {"type": "function", "function": {"name": "save_intro"}}
     assert posts[0]["enable_thinking"] is False
     assert load_intros(tmp_path / "intros.json") == (_LINE, _MORE)
@@ -224,7 +312,7 @@ def test_a_later_start_reuses_the_saved_line(tmp_path: Path) -> None:
         "127.0.0.1", 9, io.StringIO(""), lines.append, Idle(), home=tmp_path, introduce=_boom
     )
     thread.join(2)
-    assert lines == [_LINE]
+    assert lines == [f"favlo: {_LINE}"]
 
 
 def test_a_failed_intro_is_printed_and_not_stored(tmp_path: Path) -> None:
@@ -277,7 +365,7 @@ def test_quit_stops_the_server_and_skips_the_model(tmp_path: Path) -> None:
     thread.join(2)
     assert is_quit("/quit")
     assert stopped.is_set()
-    assert lines == [_LINE]
+    assert lines == [f"favlo: {_LINE}"]
 
 
 def test_the_opening_is_the_assistant_first_turn(tmp_path: Path) -> None:

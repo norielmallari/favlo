@@ -2,14 +2,18 @@
 
 One Microsoft Agent Framework session talks to the serve daemon's chat
 completions endpoint. The session lives on the thread that reads stdin.
-A turn starts only when no request is open, including a turn already in
-flight. The first start has no saved line: one chat completion asks the
-registered model to call ``save_intro``. The load row opens when that
-request is sent. The stored first line is what gets printed. Later starts
-print that line and do not call the model until someone types. After 30
-minutes with no request and no typing, one more session checks free disk
-and memory and may start the Qwen3.8-27B download. Five minutes is a pause
-in a conversation, and that turn would occupy the only request slot.
+A typed line is sent immediately. The model field is the first folder in
+the registry. This terminal's own completion keeps the idle check waiting.
+The first start has no saved line: one chat completion asks the
+registered model to call ``save_intro``. This start prints the first saved
+line, as ``favlo:``. Each later start prints the next line, then the first
+again. A reply streams as the tokens arrive, and the terminal wraps it.
+The daemon's prefill and decode rows stay on the line under that reply.
+The model is not called again until someone types. After 30
+minutes with no completion from this terminal and no typing, one more
+session checks free disk and memory and may start the Qwen3.8-27B download.
+Five minutes is a pause in a conversation, and that turn would occupy the
+only request slot.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ from favlo.persona import (
     intros_path,
     opening,
     refusal,
+    rotate_opening,
     save_intros,
 )
 
@@ -44,7 +49,7 @@ _HEARTBEAT_LINE = (
 
 
 class Idle:
-    """Set while no chat request is inside the listener."""
+    """Set while this terminal has no completion in flight."""
 
     def __init__(self, now: Callable[[], float] | None = None) -> None:
         self._now = time.monotonic if now is None else now
@@ -85,14 +90,14 @@ class Idle:
             self._quiet_since = self._now()
 
     def quiet(self, seconds: float) -> bool:
-        """True when no request is open and ``seconds`` have passed since the last activity."""
+        """True when this terminal is idle and ``seconds`` have passed."""
         with self._lock:
             if self._count != 0:
                 return False
             return self._now() - self._quiet_since >= seconds
 
     def remaining(self, seconds: float) -> float:
-        """Seconds until ``quiet``. A busy server reports one second, so the wait can recheck."""
+        """Seconds until ``quiet``. A completion in flight reports one second."""
         with self._lock:
             if self._count != 0:
                 return 1.0
@@ -122,17 +127,18 @@ def start(
     *,
     home: Path | None = None,
     introduce: Callable[[], str] | None = None,
-    on_call: Callable[[], Callable[[], None]] | None = None,
+    draft: Callable[[str], None] | None = None,
+    prompt: Callable[[bool], None] | None = None,
+    hold: Callable[[bool], None] | None = None,
 ) -> threading.Thread:
     """Read stdin until it closes or the line is ``/quit``.
 
     A saved opening is printed first. When none is saved, one chat completion
-    runs. ``on_call`` opens the load row for that request and returns the
-    closer. ``introduce`` replaces the completion in tests.
+    runs. ``introduce`` replaces the completion in tests.
     """
     thread = threading.Thread(
         target=_run,
-        args=(host, port, stdin, write, idle, stop, home, introduce, on_call),
+        args=(host, port, stdin, write, idle, stop, home, introduce, draft, prompt, hold),
         name="favlo-talk",
         daemon=True,
     )
@@ -149,7 +155,9 @@ def _run(
     stop: Callable[[], None] | None,
     home: Path | None,
     introduce: Callable[[], str] | None,
-    on_call: Callable[[], Callable[[], None]] | None,
+    draft: Callable[[str], None] | None,
+    prompt: Callable[[bool], None] | None,
+    hold: Callable[[bool], None] | None,
 ) -> None:
     path = intros_path(home)
     base = f"http://{host}:{port}/v1"
@@ -164,7 +172,7 @@ def _run(
         with notes_lock:
             pending = list(notes)
             notes.clear()
-        return loop.run_until_complete(_once(base, text, held, path, home, pending))
+        return loop.run_until_complete(_once(base, text, held, path, home, pending, draft))
 
     def beat() -> str:
         text = _heartbeat(base, home)
@@ -173,18 +181,23 @@ def _run(
                 notes.append(text)
         return text
 
+    def ask(after_output: bool = False) -> None:
+        _prompt(after_output, prompt)
+
     beat_thread = threading.Thread(
         target=heartbeat_loop,
-        args=(idle, HEARTBEAT_SECONDS, ended, beat, write),
+        args=(idle, HEARTBEAT_SECONDS, ended, beat, write, None, ask),
         name="favlo-heartbeat",
         daemon=True,
     )
     try:
         asyncio.set_event_loop(loop)
-        _speak(path, base, idle, write, introduce, on_call)
+        shown = _speak(path, base, idle, write, introduce, hold)
+        if isinstance(shown, str):
+            held["greeting"] = shown
         idle.mark()
         beat_thread.start()
-        _prompt()
+        ask(True)
         while True:
             line = stdin.readline()
             if not line:
@@ -192,23 +205,27 @@ def _run(
             text = line.strip()
             idle.mark()
             if not text:
-                _prompt()
+                ask(False)
                 continue
             if is_quit(text):
                 if stop is not None:
                     stop()
                 return
-            idle.wait()
+            idle.enter()
+            _hold(True, hold)
             try:
-                write(reply(text, turn))
-            except Exception as exc:
-                write(str(exc))
-            _prompt()
+                try:
+                    write(_voice(reply(text, turn)))
+                except Exception as exc:
+                    write(str(exc))
+            finally:
+                idle.leave()
+                _hold(False, hold)
+            ask(True)
     finally:
         ended.set()
         beat_thread.join(1)
-        _close(loop, held)
-        loop.close()
+        _finish_loop(loop, held)
 
 
 def heartbeat_loop(
@@ -218,8 +235,9 @@ def heartbeat_loop(
     run: Callable[[], str],
     write: Callable[[str], None],
     wait: Callable[[float], bool] | None = None,
+    ask: Callable[[bool], None] | None = None,
 ) -> None:
-    """Run ``run`` once the server has been quiet for ``interval``. Missed ticks coalesce."""
+    """Run ``run`` once this terminal has been quiet for ``interval``. Missed ticks coalesce."""
     pause = stop.wait if wait is None else wait
     while not stop.is_set():
         remaining = idle.remaining(interval)
@@ -239,8 +257,11 @@ def heartbeat_loop(
             continue
         idle.mark()
         if text and text.strip() and text.strip() != HEARTBEAT_QUIET:
-            write(text.strip())
-            _prompt()
+            write(_voice(text))
+            if ask is not None:
+                ask(True)
+            else:
+                _prompt(True)
 
 
 def _heartbeat(base: str, home: Path | None) -> str:
@@ -271,11 +292,11 @@ def _heartbeat(base: str, home: Path | None) -> str:
 
 
 _INTRO_ASK = (
-    "This is the first start. Write the opening now. "
-    "Make it longer than a later reply: several flavorful sentences, with emojis, "
+    "This is the first start. Write several opening lines. "
+    "Each line is its own introduction: longer than a later reply, flavorful, with emojis, "
     "as Favlo, a small horse who would like a carrot. "
     "Call save_intro with those lines. "
-    "The terminal shows the first line, so put the whole introduction in that first line."
+    "The next start shows the next line, then the first line again."
 )
 
 
@@ -294,17 +315,17 @@ def _speak(
     idle: Idle,
     write: Callable[[str], None],
     introduce: Callable[[], str] | None,
-    on_call: Callable[[], Callable[[], None]] | None,
-) -> None:
-    """Print the stored first line, or the line the first completion just saved."""
+    hold: Callable[[bool], None] | None = None,
+) -> str | None:
+    """Print this start's line and leave the next line first for the following start."""
     try:
         line = opening(path)
     except ValueError as exc:
         write(str(exc))
-        return
+        return None
     if line is None:
-        idle.wait()
-        finish = on_call() if on_call is not None else None
+        idle.enter()
+        _hold(True, hold)
         try:
             try:
                 if introduce is not None:
@@ -315,14 +336,19 @@ def _speak(
                 line = _saved_or_none(path, write)
                 if line is None:
                     write(str(exc))
-                    return
+                    _hold(False, hold)
+                    return None
         finally:
-            if finish is not None:
-                finish()
-    if not isinstance(line, str) or not line.strip():
-        write("the model did not save an introduction")
-        return
-    write(line.strip())
+            idle.leave()
+    try:
+        if not isinstance(line, str) or not line.strip():
+            write("the model did not save an introduction")
+            return None
+        write(_voice(line))
+        rotate_opening(path)
+        return line.strip()
+    finally:
+        _hold(False, hold)
 
 
 def intro_request(model: str) -> dict[str, Any]:
@@ -335,11 +361,10 @@ def intro_request(model: str) -> dict[str, Any]:
                 "content": (
                     f"{INSTRUCTIONS}\n\n"
                     "This call writes the opening, before any later reply. "
-                    "Greet now. The opening is longer than those replies: "
-                    "several flavorful sentences, with emojis. "
+                    "Greet now. Write several lines. Each line is its own introduction, "
+                    "longer than a later reply, flavorful, and with emojis. "
                     "Do not use violent, sexual, or obscene language. "
-                    "Call save_intro. The first line is what the terminal shows, "
-                    "so put the whole introduction in that first line."
+                    "Call save_intro. A later start shows the next line."
                 ),
             },
             {"role": "user", "content": _INTRO_ASK},
@@ -375,9 +400,9 @@ def intro_request(model: str) -> dict[str, Any]:
     }
 
 
-def _introduce(base: str, path: Path) -> str:
+def _introduce(base: str, path: Path, root: Path | None = None) -> str:
     """Ask the registered model for the opening and store the tool call."""
-    model = _model_id(base)
+    model = chat_model_id(root)
     payload = _post_json(f"{base}/chat/completions", intro_request(model))
     lines = _intro_lines(payload)
     if not lines:
@@ -469,7 +494,7 @@ async def _heartbeat_turn(base: str, root: Path, home: Path | None) -> str:
     from agent_framework.openai import OpenAIChatCompletionClient
     from openai import AsyncOpenAI
 
-    model = _model_id(base, settle=True)
+    model = chat_model_id(root)
     http = AsyncOpenAI(api_key="favlo", base_url=base, timeout=3600.0)
     client = OpenAIChatCompletionClient(
         model=model,
@@ -573,15 +598,85 @@ async def _once(
     path: Path,
     home: Path | None,
     pending: list[str],
+    draft: Callable[[str], None] | None,
 ) -> str:
-    agent, session = held.get("pair") or await _pair(base, path, home)
+    greeting = held.get("greeting")
+    agent, session = held.get("pair") or await _pair(
+        base,
+        path,
+        home,
+        greeting if isinstance(greeting, str) else None,
+    )
     held["pair"] = (agent, session)
     _note(session, pending)
-    result = await agent.run(text, session=session)
-    spoken = getattr(result, "text", None)
-    if isinstance(spoken, str) and spoken.strip():
-        return spoken.strip()
-    return "I lost that thought. Could you say it again, maybe with a carrot?"
+    stream = agent.run(text, session=session, stream=True)
+    try:
+        parts: list[str] = []
+        async for update in stream:
+            piece = assistant_piece(update)
+            if not piece:
+                continue
+            parts.append(piece)
+            shown = spoken_text("".join(parts))
+            if draft is not None and shown:
+                draft(_voice(shown))
+        final = await stream.get_final_response()
+        spoken = spoken_text("".join(parts))
+        if spoken:
+            return spoken
+        text_out = getattr(final, "text", None)
+        if isinstance(text_out, str) and text_out.strip():
+            return text_out.strip()
+        return "I lost that thought. Could you say it again, maybe with a carrot?"
+    finally:
+        await _close_stream(stream)
+
+
+_TOOL_OPEN = "<tool_call>"
+_TOOL_CLOSE = "</tool_call>"
+
+
+def spoken_text(text: str) -> str:
+    """Reply text with tool-call markup removed. An unfinished call stays hidden."""
+    kept: list[str] = []
+    rest = text
+    while rest:
+        start = rest.find(_TOOL_OPEN)
+        if start < 0:
+            keep = _marker_prefix(rest, _TOOL_OPEN)
+            kept.append(rest[:-keep] if keep else rest)
+            break
+        kept.append(rest[:start])
+        end = rest.find(_TOOL_CLOSE, start)
+        if end < 0:
+            break
+        rest = rest[end + len(_TOOL_CLOSE) :]
+    return "".join(kept).strip()
+
+
+def _marker_prefix(text: str, marker: str) -> int:
+    limit = min(len(text), len(marker) - 1)
+    for size in range(limit, 0, -1):
+        if marker.startswith(text[-size:]):
+            return size
+    return 0
+
+
+def assistant_piece(update: Any) -> str:
+    """Assistant text from one stream update. Tool results stay off the screen."""
+    role = getattr(update, "role", None)
+    if role not in (None, "assistant"):
+        return ""
+    text = getattr(update, "text", "")
+    return text if isinstance(text, str) else ""
+
+
+def _voice(text: str) -> str:
+    """The line the terminal shows for something Favlo said."""
+    body = text.strip()
+    if body.startswith("favlo:"):
+        return body
+    return f"favlo: {body}"
 
 
 def _note(session: Any, lines: list[str]) -> None:
@@ -595,12 +690,14 @@ def _note(session: Any, lines: list[str]) -> None:
     messages.extend(Message("assistant", [line]) for line in lines)
 
 
-async def _pair(base: str, path: Path, home: Path | None) -> tuple[Any, Any]:
+async def _pair(
+    base: str, path: Path, home: Path | None, greeting: str | None = None
+) -> tuple[Any, Any]:
     from agent_framework import Agent
     from agent_framework.openai import OpenAIChatCompletionClient
     from openai import AsyncOpenAI
 
-    model = _model_id(base)
+    model = chat_model_id()
     http = AsyncOpenAI(api_key="favlo", base_url=base, timeout=3600.0)
     client = OpenAIChatCompletionClient(
         model=model,
@@ -613,20 +710,20 @@ async def _pair(base: str, path: Path, home: Path | None) -> tuple[Any, Any]:
         client=client,
         name="favlo",
         instructions=INSTRUCTIONS,
-        tools=[_guide_tool(), _suggestions_tool(home)],
+        tools=[_guide_tool(), _models_tool(), _suggestions_tool(home)],
         default_options={
             "max_tokens": 400,
             "extra_body": {"enable_thinking": False},
         },
     )
-    return agent, _with_opening(agent.create_session(), path)
+    return agent, _with_opening(agent.create_session(), path, greeting)
 
 
-def _with_opening(session: Any, path: Path) -> Any:
+def _with_opening(session: Any, path: Path, shown: str | None = None) -> Any:
     """Store the printed greeting as the assistant's first turn."""
     from agent_framework import InMemoryHistoryProvider, Message
 
-    line = opening(path)
+    line = shown.strip() if isinstance(shown, str) and shown.strip() else opening(path)
     if line is None:
         return session
     bucket = session.state.setdefault(InMemoryHistoryProvider.DEFAULT_SOURCE_ID, {})
@@ -659,46 +756,75 @@ def _guide_tool() -> object:
     return read_guide
 
 
-def _prompt() -> None:
+def chat_model_id(root: Path | None = None) -> str:
+    """The folder the terminal sends as ``model``."""
+    from favlo.registry import load_registry
+
+    models = load_registry(root).get("models")
+    if isinstance(models, dict):
+        for folder in models:
+            if isinstance(folder, str) and folder and ":" not in folder:
+                return folder
+    message = "no model is registered"
+    raise RuntimeError(message)
+
+
+def registered_models(root: Path | None = None) -> str:
+    """The registry listing. An empty registry says so."""
+    from favlo.registry import format_listing
+
+    listing = format_listing(root).strip()
+    if not listing:
+        return "no models are registered"
+    return listing
+
+
+def _models_tool() -> object:
+    from agent_framework import tool
+
+    @tool(approval_mode="never_require")
+    def list_models() -> str:
+        """List the registered models.
+
+        Each line is one record: folder, pipeline, alias, and key/value mode.
+        An unregistered complete record is named too. This is the live registry,
+        not the download guide.
+        """
+        return registered_models()
+
+    return list_models
+
+
+def _hold(active: bool, hold: Callable[[bool], None] | None) -> None:
+    if hold is not None:
+        hold(active)
+
+
+def _prompt(after_output: bool = False, show: Callable[[bool], None] | None = None) -> None:
+    if show is not None:
+        show(after_output)
+        return
     sys.stderr.write("you: ")
     sys.stderr.flush()
 
 
-def _model_id(base: str, *, settle: bool = False) -> str:
-    attempts = 50 if settle else 1
-    last: Exception | None = None
-    for attempt in range(attempts):
-        try:
-            return _read_model_id(base)
-        except RuntimeError:
-            raise
-        except (OSError, urllib.error.URLError) as exc:
-            last = exc
-            if attempt + 1 == attempts:
-                break
-            time.sleep(0.1)
-    message = "the model list is not available"
-    raise RuntimeError(message) from last
+async def _close_stream(stream: Any) -> None:
+    """Release the chat stream. An open generator warns when the loop closes."""
+    close = getattr(stream, "close", None)
+    if not callable(close):
+        return
+    result = close()
+    if asyncio.iscoroutine(result):
+        await result
 
 
-def _read_model_id(base: str) -> str:
-    url = base.removesuffix("/v1") + "/v1/models"
+def _finish_loop(loop: asyncio.AbstractEventLoop, held: dict[str, Any]) -> None:
+    """Close the client, then any stream the turn left open, then the loop."""
     try:
-        with urllib.request.urlopen(url, timeout=5) as response:
-            payload = json.loads(response.read().decode())
-    except (json.JSONDecodeError, UnicodeError) as exc:
-        message = "the model list is not available"
-        raise RuntimeError(message) from exc
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(data, list):
-        message = "no model is registered"
-        raise RuntimeError(message)
-    for row in data:
-        model_id = row.get("id") if isinstance(row, dict) else None
-        if isinstance(model_id, str) and model_id and ":" not in model_id:
-            return model_id
-    message = "no model is registered"
-    raise RuntimeError(message)
+        _close(loop, held)
+        loop.run_until_complete(loop.shutdown_asyncgens())
+    finally:
+        loop.close()
 
 
 def _close(loop: asyncio.AbstractEventLoop, held: dict[str, Any]) -> None:

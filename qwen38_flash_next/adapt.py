@@ -334,7 +334,7 @@ def open_request(runtime: Any) -> None:
 
 
 def finish_request(runtime: Any, selection: Any, *, complete: bool) -> None:
-    """Queue this request. The write waits until the listener is idle."""
+    """Queue this request. The daemon runs the lull after the request closes."""
     runtime._firing_open = False
     routes = getattr(runtime, "routes", None)
     if routes is None or selection is None:
@@ -351,11 +351,15 @@ def finish_request(runtime: Any, selection: Any, *, complete: bool) -> None:
     token = id(runtime)
     with _lock:
         _pending.setdefault(token, []).append((record, snap))
-    thread = threading.Thread(
-        target=_lull,
-        args=(runtime, folder, record, Path(runtime.files.root), token),
-        name="favlo-firing",
-        daemon=True,
-    )
-    thread.start()
+    runtime._idle_heartbeat = (folder, record, Path(runtime.files.root), token)
+
+
+def idle_heartbeat(runtime: Any, selection: Any = None) -> None:
+    """Write the queued routes and repack. The daemon calls this."""
+    del selection
+    job = getattr(runtime, "_idle_heartbeat", None)
+    if job is None:
+        return
+    runtime._idle_heartbeat = None
+    _lull(runtime, *job)
 

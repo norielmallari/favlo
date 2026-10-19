@@ -2,6 +2,7 @@
 
 import io
 import json
+import time
 
 import pytest
 
@@ -139,10 +140,9 @@ def test_a_daemon_tick_paints_the_row() -> None:
     assert Console("json", pipeline="", stream=io.StringIO(), start_thread=False).shows_bars
 
 
-def test_a_local_load_row_takes_the_daemon_begin() -> None:
-    ui, stream, clock = _ui("pretty", color=0)
+def test_a_daemon_load_begin_opens_its_own_row() -> None:
+    ui, stream, _clock = _ui("pretty", color=0)
     local = ui.begin("load", total=0, unit="bytes")
-    assert "load" in stream.getvalue()
     ui.apply_event(
         {
             "type": "begin",
@@ -153,33 +153,40 @@ def test_a_local_load_row_takes_the_daemon_begin() -> None:
             "request": 1,
         }
     )
-    assert local.request == 1
-    assert [item for item in ui._handles if item.phase == "load"] == [local]
-    ui.apply_event(
-        {
-            "type": "tick",
-            "phase": "load",
-            "done": 40,
-            "total": 100,
-            "unit": "bytes",
-            "request": 1,
-        }
-    )
-    clock.now += 1
-    ui.sample()
-    assert "40%" in stream.getvalue()
-    ui.apply_event({"type": "end", "phase": "load", "summary": "loaded record", "request": 1})
-    assert local.closed
-    assert "loaded record" in stream.getvalue()
+    assert local.request is None
+    assert not local.closed
+    assert [item.phase for item in ui._handles] == ["load", "load"]
+    assert "load" in stream.getvalue()
 
 
-def test_a_later_phase_closes_the_waiting_load_row() -> None:
+def test_a_reply_streams_without_a_second_copy() -> None:
     ui, stream, _clock = _ui("pretty", color=0)
-    local = ui.begin("load", total=0, unit="bytes")
-    ui.apply_event({"type": "begin", "phase": "prefill", "total": 10, "unit": "tok", "request": 1})
-    assert local.closed
-    assert [item.phase for item in ui._handles] == ["prefill"]
-    assert "prefill" in stream.getvalue()
+    progress = ui.begin("decode", total=10, unit="tok")
+    ui.draft("favlo: He")
+    ui.draft("favlo: Hello")
+    ui.sample()
+    ui.end(progress, "decoded 2 tok")
+    ui.say("favlo: Hello")
+    text = stream.getvalue()
+    assert text.count("favlo: He") == 1
+    assert "favlo: He\n" not in text
+    assert "decoded 2 tok" in text
+    assert "\x1b[?7h" in text
+
+
+def test_a_reply_keeps_the_decode_rate_under_the_text() -> None:
+    ui, stream, clock = _ui("pretty", color=0)
+    progress = ui.begin("decode", total=0, unit="tok")
+    progress.done = 4
+    clock.now += 1
+    progress.done = 12
+    ui.draft("favlo: He")
+    ui.sample()
+    text = stream.getvalue()
+    assert "favlo: He" in text
+    assert "tok/s" in text
+    assert text.index("favlo: He") < text.rindex("tok/s")
+    ui.end(progress, "decoded 12 tok")
 
 
 def test_plain_plate_is_one_line() -> None:
@@ -361,6 +368,158 @@ def test_prefill_done_only_moves_forward() -> None:
     assert runtime._prefill_progress.done == 25
     Qwen38Runtime._note_prefill(runtime, 3, 100, 100)
     assert runtime._prefill_progress.done == 100
+
+
+def _wait_until(predicate, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_each_long_phase_updates_before_it_ends() -> None:
+    """A phase that is still open keeps painting. The summary is later."""
+    for phase in PHASES:
+        stream = io.StringIO()
+        ui = Console("pretty", pipeline="favlo", stream=stream, color=0, start_thread=True)
+        try:
+            progress = ui.begin(phase, total=100, unit="tok")
+            assert phase in stream.getvalue()
+            progress.done = 41
+
+            def painted(raw: io.StringIO = stream) -> bool:
+                return "41/100 tok" in raw.getvalue()
+
+            assert _wait_until(painted)
+            assert f"{phase} settled" not in stream.getvalue()
+            assert not progress.closed
+            ui.end(progress, f"{phase} settled")
+            assert f"{phase} settled" in stream.getvalue()
+        finally:
+            ui.close()
+
+
+def test_json_ticks_while_a_phase_is_still_open() -> None:
+    for phase in PHASES:
+        stream = io.StringIO()
+        ui = Console("json", pipeline="favlo", stream=stream, start_thread=True)
+        try:
+            progress = ui.begin(phase, total=100, unit="tok")
+            progress.done = 41
+
+            def painted(raw: io.StringIO = stream, name: str = phase) -> bool:
+                for line in raw.getvalue().splitlines():
+                    if '"tick"' not in line:
+                        continue
+                    row = json.loads(line)
+                    if row.get("phase") == name and row.get("done") == 41:
+                        return True
+                return False
+
+            assert _wait_until(painted)
+            assert not progress.closed
+        finally:
+            ui.close()
+
+
+def test_a_mirrored_tick_shows_before_the_phase_ends() -> None:
+    for phase, unit in (
+        ("load", "bytes"),
+        ("download", "bytes"),
+        ("quantize", "layers"),
+        ("prefill", "tok"),
+        ("decode", "tok"),
+    ):
+        stream = io.StringIO()
+        ui = Console("pretty", pipeline="", stream=stream, color=0, start_thread=True)
+        try:
+            ui.apply_event(
+                {"type": "begin", "phase": phase, "total": 100, "unit": unit, "detail": phase}
+            )
+            ui.apply_event(
+                {"type": "tick", "phase": phase, "done": 41, "total": 100, "unit": unit}
+            )
+            def painted(raw: io.StringIO = stream) -> bool:
+                return "41" in raw.getvalue()
+
+            assert _wait_until(painted)
+            assert f"{phase} settled" not in stream.getvalue()
+            ui.apply_event({"type": "end", "phase": phase, "summary": f"{phase} settled"})
+            assert f"{phase} settled" in stream.getvalue()
+        finally:
+            ui.close()
+
+
+def test_a_reply_shows_the_rate_before_the_phase_ends() -> None:
+    for phase in ("prefill", "decode"):
+        stream = io.StringIO()
+        ui = Console("pretty", pipeline="", stream=stream, color=0, start_thread=True)
+        try:
+            ui.apply_event({"type": "begin", "phase": phase, "total": 0, "unit": "tok"})
+            ui.draft("favlo: He")
+            ui.apply_event({"type": "tick", "phase": phase, "done": 41, "total": 0, "unit": "tok"})
+            def painted(raw: io.StringIO = stream) -> bool:
+                text = raw.getvalue()
+                return "favlo: He" in text and "41 tok" in text
+
+            assert _wait_until(painted)
+            assert f"{phase} settled" not in stream.getvalue()
+            ui.apply_event({"type": "end", "phase": phase, "summary": f"{phase} settled"})
+        finally:
+            ui.close()
+
+
+def test_a_reply_finishes_before_its_telemetry() -> None:
+    ui, stream, _clock = _ui("pretty", color=0)
+    ui.hold(True)
+    ui.apply_event({"type": "begin", "phase": "decode", "total": 0, "unit": "tok"})
+    ui.apply_event({"type": "tick", "phase": "decode", "done": 41, "total": 0, "unit": "tok"})
+    ui.apply_event({"type": "log", "line": "prefix store 10 tokens"})
+    ui.draft("favlo: He")
+    ui.draft("favlo: Hello")
+    assert "prefix store" not in stream.getvalue()
+    assert "41" not in stream.getvalue()
+    ui.apply_event(
+        {"type": "end", "phase": "decode", "summary": "decode 12.00 tok/s (12 tok in 1.00s)"}
+    )
+    ui.say("favlo: Hello")
+    ui.hold(False)
+    text = stream.getvalue()
+    reply_at = text.index("favlo: Hello")
+    assert reply_at < text.index("prefix store 10 tokens")
+    assert reply_at < text.index("decode 12.00 tok/s")
+    assert "41" not in text
+
+
+def test_the_prompt_starts_on_the_line_after_telemetry() -> None:
+    ui, stream, _clock = _ui("pretty", color=0)
+    progress = ui.begin("decode", total=0, unit="tok")
+    progress.done = 12
+    ui.end(progress, "decode 12.00 tok/s (12 tok in 1.00s)")
+    ui.log("prefix store 10 tokens")
+    ui.prompt(True)
+    text = stream.getvalue()
+    assert "prefix store 10 tokens\n" in text
+    assert text.index("prefix store 10 tokens") < text.index("you:")
+    assert "tokensyou:" not in text
+
+
+def test_a_late_telemetry_line_lands_before_the_prompt() -> None:
+    import threading
+
+    ui, stream, _clock = _ui("pretty", color=0)
+
+    def late() -> None:
+        time.sleep(0.05)
+        ui.log("prefix store 10 tokens")
+
+    threading.Thread(target=late).start()
+    ui.prompt(True)
+    text = stream.getvalue()
+    assert text.index("prefix store 10 tokens") < text.index("you:")
+    assert text.endswith("you: ") or "tokens\nyou: " in text
 
 
 def test_vocabulary_is_closed() -> None:

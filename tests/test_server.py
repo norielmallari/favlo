@@ -101,6 +101,8 @@ class _Runtime:
     def _hold(self) -> None:
         deadline = time.monotonic() + 5
         while not self.release.is_set() and time.monotonic() < deadline:
+            if self.halted:
+                raise RequestClosed()
             time.sleep(0.02)
 
     def _mark(self, kind: str) -> None:
@@ -239,6 +241,63 @@ def test_a_silent_client_releases_the_request_slot(monkeypatch) -> None:
         stuck.close()
         _stop_background(state, thread)
     assert b"200" in data.split(b"\r\n", 1)[0]
+
+
+def test_an_idle_kept_alive_connection_does_not_hold_the_slot() -> None:
+    """An editor that probes the port and keeps the socket open does not block a chat."""
+    runtime = _Runtime()
+    state, thread = _serve_background(runtime)
+    port = int(state["server"].server_address[1])
+    idle = socket.create_connection(("127.0.0.1", port), timeout=2)
+    silent = socket.create_connection(("127.0.0.1", port), timeout=2)
+    try:
+        idle.settimeout(2)
+        idle.sendall(b"GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        assert idle.recv(4096).startswith(b"HTTP/1.1 200")
+        started = time.monotonic()
+        body = _exchange(port, "after the probe")
+        elapsed = time.monotonic() - started
+    finally:
+        idle.close()
+        silent.close()
+        _stop_background(state, thread)
+    assert body.startswith(b"HTTP/1.1 200")
+    assert elapsed < 1.0
+
+
+def test_the_model_list_answers_while_a_completion_is_open(monkeypatch) -> None:
+    lines: list[str] = []
+    monkeypatch.setattr(listener, "_log_sink", lines.append)
+    runtime = _Runtime()
+    runtime.hold = True
+    state, thread = _serve_background(runtime)
+    port = int(state["server"].server_address[1])
+    worker = threading.Thread(target=_exchange, args=(port, "held"))
+    second = threading.Thread(target=_exchange, args=(port, "queued"))
+    try:
+        worker.start()
+        assert runtime.entered.wait(3)
+        sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+        sock.settimeout(2)
+        try:
+            sock.sendall(
+                b"GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            )
+            head = sock.recv(4096)
+        finally:
+            sock.close()
+        second.start()
+        deadline = time.monotonic() + 3
+        while "waiting for the open request" not in lines and time.monotonic() < deadline:
+            time.sleep(0.02)
+        runtime.release.set()
+        worker.join(timeout=5)
+        second.join(timeout=5)
+    finally:
+        runtime.release.set()
+        _stop_background(state, thread)
+    assert head.startswith(b"HTTP/1.1 200")
+    assert "waiting for the open request" in lines
 
 
 def test_requests_wait_until_the_current_one_finishes() -> None:
