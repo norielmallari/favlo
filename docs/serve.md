@@ -1,0 +1,15 @@
+# Serve
+
+As-built listener and daemon. The map and the write set are [../ARCHITECTURE.md](../ARCHITECTURE.md). That file wins for which files an agent may edit. Terminal chat is [ai-assistance/README.md](ai-assistance/README.md).
+
+`favlo serve` on a terminal is the CLI. `favlo serve --non-interactive` starts the daemon and exits. The daemon listens on `127.0.0.1:8129` with nothing loaded. It does not read the terminal. Closing the terminal leaves the daemon running. A later `favlo serve` attaches to the daemon already listening on that address. `/quit` stops the daemon. Ctrl+C stops the daemon when this terminal started it.
+
+`--max-memory` is passed to a pipeline whose `open_runtime` accepts it, as the maximum bytes that runtime may allocate.
+
+`GET /v1/models` lists every registered row. `POST /v1/chat/completions` loads the pipeline that row names. One completion runs at a time. Each connection has its own thread. A completion that arrives while another is open waits until that one has returned, and the daemon logs `waiting for the open request`, which the terminal prints. `GET /v1/models` answers while a completion is open. A connection that keeps its socket open between requests does not hold the completion slot. A connection that sends no request is dropped after 10 seconds. A different folder or a different pipeline unloads the previous record first. An unknown id is 404.
+
+The daemon writes one JSON event per line to `~/.favlo/logs/serve-<port>.log`. Durable lines are also appended to `~/.favlo/logs/favlo.log`. The live progress row is not written there. `~/.favlo/settings.json` key `log_max_bytes` is the most bytes `favlo.log` may hold. The default is 1048576. Keys `max_tokens` and `thinking_budget` apply only when present. An omitted `max_tokens` on the request and in that file does not cap the completion. An omitted `thinking_budget` does not close a think block on a token count. The first serve creates that file when it is missing. A line that would pass the cap leaves the newest bytes that still fit, starting at the next line when one fits.
+
+A terminal `favlo serve` whose registry has no rows checks that a small shader compiles at Metal 4.1, then runs `favlo --qwen36-35b-a3b setup` before the daemon starts. The checkpoint and the packed directory are [guides/models.md](guides/models.md). `--non-interactive` does not download. A pipe does not download. A failed check or a failed download exits. The next `serve` on a terminal continues from the files already written.
+
+A pipeline heartbeat runs in the daemon after the request closes. The terminal's only heartbeat is the agent check in [ai-assistance/README.md](ai-assistance/README.md).

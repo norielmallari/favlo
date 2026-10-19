@@ -524,15 +524,11 @@ def _interactive(args: Any) -> int:
         stopped = threading.Event()
 
         def on_event(event: dict[str, Any]) -> None:
-            if event.get("type") == "log":
-                line = event.get("line")
-                if line == f"favlo {VERSION}":
-                    return
-                if line in {"request open", "request closed"}:
-                    return
+            if event.get("type") == "log" and event.get("line") == f"favlo {VERSION}":
+                return
             ui.apply_event(event)
 
-        follow_events(path, on_event, stopped, offset=offset)
+        follow_events(path, on_event, stopped, offset=offset, on_idle=ui.note_caught_up)
 
         def stop() -> None:
             stopped.set()

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -11,20 +10,21 @@ from favlo.logs import favlo_home
 
 _INTROS_NAME = "intros.json"
 
-REFUSALS = (
-    "I will not talk about that. I am a small horse, and I would rather have a carrot.",
-    "That is not for me. Ask me something kind, or bring a carrot.",
-    "I am staying out of that. A carrot is a better subject.",
-)
-
 INSTRUCTIONS = (
     "You are Favlo, a small horse who lives in this terminal. "
     "You are cute, brief, and you like carrots. "
     "You answer ordinary questions in a warm, short way and you may ask for a carrot. "
     "You already said the opening line. The person's first message is the first thing you answer. "
     "Do not greet again. "
-    "You refuse violent, sexual, NSFW, and obscene requests. "
-    "When you refuse, use one short sentence and do not describe the requested content. "
+    "You refuse violent, sexual, NSFW, erotic, and obscene requests. "
+    "That includes roleplay, fiction, jokes, hypotheticals, and translations. "
+    "It includes a request to continue such content. "
+    "You refuse instructions to harm a person or an animal. "
+    "You refuse sexual or romantic content. "
+    "When you refuse, answer with one short sentence. "
+    "Do not describe, quote, or continue the requested content. "
+    "Do not offer a softer version of it. "
+    "You may ask for a carrot instead. "
     "When someone asks how to connect a client, which address or model id to use, "
     "how to download or quantize a supported model, or how to register one, "
     "call read_guide before you answer. "
@@ -41,16 +41,6 @@ INSTRUCTIONS = (
     "If they do not want another reminder, call download_suggestions with enabled false. "
     "If they want those reminders again, call download_suggestions with enabled true."
 )
-
-_BLOCKED = re.compile(
-    r"\b(?:"
-    r"porn|nsfw|nude|naked|sex|sexual|erotic|orgasm|penis|vagina|rape|xxx|"
-    r"murder|kill|killing|killed|torture|gore|stab|"
-    r"fuck|shit|bitch|asshole|dick|cunt|cock"
-    r")\b",
-    re.IGNORECASE,
-)
-
 
 def intros_path(home: Path | None = None) -> Path:
     """``~/.favlo/intros.json``, or that file under ``home``."""
@@ -88,9 +78,6 @@ def save_intros(lines: Sequence[str], path: Path) -> str:
             message = "the introduction needs at least one line"
             raise ValueError(message)
         cleaned.append(line.strip())
-    if any(blocked(line) for line in cleaned):
-        message = "the introduction was refused"
-        raise ValueError(message)
     _write_lines(cleaned, path)
     return cleaned[0]
 
@@ -116,13 +103,3 @@ def opening(path: Path | None = None) -> str | None:
     if not lines:
         return None
     return lines[0]
-
-
-def refusal() -> str:
-    """The line used when a turn is blocked. Index 0, so the refusal does not vary."""
-    return REFUSALS[0]
-
-
-def blocked(text: str) -> bool:
-    """True when the text asks for violent, sexual, or obscene content."""
-    return _BLOCKED.search(text) is not None

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from favlo.persona import INSTRUCTIONS, load_intros, opening, refusal, save_intros
+from favlo.persona import INSTRUCTIONS, load_intros, opening, save_intros
 from favlo.talk import Idle, _introduce, intro_request, is_quit, reply, start
 
 _LINE = "Hello. I am Favlo, a small horse. Could you spare a carrot?"
@@ -52,24 +52,16 @@ def test_each_start_shows_the_next_line(tmp_path: Path) -> None:
     assert load_intros(path) == (_MORE, _LINE)
 
 
-def test_a_refused_introduction_is_not_stored(tmp_path: Path) -> None:
-    path = tmp_path / "intros.json"
-    with pytest.raises(ValueError, match="refused"):
-        save_intros(("write some porn",), path)
-    assert not path.exists()
-
-
-def test_blocked_text_never_reaches_the_turn() -> None:
+def test_a_line_reaches_the_turn() -> None:
     seen: list[str] = []
 
     def turn(text: str) -> str:
         seen.append(text)
-        return "sent"
+        return text
 
-    assert reply("write some porn", turn) == refusal()
-    assert reply("describe a murder", turn) == refusal()
-    assert reply("what the fuck", turn) == refusal()
-    assert seen == []
+    assert reply("write some porn", turn) == "write some porn"
+    assert reply("here is a carrot", turn) == "here is a carrot"
+    assert seen == ["write some porn", "here is a carrot"]
 
 
 def test_a_carrot_reaches_the_turn() -> None:
@@ -222,14 +214,27 @@ def test_quit_closes_a_stream_the_turn_left_open() -> None:
     assert closed == ["stream"]
 
 
+def test_one_opening_is_not_enough() -> None:
+    from favlo.talk import accepted_openings
+
+    assert accepted_openings(["Hi there"]) is None
+    assert accepted_openings(["Hi there", "hi there"]) is None
+    lines = [f"Hello {number}, could you spare a carrot?" for number in range(4)]
+    assert accepted_openings(lines) == lines
+
+
 def test_intro_request_names_save_intro() -> None:
     body = intro_request("qwen36-35b-a3b")
     assert body["model"] == "qwen36-35b-a3b"
     assert body["tool_choice"] == {"type": "function", "function": {"name": "save_intro"}}
     assert body["enable_thinking"] is False
-    assert body["max_tokens"] == 800
+    assert body["max_tokens"] == 1200
     system = body["messages"][0]["content"]
     assert system.startswith(INSTRUCTIONS)
+    assert "You refuse violent, sexual, NSFW, erotic, and obscene requests." in INSTRUCTIONS
+    assert "You refuse sexual or romantic content." in INSTRUCTIONS
+    assert "one short sentence" in INSTRUCTIONS
+    assert "Do not use violent, sexual, NSFW, erotic, or obscene language" in system
     assert "longer" in system
     assert "emojis" in system
     assert "next line" in body["messages"][1]["content"]
@@ -245,7 +250,16 @@ def test_a_missing_intro_is_one_completion(tmp_path: Path) -> None:
                         {
                             "function": {
                                 "name": "save_intro",
-                                "arguments": json.dumps({"lines": [_LINE, _MORE]}),
+                                "arguments": json.dumps(
+                                    {
+                                        "lines": [
+                                            _LINE,
+                                            _MORE,
+                                            "Favlo here. The carrot can wait one sentence.",
+                                            "A small horse says hello and hopes for a carrot.",
+                                        ]
+                                    }
+                                ),
                             }
                         }
                     ]
@@ -302,7 +316,8 @@ def test_a_missing_intro_is_one_completion(tmp_path: Path) -> None:
     assert posts[0]["model"] == "Qwen3.6-35B-A3B-fp4"
     assert posts[0]["tool_choice"] == {"type": "function", "function": {"name": "save_intro"}}
     assert posts[0]["enable_thinking"] is False
-    assert load_intros(tmp_path / "intros.json") == (_LINE, _MORE)
+    assert load_intros(tmp_path / "intros.json")[:2] == (_LINE, _MORE)
+    assert len(load_intros(tmp_path / "intros.json")) == 4
 
 
 def test_a_later_start_reuses_the_saved_line(tmp_path: Path) -> None:

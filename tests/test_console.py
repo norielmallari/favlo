@@ -471,26 +471,21 @@ def test_a_reply_shows_the_rate_before_the_phase_ends() -> None:
             ui.close()
 
 
-def test_a_reply_finishes_before_its_telemetry() -> None:
+def test_the_load_row_shows_before_the_reply() -> None:
     ui, stream, _clock = _ui("pretty", color=0)
     ui.hold(True)
-    ui.apply_event({"type": "begin", "phase": "decode", "total": 0, "unit": "tok"})
-    ui.apply_event({"type": "tick", "phase": "decode", "done": 41, "total": 0, "unit": "tok"})
-    ui.apply_event({"type": "log", "line": "prefix store 10 tokens"})
-    ui.draft("favlo: He")
-    ui.draft("favlo: Hello")
-    assert "prefix store" not in stream.getvalue()
-    assert "41" not in stream.getvalue()
     ui.apply_event(
-        {"type": "end", "phase": "decode", "summary": "decode 12.00 tok/s (12 tok in 1.00s)"}
+        {"type": "begin", "phase": "load", "total": 100, "unit": "bytes", "detail": "record"}
     )
+    ui.apply_event({"type": "tick", "phase": "load", "done": 41, "total": 100, "unit": "bytes"})
     ui.say("favlo: Hello")
+    assert "favlo: Hello" not in stream.getvalue()
+    assert "41" in stream.getvalue()
+    ui.apply_event({"type": "end", "phase": "load", "summary": "loaded record"})
     ui.hold(False)
     text = stream.getvalue()
-    reply_at = text.index("favlo: Hello")
-    assert reply_at < text.index("prefix store 10 tokens")
-    assert reply_at < text.index("decode 12.00 tok/s")
-    assert "41" not in text
+    assert text.index("41") < text.index("loaded record")
+    assert text.index("loaded record") < text.index("favlo: Hello")
 
 
 def test_the_prompt_starts_on_the_line_after_telemetry() -> None:
@@ -506,20 +501,57 @@ def test_the_prompt_starts_on_the_line_after_telemetry() -> None:
     assert "tokensyou:" not in text
 
 
-def test_a_late_telemetry_line_lands_before_the_prompt() -> None:
+def test_the_frame_waits_until_every_request_closes() -> None:
     import threading
 
     ui, stream, _clock = _ui("pretty", color=0)
+    ui.hold(True)
+    ui.note_caught_up()
+    ui.apply_event({"type": "log", "line": "request open"})
+    ui.apply_event({"type": "log", "line": "prefix store 10 tokens"})
+    ui.say("favlo: Hello")
+    assert "prefix store 10 tokens" in stream.getvalue()
+    assert "favlo: Hello" not in stream.getvalue()
 
-    def late() -> None:
+    def finish() -> None:
         time.sleep(0.05)
-        ui.log("prefix store 10 tokens")
+        ui.apply_event({"type": "log", "line": "request closed"})
+        ui.note_caught_up()
 
-    threading.Thread(target=late).start()
+    threading.Thread(target=finish).start()
+    ui.hold(False)
     ui.prompt(True)
     text = stream.getvalue()
-    assert text.index("prefix store 10 tokens") < text.index("you:")
-    assert text.endswith("you: ") or "tokens\nyou: " in text
+    assert text.index("prefix store 10 tokens") < text.index("favlo: Hello")
+    assert text.index("favlo: Hello") < text.index("you:")
+    assert "request open" not in text
+    assert "request closed" not in text
+
+
+def test_a_turn_prints_every_request_after_the_last_close() -> None:
+    ui, stream, _clock = _ui("pretty", color=0)
+    ui.hold(True)
+    for label in ("prefix store 1 tokens", "prefix store 2 tokens"):
+        ui.apply_event({"type": "log", "line": "request open"})
+        ui.apply_event({"type": "log", "line": label})
+        ui.apply_event({"type": "log", "line": "request closed"})
+    ui.say("favlo: Hello")
+    assert "prefix store 1 tokens" in stream.getvalue()
+    assert "favlo: Hello" not in stream.getvalue()
+    ui.hold(False)
+    text = stream.getvalue()
+    reply_at = text.index("favlo: Hello")
+    assert text.index("prefix store 1 tokens") < reply_at
+    assert text.index("prefix store 2 tokens") < reply_at
+
+
+def test_a_wait_line_is_shown_while_the_frame_is_open() -> None:
+    ui, stream, _clock = _ui("pretty", color=0)
+    ui.hold(True)
+    ui.apply_event({"type": "log", "line": "waiting for the open request"})
+    assert "waiting for the open request" in stream.getvalue()
+    assert "you:" not in stream.getvalue()
+    ui.hold(False)
 
 
 def test_vocabulary_is_closed() -> None:

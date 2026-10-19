@@ -5,7 +5,7 @@ description: Wire a Favlo pipeline to the shared SSD prefix cache in src/favlo/p
 
 # Prefix cache
 
-The file format lives in `src/favlo/prefix.py`. Read the Prefix cache section of [ARCHITECTURE.md](../../../ARCHITECTURE.md) first. A pipeline imports that module. It does not copy the format, and it does not edit the module to special-case one model.
+The file format lives in `src/favlo/prefix.py`. Read [docs/prefix.md](../../../docs/prefix.md) first. A pipeline imports that module. It does not copy the format, and it does not edit the module to special-case one model.
 
 Another pipeline's adapter, region names, and pack functions are not a reference. Pack this pipeline's own buffers.
 

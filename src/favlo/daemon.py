@@ -131,11 +131,13 @@ def _follow(
     stop: threading.Event,
     offset: int,
     take: Callable[[str], None],
+    on_idle: Callable[[], None] | None = None,
 ) -> threading.Thread:
     def run() -> None:
         position = offset
         pending = b""
         while not stop.is_set():
+            size = position
             if path.is_file():
                 try:
                     size = path.stat().st_size
@@ -156,6 +158,14 @@ def _follow(
                     while b"\n" in pending:
                         raw, pending = pending.split(b"\n", 1)
                         take(raw.decode("utf-8", errors="replace"))
+            if on_idle is not None and b"\n" not in pending and position >= size:
+                if path.is_file():
+                    try:
+                        size = path.stat().st_size
+                    except OSError:
+                        size = position
+                if position >= size:
+                    on_idle()
             if stop.wait(0.05):
                 return
 
@@ -170,6 +180,7 @@ def follow(
     stop: threading.Event,
     *,
     offset: int = 0,
+    on_idle: Callable[[], None] | None = None,
 ) -> threading.Thread:
     """Call ``on_line`` with each new durable line until ``stop`` is set."""
 
@@ -178,7 +189,7 @@ def follow(
         if line:
             on_line(line)
 
-    return _follow(path, stop, offset, take)
+    return _follow(path, stop, offset, take, on_idle)
 
 
 def follow_events(
@@ -187,6 +198,7 @@ def follow_events(
     stop: threading.Event,
     *,
     offset: int = 0,
+    on_idle: Callable[[], None] | None = None,
 ) -> threading.Thread:
     """Call ``on_event`` with each telemetry object, including ticks."""
 
@@ -195,7 +207,7 @@ def follow_events(
         if event is not None:
             on_event(event)
 
-    return _follow(path, stop, offset, take)
+    return _follow(path, stop, offset, take, on_idle)
 
 
 def stop_pid(pid: int) -> None:

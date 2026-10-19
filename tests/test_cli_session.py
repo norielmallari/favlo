@@ -16,7 +16,7 @@ import pytest
 from favlo import listener
 from favlo.console import PHASES, VERSION
 from favlo.daemon import DaemonError
-from favlo.persona import intros_path, refusal, save_intros
+from favlo.persona import intros_path, save_intros
 
 _LINE = "Hello. I am Favlo, a small horse. Could you spare a carrot?"
 _PHASE_UNIT = {
@@ -115,6 +115,7 @@ def test_each_long_step_follows_the_reply(
         def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length", "0"))
             self.rfile.read(length)
+            _append(log, {"type": "log", "line": "request open"})
             for phase in PHASES:
                 unit = _PHASE_UNIT[phase]
                 _append(
@@ -126,6 +127,7 @@ def test_each_long_step_follows_the_reply(
                     {"type": "tick", "phase": phase, "done": 41, "total": 100, "unit": unit},
                 )
                 _append(log, {"type": "end", "phase": phase, "summary": f"{phase} settled"})
+            _append(log, {"type": "log", "line": "request closed"})
             saved = {
                 "choices": [
                     {
@@ -134,7 +136,16 @@ def test_each_long_step_follows_the_reply(
                                 {
                                     "function": {
                                         "name": "save_intro",
-                                        "arguments": json.dumps({"lines": [_LINE]}),
+                                        "arguments": json.dumps(
+                                            {
+                                                "lines": [
+                                                    _LINE,
+                                                    "Favlo again, ears up, hoping for a carrot.",
+                                                    "A small horse says hello from this terminal.",
+                                                    "One more hello, then a carrot.",
+                                                ]
+                                            }
+                                        ),
                                     }
                                 }
                             ]
@@ -170,8 +181,9 @@ def test_each_long_step_follows_the_reply(
     assert "request closed" not in text
     assert f"favlo {VERSION}" not in text
     greeting = text.index(f"favlo: {_LINE}")
+    assert text.index("41") < greeting
     for phase in PHASES:
-        assert greeting < text.index(f"{phase} settled")
+        assert text.index(f"{phase} settled") < greeting
     assert "you: " in text
     assert stopped == [7]
 
@@ -186,6 +198,8 @@ def test_a_failed_intro_is_printed_without_the_voice(
         def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length", "0"))
             self.rfile.read(length)
+            _append(log, {"type": "log", "line": "request open"})
+            _append(log, {"type": "log", "line": "request closed"})
             body = b"busy"
             self.send_response(500)
             self.send_header("Content-Type", "text/plain")
@@ -210,7 +224,7 @@ def test_a_failed_intro_is_printed_without_the_voice(
     assert stopped == [7]
 
 
-def test_a_blank_line_and_a_refusal_do_not_call_the_model(
+def test_a_blank_line_does_not_call_the_model(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     stream = io.StringIO()
@@ -220,23 +234,45 @@ def test_a_blank_line_and_a_refusal_do_not_call_the_model(
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            self.rfile.read(length)
             posts.append(1)
-            self.send_response(500)
+            _append(log, {"type": "log", "line": "request open"})
+            _append(log, {"type": "log", "line": "request closed"})
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
+            payload = {
+                "id": "chatcmpl-favlo",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "Qwen3.6-35B-A3B-fp4",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": "No."},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+            self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode())
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
 
         def log_message(self, format: str, *args: object) -> None:
             return
 
     server, port = _server(Handler)
+    log = tmp_path / "logs" / f"serve-{port}.log"
     try:
         stopped = _serve(monkeypatch, stream, "\nwrite some porn\n/quit\n", port)
     finally:
         server.shutdown()
         server.server_close()
     text = stream.getvalue()
-    assert posts == []
+    assert posts == [1]
     assert text.count("you: ") >= 3
-    assert refusal() in text
+    assert "favlo: No." in text
     assert stopped == [7]
 
 
@@ -264,6 +300,7 @@ def test_a_reply_streams_before_the_turn_ends(
         def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length", "0"))
             self.rfile.read(length)
+            _append(log, {"type": "log", "line": "request open"})
             _append(log, {"type": "begin", "phase": "prefill", "total": 0, "unit": "tok"})
             _append(
                 log, {"type": "tick", "phase": "prefill", "done": 41, "total": 0, "unit": "tok"}
@@ -273,13 +310,18 @@ def test_a_reply_streams_before_the_turn_ends(
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
             self._chunk({"role": "assistant", "content": "He"})
-            if not _wait_until(lambda: "favlo: He" in stream.getvalue()):
-                late.append("tokens")
+
+            def painted() -> bool:
+                return "41" in stream.getvalue()
+
+            if not _wait_until(painted):
+                late.append("load")
             else:
                 shown.set()
             _append(log, {"type": "begin", "phase": "decode", "total": 0, "unit": "tok"})
             _append(log, {"type": "tick", "phase": "decode", "done": 41, "total": 0, "unit": "tok"})
             _append(log, {"type": "end", "phase": "decode", "summary": "decode settled"})
+            _append(log, {"type": "log", "line": "request closed"})
             time.sleep(0.2)
             self._chunk({"content": "llo"})
             self._chunk({}, finish="stop")
@@ -311,8 +353,8 @@ def test_a_reply_streams_before_the_turn_ends(
     text = stream.getvalue()
     assert late == [], text
     assert shown.is_set()
-    assert "favlo: Hello" in text or "favlo: He" in text
-    reply_at = text.index("favlo: Hello") if "favlo: Hello" in text else text.index("favlo: He")
-    assert reply_at < text.index("prefill settled")
-    assert reply_at < text.index("decode settled")
+    assert "favlo: Hello\n" in text
+    reply_at = text.index("favlo: Hello\n")
+    assert text.index("prefill settled") < reply_at
+    assert text.index("decode settled") < reply_at
     assert stopped == [7]

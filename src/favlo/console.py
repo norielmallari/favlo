@@ -32,7 +32,7 @@ _PLATE_TOP = "▕█████████████████████
 _PLATE_MID = "▕██     F A V L O     ██▏"
 _PLATE_BOT = "▕███████████████████████▏"
 _TICK = 0.1
-_PROMPT_QUIET = 0.25
+_FRAME_WAIT = 2.0
 _CSI_FINAL = set(
     "@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
 )
@@ -100,9 +100,12 @@ class Console:
         self._status_lines = 0
         self._pending_summaries: list[str] = []
         self._column = 0
-        self._activity = time.monotonic()
         self._holding = False
-        self._held: list[dict[str, Any]] = []
+        self._reply: str | None = None
+        self._opens = 0
+        self._closes = 0
+        self._follower = False
+        self._caught_at = 0.0
 
     @classmethod
     def from_env(
@@ -173,10 +176,12 @@ class Console:
     def draft(self, text: str) -> None:
         """Show a reply that is still arriving. The terminal wraps it.
 
-        An open prefill or decode row stays on the line under the reply and
-        keeps its tok/s.
+        While a turn is open, the reply waits until that turn's telemetry is drawn.
         """
         with self._lock:
+            if self._holding:
+                self._reply = text
+                return
             if self.mode != "pretty":
                 self._draft = text
                 return
@@ -196,6 +201,10 @@ class Console:
 
     def say(self, line: str) -> None:
         """A line that stays on screen while a row is open."""
+        with self._lock:
+            if self._holding:
+                self._reply = line
+                return
         self._record(line)
         if self.mode == "json":
             self._event({"type": "log", "line": line})
@@ -227,32 +236,64 @@ class Console:
             self._redraw()
 
     def prompt(self, after_output: bool = False) -> None:
-        """``you:`` at the start of a line, after this turn's telemetry is drawn."""
-        if after_output:
-            self._wait_quiet(_PROMPT_QUIET)
+        """``you:`` at the start of a line. The turn's telemetry is already drawn."""
         with self._lock:
             if after_output and self._column != 0:
                 self._write("\n")
             self._write("you: ")
 
+    def note_caught_up(self) -> None:
+        """The follower has applied every complete line now in the log."""
+        with self._lock:
+            self._follower = True
+            self._caught_at = time.monotonic()
+
     def hold(self, active: bool) -> None:
-        """Keep telemetry until the reply is finished, then print those lines."""
+        """Paint telemetry now. Print the reply after every request has closed."""
         if active:
             with self._lock:
                 self._holding = True
+                self._opens = 0
+                self._closes = 0
+                self._reply = None
             return
-        with self._lock:
-            queued = self._held
-            self._held = []
-            self._holding = False
-        for line in _telemetry_lines(queued):
-            self.log(line)
+        self._release_frame()
+
+    def _release_frame(self) -> None:
+        started = time.monotonic()
+        deadline = started + _FRAME_WAIT
+        while True:
+            with self._lock:
+                if not self._holding:
+                    return
+                balanced = self._opens == self._closes
+                caught = self._caught_at >= started
+                if not self._follower:
+                    ready = balanced
+                else:
+                    ready = balanced and self._closes >= 1 and caught
+                if ready or time.monotonic() >= deadline:
+                    reply = self._reply
+                    self._reply = None
+                    self._holding = False
+                    self._opens = 0
+                    self._closes = 0
+                    break
+            self._sleep(0.02)
+        if reply:
+            self.say(reply)
 
     def apply_event(self, event: dict[str, Any]) -> None:
         """Mirror one daemon event onto this console."""
         with self._lock:
-            if self._holding:
-                self._held.append(event)
+            line = _log_line(event)
+            if line == "request open":
+                if self._holding:
+                    self._opens += 1
+                return
+            if line == "request closed":
+                if self._holding:
+                    self._closes += 1
                 return
         kind = event.get("type")
         if kind == "log":
@@ -477,6 +518,7 @@ class Console:
         gauge = _event_gauge(event.get("gauge"))
         if gauge is not None:
             progress.gauge = gauge
+        self.sample()
 
     def _mirror_end(self, event: dict[str, Any]) -> None:
         progress = self._remote.pop(self._mirror_key(event), None)
@@ -793,20 +835,8 @@ class Console:
         payload.setdefault("ts", self._clock())
         self._write(json.dumps(payload, separators=(",", ":")) + "\n")
 
-    def _wait_quiet(self, seconds: float) -> None:
-        """Return once no row is open and nothing has been drawn for ``seconds``."""
-        deadline = time.monotonic() + max(seconds * 4, 1.0)
-        while time.monotonic() < deadline:
-            with self._lock:
-                idle_for = time.monotonic() - self._activity
-                busy = bool(self._handles)
-            if not busy and idle_for >= seconds:
-                return
-            self._sleep(0.02)
-
     def _write(self, text: str) -> None:
         if text:
-            self._activity = time.monotonic()
             self._advance(text)
         self.stream.write(text)
         self.stream.flush()
@@ -830,20 +860,13 @@ class Console:
             index += 1
 
 
-def _telemetry_lines(events: list[dict[str, Any]]) -> list[str]:
-    """The durable lines from one turn. Ticks stay off the reply."""
-    lines: list[str] = []
-    for event in events:
-        kind = event.get("type")
-        if kind == "log":
-            line = event.get("line")
-        elif kind == "end":
-            line = event.get("summary")
-        else:
-            continue
-        if isinstance(line, str) and line:
-            lines.append(line)
-    return lines
+def _log_line(event: dict[str, Any]) -> str | None:
+    if event.get("type") != "log":
+        return None
+    line = event.get("line")
+    if isinstance(line, str) and line:
+        return line
+    return None
 
 
 def _event_gauge(value: Any) -> tuple[str, int] | None:

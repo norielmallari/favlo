@@ -29,15 +29,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TextIO
 
-from favlo.persona import (
-    INSTRUCTIONS,
-    blocked,
-    intros_path,
-    opening,
-    refusal,
-    rotate_opening,
-    save_intros,
-)
+from favlo.persona import INSTRUCTIONS, intros_path, opening, rotate_opening, save_intros
 
 Turn = Callable[[str], str]
 HEARTBEAT_SECONDS = 30 * 60
@@ -106,9 +98,7 @@ class Idle:
 
 
 def reply(text: str, turn: Turn) -> str:
-    """Answer one line. Blocked text never reaches ``turn``."""
-    if blocked(text):
-        return refusal()
+    """Answer one line. The model applies its own guardrails."""
     return turn(text)
 
 
@@ -291,10 +281,13 @@ def _heartbeat(base: str, home: Path | None) -> str:
     return _ask_again(spoken.strip())
 
 
+_INTRO_KEEP = 4
+
 _INTRO_ASK = (
-    "This is the first start. Write several opening lines. "
-    "Each line is its own introduction: longer than a later reply, flavorful, with emojis, "
+    "This is the first start. Write six opening lines. "
+    "Each line is a different introduction: longer than a later reply, flavorful, with emojis, "
     "as Favlo, a small horse who would like a carrot. "
+    "No two lines say the same thing. "
     "Call save_intro with those lines. "
     "The next start shows the next line, then the first line again."
 )
@@ -361,9 +354,11 @@ def intro_request(model: str) -> dict[str, Any]:
                 "content": (
                     f"{INSTRUCTIONS}\n\n"
                     "This call writes the opening, before any later reply. "
-                    "Greet now. Write several lines. Each line is its own introduction, "
+                    "Greet now. Write six different lines. Each line is its own introduction, "
                     "longer than a later reply, flavorful, and with emojis. "
-                    "Do not use violent, sexual, or obscene language. "
+                    "No two lines say the same thing. "
+                    "Do not use violent, sexual, NSFW, erotic, or obscene language, "
+                    "and do not describe harm. "
                     "Call save_intro. A later start shows the next line."
                 ),
             },
@@ -385,8 +380,10 @@ def intro_request(model: str) -> dict[str, Any]:
                                 "type": "array",
                                 "items": {"type": "string"},
                                 "description": (
-                                    "Opening lines. The first is shown now and on later starts."
+                                    "Six different opening lines. "
+                                    "The first is shown now. A later start shows the next."
                                 ),
+                                "minItems": _INTRO_KEEP,
                             }
                         },
                         "required": ["lines"],
@@ -395,7 +392,7 @@ def intro_request(model: str) -> dict[str, Any]:
             }
         ],
         "tool_choice": {"type": "function", "function": {"name": "save_intro"}},
-        "max_tokens": 800,
+        "max_tokens": 1200,
         "enable_thinking": False,
     }
 
@@ -404,7 +401,7 @@ def _introduce(base: str, path: Path, root: Path | None = None) -> str:
     """Ask the registered model for the opening and store the tool call."""
     model = chat_model_id(root)
     payload = _post_json(f"{base}/chat/completions", intro_request(model))
-    lines = _intro_lines(payload)
+    lines = accepted_openings(_intro_lines(payload))
     if not lines:
         message = "the model did not save an introduction"
         raise RuntimeError(message)
@@ -429,6 +426,24 @@ def _post_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
         message = "the model did not save an introduction"
         raise RuntimeError(message)
     return body
+
+
+def accepted_openings(lines: list[str] | None) -> list[str] | None:
+    """Distinct opening lines. One line would repeat on every later start."""
+    if not lines:
+        return None
+    kept: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        cleaned = " ".join(line.split())
+        key = cleaned.casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        kept.append(cleaned)
+    if len(kept) < _INTRO_KEEP:
+        return None
+    return kept
 
 
 def _intro_lines(payload: dict[str, Any]) -> list[str] | None:

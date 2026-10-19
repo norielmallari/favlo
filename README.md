@@ -48,9 +48,9 @@ uv run favlo serve --non-interactive
 
 ## Chat
 
-On a terminal, `favlo serve` reads stdin and talks to the daemon through its chat endpoint. The model field is the first folder in the registry. A line is sent when it is ready. The prompt is `you:`. It starts on a new line after that turn's telemetry. The reply is `favlo:` and the tokens appear as they arrive. A tool call is not printed. The terminal wraps that text. That reply finishes before its telemetry is printed. Ctrl+C stops the daemon when this terminal started it. Closing the terminal leaves the daemon running.
+On a terminal, `favlo serve` reads stdin and talks to the daemon through its chat endpoint. The model field is the first folder in the registry. A line is sent when it is ready. The prompt is `you:`. It starts on a new line after that turn's telemetry. The reply is `favlo:`. Telemetry is painted as it arrives, including the load row. The reply is printed after that turn's requests have closed. A tool call is not printed. The terminal wraps that text. Ctrl+C stops the daemon when this terminal started it. Closing the terminal leaves the daemon running.
 
-The first start, when `~/.favlo/intros.json` has no lines, sends one chat completion. The daemon opens the load row when it reads the record. `save_intro` stores the openings. The first start prints the first line. Each later start prints the next line, then the first again. The model runs again when someone types.
+The first start, when `~/.favlo/intros.json` has no lines, sends one chat completion. The daemon opens the load row when it reads the record. `save_intro` stores the openings when several of them are different. The first start prints the first line. Each later start prints the next line, then the first again. The model runs again when someone types.
 
 After 30 minutes with no completion from this terminal and no typing, Favlo checks memory and free disk. When the machine can hold [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B), Favlo starts that download and asks whether to remind them again. A no is remembered, and those reminders stay off until they are turned back on. A shorter idle gap would take the only request slot during a pause in the conversation.
 

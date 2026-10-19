@@ -4,6 +4,10 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 
 | Path | Contents |
 |---|---|
+| [serve.md](serve.md) | Listener, daemon, and the serve log |
+| [console.md](console.md) | Shared status row |
+| [prefix.md](prefix.md) | SSD prefix store |
+| [harness.md](harness.md) | File agent and coding agent |
 | [ai-assistance/README.md](ai-assistance/README.md) | AI-assisted features on `favlo serve` |
 | [qwen38-flash-next/architecture.md](qwen38-flash-next/architecture.md) | Qwen3.8-Flash-Next pipeline contract |
 | [qwen38-flash-next/performance.md](qwen38-flash-next/performance.md) | Qwen3.8-Flash-Next recorded prefill and decode rates |

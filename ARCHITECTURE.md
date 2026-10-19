@@ -1,10 +1,25 @@
 # Favlo architecture
 
-As-built contract for the process.
+One model is one pipeline. `favlo serve` listens with nothing loaded. The `model` field on `POST /v1/chat/completions` loads one registry row. Two records are not resident together. A pipeline does not import another pipeline, and it does not share that pipeline's forward, records, or kernels. Quantize and the other non-serve commands require `favlo --<pipeline>`.
 
-One model is one pipeline. `favlo serve` is the entry point. It listens with nothing loaded. `GET /v1/models` lists `models/registry.json`. The `model` field on `POST /v1/chat/completions` selects one row, and that row's `pipeline` names the entry file that loads. The resident pipeline releases its record, device buffers, cache, and live prefix before a different pipeline loads. Two records are not resident together. A pipeline does not import another pipeline, and it does not share that pipeline's forward, records, or kernels. Quantize and the other non-serve commands require `favlo --<pipeline>`. Each pipeline keeps that flag.
+This file is the map and the write set. It wins for the listener, the registry, the console, and which files an agent may edit. A pipeline note wins for that pipeline's records, cache, and kernels. Implementation plans stay under `artifacts/implementation-plan/` (gitignored).
 
-This file wins for the listener, the registry, the console, and the write set below. A pipeline's own note wins for that pipeline's records, cache, and kernels. Implementation plans stay under `artifacts/implementation-plan/` (gitignored).
+## Map
+
+| Area | Code | Note |
+|---|---|---|
+| Command discovery | `src/favlo/cli.py` | This file. The command finds each `*-*.py` entry. Adding a runtime does not edit `cli.py`. |
+| Listener and daemon | `src/favlo/listener.py`, `src/favlo/daemon.py` | [docs/serve.md](docs/serve.md) |
+| Terminal chat | `src/favlo/talk.py`, `src/favlo/persona.py` | [docs/ai-assistance](docs/ai-assistance/README.md) |
+| Console | `src/favlo/console.py` | [docs/console.md](docs/console.md) |
+| Registry | `src/favlo/registry.py`, `models/registry.json` | This file |
+| Prefix store | `src/favlo/prefix.py` | [docs/prefix.md](docs/prefix.md) |
+| First-run setup | `src/favlo/setup.py` | [docs/guides/models.md](docs/guides/models.md) |
+| Harness | `harness/` | [docs/harness.md](docs/harness.md) |
+
+Shared code is `src/favlo/`. There is no model base class and no kernel that branches on the pipeline. A pipeline task does not change `src/favlo/` to reach into another runtime. A pipeline imports the prefix store and adapts its own buffers.
+
+The daemon is a request server. It does not own chat history, tools, or the terminal session. The CLI owns those. Telemetry is one JSON event per line. The terminal paints it as it arrives, and prints the reply after that turn's requests have closed.
 
 ## Runtimes
 
@@ -16,40 +31,57 @@ Each runtime is a separate write set. An agent developing one runtime edits that
 | `qwen38-27b` | `qwen38-27b.py` | `qwen38_27b/` | [docs/qwen38-27b/README.md](docs/qwen38-27b/README.md) |
 | `qwen36-35b-a3b` | `qwen36-35b-a3b.py` | `qwen36_35b_a3b/` | [docs/qwen36-35b-a3b/README.md](docs/qwen36-35b-a3b/README.md) |
 
-The entry file sets `PIPELINE` to its filename stem. The command discovers those files. Adding a runtime does not edit `src/favlo/cli.py`.
-
-A runtime's write set is the entry file, the package, `docs/<pipeline>/`, and tests that import only that package. A new runtime adds a row to the table above and its own doc directory. It does not edit another row's package, shaders, tests, or docs.
-
-Shared code is `src/favlo/`: the process entry, the registry, the listener, and the SSD prefix store. There is no model base class and no kernel that branches on the pipeline. `src/favlo/` changes when the listener, the registry, the console, or the prefix store changes. A pipeline task does not change it to reach into another runtime. A pipeline imports the prefix store and adapts its own buffers. It does not import another pipeline.
-
-The registry stores a sampling card on each row. Registration loads `VARIANTS` and `DEFAULT_VARIANT` from that pipeline's `sampling.py` and writes them on the row. The stored names are the `:suffix` ids. A bare model id selects no row. The pipeline applies its default variant, or the row the request selects.
+The entry filename may contain hyphens. The command loads it by path. It is not an importable module name. The package beside it uses underscores. The entry sets `PIPELINE` to that filename stem. A runtime's write set is the entry file, the package, `docs/<pipeline>/`, and tests that import only that package. A new runtime adds a row to the table above and its own doc directory. It does not edit another row's package, shaders, tests, or docs.
 
 Tests for the listener, the registry, and the console live in `tests/test_cli.py`, `tests/test_server.py`, `tests/test_registry.py`, and `tests/test_console.py`. A pipeline's tests do not import another pipeline.
 
-## Listener
+## Registry
 
-`favlo serve` on a terminal is the CLI. `favlo serve --non-interactive` starts the server daemon and exits. The daemon listens on `127.0.0.1:8129` with nothing loaded. It does not read the terminal. Closing the terminal leaves the daemon running. A later `favlo serve` attaches to the daemon already listening on that address. `/quit` stops the daemon. Ctrl+C stops the daemon when this terminal started it. `--max-memory` is passed to a pipeline whose `open_runtime` accepts it, as the maximum bytes that runtime may allocate. `GET /v1/models` lists every registered row. `POST /v1/chat/completions` loads the pipeline that row names, one request at a time. Each connection has its own thread. A completion that arrives while another is open waits until that one has returned, and the daemon logs `waiting for the open request`, which the terminal prints. `GET /v1/models` answers while a completion is open. A connection that keeps its socket open between requests, such as an editor probing the port, does not hold the completion slot. A connection that sends no request is dropped after 10 seconds. A different folder or a different pipeline unloads the previous record first. An unknown id is 404. `serve` does not register a record it finds on disk. The daemon writes one JSON event per line to `~/.favlo/logs/serve-<port>.log`. Durable lines are also appended to `~/.favlo/logs/favlo.log`.
+`models/registry.json` is gitignored. A row stores the folder, the pipeline entry, an alias, the BF16 source path, the key/value mode, the resident percent, and the sampling card copied from that pipeline's `sampling.py`. The stored names are the `:suffix` ids. A bare model id selects no row. The pipeline applies its default variant, or the row the request selects. `serve` does not register a record it finds on disk. A fresh tree has no rows. `GET /v1/models` lists every registered row, including each sampling suffix that row stores.
 
-A terminal `favlo serve` whose registry has no rows checks that a small shader compiles at Metal 4.1, then runs `favlo --qwen36-35b-a3b setup` before the daemon starts. That command downloads `Qwen/Qwen3.6-35B-A3B` with plain HTTP, packs `models/Qwen3.6-35B-A3B-fp4`, registers the row, and removes the BF16 checkout. The download bar and the quantize bar are console rows. `--non-interactive` does not download. A pipe does not download. A failed check or a failed download exits. The next `serve` on a terminal continues from the files already written.
+## Layout
 
-On a terminal, the CLI prints no introduction of its own. When `~/.favlo/intros.json` has no lines, one chat completion is sent immediately. The registered model is the `model` field, and `tool_choice` names `save_intro`. The request includes the persona and asks for several introductions, each with emojis. The first start prints the first saved line. Each later start prints the next line, then the first again. The daemon opens the load row when it reads the record. The completion's tool call is stored, and this start prints the first of those lines. That request loads the model when it is not already loaded. The reply finishes before that turn's telemetry is printed. A tool call is not printed. The next `you:` starts on a new line after that turn's telemetry. The model field is the first folder in the registry. That completion is the check that this model can complete a chat. A failure that stores nothing is printed, and the next start tries again. When the file has lines, serve prints the next line and does not call the model until the person types. After the last line, the next start prints the first again. The line just shown is stored as the assistant's first turn. The next model call answers the line the person typed. That reply is printed as `favlo:`, the tokens appear as they arrive, and the terminal wraps the text. A tool result is not printed. The voice is a small horse who asks for a carrot. A line that matches the violent, sexual, or obscene list is answered from a second fixed list and is not sent to the model. Any other line is sent immediately. One Microsoft Agent Framework session calls this server's own `POST /v1/chat/completions`. The model field on that call is the first folder in the registry. The session keeps the terminal's history. `/quit` on that terminal stops the daemon. A question about connecting a client, adding a model, or where the name came from is answered from `docs/guides/` after the `read_guide` tool returns that file. A question about which models are registered is answered from `list_models`, which reads the registry. A pipe reaches the end of stdin and leaves the daemon running. The reader is a thread in the CLI, and it does not import a pipeline. The daemon does not import the CLI.
+```text
+qwen38-flash-next.py    command entry; loads the package by path
+qwen38_flash_next/      this model's pipeline; see its note
+qwen38-27b.py           command entry; loads the package by path
+qwen38_27b/             Qwen3.8-27B. It does not import Flash Next.
+qwen36-35b-a3b.py       command entry; loads the package by path
+qwen36_35b_a3b/         Qwen3.6-35B-A3B. It does not import another pipeline.
+src/favlo/              process entry; the listener loads the pipeline a request names
+  cli.py                discovers entry files; a new runtime does not edit this
+  registry.py           folders, aliases, pipelines, and sampling variants
+  listener.py           HTTP daemon; a terminal starts it and keeps the CLI
+  daemon.py             spawn and stop the listener; no pipeline imports
+  console.py            status row; no pipeline imports
+  talk.py               terminal chat
+  persona.py            voice and saved openings
+  prefix.py             SSD prefix store
+  setup.py              empty-registry download
+  logs.py               rolling server log; size is settings.json log_max_bytes
+harness/                file agent, coding agent, and the three benchmarks
+docs/                   as-built notes; see docs/README.md
+```
 
-The terminal's only heartbeat is the agent check. It waits until this terminal has no completion in flight and nobody has typed for 30 minutes, then runs one session. A completion or a typed line starts that wait over. A check that comes due during a completion waits until that completion returns and runs once. The session calls `machine`, which reports physical memory and free disk, then `download_qwen38_27b` when that report says the machine is ready. Ready means at least 16 GB of physical memory, no registered `qwen38-27b` row, and room on the volume for the published `Qwen/Qwen3.8-27B` files. The tool starts `favlo --qwen38-27b download`, which writes `models/Qwen3.8-27B-bf16` and continues a short file on the next run. The packed record is still `quantize`. The line asks whether to remind them again. On a later turn, `download_suggestions` writes `~/.favlo/suggestions.json`. `enabled` false stops later idle suggestions. `enabled` true turns them back on. A missing file leaves reminders on. A machine that is not ready, a checkout that is already downloading or present, or reminders that are off, does not call the model and does not print. The log for that download is `~/.favlo/logs/qwen38-27b-download.log`. A pipeline heartbeat runs in the daemon after the request closes.
+Probe, matmul, kernels, bf16, complete, and quantize stay on that pipeline's flag: `favlo --qwen38-flash-next quantize`, and the same flag for the other commands. The process does not batch and does not use the Neural Engine. A pipeline does not fuse a whole layer into one kernel. Prefill, decode, and the calibration prefill are Metal shaders. A missing kernel stays missing.
 
-`models/registry.json` is gitignored. It stores folder names, the pipeline entry, an alias, the BF16 source path, the key/value mode, the resident percent, and the sampling rows copied from that pipeline. A fresh tree has no rows.
+## Commands
 
-## Console
+```text
+uv sync --extra dev
+uv run pytest
+uv run favlo serve
+uv run favlo --qwen38-flash-next probe
+uv run favlo --qwen38-flash-next matmul
+uv run favlo --qwen38-flash-next kernels
+uv run favlo --qwen38-flash-next quantize
+uv run favlo --qwen38-27b quantize
+uv run favlo --qwen36-35b-a3b kernels
+uv run favlo --qwen36-35b-a3b quantize
+uv run python -m harness.file_agent --base-url http://127.0.0.1:8129/v1 --workspace ./note-workspace
+uv run python -m harness --model qwen38-27b
+uv run python -m harness.benchmarks --model qwen38-27b
+uv run python -m harness.coding --model qwen38-27b
+```
 
-Status goes through `src/favlo/console.py`. The module imports nothing from a pipeline. The listener does not import a pipeline until a request names one. That row's entry file provides `open_runtime` and `handle_chat`. `--console auto` is pretty when stderr is a terminal, and plain when it is a pipe, when `NO_COLOR` is set, or when `TERM` is `dumb`. `plain` prints the lines the harness parses. `pretty` draws one row per open phase at 10 Hz. Phases are `load`, `download`, `quantize`, `prefill`, and `decode`. `json` writes one NDJSON object per event, schema version 1. The daemon console is JSON and emits those events, including ticks. A terminal `favlo serve` draws the Ingot Plate, then paints each open phase from that stream. The daemon opens a load row when a completion reads the record. A chat reply finishes before that turn's telemetry lines are printed. Plain does not open a row. How a pipeline binds those phases is that pipeline's note.
-
-`favlo serve` also appends those durable lines, phase summaries, and tracebacks to `~/.favlo/logs/favlo.log`. The live row is not written there. `~/.favlo/settings.json` key `log_max_bytes` is the most bytes that file may hold. The default is 1048576. Keys `max_tokens` and `thinking_budget` apply only when present. An omitted `max_tokens` on the request and in that file does not cap the completion. An omitted `thinking_budget` does not close a think block on a token count. The first serve creates that file when it is missing. A line that would pass the cap leaves the newest bytes that still fit, starting at the next line when one fits.
-
-## Prefix cache
-
-`src/favlo/prefix.py` stores one sequence as token ids plus named regions under `~/.favlo/prefix/<model>/<checkpoint>/<hash>.bin`. The checkpoint id is the hex SHA-256 of `manifest.json`, or of `config.json` when the record has no manifest. The file name is the hex SHA-256 of the format, the model id, that digest, the cache tag, and the token ids. The store does not know a key/value layout. Each pipeline packs its own buffers into regions and copies a matching file back.
-
-A prompt that extends the live tokens keeps the device. Any other prompt writes the live sequence, clears the device, and loads the longest stored prefix that pipeline accepts. A match reads the header. Region bytes are read when that prefix is installed. Regions start on a 16 KB page. The write replaces the destination after the header hash is in place. A region whose stored bytes are a prefix of the new blob is copied forward. One model and one checkpoint stay within 32 GiB. Past that, the oldest files are deleted and the file just written stays. What a pipeline puts in the regions, and whether an exact-length file can be sampled, is that pipeline's note.
-
-## Harness
-
-`python -m harness --model <id>` is the file agent. The model field is the pipeline name. The request sets `enable_thinking` false and leaves every other sampling field unset, so the listener fills the instruct card. It reads repository files until the prompt reaches the token target, prints each request's prefill and decode line, and restarts after the first turn so the next turn loads the prefix from disk. `python -m harness.coding --model <id>` sets `enable_thinking` true on that bare id. The model writes `ledger.py` in a throwaway workspace. The suite that decides the run lives outside that workspace. Exit 0 is a pass. Its prefill and decode lines are a separate series. The file-agent check in `pytest` is a separate three-step tool check (`python -m harness.file_agent`).
+What the harness scores is [docs/harness.md](docs/harness.md). A pipeline's quantize, probe, and matmul commands are that pipeline's note.
