@@ -24,6 +24,14 @@ The harness is a [Microsoft Agent Framework](https://github.com/microsoft/agent-
 
 MADMetal is an AI-first application. Agentic software delivery is how this repository is built: agents design the change, write the code, and land it. The author directs the work.
 
+## Local Inference First
+
+The objective is several models on one machine, under the memory that machine can give them. The registry holds the records. One pipeline is resident. A request for a different model releases that record, its device buffers, and its live prefix, then loads the pipeline the request names. The listener serves one completion at a time, on the machine that stores the weights.
+
+`--max-memory` is the byte cap for a pipeline that enforces one. Sequence state that is not the live prompt is written to the SSD prefix store and read back when a later turn extends those token ids. Each pipeline keeps its own weight records and Metal kernels, sized for the memory it is given.
+
+Batching, and other work that spends memory on extra sequences or extra copies of the weights, is deprioritized. The resident set stays one pipeline, so the machine can switch among the models it has registered. The process contract is [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## Problems
 
 Report a problem in this repository's issue tracker.
