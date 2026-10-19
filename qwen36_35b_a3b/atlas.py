@@ -184,7 +184,7 @@ class S3Fifo:
             self._ghost_set.discard(old)
 
 
-def _read_file(buffer: Any, path: Path, nbytes: int) -> None:
+def _read_file(buffer: Any, path: Path, nbytes: int, note: Any = None) -> None:
     view = memoryview(buffer.contents().as_buffer(nbytes))
     with path.open("rb") as handle:
         offset = 0
@@ -194,6 +194,8 @@ def _read_file(buffer: Any, path: Path, nbytes: int) -> None:
                 break
             view[offset : offset + len(chunk)] = chunk
             offset += len(chunk)
+            if note is not None:
+                note(len(chunk))
     if offset != nbytes:
         message = f"{path.name} stopped at {offset} of {nbytes}"
         raise OSError(message)
@@ -289,7 +291,12 @@ class ExpertAtlas:
             if buffer is None:
                 self.layers = []
                 return False
-            _read_file(buffer, self.root / "experts" / f"{layer}.bin", self.file_bytes)
+            _read_file(
+                buffer,
+                self.root / "experts" / f"{layer}.bin",
+                self.file_bytes,
+                getattr(session, "_load_note", None),
+            )
             made.append(buffer)
         self.layers = made
         self.buffers = made

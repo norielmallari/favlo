@@ -37,9 +37,27 @@ def parse_tool_calls(text: str) -> tuple[str | None, list[dict[str, Any]]]:
     return (prefix or None), calls
 
 
-def _parameter_value(value: str) -> str:
+def _parameter_value(value: str) -> Any:
+    """The parameter body. A JSON array or object is that value. Other text stays a string."""
     text = value.strip("\n")
+    parsed = _json_container(text.strip())
+    if parsed is not None:
+        return parsed
     return text
+
+
+def _json_container(text: str) -> Any | None:
+    if len(text) < 2 or text[0] not in "[{":
+        return None
+    if (text[0] == "[" and not text.endswith("]")) or (text[0] == "{" and not text.endswith("}")):
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(parsed, (list, dict)):
+        return parsed
+    return None
 
 
 def function_has_parameters(tools: Any, name: str) -> bool:

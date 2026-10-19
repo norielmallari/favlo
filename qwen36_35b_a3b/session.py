@@ -124,13 +124,16 @@ _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"
 _ZERO = b"\x00" * (8 << 20)
 
 
-def _clear(buffer: Any, nbytes: int) -> None:
+def _clear(buffer: Any, nbytes: int, note: Any = None) -> None:
     view = memoryview(buffer.contents().as_buffer(nbytes))
     offset = 0
     while offset < nbytes:
         end = min(offset + len(_ZERO), nbytes)
         view[offset:end] = _ZERO[: end - offset]
+        step = end - offset
         offset = end
+        if note is not None:
+            note(step)
 
 
 def _metal() -> Any:
@@ -188,6 +191,7 @@ class Session:
                 raise RuntimeError(message)
             self.pipes[name] = pipeline
         self._held: list[Any] = []
+        self._load_note = None
 
     @property
     def device_name(self) -> str:
@@ -213,7 +217,7 @@ class Session:
         if buffer is None:
             message = f"device refused a {nbytes} byte buffer"
             raise RuntimeError(message)
-        _clear(buffer, nbytes)
+        _clear(buffer, nbytes, self._load_note)
         return buffer
 
     def download(self, buffer: Any, nbytes: int) -> bytes:

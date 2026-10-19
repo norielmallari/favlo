@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from qwen36_35b_a3b.atlas import EXPERTS, ExpertAtlas, atlas_slots, available_bytes
+from qwen36_35b_a3b.atlas import EXPERTS, LAYERS, ExpertAtlas, atlas_slots, available_bytes
 from qwen36_35b_a3b.attn import attend_plane, bind_plane, plane_bytes, resize_plane
 from qwen36_35b_a3b.cache import (
     CONTEXT_STEP,
@@ -48,9 +48,9 @@ _THINK_REPEAT_SPAN = 5
 _LONG_LETTERS = 7
 
 
-def _reserved_bytes(resident: int, kv_one: int, plane: int) -> int:
-    """Bytes allocated besides the expert atlas, including the chunk workspace."""
-    scratch = (
+def _scratch_bytes() -> int:
+    """Activation scratch cleared while the record loads."""
+    return (
         HIDDEN * 4
         + HIDDEN * 4
         + 8192 * 2
@@ -78,7 +78,11 @@ def _reserved_bytes(resident: int, kv_one: int, plane: int) -> int:
         + 30 * 3 * 8192 * 2
         + 30 * 32 * 128 * 128 * 4
     )
-    return resident + scratch + workspace_bytes() + 20 * kv_one + plane
+
+
+def _reserved_bytes(resident: int, kv_one: int, plane: int) -> int:
+    """Bytes allocated besides the expert atlas, including the chunk workspace."""
+    return resident + _scratch_bytes() + workspace_bytes() + 20 * kv_one + plane
 
 
 def _u32(value: int) -> bytes:
@@ -93,6 +97,7 @@ def _file_buffer(session: Session, path: Path) -> Any:
     size = path.stat().st_size
     buffer = session.device.newBufferWithLength_options_(max(size, 16), session.shared)
     view = memoryview(buffer.contents().as_buffer(size))
+    note = session._load_note
     with path.open("rb") as handle:
         offset = 0
         while offset < size:
@@ -101,6 +106,8 @@ def _file_buffer(session: Session, path: Path) -> Any:
                 break
             view[offset : offset + len(chunk)] = chunk
             offset += len(chunk)
+            if note is not None:
+                note(len(chunk))
     return buffer
 
 
@@ -209,70 +216,91 @@ class Qwen36Runtime:
         self.max_pos = min(CONTEXT_STEP, ceiling)
         self.kv_record = kv_record_bytes(self.kv_cache)
         self.kv_bytes = kv_buffer_bytes(self.kv_cache, self.max_pos)
-        self.session = Session()
-        self.resident = _file_buffer(self.session, self.root / "resident.bin")
         plane = _plane(self.max_pos)
         reserved = _reserved_bytes(resident_bytes, self.kv_bytes, plane)
-        self.atlas = ExpertAtlas(
-            self.session,
-            self.root,
-            max_memory=self.max_memory,
-            reserved=reserved,
+        images = atlas_slots(
+            self.max_memory,
+            EXPERT_IMAGE,
+            reserved,
+            layers=LAYERS * EXPERTS,
         )
-        self.tensors: dict[str, dict] = self.manifest["tensors"]
-        self.hidden = self.session.zeros(HIDDEN * 4)
-        self.normed = self.session.zeros(HIDDEN * 4)
-        self.half = self.session.zeros(8192 * 2)
-        self.wide = self.session.zeros(8192 * 4)
-        self.z = self.session.zeros(4096 * 4)
-        self.ab = self.session.zeros(32 * 4)
-        self.ab2 = self.session.zeros(32 * 4)
-        self.mixed = self.session.zeros(8192 * 4)
-        self.gdn_y = self.session.zeros(4096 * 4)
-        self.query = self.session.zeros(4096 * 4)
-        self.gate = self.session.zeros(4096 * 4)
-        self.kv = self.session.zeros(512 * 4)
-        self.vv = self.session.zeros(512 * 4)
-        self.attn = self.session.zeros(4096 * 4)
-        self.expert = self.session.zeros(2048 * 4)
-        self.mid = self.session.zeros(8 * 1024 * 4)
-        self.gated = self.session.zeros(8 * 512 * 4)
-        self.partial = self.session.zeros(8 * HIDDEN * 4)
-        self.ids = self.session.zeros(8 * 4)
-        order_path = self.root / "experts" / "order.bin"
-        order = order_path.read_bytes()
-        if len(order) != SLOT_MAP_BYTES:
-            message = f"expert slot map is {len(order)} bytes"
-            raise RuntimeError(message)
-        self.expert_order = self.session.upload(order)
-        self.mix_w = self.session.zeros(8 * 4)
-        self.acc = self.session.zeros(HIDDEN * 4)
-        self.router = self.session.zeros(256 * 4)
-        self.coeff = self.session.zeros(4)
-        self.logits = self.session.zeros(VOCAB * 4)
-        self.history = self.session.zeros(30 * 3 * 8192 * 2)
-        self.state = self.session.zeros(30 * 32 * 128 * 128 * 4)
-        self.k_cache = [self.session.zeros(self.kv_bytes) for _ in range(10)]
-        self.v_cache = [self.session.zeros(self.kv_bytes) for _ in range(10)]
-        if plane:
-            bind_plane(self)
-        self.filled = 0
-        self.prefix = open_session(self)
-        self._prefill = None
-        self._pending: _Pending | None = None
-        self._prefill_progress = None
-        self._prefill_base = 0
-        self._cached: list[int] = []
-        self._cached_tokens = 0
-        self._prefill_seconds = 0.0
-        self._decode_seconds = 0.0
-        self._output_ids: list[int] = []
-        used = reserved + self.atlas.bytes
-        print(
-            f"loaded {self.root.name} kv {self.kv_cache} context {self.max_pos} "
-            f"atlas {self.atlas.slots} images memory {used}/{self.max_memory}",
-            flush=True,
-        )
+        atlas_read = LAYERS * EXPERTS * EXPERT_IMAGE if images >= LAYERS * EXPERTS else 0
+        load_total = resident_bytes + atlas_read + _scratch_bytes() + 20 * self.kv_bytes + plane
+        self._load_progress = self._begin_load(load_total)
+        summary = ""
+        try:
+            self.session = Session()
+            self.session._load_note = self._note_load
+            self.resident = _file_buffer(self.session, self.root / "resident.bin")
+            self.atlas = ExpertAtlas(
+                self.session,
+                self.root,
+                max_memory=self.max_memory,
+                reserved=reserved,
+            )
+            self.tensors: dict[str, dict] = self.manifest["tensors"]
+            self.hidden = self.session.zeros(HIDDEN * 4)
+            self.normed = self.session.zeros(HIDDEN * 4)
+            self.half = self.session.zeros(8192 * 2)
+            self.wide = self.session.zeros(8192 * 4)
+            self.z = self.session.zeros(4096 * 4)
+            self.ab = self.session.zeros(32 * 4)
+            self.ab2 = self.session.zeros(32 * 4)
+            self.mixed = self.session.zeros(8192 * 4)
+            self.gdn_y = self.session.zeros(4096 * 4)
+            self.query = self.session.zeros(4096 * 4)
+            self.gate = self.session.zeros(4096 * 4)
+            self.kv = self.session.zeros(512 * 4)
+            self.vv = self.session.zeros(512 * 4)
+            self.attn = self.session.zeros(4096 * 4)
+            self.expert = self.session.zeros(2048 * 4)
+            self.mid = self.session.zeros(8 * 1024 * 4)
+            self.gated = self.session.zeros(8 * 512 * 4)
+            self.partial = self.session.zeros(8 * HIDDEN * 4)
+            self.ids = self.session.zeros(8 * 4)
+            order_path = self.root / "experts" / "order.bin"
+            order = order_path.read_bytes()
+            if len(order) != SLOT_MAP_BYTES:
+                message = f"expert slot map is {len(order)} bytes"
+                raise RuntimeError(message)
+            self.expert_order = self.session.upload(order)
+            self.mix_w = self.session.zeros(8 * 4)
+            self.acc = self.session.zeros(HIDDEN * 4)
+            self.router = self.session.zeros(256 * 4)
+            self.coeff = self.session.zeros(4)
+            self.logits = self.session.zeros(VOCAB * 4)
+            self.history = self.session.zeros(30 * 3 * 8192 * 2)
+            self.state = self.session.zeros(30 * 32 * 128 * 128 * 4)
+            self.k_cache = [self.session.zeros(self.kv_bytes) for _ in range(10)]
+            self.v_cache = [self.session.zeros(self.kv_bytes) for _ in range(10)]
+            if plane:
+                bind_plane(self)
+            self.filled = 0
+            self.prefix = open_session(self)
+            self._prefill = None
+            self._pending: _Pending | None = None
+            self._prefill_progress = None
+            self._prefill_base = 0
+            self._cached: list[int] = []
+            self._cached_tokens = 0
+            self._prefill_seconds = 0.0
+            self._decode_seconds = 0.0
+            self._output_ids: list[int] = []
+            used = reserved + self.atlas.bytes
+            summary = (
+                f"loaded {self.root.name} kv {self.kv_cache} context {self.max_pos} "
+                f"atlas {self.atlas.slots} images memory {used}/{self.max_memory}"
+            )
+        finally:
+            session = getattr(self, "session", None)
+            if session is not None:
+                session._load_note = None
+            progress = self._load_progress
+            self._load_progress = None
+            if progress is not None and not progress.closed and self.console is not None:
+                self.console.end(progress, summary)
+            elif summary:
+                print(summary, flush=True)
         self._held = [
             self.resident,
             *self.atlas.buffers,
@@ -967,6 +995,19 @@ class Qwen36Runtime:
             return
         if path is not None:
             self._status(f"prefix store {len(self.prefix.tokens)} tokens")
+
+    def _begin_load(self, total: int) -> Any:
+        console = self.console
+        if console is None or total <= 0 or not getattr(console, "shows_bars", False):
+            return None
+        detail = getattr(console, "load_detail", "") or self.root.name
+        return console.begin("load", total=total, unit="bytes", detail=detail)
+
+    def _note_load(self, step: int) -> None:
+        progress = self._load_progress
+        if progress is None or step <= 0:
+            return
+        progress.done = min(progress.total, progress.done + step)
 
     def _status(self, line: str) -> None:
         console = self.console

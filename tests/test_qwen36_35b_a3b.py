@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
@@ -51,6 +52,34 @@ def test_expert_slots_follow_the_median_scale() -> None:
     down = [bytes([10]), bytes([1]), bytes([40]), bytes([10])]
     mapping = expert_slot_map(gate, down)
     assert mapping.tolist() == [1, 0, 3, 2]
+
+
+def test_load_row_opens_when_the_console_shows_bars() -> None:
+    from qwen36_35b_a3b.forward import Qwen36Runtime
+
+    begun: list[dict[str, object]] = []
+
+    class _Bars:
+        shows_bars = True
+
+        def begin(self, phase: str, **kwargs: object) -> SimpleNamespace:
+            begun.append({"phase": phase, **kwargs})
+            return SimpleNamespace(total=kwargs["total"], done=0, closed=False)
+
+    runtime = Qwen36Runtime.__new__(Qwen36Runtime)
+    runtime.console = _Bars()
+    runtime.root = SimpleNamespace(name="record")
+    runtime._load_progress = runtime._begin_load(100)
+    runtime._note_load(40)
+    assert begun[0]["phase"] == "load"
+    assert begun[0]["unit"] == "bytes"
+    assert runtime._load_progress.done == 40
+
+    class _Plain:
+        shows_bars = False
+
+    runtime.console = _Plain()
+    assert runtime._begin_load(100) is None
 
 
 def test_an_omitted_completion_cap_is_the_context_room() -> None:
@@ -445,6 +474,20 @@ def test_stream_text_emits_reasoning_then_reply() -> None:
         ("content", "ans"),
         ("content", "wer"),
         ("content", "<tool_call>"),
+    ]
+
+
+def test_a_json_array_parameter_is_a_list() -> None:
+    text = (
+        "<tool_call>\n<function=save_intro>\n<parameter=lines>\n"
+        '["Hello! I\'m Favlo, a small horse.", "I\'d love a carrot."]\n'
+        "</parameter>\n</function>\n</tool_call>"
+    )
+    _content, calls = parse_tool_calls(text)
+    arguments = json.loads(calls[0]["function"]["arguments"])
+    assert arguments["lines"] == [
+        "Hello! I'm Favlo, a small horse.",
+        "I'd love a carrot.",
     ]
 
 
