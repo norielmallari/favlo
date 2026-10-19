@@ -187,18 +187,21 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def start_server(port: int) -> tuple[subprocess.Popen[str], Log]:
+def start_server(port: int, max_memory: str | None = None) -> tuple[subprocess.Popen[str], Log]:
+    command = [
+        sys.executable,
+        "-m",
+        "madmetal",
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+    ]
+    if max_memory:
+        command.extend(["--max-memory", max_memory])
     proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "madmetal",
-            "serve",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-        ],
+        command,
         cwd=_ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -225,14 +228,15 @@ def start_server(port: int) -> tuple[subprocess.Popen[str], Log]:
 class Server:
     """The local serve process. A dropped connection starts a new one."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_memory: str | None = None) -> None:
         self.port = 0
+        self.max_memory = max_memory
         self.proc: subprocess.Popen[str] | None = None
         self.log = Log()
 
     def start(self) -> None:
         self.port = free_port()
-        self.proc, self.log = start_server(self.port)
+        self.proc, self.log = start_server(self.port, self.max_memory)
 
     def restart(self) -> None:
         self.stop()

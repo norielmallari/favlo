@@ -388,6 +388,7 @@ def _read_tool(root: Path, allowed: set[str], loaded: list[str], task: dict[str,
 class Server:
     proc: subprocess.Popen[str]
     port: int
+    max_memory: str | None = None
 
 
 def _wait_requests(log: Log, previous: int, server: Server) -> list[RequestRate]:
@@ -629,18 +630,21 @@ def _wait_listening(proc: subprocess.Popen[str], log: Log, seen: int) -> None:
     raise TimeoutError(message)
 
 
-def _spawn(port: int, log: Log) -> subprocess.Popen[str]:
+def _spawn(port: int, log: Log, max_memory: str | None = None) -> subprocess.Popen[str]:
+    command = [
+        sys.executable,
+        "-m",
+        "madmetal",
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+    ]
+    if max_memory:
+        command.extend(["--max-memory", max_memory])
     proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "madmetal",
-            "serve",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-        ],
+        command,
         cwd=Path(__file__).resolve().parents[1],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -666,7 +670,7 @@ def _restart(server: Server, log: Log) -> None:
     _stop_server(server.proc)
     seen = log.text().count("listening on")
     server.port = _free_port()
-    server.proc = _spawn(server.port, log)
+    server.proc = _spawn(server.port, log, server.max_memory)
     _wait_listening(server.proc, log, seen)
 
 
@@ -731,6 +735,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--model", required=True)
+    parser.add_argument("--max-memory", default=None, help="serve memory cap, such as 16GiB")
     args = parser.parse_args(argv)
     if args.tokens < 1:
         print("token target must be positive")
@@ -741,7 +746,7 @@ def main(argv: list[str] | None = None) -> int:
     server: Server | None = None
     try:
         port = args.port or _free_port()
-        server = Server(_spawn(port, log), port)
+        server = Server(_spawn(port, log, args.max_memory), port, args.max_memory)
         _wait_listening(server.proc, log, 0)
         result = asyncio.run(
             run_file_agent(args.repo, args.tokens, log, server, model=stem)

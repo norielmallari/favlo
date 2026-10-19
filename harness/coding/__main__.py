@@ -28,6 +28,7 @@ _LOCK = _ROOT / "artifacts" / "pipeline-test.lock"
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Grade a Python file written through serve.")
     parser.add_argument("--model", required=True)
+    parser.add_argument("--max-memory", default=None, help="serve memory cap, such as 16GiB")
     args = parser.parse_args(argv)
     stem = args.model.partition(":")[0]
     workspace = _ROOT / "artifacts" / "coding" / stem
@@ -39,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
                 child.rmdir()
     workspace.mkdir(parents=True, exist_ok=True)
     take_lock(stem)
-    server = Server()
+    server = Server(args.max_memory)
     try:
         server.start()
         run_session(server.port, stem, Request(enable_thinking=True), workspace)
