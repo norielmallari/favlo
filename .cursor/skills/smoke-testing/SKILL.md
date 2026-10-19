@@ -11,6 +11,8 @@ Take `artifacts/pipeline-test.lock` before a command that loads a checkpoint or 
 
 Stop at the first failure. Do not start agent smoke while a pipeline smoke is failing.
 
+Every smoke keeps the prefill and decode tok/s. Each line has the rate, the token count, and the seconds. A pipeline smoke prints those lines from the runtime; run it with `-s` so pytest does not hide them. An agent smoke prints each request's prefill and decode line, then the summed rates. A run that drops those lines is not a finished smoke. Do not write a rate that was not printed.
+
 ## Sampling
 
 The model field is the pipeline name. A `:instruct` or `:thinking` id pins that row and ignores `enable_thinking`.
@@ -29,8 +31,10 @@ Run the carrot file that imports only this package:
 | `qwen36-35b-a3b` | `tests/test_qwen36_35b_a3b_smoke.py` |
 | `qwen38-flash-next` | `tests/test_smoke.py` |
 
+`tests/test_qwen36_35b_a3b_smoke_16gb.py` runs the 35B file's cases with the runtime capped at 16GiB.
+
 ```text
-uv run pytest tests/<file>
+uv run pytest tests/<file> -s
 ```
 
 The file covers, in order: greedy decode, the instruct card, the thinking card at the template default effort, then one case for each reasoning effort that template names (`low`, `medium`, `xhigh` when the template names them).

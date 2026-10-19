@@ -462,7 +462,7 @@ def _route(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) ->
 def _experts(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) -> None:
     """Shared expert, then routed experts. Groups are built on device."""
     prefix = f"model.language_model.layers.{layer}.mlp."
-    file = runtime.expert_buffer(layer)
+    file = runtime.routed_layer(layer, work.ids, count * 8)
     _cast(runtime, work.normed, work.half, rows * HIDDEN)
     _matmul(runtime, work.half, prefix + "shared_expert.gate_up", work.gate_up, rows)
     runtime.session.encode(

@@ -242,10 +242,10 @@ class Qwen36Runtime:
         self._prefill_seconds = 0.0
         self._decode_seconds = 0.0
         self._output_ids: list[int] = []
-        used = reserved + self.atlas.slots * self.atlas.file_bytes
+        used = reserved + self.atlas.bytes
         print(
             f"loaded {self.root.name} kv {self.kv_cache} context {self.max_pos} "
-            f"atlas {self.atlas.slots}/40 memory {used}/{self.max_memory}",
+            f"atlas {self.atlas.slots} images memory {used}/{self.max_memory}",
             flush=True,
         )
         self._held = [
@@ -283,20 +283,17 @@ class Qwen36Runtime:
         self.resident = None
         self.session = None
 
-    def expert_buffer(self, layer: int) -> Any:
-        """The layer file in the atlas. A miss finishes the open command buffer first."""
-        found = self.atlas.cached(layer)
-        if found is not None:
-            return found
-        restart = self.session._recording
-        if restart:
-            self.session.end()
-        else:
-            self.session.wait_inflight()
-        found = self.atlas.load(layer)
-        if restart:
-            self.session.begin()
-        return found
+    def _routed_ids(self, ids: Any, count: int) -> list[int]:
+        """Finish the open buffer so the router ids can be read."""
+        self.session.end()
+        raw = np.frombuffer(self.session.download(ids, count * 4), dtype=np.uint32)
+        return [int(value) for value in raw]
+
+    def routed_layer(self, layer: int, ids: Any, count: int) -> Any:
+        """Load the routed images into the pack at their file slots. ``ids`` stay."""
+        self.atlas.stage_pack(layer, self._routed_ids(ids, count))
+        self.session.begin()
+        return self.atlas.pack
 
     def reset(self) -> None:
         for buffer, nbytes in (
@@ -547,7 +544,7 @@ class Qwen36Runtime:
         )
         gate_w, gate_s = self._weight(prefix + "shared_expert.gate_up")
         down_w, down_s = self._weight(prefix + "shared_expert.down_proj.weight")
-        experts = self.expert_buffer(layer)
+        experts = self.routed_layer(layer, self.ids, 8)
         self.session.encode(
             "moe_gate_silu",
             [
@@ -629,19 +626,8 @@ class Qwen36Runtime:
             self._gemv_fp4(self.normed, 0, "lm_head.weight", self.logits)
 
     def _prepare_pending(self, pos: int) -> None:
-        """Record the next token's layers while this token's GPU work is in flight."""
-        if pos >= self.max_pos or self.session._inflight == []:
-            return
-        pending = _Pending(self.session, pos)
-        self.session._redirect = pending
-        try:
-            self._layers(pos, head=True)
-        except BaseException:
-            self.session._redirect = None
-            pending.discard()
-            raise
-        self.session._redirect = None
-        self._pending = pending
+        """The next token's experts come from its router, so its layers are not recorded ahead."""
+        del pos
 
     def _drop_pending(self) -> None:
         pending = self._pending

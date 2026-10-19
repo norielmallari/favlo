@@ -442,6 +442,25 @@ def test_record_name_is_the_source_model_plus_fp4() -> None:
     assert record_name(snapshot) == "Example-Model-fp4"
 
 
+def test_s3_evicts_a_one_hit_before_a_reused_expert() -> None:
+    from qwen36_35b_a3b.atlas import S3Fifo
+
+    span = 100
+    fifo = S3Fifo(span * 10, span)
+    one = (0, 1)
+    other = (0, 2)
+    fifo.insert(one)
+    fifo.insert(other)
+    assert fifo.relieve(set()) == one
+    fifo.hit(other)
+    fifo.insert((0, 3))
+    assert fifo.relieve(set()) is None
+    assert fifo.place(other) == "m"
+    fifo.insert((0, 4))
+    assert fifo.relieve(set()) == (0, 3)
+    assert fifo.place(other) == "m"
+
+
 def test_kv_widths_and_atlas_budget() -> None:
     assert kv_mode(None) == "e4m3"
     assert kv_mode("fp4") == "e2m1"
