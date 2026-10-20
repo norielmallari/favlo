@@ -59,7 +59,7 @@ src/favlo/              process entry; the listener loads the pipeline a request
   prefix.py             SSD prefix store
   setup.py              empty-registry download
   logs.py               rolling server log; size is settings.json log_max_bytes
-harness/                file agent, coding agent, and the three benchmarks
+harness/                file agent, coding agent, worktree agent, and the three benchmarks
 docs/                   as-built notes; see docs/README.md
 ```
 
@@ -82,6 +82,7 @@ uv run python -m harness.file_agent --base-url http://127.0.0.1:8129/v1 --worksp
 uv run python -m harness --model qwen38-27b
 uv run python -m harness.benchmarks --model qwen38-27b
 uv run python -m harness.coding --model qwen38-27b
+uv run python -m harness.worktree --model qwen36-35b-a3b
 ```
 
 What the harness scores is [docs/harness.md](docs/harness.md). A pipeline's quantize, probe, and matmul commands are that pipeline's note.

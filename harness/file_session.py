@@ -667,11 +667,11 @@ def _restart(server: Server, log: Log) -> None:
 _LOCK = Path(__file__).resolve().parents[1] / "artifacts" / "pipeline-test.lock"
 
 
-def take_lock(pipeline: str) -> None:
+def take_lock(pipeline: str, command: str = "file-agent") -> None:
     """Exclusive machine lock. A live holder is left alone."""
     _LOCK.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(
-        {"pipeline": pipeline, "pid": os.getpid(), "command": "file-agent"}
+        {"pipeline": pipeline, "pid": os.getpid(), "command": command}
     ).encode()
     while True:
         if _LOCK.exists() and not _stale_lock():
