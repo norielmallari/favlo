@@ -75,6 +75,7 @@ def test_listing_includes_folder_alias_and_variants(tmp_path) -> None:
     assert all(row["loaded"] for row in rows)
     assert rows[0]["owned_by"] == "favlo"
     assert rows[0]["object"] == "model"
+    assert rows[0]["context_length"] == 131072
     thinking = rows[1]
     assert thinking["variant"] == "thinking"
     assert thinking["parent"] == "packed"

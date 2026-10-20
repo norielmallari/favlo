@@ -37,7 +37,7 @@ Tests for the listener, the registry, and the console live in `tests/test_cli.py
 
 ## Registry
 
-`models/registry.json` is gitignored. A row stores the folder, the pipeline entry, an alias, the BF16 source path, the key/value mode, the resident percent, and the sampling card copied from that pipeline's `sampling.py`. The stored names are the `:suffix` ids. A bare model id selects no row. The pipeline applies its default variant, or the row the request selects. `serve` does not register a record it finds on disk. A fresh tree has no rows. `GET /v1/models` lists every registered row, including each sampling suffix that row stores.
+`models/registry.json` is gitignored. A row stores the folder, the pipeline entry, an alias, the BF16 source path, the key/value mode, the resident percent, `context_length`, and the sampling card copied from that pipeline's `sampling.py`. A row that omits `context_length` uses 131072. The stored names are the `:suffix` ids. A bare model id selects no row. The pipeline applies its default variant, or the row the request selects. `serve` does not register a record it finds on disk. A fresh tree has no rows. `GET /v1/models` lists every registered row, including each sampling suffix that row stores, and each object includes `context_length`.
 
 ## Layout
 

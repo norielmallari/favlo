@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 _CARD_FIELDS = ("temperature", "top_p", "top_k", "presence_penalty")
+DEFAULT_CONTEXT_LENGTH = 131072
 
 
 def models_dir(root: Path | None = None) -> Path:
@@ -37,6 +38,7 @@ class Selection:
     kv_cache: str
     resident_percent: float | None
     max_prompt_tokens: int | None
+    context_length: int = DEFAULT_CONTEXT_LENGTH
     variants: dict[str, dict[str, float | int]] | None = None
     default_variant: str | None = None
 
@@ -164,6 +166,7 @@ def register_quantized(
             if max_prompt_tokens is not None:
                 current["max_prompt_tokens"] = max_prompt_tokens
                 current.pop("max_tokens", None)
+            current.setdefault("context_length", DEFAULT_CONTEXT_LENGTH)
             save_registry(data, root)
             return
         message = f"{folder} is already registered for a different source"
@@ -276,6 +279,13 @@ def choose_complete(
     raise LookupError(message)
 
 
+def _context_length(entry: dict[str, Any]) -> int:
+    stored = entry.get("context_length")
+    if isinstance(stored, int) and not isinstance(stored, bool) and stored > 0:
+        return stored
+    return DEFAULT_CONTEXT_LENGTH
+
+
 def _max_prompt_tokens(entry: dict[str, Any]) -> int | None:
     cap = entry.get("max_prompt_tokens")
     if isinstance(cap, bool) or not isinstance(cap, int):
@@ -307,6 +317,7 @@ def _entry(
         "resident_percent": None,
         "variants": variants,
         "default_variant": default_variant,
+        "context_length": DEFAULT_CONTEXT_LENGTH,
     }
     if max_prompt_tokens is not None:
         entry["max_prompt_tokens"] = max_prompt_tokens
@@ -403,6 +414,7 @@ def _selection(
         kv_cache=str(entry.get("kv_cache") or "e4m3"),
         resident_percent=None if percent is None else float(percent),
         max_prompt_tokens=_max_prompt_tokens(entry),
+        context_length=_context_length(entry),
         variants=stored,
         default_variant=_default_variant(entry),
     )
@@ -433,6 +445,7 @@ def _object(
     cap = _max_prompt_tokens(entry)
     if cap is not None:
         row["max_prompt_tokens"] = cap
+    row["context_length"] = _context_length(entry)
     if variant is not None:
         row["parent"] = parent if ":" not in model_id else model_id.split(":", 1)[0]
         row["variant"] = variant

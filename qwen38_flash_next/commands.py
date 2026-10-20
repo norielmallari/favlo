@@ -365,7 +365,8 @@ INSTRUCT_TEMPERATURE = float(_SAMPLING["instruct"]["temperature"])
 INSTRUCT_TOP_P = float(_SAMPLING["instruct"]["top_p"])
 INSTRUCT_TOP_K = int(_SAMPLING["instruct"]["top_k"])
 INSTRUCT_PRESENCE = float(_SAMPLING["instruct"]["presence_penalty"])
-DEFAULT_MAX_PROMPT_TOKENS = 65536
+DEFAULT_CONTEXT_LENGTH = 131072
+DEFAULT_MAX_PROMPT_TOKENS = DEFAULT_CONTEXT_LENGTH
 
 
 def _stream_delta(decoded: str, shown: str, *, final: bool) -> tuple[str, str]:
@@ -584,10 +585,17 @@ def _usage(
     prompt_n = max(0, prompt_tokens - cached)
     prefill_s = float(getattr(runtime, "_prefill_seconds", 0.0) or 0.0)
     decode_s = float(getattr(runtime, "_decode_seconds", 0.0) or 0.0)
+    window = (
+        max_prompt_tokens
+        if isinstance(max_prompt_tokens, int) and max_prompt_tokens > 0
+        else DEFAULT_CONTEXT_LENGTH
+    )
     usage = {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": prompt_tokens + completion_tokens,
+        "context_length": window,
+        "prompt_tokens_details": {"cached_tokens": cached},
         "timings": {
             "prompt_per_second": 0.0 if prefill_s <= 0 else prompt_n / prefill_s,
             "predicted_per_second": 0.0 if decode_s <= 0 else completion_tokens / decode_s,

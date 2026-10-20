@@ -452,6 +452,8 @@ def test_usage_excludes_the_cached_prefix() -> None:
     assert timings["prompt_per_second"] == 143.5
     assert timings["predicted_per_second"] == 120.0
     assert usage["max_prompt_tokens"] == commands.DEFAULT_MAX_PROMPT_TOKENS
+    assert usage["context_length"] == commands.DEFAULT_CONTEXT_LENGTH
+    assert usage["prompt_tokens_details"]["cached_tokens"] == 900
     idle = commands._usage(SimpleNamespace(), 10, 4)
     assert idle["timings"]["prompt_per_second"] == 0.0
     assert idle["timings"]["predicted_per_second"] == 0.0
