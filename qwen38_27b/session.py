@@ -131,6 +131,28 @@ class Session:
         self._held: list[Any] = []
         self._load_note = None
 
+    def close(self) -> None:
+        """Finish an open pass, then drop the queue and the device."""
+        encoder = getattr(self, "_pass_encoder", None)
+        command = getattr(self, "_pass_command", None)
+        self._pass_encoder = None
+        self._pass_command = None
+        if encoder is not None and command is not None:
+            try:
+                encoder.endEncoding()
+                command.commit()
+                command.waitUntilCompleted()
+            except (RuntimeError, OSError):
+                pass
+        for name in ("_pass_held", "_held"):
+            held = getattr(self, name, None)
+            if isinstance(held, list):
+                held.clear()
+        self.pipes = {}
+        self.queue = None
+        self.device = None
+        self.metal = None
+
     @property
     def device_name(self) -> str:
         name = self.device.name

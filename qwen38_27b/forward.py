@@ -18,6 +18,7 @@ import numpy as np
 
 from qwen38_27b.attn import bind_plane, scratch_bytes
 from qwen38_27b.cache import (
+    DEFAULT_CONTEXT_LENGTH,
     available_bytes,
     fit_positions,
     kv_mode,
@@ -91,6 +92,39 @@ def _file_buffer(session: Session, path: Path) -> Any:
 
 _STATE_BYTES = LINEAR_LAYERS * LINEAR_V * 128 * 128 * 4
 _HISTORY_BYTES = LINEAR_LAYERS * 3 * MIX * 2
+_DEVICE_FIELDS = (
+    "resident",
+    "history",
+    "state",
+    "hidden",
+    "normed",
+    "hold",
+    "wide",
+    "z",
+    "y",
+    "query",
+    "gate",
+    "kv",
+    "vv",
+    "ab",
+    "ab2",
+    "logits",
+    "best_v",
+    "best_i",
+    "plane_q",
+    "plane_scores",
+    "plane_probs",
+    "plane_prob_half",
+    "plane_row_scale",
+    "plane_parts",
+    "plane_partial",
+    "plane_acc",
+    "plane_max",
+    "plane_sum",
+    "plane_tail",
+    "plane_chunk_max",
+    "plane_chunk_sum",
+)
 
 
 def startup_bytes(
@@ -195,7 +229,7 @@ class Qwen38Runtime:
             _fixed_bytes(card_limit, drafts=self.drafts, slots=self.kv_slots),
             slots=self.kv_slots,
         )
-        self.max_pos = min(self.max_pos, card_limit)
+        self.max_pos = min(self.max_pos, card_limit, DEFAULT_CONTEXT_LENGTH)
         if self.max_pos < 2048:
             message = "the record does not fit a 2048-token cache"
             raise RuntimeError(message)
@@ -260,16 +294,48 @@ class Qwen38Runtime:
                 self._status(summary)
 
     def close(self) -> None:
+        """Write the live prefix, then drop every device buffer before another pipeline loads."""
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
         prefix = getattr(self, "prefix", None)
-        if prefix is not None and self.session is not None:
+        session = getattr(self, "session", None)
+        if prefix is not None and session is not None:
             try:
                 prefix.flush()
-            except OSError:
+            except (OSError, RuntimeError):
                 pass
+        adapter = getattr(prefix, "adapter", None) if prefix is not None else None
+        if adapter is not None:
+            adapter.runtime = None
+        self.prefix = None
+        self._end_open_progress()
         self._prefill = None
-        self._held.clear()
-        self.resident = None
+        for name in ("k_cache", "v_cache", "_held"):
+            held = getattr(self, name, None)
+            if isinstance(held, list):
+                held.clear()
+        for name in _DEVICE_FIELDS:
+            if hasattr(self, name):
+                setattr(self, name, None)
+        if session is not None:
+            try:
+                session.close()
+            except (OSError, RuntimeError):
+                pass
         self.session = None
+
+    def _end_open_progress(self) -> None:
+        console = getattr(self, "console", None)
+        for name in ("_load_progress", "_prefill_progress"):
+            progress = getattr(self, name, None)
+            setattr(self, name, None)
+            if progress is None or console is None or getattr(progress, "closed", True):
+                continue
+            try:
+                console.end(progress, "")
+            except (OSError, RuntimeError, AttributeError):
+                pass
 
     def halt(self) -> None:
         """Stop before the next chunk or the next token."""

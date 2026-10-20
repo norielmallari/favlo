@@ -147,6 +147,85 @@ def test_prefill_ids_notes_each_finished_chunk(monkeypatch) -> None:
     assert noted == [2048, 4096, 5000]
 
 
+def test_close_drops_the_device_before_another_pipeline_loads() -> None:
+    runtime = Qwen38Runtime.__new__(Qwen38Runtime)
+    weights = object()
+    cache = object()
+    scratch = object()
+    seen: list[object] = []
+    flushed: list[bool] = []
+
+    class _Session:
+        def close(self) -> None:
+            seen.append(runtime.resident)
+
+    class _Prefix:
+        def __init__(self) -> None:
+            self.adapter = SimpleNamespace(runtime=runtime)
+
+        def flush(self) -> None:
+            flushed.append(runtime.resident is weights and runtime.k_cache == [cache])
+
+    runtime.session = _Session()
+    runtime.prefix = _Prefix()
+    runtime.resident = weights
+    runtime.k_cache = [cache]
+    runtime.v_cache = [cache]
+    runtime._held = [weights]
+    runtime._prefill = object()
+    runtime.plane_probs = scratch
+    runtime.console = None
+    runtime.close()
+    runtime.close()
+    assert flushed == [True]
+    assert seen == [None]
+    assert runtime.session is None
+    assert runtime.resident is None
+    assert runtime.k_cache == []
+    assert runtime.v_cache == []
+    assert runtime._held == []
+    assert runtime._prefill is None
+    assert runtime.plane_probs is None
+    assert runtime.prefix is None
+
+
+def test_session_close_finishes_an_open_pass() -> None:
+    from qwen38_27b.session import Session
+
+    session = Session.__new__(Session)
+    ended: list[str] = []
+
+    class _Encoder:
+        def endEncoding(self) -> None:
+            ended.append("end")
+
+    class _Command:
+        def commit(self) -> None:
+            ended.append("commit")
+
+        def waitUntilCompleted(self) -> None:
+            ended.append("wait")
+
+    session._pass_encoder = _Encoder()
+    session._pass_command = _Command()
+    session._pass_held = [object()]
+    session._held = [object()]
+    session.pipes = {"gemv_fp4": object()}
+    session.queue = object()
+    session.device = object()
+    session.metal = object()
+    session.close()
+    assert ended == ["end", "commit", "wait"]
+    assert session._pass_encoder is None
+    assert session._pass_command is None
+    assert session._pass_held == []
+    assert session._held == []
+    assert session.pipes == {}
+    assert session.queue is None
+    assert session.device is None
+    assert session.metal is None
+
+
 def test_startup_bytes_cover_the_record_and_the_cache() -> None:
     resident = 1000
     total = startup_bytes(resident, 4096)

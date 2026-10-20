@@ -3,7 +3,8 @@
 Keys are ``[head, token, channel]`` with an E8M0 scale every 32 channels.
 Values are ``[head, channel, token]`` with an E8M0 scale every 32 tokens, so
 both the score product and the value mix are ``matmul2d``. A head at one
-position is 264 bytes either way. The width is fp8 E4M3.
+position is 264 bytes either way. The width is fp8 E4M3. The served window
+stops at ``DEFAULT_CONTEXT_LENGTH``.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from pathlib import Path
 
 from qwen38_27b.layout import CONTEXT, FULL_LAYERS, HEAD, KV_HEADS
 
+DEFAULT_CONTEXT_LENGTH = 131072
 BLOCK = 32
 RECORD = HEAD + HEAD // BLOCK
 
