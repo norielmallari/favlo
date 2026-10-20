@@ -1,5 +1,5 @@
 ---
-description: One write set per runtime, and one machine lock while a pipeline test is running
+description: One write set per runtime, a clean close on model switch, and one machine lock while a pipeline test is running
 alwaysApply: true
 ---
 
@@ -16,6 +16,12 @@ A new runtime adds those files and one row in the runtime table in `ARCHITECTURE
 Do not edit another pipeline's package, shaders, tests, or docs. Do not add a base class or a kernel that branches on the pipeline. Do not change `src/favlo/` unless the task is the listener, the registry, or the console. Registration loads `sampling.py` from the pipeline that owns the row. Do not pass a sampling card into the registry.
 
 A pipeline's kernels, records, and cache are described in that pipeline's `docs/<pipeline>/` note. Root `ARCHITECTURE.md` is the process and the write set.
+
+## Model switch
+
+One pipeline is resident. A request that names a different folder or a different pipeline closes that runtime before the next one opens. The same folder and the same pipeline stay resident.
+
+`close` returns only after that pipeline's device memory is released. That includes its key/value cache, prefill workspace, decode path, command queue, and open record. A prefix flush may finish first. After `close` returns, the previous runtime holds no Metal buffer, and the next runtime is the one that allocates.
 
 ## Machine lock
 

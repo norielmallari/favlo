@@ -1,0 +1,44 @@
+---
+description: Use when designing a pipeline's Metal data plane or writing its kernels. Tensor types, matmul2d, and the E8M0 scale layout.
+alwaysApply: false
+---
+
+# Metal data planes
+
+Use a Metal 4 tensor op. The type list and `matmul2d` are [WWDC26 session 330](https://developer.apple.com/videos/play/wwdc2026/330/) and `MTLTensorDataType` on macOS 27. The scale and the element encodings are the OCP MX spec, as [REFERENCES.md](REFERENCES.md) records them. A pipeline's `kernels` command is what accepts a dispatch. Another pipeline's probe is not that acceptance.
+
+## Ops
+
+`mpp::tensor_ops::matmul2d` dequantizes a quantized right-hand tensor. The left operand is float16. The destination is float32. The descriptor sets the output tile, the K tile, and the two transpose flags so they match the stored major axis. Launch it with `execution_simdgroups<N>` and have every thread in that scope take part. Apple's sample uses four simdgroups.
+
+```metal
+constexpr auto desc = matmul2d_descriptor(
+    tile_m, tile_n, static_cast<int>(dynamic_extent),
+    transpose_left, transpose_right, false);
+matmul2d<desc, execution_simdgroups<4>> op;
+```
+
+A quantized tensor can also be dequantized into a cooperative tensor and passed back into `matmul2d` when `is_compatible_as_left_input` or `is_compatible_as_right_input` is true. Reductions are the same TensorOps set. A missing kernel stays missing. A host GEMV, a CPU matmul, or the Neural Engine is not a stand-in. Do not fuse a whole layer.
+
+## Planes
+
+| MSL type | Role |
+|---|---|
+| `metal_fp4_e2m1` | 4-bit float weight. Magnitudes `0, 0.5, 1, 1.5, 2, 3, 4, 6`. Sign is bit 3. Low nibble is element 0 |
+| `metal_fp8_e4m3` | 8-bit float weight or key/value. OCP E4M3FN. Largest finite value is 448. `0x7F` is NaN |
+| `metal_fp8_ue8m0` | Scale plane only. One byte covers 32 values along K. Block factors `{32, 1}` |
+| `half` | Activation, norms, biases, and any matrix that is not a quantized tensor |
+| `float` | `matmul2d` destination and a recurrent or latent state |
+
+`MTLTensorDataType` also names bfloat16, fp8 E5M2, and int and uint 2/4/8/16/32. Those stay unused until this pipeline's `kernels` command completes a dispatch of that type.
+
+One scale byte is an E8M0 exponent, bias 127. Reconstruct `value × 2^(e − 127)`. Store `e` in `0..254`. `0xFF` is not a scale. A zero block stores 0. There is no zero point. Round the power of two up so the peak fits: fp4 endpoint 6, fp8 E4M3 endpoint 448.
+
+For int4, int8, int2, fp8, and E8M0, the innermost stride is 1 and every later stride is a multiple of 128 bytes. The buffer offset is 128-byte aligned. A row's packed bytes are therefore a multiple of 128: fp4 K is a multiple of 256, fp8 K is a multiple of 128, int2 K is a multiple of 512. Extra K columns are zero codes. The scale extent is the data extent divided by `{32, 1}`. The data plane ends on a 128-byte boundary and the scale plane starts there.
+
+Pad a batch or an output extent up to the tile and drop the extra rows. A K that is not a multiple of 32 is not a scale block. Pad it to the row alignment above before the pack.
+
+```metal
+// ❌ K 144 on an fp4 tensor — 144 is not a multiple of 32, so the scale plane has no whole block
+// ✅ pad K 144 → 256, pad output rows up to tile_n, drop the extra rows
+```

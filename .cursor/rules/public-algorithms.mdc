@@ -1,5 +1,5 @@
 ---
-description: Derive Favlo algorithms from public papers and Metal, not from other repos
+description: Derive Favlo algorithms from public papers and Metal, and keep prefill, the key/value cache, and decode allocated
 alwaysApply: true
 ---
 
@@ -11,8 +11,18 @@ Score a formula on this runtime's own forward. An int4 argmax is not evidence th
 
 Record a pipeline citation in that pipeline's references note, and a process citation in REFERENCES.md. The as-built form goes in that pipeline's note, or in ARCHITECTURE.md when the change is the listener, the registry, or the console.
 
+## Memory
+
+Allocate the input path and the output path first. The input path is the key/value cache and the prefill workspace. The output path is decode. Other modules, such as the expert atlas, staging buffers, and a scratch buffer that the forward can rebuild, receive what remains.
+
+When a formula needs more device memory, leave the key/value cache, the prefill workspace, and the decode path allocated. Name another module to drop, and say which bytes that module returns.
+
 ## Examples
 
 Wrong: open another runtime's n-gram forward and copy its hash so the tokens match.
 
 Right: Cheng et al. eq. (6) for the branch gate, the tech report's `1/n_r` on the residual read, and a Metal float dot of the stored matrix.
+
+Wrong: shrink the key/value cache so the atlas stays complete.
+
+Right: keep the cache, the prefill workspace, and decode, and drop atlas images that the forward can read again from the record.

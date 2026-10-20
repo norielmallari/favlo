@@ -13,8 +13,8 @@ The files in [`.cursor/rules`](.cursor/rules) are repo rules. Cursor loads them 
 | Rule | Applies |
 |---|---|
 | [documentation.mdc](.cursor/rules/documentation.mdc) | Always. Public wording, no personal data, official model cards only. |
-| [pipeline-isolation.mdc](.cursor/rules/pipeline-isolation.mdc) | Always. One write set, and the machine lock before a pipeline test. |
-| [public-algorithms.mdc](.cursor/rules/public-algorithms.mdc) | Always. Equations come from public papers and map onto Metal. |
+| [pipeline-isolation.mdc](.cursor/rules/pipeline-isolation.mdc) | Always. One write set, a clean close on model switch, and the machine lock before a pipeline test. |
+| [public-algorithms.mdc](.cursor/rules/public-algorithms.mdc) | Always. Equations come from public papers and map onto Metal. Prefill, the key/value cache, and decode stay allocated. |
 | [python-file-split.mdc](.cursor/rules/python-file-split.mdc) | When editing Python. One module, one responsibility. Imports point one way. |
 
 ## Changes
