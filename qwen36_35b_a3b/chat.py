@@ -428,7 +428,7 @@ def _stream(
         nonlocal text
         produced: list[int] = []
         previous = ""
-        gate = StreamText(thinking)
+        gate = StreamText(thinking, keep_calls=not emit_tools)
         try:
             while True:
                 token = pending.get()

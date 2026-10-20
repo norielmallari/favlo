@@ -349,6 +349,80 @@ def test_stream_chunks_carry_reasoning_then_the_reply() -> None:
     ]
 
 
+def test_a_tool_call_is_not_sent_as_a_chat_message() -> None:
+    from types import SimpleNamespace
+
+    from qwen36_35b_a3b.chat import _stream
+
+    class _Handler:
+        _model_id = "qwen36-35b-a3b"
+        _started = False
+        close_connection = False
+        events: list[dict] = []
+        sent: list[bytes] = []
+        connection = SimpleNamespace(settimeout=lambda *_args, **_kwargs: None)
+
+        def send_response(self, _code: int) -> None:
+            return None
+
+        def send_header(self, *_args: object) -> None:
+            return None
+
+        def end_headers(self) -> None:
+            return None
+
+        def _event(self, payload: dict) -> None:
+            self.events.append(payload)
+
+        def _send(self, data: bytes) -> None:
+            self.sent.append(data)
+
+    call = "<tool_call>\n<function=read_file>\n</function>\n</tool_call>"
+
+    class _Runtime:
+        _hit_limit = False
+        _cached_tokens = 0
+        _prefill_seconds = 1.0
+        _decode_seconds = 1.0
+        _output_ids: list[int] = []
+
+        def decode(self, ids: list[int]) -> str:
+            words = {1: "Look", 2: " here\n", 3: call}
+            return "".join(words[token] for token in ids)
+
+        def generate(self, prompt, limit, temperature, top_p, top_k, presence, stop, **kwargs):
+            del prompt, limit, temperature, top_p, top_k, presence, stop
+            ids = [1, 2, 3]
+            on_token = kwargs["on_token"]
+            for token in ids:
+                on_token(token)
+            self._output_ids = ids
+            return ids
+
+    handler = _Handler()
+    handler.events = []
+    handler.sent = []
+    _stream(handler, _Runtime(), [9], [], False, 8, 0.0, 1.0, 1, 0.0, False, [], None)
+    content = []
+    names = []
+    finish = None
+    for payload in handler.events:
+        choices = payload["choices"]
+        if not choices:
+            continue
+        delta = choices[0]["delta"]
+        if delta.get("content"):
+            content.append(delta["content"])
+        for call_delta in delta.get("tool_calls") or []:
+            names.append(call_delta["function"]["name"])
+        if choices[0].get("finish_reason"):
+            finish = choices[0]["finish_reason"]
+    assert "".join(content) == "Look here\n"
+    assert names == ["read_file"]
+    assert finish == "tool_calls"
+    assert "<tool_call>" not in "".join(content)
+
+
 def _qwen36_record() -> Path | None:
     from favlo.registry import load_registry, models_dir
 
@@ -474,7 +548,6 @@ def test_stream_text_emits_reasoning_then_reply() -> None:
         ("reasoning", "son"),
         ("content", "ans"),
         ("content", "wer"),
-        ("content", "<tool_call>"),
     ]
 
 

@@ -149,12 +149,14 @@ class StreamText:
     """Reasoning and reply as tokens arrive.
 
     Thinking stays open until ``</think>``. A reply suffix that may still grow
-    into ``<tool_call>`` is held until the call is complete, then sent as content
-    so a later request can echo that text.
+    into ``<tool_call>`` is held and is not sent as content. The caller parses
+    the call into ``tool_calls``. ``keep_calls`` leaves that text in the reply
+    when the request asked for no tool message.
     """
 
-    def __init__(self, thinking: bool) -> None:
+    def __init__(self, thinking: bool, *, keep_calls: bool = False) -> None:
         self._reasoning = thinking
+        self._keep_calls = keep_calls
         self._held = ""
         self._call = ""
         self._in_call = False
@@ -176,7 +178,9 @@ class StreamText:
             self._call = ""
             self._in_call = False
             self._held = ""
-            return [("content", xml)] if xml else []
+            if self._keep_calls and xml:
+                return [("content", xml)]
+            return []
         if not self._held:
             return []
         channel = "reasoning" if self._reasoning else "content"

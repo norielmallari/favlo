@@ -896,11 +896,24 @@ class Qwen36Runtime:
                         budget, out, nxt, tool_open, long_ids, set(prompt), word_ids
                     )
                     if revised is None:
-                        break
-                    nxt = revised
+                        nxt = _sample(
+                            logits,
+                            temperature,
+                            top_p,
+                            top_k,
+                            presence,
+                            seen,
+                            {nxt},
+                            out,
+                            frequency,
+                            counts,
+                        )
+                        finished_forced = False
+                    else:
+                        nxt = revised
+                        finished_forced = close_after and not pending
                     if budget is not None:
                         nxt = budget.take(nxt)
-                    finished_forced = close_after and not pending
                 else:
                     held = {budget.end} if budget is not None and budget.closed else set()
                     if forbid:
@@ -928,7 +941,18 @@ class Qwen36Runtime:
                             break
                         held.add(drawn)
                     if revised is None:
-                        break
+                        nxt = _sample(
+                            logits,
+                            temperature,
+                            top_p,
+                            top_k,
+                            presence,
+                            seen,
+                            held,
+                            out,
+                            frequency,
+                            counts,
+                        )
                     if budget is not None:
                         nxt = budget.take(nxt)
                     finished_forced = False
@@ -1128,9 +1152,23 @@ class ThinkBudget:
         return token
 
 
-def _tool_call_started(produced: list[int], tool_open: int | None) -> bool:
-    """True once ``tool_open`` has been drawn in this completion."""
-    return tool_open is not None and tool_open in produced
+def _reply_tokens(produced: list[int], end: int | None) -> list[int]:
+    """Tokens after ``</think>``. Before that close, the whole completion is the span."""
+    if end is not None and end in produced:
+        return produced[produced.index(end) + 1 :]
+    return produced
+
+
+def _calls_after_think(produced: list[int], tool_open: int | None, end: int | None) -> int:
+    """``tool_open`` tokens in the reply. A mention before ``</think>`` is not one of them."""
+    if tool_open is None:
+        return 0
+    return sum(1 for token in _reply_tokens(produced, end) if token == tool_open)
+
+
+def _tool_call_started(produced: list[int], tool_open: int | None, end: int | None) -> bool:
+    """True once the reply has drawn ``tool_open``."""
+    return _calls_after_think(produced, tool_open, end) > 0
 
 
 def _stutter(
@@ -1201,23 +1239,26 @@ def revise_think_draw(
 ) -> int | None:
     """The token to emit, or None when ``drawn`` would continue a repeated clause.
 
+    None refuses that draw. The completion samples another token and continues.
     While ``<think>`` is open, a 5-token span already drawn starts the close.
     The same word with one token between the copies does the same, as does a
     second draw of a token whose piece has seven or more letters, unless that
     token is already in the prompt. After the close, any of those repeats is
-    not drawn, and another token is sampled. A tool call is left as drawn,
-    and a repeated span inside it stays.
-    A second call in the same completion is not drawn. An 8-token block still
-    applies to the draw itself.
+    not drawn, and another token is sampled. A ``<tool_call>`` token inside
+    the open think block does not count as the call. After the close, the
+    call is left as drawn, and a repeated span inside it stays. A second
+    call in that reply is not drawn. An 8-token block still applies to the
+    draw itself.
     """
+    end = None if budget is None else budget.end
     if (
         budget is not None
         and tool_open is not None
         and drawn == tool_open
-        and tool_open in produced
+        and _calls_after_think(produced, tool_open, end) > 0
     ):
         return None
-    if budget is None or budget.forcing or _tool_call_started(produced, tool_open):
+    if budget is None or budget.forcing or _tool_call_started(produced, tool_open, end):
         return drawn
     if tool_open is not None and drawn == tool_open:
         return drawn
@@ -1267,6 +1308,14 @@ def assert_think_repeat_cases() -> None:
         message = "a tool call was replaced"
         raise AssertionError(message)
     if revise_think_draw(opening, [50, 7, 8], 50, 50) is not None:
+        message = "a second tool call was drawn"
+        raise AssertionError(message)
+    closed = ThinkBudget(close, 21, 64)
+    closed.closed = True
+    if revise_think_draw(closed, [50, 21], 50, 50) != 50:
+        message = "the call after thinking was removed"
+        raise AssertionError(message)
+    if revise_think_draw(closed, [21, 50, 7], 50, 50) is not None:
         message = "a second tool call was drawn"
         raise AssertionError(message)
 
