@@ -11,6 +11,7 @@ from typing import Any
 from jinja2 import Environment
 from tokenizers import Tokenizer
 
+from qwen36_35b_a3b.cache import DEFAULT_CONTEXT_LENGTH
 from qwen36_35b_a3b.forward import RequestClosed, letter_token_ids, long_token_ids
 from qwen36_35b_a3b.sampling import VARIANTS, mode_card, requested_thinking
 from qwen36_35b_a3b.tools import (
@@ -333,6 +334,13 @@ def _stream_delta(decoded: str, shown: str, *, final: bool) -> tuple[str, str]:
     return decoded[len(shown) :], decoded
 
 
+def _context_length(runtime: Any) -> int:
+    live = getattr(runtime, "_context_limit", None)
+    if isinstance(live, int) and live > 0:
+        return min(live, DEFAULT_CONTEXT_LENGTH)
+    return DEFAULT_CONTEXT_LENGTH
+
+
 def _usage(runtime: Any, prompt_tokens: int, completion_tokens: int) -> dict[str, Any]:
     cached = int(getattr(runtime, "_cached_tokens", 0) or 0)
     prompt_n = max(0, prompt_tokens - cached)
@@ -342,6 +350,8 @@ def _usage(runtime: Any, prompt_tokens: int, completion_tokens: int) -> dict[str
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": prompt_tokens + completion_tokens,
+        "context_length": _context_length(runtime),
+        "prompt_tokens_details": {"cached_tokens": cached},
         "timings": {
             "prompt_per_second": 0.0 if prefill_s <= 0 else prompt_n / prefill_s,
             "predicted_per_second": 0.0 if decode_s <= 0 else completion_tokens / decode_s,

@@ -140,6 +140,61 @@ def test_a_closed_think_tool_call_is_a_prefix_of_the_next_prompt() -> None:
     assert whole[: len(joined)] == joined
 
 
+def test_close_drops_device_buffers_before_another_pipeline() -> None:
+    from qwen36_35b_a3b.forward import Qwen36Runtime
+
+    class _Atlas:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def close(self) -> None:
+            self.calls += 1
+
+    class _Session:
+        def __init__(self) -> None:
+            self.ended = 0
+
+        def end(self) -> None:
+            self.ended += 1
+
+    class _Prefix:
+        def __init__(self) -> None:
+            self.flushed = 0
+
+        def flush(self) -> None:
+            self.flushed += 1
+
+    atlas = _Atlas()
+    session = _Session()
+    prefix = _Prefix()
+    runtime = Qwen36Runtime.__new__(Qwen36Runtime)
+    runtime._pending = None
+    runtime.session = session
+    runtime.atlas = atlas
+    runtime.prefix = prefix
+    runtime._prefill = object()
+    runtime._held = [object()]
+    runtime.resident = object()
+    runtime.hidden = object()
+    runtime.k_cache = [object()]
+    runtime.v_cache = [object()]
+    runtime.plane_scores = object()
+    Qwen36Runtime.close(runtime)
+    Qwen36Runtime.close(runtime)
+    assert session.ended == 1
+    assert atlas.calls == 1
+    assert prefix.flushed == 1
+    assert runtime.session is None
+    assert runtime.atlas is None
+    assert runtime.prefix is None
+    assert runtime.resident is None
+    assert runtime.hidden is None
+    assert runtime.plane_scores is None
+    assert runtime.k_cache == []
+    assert runtime.v_cache == []
+    assert runtime._held == []
+
+
 def test_an_omitted_assistant_turn_stays_a_prefix_of_the_next_prompt() -> None:
     root = Path("models/Qwen3.6-35B-A3B-fp4")
     if not (root / "chat_template.jinja").is_file():

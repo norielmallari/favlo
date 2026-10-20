@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import struct
 import time
@@ -21,6 +22,7 @@ from qwen36_35b_a3b.atlas import (
 from qwen36_35b_a3b.attn import attend_plane, bind_plane, plane_bytes, resize_plane
 from qwen36_35b_a3b.cache import (
     CONTEXT_STEP,
+    DEFAULT_CONTEXT_LENGTH,
     fit_positions,
     kv_buffer_bytes,
     kv_mode,
@@ -37,6 +39,51 @@ from qwen36_35b_a3b.session import Session, _clear
 
 HIDDEN = 2048
 VOCAB = 248320
+_DEVICE_BUFFERS = (
+    "resident",
+    "hidden",
+    "normed",
+    "half",
+    "wide",
+    "z",
+    "ab",
+    "ab2",
+    "mixed",
+    "gdn_y",
+    "query",
+    "gate",
+    "kv",
+    "vv",
+    "attn",
+    "expert",
+    "mid",
+    "gated",
+    "partial",
+    "ids",
+    "expert_order",
+    "mix_w",
+    "acc",
+    "router",
+    "coeff",
+    "logits",
+    "history",
+    "state",
+    "k_cache",
+    "v_cache",
+    "plane_q",
+    "plane_scores",
+    "plane_probs",
+    "plane_prob_half",
+    "plane_row_scale",
+    "plane_parts",
+    "plane_partial",
+    "plane_acc",
+    "plane_max",
+    "plane_sum",
+    "plane_tail",
+    "plane_chunk_max",
+    "plane_chunk_sum",
+)
 HEAD = 256
 Q_HEADS = 16
 KV = 2
@@ -218,7 +265,7 @@ class Qwen36Runtime:
         if ceiling is None:
             message = "the key/value cache does not fit a 2048-token context"
             raise RuntimeError(message)
-        self._context_limit = ceiling
+        self._context_limit = min(ceiling, DEFAULT_CONTEXT_LENGTH)
         self._plane_at = _plane
         self.max_pos = min(CONTEXT_STEP, ceiling)
         self.kv_record = kv_record_bytes(self.kv_cache)
@@ -330,18 +377,47 @@ class Qwen36Runtime:
             raise RequestClosed()
 
     def close(self) -> None:
+        """Finish device work and drop the buffers before another pipeline allocates."""
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
         self._drop_pending()
         prefix = getattr(self, "prefix", None)
-        if prefix is not None and self.session is not None:
+        session = getattr(self, "session", None)
+        if prefix is not None and session is not None:
             try:
                 prefix.flush()
             except OSError:
                 pass
+        if session is not None:
+            try:
+                session.end()
+            except Exception:
+                abort = getattr(session, "abort", None)
+                if callable(abort):
+                    abort()
         self._prefill = None
-        self._held.clear()
-        self.atlas.close()
-        self.resident = None
+        held = getattr(self, "_held", None)
+        if held is not None:
+            held.clear()
+        atlas = getattr(self, "atlas", None)
+        if atlas is not None:
+            atlas.close()
+        for name in _DEVICE_BUFFERS:
+            current = getattr(self, name, None)
+            if isinstance(current, list):
+                current.clear()
+            else:
+                setattr(self, name, None)
+        self.atlas = None
+        self.prefix = None
         self.session = None
+        current = None
+        session = None
+        atlas = None
+        prefix = None
+        held = None
+        gc.collect()
 
     def _routed_ids(self, ids: Any, count: int) -> list[int]:
         """Finish the open buffer so the router ids can be read."""
