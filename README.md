@@ -44,17 +44,15 @@ uv run favlo serve
 uv run favlo serve --non-interactive
 ```
 
-`favlo serve` on a terminal is the CLI. `favlo serve --non-interactive` starts the server daemon and exits. The daemon listens on `127.0.0.1:8129`. On a terminal, an empty registry downloads [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B), packs `models/Qwen3.6-35B-A3B-fp4`, and then the daemon listens. Quantize and the other non-serve commands use that model's flag, as in `favlo --qwen38-flash-next quantize`.
+`favlo serve` on a terminal is the CLI. `favlo serve --non-interactive` starts the server daemon and exits. The daemon listens on `127.0.0.1:8129`. On a terminal, an empty registry downloads [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B), packs `models/Qwen3.6-35B-A3B-fp4`, and then the daemon listens. Quantize and the other non-serve commands use that model's flag, as in `favlo --qwen38-flash-next quantize`. The terminal session is [docs/guides/clients.md](docs/guides/clients.md). The assisted features on that session are [docs/ai-assistance](docs/ai-assistance/README.md).
 
-## Chat
+## Methodology
 
-On a terminal, `favlo serve` reads stdin and talks to the daemon through its chat endpoint. The model field is the first folder in the registry. A line is sent when it is ready. The prompt is `you:`. It starts on a new line after that turn's telemetry. The reply is `favlo:`. Telemetry is painted as it arrives, including the load row. The reply is printed after that turn's requests have closed. A tool call is not printed. The terminal wraps that text. Ctrl+C stops the daemon when this terminal started it. Closing the terminal leaves the daemon running.
+A pipeline equation comes from a public paper, a published specification, or a vendor document, then maps onto a Metal operation. Another application's source is not a reference. The process citations are [REFERENCES.md](REFERENCES.md). A pipeline's own citations are in that pipeline's note.
 
-The first start, when `~/.favlo/intros.json` has no lines, sends one chat completion. The daemon opens the load row when it reads the record. `save_intro` stores the openings when several of them are different. The first start prints the first line. Each later start prints the next line, then the first again. The model runs again when someone types.
+The prompt and the generated tokens are separate phases. Patel et al., *Splitwise* ([arXiv:2311.18677](https://arxiv.org/abs/2311.18677)), and Zhong et al., *DistServe* ([arXiv:2401.09670](https://arxiv.org/abs/2401.09670)), split those phases. The key/value cache is what crosses the boundary. Agrawal et al., *SARATHI* ([arXiv:2308.16369](https://arxiv.org/abs/2308.16369)), compute a prompt in chunks. Prefill and decode are Metal shaders. A missing kernel stays missing.
 
-After 30 minutes with no completion from this terminal and no typing, Favlo checks memory and free disk. When the machine can hold [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B), Favlo starts that download and asks whether to remind them again. A no is remembered, and those reminders stay off until they are turned back on. A shorter idle gap would take the only request slot during a pause in the conversation.
-
-Favlo speaks as a small horse who wants a carrot. `/quit` stops the daemon. Questions about connecting a client, adding a model, or the name are answered from [docs/guides](docs/guides). The list of these features is [docs/ai-assistance](docs/ai-assistance/README.md).
+Weights follow the Open Compute Project *Microscaling Formats (MX) Specification*: a block of 32 values and an E8M0 scale. Apple's Metal tensor documents name `matmul2d` and that scale plane. WWDC26 session 330 is the tensor-op session. The Metal shading-language specification is the unpack and storage reference.
 
 ## Development
 
