@@ -116,6 +116,7 @@ KERNELS = (
     "scatter_add_rows",
     "silu_mul_slots",
     "router8",
+    "copy_u32",
     "remap_expert_ids",
     "mix_experts",
     "layernorm_rows_f32",

@@ -32,6 +32,7 @@ from qwen36_35b_a3b.cache import (
     repack_plane,
 )
 from qwen36_35b_a3b.convert import LANGUAGE_LAYERS, SLOT_MAP_BYTES
+from qwen36_35b_a3b.firing import RouteScratch
 from qwen36_35b_a3b.formats import EXPERT_IMAGE
 from qwen36_35b_a3b.prefill import workspace_bytes
 from qwen36_35b_a3b.prefix import open_session
@@ -60,6 +61,7 @@ _DEVICE_BUFFERS = (
     "gated",
     "partial",
     "ids",
+    "route_ids",
     "expert_order",
     "mix_w",
     "acc",
@@ -232,6 +234,8 @@ class Qwen36Runtime:
     ) -> None:
         del resident_percent
         self.root = Path(path)
+        self.routes = RouteScratch(LAYERS, EXPERTS)
+        self._firing_open = False
         self.console = console
         self.kv_cache = kv_mode(kv_cache)
         self._request_id = 0
@@ -312,6 +316,7 @@ class Qwen36Runtime:
             self.gated = self.session.zeros(8 * 512 * 4)
             self.partial = self.session.zeros(8 * HIDDEN * 4)
             self.ids = self.session.zeros(8 * 4)
+            self.route_ids = self.session.zeros(LAYERS * 8 * 4)
             order_path = self.root / "experts" / "order.bin"
             order = order_path.read_bytes()
             if len(order) != SLOT_MAP_BYTES:
@@ -418,6 +423,25 @@ class Qwen36Runtime:
         prefix = None
         held = None
         gc.collect()
+
+    def _note_routes(self) -> None:
+        """Read the router ids copied before remap. One token, forty layers."""
+        routes = self.routes
+        route_ids = getattr(self, "route_ids", None)
+        if routes is None or route_ids is None or self.session is None:
+            return
+        raw = self.session.download(route_ids, LAYERS * 8 * 4)
+        ids = np.frombuffer(raw, dtype=np.uint32).reshape(LAYERS, 1, 8)
+        routes.note_decode(ids)
+
+    def _take_routes(self, *, prefill: bool) -> None:
+        routes = self.routes
+        if routes is None:
+            return
+        if prefill:
+            routes.take_prefill_span()
+        else:
+            routes.take_decode(1)
 
     def _routed_ids(self, ids: Any, count: int) -> list[int]:
         """Finish the open buffer so the router ids can be read."""
@@ -684,6 +708,14 @@ class Qwen36Runtime:
             (1, 1, 1),
             (1, 1, 1),
         )
+        if self.routes is not None:
+            self.session.encode(
+                "copy_u32",
+                [(self.ids, 0), (self.route_ids, layer * 8 * 4)],
+                [_u32(8)],
+                (1, 1, 1),
+                (32, 1, 1),
+            )
         if layer >= LANGUAGE_LAYERS:
             message = f"layer {layer} has no expert slot map"
             raise RuntimeError(message)
@@ -835,6 +867,7 @@ class Qwen36Runtime:
             self.session.commit()
         self._prepare_pending(pos + 1)
         self.session.wait_inflight()
+        self._note_routes()
         self.filled = pos + 1
         if not logits:
             return None
@@ -939,6 +972,7 @@ class Qwen36Runtime:
                 self._prefill_base = 0
                 prefill_ids(self, suffix[:-1], hit)
             logits = self.step(suffix[-1], len(prompt) - 1, logits=True)
+            self._take_routes(prefill=True)
             assert logits is not None
             self.prefix.note(prompt)
             self._store_prefix()
@@ -1060,12 +1094,15 @@ class Qwen36Runtime:
                 )
                 if finished_forced or repeat_done:
                     self.step(nxt, len(prompt) + count, logits=False)
+                    self._take_routes(prefill=False)
                     break
                 if count + 1 == max_tokens:
                     self._hit_limit = True
                     self.step(nxt, len(prompt) + count, logits=False)
+                    self._take_routes(prefill=False)
                     break
                 logits = self.step(nxt, len(prompt) + count, logits=True)
+                self._take_routes(prefill=False)
                 assert logits is not None
             decode_elapsed = max(time.perf_counter() - decode_started, 1e-9)
             self._decode_seconds = decode_elapsed

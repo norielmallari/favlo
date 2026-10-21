@@ -211,10 +211,15 @@ def handle_chat(
 ) -> None:
     """One non-streaming or streaming chat completion."""
     del args, state
+    from qwen36_35b_a3b.firing import finish_request, open_request
+
     runtime._halted = False
     runtime._stop = getattr(handler, "_client_stopped", None)
+    open_request(runtime)
+    finished = False
     try:
         _handle_chat(handler, runtime, body, selection)
+        finished = True
     except RequestClosed:
         handler.close_connection = True
         runtime._status("client closed")
@@ -226,6 +231,7 @@ def handle_chat(
     finally:
         runtime._vision_at = None
         runtime._stop = None
+        finish_request(runtime, selection, complete=finished)
 
 
 def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: Any) -> None:

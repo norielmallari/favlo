@@ -1300,6 +1300,18 @@ kernel void router8(
     }
 }
 
+// Router ids, copied before remap replaces them with file slots.
+kernel void copy_u32(
+    device const uint* source [[buffer(0)]],
+    device uint* dest [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid < count) {
+        dest[tid] = source[tid];
+    }
+}
+
 // Checkpoint router rows become file slots. ``order`` is 256 bytes per layer.
 kernel void remap_expert_ids(
     device uint* ids [[buffer(0)]],

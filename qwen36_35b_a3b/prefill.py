@@ -70,6 +70,7 @@ class _Workspace:
         self.router = zeros(cap * 256 * 4)
         self.coeff = zeros(cap * 4)
         self.ids = zeros(cap * 8 * 4)
+        self.route_ids = zeros(40 * cap * 8 * 4)
         self.mix = zeros(cap * 8 * 4)
         self.gate_up = zeros(cap * 1024 * 4)
         self.gated = zeros(cap * 512 * 4)
@@ -122,6 +123,7 @@ def workspace_bytes() -> int:
         + cap * 256 * 4
         + cap * 4
         + cap * 8 * 4
+        + 40 * cap * 8 * 4
         + cap * 8 * 4
         + cap * 1024 * 4
         + cap * 512 * 4
@@ -221,6 +223,7 @@ def _chunk(runtime: Any, work: _Workspace, ids: list[int], pos0: int) -> None:
                 _note_chunk(runtime, finished, count)
         runtime.session.wait_inflight()
         _note_chunk(runtime, 40, count)
+        _collect_routes(runtime, work, count)
     finally:
         if runtime.session._recording:
             runtime.session.abort()
@@ -468,6 +471,14 @@ def _route(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) ->
         (256, 1, 1),
     )
     assignments = count * 8
+    if getattr(runtime, "routes", None) is not None:
+        runtime.session.encode(
+            "copy_u32",
+            [(work.ids, 0), (work.route_ids, layer * assignments * 4)],
+            [_u32(assignments)],
+            ((assignments + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
     runtime.session.encode(
         "remap_expert_ids",
         [(work.ids, 0), (runtime.expert_order, 0)],
@@ -507,6 +518,17 @@ def masked_expert_passes(ids: np.ndarray, slots: int) -> list[np.ndarray] | None
                 masked[index] = _ABSENT
         passes.append(masked)
     return passes
+
+
+def _collect_routes(runtime: Any, work: _Workspace, count: int) -> None:
+    """Bin this chunk's router ids. The copy ran before each layer's remap."""
+    routes = getattr(runtime, "routes", None)
+    if routes is None or count <= 0:
+        return
+    raw = runtime.session.download(work.route_ids, 40 * count * 8 * 4)
+    ids = np.frombuffer(raw, dtype=np.uint32).reshape(40, count, 8)
+    for layer in range(40):
+        routes.add_prefill(layer, ids[layer])
 
 
 def _experts(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) -> None:
