@@ -1,11 +1,11 @@
 ---
 name: optimization-loop
-description: Run the Favlo optimization loop for one pipeline. Establish ceilings from theoretical computations on the designed kernels, cache them in that pipeline's docs, and reuse them when the kernels are unchanged. Then modify the pipeline and run the smoke-testing skill. Use when optimizing a pipeline, raising prefill or decode rate, closing a kernel gap, or when the user asks for an optimization loop. The whole process is non-HITL until 90% of the ceiling is achieved. Once the agent smokes pass, commit the related code on the current branch, including main.
+description: Optimize one Favlo language-model pipeline toward its prefill or decode ceiling. Use when raising tok/s, closing a prefill or decode gap, or when the user asks for an optimization loop on a text model. Do not use for image generation.
 ---
 
-# Optimization loop
+# Language-model optimization
 
-One pipeline. Read [ARCHITECTURE.md](../../../ARCHITECTURE.md) and that pipeline's `docs/<pipeline>/` note. Edit only that write set. Leave every other pipeline untouched.
+One language-model pipeline. An image pipeline uses [optimization-image](../optimization-image/SKILL.md). Read [ARCHITECTURE.md](../../../ARCHITECTURE.md) and that pipeline's `docs/<pipeline>/` note. Edit only that write set. Leave every other pipeline untouched.
 
 The whole process is non-HITL until 90% of the ceiling is achieved. Do not ask, and do not stop between iterations, until the measured rate meets that bar or a step cannot proceed.
 
@@ -30,7 +30,7 @@ The ceiling used for the 90% test is the kernel ceiling. The bandwidth ceiling i
 
 Change this pipeline's kernels or the forward that launches them. Update `docs/<pipeline>/` in the same change when the kernels, records, or cache change.
 
-Take `artifacts/pipeline-test.lock` before any command that compiles shaders, dispatches Metal, loads a checkpoint, quantizes, or starts `favlo serve`. The lock is one JSON object: `pipeline` (the flag stem), `pid` (this shell), `command` (the short test name). Create it with exclusive create. If a live `pid` holds it, wait. Release it when the testing stretch ends, including on failure. Remove the file only when its `pid` is this agent's.
+Take the GPU with `uv run python -m favlo.smoke_lock acquire --pipeline <stem> --command <name>` before any command that compiles shaders, dispatches Metal, loads a checkpoint, quantizes, or starts `favlo serve`. Run acquire, the command, and `uv run python -m favlo.smoke_lock release` in the same shell. Exit 2 or 3 means wait and run acquire again. Do not kill a serve the user left running.
 
 ## 3. Smoke
 

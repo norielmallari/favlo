@@ -1,0 +1,8 @@
+---
+description: Use when optimizing an image pipeline's generation time. Do not use for language-model prefill or decode.
+alwaysApply: false
+---
+
+# Image optimization
+
+Load [optimization-image](../skills/optimization-image/SKILL.md) and follow it. The ceiling is seconds for one generation. A shorter time is faster. The 90% test compares the printed generation time with the kernel ceiling. Do not apply this rule to a language model.

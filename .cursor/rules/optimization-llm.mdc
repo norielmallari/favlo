@@ -1,0 +1,8 @@
+---
+description: Use when optimizing a language-model pipeline's prefill or decode rate. Do not use for image generation.
+alwaysApply: false
+---
+
+# Language-model optimization
+
+Load [optimization-loop](../skills/optimization-loop/SKILL.md) and follow it. The ceiling is tok/s for prefill or decode. The 90% test compares the printed rate on that phase with the kernel ceiling. Do not apply this rule to an image pipeline.
