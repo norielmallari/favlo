@@ -9,8 +9,8 @@ One decode token at context 2048, experts resident, sums to 75.23 ms, 13.29 tok/
 ## Predecessors
 
 - Method. Qwen Team ([arXiv:2608.30320](https://arxiv.org/abs/2608.30320)) gives Gated DeltaNet and sparse attention. Apple, WWDC26 session 330, specifies `matmul2d`.
-- Model. The same report. [MTPLX](https://mtplx.com/docs/run-qwen-3-8-on-a-mac/) reports 125.8 tok/s on one cached request for this model, with a draft.
-- Measurement. That rate is another engine. It does not publish this per-kernel sum.
+- Model. The same report. [MTPLX](https://mtplx.com/docs/run-qwen-3-8-on-a-mac/) reports 125.8 tok/s on one OpenCode request for this model, with a draft and 18,364 cached prompt tokens, on an M5 Max.
+- Measurement. [oMLX issue 3353](https://github.com/jundot/omlx/issues/3353) reports 29.7 tok/s greedy with MTP off on an M3 Ultra. The [mlx-serve pack](https://huggingface.co/ARC4NUM/Qwen3.8-Flash-Next-Uncensored-MLX-Serve-4bit) reports 55.7 tok/s serial decode on an M5 Max. None of those rates is this per-kernel sum.
 - Mechanism. Overlapping command buffers are not added. The 90% test for decode uses the kernel column. A 2 GiB streaming read finished in 8043 µs, 267.0 GB/s.
 
 ## Rule
@@ -32,7 +32,7 @@ Each time is one command buffer, then a wait. Context 2048 uses dense attention 
 
 ## Search
 
-21 October 2026. Query: "Qwen3.8-27B inference tok/s Apple Silicon Qwen3.8-Flash-Next". The predecessor in this note is the overlap that query returned for this model. The search did not find the 13.29 and 518.4 tok/s sums.
+21 October 2026. Queries: "Qwen3.8-Flash-Next tokens per second Apple Silicon MLX inference", "Qwen3.8-Flash-Next fp8 int2 expert layer microseconds decode Apple Silicon moe_decode". The predecessors in this note are the overlaps those queries returned. The search did not find the 13.29 and 518.4 tok/s sums.
 
 ## Corrections
 

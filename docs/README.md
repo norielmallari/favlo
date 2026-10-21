@@ -12,6 +12,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen38-flash-next/architecture.md](qwen38-flash-next/architecture.md) | Qwen3.8-Flash-Next pipeline contract |
 | [qwen38-flash-next/research/int2-miss.md](qwen38-flash-next/research/int2-miss.md) | Qwen3.8-Flash-Next int2 reconstruction bound |
 | [qwen38-flash-next/research/kernel-ceilings.md](qwen38-flash-next/research/kernel-ceilings.md) | Qwen3.8-Flash-Next isolated dispatch sum |
+| [qwen38-flash-next/research/expert-planes.md](qwen38-flash-next/research/expert-planes.md) | Qwen3.8-Flash-Next expert-width dispatch times |
 | [qwen38-flash-next/research/recorded-forward.md](qwen38-flash-next/research/recorded-forward.md) | Qwen3.8-Flash-Next recorded prefill and decode sums |
 | [qwen38-flash-next/performance.md](qwen38-flash-next/performance.md) | Qwen3.8-Flash-Next recorded prefill and decode rates |
 | [qwen38-flash-next/references.md](qwen38-flash-next/references.md) | Papers and specifications for that pipeline |
