@@ -1,6 +1,6 @@
 # Feed-forward fp8 budget
 
-Measurement note for the `qwen38-27b` pipeline. The serving contract is [../README.md](../README.md). Quantize still writes every matrix as fp4. This file records a format bound and the budget rule that would spend fp8 on the worst feed-forward layers. It does not record the per-matrix errors of the [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) checkout.
+Measurement note for the `qwen38-27b` pipeline. The serving contract is [../README.md](../README.md). This file records a format bound and the budget rule that spends fp8 on the worst feed-forward layers. It does not record the per-matrix errors of the [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) checkout.
 
 ## Remainder
 
@@ -44,4 +44,4 @@ A scaled fp4 magnitude of 0.25 or less restores as 0. That is 1/24 of an exact-s
 
 ## Corrections
 
-Later finds are appended here. The sections above stay as committed.
+Quantize accepts `--ffn-fp8`. A mixed percentage writes `models/Qwen3.8-27B-fp8-fp4` and records the chosen layers in that directory. The sections above stay as committed.

@@ -325,12 +325,14 @@ def _ffn(
 def _matmul(runtime: Any, half: Any, name: str, dest: Any, rows: int) -> None:
     buf, offset, entry = runtime.locate(name)
     cols, inner = (int(value) for value in entry["stored_shape"])
-    if cols % 64 or inner % 32 or rows % 64:
-        message = f"{name} tile {rows}x{cols}x{inner} is not a 64-row fp4 tile"
+    kind = str(entry.get("dtype", "fp4"))
+    if kind not in {"fp4", "fp8"} or cols % 64 or inner % 32 or rows % 64:
+        message = f"{name} tile {rows}x{cols}x{inner} is not a 64-row {kind} tile"
         raise RuntimeError(message)
-    width = int(runtime.session.pipes["prefill_fp4_n64"].threadExecutionWidth())
+    kernel = "prefill_fp8_n64" if kind == "fp8" else "prefill_fp4_n64"
+    width = int(runtime.session.pipes[kernel].threadExecutionWidth())
     runtime.session.encode(
-        "prefill_fp4_n64",
+        kernel,
         [
             (half, 0),
             (buf, offset),

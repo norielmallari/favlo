@@ -14,13 +14,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 from qwen38_27b.chat import STOP, decode_text, encode_chat
-from qwen38_27b.commands import CARROT_PROMPT
-from qwen38_27b.convert import RECORD_NAME
+from qwen38_27b.commands import CARROT_PROMPT, installed_record
 from qwen38_27b.forward import Qwen38Runtime
 from qwen38_27b.sampling import VARIANTS
 from qwen38_27b.tools import split_thinking
-
-_ROOT = Path("models") / RECORD_NAME
 _INSTRUCT_TOKENS = 384
 _THINK_TOKENS = 768
 _ANSWER = re.compile(
@@ -48,9 +45,10 @@ def _efforts(template: str) -> tuple[str, ...]:
 
 @pytest.fixture(scope="module")
 def carrot_runtime():
-    if not (_ROOT / "manifest.json").is_file():
+    root = installed_record()
+    if root is None:
         pytest.skip("quantized record is not installed")
-    runtime = Qwen38Runtime(_ROOT)
+    runtime = Qwen38Runtime(root)
     try:
         yield runtime
     finally:

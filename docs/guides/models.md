@@ -24,7 +24,7 @@ The official checkpoint is `Qwen/Qwen3.8-27B`.
 
 `favlo --qwen38-27b download` fetches that checkpoint into `models/Qwen3.8-27B-bf16` with plain HTTP. `--check` reports whether the volume has room and does not write the files. A short file is continued on the next run.
 
-`favlo --qwen38-27b quantize` does not download. With no `--src`, it reads the Hugging Face cache snapshot for that repository. A missing cache is an error. `--src` names a local BF16 checkout, including `models/Qwen3.8-27B-bf16`. The packed record is `models/Qwen3.8-27B-fp4`, registered under the alias `qwen38-27b`.
+`favlo --qwen38-27b quantize` does not download. With no `--src`, it reads the Hugging Face cache snapshot for that repository. A missing cache is an error. `--src` names a local BF16 checkout, including `models/Qwen3.8-27B-bf16`. A uniform pack is `models/Qwen3.8-27B-fp4`. `--ffn-fp8 100` writes `models/Qwen3.8-27B-fp8`. Any other percentage writes `models/Qwen3.8-27B-fp8-fp4`. The record is registered under the alias `qwen38-27b`.
 
 An idle `favlo serve` may start that download when the machine has at least 16 GB of memory and the volume has room. It asks whether to remind them again. `download_suggestions` turns those reminders off or back on. Packing the record stays `quantize`.
 

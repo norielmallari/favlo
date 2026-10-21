@@ -21,7 +21,7 @@ from favlo.registry import (
 )
 from qwen38_27b.chat import STOP, decode_text, encode_chat
 from qwen38_27b.checks import format_report, run_checks
-from qwen38_27b.convert import RECORD_NAME, quantize
+from qwen38_27b.convert import quantize
 from qwen38_27b.fetch import (
     CHECKOUT,
     REPO,
@@ -43,9 +43,16 @@ _BF16_REPO = "Qwen/Qwen3.8-27B"
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="favlo --qwen38-27b")
     sub = parser.add_subparsers(dest="command", required=True)
-    quant = sub.add_parser("quantize", help="write the uniform fp4 record from BF16 shards")
+    quant = sub.add_parser("quantize", help="write the fp4 record, or a mixed feed-forward record")
     quant.add_argument("--src", type=Path, default=None)
     quant.add_argument("--output", type=Path, default=None)
+    quant.add_argument(
+        "--ffn-fp8",
+        nargs="?",
+        const="",
+        default=None,
+        help="percentage of language feed-forward layers to store as fp8; empty promotes none",
+    )
     fetch = sub.add_parser("download", help="download the official BF16 checkout")
     fetch.add_argument("--check", action="store_true", help="report disk space and do not write")
     fetch.add_argument("--console", choices=("auto", "pretty", "plain", "json"), default="auto")
@@ -131,11 +138,31 @@ def _move(progress: Any, done: int, total: int) -> None:
     progress.total = total
 
 
+def installed_record() -> Path | None:
+    """The one registered record for this pipeline. None when the registry has no row."""
+    try:
+        path, _selection = choose_complete(model=None, record=None, pipeline=PIPELINE)
+    except LookupError:
+        return None
+    if not (path / "manifest.json").is_file():
+        return None
+    return path
+
+
+def _percent(text: str | None) -> float | None:
+    if text is None or text == "":
+        return None
+    try:
+        return float(text)
+    except ValueError as exc:
+        message = f"ffn fp8 percentage {text} is not a number"
+        raise ValueError(message) from exc
+
+
 def _quantize(args: argparse.Namespace) -> int:
     src = args.src or snapshot_dir(_BF16_REPO)
-    output = args.output or Path("models") / RECORD_NAME
     try:
-        quantize(src, output)
+        output = quantize(src, args.output, ffn_fp8=_percent(args.ffn_fp8))
         register_quantized(output.name, source=src, alias="qwen38-27b", pipeline=PIPELINE)
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError, KeyError) as exc:
         sys.stderr.write(f"{exc}\n")

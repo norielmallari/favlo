@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from qwen38_27b.formats import dequant_e4m3_block, dequant_fp4, quantize_fp4
+from qwen38_27b.formats import dequant_e4m3_block, dequant_fp4, dequant_fp8, quantize_fp4, quantize_fp8
 from qwen38_27b.session import Session
 
 EPS = np.float32(1e-6)
@@ -111,6 +111,77 @@ def check_fp4_span2(session: Session) -> None:
     matrix = dequant_fp4(data, scales, cols, inner)
     _close("fp4 span2 a", session.download_f32(dest0, cols), (matrix @ act0).astype(np.float32), atol=1e-4)
     _close("fp4 span2 b", session.download_f32(dest1, cols), (matrix @ act1).astype(np.float32), atol=1e-4)
+
+
+def _fp8_case(cols: int, inner: int, seed: int) -> tuple[np.ndarray, bytes, bytes, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    activation = rng.normal(scale=0.05, size=inner).astype(np.float32)
+    weight = rng.normal(scale=0.05, size=(cols, inner)).astype(np.float32)
+    data, scales = quantize_fp8(weight)
+    expect = dequant_fp8(data, scales, cols, inner) @ activation
+    return activation, data, scales, expect.astype(np.float32)
+
+
+def check_fp8_prefill(session: Session) -> None:
+    rng = np.random.default_rng(2)
+    shapes = (("fp8 gate", 64, 128, 256), ("fp8 down", 64, 64, 512))
+    for label, rows, cols, inner in shapes:
+        activation = rng.normal(scale=0.05, size=(rows, inner)).astype(np.float16)
+        weight = rng.normal(scale=0.05, size=(cols, inner)).astype(np.float32)
+        data, scales = quantize_fp8(weight)
+        got = session.prefill("prefill_fp8_n64", activation, data, scales, rows, cols, inner)
+        matrix = dequant_fp8(data, scales, cols, inner)
+        expect = activation.astype(np.float32) @ matrix.T
+        _close(label, got, expect.astype(np.float32), atol=2e-3)
+
+
+def check_fp8_x4(session: Session) -> None:
+    activation, data, scales, expect = _fp8_case(8, 256, 3)
+    destination = session.zeros(8 * 4)
+    session.dispatch(
+        "gemv_fp8_x4",
+        [
+            session.upload(activation),
+            session.upload(data),
+            session.upload(scales),
+            destination,
+        ],
+        [np.uint32(8).tobytes(), np.uint32(256).tobytes()],
+        (2, 1, 1),
+        (32, 1, 1),
+    )
+    _close("fp8 x4", session.download_f32(destination, 8), expect, atol=1e-3)
+
+
+def check_fp8_gate_up(session: Session) -> None:
+    rng = np.random.default_rng(4)
+    rows, inner = 8, 256
+    activation = rng.normal(scale=0.05, size=inner).astype(np.float32)
+    gate = rng.normal(scale=0.05, size=(rows, inner)).astype(np.float32)
+    up = rng.normal(scale=0.05, size=(rows, inner)).astype(np.float32)
+    gate_data, gate_scales = quantize_fp8(gate)
+    up_data, up_scales = quantize_fp8(up)
+    gate_dest = session.zeros(rows * 4)
+    up_dest = session.zeros(rows * 4)
+    session.dispatch(
+        "ffn_gate_up_fp8",
+        [
+            session.upload(activation),
+            session.upload(gate_data),
+            session.upload(gate_scales),
+            session.upload(up_data),
+            session.upload(up_scales),
+            gate_dest,
+            up_dest,
+        ],
+        [np.uint32(rows).tobytes(), np.uint32(inner).tobytes()],
+        (rows // 4, 1, 1),
+        (32, 1, 1),
+    )
+    gate_expect = dequant_fp8(gate_data, gate_scales, rows, inner) @ activation
+    up_expect = dequant_fp8(up_data, up_scales, rows, inner) @ activation
+    _close("fp8 gate", session.download_f32(gate_dest, rows), gate_expect.astype(np.float32), atol=1e-3)
+    _close("fp8 up", session.download_f32(up_dest, rows), up_expect.astype(np.float32), atol=1e-3)
 
 
 def check_rms(session: Session) -> None:
@@ -355,6 +426,9 @@ CHECKS = (
     ("fp4 gemv", check_fp4_gemv),
     ("fp4 x4", check_fp4_x4),
     ("fp4 span2", check_fp4_span2),
+    ("fp8 prefill", check_fp8_prefill),
+    ("fp8 x4", check_fp8_x4),
+    ("fp8 gate up", check_fp8_gate_up),
     ("rms", check_rms),
     ("swiglu", check_swiglu),
     ("deltanet", check_deltanet),

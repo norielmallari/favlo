@@ -36,6 +36,73 @@ static float silu_f(float x) {
     return x * sigmoid_f(x);
 }
 
+constant float E4M3_TABLE[256] = {
+    0.000000000e+00f, 1.953125000e-03f, 3.906250000e-03f, 5.859375000e-03f,
+    7.812500000e-03f, 9.765625000e-03f, 1.171875000e-02f, 1.367187500e-02f,
+    1.562500000e-02f, 1.757812500e-02f, 1.953125000e-02f, 2.148437500e-02f,
+    2.343750000e-02f, 2.539062500e-02f, 2.734375000e-02f, 2.929687500e-02f,
+    3.125000000e-02f, 3.515625000e-02f, 3.906250000e-02f, 4.296875000e-02f,
+    4.687500000e-02f, 5.078125000e-02f, 5.468750000e-02f, 5.859375000e-02f,
+    6.250000000e-02f, 7.031250000e-02f, 7.812500000e-02f, 8.593750000e-02f,
+    9.375000000e-02f, 1.015625000e-01f, 1.093750000e-01f, 1.171875000e-01f,
+    1.250000000e-01f, 1.406250000e-01f, 1.562500000e-01f, 1.718750000e-01f,
+    1.875000000e-01f, 2.031250000e-01f, 2.187500000e-01f, 2.343750000e-01f,
+    2.500000000e-01f, 2.812500000e-01f, 3.125000000e-01f, 3.437500000e-01f,
+    3.750000000e-01f, 4.062500000e-01f, 4.375000000e-01f, 4.687500000e-01f,
+    5.000000000e-01f, 5.625000000e-01f, 6.250000000e-01f, 6.875000000e-01f,
+    7.500000000e-01f, 8.125000000e-01f, 8.750000000e-01f, 9.375000000e-01f,
+    1.000000000e+00f, 1.125000000e+00f, 1.250000000e+00f, 1.375000000e+00f,
+    1.500000000e+00f, 1.625000000e+00f, 1.750000000e+00f, 1.875000000e+00f,
+    2.000000000e+00f, 2.250000000e+00f, 2.500000000e+00f, 2.750000000e+00f,
+    3.000000000e+00f, 3.250000000e+00f, 3.500000000e+00f, 3.750000000e+00f,
+    4.000000000e+00f, 4.500000000e+00f, 5.000000000e+00f, 5.500000000e+00f,
+    6.000000000e+00f, 6.500000000e+00f, 7.000000000e+00f, 7.500000000e+00f,
+    8.000000000e+00f, 9.000000000e+00f, 1.000000000e+01f, 1.100000000e+01f,
+    1.200000000e+01f, 1.300000000e+01f, 1.400000000e+01f, 1.500000000e+01f,
+    1.600000000e+01f, 1.800000000e+01f, 2.000000000e+01f, 2.200000000e+01f,
+    2.400000000e+01f, 2.600000000e+01f, 2.800000000e+01f, 3.000000000e+01f,
+    3.200000000e+01f, 3.600000000e+01f, 4.000000000e+01f, 4.400000000e+01f,
+    4.800000000e+01f, 5.200000000e+01f, 5.600000000e+01f, 6.000000000e+01f,
+    6.400000000e+01f, 7.200000000e+01f, 8.000000000e+01f, 8.800000000e+01f,
+    9.600000000e+01f, 1.040000000e+02f, 1.120000000e+02f, 1.200000000e+02f,
+    1.280000000e+02f, 1.440000000e+02f, 1.600000000e+02f, 1.760000000e+02f,
+    1.920000000e+02f, 2.080000000e+02f, 2.240000000e+02f, 2.400000000e+02f,
+    2.560000000e+02f, 2.880000000e+02f, 3.200000000e+02f, 3.520000000e+02f,
+    3.840000000e+02f, 4.160000000e+02f, 4.480000000e+02f, NAN,
+    -0.000000000e+00f, -1.953125000e-03f, -3.906250000e-03f, -5.859375000e-03f,
+    -7.812500000e-03f, -9.765625000e-03f, -1.171875000e-02f, -1.367187500e-02f,
+    -1.562500000e-02f, -1.757812500e-02f, -1.953125000e-02f, -2.148437500e-02f,
+    -2.343750000e-02f, -2.539062500e-02f, -2.734375000e-02f, -2.929687500e-02f,
+    -3.125000000e-02f, -3.515625000e-02f, -3.906250000e-02f, -4.296875000e-02f,
+    -4.687500000e-02f, -5.078125000e-02f, -5.468750000e-02f, -5.859375000e-02f,
+    -6.250000000e-02f, -7.031250000e-02f, -7.812500000e-02f, -8.593750000e-02f,
+    -9.375000000e-02f, -1.015625000e-01f, -1.093750000e-01f, -1.171875000e-01f,
+    -1.250000000e-01f, -1.406250000e-01f, -1.562500000e-01f, -1.718750000e-01f,
+    -1.875000000e-01f, -2.031250000e-01f, -2.187500000e-01f, -2.343750000e-01f,
+    -2.500000000e-01f, -2.812500000e-01f, -3.125000000e-01f, -3.437500000e-01f,
+    -3.750000000e-01f, -4.062500000e-01f, -4.375000000e-01f, -4.687500000e-01f,
+    -5.000000000e-01f, -5.625000000e-01f, -6.250000000e-01f, -6.875000000e-01f,
+    -7.500000000e-01f, -8.125000000e-01f, -8.750000000e-01f, -9.375000000e-01f,
+    -1.000000000e+00f, -1.125000000e+00f, -1.250000000e+00f, -1.375000000e+00f,
+    -1.500000000e+00f, -1.625000000e+00f, -1.750000000e+00f, -1.875000000e+00f,
+    -2.000000000e+00f, -2.250000000e+00f, -2.500000000e+00f, -2.750000000e+00f,
+    -3.000000000e+00f, -3.250000000e+00f, -3.500000000e+00f, -3.750000000e+00f,
+    -4.000000000e+00f, -4.500000000e+00f, -5.000000000e+00f, -5.500000000e+00f,
+    -6.000000000e+00f, -6.500000000e+00f, -7.000000000e+00f, -7.500000000e+00f,
+    -8.000000000e+00f, -9.000000000e+00f, -1.000000000e+01f, -1.100000000e+01f,
+    -1.200000000e+01f, -1.300000000e+01f, -1.400000000e+01f, -1.500000000e+01f,
+    -1.600000000e+01f, -1.800000000e+01f, -2.000000000e+01f, -2.200000000e+01f,
+    -2.400000000e+01f, -2.600000000e+01f, -2.800000000e+01f, -3.000000000e+01f,
+    -3.200000000e+01f, -3.600000000e+01f, -4.000000000e+01f, -4.400000000e+01f,
+    -4.800000000e+01f, -5.200000000e+01f, -5.600000000e+01f, -6.000000000e+01f,
+    -6.400000000e+01f, -7.200000000e+01f, -8.000000000e+01f, -8.800000000e+01f,
+    -9.600000000e+01f, -1.040000000e+02f, -1.120000000e+02f, -1.200000000e+02f,
+    -1.280000000e+02f, -1.440000000e+02f, -1.600000000e+02f, -1.760000000e+02f,
+    -1.920000000e+02f, -2.080000000e+02f, -2.240000000e+02f, -2.400000000e+02f,
+    -2.560000000e+02f, -2.880000000e+02f, -3.200000000e+02f, -3.520000000e+02f,
+    -3.840000000e+02f, -4.160000000e+02f, -4.480000000e+02f, NAN,
+};
+
 constant float FP4_TABLE[16] = {
     0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
     -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f,
@@ -406,6 +473,159 @@ kernel void gemv_fp4_x4(
         destination[row0 + 1u] = o1;
         destination[row0 + 2u] = o2;
         destination[row0 + 3u] = o3;
+    }
+}
+
+// Four fp8 rows share one activation. inner is a multiple of 16. One scale covers 32 elements.
+template <typename Act>
+static void fp8_rows4(
+    Act activation,
+    device const uchar* weights,
+    device const uchar* scales,
+    uint row0,
+    uint inner,
+    uint lane,
+    thread float& a0,
+    thread float& a1,
+    thread float& a2,
+    thread float& a3)
+{
+    uint vecs = inner >> 4;
+    uint blocks = inner >> 5;
+    device const uint4* p0 = (device const uint4*)(weights + row0 * inner);
+    device const uint4* p1 = (device const uint4*)(weights + (row0 + 1u) * inner);
+    device const uint4* p2 = (device const uint4*)(weights + (row0 + 2u) * inner);
+    device const uint4* p3 = (device const uint4*)(weights + (row0 + 3u) * inner);
+    device const uchar* s0 = scales + row0 * blocks;
+    device const uchar* s1 = scales + (row0 + 1u) * blocks;
+    device const uchar* s2 = scales + (row0 + 2u) * blocks;
+    device const uchar* s3 = scales + (row0 + 3u) * blocks;
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+    for (uint i = lane; i < vecs; i += 32u) {
+        uint4 w0 = p0[i];
+        uint4 w1 = p1[i];
+        uint4 w2 = p2[i];
+        uint4 w3 = p3[i];
+        float f0 = exp2(float(s0[i >> 1]) - 127.0f);
+        float f1 = exp2(float(s1[i >> 1]) - 127.0f);
+        float f2 = exp2(float(s2[i >> 1]) - 127.0f);
+        float f3 = exp2(float(s3[i >> 1]) - 127.0f);
+        uint base = i << 4;
+        uint words0[4] = {w0.x, w0.y, w0.z, w0.w};
+        uint words1[4] = {w1.x, w1.y, w1.z, w1.w};
+        uint words2[4] = {w2.x, w2.y, w2.z, w2.w};
+        uint words3[4] = {w3.x, w3.y, w3.z, w3.w};
+        for (uint k = 0u; k < 4u; ++k) {
+            uint off = base + (k << 2);
+            float act0 = activation[off];
+            float act1 = activation[off + 1u];
+            float act2 = activation[off + 2u];
+            float act3 = activation[off + 3u];
+            uint v0 = words0[k];
+            uint v1 = words1[k];
+            uint v2 = words2[k];
+            uint v3 = words3[k];
+            acc0 += E4M3_TABLE[v0 & 0xFFu] * f0 * act0;
+            acc1 += E4M3_TABLE[v1 & 0xFFu] * f1 * act0;
+            acc2 += E4M3_TABLE[v2 & 0xFFu] * f2 * act0;
+            acc3 += E4M3_TABLE[v3 & 0xFFu] * f3 * act0;
+            acc0 += E4M3_TABLE[(v0 >> 8) & 0xFFu] * f0 * act1;
+            acc1 += E4M3_TABLE[(v1 >> 8) & 0xFFu] * f1 * act1;
+            acc2 += E4M3_TABLE[(v2 >> 8) & 0xFFu] * f2 * act1;
+            acc3 += E4M3_TABLE[(v3 >> 8) & 0xFFu] * f3 * act1;
+            acc0 += E4M3_TABLE[(v0 >> 16) & 0xFFu] * f0 * act2;
+            acc1 += E4M3_TABLE[(v1 >> 16) & 0xFFu] * f1 * act2;
+            acc2 += E4M3_TABLE[(v2 >> 16) & 0xFFu] * f2 * act2;
+            acc3 += E4M3_TABLE[(v3 >> 16) & 0xFFu] * f3 * act2;
+            acc0 += E4M3_TABLE[v0 >> 24] * f0 * act3;
+            acc1 += E4M3_TABLE[v1 >> 24] * f1 * act3;
+            acc2 += E4M3_TABLE[v2 >> 24] * f2 * act3;
+            acc3 += E4M3_TABLE[v3 >> 24] * f3 * act3;
+        }
+    }
+    a0 = acc0;
+    a1 = acc1;
+    a2 = acc2;
+    a3 = acc3;
+}
+
+kernel void gemv_fp8_x4(
+    device const float* activation [[buffer(0)]],
+    device const uchar* weights [[buffer(1)]],
+    device const uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint group [[threadgroup_position_in_grid]])
+{
+    uint row0 = group << 2;
+    if (row0 >= cols) {
+        return;
+    }
+    float acc0, acc1, acc2, acc3;
+    fp8_rows4(activation, weights, scales, row0, inner, lane, acc0, acc1, acc2, acc3);
+    float o0 = simd_sum(acc0);
+    float o1 = simd_sum(acc1);
+    float o2 = simd_sum(acc2);
+    float o3 = simd_sum(acc3);
+    if (lane == 0u) {
+        destination[row0] = o0;
+        destination[row0 + 1u] = o1;
+        destination[row0 + 2u] = o2;
+        destination[row0 + 3u] = o3;
+    }
+}
+
+// Gate and up share one read of the activation. inner is at most 5120.
+kernel void ffn_gate_up_fp8(
+    device const float* activation [[buffer(0)]],
+    device const uchar* gate_w [[buffer(1)]],
+    device const uchar* gate_s [[buffer(2)]],
+    device const uchar* up_w [[buffer(3)]],
+    device const uchar* up_s [[buffer(4)]],
+    device float* gate [[buffer(5)]],
+    device float* up [[buffer(6)]],
+    constant uint& rows [[buffer(7)]],
+    constant uint& inner [[buffer(8)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint group [[threadgroup_position_in_grid]])
+{
+    threadgroup float shared_act[5120];
+    uint row0 = group << 2;
+    if (inner > 5120u) {
+        return;
+    }
+    for (uint i = lane; i < inner; i += 32u) {
+        shared_act[i] = activation[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (row0 >= rows) {
+        return;
+    }
+    float g0, g1, g2, g3, u0, u1, u2, u3;
+    fp8_rows4(shared_act, gate_w, gate_s, row0, inner, lane, g0, g1, g2, g3);
+    fp8_rows4(shared_act, up_w, up_s, row0, inner, lane, u0, u1, u2, u3);
+    float og0 = simd_sum(g0);
+    float og1 = simd_sum(g1);
+    float og2 = simd_sum(g2);
+    float og3 = simd_sum(g3);
+    float ou0 = simd_sum(u0);
+    float ou1 = simd_sum(u1);
+    float ou2 = simd_sum(u2);
+    float ou3 = simd_sum(u3);
+    if (lane == 0u) {
+        gate[row0] = og0;
+        gate[row0 + 1u] = og1;
+        gate[row0 + 2u] = og2;
+        gate[row0 + 3u] = og3;
+        up[row0] = ou0;
+        up[row0 + 1u] = ou1;
+        up[row0 + 2u] = ou2;
+        up[row0 + 3u] = ou3;
     }
 }
 

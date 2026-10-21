@@ -389,6 +389,19 @@ class Qwen38Runtime:
         buf, offset, entry = self.locate(name)
         rows, inner = (int(value) for value in entry["stored_shape"])
         scale = self.scale_offset(entry, offset)
+        kind = str(entry.get("dtype", "fp4"))
+        if kind == "fp8":
+            if rows % 4 or inner % 16:
+                message = f"{name} is not an fp8 four-row tile"
+                raise RuntimeError(message)
+            self.session.encode(
+                "gemv_fp8_x4",
+                [(act, 0), (buf, offset), (buf, scale), (dest, 0)],
+                [_u32(rows), _u32(inner)],
+                (rows // 4, 1, 1),
+                (32, 1, 1),
+            )
+            return
         if rows % 4 == 0:
             self.session.encode(
                 "gemv_fp4_x4",
@@ -560,10 +573,21 @@ class Qwen38Runtime:
         )
 
     def _ffn(self, layer: int | None) -> None:
-        gate_w, gate_s = self._pair(self._w(layer, "mlp.gate_proj.weight"))
-        up_w, up_s = self._pair(self._w(layer, "mlp.up_proj.weight"))
+        gate_name = self._w(layer, "mlp.gate_proj.weight")
+        up_name = self._w(layer, "mlp.up_proj.weight")
+        _buf, _offset, gate_entry = self.locate(gate_name)
+        _buf, _offset, up_entry = self.locate(up_name)
+        gate_kind = str(gate_entry.get("dtype", "fp4"))
+        up_kind = str(up_entry.get("dtype", "fp4"))
+        if gate_kind != up_kind or gate_kind not in {"fp4", "fp8"}:
+            message = f"{gate_name} and {up_name} widths differ"
+            raise RuntimeError(message)
+        gate_w, gate_s = self._pair(gate_name)
+        up_w, up_s = self._pair(up_name)
+        kernel = "ffn_gate_up_fp8" if gate_kind == "fp8" else "ffn_gate_up"
+        groups = INTERMEDIATE // 4 if gate_kind == "fp8" else INTERMEDIATE * 2
         self.session.encode(
-            "ffn_gate_up",
+            kernel,
             [
                 (self.normed, 0),
                 gate_w,
@@ -574,7 +598,7 @@ class Qwen38Runtime:
                 (self.z, 0),
             ],
             [_u32(INTERMEDIATE), _u32(HIDDEN)],
-            (INTERMEDIATE * 2, 1, 1),
+            (groups, 1, 1),
             (32, 1, 1),
         )
         self.session.encode(

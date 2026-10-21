@@ -8,8 +8,19 @@ import pytest
 
 from qwen38_27b.cache import cache_bytes, plane_bytes, sequence_cache_bytes
 from qwen38_27b.chat import _reasoning_effort, _stream, decode_text, encode_chat, encode_text
+from qwen38_27b.commands import installed_record
+from qwen38_27b.convert import record_name
 from qwen38_27b.checks import run_checks
-from qwen38_27b.formats import dequant_fp4, quantize_fp4, text_shapes
+from qwen38_27b.formats import (
+    dequant_fp4,
+    dequant_fp8,
+    ffn_promote_count,
+    promoted_layer_ids,
+    quantize_fp4,
+    quantize_fp8,
+    relative_error,
+    text_shapes,
+)
 from qwen38_27b.forward import Qwen38Runtime, repeated_tail, startup_bytes
 from qwen38_27b.layout import FULL_LAYERS
 from qwen38_27b.prefill import prefill_ids
@@ -120,9 +131,27 @@ def test_reasoning_effort_none_uses_the_template_default() -> None:
     assert _reasoning_effort({"chat_template_kwargs": {"reasoning_effort": "medium"}}) == "medium"
 
 
+def test_ffn_percentage_selects_whole_layers() -> None:
+    assert ffn_promote_count(0, 64) == 0
+    assert ffn_promote_count(10, 64) == 6
+    assert ffn_promote_count(20, 64) == 12
+    assert ffn_promote_count(100, 64) == 64
+    assert record_name(0, 64) == "Qwen3.8-27B-fp4"
+    assert record_name(12, 64) == "Qwen3.8-27B-fp8-fp4"
+    assert record_name(64, 64) == "Qwen3.8-27B-fp8"
+    scores = {0: 0.2, 1: 0.2, 2: 0.9}
+    assert promoted_layer_ids(scores, 2) == [0, 2]
+    row = np.zeros((1, 32), dtype=np.float32)
+    row[0, 0] = 448.0
+    packed, scales = quantize_fp8(row)
+    restored = dequant_fp8(packed, scales, 1, 32)
+    assert restored[0, 0] == np.float32(448.0)
+    assert relative_error(np.zeros((1, 32), dtype=np.float32)) == 0.0
+
+
 def test_empty_think_turn_stays_a_prefix_of_the_next_prompt() -> None:
-    root = Path("models/Qwen3.8-27B-fp4")
-    if not (root / "chat_template.jinja").is_file():
+    root = installed_record()
+    if root is None or not (root / "chat_template.jinja").is_file():
         pytest.skip("quantized record is not installed")
     user = [{"role": "user", "content": "Read notes.txt"}]
     first = encode_chat(root, user, None, True)

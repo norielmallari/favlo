@@ -1,4 +1,4 @@
-"""Shapes and fp4 E2M1 block scaling for this pipeline.
+"""Shapes and block scaling for this pipeline.
 
 Block 32. The scale is the power of two rounded up so the peak fits, stored as
 E8M0. Element codes use round-ties-to-even and then saturate. A zero block
@@ -8,6 +8,7 @@ stores exponent 0.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +16,7 @@ import numpy as np
 
 BLOCK = 32
 FP4_QMAX = 6.0
+FP8_QMAX = 448.0
 FP4_MAGNITUDE = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float64)
 
 
@@ -233,3 +235,117 @@ def decode_e4m3(codes: np.ndarray) -> np.ndarray:
 def dequant_e4m3_block(codes: np.ndarray, scale: int) -> np.ndarray:
     factor = np.ldexp(np.float32(1.0), int(scale) - 127)
     return decode_e4m3(codes).reshape(-1) * factor
+
+
+_E4M3_LEVEL = decode_e4m3(np.arange(127, dtype=np.uint8)).astype(np.float32)
+_E4M3_EDGE = ((_E4M3_LEVEL[:-1] + _E4M3_LEVEL[1:]) * np.float32(0.5)).astype(np.float32)
+
+
+def quantize_fp8(weight: np.ndarray) -> tuple[bytes, bytes]:
+    """Pack ``[rows, inner]`` float32 as E4M3FN. Inner is a multiple of 32."""
+    matrix = np.ascontiguousarray(weight, dtype=np.float32)
+    _rows, inner = matrix.shape
+    if inner % BLOCK:
+        message = f"inner dimension {inner} is not a multiple of {BLOCK}"
+        raise ValueError(message)
+    data: list[bytes] = []
+    scales: list[bytes] = []
+    for start in range(0, matrix.shape[0], 4096):
+        packed, biased = _quantize_fp8_tile(matrix[start : start + 4096])
+        data.append(packed)
+        scales.append(biased)
+    return b"".join(data), b"".join(scales)
+
+
+def _quantize_fp8_tile(matrix: np.ndarray) -> tuple[bytes, bytes]:
+    rows, inner = matrix.shape
+    values = matrix.reshape(rows, inner // BLOCK, BLOCK)
+    amax = np.max(np.abs(values), axis=-1)
+    biased, scale = biased_e8m0(amax, FP8_QMAX)
+    scaled = values / scale[..., None]
+    magnitude = np.abs(scaled).astype(np.float32, copy=False)
+    choice = np.searchsorted(_E4M3_EDGE, magnitude, side="left").astype(np.int16)
+    choice = np.clip(choice, 0, 126)
+    edge_at = np.minimum(choice, 125)
+    on_edge = (choice < 126) & (magnitude == _E4M3_EDGE[edge_at])
+    bump = on_edge & ((choice & 1) == 1)
+    choice = np.where(bump, choice + 1, choice).astype(np.uint8)
+    sign = np.signbit(scaled).astype(np.uint8) << np.uint8(7)
+    codes = choice | sign
+    return np.ascontiguousarray(codes).tobytes(), np.ascontiguousarray(biased).tobytes()
+
+
+def dequant_fp8(packed: bytes, scales: bytes, rows: int, inner: int) -> np.ndarray:
+    codes = np.frombuffer(packed, dtype=np.uint8).reshape(rows, inner)
+    values = decode_e4m3(codes)
+    factors = np.frombuffer(scales, dtype=np.uint8).astype(np.int32).reshape(rows, inner // BLOCK)
+    restored = values.reshape(rows, inner // BLOCK, BLOCK)
+    restored *= np.ldexp(np.ones(factors.shape, dtype=np.float32), factors - 127)[..., None]
+    return restored.reshape(rows, inner)
+
+
+def pack_fp8_matrix(
+    weight: np.ndarray, *, rows: int | None = None, inner: int | None = None
+) -> tuple[bytes, bytes, int, int]:
+    """Pad K to a multiple of 256 and rows up to a multiple of 64 when asked."""
+    matrix = np.ascontiguousarray(weight, dtype=np.float32)
+    if matrix.ndim == 1:
+        matrix = matrix.reshape(1, -1)
+    got_rows, got_inner = matrix.shape
+    stored_inner = stored_k(got_inner if inner is None else inner)
+    stored = got_rows if rows is None else rows
+    if stored < got_rows or stored_inner < got_inner:
+        message = "stored shape is smaller than the matrix"
+        raise ValueError(message)
+    if stored != got_rows or stored_inner != got_inner:
+        padded = np.zeros((stored, stored_inner), dtype=np.float32)
+        padded[:got_rows, :got_inner] = matrix
+        matrix = padded
+    data, scales = quantize_fp8(matrix)
+    return data, scales, stored, stored_inner
+
+
+def relative_error(weight: np.ndarray) -> float:
+    """RMS of the BF16 row against its restored fp4 row, divided by the BF16 RMS."""
+    matrix = np.ascontiguousarray(weight, dtype=np.float32)
+    if matrix.ndim == 1:
+        matrix = matrix.reshape(1, -1)
+    elif matrix.ndim > 2:
+        matrix = matrix.reshape(matrix.shape[0], -1)
+    rows, inner = matrix.shape
+    numerator = 0.0
+    denominator = 0.0
+    for start in range(0, rows, 4096):
+        tile = matrix[start : start + 4096]
+        data, scales = quantize_fp4(tile)
+        restored = dequant_fp4(data, scales, tile.shape[0], inner)
+        diff = tile.astype(np.float64) - restored.astype(np.float64)
+        flat = tile.astype(np.float64).ravel()
+        numerator += float(np.dot(diff.ravel(), diff.ravel()))
+        denominator += float(np.dot(flat, flat))
+    if denominator == 0.0:
+        return 0.0
+    return math.sqrt(numerator / denominator)
+
+
+def ffn_promote_count(percent: float, layers: int) -> int:
+    """Largest whole layer count that does not exceed ``percent`` of ``layers``."""
+    if layers < 1:
+        message = f"layer count {layers} is empty"
+        raise ValueError(message)
+    if not math.isfinite(percent) or percent < 0.0 or percent > 100.0:
+        message = f"ffn fp8 percentage {percent} is outside 0..100"
+        raise ValueError(message)
+    count = int(math.floor((percent * layers / 100.0) + 1e-9))
+    if count > layers:
+        return layers
+    return count
+
+
+def promoted_layer_ids(scores: dict[int, float], count: int) -> list[int]:
+    """Highest scores. An equal score keeps the lower layer index."""
+    if count < 0 or count > len(scores):
+        message = f"promote count {count} does not fit {len(scores)} layers"
+        raise ValueError(message)
+    ranked = sorted(scores, key=lambda layer: (-float(scores[layer]), int(layer)))
+    return sorted(int(layer) for layer in ranked[:count])

@@ -33,6 +33,8 @@ KERNELS = (
     "attn_qkv",
     "attn_qkv_span2",
     "ffn_gate_up",
+    "ffn_gate_up_fp8",
+    "gemv_fp8_x4",
     "ffn_gate_up_span2",
     "gdn_conv_rows",
     "gdn_conv_shift",

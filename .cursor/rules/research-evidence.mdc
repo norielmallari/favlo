@@ -1,20 +1,21 @@
 ---
 description: Bound a research claim to the measured remainder and the search that limits it
-globs: docs/**/*.md,artifacts/implementation-plan/**/*.md,REFERENCES.md,RESEARCH.md
+globs: docs/**/*.md,REFERENCES.md,RESEARCH.md
 alwaysApply: false
 ---
-
 # Research evidence
 
 A public commit records an artifact and a date. It does not establish that the idea is original. Write "not found in these sources on this date." Do not write "first," "novel," or "no prior work."
 
 Split the proposal into the method, the model or task, the measurement, and the mechanism. Name the closest public predecessor for each part, with a link and one sentence on what that work already did. Papers, model cards, and shipped code all count. The sentence this repo may own is only the remainder.
 
+A measured mapping onto one machine is a claim even when the method is already published. The remainder is this implementation's table: the times, the bandwidth ceiling, or the recorded rate for that pipeline's task. Name the closest published implementation of the same task and the figure it reported. The "not found" sentence names this table. A tile or stride the vendor requires is a constraint. An unmeasured mapping stays a plan.
+
 ## Where a note lives
 
 An idea with no measurement stays at `artifacts/implementation-plan/docs/<pipeline>/<slug>.md`. That tree is gitignored.
 
-A measured remainder is one Markdown file, `docs/<pipeline>/research/<slug>.md`. A format bound is a measurement of the code points. A per-matrix table is a measurement of the checkout. The file says which one it holds. The pipeline README links it as a measurement. The serving note changes only when that behavior ships.
+A measured remainder is one Markdown file, `docs/<pipeline>/research/<slug>.md`. A format bound is a measurement of the code points. A per-matrix table is a measurement of the checkout. A dispatch table, a bandwidth ceiling, or a recorded rate is a measurement of this implementation. The file says which one it holds. The pipeline README links it as a measurement. The serving note changes only when that behavior ships.
 
 The root catalog is [RESEARCH.md](../../RESEARCH.md). It is an index, not a second copy of the notes. One row per claim, added in the same commit as the note. Columns are slug, pipeline, status, search date, the one-sentence remainder, and the note path. Status is `measured` while the serving note is unchanged, `shipped` once that note describes the behavior, and `narrowed` after a correction is appended. A row stays. The index does not repeat the table, the predecessors, or the command.
 

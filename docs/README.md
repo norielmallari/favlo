@@ -11,12 +11,19 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [ai-assistance/README.md](ai-assistance/README.md) | AI-assisted features on `favlo serve` |
 | [qwen38-flash-next/architecture.md](qwen38-flash-next/architecture.md) | Qwen3.8-Flash-Next pipeline contract |
 | [qwen38-flash-next/research/int2-miss.md](qwen38-flash-next/research/int2-miss.md) | Qwen3.8-Flash-Next int2 reconstruction bound |
+| [qwen38-flash-next/research/kernel-ceilings.md](qwen38-flash-next/research/kernel-ceilings.md) | Qwen3.8-Flash-Next isolated dispatch sum |
+| [qwen38-flash-next/research/recorded-forward.md](qwen38-flash-next/research/recorded-forward.md) | Qwen3.8-Flash-Next recorded prefill and decode sums |
 | [qwen38-flash-next/performance.md](qwen38-flash-next/performance.md) | Qwen3.8-Flash-Next recorded prefill and decode rates |
 | [qwen38-flash-next/references.md](qwen38-flash-next/references.md) | Papers and specifications for that pipeline |
 | [qwen38-27b/README.md](qwen38-27b/README.md) | Qwen3.8-27B pipeline contract |
 | [qwen38-27b/research/ffn-fp8-budget.md](qwen38-27b/research/ffn-fp8-budget.md) | Qwen3.8-27B feed-forward fp8 budget measurement |
 | [qwen38-27b/research/span-draft.md](qwen38-27b/research/span-draft.md) | Qwen3.8-27B two-token draft measurement |
+| [qwen38-27b/research/kernel-ceilings.md](qwen38-27b/research/kernel-ceilings.md) | Qwen3.8-27B isolated projection sum |
+| [qwen38-27b/research/recorded-forward.md](qwen38-27b/research/recorded-forward.md) | Qwen3.8-27B recorded prefill and decode sums |
 | [qwen36-35b-a3b/README.md](qwen36-35b-a3b/README.md) | Qwen3.6-35B-A3B pipeline contract |
+| [qwen36-35b-a3b/research/fp16-peak-restore.md](qwen36-35b-a3b/research/fp16-peak-restore.md) | Qwen3.6-35B-A3B float16 peak-restore bound |
+| [qwen36-35b-a3b/research/kernel-ceilings.md](qwen36-35b-a3b/research/kernel-ceilings.md) | Qwen3.6-35B-A3B isolated dispatch sum |
+| [qwen36-35b-a3b/research/recorded-forward.md](qwen36-35b-a3b/research/recorded-forward.md) | Qwen3.6-35B-A3B recorded prefill and decode sums |
 | [qwen36-35b-a3b/performance.md](qwen36-35b-a3b/performance.md) | Qwen3.6-35B-A3B recorded prefill and decode rates |
 | [qwen38-flash-next/record.md](qwen38-flash-next/record.md) | Metal record layout and tier rules |
 | [qwen38-flash-next/ngram.md](qwen38-flash-next/ngram.md) | n-gram hash and injection |
@@ -27,5 +34,6 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen38-27b/benchmarks.md](qwen38-27b/benchmarks.md) | Harness scores against `serve` |
 | [qwen36-35b-a3b/benchmarks.md](qwen36-35b-a3b/benchmarks.md) | Harness scores against `serve` |
 | [z-image-turbo/README.md](z-image-turbo/README.md) | Z-Image-Turbo pipeline contract |
+| [z-image-turbo/research/generation-ceiling.md](z-image-turbo/research/generation-ceiling.md) | Z-Image-Turbo 1280 generation sum |
 
 Implementation plans, option comparisons, and design sketches are **not** committed here. They belong under `artifacts/implementation-plan/` (gitignored). A measured research remainder lives at `docs/<pipeline>/research/<slug>.md` and does not change the serving note until that behavior ships.
