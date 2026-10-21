@@ -1,0 +1,22 @@
+---
+description: Before a commit, check every file for personal data and disallowed content
+alwaysApply: true
+---
+
+# Commit precheck
+
+Before creating a commit, check every path the commit would add. That includes source, docs, tests, shaders, data, images, and any other file. A clean subset does not excuse an unchecked path.
+
+## Personal data
+
+Look for names, email addresses, phone numbers, account handles, home directories, hostnames, serial numbers, local network addresses, tokens, keys, passwords, and private URLs. Logs, screenshots, and sample output count.
+
+Placeholders are `~/.favlo`, `127.0.0.1`, and `example-model`. The copyright line already in the repository stays. A new name does not.
+
+When a path contains personal data, leave it out of the commit. Name the path and the kind. Do not copy the value into the commit message or the reply.
+
+## NSFW, violent, and racist content
+
+Look for sexual, erotic, nude, obscene, violent, racist, hateful, or abusive text, prompts, and images, including instructions to harm a person or an animal. A refusal policy may name the categories it refuses. A test may quote a request only to assert that the refusal leaves it out of the reply.
+
+When a path contains that content, leave it out of the commit. Name the path. Do not quote the content.

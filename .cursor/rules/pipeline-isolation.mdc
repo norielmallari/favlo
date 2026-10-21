@@ -1,8 +1,7 @@
 ---
-description: One write set per runtime, a clean close on model switch, and one machine lock while a pipeline test is running
-alwaysApply: true
+globs: *.py,*.metal
+alwaysApply: false
 ---
-
 # Pipeline isolation
 
 Edit one runtime. Leave every other runtime's files untouched. Pipeline tests share one machine lock so several agents can edit different pipelines at the same time and only one of them runs on the GPU.

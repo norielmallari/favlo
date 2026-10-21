@@ -1,8 +1,7 @@
 ---
-description: Derive Favlo algorithms from public papers and Metal, and keep prefill, the key/value cache, and decode allocated
-alwaysApply: true
+globs: *.py,*.metal
+alwaysApply: false
 ---
-
 # Public algorithms, Metal mapping
 
 Every equation in a pipeline comes from a public paper, spec, or vendor document, then mapped onto a Metal op this machine actually runs. Another repository's source, tests, comments, or design notes are not a reference. Porting them pulls in that runtime's layout and hides the Metal mapping.

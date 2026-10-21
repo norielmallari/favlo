@@ -1,8 +1,7 @@
 ---
-description: Write public Favlo docs in a neutral tone and keep personal data out of the repo
-alwaysApply: true
+globs: *.md
+alwaysApply: false
 ---
-
 # Public documentation
 
 This repository is public. Anyone can read the tree, the history, issues, and pull requests. Write docs, commits, comments, and examples as if they will stay public.
