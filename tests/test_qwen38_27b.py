@@ -1,12 +1,13 @@
 """Checkpoint shapes, fp4 packing, and shader checks for Qwen3.8-27B."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from qwen38_27b.cache import cache_bytes, plane_bytes, sequence_cache_bytes
-from qwen38_27b.chat import _reasoning_effort, _stream
+from qwen38_27b.chat import _reasoning_effort, _stream, decode_text, encode_chat, encode_text
 from qwen38_27b.checks import run_checks
 from qwen38_27b.formats import dequant_fp4, quantize_fp4, text_shapes
 from qwen38_27b.forward import Qwen38Runtime, repeated_tail, startup_bytes
@@ -117,6 +118,33 @@ def test_reasoning_effort_none_uses_the_template_default() -> None:
     assert _reasoning_effort({"chat_template_kwargs": {"reasoning_effort": "none"}}) is None
     assert _reasoning_effort({"reasoning_effort": "low"}) == "low"
     assert _reasoning_effort({"chat_template_kwargs": {"reasoning_effort": "medium"}}) == "medium"
+
+
+def test_empty_think_turn_stays_a_prefix_of_the_next_prompt() -> None:
+    root = Path("models/Qwen3.8-27B-fp4")
+    if not (root / "chat_template.jinja").is_file():
+        pytest.skip("quantized record is not installed")
+    user = [{"role": "user", "content": "Read notes.txt"}]
+    first = encode_chat(root, user, None, True)
+    assert decode_text(root, first).endswith("<think>\n")
+    continuation = (
+        "</think>\n\n<tool_call>\n<function=read_file>\n"
+        "<parameter=path>\nnotes.txt\n</parameter>\n</function>\n</tool_call>"
+    )
+    applied = encode_text(root, decode_text(root, first) + continuation)
+    assert applied[: len(first)] == first
+    follow = user + [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"function": {"name": "read_file", "arguments": {"path": "notes.txt"}}}
+            ],
+        },
+        {"role": "tool", "content": "ok"},
+    ]
+    second = encode_chat(root, follow, None, True)
+    assert second[: len(applied)] == applied
 
 
 def test_prefill_progress_counts_finished_tokens() -> None:

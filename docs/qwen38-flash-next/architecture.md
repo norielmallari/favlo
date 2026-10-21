@@ -48,7 +48,7 @@ The directory this tree serves is record version 6. The shipped map is 48 rows o
 
 `quantize` is the only command that quantizes a weight. `serve` and `complete` read the record and do not open the BF16 shards.
 
-Image sizes, the five super ids, the directory name, and the E8M0 rule are in [record.md](record.md).
+Image sizes, the five super ids, the directory name, and the E8M0 rule are in [record.md](record.md). The int2 reconstruction bound is a measurement in [research/int2-miss.md](research/int2-miss.md).
 
 ## Firing
 

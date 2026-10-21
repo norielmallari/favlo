@@ -2,7 +2,7 @@
 
 Rules for coding agents in **Favlo**.
 
-Read this file first. Then read [ARCHITECTURE.md](ARCHITECTURE.md) for the map and the write set. The pipeline being edited has its own note. Papers and specifications are [REFERENCES.md](REFERENCES.md). A pipeline's own citations live in its note. The product name and the one-pipeline rule are [README.md](README.md). AI-assisted features are [docs/ai-assistance](docs/ai-assistance/README.md).
+Read this file first. Then read [ARCHITECTURE.md](ARCHITECTURE.md) for the map and the write set. The pipeline being edited has its own note. Papers and specifications are [REFERENCES.md](REFERENCES.md). Measured research claims are [RESEARCH.md](RESEARCH.md). A pipeline's own citations live in its note. The product name and the one-pipeline rule are [README.md](README.md). AI-assisted features are [docs/ai-assistance](docs/ai-assistance/README.md).
 
 [ARCHITECTURE.md](ARCHITECTURE.md) wins for the listener, the registry, the console, and which files an agent may edit. A pipeline note wins for that pipeline's kernels.
 
@@ -18,6 +18,7 @@ The files in [`.cursor/rules`](.cursor/rules) are repo rules. Cursor loads them 
 | [python-file-split.mdc](.cursor/rules/python-file-split.mdc) | When editing Python. One module, one responsibility. Imports point one way. |
 | [optimization-llm.mdc](.cursor/rules/optimization-llm.mdc) | When optimizing a language model's prefill or decode. |
 | [optimization-image.mdc](.cursor/rules/optimization-image.mdc) | When optimizing image generation time. |
+| [research-evidence.mdc](.cursor/rules/research-evidence.mdc) | When writing a measured claim. The note records the remainder a search on that date did not find. |
 
 ## Changes
 
@@ -43,7 +44,7 @@ Do not invent routing hits, calibration energies, or hidden-state errors. A meas
 
 A pipeline change updates that pipeline's `docs/<pipeline>/` note in the same change. A process change (listener, registry, console, or the write set) updates [ARCHITECTURE.md](ARCHITECTURE.md). An AI-assisted feature change updates [docs/ai-assistance](docs/ai-assistance/README.md) in the same change. Add a page under that folder when the feature needs its own note, and list the page from that folder's README. Do not edit another pipeline's note to describe this one.
 
-`docs/` is as-built only. Implementation plans live under `artifacts/implementation-plan/` (gitignored). Do not commit plan or option-comparison notes under `docs/`.
+`docs/` is as-built only, plus a measured research remainder at `docs/<pipeline>/research/<slug>.md`. That file does not change the serving note until the behavior ships. Implementation plans live under `artifacts/implementation-plan/` (gitignored). Do not commit plan or option-comparison notes under `docs/`. Load [research-claims](.cursor/skills/research-claims/SKILL.md) before documenting a research claim.
 
 ## Commits
 
