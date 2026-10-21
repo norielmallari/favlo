@@ -19,6 +19,7 @@ _NAMES = (
     "layernorm",
     "rope_axes",
     "attend",
+    "attend_q4",
     "scale_to_half",
     "bias_cast",
     "channel_scale",
@@ -296,8 +297,10 @@ class Gpu:
         if head_dim % 32 or head_dim > 512:
             message = f"head dim {head_dim} is not a 32-wide span up to 512"
             raise ValueError(message)
+        name = "attend_q4" if head_dim <= 128 else "attend"
+        rows = (seq + 3) // 4 if head_dim <= 128 else seq
         self._dispatch(
-            "attend",
+            name,
             [query, key, value, dest],
             [
                 struct.pack("I", seq),
@@ -307,7 +310,7 @@ class Gpu:
                 struct.pack("I", head_dim),
                 struct.pack("I", 1 if causal else 0),
             ],
-            (q_heads, seq, 1),
+            (q_heads, rows, 1),
             (32, 1, 1),
         )
 

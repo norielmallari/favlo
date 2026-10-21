@@ -247,6 +247,118 @@ kernel void attend(
     }
 }
 
+// Four queries share each key and value tile. Head dim is 128, so the tile is
+// 4 by 128. The decoder head is 512 and stays on `attend`.
+constant uint Q_BLOCK = 4u;
+constant uint K_BLOCK = 4u;
+
+kernel void attend_q4(
+    device const float* query [[buffer(0)]],
+    device const float* key [[buffer(1)]],
+    device const float* value [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& seq [[buffer(4)]],
+    constant uint& limit [[buffer(5)]],
+    constant uint& q_heads [[buffer(6)]],
+    constant uint& kv_heads [[buffer(7)]],
+    constant uint& head_dim [[buffer(8)]],
+    constant uint& causal [[buffer(9)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 lane_id [[thread_position_in_threadgroup]])
+{
+    uint lane = lane_id.x;
+    uint head = tgid.x;
+    uint q0 = tgid.y * Q_BLOCK;
+    uint span = head_dim >> 5;
+    if (head >= q_heads || span != 4u) {
+        return;
+    }
+    threadgroup float k_tile[K_BLOCK * 128u];
+    threadgroup float v_tile[K_BLOCK * 128u];
+    uint group = q_heads / kv_heads;
+    uint kv = head / group;
+    float scale = rsqrt(float(head_dim));
+    float qv[Q_BLOCK][4];
+    float acc[Q_BLOCK][4];
+    float running_max[Q_BLOCK];
+    float running_sum[Q_BLOCK];
+    uint any_live = 0u;
+    for (uint block = 0u; block < Q_BLOCK; ++block) {
+        uint token = q0 + block;
+        running_max[block] = -INFINITY;
+        running_sum[block] = 0.0f;
+        for (uint i = 0u; i < 4u; ++i) {
+            acc[block][i] = 0.0f;
+            qv[block][i] = 0.0f;
+        }
+        if (token < limit) {
+            any_live = 1u;
+            uint base = (token * q_heads + head) * head_dim + lane * 4u;
+            for (uint i = 0u; i < 4u; ++i) {
+                qv[block][i] = query[base + i];
+            }
+        }
+    }
+    if (any_live != 0u) {
+        for (uint key0 = 0u; key0 < limit; key0 += K_BLOCK) {
+            uint tile = min(K_BLOCK, limit - key0);
+            for (uint ki = 0u; ki < tile; ++ki) {
+                uint src = ((key0 + ki) * kv_heads + kv) * head_dim + lane * 4u;
+                uint dst = ki * 128u + lane * 4u;
+                for (uint i = 0u; i < 4u; ++i) {
+                    k_tile[dst + i] = key[src + i];
+                    v_tile[dst + i] = value[src + i];
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint block = 0u; block < Q_BLOCK; ++block) {
+                uint token = q0 + block;
+                if (token >= limit) {
+                    continue;
+                }
+                for (uint ki = 0u; ki < tile; ++ki) {
+                    uint key_index = key0 + ki;
+                    if (causal != 0u && key_index > token) {
+                        break;
+                    }
+                    float dot = 0.0f;
+                    uint base = ki * 128u + lane * 4u;
+                    for (uint i = 0u; i < 4u; ++i) {
+                        dot += qv[block][i] * k_tile[base + i];
+                    }
+                    dot = simd_sum(dot) * scale;
+                    float next_max = max(running_max[block], dot);
+                    float alpha = exp(running_max[block] - next_max);
+                    float weight = exp(dot - next_max);
+                    running_sum[block] = running_sum[block] * alpha + weight;
+                    for (uint i = 0u; i < 4u; ++i) {
+                        acc[block][i] = acc[block][i] * alpha + weight * v_tile[base + i];
+                    }
+                    running_max[block] = next_max;
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+    for (uint block = 0u; block < Q_BLOCK; ++block) {
+        uint token = q0 + block;
+        if (token >= seq) {
+            continue;
+        }
+        device float* out = destination + (token * q_heads + head) * head_dim;
+        if (token >= limit || running_sum[block] == 0.0f) {
+            for (uint i = 0u; i < 4u; ++i) {
+                out[lane * 4u + i] = 0.0f;
+            }
+            continue;
+        }
+        float inv = 1.0f / running_sum[block];
+        for (uint i = 0u; i < 4u; ++i) {
+            out[lane * 4u + i] = acc[block][i] * inv;
+        }
+    }
+}
+
 kernel void scale_to_half(
     device const float* source [[buffer(0)]],
     device half* destination [[buffer(1)]],
