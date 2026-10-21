@@ -1,4 +1,4 @@
-"""Text forward. Weights are uniform fp4. The key/value cache is fp8.
+"""Text forward. Weights are fp4, with promoted feed-forward layers at fp8. The key/value cache is fp8.
 
 Temperature 0 is an argmax. A positive temperature samples with top-k and
 top-p. Presence, frequency, and logit bias follow the OpenAI logit update.
@@ -46,7 +46,7 @@ from qwen38_27b.layout import (
     VOCAB,
     Z_WIDTH,
 )
-from qwen38_27b.prefill import workspace_bytes
+from qwen38_27b.prefill import _Workspace, workspace_bytes
 from qwen38_27b.prefix import open_session
 from qwen38_27b.session import Session
 
@@ -277,6 +277,8 @@ class Qwen38Runtime:
             self.logits = zeros(VOCAB * 4)
             self.best_v = zeros(_ARGMAX_GROUPS * 4)
             self.best_i = zeros(_ARGMAX_GROUPS * 4)
+            self._prefill = _Workspace(self.session, drafts=self.drafts)
+            self._touch_resident(resident_bytes)
             self._held = [self.resident, self.history, self.state, *self.k_cache, *self.v_cache]
             self.prefix = open_session(self)
             summary = (
@@ -361,6 +363,22 @@ class Qwen38Runtime:
         self.filled = 0
         del session
 
+    def _touch_resident(self, nbytes: int) -> None:
+        stride = 4096
+        count = nbytes // stride
+        if count < 1:
+            return
+        sink = self.session.allocate(1024)
+        self.session.begin()
+        self.session.encode(
+            "touch_pages",
+            [(self.resident, 0), (sink, 0)],
+            [_u32(stride), _u32(count)],
+            ((count + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+        self.session.end()
+
     def weight(self, layer: int, rest: str) -> str:
         return self._resolve(
             f"model.language_model.layers.{layer}.{rest}",
@@ -394,12 +412,13 @@ class Qwen38Runtime:
             if rows % 4 or inner % 16:
                 message = f"{name} is not an fp8 four-row tile"
                 raise RuntimeError(message)
+            threads = 160 if (inner >> 4) % 160 == 0 else 256
             self.session.encode(
                 "gemv_fp8_x4",
                 [(act, 0), (buf, offset), (buf, scale), (dest, 0)],
                 [_u32(rows), _u32(inner)],
                 (rows // 4, 1, 1),
-                (32, 1, 1),
+                (threads, 1, 1),
             )
             return
         if rows % 4 == 0:
@@ -582,25 +601,27 @@ class Qwen38Runtime:
         if gate_kind != up_kind or gate_kind not in {"fp4", "fp8"}:
             message = f"{gate_name} and {up_name} widths differ"
             raise RuntimeError(message)
-        gate_w, gate_s = self._pair(gate_name)
-        up_w, up_s = self._pair(up_name)
-        kernel = "ffn_gate_up_fp8" if gate_kind == "fp8" else "ffn_gate_up"
-        groups = INTERMEDIATE // 4 if gate_kind == "fp8" else INTERMEDIATE * 2
-        self.session.encode(
-            kernel,
-            [
-                (self.normed, 0),
-                gate_w,
-                gate_s,
-                up_w,
-                up_s,
-                (self.wide, 0),
-                (self.z, 0),
-            ],
-            [_u32(INTERMEDIATE), _u32(HIDDEN)],
-            (groups, 1, 1),
-            (32, 1, 1),
-        )
+        if gate_kind == "fp8":
+            self._gemv(self.normed, gate_name, self.wide)
+            self._gemv(self.normed, up_name, self.z)
+        else:
+            gate_w, gate_s = self._pair(gate_name)
+            up_w, up_s = self._pair(up_name)
+            self.session.encode(
+                "ffn_gate_up",
+                [
+                    (self.normed, 0),
+                    gate_w,
+                    gate_s,
+                    up_w,
+                    up_s,
+                    (self.wide, 0),
+                    (self.z, 0),
+                ],
+                [_u32(INTERMEDIATE), _u32(HIDDEN)],
+                (INTERMEDIATE * 2, 1, 1),
+                (32, 1, 1),
+            )
         self.session.encode(
             "swiglu_f32",
             [(self.wide, 0), (self.z, 0), (self.y, 0)],
@@ -633,6 +654,8 @@ class Qwen38Runtime:
         self.session.begin()
         self._embed(token)
         for layer, kind in enumerate(self.layer_types):
+            if layer > 0 and layer % 4 == 0:
+                self.session.submit()
             self._rms(self.hidden, self.weight(layer, "input_layernorm.weight"), self.normed)
             if kind == "full_attention":
                 self._attend(layer, pos)

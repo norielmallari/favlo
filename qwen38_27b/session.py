@@ -18,6 +18,7 @@ KERNELS = (
     "gemv_fp4_vec",
     "gemv_fp4_x4",
     "gemv_fp4_span2",
+    "touch_pages",
     "copy_f32",
     "rmsnorm_f32",
     "rmsnorm_rows",
@@ -137,13 +138,17 @@ class Session:
         """Finish an open pass, then drop the queue and the device."""
         encoder = getattr(self, "_pass_encoder", None)
         command = getattr(self, "_pass_command", None)
+        ready = list(getattr(self, "_pass_ready", ()))
         self._pass_encoder = None
         self._pass_command = None
+        self._pass_ready = []
         if encoder is not None and command is not None:
             try:
                 encoder.endEncoding()
                 command.commit()
-                command.waitUntilCompleted()
+                ready.append(command)
+                for earlier in ready:
+                    earlier.waitUntilCompleted()
             except (RuntimeError, OSError):
                 pass
         for name in ("_pass_held", "_held"):
@@ -220,6 +225,16 @@ class Session:
 
     def begin(self) -> None:
         self._pass_held: list[Any] = []
+        self._pass_ready: list[Any] = []
+        self._pass_command = self.queue.commandBuffer()
+        self._pass_encoder = self._pass_command.computeCommandEncoder()
+
+    def submit(self) -> None:
+        """Commit the open encoder and start another. The device runs the first while the host encodes the next."""
+        self._pass_encoder.endEncoding()
+        command = self._pass_command
+        command.commit()
+        self._pass_ready.append(command)
         self._pass_command = self.queue.commandBuffer()
         self._pass_encoder = self._pass_command.computeCommandEncoder()
 
@@ -249,13 +264,17 @@ class Session:
         self._pass_encoder.endEncoding()
         command = self._pass_command
         command.commit()
-        command.waitUntilCompleted()
-        self._pass_held.clear()
+        ready = list(getattr(self, "_pass_ready", ()))
+        ready.append(command)
         self._pass_encoder = None
         self._pass_command = None
-        if int(command.status()) != 4:
-            message = f"command status {command.status()} {command.error()}"
-            raise RuntimeError(message)
+        self._pass_ready = []
+        for earlier in ready:
+            earlier.waitUntilCompleted()
+            if int(earlier.status()) != 4:
+                message = f"command status {earlier.status()} {earlier.error()}"
+                raise RuntimeError(message)
+        self._pass_held.clear()
 
     def prefill(
         self,

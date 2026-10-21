@@ -1,6 +1,6 @@
 # Ceilings
 
-Kernel and bandwidth figures for the decode projections. Reuse them while `gemv_fp4_x4` and the fused projection kernels are unchanged. Recompute when one of those kernels changes.
+Kernel and bandwidth figures for the decode projections. The fp4 rows predate the E8M0 scale bit insert in `gemv_fp4_x4` and the fused fp4 projection kernels. Recompute the fp8 rows when `gemv_fp8_x4` changes.
 
 Each GEMV time is one command buffer, then a wait. The median of five dispatches after one discarded sample. Overlapping command buffers are not added. A 2 GiB buffer copy finished in 15705 µs, which is 254.6 GB/s counting the read and the write.
 
@@ -49,3 +49,14 @@ One head at 65536 tokens is 98.6 µs. The language stack has 4 key/value heads a
 The bytes of one head at context C are the float scores read twice (64 C), the float weight write (32 C), the cast reread (32 C), the float16 window write and read (32 C), the fp8 values and their scales (264 C), the partial write and the in-place scale (48 C), and the block reduction's read of those partials (16 C). That is 488 C bytes per head, 31232 C bytes for 64 heads. At 65536 tokens that is 1.907 GiB. Divided by 254.6 GB/s the bandwidth ceiling of this traffic is 8.04 ms, 124 tok/s. At 262144 tokens it is 32.2 ms, 31.1 tok/s. The 65536 kernel sum sits under that line because most of its dispatches are under 30 µs. The 262144 sum is the one past that noise: 28.6 ms beside the 32.2 ms bandwidth ceiling.
 
 One prefill value-mix tile, `prefill_fp8_n64_stride`, is 12288 rows by 2048 keys by 256 channels and measured 614.6 µs. That is one head of one 2048-token chunk. Sixty-four such tiles, each in its own command buffer, are 39.3 ms.
+
+## Feed-forward fp8
+
+`gemv_fp8_x4`. Decode launches it once per matrix. The threadgroup is 160 when the K dimension has a multiple of 160 groups of 16 bytes, and 256 otherwise. Gate and up use 160. Down uses 256. Same timing rule as the fp4 rows: one command buffer, then a wait, the median of five dispatches after one discarded sample. The copy above counts a read and a write, so one direction of that copy is 127.3 GB/s.
+
+| Kernel | Shape | Threads | µs | GB/s |
+|---|---|---:|---:|---:|
+| `gemv_fp8_x4` gate or up | 17408×5120 | 160 | 354.6 | 241.6 |
+| `gemv_fp8_x4` down | 5120×17408 | 256 | 336.8 | 254.4 |
+
+The gate dispatch reads the 91,914,240-byte image and the 20,480-byte activation, and writes 69,632 bytes. A promoted layer is those two dispatches plus the down GEMV, 1.047 ms. `ffn_gate_up_fp8` at 128 threads measured 830.9 µs for both images and is not the decode launch. The fp4 feed-forward rows above stay the comparison for a layer that was not promoted. Prefill of a promoted layer is `prefill_fp8_n64`. A cold 2048×17408×5120 tile of that kernel measured 14.9 ms, beside 15.1 ms for `prefill_fp4_n64` on the fp4 image of the same shape.

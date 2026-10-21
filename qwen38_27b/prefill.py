@@ -1,8 +1,9 @@
-"""Chunked prompt prefill. Projections are fp4 ``matmul2d`` tiles of 64 rows.
+"""Chunked prompt prefill. Projections are ``matmul2d`` tiles of 64 rows.
 
-The feed-forward is uniform fp4: SiLU on the gate, multiply by the up
-projection, then the down projection. Gated DeltaNet and full attention run
-in the same command buffer as that layer's feed-forward. Decode stays a GEMV.
+SiLU runs on the gate, then multiplies by the up projection, then the down
+projection. A promoted feed-forward matrix is fp8. The others are fp4.
+Gated DeltaNet and full attention run in the same command buffer as that
+layer's feed-forward. Decode stays a GEMV.
 """
 
 from __future__ import annotations

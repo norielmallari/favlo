@@ -148,9 +148,24 @@ def check_fp8_x4(session: Session) -> None:
         ],
         [np.uint32(8).tobytes(), np.uint32(256).tobytes()],
         (2, 1, 1),
-        (32, 1, 1),
+        (256, 1, 1),
     )
     _close("fp8 x4", session.download_f32(destination, 8), expect, atol=1e-3)
+    activation, data, scales, expect = _fp8_case(4, 2560, 5)
+    destination = session.zeros(4 * 4)
+    session.dispatch(
+        "gemv_fp8_x4",
+        [
+            session.upload(activation),
+            session.upload(data),
+            session.upload(scales),
+            destination,
+        ],
+        [np.uint32(4).tobytes(), np.uint32(2560).tobytes()],
+        (1, 1, 1),
+        (160, 1, 1),
+    )
+    _close("fp8 x4 160", session.download_f32(destination, 4), expect, atol=1e-3)
 
 
 def check_fp8_gate_up(session: Session) -> None:
@@ -176,7 +191,7 @@ def check_fp8_gate_up(session: Session) -> None:
         ],
         [np.uint32(rows).tobytes(), np.uint32(inner).tobytes()],
         (rows // 4, 1, 1),
-        (32, 1, 1),
+        (256, 1, 1),
     )
     gate_expect = dequant_fp8(gate_data, gate_scales, rows, inner) @ activation
     up_expect = dequant_fp8(up_data, up_scales, rows, inner) @ activation

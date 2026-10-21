@@ -128,7 +128,7 @@ def test_carrot_instruct_recommended(carrot_runtime: Qwen38Runtime) -> None:
 
 
 def test_carrot_thinking_recommended(carrot_runtime: Qwen38Runtime) -> None:
-    if "enable_thinking" not in _template(_ROOT):
+    if "enable_thinking" not in _template(carrot_runtime.root):
         pytest.skip("template does not open a think block")
     temperature, top_p, top_k, presence = _card("thinking")
     text = _complete(
@@ -146,7 +146,8 @@ def test_carrot_thinking_recommended(carrot_runtime: Qwen38Runtime) -> None:
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     if "carrot_effort" not in metafunc.fixturenames:
         return
-    template = _template(_ROOT)
+    root = installed_record()
+    template = _template(root) if root is not None else ""
     efforts = _efforts(template) if "enable_thinking" in template else ()
     if not efforts:
         metafunc.parametrize(

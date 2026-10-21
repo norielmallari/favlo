@@ -108,8 +108,35 @@ constant float FP4_TABLE[16] = {
     -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f,
 };
 
+// Positive subnormals of E4M3FN: mantissa 0..7 times 2^-9.
+constant uint E4M3_SUB[8] = {
+    0u,
+    118u << 23,
+    119u << 23,
+    (119u << 23) | (1u << 22),
+    120u << 23,
+    (120u << 23) | (1u << 21),
+    (120u << 23) | (1u << 22),
+    (120u << 23) | (3u << 21),
+};
+
 static float fp4_e2m1(uint nibble) {
     return FP4_TABLE[nibble & 15u];
+}
+
+// E8M0 byte as 2^(e-127). A zero code is 2^-127, the same value as exp2(-127).
+static float e8m0_code(uint scale) {
+    uint bits = select(scale << 23, 1u << 22, scale == 0u);
+    return as_type<float>(bits);
+}
+
+// OCP E4M3FN finite values. 0x7F and 0xFF are NaN and are not stored.
+static float e4m3_code(uint code) {
+    uint exp = (code >> 3) & 0xFu;
+    uint mant = code & 7u;
+    uint bits = select(((exp + 120u) << 23) | (mant << 20), E4M3_SUB[mant], exp == 0u);
+    bits |= (code & 0x80u) << 24;
+    return as_type<float>(bits);
 }
 
 // One simdgroup, one output row. Inner is a multiple of 256 so a 32-bit word
@@ -128,7 +155,7 @@ static float fp4_vec_dot(
     float acc = 0.0f;
     for (uint i = lane; i < words; i += 32u) {
         uint word = packed[i];
-        float factor = exp2(float(row_scale[i >> 2]) - 127.0f);
+        float factor = e8m0_code(row_scale[i >> 2]);
         uint base = i << 3;
         for (uint n = 0u; n < 8u; ++n) {
             uint nibble = (word >> (n * 4u)) & 0xFu;
@@ -171,10 +198,10 @@ static void fp4_rows4(
         uint w1 = p1[i];
         uint w2 = p2[i];
         uint w3 = p3[i];
-        float f0 = exp2(float(s0[i >> 2]) - 127.0f);
-        float f1 = exp2(float(s1[i >> 2]) - 127.0f);
-        float f2 = exp2(float(s2[i >> 2]) - 127.0f);
-        float f3 = exp2(float(s3[i >> 2]) - 127.0f);
+        float f0 = e8m0_code(s0[i >> 2]);
+        float f1 = e8m0_code(s1[i >> 2]);
+        float f2 = e8m0_code(s2[i >> 2]);
+        float f3 = e8m0_code(s3[i >> 2]);
         uint base = i << 3;
         for (uint n = 0u; n < 8u; ++n) {
             float act = activation[base + n];
@@ -210,7 +237,7 @@ static void fp4_span2_row(
     float acc1 = 0.0f;
     for (uint i = lane; i < words; i += 32u) {
         uint word = packed[i];
-        float factor = exp2(float(row_scale[i >> 2]) - 127.0f);
+        float factor = e8m0_code(row_scale[i >> 2]);
         uint base = i << 3;
         for (uint n = 0u; n < 8u; ++n) {
             uint nibble = (word >> (n * 4u)) & 0xFu;
@@ -416,7 +443,7 @@ kernel void gemv_fp4(
     device const uchar* row_scale = scales + row * blocks;
     float acc = 0.0f;
     for (uint block = 0; block < blocks; ++block) {
-        float factor = exp2(float(row_scale[block]) - 127.0f);
+        float factor = e8m0_code(row_scale[block]);
         uint element = (block << 5) + lane;
         uchar byte = packed[element >> 1];
         uint nibble = (element & 1u) ? (byte >> 4) : (byte & 0x0Fu);
@@ -484,7 +511,8 @@ static void fp8_rows4(
     device const uchar* scales,
     uint row0,
     uint inner,
-    uint lane,
+    uint tid,
+    uint span,
     thread float& a0,
     thread float& a1,
     thread float& a2,
@@ -504,47 +532,84 @@ static void fp8_rows4(
     float acc1 = 0.0f;
     float acc2 = 0.0f;
     float acc3 = 0.0f;
-    for (uint i = lane; i < vecs; i += 32u) {
+    for (uint i = tid; i < vecs; i += span) {
         uint4 w0 = p0[i];
         uint4 w1 = p1[i];
         uint4 w2 = p2[i];
         uint4 w3 = p3[i];
-        float f0 = exp2(float(s0[i >> 1]) - 127.0f);
-        float f1 = exp2(float(s1[i >> 1]) - 127.0f);
-        float f2 = exp2(float(s2[i >> 1]) - 127.0f);
-        float f3 = exp2(float(s3[i >> 1]) - 127.0f);
+        float f0 = e8m0_code(s0[i >> 1]);
+        float f1 = e8m0_code(s1[i >> 1]);
+        float f2 = e8m0_code(s2[i >> 1]);
+        float f3 = e8m0_code(s3[i >> 1]);
         uint base = i << 4;
-        uint words0[4] = {w0.x, w0.y, w0.z, w0.w};
-        uint words1[4] = {w1.x, w1.y, w1.z, w1.w};
-        uint words2[4] = {w2.x, w2.y, w2.z, w2.w};
-        uint words3[4] = {w3.x, w3.y, w3.z, w3.w};
-        for (uint k = 0u; k < 4u; ++k) {
-            uint off = base + (k << 2);
-            float act0 = activation[off];
-            float act1 = activation[off + 1u];
-            float act2 = activation[off + 2u];
-            float act3 = activation[off + 3u];
-            uint v0 = words0[k];
-            uint v1 = words1[k];
-            uint v2 = words2[k];
-            uint v3 = words3[k];
-            acc0 += E4M3_TABLE[v0 & 0xFFu] * f0 * act0;
-            acc1 += E4M3_TABLE[v1 & 0xFFu] * f1 * act0;
-            acc2 += E4M3_TABLE[v2 & 0xFFu] * f2 * act0;
-            acc3 += E4M3_TABLE[v3 & 0xFFu] * f3 * act0;
-            acc0 += E4M3_TABLE[(v0 >> 8) & 0xFFu] * f0 * act1;
-            acc1 += E4M3_TABLE[(v1 >> 8) & 0xFFu] * f1 * act1;
-            acc2 += E4M3_TABLE[(v2 >> 8) & 0xFFu] * f2 * act1;
-            acc3 += E4M3_TABLE[(v3 >> 8) & 0xFFu] * f3 * act1;
-            acc0 += E4M3_TABLE[(v0 >> 16) & 0xFFu] * f0 * act2;
-            acc1 += E4M3_TABLE[(v1 >> 16) & 0xFFu] * f1 * act2;
-            acc2 += E4M3_TABLE[(v2 >> 16) & 0xFFu] * f2 * act2;
-            acc3 += E4M3_TABLE[(v3 >> 16) & 0xFFu] * f3 * act2;
-            acc0 += E4M3_TABLE[v0 >> 24] * f0 * act3;
-            acc1 += E4M3_TABLE[v1 >> 24] * f1 * act3;
-            acc2 += E4M3_TABLE[v2 >> 24] * f2 * act3;
-            acc3 += E4M3_TABLE[v3 >> 24] * f3 * act3;
-        }
+        float4 act = *(device const float4*)(activation + base);
+        acc0 = fma(e4m3_code(w0.x & 0xFFu) * f0, act.x, acc0);
+        acc1 = fma(e4m3_code(w1.x & 0xFFu) * f1, act.x, acc1);
+        acc2 = fma(e4m3_code(w2.x & 0xFFu) * f2, act.x, acc2);
+        acc3 = fma(e4m3_code(w3.x & 0xFFu) * f3, act.x, acc3);
+        acc0 = fma(e4m3_code((w0.x >> 8) & 0xFFu) * f0, act.y, acc0);
+        acc1 = fma(e4m3_code((w1.x >> 8) & 0xFFu) * f1, act.y, acc1);
+        acc2 = fma(e4m3_code((w2.x >> 8) & 0xFFu) * f2, act.y, acc2);
+        acc3 = fma(e4m3_code((w3.x >> 8) & 0xFFu) * f3, act.y, acc3);
+        acc0 = fma(e4m3_code((w0.x >> 16) & 0xFFu) * f0, act.z, acc0);
+        acc1 = fma(e4m3_code((w1.x >> 16) & 0xFFu) * f1, act.z, acc1);
+        acc2 = fma(e4m3_code((w2.x >> 16) & 0xFFu) * f2, act.z, acc2);
+        acc3 = fma(e4m3_code((w3.x >> 16) & 0xFFu) * f3, act.z, acc3);
+        acc0 = fma(e4m3_code(w0.x >> 24) * f0, act.w, acc0);
+        acc1 = fma(e4m3_code(w1.x >> 24) * f1, act.w, acc1);
+        acc2 = fma(e4m3_code(w2.x >> 24) * f2, act.w, acc2);
+        acc3 = fma(e4m3_code(w3.x >> 24) * f3, act.w, acc3);
+        act = *(device const float4*)(activation + base + 4u);
+        acc0 = fma(e4m3_code(w0.y & 0xFFu) * f0, act.x, acc0);
+        acc1 = fma(e4m3_code(w1.y & 0xFFu) * f1, act.x, acc1);
+        acc2 = fma(e4m3_code(w2.y & 0xFFu) * f2, act.x, acc2);
+        acc3 = fma(e4m3_code(w3.y & 0xFFu) * f3, act.x, acc3);
+        acc0 = fma(e4m3_code((w0.y >> 8) & 0xFFu) * f0, act.y, acc0);
+        acc1 = fma(e4m3_code((w1.y >> 8) & 0xFFu) * f1, act.y, acc1);
+        acc2 = fma(e4m3_code((w2.y >> 8) & 0xFFu) * f2, act.y, acc2);
+        acc3 = fma(e4m3_code((w3.y >> 8) & 0xFFu) * f3, act.y, acc3);
+        acc0 = fma(e4m3_code((w0.y >> 16) & 0xFFu) * f0, act.z, acc0);
+        acc1 = fma(e4m3_code((w1.y >> 16) & 0xFFu) * f1, act.z, acc1);
+        acc2 = fma(e4m3_code((w2.y >> 16) & 0xFFu) * f2, act.z, acc2);
+        acc3 = fma(e4m3_code((w3.y >> 16) & 0xFFu) * f3, act.z, acc3);
+        acc0 = fma(e4m3_code(w0.y >> 24) * f0, act.w, acc0);
+        acc1 = fma(e4m3_code(w1.y >> 24) * f1, act.w, acc1);
+        acc2 = fma(e4m3_code(w2.y >> 24) * f2, act.w, acc2);
+        acc3 = fma(e4m3_code(w3.y >> 24) * f3, act.w, acc3);
+        act = *(device const float4*)(activation + base + 8u);
+        acc0 = fma(e4m3_code(w0.z & 0xFFu) * f0, act.x, acc0);
+        acc1 = fma(e4m3_code(w1.z & 0xFFu) * f1, act.x, acc1);
+        acc2 = fma(e4m3_code(w2.z & 0xFFu) * f2, act.x, acc2);
+        acc3 = fma(e4m3_code(w3.z & 0xFFu) * f3, act.x, acc3);
+        acc0 = fma(e4m3_code((w0.z >> 8) & 0xFFu) * f0, act.y, acc0);
+        acc1 = fma(e4m3_code((w1.z >> 8) & 0xFFu) * f1, act.y, acc1);
+        acc2 = fma(e4m3_code((w2.z >> 8) & 0xFFu) * f2, act.y, acc2);
+        acc3 = fma(e4m3_code((w3.z >> 8) & 0xFFu) * f3, act.y, acc3);
+        acc0 = fma(e4m3_code((w0.z >> 16) & 0xFFu) * f0, act.z, acc0);
+        acc1 = fma(e4m3_code((w1.z >> 16) & 0xFFu) * f1, act.z, acc1);
+        acc2 = fma(e4m3_code((w2.z >> 16) & 0xFFu) * f2, act.z, acc2);
+        acc3 = fma(e4m3_code((w3.z >> 16) & 0xFFu) * f3, act.z, acc3);
+        acc0 = fma(e4m3_code(w0.z >> 24) * f0, act.w, acc0);
+        acc1 = fma(e4m3_code(w1.z >> 24) * f1, act.w, acc1);
+        acc2 = fma(e4m3_code(w2.z >> 24) * f2, act.w, acc2);
+        acc3 = fma(e4m3_code(w3.z >> 24) * f3, act.w, acc3);
+        act = *(device const float4*)(activation + base + 12u);
+        acc0 = fma(e4m3_code(w0.w & 0xFFu) * f0, act.x, acc0);
+        acc1 = fma(e4m3_code(w1.w & 0xFFu) * f1, act.x, acc1);
+        acc2 = fma(e4m3_code(w2.w & 0xFFu) * f2, act.x, acc2);
+        acc3 = fma(e4m3_code(w3.w & 0xFFu) * f3, act.x, acc3);
+        acc0 = fma(e4m3_code((w0.w >> 8) & 0xFFu) * f0, act.y, acc0);
+        acc1 = fma(e4m3_code((w1.w >> 8) & 0xFFu) * f1, act.y, acc1);
+        acc2 = fma(e4m3_code((w2.w >> 8) & 0xFFu) * f2, act.y, acc2);
+        acc3 = fma(e4m3_code((w3.w >> 8) & 0xFFu) * f3, act.y, acc3);
+        acc0 = fma(e4m3_code((w0.w >> 16) & 0xFFu) * f0, act.z, acc0);
+        acc1 = fma(e4m3_code((w1.w >> 16) & 0xFFu) * f1, act.z, acc1);
+        acc2 = fma(e4m3_code((w2.w >> 16) & 0xFFu) * f2, act.z, acc2);
+        acc3 = fma(e4m3_code((w3.w >> 16) & 0xFFu) * f3, act.z, acc3);
+        acc0 = fma(e4m3_code(w0.w >> 24) * f0, act.w, acc0);
+        acc1 = fma(e4m3_code(w1.w >> 24) * f1, act.w, acc1);
+        acc2 = fma(e4m3_code(w2.w >> 24) * f2, act.w, acc2);
+        acc3 = fma(e4m3_code(w3.w >> 24) * f3, act.w, acc3);
     }
     a0 = acc0;
     a1 = acc1;
@@ -560,6 +625,9 @@ kernel void gemv_fp8_x4(
     constant uint& cols [[buffer(4)]],
     constant uint& inner [[buffer(5)]],
     uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint span [[threads_per_threadgroup]],
     uint group [[threadgroup_position_in_grid]])
 {
     uint row0 = group << 2;
@@ -567,20 +635,39 @@ kernel void gemv_fp8_x4(
         return;
     }
     float acc0, acc1, acc2, acc3;
-    fp8_rows4(activation, weights, scales, row0, inner, lane, acc0, acc1, acc2, acc3);
+    fp8_rows4(activation, weights, scales, row0, inner, tid, span, acc0, acc1, acc2, acc3);
     float o0 = simd_sum(acc0);
     float o1 = simd_sum(acc1);
     float o2 = simd_sum(acc2);
     float o3 = simd_sum(acc3);
+    threadgroup float part[8][4];
     if (lane == 0u) {
-        destination[row0] = o0;
-        destination[row0 + 1u] = o1;
-        destination[row0 + 2u] = o2;
-        destination[row0 + 3u] = o3;
+        part[simd][0] = o0;
+        part[simd][1] = o1;
+        part[simd][2] = o2;
+        part[simd][3] = o3;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simd == 0u && lane == 0u) {
+        float s0 = 0.0f;
+        float s1 = 0.0f;
+        float s2 = 0.0f;
+        float s3 = 0.0f;
+        uint nsimd = span >> 5;
+        for (uint s = 0u; s < nsimd; ++s) {
+            s0 += part[s][0];
+            s1 += part[s][1];
+            s2 += part[s][2];
+            s3 += part[s][3];
+        }
+        destination[row0] = s0;
+        destination[row0 + 1u] = s1;
+        destination[row0 + 2u] = s2;
+        destination[row0 + 3u] = s3;
     }
 }
 
-// Gate and up share one read of the activation. inner is at most 5120.
+// Gate and up of one feed-forward. The activation stays in cache across the two images.
 kernel void ffn_gate_up_fp8(
     device const float* activation [[buffer(0)]],
     device const uchar* gate_w [[buffer(1)]],
@@ -592,23 +679,18 @@ kernel void ffn_gate_up_fp8(
     constant uint& rows [[buffer(7)]],
     constant uint& inner [[buffer(8)]],
     uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint span [[threads_per_threadgroup]],
     uint group [[threadgroup_position_in_grid]])
 {
-    threadgroup float shared_act[5120];
     uint row0 = group << 2;
-    if (inner > 5120u) {
-        return;
-    }
-    for (uint i = lane; i < inner; i += 32u) {
-        shared_act[i] = activation[i];
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
     if (row0 >= rows) {
         return;
     }
     float g0, g1, g2, g3, u0, u1, u2, u3;
-    fp8_rows4(shared_act, gate_w, gate_s, row0, inner, lane, g0, g1, g2, g3);
-    fp8_rows4(shared_act, up_w, up_s, row0, inner, lane, u0, u1, u2, u3);
+    fp8_rows4(activation, gate_w, gate_s, row0, inner, tid, span, g0, g1, g2, g3);
+    fp8_rows4(activation, up_w, up_s, row0, inner, tid, span, u0, u1, u2, u3);
     float og0 = simd_sum(g0);
     float og1 = simd_sum(g1);
     float og2 = simd_sum(g2);
@@ -617,15 +699,40 @@ kernel void ffn_gate_up_fp8(
     float ou1 = simd_sum(u1);
     float ou2 = simd_sum(u2);
     float ou3 = simd_sum(u3);
+    threadgroup float part[8][8];
     if (lane == 0u) {
-        gate[row0] = og0;
-        gate[row0 + 1u] = og1;
-        gate[row0 + 2u] = og2;
-        gate[row0 + 3u] = og3;
-        up[row0] = ou0;
-        up[row0 + 1u] = ou1;
-        up[row0 + 2u] = ou2;
-        up[row0 + 3u] = ou3;
+        part[simd][0] = og0;
+        part[simd][1] = og1;
+        part[simd][2] = og2;
+        part[simd][3] = og3;
+        part[simd][4] = ou0;
+        part[simd][5] = ou1;
+        part[simd][6] = ou2;
+        part[simd][7] = ou3;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simd == 0u && lane == 0u) {
+        float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
+        float t0 = 0.0f, t1 = 0.0f, t2 = 0.0f, t3 = 0.0f;
+        uint nsimd = span >> 5;
+        for (uint s = 0u; s < nsimd; ++s) {
+            s0 += part[s][0];
+            s1 += part[s][1];
+            s2 += part[s][2];
+            s3 += part[s][3];
+            t0 += part[s][4];
+            t1 += part[s][5];
+            t2 += part[s][6];
+            t3 += part[s][7];
+        }
+        gate[row0] = s0;
+        gate[row0 + 1u] = s1;
+        gate[row0 + 2u] = s2;
+        gate[row0 + 3u] = s3;
+        up[row0] = t0;
+        up[row0 + 1u] = t1;
+        up[row0 + 2u] = t2;
+        up[row0 + 3u] = t3;
     }
 }
 
@@ -664,10 +771,10 @@ kernel void gemv_fp4_span2(
         uint w1 = p1[i];
         uint w2 = p2[i];
         uint w3 = p3[i];
-        float f0 = exp2(float(s0[i >> 2]) - 127.0f);
-        float f1 = exp2(float(s1[i >> 2]) - 127.0f);
-        float f2 = exp2(float(s2[i >> 2]) - 127.0f);
-        float f3 = exp2(float(s3[i >> 2]) - 127.0f);
+        float f0 = e8m0_code(s0[i >> 2]);
+        float f1 = e8m0_code(s1[i >> 2]);
+        float f2 = e8m0_code(s2[i >> 2]);
+        float f3 = e8m0_code(s3[i >> 2]);
         uint base = i << 3;
         for (uint n = 0u; n < 8u; ++n) {
             float x0 = act0[base + n];
@@ -700,6 +807,19 @@ kernel void gemv_fp4_span2(
         dest1[row0 + 1u] = p1s;
         dest1[row0 + 2u] = p2s;
         dest1[row0 + 3u] = p3s;
+    }
+}
+
+// Read one byte per page so the resident weights are resident on the device before the first prefill.
+kernel void touch_pages(
+    device const uchar* source [[buffer(0)]],
+    device uchar* sink [[buffer(1)]],
+    constant uint& stride [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid < count) {
+        sink[tid & 1023u] = source[tid * stride];
     }
 }
 
@@ -858,7 +978,7 @@ kernel void embed_fp4_rows(
     device const uchar* row_scale = scales + tokens[row] * blocks;
     device float* dest = destination + row * inner;
     for (uint block = 0u; block < blocks; ++block) {
-        float factor = exp2(float(row_scale[block]) - 127.0f);
+        float factor = e8m0_code(row_scale[block]);
         uint element = (block << 5) + lane;
         uchar byte = packed[element >> 1];
         uint nibble = (element & 1u) ? (byte >> 4) : (byte & 0x0Fu);
@@ -878,7 +998,7 @@ kernel void gather_fp4_row(
     device const uchar* packed = weights + row * (inner >> 1);
     device const uchar* row_scale = scales + row * blocks;
     for (uint block = 0u; block < blocks; ++block) {
-        float factor = exp2(float(row_scale[block]) - 127.0f);
+        float factor = e8m0_code(row_scale[block]);
         uint element = (block << 5) + lane;
         uchar byte = packed[element >> 1];
         uint nibble = (element & 1u) ? (byte >> 4) : (byte & 0x0Fu);
