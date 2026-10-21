@@ -166,7 +166,11 @@ def register_quantized(
             if max_prompt_tokens is not None:
                 current["max_prompt_tokens"] = max_prompt_tokens
                 current.pop("max_tokens", None)
-            current.setdefault("context_length", DEFAULT_CONTEXT_LENGTH)
+            ctx = card_context_length(pipeline)
+            if ctx is not None:
+                current["context_length"] = ctx
+            else:
+                current.setdefault("context_length", DEFAULT_CONTEXT_LENGTH)
             save_registry(data, root)
             return
         message = f"{folder} is already registered for a different source"
@@ -309,6 +313,7 @@ def _entry(
     max_prompt_tokens: int | None = None,
 ) -> dict[str, Any]:
     variants, default_variant = pipeline_sampling(pipeline)
+    ctx = card_context_length(pipeline)
     entry = {
         "pipeline": pipeline,
         "alias": alias,
@@ -317,7 +322,7 @@ def _entry(
         "resident_percent": None,
         "variants": variants,
         "default_variant": default_variant,
-        "context_length": DEFAULT_CONTEXT_LENGTH,
+        "context_length": ctx if ctx is not None else DEFAULT_CONTEXT_LENGTH,
     }
     if max_prompt_tokens is not None:
         entry["max_prompt_tokens"] = max_prompt_tokens
@@ -476,6 +481,23 @@ def _created(root: Path | None) -> int:
 
 def _same_path(stored: str, source: Path) -> bool:
     return Path(stored).expanduser().resolve() == source.expanduser().resolve()
+
+
+def card_context_length(pipeline: str) -> int | None:
+    """``CONTEXT_LENGTH`` on the sampling card, when the pipeline defines one."""
+    package = pipeline.replace("-", "_")
+    path = _repo_root() / package / "sampling.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location(f"{package}.sampling_context", path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    value = getattr(module, "CONTEXT_LENGTH", None)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
 
 
 def pipeline_sampling(pipeline: str) -> tuple[dict[str, dict[str, float | int]], str]:

@@ -565,3 +565,78 @@ def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
     assert state["runtime"] is opened[1]
     assert state["record"] == "dense"
     assert state["pipeline"] == "qwen38-27b"
+
+
+def _post_json(port: int, path: str, payload: dict) -> bytes:
+    body = json.dumps(payload).encode()
+    head = (
+        f"POST {path} HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        "Connection: close\r\n\r\n"
+    )
+    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+    sock.settimeout(5)
+    try:
+        sock.sendall(head.encode() + body)
+        chunks: list[bytes] = []
+        while True:
+            data = sock.recv(4096)
+            if not data:
+                break
+            chunks.append(data)
+    finally:
+        sock.close()
+    return b"".join(chunks)
+
+
+def test_an_idle_release_closes_the_model_and_holds_chat() -> None:
+    runtime = _Runtime()
+    state, thread = _serve_background(runtime)
+    state["record"] = "example-model"
+    port = int(state["server"].server_address[1])
+    try:
+        released = _post_json(port, "/v1/release", {"pid": os.getpid()})
+        refused = _exchange(port, "later")
+    finally:
+        _stop_background(state, thread)
+    assert released.startswith(b"HTTP/1.1 200")
+    assert b'"closed": "example-model"' in released
+    assert runtime.closed
+    assert state["runtime"] is None
+    assert refused.startswith(b"HTTP/1.1 503")
+
+
+def test_a_release_waits_while_a_request_is_open() -> None:
+    runtime = _Runtime()
+    runtime.hold = True
+    state, thread = _serve_background(runtime)
+    port = int(state["server"].server_address[1])
+    worker = threading.Thread(target=_exchange, args=(port, "held"))
+    try:
+        worker.start()
+        assert runtime.entered.wait(3)
+        released = _post_json(port, "/v1/release", {"pid": os.getpid()})
+        runtime.release.set()
+        worker.join(timeout=5)
+    finally:
+        runtime.release.set()
+        _stop_background(state, thread)
+    assert released.startswith(b"HTTP/1.1 409")
+    assert runtime.closed is False
+
+
+def test_resume_clears_the_smoke_hold() -> None:
+    runtime = _Runtime()
+    state, thread = _serve_background(runtime)
+    port = int(state["server"].server_address[1])
+    try:
+        _post_json(port, "/v1/release", {"pid": os.getpid()})
+        resumed = _post_json(port, "/v1/resume", {"pid": os.getpid()})
+        refused = _exchange(port, "again")
+    finally:
+        _stop_background(state, thread)
+    assert resumed.startswith(b"HTTP/1.1 200")
+    assert state["smoke_hold"] is None
+    assert refused.startswith(b"HTTP/1.1 404")

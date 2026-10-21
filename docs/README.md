@@ -23,5 +23,6 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen38-flash-next/benchmarks.md](qwen38-flash-next/benchmarks.md) | Harness scores against `serve` |
 | [qwen38-27b/benchmarks.md](qwen38-27b/benchmarks.md) | Harness scores against `serve` |
 | [qwen36-35b-a3b/benchmarks.md](qwen36-35b-a3b/benchmarks.md) | Harness scores against `serve` |
+| [z-image-turbo/README.md](z-image-turbo/README.md) | Z-Image-Turbo pipeline contract |
 
 Implementation plans, option comparisons, and design sketches are **not** committed here. They belong under `artifacts/implementation-plan/` (gitignored).

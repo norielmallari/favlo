@@ -1,0 +1,122 @@
+"""The smoke lock closes an idle serve and leaves the process up."""
+
+import json
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+from favlo.smoke_lock import acquire, release
+
+
+class _Scripted(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    status = 200
+    closed = "example-model"
+
+    def log_message(self, fmt: str, *args) -> None:
+        del fmt, args
+
+    def do_POST(self) -> None:  # noqa: N802
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        self.rfile.read(length)
+        if self.path == "/v1/release" and self.status == 200:
+            body = json.dumps({"released": True, "closed": self.closed}).encode()
+            code = 200
+        elif self.path == "/v1/resume":
+            body = json.dumps({"resumed": True}).encode()
+            code = 200
+        else:
+            body = json.dumps({"error": {"message": "a request is open", "type": "busy"}}).encode()
+            code = 409
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def _serve(status: int) -> tuple[ThreadingHTTPServer, int]:
+    _Scripted.status = status
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Scripted)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, int(server.server_address[1])
+
+
+def test_acquire_closes_an_idle_model(tmp_path: Path, capsys) -> None:
+    server, port = _serve(200)
+    try:
+        code = acquire(
+            root=tmp_path,
+            pipeline="qwen36-35b-a3b",
+            command="smoke",
+            port=port,
+            pid=os.getpid(),
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+    text = capsys.readouterr().out
+    assert code == 0
+    assert "released example-model" in text
+    body = json.loads((tmp_path / "artifacts" / "pipeline-test.lock").read_text())
+    assert body == {"pipeline": "qwen36-35b-a3b", "pid": os.getpid(), "command": "smoke"}
+
+
+def test_acquire_leaves_the_lock_when_a_request_is_open(tmp_path: Path) -> None:
+    server, port = _serve(409)
+    try:
+        code = acquire(
+            root=tmp_path,
+            pipeline="qwen36-35b-a3b",
+            command="smoke",
+            port=port,
+            pid=os.getpid(),
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert code == 2
+    assert not (tmp_path / "artifacts" / "pipeline-test.lock").exists()
+
+
+def test_acquire_holds_the_lock_when_serve_is_down(tmp_path: Path) -> None:
+    code = acquire(
+        root=tmp_path,
+        pipeline="qwen38-27b",
+        command="kernels",
+        port=1,
+        pid=os.getpid(),
+    )
+    assert code == 0
+    assert (tmp_path / "artifacts" / "pipeline-test.lock").is_file()
+
+
+def test_release_removes_only_this_pid(tmp_path: Path) -> None:
+    path = tmp_path / "artifacts" / "pipeline-test.lock"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"pipeline": "qwen38-27b", "pid": os.getpid(), "command": "smoke"}))
+    server, port = _serve(200)
+    try:
+        code = release(root=tmp_path, port=port, pid=os.getpid())
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert code == 0
+    assert not path.exists()
+
+
+def test_acquire_does_not_steal_a_live_lock(tmp_path: Path) -> None:
+    path = tmp_path / "artifacts" / "pipeline-test.lock"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"pipeline": "qwen38-27b", "pid": os.getppid(), "command": "smoke"}))
+    code = acquire(
+        root=tmp_path,
+        pipeline="qwen36-35b-a3b",
+        command="smoke",
+        port=1,
+        pid=os.getpid(),
+    )
+    assert code == 3
+    assert json.loads(path.read_text())["pid"] == os.getppid()

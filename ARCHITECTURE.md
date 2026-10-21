@@ -21,6 +21,8 @@ Shared code is `src/favlo/`. There is no model base class and no kernel that bra
 
 The daemon is a request server. It does not own chat history, tools, or the terminal session. The CLI owns those. Telemetry is one JSON event per line. The terminal paints it as it arrives, and prints the reply after that turn's requests have closed.
 
+`python -m favlo.smoke_lock` is how a pipeline test takes the GPU while the daemon stays up. Acquire closes the resident model when no request is open. Release lets the next chat load one again. The listener note is [docs/serve.md](docs/serve.md).
+
 ## Runtimes
 
 Each runtime is a separate write set. An agent developing one runtime edits that set and leaves the others untouched.
@@ -30,6 +32,7 @@ Each runtime is a separate write set. An agent developing one runtime edits that
 | `qwen38-flash-next` | `qwen38-flash-next.py` | `qwen38_flash_next/` | [docs/qwen38-flash-next/architecture.md](docs/qwen38-flash-next/architecture.md) |
 | `qwen38-27b` | `qwen38-27b.py` | `qwen38_27b/` | [docs/qwen38-27b/README.md](docs/qwen38-27b/README.md) |
 | `qwen36-35b-a3b` | `qwen36-35b-a3b.py` | `qwen36_35b_a3b/` | [docs/qwen36-35b-a3b/README.md](docs/qwen36-35b-a3b/README.md) |
+| `z-image-turbo` | `z-image-turbo.py` | `z_image_turbo/` | [docs/z-image-turbo/README.md](docs/z-image-turbo/README.md) |
 
 The entry filename may contain hyphens. The command loads it by path. It is not an importable module name. The package beside it uses underscores. The entry sets `PIPELINE` to that filename stem. A runtime's write set is the entry file, the package, `docs/<pipeline>/`, and tests that import only that package. A new runtime adds a row to the table above and its own doc directory. It does not edit another row's package, shaders, tests, or docs.
 
@@ -83,6 +86,8 @@ uv run python -m harness --model qwen38-27b
 uv run python -m harness.benchmarks --model qwen38-27b
 uv run python -m harness.coding --model qwen38-27b
 uv run python -m harness.worktree --model qwen36-35b-a3b
+uv run python -m harness.image_agent
+uv run python -m harness.image_persona
 ```
 
 What the harness scores is [docs/harness.md](docs/harness.md). A pipeline's quantize, probe, and matmul commands are that pipeline's note.

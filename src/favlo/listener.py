@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from favlo.console import VERSION, Console
-from favlo.daemon import DAEMON_ENV
+from favlo.daemon import DAEMON_ENV, alive
 from favlo.logs import attach_process_log
 from favlo.registry import model_objects, one_model, resolve
 
@@ -220,6 +220,36 @@ def _install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
         _log(f"loaded {label} {selection.folder}")
 
 
+def _smoke_held(state: dict[str, Any]) -> bool:
+    """True when a live smoke pid still owns the GPU. A dead pid clears the hold."""
+    holder = state.get("smoke_hold")
+    if isinstance(holder, bool) or not isinstance(holder, int) or holder <= 0:
+        return False
+    if not alive(holder):
+        state["smoke_hold"] = None
+        return False
+    return True
+
+
+def _drop_runtime(state: dict[str, Any], args: Any) -> str | None:
+    """Close the resident pipeline and leave the listener up."""
+    old = state.get("runtime")
+    folder = state.get("record")
+    state["runtime"] = None
+    state["record"] = None
+    state["pipeline"] = None
+    state["module"] = None
+    shutdown = getattr(args, "shutdown", None)
+    if shutdown is not None:
+        shutdown.runtime = None
+    if old is not None:
+        old.close()
+    if isinstance(folder, str) and folder:
+        _log(f"released {folder}")
+        return folder
+    return None
+
+
 def _bind_request(body: dict[str, Any], state: dict[str, Any], args: Any) -> Any:
     """Load the requested folder when serve was started with an empty process."""
     if not getattr(args, "lazy", False):
@@ -271,6 +301,20 @@ def _run_until_stopped(args: Any, state: dict[str, Any], shutdown: _Shutdown) ->
         _release(state["runtime"], shutdown, state.get("server"))
 
 
+def _request_pid(handler: BaseHTTPRequestHandler) -> int:
+    length = int(handler.headers.get("Content-Length", "0") or "0")
+    raw = handler.rfile.read(length) if length else b"{}"
+    body = json.loads(raw or b"{}")
+    if not isinstance(body, dict):
+        message = "pid is required"
+        raise ValueError(message)
+    pid = body.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        message = "pid is required"
+        raise ValueError(message)
+    return pid
+
+
 def _serve_loop(args: Any, state: dict[str, Any]) -> int:
     lock = state.setdefault("lock", threading.Lock())
 
@@ -304,7 +348,14 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
             self._json(404, {"error": {"message": "not found"}})
 
         def do_POST(self) -> None:  # noqa: N802
-            if self.path.split("?", 1)[0] != "/v1/chat/completions":
+            route = self.path.split("?", 1)[0]
+            if route == "/v1/release":
+                self._release_for_smoke()
+                return
+            if route == "/v1/resume":
+                self._resume_from_smoke()
+                return
+            if route not in {"/v1/chat/completions", "/v1/images/generations"}:
                 self._json(404, {"error": {"message": "not found"}})
                 return
             self._started = False
@@ -321,8 +372,21 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
             if not lock.acquire(blocking=False):
                 _log("waiting for the open request")
                 lock.acquire()
-            _log("request open")
+            opened = False
             try:
+                if _smoke_held(state):
+                    self._json(
+                        503,
+                        {
+                            "error": {
+                                "message": "the gpu is held for a pipeline smoke",
+                                "type": "busy",
+                            }
+                        },
+                    )
+                    return
+                _log("request open")
+                opened = True
                 body = json.loads(raw or b"{}")
                 selection = _bind_request(body, state, args)
                 if selection is not None:
@@ -334,6 +398,13 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
                         404,
                         {"error": {"message": "no model is loaded", "type": "not_found"}},
                     )
+                    return
+                if route == "/v1/images/generations":
+                    image = getattr(module, "handle_image", None)
+                    if not callable(image):
+                        self._json(404, {"error": {"message": "not found"}})
+                        return
+                    image(self, runtime, body, selection, args, state)
                     return
                 chat = getattr(module, "handle_chat", None)
                 if not callable(chat):
@@ -366,15 +437,71 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
                     return
                 self._json(500, {"error": {"message": str(exc), "type": type(exc).__name__}})
             finally:
-                _log("request closed")
+                if opened:
+                    _log("request closed")
                 module = state.get("module")
                 runtime = state.get("runtime")
                 lock.release()
-                _schedule_pipeline_heartbeat(module, runtime, selection)
+                if opened:
+                    _schedule_pipeline_heartbeat(module, runtime, selection)
                 try:
                     self.connection.settimeout(_REQUEST_READ_TIMEOUT)
                 except OSError:
                     self.close_connection = True
+
+        def _release_for_smoke(self) -> None:
+            try:
+                pid = _request_pid(self)
+            except (TimeoutError, ValueError, json.JSONDecodeError):
+                self.close_connection = True
+                self._json(400, {"error": {"message": "pid is required", "type": "bad_request"}})
+                return
+            if not lock.acquire(blocking=False):
+                self._json(409, {"error": {"message": "a request is open", "type": "busy"}})
+                return
+            try:
+                holder = state.get("smoke_hold")
+                if _smoke_held(state) and holder != pid:
+                    self._json(
+                        409,
+                        {"error": {"message": "a smoke hold is active", "type": "busy"}},
+                    )
+                    return
+                try:
+                    closed = _drop_runtime(state, args)
+                except Exception as exc:
+                    self._json(
+                        500,
+                        {"error": {"message": str(exc), "type": type(exc).__name__}},
+                    )
+                    return
+                state["smoke_hold"] = pid
+                self._json(200, {"released": True, "closed": closed})
+            finally:
+                lock.release()
+
+        def _resume_from_smoke(self) -> None:
+            try:
+                pid = _request_pid(self)
+            except (TimeoutError, ValueError, json.JSONDecodeError):
+                self.close_connection = True
+                self._json(400, {"error": {"message": "pid is required", "type": "bad_request"}})
+                return
+            if not lock.acquire(blocking=False):
+                self._json(409, {"error": {"message": "a request is open", "type": "busy"}})
+                return
+            try:
+                holder = state.get("smoke_hold")
+                if _smoke_held(state) and holder != pid:
+                    self._json(
+                        409,
+                        {"error": {"message": "a smoke hold is active", "type": "busy"}},
+                    )
+                    return
+                state["smoke_hold"] = None
+                self._json(200, {"resumed": True})
+            finally:
+                lock.release()
 
         def _client_stopped(self) -> bool:
             if self._gone:
