@@ -1,12 +1,48 @@
-"""HTTP handlers. Chat is refused. Images use the OpenAI generations body."""
+"""HTTP handlers. Chat is refused. Images use the OpenAI generations body.
+
+``POST /v1/images/edits`` and ``POST /v1/images/variations`` are not handlers.
+This pipeline has no image input. A transparent background, a hosted URL, and a
+streaming partial are not produced. JPEG and WebP are not encoded.
+"""
 
 from __future__ import annotations
 
 import base64
 import time
-from typing import Any
+from typing import Any, NamedTuple
 
 from z_image_turbo.schedule import STEPS
+from z_image_turbo.scratch import MAX_EDGE
+
+_QUALITY = {
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "max",
+    "auto": "high",
+    "standard": "high",
+    "hd": "high",
+}
+
+
+class ImageRequestError(ValueError):
+    def __init__(self, message: str, param: str | None) -> None:
+        super().__init__(message)
+        self.param = param
+
+
+class ImageFields(NamedTuple):
+    prompt: str
+    width: int
+    height: int
+    seed: int
+    count: int
+    quality: str
+    background: str
+    output_format: str
+    size: str
+    safety_identifier: str | None
 
 
 def handle_chat(
@@ -18,14 +54,10 @@ def handle_chat(
     state: dict[str, Any],
 ) -> None:
     del runtime, body, selection, args, state
-    handler._json(
-        400,
-        {
-            "error": {
-                "message": "z-image-turbo generates images at POST /v1/images/generations",
-                "type": "invalid_request_error",
-            }
-        },
+    _reject(
+        handler,
+        "z-image-turbo generates images at POST /v1/images/generations",
+        None,
     )
 
 
@@ -39,57 +71,146 @@ def handle_image(
 ) -> None:
     del selection, args, state
     try:
-        prompt, width, height, seed = _fields(body)
-        png, _digest, timing = runtime.generate(prompt, width, height, STEPS, seed)
-    except (TypeError, ValueError) as exc:
-        handler._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+        fields = _fields(body)
+        images: list[dict[str, str]] = []
+        timings: list[dict[str, Any]] = []
+        for index in range(fields.count):
+            png, _digest, timing = runtime.generate(
+                fields.prompt,
+                fields.width,
+                fields.height,
+                STEPS,
+                fields.seed + index,
+            )
+            images.append({"b64_json": base64.b64encode(png).decode("ascii")})
+            timings.append(timing)
+    except ImageRequestError as exc:
+        _reject(handler, str(exc), exc.param)
         return
-    encoded = base64.b64encode(png).decode("ascii")
-    handler._json(
-        200,
-        {
-            "created": int(time.time()),
-            "data": [{"b64_json": encoded}],
-            "generation_seconds": timing,
-        },
+    except (TypeError, ValueError) as exc:
+        text = str(exc)
+        param = "prompt" if text.startswith("caption length") else None
+        _reject(handler, text, param)
+        return
+    payload: dict[str, Any] = {
+        "created": int(time.time()),
+        "background": fields.background,
+        "data": images,
+        "output_format": fields.output_format,
+        "quality": fields.quality,
+        "size": fields.size,
+        "generation_seconds": timings[0] if fields.count == 1 else timings,
+    }
+    if fields.safety_identifier:
+        payload["safety_identifier"] = fields.safety_identifier
+    handler._json(200, payload)
+
+
+def _fields(body: dict[str, Any]) -> ImageFields:
+    _absent_or(body, "response_format", {"b64_json"}, "response_format must be b64_json")
+    output_format = _absent_or(body, "output_format", {"png"}, "output_format must be png")
+    _absent_or(body, "stream", {False}, "stream must be false")
+    _bounded_int(body, "partial_images", 0, 0, 0, "partial_images must be 0")
+    _absent_or(body, "background", {"auto", "opaque"}, "background must be auto or opaque")
+    _absent_or(body, "moderation", {"low", "auto"}, "moderation must be low or auto")
+    _absent_or(body, "style", {"vivid", "natural"}, "style must be vivid or natural")
+    quality = _absent_or(
+        body,
+        "quality",
+        set(_QUALITY),
+        "quality must be auto, low, medium, high, xhigh, max, standard, or hd",
+    )
+    prompt = body.get("prompt")
+    if not isinstance(prompt, str) or not prompt:
+        raise ImageRequestError("prompt is required", "prompt")
+    width, height, size = _size(body.get("size"))
+    return ImageFields(
+        prompt=prompt,
+        width=width,
+        height=height,
+        seed=_optional_int(body, "seed", 0, "seed must be an integer"),
+        count=_bounded_int(body, "n", 1, 1, 10, "n must be from 1 to 10"),
+        quality=_QUALITY[quality or "auto"],
+        background="opaque",
+        output_format=output_format or "png",
+        size=size,
+        safety_identifier=_safety_identifier(body),
     )
 
 
-def _fields(body: dict[str, Any]) -> tuple[str, int, int, int]:
-    rejected = ("quality", "background", "moderation", "partial_images")
-    for key in rejected:
-        if key in body:
-            message = f"{key} is not accepted"
-            raise ValueError(message)
-    if body.get("response_format") not in {None, "b64_json"}:
-        message = "response_format must be b64_json"
-        raise ValueError(message)
-    if body.get("output_format") not in {None, "png"}:
-        message = "output_format must be png"
-        raise ValueError(message)
-    if body.get("n") not in {None, 1}:
-        message = "n must be 1"
-        raise ValueError(message)
-    prompt = body.get("prompt")
-    if not isinstance(prompt, str) or not prompt:
-        message = "prompt is required"
-        raise ValueError(message)
-    width, height = _size(body.get("size"))
-    seed = body.get("seed", 0)
-    if isinstance(seed, bool) or not isinstance(seed, int):
-        message = "seed must be an integer"
-        raise ValueError(message)
-    return prompt, width, height, seed
-
-
-def _size(value: Any) -> tuple[int, int]:
+def _absent_or(body: dict[str, Any], key: str, allowed: set[Any], message: str) -> Any:
+    value = body.get(key)
     if value is None:
-        return 1024, 1024
+        return None
+    if value not in allowed:
+        raise ImageRequestError(message, key)
+    return value
+
+
+def _optional_int(body: dict[str, Any], key: str, default: int, message: str) -> int:
+    value = body.get(key, default)
+    if value is None:
+        value = default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ImageRequestError(message, key)
+    return value
+
+
+def _bounded_int(
+    body: dict[str, Any],
+    key: str,
+    default: int,
+    low: int,
+    high: int,
+    message: str,
+) -> int:
+    value = _optional_int(body, key, default, message)
+    if value < low or value > high:
+        raise ImageRequestError(message, key)
+    return value
+
+
+def _safety_identifier(body: dict[str, Any]) -> str | None:
+    safety = body.get("safety_identifier")
+    user = body.get("user")
+    if safety is not None and not isinstance(safety, str):
+        raise ImageRequestError("safety_identifier must be a string", "safety_identifier")
+    if user is not None and not isinstance(user, str):
+        raise ImageRequestError("user must be a string", "user")
+    chosen = safety if isinstance(safety, str) and safety else user
+    if not isinstance(chosen, str) or not chosen:
+        return None
+    return chosen
+
+
+def _size(value: Any) -> tuple[int, int, str]:
+    if value is None or value == "auto":
+        return 1024, 1024, "1024x1024"
     if not isinstance(value, str) or "x" not in value:
-        message = "size must be WIDTHxHEIGHT"
-        raise ValueError(message)
+        raise ImageRequestError("size must be auto or WIDTHxHEIGHT", "size")
     left, _, right = value.partition("x")
     if not left.isdigit() or not right.isdigit():
-        message = "size must be WIDTHxHEIGHT"
-        raise ValueError(message)
-    return int(left), int(right)
+        raise ImageRequestError("size must be auto or WIDTHxHEIGHT", "size")
+    width, height = int(left), int(right)
+    fits = 16 <= width <= MAX_EDGE and 16 <= height <= MAX_EDGE
+    if not fits or width % 16 or height % 16:
+        message = f"edge must be a multiple of 16 from 16 to {MAX_EDGE}, got {width}x{height}"
+        raise ImageRequestError(message, "size")
+    if width * 3 < height or height * 3 < width:
+        message = f"aspect ratio must be between 1:3 and 3:1, got {width}x{height}"
+        raise ImageRequestError(message, "size")
+    return width, height, f"{width}x{height}"
+
+
+def _reject(handler: Any, message: str, param: str | None) -> None:
+    handler._json(
+        400,
+        {
+            "error": {
+                "message": message,
+                "type": "invalid_request_error",
+                "param": param,
+                "code": None,
+            }
+        },
+    )

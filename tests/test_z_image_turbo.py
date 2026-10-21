@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+
 import numpy as np
 import pytest
-from z_image_turbo.chat import _fields
+from z_image_turbo.chat import ImageRequestError, _fields, handle_image
 from z_image_turbo.formats import dequant_fp4, pack_fp4, stored_k
 from z_image_turbo.png import encode_png
 from z_image_turbo.record import Plane
@@ -69,15 +71,107 @@ def test_png_signature() -> None:
     assert blob.startswith(b"\x89PNG\r\n\x1a\n")
 
 
-def test_image_request_rejects_n() -> None:
-    with pytest.raises(ValueError, match="n must be 1"):
-        _fields({"prompt": "a cat", "n": 2})
-
-
 def test_image_request_default_size() -> None:
-    prompt, width, height, seed = _fields({"prompt": "a cat"})
-    assert prompt == "a cat"
-    assert (width, height, seed) == (1024, 1024, 0)
+    fields = _fields({"prompt": "a cat"})
+    assert fields.prompt == "a cat"
+    assert (fields.width, fields.height, fields.seed, fields.count) == (1024, 1024, 0, 1)
+    assert fields.quality == "high"
+    assert fields.background == "opaque"
+    assert fields.output_format == "png"
+    assert fields.size == "1024x1024"
+    assert fields.safety_identifier is None
+
+
+def test_image_request_accepts_a_standard_body() -> None:
+    fields = _fields(
+        {
+            "prompt": "a cat",
+            "n": 2,
+            "size": "auto",
+            "quality": "auto",
+            "background": "opaque",
+            "moderation": "low",
+            "style": "natural",
+            "output_format": "png",
+            "response_format": "b64_json",
+            "stream": False,
+            "partial_images": 0,
+            "seed": 4,
+            "output_compression": 80,
+            "model": "Z-Image-Turbo-fp4",
+            "safety_identifier": "",
+            "user": "reader",
+        }
+    )
+    assert fields.count == 2
+    assert fields.seed == 4
+    assert fields.size == "1024x1024"
+    assert fields.quality == "high"
+    assert fields.safety_identifier == "reader"
+
+
+def test_image_request_rejects_counts_past_ten() -> None:
+    with pytest.raises(ImageRequestError, match="n must be from 1 to 10") as raised:
+        _fields({"prompt": "a cat", "n": 11})
+    assert raised.value.param == "n"
+
+
+def test_image_request_rejects_sizes_this_model_cannot_draw() -> None:
+    with pytest.raises(ImageRequestError, match="1280") as raised:
+        _fields({"prompt": "a cat", "size": "1536x1024"})
+    assert raised.value.param == "size"
+    with pytest.raises(ImageRequestError, match="1:3"):
+        _fields({"prompt": "a cat", "size": "16x1280"})
+
+
+def test_image_request_rejects_unsupported_image_options() -> None:
+    rejected = {
+        "background": "transparent",
+        "response_format": "url",
+        "output_format": "jpeg",
+        "stream": True,
+        "partial_images": 1,
+    }
+    for key, value in rejected.items():
+        with pytest.raises(ImageRequestError) as raised:
+            _fields({"prompt": "a cat", key: value})
+        assert raised.value.param == key
+
+
+def test_image_response_returns_one_png_per_count() -> None:
+    class _Handler:
+        def __init__(self) -> None:
+            self.status = 0
+            self.body: dict[str, object] = {}
+
+        def _json(self, status: int, body: dict[str, object]) -> None:
+            self.status = status
+            self.body = body
+
+    class _Runtime:
+        def generate(self, prompt: str, width: int, height: int, steps: int, seed: int) -> tuple:
+            del prompt, width, height, steps
+            timing = {"total": 1.0, "caption": 0.1, "vae": 0.2, "steps": [0.1]}
+            return f"png-{seed}".encode(), "digest", timing
+
+    handler = _Handler()
+    handle_image(handler, _Runtime(), {"prompt": "a cat", "n": 2, "seed": 7}, None, None, {})
+    assert handler.status == 200
+    data = handler.body["data"]
+    assert isinstance(data, list)
+    assert len(data) == 2
+    assert base64.b64decode(data[0]["b64_json"]) == b"png-7"
+    assert base64.b64decode(data[1]["b64_json"]) == b"png-8"
+    timings = handler.body["generation_seconds"]
+    assert isinstance(timings, list)
+    assert len(timings) == 2
+    assert handler.body["output_format"] == "png"
+    assert handler.body["background"] == "opaque"
+    assert handler.body["size"] == "1024x1024"
+    assert "usage" not in handler.body
+    assert "revised_prompt" not in data[0]
+    handle_image(handler, _Runtime(), {"prompt": "a cat"}, None, None, {})
+    assert isinstance(handler.body["generation_seconds"], dict)
 
 
 def test_close_drops_the_device_buffers() -> None:
