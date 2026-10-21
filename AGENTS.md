@@ -21,6 +21,8 @@ The files in [`.cursor/rules`](.cursor/rules) are repo rules. Cursor loads them 
 
 ## Changes
 
+Work on `main`. Do not create a branch unless the user asks for one.
+
 Changes stay in this repository. Edit another repository only when the user asks for that repository.
 
 Edit one runtime. Leave every other runtime's files untouched. The write set and the runtime table are in [ARCHITECTURE.md](ARCHITECTURE.md). Do not edit `src/favlo/cli.py` to register a runtime. Do not edit another pipeline's package, shaders, tests, or docs. Do not add a base class or a kernel that branches on the pipeline.
