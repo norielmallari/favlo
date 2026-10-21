@@ -22,6 +22,7 @@ from qwen36_35b_a3b.tools import (
     required_function,
     split_thinking,
 )
+from qwen36_35b_a3b.vision import prepare_prompt
 
 STOP = {248046, 248044}
 _LONG_IDS: dict[Path, frozenset[int]] = {}
@@ -223,6 +224,7 @@ def handle_chat(
             raise
         runtime._status("client closed")
     finally:
+        runtime._vision_at = None
         runtime._stop = None
 
 
@@ -240,6 +242,7 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
     presence = _presence(body, thinking, card)
     frequency = _frequency(body)
     prompt = encode_chat(runtime.root, messages, body.get("tools"), thinking)
+    prompt = prepare_prompt(runtime, messages, prompt)
     forced, stop_after_forced = _forced_call(runtime.root, body.get("tools"), required)
     close, end = think_close_ids(runtime.root) if thinking else ([], None)
     tool_open = encode_text(runtime.root, "<tool_call>")[0] if thinking else None

@@ -118,6 +118,16 @@ KERNELS = (
     "router8",
     "remap_expert_ids",
     "mix_experts",
+    "layernorm_rows_f32",
+    "cast_pad_f16",
+    "pack_bias_f32",
+    "gemv_fp4_tail",
+    "gelu_tanh_n",
+    "gelu_erf_n",
+    "split_qkv72",
+    "vision_rope72",
+    "vision_attend72",
+    "dequant_fp4_rows",
 )
 
 _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"

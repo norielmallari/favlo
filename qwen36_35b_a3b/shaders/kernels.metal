@@ -31,8 +31,28 @@ static float silu_f(float x) {
 }
 
 static float gelu_tanh_f(float x) {
+    // tanh(z) via exp overflows once |x| is past about 10. The cubic is already
+    // saturated in float32 by |x| == 8, so the tail is x or 0.
+    float ax = fabs(x);
+    if (ax >= 8.0f) {
+        return x > 0.0f ? x : 0.0f;
+    }
     float inner = GELU_K * (x + GELU_CUBE * x * x * x);
     return 0.5f * x * (1.0f + tanh(inner));
+}
+
+// Abramowitz and Stegun 7.1.26. The Metal dialect here has no erf builtin.
+static float erf_f(float x) {
+    float sign = x < 0.0f ? -1.0f : 1.0f;
+    float ax = fabs(x);
+    float t = 1.0f / (1.0f + 0.3275911f * ax);
+    float poly = 1.061405429f;
+    poly = poly * t - 1.453152027f;
+    poly = poly * t + 1.421413741f;
+    poly = poly * t - 0.284496736f;
+    poly = poly * t + 0.254829592f;
+    poly = poly * t;
+    return sign * (1.0f - poly * exp(-ax * ax));
 }
 
 constant float FP4_TABLE[16] = {
@@ -3602,4 +3622,298 @@ kernel void kv_attend_write(
     float sum = row_sum[row];
     float inv = sum == 0.0f ? 0.0f : 1.0f / sum;
     destination[index] = acc[row * 256u + channel] * inv * sigmoid_f(gate[index]);
+}
+
+// Vision tower. One threadgroup is one patch row. Mean and variance divide by width.
+kernel void layernorm_rows_f32(
+    device const float* x [[buffer(0)]],
+    device const half* weight [[buffer(1)]],
+    device const half* bias [[buffer(2)]],
+    device float* y [[buffer(3)]],
+    constant uint& width [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    constant uint& rows [[buffer(6)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= rows) {
+        return;
+    }
+    threadgroup float red[8];
+    x += row * width;
+    y += row * width;
+    float sum = 0.0f;
+    for (uint i = tid; i < width; i += 256u) {
+        sum += x[i];
+    }
+    float part = simd_sum(sum);
+    if (lane == 0u) {
+        red[simd] = part;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0u) {
+        float total = red[0] + red[1] + red[2] + red[3] + red[4] + red[5] + red[6] + red[7];
+        red[0] = total / float(width);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float mean = red[0];
+    float var = 0.0f;
+    for (uint i = tid; i < width; i += 256u) {
+        float diff = x[i] - mean;
+        var += diff * diff;
+    }
+    part = simd_sum(var);
+    if (lane == 0u) {
+        red[simd] = part;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0u) {
+        float total = red[0] + red[1] + red[2] + red[3] + red[4] + red[5] + red[6] + red[7];
+        red[0] = rsqrt(total / float(width) + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float inv = red[0];
+    for (uint i = tid; i < width; i += 256u) {
+        y[i] = (x[i] - mean) * inv * float(weight[i]) + float(bias[i]);
+    }
+}
+
+// Pad a tight float activation into the fp4 matmul stride. Extra K and extra rows are zero.
+kernel void cast_pad_f16(
+    device const float* source [[buffer(0)]],
+    device half* destination [[buffer(1)]],
+    constant uint& rows [[buffer(2)]],
+    constant uint& pad_rows [[buffer(3)]],
+    constant uint& logical_k [[buffer(4)]],
+    constant uint& stored_k [[buffer(5)]],
+    uint3 gid [[thread_position_in_grid]])
+{
+    uint col = gid.x;
+    uint row = gid.y;
+    if (row >= pad_rows || col >= stored_k) {
+        return;
+    }
+    float value = 0.0f;
+    if (row < rows && col < logical_k) {
+        value = source[row * logical_k + col];
+    }
+    destination[row * stored_k + col] = half(value);
+}
+
+// Keep the logical columns of a padded matmul and add the float16 bias.
+kernel void pack_bias_f32(
+    device const float* source [[buffer(0)]],
+    device const half* bias [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    device const float* tail [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& main_cols [[buffer(5)]],
+    constant uint& logical [[buffer(6)]],
+    constant uint& tail_n [[buffer(7)]],
+    uint3 gid [[thread_position_in_grid]])
+{
+    uint col = gid.x;
+    uint row = gid.y;
+    if (row >= rows || col >= logical) {
+        return;
+    }
+    float value = col < main_cols
+        ? source[row * main_cols + col]
+        : tail[row * tail_n + (col - main_cols)];
+    destination[row * logical + col] = value + float(bias[col]);
+}
+
+// Output rows past the 32-wide tile. K past logical_k is zero.
+kernel void gemv_fp4_tail(
+    device const float* activation [[buffer(0)]],
+    device const uchar* weights [[buffer(1)]],
+    device const uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    constant uint& tail [[buffer(5)]],
+    constant uint& logical_k [[buffer(6)]],
+    constant uint& stored_k [[buffer(7)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= tail) {
+        return;
+    }
+    uint blocks = stored_k >> 5;
+    device const uchar* packed = weights + row * (stored_k >> 1);
+    device const uchar* row_scale = scales + row * blocks;
+    for (uint token = 0u; token < count; ++token) {
+        device const float* act = activation + token * logical_k;
+        float acc = 0.0f;
+        for (uint block = 0u; block < blocks; ++block) {
+            uint element = (block << 5) + lane;
+            float aval = element < logical_k ? act[element] : 0.0f;
+            uchar byte = packed[element >> 1];
+            uint nibble = (element & 1u) ? (byte >> 4) : (byte & 0x0Fu);
+            float factor = exp2(float(row_scale[block]) - 127.0f);
+            acc += fp4_e2m1(nibble) * factor * aval;
+        }
+        float sum = simd_sum(acc);
+        if (lane == 0u) {
+            destination[token * tail + row] = sum;
+        }
+    }
+}
+
+kernel void gelu_tanh_n(
+    device const float* x [[buffer(0)]],
+    device float* y [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= count) {
+        return;
+    }
+    y[tid] = gelu_tanh_f(x[tid]);
+}
+
+kernel void gelu_erf_n(
+    device const float* x [[buffer(0)]],
+    device float* y [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= count) {
+        return;
+    }
+    float value = x[tid];
+    y[tid] = 0.5f * value * (1.0f + erf_f(value * 0.7071067811865476f));
+}
+
+kernel void split_qkv72(
+    device const float* qkv [[buffer(0)]],
+    device float* q [[buffer(1)]],
+    device float* k [[buffer(2)]],
+    device float* v [[buffer(3)]],
+    constant uint& tokens [[buffer(4)]],
+    uint3 gid [[thread_position_in_grid]])
+{
+    uint channel = gid.x;
+    uint token = gid.y;
+    if (token >= tokens || channel >= 1152u) {
+        return;
+    }
+    uint base = token * 3456u + channel;
+    uint out = token * 1152u + channel;
+    q[out] = qkv[base];
+    k[out] = qkv[base + 1152u];
+    v[out] = qkv[base + 2304u];
+}
+
+// Duplicate 36 frequencies are already in the table. Rotate the two halves of the head.
+kernel void vision_rope72(
+    device float* values [[buffer(0)]],
+    device const float* cosv [[buffer(1)]],
+    device const float* sinv [[buffer(2)]],
+    constant uint& tokens [[buffer(3)]],
+    constant uint& heads [[buffer(4)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint token [[threadgroup_position_in_grid]])
+{
+    if (token >= tokens) {
+        return;
+    }
+    uint pairs = heads * 36u;
+    for (uint index = tid; index < pairs; index += 256u) {
+        uint head = index / 36u;
+        uint pair = index - head * 36u;
+        device float* row = values + (token * heads + head) * 72u;
+        float c = cosv[token * 72u + pair];
+        float s = sinv[token * 72u + pair];
+        float x0 = row[pair];
+        float x1 = row[36u + pair];
+        row[pair] = x0 * c - x1 * s;
+        row[36u + pair] = x1 * c + x0 * s;
+    }
+}
+
+// One query, one head. The grid is heads by tokens. The reduction matches attend_head72.
+kernel void vision_attend72(
+    device const float* query [[buffer(0)]],
+    device const float* key [[buffer(1)]],
+    device const float* value [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& tokens [[buffer(4)]],
+    constant uint& heads [[buffer(5)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint3 tgid [[threadgroup_position_in_grid]])
+{
+    uint head = tgid.x;
+    uint qindex = tgid.y;
+    if (head >= heads || qindex >= tokens) {
+        return;
+    }
+    device const float* qrow = query + (qindex * heads + head) * 72u;
+    threadgroup float red[3];
+    float running_max = -INFINITY;
+    float running_sum = 0.0f;
+    for (uint token = 0u; token < tokens; ++token) {
+        device const float* krow = key + (token * heads + head) * 72u;
+        float mine = tid < 72u ? qrow[tid] * krow[tid] : 0.0f;
+        float part = simd_sum(mine);
+        if (lane == 0u) {
+            red[simd] = part;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float score = (red[0] + red[1] + red[2]) * INV_SQRT_72;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float next = max(running_max, score);
+        running_sum = running_sum * exp(running_max - next) + exp(score - next);
+        running_max = next;
+    }
+    float acc = 0.0f;
+    for (uint token = 0u; token < tokens; ++token) {
+        device const float* krow = key + (token * heads + head) * 72u;
+        device const float* vrow = value + (token * heads + head) * 72u;
+        float mine = tid < 72u ? qrow[tid] * krow[tid] : 0.0f;
+        float part = simd_sum(mine);
+        if (lane == 0u) {
+            red[simd] = part;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float score = (red[0] + red[1] + red[2]) * INV_SQRT_72;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float weight = exp(score - running_max) / running_sum;
+        if (tid < 72u) {
+            acc += weight * vrow[tid];
+        }
+    }
+    if (tid < 72u) {
+        destination[(qindex * heads + head) * 72u + tid] = acc;
+    }
+}
+
+kernel void dequant_fp4_rows(
+    device const uchar* weights [[buffer(0)]],
+    device const uchar* scales [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& logical [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    constant uint& rows [[buffer(5)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= rows) {
+        return;
+    }
+    uint blocks = logical >> 5;
+    device const uchar* packed = weights + row * (inner >> 1);
+    device const uchar* row_scale = scales + row * (inner >> 5);
+    device float* dest = destination + row * logical;
+    for (uint block = 0u; block < blocks; ++block) {
+        float factor = exp2(float(row_scale[block]) - 127.0f);
+        uint element = (block << 5) + lane;
+        uchar byte = packed[element >> 1];
+        uint nibble = (element & 1u) ? (byte >> 4) : (byte & 0x0Fu);
+        dest[element] = fp4_e2m1(nibble) * factor;
+    }
 }

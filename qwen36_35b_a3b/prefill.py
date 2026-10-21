@@ -196,6 +196,7 @@ def _chunk(runtime: Any, work: _Workspace, ids: list[int], pos0: int) -> None:
     _zero(runtime, work.hidden, rows * HIDDEN)
     _embed(runtime, work, count)
     runtime.session.end()
+    _splice_vision(runtime, work, ids, pos0)
     finished = 0
     try:
         for layer in range(40):
@@ -224,6 +225,21 @@ def _chunk(runtime: Any, work: _Workspace, ids: list[int], pos0: int) -> None:
         if runtime.session._recording:
             runtime.session.abort()
         runtime.session.wait_inflight()
+
+
+def _splice_vision(runtime: Any, work: _Workspace, ids: list[int], pos0: int) -> None:
+    table = getattr(runtime, "_vision_at", None)
+    if not table:
+        return
+    count = len(ids)
+    slots = [index for index in range(count) if pos0 + index in table]
+    if not slots:
+        return
+    raw = runtime.session.download(work.hidden, count * HIDDEN * 4)
+    hidden = np.frombuffer(raw, dtype=np.float32).reshape(count, HIDDEN).copy()
+    for index in slots:
+        hidden[index] = table[pos0 + index]
+    _write(work.hidden, np.ascontiguousarray(hidden, dtype=np.float32).tobytes())
 
 
 def _embed(runtime: Any, work: _Workspace, count: int) -> None:
