@@ -106,8 +106,86 @@ static float e4m3_fn(uint code) {
     return sign != 0u ? -value : value;
 }
 
-// One simdgroup, one output row. Inner is a multiple of 32. Each byte is one
-// finite E4M3FN value and each scale byte covers the next 32 elements.
+// OCP E4M3FN. 0x7F and 0xFF are NaN. The decode dot indexes this table.
+constant float E4M3_TABLE[256] = {
+    0.0f, 0.001953125f, 0.00390625f, 0.005859375f, 0.0078125f, 0.009765625f, 0.01171875f, 0.013671875f,
+    0.015625f, 0.017578125f, 0.01953125f, 0.021484375f, 0.0234375f, 0.025390625f, 0.02734375f, 0.029296875f,
+    0.03125f, 0.03515625f, 0.0390625f, 0.04296875f, 0.046875f, 0.05078125f, 0.0546875f, 0.05859375f,
+    0.0625f, 0.0703125f, 0.078125f, 0.0859375f, 0.09375f, 0.1015625f, 0.109375f, 0.1171875f,
+    0.125f, 0.140625f, 0.15625f, 0.171875f, 0.1875f, 0.203125f, 0.21875f, 0.234375f,
+    0.25f, 0.28125f, 0.3125f, 0.34375f, 0.375f, 0.40625f, 0.4375f, 0.46875f,
+    0.5f, 0.5625f, 0.625f, 0.6875f, 0.75f, 0.8125f, 0.875f, 0.9375f,
+    1.0f, 1.125f, 1.25f, 1.375f, 1.5f, 1.625f, 1.75f, 1.875f,
+    2.0f, 2.25f, 2.5f, 2.75f, 3.0f, 3.25f, 3.5f, 3.75f,
+    4.0f, 4.5f, 5.0f, 5.5f, 6.0f, 6.5f, 7.0f, 7.5f,
+    8.0f, 9.0f, 10.0f, 11.0f, 12.0f, 13.0f, 14.0f, 15.0f,
+    16.0f, 18.0f, 20.0f, 22.0f, 24.0f, 26.0f, 28.0f, 30.0f,
+    32.0f, 36.0f, 40.0f, 44.0f, 48.0f, 52.0f, 56.0f, 60.0f,
+    64.0f, 72.0f, 80.0f, 88.0f, 96.0f, 104.0f, 112.0f, 120.0f,
+    128.0f, 144.0f, 160.0f, 176.0f, 192.0f, 208.0f, 224.0f, 240.0f,
+    256.0f, 288.0f, 320.0f, 352.0f, 384.0f, 416.0f, 448.0f, NAN,
+    -0.0f, -0.001953125f, -0.00390625f, -0.005859375f, -0.0078125f, -0.009765625f, -0.01171875f, -0.013671875f,
+    -0.015625f, -0.017578125f, -0.01953125f, -0.021484375f, -0.0234375f, -0.025390625f, -0.02734375f, -0.029296875f,
+    -0.03125f, -0.03515625f, -0.0390625f, -0.04296875f, -0.046875f, -0.05078125f, -0.0546875f, -0.05859375f,
+    -0.0625f, -0.0703125f, -0.078125f, -0.0859375f, -0.09375f, -0.1015625f, -0.109375f, -0.1171875f,
+    -0.125f, -0.140625f, -0.15625f, -0.171875f, -0.1875f, -0.203125f, -0.21875f, -0.234375f,
+    -0.25f, -0.28125f, -0.3125f, -0.34375f, -0.375f, -0.40625f, -0.4375f, -0.46875f,
+    -0.5f, -0.5625f, -0.625f, -0.6875f, -0.75f, -0.8125f, -0.875f, -0.9375f,
+    -1.0f, -1.125f, -1.25f, -1.375f, -1.5f, -1.625f, -1.75f, -1.875f,
+    -2.0f, -2.25f, -2.5f, -2.75f, -3.0f, -3.25f, -3.5f, -3.75f,
+    -4.0f, -4.5f, -5.0f, -5.5f, -6.0f, -6.5f, -7.0f, -7.5f,
+    -8.0f, -9.0f, -10.0f, -11.0f, -12.0f, -13.0f, -14.0f, -15.0f,
+    -16.0f, -18.0f, -20.0f, -22.0f, -24.0f, -26.0f, -28.0f, -30.0f,
+    -32.0f, -36.0f, -40.0f, -44.0f, -48.0f, -52.0f, -56.0f, -60.0f,
+    -64.0f, -72.0f, -80.0f, -88.0f, -96.0f, -104.0f, -112.0f, -120.0f,
+    -128.0f, -144.0f, -160.0f, -176.0f, -192.0f, -208.0f, -224.0f, -240.0f,
+    -256.0f, -288.0f, -320.0f, -352.0f, -384.0f, -416.0f, -448.0f, NAN
+};
+
+// Table lookup for one prefetched scale block. The two uint4 words are the
+// 32 E4M3 values. Activations stay in the cached vector.
+static float fp8_apply(
+    uint4 packed0,
+    uint4 packed1,
+    device const float* activation,
+    uint block,
+    float factor)
+{
+    device const float4* act = (device const float4*)(activation + (block << 5u));
+    float sum = 0.0f;
+    uint4 words[2] = {packed0, packed1};
+    for (uint chunk = 0u; chunk < 2u; ++chunk) {
+        uint word0 = words[chunk].x;
+        uint word1 = words[chunk].y;
+        uint word2 = words[chunk].z;
+        uint word3 = words[chunk].w;
+        float4 a0 = act[chunk * 4u];
+        float4 a1 = act[chunk * 4u + 1u];
+        float4 a2 = act[chunk * 4u + 2u];
+        float4 a3 = act[chunk * 4u + 3u];
+        sum += E4M3_TABLE[word0 & 255u] * a0.x;
+        sum += E4M3_TABLE[(word0 >> 8u) & 255u] * a0.y;
+        sum += E4M3_TABLE[(word0 >> 16u) & 255u] * a0.z;
+        sum += E4M3_TABLE[(word0 >> 24u) & 255u] * a0.w;
+        sum += E4M3_TABLE[word1 & 255u] * a1.x;
+        sum += E4M3_TABLE[(word1 >> 8u) & 255u] * a1.y;
+        sum += E4M3_TABLE[(word1 >> 16u) & 255u] * a1.z;
+        sum += E4M3_TABLE[(word1 >> 24u) & 255u] * a1.w;
+        sum += E4M3_TABLE[word2 & 255u] * a2.x;
+        sum += E4M3_TABLE[(word2 >> 8u) & 255u] * a2.y;
+        sum += E4M3_TABLE[(word2 >> 16u) & 255u] * a2.z;
+        sum += E4M3_TABLE[(word2 >> 24u) & 255u] * a2.w;
+        sum += E4M3_TABLE[word3 & 255u] * a3.x;
+        sum += E4M3_TABLE[(word3 >> 8u) & 255u] * a3.y;
+        sum += E4M3_TABLE[(word3 >> 16u) & 255u] * a3.z;
+        sum += E4M3_TABLE[(word3 >> 24u) & 255u] * a3.w;
+    }
+    return sum * factor;
+}
+
+// One simdgroup, one output row. Lanes read consecutive 32-byte blocks so a
+// step is one contiguous run. Both of a lane's blocks are loaded before the
+// table lookup when the row is 2048 wide.
 static float fp8_vec_dot(
     device const float* activation,
     device const uchar* weights,
@@ -116,12 +194,31 @@ static float fp8_vec_dot(
     uint inner,
     uint lane)
 {
-    device const uchar* row_w = weights + row * inner;
-    device const uchar* row_scale = scales + row * (inner >> 5);
+    uint blocks = inner >> 5u;
+    device const uchar* row_w = weights + (ulong)row * inner;
+    device const uchar* row_scale = scales + (ulong)row * blocks;
+    if (blocks == 64u) {
+        uint b0 = lane;
+        uint b1 = lane + 32u;
+        device const uint4* w0 = (device const uint4*)(row_w + (b0 << 5u));
+        device const uint4* w1 = (device const uint4*)(row_w + (b1 << 5u));
+        uint4 p0 = w0[0];
+        uint4 p1 = w0[1];
+        uint4 q0 = w1[0];
+        uint4 q1 = w1[1];
+        float f0 = exp2(float(row_scale[b0]) - 127.0f);
+        float f1 = exp2(float(row_scale[b1]) - 127.0f);
+        float acc = fp8_apply(p0, p1, activation, b0, f0);
+        acc += fp8_apply(q0, q1, activation, b1, f1);
+        return simd_sum(acc);
+    }
     float acc = 0.0f;
-    for (uint i = lane; i < inner; i += 32u) {
-        float factor = exp2(float(row_scale[i >> 5]) - 127.0f);
-        acc += e4m3_fn(row_w[i]) * factor * activation[i];
+    for (uint block = lane; block < blocks; block += 32u) {
+        device const uint4* words = (device const uint4*)(row_w + (block << 5u));
+        uint4 p0 = words[0];
+        uint4 p1 = words[1];
+        float factor = exp2(float(row_scale[block]) - 127.0f);
+        acc += fp8_apply(p0, p1, activation, block, factor);
     }
     return simd_sum(acc);
 }
@@ -1570,9 +1667,8 @@ kernel void gdn_in_proj_fp8(
     uint lane [[thread_index_in_simdgroup]],
     uint job [[threadgroup_position_in_grid]])
 {
-    float sum = 0.0f;
     if (job < 8192u) {
-        sum = fp8_vec_dot(activation, qkv_w, qkv_s, job, 2048u, lane);
+        float sum = fp8_vec_dot(activation, qkv_w, qkv_s, job, 2048u, lane);
         if (lane == 0u) {
             qkv[job] = sum;
         }
@@ -1580,7 +1676,7 @@ kernel void gdn_in_proj_fp8(
     }
     if (job < 12288u) {
         uint row = job - 8192u;
-        sum = fp8_vec_dot(activation, z_w, z_s, row, 2048u, lane);
+        float sum = fp8_vec_dot(activation, z_w, z_s, row, 2048u, lane);
         if (lane == 0u) {
             z[row] = sum;
         }
@@ -1588,7 +1684,7 @@ kernel void gdn_in_proj_fp8(
     }
     if (job < 12320u) {
         uint row = job - 12288u;
-        sum = fp8_vec_dot(activation, a_w, a_s, row, 2048u, lane);
+        float sum = fp8_vec_dot(activation, a_w, a_s, row, 2048u, lane);
         if (lane == 0u) {
             a[row] = sum;
         }
@@ -1596,7 +1692,7 @@ kernel void gdn_in_proj_fp8(
     }
     if (job < 12352u) {
         uint row = job - 12320u;
-        sum = fp8_vec_dot(activation, b_w, b_s, row, 2048u, lane);
+        float sum = fp8_vec_dot(activation, b_w, b_s, row, 2048u, lane);
         if (lane == 0u) {
             b[row] = sum;
         }

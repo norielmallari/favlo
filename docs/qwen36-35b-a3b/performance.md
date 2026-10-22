@@ -6,7 +6,7 @@ The file-agent series and the coding-agent series stay separate. Prefill is the 
 
 ## Recorded file-reading run
 
-The rates below are from a finished file-reading run. The prompt reached 73810 tokens over five requests. The request set temperature 0 and left thinking on.
+The rates below are from a finished file-reading run on the earlier fp4 record. The prompt reached 73810 tokens over five requests. The request set temperature 0 and left thinking on.
 
 | Request | Prompt tokens | Cache | Prefill | Decode |
 |---|---:|---|---|---|
@@ -26,18 +26,18 @@ Instruct card. `enable_thinking` is false. Omitted sampling fields come from tha
 uv run python -m harness --model qwen36-35b-a3b
 ```
 
-The server stops after the first turn and starts again, so the next turn loads the stored prefix. Later turns stay on that server. This run reached 88443 prompt tokens over four requests. The prefill kernel ceiling for 65536 tokens from position 0 is 815.71 tok/s.
+The server stops after the first turn and starts again, so the next turn loads the stored prefix. Later turns stay on that server. This run is `Qwen3.6-35B-A3B-fp8-e20`. It reached 101723 prompt tokens over four requests. The prefill kernel rows in [ceilings.md](ceilings.md) are the fp4-weight measurement.
 
 | Request | Prompt tokens | Cache | Prefill | Decode |
 |---|---:|---|---|---|
-| 1 | 361 | miss | 500.50 tok/s (361 tok in 0.72 s) | 76.42 tok/s (31 tok in 0.41 s) |
-| 2 | 46417 | hit 392 | 811.33 tok/s (46025 tok in 56.73 s) | 57.99 tok/s (368 tok in 6.35 s) |
-| 3 | 46822 | prefix load 46785, hit 46785 | 37.59 tok/s (37 tok in 0.98 s) | 57.81 tok/s (40 tok in 0.69 s) |
-| 4 | 88443 | hit 46862 | 468.56 tok/s (41581 tok in 88.74 s) | 48.06 tok/s (859 tok in 17.87 s) |
+| 1 | 361 | miss | 125.46 tok/s (361 tok in 2.88 s) | 53.46 tok/s (31 tok in 0.58 s) |
+| 2 | 46901 | hit 392 | 777.26 tok/s (46509 tok in 59.84 s) | 43.21 tok/s (339 tok in 7.85 s) |
+| 3 | 47277 | prefix load 47240, hit 47240 | 14.45 tok/s (37 tok in 2.56 s) | 29.79 tok/s (40 tok in 1.34 s) |
+| 4 | 101723 | hit 47317 | 433.30 tok/s (54406 tok in 125.56 s) | 34.65 tok/s (373 tok in 10.77 s) |
 
-The summary is prefill 597.98 tok/s (88004 tok in 147.17 s) and decode 51.26 tok/s (1298 tok in 25.32 s).
+The summary is prefill 530.88 tok/s (101313 tok in 190.84 s) and decode 38.12 tok/s (783 tok in 20.54 s).
 
-One resident load then applied four chunks in order. The first 2048-token chunk of a prompt, the kernel ceiling in [ceilings.md](ceilings.md), is 1521.37 tok/s.
+One resident load of the earlier fp4 record then applied four chunks in order. The first 2048-token chunk of a prompt, the kernel ceiling in [ceilings.md](ceilings.md), is 1521.37 tok/s.
 
 | Chunk | Position | Tokens | Prefill |
 |---|---:|---:|---|
@@ -54,18 +54,18 @@ Thinking card. `enable_thinking` is true. Omitted sampling fields come from that
 uv run python -m harness.coding --model qwen36-35b-a3b
 ```
 
-The hidden suite passed. The run used two requests and stopped at 563 prompt tokens.
+The hidden suite passed. This run is `Qwen3.6-35B-A3B-fp8-e20`. It used two requests and stopped at 572 prompt tokens.
 
 | Request | Prompt tokens | Cache | Prefill | Decode |
 |---|---:|---|---|---|
-| 1 | 399 | miss | 470.49 tok/s (399 tok in 0.85 s) | 73.67 tok/s (144 tok in 1.95 s) |
-| 2 | 563 | hit 543 | 98.87 tok/s (20 tok in 0.20 s) | 74.83 tok/s (53 tok in 0.71 s) |
+| 1 | 399 | miss | 144.97 tok/s (399 tok in 2.75 s) | 55.00 tok/s (153 tok in 2.78 s) |
+| 2 | 572 | prefix load 399, hit 399 | 434.45 tok/s (173 tok in 0.40 s) | 54.30 tok/s (46 tok in 0.85 s) |
 
-The summary is prefill 399.05 tok/s (419 tok in 1.05 s) and decode 74.06 tok/s (197 tok in 2.66 s).
+The summary is prefill 181.59 tok/s (572 tok in 3.15 s) and decode 54.82 tok/s (199 tok in 3.63 s).
 
 ## File agent, 16GiB
 
-Same instruct card as the file agent above. The command passes a memory cap, so the atlas holds fewer than every expert image:
+Same instruct card as the file agent above, on the earlier fp4 record. The command passes a memory cap, so the atlas holds fewer than every expert image:
 
 ```text
 uv run python -m harness --model qwen36-35b-a3b --max-memory 16GiB
@@ -84,7 +84,7 @@ The summary is prefill 493.77 tok/s (88004 tok in 178.23 s) and decode 29.72 tok
 
 ## Coding agent, 16GiB
 
-Same thinking card as the coding agent above. The hidden suite passed. The command is:
+Same thinking card as the coding agent above, on the earlier fp4 record. The hidden suite passed. The command is:
 
 ```text
 uv run python -m harness.coding --model qwen36-35b-a3b --max-memory 16GiB

@@ -41,3 +41,5 @@ The first-chunk bandwidth cell is the byte count. The ceilings note does not div
 Later finds are appended here. The sections above stay as committed.
 
 23 October 2026. The `Qwen3.6-35B-A3B-fp8-e20` record stores the language projections, the shared expert, and `lm_head` as fp8, and 2,048 of 10,240 routed experts as fp8. At the same 302.74 GB/s, a decode token that reads the pool mix of those experts is 9.27 ms, 107.90 tok/s at context 2048, and 11.82 ms, 84.61 tok/s at context 65536. A 65536-token prefill is 14.06 s, 4659.90 tok/s. The kernel sums above were measured on fp4 weight images.
+
+23 October 2026. The fp8 decode dot indexes a 256-entry E4M3 table and loads both scale blocks of a 2048-wide row before that lookup. The isolated sums in the table stay the fp4-weight measurement.

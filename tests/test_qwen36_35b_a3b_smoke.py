@@ -28,7 +28,7 @@ from qwen36_35b_a3b.forward import Qwen36Runtime, letter_token_ids, long_token_i
 from qwen36_35b_a3b.sampling import VARIANTS
 from qwen36_35b_a3b.tools import split_thinking
 
-_ROOT = Path("models/Qwen3.6-35B-A3B-fp4")
+_ROOT = Path("models/Qwen3.6-35B-A3B-fp8-e20")
 _INSTRUCT_TOKENS = 384
 _THINK_TOKENS = 768
 # The test forces the close so the carrot reply is in the scored text.
