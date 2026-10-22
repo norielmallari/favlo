@@ -205,6 +205,57 @@ def vision_rotary(grid_h: int, grid_w: int) -> tuple[np.ndarray, np.ndarray]:
     return np.cos(emb).astype(np.float32), np.sin(emb).astype(np.float32)
 
 
+def rope_positions(
+    length: int, images: list[tuple[int, int, int]]
+) -> tuple[np.ndarray, int]:
+    """Three mRoPE axes, and the delta decode adds to the sequence index.
+
+    ``images`` is ``(start, merged_height, merged_width)`` in token order. Text
+    writes the same position on every axis. An image holds the temporal axis
+    and sweeps the merged grid. The cursor then advances by the longer side.
+    """
+    if length < 0:
+        message = f"prompt length {length} is negative"
+        raise ValueError(message)
+    positions = np.empty((3, length), dtype=np.uint32)
+    cursor = 0
+    index = 0
+    previous = -1
+    for start, height, width in images:
+        if height < 1 or width < 1:
+            message = f"image grid {height}x{width} is empty"
+            raise ValueError(message)
+        count = height * width
+        if start < index or start + count > length:
+            message = f"image span {start}+{count} does not fit {length} tokens"
+            raise ValueError(message)
+        if start < previous:
+            message = "image spans are out of order"
+            raise ValueError(message)
+        previous = start
+        text = start - index
+        if text:
+            span = np.arange(cursor, cursor + text, dtype=np.uint32)
+            positions[:, index:start] = span
+            cursor += text
+        height_ids = np.repeat(np.arange(height, dtype=np.uint32), width) + np.uint32(cursor)
+        width_ids = np.tile(np.arange(width, dtype=np.uint32), height) + np.uint32(cursor)
+        positions[0, start : start + count] = np.uint32(cursor)
+        positions[1, start : start + count] = height_ids
+        positions[2, start : start + count] = width_ids
+        cursor += max(height, width)
+        index = start + count
+    rest = length - index
+    if rest:
+        span = np.arange(cursor, cursor + rest, dtype=np.uint32)
+        positions[:, index:] = span
+        cursor += rest
+    if length == 0:
+        return positions, 0
+    delta = int(positions.max()) + 1 - length
+    return positions, delta
+
+
 def expand_image_tokens(
     ids: list[int], lengths: list[int], image_id: int
 ) -> tuple[list[int], list[int]]:
@@ -233,20 +284,35 @@ def prepare_prompt(runtime: Any, messages: list[dict[str, Any]], ids: list[int])
     blobs = _image_blobs(messages)
     if not blobs:
         runtime._vision_at = None
+        runtime._rope_positions = None
+        runtime._rope_delta = 0
         return ids
     vision, image_id = _vision_config(runtime.root)
     _check_config(vision)
     rows: list[np.ndarray] = []
     lengths: list[int] = []
+    grids: list[tuple[int, int]] = []
     for blob in blobs:
-        embedded = embed_image(runtime, blob)
+        embedded, grid_h, grid_w = embed_image(runtime, blob)
+        merged_h = grid_h // MERGE
+        merged_w = grid_w // MERGE
+        if embedded.shape[0] != merged_h * merged_w:
+            message = f"vision merged {embedded.shape[0]} is not {merged_h}x{merged_w}"
+            raise RuntimeError(message)
         rows.append(embedded)
         lengths.append(int(embedded.shape[0]))
+        grids.append((merged_h, merged_w))
     expanded, spans = expand_image_tokens(ids, lengths, image_id)
     table: dict[int, np.ndarray] = {}
     for start, embedded in zip(spans, rows, strict=True):
         for offset in range(embedded.shape[0]):
             table[start + offset] = embedded[offset]
+    positions, delta = rope_positions(
+        len(expanded),
+        [(start, height, width) for start, (height, width) in zip(spans, grids, strict=True)],
+    )
+    runtime._rope_positions = positions
+    runtime._rope_delta = delta
     if expanded and (len(expanded) - 1) in table:
         message = "the last prompt token is an image pad"
         raise RuntimeError(message)
@@ -254,8 +320,8 @@ def prepare_prompt(runtime: Any, messages: list[dict[str, Any]], ids: list[int])
     return expanded
 
 
-def embed_image(runtime: Any, blob: bytes) -> np.ndarray:
-    """Merged rows ``[tokens, 2048]`` for one PNG."""
+def embed_image(runtime: Any, blob: bytes) -> tuple[np.ndarray, int, int]:
+    """Merged rows ``[tokens, 2048]`` and the patch grid for one PNG."""
     vision, _image_id = _vision_config(runtime.root)
     _check_config(vision)
     pixels, grid_h, grid_w = pack_image(decode_png(blob))
@@ -318,7 +384,7 @@ def embed_image(runtime: Any, blob: bytes) -> np.ndarray:
         message = "vision embedding is not finite"
         raise RuntimeError(message)
     _note(runtime, f"vision merged {merged}")
-    return embedded
+    return embedded, grid_h, grid_w
 
 
 class _Buffers:

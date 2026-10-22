@@ -14,6 +14,7 @@ from qwen36_35b_a3b.vision import (
     expand_image_tokens,
     interpolate_positions,
     pack_image,
+    rope_positions,
     smart_size,
     vision_rotary,
 )
@@ -66,6 +67,21 @@ def test_position_sample_covers_the_table() -> None:
     assert cos.shape == (16, 72)
     assert np.allclose(cos[:, :36], cos[:, 36:])
     assert sin.shape == cos.shape
+
+
+def test_an_image_advances_mrope_by_its_longer_side() -> None:
+    text, delta = rope_positions(4, [])
+    assert delta == 0
+    assert np.array_equal(text, np.tile(np.arange(4, dtype=np.uint32), (3, 1)))
+    positions, delta = rope_positions(10, [(2, 2, 3)])
+    assert positions[:, :2].tolist() == [[0, 1], [0, 1], [0, 1]]
+    assert positions[0, 2:8].tolist() == [2, 2, 2, 2, 2, 2]
+    assert positions[1, 2:8].tolist() == [2, 2, 2, 3, 3, 3]
+    assert positions[2, 2:8].tolist() == [2, 3, 4, 2, 3, 4]
+    assert positions[:, 8:].tolist() == [[5, 6], [5, 6], [5, 6]]
+    assert delta == -3
+    assert (10 - 1) + delta == int(positions[0, -1])
+    assert 10 + delta == int(positions[0, -1]) + 1
 
 
 def test_image_pad_expands_once() -> None:

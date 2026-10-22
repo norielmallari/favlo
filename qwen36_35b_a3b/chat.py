@@ -213,6 +213,8 @@ def handle_chat(
         runtime._status("client closed")
     finally:
         runtime._vision_at = None
+        runtime._rope_positions = None
+        runtime._rope_delta = 0
         runtime._stop = None
         finish_request(runtime, selection, complete=finished)
 

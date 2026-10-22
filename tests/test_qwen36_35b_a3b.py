@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import threading
 import time
@@ -62,8 +63,17 @@ def test_expert_budget_keeps_the_lower_index() -> None:
     assert promote_count(20, 10240) == 2048
     assert promote_count(20, 256) == 51
     assert promote_count(0, 10240) == 0
+    assert promote_count(0, 256) == 0
+    assert promote_count(100, 10240) == 10240
+    assert promote_count(100, 256) == 256
+    with pytest.raises(ValueError, match="outside 0..100"):
+        promote_count(-1, 256)
+    with pytest.raises(ValueError, match="outside 0..100"):
+        promote_count(101, 256)
     scores = {0: 0.2, 1: 0.5, 2: 0.5, 3: 0.1}
     assert promoted_indices(scores, 2) == [1, 2]
+    assert promoted_indices(scores, 0) == []
+    assert promoted_indices(scores, 4) == [0, 1, 2, 3]
 
 
 def test_load_row_opens_when_the_console_shows_bars() -> None:
@@ -309,16 +319,6 @@ def test_thinking_budget_forces_the_close_then_drops_that_token() -> None:
     logits[9] = np.float32(10.0)
     logits[8] = np.float32(3.0)
     assert _sample(logits, 0.0, 1.0, 0, 0.0, set(), {9}) == 8
-
-
-def test_a_stop_inside_an_open_think_starts_the_close() -> None:
-    budget = ThinkBudget([2, 9, 3], 9, 8)
-    assert budget.instead_of_stop(7, {7}) == 2
-    assert budget.forcing
-    assert budget.instead_of_stop(7, {7}) is None
-    assert budget.forced() == 9
-    assert budget.forced() == 3
-    assert budget.instead_of_stop(7, {7}) is None
 
 
 def test_a_natural_close_ends_the_budget() -> None:
@@ -755,6 +755,19 @@ def test_empty_function_has_no_parameters() -> None:
     assert function_has_parameters(with_path, "read_file") is True
 
 
+def test_quantize_accepts_a_budget_from_zero_to_one_hundred() -> None:
+    from qwen36_35b_a3b.commands import _expert_budget, main
+
+    assert _expert_budget("0") == 0.0
+    assert _expert_budget("20") == 20.0
+    assert _expert_budget("100") == 100.0
+    with pytest.raises(argparse.ArgumentTypeError, match="outside 0..100"):
+        _expert_budget("-1")
+    with pytest.raises(argparse.ArgumentTypeError, match="outside 0..100"):
+        _expert_budget("101")
+    assert main(["quantize", "--expert-fp8", "101"]) == 2
+
+
 def test_record_name_uses_the_expert_percentage() -> None:
     from qwen36_35b_a3b.convert import record_name
 
@@ -763,6 +776,8 @@ def test_record_name_uses_the_expert_percentage() -> None:
     assert record_name(plain, 20) == "Example-Model-fp8-e20"
     checkout = Path("models/Qwen3.6-35B-A3B-bf16")
     assert record_name(checkout, 20) == "Qwen3.6-35B-A3B-fp8-e20"
+    assert record_name(checkout, 0) == "Qwen3.6-35B-A3B-fp4"
+    assert record_name(checkout, 100) == "Qwen3.6-35B-A3B-fp8-e100"
     snapshot = Path("hub/models--org--Example-Model/snapshots/abc123")
     assert record_name(snapshot) == "Example-Model-fp4"
 

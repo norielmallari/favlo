@@ -89,6 +89,7 @@ class _Workspace:
         self.group = zeros(8 * 16)
         self.pack_row = zeros(cap * 8 * 4)
         self.tokens = zeros(cap * 4)
+        self.rope = zeros(cap * 3 * 4)
         self.offsets = zeros(_EXPERTS * 8)
         # Alignment padding between experts can add up to three slots each.
         self.csr_i = zeros((cap * 8 + 1024) * 4)
@@ -147,6 +148,7 @@ def workspace_bytes() -> int:
         + 8 * 16
         + cap * 8 * 4
         + cap * 4
+        + cap * 3 * 4
         + (cap * 8 + 1024) * 4
         + (cap * 8 + 1024) * 4
         + (cap * 8 + 1024) * 4
@@ -200,6 +202,7 @@ def _chunk(runtime: Any, work: _Workspace, ids: list[int], pos0: int) -> None:
     _embed(runtime, work, count)
     runtime.session.end()
     _splice_vision(runtime, work, ids, pos0)
+    _write_rope(runtime, work, count, pos0)
     finished = 0
     try:
         for layer in range(40):
@@ -244,6 +247,16 @@ def _splice_vision(runtime: Any, work: _Workspace, ids: list[int], pos0: int) ->
     for index in slots:
         hidden[index] = table[pos0 + index]
     _write(work.hidden, np.ascontiguousarray(hidden, dtype=np.float32).tobytes())
+
+
+def _write_rope(runtime: Any, work: _Workspace, count: int, pos0: int) -> None:
+    table = getattr(runtime, "_rope_positions", None)
+    if table is None:
+        base = np.arange(pos0, pos0 + count, dtype=np.uint32)
+        packed = np.stack((base, base, base), axis=1)
+    else:
+        packed = np.ascontiguousarray(table[:, pos0 : pos0 + count].T, dtype=np.uint32)
+    _write(work.rope, packed.tobytes())
 
 
 def _embed(runtime: Any, work: _Workspace, count: int) -> None:
@@ -393,8 +406,14 @@ def _attend(
     k_buf, k_off, _entry = runtime._loc(base + "k_norm.weight")
     runtime.session.encode(
         "qk_norm_rope_rows",
-        [(work.query, 0), (work.kv, 0), (q_buf, q_off), (k_buf, k_off)],
-        [_f32(1e7), _f32(EPS), _u32(pos0)],
+        [
+            (work.query, 0),
+            (work.kv, 0),
+            (q_buf, q_off),
+            (k_buf, k_off),
+            (work.rope, 0),
+        ],
+        [_f32(1e7), _f32(EPS)],
         (count, 18, 1),
         (HEAD, 1, 1),
     )

@@ -2674,9 +2674,9 @@ kernel void qk_norm_rope_rows(
     device float* key [[buffer(1)]],
     device const half* q_weight [[buffer(2)]],
     device const half* k_weight [[buffer(3)]],
-    constant float& theta [[buffer(4)]],
-    constant float& eps [[buffer(5)]],
-    constant uint& pos0 [[buffer(6)]],
+    device const uint* positions [[buffer(4)]],
+    constant float& theta [[buffer(5)]],
+    constant float& eps [[buffer(6)]],
     uint tid [[thread_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]],
     uint simd [[simdgroup_index_in_threadgroup]],
@@ -2707,9 +2707,11 @@ kernel void qk_norm_rope_rows(
     if (tid >= 32u) {
         return;
     }
-    // Text puts the same position on every mRoPE axis. The first 64 channels
-    // rotate as two halves: channel i with channel i+32.
-    float position = float(pos0 + token);
+    // ``positions`` is three mRoPE axes per token. Text stores the same value
+    // on each axis. The first 64 channels rotate as two halves: channel i
+    // with channel i+32.
+    uint axis = mrope_axis(tid);
+    float position = float(positions[token * 3u + axis]);
     float angle = position * pow(theta, -float(tid) / 32.0f);
     float c = cos(angle);
     float s = sin(angle);

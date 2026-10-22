@@ -30,6 +30,7 @@ from qwen36_35b_a3b.fetch import (
     remaining_download,
     shortfall,
 )
+from qwen36_35b_a3b.formats import promote_count
 from qwen36_35b_a3b.forward import Qwen36Runtime
 
 PIPELINE = "qwen36-35b-a3b"
@@ -41,6 +42,19 @@ _BF16 = Path("models/Qwen3.6-35B-A3B-bf16")
 _BF16_REPO = "Qwen/Qwen3.6-35B-A3B"
 
 
+def _expert_budget(text: str) -> float:
+    """Accept a routed-expert fp8 percentage from 0 to 100."""
+    try:
+        percent = float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expert fp8 percentage is not a number") from exc
+    try:
+        promote_count(percent, 1)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return percent
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="favlo --qwen36-35b-a3b")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -49,9 +63,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     quant.add_argument("--output", type=Path, default=None)
     quant.add_argument(
         "--expert-fp8",
-        type=float,
+        type=_expert_budget,
         default=20,
-        help="percentage of routed experts stored as fp8",
+        help="percentage of routed experts stored as fp8, from 0 to 100",
     )
     sub.add_parser("bf16", help="run this package's shaders on stored BF16 values")
     complete = sub.add_parser("complete", help="complete from the packed record")

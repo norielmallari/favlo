@@ -669,7 +669,8 @@ class Qwen36Runtime:
         )
         q_buf, q_off, _entry = self._loc(base + "q_norm.weight")
         k_buf, k_off, _entry = self._loc(base + "k_norm.weight")
-        positions = np.array([pos, pos, pos], dtype=np.uint32).tobytes()
+        rope = int(pos) + int(getattr(self, "_rope_delta", 0))
+        positions = np.array([rope, rope, rope], dtype=np.uint32).tobytes()
         self.session.encode(
             "qk_norm_rope",
             [
@@ -1158,10 +1159,7 @@ class Qwen36Runtime:
                     decode_row = self._begin_phase("decode", max_tokens, live=True)
                     prefill_open = False
                 if nxt in stop:
-                    replaced = None if budget is None else budget.instead_of_stop(nxt, stop)
-                    if replaced is None:
-                        break
-                    nxt = replaced
+                    break
                 open_think = (
                     budget is not None and not budget.closed and not budget.forcing
                 )
@@ -1344,12 +1342,6 @@ class ThinkBudget:
             self.force_at = None
             self.closed = True
         return token
-
-    def instead_of_stop(self, token: int, stop: set[int]) -> int | None:
-        """The first close id when ``token`` would end an open think block."""
-        if token not in stop or self.closed or self.forcing:
-            return None
-        return self._start()
 
     def _start(self, stop_after: bool = False) -> int:
         if stop_after:

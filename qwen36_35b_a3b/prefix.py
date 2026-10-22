@@ -37,7 +37,7 @@ def open_session(runtime: Any) -> PrefixSession:
             default_prefix_dir(),
             model="qwen36-35b-a3b",
             digest=checkpoint_digest(runtime.root),
-            tag=runtime.kv_cache,
+            tag=f"{runtime.kv_cache}-mrope",
             budget=DEFAULT_BUDGET,
         ),
         CacheAdapter(runtime),
