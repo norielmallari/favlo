@@ -28,7 +28,6 @@ KERNELS = (
     "gemv_fp4_vec",
     "gemv_fp4_x4",
     "gemv_fp4_span2",
-    "touch_pages",
     "copy_f32",
     "rmsnorm_f32",
     "rmsnorm_rows",

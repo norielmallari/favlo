@@ -249,7 +249,6 @@ class Qwen38Runtime:
             self.best_i = zeros(_ARGMAX_GROUPS * 4)
             self._apply(plan, 0, [])
             self._prefill = _Workspace(self.session, drafts=plan.mtp)
-            self._touch_resident(self.weights.nbytes)
             self.prefix = open_session(self)
             summary = self._loaded_summary()
         finally:
@@ -592,22 +591,6 @@ class Qwen38Runtime:
         _wipe(self.plane_tail, self.kv_slots * 4 * 32 * 256 * 4)
         self.filled = 0
         del session
-
-    def _touch_resident(self, nbytes: int) -> None:
-        stride = 4096
-        count = nbytes // stride
-        if count < 1:
-            return
-        sink = self.session.allocate(1024)
-        self.session.begin()
-        self.session.encode(
-            "touch_pages",
-            [(self.resident, 0), (sink, 0)],
-            [_u32(stride), _u32(count)],
-            ((count + 255) // 256, 1, 1),
-            (256, 1, 1),
-        )
-        self.session.end()
 
     def weight(self, layer: int, rest: str) -> str:
         return self._resolve(

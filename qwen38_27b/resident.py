@@ -1,7 +1,8 @@
 """Device image of the text tensors this forward is allowed to keep.
 
-Vision stays in the record file. An unwired feed-forward layer is three range
-reads into the stage at the end of the image.
+The wired spans are read in file order into the device image. Vision stays in
+the record file. An unwired feed-forward layer is three range reads into the
+stage at the end of the image.
 """
 
 from __future__ import annotations
@@ -34,8 +35,7 @@ class DeviceImage:
         mapping = mmap.mmap(record.fileno(), 0, access=mmap.ACCESS_READ)
         view = memoryview(buffer.contents().as_buffer(max(total, 16)))
         try:
-            for _name, file_offset, device_offset, span in copies:
-                _copy(mapping, file_offset, view, device_offset, span, note)
+            _fill(record, view, copies, note)
             if note is not None and wire.stage:
                 note(wire.stage)
         except Exception:
@@ -107,6 +107,38 @@ class DeviceImage:
         self._staged_offsets = {}
         if mapping is not None:
             mapping.close()
+
+
+def _fill(
+    record: BinaryIO,
+    view: memoryview,
+    copies: list[tuple[str, int, int, int]],
+    note: Any,
+) -> None:
+    """Read wired spans in file order and place each one at its device offset."""
+    cursor = -1
+    for _name, file_offset, device_offset, span in sorted(copies, key=lambda item: item[1]):
+        if span <= 0:
+            continue
+        if file_offset < cursor:
+            message = f"resident span at {file_offset} overlaps byte {cursor}"
+            raise RuntimeError(message)
+        if file_offset != cursor:
+            record.seek(file_offset)
+            cursor = file_offset
+        copied = 0
+        while copied < span:
+            step = min(_CHUNK, span - copied)
+            chunk = record.read(step)
+            if len(chunk) != step:
+                message = f"resident read stopped at {cursor + len(chunk)}"
+                raise RuntimeError(message)
+            dest = device_offset + copied
+            view[dest : dest + step] = chunk
+            copied += step
+            cursor += step
+            if note is not None:
+                note(step)
 
 
 def _copy(

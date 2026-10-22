@@ -810,19 +810,6 @@ kernel void gemv_fp4_span2(
     }
 }
 
-// Read one byte per page so the resident weights are resident on the device before the first prefill.
-kernel void touch_pages(
-    device const uchar* source [[buffer(0)]],
-    device uchar* sink [[buffer(1)]],
-    constant uint& stride [[buffer(2)]],
-    constant uint& count [[buffer(3)]],
-    uint tid [[thread_position_in_grid]])
-{
-    if (tid < count) {
-        sink[tid & 1023u] = source[tid * stride];
-    }
-}
-
 kernel void copy_f32(
     device const float* source [[buffer(0)]],
     device float* destination [[buffer(1)]],

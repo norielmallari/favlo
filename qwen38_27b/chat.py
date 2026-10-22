@@ -35,6 +35,19 @@ def load_tokenizer(root: Path) -> Tokenizer:
     return Tokenizer.from_file(str(root / "tokenizer.json"))
 
 
+_CHECKOUT_EMPTY_THINK = (
+    "{{- '<|im_start|>' + message.role + '\\n<think>\\n' + reasoning_content"
+    " + '\\n</think>\\n\\n' + content }}"
+)
+_EMPTY_THINK = """{%- if reasoning_content %}
+                {{- '<|im_start|>' + message.role + '\\n<think>\\n' + reasoning_content + '\\n</think>\\n\\n' + content }}
+            {%- elif enable_thinking is defined and enable_thinking is false %}
+                {{- '<|im_start|>' + message.role + '\\n<think>\\n\\n</think>\\n\\n' + content }}
+            {%- else %}
+                {{- '<|im_start|>' + message.role + '\\n<think>\\n</think>\\n\\n' + content }}
+            {%- endif %}"""
+
+
 def encode_chat(
     root: Path,
     messages: list[dict[str, Any]],
@@ -44,6 +57,10 @@ def encode_chat(
 ) -> list[int]:
     """Render the checkpoint template and encode it."""
     template = (root / "chat_template.jinja").read_text()
+    if _CHECKOUT_EMPTY_THINK not in template:
+        message = "chat template has no empty think block to align"
+        raise ValueError(message)
+    template = template.replace(_CHECKOUT_EMPTY_THINK, _EMPTY_THINK, 1)
     env = Environment()
     env.globals["raise_exception"] = _raise
     rendered_args = {

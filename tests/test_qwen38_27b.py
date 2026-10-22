@@ -157,6 +157,26 @@ def test_ffn_percentage_selects_whole_layers() -> None:
     assert relative_error(np.zeros((1, 32), dtype=np.float32)) == 0.0
 
 
+def test_wired_spans_are_read_in_file_order(tmp_path: Path) -> None:
+    from qwen38_27b.resident import _fill
+
+    raw = bytearray(64)
+    raw[10:14] = b"ABCD"
+    raw[40:44] = b"WXYZ"
+    path = tmp_path / "resident.bin"
+    path.write_bytes(raw)
+    view = bytearray(8)
+    copies = [("late", 40, 0, 4), ("early", 10, 4, 4)]
+    noted: list[int] = []
+    with path.open("rb") as handle:
+        _fill(handle, memoryview(view), copies, noted.append)
+    assert bytes(view) == b"WXYZABCD"
+    assert noted == [4, 4]
+    with path.open("rb") as handle:
+        with pytest.raises(RuntimeError, match="overlaps"):
+            _fill(handle, memoryview(bytearray(16)), [("a", 10, 0, 8), ("b", 12, 4, 4)], None)
+
+
 def test_empty_think_turn_stays_a_prefix_of_the_next_prompt() -> None:
     root = installed_record()
     if root is None or not (root / "chat_template.jinja").is_file():
@@ -182,6 +202,30 @@ def test_empty_think_turn_stays_a_prefix_of_the_next_prompt() -> None:
     ]
     second = encode_chat(root, follow, None, True)
     assert second[: len(applied)] == applied
+    prose = encode_text(root, decode_text(root, first) + "</think>\n\nThe notes are short.")
+    follow_prose = user + [
+        {"role": "assistant", "content": "The notes are short.", "reasoning_content": ""}
+    ]
+    second_prose = encode_chat(root, follow_prose, None, True)
+    assert second_prose[: len(prose)] == prose
+    reasoned = encode_text(
+        root, decode_text(root, first) + "Look at the file.\n</think>\n\nIt is empty."
+    )
+    follow_reasoned = user + [
+        {
+            "role": "assistant",
+            "content": "It is empty.",
+            "reasoning_content": "Look at the file.",
+        }
+    ]
+    second_reasoned = encode_chat(root, follow_reasoned, None, True)
+    assert second_reasoned[: len(reasoned)] == reasoned
+    first_off = encode_chat(root, user, None, False)
+    assert decode_text(root, first_off).endswith("<think>\n\n</think>\n\n")
+    applied_off = encode_text(root, decode_text(root, first_off) + "done")
+    follow_off = user + [{"role": "assistant", "content": "done"}]
+    second_off = encode_chat(root, follow_off, None, False)
+    assert second_off[: len(applied_off)] == applied_off
 
 
 def test_prefill_progress_counts_finished_tokens() -> None:
