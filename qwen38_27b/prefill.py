@@ -308,6 +308,8 @@ def _ffn(
             return runtime.weight(layer, rest)
         return f"{prefix}.{rest}"
 
+    if layer is not None:
+        runtime.prepare_ffn(layer)
     _cast_half(runtime, work, work.normed, count * HIDDEN, rows, HIDDEN)
     _matmul(runtime, work.half, weight("mlp.gate_proj.weight"), work.big0, rows)
     _matmul(runtime, work.half, weight("mlp.up_proj.weight"), work.big1, rows)

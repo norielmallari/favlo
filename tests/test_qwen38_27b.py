@@ -6,6 +6,14 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from qwen38_27b.budget import (
+    choose_wire,
+    group_tensors,
+    growth_budget,
+    same_weight_image,
+    startup_bytes,
+    tensor_span,
+)
 from qwen38_27b.cache import cache_bytes, plane_bytes, sequence_cache_bytes
 from qwen38_27b.chat import _reasoning_effort, _stream, decode_text, encode_chat, encode_text
 from qwen38_27b.commands import installed_record
@@ -21,7 +29,7 @@ from qwen38_27b.formats import (
     relative_error,
     text_shapes,
 )
-from qwen38_27b.forward import Qwen38Runtime, repeated_tail, startup_bytes
+from qwen38_27b.forward import Qwen38Runtime, repeated_tail
 from qwen38_27b.layout import FULL_LAYERS
 from qwen38_27b.prefill import prefill_ids
 from qwen38_27b.tools import StreamText, parse_tool_calls
@@ -204,6 +212,27 @@ def test_prefill_ids_notes_each_finished_chunk(monkeypatch) -> None:
     assert noted == [2048, 4096, 5000]
 
 
+def test_discard_returns_a_shared_buffer() -> None:
+    from qwen38_27b.session import discard
+
+    seen: list[int] = []
+
+    class _Buffer:
+        def setPurgeableState_(self, state: int) -> None:
+            seen.append(state)
+
+        def length(self) -> int:
+            return 32
+
+        def contents(self) -> None:
+            message = "no mapping"
+            raise BufferError(message)
+
+    discard(_Buffer())
+    discard(object())
+    assert seen == [4]
+
+
 def test_close_drops_the_device_before_another_pipeline_loads() -> None:
     runtime = Qwen38Runtime.__new__(Qwen38Runtime)
     weights = object()
@@ -211,6 +240,18 @@ def test_close_drops_the_device_before_another_pipeline_loads() -> None:
     scratch = object()
     seen: list[object] = []
     flushed: list[bool] = []
+    purged: list[int] = []
+
+    class _Buffer:
+        def setPurgeableState_(self, state: int) -> None:
+            purged.append(state)
+
+        def length(self) -> int:
+            return 32
+
+        def contents(self) -> None:
+            message = "no mapping"
+            raise BufferError(message)
 
     class _Session:
         def close(self) -> None:
@@ -221,11 +262,11 @@ def test_close_drops_the_device_before_another_pipeline_loads() -> None:
             self.adapter = SimpleNamespace(runtime=runtime)
 
         def flush(self) -> None:
-            flushed.append(runtime.resident is weights and runtime.k_cache == [cache])
+            flushed.append(runtime.resident is not None and runtime.k_cache == [cache])
 
     runtime.session = _Session()
     runtime.prefix = _Prefix()
-    runtime.resident = weights
+    runtime.resident = _Buffer()
     runtime.k_cache = [cache]
     runtime.v_cache = [cache]
     runtime._held = [weights]
@@ -244,6 +285,7 @@ def test_close_drops_the_device_before_another_pipeline_loads() -> None:
     assert runtime._prefill is None
     assert runtime.plane_probs is None
     assert runtime.prefix is None
+    assert purged == [4]
 
 
 def test_session_close_finishes_an_open_pass() -> None:
@@ -365,6 +407,8 @@ def test_openai_chunk_streams_one_delta_per_token() -> None:
 
     class _Runtime:
         _hit_limit = False
+        _limit = 131072
+        max_pos = 4096
         _cached_tokens = 1
         _prefill_seconds = 2.0
         _decode_seconds = 4.0
@@ -397,6 +441,8 @@ def test_openai_chunk_streams_one_delta_per_token() -> None:
         assert isinstance(chunk.created, int)
         if not chunk.choices:
             seen.append(("usage", payload["usage"]["timings"]["predicted_n"]))
+            assert payload["usage"]["context_length"] == 131072
+            assert payload["usage"]["prompt_tokens_details"]["cached_tokens"] == 1
             assert payload["usage"]["timings"]["prompt_n"] == 1
             assert payload["usage"]["timings"]["predicted_per_second"] == 1.0
             continue
@@ -416,6 +462,39 @@ def test_openai_chunk_streams_one_delta_per_token() -> None:
         ("usage", 4),
     ]
     del openai
+
+
+def test_completion_usage_reports_the_served_window() -> None:
+    pytest.importorskip("openai")
+    from openai.types.chat import ChatCompletion
+
+    from qwen38_27b.chat import _completion
+
+    runtime = SimpleNamespace(
+        _limit=131072,
+        max_pos=65536,
+        _cached_tokens=12,
+        _prefill_seconds=2.0,
+        _decode_seconds=4.0,
+    )
+    body = _completion("ok", 100, 4, "stop", [], "", runtime, "example-model")
+    usage = body["usage"]
+    assert usage["prompt_tokens"] == 100
+    assert usage["completion_tokens"] == 4
+    assert usage["total_tokens"] == 104
+    assert usage["context_length"] == 131072
+    assert usage["prompt_tokens_details"] == {"cached_tokens": 12}
+    assert usage["timings"]["prompt_n"] == 88
+    assert usage["timings"]["prompt_per_second"] == 44.0
+    assert usage["timings"]["predicted_n"] == 4
+    assert usage["timings"]["predicted_per_second"] == 1.0
+    parsed = ChatCompletion.model_validate(body)
+    assert parsed.usage is not None
+    assert parsed.usage.prompt_tokens == 100
+    assert parsed.usage.prompt_tokens_details is not None
+    assert parsed.usage.prompt_tokens_details.cached_tokens == 12
+    extra = parsed.usage.model_extra if isinstance(parsed.usage.model_extra, dict) else {}
+    assert extra.get("context_length") == 131072
 
 
 def test_openai_tool_call_delta_carries_an_index() -> None:
@@ -589,6 +668,115 @@ def test_openai_client_receives_a_token_before_generation_ends(monkeypatch: pyte
     assert first is not None
     assert "done" in marks
     assert first < marks["done"]
+
+
+def _span_entry(span: int) -> dict:
+    return {
+        "dtype": "fp4",
+        "data_nbytes": span,
+        "scale_nbytes": 0,
+        "scale_pad": 0,
+        "offset": 0,
+        "stored_shape": [1, 32],
+    }
+
+
+def _sample_group(*, layer_span: int = 3000, mtp_span: int = 5000, vision: int = 0):
+    tensors = {
+        "model.language_model.embed_tokens.weight": _span_entry(8000),
+        "lm_head.weight": _span_entry(8000),
+        "mtp.fc.weight": _span_entry(mtp_span),
+    }
+    if vision:
+        tensors["model.visual.blocks.0.attn.proj.weight"] = _span_entry(vision)
+    for layer in range(64):
+        tensors[f"model.language_model.layers.{layer}.mlp.gate_proj.weight"] = _span_entry(layer_span)
+        tensors[f"model.language_model.layers.{layer}.mlp.up_proj.weight"] = _span_entry(0)
+        tensors[f"model.language_model.layers.{layer}.mlp.down_proj.weight"] = _span_entry(0)
+    return group_tensors(tensors)
+
+
+def test_float16_tensor_span_is_two_bytes_per_element() -> None:
+    assert tensor_span({"dtype": "f16", "stored_shape": [5120], "offset": 0}) == 10240
+
+
+def test_fit_drops_the_mtp_head_before_a_language_layer() -> None:
+    group = _sample_group()
+    full = choose_wire(10**18, 4096, group, 131072)
+    assert full.mtp is True
+    assert full.wired == tuple(range(64))
+    assert full.stage == 0
+    cost = startup_bytes(full.weights, 4096, slots=full.slots, drafts=True)
+    wire = choose_wire(cost - 1, 4096, group, 131072)
+    assert wire.positions == 4096
+    assert wire.mtp is False
+    assert wire.wired == tuple(range(64))
+    assert wire.stage == 0
+
+
+def test_fit_unwires_language_layers_from_the_end() -> None:
+    group = _sample_group()
+    off = choose_wire(10**18, 4096, group, 131072, extra_unwire=1)
+    assert off.mtp is False
+    assert off.wired == tuple(range(64))
+    cost = startup_bytes(off.weights, 4096, slots=off.slots, drafts=False)
+    wire = choose_wire(cost - 1, 4096, group, 131072)
+    assert wire.mtp is False
+    assert wire.wired == tuple(range(62))
+    assert wire.stage == 3000
+    assert wire.positions == 4096
+
+
+def test_fit_covers_a_prompt_on_the_next_2048_boundary() -> None:
+    group = _sample_group()
+    full = choose_wire(10**18, 79872, group, 131072)
+    budget = startup_bytes(full.weights, 79872, slots=full.slots, drafts=True)
+    wire = choose_wire(budget, 79131, group, 131072)
+    assert wire.positions == 79872
+    assert wire.mtp is True
+
+
+def test_fit_stops_at_the_longest_length_when_the_prompt_does_not_fit() -> None:
+    group = _sample_group()
+    bare = choose_wire(10**18, 2048, group, 131072, extra_unwire=65)
+    assert bare.mtp is False
+    assert bare.wired == ()
+    cost = startup_bytes(bare.weights, 2048, slots=bare.slots, drafts=False)
+    wire = choose_wire(cost, 90_000, group, 131072)
+    assert wire.positions == 2048
+    assert wire.mtp is False
+    assert wire.wired == ()
+
+
+def test_same_weight_image_keeps_the_resident_weights_when_the_cache_grows() -> None:
+    group = _sample_group()
+    current = choose_wire(10**18, 2048, group, 131072)
+    nxt = choose_wire(10**18, 4096, group, 131072)
+    assert nxt.positions == 4096
+    assert same_weight_image(current, nxt)
+    dropped = choose_wire(10**18, 4096, group, 131072, extra_unwire=1)
+    assert same_weight_image(current, dropped) is False
+
+
+def test_growth_budget_keeps_the_live_length_when_the_host_copy_is_reserved() -> None:
+    group = _sample_group()
+    current = choose_wire(10**18, 2048, group, 131072)
+    held = startup_bytes(current.weights, 2048, slots=current.slots, drafts=True)
+    nxt = choose_wire(10**18, 4096, group, 131072)
+    nxt_cost = startup_bytes(nxt.weights, 4096, slots=nxt.slots, drafts=True)
+    packed = sequence_cache_bytes(2048, current.slots)
+    reclaimable = nxt_cost - held
+    open_wire = choose_wire(growth_budget(reclaimable, held, 0), 4096, group, 131072)
+    assert open_wire.positions == 4096
+    assert open_wire.mtp is True
+    wire = choose_wire(growth_budget(reclaimable, held, packed), 4096, group, 131072)
+    assert wire.positions < 4096 or wire.mtp is False
+
+
+def test_vision_tensors_stay_out_of_the_device_image() -> None:
+    plain = choose_wire(10**18, 2048, _sample_group(), 131072)
+    visual = choose_wire(10**18, 2048, _sample_group(vision=10**9), 131072)
+    assert plain.weights == visual.weights
 
 
 def test_shader_dispatches_match_the_host_formulas() -> None:

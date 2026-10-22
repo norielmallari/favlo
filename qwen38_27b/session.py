@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+import ctypes
+import os
 import struct
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+# Darwin <sys/mman.h>. The kernel may reuse these pages instead of keeping them.
+_MADV_FREE_REUSABLE = 7
+# MTLPurgeableStateEmpty.
+_PURGEABLE_EMPTY = 4
+_LIBC = ctypes.CDLL(None, use_errno=True)
+_LIBC.madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+_LIBC.madvise.restype = ctypes.c_int
 
 KERNELS = (
     "prefill_fp4_n64",
@@ -79,6 +89,41 @@ def _clear(buffer: Any, nbytes: int, note: Any = None) -> None:
         offset = end
         if note is not None:
             note(step)
+
+
+def discard(buffer: Any) -> None:
+    """Return a shared buffer's pages so the next pipeline can allocate them."""
+    if buffer is None:
+        return
+    purge = getattr(buffer, "setPurgeableState_", None)
+    if callable(purge):
+        try:
+            purge(_PURGEABLE_EMPTY)
+        except (RuntimeError, OSError, AttributeError, TypeError):
+            pass
+    length_of = getattr(buffer, "length", None)
+    contents = getattr(buffer, "contents", None)
+    if not callable(length_of) or not callable(contents):
+        return
+    try:
+        length = int(length_of())
+        page = int(os.sysconf("SC_PAGE_SIZE"))
+        aligned = length - (length % page)
+        if aligned < page:
+            return
+        view = memoryview(contents().as_buffer(page))
+        holder = ctypes.c_char.from_buffer(view)
+        try:
+            address = ctypes.addressof(holder)
+        finally:
+            del holder
+        _LIBC.madvise(
+            ctypes.c_void_p(address),
+            ctypes.c_size_t(aligned),
+            ctypes.c_int(_MADV_FREE_REUSABLE),
+        )
+    except (RuntimeError, OSError, AttributeError, TypeError, ValueError, BufferError):
+        return
 
 
 def _metal() -> Any:
@@ -154,6 +199,8 @@ class Session:
         for name in ("_pass_held", "_held"):
             held = getattr(self, name, None)
             if isinstance(held, list):
+                for buffer in held:
+                    discard(buffer)
                 held.clear()
         self.pipes = {}
         self.queue = None
@@ -275,6 +322,32 @@ class Session:
                 message = f"command status {earlier.status()} {earlier.error()}"
                 raise RuntimeError(message)
         self._pass_held.clear()
+
+    def finish(self) -> None:
+        """Wait for the open encoder and any submitted buffers. Leave no encoder open."""
+        encoder = getattr(self, "_pass_encoder", None)
+        command = getattr(self, "_pass_command", None)
+        ready = list(getattr(self, "_pass_ready", ()))
+        self._pass_encoder = None
+        self._pass_command = None
+        self._pass_ready = []
+        if encoder is not None and command is not None:
+            encoder.endEncoding()
+            command.commit()
+            ready.append(command)
+        for earlier in ready:
+            earlier.waitUntilCompleted()
+            if int(earlier.status()) != 4:
+                message = f"command status {earlier.status()} {earlier.error()}"
+                raise RuntimeError(message)
+        held = getattr(self, "_pass_held", None)
+        if isinstance(held, list):
+            held.clear()
+
+    def resume(self) -> None:
+        """Open an encoder when ``finish`` closed the previous one."""
+        if getattr(self, "_pass_encoder", None) is None:
+            self.begin()
 
     def prefill(
         self,

@@ -205,7 +205,6 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
             emit_tools=emit_tools,
         )
         return
-    started = time.perf_counter()
     tokens = runtime.generate(
         prompt,
         _limit(body),
@@ -241,7 +240,7 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
             reason,
             calls,
             reasoning if thinking else "",
-            time.perf_counter() - started,
+            runtime,
             handler._model_id,
         ),
     )
@@ -260,9 +259,10 @@ def _stream_delta(decoded: str, shown: str, *, final: bool) -> tuple[str, str]:
 
 
 def _context_length(runtime: Any) -> int:
-    live = getattr(runtime, "max_pos", None)
-    if isinstance(live, int) and live > 0:
-        return min(live, DEFAULT_CONTEXT_LENGTH)
+    """The served window. The live cache length is not the model context."""
+    window = getattr(runtime, "_limit", None)
+    if isinstance(window, int) and window > 0:
+        return min(window, DEFAULT_CONTEXT_LENGTH)
     return DEFAULT_CONTEXT_LENGTH
 
 
@@ -472,7 +472,7 @@ def _completion(
     finish_reason: str,
     tool_calls: list[dict[str, Any]],
     reasoning: str,
-    seconds: float,
+    runtime: Any,
     model: str,
 ) -> dict[str, Any]:
     message: dict[str, Any] = {"role": "assistant", "content": content}
@@ -487,13 +487,5 @@ def _completion(
         "created": int(time.time()),
         "model": model,
         "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens,
-            "timings": {
-                "predicted_per_second": 0.0 if seconds <= 0 else completion_tokens / seconds,
-                "predicted_n": completion_tokens,
-            },
-        },
+        "usage": _usage(runtime, prompt_tokens, completion_tokens),
     }

@@ -25,7 +25,6 @@ DECODE_ROWS = 8
 def scratch_bytes(positions: int, slots: int = FULL_LAYERS) -> int:
     """Score, probability, and value-block scratch for one chunk."""
     rows = GROUP * CHUNK
-    blocks = max(positions, BLOCK) // BLOCK
     return (
         rows * HEAD * 2
         + rows * SCORE * 4
@@ -38,8 +37,14 @@ def scratch_bytes(positions: int, slots: int = FULL_LAYERS) -> int:
         + rows * 4
         + rows * (SCORE // TILE) * 8
         + slots * KV_HEADS * 32 * HEAD * 4
-        + blocks * DECODE_ROWS * HEAD * 4
+        + value_block_bytes(positions)
     )
+
+
+def value_block_bytes(positions: int) -> int:
+    """Scratch for the decode value-mix blocks at ``positions``."""
+    blocks = max(positions, BLOCK) // BLOCK
+    return blocks * DECODE_ROWS * HEAD * 4
 
 
 def bind_plane(runtime: Any) -> None:
@@ -51,8 +56,7 @@ def bind_plane(runtime: Any) -> None:
     runtime.plane_probs = zeros(rows * SCORE * 4)
     runtime.plane_prob_half = zeros(rows * SCORE * 2)
     runtime.plane_row_scale = zeros(rows * 4)
-    blocks = max(runtime.max_pos, BLOCK) // BLOCK
-    runtime.plane_parts = zeros(blocks * DECODE_ROWS * HEAD * 4)
+    runtime.plane_parts = zeros(value_block_bytes(runtime.max_pos))
     runtime.plane_partial = zeros(rows * HEAD * 4)
     runtime.plane_acc = zeros(rows * HEAD * 4)
     runtime.plane_max = zeros(rows * 4)

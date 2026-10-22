@@ -2,9 +2,11 @@
 
 The shared store in ``favlo.prefix`` owns the file. This module packs the
 used key and value positions off the context stride, plus the DeltaNet state
-and the convolution history. A drafted record also packs the MTP plane. A
-stored file is accepted when it is a strict prefix of the new prompt, so the
-next token is still stepped. A file without the MTP plane is not installed.
+and the convolution history. A runtime that still has the MTP head also packs
+that plane, and a stored file without it is not installed. After the fit drops
+the head, a file is accepted on the 16 language planes. A stored file is
+accepted when it is a strict prefix of the new prompt, so the next token is
+still stepped.
 """
 
 from __future__ import annotations

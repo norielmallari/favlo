@@ -1,5 +1,9 @@
 """Text forward. Weights are fp4, with promoted feed-forward layers at fp8. The key/value cache is fp8.
 
+A feed-forward layer that does not fit stays in the record and is copied into one
+stage before that layer runs. The MTP head leaves the device when the prompt
+needs its bytes. Decode does not run that block.
+
 Temperature 0 is an argmax. A positive temperature samples with top-k and
 top-p. Presence, frequency, and logit bias follow the OpenAI logit update.
 A repeated span of 16 or more tokens ends the completion. A text request
@@ -8,19 +12,28 @@ does not run the vision tower.
 
 from __future__ import annotations
 
+import gc
 import json
 import struct
 import time
 from pathlib import Path
 from typing import Any
 
+import objc
+
 import numpy as np
 
-from qwen38_27b.attn import bind_plane, scratch_bytes
+from qwen38_27b.attn import bind_plane, value_block_bytes
+from qwen38_27b.budget import (
+    choose_wire,
+    group_tensors,
+    growth_budget,
+    same_weight_image,
+    startup_bytes,
+)
 from qwen38_27b.cache import (
     DEFAULT_CONTEXT_LENGTH,
     available_bytes,
-    fit_positions,
     kv_mode,
     layer_cache_bytes,
     max_position,
@@ -31,11 +44,13 @@ from qwen38_27b.cache import (
 from qwen38_27b.layout import (
     AB,
     ATTN_OUT,
+    CHUNK,
     EPS,
     FULL_LAYERS,
     HIDDEN,
     INTERMEDIATE,
     KV_PROJ,
+    LAYERS,
     LINEAR_LAYERS,
     LINEAR_V,
     MIX,
@@ -46,9 +61,10 @@ from qwen38_27b.layout import (
     VOCAB,
     Z_WIDTH,
 )
-from qwen38_27b.prefill import _Workspace, workspace_bytes
-from qwen38_27b.prefix import open_session
-from qwen38_27b.session import Session
+from qwen38_27b.prefill import _Workspace
+from qwen38_27b.prefix import open_session, pack_plane, unpack_plane
+from qwen38_27b.resident import DeviceImage
+from qwen38_27b.session import Session, discard
 
 
 class RequestClosed(Exception):
@@ -64,30 +80,6 @@ def _u32(value: int) -> bytes:
 
 def _f32(value: float) -> bytes:
     return struct.pack("<f", value)
-
-
-def _file_buffer(session: Session, path: Path) -> Any:
-    size = path.stat().st_size
-    buffer = session.allocate(size)
-    if buffer is None:
-        message = f"{path.name} did not fit in a device buffer"
-        raise RuntimeError(message)
-    note = session._load_note
-    view = memoryview(buffer.contents().as_buffer(size))
-    with path.open("rb") as handle:
-        offset = 0
-        while offset < size:
-            chunk = handle.read(8 << 20)
-            if not chunk:
-                break
-            view[offset : offset + len(chunk)] = chunk
-            offset += len(chunk)
-            if note is not None:
-                note(len(chunk))
-    if offset != size:
-        message = f"{path.name} stopped at {offset} of {size}"
-        raise OSError(message)
-    return buffer
 
 
 _STATE_BYTES = LINEAR_LAYERS * LINEAR_V * 128 * 128 * 4
@@ -127,61 +119,39 @@ _DEVICE_FIELDS = (
 )
 
 
-def startup_bytes(
-    resident: int, positions: int, *, slots: int = FULL_LAYERS, drafts: bool = False
-) -> int:
-    """Bytes copied or cleared before the first token: the record, the cache, and scratch."""
-    one = plane_bytes(positions)
-    decode = (
-        HIDDEN * 4
-        + HIDDEN * 4
-        + max(MIX, Q_PROJ, INTERMEDIATE) * 4
-        + max(Z_WIDTH, INTERMEDIATE) * 4
-        + max(Z_WIDTH, ATTN_OUT, INTERMEDIATE) * 4
-        + ATTN_OUT * 4
-        + ATTN_OUT * 4
-        + KV_PROJ * 4
-        + KV_PROJ * 4
-        + AB * 4
-        + AB * 4
-        + VOCAB * 4
-        + _ARGMAX_GROUPS * 8
-    )
-    state = _STATE_BYTES
-    history = _HISTORY_BYTES
-    hold = HIDDEN * 4 if drafts else 0
-    return (
-        resident
-        + one * slots * 2
-        + state
-        + history
-        + hold
-        + decode
-        + scratch_bytes(positions, slots)
-    )
+def _device_buffers(runtime: Any) -> list[Any]:
+    """Metal buffers this runtime still holds. The caller releases them after the drop."""
+    found: list[Any] = []
+    weights = getattr(runtime, "weights", None)
+    buffer = getattr(weights, "buffer", None)
+    if buffer is not None:
+        found.append(buffer)
+    for name in ("k_cache", "v_cache", "_held"):
+        held = getattr(runtime, name, None)
+        if isinstance(held, list):
+            found.extend(item for item in held if item is not None)
+    for name in _DEVICE_FIELDS:
+        item = getattr(runtime, name, None)
+        if item is not None:
+            found.append(item)
+    return found
 
 
-def _fixed_bytes(positions: int, *, drafts: bool = False, slots: int = FULL_LAYERS) -> int:
-    """Bytes besides the resident file and the key/value cache."""
-    decode = (
-        HIDDEN * 4 * 4
-        + INTERMEDIATE * 4 * 4
-        + Z_WIDTH * 4 * 2
-        + ATTN_OUT * 4 * 3
-        + KV_PROJ * 4 * 2
-        + AB * 4 * 2
-        + VOCAB * 4
-        + _ARGMAX_GROUPS * 8
-    )
-    hold = HIDDEN * 4 if drafts else 0
-    return (
-        workspace_bytes(drafts=drafts)
-        + scratch_bytes(positions, slots)
-        + decode
-        + _STATE_BYTES
-        + _HISTORY_BYTES
-        + hold
-    )
+_SCRATCH_FIELDS = (
+    "plane_q",
+    "plane_scores",
+    "plane_probs",
+    "plane_prob_half",
+    "plane_row_scale",
+    "plane_parts",
+    "plane_partial",
+    "plane_acc",
+    "plane_max",
+    "plane_sum",
+    "plane_tail",
+    "plane_chunk_max",
+    "plane_chunk_sum",
+)
 
 
 class Qwen38Runtime:
@@ -213,27 +183,21 @@ class Qwen38Runtime:
             message = f"{self.root.name} is not a finished record"
             raise RuntimeError(message)
         self.tensors: dict[str, dict] = self.manifest["tensors"]
-        self.drafts = "mtp.fc.weight" in self.tensors
-        self.kv_slots = FULL_LAYERS + (1 if self.drafts else 0)
+        self._record_mtp = "mtp.fc.weight" in self.tensors
+        self._group = group_tensors(self.tensors)
         self.layer_types = tuple(self.manifest.get("layer_types") or _default_layers())
         self.linear_slot = _slots(self.layer_types, "linear_attention")
         self.full_slot = _slots(self.layer_types, "full_attention")
         card_limit = max_position(self.root) if (self.root / "config.json").is_file() else 262144
-        resident_path = self.root / "resident.bin"
-        resident_bytes = resident_path.stat().st_size
-        cap = parse_memory(max_memory)
-        self.max_memory = available_bytes() if cap is None else cap
-        self.max_pos = fit_positions(
-            self.max_memory,
-            resident_bytes,
-            _fixed_bytes(card_limit, drafts=self.drafts, slots=self.kv_slots),
-            slots=self.kv_slots,
-        )
-        self.max_pos = min(self.max_pos, card_limit, DEFAULT_CONTEXT_LENGTH)
-        if self.max_pos < 2048:
-            message = "the record does not fit a 2048-token cache"
-            raise RuntimeError(message)
+        self._limit = min(card_limit, DEFAULT_CONTEXT_LENGTH)
+        self._memory_cap = parse_memory(max_memory)
         self.filled = 0
+        self.drafts = False
+        self.kv_slots = FULL_LAYERS
+        self.max_pos = 0
+        self.wire = None
+        self.weights = None
+        self._record = None
         self._prefill = None
         self._prefill_progress = None
         self._load_progress = None
@@ -245,26 +209,29 @@ class Qwen38Runtime:
         self._cached_tokens = 0
         self.session = None
         self.resident = None
+        self.k_cache = []
+        self.v_cache = []
+        plan = choose_wire(
+            available_bytes() if self._memory_cap is None else self._memory_cap,
+            2048,
+            self._group,
+            self._limit,
+            mtp_available=self._record_mtp,
+        )
         summary = ""
         self._load_progress = self._begin_load(
-            startup_bytes(
-                resident_bytes, self.max_pos, slots=self.kv_slots, drafts=self.drafts
-            )
+            startup_bytes(plan.weights, plan.positions, slots=plan.slots, drafts=plan.mtp)
         )
         try:
             self.session = Session()
             self.session._load_note = self._note_load
-            self.resident = _file_buffer(self.session, resident_path)
+            self._record = (self.root / "resident.bin").open("rb")
             zeros = self.session.zeros
-            one = plane_bytes(self.max_pos)
-            self.k_cache = [zeros(one) for _ in range(self.kv_slots)]
-            self.v_cache = [zeros(one) for _ in range(self.kv_slots)]
-            bind_plane(self)
             self.history = zeros(_HISTORY_BYTES)
             self.state = zeros(_STATE_BYTES)
             self.hidden = zeros(HIDDEN * 4)
             self.normed = zeros(HIDDEN * 4)
-            self.hold = zeros(HIDDEN * 4) if self.drafts else None
+            self.hold = None
             self.wide = zeros(max(MIX, Q_PROJ, INTERMEDIATE) * 4)
             self.z = zeros(max(Z_WIDTH, INTERMEDIATE) * 4)
             self.y = zeros(max(Z_WIDTH, ATTN_OUT, INTERMEDIATE) * 4)
@@ -277,14 +244,11 @@ class Qwen38Runtime:
             self.logits = zeros(VOCAB * 4)
             self.best_v = zeros(_ARGMAX_GROUPS * 4)
             self.best_i = zeros(_ARGMAX_GROUPS * 4)
-            self._prefill = _Workspace(self.session, drafts=self.drafts)
-            self._touch_resident(resident_bytes)
-            self._held = [self.resident, self.history, self.state, *self.k_cache, *self.v_cache]
+            self._apply(plan, 0, [])
+            self._prefill = _Workspace(self.session, drafts=plan.mtp)
+            self._touch_resident(self.weights.nbytes)
             self.prefix = open_session(self)
-            summary = (
-                f"loaded {self.root.name} kv {self.kv_cache} context {self.max_pos} "
-                f"weights {resident_bytes} cache {sequence_cache_bytes(self.max_pos, self.kv_slots)}"
-            )
+            summary = self._loaded_summary()
         finally:
             if self.session is not None:
                 self.session._load_note = None
@@ -294,9 +258,11 @@ class Qwen38Runtime:
                 self.console.end(progress, summary)
             elif summary:
                 self._status(summary)
+            if not summary:
+                self.close()
 
     def close(self) -> None:
-        """Write the live prefix, then drop every device buffer before another pipeline loads."""
+        """Write the live prefix, then return every device buffer before another pipeline loads."""
         if getattr(self, "_closed", False):
             return
         self._closed = True
@@ -311,8 +277,17 @@ class Qwen38Runtime:
         if adapter is not None:
             adapter.runtime = None
         self.prefix = None
+        buffers = _device_buffers(self)
         self._end_open_progress()
         self._prefill = None
+        weights = getattr(self, "weights", None)
+        if weights is not None:
+            weights.close()
+        self.weights = None
+        record = getattr(self, "_record", None)
+        self._record = None
+        if record is not None:
+            record.close()
         for name in ("k_cache", "v_cache", "_held"):
             held = getattr(self, name, None)
             if isinstance(held, list):
@@ -326,6 +301,258 @@ class Qwen38Runtime:
             except (OSError, RuntimeError):
                 pass
         self.session = None
+        weights = None
+        record = None
+        prefix = None
+        adapter = None
+        session = None
+        with objc.autorelease_pool():
+            for buffer in buffers:
+                discard(buffer)
+            buffers.clear()
+            gc.collect()
+
+    def ensure(self, needed: int) -> bool:
+        """Grow the cache so ``needed`` positions fit. Leave the device alone when it cannot."""
+        if needed <= self.max_pos:
+            return True
+        budget = self._growth_budget()
+        previous = self.wire
+        count = 0
+        saved: list[tuple[int, str, bytes]] = []
+        captured = False
+        extra = 0
+        intact = True
+        tried: set[tuple[int, bool, tuple[int, ...]]] = set()
+        while True:
+            try:
+                plan = choose_wire(
+                    budget,
+                    needed,
+                    self._group,
+                    self._limit,
+                    extra_unwire=extra,
+                    mtp_available=self._record_mtp,
+                )
+            except RuntimeError as exc:
+                if "does not fit" not in str(exc):
+                    raise
+                break
+            key = (plan.positions, plan.mtp, plan.wired)
+            if plan.positions < needed or key in tried:
+                break
+            tried.add(key)
+            if not captured:
+                count, saved = self._capture_planes()
+                captured = True
+            try:
+                if same_weight_image(previous, plan):
+                    self._extend_cache(plan, count, saved)
+                else:
+                    self._apply(plan, count, saved)
+            except RuntimeError as exc:
+                if "device refused" not in str(exc):
+                    raise
+                if self.weights is None or not self.k_cache:
+                    intact = False
+                extra += 1
+                continue
+            self._note_growth(previous, plan)
+            return True
+        if not intact and previous is not None:
+            try:
+                self._apply(previous, count, saved)
+            except RuntimeError as exc:
+                if "device refused" not in str(exc):
+                    raise
+        return self.max_pos >= needed
+
+    def prepare_ffn(self, layer: int | None) -> None:
+        """Copy an unwired feed-forward layer into the stage before its kernels run."""
+        weights = self.weights
+        if layer is None or weights is None or layer in weights.wired:
+            return
+        if weights.staged == layer:
+            if getattr(self.session, "_pass_encoder", None) is None:
+                self.session.resume()
+            weights.stage_busy = True
+            return
+        if weights.stage_busy:
+            self.session.finish()
+            weights.stage_busy = False
+        weights.load_layer(layer)
+        if getattr(self.session, "_pass_encoder", None) is None:
+            self.session.resume()
+        weights.stage_busy = True
+
+    def _budget(self) -> int:
+        if self._memory_cap is not None:
+            return self._memory_cap
+        return available_bytes() + self._held_bytes()
+
+    def _growth_budget(self) -> int:
+        """Bytes the next image may use while the host copy of the live cache stays."""
+        if self._memory_cap is not None:
+            return self._memory_cap
+        count = min(int(self.filled), int(self.max_pos))
+        packed = sequence_cache_bytes(count, self.kv_slots) if count > 0 and self.k_cache else 0
+        return growth_budget(available_bytes(), self._held_bytes(), packed)
+
+    def _held_bytes(self) -> int:
+        if self.weights is None or not self.max_pos:
+            return 0
+        return startup_bytes(
+            self.weights.nbytes, self.max_pos, slots=self.kv_slots, drafts=self.drafts
+        )
+
+    def _apply(self, plan: Any, count: int, saved: list[tuple[int, str, bytes]]) -> None:
+        self._release_elastic()
+        assert self.session is not None
+        assert self._record is not None
+        image = DeviceImage(
+            self.session,
+            self._record,
+            self._group,
+            plan,
+            self.session._load_note,
+        )
+        self.weights = image
+        self.resident = image.buffer
+        self.drafts = plan.mtp
+        self.kv_slots = plan.slots
+        self.max_pos = plan.positions
+        self.wire = plan
+        zeros = self.session.zeros
+        one = plane_bytes(plan.positions)
+        self.k_cache = [zeros(one) for _ in range(plan.slots)]
+        self.v_cache = [zeros(one) for _ in range(plan.slots)]
+        bind_plane(self)
+        self.hold = zeros(HIDDEN * 4) if plan.mtp else None
+        work = self._prefill
+        if work is not None:
+            work.mix = zeros(CHUNK * MIX * 4) if plan.mtp else None
+        self._restore_planes(count, saved)
+        self._held = [self.resident, self.history, self.state, *self.k_cache, *self.v_cache]
+
+    def _extend_cache(self, plan: Any, count: int, saved: list[tuple[int, str, bytes]]) -> None:
+        """Replace the key/value planes. The weight buffer stays."""
+        assert self.session is not None
+        old_positions = self.max_pos
+        old_slots = self.kv_slots
+        self.k_cache = []
+        self.v_cache = []
+        self.plane_parts = None
+        zeros = self.session.zeros
+        try:
+            parts = zeros(value_block_bytes(plan.positions))
+            one = plane_bytes(plan.positions)
+            new_k = [zeros(one) for _ in range(plan.slots)]
+            new_v = [zeros(one) for _ in range(plan.slots)]
+        except RuntimeError:
+            self._restore_cache(old_positions, old_slots, count, saved)
+            raise
+        self.plane_parts = parts
+        self.k_cache = new_k
+        self.v_cache = new_v
+        self.max_pos = plan.positions
+        self.wire = plan
+        self._restore_planes(count, saved)
+        self._held = [self.resident, self.history, self.state, *self.k_cache, *self.v_cache]
+
+    def _restore_cache(
+        self,
+        positions: int,
+        slots: int,
+        count: int,
+        saved: list[tuple[int, str, bytes]],
+    ) -> None:
+        """Put the previous planes back after a longer cache was refused."""
+        if self.session is None:
+            return
+        zeros = self.session.zeros
+        try:
+            self.plane_parts = zeros(value_block_bytes(positions))
+            one = plane_bytes(positions)
+            self.k_cache = [zeros(one) for _ in range(slots)]
+            self.v_cache = [zeros(one) for _ in range(slots)]
+        except RuntimeError as exc:
+            if "device refused" not in str(exc):
+                raise
+            return
+        self._restore_planes(count, saved)
+
+    def _release_elastic(self) -> None:
+        weights = getattr(self, "weights", None)
+        if weights is not None:
+            weights.close()
+        self.weights = None
+        self.resident = None
+        self.k_cache = []
+        self.v_cache = []
+        self.hold = None
+        for name in _SCRATCH_FIELDS:
+            if hasattr(self, name):
+                setattr(self, name, None)
+        work = getattr(self, "_prefill", None)
+        if work is not None:
+            work.mix = None
+        held = getattr(self, "_held", None)
+        if isinstance(held, list):
+            held.clear()
+
+    def _capture_planes(self) -> tuple[int, list[tuple[int, str, bytes]]]:
+        count = min(int(self.filled), int(self.max_pos))
+        if count < 1 or not self.k_cache:
+            return 0, []
+        saved: list[tuple[int, str, bytes]] = []
+        for slot in range(self.kv_slots):
+            saved.append((slot, "key", self._pack_plane(self.k_cache[slot], count, kind="key")))
+            saved.append((slot, "value", self._pack_plane(self.v_cache[slot], count, kind="value")))
+        return count, saved
+
+    def _pack_plane(self, buffer: Any, count: int, *, kind: str) -> bytes:
+        view = np.frombuffer(
+            memoryview(buffer.contents().as_buffer(plane_bytes(self.max_pos))),
+            dtype=np.uint8,
+        )
+        return pack_plane(view, self.max_pos, count, kind=kind)
+
+    def _restore_planes(self, count: int, saved: list[tuple[int, str, bytes]]) -> None:
+        if count < 1:
+            return
+        for slot, kind, blob in saved:
+            if slot >= self.kv_slots:
+                continue
+            buffer = self.k_cache[slot] if kind == "key" else self.v_cache[slot]
+            view = np.frombuffer(
+                memoryview(buffer.contents().as_buffer(plane_bytes(self.max_pos))),
+                dtype=np.uint8,
+            )
+            unpack_plane(view, self.max_pos, count, blob, kind=kind)
+
+    def _loaded_summary(self) -> str:
+        text = (
+            f"loaded {self.root.name} kv {self.kv_cache} context {self.max_pos} "
+            f"weights {self.weights.nbytes} cache {sequence_cache_bytes(self.max_pos, self.kv_slots)}"
+        )
+        return text + self._fit_suffix()
+
+    def _fit_suffix(self) -> str:
+        suffix = ""
+        if self._record_mtp and not self.drafts:
+            suffix += " mtp off"
+        wired = len(self.wire.wired) if self.wire is not None else LAYERS
+        if wired != LAYERS:
+            suffix += f" feed-forward {wired}/{LAYERS}"
+        return suffix
+
+    def _note_growth(self, previous: Any, plan: Any) -> None:
+        if previous is not None and (
+            previous.positions != plan.positions
+            or previous.mtp != plan.mtp
+            or previous.wired != plan.wired
+        ):
+            self._status(f"context {plan.positions}{self._fit_suffix()}")
 
     def _end_open_progress(self) -> None:
         console = getattr(self, "console", None)
@@ -388,7 +615,7 @@ class Qwen38Runtime:
     def locate(self, *names: str) -> tuple[Any, int, dict]:
         name = self._resolve(*names)
         entry = self.tensors[name]
-        return self.resident, int(entry["offset"]), entry
+        return self.resident, self.weights.offset(name), entry
 
     def locate_weight(self, layer: int, rest: str) -> tuple[Any, int, dict]:
         return self.locate(self.weight(layer, rest))
@@ -592,6 +819,7 @@ class Qwen38Runtime:
         )
 
     def _ffn(self, layer: int | None) -> None:
+        self.prepare_ffn(layer)
         gate_name = self._w(layer, "mlp.gate_proj.weight")
         up_name = self._w(layer, "mlp.up_proj.weight")
         _buf, _offset, gate_entry = self.locate(gate_name)
@@ -762,9 +990,20 @@ class Qwen38Runtime:
         if not prompt:
             return []
         prompt = [int(token) for token in prompt]
-        if prompt[-1] < 0 or len(prompt) > self.max_pos:
+        if prompt[-1] < 0:
             message = f"prompt length {len(prompt)} is past {self.max_pos}"
             raise RuntimeError(message)
+        if not self.ensure(len(prompt)):
+            reached = choose_wire(
+                self._budget(),
+                len(prompt),
+                self._group,
+                self._limit,
+                mtp_available=self._record_mtp,
+            ).positions
+            message = f"prompt length {len(prompt)} is past {max(self.max_pos, reached)}"
+            raise RuntimeError(message)
+        self.ensure(len(prompt) + 1)
         self._status(f"prompt tokens {len(prompt)}")
         hit = self.prefix.align(prompt)
         if self.prefix.loaded:
@@ -802,7 +1041,7 @@ class Qwen38Runtime:
             pending = list(forced or [])
             close_after = bool(stop_after_forced) and bool(pending)
             counts: dict[int, int] = {}
-            room = max(0, self.max_pos - len(prompt))
+            room = max(0, self._limit - len(prompt))
             decode_total = room if max_tokens is None else max(0, min(max_tokens, room))
             decode_row = self._begin_phase("decode", decode_total, live=True)
             decode_started = time.perf_counter()
@@ -837,8 +1076,18 @@ class Qwen38Runtime:
                         self._hit_limit = True
                     break
                 if pos + 1 >= self.max_pos:
-                    self._hit_limit = True
-                    break
+                    paused = time.perf_counter()
+                    if decode_row is not None:
+                        decode_row.detail = "growing context"
+                    try:
+                        self.ensure(pos + 2)
+                    finally:
+                        if decode_row is not None:
+                            decode_row.detail = ""
+                        decode_started += time.perf_counter() - paused
+                    if pos + 1 >= self.max_pos:
+                        self._hit_limit = True
+                        break
                 if repeated_tail(out):
                     self.step(chosen, pos, logits=False)
                     break
