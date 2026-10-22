@@ -51,6 +51,13 @@ class Scratch:
         self.cond = gpu.keep(gpu.empty(64 * 1024 * 4))
         self.time = gpu.keep(gpu.empty(64 * 256 * 4))
         self.tokens = gpu.keep(gpu.empty(self.image_rows * 256 * 4))
+        latent_n = 16 * (MAX_EDGE // 8) ** 2
+        self.latent = gpu.keep(gpu.empty(latent_n * 4))
+        self.vel = gpu.keep(gpu.empty(latent_n * 4))
+        pos_bytes = self.seq_rows * 3 * 4
+        self.pos_noise = gpu.keep(gpu.empty(pos_bytes))
+        self.pos_text = gpu.keep(gpu.empty(pos_bytes))
+        self.pos_main = gpu.keep(gpu.empty(pos_bytes))
 
     def release(self) -> None:
         """Drop every scratch buffer. The device then can free that memory."""
@@ -85,4 +92,9 @@ _BUFFERS = (
     "cond",
     "time",
     "tokens",
+    "latent",
+    "vel",
+    "pos_noise",
+    "pos_text",
+    "pos_main",
 )

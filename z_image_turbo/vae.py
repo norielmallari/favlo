@@ -1,8 +1,8 @@
 """FLUX VAE decoder.
 
-The latent is ``z / 0.3611 + 0.1159``. GroupNorm uses 32 groups and epsilon
-1e-5. The mid-block attention is one head across the 512 channels. Bytes are
-the ``[-1, 1]`` map ``(clip(x, -1, 1) + 1) / 2``.
+The latent is ``z / 0.3611 + 0.1159`` on device. GroupNorm uses 32 groups and
+epsilon 1e-5. The mid-block attention is one head across the 512 channels.
+The last read is uint8 HWC, ``rint((clip(x, -1, 1) + 1) * 127.5)``.
 """
 
 from __future__ import annotations
@@ -36,13 +36,12 @@ class _Vol:
         return self.channels * self.height * self.width
 
 
-def decode(gpu: Gpu, weights: dict[str, Plane], latent: np.ndarray) -> np.ndarray:
-    """``latent`` is ``[16, h, w]``. The return is ``[3, H, W]`` float32 in ``[-1, 1]``."""
-    channels, height, width = (int(dim) for dim in latent.shape)
-    scaled = latent / SCALE + SHIFT
+def decode(gpu: Gpu, weights: dict[str, Plane], latent: Any, height: int, width: int) -> np.ndarray:
+    """``latent`` is device ``[16, h, w]``. The return is uint8 ``[H, W, 3]``."""
+    gpu.affine(latent, SCALE, SHIFT, 16 * height * width)
     bank: list[_Vol] = []
     ws: dict[str, tuple[Any, int]] = {}
-    current = _upload(gpu, bank, scaled, channels, height, width)
+    current = _Vol(latent, 16 * height * width, 16, height, width)
     produced = _conv(gpu, weights, bank, ws, current, "decoder.conv_in", 3, 1)
     _release(bank, current)
     current = _resnet(gpu, weights, bank, ws, produced, "decoder.mid_block.resnets.0")
@@ -71,16 +70,10 @@ def decode(gpu: Gpu, weights: dict[str, Plane], latent: np.ndarray) -> np.ndarra
     _release(bank, current)
     current = _conv(gpu, weights, bank, ws, normed, "decoder.conv_out", 3, 1)
     _release(bank, normed)
-    raw = gpu.read_f32(current.buf, current.count)
-    return raw.reshape(current.channels, current.height, current.width)
-
-
-def _upload(
-    gpu: Gpu, bank: list[_Vol], array: np.ndarray, channels: int, height: int, width: int
-) -> _Vol:
-    vol = _alloc(gpu, bank, channels, height, width)
-    gpu.store_f32(vol.buf, np.ascontiguousarray(array, dtype=np.float32))
-    return vol
+    pixels = gpu.empty(current.height * current.width * 3)
+    gpu.clip_u8(current.buf, pixels, current.height, current.width)
+    raw = gpu.read_u8(pixels, current.height * current.width * 3)
+    return raw.reshape(current.height, current.width, 3)
 
 
 def _conv(

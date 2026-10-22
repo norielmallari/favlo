@@ -712,3 +712,212 @@ kernel void euler(
         latent[gid] = latent[gid] + delta * velocity[gid];
     }
 }
+
+// (C, patch_h, 2, patch_w, 2) → token rows, channel fastest, stride `stride`.
+kernel void patchify(
+    device const float* latent [[buffer(0)]],
+    device float* tokens [[buffer(1)]],
+    constant uint& channels [[buffer(2)]],
+    constant uint& patch_h [[buffer(3)]],
+    constant uint& patch_w [[buffer(4)]],
+    constant uint& stride [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint patches = patch_h * patch_w;
+    uint span = channels * 4u;
+    if (gid.y >= patches || gid.x >= span) {
+        return;
+    }
+    uint py = gid.y / patch_w;
+    uint px = gid.y - py * patch_w;
+    uint inner = gid.x / channels;
+    uint c = gid.x - inner * channels;
+    uint ih = inner / 2u;
+    uint iw = inner - ih * 2u;
+    uint height = patch_h * 2u;
+    uint width = patch_w * 2u;
+    uint y = py * 2u + ih;
+    uint x = px * 2u + iw;
+    tokens[gid.y * stride + gid.x] = latent[(c * height + y) * width + x];
+}
+
+kernel void unpatchify(
+    device const float* tokens [[buffer(0)]],
+    device float* latent [[buffer(1)]],
+    constant uint& channels [[buffer(2)]],
+    constant uint& height [[buffer(3)]],
+    constant uint& width [[buffer(4)]],
+    constant uint& stride [[buffer(5)]],
+    constant uint& n [[buffer(6)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= n) {
+        return;
+    }
+    uint plane = height * width;
+    uint c = gid / plane;
+    uint rem = gid - c * plane;
+    uint y = rem / width;
+    uint x = rem - y * width;
+    uint patch_w = width / 2u;
+    uint py = y / 2u;
+    uint px = x / 2u;
+    uint ih = y - py * 2u;
+    uint iw = x - px * 2u;
+    uint patch = py * patch_w + px;
+    uint elem = ((ih * 2u + iw) * channels) + c;
+    latent[gid] = tokens[patch * stride + elem];
+}
+
+kernel void copy_rows(
+    device const float* src [[buffer(0)]],
+    device float* dst [[buffer(1)]],
+    constant uint& src_stride [[buffer(2)]],
+    constant uint& dst_stride [[buffer(3)]],
+    constant uint& width [[buffer(4)]],
+    constant uint& src_row [[buffer(5)]],
+    constant uint& dst_row [[buffer(6)]],
+    constant uint& count [[buffer(7)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.y >= count || gid.x >= width) {
+        return;
+    }
+    dst[(dst_row + gid.y) * dst_stride + gid.x] = src[(src_row + gid.y) * src_stride + gid.x];
+}
+
+kernel void fill_half_rows(
+    device const half* token [[buffer(0)]],
+    device float* rows [[buffer(1)]],
+    constant uint& width [[buffer(2)]],
+    constant uint& start [[buffer(3)]],
+    constant uint& stop [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint row = start + gid.y;
+    if (row >= stop || gid.x >= width) {
+        return;
+    }
+    rows[row * width + gid.x] = float(token[gid.x]);
+}
+
+kernel void sinusoid(
+    device float* dest [[buffer(0)]],
+    constant float& value [[buffer(1)]],
+    constant uint& dim [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= dim) {
+        return;
+    }
+    uint half_n = dim / 2u;
+    float index = float(gid < half_n ? gid : gid - half_n);
+    float freq = exp(-log(10000.0f) * index / float(half_n));
+    float angle = value * freq;
+    dest[gid] = gid < half_n ? cos(angle) : sin(angle);
+}
+
+kernel void affine(
+    device float* data [[buffer(0)]],
+    constant float& scale [[buffer(1)]],
+    constant float& shift [[buffer(2)]],
+    constant uint& n [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid < n) {
+        data[gid] = data[gid] / scale + shift;
+    }
+}
+
+kernel void text_positions(
+    device int* pos [[buffer(0)]],
+    constant uint& rows [[buffer(1)]],
+    constant uint& limit [[buffer(2)]],
+    constant int& start [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= rows) {
+        return;
+    }
+    int temporal = gid < limit ? start + int(gid) : 0;
+    pos[gid * 3u] = temporal;
+    pos[gid * 3u + 1u] = 0;
+    pos[gid * 3u + 2u] = 0;
+}
+
+kernel void image_positions(
+    device int* pos [[buffer(0)]],
+    constant uint& rows [[buffer(1)]],
+    constant uint& patch_h [[buffer(2)]],
+    constant uint& patch_w [[buffer(3)]],
+    constant int& origin [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= rows) {
+        return;
+    }
+    int temporal = 0;
+    int y = 0;
+    int x = 0;
+    uint count = patch_h * patch_w;
+    if (gid < count) {
+        uint yy = gid / patch_w;
+        uint xx = gid - yy * patch_w;
+        temporal = origin;
+        y = int(yy);
+        x = int(xx);
+    }
+    pos[gid * 3u] = temporal;
+    pos[gid * 3u + 1u] = y;
+    pos[gid * 3u + 2u] = x;
+}
+
+kernel void joined_positions(
+    device int* pos [[buffer(0)]],
+    constant uint& rows [[buffer(1)]],
+    constant uint& image_count [[buffer(2)]],
+    constant uint& image_attend [[buffer(3)]],
+    constant uint& patch_w [[buffer(4)]],
+    constant int& origin [[buffer(5)]],
+    constant uint& cap_len [[buffer(6)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= rows) {
+        return;
+    }
+    int temporal = 0;
+    int y = 0;
+    int x = 0;
+    if (gid < image_count) {
+        uint yy = gid / patch_w;
+        uint xx = gid - yy * patch_w;
+        temporal = origin;
+        y = int(yy);
+        x = int(xx);
+    } else if (gid >= image_attend && gid < image_attend + cap_len) {
+        temporal = int(gid - image_attend) + 1;
+    }
+    pos[gid * 3u] = temporal;
+    pos[gid * 3u + 1u] = y;
+    pos[gid * 3u + 2u] = x;
+}
+
+kernel void clip_u8_hwc(
+    device const float* nchw [[buffer(0)]],
+    device uchar* hwc [[buffer(1)]],
+    constant uint& height [[buffer(2)]],
+    constant uint& width [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= width || gid.y >= height) {
+        return;
+    }
+    uint plane = height * width;
+    uint pixel = gid.y * width + gid.x;
+    for (uint c = 0u; c < 3u; ++c) {
+        float value = nchw[c * plane + pixel];
+        value = clamp(value, -1.0f, 1.0f);
+        int rounded = int(rint((value + 1.0f) * 127.5f));
+        hwc[pixel * 3u + c] = uchar(rounded);
+    }
+}

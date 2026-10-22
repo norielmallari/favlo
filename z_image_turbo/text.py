@@ -94,9 +94,8 @@ def _prefill(
     )
     # The gather wrote `limit` rows. Norm the text hidden before the projection
     # with the DiT caption norm. The stack below uses the text eps.
-    pos = np.zeros((rows, 3), dtype=np.int32)
-    pos[:limit, 0] = np.arange(limit, dtype=np.int32)
-    positions = gpu.upload(pos)
+    gpu.text_positions(scratch.pos_text, rows, limit, 0)
+    positions = scratch.pos_text
     for layer in range(LAYERS - 1):
         prefix = f"model.layers.{layer}"
         gpu.rmsnorm(

@@ -63,46 +63,52 @@ class Runtime:
         caption_started = time.perf_counter()
         with objc.autorelease_pool():
             ids = prompt_ids(prompt, self.source)
-            _caption, length = embed_caption(self.gpu, self.scratch, self.weights, ids)
-            rows = pad_to(length, TILE_M)
-            caption = self.gpu.read_f32(_caption, rows * 3840).reshape(rows, 3840)[:length].copy()
+            _, length = embed_caption(self.gpu, self.scratch, self.weights, ids)
         self.gpu.reclaim()
         caption_s = time.perf_counter() - caption_started
         latent_h = height // 8
         latent_w = width // 8
         patch_h = latent_h // 2
         patch_w = latent_w // 2
+        image_rows = pad_to(patch_h * patch_w, TILE_M)
         noise = np.random.default_rng(seed).standard_normal((16, latent_h, latent_w))
-        latent = noise.astype(np.float32)
+        self.gpu.store_f32(self.scratch.latent, noise.astype(np.float32))
         knots = sigmas(steps)
+        count = 16 * latent_h * latent_w
         times: list[float] = []
         for index in range(steps):
             started = time.perf_counter()
             with objc.autorelease_pool():
-                tokens = _patchify(latent)
-                pred = velocity(
+                self.gpu.zero(self.scratch.tokens, image_rows * 256 * 4)
+                self.gpu.patchify(
+                    self.scratch.latent, self.scratch.tokens, 16, patch_h, patch_w, 256
+                )
+                velocity(
                     self.gpu,
                     self.scratch,
                     self.weights,
-                    tokens,
-                    caption,
+                    length,
                     float(knots[index]),
                     self.ones,
                     patch_h,
                     patch_w,
                 )
-                latent = latent + float(knots[index] - knots[index + 1]) * _unpatchify(
-                    pred, latent_h, latent_w
+                self.gpu.euler(
+                    self.scratch.latent,
+                    self.scratch.vel,
+                    float(knots[index] - knots[index + 1]),
+                    count,
                 )
             self.gpu.reclaim()
             times.append(time.perf_counter() - started)
             print(f"step {index + 1}/{steps} {times[-1]:.2f}s", flush=True)
+        latent = self.gpu.read_f32(self.scratch.latent, count).reshape(16, latent_h, latent_w)
         if not np.isfinite(latent).all():
             raise RuntimeError("latent is not finite")
         digest = hashlib.sha256(np.ascontiguousarray(latent).tobytes()).hexdigest()
         vae_started = time.perf_counter()
         with objc.autorelease_pool():
-            pixels = _decode_image(self, latent)
+            pixels = _decode_image(self, latent_h, latent_w)
         self.gpu.reclaim()
         vae_s = time.perf_counter() - vae_started
         total_s = time.perf_counter() - wall
@@ -131,15 +137,10 @@ def open_runtime(
     return Runtime(Path(path), console)
 
 
-def _decode_image(runtime: Runtime, latent: np.ndarray) -> np.ndarray:
+def _decode_image(runtime: Runtime, height: int, width: int) -> np.ndarray:
     from z_image_turbo.vae import decode
 
-    image = decode(runtime.gpu, runtime.weights, latent)
-    if not np.isfinite(image).all():
-        raise RuntimeError("decoded image is not finite")
-    clipped = np.clip(image, -1.0, 1.0)
-    bytes_ = np.rint((clipped + 1.0) * 127.5).astype(np.uint8)
-    return np.transpose(bytes_, (1, 2, 0))
+    return decode(runtime.gpu, runtime.weights, runtime.scratch.latent, height, width)
 
 
 def _patchify(latent: np.ndarray) -> np.ndarray:

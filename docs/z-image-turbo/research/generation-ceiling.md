@@ -38,3 +38,5 @@ Each listed kernel runs in its own command buffer. The sample is the median of f
 ## Corrections
 
 Later finds are appended here. The sections above stay as committed.
+
+23 October 2026. The latent stays on device for patchify, the Euler update, the float32 time basis, the pad fill, and the image/caption join. The VAE scale and the uint8 clip are shaders. The listed block kernels are unchanged, so the 202.87 s sum stands. The added dispatches measure 11.6 ms at 1280 and sit outside that sum. A printed 1280 generation of the smoke prompt was 202.56 s, caption 3.10 s, decoder 9.75 s, steps 23.54–24.06 s.

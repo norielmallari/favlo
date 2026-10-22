@@ -139,6 +139,9 @@ def _kernel_checks(gpu: Any) -> int:
     if not _attention(gpu):
         print("kernels attention mismatch", flush=True)
         return 1
+    if not _layout(gpu):
+        print("kernels layout mismatch", flush=True)
+        return 1
     print("kernels ok", flush=True)
     return 0
 
@@ -179,6 +182,66 @@ def _attend_numpy(q: np.ndarray, k: np.ndarray, v: np.ndarray) -> np.ndarray:
         weights /= weights.sum(axis=-1, keepdims=True)
         out[:, head] = weights @ v[:, head]
     return out
+
+
+def _layout(gpu: object) -> bool:
+    from z_image_turbo.runtime import _patchify, _unpatchify
+
+    latent = np.zeros((16, 4, 2), dtype=np.float32)
+    latent[3, 0, 1] = 7.0
+    tokens = gpu.empty(2 * 256 * 4)
+    gpu.patchify(gpu.upload(latent), tokens, 16, 2, 1, 256)
+    got = gpu.read_f32(tokens, 2 * 256).reshape(2, 256)
+    ref = _patchify(latent)
+    if not np.array_equal(got[:, :64], ref) or not np.all(got[:, 64:] == 0):
+        return False
+    packed = gpu.upload(np.ascontiguousarray(ref))
+    restored = gpu.empty(16 * 4 * 2 * 4)
+    gpu.unpatchify(packed, restored, 16, 4, 2, 64)
+    back = gpu.read_f32(restored, 16 * 4 * 2).reshape(16, 4, 2)
+    if not np.array_equal(back, _unpatchify(ref, 4, 2)):
+        return False
+    base = gpu.upload(np.ones(4, dtype=np.float32))
+    gpu.euler(base, gpu.upload(np.full(4, 2.0, dtype=np.float32)), 0.5, 4)
+    if not np.allclose(gpu.read_f32(base, 4), 2.0):
+        return False
+    wave = gpu.empty(256 * 4)
+    gpu.sinusoid(wave, 250.0, 256)
+    half = np.arange(128, dtype=np.float32)
+    freq = np.exp(-np.log(np.float32(10000.0)) * half / np.float32(128.0))
+    angles = np.float32(250.0) * freq
+    expect = np.concatenate([np.cos(angles), np.sin(angles)])
+    if float(np.max(np.abs(gpu.read_f32(wave, 256) - expect))) > 1e-4:
+        return False
+    scaled = gpu.upload(np.array([0.3611, 0.0], dtype=np.float32))
+    gpu.affine(scaled, 0.3611, 0.1159, 2)
+    affine = gpu.read_f32(scaled, 2)
+    if abs(float(affine[0]) - 1.1159) > 1e-4 or abs(float(affine[1]) - 0.1159) > 1e-4:
+        return False
+    pos = gpu.empty(4 * 3 * 4)
+    gpu.text_positions(pos, 4, 2, 1)
+    temporal = gpu.read_i32(pos, 12).reshape(4, 3)[:, 0]
+    if not np.array_equal(temporal, np.array([1, 2, 0, 0], dtype=np.int32)):
+        return False
+    grid = np.zeros((3, 2, 2), dtype=np.float32)
+    grid[0, 0, 0] = 1.0
+    grid[1, 0, 1] = -1.0
+    raw = gpu.empty(12)
+    gpu.clip_u8(gpu.upload(grid), raw, 2, 2)
+    picture = gpu.read_u8(raw, 12).reshape(2, 2, 3)
+    if int(picture[0, 0, 0]) != 255 or int(picture[0, 1, 1]) != 0:
+        return False
+    src = gpu.upload(np.arange(8, dtype=np.float32).reshape(2, 4))
+    dst = gpu.empty(8 * 4)
+    gpu.copy_rows(src, dst, 4, 4, 4, 0, 0, 2)
+    copied = gpu.read_f32(dst, 8).reshape(2, 4)
+    if not np.array_equal(copied, np.arange(8, dtype=np.float32).reshape(2, 4)):
+        return False
+    token = gpu.upload(np.array([1, 2, 3, 4], dtype=np.float16))
+    rows = gpu.empty(8 * 4)
+    gpu.fill_half_rows(token, rows, 4, 1, 2)
+    filled = gpu.read_f32(rows, 8).reshape(2, 4)
+    return bool(np.allclose(filled[1], [1, 2, 3, 4]) and np.all(filled[0] == 0))
 
 
 def _close(got: np.ndarray, ref: np.ndarray) -> bool:

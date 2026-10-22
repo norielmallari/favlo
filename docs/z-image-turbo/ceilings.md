@@ -46,4 +46,6 @@ The decoder adds one `attend` over the 160×160 latent, one head of 512, median 
 
 The decoder sum is 7.13 s. One generation is 202.87 s. The 90% test uses that kernel ceiling. The attention bandwidth ceiling is 1301 s.
 
-A 1280 generation of the smoke prompt printed `generation_seconds.total` 200.58 s, caption 0.18 s, and decoder 9.86 s. The eight steps were 23.73–23.99 s. That wall clock is within the 202.87 s kernel ceiling.
+The latent path adds `patchify`, `unpatchify`, `euler`, `sinusoid`, `copy_rows`, `zero_bytes`, `text_positions`, `image_positions`, `joined_positions`, `affine`, and `clip_u8_hwc`. Those dispatches are outside the block sum. At 1280 the medians are 0.046 ms, 0.099 ms, 0.028 ms, 0.007 ms, 0.739 ms for a 6400×3840 copy, 0.014 ms for a 128×3840 copy, 0.446 ms to clear the joined sequence, 0.031 ms to clear the token rows, 0.002 ms for a position table, 0.005 ms for the VAE scale, and 0.054 ms for the uint8 clip. Eight steps of that glue plus the decoder clip are 11.6 ms. The listed kernels are unchanged, so the kernel ceiling stays 202.87 s.
+
+A 1280 generation of the smoke prompt printed `generation_seconds.total` 202.56 s, caption 3.10 s, and decoder 9.75 s. The eight steps were 23.54–24.06 s. That wall clock is within the 202.87 s kernel ceiling.

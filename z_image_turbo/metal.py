@@ -36,6 +36,16 @@ _NAMES = (
     "nchw_to_f32",
     "rows_add_nchw",
     "euler",
+    "patchify",
+    "unpatchify",
+    "copy_rows",
+    "fill_half_rows",
+    "sinusoid",
+    "affine",
+    "text_positions",
+    "image_positions",
+    "joined_positions",
+    "clip_u8_hwc",
 )
 
 
@@ -183,6 +193,16 @@ class Gpu:
         self.end()
         view = buf.contents().as_buffer(count * 4)
         return np.frombuffer(view, dtype=np.float32, count=count).copy()
+
+    def read_u8(self, buf: Any, count: int) -> np.ndarray:
+        self.end()
+        view = buf.contents().as_buffer(count)
+        return np.frombuffer(view, dtype=np.uint8, count=count).copy()
+
+    def read_i32(self, buf: Any, count: int) -> np.ndarray:
+        self.end()
+        view = buf.contents().as_buffer(count * 4)
+        return np.frombuffer(view, dtype=np.int32, count=count).copy()
 
     def read_f16(self, buf: Any, count: int) -> np.ndarray:
         self.end()
@@ -560,6 +580,192 @@ class Gpu:
             [struct.pack("f", float(delta)), struct.pack("I", count)],
             (groups, 1, 1),
             (threads, 1, 1),
+        )
+
+    def patchify(
+        self,
+        latent: Any,
+        tokens: Any,
+        channels: int,
+        patch_h: int,
+        patch_w: int,
+        stride: int,
+    ) -> None:
+        span = channels * 4
+        self._dispatch(
+            "patchify",
+            [latent, tokens],
+            [
+                struct.pack("I", channels),
+                struct.pack("I", patch_h),
+                struct.pack("I", patch_w),
+                struct.pack("I", stride),
+            ],
+            ((span + 31) // 32, patch_h * patch_w, 1),
+            (32, 1, 1),
+        )
+
+    def unpatchify(
+        self,
+        tokens: Any,
+        latent: Any,
+        channels: int,
+        height: int,
+        width: int,
+        stride: int,
+    ) -> None:
+        count = channels * height * width
+        threads = 256
+        groups = (count + threads - 1) // threads
+        self._dispatch(
+            "unpatchify",
+            [tokens, latent],
+            [
+                struct.pack("I", channels),
+                struct.pack("I", height),
+                struct.pack("I", width),
+                struct.pack("I", stride),
+                struct.pack("I", count),
+            ],
+            (groups, 1, 1),
+            (threads, 1, 1),
+        )
+
+    def copy_rows(
+        self,
+        src: Any,
+        dst: Any,
+        src_stride: int,
+        dst_stride: int,
+        width: int,
+        src_row: int,
+        dst_row: int,
+        count: int,
+    ) -> None:
+        if count <= 0 or width <= 0:
+            return
+        self._dispatch(
+            "copy_rows",
+            [src, dst],
+            [
+                struct.pack("I", src_stride),
+                struct.pack("I", dst_stride),
+                struct.pack("I", width),
+                struct.pack("I", src_row),
+                struct.pack("I", dst_row),
+                struct.pack("I", count),
+            ],
+            ((width + 31) // 32, count, 1),
+            (32, 1, 1),
+        )
+
+    def fill_half_rows(self, token: Any, rows: Any, width: int, start: int, stop: int) -> None:
+        count = stop - start
+        if count <= 0:
+            return
+        self._dispatch(
+            "fill_half_rows",
+            [token, rows],
+            [
+                struct.pack("I", width),
+                struct.pack("I", start),
+                struct.pack("I", stop),
+            ],
+            ((width + 31) // 32, count, 1),
+            (32, 1, 1),
+        )
+
+    def sinusoid(self, dest: Any, value: float, dim: int) -> None:
+        self._dispatch(
+            "sinusoid",
+            [dest],
+            [struct.pack("f", float(value)), struct.pack("I", dim)],
+            (1, 1, 1),
+            (dim, 1, 1),
+        )
+
+    def affine(self, data: Any, scale: float, shift: float, count: int) -> None:
+        threads = 256
+        groups = (count + threads - 1) // threads
+        self._dispatch(
+            "affine",
+            [data],
+            [
+                struct.pack("f", float(scale)),
+                struct.pack("f", float(shift)),
+                struct.pack("I", count),
+            ],
+            (groups, 1, 1),
+            (threads, 1, 1),
+        )
+
+    def text_positions(self, dest: Any, rows: int, limit: int, start: int) -> None:
+        threads = 256
+        groups = (rows + threads - 1) // threads
+        self._dispatch(
+            "text_positions",
+            [dest],
+            [
+                struct.pack("I", rows),
+                struct.pack("I", limit),
+                struct.pack("i", int(start)),
+            ],
+            (groups, 1, 1),
+            (threads, 1, 1),
+        )
+
+    def image_positions(
+        self, dest: Any, rows: int, patch_h: int, patch_w: int, origin: int
+    ) -> None:
+        threads = 256
+        groups = (rows + threads - 1) // threads
+        self._dispatch(
+            "image_positions",
+            [dest],
+            [
+                struct.pack("I", rows),
+                struct.pack("I", patch_h),
+                struct.pack("I", patch_w),
+                struct.pack("i", int(origin)),
+            ],
+            (groups, 1, 1),
+            (threads, 1, 1),
+        )
+
+    def joined_positions(
+        self,
+        dest: Any,
+        rows: int,
+        image_count: int,
+        image_attend: int,
+        patch_w: int,
+        origin: int,
+        cap_len: int,
+    ) -> None:
+        threads = 256
+        groups = (rows + threads - 1) // threads
+        self._dispatch(
+            "joined_positions",
+            [dest],
+            [
+                struct.pack("I", rows),
+                struct.pack("I", image_count),
+                struct.pack("I", image_attend),
+                struct.pack("I", patch_w),
+                struct.pack("i", int(origin)),
+                struct.pack("I", cap_len),
+            ],
+            (groups, 1, 1),
+            (threads, 1, 1),
+        )
+
+    def clip_u8(self, nchw: Any, hwc: Any, height: int, width: int) -> None:
+        self._dispatch(
+            "clip_u8_hwc",
+            [nchw, hwc],
+            [struct.pack("I", height), struct.pack("I", width)],
+            ((width + 15) // 16, (height + 15) // 16, 1),
+            (16, 16, 1),
         )
 
     def _span(
