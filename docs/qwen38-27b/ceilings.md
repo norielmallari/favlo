@@ -97,10 +97,7 @@ Each prefill time below is one command buffer, then a wait, the median of five d
 | `cast_f32_f16` hidden | 2048×5120 | 64 | 244 | 15.64 |
 | `cast_f32_f16` intermediate | 2048×17408 | 64 | 798 | 51.04 |
 | `cast_f32_f16` z or o | 2048×6144 | 64 | 964 | 61.66 |
-| `zero_f32` | 2048×5120 | 129 | 138 | 17.78 |
-| `zero_f32` half hidden | 2048×5120 | 64 | 150 | 9.59 |
-| `zero_f32` half feed-forward | 2048×17408 | 64 | 397 | 25.38 |
-| `zero_f32` half z or o | 2048×6144 | 64 | 365 | 23.38 |
+| `zero_f32` | 2048×5120 | 1 | 138 | 0.14 |
 | `swiglu_f32` | 2048×17408 | 64 | 1687 | 107.94 |
 | `residual_rows` | 2048×5120 | 64 | 481 | 30.78 |
 | `rmsnorm_rows` | 2048×5120 | 128 | 331 | 42.34 |
@@ -111,4 +108,4 @@ Each prefill time below is one command buffer, then a wait, the median of five d
 | `kv_softmax_close` | 12288 | 64 | 45 | 2.86 |
 | `kv_acc_add` | 12288×256 | 64 | 41 | 2.59 |
 
-The sum is 5321.3 ms, 385 tok/s. That is the kernel ceiling for this set. Key and value stores, the query cast, the row init, the attend write, and the embedding row are outside it.
+The sum is 5245.3 ms, 390 tok/s. That is the kernel ceiling for this set. A full chunk does not clear the norm buffer or the half tile, because the norm and the cast overwrite them. Key and value stores, the query cast, the row init, the attend write, and the embedding row are outside it.

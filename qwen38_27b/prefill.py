@@ -132,13 +132,13 @@ def _chunk(
 
         scatter(runtime, work.hidden, pos0, count)
         for layer, kind in enumerate(runtime.layer_types):
-            _zero(runtime, work.normed, rows * HIDDEN)
+            if layer > 0 and layer % 4 == 0:
+                runtime.session.submit()
             _rms(runtime, work.hidden, runtime.weight(layer, "input_layernorm.weight"), work.normed, count)
             if kind == "full_attention":
                 _attend(runtime, work, layer, count, rows, pos0)
             else:
                 _gdn(runtime, work, layer, count, rows)
-            _zero(runtime, work.normed, rows * HIDDEN)
             _rms(
                 runtime,
                 work.hidden,
@@ -184,10 +184,8 @@ def _mtp_rows(
     )
     _cast_half(runtime, work, work.mix, rows * MIX, rows, MIX)
     _matmul(runtime, work.half, "mtp.fc.weight", work.hidden, rows)
-    _zero(runtime, work.normed, rows * HIDDEN)
     _rms(runtime, work.hidden, "mtp.layers.0.input_layernorm.weight", work.normed, count)
     _attend(runtime, work, None, count, rows, pos0, prefix="mtp.layers.0", slot=MTP_SLOT)
-    _zero(runtime, work.normed, rows * HIDDEN)
     _rms(runtime, work.hidden, "mtp.layers.0.post_attention_layernorm.weight", work.normed, count)
     _ffn(runtime, work, None, count, rows, prefix="mtp.layers.0")
 
@@ -383,17 +381,12 @@ def _matmul(runtime: Any, half: Any, name: str, dest: Any, rows: int) -> None:
 
 def _cast_half(runtime: Any, work: _Workspace, src: Any, n: int, rows: int, inner: int) -> None:
     span = rows * inner
-    if span % 2:
+    if span % 2 or n % 2:
         message = "half tile is an odd number of elements"
         raise RuntimeError(message)
-    nfloat = span // 2
-    runtime.session.encode(
-        "zero_f32",
-        [(work.half, 0)],
-        [],
-        (nfloat // 256, 1, 1),
-        (256, 1, 1),
-    )
+    if n < span:
+        # The cast writes the live rows. Only the padding rows still need a zero.
+        _zero(runtime, work.half, (span - n) // 2, offset=n * 2)
     if n % 256:
         message = f"cast length {n} is not a multiple of 256"
         raise RuntimeError(message)
@@ -406,11 +399,13 @@ def _cast_half(runtime: Any, work: _Workspace, src: Any, n: int, rows: int, inne
     )
 
 
-def _zero(runtime: Any, buf: Any, n: int) -> None:
+def _zero(runtime: Any, buf: Any, n: int, offset: int = 0) -> None:
+    if n == 0:
+        return
     if n % 256:
         message = f"zero length {n} is not a multiple of 256"
         raise RuntimeError(message)
-    runtime.session.encode("zero_f32", [(buf, 0)], [], (n // 256, 1, 1), (256, 1, 1))
+    runtime.session.encode("zero_f32", [(buf, offset)], [], (n // 256, 1, 1), (256, 1, 1))
 
 
 def _rms(runtime: Any, src: Any, name: str, dest: Any, rows: int) -> None:
