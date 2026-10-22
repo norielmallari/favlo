@@ -6,7 +6,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from favlo.smoke_lock import acquire, release
+from favlo.smoke_lock import acquire, hold, owner_pid, release
 
 
 class _Scripted(BaseHTTPRequestHandler):
@@ -105,6 +105,47 @@ def test_release_removes_only_this_pid(tmp_path: Path) -> None:
         server.server_close()
     assert code == 0
     assert not path.exists()
+
+
+def test_owner_pid_is_the_shell_above_uv(monkeypatch) -> None:
+    parents = {10: 9, 9: 8, 8: 1}
+    names = {10: "Python", 9: "uv", 8: "zsh"}
+    monkeypatch.setattr("favlo.smoke_lock._parent", lambda pid: parents.get(pid, 0))
+    monkeypatch.setattr("favlo.smoke_lock._ps", lambda _column, pid: names.get(pid, ""))
+    monkeypatch.setattr(os, "getpid", lambda: 10)
+    assert owner_pid() == 8
+
+
+def test_acquire_replaces_a_dead_pid(tmp_path: Path) -> None:
+    path = tmp_path / "artifacts" / "pipeline-test.lock"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"pipeline": "qwen38-27b", "pid": 2**30, "command": "smoke"}))
+    code = acquire(
+        root=tmp_path,
+        pipeline="qwen38-27b",
+        command="agent-smoke",
+        port=1,
+        pid=os.getpid(),
+    )
+    assert code == 0
+    assert json.loads(path.read_text())["pid"] == os.getpid()
+
+
+def test_hold_leaves_a_lock_this_shell_already_owns(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "artifacts" / "pipeline-test.lock"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"pipeline": "qwen38-27b", "pid": 4242, "command": "smoke"}))
+    monkeypatch.setattr("favlo.smoke_lock.owner_pid", lambda: 4242)
+    monkeypatch.setattr("favlo.smoke_lock.alive", lambda pid: pid == 4242)
+    created = hold(
+        root=tmp_path,
+        pipeline="qwen38-27b",
+        command="file-agent",
+        port=1,
+        pid=4242,
+    )
+    assert created is False
+    assert json.loads(path.read_text())["command"] == "smoke"
 
 
 def test_acquire_does_not_steal_a_live_lock(tmp_path: Path) -> None:

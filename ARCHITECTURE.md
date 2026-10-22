@@ -21,7 +21,7 @@ Shared code is `src/favlo/`. There is no model base class and no kernel that bra
 
 The daemon is a request server. It does not own chat history, tools, or the terminal session. The CLI owns those. Telemetry is one JSON event per line. The terminal paints it as it arrives, and prints the reply after that turn's requests have closed.
 
-`python -m favlo.smoke_lock` is how a pipeline test takes the GPU while the daemon stays up. Acquire closes the resident model when no request is open. Release lets the next chat load one again. The listener note is [docs/serve.md](docs/serve.md).
+`python -m favlo.smoke_lock` is how a pipeline test takes the GPU while the daemon stays up. Acquire closes the resident model when no request is open. Release lets the next chat load one again. The recorded pid is the invoking shell. `uv` and `python` are not that owner. A command started from a shell that already holds the lock leaves the file in place and does not release it. The listener note is [docs/serve.md](docs/serve.md).
 
 ## Runtimes
 

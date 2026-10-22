@@ -10,8 +10,6 @@ Each request's server prefill and decode lines are the thinking series.
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -22,7 +20,6 @@ from harness.coding.loop import run_session
 from harness.file_session import format_request, format_summary, parse_requests
 
 _ROOT = Path(__file__).resolve().parents[2]
-_LOCK = _ROOT / "artifacts" / "pipeline-test.lock"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -31,6 +28,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-memory", default=None, help="serve memory cap, such as 16GiB")
     args = parser.parse_args(argv)
     stem = args.model.partition(":")[0]
+    from favlo.cli import repo_root
+    from favlo.smoke_lock import hold, release
+
+    root = repo_root()
+    created = hold(root=root, pipeline=stem, command="coding")
     workspace = _ROOT / "artifacts" / "coding" / stem
     if workspace.exists():
         for child in sorted(workspace.rglob("*"), reverse=True):
@@ -39,7 +41,6 @@ def main(argv: list[str] | None = None) -> int:
             elif child.is_dir():
                 child.rmdir()
     workspace.mkdir(parents=True, exist_ok=True)
-    take_lock(stem)
     server = Server(args.max_memory)
     try:
         server.start()
@@ -48,7 +49,8 @@ def main(argv: list[str] | None = None) -> int:
         result = grade(workspace)
     finally:
         server.stop()
-        release_lock()
+        if created:
+            release(root=root)
     sys.stdout.write(result.stdout)
     sys.stderr.write(result.stderr)
     if result.returncode == 0:
@@ -71,53 +73,6 @@ def _print_rates(log: object) -> None:
     for index, request in enumerate(requests, start=1):
         print(format_request(index, request), flush=True)
     print(format_summary(requests, 0), flush=True)
-
-
-def take_lock(pipeline: str) -> None:
-    """Exclusive machine lock. A live holder is left alone."""
-    _LOCK.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps({"pipeline": pipeline, "pid": os.getpid(), "command": "coding"}).encode()
-    while True:
-        if _LOCK.exists() and not _stale_lock():
-            time.sleep(5)
-            continue
-        try:
-            fd = os.open(_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        except FileExistsError:
-            continue
-        os.write(fd, payload)
-        os.close(fd)
-        try:
-            current = json.loads(_LOCK.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if current.get("pid") == os.getpid():
-            return
-
-
-def release_lock() -> None:
-    if not _LOCK.exists():
-        return
-    try:
-        current = json.loads(_LOCK.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
-    if current.get("pid") == os.getpid():
-        _LOCK.unlink()
-
-
-def _stale_lock() -> bool:
-    try:
-        current = json.loads(_LOCK.read_text(encoding="utf-8"))
-        pid = int(current["pid"])
-    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
-        return False
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        _LOCK.unlink()
-        return True
-    return False
 
 
 if __name__ == "__main__":

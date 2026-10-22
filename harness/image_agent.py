@@ -12,7 +12,6 @@ import asyncio
 import base64
 import json
 import socket
-import time
 import urllib.request
 from pathlib import Path
 from typing import Annotated, Any
@@ -139,17 +138,10 @@ def _listening(port: int) -> bool:
         return sock.connect_ex((HOST, port)) == 0
 
 
-def _hold_machine(root: Path) -> None:
-    from favlo.smoke_lock import acquire
+def _hold_machine(root: Path) -> bool:
+    from favlo.smoke_lock import hold
 
-    deadline = time.monotonic() + 3600
-    while time.monotonic() < deadline:
-        code = acquire(root=root, pipeline="qwen36-35b-a3b", command="image-agent")
-        if code == 0:
-            return
-        time.sleep(15)
-    message = "the machine stayed busy"
-    raise TimeoutError(message)
+    return hold(root=root, pipeline="qwen36-35b-a3b", command="image-agent")
 
 
 def _open_server(root: Path, was_up: bool) -> tuple[int, Any]:
@@ -171,11 +163,12 @@ def main(argv: list[str] | None = None) -> int:
     body = smoke_body(root)
     was_up = _listening(PORT)
     owned = None
+    created = False
     from favlo.cli import repo_root
     from favlo.smoke_lock import release
 
-    _hold_machine(repo_root())
     try:
+        created = _hold_machine(repo_root())
         port, owned = _open_server(root, was_up)
         base = f"http://{HOST}:{port}/v1"
         print(f"generating on {port}", flush=True)
@@ -195,7 +188,8 @@ def main(argv: list[str] | None = None) -> int:
             from harness.benchmarks.serve import stop_server
 
             stop_server(owned[0], owned[1])
-        release(root=repo_root())
+        if created:
+            release(root=repo_root())
 
 
 if __name__ == "__main__":

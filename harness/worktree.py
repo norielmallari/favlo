@@ -48,9 +48,7 @@ from harness.file_session import (
     model_stem,
     parse_requests,
     read_repository_file,
-    release_lock,
     source_files,
-    take_lock,
 )
 
 TARGET_TOKENS = 131072
@@ -486,7 +484,11 @@ def main(argv: list[str] | None = None) -> int:
         print("token target must be positive")
         return 1
     stem = model_stem(args.model)
-    take_lock(stem, "worktree")
+    from favlo.cli import repo_root
+    from favlo.smoke_lock import hold, release
+
+    root = repo_root()
+    created = hold(root=root, pipeline=stem, command="worktree")
     log = Log()
     server: Server | None = None
     try:
@@ -503,7 +505,8 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if server is not None:
             _stop_server(server)
-        release_lock()
+        if created:
+            release(root=root)
     print(format_summary(requests, args.tokens))
     if note:
         print(note)

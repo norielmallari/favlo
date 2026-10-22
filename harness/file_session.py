@@ -71,15 +71,22 @@ def model_stem(model: str) -> str:
 def source_files(root: Path) -> list[Path]:
     """UTF-8 source files, largest first. Models, artifacts, and caches are omitted."""
     base = root.resolve()
-    found: list[Path] = []
-    for path in base.rglob("*"):
-        if not path.is_file() or path.suffix not in TEXT_SUFFIXES or path.stat().st_size == 0:
-            continue
-        if any(part in SKIP_PARTS for part in path.relative_to(base).parts):
-            continue
-        found.append(path)
-    found.sort(key=lambda item: (-item.stat().st_size, item.relative_to(base).as_posix()))
-    return found
+    found: list[tuple[int, Path]] = []
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = [name for name in dirnames if name not in SKIP_PARTS]
+        for name in filenames:
+            path = Path(dirpath) / name
+            if path.suffix not in TEXT_SUFFIXES:
+                continue
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            if size == 0:
+                continue
+            found.append((size, path))
+    found.sort(key=lambda item: (-item[0], item[1].relative_to(base).as_posix()))
+    return [path for _size, path in found]
 
 
 def read_repository_file(
@@ -664,59 +671,6 @@ def _restart(server: Server, log: Log) -> None:
     _wait_listening(server, log, seen)
 
 
-_LOCK = Path(__file__).resolve().parents[1] / "artifacts" / "pipeline-test.lock"
-
-
-def take_lock(pipeline: str, command: str = "file-agent") -> None:
-    """Exclusive machine lock. A live holder is left alone."""
-    _LOCK.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(
-        {"pipeline": pipeline, "pid": os.getpid(), "command": command}
-    ).encode()
-    while True:
-        if _LOCK.exists() and not _stale_lock():
-            time.sleep(5)
-            continue
-        try:
-            fd = os.open(_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        except FileExistsError:
-            continue
-        os.write(fd, payload)
-        os.close(fd)
-        try:
-            current = json.loads(_LOCK.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if current.get("pid") == os.getpid():
-            return
-
-
-def release_lock() -> None:
-    if not _LOCK.exists():
-        return
-    try:
-        current = json.loads(_LOCK.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
-    if current.get("pid") == os.getpid():
-        _LOCK.unlink()
-
-
-def _stale_lock() -> bool:
-    try:
-        current = json.loads(_LOCK.read_text(encoding="utf-8"))
-        pid = int(current["pid"])
-    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    except OSError:
-        return False
-    return False
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Read repository files until the prompt reaches a token target."
@@ -731,7 +685,11 @@ def main(argv: list[str] | None = None) -> int:
         print("token target must be positive")
         return 1
     stem = model_stem(args.model)
-    take_lock(stem)
+    from favlo.cli import repo_root
+    from favlo.smoke_lock import hold, release
+
+    root = repo_root()
+    created = hold(root=root, pipeline=stem, command="file-agent")
     log = Log()
     server: Server | None = None
     try:
@@ -748,7 +706,8 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if server is not None:
             _stop_server(server)
-        release_lock()
+        if created:
+            release(root=root)
     print(format_summary(result.requests, args.tokens))
     if result.note:
         print(result.note)

@@ -46,6 +46,6 @@ Release removes the file only when its `pid` is this shell. A chat during the ho
 {"pipeline": "qwen38-27b", "pid": 12345, "command": "kernels"}
 ```
 
-`pipeline` is the flag stem. `pid` is the shell that owns the test. `command` is the short name of that test. Do not write a name, home directory, hostname, or device path.
+`pipeline` is the flag stem. `pid` is the shell that owns the test. `uv` and `python` are skipped when the script records that pid, so `uv run` names the shell that stays up for the stretch. A nested command from that shell leaves the file in place. `command` is the short name of that test. Do not write a name, home directory, hostname, or device path.
 
 The file lives under `artifacts/`, which is gitignored. Do not commit it. `pid` is the shell that ran acquire, not the short-lived Python process. Run acquire, the test, and release in that same shell.

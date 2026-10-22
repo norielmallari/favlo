@@ -137,13 +137,14 @@ def main(argv: list[str] | None = None) -> int:
     root = args.root.resolve()
     was_up = _listening(PORT)
     owned = None
+    created = False
     png: list[bytes] = []
     timing: list[dict[str, Any]] = []
     from favlo.cli import repo_root
     from favlo.smoke_lock import release
 
-    _hold_machine(repo_root())
     try:
+        created = _hold_machine(repo_root())
         port, owned = _open_server(root, was_up)
         base = f"http://{HOST}:{port}/v1"
         print(f"generating on {port} size {MAX_EDGE}", flush=True)
@@ -167,7 +168,8 @@ def main(argv: list[str] | None = None) -> int:
             from harness.benchmarks.serve import stop_server
 
             stop_server(owned[0], owned[1])
-        release(root=repo_root())
+        if created:
+            release(root=repo_root())
 
 
 if __name__ == "__main__":

@@ -14,7 +14,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -32,6 +34,62 @@ def lock_path(root: Path) -> Path:
     return root / "artifacts" / "pipeline-test.lock"
 
 
+def owner_pid() -> int:
+    """Process id of the shell that started this command.
+
+    ``uv run`` and the Python interpreter sit between that shell and this
+    module. Those parents exit when the module returns, so they are not the
+    owner.
+    """
+    current = os.getpid()
+    seen: set[int] = set()
+    while current > 1 and current not in seen:
+        seen.add(current)
+        if not _launcher(current):
+            return current
+        parent = _parent(current)
+        if parent <= 1:
+            return current
+        current = parent
+    return os.getppid()
+
+
+def hold(
+    *,
+    root: Path,
+    pipeline: str,
+    command: str,
+    host: str = _HOST,
+    port: int = _PORT,
+    pid: int | None = None,
+    wait: float = 5.0,
+) -> bool:
+    """Wait until this shell holds the lock.
+
+    Return True when this call created the file. A lock this shell already
+    holds stays as it is, and the return is False, so a nested command does
+    not release the caller's hold.
+    """
+    owner = owner_pid() if pid is None else pid
+    while True:
+        holder = _read_pid(lock_path(root))
+        if holder == owner and alive(holder):
+            return False
+        code = acquire(
+            root=root,
+            pipeline=pipeline,
+            command=command,
+            host=host,
+            port=port,
+            pid=owner,
+        )
+        if code == 0:
+            return True
+        if code not in {2, 3}:
+            raise RuntimeError(f"lock status {code}")
+        time.sleep(wait)
+
+
 def acquire(
     *,
     root: Path,
@@ -42,7 +100,7 @@ def acquire(
     pid: int | None = None,
 ) -> int:
     """Close an idle resident model, then hold the machine lock."""
-    owner = os.getppid() if pid is None else pid
+    owner = owner_pid() if pid is None else pid
     status = _claim(root, pipeline, command, owner)
     if status != 0:
         return status
@@ -75,7 +133,7 @@ def release(
     pid: int | None = None,
 ) -> int:
     """Clear the smoke hold and remove this shell's lock."""
-    owner = os.getppid() if pid is None else pid
+    owner = owner_pid() if pid is None else pid
     path = lock_path(root)
     holder = _read_pid(path)
     if holder is not None and holder != owner and alive(holder):
@@ -92,6 +150,34 @@ def release(
         _drop_claim(root, owner if holder == owner else holder or owner)
     print("lock released")
     return 0
+
+
+def _parent(pid: int) -> int:
+    text = _ps("ppid=", pid)
+    try:
+        return int(text or "0")
+    except ValueError:
+        return 0
+
+
+def _launcher(pid: int) -> bool:
+    name = Path(_ps("comm=", pid)).name.lower()
+    return name == "uv" or name.startswith("python")
+
+
+def _ps(column: str, pid: int) -> str:
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", column, "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return ""
+    if completed.returncode != 0:
+        return ""
+    return completed.stdout.strip()
 
 
 def _claim(root: Path, pipeline: str, command: str, pid: int) -> int:

@@ -1,6 +1,6 @@
 # Harness
 
-As-built clients that score a running `favlo serve`. The map is [../ARCHITECTURE.md](../ARCHITECTURE.md). A pipeline's scores live in that pipeline's `benchmarks.md`.
+As-built clients that score a running `favlo serve`. The map is [../ARCHITECTURE.md](../ARCHITECTURE.md). A pipeline's scores live in that pipeline's `benchmarks.md`. A command that starts `serve` takes the machine lock with `python -m favlo.smoke_lock`. The recorded pid is the shell that invoked it. A lock that shell already holds stays in place.
 
 `python -m harness.benchmarks --model <id>` scores IFEval, GSM8K, and HumanEval against `serve`. The `model` field is that id. Thinking stays off. Omitted sampling fields are filled from `GET /v1/models` row `<id>:instruct`. A CLI flag overrides that field. The checker reads `message.content`. `--limit 30` scores the first 30 rows and writes the smoke section. `--limit 100` writes the sample of 100. A run with no limit scores the smoke, then the full sets. That run is not part of `pytest`. Each finished suite is written into `docs/<pipeline>/benchmarks.md`.
 
