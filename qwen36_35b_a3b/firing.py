@@ -258,7 +258,10 @@ def _store(folder: str) -> FiringStore:
 
 
 def _width_counts(runtime: Any) -> tuple[int, int, int]:
-    """fp8, fp4, and int2. This record is uniform fp4, so int2 stays 0."""
+    """fp8, fp4, and int2. A uniform record is all fp4. int2 stays 0."""
+    layout = getattr(getattr(runtime, "atlas", None), "layout", None)
+    if layout is not None and layout.mixed:
+        return layout.count(8), layout.count(4), 0
     manifest = getattr(runtime, "manifest", None) or {}
     layers = int(manifest.get("layers") or LAYERS)
     experts = int(manifest.get("experts") or EXPERTS)

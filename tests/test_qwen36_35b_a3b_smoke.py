@@ -2,7 +2,7 @@
 
 Greedy instruct is temperature 0. The recommended instruct and thinking cases
 use this model's sampling card. Thinking runs when the checkpoint template
-opens a think block. A reasoning effort runs only when that template names it.
+opens a think block. A passed reasoning effort is not rendered.
 The reply is 6 carrots.
 """
 
@@ -50,12 +50,6 @@ def _template(root: Path) -> str:
     return text if isinstance(text, str) else ""
 
 
-def _efforts(template: str) -> tuple[str, ...]:
-    if "reasoning_effort" not in template:
-        return ()
-    return tuple(name for name in ("low", "medium", "xhigh") if f"'{name}'" in template)
-
-
 @pytest.fixture(scope="module")
 def carrot_runtime():
     if not (_ROOT / "manifest.json").is_file():
@@ -71,7 +65,6 @@ def _complete(
     runtime: Qwen36Runtime,
     *,
     thinking: bool,
-    effort: str | None,
     temperature: float,
     top_p: float,
     top_k: int,
@@ -86,7 +79,6 @@ def _complete(
         [{"role": "user", "content": CARROT_PROMPT}],
         None,
         thinking,
-        effort,
     )
     close: list[int] | None = None
     end = None
@@ -135,7 +127,6 @@ def test_carrot_instruct_greedy(carrot_runtime: Qwen36Runtime) -> None:
     text = _complete(
         carrot_runtime,
         thinking=False,
-        effort=None,
         temperature=0.0,
         top_p=1.0,
         top_k=0,
@@ -149,7 +140,6 @@ def test_carrot_instruct_recommended(carrot_runtime: Qwen36Runtime) -> None:
     text = _complete(
         carrot_runtime,
         thinking=False,
-        effort=None,
         temperature=float(card["temperature"]),
         top_p=float(card["top_p"]),
         top_k=int(card["top_k"]),
@@ -167,7 +157,6 @@ def test_carrot_thinking_recommended(carrot_runtime: Qwen36Runtime) -> None:
         text = _complete(
             carrot_runtime,
             thinking=True,
-            effort=None,
             temperature=float(card["temperature"]),
             top_p=float(card["top_p"]),
             top_k=int(card["top_k"]),
@@ -184,35 +173,3 @@ def test_carrot_thinking_recommended(carrot_runtime: Qwen36Runtime) -> None:
         return
     raise AssertionError("carrot reply did not collect 6 carrots\n" + "\n".join(misses))
 
-
-def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
-    if "carrot_effort" not in metafunc.fixturenames:
-        return
-    template = _template(_ROOT)
-    efforts = _efforts(template) if "enable_thinking" in template else ()
-    if not efforts:
-        metafunc.parametrize(
-            "carrot_effort",
-            [
-                pytest.param(
-                    "none",
-                    marks=pytest.mark.skip(reason="template names no reasoning effort"),
-                )
-            ],
-        )
-        return
-    metafunc.parametrize("carrot_effort", efforts)
-
-
-def test_carrot_thinking_effort(carrot_runtime: Qwen36Runtime, carrot_effort: str) -> None:
-    card = VARIANTS["thinking"]
-    text = _complete(
-        carrot_runtime,
-        thinking=True,
-        effort=carrot_effort,
-        temperature=float(card["temperature"]),
-        top_p=float(card["top_p"]),
-        top_k=int(card["top_k"]),
-        presence=float(card["presence_penalty"]),
-    )
-    print(f"thinking {carrot_effort}: {text[:160]}")

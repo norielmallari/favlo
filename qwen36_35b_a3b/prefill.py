@@ -7,7 +7,8 @@ with the state update and the outputs dispatched across the chunk and the 32
 heads. The short convolution is one thread per token and channel. Float
 attention is one dispatch per layer. fp8 and fp4 attention
 scores and value mixes are ``matmul2d`` tiles. Expert groups are gathered,
-multiplied, and scattered back onto the token rows.
+multiplied, and scattered back onto the token rows. A widths file
+dispatches the fp8 expert tile when that expert's width byte is 8.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import numpy as np
 
 from qwen36_35b_a3b.attn import attend_plane
 from qwen36_35b_a3b.convert import GATE_UP_BYTES
-from qwen36_35b_a3b.formats import EXPERT_IMAGE
+from qwen36_35b_a3b.formats import EXPERT_IMAGE, FP8_DOWN_DATA, FP8_DOWN_SCALE, FP8_GATE_SCALE
 
 CHUNK = 2048
 HIDDEN = 2048
@@ -535,8 +536,17 @@ def _experts(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) 
     """Shared expert, then routed experts. Groups are built on device."""
     prefix = f"model.language_model.layers.{layer}.mlp."
     if runtime.atlas.complete:
+        offsets = runtime.expert_offsets if runtime.atlas.layout.mixed else None
         _expert_pass(
-            runtime, work, layer, count, rows, prefix, runtime.atlas.layers[layer], None, True
+            runtime,
+            work,
+            layer,
+            count,
+            rows,
+            prefix,
+            runtime.atlas.layers[layer],
+            offsets,
+            True,
         )
         return
     runtime.session.end()
@@ -574,11 +584,16 @@ def _stage_present(runtime: Any, layer: int, ids: np.ndarray, offsets: Any) -> A
         for value in dict.fromkeys(int(item) for item in ids.tolist())
         if int(value) < 256
     ]
-    placed = runtime.atlas.stage(layer, present)
-    table = np.zeros(256, dtype=np.uint64)
-    image = np.uint64(EXPERT_IMAGE)
-    for file_slot, atlas_slot in zip(present, placed, strict=True):
-        table[file_slot] = np.uint64(atlas_slot) * image
+    table = np.zeros(_EXPERTS, dtype=np.uint64)
+    if runtime.atlas.layout.mixed:
+        placed = runtime.atlas.stage_offsets(layer, present)
+        for file_slot, byte_off in zip(present, placed, strict=True):
+            table[file_slot] = np.uint64(byte_off)
+    else:
+        placed = runtime.atlas.stage(layer, present)
+        image = np.uint64(EXPERT_IMAGE)
+        for file_slot, atlas_slot in zip(present, placed, strict=True):
+            table[file_slot] = np.uint64(atlas_slot) * image
     raw = table.tobytes()
     memoryview(offsets.contents().as_buffer(len(raw)))[:] = raw
     return runtime.atlas.buffer
@@ -596,7 +611,6 @@ def _expert_pass(
     shared: bool,
 ) -> None:
     """One grouped expert pass. ``shared`` runs the shared expert on the first pass."""
-    del layer
     if shared:
         _cast(runtime, work.normed, work.half, rows * HIDDEN)
         _matmul(runtime, work.half, prefix + "shared_expert.gate_up", work.gate_up, rows)
@@ -665,7 +679,21 @@ def _expert_pass(
         0,
         threads,
     )
-    _grouped_tiles(runtime, work, file, offsets, work.expert_out, 1024, HIDDEN, 0, _GATE_SCALE, 2)
+    _expert_tiles(
+        runtime,
+        work,
+        layer,
+        file,
+        offsets,
+        work.expert_out,
+        1024,
+        HIDDEN,
+        0,
+        _GATE_SCALE,
+        0,
+        FP8_GATE_SCALE,
+        2,
+    )
     _indirect(
         runtime,
         work.group,
@@ -684,9 +712,10 @@ def _expert_pass(
         4,
         threads,
     )
-    _grouped_tiles(
+    _expert_tiles(
         runtime,
         work,
+        layer,
         file,
         offsets,
         work.expert_down,
@@ -694,6 +723,8 @@ def _expert_pass(
         512,
         GATE_UP_BYTES,
         GATE_UP_BYTES + _DOWN_SCALE,
+        FP8_DOWN_DATA,
+        FP8_DOWN_SCALE,
         5,
     )
     runtime.session.encode(
@@ -753,6 +784,108 @@ def _indirect(
         group,
         16 + record * 16,
         threads,
+    )
+
+
+def _expert_tiles(
+    runtime: Any,
+    work: _Workspace,
+    layer: int,
+    file: Any,
+    offsets: Any,
+    dest: Any,
+    cols: int,
+    inner: int,
+    fp4_data: int,
+    fp4_scale: int,
+    fp8_data: int,
+    fp8_scale: int,
+    record: int,
+) -> None:
+    """Launch the fp4 tile, and the fp8 tile when this layer stores an fp8 expert."""
+    layout = runtime.atlas.layout
+    if not layout.mixed:
+        _grouped_tiles(
+            runtime, work, file, offsets, dest, cols, inner, fp4_data, fp4_scale, record
+        )
+        return
+    if offsets is None:
+        message = "a mixed expert file has no byte offsets"
+        raise RuntimeError(message)
+    table = getattr(runtime, "expert_offsets", None)
+    off_at = layer * _EXPERTS * 8 if offsets is table else 0
+    widths = runtime.expert_widths
+    width_at = layer * _EXPERTS
+    if layout.has(layer, 4):
+        _width_tiles(
+            runtime,
+            work,
+            "prefill_fp4_expert_tile_w",
+            file,
+            offsets,
+            off_at,
+            widths,
+            width_at,
+            dest,
+            cols,
+            inner,
+            fp4_data,
+            fp4_scale,
+            record,
+        )
+    if layout.has(layer, 8):
+        _width_tiles(
+            runtime,
+            work,
+            "prefill_fp8_expert_tile_at",
+            file,
+            offsets,
+            off_at,
+            widths,
+            width_at,
+            dest,
+            cols,
+            inner,
+            fp8_data,
+            fp8_scale,
+            record,
+        )
+
+
+def _width_tiles(
+    runtime: Any,
+    work: _Workspace,
+    name: str,
+    file: Any,
+    offsets: Any,
+    off_at: int,
+    widths: Any,
+    width_at: int,
+    dest: Any,
+    cols: int,
+    inner: int,
+    image_data: int,
+    image_scale: int,
+    record: int,
+) -> None:
+    _indirect(
+        runtime,
+        work.group,
+        name,
+        [
+            (work.expert_pack, 0),
+            (file, 0),
+            (dest, 0),
+            (work.jobs, 0),
+            (work.expert_of, 0),
+            (work.row_base, 0),
+            (work.group, 0),
+            (offsets, off_at),
+            (widths, width_at),
+        ],
+        [_u32(inner), _u32(cols), _u32(image_data), _u32(image_scale)],
+        record,
+        _tile_threads(runtime),
     )
 
 

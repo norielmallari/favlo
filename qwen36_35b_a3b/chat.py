@@ -138,7 +138,12 @@ def encode_chat(
     enable_thinking: bool,
     reasoning_effort: str | None = None,
 ) -> list[int]:
-    """Render the checkpoint template and encode it."""
+    """Render the checkpoint template and encode it.
+
+    A passed reasoning effort is ignored. This checkpoint opens or closes
+    thinking only through ``enable_thinking``.
+    """
+    del reasoning_effort
     template = (root / "chat_template.jinja").read_text()
     env = Environment()
     env.globals["raise_exception"] = _raise
@@ -150,8 +155,6 @@ def encode_chat(
         "add_vision_id": False,
         "preserve_thinking": True,
     }
-    if reasoning_effort:
-        rendered_args["reasoning_effort"] = reasoning_effort
     rendered = env.from_string(template).render(**rendered_args)
     return list(load_tokenizer(root).encode(rendered).ids)
 

@@ -48,10 +48,6 @@ def carrot_runtime():
         runtime.close()
 
 
-def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
-    _CASES.pytest_generate_tests(metafunc)
-
-
 def test_carrot_instruct_greedy(carrot_runtime: Qwen36Runtime) -> None:
     _CASES.test_carrot_instruct_greedy(carrot_runtime)
 
@@ -62,7 +58,3 @@ def test_carrot_instruct_recommended(carrot_runtime: Qwen36Runtime) -> None:
 
 def test_carrot_thinking_recommended(carrot_runtime: Qwen36Runtime) -> None:
     _CASES.test_carrot_thinking_recommended(carrot_runtime)
-
-
-def test_carrot_thinking_effort(carrot_runtime: Qwen36Runtime, carrot_effort: str) -> None:
-    _CASES.test_carrot_thinking_effort(carrot_runtime, carrot_effort)

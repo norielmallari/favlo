@@ -15,6 +15,12 @@ FP8_QMAX = 448.0
 FP4_MAGNITUDE = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float64)
 PAGE = 16384
 EXPERT_IMAGE = 1_671_168
+# fp8 E4M3 gate-up is 2,097,152 data bytes plus 65,536 scale bytes.
+# The down plane starts on the next 128-byte boundary.
+EXPERT_FP8 = 3_244_032
+FP8_GATE_SCALE = 2_097_152
+FP8_DOWN_DATA = 2_162_688
+FP8_DOWN_SCALE = 3_211_264
 
 
 def stored_k(inner: int) -> int:
@@ -144,3 +150,142 @@ def decode_e4m3(codes: np.ndarray) -> np.ndarray:
 def dequant_e4m3_block(codes: np.ndarray, scale: int) -> np.ndarray:
     factor = np.ldexp(np.float32(1.0), int(scale) - 127)
     return decode_e4m3(codes).reshape(-1) * factor
+
+
+def _e4m3_ladder() -> tuple[np.ndarray, np.ndarray]:
+    codes = np.arange(256, dtype=np.uint8)
+    values = decode_e4m3(codes)
+    finite = np.isfinite(values)
+    kept = codes[finite]
+    ladder = values[finite].astype(np.float32)
+    order = np.argsort(ladder, kind="mergesort")
+    return kept[order], ladder[order]
+
+
+_E4M3_CODE, _E4M3_VALUE = _e4m3_ladder()
+
+
+def _nearest_e4m3(scaled: np.ndarray) -> np.ndarray:
+    """Nearest finite E4M3FN code. An exact tie keeps the even mantissa."""
+    flat = np.nan_to_num(
+        np.ascontiguousarray(scaled, dtype=np.float32).reshape(-1),
+        nan=0.0,
+        posinf=FP8_QMAX,
+        neginf=-FP8_QMAX,
+    )
+    flat = np.clip(flat, -FP8_QMAX, FP8_QMAX)
+    pos = np.searchsorted(_E4M3_VALUE, flat, side="left")
+    hi = np.clip(pos, 1, len(_E4M3_VALUE) - 1)
+    lo = hi - 1
+    dlo = np.abs(_E4M3_VALUE[lo] - flat)
+    dhi = np.abs(_E4M3_VALUE[hi] - flat)
+    clo = _E4M3_CODE[lo]
+    chi = _E4M3_CODE[hi]
+    prefer_lo = dlo < dhi
+    tie = dlo == dhi
+    lo_even = (clo & np.uint8(1)) == 0
+    hi_even = (chi & np.uint8(1)) == 0
+    both = lo_even == hi_even
+    tie_lo = tie & ((lo_even & ~hi_even) | (both & (clo <= chi)))
+    chosen = np.where(prefer_lo | tie_lo, clo, chi).astype(np.uint8)
+    return chosen.reshape(scaled.shape)
+
+
+def quantize_fp8(weight: np.ndarray) -> tuple[bytes, bytes]:
+    """Pack ``[rows, inner]`` float32 as E4M3FN. Inner is a multiple of 32.
+
+    ``0x7F`` is NaN and is not stored. Values past 448 saturate to 448.
+    """
+    matrix = np.ascontiguousarray(weight, dtype=np.float32)
+    rows, inner = matrix.shape
+    if inner % BLOCK:
+        message = f"inner dimension {inner} is not a multiple of {BLOCK}"
+        raise ValueError(message)
+    values = matrix.reshape(rows, inner // BLOCK, BLOCK)
+    amax = np.max(np.abs(values), axis=-1)
+    biased, scale = biased_e8m0(amax, FP8_QMAX)
+    codes = _nearest_e4m3(values / scale[..., None])
+    data = np.ascontiguousarray(codes.reshape(rows, inner))
+    return data.tobytes(), np.ascontiguousarray(biased).tobytes()
+
+
+def dequant_fp8(data: bytes, scales: bytes, rows: int, inner: int) -> np.ndarray:
+    codes = np.frombuffer(data, dtype=np.uint8).reshape(rows, inner)
+    factors = np.frombuffer(scales, dtype=np.uint8).astype(np.int32).reshape(rows, inner // BLOCK)
+    restored = decode_e4m3(codes).reshape(rows, inner // BLOCK, BLOCK)
+    restored *= np.ldexp(np.ones(factors.shape, dtype=np.float32), factors - 127)[..., None]
+    return restored.reshape(rows, inner)
+
+
+def pack_fp8_matrix(weight: np.ndarray) -> tuple[bytes, bytes, int, int]:
+    """Pad K to a multiple of 128. Returns data, scales, rows, and stored K."""
+    matrix = np.ascontiguousarray(weight, dtype=np.float32)
+    rows, inner = matrix.shape
+    if inner < 1:
+        message = f"inner dimension {inner} is empty"
+        raise ValueError(message)
+    stored = ((inner + 127) // 128) * 128
+    if stored != inner:
+        padded = np.zeros((rows, stored), dtype=np.float32)
+        padded[:, :inner] = matrix
+        matrix = padded
+    data, scales = quantize_fp8(matrix)
+    return data, scales, rows, stored
+
+
+def fp8_image(weight: np.ndarray) -> bytes:
+    """Data plane, then the E8M0 plane. Both start on a 128-byte boundary."""
+    data, scales, _rows, _inner = pack_fp8_matrix(weight)
+    pad = (128 - (len(data) % 128)) % 128
+    return data + (b"\x00" * pad) + scales
+
+
+def expert_bytes(width: int) -> int:
+    """Byte length of one routed expert image."""
+    if width == 4:
+        return EXPERT_IMAGE
+    if width == 8:
+        return EXPERT_FP8
+    message = f"expert width {width} is not 4 or 8"
+    raise ValueError(message)
+
+
+def expert_offsets(widths: np.ndarray) -> np.ndarray:
+    """Pack each layer in expert-index order. Both image lengths divide by 128."""
+    matrix = np.ascontiguousarray(widths, dtype=np.uint8)
+    offsets = np.zeros(matrix.shape, dtype=np.uint64)
+    for layer in range(matrix.shape[0]):
+        cursor = 0
+        for expert in range(matrix.shape[1]):
+            offsets[layer, expert] = cursor
+            cursor += expert_bytes(int(matrix[layer, expert]))
+    return offsets
+
+
+def expert_file_bytes(widths: np.ndarray, offsets: np.ndarray) -> list[int]:
+    """Byte length of each layer file. Images stay 128-byte aligned and do not overlap."""
+    matrix = np.ascontiguousarray(widths, dtype=np.uint8)
+    places = np.ascontiguousarray(offsets, dtype=np.uint64)
+    if matrix.shape != places.shape:
+        message = "expert widths and offsets have different shapes"
+        raise ValueError(message)
+    sizes: list[int] = []
+    for layer in range(matrix.shape[0]):
+        spans: list[tuple[int, int]] = []
+        end = 0
+        for expert in range(matrix.shape[1]):
+            off = int(places[layer, expert])
+            if off % 128:
+                message = f"expert {layer}:{expert} offset {off} is not 128-byte aligned"
+                raise ValueError(message)
+            size = expert_bytes(int(matrix[layer, expert]))
+            spans.append((off, size))
+            end = max(end, off + size)
+        cursor = 0
+        for off, size in sorted(spans):
+            if off < cursor:
+                message = f"layer {layer} expert images overlap"
+                raise ValueError(message)
+            cursor = off + size
+        sizes.append(end)
+    return sizes

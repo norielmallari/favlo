@@ -7,11 +7,18 @@ from pathlib import Path
 import numpy as np
 
 from qwen36_35b_a3b.formats import (
+    EXPERT_FP8,
     EXPERT_IMAGE,
+    FP8_DOWN_DATA,
+    FP8_DOWN_SCALE,
+    FP8_GATE_SCALE,
     dequant_e4m3_block,
     dequant_fp4,
+    dequant_fp8,
     fp4_image,
+    fp8_image,
     pack_fp4_matrix,
+    pack_fp8_matrix,
     quantize_fp4,
 )
 from qwen36_35b_a3b.forward import (
@@ -1021,6 +1028,197 @@ def check_think_loops(session: Session) -> None:
         raise AssertionError(message)
 
 
+def _silu(values: np.ndarray) -> np.ndarray:
+    return values / (np.float32(1.0) + np.exp(-values))
+
+
+def _routed_row(
+    gate: np.ndarray, down: np.ndarray, act: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    proj = gate @ act
+    mid = _silu(proj[:512]) * proj[512:]
+    return down @ mid, mid
+
+
+def check_fp8_expert(session: Session) -> None:
+    """Gate row 17 matches the dequantized dot. The fp4 and fp8 partials add."""
+    if FP8_GATE_SCALE != 1024 * 2048:
+        message = "fp8 gate scale does not follow the data plane"
+        raise AssertionError(message)
+    if FP8_DOWN_DATA != FP8_GATE_SCALE + 1024 * (2048 // 32):
+        message = "fp8 down plane does not follow the gate scale"
+        raise AssertionError(message)
+    if FP8_DOWN_SCALE != FP8_DOWN_DATA + 2048 * 512:
+        message = "fp8 down scale does not follow the down data"
+        raise AssertionError(message)
+    if EXPERT_FP8 != FP8_DOWN_SCALE + 2048 * (512 // 32):
+        message = f"fp8 expert image is not {EXPERT_FP8}"
+        raise AssertionError(message)
+    rng = np.random.default_rng(0)
+    gate = rng.normal(scale=0.02, size=(1024, 2048)).astype(np.float32)
+    data, scales, _rows, _inner = pack_fp8_matrix(gate)
+    blob = fp8_image(gate)
+    scale_at = blob[FP8_GATE_SCALE : FP8_GATE_SCALE + len(scales)]
+    if len(data) != FP8_GATE_SCALE or scale_at != scales:
+        message = "fp8 gate image does not place the scale plane on the data boundary"
+        raise AssertionError(message)
+    restored = dequant_fp8(data, scales, 1024, 2048)
+    act = rng.normal(scale=0.02, size=(64, 2048)).astype(np.float16)
+    expect = act.astype(np.float32) @ restored.T
+    info = np.zeros(4, dtype=np.uint32)
+    info[1] = 1
+    jobs = np.zeros(2, dtype=np.uint32)
+    expert_of = np.zeros(1, dtype=np.uint32)
+    row_base = np.zeros(1, dtype=np.uint32)
+    offsets = np.zeros(1, dtype=np.uint64)
+    widths = np.array([8], dtype=np.uint8)
+    dest = session.zeros(64 * 1024 * 4)
+    width = int(session.pipes["prefill_fp8_expert_tile_at"].threadExecutionWidth())
+    session.begin()
+    session.encode(
+        "prefill_fp8_expert_tile_at",
+        [
+            (session.upload(act), 0),
+            (session.upload(np.frombuffer(blob, dtype=np.uint8)), 0),
+            (dest, 0),
+            (session.upload(jobs), 0),
+            (session.upload(expert_of), 0),
+            (session.upload(row_base), 0),
+            (session.upload(info), 0),
+            (session.upload(offsets), 0),
+            (session.upload(widths), 0),
+        ],
+        [
+            np.uint32(2048).tobytes(),
+            np.uint32(1024).tobytes(),
+            np.uint32(0).tobytes(),
+            np.uint32(FP8_GATE_SCALE).tobytes(),
+        ],
+        (16, 1, 1),
+        (width * 4, 1, 1),
+    )
+    session.end()
+    got = session.download_f32(dest, 64 * 1024).reshape(64, 1024)
+    _close("fp8 expert row 17", got[0, 17:18], expect[0, 17:18])
+    _close("fp8 expert tile", got, expect)
+
+    gate8 = rng.normal(scale=0.02, size=(1024, 2048)).astype(np.float32)
+    down8 = rng.normal(scale=0.02, size=(2048, 512)).astype(np.float32)
+    gate4 = rng.normal(scale=0.02, size=(1024, 2048)).astype(np.float32)
+    down4 = rng.normal(scale=0.02, size=(2048, 512)).astype(np.float32)
+    gate_blob = fp8_image(gate8)
+    fp8_blob = gate_blob + fp8_image(down8)
+    fp4_blob = fp4_image(gate4) + fp4_image(down4)
+    fp8_len = len(gate_blob) == FP8_DOWN_DATA and len(fp8_blob) == EXPERT_FP8
+    if not fp8_len or len(fp4_blob) != EXPERT_IMAGE:
+        message = "mixed expert file is not one fp8 image plus one fp4 image"
+        raise AssertionError(message)
+    g8, s8, _, _ = pack_fp8_matrix(gate8)
+    d8, t8, _, _ = pack_fp8_matrix(down8)
+    g4, s4, _, _ = pack_fp4_matrix(gate4)
+    d4, t4, _, _ = pack_fp4_matrix(down4)
+    vector = rng.normal(scale=0.02, size=2048).astype(np.float32)
+    fp8_gate = dequant_fp8(g8, s8, 1024, 2048)
+    fp8_down = dequant_fp8(d8, t8, 2048, 512)
+    fp4_gate = dequant_fp4(g4, s4, 1024, 2048)
+    fp4_down = dequant_fp4(d4, t4, 2048, 512)
+    fp8_row, fp8_mid = _routed_row(fp8_gate, fp8_down, vector)
+    fp4_row, fp4_mid = _routed_row(fp4_gate, fp4_down, vector)
+    ids = np.array([0, 1, 1, 1, 1, 1, 1, 1], dtype=np.uint32)
+    mix = np.array([1, 1, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+    table = np.zeros(256, dtype=np.uint64)
+    table[1] = np.uint64(EXPERT_FP8)
+    width_row = np.full(256, 4, dtype=np.uint8)
+    width_row[0] = 8
+    file = session.upload(np.frombuffer(fp8_blob + fp4_blob, dtype=np.uint8))
+    id_buf = session.upload(ids)
+    mix_buf = session.upload(mix)
+    off_buf = session.upload(table)
+    width_buf = session.upload(width_row)
+    act_buf = session.upload(vector)
+    gated = session.zeros(8 * 512 * 4)
+    shared_gated = session.zeros(512 * 4)
+    hidden = session.zeros(2048 * 4)
+    coeff = session.upload(np.zeros(1, dtype=np.float32))
+    shared_gate_w = session.zeros(1_048_576)
+    shared_gate_s = session.zeros(65_536)
+    shared_down_w = session.zeros(524_288)
+    shared_down_s = session.zeros(32_768)
+    dot = (32, 1, 1)
+    session.begin()
+    session.encode(
+        "moe_gate_silu_fp8",
+        [(act_buf, 0), (file, 0), (id_buf, 0), (gated, 0), (off_buf, 0), (width_buf, 0)],
+        [],
+        (4096, 1, 1),
+        dot,
+    )
+    session.end()
+    mid = session.download_f32(gated, 8 * 512).reshape(8, 512)
+    _close("fp8 expert gate", mid[0], fp8_mid)
+    _close("fp4 slot skipped by fp8 gate", mid[1], np.zeros(512, dtype=np.float32), atol=0.0)
+    session.begin()
+    session.encode(
+        "moe_gate_silu_w",
+        [
+            (act_buf, 0),
+            (file, 0),
+            (id_buf, 0),
+            (shared_gate_w, 0),
+            (shared_gate_s, 0),
+            (gated, 0),
+            (shared_gated, 0),
+            (off_buf, 0),
+            (width_buf, 0),
+        ],
+        [],
+        (4608, 1, 1),
+        dot,
+    )
+    session.end()
+    mid = session.download_f32(gated, 8 * 512).reshape(8, 512)
+    _close("fp8 gate kept", mid[0], fp8_mid)
+    _close("fp4 expert gate", mid[1], fp4_mid)
+    session.begin()
+    session.encode(
+        "moe_down_mix_w",
+        [
+            (gated, 0),
+            (shared_gated, 0),
+            (file, 0),
+            (id_buf, 0),
+            (mix_buf, 0),
+            (shared_down_w, 0),
+            (shared_down_s, 0),
+            (coeff, 0),
+            (hidden, 0),
+            (off_buf, 0),
+            (width_buf, 0),
+        ],
+        [],
+        (2048, 1, 1),
+        dot,
+    )
+    session.encode(
+        "moe_down_mix_fp8",
+        [
+            (gated, 0),
+            (file, 0),
+            (id_buf, 0),
+            (mix_buf, 0),
+            (hidden, 0),
+            (off_buf, 0),
+            (width_buf, 0),
+        ],
+        [],
+        (2048, 1, 1),
+        dot,
+    )
+    session.end()
+    summed = (fp8_row + fp4_row).astype(np.float32)
+    _close("fp8 and fp4 partials", session.download_f32(hidden, 2048), summed)
+
+
 CHECKS = (
     ("fp4 tile", check_fp4_tile),
     ("fp8 tile", check_fp8_tile),
@@ -1047,6 +1245,7 @@ CHECKS = (
     ("think loop", check_think_loops),
     ("moe group", check_moe_group),
     ("grouped expert", check_grouped_expert),
+    ("fp8 expert", check_fp8_expert),
 )
 
 

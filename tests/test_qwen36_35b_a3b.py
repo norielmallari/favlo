@@ -21,7 +21,18 @@ from qwen36_35b_a3b.cache import (
 )
 from qwen36_35b_a3b.checks import run_checks
 from qwen36_35b_a3b.convert import expert_slot_map
-from qwen36_35b_a3b.formats import EXPERT_IMAGE, dequant_fp4, fp4_image, quantize_fp4
+from qwen36_35b_a3b.formats import (
+    EXPERT_FP8,
+    EXPERT_IMAGE,
+    dequant_fp4,
+    dequant_fp8,
+    expert_file_bytes,
+    expert_offsets,
+    fp4_image,
+    fp8_image,
+    quantize_fp4,
+    quantize_fp8,
+)
 from qwen36_35b_a3b.forward import (
     ThinkBudget,
     _sample,
@@ -237,6 +248,29 @@ def test_an_omitted_assistant_turn_stays_a_prefix_of_the_next_prompt() -> None:
     assert follow[: len(previous)] == previous
 
 
+def test_a_passed_reasoning_effort_is_not_rendered(tmp_path: Path) -> None:
+    source = Path("models/Qwen3.6-35B-A3B-fp4/tokenizer.json")
+    if not source.is_file():
+        pytest.skip("tokenizer is not installed")
+    (tmp_path / "tokenizer.json").symlink_to(source.resolve())
+    (tmp_path / "chat_template.jinja").write_text(
+        "{%- if reasoning_effort is defined -%}{{ reasoning_effort }}{%- endif -%}"
+        "{{ messages[0].content }}",
+        encoding="utf-8",
+    )
+    from qwen36_35b_a3b.chat import decode_text, encode_chat
+
+    messages = [{"role": "user", "content": "Hello"}]
+    plain = decode_text(tmp_path, encode_chat(tmp_path, messages, None, True))
+    for effort in ("low", "medium", "high", "xhigh"):
+        rendered = decode_text(
+            tmp_path, encode_chat(tmp_path, messages, None, True, effort)
+        )
+        assert rendered == plain
+        assert effort not in rendered
+    assert "Hello" in plain
+
+
 def test_a_blank_piece_is_dropped_when_the_limit_cuts_an_open_think() -> None:
     assert not limit_keeps_piece(True, True)
     assert limit_keeps_piece(True, False)
@@ -310,6 +344,51 @@ def test_expert_image_is_two_fp4_planes() -> None:
     gate = np.zeros((1024, 2048), dtype=np.float32)
     down = np.zeros((2048, 512), dtype=np.float32)
     assert len(fp4_image(gate) + fp4_image(down)) == EXPERT_IMAGE
+
+
+def test_fp8_image_is_the_e4m3_expert() -> None:
+    gate = np.zeros((1024, 2048), dtype=np.float32)
+    down = np.zeros((2048, 512), dtype=np.float32)
+    assert len(fp8_image(gate) + fp8_image(down)) == EXPERT_FP8
+
+
+def test_fp8_ones_restore_to_one() -> None:
+    block = np.ones((1, 32), dtype=np.float32)
+    data, scales = quantize_fp8(block)
+    restored = dequant_fp8(data, scales, 1, 32)
+    assert restored[0, 0] == np.float32(1.0)
+    assert np.frombuffer(data, dtype=np.uint8)[0] != 0x7F
+
+
+def test_fp8_tie_keeps_the_even_mantissa() -> None:
+    block = np.zeros((1, 32), dtype=np.float32)
+    block[0, 0] = np.float32(1.0625)
+    block[0, 1] = np.float32(448.0)
+    data, scales = quantize_fp8(block)
+    codes = np.frombuffer(data, dtype=np.uint8)
+    assert codes[0] == 0x38
+    assert codes[1] == 0x7E
+    assert 0x7F not in codes
+    assert 0xFF not in codes
+    restored = dequant_fp8(data, scales, 1, 32)
+    assert restored[0, 0] == np.float32(1.0)
+    assert restored[0, 1] == np.float32(448.0)
+
+
+def test_expert_offsets_place_an_fp8_image_on_a_128_byte_boundary() -> None:
+    widths = np.array([[4, 8, 4, 4]], dtype=np.uint8)
+    offsets = expert_offsets(widths)
+    assert offsets[0].tolist() == [
+        0,
+        EXPERT_IMAGE,
+        EXPERT_IMAGE + EXPERT_FP8,
+        EXPERT_IMAGE * 2 + EXPERT_FP8,
+    ]
+    assert expert_file_bytes(widths, offsets) == [EXPERT_IMAGE * 3 + EXPERT_FP8]
+    assert all(int(off) % 128 == 0 for off in offsets[0])
+    overlap = np.array([[0, 128]], dtype=np.uint64)
+    with pytest.raises(ValueError, match="overlap"):
+        expert_file_bytes(np.array([[4, 4]], dtype=np.uint8), overlap)
 
 
 def test_stream_delta_holds_a_partial_character() -> None:
@@ -666,6 +745,52 @@ def test_record_name_is_the_source_model_plus_fp4() -> None:
     assert record_name(plain) == "Example-Model-fp4"
     snapshot = Path("hub/models--org--Example-Model/snapshots/abc123")
     assert record_name(snapshot) == "Example-Model-fp4"
+
+
+def test_a_widths_file_of_fours_keeps_the_fp4_stride(tmp_path: Path) -> None:
+    from qwen36_35b_a3b.atlas import EXPERTS, LAYERS, read_expert_layout
+
+    folder = tmp_path / "experts"
+    folder.mkdir()
+    (folder / "widths.bin").write_bytes(bytes([4]) * (LAYERS * EXPERTS))
+    (folder / "offsets.bin").write_bytes(b"\xff" * (LAYERS * EXPERTS * 8))
+    layout = read_expert_layout(tmp_path)
+    assert layout.mixed is False
+    assert int(layout.offsets[0, 3]) == 3 * EXPERT_IMAGE
+
+
+def test_an_fp8_width_needs_the_layer_file(tmp_path: Path) -> None:
+    from qwen36_35b_a3b.atlas import EXPERTS, LAYERS, read_expert_layout
+
+    folder = tmp_path / "experts"
+    folder.mkdir()
+    widths = np.full((LAYERS, EXPERTS), 4, dtype=np.uint8)
+    widths[0, 0] = 8
+    (folder / "widths.bin").write_bytes(widths.tobytes())
+    with pytest.raises(FileNotFoundError):
+        read_expert_layout(tmp_path)
+
+
+def test_s3_accounts_an_image_by_its_own_length() -> None:
+    from qwen36_35b_a3b.atlas import S3Fifo
+
+    fifo = S3Fifo(1000, 100)
+    fifo.insert((0, 1), 300)
+    assert fifo._small_bytes == 300
+    assert fifo.relieve(set()) == (0, 1)
+    assert fifo._small_bytes == 0
+
+
+def test_byte_arena_reuses_a_freed_image() -> None:
+    from qwen36_35b_a3b.atlas import ByteArena
+
+    arena = ByteArena(4096)
+    first = arena.alloc(100)
+    second = arena.alloc(100)
+    assert first == 0
+    assert second == 128
+    arena.free(first, 100)
+    assert arena.alloc(100) == 0
 
 
 def test_s3_evicts_a_one_hit_before_a_reused_expert() -> None:

@@ -106,6 +106,26 @@ static float e4m3_fn(uint code) {
     return sign != 0u ? -value : value;
 }
 
+// One simdgroup, one output row. Inner is a multiple of 32. Each byte is one
+// finite E4M3FN value and each scale byte covers the next 32 elements.
+static float fp8_vec_dot(
+    device const float* activation,
+    device const uchar* weights,
+    device const uchar* scales,
+    uint row,
+    uint inner,
+    uint lane)
+{
+    device const uchar* row_w = weights + row * inner;
+    device const uchar* row_scale = scales + row * (inner >> 5);
+    float acc = 0.0f;
+    for (uint i = lane; i < inner; i += 32u) {
+        float factor = exp2(float(row_scale[i >> 5]) - 127.0f);
+        acc += e4m3_fn(row_w[i]) * factor * activation[i];
+    }
+    return simd_sum(acc);
+}
+
 // Pair i keeps the temporal frequency unless the interleaved sections overwrite it.
 // Height owns 1, 4, ..., 31. Width owns 2, 5, ..., 29. The rest stay temporal.
 static uint mrope_axis(uint pair) {
@@ -241,6 +261,112 @@ kernel void prefill_fp4_expert_tile_at(
     auto tile_right = right.slice(0, int(col0));
     auto tile_out = dest.slice(int(col0), 0);
     op.run(tile_left, tile_right, tile_out);
+}
+
+// The fp4 expert tile at a stored byte offset. The whole threadgroup returns
+// before matmul2d when the expert is not fp4.
+kernel void prefill_fp4_expert_tile_w(
+    device half* pack [[buffer(0)]],
+    device uchar* file [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    device const uint* jobs [[buffer(3)]],
+    device const uint* expert_of [[buffer(4)]],
+    device const uint* row_base [[buffer(5)]],
+    device const uint* info [[buffer(6)]],
+    device const ulong* offsets [[buffer(7)]],
+    device const uchar* widths [[buffer(8)]],
+    constant uint& inner [[buffer(9)]],
+    constant uint& cols [[buffer(10)]],
+    constant uint& image_data [[buffer(11)]],
+    constant uint& image_scale [[buffer(12)]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    uint n_jobs = info[1];
+    if (tgid.y >= n_jobs) {
+        return;
+    }
+    uint slot = jobs[tgid.y * 2u];
+    uint expert = expert_of[slot];
+    if (widths[expert] != 4u) {
+        return;
+    }
+    uint row0 = jobs[tgid.y * 2u + 1u] * 64u;
+    uint col0 = tgid.x * 64u;
+    uint base_row = row_base[slot] + row0;
+    device half* act = pack + base_row * inner;
+    device uchar* base = file + offsets[expert];
+    device float* out = destination + base_row * cols;
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        act, dextents<int, 2>(int(inner), 64), array<int, 2>{1, int(inner)});
+    tensor<device metal_fp4_e2m1_format, dextents<int, 2>, tensor_inline, scales_plane> right(
+        base + image_data,
+        dextents<int, 2>(int(inner), int(cols)),
+        array<int, 2>{1, int(inner)},
+        scales_plane(base + image_scale));
+    tensor<device float, dextents<int, 2>, tensor_inline> dest(
+        out, dextents<int, 2>(int(cols), 64), array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(
+        64, 64, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, 0);
+    auto tile_right = right.slice(0, int(col0));
+    auto tile_out = dest.slice(int(col0), 0);
+    op.run(tile_left, tile_right, tile_out);
+}
+
+// Same 64-row job as the fp4 expert tile. fp8 uses the 64×32 matmul2d this
+// pipeline already accepts, twice, so the indirect grid stays 64 columns wide.
+// The whole threadgroup returns before matmul2d when the expert is not fp8.
+kernel void prefill_fp8_expert_tile_at(
+    device half* pack [[buffer(0)]],
+    device uchar* file [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    device const uint* jobs [[buffer(3)]],
+    device const uint* expert_of [[buffer(4)]],
+    device const uint* row_base [[buffer(5)]],
+    device const uint* info [[buffer(6)]],
+    device const ulong* offsets [[buffer(7)]],
+    device const uchar* widths [[buffer(8)]],
+    constant uint& inner [[buffer(9)]],
+    constant uint& cols [[buffer(10)]],
+    constant uint& image_data [[buffer(11)]],
+    constant uint& image_scale [[buffer(12)]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    uint n_jobs = info[1];
+    if (tgid.y >= n_jobs) {
+        return;
+    }
+    uint slot = jobs[tgid.y * 2u];
+    uint expert = expert_of[slot];
+    if (widths[expert] != 8u) {
+        return;
+    }
+    uint row0 = jobs[tgid.y * 2u + 1u] * 64u;
+    uint col0 = tgid.x * 64u;
+    uint base_row = row_base[slot] + row0;
+    device half* act = pack + base_row * inner;
+    device uchar* base = file + offsets[expert];
+    device float* out = destination + base_row * cols;
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        act, dextents<int, 2>(int(inner), 64), array<int, 2>{1, int(inner)});
+    tensor<device metal_fp8_e4m3_format, dextents<int, 2>, tensor_inline, scales_plane> right(
+        base + image_data,
+        dextents<int, 2>(int(inner), int(cols)),
+        array<int, 2>{1, int(inner)},
+        scales_plane(base + image_scale));
+    tensor<device float, dextents<int, 2>, tensor_inline> dest(
+        out, dextents<int, 2>(int(cols), 64), array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(
+        64, 32, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, 0);
+    auto tile_right = right.slice(0, int(col0));
+    auto tile_out = dest.slice(int(col0), 0);
+    op.run(tile_left, tile_right, tile_out);
+    auto tile_right_hi = right.slice(0, int(col0) + 32);
+    auto tile_out_hi = dest.slice(int(col0) + 32, 0);
+    op.run(tile_left, tile_right_hi, tile_out_hi);
 }
 
 kernel void prefill_f16(
@@ -1679,6 +1805,138 @@ kernel void moe_down_mix(
     }
     float shared = fp4_vec_dot(shared_gated, shared_w, shared_s, row, 512u, lane);
     acc += coeff[0] * shared;
+    if (lane == 0u) {
+        hidden[row] += acc;
+    }
+}
+
+// fp4 gate and the shared expert. A slot whose width is not 4 returns before
+// the dot. The shared expert has no width byte.
+kernel void moe_gate_silu_w(
+    device const float* activation [[buffer(0)]],
+    device const uchar* file [[buffer(1)]],
+    device const uint* ids [[buffer(2)]],
+    device const uchar* shared_w [[buffer(3)]],
+    device const uchar* shared_s [[buffer(4)]],
+    device float* gated [[buffer(5)]],
+    device float* shared_gated [[buffer(6)]],
+    device const ulong* offsets [[buffer(7)]],
+    device const uchar* widths [[buffer(8)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint job [[threadgroup_position_in_grid]])
+{
+    if (job < 4096u) {
+        uint slot = job >> 9;
+        uint row = job & 511u;
+        if (widths[ids[slot]] != 4u) {
+            return;
+        }
+        device const uchar* base = file + offsets[ids[slot]];
+        float gate = fp4_vec_dot(activation, base, base + 1048576u, row, 2048u, lane);
+        float up = fp4_vec_dot(activation, base, base + 1048576u, row + 512u, 2048u, lane);
+        if (lane == 0u) {
+            gated[slot * 512u + row] = silu_f(gate) * up;
+        }
+        return;
+    }
+    if (job < 4608u) {
+        uint row = job - 4096u;
+        float gate = fp4_vec_dot(activation, shared_w, shared_s, row, 2048u, lane);
+        float up = fp4_vec_dot(activation, shared_w, shared_s, row + 512u, 2048u, lane);
+        if (lane == 0u) {
+            shared_gated[row] = silu_f(gate) * up;
+        }
+    }
+}
+
+// fp4 down mix. Slots whose width is not 4 are skipped. The shared expert is
+// still added here.
+kernel void moe_down_mix_w(
+    device const float* gated [[buffer(0)]],
+    device const float* shared_gated [[buffer(1)]],
+    device const uchar* file [[buffer(2)]],
+    device const uint* ids [[buffer(3)]],
+    device const float* mix [[buffer(4)]],
+    device const uchar* shared_w [[buffer(5)]],
+    device const uchar* shared_s [[buffer(6)]],
+    device const float* coeff [[buffer(7)]],
+    device float* hidden [[buffer(8)]],
+    device const ulong* offsets [[buffer(9)]],
+    device const uchar* widths [[buffer(10)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= 2048u) {
+        return;
+    }
+    float acc = 0.0f;
+    for (uint slot = 0u; slot < 8u; ++slot) {
+        if (widths[ids[slot]] != 4u) {
+            continue;
+        }
+        device const uchar* down = file + offsets[ids[slot]] + 1114112ul;
+        float dot = fp4_vec_dot(gated + slot * 512u, down, down + 524288u, row, 512u, lane);
+        acc += mix[slot] * dot;
+    }
+    float shared = fp4_vec_dot(shared_gated, shared_w, shared_s, row, 512u, lane);
+    acc += coeff[0] * shared;
+    if (lane == 0u) {
+        hidden[row] += acc;
+    }
+}
+
+// Eight routed fp8 gate-up rows. There is no shared expert in this dispatch.
+kernel void moe_gate_silu_fp8(
+    device const float* activation [[buffer(0)]],
+    device const uchar* file [[buffer(1)]],
+    device const uint* ids [[buffer(2)]],
+    device float* gated [[buffer(3)]],
+    device const ulong* offsets [[buffer(4)]],
+    device const uchar* widths [[buffer(5)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint job [[threadgroup_position_in_grid]])
+{
+    if (job >= 4096u) {
+        return;
+    }
+    uint slot = job >> 9;
+    uint row = job & 511u;
+    if (widths[ids[slot]] != 8u) {
+        return;
+    }
+    device const uchar* base = file + offsets[ids[slot]];
+    float gate = fp8_vec_dot(activation, base, base + 2097152u, row, 2048u, lane);
+    float up = fp8_vec_dot(activation, base, base + 2097152u, row + 512u, 2048u, lane);
+    if (lane == 0u) {
+        gated[slot * 512u + row] = silu_f(gate) * up;
+    }
+}
+
+// fp8 down mix. Slots whose width is not 8 are skipped. This adds into the
+// hidden row and does not add the shared expert.
+kernel void moe_down_mix_fp8(
+    device const float* gated [[buffer(0)]],
+    device const uchar* file [[buffer(1)]],
+    device const uint* ids [[buffer(2)]],
+    device const float* mix [[buffer(3)]],
+    device float* hidden [[buffer(4)]],
+    device const ulong* offsets [[buffer(5)]],
+    device const uchar* widths [[buffer(6)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= 2048u) {
+        return;
+    }
+    float acc = 0.0f;
+    for (uint slot = 0u; slot < 8u; ++slot) {
+        if (widths[ids[slot]] != 8u) {
+            continue;
+        }
+        device const uchar* down = file + offsets[ids[slot]] + 2162688ul;
+        float dot = fp8_vec_dot(gated + slot * 512u, down, down + 1048576u, row, 512u, lane);
+        acc += mix[slot] * dot;
+    }
     if (lane == 0u) {
         hidden[row] += acc;
     }

@@ -58,6 +58,17 @@ def test_decode_counts_a_kept_token_once() -> None:
     assert int(routes.decode[0, 0]) == 0
 
 
+def test_width_counts_follow_a_mixed_layout() -> None:
+    mixed = SimpleNamespace(
+        mixed=True,
+        count=lambda width: {8: 3, 4: 7}[width],
+    )
+    runtime = SimpleNamespace(atlas=SimpleNamespace(layout=mixed), manifest={})
+    assert firing._width_counts(runtime) == (3, 7, 0)
+    plain = SimpleNamespace(manifest={"layers": 2, "experts": 4})
+    assert firing._width_counts(plain) == (0, 8, 0)
+
+
 def test_the_last_prompt_token_counts_as_prefill() -> None:
     routes = RouteScratch(1, 4)
     routes.note_decode(np.array([[[1, 2, 1, 2]]], dtype=np.int64))

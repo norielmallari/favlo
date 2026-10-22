@@ -18,6 +18,7 @@ from qwen36_35b_a3b.atlas import (
     ExpertAtlas,
     atlas_slots,
     available_bytes,
+    read_expert_layout,
 )
 from qwen36_35b_a3b.attn import attend_plane, bind_plane, plane_bytes, resize_plane
 from qwen36_35b_a3b.cache import (
@@ -33,7 +34,7 @@ from qwen36_35b_a3b.cache import (
 )
 from qwen36_35b_a3b.convert import LANGUAGE_LAYERS, SLOT_MAP_BYTES
 from qwen36_35b_a3b.firing import RouteScratch
-from qwen36_35b_a3b.formats import EXPERT_IMAGE
+from qwen36_35b_a3b.formats import EXPERT_FP8, EXPERT_IMAGE
 from qwen36_35b_a3b.prefill import workspace_bytes
 from qwen36_35b_a3b.prefix import open_session
 from qwen36_35b_a3b.session import Session, _clear
@@ -85,6 +86,9 @@ _DEVICE_BUFFERS = (
     "plane_tail",
     "plane_chunk_max",
     "plane_chunk_sum",
+    "expert_widths",
+    "expert_offsets",
+    "token_offsets",
 )
 HEAD = 256
 Q_HEADS = 16
@@ -256,6 +260,8 @@ class Qwen36Runtime:
         self._resident_bytes = resident_bytes
         card = max_position(self.root)
         fixed = _reserved_bytes(resident_bytes, 0, 0)
+        self.expert_layout = read_expert_layout(self.root)
+        image = EXPERT_FP8 if self.expert_layout.mixed else EXPERT_IMAGE
         # Eight images is one token. A larger atlas is what remains after the cache.
 
         def _plane(positions: int) -> int:
@@ -264,7 +270,7 @@ class Qwen36Runtime:
             return plane_bytes(positions)
 
         ceiling = fit_positions(
-            self.max_memory, fixed, self.kv_cache, card, _plane, keep=MIN_IMAGES * EXPERT_IMAGE
+            self.max_memory, fixed, self.kv_cache, card, _plane, keep=MIN_IMAGES * image
         )
         if ceiling is None:
             message = "the key/value cache does not fit a 2048-token context"
@@ -278,11 +284,16 @@ class Qwen36Runtime:
         reserved = _reserved_bytes(resident_bytes, self.kv_bytes, plane)
         images = atlas_slots(
             self.max_memory,
-            EXPERT_IMAGE,
+            image,
             reserved,
             layers=LAYERS * EXPERTS,
         )
-        atlas_read = LAYERS * EXPERTS * EXPERT_IMAGE if images >= LAYERS * EXPERTS else 0
+        if self.expert_layout.mixed:
+            room = self.max_memory - reserved
+            total = self.expert_layout.total_bytes
+            atlas_read = total if room >= total else 0
+        else:
+            atlas_read = LAYERS * EXPERTS * EXPERT_IMAGE if images >= LAYERS * EXPERTS else 0
         load_total = resident_bytes + atlas_read + _scratch_bytes() + 20 * self.kv_bytes + plane
         self._load_progress = self._begin_load(load_total)
         summary = ""
@@ -295,7 +306,12 @@ class Qwen36Runtime:
                 self.root,
                 max_memory=self.max_memory,
                 reserved=reserved,
+                layout=self.expert_layout,
             )
+            if self.expert_layout.mixed:
+                self.expert_widths = self.session.upload(self.expert_layout.widths)
+                self.expert_offsets = self.session.upload(self.expert_layout.offsets)
+                self.token_offsets = self.session.zeros(EXPERTS * 8)
             self.tensors: dict[str, dict] = self.manifest["tensors"]
             self.hidden = self.session.zeros(HIDDEN * 4)
             self.normed = self.session.zeros(HIDDEN * 4)
@@ -452,11 +468,16 @@ class Qwen36Runtime:
     def routed_layer(self, layer: int, ids: Any, count: int, offsets: Any) -> Any:
         """Load misses and write each file slot's byte offset. ``ids`` stay file slots."""
         file_slots = self._routed_ids(ids, count)
-        placed = self.atlas.stage(layer, file_slots)
-        table = np.zeros(256, dtype=np.uint64)
-        image = np.uint64(EXPERT_IMAGE)
-        for file_slot, atlas_slot in zip(file_slots, placed, strict=True):
-            table[file_slot] = np.uint64(atlas_slot) * image
+        table = np.zeros(EXPERTS, dtype=np.uint64)
+        if self.atlas.layout.mixed:
+            placed = self.atlas.stage_offsets(layer, file_slots)
+            for file_slot, byte_off in zip(file_slots, placed, strict=True):
+                table[file_slot] = np.uint64(byte_off)
+        else:
+            placed = self.atlas.stage(layer, file_slots)
+            image = np.uint64(EXPERT_IMAGE)
+            for file_slot, atlas_slot in zip(file_slots, placed, strict=True):
+                table[file_slot] = np.uint64(atlas_slot) * image
         raw = table.tobytes()
         memoryview(offsets.contents().as_buffer(len(raw)))[:] = raw
         self.session.begin()
@@ -465,6 +486,15 @@ class Qwen36Runtime:
     def _stage_decode(self, layer: int) -> Any:
         """Point the eight ids at atlas slots and return the atlas buffer."""
         file_slots = self._routed_ids(self.ids, 8)
+        if self.atlas.layout.mixed:
+            placed = self.atlas.stage_offsets(layer, file_slots)
+            table = np.zeros(EXPERTS, dtype=np.uint64)
+            for file_slot, byte_off in zip(file_slots, placed, strict=True):
+                table[file_slot] = np.uint64(byte_off)
+            raw = table.tobytes()
+            memoryview(self.token_offsets.contents().as_buffer(len(raw)))[:] = raw
+            self.session.begin()
+            return self.atlas.buffer
         placed = np.asarray(self.atlas.stage(layer, file_slots), dtype=np.uint32)
         blob = placed.tobytes()
         memoryview(self.ids.contents().as_buffer(len(blob)))[:] = blob
@@ -728,6 +758,15 @@ class Qwen36Runtime:
         )
         gate_w, gate_s = self._weight(prefix + "shared_expert.gate_up")
         down_w, down_s = self._weight(prefix + "shared_expert.down_proj.weight")
+        if self.atlas.layout.mixed:
+            if self.atlas.complete:
+                experts = self.atlas.layers[layer]
+                offsets = (self.expert_offsets, layer * EXPERTS * 8)
+            else:
+                experts = self._stage_decode(layer)
+                offsets = (self.token_offsets, 0)
+            self._moe_mixed(layer, experts, offsets, gate_w, gate_s, down_w, down_s)
+            return
         if self.atlas.complete:
             experts = self.atlas.layers[layer]
         else:
@@ -765,6 +804,87 @@ class Qwen36Runtime:
             (32, 1, 1),
         )
 
+    def _moe_mixed(
+        self,
+        layer: int,
+        experts: Any,
+        offsets: tuple[Any, int],
+        gate_w: tuple[Any, int],
+        gate_s: tuple[Any, int],
+        down_w: tuple[Any, int],
+        down_s: tuple[Any, int],
+    ) -> None:
+        """fp4 kernel keeps the shared expert. The fp8 kernel runs when the layer has one."""
+        widths = (self.expert_widths, layer * EXPERTS)
+        threads = (32, 1, 1)
+        self.session.encode(
+            "moe_gate_silu_w",
+            [
+                (self.normed, 0),
+                (experts, 0),
+                (self.ids, 0),
+                gate_w,
+                gate_s,
+                (self.gated, 0),
+                (self.expert, 0),
+                offsets,
+                widths,
+            ],
+            [],
+            (4608, 1, 1),
+            threads,
+        )
+        if self.atlas.layout.has(layer, 8):
+            self.session.encode(
+                "moe_gate_silu_fp8",
+                [
+                    (self.normed, 0),
+                    (experts, 0),
+                    (self.ids, 0),
+                    (self.gated, 0),
+                    offsets,
+                    widths,
+                ],
+                [],
+                (4096, 1, 1),
+                threads,
+            )
+        self.session.encode(
+            "moe_down_mix_w",
+            [
+                (self.gated, 0),
+                (self.expert, 0),
+                (experts, 0),
+                (self.ids, 0),
+                (self.mix_w, 0),
+                down_w,
+                down_s,
+                (self.coeff, 0),
+                (self.hidden, 0),
+                offsets,
+                widths,
+            ],
+            [],
+            (HIDDEN, 1, 1),
+            threads,
+        )
+        if self.atlas.layout.has(layer, 8):
+            self.session.encode(
+                "moe_down_mix_fp8",
+                [
+                    (self.gated, 0),
+                    (experts, 0),
+                    (self.ids, 0),
+                    (self.mix_w, 0),
+                    (self.hidden, 0),
+                    offsets,
+                    widths,
+                ],
+                [],
+                (HIDDEN, 1, 1),
+                threads,
+            )
+
     def _grow(self, length: int) -> bool:
         """Widen the cache to cover ``length`` tokens and shrink the atlas to match."""
         if length <= self.max_pos:
@@ -777,9 +897,10 @@ class Qwen36Runtime:
         plane = self._plane_at(target)
         reserved = _reserved_bytes(self._resident_bytes, new_bytes, plane)
         try:
+            image = EXPERT_FP8 if self.atlas.layout.mixed else EXPERT_IMAGE
             images = atlas_slots(
                 self.max_memory,
-                EXPERT_IMAGE,
+                image,
                 reserved,
                 layers=LANGUAGE_LAYERS * EXPERTS,
             )
