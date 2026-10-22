@@ -2,6 +2,7 @@ import io
 import json
 import mmap
 import os
+import time
 
 import numpy as np
 import pytest
@@ -1162,6 +1163,36 @@ def test_the_next_request_does_not_keep_the_previous_decode_row() -> None:
     runtime._close_decode_row()
     runtime.console.begin("prefill", total=8, unit="tok", detail="req #6", request=6)
     assert [item.phase for item in console._handles] == ["prefill"]
+
+
+def test_the_first_sample_ends_prefill_and_the_next_starts_decode() -> None:
+    runtime = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
+    runtime.console = None
+    runtime._prefill_progress = None
+    runtime._prefill_tokens = 8
+    runtime._prefill_seconds = 2.0
+    runtime._prefill_open = time.perf_counter()
+    runtime._decode_open = None
+    runtime._decode_seconds = 5.0
+    runtime._note_sample(first=True)
+    assert runtime._prefill_open is None
+    assert runtime._prefill_seconds >= 2.0
+    assert runtime._decode_seconds == 0.0
+    assert runtime._decode_open is not None
+    opened = runtime._decode_open
+    runtime._note_sample(first=False)
+    assert runtime._decode_seconds >= 0.0
+    assert runtime._decode_seconds == pytest.approx(time.perf_counter() - opened, abs=0.05)
+    lone = pipeline.Qwen38Runtime.__new__(pipeline.Qwen38Runtime)
+    lone.console = None
+    lone._prefill_progress = None
+    lone._prefill_tokens = 0
+    lone._prefill_seconds = 0.0
+    lone._prefill_open = time.perf_counter()
+    lone._decode_open = None
+    lone._decode_seconds = 0.0
+    lone._note_sample(first=True)
+    assert lone._decode_seconds == 0.0
 
 
 def test_decode_always_uses_the_mtp_cycle() -> None:

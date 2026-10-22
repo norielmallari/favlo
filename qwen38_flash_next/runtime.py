@@ -182,6 +182,8 @@ class Qwen38Runtime:
         self._prompt_tokens = 0
         self._prefill_tokens = 0
         self._prefill_seconds = 0.0
+        self._prefill_open = None
+        self._decode_open = None
         self.gpu = None
         self.store = None
         self.files = None
@@ -920,6 +922,10 @@ class Qwen38Runtime:
 
     def _prompt_logits(self, prompt: list[int]) -> Dev:
         """Logits for ``prompt``. A boundary with no logits is prefilled again."""
+        self._prefill_open = None
+        self._decode_open = None
+        self._prefill_seconds = 0.0
+        self._prefill_tokens = 0
         start = self.align(prompt)
         if start == len(prompt) and self.last_logits is None:
             _log("prefix has no logits")
@@ -960,6 +966,7 @@ class Qwen38Runtime:
         self._close_decode_row()
         self._decode_tokens = 0
         self._decode_seconds = 0.0
+        self._decode_open = None
         self._decode_steps = []
         self._output_ids = []
         self._hit_limit = False
@@ -969,8 +976,11 @@ class Qwen38Runtime:
         self._atlas_trusted = False
         self._carry = None
         self._carry_yielded = False
+        if getattr(self, "_prefill_open", None) is None:
+            self._prefill_open = time.perf_counter()
         produced_ids: list[int] = []
         produced = 0
+        first_sample = True
         try:
             while True:
                 self._check_stop()
@@ -984,6 +994,8 @@ class Qwen38Runtime:
                     echo = False
                 else:
                     token = self._pick(logits, temperature, top_p, top_k, produced_ids)
+                    self._note_sample(first=first_sample)
+                    first_sample = False
                     echo = True
                 if token in self.stop_ids:
                     return
@@ -1022,6 +1034,9 @@ class Qwen38Runtime:
                 if stopped:
                     return
         finally:
+            if getattr(self, "_prefill_open", None) is not None:
+                self._close_prefill_line()
+                self._prefill_open = None
             self._flush_carry()
             self._log_decode()
 
@@ -1087,6 +1102,40 @@ class Qwen38Runtime:
         done = min(progress.total, int(frac * progress.total))
         if done > progress.done:
             progress.done = done
+
+    def _note_sample(self, *, first: bool) -> None:
+        """Close prefill on the first sample. Later samples extend decode."""
+        now = time.perf_counter()
+        if first:
+            opened = getattr(self, "_prefill_open", None)
+            if opened is not None:
+                base = float(getattr(self, "_prefill_seconds", 0.0) or 0.0)
+                self._prefill_seconds = base + (now - opened)
+                self._prefill_open = None
+            self._close_prefill_line()
+            self._decode_open = now
+            self._decode_seconds = 0.0
+            return
+        opened = self._decode_open
+        if opened is None:
+            return
+        self._decode_seconds = now - opened
+
+    def _close_prefill_line(self) -> None:
+        tokens = int(getattr(self, "_prefill_tokens", 0) or 0)
+        seconds = float(getattr(self, "_prefill_seconds", 0.0) or 0.0)
+        summary = _tok_s("prefill", tokens, seconds)
+        progress = getattr(self, "_prefill_progress", None)
+        self._prefill_progress = None
+        if progress is not None and self.console is not None:
+            progress.done = tokens
+            if self.console.fold_turns:
+                self.console.end(progress, "")
+            else:
+                self.console.end(progress, summary)
+            return
+        if tokens > 0:
+            _log(summary)
 
     def _log_decode(self) -> None:
         if self._decode_reported:
@@ -1273,7 +1322,8 @@ class Qwen38Runtime:
                 self.routes.take_decode(len(tokens))
         self._forward_open = False
         self.last_logits = logits
-        elapsed = time.perf_counter() - started
+        now = time.perf_counter()
+        elapsed = now - started
         gpu_elapsed = self.gpu.gpu_seconds - gpu_at
         self._last_elapsed = elapsed
         self._last_gpu = gpu_elapsed
@@ -1286,19 +1336,12 @@ class Qwen38Runtime:
         elif not decode:
             self._prefill_tokens = len(tokens)
             self._prefill_seconds = elapsed
-            summary = _tok_s("prefill", len(tokens), elapsed)
-            progress = self._prefill_progress
-            self._prefill_progress = None
-            if progress is not None and self.console is not None:
-                progress.done = len(tokens)
-                if self.console.fold_turns:
-                    self.console.end(progress, "")
-                else:
-                    self.console.end(progress, summary)
-            else:
-                _log(summary)
+            # The prompt prefix write stays outside this clock. The first sample
+            # closes it and prints the phase line.
+            self._prefill_open = now
             if commit:
                 self._persist_prefix(release_atlas=False)
+                self._prefill_open = time.perf_counter()
         if self.atlas is not None:
             self.atlas.release_unused()
         return logits
@@ -1813,7 +1856,6 @@ class Qwen38Runtime:
         def bill(count: int) -> None:
             elapsed = time.perf_counter() - started
             self._decode_tokens += count
-            self._decode_seconds += elapsed
             resident = self.atlas.resident_count if self.atlas is not None else 0
             gpu_elapsed = getattr(self, "_last_gpu", 0.0)
             self._decode_steps.append((elapsed, gpu_elapsed, resident))
@@ -1837,16 +1879,20 @@ class Qwen38Runtime:
             if not isinstance(prepared, Dev):
                 if prepared == draft:
                     kept.append(draft)
+                    self._note_sample(first=False)
                     continue
                 correction = int(prepared)
+                self._note_sample(first=False)
                 break
             token, accepted = self.gpu.spec_accept(
                 prepared, views[index], draft, temperature, top_p, top_k, self.rng
             )
             if not accepted:
                 correction = token
+                self._note_sample(first=False)
                 break
             kept.append(draft)
+            self._note_sample(first=False)
         if correction is None and len(kept) == len(span):
             if self.routes is not None:
                 self.routes.take_decode(len(span))

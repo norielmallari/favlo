@@ -5,6 +5,8 @@ token that filled the atlas, and every draft is kept. The forwards are the
 real backbone, including draft time.
 """
 
+import time
+
 import pytest
 
 from test_packing import pipeline
@@ -67,6 +69,7 @@ def test_resident_kept_span_exceeds_10_tok_s() -> None:
             resident = runtime.atlas.resident_count if runtime.atlas is not None else 0
             runtime._decode_tokens = 0
             runtime._decode_seconds = 0.0
+            runtime._decode_open = time.perf_counter()
             runtime._mtp_full = 0
             runtime._mtp_partial = 0
             for _cycle in range(MEASURED):
