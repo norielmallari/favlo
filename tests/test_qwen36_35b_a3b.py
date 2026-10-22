@@ -402,6 +402,35 @@ def test_stream_delta_holds_a_partial_character() -> None:
     assert shown == "hello世"
 
 
+def test_completion_usage_uses_the_phase_clocks() -> None:
+    from qwen36_35b_a3b.chat import _completion
+
+    runtime = SimpleNamespace(
+        _context_limit=131072,
+        _cached_tokens=12,
+        _prefill_seconds=2.0,
+        _decode_seconds=4.0,
+    )
+    body = _completion("ok", 100, 4, "stop", [], "", runtime, "example-model")
+    timings = body["usage"]["timings"]
+    assert body["usage"]["prompt_tokens_details"] == {"cached_tokens": 12}
+    assert timings["prompt_n"] == 88
+    assert timings["prompt_per_second"] == 44.0
+    assert timings["predicted_n"] == 4
+    assert timings["predicted_per_second"] == 1.0
+    runtime._decode_seconds = 0.0
+    single = _completion("ok", 100, 1, "stop", [], "", runtime, "example-model")
+    assert single["usage"]["timings"]["predicted_n"] == 1
+    assert single["usage"]["timings"]["predicted_per_second"] == 0.0
+
+
+def test_a_zero_clock_prints_a_zero_rate() -> None:
+    from qwen36_35b_a3b.forward import _clock_line
+
+    assert _clock_line("decode", 1, 0.0) == "decode 0.00 tok/s (1 tok in 0.00s)"
+    assert _clock_line("prefill", 4, 2.0) == "prefill 2.00 tok/s (4 tok in 2.00s)"
+
+
 def test_stream_chunks_carry_reasoning_then_the_reply() -> None:
     from types import SimpleNamespace
 

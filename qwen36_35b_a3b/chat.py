@@ -287,7 +287,6 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
             frequency=frequency,
         )
         return
-    started = time.perf_counter()
     tokens = runtime.generate(
         prompt,
         limit,
@@ -328,7 +327,7 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
             reason,
             calls,
             reasoning if thinking else "",
-            time.perf_counter() - started,
+            runtime,
             handler._model_id,
         ),
     )
@@ -565,7 +564,7 @@ def _completion(
     finish_reason: str,
     tool_calls: list[dict[str, Any]],
     reasoning: str,
-    seconds: float,
+    runtime: Any,
     model: str,
 ) -> dict[str, Any]:
     message: dict[str, Any] = {"role": "assistant", "content": content}
@@ -580,13 +579,5 @@ def _completion(
         "created": int(time.time()),
         "model": model,
         "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens,
-            "timings": {
-                "predicted_per_second": 0.0 if seconds <= 0 else completion_tokens / seconds,
-                "predicted_n": completion_tokens,
-            },
-        },
+        "usage": _usage(runtime, prompt_tokens, completion_tokens),
     }

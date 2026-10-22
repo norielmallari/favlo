@@ -149,6 +149,12 @@ def _u32(value: int) -> bytes:
     return struct.pack("<I", value)
 
 
+def _clock_line(phase: str, count: int, elapsed: float) -> str:
+    """Phase tok/s. A zero duration writes a zero rate."""
+    rate = 0.0 if elapsed <= 0.0 else count / elapsed
+    return f"{phase} {rate:.2f} tok/s ({count} tok in {elapsed:.2f}s)"
+
+
 def _f32(value: float) -> bytes:
     return struct.pack("<f", value)
 
@@ -1096,17 +1102,9 @@ class Qwen36Runtime:
             self._take_routes(prefill=True)
             assert logits is not None
             self.prefix.note(prompt)
-            self._store_prefix()
-            boundary = True
             self._note_prefill(len(suffix))
-            elapsed = max(time.perf_counter() - started, 1e-9)
-            self._prefill_seconds = elapsed
-            self._prefill_progress = None
-            self._end_phase(
-                prefill_row,
-                f"prefill {len(suffix) / elapsed:.2f} tok/s ({len(suffix)} tok in {elapsed:.2f}s)",
-            )
-            prefill_row = None
+            # The forward is inside prefill. The first sample closes it.
+            self._prefill_seconds = time.perf_counter() - started
             pending = list(forced or [])
             close_after = bool(stop_after_forced) and bool(pending)
             seen: set[int] = set()
@@ -1114,8 +1112,10 @@ class Qwen36Runtime:
             budget = None
             if think_close and think_end is not None and thinking_budget != 0:
                 budget = ThinkBudget(think_close, think_end, thinking_budget)
-            decode_row = self._begin_phase("decode", max_tokens, live=True)
-            decode_started = time.perf_counter()
+            decode_row = None
+            prefill_open = True
+            decode_started = started
+            last_sample = started
             for count in range(max_tokens):
                 self._check_stop()
                 if budget is not None and budget.forcing:
@@ -1187,6 +1187,18 @@ class Qwen36Runtime:
                     if budget is not None:
                         nxt = budget.take(nxt)
                     finished_forced = False
+                last_sample = time.perf_counter()
+                if prefill_open:
+                    elapsed = last_sample - started
+                    self._prefill_seconds = elapsed
+                    self._prefill_progress = None
+                    self._end_phase(prefill_row, _clock_line("prefill", len(suffix), elapsed))
+                    prefill_row = None
+                    boundary = True
+                    self._store_prefix()
+                    decode_started = last_sample
+                    decode_row = self._begin_phase("decode", max_tokens, live=True)
+                    prefill_open = False
                 if nxt in stop:
                     replaced = None if budget is None else budget.instead_of_stop(nxt, stop)
                     if replaced is None:
@@ -1225,15 +1237,21 @@ class Qwen36Runtime:
                 logits = self.step(nxt, len(prompt) + count, logits=True)
                 self._take_routes(prefill=False)
                 assert logits is not None
-            decode_elapsed = max(time.perf_counter() - decode_started, 1e-9)
-            self._decode_seconds = decode_elapsed
+            if prefill_open:
+                elapsed = time.perf_counter() - started
+                self._prefill_seconds = elapsed
+                self._prefill_progress = None
+                self._end_phase(prefill_row, _clock_line("prefill", len(suffix), elapsed))
+                prefill_row = None
+                boundary = True
+                self._store_prefix()
+                self._decode_seconds = 0.0
+            else:
+                decode_elapsed = last_sample - decode_started
+                self._decode_seconds = decode_elapsed if decode_elapsed > 0.0 else 0.0
+                self._end_phase(decode_row, _clock_line("decode", len(out), self._decode_seconds))
+                decode_row = None
             self._output_ids = list(out)
-            self._end_phase(
-                decode_row,
-                f"decode {len(out) / decode_elapsed:.2f} tok/s "
-                f"({len(out)} tok in {decode_elapsed:.2f}s)",
-            )
-            decode_row = None
             self.prefix.note((prompt + out)[: self.filled])
             self._store_prefix()
         except ContextFull:
