@@ -39,7 +39,7 @@ The pipeline README links the measurement in one sentence. Add a row to `docs/RE
 - `shipped` once that note describes it. If it already does, add the link and use `shipped`.
 - `narrowed` after a correction is appended. The row stays.
 
-Catalog columns: slug, pipeline, status, search date, the one-sentence remainder, the note path. The index does not repeat the table, the predecessors, or the command.
+Catalog columns: slug, pipeline, status, search date, shipped date, benchmark date, the one-sentence remainder, the note path. The shipped date is the date the serving note described the behavior, empty while status is `measured`. The benchmark date is the date of that pipeline's latest harness scores, empty when that pipeline has none. The index does not repeat the table, the predecessors, or the command.
 
 The package license and readme are the rerun instructions. Do not add another license file. The pipeline id, the model, and the papers come from the note under edit. Do not reuse another pipeline's claim as this one.
 
