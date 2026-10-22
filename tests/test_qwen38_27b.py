@@ -497,6 +497,85 @@ def test_completion_usage_reports_the_served_window() -> None:
     assert extra.get("context_length") == 131072
 
 
+def test_usage_rate_is_zero_when_the_clock_is_zero() -> None:
+    from qwen38_27b.chat import _usage
+
+    runtime = SimpleNamespace(
+        _limit=131072,
+        _cached_tokens=8,
+        _prefill_seconds=0.0,
+        _decode_seconds=0.0,
+    )
+    usage = _usage(runtime, 8, 1)
+    assert usage["timings"]["prompt_n"] == 0
+    assert usage["timings"]["prompt_per_second"] == 0.0
+    assert usage["timings"]["predicted_n"] == 1
+    assert usage["timings"]["predicted_per_second"] == 0.0
+
+
+def test_generate_clock_ends_prefill_at_the_first_sample(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = object.__new__(Qwen38Runtime)
+    runtime.console = None
+    runtime.max_pos = 3
+    runtime._limit = 128
+    runtime.filled = 0
+    clock = {"t": 100.0}
+
+    def now() -> float:
+        return clock["t"]
+
+    class Prefix:
+        loaded = False
+        tokens: list[int] = []
+        dirty = False
+
+        def align(self, prompt: list[int]) -> int:
+            return 1
+
+        def note(self, tokens: list[int]) -> None:
+            self.tokens = list(tokens)
+            clock["t"] += 3.0
+
+        def flush(self) -> None:
+            return None
+
+    runtime.prefix = Prefix()
+
+    def ensure(needed: int) -> bool:
+        if needed == 4:
+            clock["t"] += 7.0
+            runtime.max_pos = 8
+        return True
+
+    runtime.ensure = ensure
+
+    def step(token: int, pos: int, *, logits: bool) -> int | None:
+        runtime.filled = pos + 1
+        clock["t"] += 2.0
+        return 7 if logits else None
+
+    runtime.step = step
+    runtime._pick = lambda argmax_id, counts: int(argmax_id)
+    runtime._check_stop = lambda: None
+    monkeypatch.setattr("qwen38_27b.forward.time.perf_counter", now)
+
+    def on_token(_token: int) -> None:
+        clock["t"] += 0.5
+
+    out = runtime.generate([9, 10], 2, set(), on_token=on_token)
+    assert out == [7, 7]
+    assert runtime._prefill_seconds == pytest.approx(2.0)
+    assert runtime._decode_seconds == pytest.approx(12.5)
+
+    clock["t"] = 100.0
+    runtime.filled = 0
+    runtime.max_pos = 3
+    one = runtime.generate([9, 10], 1, set(), on_token=on_token)
+    assert one == [7]
+    assert runtime._prefill_seconds == pytest.approx(2.0)
+    assert runtime._decode_seconds == 0.0
+
+
 def test_openai_tool_call_delta_carries_an_index() -> None:
     pytest.importorskip("openai")
     from openai.types.chat.chat_completion_chunk import ChatCompletionChunk

@@ -1025,29 +1025,33 @@ class Qwen38Runtime:
                 prefill_ids(self, suffix[:-1], hit, follow=suffix[-1])
             nxt = self.step(suffix[-1], len(prompt) - 1, logits=True)
             assert nxt is not None
-            self.prefix.note(prompt)
-            self._store_prefix()
-            boundary = True
-            self._note_prefill(len(suffix))
-            elapsed = max(time.perf_counter() - started, 1e-9)
-            self._prefill_seconds = elapsed
+            counts: dict[int, int] = {}
+            chosen = self._pick(nxt, counts)
+            sampled_at = time.perf_counter()
+            prefill_elapsed = max(sampled_at - started, 0.0)
+            self._prefill_seconds = prefill_elapsed
+            prefill_rate = 0.0 if prefill_elapsed <= 0 else len(suffix) / prefill_elapsed
             summary = (
-                f"prefill {len(suffix) / elapsed:.2f} tok/s ({len(suffix)} tok in {elapsed:.2f}s)"
+                f"prefill {prefill_rate:.2f} tok/s "
+                f"({len(suffix)} tok in {prefill_elapsed:.2f}s)"
             )
             self._prefill_progress = None
             self._end_phase(prefill_row, summary)
             print(summary, flush=True)
             prefill_row = None
+            self.prefix.note(prompt)
+            self._store_prefix()
+            boundary = True
+            self._note_prefill(len(suffix))
             pending = list(forced or [])
             close_after = bool(stop_after_forced) and bool(pending)
-            counts: dict[int, int] = {}
             room = max(0, self._limit - len(prompt))
             decode_total = room if max_tokens is None else max(0, min(max_tokens, room))
             decode_row = self._begin_phase("decode", decode_total, live=True)
-            decode_started = time.perf_counter()
+            decode_started = sampled_at
+            last_sample: float | None = None
             self._mtp_accepts = 0
             self._mtp_tries = 0
-            chosen = self._pick(nxt, counts)
             emitted = 0
             if decode_total == 0:
                 self._hit_limit = True
@@ -1076,7 +1080,6 @@ class Qwen38Runtime:
                         self._hit_limit = True
                     break
                 if pos + 1 >= self.max_pos:
-                    paused = time.perf_counter()
                     if decode_row is not None:
                         decode_row.detail = "growing context"
                     try:
@@ -1084,7 +1087,6 @@ class Qwen38Runtime:
                     finally:
                         if decode_row is not None:
                             decode_row.detail = ""
-                        decode_started += time.perf_counter() - paused
                     if pos + 1 >= self.max_pos:
                         self._hit_limit = True
                         break
@@ -1094,13 +1096,14 @@ class Qwen38Runtime:
                 nxt_id = self.step(chosen, pos, logits=True)
                 assert nxt_id is not None
                 chosen = self._pick(nxt_id, counts)
+                last_sample = time.perf_counter()
             if self._mtp_tries:
                 self._status(f"mtp {self._mtp_accepts}/{self._mtp_tries}")
-            decode_elapsed = max(time.perf_counter() - decode_started, 1e-9)
+            decode_elapsed = 0.0 if last_sample is None else max(last_sample - decode_started, 0.0)
             self._decode_seconds = decode_elapsed
+            decode_rate = 0.0 if decode_elapsed <= 0 else len(out) / decode_elapsed
             decode_summary = (
-                f"decode {len(out) / decode_elapsed:.2f} tok/s "
-                f"({len(out)} tok in {decode_elapsed:.2f}s)"
+                f"decode {decode_rate:.2f} tok/s ({len(out)} tok in {decode_elapsed:.2f}s)"
             )
             self._end_phase(decode_row, decode_summary)
             print(decode_summary, flush=True)
