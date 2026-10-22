@@ -88,6 +88,16 @@ class DeviceImage:
         self._staged_offsets = staged
         self.staged = layer
 
+    def load_span(self, session: Any, start: int, nbytes: int) -> Any:
+        """Copy one file range into a new buffer. Vision weights stay out of the text image."""
+        buffer = session.allocate(nbytes)
+        if buffer is None:
+            message = f"device refused a {nbytes} byte vision buffer"
+            raise RuntimeError(message)
+        view = memoryview(buffer.contents().as_buffer(nbytes))
+        _copy(self._map, start, view, 0, nbytes, None)
+        return buffer
+
     def close(self) -> None:
         mapping = self._map
         self._map = None

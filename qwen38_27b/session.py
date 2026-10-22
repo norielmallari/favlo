@@ -53,6 +53,19 @@ KERNELS = (
     "split_q_gate_rows",
     "qk_norm_rope",
     "qk_norm_rope_rows",
+    "qk_norm_mrope_rows",
+    "vision_layernorm",
+    "vision_gelu_tanh",
+    "vision_gelu_erf",
+    "vision_bias",
+    "vision_to_half",
+    "dequant_fp4_rows",
+    "vision_pos_add",
+    "vision_rope",
+    "vision_split_qkv",
+    "vision_attend",
+    "vision_merge_pack",
+    "scatter_hidden_rows",
     "kv_plane_k",
     "kv_tail_store",
     "kv_plane_v",
@@ -76,6 +89,7 @@ KERNELS = (
 )
 
 _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"
+_VISION = Path(__file__).resolve().parent / "shaders" / "vision.metal"
 _ZERO = b"\x00" * (8 << 20)
 
 
@@ -152,7 +166,7 @@ class Session:
             raise RuntimeError(message)
         options = metal.MTLCompileOptions.alloc().init()
         options.setLanguageVersion_((4 << 16) + 1)
-        source = _SHADER.read_text(encoding="utf-8")
+        source = _SHADER.read_text(encoding="utf-8") + "\n" + _VISION.read_text(encoding="utf-8")
         library, error = _objc_pair(
             device.newLibraryWithSource_options_error_(source, options, None)
         )

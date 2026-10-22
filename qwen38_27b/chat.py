@@ -181,9 +181,21 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
     frequency = _frequency(body)
     bias = _logit_bias(body)
     draw = _rng(body)
+    from qwen38_27b.vision import collect_images, expand_image_tokens, merged_grid, prepare_image
+
+    images = collect_images(messages)
     prompt = encode_chat(
         runtime.root, messages, body.get("tools"), thinking, _reasoning_effort(body)
     )
+    prepared = [prepare_image(blob) for blob in images]
+    if prepared:
+        counts = []
+        for _patches, grid in prepared:
+            height, width = merged_grid(grid)
+            counts.append(height * width)
+        prompt = expand_image_tokens(prompt, counts)
+    runtime._vision_images = images
+    runtime._vision_prepared = prepared
     emit_tools = body.get("tool_choice") != "none"
     forced, stop_after_forced = _forced_call(runtime.root, body.get("tools"), required)
     if bool(body.get("stream", False)):

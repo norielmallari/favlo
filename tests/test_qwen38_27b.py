@@ -549,7 +549,8 @@ def test_generate_clock_ends_prefill_at_the_first_sample(monkeypatch: pytest.Mon
 
     runtime.ensure = ensure
 
-    def step(token: int, pos: int, *, logits: bool) -> int | None:
+    def step(token: int, pos: int, *, logits: bool, rope: tuple[int, int, int] | None = None) -> int | None:
+        del rope
         runtime.filled = pos + 1
         clock["t"] += 2.0
         return 7 if logits else None
@@ -926,6 +927,54 @@ def test_install_reads_one_prefix_region_at_a_time(monkeypatch) -> None:
     assert calls == [[name] for name in names]
     assert released == names
     assert runtime.filled == count
+
+
+def test_image_tokens_use_the_merged_grid() -> None:
+    from qwen38_27b.vision import IMAGE_PAD, expand_image_tokens, language_positions
+
+    prompt = expand_image_tokens([1, IMAGE_PAD, 2], [4])
+    positions, nxt = language_positions(prompt, [(2, 2)])
+    assert prompt == [1, IMAGE_PAD, IMAGE_PAD, IMAGE_PAD, IMAGE_PAD, 2]
+    assert positions[0].tolist() == [0, 0, 0]
+    assert positions[1].tolist() == [1, 1, 1]
+    assert positions[2].tolist() == [1, 1, 2]
+    assert positions[3].tolist() == [1, 2, 1]
+    assert positions[4].tolist() == [1, 2, 2]
+    assert positions[5].tolist() == [3, 3, 3]
+    assert nxt == 4
+
+
+def test_png_round_trip_and_square_grid() -> None:
+    import struct
+    import zlib
+
+    from qwen38_27b.vision import decode_png, merged_grid, prepare_image
+
+    def png_of(image: np.ndarray) -> bytes:
+        height, width, _channels = image.shape
+        raw = b"".join(b"\x00" + image[row].tobytes() for row in range(height))
+
+        def chunk(kind: bytes, payload: bytes) -> bytes:
+            check = zlib.crc32(kind + payload) & 0xFFFFFFFF
+            return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", check)
+
+        return b"".join(
+            (
+                b"\x89PNG\r\n\x1a\n",
+                chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)),
+                chunk(b"IDAT", zlib.compress(raw)),
+                chunk(b"IEND", b""),
+            )
+        )
+
+    small = np.zeros((8, 8, 3), dtype=np.uint8)
+    small[:, :, 0] = 255
+    assert decode_png(png_of(small)).shape == (8, 8, 3)
+    square = np.zeros((512, 512, 3), dtype=np.uint8)
+    patches, grid = prepare_image(png_of(square))
+    assert grid == (32, 32)
+    assert merged_grid(grid) == (16, 16)
+    assert patches.shape == (32 * 32, 3 * 2 * 16 * 16)
 
 
 def test_shader_dispatches_match_the_host_formulas() -> None:

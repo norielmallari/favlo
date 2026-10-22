@@ -80,9 +80,11 @@ def image_tools(port: int, body: dict[str, Any], png: list[bytes]) -> list[objec
     return [generate_image]
 
 
-async def create_image(base_url: str, port: int, body: dict[str, Any]) -> bytes:
+async def create_image(
+    base_url: str, port: int, body: dict[str, Any], model: str = JUDGE
+) -> bytes:
     png: list[bytes] = []
-    client = OpenAIChatCompletionClient(model=JUDGE, api_key="favlo", base_url=base_url)
+    client = OpenAIChatCompletionClient(model=model, api_key="favlo", base_url=base_url)
     client.function_invocation_configuration["max_iterations"] = 2
     client.function_invocation_configuration["max_consecutive_errors_per_request"] = 1
     agent = Agent(
@@ -105,13 +107,13 @@ async def create_image(base_url: str, port: int, body: dict[str, Any]) -> bytes:
     return png[-1]
 
 
-def judge(port: int, png: bytes) -> str:
+def judge(port: int, png: bytes, model: str = JUDGE) -> str:
     encoded = base64.b64encode(png).decode("ascii")
     payload = post_json(
         port,
         "/v1/chat/completions",
         {
-            "model": JUDGE,
+            "model": model,
             "temperature": 0,
             "max_tokens": 8,
             "enable_thinking": False,
@@ -158,6 +160,7 @@ def _open_server(root: Path, was_up: bool) -> tuple[int, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate an image and check it.")
     parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument("--judge", default=JUDGE)
     args = parser.parse_args(argv)
     root = args.root.resolve()
     body = smoke_body(root)
@@ -172,11 +175,11 @@ def main(argv: list[str] | None = None) -> int:
         port, owned = _open_server(root, was_up)
         base = f"http://{HOST}:{port}/v1"
         print(f"generating on {port}", flush=True)
-        png = asyncio.run(create_image(base, port, body))
+        png = asyncio.run(create_image(base, port, body, args.judge))
         (root / "artifacts").mkdir(parents=True, exist_ok=True)
         (root / "artifacts" / "image-agent.png").write_bytes(png)
         print("checking", flush=True)
-        reply = judge(port, png)
+        reply = judge(port, png, args.judge)
         print(reply, flush=True)
         if affirms(reply):
             print("image matches", flush=True)

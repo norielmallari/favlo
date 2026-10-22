@@ -11,6 +11,8 @@ from __future__ import annotations
 import struct
 from typing import Any
 
+import numpy as np
+
 from qwen38_27b.attn import attend_plane
 from qwen38_27b.layout import (
     AB,
@@ -121,27 +123,34 @@ def _chunk(
     rows = (count + 63) // 64 * 64
     _write(work.tokens, _pack_u32(ids))
     runtime.session.begin()
-    _zero(runtime, work.hidden, rows * HIDDEN)
-    _embed(runtime, work, count)
-    for layer, kind in enumerate(runtime.layer_types):
-        _zero(runtime, work.normed, rows * HIDDEN)
-        _rms(runtime, work.hidden, runtime.weight(layer, "input_layernorm.weight"), work.normed, count)
-        if kind == "full_attention":
-            _attend(runtime, work, layer, count, rows, pos0)
-        else:
-            _gdn(runtime, work, layer, count, rows)
-        _zero(runtime, work.normed, rows * HIDDEN)
-        _rms(
-            runtime,
-            work.hidden,
-            runtime.weight(layer, "post_attention_layernorm.weight"),
-            work.normed,
-            count,
-        )
-        _ffn(runtime, work, layer, count, rows)
-    if mtp and getattr(runtime, "drafts", False):
-        _mtp_rows(runtime, work, ids, pos0, follow, rows)
-    runtime.session.end()
+    try:
+        _zero(runtime, work.hidden, rows * HIDDEN)
+        _embed(runtime, work, count)
+        from qwen38_27b.tower import scatter
+
+        scatter(runtime, work.hidden, pos0, count)
+        for layer, kind in enumerate(runtime.layer_types):
+            _zero(runtime, work.normed, rows * HIDDEN)
+            _rms(runtime, work.hidden, runtime.weight(layer, "input_layernorm.weight"), work.normed, count)
+            if kind == "full_attention":
+                _attend(runtime, work, layer, count, rows, pos0)
+            else:
+                _gdn(runtime, work, layer, count, rows)
+            _zero(runtime, work.normed, rows * HIDDEN)
+            _rms(
+                runtime,
+                work.hidden,
+                runtime.weight(layer, "post_attention_layernorm.weight"),
+                work.normed,
+                count,
+            )
+            _ffn(runtime, work, layer, count, rows)
+        if mtp and getattr(runtime, "drafts", False):
+            _mtp_rows(runtime, work, ids, pos0, follow, rows)
+        runtime.session.end()
+    except Exception:
+        runtime.session.finish()
+        raise
 
 
 def _mtp_rows(
@@ -271,13 +280,29 @@ def _attend(
     )
     q_buf, q_off, _entry = runtime.locate(weight("self_attn.q_norm.weight"))
     k_buf, k_off, _entry = runtime.locate(weight("self_attn.k_norm.weight"))
-    runtime.session.encode(
-        "qk_norm_rope_rows",
-        [(work.big2, 0), (work.kv, 0), (q_buf, q_off), (k_buf, k_off)],
-        [_f32(THETA), _f32(EPS), _u32(pos0)],
-        (count, Q_HEADS + 4, 1),
-        (256, 1, 1),
-    )
+    rope = getattr(runtime, "_rope_ids", None)
+    if rope is None:
+        runtime.session.encode(
+            "qk_norm_rope_rows",
+            [(work.big2, 0), (work.kv, 0), (q_buf, q_off), (k_buf, k_off)],
+            [_f32(THETA), _f32(EPS), _u32(pos0)],
+            (count, Q_HEADS + 4, 1),
+            (256, 1, 1),
+        )
+    else:
+        runtime.session.encode(
+            "qk_norm_mrope_rows",
+            [
+                (work.big2, 0),
+                (work.kv, 0),
+                (q_buf, q_off),
+                (k_buf, k_off),
+                (runtime.session.upload(np.ascontiguousarray(rope[pos0 : pos0 + count])), 0),
+            ],
+            [_f32(THETA), _f32(EPS)],
+            (count, Q_HEADS + 4, 1),
+            (256, 1, 1),
+        )
     attend_plane(
         runtime,
         query=work.big2,

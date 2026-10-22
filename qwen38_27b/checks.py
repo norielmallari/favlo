@@ -332,13 +332,52 @@ def check_rope(session: Session) -> None:
     session.dispatch(
         "qk_norm_rope",
         [q_buf, k_buf, session.upload(weight), session.upload(weight)],
-        [np.float32(1e7).tobytes(), np.float32(EPS).tobytes(), np.uint32(0).tobytes()],
+        [
+            np.float32(1e7).tobytes(),
+            np.float32(EPS).tobytes(),
+            np.uint32(0).tobytes(),
+            np.uint32(0).tobytes(),
+            np.uint32(0).tobytes(),
+        ],
         (28, 1, 1),
         (256, 1, 1),
     )
     got = session.download_f32(q_buf, 24 * 256)
     inv = np.float32(2.0) / np.sqrt(np.float32(1.0) + EPS)
     _close("rope", got, np.full_like(got, inv), atol=1e-4)
+
+
+def check_vision_gelu(session: Session) -> None:
+    values = np.array([0.0, 1.0, -0.5, 20.0, -20.0], dtype=np.float64)
+    destination = session.zeros(values.size * 4)
+    session.dispatch(
+        "vision_gelu_tanh",
+        [session.upload(values.astype(np.float32)), destination],
+        [np.uint32(values.size).tobytes()],
+        (1, 1, 1),
+        (32, 1, 1),
+    )
+    cube = values * values * values
+    inner = np.sqrt(2.0 / np.pi) * (values + 0.044715 * cube)
+    expect = (0.5 * values * (1.0 + np.tanh(inner))).astype(np.float32)
+    _close("vision gelu", session.download_f32(destination, values.size), expect, atol=1e-4)
+
+
+def check_vision_gelu_erf(session: Session) -> None:
+    values = np.array([0.0, 1.0, -0.5], dtype=np.float32)
+    destination = session.zeros(values.size * 4)
+    session.dispatch(
+        "vision_gelu_erf",
+        [session.upload(values), destination],
+        [np.uint32(values.size).tobytes()],
+        (1, 1, 1),
+        (values.size, 1, 1),
+    )
+    import math
+
+    scaled = values * np.float32(2.0**-0.5)
+    expect = np.float32(0.5) * values * (1.0 + np.vectorize(math.erf)(scaled))
+    _close("vision erf gelu", session.download_f32(destination, values.size), expect, atol=1e-5)
 
 
 def check_attention(session: Session) -> None:
@@ -450,6 +489,8 @@ CHECKS = (
     ("conv", check_conv),
     ("e4m3", check_e4m3),
     ("rope", check_rope),
+    ("vision gelu", check_vision_gelu),
+    ("vision erf gelu", check_vision_gelu_erf),
     ("attention", check_attention),
     ("attention blocks", check_attention_blocks),
 )

@@ -1437,7 +1437,9 @@ kernel void qk_norm_rope(
     device const half* k_weight [[buffer(3)]],
     constant float& theta [[buffer(4)]],
     constant float& eps [[buffer(5)]],
-    constant uint& position [[buffer(6)]],
+    constant uint& pos_t [[buffer(6)]],
+    constant uint& pos_h [[buffer(7)]],
+    constant uint& pos_w [[buffer(8)]],
     uint tid [[thread_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]],
     uint simd [[simdgroup_index_in_threadgroup]],
@@ -1465,7 +1467,14 @@ kernel void qk_norm_rope(
     if (tid >= 32u) {
         return;
     }
-    float angle = float(position) * pow(theta, -float(tid) / 32.0f);
+    uint axis = tid % 3u;
+    uint pos = pos_t;
+    if (axis == 1u) {
+        pos = pos_h;
+    } else if (axis == 2u && tid < 30u) {
+        pos = pos_w;
+    }
+    float angle = float(pos) * pow(theta, -float(tid) / 32.0f);
     float c = cos(angle);
     float s = sin(angle);
     uint i0 = tid * 2u;
@@ -1514,6 +1523,62 @@ kernel void qk_norm_rope_rows(
         return;
     }
     float angle = float(pos0 + token) * pow(theta, -float(tid) / 32.0f);
+    float c = cos(angle);
+    float s = sin(angle);
+    uint i0 = tid * 2u;
+    float x0 = row[i0];
+    float x1 = row[i0 + 1u];
+    row[i0] = x0 * c - x1 * s;
+    row[i0 + 1u] = x0 * s + x1 * c;
+}
+
+// One token uses three position ids. Equal ids match ``qk_norm_rope_rows``.
+kernel void qk_norm_mrope_rows(
+    device float* query [[buffer(0)]],
+    device float* key [[buffer(1)]],
+    device const half* q_weight [[buffer(2)]],
+    device const half* k_weight [[buffer(3)]],
+    device const uint* rope [[buffer(4)]],
+    constant float& theta [[buffer(5)]],
+    constant float& eps [[buffer(6)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    uint token = tgid.x;
+    uint head = tgid.y;
+    threadgroup float red[8];
+    device float* row = head < Q_HEADS ? query + (token * Q_HEADS + head) * 256u
+                                       : key + (token * KV_HEADS + (head - Q_HEADS)) * 256u;
+    device const half* weight = head < Q_HEADS ? q_weight : k_weight;
+    float value = row[tid];
+    float part = simd_sum(value * value);
+    if (lane == 0u) {
+        red[simd] = part;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0u) {
+        float total = 0.0f;
+        for (uint i = 0u; i < 8u; ++i) {
+            total += red[i];
+        }
+        red[0] = rsqrt(total / 256.0f + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    row[tid] = value * red[0] * (1.0f + float(weight[tid]));
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid >= 32u) {
+        return;
+    }
+    uint axis = tid % 3u;
+    uint pos = rope[token * 3u];
+    if (axis == 1u) {
+        pos = rope[token * 3u + 1u];
+    } else if (axis == 2u && tid < 30u) {
+        pos = rope[token * 3u + 2u];
+    }
+    float angle = float(pos) * pow(theta, -float(tid) / 32.0f);
     float c = cos(angle);
     float s = sin(angle);
     uint i0 = tid * 2u;

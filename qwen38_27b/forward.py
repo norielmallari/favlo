@@ -6,8 +6,8 @@ needs its bytes. Decode does not run that block.
 
 Temperature 0 is an argmax. A positive temperature samples with top-k and
 top-p. Presence, frequency, and logit bias follow the OpenAI logit update.
-A repeated span of 16 or more tokens ends the completion. A text request
-does not run the vision tower.
+A repeated span of 16 or more tokens ends the completion. An image request
+runs the vision tower and writes those tokens into the prompt.
 """
 
 from __future__ import annotations
@@ -134,6 +134,9 @@ def _device_buffers(runtime: Any) -> list[Any]:
         item = getattr(runtime, name, None)
         if item is not None:
             found.append(item)
+    blob = getattr(runtime, "_vision_blob", None)
+    if blob is not None:
+        found.append(blob)
     return found
 
 
@@ -758,7 +761,9 @@ class Qwen38Runtime:
             (256, 1, 1),
         )
 
-    def _attend(self, layer: int | None, pos: int) -> None:
+    def _attend(
+        self, layer: int | None, pos: int, rope: tuple[int, int, int] | None = None
+    ) -> None:
         from qwen38_27b.attn import attend_plane
 
         q_w, q_s = self._pair(self._w(layer, "self_attn.q_proj.weight"))
@@ -794,7 +799,13 @@ class Qwen38Runtime:
         self.session.encode(
             "qk_norm_rope",
             [(self.query, 0), (self.kv, 0), (q_buf, q_off), (k_buf, k_off)],
-            [_f32(THETA), _f32(EPS), _u32(pos)],
+            [
+                _f32(THETA),
+                _f32(EPS),
+                _u32(pos if rope is None else rope[0]),
+                _u32(pos if rope is None else rope[1]),
+                _u32(pos if rope is None else rope[2]),
+            ],
             (Q_HEADS + 4, 1, 1),
             (256, 1, 1),
         )
@@ -875,42 +886,60 @@ class Qwen38Runtime:
         buf, offset, entry = self.locate(name)
         return (buf, offset), (buf, self.scale_offset(entry, offset))
 
-    def step(self, token: int, pos: int, *, logits: bool) -> int | None:
+    def _rope_at(self, index: int) -> tuple[int, int, int] | None:
+        rope = getattr(self, "_rope_ids", None)
+        if rope is None:
+            return None
+        row = rope[index]
+        return int(row[0]), int(row[1]), int(row[2])
+
+    def step(
+        self,
+        token: int,
+        pos: int,
+        *,
+        logits: bool,
+        rope: tuple[int, int, int] | None = None,
+    ) -> int | None:
         if pos >= self.max_pos:
             message = f"position {pos} is past {self.max_pos}"
             raise RuntimeError(message)
         self.session.begin()
-        self._embed(token)
-        for layer, kind in enumerate(self.layer_types):
-            if layer > 0 and layer % 4 == 0:
-                self.session.submit()
-            self._rms(self.hidden, self.weight(layer, "input_layernorm.weight"), self.normed)
-            if kind == "full_attention":
-                self._attend(layer, pos)
-            else:
-                self._gdn(layer)
-            self._rms(
-                self.hidden,
-                self.weight(layer, "post_attention_layernorm.weight"),
-                self.normed,
+        try:
+            self._embed(token)
+            for layer, kind in enumerate(self.layer_types):
+                if layer > 0 and layer % 4 == 0:
+                    self.session.submit()
+                self._rms(self.hidden, self.weight(layer, "input_layernorm.weight"), self.normed)
+                if kind == "full_attention":
+                    self._attend(layer, pos, rope)
+                else:
+                    self._gdn(layer)
+                self._rms(
+                    self.hidden,
+                    self.weight(layer, "post_attention_layernorm.weight"),
+                    self.normed,
+                )
+                self._ffn(layer)
+            final = self._resolve(
+                "model.language_model.norm.weight",
+                "model.norm.weight",
             )
-            self._ffn(layer)
-        final = self._resolve(
-            "model.language_model.norm.weight",
-            "model.norm.weight",
-        )
-        self._rms(self.hidden, final, self.normed)
-        if logits:
-            head = self._resolve("lm_head.weight", "model.language_model.lm_head.weight")
-            self._gemv(self.normed, head, self.logits)
-            self.session.encode(
-                "argmax_partial",
-                [(self.logits, 0), (self.best_v, 0), (self.best_i, 0)],
-                [_u32(VOCAB)],
-                (_ARGMAX_GROUPS, 1, 1),
-                (256, 1, 1),
-            )
-        self.session.end()
+            self._rms(self.hidden, final, self.normed)
+            if logits:
+                head = self._resolve("lm_head.weight", "model.language_model.lm_head.weight")
+                self._gemv(self.normed, head, self.logits)
+                self.session.encode(
+                    "argmax_partial",
+                    [(self.logits, 0), (self.best_v, 0), (self.best_i, 0)],
+                    [_u32(VOCAB)],
+                    (_ARGMAX_GROUPS, 1, 1),
+                    (256, 1, 1),
+                )
+            self.session.end()
+        except Exception:
+            self.session.finish()
+            raise
         self.filled = pos + 1
         if not logits:
             return None
@@ -1016,6 +1045,9 @@ class Qwen38Runtime:
         boundary = False
         out: list[int] = []
         try:
+            from qwen38_27b.tower import bind_request
+
+            bind_request(self, prompt, hit)
             prefill_row = self._begin_phase("prefill", len(suffix))
             self._prefill_progress = prefill_row
             started = time.perf_counter()
@@ -1023,7 +1055,7 @@ class Qwen38Runtime:
                 from qwen38_27b.prefill import prefill_ids
 
                 prefill_ids(self, suffix[:-1], hit, follow=suffix[-1])
-            nxt = self.step(suffix[-1], len(prompt) - 1, logits=True)
+            nxt = self.step(suffix[-1], len(prompt) - 1, logits=True, rope=self._rope_at(len(prompt) - 1))
             assert nxt is not None
             counts: dict[int, int] = {}
             chosen = self._pick(nxt, counts)
@@ -1053,6 +1085,15 @@ class Qwen38Runtime:
             self._mtp_accepts = 0
             self._mtp_tries = 0
             emitted = 0
+            rope_cursor = getattr(self, "_rope_next", None)
+
+            def step_new(token: int, pos: int, *, logits: bool) -> int | None:
+                nonlocal rope_cursor
+                if rope_cursor is None:
+                    return self.step(token, pos, logits=logits)
+                angle = int(rope_cursor)
+                rope_cursor += 1
+                return self.step(token, pos, logits=logits, rope=(angle, angle, angle))
             if decode_total == 0:
                 self._hit_limit = True
             while emitted < decode_total:
@@ -1075,7 +1116,7 @@ class Qwen38Runtime:
                 pos = len(prompt) + emitted - 1
                 at_cap = emitted == decode_total
                 if finished_forced or at_cap:
-                    self.step(chosen, pos, logits=False)
+                    step_new(chosen, pos, logits=False)
                     if at_cap:
                         self._hit_limit = True
                     break
@@ -1091,9 +1132,9 @@ class Qwen38Runtime:
                         self._hit_limit = True
                         break
                 if repeated_tail(out):
-                    self.step(chosen, pos, logits=False)
+                    step_new(chosen, pos, logits=False)
                     break
-                nxt_id = self.step(chosen, pos, logits=True)
+                nxt_id = step_new(chosen, pos, logits=True)
                 assert nxt_id is not None
                 chosen = self._pick(nxt_id, counts)
                 last_sample = time.perf_counter()
@@ -1120,6 +1161,8 @@ class Qwen38Runtime:
                 self.reset()
             raise
         finally:
+            self._vision_images = None
+            self._vision_prepared = None
             self._on_prefill = None
             self._prefill_progress = None
             self._end_phase(prefill_row, "")
