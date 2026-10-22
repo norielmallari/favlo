@@ -6,7 +6,8 @@ and the convolution history. A runtime that still has the MTP head also packs
 that plane, and a stored file without it is not installed. After the fit drops
 the head, a file is accepted on the 16 language planes. A stored file is
 accepted when it is a strict prefix of the new prompt, so the next token is
-still stepped.
+still stepped. A reload reads one region, copies it into the cleared plane,
+and drops those bytes before the next region.
 """
 
 from __future__ import annotations
@@ -81,32 +82,62 @@ class CacheAdapter:
 
     def install(self, header: PrefixHeader) -> bool:
         count = len(header.tokens)
-        if not _fits(header, count, int(self.runtime.kv_slots)):
-            return False
-        names = ["history", "state"]
         slots = int(self.runtime.kv_slots)
-        names.extend(f"k.{slot}" for slot in range(slots))
-        names.extend(f"v.{slot}" for slot in range(slots))
-        blobs = read_regions(header, names)
-        if blobs is None:
+        if not _fits(header, count, slots):
             return False
+        wrote = False
+
+        def take(name: str) -> bytes | None:
+            blobs = read_regions(header, [name])
+            if blobs is None or name not in blobs:
+                return None
+            data = blobs.pop(name)
+            blobs.clear()
+            return data
+
+        def apply(name: str, copy) -> bool:
+            nonlocal wrote
+            data = take(name)
+            if data is None:
+                return False
+            try:
+                copy(data)
+            finally:
+                del data
+            wrote = True
+            return True
+
+        ok = apply("history", lambda data: _write(self.runtime.history, data))
+        ok = ok and apply("state", lambda data: _write(self.runtime.state, data))
         for slot in range(slots):
-            _unpack(
-                self.runtime.k_cache[slot],
-                self.runtime.max_pos,
-                count,
-                blobs[f"k.{slot}"],
-                kind="key",
+            if not ok:
+                break
+            key = f"k.{slot}"
+            value = f"v.{slot}"
+            ok = apply(
+                key,
+                lambda data, slot=slot: _unpack(
+                    self.runtime.k_cache[slot],
+                    self.runtime.max_pos,
+                    count,
+                    data,
+                    kind="key",
+                ),
             )
-            _unpack(
-                self.runtime.v_cache[slot],
-                self.runtime.max_pos,
-                count,
-                blobs[f"v.{slot}"],
-                kind="value",
+            ok = ok and apply(
+                value,
+                lambda data, slot=slot: _unpack(
+                    self.runtime.v_cache[slot],
+                    self.runtime.max_pos,
+                    count,
+                    data,
+                    kind="value",
+                ),
             )
-        _write(self.runtime.history, blobs["history"])
-        _write(self.runtime.state, blobs["state"])
+        if not ok:
+            if wrote:
+                self.reset()
+            return False
         self.runtime.filled = count
         return True
 

@@ -779,6 +779,76 @@ def test_vision_tensors_stay_out_of_the_device_image() -> None:
     assert plain.weights == visual.weights
 
 
+def test_install_reads_one_prefix_region_at_a_time(monkeypatch) -> None:
+    import gc
+    from pathlib import Path
+
+    from favlo.prefix import PrefixHeader, RegionRef
+    from qwen38_27b.prefix import (
+        _HISTORY_BYTES,
+        _STATE_BYTES,
+        CacheAdapter,
+        _packed_length,
+    )
+
+    count = 4
+    slots = 2
+    names = ["history", "state"]
+    for slot in range(slots):
+        names.extend((f"k.{slot}", f"v.{slot}"))
+    lengths = {"history": _HISTORY_BYTES, "state": _STATE_BYTES}
+    for slot in range(slots):
+        lengths[f"k.{slot}"] = _packed_length(count, "key")
+        lengths[f"v.{slot}"] = _packed_length(count, "value")
+    header = PrefixHeader(
+        Path("example.bin"),
+        "qwen38-27b",
+        b"\x00" * 32,
+        "e4m3",
+        tuple(range(count)),
+        tuple(RegionRef(name, 16384, lengths[name]) for name in names),
+        16384,
+    )
+
+    class _Blob:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def __del__(self) -> None:
+            released.append(self.name)
+
+    released: list[str] = []
+    calls: list[list[str]] = []
+
+    def read_regions(_header: PrefixHeader, asked: list[str]) -> dict[str, _Blob]:
+        gc.collect()
+        assert len(asked) == 1
+        if calls:
+            assert released[-1] == calls[-1][0]
+        name = asked[0]
+        calls.append(list(asked))
+        return {name: _Blob(name)}
+
+    monkeypatch.setattr("qwen38_27b.prefix.read_regions", read_regions)
+    monkeypatch.setattr("qwen38_27b.prefix._unpack", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("qwen38_27b.prefix._write", lambda *_args, **_kwargs: None)
+    runtime = SimpleNamespace(
+        kv_slots=slots,
+        max_pos=32,
+        filled=0,
+        history=object(),
+        state=object(),
+        k_cache=[object(), object()],
+        v_cache=[object(), object()],
+        reset=lambda: None,
+    )
+    assert CacheAdapter(runtime).install(header)
+    gc.collect()
+    assert calls == [[name] for name in names]
+    assert released == names
+    assert runtime.filled == count
+
+
 def test_shader_dispatches_match_the_host_formulas() -> None:
     report = run_checks()
     failed = [name for name, ok, _detail in report["rows"] if not ok]
