@@ -96,18 +96,6 @@ KV = 2
 EPS = 1e-6
 # Each head stores query then gate. The other split is the flat halves.
 GATE_PER_HEAD = 1
-# Paulus, Xiong, and Socher block a repeated n-gram. Eight tokens is one short clause.
-# While think is open, a five-token repeat starts the close.
-# The same word with one token between the copies does the same.
-# A markdown marker is not that word.
-# A token whose piece has seven or more letters, drawn again, does the same,
-# unless that token is already in the prompt.
-# Masking that token lets the same clause continue with a synonym.
-_REPEAT_SPAN = 8
-_THINK_REPEAT_SPAN = 5
-_LONG_LETTERS = 7
-
-
 def _scratch_bytes() -> int:
     """Activation scratch cleared while the record loads."""
     return (
@@ -1073,10 +1061,7 @@ class Qwen36Runtime:
         think_close: list[int] | None = None,
         think_end: int | None = None,
         thinking_budget: int | None = 0,
-        tool_open: int | None = None,
-        long_ids: set[int] | None = None,
         forbid: set[int] | None = None,
-        word_ids: set[int] | None = None,
         frequency: float = 0.0,
     ) -> list[int]:
         self._hit_limit = False
@@ -1139,67 +1124,24 @@ class Qwen36Runtime:
                     finished_forced = False
                 elif pending:
                     nxt = int(pending.pop(0))
-                    revised = revise_think_draw(
-                        budget, out, nxt, tool_open, long_ids, set(prompt), word_ids
-                    )
-                    if revised is None:
-                        nxt = _sample(
-                            logits,
-                            temperature,
-                            top_p,
-                            top_k,
-                            presence,
-                            seen,
-                            {nxt},
-                            out,
-                            frequency,
-                            counts,
-                        )
-                        finished_forced = False
-                    else:
-                        nxt = revised
-                        finished_forced = close_after and not pending
+                    finished_forced = close_after and not pending
                     if budget is not None:
                         nxt = budget.take(nxt)
                 else:
                     held = {budget.end} if budget is not None and budget.closed else set()
                     if forbid:
                         held |= forbid
-                    nxt = 0
-                    revised = None
-                    for _attempt in range(8):
-                        drawn = _sample(
-                            logits,
-                            temperature,
-                            top_p,
-                            top_k,
-                            presence,
-                            seen,
-                            held,
-                            out,
-                            frequency,
-                            counts,
-                        )
-                        revised = revise_think_draw(
-                            budget, out, drawn, tool_open, long_ids, set(prompt), word_ids
-                        )
-                        if revised is not None:
-                            nxt = revised
-                            break
-                        held.add(drawn)
-                    if revised is None:
-                        nxt = _sample(
-                            logits,
-                            temperature,
-                            top_p,
-                            top_k,
-                            presence,
-                            seen,
-                            held,
-                            out,
-                            frequency,
-                            counts,
-                        )
+                    nxt = _sample(
+                        logits,
+                        temperature,
+                        top_p,
+                        top_k,
+                        presence,
+                        seen,
+                        held,
+                        frequency,
+                        counts,
+                    )
                     if budget is not None:
                         nxt = budget.take(nxt)
                     finished_forced = False
@@ -1420,250 +1362,6 @@ class ThinkBudget:
         return token
 
 
-def _reply_tokens(produced: list[int], end: int | None) -> list[int]:
-    """Tokens after ``</think>``. Before that close, the whole completion is the span."""
-    if end is not None and end in produced:
-        return produced[produced.index(end) + 1 :]
-    return produced
-
-
-def _calls_after_think(produced: list[int], tool_open: int | None, end: int | None) -> int:
-    """``tool_open`` tokens in the reply. A mention before ``</think>`` is not one of them."""
-    if tool_open is None:
-        return 0
-    return sum(1 for token in _reply_tokens(produced, end) if token == tool_open)
-
-
-def _tool_call_started(produced: list[int], tool_open: int | None, end: int | None) -> bool:
-    """True once the reply has drawn ``tool_open``."""
-    return _calls_after_think(produced, tool_open, end) > 0
-
-
-def _stutter(
-    produced: list[int], drawn: int, word_ids: set[int] | None = None
-) -> bool:
-    """True when ``drawn`` repeats the word two positions back.
-
-    The recorded analysis drew `` messy``, a comma, and `` messy`` again.
-    A markdown marker is not a word, so a bullet list stays.
-    """
-    if len(produced) < 2 or produced[-2] != drawn:
-        return False
-    return word_ids is None or drawn in word_ids
-
-
-def _piece(text: str) -> str:
-    """The stored piece without the GPT-2 space marker.
-
-    That marker is U+0120, which ``isalpha`` counts as a letter. A run of
-    markers is indentation, not a word.
-    """
-    return text.replace("Ġ", "")
-
-
-def letter_token_ids(vocab: dict[str, int]) -> frozenset[int]:
-    """Token ids whose stored piece contains a letter."""
-    return frozenset(
-        token
-        for text, token in vocab.items()
-        if any(character.isalpha() for character in _piece(text))
-    )
-
-
-def long_token_ids(vocab: dict[str, int]) -> frozenset[int]:
-    """Token ids whose stored piece contains at least seven letters."""
-    return frozenset(
-        token
-        for text, token in vocab.items()
-        if sum(character.isalpha() for character in _piece(text)) >= _LONG_LETTERS
-    )
-
-
-def _long_repeat(
-    produced: list[int],
-    drawn: int,
-    long_ids: set[int] | None,
-    prompt_ids: set[int] | None = None,
-) -> bool:
-    """True when ``drawn`` is a long token already present in ``produced``.
-
-    `` heavily`` is one token. The analysis drew it again at the start of the
-    same clause. A token that is already in the prompt is the subject of the
-    turn, so a second draw of that token stays.
-    """
-    if long_ids is None or drawn not in long_ids or drawn not in produced:
-        return False
-    return prompt_ids is None or drawn not in prompt_ids
-
-
-def revise_think_draw(
-    budget: ThinkBudget | None,
-    produced: list[int],
-    drawn: int,
-    tool_open: int | None,
-    long_ids: set[int] | None = None,
-    prompt_ids: set[int] | None = None,
-    word_ids: set[int] | None = None,
-) -> int | None:
-    """The token to emit, or None when ``drawn`` would continue a repeated clause.
-
-    None refuses that draw. The completion samples another token and continues.
-    While ``<think>`` is open, a 5-token span already drawn starts the close.
-    The same word with one token between the copies does the same, as does a
-    second draw of a token whose piece has seven or more letters, unless that
-    token is already in the prompt. After the close, any of those repeats is
-    not drawn, and another token is sampled. A ``<tool_call>`` token inside
-    the open think block does not count as the call. After the close, the
-    call is left as drawn, and a repeated span inside it stays. A second
-    call in that reply is not drawn. An 8-token block still applies to the
-    draw itself.
-    """
-    end = None if budget is None else budget.end
-    if (
-        budget is not None
-        and tool_open is not None
-        and drawn == tool_open
-        and _calls_after_think(produced, tool_open, end) > 0
-    ):
-        return None
-    if budget is None or budget.forcing or _tool_call_started(produced, tool_open, end):
-        return drawn
-    if tool_open is not None and drawn == tool_open:
-        return drawn
-    repeated = (
-        _stutter(produced, drawn, word_ids)
-        or _long_repeat(produced, drawn, long_ids, prompt_ids)
-        or drawn in _blocked_tokens(produced, _THINK_REPEAT_SPAN)
-    )
-    if not budget.closed:
-        if repeated:
-            return budget._start()
-        return drawn
-    if repeated:
-        return None
-    return drawn
-
-
-def assert_think_repeat_cases() -> None:
-    """The clauses that looped, as token ids, do not get drawn again.
-
-    The analysis repeated "many lines of code that are". A 7-token block
-    missed it and an 8-token block missed it. "obfuscated or corrupted" did
-    the same. The tool parameter repeats a shorter path from the think text,
-    and that draw has to stay.
-    """
-    close = [20, 21, 22]
-    clause = [1, 2, 3, 4, 5, 6]
-    produced = [*clause, 8, *clause[:-1]]
-    budget = ThinkBudget(close, 21, 64)
-    got = revise_think_draw(budget, produced, clause[-1], None)
-    if got != close[0] or budget.stop_after or got == clause[-1]:
-        message = "a repeated think clause was drawn"
-        raise AssertionError(message)
-    if clause[-1] in _blocked_tokens(produced, 7):
-        message = "the recorded clause is not a 7-token repeat"
-        raise AssertionError(message)
-
-    reply = ThinkBudget(close, 21, 64)
-    reply.closed = True
-    paraphrased = [*clause, 21, *clause[:-1]]
-    if revise_think_draw(reply, paraphrased, clause[-1], 50) is not None:
-        message = "the reply drew the think clause again"
-        raise AssertionError(message)
-
-    opening = ThinkBudget(close, 21, 64)
-    if revise_think_draw(opening, [], 50, 50) != 50:
-        message = "a tool call was replaced"
-        raise AssertionError(message)
-    if revise_think_draw(opening, [50, 7, 8], 50, 50) is not None:
-        message = "a second tool call was drawn"
-        raise AssertionError(message)
-    closed = ThinkBudget(close, 21, 64)
-    closed.closed = True
-    if revise_think_draw(closed, [50, 21], 50, 50) != 50:
-        message = "the call after thinking was removed"
-        raise AssertionError(message)
-    if revise_think_draw(closed, [21, 50, 7], 50, 50) is not None:
-        message = "a second tool call was drawn"
-        raise AssertionError(message)
-
-    path = [11, 12, 13, 14, 15, 16]
-    tool = ThinkBudget(close, 21, 64)
-    parameter = [*path, 50, *path[:-1]]
-    if revise_think_draw(tool, parameter, path[-1], 50) != path[-1]:
-        message = "the tool path was removed"
-        raise AssertionError(message)
-
-    # " contains many lines of code" is five tokens. A 6-token block missed it.
-    five = [5435, 1599, 4965, 314, 1970]
-    five_produced = [*five, 8, *five[:-1]]
-    five_budget = ThinkBudget(close, 21, 64)
-    if revise_think_draw(five_budget, five_produced, five[-1], None) != close[0]:
-        message = "contains many lines of code was drawn again"
-        raise AssertionError(message)
-    if five[-1] in _blocked_tokens(five_produced, 6):
-        message = "the recorded clause is a 6-token repeat"
-        raise AssertionError(message)
-
-    # " messy, messy" is that token, a comma, and the same token.
-    stutter_budget = ThinkBudget(close, 21, 64)
-    if revise_think_draw(stutter_budget, [760, 44318, 11], 44318, None) != close[0]:
-        message = "messy, messy was drawn"
-        raise AssertionError(message)
-    distant = ThinkBudget(close, 21, 64)
-    if revise_think_draw(distant, [44318, 1, 2, 3], 44318, None) != 44318:
-        message = "a distant token was treated as a stutter"
-        raise AssertionError(message)
-    inside = ThinkBudget(close, 21, 64)
-    if revise_think_draw(inside, [50, 44318, 11], 44318, 50) != 44318:
-        message = "a stutter inside a tool call was removed"
-        raise AssertionError(message)
-
-    # " heavily" is one token. Drawing it again closes think. " file" stays.
-    long_ids = {16421}
-    word = ThinkBudget(close, 21, 64)
-    if revise_think_draw(word, [16, 16421, 20], 16421, None, long_ids) != close[0]:
-        message = "heavily was drawn again"
-        raise AssertionError(message)
-    short = ThinkBudget(close, 21, 64)
-    if revise_think_draw(short, [999, 1, 2], 999, None, long_ids) != 999:
-        message = "file was treated as a long repeat"
-        raise AssertionError(message)
-    kept = ThinkBudget(close, 21, 64)
-    if revise_think_draw(kept, [50, 16421], 16421, 50, long_ids) != 16421:
-        message = "a long token inside a tool call was removed"
-        raise AssertionError(message)
-    subject = ThinkBudget(close, 21, 64)
-    if revise_think_draw(subject, [16, 59344], 59344, None, {59344}, {59344}) != 59344:
-        message = "a prompt token was treated as a long repeat"
-        raise AssertionError(message)
-    bullet = ThinkBudget(close, 21, 64)
-    if revise_think_draw(bullet, [348, 256], 348, None, None, None, {44318}) != 348:
-        message = "a markdown bullet was treated as a stutter"
-        raise AssertionError(message)
-    spaces = long_token_ids({"ĠĠĠĠĠĠĠ": 285, "Ġheavily": 16421})
-    if 285 in spaces or 16421 not in spaces:
-        message = "a space run was treated as a long token"
-        raise AssertionError(message)
-
-
-def _blocked_tokens(produced: list[int], span: int) -> set[int]:
-    """Tokens that would repeat an n-gram already present in ``produced``.
-
-    Paulus, Xiong, and Socher, "A Deep Reinforced Model for Abstractive
-    Summarization", block a repeated n-gram by forbidding the token that
-    would complete it.
-    """
-    if span < 2 or len(produced) < span:
-        return set()
-    prefix = tuple(produced[-(span - 1) :])
-    blocked: set[int] = set()
-    for start in range(len(produced) - span + 1):
-        if tuple(produced[start : start + span - 1]) == prefix:
-            blocked.add(produced[start + span - 1])
-    return blocked
-
-
 def decode_steps(max_tokens: int, context_limit: int, prompt_tokens: int) -> int:
     """Completion steps that fit the context ceiling, not the prompt-sized cache."""
     return min(int(max_tokens), max(0, int(context_limit) - int(prompt_tokens)))
@@ -1677,14 +1375,12 @@ def _sample(
     presence: float,
     seen: set[int],
     banned: set[int] | None = None,
-    produced: list[int] | None = None,
     frequency: float = 0.0,
     counts: dict[int, int] | None = None,
 ) -> int:
     scores = logits
-    blocked = _blocked_tokens(produced or [], _REPEAT_SPAN)
     counted = counts or {}
-    if (presence and seen) or (frequency and counted) or banned or blocked:
+    if (presence and seen) or (frequency and counted) or banned:
         scores = np.array(logits, copy=True)
         if presence and seen:
             penalty = np.float32(presence)
@@ -1698,8 +1394,6 @@ def _sample(
         if banned:
             for token in banned:
                 scores[token] = np.float32(-np.inf)
-        for token in blocked:
-            scores[token] = np.float32(-np.inf)
     if temperature == 0.0:
         return int(np.argmax(scores))
     if top_k > 0 and top_k < scores.size:

@@ -18,13 +18,11 @@ from qwen36_35b_a3b.chat import (
     STOP,
     decode_text,
     encode_chat,
-    encode_text,
-    load_tokenizer,
     think_close_ids,
     think_open_id,
 )
 from qwen36_35b_a3b.commands import CARROT_PROMPT
-from qwen36_35b_a3b.forward import Qwen36Runtime, letter_token_ids, long_token_ids
+from qwen36_35b_a3b.forward import Qwen36Runtime
 from qwen36_35b_a3b.sampling import VARIANTS
 from qwen36_35b_a3b.tools import split_thinking
 
@@ -82,16 +80,9 @@ def _complete(
     )
     close: list[int] | None = None
     end = None
-    tool_open = None
-    long_ids = None
-    word_ids = None
     forbid = None if thinking else {think_open_id(runtime.root)}
     if thinking:
         close, end = think_close_ids(runtime.root)
-        tool_open = encode_text(runtime.root, "<tool_call>")[0]
-        vocab = load_tokenizer(runtime.root).get_vocab()
-        long_ids = long_token_ids(vocab)
-        word_ids = letter_token_ids(vocab)
     limit = _THINK_TOKENS if thinking else _INSTRUCT_TOKENS
     tokens = runtime.generate(
         prompt,
@@ -104,10 +95,7 @@ def _complete(
         think_close=close,
         think_end=end,
         thinking_budget=_THINK_BUDGET if thinking else 0,
-        tool_open=tool_open,
-        long_ids=long_ids,
         forbid=forbid,
-        word_ids=word_ids,
     )
     text = decode_text(runtime.root, tokens).rstrip()
     if check:

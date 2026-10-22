@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 
 from qwen36_35b_a3b.formats import (
@@ -20,12 +18,6 @@ from qwen36_35b_a3b.formats import (
     pack_fp4_matrix,
     pack_fp8_matrix,
     quantize_fp4,
-)
-from qwen36_35b_a3b.forward import (
-    ThinkBudget,
-    assert_think_repeat_cases,
-    long_token_ids,
-    revise_think_draw,
 )
 from qwen36_35b_a3b.session import Session
 
@@ -969,65 +961,6 @@ def struct_f32(value: float) -> bytes:
     return np.float32(value).tobytes()
 
 
-def check_think_loops(session: Session) -> None:
-    """Repeated think clauses from recorded completions are not drawn again."""
-    del session
-    assert_think_repeat_cases()
-    root = Path("models/Qwen3.6-35B-A3B-fp4")
-    if not (root / "tokenizer.json").is_file():
-        return
-    from qwen36_35b_a3b.chat import encode_text, load_tokenizer
-
-    recorded = (
-        "many lines of code that are messy, complex, and confusing",
-        "obfuscated or corrupted Python constructs",
-        " contains many lines of code",
-    )
-    for text in recorded:
-        clause = encode_text(root, text)
-        if len(clause) < 5:
-            message = "recorded clause is shorter than the think span"
-            raise AssertionError(message)
-        produced = [*clause, *clause[:-1]]
-        budget = ThinkBudget([20, 21, 22], 21, 64)
-        if revise_think_draw(budget, produced, clause[-1], None) == clause[-1]:
-            message = "recorded think clause was drawn again"
-            raise AssertionError(message)
-        reply = ThinkBudget([20, 21, 22], 21, 64)
-        reply.closed = True
-        paraphrased = [*clause, 21, *clause[:-1]]
-        if revise_think_draw(reply, paraphrased, clause[-1], 50) is not None:
-            message = "recorded reply drew the think clause again"
-            raise AssertionError(message)
-
-    stutter = encode_text(root, " messy, messy")
-    if len(stutter) != 3 or stutter[0] != stutter[2]:
-        message = "messy, messy is not one token, a comma, and that token"
-        raise AssertionError(message)
-    stutter_budget = ThinkBudget([20, 21, 22], 21, 64)
-    if revise_think_draw(stutter_budget, stutter[:-1], stutter[-1], None) == stutter[-1]:
-        message = "messy, messy was drawn"
-        raise AssertionError(message)
-
-    long_ids = long_token_ids(load_tokenizer(root).get_vocab())
-    heavily = encode_text(root, " heavily")
-    if len(heavily) != 1 or heavily[0] not in long_ids:
-        message = "heavily is not one long token"
-        raise AssertionError(message)
-    word = ThinkBudget([20, 21, 22], 21, 64)
-    if revise_think_draw(word, [heavily[0]], heavily[0], None, long_ids) == heavily[0]:
-        message = "heavily was drawn again"
-        raise AssertionError(message)
-    file_id = encode_text(root, " file")
-    if len(file_id) != 1 or file_id[0] in long_ids:
-        message = "file is a long token"
-        raise AssertionError(message)
-    short = ThinkBudget([20, 21, 22], 21, 64)
-    if revise_think_draw(short, file_id, file_id[0], None, long_ids) != file_id[0]:
-        message = "file was treated as a long repeat"
-        raise AssertionError(message)
-
-
 def _silu(values: np.ndarray) -> np.ndarray:
     return values / (np.float32(1.0) + np.exp(-values))
 
@@ -1242,7 +1175,6 @@ CHECKS = (
     ("norms", check_norms),
     ("gather", check_gather_and_attend),
     ("expert slots", check_remap_expert_ids),
-    ("think loop", check_think_loops),
     ("moe group", check_moe_group),
     ("grouped expert", check_grouped_expert),
     ("fp8 expert", check_fp8_expert),

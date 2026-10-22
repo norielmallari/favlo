@@ -39,7 +39,7 @@ def test_top_k_excludes_the_tail() -> None:
 
 def test_35b_frequency_and_presence_both_apply() -> None:
     logits = np.array([1.0, 2.5], dtype=np.float32)
-    drawn = _sample(logits, 0.0, 1.0, 0, 0.5, {1}, None, None, 1.0, {1: 2})
+    drawn = _sample(logits, 0.0, 1.0, 0, 0.5, {1}, None, 1.0, {1: 2})
     assert drawn == 0
 
 

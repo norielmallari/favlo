@@ -37,7 +37,6 @@ from qwen36_35b_a3b.formats import (
 from qwen36_35b_a3b.forward import (
     ThinkBudget,
     _sample,
-    assert_think_repeat_cases,
     decode_steps,
     limit_keeps_piece,
 )
@@ -277,19 +276,6 @@ def test_a_blank_piece_is_dropped_when_the_limit_cuts_an_open_think() -> None:
     assert not limit_keeps_piece(True, True)
     assert limit_keeps_piece(True, False)
     assert limit_keeps_piece(False, True)
-
-
-def test_a_repeated_span_is_not_drawn_again() -> None:
-    produced = [1, 2, 3, 4, 5, 6, 7, 9, 1, 2, 3, 4, 5, 6, 7]
-    logits = np.full(16, -10.0, dtype=np.float32)
-    logits[9] = np.float32(10.0)
-    logits[8] = np.float32(3.0)
-    drawn = _sample(logits, 0.0, 1.0, 0, 0.0, set(produced), None, produced)
-    assert drawn == 8
-
-
-def test_recorded_think_clauses_are_not_drawn_again() -> None:
-    assert_think_repeat_cases()
 
 
 def test_a_repeated_clause_ends_after_the_close() -> None:

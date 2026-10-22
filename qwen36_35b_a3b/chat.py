@@ -12,7 +12,7 @@ from jinja2 import Environment
 from tokenizers import Tokenizer
 
 from qwen36_35b_a3b.cache import DEFAULT_CONTEXT_LENGTH
-from qwen36_35b_a3b.forward import RequestClosed, letter_token_ids, long_token_ids
+from qwen36_35b_a3b.forward import RequestClosed
 from qwen36_35b_a3b.sampling import VARIANTS, mode_card, requested_thinking
 from qwen36_35b_a3b.tools import (
     StreamText,
@@ -25,26 +25,6 @@ from qwen36_35b_a3b.tools import (
 from qwen36_35b_a3b.vision import prepare_prompt
 
 STOP = {248046, 248044}
-_LONG_IDS: dict[Path, frozenset[int]] = {}
-
-
-def _long_ids(root: Path) -> frozenset[int]:
-    cached = _LONG_IDS.get(root)
-    if cached is None:
-        cached = long_token_ids(load_tokenizer(root).get_vocab())
-        _LONG_IDS[root] = cached
-    return cached
-
-
-_WORD_IDS: dict[Path, frozenset[int]] = {}
-
-
-def _word_ids(root: Path) -> frozenset[int]:
-    cached = _WORD_IDS.get(root)
-    if cached is None:
-        cached = letter_token_ids(load_tokenizer(root).get_vocab())
-        _WORD_IDS[root] = cached
-    return cached
 
 
 def _sampling(
@@ -254,9 +234,6 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
     prompt = prepare_prompt(runtime, messages, prompt)
     forced, stop_after_forced = _forced_call(runtime.root, body.get("tools"), required)
     close, end = think_close_ids(runtime.root) if thinking else ([], None)
-    tool_open = encode_text(runtime.root, "<tool_call>")[0] if thinking else None
-    long_ids = _long_ids(runtime.root) if thinking else None
-    word_ids = _word_ids(runtime.root) if thinking else None
     forbid = None if thinking else instruct_forbid(runtime.root)
     emit_tools = body.get("tool_choice") != "none"
     stream = bool(body.get("stream", False))
@@ -279,11 +256,8 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
             thinking,
             close,
             end,
-            tool_open,
             emit_tools,
-            long_ids,
             forbid,
-            word_ids,
             frequency=frequency,
         )
         return
@@ -300,10 +274,7 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
         think_close=close,
         think_end=end,
         thinking_budget=thinking_token_budget(thinking),
-        tool_open=tool_open,
-        long_ids=long_ids,
         forbid=forbid,
-        word_ids=word_ids,
         frequency=frequency,
     )
     text = decode_text(runtime.root, tokens)
@@ -405,11 +376,8 @@ def _stream(
     thinking: bool,
     think_close: list[int],
     think_end: int | None,
-    tool_open: int | None = None,
     emit_tools: bool = True,
-    long_ids: set[int] | None = None,
     forbid: set[int] | None = None,
-    word_ids: set[int] | None = None,
     frequency: float = 0.0,
 ) -> None:
     decode = getattr(runtime, "decode", None)
@@ -491,10 +459,7 @@ def _stream(
             think_close=think_close,
             think_end=think_end,
             thinking_budget=thinking_token_budget(thinking),
-            tool_open=tool_open,
-            long_ids=long_ids,
             forbid=forbid,
-            word_ids=word_ids,
             frequency=frequency,
         )
     finally:
