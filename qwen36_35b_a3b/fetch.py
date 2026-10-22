@@ -14,8 +14,8 @@ from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import quote
 
-from qwen36_35b_a3b.convert import LANGUAGE_LAYERS
-from qwen36_35b_a3b.formats import EXPERT_IMAGE
+from qwen36_35b_a3b.convert import LANGUAGE_EXPERTS, MTP_EXPERTS
+from qwen36_35b_a3b.formats import EXPERT_FP8, EXPERT_IMAGE, promote_count
 
 REPO = "Qwen/Qwen3.6-35B-A3B"
 _HOST = "https://huggingface.co"
@@ -25,10 +25,18 @@ _AGENT = "favlo"
 Progress = Callable[[int, int, str], None]
 
 
-def record_bytes() -> int:
-    """Language expert images, one MTP layer, and headroom for resident.bin."""
-    images = (LANGUAGE_LAYERS + 1) * 256 * EXPERT_IMAGE
-    return images + images // 10
+def record_bytes(percent: float = 20.0) -> int:
+    """Packed bytes of the default mixed record: routed images plus the fp8 resident."""
+    language = promote_count(percent, LANGUAGE_EXPERTS)
+    mtp = promote_count(percent, MTP_EXPERTS)
+    experts = (
+        language * EXPERT_FP8
+        + (LANGUAGE_EXPERTS - language) * EXPERT_IMAGE
+        + mtp * EXPERT_FP8
+        + (MTP_EXPERTS - mtp) * EXPERT_IMAGE
+    )
+    resident = 3_082_002_816
+    return experts + resident
 
 
 def shortfall(need_download: int, need_record: int, download: Path, record: Path) -> str | None:

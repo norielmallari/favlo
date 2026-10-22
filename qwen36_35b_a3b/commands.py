@@ -47,6 +47,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     quant = sub.add_parser("quantize", help="write the Metal record from BF16 shards")
     quant.add_argument("--src", type=Path, default=None)
     quant.add_argument("--output", type=Path, default=None)
+    quant.add_argument(
+        "--expert-fp8",
+        type=float,
+        default=20,
+        help="percentage of routed experts stored as fp8",
+    )
     sub.add_parser("bf16", help="run this package's shaders on stored BF16 values")
     complete = sub.add_parser("complete", help="complete from the packed record")
     complete.add_argument(
@@ -61,7 +67,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="maximum bytes for this runtime, such as 32GiB",
     )
     sub.add_parser("kernels", help="compile the shader library and run the dispatch checks")
-    setup = sub.add_parser("setup", help="download the official checkpoint and pack fp4")
+    setup = sub.add_parser("setup", help="download the official checkpoint and pack fp8-e20")
     setup.add_argument("--console", choices=("auto", "pretty", "plain", "json"), default="auto")
     models = sub.add_parser("models", help="list or edit the flavor registry")
     models_sub = models.add_subparsers(dest="models_command")
@@ -91,12 +97,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _setup(args: argparse.Namespace) -> int:
-    """Download Qwen/Qwen3.6-35B-A3B, pack fp4, and remove the checkout."""
+    """Download Qwen/Qwen3.6-35B-A3B, pack fp8-e20, and remove the checkout."""
     ui = Console.from_env(getattr(args, "console", None), pipeline=PIPELINE)
     if os.environ.get("FAVLO_SKIP_PLATE") != "1":
         ui.plate()
     src = models_dir() / _BF16.name
-    output = models_dir() / f"{_BF16_REPO.split('/')[-1]}-fp4"
+    output = models_dir() / record_name(_BF16, 20)
     download_bar = None
     quantize_bar = None
     try:
@@ -136,7 +142,7 @@ def _setup(args: argparse.Namespace) -> int:
                 quantize_bar.total = done
             quantize_bar.detail = detail
 
-        quantize(src, output, on_bytes=_on_bytes)
+        quantize(src, output, on_bytes=_on_bytes, expert_fp8=20)
         quantize_bar.done = quantize_bar.total
         ui.end(quantize_bar, f"record complete: {output}")
         quantize_bar = None
@@ -191,14 +197,13 @@ def _remove_checkout(path: Path) -> None:
 
 def _quantize(args: argparse.Namespace) -> int:
     src = args.src or _BF16
+    percent = float(args.expert_fp8)
     if args.output is not None:
         output = args.output
-    elif args.src is not None:
-        output = Path("models") / record_name(Path(args.src))
     else:
-        output = Path("models") / f"{_BF16_REPO.split('/')[-1]}-fp4"
+        output = Path("models") / record_name(Path(src), percent)
     try:
-        quantize(src, output)
+        quantize(src, output, expert_fp8=percent)
         register_quantized(
             output.name,
             source=src,

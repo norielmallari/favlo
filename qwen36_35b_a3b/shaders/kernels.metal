@@ -1220,6 +1220,22 @@ kernel void gather_fp4_row(
     }
 }
 
+kernel void gather_fp8_row(
+    device const uchar* weights [[buffer(0)]],
+    device const uchar* scales [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& row [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    uint lane [[thread_index_in_simdgroup]])
+{
+    device const uchar* row_w = weights + row * inner;
+    device const uchar* row_scale = scales + row * (inner >> 5);
+    for (uint element = lane; element < inner; element += 32u) {
+        float factor = exp2(float(row_scale[element >> 5]) - 127.0f);
+        destination[element] = e4m3_fn(row_w[element]) * factor;
+    }
+}
+
 // One weight matrix, many activation rows. The row stays in cache across tokens.
 kernel void gemv_fp4_batch(
     device const float* activation [[buffer(0)]],
@@ -1331,6 +1347,25 @@ kernel void gemv_fp4_vec(
         return;
     }
     float sum = fp4_vec_dot(activation, weights, scales, row, inner, lane);
+    if (lane == 0u) {
+        destination[row] = sum;
+    }
+}
+
+kernel void gemv_fp8_vec(
+    device const float* activation [[buffer(0)]],
+    device const uchar* weights [[buffer(1)]],
+    device const uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= cols) {
+        return;
+    }
+    float sum = fp8_vec_dot(activation, weights, scales, row, inner, lane);
     if (lane == 0u) {
         destination[row] = sum;
     }
@@ -1518,6 +1553,56 @@ kernel void gdn_in_proj(
     }
 }
 
+kernel void gdn_in_proj_fp8(
+    device const float* activation [[buffer(0)]],
+    device const uchar* qkv_w [[buffer(1)]],
+    device const uchar* qkv_s [[buffer(2)]],
+    device const uchar* z_w [[buffer(3)]],
+    device const uchar* z_s [[buffer(4)]],
+    device const uchar* a_w [[buffer(5)]],
+    device const uchar* a_s [[buffer(6)]],
+    device const uchar* b_w [[buffer(7)]],
+    device const uchar* b_s [[buffer(8)]],
+    device float* qkv [[buffer(9)]],
+    device float* z [[buffer(10)]],
+    device float* a [[buffer(11)]],
+    device float* b [[buffer(12)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint job [[threadgroup_position_in_grid]])
+{
+    float sum = 0.0f;
+    if (job < 8192u) {
+        sum = fp8_vec_dot(activation, qkv_w, qkv_s, job, 2048u, lane);
+        if (lane == 0u) {
+            qkv[job] = sum;
+        }
+        return;
+    }
+    if (job < 12288u) {
+        uint row = job - 8192u;
+        sum = fp8_vec_dot(activation, z_w, z_s, row, 2048u, lane);
+        if (lane == 0u) {
+            z[row] = sum;
+        }
+        return;
+    }
+    if (job < 12320u) {
+        uint row = job - 12288u;
+        sum = fp8_vec_dot(activation, a_w, a_s, row, 2048u, lane);
+        if (lane == 0u) {
+            a[row] = sum;
+        }
+        return;
+    }
+    if (job < 12352u) {
+        uint row = job - 12320u;
+        sum = fp8_vec_dot(activation, b_w, b_s, row, 2048u, lane);
+        if (lane == 0u) {
+            b[row] = sum;
+        }
+    }
+}
+
 // Query, key, and value of one full-attention layer.
 kernel void attn_qkv(
     device const float* activation [[buffer(0)]],
@@ -1557,6 +1642,44 @@ kernel void attn_qkv(
     }
 }
 
+kernel void attn_qkv_fp8(
+    device const float* activation [[buffer(0)]],
+    device const uchar* q_w [[buffer(1)]],
+    device const uchar* q_s [[buffer(2)]],
+    device const uchar* k_w [[buffer(3)]],
+    device const uchar* k_s [[buffer(4)]],
+    device const uchar* v_w [[buffer(5)]],
+    device const uchar* v_s [[buffer(6)]],
+    device float* query [[buffer(7)]],
+    device float* key [[buffer(8)]],
+    device float* value [[buffer(9)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint job [[threadgroup_position_in_grid]])
+{
+    if (job < 8192u) {
+        float sum = fp8_vec_dot(activation, q_w, q_s, job, 2048u, lane);
+        if (lane == 0u) {
+            query[job] = sum;
+        }
+        return;
+    }
+    if (job < 8704u) {
+        uint row = job - 8192u;
+        float sum = fp8_vec_dot(activation, k_w, k_s, row, 2048u, lane);
+        if (lane == 0u) {
+            key[row] = sum;
+        }
+        return;
+    }
+    if (job < 9216u) {
+        uint row = job - 8704u;
+        float sum = fp8_vec_dot(activation, v_w, v_s, row, 2048u, lane);
+        if (lane == 0u) {
+            value[row] = sum;
+        }
+    }
+}
+
 kernel void gemv_fp4_vec_acc(
     device const float* activation [[buffer(0)]],
     device const uchar* weights [[buffer(1)]],
@@ -1571,6 +1694,25 @@ kernel void gemv_fp4_vec_acc(
         return;
     }
     float sum = fp4_vec_dot(activation, weights, scales, row, inner, lane);
+    if (lane == 0u) {
+        destination[row] += sum;
+    }
+}
+
+kernel void gemv_fp8_vec_acc(
+    device const float* activation [[buffer(0)]],
+    device const uchar* weights [[buffer(1)]],
+    device const uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= cols) {
+        return;
+    }
+    float sum = fp8_vec_dot(activation, weights, scales, row, inner, lane);
     if (lane == 0u) {
         destination[row] += sum;
     }
@@ -1810,7 +1952,7 @@ kernel void moe_down_mix(
     }
 }
 
-// fp4 gate and the shared expert. A slot whose width is not 4 returns before
+// fp4 gate and the fp8 shared expert. A slot whose width is not 4 returns before
 // the dot. The shared expert has no width byte.
 kernel void moe_gate_silu_w(
     device const float* activation [[buffer(0)]],
@@ -1841,8 +1983,8 @@ kernel void moe_gate_silu_w(
     }
     if (job < 4608u) {
         uint row = job - 4096u;
-        float gate = fp4_vec_dot(activation, shared_w, shared_s, row, 2048u, lane);
-        float up = fp4_vec_dot(activation, shared_w, shared_s, row + 512u, 2048u, lane);
+        float gate = fp8_vec_dot(activation, shared_w, shared_s, row, 2048u, lane);
+        float up = fp8_vec_dot(activation, shared_w, shared_s, row + 512u, 2048u, lane);
         if (lane == 0u) {
             shared_gated[row] = silu_f(gate) * up;
         }
@@ -1850,7 +1992,7 @@ kernel void moe_gate_silu_w(
 }
 
 // fp4 down mix. Slots whose width is not 4 are skipped. The shared expert is
-// still added here.
+// fp8 and is still added here.
 kernel void moe_down_mix_w(
     device const float* gated [[buffer(0)]],
     device const float* shared_gated [[buffer(1)]],
@@ -1878,7 +2020,7 @@ kernel void moe_down_mix_w(
         float dot = fp4_vec_dot(gated + slot * 512u, down, down + 524288u, row, 512u, lane);
         acc += mix[slot] * dot;
     }
-    float shared = fp4_vec_dot(shared_gated, shared_w, shared_s, row, 512u, lane);
+    float shared = fp8_vec_dot(shared_gated, shared_w, shared_s, row, 512u, lane);
     acc += coeff[0] * shared;
     if (lane == 0u) {
         hidden[row] += acc;
@@ -2004,6 +2146,28 @@ kernel void embed_fp4_rows(
         uchar byte = packed[element >> 1];
         uint nibble = (element & 1u) ? (byte >> 4) : (byte & 0x0Fu);
         dest[element] = fp4_e2m1(nibble) * factor;
+    }
+}
+
+kernel void embed_fp8_rows(
+    device const uchar* weights [[buffer(0)]],
+    device const uchar* scales [[buffer(1)]],
+    device const uint* tokens [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= count) {
+        return;
+    }
+    device const uchar* row_w = weights + tokens[row] * inner;
+    device const uchar* row_scale = scales + tokens[row] * (inner >> 5);
+    device float* dest = destination + row * inner;
+    for (uint element = lane; element < inner; element += 32u) {
+        float factor = exp2(float(row_scale[element >> 5]) - 127.0f);
+        dest[element] = e4m3_fn(row_w[element]) * factor;
     }
 }
 
@@ -4032,6 +4196,40 @@ kernel void gemv_fp4_tail(
     }
 }
 
+kernel void gemv_fp8_tail(
+    device const float* activation [[buffer(0)]],
+    device const uchar* weights [[buffer(1)]],
+    device const uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    constant uint& tail [[buffer(5)]],
+    constant uint& logical_k [[buffer(6)]],
+    constant uint& stored_k [[buffer(7)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= tail) {
+        return;
+    }
+    uint blocks = stored_k >> 5;
+    device const uchar* packed = weights + row * stored_k;
+    device const uchar* row_scale = scales + row * blocks;
+    for (uint token = 0u; token < count; ++token) {
+        device const float* act = activation + token * logical_k;
+        float acc = 0.0f;
+        for (uint block = 0u; block < blocks; ++block) {
+            uint element = (block << 5) + lane;
+            float aval = element < logical_k ? act[element] : 0.0f;
+            float factor = exp2(float(row_scale[block]) - 127.0f);
+            acc += e4m3_fn(packed[element]) * factor * aval;
+        }
+        float sum = simd_sum(acc);
+        if (lane == 0u) {
+            destination[token * tail + row] = sum;
+        }
+    }
+}
+
 kernel void gelu_tanh_n(
     device const float* x [[buffer(0)]],
     device float* y [[buffer(1)]],
@@ -4185,5 +4383,29 @@ kernel void dequant_fp4_rows(
         uchar byte = packed[element >> 1];
         uint nibble = (element & 1u) ? (byte >> 4) : (byte & 0x0Fu);
         dest[element] = fp4_e2m1(nibble) * factor;
+    }
+}
+
+kernel void dequant_fp8_rows(
+    device const uchar* weights [[buffer(0)]],
+    device const uchar* scales [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& logical [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    constant uint& rows [[buffer(5)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= rows) {
+        return;
+    }
+    uint blocks = logical >> 5;
+    device const uchar* packed = weights + row * inner;
+    device const uchar* row_scale = scales + row * (inner >> 5);
+    device float* dest = destination + row * logical;
+    for (uint block = 0u; block < blocks; ++block) {
+        float factor = exp2(float(row_scale[block]) - 127.0f);
+        uint element = (block << 5) + lane;
+        dest[element] = e4m3_fn(packed[element]) * factor;
     }
 }

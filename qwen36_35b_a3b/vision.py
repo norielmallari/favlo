@@ -449,23 +449,26 @@ def _linear(
         ((stored_k + 31) // 32, (pad + 7) // 8, 1),
         (32, 8, 1),
     )
+    fp8 = entry.get("dtype") == "fp8"
     wide = aligned % 64 == 0
     tile = 64 if wide else 32
+    kind = "fp8" if fp8 else "fp4"
     width = int(runtime.session.pipes["prefill_fp4_e8m0"].threadExecutionWidth())
     scale_at = runtime._scale(entry, offset)
     runtime.session.encode(
-        "prefill_fp4_n64" if wide else "prefill_fp4_e8m0",
+        f"prefill_{kind}_n64" if wide else f"prefill_{kind}_e8m0",
         [(bufs.half, 0), (file, offset), (file, scale_at), (bufs.wide, 0)],
         [_u32(pad), _u32(aligned), _u32(stored_k)],
         (aligned // tile, pad // 64, 1),
         (width * 4, 1, 1),
     )
     if tail_n:
+        stride = stored_k if fp8 else stored_k // 2
         runtime.session.encode(
-            "gemv_fp4_tail",
+            "gemv_fp8_tail" if fp8 else "gemv_fp4_tail",
             [
                 (source, 0),
-                (file, offset + aligned * (stored_k // 2)),
+                (file, offset + aligned * stride),
                 (file, scale_at + aligned * (stored_k // 32)),
                 (bufs.tail, 0),
             ],
@@ -531,9 +534,10 @@ def _dequant_positions(runtime: Any, bufs: _Buffers) -> None:
         message = f"position table stored {(stored_rows, stored_k)}"
         raise RuntimeError(message)
     session = runtime.session
+    kernel = "dequant_fp8_rows" if entry.get("dtype") == "fp8" else "dequant_fp4_rows"
     session.begin()
     session.encode(
-        "dequant_fp4_rows",
+        kernel,
         [(file, offset), (file, runtime._scale(entry, offset)), (bufs.table, 0)],
         [_u32(HIDDEN), _u32(stored_k), _u32(GRID * GRID)],
         (GRID * GRID, 1, 1),

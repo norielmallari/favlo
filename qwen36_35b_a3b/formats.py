@@ -7,6 +7,8 @@ stores exponent 0.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 BLOCK = 32
@@ -289,3 +291,49 @@ def expert_file_bytes(widths: np.ndarray, offsets: np.ndarray) -> list[int]:
             cursor = off + size
         sizes.append(end)
     return sizes
+
+
+def relative_error(weight: np.ndarray) -> float:
+    """RMS of the restored fp4 matrix against the source, divided by the source RMS."""
+    matrix = np.ascontiguousarray(weight, dtype=np.float32)
+    if matrix.ndim == 1:
+        matrix = matrix.reshape(1, -1)
+    elif matrix.ndim > 2:
+        matrix = matrix.reshape(matrix.shape[0], -1)
+    rows, inner = matrix.shape
+    numerator = 0.0
+    denominator = 0.0
+    for start in range(0, rows, 4096):
+        tile = matrix[start : start + 4096]
+        data, scales = quantize_fp4(tile)
+        restored = dequant_fp4(data, scales, tile.shape[0], inner)
+        diff = tile.astype(np.float64) - restored.astype(np.float64)
+        flat = tile.astype(np.float64).ravel()
+        numerator += float(np.dot(diff.ravel(), diff.ravel()))
+        denominator += float(np.dot(flat, flat))
+    if denominator == 0.0:
+        return 0.0
+    return math.sqrt(numerator / denominator)
+
+
+def promote_count(percent: float, pool: int) -> int:
+    """Largest whole count that does not exceed ``percent`` of ``pool``."""
+    if pool < 1:
+        message = f"expert pool {pool} is empty"
+        raise ValueError(message)
+    if not math.isfinite(percent) or percent < 0.0 or percent > 100.0:
+        message = f"expert fp8 percentage {percent} is outside 0..100"
+        raise ValueError(message)
+    count = int(math.floor((percent * pool / 100.0) + 1e-9))
+    if count > pool:
+        return pool
+    return count
+
+
+def promoted_indices(scores: dict[int, float], count: int) -> list[int]:
+    """Highest scores. An equal score keeps the lower index."""
+    if count < 0 or count > len(scores):
+        message = f"promote count {count} does not fit {len(scores)} experts"
+        raise ValueError(message)
+    ranked = sorted(scores, key=lambda index: (-float(scores[index]), int(index)))
+    return sorted(int(index) for index in ranked[:count])

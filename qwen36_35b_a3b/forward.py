@@ -340,11 +340,13 @@ class Qwen36Runtime:
             self.ids = self.session.zeros(8 * 4)
             self.route_ids = self.session.zeros(LAYERS * 8 * 4)
             order_path = self.root / "experts" / "order.bin"
-            order = order_path.read_bytes()
-            if len(order) != SLOT_MAP_BYTES:
-                message = f"expert slot map is {len(order)} bytes"
-                raise RuntimeError(message)
-            self.expert_order = self.session.upload(order)
+            self.expert_order = None
+            if order_path.is_file():
+                order = order_path.read_bytes()
+                if len(order) != SLOT_MAP_BYTES:
+                    message = f"expert slot map is {len(order)} bytes"
+                    raise RuntimeError(message)
+                self.expert_order = self.session.upload(order)
             self.mix_w = self.session.zeros(8 * 4)
             self.acc = self.session.zeros(HIDDEN * 4)
             self.router = self.session.zeros(256 * 4)
@@ -528,8 +530,9 @@ class Qwen36Runtime:
     def _gemv_fp4(self, act: Any, act_off: int, name: str, dest: Any, dest_off: int = 0) -> None:
         buf, offset, entry = self._loc(name)
         rows, inner = entry["stored_shape"]
+        kernel = "gemv_fp8_vec" if entry.get("dtype") == "fp8" else "gemv_fp4_vec"
         self.session.encode(
-            "gemv_fp4_vec",
+            kernel,
             [(act, act_off), (buf, offset), (buf, self._scale(entry, offset)), (dest, dest_off)],
             [_u32(int(rows)), _u32(int(inner))],
             (int(rows), 1, 1),
@@ -543,8 +546,9 @@ class Qwen36Runtime:
     def _gemv_fp4_acc(self, act: Any, act_off: int, name: str, dest: Any) -> None:
         buf, offset, entry = self._loc(name)
         rows, inner = entry["stored_shape"]
+        kernel = "gemv_fp8_vec_acc" if entry.get("dtype") == "fp8" else "gemv_fp4_vec_acc"
         self.session.encode(
-            "gemv_fp4_vec_acc",
+            kernel,
             [(act, act_off), (buf, offset), (buf, self._scale(entry, offset)), (dest, 0)],
             [_u32(int(rows)), _u32(int(inner))],
             (int(rows), 1, 1),
@@ -566,8 +570,9 @@ class Qwen36Runtime:
     def _embed(self, token: int) -> None:
         buf, offset, entry = self._loc("model.language_model.embed_tokens.weight")
         _rows, inner = entry["stored_shape"]
+        kernel = "gather_fp8_row" if entry.get("dtype") == "fp8" else "gather_fp4_row"
         self.session.encode(
-            "gather_fp4_row",
+            kernel,
             [(buf, offset), (buf, self._scale(entry, offset)), (self.hidden, 0)],
             [_u32(token), _u32(int(inner))],
             (1, 1, 1),
@@ -576,12 +581,17 @@ class Qwen36Runtime:
 
     def _gdn(self, layer: int) -> None:
         base = f"model.language_model.layers.{layer}.linear_attn."
+        proj = (
+            "gdn_in_proj_fp8"
+            if self.tensors[base + "in_proj_qkv.weight"].get("dtype") == "fp8"
+            else "gdn_in_proj"
+        )
         qkv_w, qkv_s = self._weight(base + "in_proj_qkv.weight")
         z_w, z_s = self._weight(base + "in_proj_z.weight")
         a_w, a_s = self._weight(base + "in_proj_a.weight")
         b_w, b_s = self._weight(base + "in_proj_b.weight")
         self.session.encode(
-            "gdn_in_proj",
+            proj,
             [
                 (self.normed, 0),
                 qkv_w,
@@ -636,11 +646,16 @@ class Qwen36Runtime:
 
     def _attend(self, layer: int, pos: int) -> None:
         base = f"model.language_model.layers.{layer}.self_attn."
+        proj = (
+            "attn_qkv_fp8"
+            if self.tensors[base + "q_proj.weight"].get("dtype") == "fp8"
+            else "attn_qkv"
+        )
         q_w, q_s = self._weight(base + "q_proj.weight")
         k_w, k_s = self._weight(base + "k_proj.weight")
         v_w, v_s = self._weight(base + "v_proj.weight")
         self.session.encode(
-            "attn_qkv",
+            proj,
             [
                 (self.normed, 0),
                 q_w,
@@ -753,15 +768,16 @@ class Qwen36Runtime:
                 (32, 1, 1),
             )
         if layer >= LANGUAGE_LAYERS:
-            message = f"layer {layer} has no expert slot map"
+            message = f"layer {layer} has no expert file"
             raise RuntimeError(message)
-        self.session.encode(
-            "remap_expert_ids",
-            [(self.ids, 0), (self.expert_order, 0)],
-            [_u32(8), _u32(layer)],
-            (1, 1, 1),
-            (32, 1, 1),
-        )
+        if self.expert_order is not None:
+            self.session.encode(
+                "remap_expert_ids",
+                [(self.ids, 0), (self.expert_order, 0)],
+                [_u32(8), _u32(layer)],
+                (1, 1, 1),
+                (32, 1, 1),
+            )
         gate_w, gate_s = self._weight(prefix + "shared_expert.gate_up")
         down_w, down_s = self._weight(prefix + "shared_expert.down_proj.weight")
         if self.atlas.layout.mixed:
@@ -820,7 +836,7 @@ class Qwen36Runtime:
         down_w: tuple[Any, int],
         down_s: tuple[Any, int],
     ) -> None:
-        """fp4 kernel keeps the shared expert. The fp8 kernel runs when the layer has one."""
+        """Shared expert is fp8. The fp8 routed kernel runs when the layer has one."""
         widths = (self.expert_widths, layer * EXPERTS)
         threads = (32, 1, 1)
         self.session.encode(

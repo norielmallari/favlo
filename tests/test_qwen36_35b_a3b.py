@@ -20,7 +20,6 @@ from qwen36_35b_a3b.cache import (
     repack_plane,
 )
 from qwen36_35b_a3b.checks import run_checks
-from qwen36_35b_a3b.convert import expert_slot_map
 from qwen36_35b_a3b.formats import (
     EXPERT_FP8,
     EXPERT_IMAGE,
@@ -30,6 +29,8 @@ from qwen36_35b_a3b.formats import (
     expert_offsets,
     fp4_image,
     fp8_image,
+    promote_count,
+    promoted_indices,
     quantize_fp4,
     quantize_fp8,
 )
@@ -58,11 +59,12 @@ def test_fp4_tie_picks_the_even_code() -> None:
     assert restored[0, 1] == np.float32(1.0)
 
 
-def test_expert_slots_follow_the_median_scale() -> None:
-    gate = [bytes([10]), bytes([10]), bytes([10]), bytes([10])]
-    down = [bytes([10]), bytes([1]), bytes([40]), bytes([10])]
-    mapping = expert_slot_map(gate, down)
-    assert mapping.tolist() == [1, 0, 3, 2]
+def test_expert_budget_keeps_the_lower_index() -> None:
+    assert promote_count(20, 10240) == 2048
+    assert promote_count(20, 256) == 51
+    assert promote_count(0, 10240) == 0
+    scores = {0: 0.2, 1: 0.5, 2: 0.5, 3: 0.1}
+    assert promoted_indices(scores, 2) == [1, 2]
 
 
 def test_load_row_opens_when_the_console_shows_bars() -> None:
@@ -767,11 +769,14 @@ def test_empty_function_has_no_parameters() -> None:
     assert function_has_parameters(with_path, "read_file") is True
 
 
-def test_record_name_is_the_source_model_plus_fp4() -> None:
+def test_record_name_uses_the_expert_percentage() -> None:
     from qwen36_35b_a3b.convert import record_name
 
     plain = Path("models/Example-Model")
     assert record_name(plain) == "Example-Model-fp4"
+    assert record_name(plain, 20) == "Example-Model-fp8-e20"
+    checkout = Path("models/Qwen3.6-35B-A3B-bf16")
+    assert record_name(checkout, 20) == "Qwen3.6-35B-A3B-fp8-e20"
     snapshot = Path("hub/models--org--Example-Model/snapshots/abc123")
     assert record_name(snapshot) == "Example-Model-fp4"
 

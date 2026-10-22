@@ -1,6 +1,6 @@
 # Ceilings
 
-Kernel and bandwidth ceilings for the kernels this pipeline runs. Reuse these figures while those kernels are unchanged. Recompute this note when one of them changes. Projection times are the earlier measurement. The attention rows were measured again after softmax began writing float32 weights.
+Kernel and bandwidth ceilings for the kernels this pipeline runs. Reuse these figures while those kernels are unchanged. Recompute this note when one of them changes. Projection times are the earlier measurement. The attention rows were measured again after softmax began writing float32 weights. The kernel times below were measured when every weight image was fp4. The byte counts are the `Qwen3.6-35B-A3B-fp8-e20` record. Language projections, the shared expert, and `lm_head` are fp8. Of the 10,240 routed experts, 2,048 are fp8 and 8,192 are fp4. A decode token reads eight images per layer, counted at that pool mix: 64 fp8 and 256 fp4 of the 320 images.
 
 Each time is one command buffer, then a wait. Overlapping command buffers are not added. The times are the median of four samples after one discarded sample.
 
@@ -8,7 +8,7 @@ A 2 GiB streaming read finished in 7093.5 µs, 302.74 GB/s. The bandwidth ceilin
 
 ## Decode
 
-One token. Weights are fp4. K and V are fp8 E4M3. The forward is 30 Gated DeltaNet layers, 10 attention layers, and the head. Top 8 routed experts. `gdn_in_proj` is the fused qkv, z, a, and b projection. `gemv_fp4_vec` is the output projection, the attention output, the shared expert, and the head. `router_coeff` is the float16 router and the shared-expert coefficient. `moe_gate_silu` and `moe_down_mix` read eight expert images. `rmsnorm_f32` is the layer norm, including the final norm. Attention is two key/value heads: `prefill_fp8_m8` scores the span and the three softmax kernels reduce it. The value mix is `kv_cast_blocks`, `kv_pv_split8`, and `kv_restore_sum`, each in its own command buffer. `kv_cast_blocks` writes one float16 plane in span order and one peak per row per block. `kv_pv_split8` mixes every block. `kv_restore_sum` multiplies each partial by that peak.
+One token. The times are the fp4 weight images. K and V are fp8 E4M3. The forward is 30 Gated DeltaNet layers, 10 attention layers, and the head. Top 8 routed experts. `gdn_in_proj` is the fused qkv, z, a, and b projection. `gemv_fp4_vec` is the output projection, the attention output, the shared expert, and the head. `router_coeff` is the float16 router and the shared-expert coefficient. `moe_gate_silu` and `moe_down_mix` read eight expert images. `rmsnorm_f32` is the layer norm, including the final norm. Attention is two key/value heads: `prefill_fp8_m8` scores the span and the three softmax kernels reduce it. The value mix is `kv_cast_blocks`, `kv_pv_split8`, and `kv_restore_sum`, each in its own command buffer. `kv_cast_blocks` writes one float16 plane in span order and one peak per row per block. `kv_pv_split8` mixes every block. `kv_restore_sum` multiplies each partial by that peak.
 
 | Kernel | Shape | Count | µs |
 |---|---|---:|---:|
@@ -45,7 +45,7 @@ That sum is 10.28 ms, 97.25 tok/s. A context of 65536 tokens uses the same proje
 | `kv_pv_split8` | 128 blocks of 512 keys | 20 | 166.3 |
 | `kv_restore_sum` | 128 blocks, 8×256 | 20 | 102.1 |
 
-That token is 17.17 ms, 58.23 tok/s. The byte count is the resident projections, eight expert images per layer, the float16 routers and coefficients, the head, the GDN state read and write, K and V across the visible tokens, the float32 score and probability writes, the float16 probability scratch, and one float scale per row per block. Context 2048 is 1,746,332,160 bytes, 5.77 ms, 173.36 tok/s. Context 65536 is 2,518,425,600 bytes, 8.32 ms, 120.21 tok/s. The 90% test for decode uses the kernel ceiling.
+That token is 17.17 ms, 58.23 tok/s. Those times are the fp4-weight measurement. The byte count is the resident projections, eight expert images per layer, the float16 routers and coefficients, the head, the GDN state read and write, K and V across the visible tokens, the float32 score and probability writes, the float16 probability scratch, and one float scale per row per block. On this record the projections, the shared expert, and the head are fp8 images. Context 2048 is 2,805,787,136 bytes, 9.27 ms, 107.90 tok/s. Context 65536 is 3,577,880,576 bytes, 11.82 ms, 84.61 tok/s. The 90% test for decode uses a kernel ceiling measured on the kernels the forward launches. The rows above are not that measurement.
 
 The embed, the query/gate split, RoPE, the top-8 pick, and the key/value store are not in this total.
 
@@ -97,6 +97,6 @@ The attention window is the only part of a chunk that changes with the keys alre
 
 A prompt of 65536 tokens is 32 chunks. Chunk n sees n×2048 keys: the floor of n/2 windows of 4096 keys, and one 2048-key window when n is odd. One head walks 256 windows of 4096 keys and 16 windows of 2048 keys. Ten layers and two heads make 20 of each. That prompt is 80342.7 ms, 815.71 tok/s. That is the kernel ceiling for prefill.
 
-The byte count repeats the projections, all 256 expert images, and the float16 routers on every chunk, and adds the GDN state read and write, the K and V bytes of each window, the float32 score and probability writes, the float16 probability scratch, and one float scale per row per window. One first chunk is 24,762,900,480 bytes. The 65536-token prompt is 4,132,053,975,040 bytes, 13.65 s at 302.74 GB/s, 4801.58 tok/s. The 90% test for prefill uses the kernel ceiling.
+The byte count repeats the projections, all 256 expert images, and the float16 routers on every chunk, and adds the GDN state read and write, the K and V bytes of each window, the float32 score and probability writes, the float16 probability scratch, and one float scale per row per window. On this record the projections and the shared expert are fp8, and 2,048 of the 10,240 expert images are fp8. One first chunk is 28,688,637,952 bytes. The 65536-token prompt is 4,257,677,574,144 bytes, 14.06 s at 302.74 GB/s, 4659.90 tok/s. The 90% test for prefill uses a kernel ceiling measured on the kernels the forward launches. The rows above are not that measurement.
 
 The embed, the coefficient row, the top-8 pick, the query/gate split, RoPE, the key/value store, and the grouped SiLU after the expert tile are not in this total.

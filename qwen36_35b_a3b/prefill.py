@@ -249,8 +249,9 @@ def _splice_vision(runtime: Any, work: _Workspace, ids: list[int], pos0: int) ->
 def _embed(runtime: Any, work: _Workspace, count: int) -> None:
     buf, offset, entry = runtime._loc("model.language_model.embed_tokens.weight")
     _rows, inner = entry["stored_shape"]
+    kernel = "embed_fp8_rows" if entry.get("dtype") == "fp8" else "embed_fp4_rows"
     runtime.session.encode(
-        "embed_fp4_rows",
+        kernel,
         [
             (buf, offset),
             (buf, runtime._scale(entry, offset)),
@@ -480,13 +481,14 @@ def _route(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) ->
             ((assignments + 255) // 256, 1, 1),
             (256, 1, 1),
         )
-    runtime.session.encode(
-        "remap_expert_ids",
-        [(work.ids, 0), (runtime.expert_order, 0)],
-        [_u32(assignments), _u32(layer)],
-        ((assignments + 255) // 256, 1, 1),
-        (256, 1, 1),
-    )
+    if getattr(runtime, "expert_order", None) is not None:
+        runtime.session.encode(
+            "remap_expert_ids",
+            [(work.ids, 0), (runtime.expert_order, 0)],
+            [_u32(assignments), _u32(layer)],
+            ((assignments + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
 
 
 _ABSENT = np.uint32(0xFFFFFFFF)
@@ -744,7 +746,10 @@ def _expert_pass(
 def _matmul(runtime: Any, half: Any, name: str, dest: Any, rows: int) -> None:
     buf, offset, entry = runtime._loc(name)
     cols, inner = (int(value) for value in entry["stored_shape"])
-    _fp4(runtime, half, buf, offset, runtime._scale(entry, offset), dest, rows, cols, inner)
+    kind = "fp8" if entry.get("dtype") == "fp8" else "fp4"
+    _quant_rows(
+        runtime, kind, half, buf, offset, runtime._scale(entry, offset), dest, rows, cols, inner
+    )
 
 
 def _fp4(
@@ -758,9 +763,24 @@ def _fp4(
     cols: int,
     inner: int,
 ) -> None:
+    _quant_rows(runtime, "fp4", half, buf, data_off, scale_off, dest, rows, cols, inner)
+
+
+def _quant_rows(
+    runtime: Any,
+    kind: str,
+    half: Any,
+    buf: Any,
+    data_off: int,
+    scale_off: int,
+    dest: Any,
+    rows: int,
+    cols: int,
+    inner: int,
+) -> None:
     wide = cols % 64 == 0
     runtime.session.encode(
-        "prefill_fp4_n64" if wide else "prefill_fp4_e8m0",
+        f"prefill_{kind}_n64" if wide else f"prefill_{kind}_e8m0",
         [(half, 0), (buf, data_off), (buf, scale_off), (dest, 0)],
         [_u32(rows), _u32(cols), _u32(inner)],
         (cols // (64 if wide else 32), rows // 64, 1),
