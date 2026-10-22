@@ -20,8 +20,10 @@ _LIBC.madvise.restype = ctypes.c_int
 
 KERNELS = (
     "prefill_fp4_n64",
+    "prefill_fp4_m32",
     "prefill_fp4_e8m0",
     "prefill_fp8_n64",
+    "prefill_fp8_m32",
     "prefill_fp8_n64_stride",
     "prefill_fp8_m8",
     "gemv_fp4",
@@ -374,12 +376,17 @@ class Session:
     ) -> np.ndarray:
         destination = self.zeros(rows * cols * 4)
         width = int(self.pipes[name].threadExecutionWidth())
-        tile = 64 if name.endswith("n64") else 32
+        if name.endswith("m32"):
+            col_tile, row_tile = 128, 32
+        elif name.endswith("n64"):
+            col_tile, row_tile = 64, 64
+        else:
+            col_tile, row_tile = 32, 64
         self.dispatch(
             name,
             [self.upload(activation), self.upload(data), self.upload(scales), destination],
             [struct.pack("<I", rows), struct.pack("<I", cols), struct.pack("<I", inner)],
-            (cols // tile, rows // 64, 1),
+            (cols // col_tile, rows // row_tile, 1),
             (width * 4, 1, 1),
         )
         return self.download_f32(destination, rows * cols).reshape(rows, cols)

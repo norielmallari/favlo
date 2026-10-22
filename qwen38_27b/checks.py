@@ -54,6 +54,9 @@ def check_fp4_tile(session: Session) -> None:
     activation, data, scales, expected = _probe_fp4(64, 32, 32)
     got = session.prefill("prefill_fp4_e8m0", activation, data, scales, 64, 32, 32)
     _close("fp4 32-col", got, expected, rtol=0.0, atol=0.0)
+    activation, data, scales, expected = _probe_fp4(64, 128, 256)
+    got = session.prefill("prefill_fp4_m32", activation, data, scales, 64, 128, 256)
+    _close("fp4 32x128", got, expected, rtol=0.0, atol=0.0)
 
 
 def check_fp4_gemv(session: Session) -> None:
@@ -133,6 +136,13 @@ def check_fp8_prefill(session: Session) -> None:
         matrix = dequant_fp8(data, scales, cols, inner)
         expect = activation.astype(np.float32) @ matrix.T
         _close(label, got, expect.astype(np.float32), atol=2e-3)
+    activation = rng.normal(scale=0.05, size=(64, 256)).astype(np.float16)
+    weight = rng.normal(scale=0.05, size=(128, 256)).astype(np.float32)
+    data, scales = quantize_fp8(weight)
+    got = session.prefill("prefill_fp8_m32", activation, data, scales, 64, 128, 256)
+    matrix = dequant_fp8(data, scales, 128, 256)
+    expect = activation.astype(np.float32) @ matrix.T
+    _close("fp8 32x128", got, expect.astype(np.float32), atol=2e-3)
 
 
 def check_fp8_x4(session: Session) -> None:

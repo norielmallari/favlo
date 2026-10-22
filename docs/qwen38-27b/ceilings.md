@@ -65,9 +65,9 @@ The gate dispatch reads the 91,914,240-byte image and the 20,480-byte activation
 
 The mixed record `Qwen3.8-27B-fp8-fp4`. Twelve language feed-forward layers are fp8 and the other fifty-two are fp4. MTP, the embedding, `lm_head`, the vision tower, and the float16 vectors are not in the projection image. The data plane plus the scale plane of the language projections is 14,544,732,160 bytes.
 
-`prefill_fp4_n64` and `prefill_fp8_n64` read that image once per 64-row tile. A 2048-token chunk reads it 32 times, 465,431,429,120 bytes. The same chunk reads 13,891,534,848 bytes of half activations and writes 31,994,150,912 bytes of float outputs. That is 511,317,114,880 bytes. Divided by 254.6 GB/s the projection bandwidth ceiling is 2.008 s, 1020 tok/s.
+Gate, up, and the attention projections use a 64-row tile, so those 10,979,573,760 bytes are read 32 times in a 2048-token chunk. The down projection uses a 32-row tile, so its 3,565,158,400 bytes are read 64 times. Weight traffic is 579,516,497,920 bytes. The chunk also reads 13,891,534,848 bytes of half activations and writes 31,994,150,912 bytes of float outputs. That is 625,402,183,680 bytes. Divided by 254.6 GB/s the projection bandwidth ceiling is 2.456 s, 834 tok/s.
 
-One full-attention head in that chunk has 12,288 query rows and one 2048-key window. The key plane and the value plane are 264 bytes per token, and each is read once per 64 query rows. Sixty-four heads move 13,287,555,072 bytes. Adding that traffic makes 524,604,669,952 bytes, 2.061 s, 994 tok/s. A longer window multiplies only this attention term.
+One full-attention head in that chunk has 12,288 query rows and one 2048-key window. The key plane and the value plane are 264 bytes per token, and each is read once per 64 query rows. Sixty-four heads move 13,287,555,072 bytes. Adding that traffic makes 638,689,738,752 bytes, 2.509 s, 816 tok/s. A longer window multiplies only this attention term.
 
 Decode reads the projection image once and adds `lm_head`, 675,430,400 bytes. 15,220,162,560 bytes at 254.6 GB/s is 59.8 ms, 16.7 tok/s.
 
@@ -86,10 +86,10 @@ Each prefill time below is one command buffer, then a wait, the median of five d
 | `prefill_fp4_n64` o | 2048×5120×6144 | 16 | 5478 | 87.65 |
 | `prefill_fp4_n64` gate | 2048×17408×5120 | 52 | 15012 | 780.63 |
 | `prefill_fp4_n64` up | 2048×17408×5120 | 52 | 14953 | 777.56 |
-| `prefill_fp4_n64` down | 2048×5120×17408 | 52 | 20102 | 1045.28 |
+| `prefill_fp4_m32` down | 2048×5120×17408 | 52 | 15830 | 823.16 |
 | `prefill_fp8_n64` gate | 2048×17408×5120 | 12 | 14760 | 177.12 |
 | `prefill_fp8_n64` up | 2048×17408×5120 | 12 | 14715 | 176.58 |
-| `prefill_fp8_n64` down | 2048×5120×17408 | 12 | 19882 | 238.58 |
+| `prefill_fp8_m32` down | 2048×5120×17408 | 12 | 15618 | 187.42 |
 | `prefill_fp8_n64` score | 12288×2048×256 | 64 | 492 | 31.48 |
 | `prefill_fp8_n64_stride` value | 12288×256×2048 | 64 | 609 | 38.99 |
 | `gdn_state_rows` | 2048 | 48 | 12234 | 587.23 |
@@ -111,4 +111,4 @@ Each prefill time below is one command buffer, then a wait, the median of five d
 | `kv_softmax_close` | 12288 | 64 | 45 | 2.86 |
 | `kv_acc_add` | 12288×256 | 64 | 41 | 2.59 |
 
-The sum is 5594.6 ms, 366 tok/s. That is the kernel ceiling for this set. Key and value stores, the query cast, the row init, the attend write, and the embedding row are outside it.
+The sum is 5321.3 ms, 385 tok/s. That is the kernel ceiling for this set. Key and value stores, the query cast, the row init, the attend write, and the embedding row are outside it.

@@ -1,5 +1,7 @@
 """Chunked prompt prefill. Projections are ``matmul2d`` tiles of 64 rows.
 
+The down projection uses a 32×128 tile. Gate, up, and the attention projections stay 64×64.
+
 SiLU runs on the gate, then multiplies by the up projection, then the down
 projection. A promoted feed-forward matrix is fp8. The others are fp4.
 Gated DeltaNet and full attention run in the same command buffer as that
@@ -357,7 +359,13 @@ def _matmul(runtime: Any, half: Any, name: str, dest: Any, rows: int) -> None:
     if kind not in {"fp4", "fp8"} or cols % 64 or inner % 32 or rows % 64:
         message = f"{name} tile {rows}x{cols}x{inner} is not a 64-row {kind} tile"
         raise RuntimeError(message)
-    kernel = "prefill_fp8_n64" if kind == "fp8" else "prefill_fp4_n64"
+    wide = name.endswith("mlp.down_proj.weight") and cols % 128 == 0 and rows % 32 == 0
+    if wide:
+        kernel = "prefill_fp8_m32" if kind == "fp8" else "prefill_fp4_m32"
+        groups = (cols // 128, rows // 32, 1)
+    else:
+        kernel = "prefill_fp8_n64" if kind == "fp8" else "prefill_fp4_n64"
+        groups = (cols // 64, rows // 64, 1)
     width = int(runtime.session.pipes[kernel].threadExecutionWidth())
     runtime.session.encode(
         kernel,
@@ -368,7 +376,7 @@ def _matmul(runtime: Any, half: Any, name: str, dest: Any, rows: int) -> None:
             (dest, 0),
         ],
         [_u32(rows), _u32(cols), _u32(inner)],
-        (cols // 64, rows // 64, 1),
+        groups,
         (width * 4, 1, 1),
     )
 

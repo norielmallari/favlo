@@ -296,6 +296,39 @@ kernel void prefill_fp4_n64(
     op.run(tile_left, tile_right, tile_out);
 }
 
+// Down projection. K is longer than N, and a 32×128 tile moves that matrix faster than 64×64.
+kernel void prefill_fp4_m32(
+    device half* activation [[buffer(0)]],
+    device uchar* weights [[buffer(1)]],
+    device uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& cols [[buffer(5)]],
+    constant uint& inner [[buffer(6)]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        activation,
+        dextents<int, 2>(int(inner), int(rows)),
+        array<int, 2>{1, int(inner)});
+    tensor<device metal_fp4_e2m1_format, dextents<int, 2>, tensor_inline, scales_plane> right(
+        weights,
+        dextents<int, 2>(int(inner), int(cols)),
+        array<int, 2>{1, int(inner)},
+        scales_plane(scales));
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        destination,
+        dextents<int, 2>(int(cols), int(rows)),
+        array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(
+        32, 128, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, int(tgid.y) * 32);
+    auto tile_right = right.slice(0, int(tgid.x) * 128);
+    auto tile_out = out.slice(int(tgid.x) * 128, int(tgid.y) * 32);
+    op.run(tile_left, tile_right, tile_out);
+}
+
 kernel void prefill_fp4_e8m0(
     device half* activation [[buffer(0)]],
     device uchar* weights [[buffer(1)]],
@@ -357,6 +390,38 @@ kernel void prefill_fp8_n64(
     auto tile_left = left.slice(0, int(tgid.y) * 64);
     auto tile_right = right.slice(0, int(tgid.x) * 64);
     auto tile_out = out.slice(int(tgid.x) * 64, int(tgid.y) * 64);
+    op.run(tile_left, tile_right, tile_out);
+}
+
+kernel void prefill_fp8_m32(
+    device half* activation [[buffer(0)]],
+    device uchar* weights [[buffer(1)]],
+    device uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& cols [[buffer(5)]],
+    constant uint& inner [[buffer(6)]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        activation,
+        dextents<int, 2>(int(inner), int(rows)),
+        array<int, 2>{1, int(inner)});
+    tensor<device metal_fp8_e4m3_format, dextents<int, 2>, tensor_inline, scales_plane> right(
+        weights,
+        dextents<int, 2>(int(inner), int(cols)),
+        array<int, 2>{1, int(inner)},
+        scales_plane(scales));
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        destination,
+        dextents<int, 2>(int(cols), int(rows)),
+        array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(
+        32, 128, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, int(tgid.y) * 32);
+    auto tile_right = right.slice(0, int(tgid.x) * 128);
+    auto tile_out = out.slice(int(tgid.x) * 128, int(tgid.y) * 32);
     op.run(tile_left, tile_right, tile_out);
 }
 
