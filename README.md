@@ -8,7 +8,7 @@ Favlo AI Runtime: Your Local AI Workhorse
 
 >This app is directly inspired by [oMLX](https://github.com/jundot/omlx). It's an amazing app - I recommend trying that first for general purpose inference before using my more specialized runtime.
 
-Favlo is a local inference runtime for Apple Silicon. One model is one pipeline. Each pipeline owns its forward, its weight records, and its Metal kernels. `favlo serve` is the entry point. A client selects a registered model with the OpenAI `model` field.
+Favlo is a local runtime for Apple Silicon. It serves language-model inference and text-to-image generation. One model is one pipeline. Each pipeline owns its forward, its weight records, and its Metal kernels. `favlo serve` is the entry point. A client selects a registered model with the OpenAI `model` field. A language row answers `POST /v1/chat/completions`. A [Z-Image-Turbo](docs/z-image-turbo/README.md) row, packed from [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo), answers `POST /v1/images/generations` and returns a PNG.
 
 The process contract is [ARCHITECTURE.md](ARCHITECTURE.md). The papers are [REFERENCES.md](REFERENCES.md). Measured research claims are [RESEARCH.md](RESEARCH.md). Agents start at [AGENTS.md](AGENTS.md). AI-assisted features are [docs/ai-assistance](docs/ai-assistance/README.md).
 
@@ -17,6 +17,7 @@ The process contract is [ARCHITECTURE.md](ARCHITECTURE.md). The papers are [REFE
 | `qwen38-flash-next` | [Qwen3.8-Flash-Next](docs/qwen38-flash-next/architecture.md) |
 | `qwen38-27b` | [Qwen3.8-27B](docs/qwen38-27b/README.md) |
 | `qwen36-35b-a3b` | [Qwen3.6-35B-A3B](docs/qwen36-35b-a3b/README.md) |
+| `z-image-turbo` | [Z-Image-Turbo](docs/z-image-turbo/README.md) |
 
 ## Requirements
 
@@ -44,7 +45,7 @@ uv run favlo serve
 uv run favlo serve --non-interactive
 ```
 
-`favlo serve` on a terminal is the CLI. `favlo serve --non-interactive` starts the server daemon and exits. The daemon listens on `127.0.0.1:8129`. On a terminal, an empty registry downloads [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B), packs `models/Qwen3.6-35B-A3B-fp4`, and then the daemon listens. Quantize and the other non-serve commands use that model's flag, as in `favlo --qwen38-flash-next quantize`. The terminal session is [docs/guides/clients.md](docs/guides/clients.md). The assisted features on that session are [docs/ai-assistance](docs/ai-assistance/README.md).
+`favlo serve` on a terminal is the CLI. `favlo serve --non-interactive` starts the server daemon and exits. The daemon listens on `127.0.0.1:8129`. On a terminal, an empty registry downloads [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B), packs `models/Qwen3.6-35B-A3B-fp4`, and then the daemon listens. Quantize and the other non-serve commands use that model's flag, as in `favlo --qwen38-flash-next quantize`. Chat completions and image generation are both served from that daemon. The listener is [docs/serve.md](docs/serve.md). The image request is [docs/z-image-turbo/README.md](docs/z-image-turbo/README.md). The terminal session is [docs/guides/clients.md](docs/guides/clients.md). The assisted features on that session are [docs/ai-assistance](docs/ai-assistance/README.md).
 
 ## Methodology
 
@@ -56,10 +57,7 @@ Weights follow the Open Compute Project *Microscaling Formats (MX) Specification
 
 ## Development
 
-```bash
-uv run pytest
-uv run ruff check
-```
+Favlo is an AI-First application. Agentic software delivery is how this repository is built: agents design the change, write the code, and land it. The author directs the work.
 
 ## Problems
 
