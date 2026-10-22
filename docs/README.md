@@ -36,6 +36,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen38-27b/benchmarks.md](qwen38-27b/benchmarks.md) | Harness scores against `serve` |
 | [qwen36-35b-a3b/benchmarks.md](qwen36-35b-a3b/benchmarks.md) | Harness scores against `serve` |
 | [z-image-turbo/README.md](z-image-turbo/README.md) | Z-Image-Turbo pipeline contract |
+| [wan22-i2v/README.md](wan22-i2v/README.md) | Wan 2.2 I2V pipeline contract |
 | [z-image-turbo/research/generation-ceiling.md](z-image-turbo/research/generation-ceiling.md) | Z-Image-Turbo 1280 generation sum |
 
 Implementation plans, option comparisons, and design sketches are **not** committed here. They belong under `artifacts/implementation-plan/` (gitignored). A measured research remainder lives at `docs/<pipeline>/research/<slug>.md` and does not change the serving note until that behavior ships.

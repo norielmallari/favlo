@@ -8,6 +8,7 @@ a pipeline that defines ``idle_heartbeat`` runs that function here.
 from __future__ import annotations
 
 import argparse
+import base64
 import inspect
 import json
 import os
@@ -315,6 +316,68 @@ def _request_pid(handler: BaseHTTPRequestHandler) -> int:
     return pid
 
 
+def _video_body(content_type: str, raw: bytes) -> dict[str, Any]:
+    """JSON object, or a multipart form whose file part is a PNG."""
+    if "multipart/" not in content_type.lower():
+        body = json.loads(raw or b"{}")
+        if not isinstance(body, dict):
+            message = "request body must be an object"
+            raise ValueError(message)
+        return body
+    marker = _boundary(content_type)
+    if marker is None:
+        message = "multipart boundary is missing"
+        raise ValueError(message)
+    body: dict[str, Any] = {}
+    for chunk in raw.split(b"--" + marker):
+        if chunk in (b"", b"--", b"--\r\n", b"--\n"):
+            continue
+        chunk = chunk.removeprefix(b"\r\n").removeprefix(b"\n")
+        if chunk.startswith(b"--"):
+            continue
+        header_blob, sep, payload = chunk.partition(b"\r\n\r\n")
+        if not sep:
+            header_blob, sep, payload = chunk.partition(b"\n\n")
+        if not sep:
+            continue
+        if payload.endswith(b"\r\n"):
+            payload = payload[:-2]
+        elif payload.endswith(b"\n"):
+            payload = payload[:-1]
+        headers = header_blob.decode("utf-8", errors="replace")
+        name = _form_name(headers)
+        if not name:
+            continue
+        filename = "filename=" in headers.lower()
+        if filename or (name == "input_reference" and payload.startswith(b"\x89PNG")):
+            body["image"] = base64.b64encode(payload).decode("ascii")
+            continue
+        body[name] = payload.decode("utf-8")
+    return body
+
+
+def _boundary(content_type: str) -> bytes | None:
+    index = content_type.lower().find("boundary=")
+    if index < 0:
+        return None
+    value = content_type[index + len("boundary=") :].split(";", 1)[0].strip().strip('"')
+    if not value:
+        return None
+    return value.encode("utf-8")
+
+
+def _form_name(headers: str) -> str:
+    for line in headers.splitlines():
+        if "name=" not in line.lower():
+            continue
+        _, _, tail = line.partition("name=")
+        tail = tail.strip()
+        if tail.startswith('"'):
+            return tail[1:].split('"', 1)[0]
+        return tail.split(";", 1)[0].strip()
+    return ""
+
+
 def _serve_loop(args: Any, state: dict[str, Any]) -> int:
     lock = state.setdefault("lock", threading.Lock())
 
@@ -345,6 +408,9 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
                     return
                 self._json(200, row)
                 return
+            if path.startswith("/v1/videos/"):
+                self._video(path)
+                return
             self._json(404, {"error": {"message": "not found"}})
 
         def do_POST(self) -> None:  # noqa: N802
@@ -355,7 +421,11 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
             if route == "/v1/resume":
                 self._resume_from_smoke()
                 return
-            if route not in {"/v1/chat/completions", "/v1/images/generations"}:
+            if route not in {
+                "/v1/chat/completions",
+                "/v1/images/generations",
+                "/v1/videos",
+            }:
                 self._json(404, {"error": {"message": "not found"}})
                 return
             self._started = False
@@ -387,7 +457,24 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
                     return
                 _log("request open")
                 opened = True
-                body = json.loads(raw or b"{}")
+                try:
+                    if route == "/v1/videos":
+                        body = _video_body(self.headers.get("Content-Type", ""), raw)
+                    else:
+                        body = json.loads(raw or b"{}")
+                except (json.JSONDecodeError, ValueError) as exc:
+                    if route == "/v1/videos":
+                        self._json(
+                            400,
+                            {
+                                "error": {
+                                    "message": str(exc),
+                                    "type": "invalid_request_error",
+                                }
+                            },
+                        )
+                        return
+                    raise
                 selection = _bind_request(body, state, args)
                 if selection is not None:
                     self._model_id = selection.requested_id
@@ -405,6 +492,13 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
                         self._json(404, {"error": {"message": "not found"}})
                         return
                     image(self, runtime, body, selection, args, state)
+                    return
+                if route == "/v1/videos":
+                    video = getattr(module, "handle_video", None)
+                    if not callable(video):
+                        self._json(404, {"error": {"message": "not found"}})
+                        return
+                    video(self, runtime, body, selection, args, state)
                     return
                 chat = getattr(module, "handle_chat", None)
                 if not callable(chat):
@@ -528,6 +622,55 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
                 self._gone = True
                 message = "client closed"
                 raise OSError(message) from None
+
+        def _video(self, path: str) -> None:
+            rest = path[len("/v1/videos/") :]
+            content = rest.endswith("/content")
+            video_id = rest[: -len("/content")] if content else rest
+            if not video_id or "/" in video_id:
+                self._json(404, {"error": {"message": "not found"}})
+                return
+            videos = state.get("videos")
+            job = videos.get(video_id) if isinstance(videos, dict) else None
+            if not isinstance(job, dict):
+                self._json(404, {"error": {"message": "video not found", "type": "not_found"}})
+                return
+            if not content:
+                self._json(200, job)
+                return
+            if job.get("status") != "completed":
+                self._json(
+                    400,
+                    {
+                        "error": {
+                            "message": "video is not ready",
+                            "type": "invalid_request_error",
+                        }
+                    },
+                )
+                return
+            blobs = state.get("video_mp4")
+            blob = blobs.get(video_id) if isinstance(blobs, dict) else None
+            if not isinstance(blob, (bytes, bytearray)):
+                self._json(404, {"error": {"message": "video not found", "type": "not_found"}})
+                return
+            self._bytes(200, bytes(blob), "video/mp4")
+
+        def _bytes(self, status: int, payload: bytes, content_type: str) -> None:
+            previous = self.connection.gettimeout()
+            self.connection.settimeout(_STREAM_WRITE_TIMEOUT)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                self.wfile.flush()
+            except OSError:
+                self.close_connection = True
+                _log("client closed")
+            else:
+                self.connection.settimeout(previous)
 
         def _json(self, status: int, payload: dict[str, Any]) -> None:
             blob = json.dumps(payload).encode()

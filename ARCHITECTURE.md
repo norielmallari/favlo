@@ -21,7 +21,7 @@ Shared code is `src/favlo/`. There is no model base class and no kernel that bra
 
 The daemon is a request server. It does not own chat history, tools, or the terminal session. The CLI owns those. Telemetry is one JSON event per line. The terminal paints it as it arrives, and prints the reply after that turn's requests have closed.
 
-`python -m favlo.smoke_lock` is how a pipeline test takes the GPU while the daemon stays up. Acquire closes the resident model when no request is open. Release lets the next chat load one again. The recorded pid is the invoking shell. `uv` and `python` are not that owner. A command started from a shell that already holds the lock leaves the file in place and does not release it. The listener note is [docs/serve.md](docs/serve.md).
+`python -m favlo.smoke_lock` is how a pipeline test takes the GPU while the daemon stays up. Acquire closes the resident model when no request is open. Release lets the next chat load one again. The recorded pid is the invoking shell. `uv` and `python` are not that owner. A command started from a shell that already holds the lock leaves the file in place and does not release it. A video job is `POST /v1/videos`, then `GET /v1/videos/{id}` and `GET /v1/videos/{id}/content`. Those two reads do not take the request lock. The listener note is [docs/serve.md](docs/serve.md).
 
 ## Runtimes
 
@@ -33,6 +33,7 @@ Each runtime is a separate write set. An agent developing one runtime edits that
 | `qwen38-27b` | `qwen38-27b.py` | `qwen38_27b/` | [docs/qwen38-27b/README.md](docs/qwen38-27b/README.md) |
 | `qwen36-35b-a3b` | `qwen36-35b-a3b.py` | `qwen36_35b_a3b/` | [docs/qwen36-35b-a3b/README.md](docs/qwen36-35b-a3b/README.md) |
 | `z-image-turbo` | `z-image-turbo.py` | `z_image_turbo/` | [docs/z-image-turbo/README.md](docs/z-image-turbo/README.md) |
+| `wan22-i2v` | `wan22-i2v.py` | `wan22_i2v/` | [docs/wan22-i2v/README.md](docs/wan22-i2v/README.md) |
 
 The entry filename may contain hyphens. The command loads it by path. It is not an importable module name. The package beside it uses underscores. The entry sets `PIPELINE` to that filename stem. A runtime's write set is the entry file, the package, `docs/<pipeline>/`, and tests that import only that package. A new runtime adds a row to the table above and its own doc directory. It does not edit another row's package, shaders, tests, or docs.
 
@@ -88,6 +89,7 @@ uv run python -m harness.coding --model qwen38-27b
 uv run python -m harness.worktree --model qwen36-35b-a3b
 uv run python -m harness.image_agent
 uv run python -m harness.image_persona
+uv run python -m harness.video_agent
 ```
 
 What the harness scores is [docs/harness.md](docs/harness.md). A pipeline's quantize, probe, and matmul commands are that pipeline's note.

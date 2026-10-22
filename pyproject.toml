@@ -46,7 +46,7 @@ package = true
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-src = ["src", "tests", "qwen38-flash-next.py", "qwen38_flash_next", "qwen38-27b.py", "qwen38_27b", "qwen36-35b-a3b.py", "qwen36_35b_a3b", "z-image-turbo.py", "z_image_turbo"]
+src = ["src", "tests", "qwen38-flash-next.py", "qwen38_flash_next", "qwen38-27b.py", "qwen38_27b", "qwen36-35b-a3b.py", "qwen36_35b_a3b", "z-image-turbo.py", "z_image_turbo", "wan22-i2v.py", "wan22_i2v"]
 extend-exclude = ["harness/benchmarks/vendor"]
 
 [tool.ruff.lint]

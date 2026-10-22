@@ -1,0 +1,139 @@
+"""CLI for quantize, kernels, and generate."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+
+from wan22_i2v.formats import TILE_M, dequant_fp4, dequant_fp8, pack_linear
+from wan22_i2v.png import decode_png
+from wan22_i2v.schedule import OFFICIAL, P320_HEIGHT, P320_WIDTH, SHORT_FRAMES
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="favlo --wan22-i2v")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("setup", help="download the weights into models/Wan2.2-I2V-A14B")
+    sub.add_parser("kernels", help="dispatch the fp4 and fp8 matmul")
+    quant = sub.add_parser("quantize", help="pack the high-noise and low-noise experts")
+    quant.add_argument("--high", type=Path, required=True)
+    quant.add_argument("--low", type=Path, required=True)
+    quant.add_argument("--config", type=Path)
+    quant.add_argument("--out", type=Path)
+    gen = sub.add_parser("generate", help="write one AVI")
+    gen.add_argument("--record", type=Path, required=True)
+    gen.add_argument("--image", type=Path, required=True)
+    gen.add_argument("--prompt", required=True)
+    gen.add_argument("--frames", type=int, default=SHORT_FRAMES)
+    gen.add_argument("--width", type=int, default=P320_WIDTH)
+    gen.add_argument("--height", type=int, default=P320_HEIGHT)
+    gen.add_argument("--seed", type=int, default=0)
+    gen.add_argument("--out", type=Path, required=True)
+    args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
+    if args.command == "setup":
+        from wan22_i2v.source import download, expert_paths
+
+        folder = download()
+        high, low = expert_paths(folder)
+        print(folder, flush=True)
+        print(high, flush=True)
+        print(low, flush=True)
+        return 0
+    if args.command == "kernels":
+        return kernels()
+    if args.command == "quantize":
+        return _quantize(args)
+    if args.command == "generate":
+        return _generate(args)
+    return 2
+
+
+def kernels() -> int:
+    _matmul("fp4")
+    _matmul("fp8")
+    print("fp4 ok", flush=True)
+    print("fp8 ok", flush=True)
+    return 0
+
+
+def _quantize(args: argparse.Namespace) -> int:
+    from favlo.cli import repo_root
+    from favlo.registry import register_quantized
+    from wan22_i2v.record import quantize
+
+    if args.config is None:
+        config = OFFICIAL
+    else:
+        config = json.loads(args.config.read_text(encoding="utf-8"))
+    dest = args.out or repo_root() / "models" / "Wan2.2-I2V-A14B-fp4"
+    manifest = quantize(args.high, args.low, dest, config)
+    register_quantized(
+        dest.name,
+        source=args.high,
+        alias=None,
+        pipeline="wan22-i2v",
+        max_prompt_tokens=int(config["text_len"]),
+    )
+    print(dest, flush=True)
+    print(f"high fp8 blocks {manifest['high_promoted']}", flush=True)
+    print(f"low fp8 blocks {manifest['low_promoted']}", flush=True)
+    return 0
+
+
+def _generate(args: argparse.Namespace) -> int:
+    from wan22_i2v.runtime import Runtime
+
+    image = decode_png(args.image.read_bytes())
+    runtime = Runtime(args.record)
+    try:
+        avi, timing = runtime.generate(
+            args.prompt, image, args.frames, args.width, args.height, args.seed
+        )
+    finally:
+        runtime.close()
+    args.out.write_bytes(avi)
+    print(f"wrote {args.out} frames {args.frames} steps {len(timing['steps'])}", flush=True)
+    return 0
+
+
+def _matmul(kind: str) -> None:
+    from wan22_i2v.metal import Gpu
+
+    rows = TILE_M
+    cols = 32
+    inner = 256
+    weight = np.ones((cols, inner), dtype=np.float32)
+    pack = pack_linear(weight, np.zeros(cols, dtype=np.float32), kind)
+    activation = np.ones((rows, inner), dtype=np.float32)
+    gathered = np.zeros((rows, pack.stored_k), dtype=np.float32)
+    for column in range(pack.stored_k):
+        source = int(pack.perm[column])
+        if source < inner:
+            gathered[:, column] = activation[:, source]
+    if kind == "fp4":
+        restored = dequant_fp4(pack.packed, pack.scales, pack.stored_k)
+    else:
+        restored = dequant_fp8(pack.packed, pack.scales, pack.stored_k)
+    expect = gathered @ restored[:cols].T
+    gpu = Gpu()
+    try:
+        src = gpu.upload(activation)
+        dest = gpu.empty(rows * pack.padded_n * 4)
+        half = gpu.empty(rows * pack.stored_k * 2)
+        uploaded = {
+            "packed": gpu.upload(pack.packed),
+            "scales": gpu.upload(pack.scales),
+            "bias": gpu.upload(pack.bias),
+            "perm": gpu.upload(pack.perm),
+        }
+        gpu.project(src, inner, rows, pack, dest, uploaded, half)
+        got = gpu.read_f32(dest, rows * cols).reshape(rows, cols)
+    finally:
+        gpu.close()
+    if not np.allclose(got, expect, atol=1e-2):
+        message = f"{kind} matmul mismatch"
+        raise RuntimeError(message)

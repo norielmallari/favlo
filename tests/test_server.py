@@ -1,10 +1,13 @@
 """One request at a time, a dropped client, and signal shutdown."""
 
+import base64
 import json
 import os
 import socket
 import threading
 import time
+import urllib.error
+import urllib.request
 from types import SimpleNamespace
 
 import qwen38_flash_next.commands as commands
@@ -640,3 +643,140 @@ def test_resume_clears_the_smoke_hold() -> None:
     assert resumed.startswith(b"HTTP/1.1 200")
     assert state["smoke_hold"] is None
     assert refused.startswith(b"HTTP/1.1 404")
+
+
+class _VideoApi:
+    def __init__(self) -> None:
+        self.release = threading.Event()
+        self.sent = threading.Event()
+        self.body: dict | None = None
+
+    def handle_video(self, handler, runtime, body, selection, args, state) -> None:
+        del runtime, selection, args
+        self.body = body
+        job = {
+            "id": "video_test",
+            "object": "video",
+            "status": "in_progress",
+            "progress": 0,
+            "model": body.get("model", ""),
+            "prompt": body.get("prompt"),
+            "seconds": "0.5625",
+            "size": body.get("size", "576x320"),
+            "frames": body.get("frames", 81),
+            "created_at": 1,
+            "completed_at": None,
+            "error": None,
+        }
+        state.setdefault("videos", {})[job["id"]] = job
+        handler._json(200, job)
+        self.sent.set()
+        assert self.release.wait(5)
+        state.setdefault("video_mp4", {})[job["id"]] = b"mp4-bytes"
+        job["status"] = "completed"
+        job["progress"] = 100
+        job["completed_at"] = 2
+
+
+def _http(
+    port: int,
+    method: str,
+    path: str,
+    payload: dict | None = None,
+    *,
+    raw: bytes | None = None,
+    content_type: str = "application/json",
+) -> tuple[int, str, bytes]:
+    data = raw if raw is not None else None if payload is None else json.dumps(payload).encode()
+    headers = {"Content-Type": content_type} if data is not None else {}
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}",
+        data=data,
+        headers=headers,
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            kind = response.headers.get("Content-Type", "")
+            return response.status, kind, response.read()
+    except urllib.error.HTTPError as exc:
+        kind = exc.headers.get("Content-Type", "")
+        return exc.code, kind, exc.read()
+
+
+def test_video_job_can_be_read_while_it_runs() -> None:
+    runtime = _Runtime()
+    state, thread = _serve_background(runtime)
+    port = int(state["server"].server_address[1])
+    api = _VideoApi()
+    try:
+        missing, _kind, _raw = _http(port, "POST", "/v1/videos", {"prompt": "gallop"})
+        retired, _kind, _raw = _http(port, "POST", "/v1/videos/generations", {"prompt": "gallop"})
+        state["module"] = api
+        posted: dict[str, tuple[int, str, bytes]] = {}
+
+        def _post() -> None:
+            posted["job"] = _http(
+                port,
+                "POST",
+                "/v1/videos",
+                {"prompt": "gallop", "model": "Wan2.2-I2V-A14B-fp4", "frames": 9},
+            )
+
+        worker = threading.Thread(target=_post)
+        worker.start()
+        assert api.sent.wait(3)
+        worker.join(timeout=3)
+        code, kind, raw = _http(port, "GET", "/v1/videos/video_test")
+        early, _early_kind, _early_raw = _http(port, "GET", "/v1/videos/video_test/content")
+        unknown, _unknown_kind, _unknown_raw = _http(port, "GET", "/v1/videos/missing")
+        api.release.set()
+        deadline = time.monotonic() + 3
+        finished = b""
+        while time.monotonic() < deadline:
+            _done, done_kind, finished = _http(port, "GET", "/v1/videos/video_test/content")
+            if finished == b"mp4-bytes":
+                content_type = done_kind
+                break
+            time.sleep(0.02)
+        else:
+            content_type = ""
+        boundary = "favlobound"
+        png = b"\x89PNG\r\n\x1a\nstill"
+        form = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="prompt"\r\n\r\n'
+            "gallop\r\n"
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="input_reference"; filename="still.png"\r\n'
+            "Content-Type: image/png\r\n"
+            "Content-Transfer-Encoding: binary\r\n\r\n"
+        ).encode() + png + f"\r\n--{boundary}--\r\n".encode()
+        _form_code, _form_kind, _form_raw = _http(
+            port,
+            "POST",
+            "/v1/videos",
+            raw=form,
+            content_type=f"multipart/form-data; boundary={boundary}",
+        )
+    finally:
+        api.release.set()
+        _stop_background(state, thread)
+    assert missing == 404
+    assert retired == 404
+    assert worker.is_alive() is False
+    status, _job_kind, job_raw = posted["job"]
+    job = json.loads(job_raw)
+    assert status == 200
+    assert job["status"] == "in_progress"
+    assert job["object"] == "video"
+    assert kind.startswith("application/json")
+    assert json.loads(raw)["status"] == "in_progress"
+    assert early == 400
+    assert unknown == 404
+    assert finished == b"mp4-bytes"
+    assert content_type.startswith("video/mp4")
+    assert api.body is not None
+    assert api.body["prompt"] == "gallop"
+    assert base64.b64decode(api.body["image"]).startswith(b"\x89PNG\r\n\x1a\n")
+

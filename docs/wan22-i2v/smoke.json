@@ -1,0 +1,11 @@
+{
+  "prompt": "Favlo as a cute galloping horse",
+  "video_prompt": "The horse gallops at speed, its raised foreleg driving down and the trailing legs swinging forward into the next stride, mane and tail whipping. Fixed camera.",
+  "seed": 0,
+  "width": 576,
+  "height": 320,
+  "frames": 9,
+  "fps": 16,
+  "five_second_frames": 81,
+  "model": "Wan2.2-I2V-A14B-fp4"
+}
