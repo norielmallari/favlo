@@ -1317,6 +1317,17 @@ kernel void gdn_state_rows(
     threadgroup float qshare[128];
     threadgroup float kshare[128];
     uint qhead = head / REPEAT;
+    // One state row stays on the thread for the whole chunk. The recurrence
+    // is serial in the token, so a round trip to the buffer every token
+    // only moves the same 128 floats.
+    float rowv[128];
+    device float* stored = state + (head * 128u + tid) * 128u;
+    for (uint j = 0u; j < 128u; ++j) {
+        rowv[j] = stored[j];
+    }
+    float decay = -exp(float(a_log[head]));
+    float bias = float(dt_bias[head]);
+    float gain = float(norm_w[tid]);
     for (uint token = 0u; token < count; ++token) {
         device const float* mix = mixed + token * MIX;
         float qv = mix[qhead * 128u + tid];
@@ -1338,24 +1349,22 @@ kernel void gdn_state_rows(
         threadgroup_barrier(mem_flags::mem_threadgroup);
         device const float* avec = raw_a + token * AB_STRIDE;
         device const float* bvec = raw_b + token * AB_STRIDE;
-        float along = float(a_log[head]);
-        float g = -exp(along) * softplus_f(avec[head] + float(dt_bias[head]));
+        float g = decay * softplus_f(avec[head] + bias);
         float alpha = exp(g);
         float beta = sigmoid_f(bvec[head]);
-        device float* row = state + (head * 128u + tid) * 128u;
         float acc0 = 0.0f;
         float acc1 = 0.0f;
         float acc2 = 0.0f;
         float acc3 = 0.0f;
         for (uint j = 0u; j < 128u; j += 4u) {
-            float r0 = row[j] * alpha;
-            float r1 = row[j + 1u] * alpha;
-            float r2 = row[j + 2u] * alpha;
-            float r3 = row[j + 3u] * alpha;
-            row[j] = r0;
-            row[j + 1u] = r1;
-            row[j + 2u] = r2;
-            row[j + 3u] = r3;
+            float r0 = rowv[j] * alpha;
+            float r1 = rowv[j + 1u] * alpha;
+            float r2 = rowv[j + 2u] * alpha;
+            float r3 = rowv[j + 3u] * alpha;
+            rowv[j] = r0;
+            rowv[j + 1u] = r1;
+            rowv[j + 2u] = r2;
+            rowv[j + 3u] = r3;
             acc0 += r0 * kshare[j];
             acc1 += r1 * kshare[j + 1u];
             acc2 += r2 * kshare[j + 2u];
@@ -1368,14 +1377,14 @@ kernel void gdn_state_rows(
         float y2 = 0.0f;
         float y3 = 0.0f;
         for (uint j = 0u; j < 128u; j += 4u) {
-            float r0 = row[j] + delta * kshare[j];
-            float r1 = row[j + 1u] + delta * kshare[j + 1u];
-            float r2 = row[j + 2u] + delta * kshare[j + 2u];
-            float r3 = row[j + 3u] + delta * kshare[j + 3u];
-            row[j] = r0;
-            row[j + 1u] = r1;
-            row[j + 2u] = r2;
-            row[j + 3u] = r3;
+            float r0 = rowv[j] + delta * kshare[j];
+            float r1 = rowv[j + 1u] + delta * kshare[j + 1u];
+            float r2 = rowv[j + 2u] + delta * kshare[j + 2u];
+            float r3 = rowv[j + 3u] + delta * kshare[j + 3u];
+            rowv[j] = r0;
+            rowv[j + 1u] = r1;
+            rowv[j + 2u] = r2;
+            rowv[j + 3u] = r3;
             y0 += r0 * qshare[j];
             y1 += r1 * qshare[j + 1u];
             y2 += r2 * qshare[j + 2u];
@@ -1389,9 +1398,12 @@ kernel void gdn_state_rows(
         threadgroup_barrier(mem_flags::mem_threadgroup);
         float ytot = red[0] + red[1] + red[2] + red[3];
         float inv = rsqrt(ytot / 128.0f + eps);
-        float gated = y * inv * float(norm_w[tid]);
+        float gated = y * inv * gain;
         device const float* z = gate + token * Z_WIDTH;
         destination[token * Z_WIDTH + head * 128u + tid] = gated * silu_f(z[head * 128u + tid]);
+    }
+    for (uint j = 0u; j < 128u; ++j) {
+        stored[j] = rowv[j];
     }
 }
 
