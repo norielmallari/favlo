@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ import objc
 
 from z_image_turbo.dit import velocity
 from z_image_turbo.formats import TILE_M, pad_to
+from z_image_turbo.hold import ImageHold, ImagePaused, ask
 from z_image_turbo.metal import Gpu
 from z_image_turbo.record import Plane, load
 from z_image_turbo.schedule import STEPS, sigmas
@@ -56,26 +58,51 @@ class Runtime:
         height: int,
         steps: int,
         seed: int,
+        *,
+        stop: Callable[[], str | None] | None = None,
+        latent: np.ndarray | None = None,
+        done_steps: int = 0,
+        step_times: list[float] | None = None,
+        spent: float = 0.0,
     ) -> tuple[np.ndarray, str, dict[str, Any]]:
         _check_size(width, height, steps)
+        if done_steps and latent is None:
+            message = "a resumed step needs its latent"
+            raise ValueError(message)
         wall = time.perf_counter()
-        caption_started = time.perf_counter()
-        with objc.autorelease_pool():
-            ids = prompt_ids(prompt, self.source)
-            _, length = embed_caption(self.gpu, self.scratch, self.weights, ids)
-        self.gpu.reclaim()
-        caption_s = time.perf_counter() - caption_started
+        times = list(step_times or [])
         latent_h = height // 8
         latent_w = width // 8
         patch_h = latent_h // 2
         patch_w = latent_w // 2
-        image_rows = pad_to(patch_h * patch_w, TILE_M)
-        noise = np.random.default_rng(seed).standard_normal((16, latent_h, latent_w))
-        self.gpu.store_f32(self.scratch.latent, noise.astype(np.float32))
-        knots = sigmas(steps)
         count = 16 * latent_h * latent_w
-        times: list[float] = []
-        for index in range(steps):
+        caption_s = 0.0
+        length = 0
+        if done_steps < steps:
+            caption_started = time.perf_counter()
+            with objc.autorelease_pool():
+                ids = prompt_ids(prompt, self.source)
+                _, length = embed_caption(self.gpu, self.scratch, self.weights, ids)
+            self.gpu.reclaim()
+            caption_s = time.perf_counter() - caption_started
+            self._stop(
+                stop,
+                stage="step" if done_steps else "caption",
+                step=done_steps,
+                latent=latent,
+                times=times,
+                caption_s=caption_s,
+                spent=spent,
+                wall=wall,
+            )
+        image_rows = pad_to(patch_h * patch_w, TILE_M)
+        if latent is None:
+            noise = np.random.default_rng(seed).standard_normal((16, latent_h, latent_w))
+            self.gpu.store_f32(self.scratch.latent, noise.astype(np.float32))
+        else:
+            self.gpu.store_f32(self.scratch.latent, np.ascontiguousarray(latent, dtype=np.float32))
+        knots = sigmas(steps)
+        for index in range(done_steps, steps):
             started = time.perf_counter()
             with objc.autorelease_pool():
                 self.gpu.zero(self.scratch.tokens, image_rows * 256 * 4)
@@ -101,16 +128,58 @@ class Runtime:
             self.gpu.reclaim()
             times.append(time.perf_counter() - started)
             print(f"step {index + 1}/{steps} {times[-1]:.2f}s", flush=True)
-        latent = self.gpu.read_f32(self.scratch.latent, count).reshape(16, latent_h, latent_w)
-        if not np.isfinite(latent).all():
-            raise RuntimeError("latent is not finite")
-        digest = hashlib.sha256(np.ascontiguousarray(latent).tobytes()).hexdigest()
+            reason = ask(stop)
+            if reason == "cancel":
+                self._stop(
+                    stop,
+                    stage="step",
+                    step=index + 1,
+                    times=times,
+                    caption_s=caption_s,
+                    spent=spent,
+                    wall=wall,
+                )
+            elif reason == "preempt":
+                self._stop(
+                    stop,
+                    stage="step",
+                    step=index + 1,
+                    latent=self._read_latent(count, latent_h, latent_w),
+                    times=times,
+                    caption_s=caption_s,
+                    spent=spent,
+                    wall=wall,
+                )
+        drawn = self._read_latent(count, latent_h, latent_w)
+        digest = hashlib.sha256(np.ascontiguousarray(drawn).tobytes()).hexdigest()
+        self._stop(
+            stop,
+            stage="step",
+            step=steps,
+            latent=drawn,
+            times=times,
+            caption_s=caption_s,
+            spent=spent,
+            wall=wall,
+        )
         vae_started = time.perf_counter()
         with objc.autorelease_pool():
             pixels = _decode_image(self, latent_h, latent_w)
         self.gpu.reclaim()
         vae_s = time.perf_counter() - vae_started
-        total_s = time.perf_counter() - wall
+        if ask(stop):
+            self._stop(
+                stop,
+                stage="decode",
+                step=steps,
+                pixels=np.array(pixels, copy=True),
+                times=times,
+                caption_s=caption_s,
+                vae_s=vae_s,
+                spent=spent,
+                wall=wall,
+            )
+        total_s = spent + (time.perf_counter() - wall)
         print(
             f"generate {total_s:.2f}s caption {caption_s:.2f}s vae {vae_s:.2f}s",
             flush=True,
@@ -122,6 +191,44 @@ class Runtime:
             "steps": times,
         }
         return pixels, digest, timing
+
+    def _read_latent(self, count: int, height: int, width: int) -> np.ndarray:
+        drawn = self.gpu.read_f32(self.scratch.latent, count).reshape(16, height, width)
+        if not np.isfinite(drawn).all():
+            raise RuntimeError("latent is not finite")
+        return np.array(drawn, copy=True, dtype=np.float32)
+
+    def _stop(
+        self,
+        stop: Callable[[], str | None] | None,
+        *,
+        stage: str,
+        step: int,
+        times: list[float],
+        caption_s: float,
+        spent: float,
+        wall: float,
+        latent: np.ndarray | None = None,
+        pixels: np.ndarray | None = None,
+        vae_s: float = 0.0,
+    ) -> None:
+        reason = ask(stop)
+        if reason is None:
+            return
+        kept = None if latent is None else np.array(latent, copy=True, dtype=np.float32)
+        raise ImagePaused(
+            reason,
+            ImageHold(
+                stage=stage,
+                step=step,
+                latent=kept,
+                pixels=pixels,
+                times=list(times),
+                caption_s=caption_s,
+                vae_s=vae_s,
+                spent=spent + (time.perf_counter() - wall),
+            ),
+        )
 
 
 def open_runtime(

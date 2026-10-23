@@ -1,6 +1,6 @@
-"""HTTP handlers. Chat is refused. Images use the OpenAI generations body.
+"""Chat is refused. Images use the OpenAI generations body.
 
-``POST /v1/images/edits`` and ``POST /v1/images/variations`` are not handlers.
+``POST /v1/images/edits`` and ``POST /v1/images/variations`` are not routes.
 This pipeline has no image input. A transparent background, a hosted URL, and a
 streaming partial are not produced. JPEG and WebP are not encoded.
 """
@@ -13,7 +13,10 @@ import time
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import numpy as np
+
 from favlo.images import load_image, store_source, sweep_images
+from z_image_turbo.hold import ImageHold, ImageJob, ImagePaused
 from z_image_turbo.png import REPORTED_QUALITY, pack_rgb, write_png
 from z_image_turbo.schedule import STEPS
 from z_image_turbo.scratch import MAX_EDGE
@@ -39,7 +42,7 @@ class ImageFields(NamedTuple):
 
 
 def handle_chat(
-    handler: Any,
+    reply: Any,
     runtime: Any,
     body: dict[str, Any],
     selection: Any,
@@ -48,14 +51,14 @@ def handle_chat(
 ) -> None:
     del runtime, body, selection, args, state
     _reject(
-        handler,
+        reply,
         "z-image-turbo generates images at POST /v1/images/generations",
         None,
     )
 
 
 def handle_image(
-    handler: Any,
+    reply: Any,
     runtime: Any,
     body: dict[str, Any],
     selection: Any,
@@ -67,49 +70,257 @@ def handle_image(
     root = home if isinstance(home, Path) else None
     try:
         fields = _fields(body)
-        images: list[dict[str, str]] = []
-        timings: list[dict[str, Any]] = []
-        for index in range(fields.count):
-            pixels, _digest, timing = runtime.generate(
-                fields.prompt,
-                fields.width,
-                fields.height,
-                STEPS,
-                fields.seed + index,
-            )
-            image_id = "image_" + secrets.token_hex(12)
-            write_png(store_source(image_id, pack_rgb(pixels), home=root), fields.quality)
-            sweep_images(home=root)
-            stored = load_image(image_id, home=root)
-            if stored is None:
-                raise RuntimeError("stored image is missing")
-            images.append(
-                {
-                    "id": image_id,
-                    "b64_json": base64.b64encode(stored).decode("ascii"),
-                }
-            )
-            timings.append(timing)
     except ImageRequestError as exc:
-        _reject(handler, str(exc), exc.param)
+        _reject(reply, str(exc), exc.param)
+        return
+    job = _resume(state, fields)
+    if job is None:
+        job = ImageJob(
+            id="image_" + secrets.token_hex(12),
+            created=int(time.time()),
+            prompt=fields.prompt,
+            seed=fields.seed,
+            width=fields.width,
+            height=fields.height,
+            count=fields.count,
+            quality=fields.quality,
+        )
+    try:
+        while job.index < fields.count:
+            if _paused(state, job):
+                _keep(reply, state, job, fields, _reason(state) == "cancel")
+                return
+            pixels, timing = _draw(runtime, fields, job, state)
+            if _reason(state) == "cancel":
+                _keep(reply, state, job, fields, True)
+                return
+            if _reason(state) == "preempt":
+                job.hold = _decoded(pixels, timing)
+                _keep(reply, state, job, fields, False)
+                return
+            job.images.append(_store(pixels, fields.quality, root))
+            job.timings.append(timing)
+            job.index += 1
+            job.hold = None
+    except ImagePaused as paused:
+        job.hold = paused.hold
+        _keep(reply, state, job, fields, paused.reason == "cancel")
         return
     except (TypeError, ValueError) as exc:
+        state.pop("image_hold", None)
         text = str(exc)
         param = "prompt" if text.startswith("caption length") else None
-        _reject(handler, text, param)
+        _reject(reply, text, param)
         return
+    state.pop("image_hold", None)
+    reply.json(200, _finished(job, fields))
+
+
+def _draw(
+    runtime: Any,
+    fields: ImageFields,
+    job: ImageJob,
+    state: dict[str, Any],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    hold = job.hold
+    if hold is not None and hold.pixels is not None:
+        return hold.pixels, _timing(hold)
+    latent = None
+    done = 0
+    times = None
+    spent = 0.0
+    if hold is not None and hold.stage == "step" and hold.latent is not None:
+        latent = hold.latent
+        done = hold.step
+        times = hold.times
+        spent = hold.spent
+    elif hold is not None:
+        spent = hold.spent
+    pixels, _digest, timing = runtime.generate(
+        fields.prompt,
+        fields.width,
+        fields.height,
+        STEPS,
+        fields.seed + job.index,
+        stop=lambda: _reason(state),
+        latent=latent,
+        done_steps=done,
+        step_times=times,
+        spent=spent,
+    )
+    return pixels, timing
+
+
+def _store(pixels: np.ndarray, quality: str, root: Path | None) -> dict[str, str]:
+    image_id = "image_" + secrets.token_hex(12)
+    write_png(store_source(image_id, pack_rgb(pixels), home=root), quality)
+    sweep_images(home=root)
+    stored = load_image(image_id, home=root)
+    if stored is None:
+        raise RuntimeError("stored image is missing")
+    return {"id": image_id, "b64_json": base64.b64encode(stored).decode("ascii")}
+
+
+def _decoded(pixels: np.ndarray, timing: dict[str, Any]) -> ImageHold:
+    steps = timing.get("steps")
+    return ImageHold(
+        stage="decode",
+        step=STEPS,
+        pixels=np.array(pixels, copy=True),
+        times=list(steps) if isinstance(steps, list) else [],
+        caption_s=float(timing.get("caption") or 0.0),
+        vae_s=float(timing.get("vae") or 0.0),
+        spent=float(timing.get("total") or 0.0),
+    )
+
+
+def _keep(
+    reply: Any,
+    state: dict[str, Any],
+    job: ImageJob,
+    fields: ImageFields,
+    cancel: bool,
+) -> None:
+    reply.json(200, _working(job, fields))
+    if cancel:
+        state.pop("image_hold", None)
+        return
+    state["image_hold"] = job
+
+
+def _paused(state: dict[str, Any], job: ImageJob) -> bool:
+    reason = _reason(state)
+    if reason == "cancel":
+        return True
+    if reason != "preempt":
+        return False
+    hold = job.hold
+    return hold is None or hold.pixels is None
+
+
+def _reason(state: dict[str, Any]) -> str | None:
+    cancel = state.get("cancel")
+    if getattr(cancel, "is_set", lambda: False)():
+        return "cancel"
+    preempt = state.get("preempt")
+    if getattr(preempt, "is_set", lambda: False)():
+        return "preempt"
+    return None
+
+
+def _resume(state: dict[str, Any], fields: ImageFields) -> ImageJob | None:
+    held = state.pop("image_hold", None)
+    if not isinstance(held, ImageJob):
+        return None
+    same = (
+        held.prompt == fields.prompt
+        and held.seed == fields.seed
+        and held.width == fields.width
+        and held.height == fields.height
+        and held.count == fields.count
+        and held.quality == fields.quality
+    )
+    if not same:
+        return None
+    return held
+
+
+def _finished(job: ImageJob, fields: ImageFields) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "created": int(time.time()),
+        "created": job.created,
         "background": fields.background,
-        "data": images,
+        "data": job.images,
         "output_format": fields.output_format,
         "quality": fields.quality,
         "size": fields.size,
-        "generation_seconds": timings[0] if fields.count == 1 else timings,
+        "generation_seconds": job.timings[0] if fields.count == 1 else job.timings,
     }
     if fields.safety_identifier:
         payload["safety_identifier"] = fields.safety_identifier
-    handler._json(200, payload)
+    return payload
+
+
+def _working(job: ImageJob, fields: ImageFields) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "created": job.created,
+        "id": job.id,
+        "status": "in_progress",
+        "background": fields.background,
+        "data": list(job.images),
+        "output_format": fields.output_format,
+        "quality": fields.quality,
+        "size": fields.size,
+        "progress": _progress(job),
+        "stage": _stage(job),
+        "generation_seconds": list(job.timings),
+    }
+    eta = _eta(job)
+    if eta is not None:
+        payload["eta"] = eta
+    if fields.safety_identifier:
+        payload["safety_identifier"] = fields.safety_identifier
+    return payload
+
+
+def _progress(job: ImageJob) -> int:
+    per = STEPS + 2
+    done = job.index * per
+    hold = job.hold
+    if hold is not None and hold.stage == "step":
+        done += hold.step
+    elif hold is not None and hold.stage == "decode":
+        done += STEPS + 1
+    total = job.count * per
+    if done <= 0 or total <= 0:
+        return 0
+    return min(99, (100 * done) // total)
+
+
+def _stage(job: ImageJob) -> str:
+    if job.hold is not None:
+        return job.hold.stage
+    if job.index:
+        return "store"
+    return "caption"
+
+
+def _eta(job: ImageJob) -> float | None:
+    times = _step_times(job)
+    if not times:
+        return None
+    mean = sum(times) / len(times)
+    later = job.count - job.index - 1
+    hold = job.hold
+    if hold is None or hold.stage == "caption":
+        left = (later + 1) * STEPS
+    elif hold.stage == "step":
+        left = (STEPS - hold.step) + later * STEPS
+    else:
+        left = max(later, 0) * STEPS
+    if left <= 0:
+        return 0.0
+    return left * mean
+
+
+def _step_times(job: ImageJob) -> list[float]:
+    hold = job.hold
+    if hold is not None and hold.times:
+        return hold.times
+    if not job.timings:
+        return []
+    last = job.timings[-1].get("steps")
+    if not isinstance(last, list):
+        return []
+    return [float(item) for item in last]
+
+
+def _timing(hold: ImageHold) -> dict[str, Any]:
+    return {
+        "total": hold.spent,
+        "caption": hold.caption_s,
+        "vae": hold.vae_s,
+        "steps": list(hold.times),
+    }
 
 
 def _fields(body: dict[str, Any]) -> ImageFields:
@@ -208,8 +419,8 @@ def _size(value: Any) -> tuple[int, int, str]:
     return width, height, f"{width}x{height}"
 
 
-def _reject(handler: Any, message: str, param: str | None) -> None:
-    handler._json(
+def _reject(reply: Any, message: str, param: str | None) -> None:
+    reply.json(
         400,
         {
             "error": {

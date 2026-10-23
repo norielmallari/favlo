@@ -31,7 +31,7 @@ One modulated block is 4 projections of 3840×3840, 2 of 10240×3840, and 1 of 3
 
 One block is 490.5 ms. The 256 blocks are 125.57 s.
 
-`attend_q4` reads the query once, writes the destination once, and walks every key and every value for every query. That is 1,309,326,704,640 bytes per call. Two hundred fifty-six calls are 1301 s at 257.59 GB/s. The measured `attend_q4` is 62.60 s, under that line. Eight queries share each key, and four keys are scored before the softmax rescales. The decoder head is 512 and stays on `attend`.
+`attend_q4` reads the query once, writes the destination once, and walks every key and every value for every query. That is 1,309,326,704,640 bytes per call. Two hundred fifty-six calls are 1301 s at 257.59 GB/s. The measured `attend_q4` is 62.20 s, under that line. Eight queries share each key, and four keys are scored before the softmax rescales. The decoder head is 512 and stays on `attend`.
 
 The decoder adds one `attend` over the 160×160 latent, one head of 512, median 5597 ms. The 3×3 convolutions below are `matmul_fp4` on a 4096-row chunk. The last partial chunk is counted as a full chunk. `conv_in`, `conv_out`, the 1×1 shortcuts, and group norm are not in this sum.
 

@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import base64
+import threading
 
 import numpy as np
 import pytest
 from z_image_turbo.chat import ImageRequestError, _fields, handle_image
 from z_image_turbo.formats import dequant_fp4, pack_fp4, stored_k
+from z_image_turbo.hold import ImageHold, ImageJob, ImagePaused
 from z_image_turbo.png import ZLIB_LEVEL, encode_png, pack_rgb, unpack_rgb, write_png
 from z_image_turbo.record import Plane
 from z_image_turbo.runtime import Runtime, _patchify, _unpatchify
 from z_image_turbo.schedule import sigmas, timestep
 from z_image_turbo.scratch import MAX_EDGE, Scratch
+
+from favlo.reply import MemoryReply
 
 
 def test_stored_k_pads_a_conv_row() -> None:
@@ -154,28 +158,19 @@ def test_image_request_rejects_unsupported_image_options() -> None:
 
 
 def test_image_response_returns_one_png_per_count(tmp_path) -> None:
-    class _Handler:
-        def __init__(self) -> None:
-            self.status = 0
-            self.body: dict[str, object] = {}
-
-        def _json(self, status: int, body: dict[str, object]) -> None:
-            self.status = status
-            self.body = body
-
     class _Runtime:
-        def generate(self, prompt: str, width: int, height: int, steps: int, seed: int) -> tuple:
+        def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **_extra):
             del prompt, width, height, steps
             timing = {"total": 1.0, "caption": 0.1, "vae": 0.2, "steps": [0.1]}
             image = np.zeros((8, 8, 3), dtype=np.uint8)
             image[..., 0] = seed
             return image, "digest", timing
 
-    handler = _Handler()
+    reply = MemoryReply()
     state = {"image_home": tmp_path}
-    handle_image(handler, _Runtime(), {"prompt": "a cat", "n": 2, "seed": 7}, None, None, state)
-    assert handler.status == 200
-    data = handler.body["data"]
+    handle_image(reply, _Runtime(), {"prompt": "a cat", "n": 2, "seed": 7}, None, None, state)
+    assert reply.status == 200
+    data = reply.body["data"]
     assert isinstance(data, list)
     assert len(data) == 2
     first = np.zeros((8, 8, 3), dtype=np.uint8)
@@ -187,16 +182,150 @@ def test_image_response_returns_one_png_per_count(tmp_path) -> None:
     rgb = tmp_path / "images" / f"{data[0]['id']}.rgb"
     assert np.array_equal(unpack_rgb(rgb.read_bytes()), first)
     assert (tmp_path / "images" / f"{data[0]['id']}.png").read_bytes() == encode_png(first, "high")
-    timings = handler.body["generation_seconds"]
+    timings = reply.body["generation_seconds"]
     assert isinstance(timings, list)
     assert len(timings) == 2
-    assert handler.body["output_format"] == "png"
-    assert handler.body["background"] == "opaque"
-    assert handler.body["size"] == "1024x1024"
-    assert "usage" not in handler.body
+    assert reply.body["output_format"] == "png"
+    assert reply.body["background"] == "opaque"
+    assert reply.body["size"] == "1024x1024"
+    assert "usage" not in reply.body
+    assert "status" not in reply.body
     assert "revised_prompt" not in data[0]
-    handle_image(handler, _Runtime(), {"prompt": "a cat"}, None, None, state)
-    assert isinstance(handler.body["generation_seconds"], dict)
+    handle_image(reply, _Runtime(), {"prompt": "a cat"}, None, None, state)
+    assert isinstance(reply.body["generation_seconds"], dict)
+
+
+def _picture(seed: int) -> np.ndarray:
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+    image[..., 0] = seed
+    return image
+
+
+def test_preempt_keeps_a_stored_image_and_the_same_id(tmp_path) -> None:
+    preempt = threading.Event()
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.seeds: list[int] = []
+
+        def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **_extra):
+            del prompt, width, height, steps
+            self.seeds.append(seed)
+            if len(self.seeds) > 1:
+                preempt.set()
+            timing = {"total": 1.0, "caption": 0.1, "vae": 0.2, "steps": [0.1]}
+            return _picture(seed), "digest", timing
+
+    runtime = _Runtime()
+    reply = MemoryReply()
+    state = {"image_home": tmp_path, "preempt": preempt, "cancel": threading.Event()}
+    handle_image(reply, runtime, {"prompt": "a cat", "n": 2, "seed": 7}, None, None, state)
+    assert reply.body["status"] == "in_progress"
+    assert reply.body["stage"] == "decode"
+    assert len(reply.body["data"]) == 1
+    assert state["image_hold"].id == reply.body["id"]
+    assert runtime.seeds == [7, 8]
+    preempt.clear()
+    handle_image(reply, runtime, {"prompt": "a cat", "n": 2, "seed": 7}, None, None, state)
+    assert "status" not in reply.body
+    assert len(reply.body["data"]) == 2
+    assert runtime.seeds == [7, 8]
+    assert "image_hold" not in state
+
+
+def test_a_paused_step_resumes_with_its_latent(tmp_path) -> None:
+    latent = np.arange(4, dtype=np.float32)
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.resumed: list[dict] = []
+
+        def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **extra):
+            del prompt, width, height, steps, seed
+            if not extra.get("done_steps"):
+                raise ImagePaused(
+                    "preempt",
+                    ImageHold(stage="step", step=4, latent=latent, times=[0.2, 0.2, 0.2, 0.2]),
+                )
+            self.resumed.append(extra)
+            timing = {"total": 2.0, "caption": 0.1, "vae": 0.2, "steps": [0.2] * 8}
+            return _picture(3), "digest", timing
+
+    runtime = _Runtime()
+    reply = MemoryReply()
+    state = {"image_home": tmp_path, "preempt": threading.Event(), "cancel": threading.Event()}
+    handle_image(reply, runtime, {"prompt": "a cat", "seed": 1}, None, None, state)
+    assert reply.body["status"] == "in_progress"
+    assert reply.body["stage"] == "step"
+    assert reply.body["progress"] > 0
+    assert reply.body["eta"] > 0
+    assert reply.body["data"] == []
+    job_id = reply.body["id"]
+    handle_image(reply, runtime, {"prompt": "a cat", "seed": 1}, None, None, state)
+    assert "status" not in reply.body
+    assert runtime.resumed[0]["done_steps"] == 4
+    assert np.array_equal(runtime.resumed[0]["latent"], latent)
+    assert len(reply.body["data"]) == 1
+    assert state.get("image_hold") is None
+    assert job_id
+
+
+def test_cancel_drops_the_checkpoint_and_skips_the_remaining_image(tmp_path) -> None:
+    class _Runtime:
+        def __init__(self) -> None:
+            self.seeds: list[int] = []
+
+        def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **_extra):
+            del prompt, width, height, steps
+            self.seeds.append(seed)
+            if seed == 8:
+                raise ImagePaused("cancel", ImageHold(stage="step", step=1, latent=_picture(1)))
+            timing = {"total": 1.0, "caption": 0.1, "vae": 0.2, "steps": [0.1]}
+            return _picture(seed), "digest", timing
+
+    runtime = _Runtime()
+    reply = MemoryReply()
+    state = {"image_home": tmp_path, "preempt": threading.Event(), "cancel": threading.Event()}
+    handle_image(reply, runtime, {"prompt": "a cat", "n": 2, "seed": 7}, None, None, state)
+    assert reply.body["status"] == "in_progress"
+    assert len(reply.body["data"]) == 1
+    assert "image_hold" not in state
+    assert (tmp_path / "images" / f"{reply.body['data'][0]['id']}.png").is_file()
+    handle_image(reply, runtime, {"prompt": "a cat", "n": 2, "seed": 7}, None, None, state)
+    assert runtime.seeds == [7, 8, 7, 8]
+
+
+def test_a_different_prompt_drops_the_paused_image(tmp_path) -> None:
+    class _Runtime:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **_extra):
+            del prompt, width, height, steps, seed
+            self.calls += 1
+            timing = {"total": 1.0, "caption": 0.1, "vae": 0.2, "steps": [0.1]}
+            return _picture(1), "digest", timing
+
+    state = {
+        "image_home": tmp_path,
+        "image_hold": ImageJob(
+            id="image_old",
+            created=1,
+            prompt="a dog",
+            seed=0,
+            width=1024,
+            height=1024,
+            count=1,
+            quality="high",
+            hold=ImageHold(stage="step", step=3, latent=_picture(1)),
+        ),
+    }
+    reply = MemoryReply()
+    runtime = _Runtime()
+    handle_image(reply, runtime, {"prompt": "a cat"}, None, None, state)
+    assert runtime.calls == 1
+    assert "status" not in reply.body
+    assert reply.body["created"] != 1
 
 
 def test_close_drops_the_device_buffers() -> None:
