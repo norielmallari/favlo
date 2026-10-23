@@ -4,6 +4,8 @@ As-built note for the `qwen38-27b` pipeline. The process contract is [../../ARCH
 
 Clients reach this pipeline through `favlo serve`. `GET /v1/models` lists it once a record is registered, and the `model` field on `POST /v1/chat/completions` loads it. `kernels`, `quantize`, `bf16`, `complete`, and `models` require `favlo --qwen38-27b`. That flag loads `qwen38-27b.py`, which loads `qwen38_27b`. The package does not import `qwen38_flash_next` or `qwen36_35b_a3b`.
 
+The official checkpoint is [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B). Those weights are under the Apache License, Version 2.0.
+
 ## Kernels
 
 `kernels` compiles this package's shader library and fails if any kernel in that library does not produce a pipeline. It then dispatches the 64×64 and 64×32 fp4 `matmul2d` tiles, the 32×128 fp4 and fp8 tiles, the fp8 64×64 weight tile, the fp4 GEMV, the four-row fp4 GEMV, the four-row fp8 GEMV, the fused fp8 gate and up projection, the two-activation fp4 GEMV, multiplicative RMSNorm, SwiGLU, one Gated DeltaNet step, the 10240-channel convolution, an E4M3 decode, partial RoPE at position 0, a four-token causal fp8 attention, the tanh GELU, and the erf GELU. The host formulas for those dispatches live in `qwen38_27b/checks.py`.

@@ -149,7 +149,10 @@ def _f32(value: float) -> bytes:
 
 def _file_buffer(session: Session, path: Path) -> Any:
     size = path.stat().st_size
-    buffer = session.device.newBufferWithLength_options_(max(size, 16), session.shared)
+    buffer = session.allocate(max(size, 16))
+    if buffer is None:
+        message = f"device refused a {size} byte file"
+        raise RuntimeError(message)
     view = memoryview(buffer.contents().as_buffer(size))
     note = session._load_note
     with path.open("rb") as handle:
@@ -407,12 +410,7 @@ class Qwen36Runtime:
             except OSError:
                 pass
         if session is not None:
-            try:
-                session.end()
-            except Exception:
-                abort = getattr(session, "abort", None)
-                if callable(abort):
-                    abort()
+            session.close()
         self._prefill = None
         held = getattr(self, "_held", None)
         if held is not None:

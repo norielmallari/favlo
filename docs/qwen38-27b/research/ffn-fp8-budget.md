@@ -47,3 +47,5 @@ A scaled fp4 magnitude of 0.25 or less restores as 0. That is 1/24 of an exact-s
 Quantize accepts `--ffn-fp8`. A mixed percentage writes `models/Qwen3.8-27B-fp8-fp4` and records the chosen layers in that directory. The sections above stay as committed.
 
 22 October 2026. The packed record keeps 12 language feed-forward layers at fp8, the largest whole count within 20% of 64. The harness sample of 100 on that date is in [../benchmarks.md](../benchmarks.md): IFEval prompt-strict 0.740, GSM8K 87/100, and HumanEval 98/100.
+
+23 October 2026. A later sample of 100 on `Qwen3.8-27B-fp8-fp4` is in [../benchmarks.md](../benchmarks.md): IFEval prompt-strict 0.750, GSM8K 93/100, and HumanEval 94/100.

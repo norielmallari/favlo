@@ -179,6 +179,9 @@ def test_close_drops_device_buffers_before_another_pipeline() -> None:
         def end(self) -> None:
             self.ended += 1
 
+        def close(self) -> None:
+            self.end()
+
     class _Prefix:
         def __init__(self) -> None:
             self.flushed = 0
@@ -420,32 +423,8 @@ def test_a_zero_clock_prints_a_zero_rate() -> None:
 
 
 def test_stream_chunks_carry_reasoning_then_the_reply() -> None:
-    from types import SimpleNamespace
-
+    from favlo.reply import MemoryReply
     from qwen36_35b_a3b.chat import _stream
-
-    class _Handler:
-        _model_id = "qwen36-35b-a3b"
-        _started = False
-        close_connection = False
-        events: list[dict] = []
-        sent: list[bytes] = []
-        connection = SimpleNamespace(settimeout=lambda *_args, **_kwargs: None)
-
-        def send_response(self, _code: int) -> None:
-            return None
-
-        def send_header(self, *_args: object) -> None:
-            return None
-
-        def end_headers(self) -> None:
-            return None
-
-        def _event(self, payload: dict) -> None:
-            self.events.append(payload)
-
-        def _send(self, data: bytes) -> None:
-            self.sent.append(data)
 
     class _Runtime:
         _hit_limit = False
@@ -467,13 +446,11 @@ def test_stream_chunks_carry_reasoning_then_the_reply() -> None:
             self._output_ids = ids
             return ids
 
-    handler = _Handler()
-    handler.events = []
-    handler.sent = []
-    _stream(handler, _Runtime(), [9, 9, 9], [], False, 8, 0.0, 1.0, 1, 0.0, True, [], None)
-    assert handler.sent == [b"data: [DONE]\n\n"]
+    reply = MemoryReply("qwen36-35b-a3b")
+    _stream(reply, _Runtime(), [9, 9, 9], [], False, 8, 0.0, 1.0, 1, 0.0, True, [], None)
+    assert reply.sent == [b"data: [DONE]\n\n"]
     seen: list[tuple[str, object]] = []
-    for payload in handler.events:
+    for payload in reply.events:
         assert payload["object"] == "chat.completion.chunk"
         assert payload["id"] == "chatcmpl-favlo"
         assert payload["model"] == "qwen36-35b-a3b"
@@ -501,32 +478,8 @@ def test_stream_chunks_carry_reasoning_then_the_reply() -> None:
 
 
 def test_a_tool_call_is_not_sent_as_a_chat_message() -> None:
-    from types import SimpleNamespace
-
+    from favlo.reply import MemoryReply
     from qwen36_35b_a3b.chat import _stream
-
-    class _Handler:
-        _model_id = "qwen36-35b-a3b"
-        _started = False
-        close_connection = False
-        events: list[dict] = []
-        sent: list[bytes] = []
-        connection = SimpleNamespace(settimeout=lambda *_args, **_kwargs: None)
-
-        def send_response(self, _code: int) -> None:
-            return None
-
-        def send_header(self, *_args: object) -> None:
-            return None
-
-        def end_headers(self) -> None:
-            return None
-
-        def _event(self, payload: dict) -> None:
-            self.events.append(payload)
-
-        def _send(self, data: bytes) -> None:
-            self.sent.append(data)
 
     call = "<tool_call>\n<function=read_file>\n</function>\n</tool_call>"
 
@@ -550,14 +503,12 @@ def test_a_tool_call_is_not_sent_as_a_chat_message() -> None:
             self._output_ids = ids
             return ids
 
-    handler = _Handler()
-    handler.events = []
-    handler.sent = []
-    _stream(handler, _Runtime(), [9], [], False, 8, 0.0, 1.0, 1, 0.0, False, [], None)
+    reply = MemoryReply("qwen36-35b-a3b")
+    _stream(reply, _Runtime(), [9], [], False, 8, 0.0, 1.0, 1, 0.0, False, [], None)
     content = []
     names = []
     finish = None
-    for payload in handler.events:
+    for payload in reply.events:
         choices = payload["choices"]
         if not choices:
             continue

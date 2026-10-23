@@ -675,7 +675,7 @@ def open_runtime(
 
 
 def handle_chat(
-    handler: Any,
+    reply: Any,
     runtime: Any,
     body: dict[str, Any],
     selection: Any,
@@ -701,7 +701,7 @@ def handle_chat(
         if isinstance(card, dict) and "presence_penalty" in card:
             presence_default = float(card["presence_penalty"])
         stream = bool(body.get("stream", False))
-        runtime._stop = handler._client_stopped
+        runtime._stop = reply.stopped
         runtime.tool_names = tool_names(tools)
         runtime.required_function = required_function(body.get("tool_choice"))
         runtime.required_closes = call_closes(tools, runtime.required_function)
@@ -722,7 +722,7 @@ def handle_chat(
             )
             if stream:
                 _stream_chat(
-                    handler,
+                    reply,
                     runtime,
                     prompt,
                     max_tokens,
@@ -748,7 +748,7 @@ def handle_chat(
                     reason = "tool_calls"
                 else:
                     reason = "length" if runtime._hit_limit else "stop"
-                handler._json(
+                reply.json(
                     200,
                     _completion(
                         content,
@@ -758,13 +758,12 @@ def handle_chat(
                         calls,
                         reasoning if enable_thinking else "",
                         runtime,
-                        handler._model_id,
+                        reply.model_id,
                         prompt_cap,
                     ),
                 )
             finished = True
         except (RequestClosed, OSError):
-            handler.close_connection = True
             _log("client closed")
             persist = getattr(runtime, "_persist_prefix", None)
             if persist is not None:
@@ -778,7 +777,7 @@ def handle_chat(
 
 
 def _stream_chat(
-    handler: Any,
+    reply: Any,
     runtime: Any,
     prompt: list[int],
     max_tokens: int | None,
@@ -791,22 +790,14 @@ def _stream_chat(
     max_prompt_tokens: int | None = None,
     tool_choice: Any = None,
 ) -> None:
-    handler._started = True
-    handler.close_connection = True
-    handler.connection.settimeout(2.0)
     try:
-        handler.send_response(200)
-        handler.send_header("Content-Type", "text/event-stream")
-        handler.send_header("Cache-Control", "no-cache")
-        handler.send_header("Connection", "close")
-        handler.end_headers()
+        reply.begin_events()
     except OSError:
-        handler._gone = True
         raise RequestClosed() from None
 
     def event(payload: dict[str, Any]) -> None:
         try:
-            handler._event(payload)
+            reply.event(payload)
         except OSError as exc:
             raise RequestClosed() from exc
 
@@ -905,7 +896,7 @@ def _stream_chat(
         }
     )
     try:
-        handler._send(b"data: [DONE]\n\n")
+        reply.done()
     except OSError as exc:
         raise RequestClosed() from exc
     runtime._log_decode()

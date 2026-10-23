@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import objc
 
 KERNELS = (
     "prefill_fp4_e8m0",
@@ -216,6 +217,7 @@ class Session:
                 raise RuntimeError(message)
             self.pipes[name] = pipeline
         self._held: list[Any] = []
+        self._owned: list[Any] = []
         self._load_note = None
 
     @property
@@ -228,14 +230,39 @@ class Session:
             raw = np.ascontiguousarray(blob).tobytes()
         else:
             raw = bytes(blob)
-        buffer = self.device.newBufferWithLength_options_(max(len(raw), 16), self.shared)
-        if raw:
-            memoryview(buffer.contents().as_buffer(len(raw)))[:] = raw
-        return buffer
+        with objc.autorelease_pool():
+            buffer = self.device.newBufferWithLength_options_(max(len(raw), 16), self.shared)
+            if raw:
+                memoryview(buffer.contents().as_buffer(len(raw)))[:] = raw
+            return self._keep(buffer)
 
     def allocate(self, nbytes: int) -> Any | None:
         """A shared buffer, or None when the device refuses the length."""
-        return self.device.newBufferWithLength_options_(max(nbytes, 16), self.shared)
+        with objc.autorelease_pool():
+            buffer = self.device.newBufferWithLength_options_(max(nbytes, 16), self.shared)
+            return self._keep(buffer)
+
+    def close(self) -> None:
+        """Wait for the queue and drop every buffer this session allocated."""
+        try:
+            self.end()
+        except Exception:
+            abort = getattr(self, "abort", None)
+            if callable(abort):
+                abort()
+        self._inflight.clear()
+        self._held.clear()
+        self._owned.clear()
+        self.pipes.clear()
+        self._load_note = None
+        self.queue = None
+        self.device = None
+        self.metal = None
+
+    def _keep(self, buffer: Any) -> Any:
+        if buffer is not None:
+            self._owned.append(buffer)
+        return buffer
 
     def zeros(self, nbytes: int) -> Any:
         buffer = self.allocate(nbytes)

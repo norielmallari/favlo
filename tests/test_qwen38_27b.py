@@ -429,26 +429,6 @@ def test_openai_chunk_streams_one_delta_per_token() -> None:
     openai = pytest.importorskip("openai")
     from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 
-    class _Handler:
-        _model_id = "qwen38-27b"
-        _started = False
-        close_connection = False
-
-        def send_response(self, _status: int) -> None:
-            return None
-
-        def send_header(self, _name: str, _value: str) -> None:
-            return None
-
-        def end_headers(self) -> None:
-            return None
-
-        def _event(self, payload: dict) -> None:
-            self.events.append(payload)
-
-        def _send(self, data: bytes) -> None:
-            self.sent.append(data)
-
     class _Runtime:
         _hit_limit = False
         _limit = 131072
@@ -471,13 +451,13 @@ def test_openai_chunk_streams_one_delta_per_token() -> None:
             self._output_ids = ids
             return ids
 
-    handler = _Handler()
-    handler.events = []
-    handler.sent = []
-    _stream(handler, _Runtime(), [9, 9], [], False, 8, True)
-    assert b"data: [DONE]\n\n" in handler.sent
+    from favlo.reply import MemoryReply
+
+    reply = MemoryReply("qwen38-27b")
+    _stream(reply, _Runtime(), [9, 9], [], False, 8, True)
+    assert b"data: [DONE]\n\n" in reply.sent
     seen: list[tuple[str, object]] = []
-    for payload in handler.events:
+    for payload in reply.events:
         chunk = ChatCompletionChunk.model_validate(payload)
         assert chunk.id == "chatcmpl-favlo"
         assert chunk.object == "chat.completion.chunk"
@@ -625,24 +605,6 @@ def test_openai_tool_call_delta_carries_an_index() -> None:
     pytest.importorskip("openai")
     from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 
-    class _Handler:
-        _model_id = "qwen38-27b"
-
-        def send_response(self, _status: int) -> None:
-            return None
-
-        def send_header(self, _name: str, _value: str) -> None:
-            return None
-
-        def end_headers(self) -> None:
-            return None
-
-        def _event(self, payload: dict) -> None:
-            self.events.append(payload)
-
-        def _send(self, _data: bytes) -> None:
-            return None
-
     class _Runtime:
         _hit_limit = False
         _cached_tokens = 0
@@ -660,12 +622,13 @@ def test_openai_tool_call_delta_carries_an_index() -> None:
             self._output_ids = [1]
             return [1]
 
-    handler = _Handler()
-    handler.events = []
-    _stream(handler, _Runtime(), [9], [], False, 8, False)
+    from favlo.reply import MemoryReply
+
+    reply = MemoryReply("qwen38-27b")
+    _stream(reply, _Runtime(), [9], [], False, 8, False)
     calls = [
         chunk.choices[0].delta.tool_calls
-        for payload in handler.events
+        for payload in reply.events
         if (chunk := ChatCompletionChunk.model_validate(payload)).choices
         and chunk.choices[0].delta.tool_calls
     ]

@@ -7,7 +7,6 @@ use the OpenAI logit update.
 
 from __future__ import annotations
 
-import socket
 import time
 from pathlib import Path
 from typing import Any
@@ -164,7 +163,7 @@ def _forced_call(root: Path, tools: Any, required: str | None) -> tuple[list[int
 
 
 def handle_chat(
-    handler: Any,
+    reply: Any,
     runtime: Any,
     body: dict[str, Any],
     selection: Any,
@@ -174,17 +173,16 @@ def handle_chat(
     """One non-streaming or streaming chat completion. The next token is an argmax."""
     del args, state
     runtime._halted = False
-    runtime._stop = getattr(handler, "_client_stopped", None)
+    runtime._stop = reply.stopped
     try:
-        _handle_chat(handler, runtime, body, selection)
+        _handle_chat(reply, runtime, body, selection)
     except RequestClosed:
-        handler.close_connection = True
         runtime._status("client closed")
     finally:
         runtime._stop = None
 
 
-def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: Any) -> None:
+def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any) -> None:
     messages = body["messages"]
     requested = requested_thinking(body)
     required = required_function(body.get("tool_choice"))
@@ -217,7 +215,7 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
     forced, stop_after_forced = _forced_call(runtime.root, body.get("tools"), required)
     if bool(body.get("stream", False)):
         _stream(
-            handler,
+            reply,
             runtime,
             prompt,
             forced,
@@ -249,18 +247,18 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
         rng=draw,
     )
     text = decode_text(runtime.root, tokens)
-    reasoning, reply = split_thinking(text, thinking)
-    content, calls = parse_tool_calls(reply if reply else text)
+    reasoning, visible = split_thinking(text, thinking)
+    content, calls = parse_tool_calls(visible if visible else text)
     if not emit_tools:
         calls = []
-        content = text if not thinking else (reply if reply else text)
+        content = text if not thinking else (visible if visible else text)
     if calls:
         reason = "tool_calls"
     else:
         reason = "length" if runtime._hit_limit else "stop"
         if not thinking:
             content = text
-    handler._json(
+    reply.json(
         200,
         _completion(
             content,
@@ -270,7 +268,7 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
             calls,
             reasoning if thinking else "",
             runtime,
-            handler._model_id,
+            reply.model_id,
         ),
     )
 
@@ -316,7 +314,7 @@ def _usage(runtime: Any, prompt_tokens: int, completion_tokens: int) -> dict[str
 
 
 def _frame(
-    handler: Any,
+    reply: Any,
     choices: list[dict[str, Any]],
     created: int,
     usage: dict[str, Any] | None = None,
@@ -326,7 +324,7 @@ def _frame(
         "id": "chatcmpl-favlo",
         "object": "chat.completion.chunk",
         "created": created,
-        "model": getattr(handler, "_model_id", "") or "",
+        "model": getattr(reply, "model_id", "") or "",
         "choices": choices,
     }
     if usage is not None:
@@ -335,7 +333,7 @@ def _frame(
 
 
 def _stream(
-    handler: Any,
+    reply: Any,
     runtime: Any,
     prompt: list[int],
     forced: list[int],
@@ -360,26 +358,14 @@ def _stream(
             return tokenizer.decode(ids, skip_special_tokens=False)
 
     created = int(time.time())
-    handler._started = True
-    handler.close_connection = True
-    handler._chunked = True
-    connection = getattr(handler, "connection", None)
-    if connection is not None:
-        connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        connection.settimeout(None)
     try:
-        handler.send_response(200)
-        handler.send_header("Content-Type", "text/event-stream")
-        handler.send_header("Cache-Control", "no-cache")
-        handler.send_header("Transfer-Encoding", "chunked")
-        handler.send_header("X-Accel-Buffering", "no")
-        handler.end_headers()
+        reply.begin_events()
     except OSError:
         raise RequestClosed() from None
 
     def event(payload: dict[str, Any]) -> None:
         try:
-            handler._event(payload)
+            reply.event(payload)
         except OSError as exc:
             raise RequestClosed() from exc
 
@@ -390,16 +376,16 @@ def _stream(
         for channel, payload in pieces:
             if channel == "tool_start":
                 saw_tool = True
-                _emit_tool(event, handler, created, payload, started=True)
+                _emit_tool(event, reply, created, payload, started=True)
             elif channel == "tool_args":
                 saw_tool = True
-                _emit_tool(event, handler, created, payload, started=False)
+                _emit_tool(event, reply, created, payload, started=False)
             else:
-                _emit(event, handler, channel, payload, created)
+                _emit(event, reply, channel, payload, created)
 
     event(
         _frame(
-            handler,
+            reply,
             [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
             created,
         )
@@ -416,7 +402,7 @@ def _stream(
         emit_pieces(gate.push(piece))
 
     def on_prefill(_done: int) -> None:
-        event(_frame(handler, [{"index": 0, "delta": {}, "finish_reason": None}], created))
+        event(_frame(reply, [{"index": 0, "delta": {}, "finish_reason": None}], created))
 
     try:
         runtime.generate(
@@ -440,39 +426,28 @@ def _stream(
         emit_pieces(gate.push(piece))
         emit_pieces(gate.finish())
         reason = "tool_calls" if saw_tool else ("length" if runtime._hit_limit else "stop")
-        event(_frame(handler, [{"index": 0, "delta": {}, "finish_reason": reason}], created))
+        event(_frame(reply, [{"index": 0, "delta": {}, "finish_reason": reason}], created))
         completion_tokens = len(getattr(runtime, "_output_ids", None) or produced)
-        event(_frame(handler, [], created, _usage(runtime, len(prompt), completion_tokens)))
-        handler._send(b"data: [DONE]\n\n")
+        event(_frame(reply, [], created, _usage(runtime, len(prompt), completion_tokens)))
+        reply.done()
     except OSError as exc:
         raise RequestClosed() from exc
-    finally:
-        if getattr(handler, "_chunked", False):
-            handler._chunked = False
-            try:
-                handler.wfile.write(b"0\r\n\r\n")
-                handler.wfile.flush()
-            except (AttributeError, OSError):
-                try:
-                    handler._send(b"")
-                except OSError:
-                    pass
 
 
-def _emit(event: Any, handler: Any, channel: str, visible: str, created: int) -> None:
+def _emit(event: Any, reply: Any, channel: str, visible: str, created: int) -> None:
     if not visible:
         return
     field = "reasoning_content" if channel == "reasoning" else "content"
     event(
         _frame(
-            handler,
+            reply,
             [{"index": 0, "delta": {field: visible}, "finish_reason": None}],
             created,
         )
     )
 
 
-def _emit_tool(event: Any, handler: Any, created: int, payload: dict[str, Any], *, started: bool) -> None:
+def _emit_tool(event: Any, reply: Any, created: int, payload: dict[str, Any], *, started: bool) -> None:
     function: dict[str, Any] = {}
     if started:
         function["name"] = payload["name"]
@@ -487,7 +462,7 @@ def _emit_tool(event: Any, handler: Any, created: int, payload: dict[str, Any], 
         call = {"index": payload["index"], "function": function}
     event(
         _frame(
-            handler,
+            reply,
             [{"index": 0, "delta": {"tool_calls": [call]}, "finish_reason": None}],
             created,
         )

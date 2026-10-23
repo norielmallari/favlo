@@ -185,7 +185,7 @@ def _raise(message: str) -> None:
 
 
 def handle_chat(
-    handler: Any,
+    reply: Any,
     runtime: Any,
     body: dict[str, Any],
     selection: Any,
@@ -197,17 +197,15 @@ def handle_chat(
     from qwen36_35b_a3b.firing import finish_request, open_request
 
     runtime._halted = False
-    runtime._stop = getattr(handler, "_client_stopped", None)
+    runtime._stop = reply.stopped
     open_request(runtime)
     finished = False
     try:
-        _handle_chat(handler, runtime, body, selection)
+        _handle_chat(reply, runtime, body, selection)
         finished = True
     except RequestClosed:
-        handler.close_connection = True
         runtime._status("client closed")
     except OSError as exc:
-        handler.close_connection = True
         if str(exc) != "client closed":
             raise
         runtime._status("client closed")
@@ -219,7 +217,7 @@ def handle_chat(
         finish_request(runtime, selection, complete=finished)
 
 
-def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: Any) -> None:
+def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any) -> None:
     messages = body["messages"]
     requested = requested_thinking(body)
     required = required_function(body.get("tool_choice"))
@@ -245,7 +243,7 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
     limit = runtime._context_limit if requested is None else requested
     if stream:
         _stream(
-            handler,
+            reply,
             runtime,
             prompt,
             forced,
@@ -280,18 +278,18 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
         frequency=frequency,
     )
     text = decode_text(runtime.root, tokens)
-    reasoning, reply = split_thinking(text, thinking)
-    content, calls = parse_tool_calls(reply if reply else text)
+    reasoning, visible = split_thinking(text, thinking)
+    content, calls = parse_tool_calls(visible if visible else text)
     if not emit_tools:
         calls = []
-        content = reply if reply else text
+        content = visible if visible else text
     if calls:
         reason = "tool_calls"
     else:
         reason = "length" if runtime._hit_limit else "stop"
         if not thinking:
             content = text
-    handler._json(
+    reply.json(
         200,
         _completion(
             content,
@@ -301,7 +299,7 @@ def _handle_chat(handler: Any, runtime: Any, body: dict[str, Any], selection: An
             calls,
             reasoning if thinking else "",
             runtime,
-            handler._model_id,
+            reply.model_id,
         ),
     )
 
@@ -346,7 +344,7 @@ def _usage(runtime: Any, prompt_tokens: int, completion_tokens: int) -> dict[str
 
 
 def _frame(
-    handler: Any,
+    reply: Any,
     choices: list[dict[str, Any]],
     created: int,
     usage: dict[str, Any] | None = None,
@@ -356,7 +354,7 @@ def _frame(
         "id": "chatcmpl-favlo",
         "object": "chat.completion.chunk",
         "created": created,
-        "model": getattr(handler, "_model_id", "") or "",
+        "model": getattr(reply, "model_id", "") or "",
         "choices": choices,
     }
     if usage is not None:
@@ -365,7 +363,7 @@ def _frame(
 
 
 def _stream(
-    handler: Any,
+    reply: Any,
     runtime: Any,
     prompt: list[int],
     forced: list[int],
@@ -386,27 +384,20 @@ def _stream(
     if not callable(decode):
         decode = load_tokenizer(runtime.root).decode
     created = int(time.time())
-    handler._started = True
-    handler.close_connection = True
-    handler.connection.settimeout(2.0)
     try:
-        handler.send_response(200)
-        handler.send_header("Content-Type", "text/event-stream")
-        handler.send_header("Cache-Control", "no-cache")
-        handler.send_header("Connection", "close")
-        handler.end_headers()
+        reply.begin_events()
     except OSError:
         raise RequestClosed() from None
 
     def event(payload: dict[str, Any]) -> None:
         try:
-            handler._event(payload)
+            reply.event(payload)
         except OSError as exc:
             raise RequestClosed() from exc
 
     event(
         _frame(
-            handler,
+            reply,
             [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
             created,
         )
@@ -429,10 +420,10 @@ def _stream(
                 decoded = decode(produced) if produced else ""
                 piece, previous = _stream_delta(decoded, previous, final=final)
                 for channel, visible in gate.push(piece):
-                    _emit(event, handler, channel, visible, created)
+                    _emit(event, reply, channel, visible, created)
                 if final:
                     for channel, visible in gate.finish():
-                        _emit(event, handler, channel, visible, created)
+                        _emit(event, reply, channel, visible, created)
                     break
         except BaseException as exc:
             failed.append(exc)
@@ -469,13 +460,13 @@ def _stream(
         writer.join()
     if failed:
         raise failed[0]
-    _reasoning, reply = split_thinking(text, thinking)
-    _content, calls = parse_tool_calls(reply if reply else text)
+    _reasoning, visible = split_thinking(text, thinking)
+    _content, calls = parse_tool_calls(visible if visible else text)
     if emit_tools and calls:
         for index, call in enumerate(calls):
             event(
                 _frame(
-                    handler,
+                    reply,
                     [
                         {
                             "index": 0,
@@ -501,23 +492,23 @@ def _stream(
         reason = "tool_calls"
     else:
         reason = "length" if runtime._hit_limit else "stop"
-    event(_frame(handler, [{"index": 0, "delta": {}, "finish_reason": reason}], created))
+    event(_frame(reply, [{"index": 0, "delta": {}, "finish_reason": reason}], created))
     produced = getattr(runtime, "_output_ids", None)
     completion_tokens = len(produced) if isinstance(produced, list) else 0
-    event(_frame(handler, [], created, _usage(runtime, len(prompt), completion_tokens)))
+    event(_frame(reply, [], created, _usage(runtime, len(prompt), completion_tokens)))
     try:
-        handler._send(b"data: [DONE]\n\n")
+        reply.done()
     except OSError as exc:
         raise RequestClosed() from exc
 
 
-def _emit(event: Any, handler: Any, channel: str, visible: str, created: int) -> None:
+def _emit(event: Any, reply: Any, channel: str, visible: str, created: int) -> None:
     if not visible:
         return
     field = "reasoning_content" if channel == "reasoning" else "content"
     event(
         _frame(
-            handler,
+            reply,
             [{"index": 0, "delta": {field: visible}, "finish_reason": None}],
             created,
         )

@@ -13,7 +13,7 @@ The forward follows this report:
 - Gated Residual, equations (29)–(34). Four branches. Each branch has its own RMSNorm gain. The read is an elementwise sigmoid gate from a rank-320 bottleneck. The write is one scalar per branch, in \((0, 2)\).
 - N-gram embedding at layer 2. Multi-head hashing into a host-memory table, injected by a contextual gate. Placement is Table 7.
 
-Qwen Team. *Qwen3.8-Flash-Next.* Model card and blog, August 2026. [Blog](https://qwen.ai/blog?id=qwen3.8-flash-next).
+Qwen Team. *Qwen3.8-Flash-Next.* Model card and blog, August 2026. [Blog](https://qwen.ai/blog?id=qwen3.8-flash-next). The checkpoint is [Qwen/Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next). Those weights are under the [Qwen Community License 1.0](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE).
 
 Shapes, the 3:1 GDN/QSA schedule, the 512-expert top-10 MoE, the shared expert, the 262,144 context, and the sampling defaults come from the model card. Thinking mode is `temperature=1.0`, `top_p=0.95`, `top_k=20`. Instruct mode is `temperature=0.7`, `top_p=0.8`, `top_k=20`. The checkpoint tokenizer and chat template are part of that release. Vision weights stay unloaded. Those rows are `sampling.py`.
 

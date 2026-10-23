@@ -4,6 +4,8 @@ As-built note for the `qwen36-35b-a3b` pipeline. The process contract is [../../
 
 Clients reach this pipeline through `favlo serve`. `GET /v1/models` lists it once a record is registered, and the `model` field on `POST /v1/chat/completions` loads it. `kernels`, `quantize`, `bf16`, `complete`, and `models` require `favlo --qwen36-35b-a3b`. That flag loads `qwen36-35b-a3b.py`, which loads `qwen36_35b_a3b`. The package does not import `qwen38_flash_next` or `qwen38_27b`.
 
+The official checkpoint is [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B). Those weights are under the Apache License, Version 2.0.
+
 ## Kernels
 
 `kernels` compiles this package's shader library and fails if any kernel in that library does not produce a pipeline. It then dispatches the fp4 and fp8 `matmul2d` tiles, the fp4 GEMV, the 32-row projection, the float16 GEMV at 1 row and at 256 rows, one fp4 expert image of 1,671,168 bytes, the expert-slot remap, the vision `linear_fc1` pad (4320 by 1280, 16 rows dropped), the head-72 online softmax, the tanh GELU, one Gated DeltaNet step, and the 8192-channel convolution. The vision tower adds row LayerNorm, a padded fp4 activation cast, bias packing, erf GELU, and a batched head-72 attention. The host formulas for those dispatches live in `qwen36_35b_a3b/checks.py`. The fp8 decode dot loads both scale blocks of a 2048-wide row before the table lookup. One simdgroup owns one row.
