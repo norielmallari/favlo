@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import struct
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -98,23 +99,35 @@ def quantize(source: Path, dest: Path) -> Path:
     return dest
 
 
-def load(path: Path, gpu: Gpu) -> dict[str, Plane]:
-    manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
-    if manifest.get("complete") is not True:
-        message = f"{path} is not a finished record"
-        raise RuntimeError(message)
+def weight_bytes(path: Path) -> int:
+    """Bytes ``load`` will read from a finished record."""
+    total = 0
+    for entry in _manifest(path)["tensors"].values():
+        total += (path / entry["file"]).stat().st_size
+        scale = entry.get("scale")
+        if isinstance(scale, str):
+            total += (path / scale).stat().st_size
+    return total
+
+
+def load(
+    path: Path,
+    gpu: Gpu,
+    on_bytes: Callable[[int], None] | None = None,
+) -> dict[str, Plane]:
     planes: dict[str, Plane] = {}
-    items = manifest["tensors"]
+    items = _manifest(path)["tensors"]
     for index, (name, entry) in enumerate(items.items()):
         raw = (path / entry["file"]).read_bytes()
         scale = None
+        scale_bytes = 0
         stored = int(entry.get("stored_k") or 0)
         logical = int(entry.get("logical_k") or 0)
         if entry["plane"] == "fp4":
+            scale_raw = (path / entry["scale"]).read_bytes()
+            scale_bytes = len(scale_raw)
             data = gpu.keep(gpu.upload(np.frombuffer(raw, dtype=np.uint8)))
-            scale = gpu.keep(
-                gpu.upload(np.frombuffer((path / entry["scale"]).read_bytes(), dtype=np.uint8))
-            )
+            scale = gpu.keep(gpu.upload(np.frombuffer(scale_raw, dtype=np.uint8)))
         elif entry["plane"] == "f16":
             data = gpu.keep(gpu.upload(np.frombuffer(raw, dtype=np.float16)))
         else:
@@ -129,10 +142,21 @@ def load(path: Path, gpu: Gpu) -> dict[str, Plane]:
             data,
             scale,
         )
-        if index % 100 == 0:
+        if on_bytes is not None:
+            on_bytes(len(raw) + scale_bytes)
+        elif index % 100 == 0:
             print(f"load {index}/{len(items)}", flush=True)
-    print(f"load {len(items)} tensors", flush=True)
+    if on_bytes is None:
+        print(f"load {len(items)} tensors", flush=True)
     return planes
+
+
+def _manifest(path: Path) -> dict[str, Any]:
+    manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+    if manifest.get("complete") is not True:
+        message = f"{path} is not a finished record"
+        raise RuntimeError(message)
+    return manifest
 
 
 def _kind(key: str, shape: tuple[int, ...]) -> str:

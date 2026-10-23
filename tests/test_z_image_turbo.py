@@ -3,20 +3,28 @@
 from __future__ import annotations
 
 import base64
+import json
 import threading
 
 import numpy as np
 import pytest
+
+from favlo.reply import MemoryReply
 from z_image_turbo.chat import ImageRequestError, _fields, handle_image
 from z_image_turbo.formats import dequant_fp4, pack_fp4, stored_k
 from z_image_turbo.hold import ImageHold, ImageJob, ImagePaused
 from z_image_turbo.png import ZLIB_LEVEL, encode_png, pack_rgb, unpack_rgb, write_png
-from z_image_turbo.record import Plane
+from z_image_turbo.progress import (
+    CAPTION_PIECES,
+    DECODER_PIECES,
+    STEP_PIECES,
+    ImageProgress,
+    sample_total,
+)
+from z_image_turbo.record import Plane, load, weight_bytes
 from z_image_turbo.runtime import Runtime, _patchify, _unpatchify
 from z_image_turbo.schedule import sigmas, timestep
 from z_image_turbo.scratch import MAX_EDGE, Scratch
-
-from favlo.reply import MemoryReply
 
 
 def test_stored_k_pads_a_conv_row() -> None:
@@ -358,3 +366,252 @@ def test_close_drops_the_device_buffers() -> None:
     assert runtime.scratch is None
     assert runtime.ones is None
     assert scratch.text_h is None
+
+
+def test_sample_total_counts_finished_layers() -> None:
+    assert CAPTION_PIECES == 36
+    assert STEP_PIECES == 35
+    assert DECODER_PIECES == 25
+    assert sample_total(steps=8, done_steps=0) == 36 + 8 * 35 + 25
+    assert sample_total(steps=8, done_steps=4) == 36 + 4 * 35 + 25
+    assert sample_total(steps=8, done_steps=8) == 25
+    with pytest.raises(ValueError):
+        sample_total(steps=0, done_steps=0)
+
+
+def test_sample_row_names_the_stage_and_counts_layers() -> None:
+    store: dict[str, object] = {}
+    progress = ImageProgress(_bars(store), "16x16")
+    progress.open(4)
+    progress.stage("caption")
+    progress.advance()
+    progress.advance()
+    handle = store["handle"]
+    assert store["phase"] == "sample"
+    assert store["unit"] == "layers"
+    assert store["total"] == 4
+    assert store["lines"] == ["16x16"]
+    assert handle.detail == "caption"
+    assert handle.done == 2
+    progress.note("step 1/8 0.10s")
+    progress.close(progress.summary())
+    assert store["lines"] == ["16x16", "step 1/8 0.10s"]
+    assert store["summary"] == "sample 2/4 layers"
+    assert store["closed"] == 2
+
+
+def test_generate_closes_the_sample_row(monkeypatch) -> None:
+    store: dict[str, object] = {}
+
+    def _run(self, prompt, width, height, steps, seed, **kwargs):
+        del self, prompt, width, height, steps, seed
+        progress = kwargs["progress"]
+        progress.stage("step 1/8")
+        for _ in range(progress.total):
+            progress.advance()
+        return _picture(1), "digest", {"total": 3.5, "caption": 0.2, "vae": 0.4, "steps": [0.1]}
+
+    monkeypatch.setattr(Runtime, "_run", _run)
+    runtime = Runtime.__new__(Runtime)
+    runtime.console = _bars(store)
+    pixels, digest, timing = runtime.generate("a cat", 16, 16, 8, 0)
+    assert digest == "digest"
+    assert timing["total"] == 3.5
+    assert pixels.shape == (8, 8, 3)
+    total = sample_total(steps=8, done_steps=0)
+    assert store["total"] == total
+    assert store["lines"] == ["16x16", "generate 3.50s caption 0.20s vae 0.40s"]
+    assert store["handle"].detail == "step 1/8"
+    assert store["summary"] == f"sample {total}/{total} layers"
+    assert store["closed"] == total
+
+
+def test_a_paused_generate_closes_the_sample_row(monkeypatch) -> None:
+    store: dict[str, object] = {}
+
+    def _run(self, prompt, width, height, steps, seed, **kwargs):
+        del self, prompt, width, height, steps, seed, kwargs
+        raise ImagePaused("preempt", ImageHold(stage="step", step=4))
+
+    monkeypatch.setattr(Runtime, "_run", _run)
+    runtime = Runtime.__new__(Runtime)
+    runtime.console = _bars(store)
+    latent = np.zeros((16, 2, 2), dtype=np.float32)
+    with pytest.raises(ImagePaused):
+        runtime.generate("a cat", 16, 16, 8, 0, done_steps=4, latent=latent)
+    assert store["total"] == sample_total(steps=8, done_steps=4)
+    assert store["summary"] == "sample paused"
+    assert store["lines"] == ["16x16"]
+
+
+def test_a_cancelled_generate_closes_the_sample_row(monkeypatch) -> None:
+    store: dict[str, object] = {}
+
+    def _run(self, prompt, width, height, steps, seed, **kwargs):
+        del self, prompt, width, height, steps, seed, kwargs
+        raise ImagePaused("cancel", ImageHold(stage="caption"))
+
+    monkeypatch.setattr(Runtime, "_run", _run)
+    runtime = Runtime.__new__(Runtime)
+    runtime.console = _bars(store)
+    with pytest.raises(ImagePaused):
+        runtime.generate("a cat", 16, 16, 8, 0)
+    assert store["summary"] == "sample cancelled"
+
+
+def test_a_failed_generate_closes_the_sample_row(monkeypatch) -> None:
+    store: dict[str, object] = {}
+
+    def _run(self, prompt, width, height, steps, seed, **kwargs):
+        del self, prompt, width, height, steps, seed, kwargs
+        raise RuntimeError("latent is not finite")
+
+    monkeypatch.setattr(Runtime, "_run", _run)
+    runtime = Runtime.__new__(Runtime)
+    runtime.console = _bars(store)
+    with pytest.raises(RuntimeError, match="latent is not finite"):
+        runtime.generate("a cat", 16, 16, 8, 0)
+    assert store["summary"] == "sample failed"
+
+
+def test_generate_without_a_console_prints_the_lines(monkeypatch, capsys) -> None:
+    def _run(self, prompt, width, height, steps, seed, **kwargs):
+        del self, prompt, width, height, steps, seed
+        kwargs["progress"].note("step 1/8 0.10s")
+        return _picture(1), "digest", {"total": 1.25, "caption": 0.2, "vae": 0.3, "steps": [0.1]}
+
+    monkeypatch.setattr(Runtime, "_run", _run)
+    runtime = Runtime.__new__(Runtime)
+    runtime.console = None
+    runtime.generate("a cat", 16, 16, 8, 0)
+    text = capsys.readouterr().out
+    assert text == "16x16\nstep 1/8 0.10s\ngenerate 1.25s caption 0.20s vae 0.30s\n"
+
+
+def test_load_opens_a_byte_row(monkeypatch, tmp_path) -> None:
+    store: dict[str, object] = {}
+
+    def fake_load(path, gpu, on_bytes=None):
+        del path, gpu
+        assert on_bytes is not None
+        on_bytes(4)
+        on_bytes(6)
+        return {"w": object()}
+
+    monkeypatch.setattr("z_image_turbo.runtime.weight_bytes", lambda path: 10)
+    monkeypatch.setattr("z_image_turbo.runtime.load", fake_load)
+    runtime = Runtime.__new__(Runtime)
+    runtime.console = _bars(store)
+    runtime.gpu = object()
+    assert set(runtime._load(tmp_path)) == {"w"}
+    assert store["phase"] == "load"
+    assert store["unit"] == "bytes"
+    assert store["total"] == 10
+    assert store["detail"] == tmp_path.name
+    assert store["summary"] == "load 1 tensors"
+    assert store["closed"] == 10
+
+
+def test_a_failed_load_closes_the_byte_row(monkeypatch, tmp_path) -> None:
+    store: dict[str, object] = {}
+
+    def fake_load(path, gpu, on_bytes=None):
+        del path, gpu, on_bytes
+        raise RuntimeError("missing")
+
+    monkeypatch.setattr("z_image_turbo.runtime.weight_bytes", lambda path: 10)
+    monkeypatch.setattr("z_image_turbo.runtime.load", fake_load)
+    runtime = Runtime.__new__(Runtime)
+    runtime.console = _bars(store)
+    runtime.gpu = object()
+    with pytest.raises(RuntimeError, match="missing"):
+        runtime._load(tmp_path)
+    assert store["summary"] == "load failed"
+
+
+def test_a_plain_console_keeps_the_load_print(monkeypatch, tmp_path) -> None:
+    def fake_load(path, gpu, on_bytes=None):
+        del path, gpu
+        assert on_bytes is None
+        return {}
+
+    monkeypatch.setattr("z_image_turbo.runtime.weight_bytes", lambda path: 10)
+    monkeypatch.setattr("z_image_turbo.runtime.load", fake_load)
+    runtime = Runtime.__new__(Runtime)
+    runtime.console = _Plain()
+    runtime.gpu = object()
+    assert runtime._load(tmp_path) == {}
+
+
+def test_load_counts_bytes_and_skips_the_print(tmp_path, capsys) -> None:
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    (weights / "a.f16").write_bytes(b"\x00\x01")
+    (weights / "b.fp4").write_bytes(b"\xab")
+    (weights / "b.scale").write_bytes(b"\xcd\xce")
+    body = {
+        "complete": True,
+        "tensors": {
+            "a": {"plane": "f16", "shape": [1], "file": "weights/a.f16"},
+            "b": {
+                "plane": "fp4",
+                "shape": [1, 2],
+                "file": "weights/b.fp4",
+                "scale": "weights/b.scale",
+                "logical_k": 2,
+                "stored_k": 32,
+            },
+        },
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(body), encoding="utf-8")
+    assert weight_bytes(tmp_path) == 5
+    seen: list[int] = []
+    planes = load(tmp_path, _Upload(), on_bytes=seen.append)
+    assert seen == [2, 3]
+    assert set(planes) == {"a", "b"}
+    assert capsys.readouterr().out == ""
+    load(tmp_path, _Upload())
+    assert capsys.readouterr().out == "load 0/2\nload 2 tensors\n"
+
+
+class _Row:
+    def __init__(self) -> None:
+        self.done = 0
+        self.detail = ""
+
+
+class _Plain:
+    shows_bars = False
+
+
+class _Upload:
+    def keep(self, value):
+        return value
+
+    def upload(self, value):
+        return value
+
+
+def _bars(store: dict[str, object]):
+    class _Console:
+        shows_bars = True
+
+        def begin(self, phase: str, **kwargs: object) -> _Row:
+            store["phase"] = phase
+            store["unit"] = kwargs["unit"]
+            store["total"] = kwargs["total"]
+            store["detail"] = kwargs["detail"]
+            opened = _Row()
+            store["handle"] = opened
+            return opened
+
+        def end(self, progress: _Row, summary: str) -> None:
+            store["summary"] = summary
+            store["closed"] = progress.done
+
+        def log(self, line: str) -> None:
+            lines = store.setdefault("lines", [])
+            assert isinstance(lines, list)
+            lines.append(line)
+
+    return _Console()

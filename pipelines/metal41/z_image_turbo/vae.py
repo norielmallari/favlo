@@ -7,6 +7,7 @@ The last read is uint8 HWC, ``rint((clip(x, -1, 1) + 1) * 127.5)``.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -36,25 +37,44 @@ class _Vol:
         return self.channels * self.height * self.width
 
 
-def decode(gpu: Gpu, weights: dict[str, Plane], latent: Any, height: int, width: int) -> np.ndarray:
+def decode(
+    gpu: Gpu,
+    weights: dict[str, Plane],
+    latent: Any,
+    height: int,
+    width: int,
+    *,
+    on_layer: Callable[[], None] | None = None,
+) -> np.ndarray:
     """``latent`` is device ``[16, h, w]``. The return is uint8 ``[H, W, 3]``."""
+
+    def mark() -> None:
+        if on_layer is not None:
+            on_layer()
+
     gpu.affine(latent, SCALE, SHIFT, 16 * height * width)
     bank: list[_Vol] = []
     ws: dict[str, tuple[Any, int]] = {}
     current = _Vol(latent, 16 * height * width, 16, height, width)
     produced = _conv(gpu, weights, bank, ws, current, "decoder.conv_in", 3, 1)
     _release(bank, current)
+    mark()
     current = _resnet(gpu, weights, bank, ws, produced, "decoder.mid_block.resnets.0")
+    mark()
     current = _attend(gpu, weights, bank, current, "decoder.mid_block.attentions.0")
+    mark()
     current = _resnet(gpu, weights, bank, ws, current, "decoder.mid_block.resnets.1")
+    mark()
     for index, upsample in ((0, True), (1, True), (2, True), (3, False)):
         for resnet in range(3):
             current = _resnet(
                 gpu, weights, bank, ws, current, f"decoder.up_blocks.{index}.resnets.{resnet}"
             )
+            mark()
         if upsample:
             bigger = _upsample(gpu, bank, current)
             _release(bank, current)
+            mark()
             current = _conv(
                 gpu,
                 weights,
@@ -66,12 +86,16 @@ def decode(gpu: Gpu, weights: dict[str, Plane], latent: Any, height: int, width:
                 1,
             )
             _release(bank, bigger)
+            mark()
     normed = _norm_silu(gpu, weights, bank, current, "decoder.conv_norm_out")
     _release(bank, current)
+    mark()
     current = _conv(gpu, weights, bank, ws, normed, "decoder.conv_out", 3, 1)
     _release(bank, normed)
+    mark()
     pixels = gpu.empty(current.height * current.width * 3)
     gpu.clip_u8(current.buf, pixels, current.height, current.width)
+    mark()
     raw = gpu.read_u8(pixels, current.height * current.width * 3)
     return raw.reshape(current.height, current.width, 3)
 

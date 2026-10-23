@@ -9,6 +9,7 @@ prompt. ``enable_thinking`` is left unset, which matches the published encoder
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,8 @@ def embed_caption(
     scratch: Scratch,
     weights: dict[str, Plane],
     ids: np.ndarray,
+    *,
+    on_layer: Callable[[], None] | None = None,
 ) -> tuple[Any, int]:
     """Return the caption buffer (stride 3840) and the token count."""
     limit = int(ids.size)
@@ -58,7 +61,7 @@ def embed_caption(
     if rows > scratch.cap_rows:
         message = f"caption pad {rows} exceeds {scratch.cap_rows}"
         raise ValueError(message)
-    hidden = _prefill(gpu, scratch, weights, ids, rows, limit)
+    hidden = _prefill(gpu, scratch, weights, ids, rows, limit, on_layer)
     project(
         gpu,
         hidden,
@@ -70,6 +73,8 @@ def embed_caption(
         TEXT_HIDDEN,
     )
     # cap_embedder.0 is the RMSNorm gain on the text hidden, applied above.
+    if on_layer is not None:
+        on_layer()
     return scratch.cap, limit
 
 
@@ -80,6 +85,7 @@ def _prefill(
     ids: np.ndarray,
     rows: int,
     limit: int,
+    on_layer: Callable[[], None] | None = None,
 ) -> Any:
     table = weights["model.embed_tokens.weight"]
     gpu.gather_fp4(
@@ -222,6 +228,8 @@ def _prefill(
             TEXT_FFN,
         )
         gpu.add_rows(scratch.text_h, scratch.text_h2, scratch.text_h, count)
+        if on_layer is not None:
+            on_layer()
     gpu.rmsnorm(
         scratch.text_h,
         weights["cap_embedder.0.weight"].data,

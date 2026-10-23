@@ -13,6 +13,8 @@ second RMSNorm.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from z_image_turbo.formats import TILE_M, pad_to
 from z_image_turbo.metal import Gpu
 from z_image_turbo.ops import project
@@ -40,6 +42,8 @@ def velocity(
     ones: object,
     patch_h: int,
     patch_w: int,
+    *,
+    on_layer: Callable[[], None] | None = None,
 ) -> None:
     """Image tokens are already in ``scratch.tokens``. The caption is in ``scratch.cap``.
 
@@ -80,6 +84,7 @@ def velocity(
         ones,
         "noise_refiner",
         True,
+        on_layer=on_layer,
     )
     gpu.zero(scratch.seq, cap_rows * DIT_HIDDEN * 4)
     gpu.copy_rows(scratch.cap, scratch.seq, DIT_HIDDEN, DIT_HIDDEN, DIT_HIDDEN, 0, 0, cap_len)
@@ -97,6 +102,7 @@ def velocity(
         ones,
         "context_refiner",
         False,
+        on_layer=on_layer,
     )
     _join(gpu, scratch, cap_attend, image_attend, seq_rows)
     _refine(
@@ -113,8 +119,9 @@ def velocity(
         "layers",
         True,
         LAYERS,
+        on_layer=on_layer,
     )
-    _final(gpu, scratch, weights, sigma, ones, patch_h, patch_w, seq_rows)
+    _final(gpu, scratch, weights, sigma, ones, patch_h, patch_w, seq_rows, on_layer=on_layer)
 
 
 def _embed_image(
@@ -187,6 +194,8 @@ def _refine(
     prefix: str,
     adaln: bool,
     count: int = 2,
+    *,
+    on_layer: Callable[[], None] | None = None,
 ) -> None:
     cond = _time(gpu, scratch, weights, sigma, ones) if adaln else None
     left, right = src, dst
@@ -207,6 +216,8 @@ def _refine(
             mod,
         )
         left, right = right, left
+        if on_layer is not None:
+            on_layer()
 
 
 def _final(
@@ -218,6 +229,8 @@ def _final(
     patch_h: int,
     patch_w: int,
     seq_rows: int,
+    *,
+    on_layer: Callable[[], None] | None = None,
 ) -> None:
     cond = _time(gpu, scratch, weights, sigma, ones)
     gpu.silu_f32(cond, cond, 256)
@@ -235,6 +248,8 @@ def _final(
         DIT_HIDDEN,
     )
     gpu.unpatchify(scratch.ffn, scratch.vel, 16, patch_h * 2, patch_w * 2, 64)
+    if on_layer is not None:
+        on_layer()
 
 
 def _time(

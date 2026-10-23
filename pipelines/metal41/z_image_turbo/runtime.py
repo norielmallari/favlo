@@ -15,7 +15,8 @@ from z_image_turbo.dit import velocity
 from z_image_turbo.formats import TILE_M, pad_to
 from z_image_turbo.hold import ImageHold, ImagePaused, ask
 from z_image_turbo.metal import Gpu
-from z_image_turbo.record import Plane, load
+from z_image_turbo.progress import ImageProgress, LoadProgress, sample_total
+from z_image_turbo.record import Plane, load, weight_bytes
 from z_image_turbo.schedule import STEPS, sigmas
 from z_image_turbo.scratch import MAX_EDGE, Scratch
 from z_image_turbo.text import embed_caption, prompt_ids
@@ -29,7 +30,7 @@ class Runtime:
         self.gpu = Gpu()
         # The process has no run loop. Drain the pool so only this object keeps the buffers.
         with objc.autorelease_pool():
-            self.weights: dict[str, Plane] = load(path, self.gpu)
+            self.weights = self._load(path)
             self.scratch = Scratch(self.gpu)
             self.ones = self.gpu.keep(self.gpu.upload(np.ones(1024, dtype=np.float32)))
             self.source = _source_of(path)
@@ -51,6 +52,18 @@ class Runtime:
                 scratch.release()
             self.ones = None
 
+    def _load(self, path: Path) -> dict[str, Plane]:
+        loading = LoadProgress(self.console, path.name)
+        try:
+            counted = loading.open(weight_bytes(path))
+            weights = load(path, self.gpu, on_bytes=loading.advance if counted else None)
+        except Exception:
+            loading.close("load failed")
+            raise
+        if counted:
+            loading.finish(f"load {len(weights)} tensors")
+        return weights
+
     def generate(
         self,
         prompt: str,
@@ -69,6 +82,54 @@ class Runtime:
         if done_steps and latent is None:
             message = "a resumed step needs its latent"
             raise ValueError(message)
+        progress = ImageProgress(self.console, f"{width}x{height}")
+        progress.open(sample_total(steps=steps, done_steps=done_steps))
+        try:
+            pixels, digest, timing = self._run(
+                prompt,
+                width,
+                height,
+                steps,
+                seed,
+                stop=stop,
+                latent=latent,
+                done_steps=done_steps,
+                step_times=step_times,
+                spent=spent,
+                progress=progress,
+            )
+        except ImagePaused as paused:
+            label = "sample paused" if paused.reason == "preempt" else "sample cancelled"
+            progress.close(label)
+            raise
+        except Exception:
+            progress.close(progress.summary(failed=True))
+            raise
+        summary = progress.summary()
+        try:
+            progress.note(
+                "generate "
+                f"{timing['total']:.2f}s caption {timing['caption']:.2f}s vae {timing['vae']:.2f}s"
+            )
+        finally:
+            progress.close(summary)
+        return pixels, digest, timing
+
+    def _run(
+        self,
+        prompt: str,
+        width: int,
+        height: int,
+        steps: int,
+        seed: int,
+        *,
+        stop: Callable[[], str | None] | None,
+        latent: np.ndarray | None,
+        done_steps: int,
+        step_times: list[float] | None,
+        spent: float,
+        progress: ImageProgress,
+    ) -> tuple[np.ndarray, str, dict[str, Any]]:
         wall = time.perf_counter()
         times = list(step_times or [])
         latent_h = height // 8
@@ -79,10 +140,17 @@ class Runtime:
         caption_s = 0.0
         length = 0
         if done_steps < steps:
+            progress.stage("caption")
             caption_started = time.perf_counter()
             with objc.autorelease_pool():
                 ids = prompt_ids(prompt, self.source)
-                _, length = embed_caption(self.gpu, self.scratch, self.weights, ids)
+                _, length = embed_caption(
+                    self.gpu,
+                    self.scratch,
+                    self.weights,
+                    ids,
+                    on_layer=progress.advance,
+                )
             self.gpu.reclaim()
             caption_s = time.perf_counter() - caption_started
             self._stop(
@@ -103,6 +171,7 @@ class Runtime:
             self.gpu.store_f32(self.scratch.latent, np.ascontiguousarray(latent, dtype=np.float32))
         knots = sigmas(steps)
         for index in range(done_steps, steps):
+            progress.stage(f"step {index + 1}/{steps}")
             started = time.perf_counter()
             with objc.autorelease_pool():
                 self.gpu.zero(self.scratch.tokens, image_rows * 256 * 4)
@@ -118,6 +187,7 @@ class Runtime:
                     self.ones,
                     patch_h,
                     patch_w,
+                    on_layer=progress.advance,
                 )
                 self.gpu.euler(
                     self.scratch.latent,
@@ -127,7 +197,7 @@ class Runtime:
                 )
             self.gpu.reclaim()
             times.append(time.perf_counter() - started)
-            print(f"step {index + 1}/{steps} {times[-1]:.2f}s", flush=True)
+            progress.note(f"step {index + 1}/{steps} {times[-1]:.2f}s")
             reason = ask(stop)
             if reason == "cancel":
                 self._stop(
@@ -162,9 +232,10 @@ class Runtime:
             spent=spent,
             wall=wall,
         )
+        progress.stage("decode")
         vae_started = time.perf_counter()
         with objc.autorelease_pool():
-            pixels = _decode_image(self, latent_h, latent_w)
+            pixels = _decode_image(self, latent_h, latent_w, progress.advance)
         self.gpu.reclaim()
         vae_s = time.perf_counter() - vae_started
         if ask(stop):
@@ -180,10 +251,6 @@ class Runtime:
                 wall=wall,
             )
         total_s = spent + (time.perf_counter() - wall)
-        print(
-            f"generate {total_s:.2f}s caption {caption_s:.2f}s vae {vae_s:.2f}s",
-            flush=True,
-        )
         timing = {
             "total": total_s,
             "caption": caption_s,
@@ -243,10 +310,22 @@ def open_runtime(
     return Runtime(Path(path), console)
 
 
-def _decode_image(runtime: Runtime, height: int, width: int) -> np.ndarray:
+def _decode_image(
+    runtime: Runtime,
+    height: int,
+    width: int,
+    on_layer: Callable[[], None] | None = None,
+) -> np.ndarray:
     from z_image_turbo.vae import decode
 
-    return decode(runtime.gpu, runtime.weights, runtime.scratch.latent, height, width)
+    return decode(
+        runtime.gpu,
+        runtime.weights,
+        runtime.scratch.latent,
+        height,
+        width,
+        on_layer=on_layer,
+    )
 
 
 def _patchify(latent: np.ndarray) -> np.ndarray:
