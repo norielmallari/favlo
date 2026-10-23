@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import gc
 import struct
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import objc
 
 import Metal
-from wan22_i2v.formats import TILE_M, TILE_N, LinearPack
+from wan22_i2v.formats import K_ALIGN, TILE_M, TILE_N, LinearPack, pad_to
 
 _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"
 _NAMES = (
@@ -31,60 +34,104 @@ _NAMES = (
     "attend",
     "patch_embed",
     "conv3d",
+    "conv_pack",
+    "conv_im2col",
+    "conv_scatter",
+    "matmul_f16",
+    "cast_half",
+    "add_f32",
+    "mul_f32",
+    "add_half",
+    "add_embed_half",
+    "copy_f32",
+    "axpy",
+    "sinusoid",
+    "unpatchify",
+    "condition36",
+    "affine_mu",
+    "affine_inv",
+    "channel_rms",
+    "silu_clip",
+    "spatial_attend",
+    "end_pad",
+    "nearest2",
+    "concat_time",
+    "stack_pairs",
+    "slice_time",
+    "attend_bias",
+    "pixels_u8",
 )
 
 
 class Gpu:
     """One device and one command encoder. ``end`` waits for the batch."""
 
-    def __init__(self) -> None:
+    def __init__(self, on_pipeline: Callable[[], None] | None = None) -> None:
         device = Metal.MTLCreateSystemDefaultDevice()
         if device is None:
             message = "Metal device is missing"
             raise RuntimeError(message)
         self.device = device
         self.queue = device.newCommandQueue()
-        source = _SHADER.read_text(encoding="utf-8")
-        options = Metal.MTLCompileOptions.alloc().init()
-        options.setLanguageVersion_((4 << 16) + 1)
-        library, error = device.newLibraryWithSource_options_error_(source, options, None)
-        if library is None:
-            message = f"shader compile failed: {error}"
-            raise RuntimeError(message)
         self.pipes: dict[str, Any] = {}
-        for name in _NAMES:
-            fn = library.newFunctionWithName_(name)
-            if fn is None:
-                message = f"shader is missing {name}"
+        with objc.autorelease_pool():
+            source = _SHADER.read_text(encoding="utf-8")
+            options = Metal.MTLCompileOptions.alloc().init()
+            options.setLanguageVersion_((4 << 16) + 1)
+            library, error = device.newLibraryWithSource_options_error_(source, options, None)
+            if library is None:
+                message = f"shader compile failed: {error}"
                 raise RuntimeError(message)
-            pipe, pipe_error = device.newComputePipelineStateWithFunction_error_(fn, None)
-            if pipe is None:
-                message = f"pipeline {name} failed: {pipe_error}"
-                raise RuntimeError(message)
-            self.pipes[name] = pipe
+            for name in _NAMES:
+                fn = library.newFunctionWithName_(name)
+                if fn is None:
+                    message = f"shader is missing {name}"
+                    raise RuntimeError(message)
+                pipe, pipe_error = device.newComputePipelineStateWithFunction_error_(fn, None)
+                if pipe is None:
+                    message = f"pipeline {name} failed: {pipe_error}"
+                    raise RuntimeError(message)
+                self.pipes[name] = pipe
+                if on_pipeline is not None:
+                    on_pipeline()
         self._cmd: Any = None
         self._enc: Any = None
+        self._inflight: list[Any] = []
         self._held: list[bytes] = []
         self._owned: list[Any] = []
         self._kept: set[int] = set()
         self._factors: Any = None
         self._factor_rows = 0
+        self._conv_pack: dict[tuple, Any] = {}
+        self._conv_col: tuple[Any, int] | None = None
+        self._conv_tile: tuple[Any, int] | None = None
         width = int(self.pipes["matmul_fp4"].threadExecutionWidth())
         self._matmul_threads = (width * 4, 1, 1)
 
-    def end(self) -> None:
+    def commit(self) -> None:
+        """Commit the open encoder and leave the previous buffer running."""
         if self._enc is None:
             return
         self._enc.endEncoding()
         self._cmd.commit()
-        self._cmd.waitUntilCompleted()
-        status = int(self._cmd.status())
-        error = self._cmd.error()
+        self._inflight.append(self._cmd)
         self._enc = None
         self._cmd = None
         self._held.clear()
-        if status == int(Metal.MTLCommandBufferStatusError):
-            message = f"metal command failed: {error}"
+        if len(self._inflight) > 1:
+            self._finish(self._inflight.pop(0))
+
+    def end(self) -> None:
+        self.commit()
+        pending = self._inflight
+        self._inflight = []
+        for cmd in pending:
+            self._finish(cmd)
+
+    def _finish(self, cmd: Any) -> None:
+        cmd.waitUntilCompleted()
+        if int(cmd.status()) == int(Metal.MTLCommandBufferStatusError):
+            message = f"metal command failed: {cmd.error()}"
             raise RuntimeError(message)
 
     def keep(self, buf: Any) -> Any:
@@ -99,28 +146,41 @@ class Gpu:
             self._enc = None
             self._cmd = None
             self._held.clear()
-        kept: list[Any] = []
-        for buf in self._owned:
-            if id(buf) in self._kept:
-                kept.append(buf)
-            else:
+        with objc.autorelease_pool():
+            kept: list[Any] = []
+            temps: list[Any] = []
+            for buf in self._owned:
+                if id(buf) in self._kept:
+                    kept.append(buf)
+                else:
+                    temps.append(buf)
+            self._owned = kept
+            for buf in temps:
                 buf.release()
-        self._owned = kept
+            temps.clear()
 
     def close(self) -> None:
+        """Finish device work, release every buffer, and drain the autorelease pool."""
         try:
             self.end()
         except RuntimeError:
             self._enc = None
             self._cmd = None
             self._held.clear()
-        for buf in self._owned:
-            buf.release()
-        self._owned.clear()
-        self._kept.clear()
-        self.pipes.clear()
-        self.queue = None
-        self.device = None
+        with objc.autorelease_pool():
+            owned = self._owned
+            self._owned = []
+            self._kept.clear()
+            self._conv_pack.clear()
+            self._conv_col = None
+            self._conv_tile = None
+            for buf in owned:
+                buf.release()
+            owned.clear()
+            self.pipes.clear()
+            self.queue = None
+            self.device = None
+            gc.collect()
 
     def upload(self, array: np.ndarray) -> Any:
         data = np.ascontiguousarray(array)
@@ -150,6 +210,11 @@ class Gpu:
         view = buf.contents().as_buffer(count * 4)
         return np.frombuffer(view, dtype=np.float32, count=count).copy()
 
+    def read_u8(self, buf: Any, count: int) -> np.ndarray:
+        self.end()
+        view = buf.contents().as_buffer(count)
+        return np.frombuffer(view, dtype=np.uint8, count=count).copy()
+
     def store_f32(self, buf: Any, array: np.ndarray) -> None:
         self.end()
         raw = np.ascontiguousarray(array, dtype=np.float32).ravel()
@@ -164,6 +229,16 @@ class Gpu:
 
     def unkeep(self, buf: Any) -> None:
         self._kept.discard(id(buf))
+
+    def drop(self, buf: Any) -> None:
+        """Wait, then release one buffer this device allocated."""
+        self.end()
+        self.release(buf)
+
+    def release(self, buf: Any) -> None:
+        """Release a buffer the open command buffer still retains."""
+        self.unkeep(buf)
+        self._drop([buf])
 
     def zero(self, buf: Any, nbytes: int) -> None:
         threads = 256
@@ -413,30 +488,49 @@ class Gpu:
             message = f"conv output is empty for source {source.shape} weight {weight.shape}"
             raise ValueError(message)
         count = cout * tout * hout * wout
+        with objc.autorelease_pool():
+            result = self._conv3d(
+                source,
+                weight,
+                bias,
+                count,
+                (
+                    cin,
+                    cout,
+                    tin,
+                    hin,
+                    win,
+                    tout,
+                    hout,
+                    wout,
+                    kt,
+                    kh,
+                    kw,
+                    stride_t,
+                    stride_h,
+                    stride_w,
+                ),
+                (pad_t, pad_h, pad_w),
+            )
+        return result.reshape(cout, tout, hout, wout)
+
+    def _conv3d(
+        self,
+        source: np.ndarray,
+        weight: np.ndarray,
+        bias: np.ndarray,
+        count: int,
+        shape: tuple[int, ...],
+        pad: tuple[int, int, int],
+    ) -> np.ndarray:
         buffers = [
             self.upload(source),
             self.upload(weight),
             self.upload(bias),
             self._alloc(count * 4),
         ]
-        values = (
-            cin,
-            cout,
-            tin,
-            hin,
-            win,
-            tout,
-            hout,
-            wout,
-            kt,
-            kh,
-            kw,
-            stride_t,
-            stride_h,
-            stride_w,
-        )
-        constants = [struct.pack("I", int(v)) for v in values]
-        constants.extend(struct.pack("i", int(v)) for v in (pad_t, pad_h, pad_w))
+        constants = [struct.pack("I", int(value)) for value in shape]
+        constants.extend(struct.pack("i", int(value)) for value in pad)
         threads = 256
         self._dispatch(
             "conv3d",
@@ -445,8 +539,9 @@ class Gpu:
             ((count + threads - 1) // threads, 1, 1),
             (threads, 1, 1),
         )
-        result = self.read_f32(buffers[3], count).reshape(cout, tout, hout, wout)
+        result = self.read_f32(buffers[3], count).copy()
         self._drop(buffers)
+        buffers.clear()
         return result
 
     def _alloc(self, nbytes: int) -> Any:
@@ -465,6 +560,381 @@ class Gpu:
                 self._owned.remove(buf)
             if id(buf) not in self._kept:
                 buf.release()
+
+    def alloc_f32(self, count: int) -> Any:
+        return self._alloc(int(count) * 4)
+
+    def drop_many(self, buffers: list[Any]) -> None:
+        self.end()
+        for buf in buffers:
+            self.unkeep(buf)
+        self._drop(buffers)
+
+    def _u(self, *values: int) -> list[bytes]:
+        return [struct.pack("I", int(value)) for value in values]
+
+    def _count(self, name: str, buffers: list[Any], constants: list[bytes], count: int) -> None:
+        threads = 256
+        groups = (int(count) + threads - 1) // threads
+        self._dispatch(name, buffers, constants, (groups, 1, 1), (threads, 1, 1))
+
+    def matmul_f16(
+        self, act: Any, weight: Any, dest: Any, rows: int, cols: int, inner: int
+    ) -> None:
+        if rows % TILE_M or cols % TILE_N or inner % 256:
+            message = f"matmul tile mismatch rows={rows} cols={cols} inner={inner}"
+            raise ValueError(message)
+        self._dispatch(
+            "matmul_f16",
+            [act, weight, dest],
+            self._u(rows, cols, inner),
+            (cols // TILE_N, rows // TILE_M, 1),
+            self._matmul_threads,
+        )
+
+    def cast_half(self, source: Any, dest: Any, count: int) -> None:
+        self._count("cast_half", [source, dest], self._u(count), count)
+
+    def add_f32(self, left: Any, right: Any, count: int) -> None:
+        self._count("add_f32", [left, right], self._u(count), count)
+
+    def mul_f32(self, left: Any, right: Any, count: int) -> None:
+        self._count("mul_f32", [left, right], self._u(count), count)
+
+    def add_half(self, left: Any, right: Any, dest: Any, count: int) -> None:
+        self._count("add_half", [left, right, dest], self._u(count), count)
+
+    def add_embed_half(
+        self, modulation: Any, embed: Any, dest: Any, slices: int, dim: int
+    ) -> None:
+        self._count(
+            "add_embed_half",
+            [modulation, embed, dest],
+            self._u(slices, dim),
+            slices * dim,
+        )
+
+    def copy_f32(self, source: Any, offset: int, dest: Any, count: int) -> None:
+        self._count("copy_f32", [source, dest], self._u(offset, count), count)
+
+    def axpy(self, left: Any, right: Any, scale: float, count: int) -> None:
+        threads = 256
+        groups = (int(count) + threads - 1) // threads
+        self._dispatch(
+            "axpy",
+            [left, right],
+            [struct.pack("f", float(scale)), struct.pack("I", int(count))],
+            (groups, 1, 1),
+            (threads, 1, 1),
+        )
+
+    def sinusoid(self, dest: Any, freq: int, position: float) -> None:
+        threads = 256
+        groups = (int(freq) + threads - 1) // threads
+        self._dispatch(
+            "sinusoid",
+            [dest],
+            [struct.pack("I", int(freq)), struct.pack("f", float(position))],
+            (groups, 1, 1),
+            (threads, 1, 1),
+        )
+
+    def unpatchify(
+        self, tokens: Any, latent: Any, time: int, height: int, width: int
+    ) -> None:
+        count = 16 * time * height * 2 * width * 2
+        self._count("unpatchify", [tokens, latent], self._u(time, height, width), count)
+
+    def condition(
+        self,
+        noise: Any,
+        mask: Any,
+        latent: Any,
+        dest: Any,
+        time: int,
+        height: int,
+        width: int,
+    ) -> None:
+        count = 36 * time * height * width
+        self._count(
+            "condition36",
+            [noise, mask, latent, dest],
+            self._u(time, height, width),
+            count,
+        )
+
+    def affine_mu(self, source: Any, mean: Any, std: Any, dest: Any, plane: int) -> None:
+        self._count("affine_mu", [source, mean, std, dest], self._u(plane), 16 * plane)
+
+    def affine_inv(self, source: Any, mean: Any, std: Any, dest: Any, plane: int) -> None:
+        self._count("affine_inv", [source, mean, std, dest], self._u(plane), 16 * plane)
+
+    def channel_rms(
+        self, source: Any, gamma: Any, dest: Any, channels: int, plane: int, eps: float
+    ) -> None:
+        threads = 256
+        groups = (int(plane) + threads - 1) // threads
+        constants = [
+            struct.pack("I", int(channels)),
+            struct.pack("I", int(plane)),
+            struct.pack("f", float(eps)),
+        ]
+        self._dispatch(
+            "channel_rms",
+            [source, gamma, dest],
+            constants,
+            (groups, 1, 1),
+            (threads, 1, 1),
+        )
+
+    def silu_clip(self, source: Any, dest: Any, count: int) -> None:
+        self._count("silu_clip", [source, dest], self._u(count), count)
+
+    def spatial_attend(
+        self, qkv: Any, dest: Any, channels: int, time: int, height: int, width: int
+    ) -> None:
+        count = time * height * width
+        self._count(
+            "spatial_attend",
+            [qkv, dest],
+            self._u(channels, time, height, width),
+            count,
+        )
+
+    def end_pad(self, source: Any, dest: Any, shape: tuple[int, int, int, int]) -> None:
+        channels, time, height, width = shape
+        count = channels * time * (height + 1) * (width + 1)
+        self._count("end_pad", [source, dest], self._u(channels, time, height, width), count)
+
+    def nearest2(self, source: Any, dest: Any, shape: tuple[int, int, int, int]) -> None:
+        channels, time, height, width = shape
+        count = channels * time * height * 2 * width * 2
+        self._count("nearest2", [source, dest], self._u(channels, time, height, width), count)
+
+    def concat_time(
+        self,
+        left: Any,
+        right: Any,
+        dest: Any,
+        channels: int,
+        left_time: int,
+        right_time: int,
+        height: int,
+        width: int,
+    ) -> None:
+        count = channels * (left_time + right_time) * height * width
+        self._count(
+            "concat_time",
+            [left, right, dest],
+            self._u(channels, left_time, right_time, height, width),
+            count,
+        )
+
+    def stack_pairs(self, source: Any, dest: Any, shape: tuple[int, int, int, int]) -> None:
+        channels, time, height, width = shape
+        count = channels * time * 2 * height * width
+        self._count("stack_pairs", [source, dest], self._u(channels, time, height, width), count)
+
+    def slice_time(
+        self,
+        source: Any,
+        dest: Any,
+        shape: tuple[int, int, int, int],
+        start: int,
+        count_time: int,
+    ) -> None:
+        channels, time, height, width = shape
+        count = channels * count_time * height * width
+        self._count(
+            "slice_time",
+            [source, dest],
+            self._u(channels, time, height, width, start, count_time),
+            count,
+        )
+
+    def attend_bias(
+        self,
+        query: Any,
+        key: Any,
+        value: Any,
+        dest: Any,
+        buckets: Any,
+        table: Any,
+        q_len: int,
+        kv_len: int,
+        heads: int,
+        dim: int,
+    ) -> None:
+        self._dispatch(
+            "attend_bias",
+            [query, key, value, dest, buckets, table],
+            self._u(q_len, kv_len, heads, dim),
+            (heads, q_len, 1),
+            (32, 1, 1),
+        )
+
+    def pixels_u8(self, source: Any, dest: Any, frames: int, height: int, width: int) -> None:
+        count = frames * height * width
+        self._count("pixels_u8", [source, dest], self._u(frames, height, width), count)
+
+    def conv_into(
+        self,
+        source: Any,
+        source_shape: tuple[int, int, int, int],
+        weight: Any,
+        weight_shape: tuple[int, int, int, int, int],
+        bias: Any,
+        stride: tuple[int, int, int],
+        pad: tuple[int, int, int],
+    ) -> tuple[Any, tuple[int, int, int, int]]:
+        """Dispatch ``conv3d`` into a new buffer. The caller waits before reading it."""
+        cin, tin, hin, win = source_shape
+        cout, cin_w, kt, kh, kw = weight_shape
+        if cin_w != cin:
+            message = f"conv channels {cin_w} do not match {cin}"
+            raise ValueError(message)
+        stride_t, stride_h, stride_w = stride
+        pad_t, pad_h, pad_w = pad
+        tout = (tin + pad_t - kt) // stride_t + 1
+        hout = (hin + pad_h + pad_h - kh) // stride_h + 1
+        wout = (win + pad_w + pad_w - kw) // stride_w + 1
+        if tout < 1 or hout < 1 or wout < 1:
+            message = f"conv output is empty for {source_shape} kernel {weight_shape}"
+            raise ValueError(message)
+        spatial = tout * hout * wout
+        k_raw = cin * kt * kh * kw
+        if cout >= 32 and spatial >= 1024 and k_raw >= 64:
+            dest = self._alloc(cout * spatial * 4)
+            self._conv_gemm(
+                source,
+                source_shape,
+                weight,
+                bias,
+                dest,
+                (cout, tout, hout, wout),
+                (kt, kh, kw),
+                stride,
+                pad,
+                k_raw,
+            )
+            return dest, (cout, tout, hout, wout)
+        dest = self._alloc(cout * tout * hout * wout * 4)
+        shape = (
+            cin,
+            cout,
+            tin,
+            hin,
+            win,
+            tout,
+            hout,
+            wout,
+            kt,
+            kh,
+            kw,
+            stride_t,
+            stride_h,
+            stride_w,
+        )
+        constants = [struct.pack("I", int(value)) for value in shape]
+        constants.extend(struct.pack("i", int(value)) for value in pad)
+        threads = 256
+        count = cout * tout * hout * wout
+        self._dispatch(
+            "conv3d",
+            [source, weight, bias, dest],
+            constants,
+            ((count + threads - 1) // threads, 1, 1),
+            (threads, 1, 1),
+        )
+        return dest, (cout, tout, hout, wout)
+
+    def _conv_gemm(
+        self,
+        source: Any,
+        source_shape: tuple[int, int, int, int],
+        weight: Any,
+        bias: Any,
+        dest: Any,
+        out_shape: tuple[int, int, int, int],
+        kernel: tuple[int, int, int],
+        stride: tuple[int, int, int],
+        pad: tuple[int, int, int],
+        k_raw: int,
+    ) -> None:
+        """im2col tiles plus half ``matmul2d``. ``conv3d`` covers the smaller shapes."""
+        cin, tin, hin, win = source_shape
+        cout, tout, hout, wout = out_shape
+        kt, kh, kw = kernel
+        k_pad = pad_to(k_raw, K_ALIGN)
+        n_pad = pad_to(cout, TILE_N)
+        packed = self._packed_conv(weight, cout, cin, kt, kh, kw, k_raw, k_pad, n_pad)
+        chunk = 8192
+        columns = self._fit_conv("_conv_col", chunk * k_pad * 2)
+        tile = self._fit_conv("_conv_tile", chunk * n_pad * 4)
+        spatial = tout * hout * wout
+        start = 0
+        while start < spatial:
+            valid = min(chunk, spatial - start)
+            rows = pad_to(valid, TILE_M)
+            self._dispatch(
+                "conv_im2col",
+                [source, columns],
+                [
+                    *self._u(tin, hin, win, kt, kh, kw, *stride),
+                    *self._i(*pad),
+                    *self._u(hout, wout, k_raw, k_pad, start, valid),
+                ],
+                ((k_pad + 255) // 256, rows, 1),
+                (256, 1, 1),
+            )
+            self.matmul_f16(columns, packed, tile, rows, n_pad, k_pad)
+            self._dispatch(
+                "conv_scatter",
+                [tile, bias, dest],
+                self._u(cout, tout, hout, wout, n_pad, valid, start),
+                ((cout + 31) // 32, valid, 1),
+                (32, 1, 1),
+            )
+            start += valid
+
+    def _packed_conv(
+        self,
+        weight: Any,
+        cout: int,
+        cin: int,
+        kt: int,
+        kh: int,
+        kw: int,
+        k_raw: int,
+        k_pad: int,
+        n_pad: int,
+    ) -> Any:
+        key = (id(weight), cout, cin, kt, kh, kw, k_raw, k_pad, n_pad)
+        found = self._conv_pack.get(key)
+        if found is not None:
+            return found[0]
+        packed = self.keep(self._alloc(n_pad * k_pad * 2))
+        self._dispatch(
+            "conv_pack",
+            [weight, packed],
+            self._u(cout, cin, kt, kh, kw, k_raw, k_pad, n_pad),
+            ((k_pad + 255) // 256, n_pad, 1),
+            (256, 1, 1),
+        )
+        # Hold the weight object so a later buffer cannot reuse this id.
+        self._conv_pack[key] = (packed, weight)
+        return packed
+
+    def _fit_conv(self, name: str, nbytes: int) -> Any:
+        pair = getattr(self, name)
+        if pair is not None and pair[1] >= nbytes:
+            return pair[0]
+        buf = self.keep(self._alloc(nbytes))
+        setattr(self, name, (buf, nbytes))
+        return buf
+
+    def _i(self, *values: int) -> list[bytes]:
+        return [struct.pack("i", int(value)) for value in values]
 
     def patch(
         self,

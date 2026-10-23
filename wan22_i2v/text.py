@@ -15,15 +15,21 @@ import pickle
 import time
 import zipfile
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from tokenizers import Tokenizer
 
+from wan22_i2v.formats import TILE_M, pad_to
+from wan22_i2v.metal import Gpu
 from wan22_i2v.source import source_dir
 
 _LAYERS = 24
 _HEADS = 64
+_WIDTH = 4096
+_FFN = 10240
 _BUCKETS = 32
 _MAX_DISTANCE = 128
 _EPS = np.float32(1e-6)
@@ -57,15 +63,30 @@ def relative_buckets(query: int, key: int) -> np.ndarray:
 
 
 def encode_prompt(
-    prompt: str, weights: Path | None = None, tokenizer: Path | None = None
+    prompt: str,
+    weights: Path | None = None,
+    tokenizer: Path | None = None,
+    on_layer: Callable[[], None] | None = None,
+    gpu: Gpu | None = None,
 ) -> np.ndarray:
     """Token vectors ``[tokens, 4096]`` for one prompt."""
     vocab = Tokenizer.from_file(str(tokenizer or tokenizer_path()))
     ids = vocab.encode(prompt).ids
     if not ids:
+        for _ in range(_LAYERS):
+            if on_layer is not None:
+                on_layer()
         return np.zeros((0, 4096), dtype=np.float32)
     started = time.perf_counter()
-    vectors = _Encoder(weights or encoder_path()).run(np.asarray(ids, dtype=np.int64))
+    own = gpu is None
+    device = Gpu() if own else gpu
+    try:
+        vectors = _Encoder(weights or encoder_path()).run(
+            np.asarray(ids, dtype=np.int64), on_layer, device
+        )
+    finally:
+        if own:
+            device.close()
     elapsed = time.perf_counter() - started
     print(f"umt5 {len(ids)} tokens {elapsed:.2f}s", flush=True)
     return vectors
@@ -77,32 +98,88 @@ class _Encoder:
         self._zip: zipfile.ZipFile | None = None
         self._meta: dict[str, tuple] = {}
 
-    def run(self, ids: np.ndarray) -> np.ndarray:
+    def run(
+        self, ids: np.ndarray, on_layer: Callable[[], None] | None, gpu: Gpu
+    ) -> np.ndarray:
         archive = zipfile.ZipFile(self.path)
         self._zip = archive
+        rows = int(ids.shape[0])
+        hidden: Any = None
+        buckets: Any = None
         try:
             self._meta = _metadata(archive)
-            hidden = self._rows(ids)
-            buckets = relative_buckets(len(ids), len(ids))
+            hidden = gpu.upload(self._rows(ids))
+            buckets = gpu.upload(relative_buckets(rows, rows).astype(np.int32))
             for layer in range(_LAYERS):
-                hidden = self._block(hidden, layer, buckets)
-            return _rms(hidden, self._tensor("norm.weight"))
+                hidden = self._block(gpu, hidden, rows, layer, buckets)
+                if on_layer is not None:
+                    on_layer()
+            normed = self._norm(gpu, hidden, rows, self._tensor("norm.weight"))
+            gpu.drop(hidden)
+            hidden = None
+            vectors = gpu.read_f32(normed, rows * _WIDTH).reshape(rows, _WIDTH)
+            gpu.drop(normed)
+            return vectors
         finally:
+            if hidden is not None:
+                gpu.drop(hidden)
+            if buckets is not None:
+                gpu.drop(buckets)
             archive.close()
             self._zip = None
 
-    def _block(self, hidden: np.ndarray, layer: int, buckets: np.ndarray) -> np.ndarray:
+    def _block(self, gpu: Gpu, hidden: Any, rows: int, layer: int, buckets: Any) -> Any:
         prefix = f"blocks.{layer}"
-        normed = _rms(hidden, self._tensor(f"{prefix}.norm1.weight"))
-        query = normed @ self._tensor(f"{prefix}.attn.q.weight").T
-        key = normed @ self._tensor(f"{prefix}.attn.k.weight").T
-        value = normed @ self._tensor(f"{prefix}.attn.v.weight").T
-        table = self._tensor(f"{prefix}.pos_embedding.embedding.weight")
-        hidden = hidden + _attend(query, key, value, table[buckets])
-        normed = _rms(hidden, self._tensor(f"{prefix}.norm2.weight"))
-        gate = _gelu(normed @ self._tensor(f"{prefix}.ffn.gate.0.weight").T)
-        inner = normed @ self._tensor(f"{prefix}.ffn.fc1.weight").T
-        return hidden + (gate * inner) @ self._tensor(f"{prefix}.ffn.fc2.weight").T
+        normed = self._norm(gpu, hidden, rows, self._tensor(f"{prefix}.norm1.weight"))
+        query = self._linear(gpu, normed, rows, self._tensor(f"{prefix}.attn.q.weight"))
+        key = self._linear(gpu, normed, rows, self._tensor(f"{prefix}.attn.k.weight"))
+        value = self._linear(gpu, normed, rows, self._tensor(f"{prefix}.attn.v.weight"))
+        gpu.drop(normed)
+        table = gpu.upload(self._tensor(f"{prefix}.pos_embedding.embedding.weight"))
+        attn = gpu.alloc_f32(rows * _WIDTH)
+        gpu.attend_bias(
+            query, key, value, attn, buckets, table, rows, rows, _HEADS, _WIDTH // _HEADS
+        )
+        gpu.end()
+        gpu.drop_many([query, key, value, table])
+        gpu.add_f32(hidden, attn, rows * _WIDTH)
+        gpu.end()
+        gpu.drop(attn)
+        normed = self._norm(gpu, hidden, rows, self._tensor(f"{prefix}.norm2.weight"))
+        gate = self._linear(gpu, normed, rows, self._tensor(f"{prefix}.ffn.gate.0.weight"))
+        gpu.pointwise("gelu_tanh", gate, rows, _FFN, _FFN)
+        inner = self._linear(gpu, normed, rows, self._tensor(f"{prefix}.ffn.fc1.weight"))
+        gpu.drop(normed)
+        gpu.mul_f32(gate, inner, rows * _FFN)
+        gpu.end()
+        gpu.drop(inner)
+        out = self._linear(gpu, gate, rows, self._tensor(f"{prefix}.ffn.fc2.weight"))
+        gpu.drop(gate)
+        gpu.add_f32(hidden, out, rows * _WIDTH)
+        gpu.end()
+        gpu.drop(out)
+        return hidden
+
+    def _linear(self, gpu: Gpu, source: Any, rows: int, weight: np.ndarray) -> Any:
+        out, inner = int(weight.shape[0]), int(weight.shape[1])
+        padded = pad_to(rows, TILE_M)
+        half = gpu.empty(padded * inner * 2)
+        gpu.cast_half(source, half, rows * inner)
+        packed = gpu.upload(np.ascontiguousarray(weight, dtype=np.float16))
+        dest = gpu.alloc_f32(padded * out)
+        gpu.matmul_f16(half, packed, dest, padded, out, inner)
+        gpu.end()
+        gpu.drop_many([half, packed])
+        return dest
+
+    def _norm(self, gpu: Gpu, source: Any, rows: int, weight: np.ndarray) -> Any:
+        width = int(weight.shape[0])
+        scale = gpu.upload(np.ascontiguousarray(weight, dtype=np.float16))
+        dest = gpu.alloc_f32(rows * width)
+        gpu.rmsnorm(source, scale, dest, rows, width, float(_EPS))
+        gpu.end()
+        gpu.drop(scale)
+        return dest
 
     def _tensor(self, name: str) -> np.ndarray:
         archive = self._zip
@@ -183,30 +260,3 @@ def _float(
     bits = copied.astype(np.uint32) << np.uint32(16)
     return bits.view(np.float32)
 
-
-def _rms(hidden: np.ndarray, weight: np.ndarray) -> np.ndarray:
-    variance = np.mean(hidden * hidden, axis=-1, keepdims=True)
-    return hidden * np.reciprocal(np.sqrt(variance + _EPS)) * weight
-
-
-def _gelu(hidden: np.ndarray) -> np.ndarray:
-    cube = hidden * hidden * hidden
-    inner = np.float32(0.7978845608) * (hidden + np.float32(0.044715) * cube)
-    return np.float32(0.5) * hidden * (np.float32(1.0) + np.tanh(inner))
-
-
-def _attend(
-    query: np.ndarray, key: np.ndarray, value: np.ndarray, bias: np.ndarray
-) -> np.ndarray:
-    length, width = query.shape
-    dim = width // _HEADS
-    query_h = query.reshape(length, _HEADS, dim).transpose(1, 0, 2)
-    key_h = key.reshape(length, _HEADS, dim).transpose(1, 0, 2)
-    value_h = value.reshape(length, _HEADS, dim).transpose(1, 0, 2)
-    scores = np.matmul(query_h, key_h.transpose(0, 2, 1))
-    scores = scores + bias.transpose(2, 0, 1)
-    scores -= np.max(scores, axis=-1, keepdims=True)
-    weights = np.exp(scores)
-    weights /= np.sum(weights, axis=-1, keepdims=True)
-    mixed = np.matmul(weights, value_h)
-    return np.ascontiguousarray(mixed.transpose(1, 0, 2).reshape(length, width))

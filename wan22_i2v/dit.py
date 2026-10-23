@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
 from wan22_i2v.formats import TILE_M, LinearPack, pad_to, stored_k
-from wan22_i2v.latent import unpatchify
 from wan22_i2v.metal import Gpu
 from wan22_i2v.schedule import rope_axes
 
@@ -32,7 +32,9 @@ class Resident:
     owned: list[Any]
 
 
-def upload_expert(gpu: Gpu, expert: Expert) -> Resident:
+def upload_expert(
+    gpu: Gpu, expert: Expert, on_file: Callable[[], None] | None = None
+) -> Resident:
     weights: dict[str, dict[str, Any]] = {}
     halves: dict[str, Any] = {}
     owned: list[Any] = []
@@ -45,10 +47,14 @@ def upload_expert(gpu: Gpu, expert: Expert) -> Resident:
         }
         weights[name] = buffers
         owned.extend(buffers.values())
+        if on_file is not None:
+            on_file()
     for name, array in expert.halves.items():
         buf = gpu.keep(gpu.upload(np.ascontiguousarray(array, dtype=np.float16)))
         halves[name] = buf
         owned.append(buf)
+        if on_file is not None:
+            on_file()
     return Resident(
         packs=expert.packs,
         weights=weights,
@@ -61,11 +67,42 @@ def upload_expert(gpu: Gpu, expert: Expert) -> Resident:
 def drop_expert(gpu: Gpu, resident: Resident) -> None:
     for buf in resident.owned:
         gpu.unkeep(buf)
+    resident.owned.clear()
+    resident.weights.clear()
+    resident.halves.clear()
+    resident.host.clear()
+    resident.packs.clear()
     gpu.reclaim()
 
 
+_FORWARD_BUFFERS = (
+    "half",
+    "x",
+    "nrm",
+    "q",
+    "k",
+    "v",
+    "attn",
+    "proj",
+    "hidden",
+    "wide",
+    "head_out",
+    "text",
+    "embed",
+    "time_src",
+    "volume",
+    "shift",
+    "scale",
+    "gate",
+    "ones",
+    "time_embed",
+    "mixed",
+    "vel",
+)
+
+
 class Forward:
-    """Device scratch for one geometry. The latent itself stays on the host."""
+    """Device scratch for one geometry. The latent grid stays on the device."""
 
     def __init__(self, gpu: Gpu, config: dict[str, Any], tokens: int, volume_size: int) -> None:
         self.gpu = gpu
@@ -104,30 +141,51 @@ class Forward:
         self.scale = gpu.keep(gpu.empty(dim * 4))
         self.gate = gpu.keep(gpu.empty(dim * 4))
         self.ones = gpu.keep(gpu.empty(dim * 4))
+        self.time_embed = gpu.keep(gpu.empty(dim * 4))
+        self.mixed = gpu.keep(gpu.empty(dim * 6 * 4))
+        self.vel = gpu.keep(gpu.empty((volume_size // 36) * 16 * 4))
         gpu.store_f32(self.ones, np.ones(dim, dtype=np.float32))
         self.axes = rope_axes(self.head_dim)
+
+    def prepare(
+        self, noise: Any, mask: Any, latent: Any, time: int, height: int, width: int
+    ) -> None:
+        """Stack noise, the mask, and the VAE latent into the 36-channel volume."""
+        self.gpu.condition(noise, mask, latent, self.volume, time, height, width)
+
+    def release(self) -> None:
+        """Drop the Python references to the scratch buffers."""
+        for name in _FORWARD_BUFFERS:
+            setattr(self, name, None)
+
+    def detach(self, gpu: Gpu) -> None:
+        """Release the scratch buffers back to the device."""
+        buffers = [getattr(self, name) for name in _FORWARD_BUFFERS]
+        self.release()
+        gpu.drop_many([buf for buf in buffers if buf is not None])
 
     def velocity(
         self,
         resident: Resident,
-        volume: np.ndarray,
         embed: np.ndarray,
         timestep: float,
         grid: tuple[int, int, int],
-    ) -> np.ndarray:
-        """Predict the flow velocity for one 36-channel latent volume."""
+        on_layer: Callable[[], None] | None = None,
+    ) -> None:
+        """Predict the flow velocity into ``vel``. ``prepare`` filled the volume."""
         patch_grid = (grid[0], grid[1] // 2, grid[2] // 2)
         self._text(resident, embed)
-        embedding, projected = self._time(resident, timestep)
-        self._patch(resident, volume)
+        self._time(resident, timestep)
+        self._patch(resident, grid)
+        self.gpu.commit()
         for layer in range(int(self.config["layers"])):
-            self._block(resident, layer, projected, patch_grid)
-        self._head(resident, embedding)
-        rows = self.gpu.read_f32(self.head_out, self.tokens * 64).reshape(self.tokens, 64)
-        if not np.isfinite(rows).all():
-            message = "velocity is not finite"
-            raise RuntimeError(message)
-        return unpatchify(rows, patch_grid)
+            self._block(resident, layer, patch_grid)
+            self.gpu.commit()
+            if on_layer is not None:
+                on_layer()
+        self._head(resident)
+        self.gpu.unpatchify(self.head_out, self.vel, patch_grid[0], patch_grid[1], patch_grid[2])
+        self.gpu.end()
 
     def _linear(
         self, src: Any, src_cols: int, rows: int, name: str, dest: Any, resident: Resident
@@ -150,46 +208,37 @@ class Forward:
             self.proj, self.dim, self.text_rows, "text_embedding.2.weight", self.text, resident
         )
 
-    def _time(self, resident: Resident, timestep: float) -> tuple[np.ndarray, np.ndarray]:
-        wave = np.zeros((64, self.freq), dtype=np.float32)
-        wave[0] = _sinusoidal(self.freq, timestep)
-        self.gpu.store_f32(self.time_src, wave)
+    def _time(self, resident: Resident, timestep: float) -> None:
+        self.gpu.zero(self.time_src, 64 * self.freq * 4)
+        self.gpu.sinusoid(self.time_src, self.freq, float(timestep))
         self._linear(self.time_src, self.freq, 64, "time_embedding.0.weight", self.nrm, resident)
         self.gpu.pointwise("silu", self.nrm, 64, self.dim, self.dim)
         self._linear(self.nrm, self.dim, 64, "time_embedding.2.weight", self.proj, resident)
-        embedding = self.gpu.read_f32(self.proj, self.dim).copy()
+        self.gpu.copy_f32(self.proj, 0, self.time_embed, self.dim)
         self.gpu.pointwise("silu", self.proj, 64, self.dim, self.dim)
         self._linear(self.proj, self.dim, 64, "time_projection.1.weight", self.wide, resident)
-        projected = self.gpu.read_f32(self.wide, self.dim * 6).reshape(6, self.dim)
-        return embedding, projected
 
-    def _patch(self, resident: Resident, volume: np.ndarray) -> None:
-        self.gpu.store_f32(self.volume, volume)
+    def _patch(self, resident: Resident, grid: tuple[int, int, int]) -> None:
         self.gpu.zero(self.x, self.rows * self.dim * 4)
-        channels, time, height, width = volume.shape
+        time, height, width = grid
         self.gpu.patch(
             self.volume,
             resident.halves["patch_embedding.weight"],
             resident.halves["patch_embedding.bias"],
             self.x,
-            channels,
+            36,
             time,
             height,
             width,
             self.dim,
         )
 
-    def _block(
-        self,
-        resident: Resident,
-        layer: int,
-        projected: np.ndarray,
-        grid: tuple[int, int, int],
-    ) -> None:
+    def _block(self, resident: Resident, layer: int, grid: tuple[int, int, int]) -> None:
         prefix = f"blocks.{layer}"
-        modulation = resident.host[f"{prefix}.modulation"].reshape(-1, self.dim)
-        mixed = projected + modulation.astype(np.float32)
-        self._self_attn(resident, prefix, mixed, grid)
+        self.gpu.add_half(
+            self.wide, resident.halves[f"{prefix}.modulation"], self.mixed, 6 * self.dim
+        )
+        self._self_attn(resident, prefix, grid)
         self.gpu.layernorm_affine(
             self.x,
             resident.halves[f"{prefix}.norm3.weight"],
@@ -201,25 +250,19 @@ class Forward:
         )
         self._cross(resident, prefix)
         self.gpu.layernorm(self.x, self.nrm, self.rows, self.dim, self.eps)
-        self._store_pair(mixed[3], mixed[4])
+        self._bind(3, 4)
         self.gpu.modulate(self.nrm, self.shift, self.scale, self.rows, self.dim, self.dim)
         self._linear(self.nrm, self.dim, self.rows, f"{prefix}.ffn.0.weight", self.hidden, resident)
         self.gpu.pointwise("gelu_tanh", self.hidden, self.rows, self.ffn, self.ffn)
         self._linear(
             self.hidden, self.ffn, self.rows, f"{prefix}.ffn.2.weight", self.proj, resident
         )
-        self._store_gate(mixed[5])
+        self._bind_gate(5)
         self.gpu.gate(self.x, self.proj, self.gate, self.rows, self.dim, self.dim)
 
-    def _self_attn(
-        self,
-        resident: Resident,
-        prefix: str,
-        mixed: np.ndarray,
-        grid: tuple[int, int, int],
-    ) -> None:
+    def _self_attn(self, resident: Resident, prefix: str, grid: tuple[int, int, int]) -> None:
         self.gpu.layernorm(self.x, self.nrm, self.rows, self.dim, self.eps)
-        self._store_pair(mixed[0], mixed[1])
+        self._bind(0, 1)
         self.gpu.modulate(self.nrm, self.shift, self.scale, self.rows, self.dim, self.dim)
         stem = f"{prefix}.self_attn"
         self._linear(self.nrm, self.dim, self.rows, f"{stem}.q.weight", self.q, resident)
@@ -233,7 +276,7 @@ class Forward:
             self.q, self.k, self.v, self.attn, self.tokens, self.tokens, self.heads, self.head_dim
         )
         self._linear(self.attn, self.dim, self.rows, f"{stem}.o.weight", self.proj, resident)
-        self._store_gate(mixed[2])
+        self._bind_gate(2)
         self.gpu.gate(self.x, self.proj, self.gate, self.rows, self.dim, self.dim)
 
     def _cross(self, resident: Resident, prefix: str) -> None:
@@ -249,28 +292,21 @@ class Forward:
         self._linear(self.attn, self.dim, self.rows, f"{stem}.o.weight", self.proj, resident)
         self.gpu.gate(self.x, self.proj, self.ones, self.rows, self.dim, self.dim)
 
-    def _head(self, resident: Resident, embedding: np.ndarray) -> None:
-        modulation = resident.host["head.modulation"].reshape(-1, self.dim)
-        mixed = modulation.astype(np.float32) + embedding[None, :]
+    def _head(self, resident: Resident) -> None:
+        self.gpu.add_embed_half(
+            resident.halves["head.modulation"], self.time_embed, self.mixed, 2, self.dim
+        )
         self.gpu.layernorm(self.x, self.nrm, self.rows, self.dim, self.eps)
-        self._store_pair(mixed[0], mixed[1])
+        self._bind(0, 1)
         self.gpu.modulate(self.nrm, self.shift, self.scale, self.rows, self.dim, self.dim)
         self._linear(self.nrm, self.dim, self.rows, "head.head.weight", self.head_out, resident)
 
     def _rms(self, values: Any, weight: Any, rows: int) -> None:
         self.gpu.rmsnorm(values, weight, values, rows, self.dim, self.eps)
 
-    def _store_pair(self, shift: np.ndarray, scale: np.ndarray) -> None:
-        self.gpu.store_f32(self.shift, shift)
-        self.gpu.store_f32(self.scale, scale)
+    def _bind(self, shift_at: int, scale_at: int) -> None:
+        self.gpu.copy_f32(self.mixed, shift_at * self.dim, self.shift, self.dim)
+        self.gpu.copy_f32(self.mixed, scale_at * self.dim, self.scale, self.dim)
 
-    def _store_gate(self, gate: np.ndarray) -> None:
-        self.gpu.store_f32(self.gate, gate)
-
-
-def _sinusoidal(dim: int, position: float) -> np.ndarray:
-    half = dim // 2
-    freq = np.power(10000.0, -np.arange(half, dtype=np.float64) / np.float64(half))
-    angles = np.float64(position) * freq
-    wave = np.concatenate((np.cos(angles), np.sin(angles)))
-    return wave.astype(np.float32)
+    def _bind_gate(self, index: int) -> None:
+        self.gpu.copy_f32(self.mixed, index * self.dim, self.gate, self.dim)

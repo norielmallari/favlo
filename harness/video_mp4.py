@@ -9,6 +9,11 @@ from pathlib import Path
 
 def first_frame_png(path: Path) -> bytes:
     """PNG bytes of frame 0."""
+    return frame_png(path, 0)
+
+
+def frame_png(path: Path, index: int) -> bytes:
+    """PNG bytes of one 0-based frame."""
     result = _run(
         [
             "ffmpeg",
@@ -17,6 +22,8 @@ def first_frame_png(path: Path) -> bytes:
             "error",
             "-i",
             str(path),
+            "-vf",
+            f"select=eq(n\\,{int(index)})",
             "-frames:v",
             "1",
             "-f",

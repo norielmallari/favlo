@@ -18,8 +18,8 @@ from typing import Any, TextIO
 
 from favlo.logs import RollingLog
 
-PHASES = ("load", "download", "quantize", "prefill", "decode")
-UNITS = ("tok", "layers", "bytes", "shards", "experts")
+PHASES = ("load", "download", "quantize", "prefill", "decode", "sample")
+UNITS = ("tok", "layers", "bytes", "shards", "experts", "stages")
 VERSION = "0.1.0"
 SCHEMA = 1
 

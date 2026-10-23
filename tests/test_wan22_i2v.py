@@ -10,6 +10,7 @@ from wan22_i2v.chat import _seconds_label, handle_video, video_fields
 from wan22_i2v.formats import block_winners, pack_linear, relative_error, restore_linear
 from wan22_i2v.latent import condition_volume, unpatchify
 from wan22_i2v.png import decode_png, encode_png
+from wan22_i2v.progress import ClipProgress, clip_label, sample_total
 from wan22_i2v.record import quantize, write_graph_source
 from wan22_i2v.schedule import (
     FIVE_SEC_FRAMES,
@@ -165,6 +166,7 @@ def test_video_request_defaults_to_320p_and_81_frames() -> None:
     assert fields.prompt == "move"
     assert fields.frames == FIVE_SEC_FRAMES
     assert (fields.width, fields.height) == (P320_WIDTH, P320_HEIGHT)
+    assert fields.image.shape == (P320_HEIGHT, P320_WIDTH, 3)
     snapped = video_fields({"prompt": "move", "input_reference": encoded, "seconds": "5"})
     assert snapped.frames == FIVE_SEC_FRAMES
     short = video_fields(
@@ -192,15 +194,18 @@ class _Reply:
 
 
 class _Clip:
-    def generate(self, prompt, image, frames, width, height, seed):
+    def generate(self, prompt, image, frames, width, height, seed, progress=None):
         del prompt, image, seed
+        if progress is not None:
+            progress.stage("text")
+            progress.advance()
         clip = np.zeros((frames, height, width, 3), dtype=np.uint8)
         return write_avi(clip, fps=16), {"steps": [1]}
 
 
 class _Broken:
-    def generate(self, prompt, image, frames, width, height, seed):
-        del prompt, image, frames, width, height, seed
+    def generate(self, prompt, image, frames, width, height, seed, progress=None):
+        del prompt, image, frames, width, height, seed, progress
         message = "vae missing"
         raise RuntimeError(message)
 
@@ -216,6 +221,8 @@ def test_video_job_returns_before_the_mp4_is_stored() -> None:
     assert handler.payload["size"] == "16x16"
     job = state["videos"][handler.payload["id"]]
     assert job["status"] == "completed"
+    assert job["progress"] == 100
+    assert job["stage"] is None
     assert state["video_mp4"][job["id"]][4:8] == b"ftyp"
     failed = _Reply()
     failed_state: dict = {}
@@ -223,4 +230,119 @@ def test_video_job_returns_before_the_mp4_is_stored() -> None:
     assert failed.payload["status"] == "in_progress"
     stored = failed_state["videos"][failed.payload["id"]]
     assert stored["status"] == "failed"
+    assert stored["progress"] == 0
     assert stored["error"]["message"] == "vae missing"
+
+
+def test_progress_counts_finished_stages() -> None:
+    job = {"status": "in_progress", "progress": 0, "stage": None}
+    row: dict[str, object] = {}
+
+    class _Row:
+        def __init__(self) -> None:
+            self.done = 0
+            self.detail = ""
+
+    class _Console:
+        shows_bars = True
+
+        def begin(self, phase: str, **kwargs: object) -> _Row:
+            row["phase"] = phase
+            row["unit"] = kwargs["unit"]
+            row["total"] = kwargs["total"]
+            row["detail"] = kwargs["detail"]
+            opened = _Row()
+            opened.detail = str(kwargs["detail"])
+            row["handle"] = opened
+            return opened
+
+        def end(self, progress: _Row, summary: str) -> None:
+            row["summary"] = summary
+            row["closed"] = progress.done
+
+        def log(self, line: str) -> None:
+            row["line"] = line
+
+    label = clip_label(576, 320, 81, 16)
+    assert label == "576x320 81 frames 5.0625s"
+    assert (
+        sample_total(
+            steps=4,
+            dit_layers=40,
+            loads=2,
+            weights=20,
+            text_layers=24,
+            vae_blocks=21 * 36,
+            pipelines=19,
+            gpus=3,
+        )
+        == 24 + 40 + 160 + 756 + 57
+    )
+    progress = ClipProgress(job=job, console=_Console(), clip=label)
+    progress.open(9)
+    assert row["line"] == label
+    assert row["phase"] == "sample"
+    assert row["unit"] == "layers"
+    assert row["total"] == 9
+    assert row["detail"] == ""
+    progress.stage("text")
+    assert row["handle"].detail == "text"
+    progress.advance()
+    assert job["stage"] == "text"
+    assert job["progress"] == 11
+    assert isinstance(job["eta"], int)
+    for _ in range(7):
+        progress.advance()
+    assert job["progress"] == 88
+    assert job["status"] == "in_progress"
+    progress.note("step 0 expert high 1.00s")
+    assert row["line"] == "step 0 expert high 1.00s"
+    progress.complete()
+    job["status"] = "completed"
+    progress.close(progress.summary())
+    assert job["progress"] == 100
+    assert job["stage"] is None
+    assert row["summary"] == "sample 9/9 layers"
+    assert job["eta"] == 0
+    assert row["closed"] == 9
+
+
+def test_close_drops_the_device_and_the_expert() -> None:
+    from wan22_i2v.dit import Resident
+    from wan22_i2v.runtime import Runtime
+
+    class _Gpu:
+        def __init__(self) -> None:
+            self.closed = False
+            self.unkept: list[object] = []
+            self.reclaimed = False
+
+        def unkeep(self, buf: object) -> None:
+            self.unkept.append(buf)
+
+        def reclaim(self) -> None:
+            self.reclaimed = True
+
+        def close(self) -> None:
+            self.closed = True
+
+    gpu = _Gpu()
+    runtime = Runtime.__new__(Runtime)
+    runtime.gpu = gpu
+    runtime._forward = None
+    buf = object()
+    host = np.zeros(2, dtype=np.float32)
+    runtime._resident = Resident(
+        packs={"pack": host},
+        weights={"weight": {}},
+        halves={},
+        host={"bias": host},
+        owned=[buf],
+    )
+    runtime.close()
+    assert gpu.closed
+    assert gpu.reclaimed
+    assert buf in gpu.unkept
+    assert runtime.gpu is None
+    assert runtime._resident is None
+    runtime.close()

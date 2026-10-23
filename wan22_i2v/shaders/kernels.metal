@@ -588,3 +588,637 @@ kernel void conv3d(
     }
     output[(((oc * tout + ot) * hout + oh) * wout + ow)] = acc;
 }
+
+kernel void conv_pack(
+    device const float* weight [[buffer(0)]],
+    device half* packed [[buffer(1)]],
+    constant uint& cout [[buffer(2)]],
+    constant uint& cin [[buffer(3)]],
+    constant uint& kt [[buffer(4)]],
+    constant uint& kh [[buffer(5)]],
+    constant uint& kw [[buffer(6)]],
+    constant uint& k_raw [[buffer(7)]],
+    constant uint& k_pad [[buffer(8)]],
+    constant uint& n_pad [[buffer(9)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint k = gid.x;
+    uint n = gid.y;
+    if (k >= k_pad || n >= n_pad) {
+        return;
+    }
+    if (k >= k_raw || n >= cout) {
+        packed[n * k_pad + k] = half(0.0f);
+        return;
+    }
+    uint x = k % kw;
+    uint tmp = k / kw;
+    uint y = tmp % kh;
+    tmp /= kh;
+    uint z = tmp % kt;
+    uint ic = tmp / kt;
+    uint index = (((n * cin + ic) * kt + z) * kh + y) * kw + x;
+    packed[n * k_pad + k] = half(weight[index]);
+}
+
+kernel void conv_im2col(
+    device const float* input [[buffer(0)]],
+    device half* columns [[buffer(1)]],
+    constant uint& tin [[buffer(2)]],
+    constant uint& hin [[buffer(3)]],
+    constant uint& win [[buffer(4)]],
+    constant uint& kt [[buffer(5)]],
+    constant uint& kh [[buffer(6)]],
+    constant uint& kw [[buffer(7)]],
+    constant uint& stride_t [[buffer(8)]],
+    constant uint& stride_h [[buffer(9)]],
+    constant uint& stride_w [[buffer(10)]],
+    constant int& pad_t [[buffer(11)]],
+    constant int& pad_h [[buffer(12)]],
+    constant int& pad_w [[buffer(13)]],
+    constant uint& hout [[buffer(14)]],
+    constant uint& wout [[buffer(15)]],
+    constant uint& k_raw [[buffer(16)]],
+    constant uint& k_pad [[buffer(17)]],
+    constant uint& row0 [[buffer(18)]],
+    constant uint& rows_valid [[buffer(19)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint k = gid.x;
+    uint row = gid.y;
+    if (k >= k_pad) {
+        return;
+    }
+    if (row >= rows_valid || k >= k_raw) {
+        columns[row * k_pad + k] = half(0.0f);
+        return;
+    }
+    uint spatial = hout * wout;
+    uint global = row0 + row;
+    uint ot = global / spatial;
+    uint rem = global - ot * spatial;
+    uint oh = rem / wout;
+    uint ow = rem - oh * wout;
+    uint x = k % kw;
+    uint tmp = k / kw;
+    uint y = tmp % kh;
+    tmp /= kh;
+    uint z = tmp % kt;
+    uint ic = tmp / kt;
+    int t = int(ot) * int(stride_t) - pad_t + int(z);
+    int h = int(oh) * int(stride_h) - pad_h + int(y);
+    int w = int(ow) * int(stride_w) - pad_w + int(x);
+    float value = 0.0f;
+    if (t >= 0 && h >= 0 && w >= 0 && t < int(tin) && h < int(hin) && w < int(win)) {
+        value = input[((ic * tin + uint(t)) * hin + uint(h)) * win + uint(w)];
+    }
+    columns[row * k_pad + k] = half(value);
+}
+
+kernel void conv_scatter(
+    device const float* tile [[buffer(0)]],
+    device const float* bias [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant uint& cout [[buffer(3)]],
+    constant uint& tout [[buffer(4)]],
+    constant uint& hout [[buffer(5)]],
+    constant uint& wout [[buffer(6)]],
+    constant uint& n_pad [[buffer(7)]],
+    constant uint& rows [[buffer(8)]],
+    constant uint& row0 [[buffer(9)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint oc = gid.x;
+    uint row = gid.y;
+    if (oc >= cout || row >= rows) {
+        return;
+    }
+    uint spatial = hout * wout;
+    uint global = row0 + row;
+    uint ot = global / spatial;
+    uint rem = global - ot * spatial;
+    uint oh = rem / wout;
+    uint ow = rem - oh * wout;
+    float value = tile[row * n_pad + oc] + bias[oc];
+    output[(((oc * tout + ot) * hout + oh) * wout + ow)] = value;
+}
+
+kernel void matmul_f16(
+    device half* activation [[buffer(0)]],
+    device half* weights [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        activation,
+        dextents<int, 2>(int(inner), int(rows)),
+        array<int, 2>{1, int(inner)});
+    tensor<device half, dextents<int, 2>, tensor_inline> right(
+        weights,
+        dextents<int, 2>(int(inner), int(cols)),
+        array<int, 2>{1, int(inner)});
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        destination,
+        dextents<int, 2>(int(cols), int(rows)),
+        array<int, 2>{1, int(cols)});
+
+    constexpr auto desc = matmul2d_descriptor(
+        64, 32, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, int(tgid.y) * TILE_M);
+    auto tile_right = right.slice(0, int(tgid.x) * TILE_N);
+    auto tile_out = out.slice(int(tgid.x) * TILE_N, int(tgid.y) * TILE_M);
+    op.run(tile_left, tile_right, tile_out);
+}
+
+kernel void cast_half(
+    device const float* source [[buffer(0)]],
+    device half* destination [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) {
+        return;
+    }
+    destination[gid] = half(source[gid]);
+}
+
+kernel void add_f32(
+    device float* left [[buffer(0)]],
+    device const float* right [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) {
+        return;
+    }
+    left[gid] += right[gid];
+}
+
+kernel void mul_f32(
+    device float* left [[buffer(0)]],
+    device const float* right [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) {
+        return;
+    }
+    left[gid] *= right[gid];
+}
+
+kernel void add_half(
+    device const float* left [[buffer(0)]],
+    device const half* right [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) {
+        return;
+    }
+    destination[gid] = left[gid] + float(right[gid]);
+}
+
+kernel void add_embed_half(
+    device const half* modulation [[buffer(0)]],
+    device const float* embed [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& slices [[buffer(3)]],
+    constant uint& dim [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint count = slices * dim;
+    if (gid >= count) {
+        return;
+    }
+    destination[gid] = float(modulation[gid]) + embed[gid % dim];
+}
+
+kernel void copy_f32(
+    device const float* source [[buffer(0)]],
+    device float* destination [[buffer(1)]],
+    constant uint& offset [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) {
+        return;
+    }
+    destination[gid] = source[offset + gid];
+}
+
+kernel void axpy(
+    device float* left [[buffer(0)]],
+    device const float* right [[buffer(1)]],
+    constant float& scale [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) {
+        return;
+    }
+    left[gid] += scale * right[gid];
+}
+
+kernel void sinusoid(
+    device float* destination [[buffer(0)]],
+    constant uint& freq [[buffer(1)]],
+    constant float& position [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= freq) {
+        return;
+    }
+    uint mid = freq / 2u;
+    float unit = float(gid % mid) / float(mid);
+    float angle = position * pow(10000.0f, -unit);
+    destination[gid] = (gid < mid) ? cos(angle) : sin(angle);
+}
+
+kernel void unpatchify(
+    device const float* tokens [[buffer(0)]],
+    device float* latent [[buffer(1)]],
+    constant uint& time [[buffer(2)]],
+    constant uint& height [[buffer(3)]],
+    constant uint& width [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint hout = height * 2u;
+    uint wout = width * 2u;
+    uint count = 16u * time * hout * wout;
+    if (gid >= count) {
+        return;
+    }
+    uint w = gid % wout;
+    uint rem = gid / wout;
+    uint h = rem % hout;
+    rem /= hout;
+    uint t = rem % time;
+    uint c = rem / time;
+    uint ph = h / 2u;
+    uint pw = w / 2u;
+    uint kh = h - ph * 2u;
+    uint kw = w - pw * 2u;
+    uint token = (t * height + ph) * width + pw;
+    uint inner = (kh * 2u + kw) * 16u + c;
+    latent[gid] = tokens[token * 64u + inner];
+}
+
+kernel void condition36(
+    device const float* noise [[buffer(0)]],
+    device const float* mask [[buffer(1)]],
+    device const float* latent [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& time [[buffer(4)]],
+    constant uint& height [[buffer(5)]],
+    constant uint& width [[buffer(6)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint spatial = height * width;
+    uint plane = time * spatial;
+    uint count = 36u * plane;
+    if (gid >= count) {
+        return;
+    }
+    uint c = gid / plane;
+    uint rest = gid - c * plane;
+    uint t = rest / spatial;
+    if (c < 16u) {
+        destination[gid] = noise[gid];
+    } else if (c < 20u) {
+        destination[gid] = mask[(c - 16u) * time + t];
+    } else {
+        destination[gid] = latent[(c - 20u) * plane + rest];
+    }
+}
+
+kernel void affine_mu(
+    device const float* source [[buffer(0)]],
+    device const float* mean [[buffer(1)]],
+    device const float* std [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& plane [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint count = 16u * plane;
+    if (gid >= count) {
+        return;
+    }
+    uint c = gid / plane;
+    destination[gid] = (source[gid] - mean[c]) / std[c];
+}
+
+kernel void affine_inv(
+    device const float* source [[buffer(0)]],
+    device const float* mean [[buffer(1)]],
+    device const float* std [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& plane [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint count = 16u * plane;
+    if (gid >= count) {
+        return;
+    }
+    uint c = gid / plane;
+    destination[gid] = source[gid] * std[c] + mean[c];
+}
+
+kernel void channel_rms(
+    device const float* source [[buffer(0)]],
+    device const float* gamma [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& channels [[buffer(3)]],
+    constant uint& plane [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= plane) {
+        return;
+    }
+    float sum = 0.0f;
+    for (uint c = 0u; c < channels; c++) {
+        float value = source[c * plane + gid];
+        sum += value * value;
+    }
+    float norm = max(sqrt(sum), eps);
+    float scale = sqrt(float(channels));
+    for (uint c = 0u; c < channels; c++) {
+        destination[c * plane + gid] = source[c * plane + gid] / norm * scale * gamma[c];
+    }
+}
+
+kernel void silu_clip(
+    device const float* source [[buffer(0)]],
+    device float* destination [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) {
+        return;
+    }
+    float value = clamp(source[gid], -60.0f, 60.0f);
+    destination[gid] = value / (1.0f + exp(-value));
+}
+
+kernel void spatial_attend(
+    device const float* qkv [[buffer(0)]],
+    device float* destination [[buffer(1)]],
+    constant uint& channels [[buffer(2)]],
+    constant uint& time [[buffer(3)]],
+    constant uint& height [[buffer(4)]],
+    constant uint& width [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint spatial = height * width;
+    uint count = time * spatial;
+    if (gid >= count || spatial == 0u) {
+        return;
+    }
+    uint t = gid / spatial;
+    uint pix = gid - t * spatial;
+    uint plane = time * spatial;
+    float scale = rsqrt(float(channels));
+    float running_max = -INFINITY;
+    float running_sum = 0.0f;
+    for (uint key = 0u; key < spatial; key++) {
+        float dot = 0.0f;
+        for (uint c = 0u; c < channels; c++) {
+            float q = qkv[c * plane + t * spatial + pix];
+            float k = qkv[(channels + c) * plane + t * spatial + key];
+            dot += q * k;
+        }
+        dot *= scale;
+        float next = max(running_max, dot);
+        running_sum = running_sum * exp(running_max - next) + exp(dot - next);
+        running_max = next;
+    }
+    for (uint c = 0u; c < channels; c++) {
+        destination[c * plane + gid] = 0.0f;
+    }
+    for (uint key = 0u; key < spatial; key++) {
+        float dot = 0.0f;
+        for (uint c = 0u; c < channels; c++) {
+            float q = qkv[c * plane + t * spatial + pix];
+            float k = qkv[(channels + c) * plane + t * spatial + key];
+            dot += q * k;
+        }
+        float weight = exp(dot * scale - running_max) / running_sum;
+        for (uint c = 0u; c < channels; c++) {
+            float v = qkv[(2u * channels + c) * plane + t * spatial + key];
+            destination[c * plane + gid] += weight * v;
+        }
+    }
+}
+
+kernel void end_pad(
+    device const float* source [[buffer(0)]],
+    device float* destination [[buffer(1)]],
+    constant uint& channels [[buffer(2)]],
+    constant uint& time [[buffer(3)]],
+    constant uint& height [[buffer(4)]],
+    constant uint& width [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint hout = height + 1u;
+    uint wout = width + 1u;
+    uint count = channels * time * hout * wout;
+    if (gid >= count) {
+        return;
+    }
+    uint w = gid % wout;
+    uint rem = gid / wout;
+    uint h = rem % hout;
+    rem /= hout;
+    uint t = rem % time;
+    uint c = rem / time;
+    if (h >= height || w >= width) {
+        destination[gid] = 0.0f;
+        return;
+    }
+    uint in_index = ((c * time + t) * height + h) * width + w;
+    destination[gid] = source[in_index];
+}
+
+kernel void nearest2(
+    device const float* source [[buffer(0)]],
+    device float* destination [[buffer(1)]],
+    constant uint& channels [[buffer(2)]],
+    constant uint& time [[buffer(3)]],
+    constant uint& height [[buffer(4)]],
+    constant uint& width [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint hout = height * 2u;
+    uint wout = width * 2u;
+    uint count = channels * time * hout * wout;
+    if (gid >= count) {
+        return;
+    }
+    uint w = gid % wout;
+    uint rem = gid / wout;
+    uint h = rem % hout;
+    rem /= hout;
+    uint t = rem % time;
+    uint c = rem / time;
+    uint in_index = ((c * time + t) * height + (h / 2u)) * width + (w / 2u);
+    destination[gid] = source[in_index];
+}
+
+kernel void concat_time(
+    device const float* left [[buffer(0)]],
+    device const float* right [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& channels [[buffer(3)]],
+    constant uint& left_time [[buffer(4)]],
+    constant uint& right_time [[buffer(5)]],
+    constant uint& height [[buffer(6)]],
+    constant uint& width [[buffer(7)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint spatial = height * width;
+    uint total = left_time + right_time;
+    uint count = channels * total * spatial;
+    if (gid >= count) {
+        return;
+    }
+    uint rest = gid % (total * spatial);
+    uint c = gid / (total * spatial);
+    uint t = rest / spatial;
+    uint pix = rest - t * spatial;
+    if (t < left_time) {
+        destination[gid] = left[(c * left_time + t) * spatial + pix];
+    } else {
+        uint src = t - left_time;
+        destination[gid] = right[(c * right_time + src) * spatial + pix];
+    }
+}
+
+kernel void stack_pairs(
+    device const float* source [[buffer(0)]],
+    device float* destination [[buffer(1)]],
+    constant uint& channels [[buffer(2)]],
+    constant uint& time [[buffer(3)]],
+    constant uint& height [[buffer(4)]],
+    constant uint& width [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint spatial = height * width;
+    uint count = channels * (time * 2u) * spatial;
+    if (gid >= count) {
+        return;
+    }
+    uint pix = gid % spatial;
+    uint rem = gid / spatial;
+    uint tout = time * 2u;
+    uint t = rem % tout;
+    uint c = rem / tout;
+    uint src_t = t / 2u;
+    uint band = t - src_t * 2u;
+    uint src_c = band * channels + c;
+    destination[gid] = source[((src_c * time + src_t) * height + (pix / width)) * width + (pix % width)];
+}
+
+kernel void slice_time(
+    device const float* source [[buffer(0)]],
+    device float* destination [[buffer(1)]],
+    constant uint& channels [[buffer(2)]],
+    constant uint& source_time [[buffer(3)]],
+    constant uint& height [[buffer(4)]],
+    constant uint& width [[buffer(5)]],
+    constant uint& start [[buffer(6)]],
+    constant uint& count_time [[buffer(7)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint spatial = height * width;
+    uint count = channels * count_time * spatial;
+    if (gid >= count) {
+        return;
+    }
+    uint pix = gid % spatial;
+    uint rem = gid / spatial;
+    uint t = rem % count_time;
+    uint c = rem / count_time;
+    uint src = start + t;
+    destination[gid] = source[(c * source_time + src) * spatial + pix];
+}
+
+kernel void attend_bias(
+    device const float* q [[buffer(0)]],
+    device const float* k [[buffer(1)]],
+    device const float* v [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    device const int* buckets [[buffer(4)]],
+    device const float* table [[buffer(5)]],
+    constant uint& q_len [[buffer(6)]],
+    constant uint& kv_len [[buffer(7)]],
+    constant uint& heads [[buffer(8)]],
+    constant uint& dim [[buffer(9)]],
+    uint3 lane [[thread_position_in_threadgroup]],
+    uint3 group [[threadgroup_position_in_grid]])
+{
+    uint head = group.x;
+    uint query = group.y;
+    uint lid = lane.x;
+    if (head >= heads || query >= q_len || kv_len == 0u) {
+        return;
+    }
+    device const float* qq = q + (query * heads + head) * dim;
+    float running_max = -INFINITY;
+    float running_sum = 0.0f;
+    for (uint t = 0u; t < kv_len; t++) {
+        device const float* kk = k + (t * heads + head) * dim;
+        float partial = 0.0f;
+        for (uint d = lid; d < dim; d += 32u) {
+            partial += qq[d] * kk[d];
+        }
+        int bucket = buckets[query * kv_len + t];
+        float dot = simd_sum(partial) + table[uint(bucket) * heads + head];
+        float next = max(running_max, dot);
+        running_sum = running_sum * exp(running_max - next) + exp(dot - next);
+        running_max = next;
+    }
+    device float* dst = out + (query * heads + head) * dim;
+    for (uint d = lid; d < dim; d += 32u) {
+        dst[d] = 0.0f;
+    }
+    for (uint t = 0u; t < kv_len; t++) {
+        device const float* kk = k + (t * heads + head) * dim;
+        device const float* vv = v + (t * heads + head) * dim;
+        float partial = 0.0f;
+        for (uint d = lid; d < dim; d += 32u) {
+            partial += qq[d] * kk[d];
+        }
+        int bucket = buckets[query * kv_len + t];
+        float dot = simd_sum(partial) + table[uint(bucket) * heads + head];
+        float weight = exp(dot - running_max) / running_sum;
+        for (uint d = lid; d < dim; d += 32u) {
+            dst[d] += weight * vv[d];
+        }
+    }
+}
+
+kernel void pixels_u8(
+    device const float* source [[buffer(0)]],
+    device uchar* destination [[buffer(1)]],
+    constant uint& frames [[buffer(2)]],
+    constant uint& height [[buffer(3)]],
+    constant uint& width [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint spatial = height * width;
+    uint count = frames * spatial;
+    if (gid >= count) {
+        return;
+    }
+    uint plane = frames * spatial;
+    for (uint c = 0u; c < 3u; c++) {
+        float value = clamp(source[c * plane + gid], -1.0f, 1.0f);
+        float scaled = rint((value + 1.0f) * 127.5f);
+        destination[gid * 3u + c] = uchar(clamp(scaled, 0.0f, 255.0f));
+    }
+}

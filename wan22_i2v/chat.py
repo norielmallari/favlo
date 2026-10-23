@@ -10,7 +10,14 @@ from typing import Any, NamedTuple
 import numpy as np
 
 from wan22_i2v.png import decode_png, resize_rgb
-from wan22_i2v.schedule import FIVE_SEC_FRAMES, FPS, P320_HEIGHT, P320_WIDTH, require_geometry
+from wan22_i2v.progress import ClipProgress, clip_label
+from wan22_i2v.schedule import (
+    FIVE_SEC_FRAMES,
+    FPS,
+    P320_HEIGHT,
+    P320_WIDTH,
+    require_geometry,
+)
 from wan22_i2v.video import mp4_bytes
 
 
@@ -62,12 +69,25 @@ def handle_video(
         state["videos"] = videos
     videos[job["id"]] = job
     handler._json(200, job)
+    progress = ClipProgress(
+        job=job,
+        console=getattr(runtime, "console", None),
+        clip=clip_label(fields.width, fields.height, fields.frames, FPS),
+    )
     try:
         avi, _timing = runtime.generate(
-            fields.prompt, fields.image, fields.frames, fields.width, fields.height, fields.seed
+            fields.prompt,
+            fields.image,
+            fields.frames,
+            fields.width,
+            fields.height,
+            fields.seed,
+            progress,
         )
+        progress.stage("mp4")
         mp4 = mp4_bytes(avi)
     except Exception as exc:
+        progress.close(progress.summary(failed=True))
         job["status"] = "failed"
         job["error"] = {"code": type(exc).__name__, "message": str(exc)}
         return
@@ -76,9 +96,10 @@ def handle_video(
         blobs = {}
         state["video_mp4"] = blobs
     blobs[job["id"]] = mp4
-    job["status"] = "completed"
-    job["progress"] = 100
     job["completed_at"] = int(time.time())
+    progress.complete()
+    job["status"] = "completed"
+    progress.close(progress.summary())
 
 
 def video_fields(body: dict[str, Any]) -> VideoFields:
@@ -116,10 +137,12 @@ def _job(model: str, fields: VideoFields) -> dict[str, Any]:
         "status": "in_progress",
         "model": model,
         "progress": 0,
+        "stage": None,
         "prompt": fields.prompt,
         "seconds": _seconds_label(fields.frames),
         "size": f"{fields.width}x{fields.height}",
         "frames": fields.frames,
+        "eta": None,
         "error": None,
     }
 

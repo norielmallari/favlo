@@ -4,9 +4,10 @@ The Microsoft Agent Framework agent calls the image route when the still is
 missing. The still is drawn at the clip's width and height. The next turn
 posts `POST /v1/videos`, polls the job, and saves
 `GET /v1/videos/{id}/content` to ``artifacts/video-agent.mp4``. The 35B
-vision tower then reads frame 0 of that file and must affirm the still
-sentence. Exit 0 means that frame was affirmed and the file has the
-smoke.json frame count at 576×320. This command is not part of pytest.
+vision tower then reads frame 0, the middle frame, and the last frame of
+that file and must affirm the still sentence. Exit 0 means each of those
+frames was affirmed and the file has the smoke.json frame count at 576×320.
+This command is not part of pytest.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from agent_framework.openai import OpenAIChatCompletionClient
 from pydantic import Field
 
 from harness.image_agent import affirms
-from harness.video_mp4 import first_frame_png, save_mp4
+from harness.video_mp4 import frame_png, save_mp4
 
 JUDGE = "qwen36-35b-a3b:instruct"
 HOST = "127.0.0.1"
@@ -270,13 +271,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         if saved != expected:
             return 1
-        print("checking frame 0", flush=True)
-        reply = check_still(port, first_frame_png(out), str(video_note["prompt"]), args.judge)
-        print(reply, flush=True)
-        if not affirms(reply):
-            print("frame does not match", flush=True)
-            return 1
-        print("frame matches", flush=True)
+        sentence = str(video_note["prompt"])
+        seen: list[int] = []
+        for index in (0, (saved[0] - 1) // 2, saved[0] - 1):
+            if index in seen:
+                continue
+            seen.append(index)
+            print(f"checking frame {index}", flush=True)
+            reply = check_still(port, frame_png(out, index), sentence, args.judge)
+            print(reply, flush=True)
+            if not affirms(reply):
+                print("frame does not match", flush=True)
+                return 1
+        print("frames match", flush=True)
         return 0
     finally:
         if owned is not None:

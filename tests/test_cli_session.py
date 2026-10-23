@@ -25,6 +25,7 @@ _PHASE_UNIT = {
     "quantize": "layers",
     "prefill": "tok",
     "decode": "tok",
+    "sample": "stages",
 }
 
 

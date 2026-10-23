@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -94,10 +95,14 @@ def load_embed(path: Path) -> np.ndarray:
     return np.load(path / "embed.npy")
 
 
-def load_expert(path: Path, layers: int) -> Expert:
+def load_expert(
+    path: Path, layers: int, on_file: Callable[[], None] | None = None
+) -> Expert:
     packs: dict[str, LinearPack] = {}
     for name in linear_names(layers):
         blob = np.load(path / f"{name}.npz")
+        if on_file is not None:
+            on_file()
         packs[name] = LinearPack(
             kind=str(blob["kind"].item()),
             packed=np.ascontiguousarray(blob["packed"]),
@@ -109,7 +114,11 @@ def load_expert(path: Path, layers: int) -> Expert:
             padded_n=int(blob["padded_n"]),
             stored_k=int(blob["stored_k"]),
         )
-    halves = {name: np.load(path / f"{name}.npy") for name in half_names(layers)}
+    halves: dict[str, np.ndarray] = {}
+    for name in half_names(layers):
+        halves[name] = np.load(path / f"{name}.npy")
+        if on_file is not None:
+            on_file()
     return Expert(packs=packs, halves=halves)
 
 
