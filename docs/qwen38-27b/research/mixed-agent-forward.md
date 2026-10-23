@@ -52,3 +52,22 @@ Those commands start the series. No committed command reprints the rows below.
 ## Corrections
 
 Later finds are appended here. The sections above stay as committed.
+
+23 October 2026. The same two commands, after the resident DeltaNet row, the 32×128 down tile, and the four-layer submit. The file agent recorded 189.11 tok/s prefill over 101579 tokens and 10.99 tok/s decode over 3093 tokens. The last prompt was 102388 tokens. The coding agent recorded 329.34 tok/s prefill over 853 tokens and 14.78 tok/s decode over 479 tokens.
+
+| Run | Prefill | Decode |
+|---|---|---|
+| File agent | 189.11 tok/s (101579 tok in 537.13 s) | 10.99 tok/s (3093 tok in 281.41 s) |
+| Coding agent | 329.34 tok/s (853 tok in 2.59 s) | 14.78 tok/s (479 tok in 32.40 s) |
+
+| File-agent request | Prompt | Prefill | Decode |
+|---|---|---|---|
+| 1, cache miss | 361 | 298.88 tok/s (361 tok in 1.21 s) | 14.69 tok/s (31 tok in 2.11 s) |
+| 2, cache hit 392 | 46901 | 259.10 tok/s (46509 tok in 179.50 s) | 12.83 tok/s (738 tok in 57.50 s) |
+| 3, prefix load 47639, cache hit 47639 | 47676 | 41.90 tok/s (37 tok in 0.88 s) | 10.21 tok/s (40 tok in 3.92 s) |
+| 4, cache hit 47716 | 102388 | 153.77 tok/s (54672 tok in 355.54 s) | 10.48 tok/s (2284 tok in 217.88 s) |
+
+| Coding-agent request | Prompt | Prefill | Decode |
+|---|---|---|---|
+| 1, cache miss | 437 | 319.39 tok/s (437 tok in 1.37 s) | 14.80 tok/s (396 tok in 26.75 s) |
+| 2, prefix load 437, cache hit 437 | 853 | 340.67 tok/s (416 tok in 1.22 s) | 14.70 tok/s (83 tok in 5.65 s) |
