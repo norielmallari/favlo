@@ -1,5 +1,5 @@
 ---
-description: Save generated media to disk, then stream that file through the API
+description: Save generated media to disk, then return that file. Generate tools are optional MCP tasks.
 alwaysApply: false
 ---
 
@@ -8,6 +8,16 @@ alwaysApply: false
 When an API returns generated media, write the file first and send that file. The kind does not matter: image, audio, video, or another download.
 
 This applies to a new endpoint and to a change in how an existing one returns bytes. A kernel, a quantizer, a CLI `--out` path, and a harness artifact stay where they are.
+
+## Tasks
+
+`generate_image`, `generate_video`, and `generate_music` are optional MCP tasks on `io.modelcontextprotocol/tasks`. A client that advertises the extension receives a task (`resultType` `task`, `pollIntervalMs` 2000). The GPU starts when the worker reaches it. Poll `tasks/get` or `media_status` until `completed`, `failed`, or `cancelled`, then `resources/read` the `favlo://` link. A client that does not advertise the extension receives the finished tool result on that same `tools/call`.
+
+Leave the mode optional. Required mode returns JSON-RPC `-32021` when the client did not advertise the extension, and the job never starts. Many MCP clients do not advertise it.
+
+The inline call ends at that client's tool timeout. An image or a short clip can finish inside it. A long video or a long music clip needs a client that polls. Otherwise the call ends at the timeout while the job is still running. Closing the poll request does not cancel the job. Cancel with `tasks/cancel` or `media_cancel`.
+
+Do not add an HTTP media route so a client can skip the extension. Chat stays `POST /v1/chat/completions`.
 
 ## Order
 
@@ -22,9 +32,9 @@ A kept file expires through one integer in `~/.favlo/settings.json`. The sweep d
 
 ## Examples
 
-Video: save `~/.favlo/videos/<id>.avi`, encode `<id>.mp4` from that file, then `GET /v1/videos/{id}/content` reads the MP4 as `video/mp4`. A `quality` query encodes that level from the saved AVI when `<id>.<quality>.mp4` is absent, then reads that file.
+Video: save `~/.favlo/videos/<id>.avi`, encode `<id>.mp4` from that file, then `resources/read` of `favlo://videos/{id}` reads the MP4 as `video/mp4`.
 
-The same shape for a PNG or an audio clip: one directory per kind, one extension, one content response that reads the file.
+The same shape for a PNG or an audio clip: one directory per kind, one extension, one read of the saved file.
 
 Wrong: keep the served bytes only on the request state and send those bytes.
 

@@ -31,11 +31,11 @@ That starts the daemon and returns. A later `favlo serve` attaches to it. `/quit
 
 `list_media_models`, `media_status`, and `media_cancel` run immediately.
 
-`generate_image`, `generate_video`, and `generate_music` return a task. The GPU starts when the one worker reaches that task. Poll `media_status` with the `taskId` every 2 seconds until `completed`, `failed`, or `cancelled`. Then `resources/read` the `favlo://` link in the result. Image and music bytes are inlined only when the caller asked and the file is at most 1 MiB. Video is always a `favlo://videos/{id}` link.
+`generate_image`, `generate_video`, and `generate_music` return a task when the client advertises `io.modelcontextprotocol/tasks`. The GPU starts when the one worker reaches that task. Poll `media_status` with the `taskId` every 2 seconds until `completed`, `failed`, or `cancelled`. Then `resources/read` the `favlo://` link in the result. A client that does not advertise the extension receives the finished tool result on that same call. Image and music bytes are inlined only when the caller asked and the file is at most 1 MiB. Video is always a `favlo://videos/{id}` link.
 
 The still on `generate_video` is a stored image id or a PNG image block. A filesystem path is refused. `quality` is an argument of that call. Image `n` from 1 to 10 is one task.
 
-A generate call that returns JSON-RPC `-32021` means this client did not advertise `io.modelcontextprotocol/tasks`. Call `harness.mcp_media` for that generate. It sends the capability, polls, and reads the link. Do not turn the tool into a blocking HTTP media route.
+`harness.mcp_media` advertises the extension, polls, and reads the link. Do not add an HTTP media route.
 
 Chat is `POST /v1/chat/completions`. It is not an MCP tool. A chat preempts a running media task. Media does not preempt a chat.
 

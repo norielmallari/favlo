@@ -930,10 +930,10 @@ def test_mcp_initialize_lists_tools_and_rejects_a_batch(tmp_path) -> None:
     try:
         status, body = _mcp(port, "server/discover", {})
         names_status, listed = _mcp(port, "tools/list", {})
-        _refused_status, refused = _tool(
+        inline_status, inline = _tool(
             port,
             "generate_image",
-            {"prompt": "hold", "model": "example-model"},
+            {"prompt": "pair", "model": "example-model"},
             tasks=False,
         )
         batch_status, batch = _mcp_raw(
@@ -956,7 +956,10 @@ def test_mcp_initialize_lists_tools_and_rejects_a_batch(tmp_path) -> None:
         "generate_video",
         "generate_music",
     }
-    assert refused["error"]["code"] == -32021, refused
+    assert inline_status == 200, inline
+    assert "error" not in inline
+    assert inline["result"].get("resultType") == "complete"
+    assert "taskId" not in inline["result"]
     assert not state.get("media_order")
     assert batch_status >= 400
     assert not isinstance(batch, list)

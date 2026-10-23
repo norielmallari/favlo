@@ -1,11 +1,12 @@
 """Media tools on the same process as the listener.
 
 FastMCP serves MCP 2026-07-28 at ``/mcp``. ``generate_image``,
-``generate_video``, and ``generate_music`` are required Tasks. The call
-returns a ``CreateTaskResult`` and the in-memory worker runs one task at a
-time. ``list_media_models``, ``media_status``, and ``media_cancel`` run in
-the request. A generate tool calls the pipeline handler through the same
-lock as ``POST /v1``. Chat completion is not a tool.
+``generate_video``, and ``generate_music`` are optional Tasks. A client that
+advertises ``io.modelcontextprotocol/tasks`` gets a ``CreateTaskResult`` and
+the in-memory worker runs one task at a time. A client that does not gets the
+tool result on that call. ``list_media_models``, ``media_status``, and
+``media_cancel`` run in the request. A generate tool calls the pipeline
+handler through the same lock as ``POST /v1``. Chat completion is not a tool.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ _MEDIA = (
     ("music", "handle_music"),
 )
 _POLL = timedelta(seconds=2)
-_TASK = TaskConfig(mode="required", poll_interval=_POLL)
+_TASK = TaskConfig(mode="optional", poll_interval=_POLL)
 _INLINE = 1024 * 1024
 _ANNOTATIONS = mcp_types.ToolAnnotations(
     read_only_hint=False,
