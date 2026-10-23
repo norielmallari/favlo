@@ -17,7 +17,7 @@ from wan22_i2v.schedule import OFFICIAL, P320_HEIGHT, P320_WIDTH, SHORT_FRAMES
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="favlo --wan22-i2v")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("setup", help="download the weights into models/Wan2.2-I2V-A14B")
+    sub.add_parser("setup", help="download the VAE, umT5, and the two experts")
     sub.add_parser("kernels", help="dispatch the fp4 and fp8 matmul")
     quant = sub.add_parser("quantize", help="pack the high-noise and low-noise experts")
     quant.add_argument("--high", type=Path, required=True)
@@ -35,11 +35,13 @@ def main(argv: list[str] | None = None) -> int:
     gen.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
     if args.command == "setup":
-        from wan22_i2v.source import download, expert_paths
+        from wan22_i2v.source import dit_dir, download, expert_paths, umt5_dir, vae_dir
 
-        folder = download()
-        high, low = expert_paths(folder)
-        print(folder, flush=True)
+        download()
+        high, low = expert_paths()
+        print(vae_dir(), flush=True)
+        print(umt5_dir(), flush=True)
+        print(dit_dir(), flush=True)
         print(high, flush=True)
         print(low, flush=True)
         return 0

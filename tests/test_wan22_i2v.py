@@ -23,21 +23,37 @@ from wan22_i2v.schedule import (
     promote_count,
     timesteps,
 )
-from wan22_i2v.source import FILES, FOLDER, expert_paths, mask_from_prefix, source_dir
+from wan22_i2v.source import (
+    FILES,
+    dit_dir,
+    expert_paths,
+    mask_from_prefix,
+    umt5_dir,
+    vae_dir,
+)
+from wan22_i2v.text import encoder_path, tokenizer_path
+from wan22_i2v.vae import vae_path
 from wan22_i2v.video import avi_meta, write_avi
 
 
-def test_setup_writes_under_the_official_folder() -> None:
-    assert FOLDER == "Wan2.2-I2V-A14B"
-    assert source_dir().name == FOLDER
+def test_setup_writes_each_repo_under_models() -> None:
+    assert vae_dir().parts[-2:] == ("Wan-AI", "Wan2.2-I2V-A14B")
+    assert umt5_dir().parts[-2:] == ("google", "umt5-xxl")
+    assert dit_dir().parts[-2:] == ("lightx2v", "Wan2.2-Distill-Models")
+    assert vae_path().parent == vae_dir()
+    assert encoder_path().parent == tokenizer_path().parent == umt5_dir()
+    other = umt5_dir(repo="example/umt5")
+    assert other.parts[-2:] == ("example", "umt5")
+    assert encoder_path(repo="example/umt5").parent == other
     assert [item[2] for item in FILES] == [
-        "Wan2.1_VAE.pth",
-        "models_t5_umt5-xxl-enc-bf16.pth",
-        "high.safetensors",
-        "low.safetensors",
-        "tokenizer.json",
+        "Wan-AI/Wan2.2-I2V-A14B/Wan2.1_VAE.pth",
+        "google/umt5-xxl/models_t5_umt5-xxl-enc-bf16.pth",
+        "lightx2v/Wan2.2-Distill-Models/high.safetensors",
+        "lightx2v/Wan2.2-Distill-Models/low.safetensors",
+        "google/umt5-xxl/tokenizer.json",
     ]
     high, low = expert_paths()
+    assert high.parent == low.parent == dit_dir()
     assert high.name == "high.safetensors"
     assert low.name == "low.safetensors"
 

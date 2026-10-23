@@ -24,7 +24,7 @@ from tokenizers import Tokenizer
 
 from wan22_i2v.formats import TILE_M, pad_to
 from wan22_i2v.metal import Gpu
-from wan22_i2v.source import source_dir
+from wan22_i2v.source import ENCODER_FILE, TOKENIZER_FILE, umt5_dir
 
 _LAYERS = 24
 _HEADS = 64
@@ -37,12 +37,12 @@ _PREFIX = "umt5-xxl-enc-bf16/data"
 _PICKLE = "umt5-xxl-enc-bf16/data.pkl"
 
 
-def tokenizer_path(root: Path | None = None) -> Path:
-    return source_dir(root) / "tokenizer.json"
+def tokenizer_path(root: Path | None = None, repo: str | None = None) -> Path:
+    return umt5_dir(root, repo) / TOKENIZER_FILE
 
 
-def encoder_path(root: Path | None = None) -> Path:
-    return source_dir(root) / "models_t5_umt5-xxl-enc-bf16.pth"
+def encoder_path(root: Path | None = None, repo: str | None = None) -> Path:
+    return umt5_dir(root, repo) / ENCODER_FILE
 
 
 def relative_buckets(query: int, key: int) -> np.ndarray:

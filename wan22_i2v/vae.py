@@ -25,7 +25,7 @@ import numpy as np
 
 from wan22_i2v.metal import Gpu
 from wan22_i2v.schedule import LATENT_MEAN, LATENT_STD, geometry
-from wan22_i2v.source import source_dir
+from wan22_i2v.source import VAE_FILE, vae_dir
 
 _EPS = np.float32(1e-12)
 ENCODER_BLOCKS = 16
@@ -37,7 +37,7 @@ class _FloatStorage:
 
 
 def vae_path(root: Path | None = None) -> Path:
-    return source_dir(root) / "Wan2.1_VAE.pth"
+    return vae_dir(root) / VAE_FILE
 
 
 def load_vae(path: Path) -> dict[str, np.ndarray]:

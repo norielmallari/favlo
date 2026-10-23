@@ -1,8 +1,11 @@
 """Download the Wan 2.2 I2V weights with plain HTTP.
 
-Files land under ``models/Wan2.2-I2V-A14B``. The transfer uses the resolve
-URL and does not read or write a hub cache. Sixteen connections share one
-file. A ``.parts`` map records finished ranges so a short file can continue.
+Each file lands under ``models/<org>/<repo>/``, the repository it is fetched
+from. The umT5 encoder is fetched from the Wan repository and stored with the
+tokenizer, so that directory is the text encoder a later model replaces. The
+transfer uses the resolve URL and does not read or write a hub cache. Sixteen
+connections share one file. A ``.parts`` map records finished ranges so a
+short file can continue.
 """
 
 from __future__ import annotations
@@ -18,60 +21,94 @@ from pathlib import Path
 from urllib.parse import quote
 
 HOST = "https://huggingface.co"
-FOLDER = "Wan2.2-I2V-A14B"
+VAE_REPO = "Wan-AI/Wan2.2-I2V-A14B"
+VAE_FILE = "Wan2.1_VAE.pth"
+UMT5_REPO = "google/umt5-xxl"
+ENCODER_FILE = "models_t5_umt5-xxl-enc-bf16.pth"
+TOKENIZER_FILE = "tokenizer.json"
+DIT_REPO = "lightx2v/Wan2.2-Distill-Models"
+HIGH_FILE = "high.safetensors"
+LOW_FILE = "low.safetensors"
 _CHUNK = 8 << 20
 _WORKERS = 16
 _AGENT = "favlo"
 
-# repo, remote name, local name, bytes. Sizes were read from the resolve headers.
+# repo, remote name, local path under models/, bytes. Sizes were read from the resolve headers.
 FILES = (
     (
-        "Wan-AI/Wan2.2-I2V-A14B",
-        "Wan2.1_VAE.pth",
-        "Wan2.1_VAE.pth",
+        VAE_REPO,
+        VAE_FILE,
+        f"{VAE_REPO}/{VAE_FILE}",
         507_609_880,
     ),
     (
-        "Wan-AI/Wan2.2-I2V-A14B",
-        "models_t5_umt5-xxl-enc-bf16.pth",
-        "models_t5_umt5-xxl-enc-bf16.pth",
+        VAE_REPO,
+        ENCODER_FILE,
+        f"{UMT5_REPO}/{ENCODER_FILE}",
         11_361_920_418,
     ),
     (
-        "lightx2v/Wan2.2-Distill-Models",
+        DIT_REPO,
         "wan2.2_i2v_A14b_high_noise_lightx2v_4step_720p_260412.safetensors",
-        "high.safetensors",
+        f"{DIT_REPO}/{HIGH_FILE}",
         57_155_717_592,
     ),
     (
-        "lightx2v/Wan2.2-Distill-Models",
+        DIT_REPO,
         "wan2.2_i2v_A14b_low_noise_lightx2v_4step_720p_260412.safetensors",
-        "low.safetensors",
+        f"{DIT_REPO}/{LOW_FILE}",
         57_155_717_592,
     ),
     (
-        "google/umt5-xxl",
-        "tokenizer.json",
-        "tokenizer.json",
+        UMT5_REPO,
+        TOKENIZER_FILE,
+        f"{UMT5_REPO}/{TOKENIZER_FILE}",
         16_853_013,
     ),
 )
 
 
-def source_dir(root: Path | None = None) -> Path:
+def models_dir(root: Path | None = None) -> Path:
     base = root or Path(__file__).resolve().parents[1]
-    return base / "models" / FOLDER
+    return base / "models"
+
+
+def _repo_dir(root: Path | None, repo: str) -> Path:
+    parts = Path(repo).parts
+    if not parts or Path(repo).is_absolute() or ".." in parts:
+        message = f"refusing {repo}"
+        raise RuntimeError(message)
+    return models_dir(root) / repo
+
+
+def vae_dir(root: Path | None = None) -> Path:
+    """Directory of the causal VAE."""
+    return _repo_dir(root, VAE_REPO)
+
+
+def umt5_dir(root: Path | None = None, repo: str | None = None) -> Path:
+    """Directory of one umT5 encoder and its tokenizer.
+
+    ``repo`` selects another Hugging Face repository. That directory must
+    contain the encoder file and ``tokenizer.json``.
+    """
+    return _repo_dir(root, UMT5_REPO if repo is None else repo)
+
+
+def dit_dir(root: Path | None = None) -> Path:
+    """Directory of the high-noise and low-noise experts."""
+    return _repo_dir(root, DIT_REPO)
 
 
 def expert_paths(folder: Path | None = None) -> tuple[Path, Path]:
     """High-noise file, then the low-noise file."""
-    dest = folder or source_dir()
-    return dest / "high.safetensors", dest / "low.safetensors"
+    dest = folder or dit_dir()
+    return dest / HIGH_FILE, dest / LOW_FILE
 
 
 def download(dest: Path | None = None) -> Path:
-    """Write the weight files and the umT5 tokenizer. Returns the directory."""
-    folder = dest or source_dir()
+    """Write the VAE, the umT5 files, and the two experts. Returns ``models/``."""
+    folder = dest or models_dir()
     folder.mkdir(parents=True, exist_ok=True)
     missing = _missing(folder)
     free = shutil.disk_usage(folder).free
@@ -151,9 +188,10 @@ def _load_mask(path: Path, size: int) -> bytearray:
 
 def _fetch(folder: Path, repo: str, remote: str, local: str, size: int) -> None:
     path = folder / local
-    if path.is_symlink() or ".." in Path(local).parts:
+    if path.is_symlink() or ".." in Path(local).parts or Path(local).is_absolute():
         message = f"refusing {local}"
         raise RuntimeError(message)
+    path.parent.mkdir(parents=True, exist_ok=True)
     parts = _parts_path(path)
     count = (size + _CHUNK - 1) // _CHUNK
     if path.is_file() and path.stat().st_size > size:
