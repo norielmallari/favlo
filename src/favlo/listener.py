@@ -26,6 +26,7 @@ from typing import Any
 
 from favlo.console import VERSION, Console
 from favlo.daemon import DAEMON_ENV, alive
+from favlo.images import load_image, sweep_images
 from favlo.logs import attach_process_log
 from favlo.registry import model_objects, one_model, resolve
 
@@ -269,6 +270,7 @@ def _bind_request(body: dict[str, Any], state: dict[str, Any], args: Any) -> Any
 
 
 def serve(args: Any) -> int:
+    sweep_images()
     shutdown = _Shutdown()
     shutdown.arm()
     args.shutdown = shutdown
@@ -407,6 +409,9 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
                     self._json(404, {"error": {"message": str(exc), "type": "not_found"}})
                     return
                 self._json(200, row)
+                return
+            if path.startswith("/v1/images/"):
+                self._image(path)
                 return
             if path.startswith("/v1/videos/"):
                 self._video(path)
@@ -622,6 +627,22 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
                 self._gone = True
                 message = "client closed"
                 raise OSError(message) from None
+
+        def _image(self, path: str) -> None:
+            rest = path[len("/v1/images/") :]
+            if not rest.endswith("/content"):
+                self._json(404, {"error": {"message": "not found"}})
+                return
+            image_id = rest[: -len("/content")]
+            if not image_id or "/" in image_id:
+                self._json(404, {"error": {"message": "not found"}})
+                return
+            home = state.get("image_home")
+            blob = load_image(image_id, home=home if isinstance(home, Path) else None)
+            if blob is None:
+                self._json(404, {"error": {"message": "image not found", "type": "not_found"}})
+                return
+            self._bytes(200, blob, "image/png")
 
         def _video(self, path: str) -> None:
             rest = path[len("/v1/videos/") :]

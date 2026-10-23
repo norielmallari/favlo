@@ -22,7 +22,7 @@ Shared code is `src/favlo/`. There is no model base class and no kernel that bra
 
 The daemon is a request server. It does not own chat history, tools, or the terminal session. The CLI owns those. Telemetry is one JSON event per line. The terminal paints it as it arrives, and prints the reply after that turn's requests have closed.
 
-`python -m favlo.smoke_lock` is how a pipeline test takes the GPU while the daemon stays up. Acquire closes the resident model when no request is open. Release lets the next chat load one again. The recorded pid is the invoking shell. `uv` and `python` are not that owner. A command started from a shell that already holds the lock leaves the file in place and does not release it. A video job is `POST /v1/videos`, then `GET /v1/videos/{id}` and `GET /v1/videos/{id}/content`. Those two reads do not take the request lock. The listener note is [docs/serve.md](docs/serve.md).
+`python -m favlo.smoke_lock` is how a pipeline test takes the GPU while the daemon stays up. Acquire closes the resident model when no request is open. Release lets the next chat load one again. The recorded pid is the invoking shell. `uv` and `python` are not that owner. A command started from a shell that already holds the lock leaves the file in place and does not release it. A video job is `POST /v1/videos`, then `GET /v1/videos/{id}` and `GET /v1/videos/{id}/content`. Those two reads do not take the request lock. A PNG from `POST /v1/images/generations` is `~/.favlo/images/<id>.png`. `GET /v1/images/{id}/content` reads that file and does not take the request lock. `image_ttl_seconds` in `settings.json` is how long it stays. The default is 86400. A sweep at startup and after each stored image deletes a file older than that. The listener note is [docs/serve.md](docs/serve.md).
 
 ## Runtimes
 
@@ -64,6 +64,7 @@ src/favlo/              process entry; the listener loads the pipeline a request
   prefix.py             SSD prefix store
   setup.py              empty-registry download
   logs.py               rolling server log; size is settings.json log_max_bytes
+  images.py             stored PNGs; image_ttl_seconds drops an older file
   hermes_plugins.py     install image and video backends into every Hermes profile
 hermes-agent-plugins/   Hermes image_gen and video_gen backends
 harness/                file agent, coding agent, worktree agent, and the three benchmarks

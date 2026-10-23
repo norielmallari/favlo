@@ -8,9 +8,12 @@ streaming partial are not produced. JPEG and WebP are not encoded.
 from __future__ import annotations
 
 import base64
+import secrets
 import time
+from pathlib import Path
 from typing import Any, NamedTuple
 
+from favlo.images import load_image, store_image
 from z_image_turbo.schedule import STEPS
 from z_image_turbo.scratch import MAX_EDGE
 
@@ -69,7 +72,9 @@ def handle_image(
     args: Any,
     state: dict[str, Any],
 ) -> None:
-    del selection, args, state
+    del selection, args
+    home = state.get("image_home")
+    root = home if isinstance(home, Path) else None
     try:
         fields = _fields(body)
         images: list[dict[str, str]] = []
@@ -82,7 +87,17 @@ def handle_image(
                 STEPS,
                 fields.seed + index,
             )
-            images.append({"b64_json": base64.b64encode(png).decode("ascii")})
+            image_id = "image_" + secrets.token_hex(12)
+            store_image(image_id, png, home=root)
+            stored = load_image(image_id, home=root)
+            if stored is None:
+                raise RuntimeError("stored image is missing")
+            images.append(
+                {
+                    "id": image_id,
+                    "b64_json": base64.b64encode(stored).decode("ascii"),
+                }
+            )
             timings.append(timing)
     except ImageRequestError as exc:
         _reject(handler, str(exc), exc.param)

@@ -138,7 +138,7 @@ def test_image_request_rejects_unsupported_image_options() -> None:
         assert raised.value.param == key
 
 
-def test_image_response_returns_one_png_per_count() -> None:
+def test_image_response_returns_one_png_per_count(tmp_path) -> None:
     class _Handler:
         def __init__(self) -> None:
             self.status = 0
@@ -155,13 +155,16 @@ def test_image_response_returns_one_png_per_count() -> None:
             return f"png-{seed}".encode(), "digest", timing
 
     handler = _Handler()
-    handle_image(handler, _Runtime(), {"prompt": "a cat", "n": 2, "seed": 7}, None, None, {})
+    state = {"image_home": tmp_path}
+    handle_image(handler, _Runtime(), {"prompt": "a cat", "n": 2, "seed": 7}, None, None, state)
     assert handler.status == 200
     data = handler.body["data"]
     assert isinstance(data, list)
     assert len(data) == 2
     assert base64.b64decode(data[0]["b64_json"]) == b"png-7"
     assert base64.b64decode(data[1]["b64_json"]) == b"png-8"
+    assert (tmp_path / "images" / f"{data[0]['id']}.png").read_bytes() == b"png-7"
+    assert (tmp_path / "images" / f"{data[1]['id']}.png").read_bytes() == b"png-8"
     timings = handler.body["generation_seconds"]
     assert isinstance(timings, list)
     assert len(timings) == 2
@@ -170,7 +173,7 @@ def test_image_response_returns_one_png_per_count() -> None:
     assert handler.body["size"] == "1024x1024"
     assert "usage" not in handler.body
     assert "revised_prompt" not in data[0]
-    handle_image(handler, _Runtime(), {"prompt": "a cat"}, None, None, {})
+    handle_image(handler, _Runtime(), {"prompt": "a cat"}, None, None, state)
     assert isinstance(handler.body["generation_seconds"], dict)
 
 

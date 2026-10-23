@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_LOG_MAX_BYTES = 1024 * 1024
+DEFAULT_IMAGE_TTL_SECONDS = 24 * 60 * 60
 _SETTINGS_NAME = "settings.json"
 _LOG_NAME = "favlo.log"
 
@@ -33,13 +34,13 @@ def load_settings(home: Path) -> dict[str, Any]:
     """Read settings. A missing or unreadable file uses the defaults."""
     path = settings_path(home)
     if not path.is_file():
-        return {"log_max_bytes": DEFAULT_LOG_MAX_BYTES}
+        return _default_settings()
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeError):
-        return {"log_max_bytes": DEFAULT_LOG_MAX_BYTES}
+        return _default_settings()
     if not isinstance(raw, dict):
-        return {"log_max_bytes": DEFAULT_LOG_MAX_BYTES}
+        return _default_settings()
     return raw
 
 
@@ -71,6 +72,25 @@ def configured_thinking_budget(settings: dict[str, Any] | None = None) -> int | 
     return _configured_int(source, "thinking_budget")
 
 
+def image_ttl_seconds(settings: dict[str, Any]) -> int:
+    """How long a stored PNG stays, in seconds. The default is one day."""
+    value = settings.get("image_ttl_seconds", DEFAULT_IMAGE_TTL_SECONDS)
+    try:
+        ttl = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_IMAGE_TTL_SECONDS
+    if ttl < 1:
+        return DEFAULT_IMAGE_TTL_SECONDS
+    return ttl
+
+
+def _default_settings() -> dict[str, Any]:
+    return {
+        "log_max_bytes": DEFAULT_LOG_MAX_BYTES,
+        "image_ttl_seconds": DEFAULT_IMAGE_TTL_SECONDS,
+    }
+
+
 def log_max_bytes(settings: dict[str, Any]) -> int:
     """Positive ``log_max_bytes``, or the 1 MiB default."""
     value = settings.get("log_max_bytes", DEFAULT_LOG_MAX_BYTES)
@@ -89,7 +109,7 @@ def ensure_settings(home: Path) -> dict[str, Any]:
     if path.is_file():
         return load_settings(home)
     home.mkdir(parents=True, exist_ok=True)
-    payload = {"log_max_bytes": DEFAULT_LOG_MAX_BYTES}
+    payload = _default_settings()
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     temporary.replace(path)

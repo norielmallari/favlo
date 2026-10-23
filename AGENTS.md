@@ -20,6 +20,7 @@ The files in [`.cursor/rules`](.cursor/rules) are repo rules. Cursor loads them 
 | [optimization-llm.mdc](.cursor/rules/optimization-llm.mdc) | When optimizing a language model's prefill or decode. |
 | [optimization-image.mdc](.cursor/rules/optimization-image.mdc) | When optimizing image generation time. |
 | [research-evidence.mdc](.cursor/rules/research-evidence.mdc) | When writing a measured claim. The note records the remainder a search on that date did not find. The software citation stays in CITATION.cff. |
+| [serving-media.mdc](.cursor/rules/serving-media.mdc) | When an API returns generated media. Save the file, then stream that file. |
 
 ## Changes
 
