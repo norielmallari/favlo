@@ -1,11 +1,11 @@
 ---
 name: optimization-image
-description: Optimize one Favlo image pipeline toward its generation-time ceiling. Use when shortening image generation, closing a gap to that kernel ceiling, or when the user asks to optimize an image model. Do not use for language-model prefill or decode.
+description: Optimize one Favlo image pipeline toward its generation-time ceiling. Use when shortening image generation, closing a gap to that kernel ceiling, or when the user asks to optimize an image model. Do not use for language-model prefill or decode, or for music prompting.
 ---
 
 # Image optimization
 
-One image pipeline. A language model uses [optimization-loop](../optimization-loop/SKILL.md). Read [ARCHITECTURE.md](../../../ARCHITECTURE.md) and that pipeline's `docs/<pipeline>/` note. Edit only that write set. Leave every other pipeline untouched.
+One image pipeline. A language model uses [optimization-loop](../optimization-loop/SKILL.md). Music generation time uses [optimization-music](../optimization-music/SKILL.md). A music prompt uses [music-prompting](../music-prompting/SKILL.md). Read [ARCHITECTURE.md](../../../ARCHITECTURE.md) and that pipeline's `docs/<pipeline>/` note. Edit only that write set. Leave every other pipeline untouched.
 
 The whole process is non-HITL until the printed generation time is at most the kernel ceiling divided by 0.9. A shorter time is faster. Do not ask, and do not stop between iterations, until that bar is met or a step cannot proceed.
 

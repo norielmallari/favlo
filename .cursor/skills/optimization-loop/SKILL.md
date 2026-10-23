@@ -1,11 +1,11 @@
 ---
 name: optimization-loop
-description: Optimize one Favlo language-model pipeline toward its prefill or decode ceiling. Use when raising tok/s, closing a prefill or decode gap, or when the user asks for an optimization loop on a text model. Do not use for image generation.
+description: Optimize one Favlo language-model pipeline toward its prefill or decode ceiling. Use when raising tok/s, closing a prefill or decode gap, or when the user asks for an optimization loop on a text model. Do not use for image generation time or music prompting.
 ---
 
 # Language-model optimization
 
-One language-model pipeline. An image pipeline uses [optimization-image](../optimization-image/SKILL.md). Read [ARCHITECTURE.md](../../../ARCHITECTURE.md) and that pipeline's `docs/<pipeline>/` note. Edit only that write set. Leave every other pipeline untouched.
+One language-model pipeline. An image pipeline uses [optimization-image](../optimization-image/SKILL.md). Music generation time uses [optimization-music](../optimization-music/SKILL.md). A music prompt uses [music-prompting](../music-prompting/SKILL.md). Read [ARCHITECTURE.md](../../../ARCHITECTURE.md) and that pipeline's `docs/<pipeline>/` note. Edit only that write set. Leave every other pipeline untouched.
 
 The whole process is non-HITL until 90% of the ceiling is achieved. Do not ask, and do not stop between iterations, until the measured rate meets that bar or a step cannot proceed.
 
