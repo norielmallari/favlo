@@ -8,6 +8,7 @@ import json
 import numpy as np
 from wan22_i2v.chat import VideoRequestError, _seconds_label, handle_video, video_fields
 from wan22_i2v.formats import block_winners, pack_linear, relative_error, restore_linear
+from wan22_i2v.hold import ClipHold, ClipPaused, reload_quietly
 from wan22_i2v.latent import condition_volume, unpatchify
 from wan22_i2v.png import decode_png, encode_png
 from wan22_i2v.progress import ClipProgress, clip_label, sample_total
@@ -215,7 +216,7 @@ class _Reply:
         self.status = 0
         self.payload: dict = {}
 
-    def _json(self, status: int, payload: dict) -> None:
+    def json(self, status: int, payload: dict) -> None:
         self.status = status
         self.payload = json.loads(json.dumps(payload))
 
@@ -373,6 +374,142 @@ def test_progress_counts_finished_stages() -> None:
     assert row["summary"] == "sample 9/9 layers"
     assert job["eta"] == 0
     assert row["closed"] == 9
+
+
+def test_hold_keeps_a_finished_step_and_reloads_its_expert_quietly() -> None:
+    hold = ClipHold(stage="step", step=2, expert="low", done=4)
+    assert hold.reached("encode")
+    assert hold.reached("step")
+    assert not hold.reached("decode")
+    assert reload_quietly(hold, "low", 2)
+    assert not reload_quietly(hold, "low", 3)
+    assert not reload_quietly(hold, "high", 2)
+    assert not reload_quietly(ClipHold(stage="encode"), "low", 0)
+
+
+class _Flag:
+    def __init__(self) -> None:
+        self._set = False
+
+    def is_set(self) -> bool:
+        return self._set
+
+    def set(self) -> None:
+        self._set = True
+
+    def clear(self) -> None:
+        self._set = False
+
+
+class _Pausing:
+    """Stops after the text stage once, then packs the clip on the resume."""
+
+    def __init__(self, state: dict) -> None:
+        self.state = state
+        self.stages: list[str | None] = []
+
+    def generate(self, prompt, image, frames, width, height, seed, progress=None):
+        del prompt, image, seed
+        hold = getattr(progress, "hold", None)
+        self.stages.append(None if hold is None else hold.stage)
+        if hold is not None and hold.reached("text"):
+            clip = np.zeros((frames, height, width, 3), dtype=np.uint8)
+            return write_avi(clip, fps=16), {"steps": [1]}
+        progress.stage("text")
+        progress.advance()
+        self.state["preempt"].set()
+        reason = progress.interrupt()
+        raise ClipPaused(reason, ClipHold(stage="text", done=progress.done))
+
+
+def test_preempt_pauses_and_the_same_job_resumes(tmp_path) -> None:
+    from favlo.videos import load_video
+
+    state: dict = {"video_home": tmp_path, "preempt": _Flag(), "cancel": _Flag()}
+    runtime = _Pausing(state)
+    body = {"prompt": "move", "image": _png(), "frames": 5, "size": "16x16", "model": "row"}
+    first = _Reply()
+    handle_video(first, runtime, body, None, None, state)
+    job = state["videos"][first.payload["id"]]
+    assert job["status"] == "in_progress"
+    assert state["video_hold"]["hold"].stage == "text"
+    assert state["video_hold"]["job"] is job
+    state["preempt"].clear()
+    second = _Reply()
+    handle_video(second, runtime, body, None, None, state)
+    assert runtime.stages == [None, "text"]
+    assert second.payload["id"] == job["id"]
+    assert job["status"] == "completed"
+    assert "video_hold" not in state
+    stored = load_video(job["id"], home=tmp_path)
+    assert stored is not None and stored[4:8] == b"ftyp"
+
+
+def test_expert_load_checkpoints_the_unfinished_step(monkeypatch) -> None:
+    import wan22_i2v.runtime as runtime_mod
+    from wan22_i2v.runtime import Runtime
+
+    monkeypatch.setattr(
+        runtime_mod,
+        "_volume",
+        lambda *_args, **_kwargs: np.zeros((1,), dtype=np.float32),
+    )
+
+    class _Host:
+        def __init__(self) -> None:
+            self.saved: ClipHold | None = None
+
+        def _pause(self, progress, hold) -> None:
+            hold.done = progress.done
+            self.saved = hold
+            raise ClipPaused("preempt", hold)
+
+    host = _Host()
+    progress = ClipProgress(console=None, clip="clip")
+    progress.interrupt = lambda: "preempt"
+    progress.done = 4
+    table = np.zeros((1,), dtype=np.float32)
+    args = (
+        host,
+        progress,
+        1,
+        "high_noise",
+        table,
+        object(),
+        object(),
+        object(),
+        (1,),
+        (1,),
+        [0.5],
+        object(),
+    )
+    try:
+        Runtime._load_stop(*args, quiet=False)(False)
+    except ClipPaused:
+        pass
+    assert host.saved is not None
+    assert host.saved.stage == "step"
+    assert host.saved.step == 1
+    assert host.saved.expert is None
+    assert host.saved.done == 4
+    try:
+        Runtime._load_stop(*args, quiet=True)(True)
+    except ClipPaused:
+        pass
+    assert host.saved.expert == "high_noise"
+    assert host.saved.step == 1
+
+
+def test_cancel_discards_the_hold(tmp_path) -> None:
+    state: dict = {"video_home": tmp_path, "preempt": _Flag(), "cancel": _Flag()}
+    runtime = _Pausing(state)
+    runtime.state["preempt"].set = lambda: runtime.state["cancel"].set()
+    body = {"prompt": "move", "image": _png(), "frames": 5, "size": "16x16", "model": "row"}
+    reply = _Reply()
+    handle_video(reply, runtime, body, None, None, state)
+    job = state["videos"][reply.payload["id"]]
+    assert job["status"] == "in_progress"
+    assert "video_hold" not in state
 
 
 def test_close_drops_the_device_and_the_expert() -> None:

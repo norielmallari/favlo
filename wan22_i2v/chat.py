@@ -1,4 +1,4 @@
-"""HTTP handlers. Chat is refused. Video is one MP4 job."""
+"""Chat is refused. Video is one MP4 job. The listener turns the reply into HTTP."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from typing import Any, NamedTuple
 import numpy as np
 
 from favlo.videos import reported_quality, store_source, sweep_videos
+from wan22_i2v.hold import ClipHold, ClipPaused
 from wan22_i2v.png import decode_png, resize_rgb
 from wan22_i2v.progress import ClipProgress, clip_label
 from wan22_i2v.schedule import (
@@ -40,7 +41,7 @@ class VideoFields(NamedTuple):
 
 
 def handle_chat(
-    handler: Any,
+    reply: Any,
     runtime: Any,
     body: dict[str, Any],
     selection: Any,
@@ -48,11 +49,11 @@ def handle_chat(
     state: dict[str, Any],
 ) -> None:
     del runtime, body, selection, args, state
-    _reject(handler, "wan22-i2v generates video at POST /v1/videos", None)
+    _reject(reply, "wan22-i2v generates video at POST /v1/videos", None)
 
 
 def handle_video(
-    handler: Any,
+    reply: Any,
     runtime: Any,
     body: dict[str, Any],
     selection: Any,
@@ -63,39 +64,63 @@ def handle_video(
     try:
         fields = video_fields(body)
     except VideoRequestError as exc:
-        _reject(handler, str(exc), exc.param)
+        _reject(reply, str(exc), exc.param)
         return
-    job = _job(_model_id(body, selection), fields)
     videos = state.setdefault("videos", {})
     if not isinstance(videos, dict):
         videos = {}
         state["videos"] = videos
-    videos[job["id"]] = job
-    handler._json(200, job)
+    held = _held(state, fields)
+    if held is None:
+        job = _job(_model_id(body, selection), fields)
+        videos[job["id"]] = job
+        hold = None
+    else:
+        job = held["job"]
+        hold = held["hold"]
+    if getattr(reply, "payload", None) is not job:
+        reply.json(200, job)
     progress = ClipProgress(
         job=job,
         console=getattr(runtime, "console", None),
         clip=clip_label(fields.width, fields.height, fields.frames, FPS),
     )
+    progress.hold = hold
+    progress.interrupt = lambda: _reason(state)
+    home = state.get("video_home")
+    root = home if isinstance(home, Path) else None
     try:
-        avi, _timing = runtime.generate(
-            fields.prompt,
-            fields.image,
-            fields.frames,
-            fields.width,
-            fields.height,
-            fields.seed,
-            progress,
-        )
+        if hold is not None and hold.avi is not None:
+            avi = hold.avi
+        else:
+            avi, _timing = runtime.generate(
+                fields.prompt,
+                fields.image,
+                fields.frames,
+                fields.width,
+                fields.height,
+                fields.seed,
+                progress,
+            )
+        reason = _reason(state)
+        if reason:
+            raise ClipPaused(reason, ClipHold(stage="pack", avi=avi, done=progress.done))
         progress.stage("mp4")
-        home = state.get("video_home")
-        root = home if isinstance(home, Path) else None
         write_mp4(store_source(job["id"], avi, home=root), fields.quality)
+    except ClipPaused as paused:
+        progress.close("sample paused" if paused.reason == "preempt" else "sample cancelled")
+        if paused.reason == "cancel":
+            state.pop("video_hold", None)
+            return
+        state["video_hold"] = {"job": job, "seed": fields.seed, "hold": paused.hold}
+        return
     except Exception as exc:
+        state.pop("video_hold", None)
         progress.close(progress.summary(failed=True))
         job["status"] = "failed"
         job["error"] = {"code": type(exc).__name__, "message": str(exc)}
         return
+    state.pop("video_hold", None)
     sweep_videos(videos, home=root)
     job["completed_at"] = int(time.time())
     progress.complete()
@@ -127,6 +152,39 @@ def video_fields(body: dict[str, Any]) -> VideoFields:
         raise VideoRequestError(str(exc), "frames") from exc
     resized = resize_rgb(image, height, width)
     return VideoFields(prompt.strip(), resized, frames, width, height, seed, _quality(body))
+
+
+def _reason(state: dict[str, Any]) -> str | None:
+    cancel = state.get("cancel")
+    if getattr(cancel, "is_set", lambda: False)():
+        return "cancel"
+    preempt = state.get("preempt")
+    if getattr(preempt, "is_set", lambda: False)():
+        return "preempt"
+    return None
+
+
+def _held(state: dict[str, Any], fields: VideoFields) -> dict[str, Any] | None:
+    """The paused clip when this request is that same job. A mismatch is dropped."""
+    held = state.get("video_hold")
+    if not isinstance(held, dict):
+        return None
+    job = held.get("job")
+    hold = held.get("hold")
+    same = (
+        isinstance(job, dict)
+        and isinstance(hold, ClipHold)
+        and job.get("status") == "in_progress"
+        and held.get("seed") == fields.seed
+        and job.get("prompt") == fields.prompt
+        and job.get("frames") == fields.frames
+        and job.get("quality") == fields.quality
+        and job.get("size") == f"{fields.width}x{fields.height}"
+    )
+    state.pop("video_hold", None)
+    if not same or not isinstance(job, dict) or not isinstance(hold, ClipHold):
+        return None
+    return {"job": job, "hold": hold}
 
 
 def _job(model: str, fields: VideoFields) -> dict[str, Any]:
@@ -233,8 +291,8 @@ def _size(value: Any) -> tuple[int, int]:
     return int(left), int(right)
 
 
-def _reject(handler: Any, message: str, param: str | None) -> None:
-    handler._json(
+def _reject(reply: Any, message: str, param: str | None) -> None:
+    reply.json(
         400,
         {
             "error": {

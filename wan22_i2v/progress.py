@@ -56,6 +56,7 @@ class ClipProgress:
         self.clip = clip
         self.row: Any = None
         self.started = time.perf_counter()
+        self._count = True
 
     def open(self, total: int) -> None:
         """Open the row once the piece count is known. The clip label is logged once."""
@@ -84,8 +85,14 @@ class ClipProgress:
             return "sample failed"
         return f"sample {self.done}/{self.total} layers"
 
+    def counting(self, enabled: bool) -> None:
+        """When false, ``advance`` ignores a piece that was already counted."""
+        self._count = enabled
+
     def advance(self) -> None:
         """Count one finished piece. The job stays below 100 until the caller completes it."""
+        if not self._count:
+            return
         self.done += 1
         if self.total > 0:
             self.done = min(self.total, self.done)
