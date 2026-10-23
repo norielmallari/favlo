@@ -7,8 +7,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_a_pipeline_entry_is_the_file_that_names_itself(tmp_path: Path) -> None:
-    (tmp_path / "demo-model.py").write_text('PIPELINE = "demo-model"\n', encoding="utf-8")
-    (tmp_path / "notes.py").write_text("PIPELINE = 'other'\n", encoding="utf-8")
+    tree = tmp_path / "pipelines" / "metal41"
+    tree.mkdir(parents=True)
+    (tree / "demo-model.py").write_text('PIPELINE = "demo-model"\n', encoding="utf-8")
+    (tree / "notes.py").write_text("PIPELINE = 'other'\n", encoding="utf-8")
     assert pipeline_names(tmp_path) == ("demo-model",)
 
 

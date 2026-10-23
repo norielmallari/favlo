@@ -41,6 +41,8 @@ class Selection:
     context_length: int = DEFAULT_CONTEXT_LENGTH
     variants: dict[str, dict[str, float | int]] | None = None
     default_variant: str | None = None
+    runtime: str = ""
+    custom: bool = False
 
 
 def load_registry(root: Path | None = None) -> dict[str, Any]:
@@ -110,6 +112,8 @@ def add_model(
     source: str | None = None,
     root: Path | None = None,
     pipeline: str,
+    runtime: str,
+    custom: bool = False,
     max_prompt_tokens: int | None = None,
 ) -> dict[str, Any]:
     data = load_registry(root)
@@ -123,6 +127,8 @@ def add_model(
         alias=alias,
         source=source,
         pipeline=pipeline,
+        runtime=runtime,
+        custom=custom,
         max_prompt_tokens=max_prompt_tokens,
     )
     save_registry(data, root)
@@ -148,25 +154,32 @@ def register_quantized(
     alias: str | None,
     root: Path | None = None,
     pipeline: str,
+    runtime: str,
+    custom: bool = False,
     max_prompt_tokens: int | None = None,
 ) -> None:
     """Write or update the entry for a record this quantize just produced."""
     data = load_registry(root)
     _check_alias(data, alias, folder)
     source_text = str(source)
-    variants, default_variant = pipeline_sampling(pipeline)
+    variants, default_variant = pipeline_sampling(pipeline, runtime=runtime, custom=custom)
     current = data["models"].get(folder)
     if current is not None:
         stored = current.get("source")
         if stored and _same_path(stored, source):
             current["variants"] = variants
             current["default_variant"] = default_variant
+            current["runtime"] = runtime
+            if custom:
+                current["custom"] = True
+            else:
+                current.pop("custom", None)
             if alias is not None:
                 current["alias"] = alias
             if max_prompt_tokens is not None:
                 current["max_prompt_tokens"] = max_prompt_tokens
                 current.pop("max_tokens", None)
-            ctx = card_context_length(pipeline)
+            ctx = card_context_length(pipeline, runtime=runtime, custom=custom)
             if ctx is not None:
                 current["context_length"] = ctx
             else:
@@ -179,6 +192,8 @@ def register_quantized(
         alias=alias,
         source=source_text,
         pipeline=pipeline,
+        runtime=runtime,
+        custom=custom,
         max_prompt_tokens=max_prompt_tokens,
     )
     save_registry(data, root)
@@ -302,7 +317,25 @@ def _pipeline_name(entry: dict[str, Any], folder: str) -> str:
     if not isinstance(pipeline, str) or not pipeline:
         message = f"{folder} has no pipeline"
         raise LookupError(message)
+    _require_runtime(entry, folder)
     return pipeline
+
+
+def _require_runtime(entry: dict[str, Any], folder: str) -> str:
+    from favlo.cli import RUNTIMES
+
+    runtime = entry.get("runtime")
+    if not isinstance(runtime, str) or not runtime:
+        message = f"{folder} has no runtime"
+        raise LookupError(message)
+    if runtime not in RUNTIMES:
+        message = f"{folder} runtime is unknown"
+        raise LookupError(message)
+    return runtime
+
+
+def _custom(entry: dict[str, Any]) -> bool:
+    return bool(entry.get("custom"))
 
 
 def _entry(
@@ -310,12 +343,15 @@ def _entry(
     alias: str | None,
     source: str | None,
     pipeline: str,
+    runtime: str,
+    custom: bool = False,
     max_prompt_tokens: int | None = None,
 ) -> dict[str, Any]:
-    variants, default_variant = pipeline_sampling(pipeline)
-    ctx = card_context_length(pipeline)
-    entry = {
+    variants, default_variant = pipeline_sampling(pipeline, runtime=runtime, custom=custom)
+    ctx = card_context_length(pipeline, runtime=runtime, custom=custom)
+    entry: dict[str, Any] = {
         "pipeline": pipeline,
+        "runtime": runtime,
         "alias": alias,
         "source": source,
         "kv_cache": "e4m3",
@@ -324,6 +360,8 @@ def _entry(
         "default_variant": default_variant,
         "context_length": ctx if ctx is not None else DEFAULT_CONTEXT_LENGTH,
     }
+    if custom:
+        entry["custom"] = True
     if max_prompt_tokens is not None:
         entry["max_prompt_tokens"] = max_prompt_tokens
     return entry
@@ -422,6 +460,8 @@ def _selection(
         context_length=_context_length(entry),
         variants=stored,
         default_variant=_default_variant(entry),
+        runtime=_require_runtime(entry, folder),
+        custom=_custom(entry),
     )
 
 
@@ -483,10 +523,10 @@ def _same_path(stored: str, source: Path) -> bool:
     return Path(stored).expanduser().resolve() == source.expanduser().resolve()
 
 
-def card_context_length(pipeline: str) -> int | None:
+def card_context_length(pipeline: str, *, runtime: str, custom: bool = False) -> int | None:
     """``CONTEXT_LENGTH`` on the sampling card, when the pipeline defines one."""
     package = pipeline.replace("-", "_")
-    path = _repo_root() / package / "sampling.py"
+    path = _sampling_path(package, runtime=runtime, custom=custom)
     if not path.is_file():
         return None
     spec = importlib.util.spec_from_file_location(f"{package}.sampling_context", path)
@@ -500,13 +540,15 @@ def card_context_length(pipeline: str) -> int | None:
     return value
 
 
-def pipeline_sampling(pipeline: str) -> tuple[dict[str, dict[str, float | int]], str]:
+def pipeline_sampling(
+    pipeline: str, *, runtime: str, custom: bool = False
+) -> tuple[dict[str, dict[str, float | int]], str]:
     """Load ``VARIANTS`` and ``DEFAULT_VARIANT`` from ``<package>/sampling.py``.
 
     The module is loaded by path so registration does not import the pipeline.
     """
     package = pipeline.replace("-", "_")
-    path = _repo_root() / package / "sampling.py"
+    path = _sampling_path(package, runtime=runtime, custom=custom)
     if not path.is_file():
         message = f"{pipeline} has no sampling card at {package}/sampling.py"
         raise ValueError(message)
@@ -561,6 +603,12 @@ def _default_variant(entry: dict[str, Any]) -> str | None:
     if isinstance(name, str) and name in _stored_variants(entry):
         return name
     return None
+
+
+def _sampling_path(package: str, *, runtime: str, custom: bool) -> Path:
+    from favlo.cli import pipeline_tree
+
+    return pipeline_tree(runtime, custom=custom) / package / "sampling.py"
 
 
 def _repo_root() -> Path:

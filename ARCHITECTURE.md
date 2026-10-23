@@ -8,7 +8,7 @@ This file is the map and the write set. It wins for the listener, the registry, 
 
 | Area | Code | Note |
 |---|---|---|
-| Command discovery | `src/favlo/cli.py` | This file. The command finds each `*-*.py` entry. Adding a runtime does not edit `cli.py`. |
+| Command discovery | `src/favlo/cli.py` | This file. The command scans `pipelines/metal41`, `pipelines/cuda`, and `custom-pipelines/`. Adding a runtime does not edit `cli.py`. |
 | Listener and daemon | `src/favlo/listener.py`, `src/favlo/daemon.py` | [docs/serve.md](docs/serve.md) |
 | Terminal chat | `src/favlo/talk.py`, `src/favlo/persona.py` | [docs/ai-assistance](docs/ai-assistance/README.md) |
 | Console | `src/favlo/console.py` | [docs/console.md](docs/console.md) |
@@ -29,30 +29,27 @@ Each runtime is a separate write set. An agent developing one runtime edits that
 
 | Pipeline | Entry | Package | As-built note |
 |---|---|---|---|
-| `qwen38-flash-next` | `qwen38-flash-next.py` | `qwen38_flash_next/` | [docs/qwen38-flash-next/architecture.md](docs/qwen38-flash-next/architecture.md) |
-| `qwen38-27b` | `qwen38-27b.py` | `qwen38_27b/` | [docs/qwen38-27b/README.md](docs/qwen38-27b/README.md) |
-| `qwen36-35b-a3b` | `qwen36-35b-a3b.py` | `qwen36_35b_a3b/` | [docs/qwen36-35b-a3b/README.md](docs/qwen36-35b-a3b/README.md) |
-| `z-image-turbo` | `z-image-turbo.py` | `z_image_turbo/` | [docs/z-image-turbo/README.md](docs/z-image-turbo/README.md) |
-| `wan22-i2v` | `wan22-i2v.py` | `wan22_i2v/` | [docs/wan22-i2v/README.md](docs/wan22-i2v/README.md) |
-| `ace-step-15-turbo` | `ace-step-15-turbo.py` | `ace_step_15_turbo/` | [docs/ace-step-15-turbo/README.md](docs/ace-step-15-turbo/README.md) |
+| `qwen38-flash-next` | `pipelines/metal41/qwen38-flash-next.py` | `pipelines/metal41/qwen38_flash_next/` | [docs/qwen38-flash-next/architecture.md](docs/qwen38-flash-next/architecture.md) |
+| `qwen38-27b` | `pipelines/metal41/qwen38-27b.py` | `pipelines/metal41/qwen38_27b/` | [docs/qwen38-27b/README.md](docs/qwen38-27b/README.md) |
+| `qwen36-35b-a3b` | `pipelines/metal41/qwen36-35b-a3b.py` | `pipelines/metal41/qwen36_35b_a3b/` | [docs/qwen36-35b-a3b/README.md](docs/qwen36-35b-a3b/README.md) |
+| `z-image-turbo` | `pipelines/metal41/z-image-turbo.py` | `pipelines/metal41/z_image_turbo/` | [docs/z-image-turbo/README.md](docs/z-image-turbo/README.md) |
+| `wan22-i2v` | `pipelines/metal41/wan22-i2v.py` | `pipelines/metal41/wan22_i2v/` | [docs/wan22-i2v/README.md](docs/wan22-i2v/README.md) |
+| `ace-step-15-turbo` | `pipelines/metal41/ace-step-15-turbo.py` | `pipelines/metal41/ace_step_15_turbo/` | [docs/ace-step-15-turbo/README.md](docs/ace-step-15-turbo/README.md) |
 
-The entry filename may contain hyphens. The command loads it by path. It is not an importable module name. The package beside it uses underscores. The entry sets `PIPELINE` to that filename stem. A runtime's write set is the entry file, the package, `docs/<pipeline>/`, and tests that import only that package. A new runtime adds a row to the table above and its own doc directory. It does not edit another row's package, shaders, tests, or docs.
+The entry filename may contain hyphens. The command loads it by path from `pipelines/<runtime>/`. It is not an importable module name. The package beside it uses underscores. The entry sets `PIPELINE` to that filename stem. A runtime's write set is the entry file, the package, `docs/<pipeline>/`, and tests that import only that package. A new runtime adds a row to the table above and its own doc directory. It does not edit another row's package, shaders, tests, or docs. Shipped rows use `runtime` `metal41`. `pipelines/cuda` is empty until a CUDA pipeline names the toolkit it needs. A custom entry lives under `custom-pipelines/<runtime>/` and its registry row sets `custom` true. A missing or unknown `runtime` is an error.
 
 Tests for the listener, the registry, and the console live in `tests/test_cli.py`, `tests/test_server.py`, `tests/test_registry.py`, and `tests/test_console.py`. A pipeline's tests do not import another pipeline.
 
 ## Registry
 
-`models/registry.json` is gitignored. A row stores the folder, the pipeline entry, an alias, the BF16 source path, the key/value mode, the resident percent, `context_length`, and the sampling card copied from that pipeline's `sampling.py`. A row that omits `context_length` uses 131072. The stored names are the `:suffix` ids. A bare model id selects no row. The pipeline applies its default variant, or the row the request selects. `serve` does not register a record it finds on disk. A fresh tree has no rows. `GET /v1/models` lists every registered language row, including each sampling suffix that row stores, and each object includes `context_length`. A pipeline that defines `handle_image`, `handle_video`, or `handle_music` is omitted, and `GET /v1/models/{id}` for that id is 404.
+`models/registry.json` is gitignored. A row stores the folder, the pipeline entry, `runtime`, an alias, the BF16 source path, the key/value mode, the resident percent, `context_length`, and the sampling card copied from that pipeline's `sampling.py`. `runtime` is `metal41` or `cuda`. A shipped row omits `custom`. A custom row sets `custom` true. `serve` loads `pipelines/<runtime>/<pipeline>.py`, or `custom-pipelines/<runtime>/<pipeline>.py` when `custom` is true. A row that omits `context_length` uses 131072. The stored names are the `:suffix` ids. A bare model id selects no row. The pipeline applies its default variant, or the row the request selects. `serve` does not register a record it finds on disk. A fresh tree has no rows. `GET /v1/models` lists every registered language row, including each sampling suffix that row stores, and each object includes `context_length`. A pipeline that defines `handle_image`, `handle_video`, or `handle_music` is omitted, and `GET /v1/models/{id}` for that id is 404.
 
 ## Layout
 
 ```text
-qwen38-flash-next.py    command entry; loads the package by path
-qwen38_flash_next/      this model's pipeline; see its note
-qwen38-27b.py           command entry; loads the package by path
-qwen38_27b/             Qwen3.8-27B. It does not import Flash Next.
-qwen36-35b-a3b.py       command entry; loads the package by path
-qwen36_35b_a3b/         Qwen3.6-35B-A3B. It does not import another pipeline.
+pipelines/metal41/      shipped pipelines that require Metal 4.1
+pipelines/cuda/         empty until a CUDA pipeline exists
+custom-pipelines/       gitignored; one entry and package per custom model
 src/favlo/              process entry; the listener loads the pipeline a request names
   cli.py                discovers entry files; a new runtime does not edit this
   registry.py           folders, aliases, pipelines, and sampling variants

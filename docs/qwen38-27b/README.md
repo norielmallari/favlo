@@ -2,7 +2,7 @@
 
 As-built note for the `qwen38-27b` pipeline. The process contract is [../../ARCHITECTURE.md](../../ARCHITECTURE.md). This directory wins for this pipeline's records and kernels. Another pipeline does not edit it.
 
-Clients reach this pipeline through `favlo serve`. `GET /v1/models` lists it once a record is registered, and the `model` field on `POST /v1/chat/completions` loads it. `kernels`, `quantize`, `bf16`, `complete`, and `models` require `favlo --qwen38-27b`. That flag loads `qwen38-27b.py`, which loads `qwen38_27b`. The package does not import `qwen38_flash_next` or `qwen36_35b_a3b`.
+Clients reach this pipeline through `favlo serve`. `GET /v1/models` lists it once a record is registered, and the `model` field on `POST /v1/chat/completions` loads it. `kernels`, `quantize`, `bf16`, `complete`, and `models` require `favlo --qwen38-27b`. That flag loads `pipelines/metal41/qwen38-27b.py`, which loads `qwen38_27b`. The package does not import `qwen38_flash_next` or `qwen36_35b_a3b`.
 
 The official checkpoint is [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B). Those weights are under the Apache License, Version 2.0.
 

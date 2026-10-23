@@ -56,6 +56,7 @@ def _quantize(source: Path | None, out: Path | None) -> int:
         source=origin,
         alias=None,
         pipeline="z-image-turbo",
+        runtime="metal41",
         max_prompt_tokens=1536,
     )
     print(dest, flush=True)

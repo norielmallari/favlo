@@ -201,6 +201,7 @@ def _register(output: Path, source: Path) -> None:
         source=source,
         alias="qwen36-35b-a3b",
         pipeline=PIPELINE,
+        runtime="metal41",
     )
 
 
@@ -223,6 +224,7 @@ def _quantize(args: argparse.Namespace) -> int:
             source=src,
             alias="qwen36-35b-a3b",
             pipeline=PIPELINE,
+            runtime="metal41",
         )
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         sys.stderr.write(f"{exc}\n")
@@ -284,6 +286,7 @@ def _models(args: argparse.Namespace) -> int:
                 alias=args.alias,
                 source=args.source,
                 pipeline=PIPELINE,
+                runtime="metal41",
             )
         elif command == "alias":
             set_alias(args.folder, args.alias)

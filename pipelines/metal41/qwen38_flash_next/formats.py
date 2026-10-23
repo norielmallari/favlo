@@ -23,11 +23,13 @@ RECORD_VERSION = 5
 QUANT_LAYOUT_VERSION = 6
 _QUANT_TAG = {8: "fp8", 4: "fp4", 2: "int2"}
 # Version 6. One file per quant. This directory is uniform fp4.
-DEFAULT_RECORD = (
-    Path(__file__).resolve().parents[1]
-    / "models"
-    / "Qwen3.8-Flash-Next-fp4"
-)
+def _default_record() -> Path:
+    from favlo.cli import repo_root
+
+    return repo_root() / "models" / "Qwen3.8-Flash-Next-fp4"
+
+
+DEFAULT_RECORD = _default_record()
 
 
 DEFAULT_QUANT_MAP = Path(__file__).with_name("quant_map.json")

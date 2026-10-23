@@ -13,8 +13,8 @@ Add these, and nothing of another pipeline:
 
 | Piece | Path |
 |---|---|
-| Entry | `<pipeline>.py` at the repo root |
-| Package | `<package>/` where `<package>` is `<pipeline>` with hyphens replaced by underscores |
+| Entry | `pipelines/metal41/<pipeline>.py` |
+| Package | `pipelines/metal41/<package>/` where `<package>` is `<pipeline>` with hyphens replaced by underscores |
 | Note | `docs/<pipeline>/` |
 | Tests | `tests/` files that import only `<package>` |
 
@@ -29,7 +29,7 @@ Add `<package>/sampling.py` with no imports from the package. Registration loads
 - `VARIANTS`: a non-empty dict. Each name is one token and contains no colon. Each row sets `temperature`, `top_p`, `top_k`, and `presence_penalty`.
 - `DEFAULT_VARIANT`: one of those names.
 
-`add_model` and `register_quantized` copy that module onto the row. Do not pass a card into the registry. A `:suffix` id is one of those names. A bare id selects no row; this pipeline applies `DEFAULT_VARIANT`, or the row the request selects. Numbers come from this model's card, not from another pipeline's `sampling.py`.
+`add_model` and `register_quantized` copy that module onto the row and store `runtime` `metal41`. A custom entry under `custom-pipelines/metal41/` also sets `custom` true. Do not pass a card into the registry. A `:suffix` id is one of those names. A bare id selects no row; this pipeline applies `DEFAULT_VARIANT`, or the row the request selects. Numbers come from this model's card, not from another pipeline's `sampling.py`.
 
 ## Docs
 

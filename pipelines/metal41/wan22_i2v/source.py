@@ -69,7 +69,9 @@ FILES = (
 
 
 def models_dir(root: Path | None = None) -> Path:
-    base = root or Path(__file__).resolve().parents[1]
+    from favlo.cli import repo_root
+
+    base = root or repo_root()
     return base / "models"
 
 

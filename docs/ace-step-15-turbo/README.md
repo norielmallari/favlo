@@ -1,6 +1,6 @@
 # ACE-Step 1.5 XL Turbo
 
-Stereo music from a caption and optional lyrics. The official base model is [ACE-Step/acestep-v15-xl-turbo](https://huggingface.co/ACE-Step/acestep-v15-xl-turbo). Favlo reads the Diffusers split [ACE-Step/acestep-v15-xl-turbo-diffusers](https://huggingface.co/ACE-Step/acestep-v15-xl-turbo-diffusers) and serves the packed directory `acestep-v15-xl-turbo-fp8-fp4`. Both checkpoints are under the MIT License.
+Stereo music from a caption and optional lyrics. The official base model is [ACE-Step/acestep-v15-xl-turbo](https://huggingface.co/ACE-Step/acestep-v15-xl-turbo). Favlo reads the Diffusers split [ACE-Step/acestep-v15-xl-turbo-diffusers](https://huggingface.co/ACE-Step/acestep-v15-xl-turbo-diffusers) and serves the packed directory `acestep-v15-xl-turbo-fp8-fp4`. Both checkpoints are under the MIT License. `favlo --ace-step-15-turbo` loads `pipelines/metal41/ace-step-15-turbo.py`.
 
 ```text
 uv run favlo --ace-step-15-turbo setup

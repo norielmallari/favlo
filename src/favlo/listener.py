@@ -130,15 +130,19 @@ def _release(runtime: Any, shutdown: _Shutdown, server: Any = None) -> None:
         shutdown.disarm()
 
 
-def _pipeline_module(name: str) -> Any:
+def _pipeline_module(selection: Any) -> Any:
     from favlo.cli import load_pipeline
 
-    return load_pipeline(name)
+    return load_pipeline(
+        selection.pipeline,
+        runtime=selection.runtime,
+        custom=selection.custom,
+    )
 
 
 def _open_runtime(selection: Any, console: Any, max_memory: str | None) -> Any:
     """The pipeline named on the registry row. The previous runtime is already closed."""
-    module = _pipeline_module(selection.pipeline)
+    module = _pipeline_module(selection)
     opener = getattr(module, "open_runtime", None)
     if not callable(opener):
         message = f"{selection.pipeline} does not open a runtime"
@@ -174,7 +178,7 @@ def _install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
     state["runtime"] = runtime
     state["record"] = selection.folder
     state["pipeline"] = selection.pipeline
-    state["module"] = _pipeline_module(selection.pipeline)
+    state["module"] = _pipeline_module(selection)
     shutdown = getattr(args, "shutdown", None)
     if shutdown is not None:
         shutdown.runtime = runtime

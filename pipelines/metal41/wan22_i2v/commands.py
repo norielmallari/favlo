@@ -78,6 +78,7 @@ def _quantize(args: argparse.Namespace) -> int:
         source=args.high,
         alias=None,
         pipeline="wan22-i2v",
+        runtime="metal41",
         max_prompt_tokens=int(config["text_len"]),
     )
     print(dest, flush=True)

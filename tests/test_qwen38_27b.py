@@ -744,9 +744,8 @@ def test_openai_client_receives_a_token_before_generation_ends(monkeypatch: pyte
             assert chunk.object == "chat.completion.chunk"
             if not chunk.choices:
                 continue
-            if chunk.choices[0].delta.content:
+            if first is None and chunk.choices[0].delta.content:
                 first = time.monotonic()
-                break
         stream.close()
     finally:
         server.shutdown()

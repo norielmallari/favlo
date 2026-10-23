@@ -604,8 +604,12 @@ def _media_rows() -> list[dict[str, Any]]:
         pipeline = entry.get("pipeline")
         if not isinstance(pipeline, str) or pipeline in seen:
             continue
+        runtime = entry.get("runtime")
+        if not isinstance(runtime, str) or not runtime:
+            message = f"{folder} has no runtime"
+            raise LookupError(message)
         try:
-            module = load_pipeline(pipeline)
+            module = load_pipeline(pipeline, runtime=runtime, custom=bool(entry.get("custom")))
         except (FileNotFoundError, ImportError, OSError):
             continue
         kinds = media_kinds(module)

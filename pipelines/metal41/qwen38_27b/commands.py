@@ -163,7 +163,13 @@ def _quantize(args: argparse.Namespace) -> int:
     src = args.src or snapshot_dir(_BF16_REPO)
     try:
         output = quantize(src, args.output, ffn_fp8=_percent(args.ffn_fp8))
-        register_quantized(output.name, source=src, alias="qwen38-27b", pipeline=PIPELINE)
+        register_quantized(
+            output.name,
+            source=src,
+            alias="qwen38-27b",
+            pipeline=PIPELINE,
+            runtime="metal41",
+        )
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError, KeyError) as exc:
         sys.stderr.write(f"{exc}\n")
         return 1
@@ -206,7 +212,13 @@ def _models(args: argparse.Namespace) -> int:
     command = getattr(args, "models_command", None)
     try:
         if command == "add":
-            add_model(args.folder, alias=args.alias, source=args.source, pipeline=PIPELINE)
+            add_model(
+                args.folder,
+                alias=args.alias,
+                source=args.source,
+                pipeline=PIPELINE,
+                runtime="metal41",
+            )
         elif command == "alias":
             set_alias(args.folder, args.alias)
         listing = format_listing()

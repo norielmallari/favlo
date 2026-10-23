@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_pipeline():
-    path = ROOT / "qwen38-flash-next.py"
+    path = ROOT / "pipelines" / "metal41" / "qwen38-flash-next.py"
     spec = importlib.util.spec_from_file_location("qwen38_flash_next_pipeline", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

@@ -575,6 +575,8 @@ def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
     first = SimpleNamespace(
         folder="flash",
         pipeline="qwen38-flash-next",
+        runtime="metal41",
+        custom=False,
         alias=None,
         resident_percent=None,
         kv_cache="e4m3",
@@ -583,6 +585,8 @@ def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
     second = SimpleNamespace(
         folder="dense",
         pipeline="qwen38-27b",
+        runtime="metal41",
+        custom=False,
         alias="qwen38-27b",
         resident_percent=None,
         kv_cache="e4m3",
@@ -1122,12 +1126,14 @@ def test_media_http_routes_are_gone(monkeypatch, tmp_path) -> None:
                 "models": {
                     "example-model": {
                         "pipeline": "z-image-turbo",
+                        "runtime": "metal41",
                         "alias": None,
                         "variants": {},
                         "context_length": 1536,
                     },
                     "text-model": {
                         "pipeline": "qwen36-35b-a3b",
+                        "runtime": "metal41",
                         "alias": None,
                         "variants": {},
                         "context_length": 131072,

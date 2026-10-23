@@ -30,7 +30,7 @@ def _record(root, name: str) -> None:
 def test_pipeline_id_names_the_only_row_of_that_pipeline(tmp_path) -> None:
     folder = "Qwen-h128-fp8-c384-fp4"
     _record(tmp_path, folder)
-    add_model(folder, alias="flash", root=tmp_path, pipeline=PIPELINE)
+    add_model(folder, alias="flash", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
     selection = resolve(PIPELINE, root=tmp_path)
     assert selection.folder == folder
     assert selection.requested_id == PIPELINE
@@ -45,7 +45,7 @@ def test_pipeline_id_names_the_only_row_of_that_pipeline(tmp_path) -> None:
     assert instruct.sampling is not None
     assert instruct.sampling["presence_penalty"] == 1.5
     _record(tmp_path, "other")
-    add_model("other", alias="other-name", root=tmp_path, pipeline=PIPELINE)
+    add_model("other", alias="other-name", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
     with pytest.raises(LookupError, match="unknown model"):
         resolve(PIPELINE, root=tmp_path)
     assert resolve("flash", root=tmp_path).folder == folder
@@ -53,7 +53,7 @@ def test_pipeline_id_names_the_only_row_of_that_pipeline(tmp_path) -> None:
 
 def test_unknown_suffix_names_the_registered_ids(tmp_path) -> None:
     _record(tmp_path, "packed")
-    add_model("packed", alias="short", root=tmp_path, pipeline=PIPELINE)
+    add_model("packed", alias="short", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
     with pytest.raises(LookupError, match="short") as raised:
         resolve("short:draft", root=tmp_path)
     assert "packed" in str(raised.value)
@@ -61,7 +61,7 @@ def test_unknown_suffix_names_the_registered_ids(tmp_path) -> None:
 
 def test_listing_includes_folder_alias_and_variants(tmp_path) -> None:
     _record(tmp_path, "packed")
-    add_model("packed", alias="short", root=tmp_path, pipeline=PIPELINE)
+    add_model("packed", alias="short", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
     rows = model_objects(tmp_path, resident="packed")
     ids = [row["id"] for row in rows]
     assert ids == [
@@ -84,7 +84,13 @@ def test_listing_includes_folder_alias_and_variants(tmp_path) -> None:
 
 def test_registration_stores_the_passed_max_prompt_tokens(tmp_path) -> None:
     _record(tmp_path, "packed")
-    add_model("packed", root=tmp_path, pipeline=PIPELINE, max_prompt_tokens=65536)
+    add_model(
+        "packed",
+        root=tmp_path,
+        pipeline=PIPELINE,
+        runtime="metal41",
+        max_prompt_tokens=65536,
+    )
     assert load_registry(tmp_path)["models"]["packed"]["max_prompt_tokens"] == 65536
     source = tmp_path / "bf16"
     source.mkdir()
@@ -94,7 +100,7 @@ def test_registration_stores_the_passed_max_prompt_tokens(tmp_path) -> None:
         source=source,
         alias=None,
         root=tmp_path,
-        pipeline=PIPELINE,
+        pipeline=PIPELINE, runtime="metal41",
         max_prompt_tokens=65536,
     )
     assert load_registry(tmp_path)["models"]["again"]["max_prompt_tokens"] == 65536
@@ -102,7 +108,7 @@ def test_registration_stores_the_passed_max_prompt_tokens(tmp_path) -> None:
 
 def test_model_row_includes_configured_max_prompt_tokens(tmp_path) -> None:
     _record(tmp_path, "packed")
-    add_model("packed", alias="short", root=tmp_path, pipeline=PIPELINE)
+    add_model("packed", alias="short", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
     data = load_registry(tmp_path)
     data["models"]["packed"]["max_prompt_tokens"] = 65536
     save_registry(data, tmp_path)
@@ -130,12 +136,12 @@ def test_choose_complete_lists_models_when_default_is_unset(tmp_path) -> None:
     with pytest.raises(LookupError, match="no registered model"):
         choose_complete(model=None, record=None, root=tmp_path, pipeline=PIPELINE)
     _record(tmp_path, "one")
-    add_model("one", root=tmp_path, pipeline=PIPELINE)
+    add_model("one", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
     path, selection = choose_complete(model=None, record=None, root=tmp_path, pipeline=PIPELINE)
     assert path.name == "one"
     assert selection is not None
     _record(tmp_path, "two")
-    add_model("two", alias="second", root=tmp_path, pipeline=PIPELINE)
+    add_model("two", alias="second", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
     data = load_registry(tmp_path)
     assert "default" not in data
     data["extra"] = {"kept": True}
@@ -152,11 +158,11 @@ def test_choose_complete_lists_models_when_default_is_unset(tmp_path) -> None:
 def test_alias_must_be_one_unused_name(tmp_path) -> None:
     _record(tmp_path, "one")
     _record(tmp_path, "two")
-    add_model("one", alias="short", root=tmp_path, pipeline=PIPELINE)
+    add_model("one", alias="short", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
     with pytest.raises(ValueError, match="folder"):
-        add_model("two", alias="one", root=tmp_path, pipeline=PIPELINE)
+        add_model("two", alias="one", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
     with pytest.raises(ValueError, match="already used"):
-        add_model("two", alias="short", root=tmp_path, pipeline=PIPELINE)
+        add_model("two", alias="short", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
     with pytest.raises(ValueError, match="single name"):
         set_alias("one", "bad:name", root=tmp_path)
     set_alias("one", "renamed", root=tmp_path)
@@ -168,8 +174,8 @@ def test_a_second_pipeline_is_listed_without_a_default(tmp_path) -> None:
     dense = "Qwen3.8-27B-fp4"
     _record(tmp_path, flash)
     _record(tmp_path, dense)
-    add_model(flash, alias="qwen38-flash-next", root=tmp_path, pipeline=PIPELINE)
-    add_model(dense, alias="qwen38-27b", root=tmp_path, pipeline="qwen38-27b")
+    add_model(flash, alias="qwen38-flash-next", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
+    add_model(dense, alias="qwen38-27b", root=tmp_path, pipeline="qwen38-27b", runtime="metal41")
     data = load_registry(tmp_path)
     assert "default" not in data
     assert resolve("qwen38-flash-next", root=tmp_path).folder == flash
@@ -198,18 +204,32 @@ def test_quantize_registration_refuses_a_different_source(tmp_path) -> None:
     source.mkdir()
     other = tmp_path / "other"
     other.mkdir()
-    register_quantized("packed", source=source, alias="short", root=tmp_path, pipeline=PIPELINE)
+    register_quantized(
+        "packed",
+        source=source,
+        alias="short",
+        root=tmp_path,
+        pipeline=PIPELINE,
+        runtime="metal41",
+    )
     stored = load_registry(tmp_path)
     assert "default" not in stored
     assert list(stored["models"]) == ["packed"]
-    register_quantized("packed", source=source, alias="short", root=tmp_path, pipeline=PIPELINE)
+    register_quantized(
+        "packed",
+        source=source,
+        alias="short",
+        root=tmp_path,
+        pipeline=PIPELINE,
+        runtime="metal41",
+    )
     with pytest.raises(ValueError, match="different source"):
         refuse_conflicting_destination("packed", other, root=tmp_path)
 
 
 def test_registration_copies_the_pipeline_card(tmp_path) -> None:
     _record(tmp_path, "packed")
-    add_model("packed", root=tmp_path, pipeline=PIPELINE)
+    add_model("packed", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
     flash = load_registry(tmp_path)["models"]["packed"]
     assert flash["default_variant"] == "thinking"
     assert flash["variants"]["thinking"]["presence_penalty"] == 0.0
@@ -225,7 +245,13 @@ def test_registration_copies_the_pipeline_card(tmp_path) -> None:
 
 def test_qwen36_registration_uses_that_pipeline_card(tmp_path) -> None:
     _record(tmp_path, "a3b")
-    add_model("a3b", alias="qwen36-35b-a3b", root=tmp_path, pipeline="qwen36-35b-a3b")
+    add_model(
+        "a3b",
+        alias="qwen36-35b-a3b",
+        root=tmp_path,
+        pipeline="qwen36-35b-a3b",
+        runtime="metal41",
+    )
     entry = load_registry(tmp_path)["models"]["a3b"]
     assert entry["default_variant"] == "thinking"
     assert entry["variants"]["thinking"]["presence_penalty"] == 1.5
@@ -248,12 +274,26 @@ def test_qwen36_registration_uses_that_pipeline_card(tmp_path) -> None:
 def test_reregister_refreshes_the_card_from_the_pipeline(tmp_path) -> None:
     source = tmp_path / "bf16"
     source.mkdir()
-    register_quantized("packed", source=source, alias="short", root=tmp_path, pipeline=PIPELINE)
+    register_quantized(
+        "packed",
+        source=source,
+        alias="short",
+        root=tmp_path,
+        pipeline=PIPELINE,
+        runtime="metal41",
+    )
     data = load_registry(tmp_path)
     data["models"]["packed"]["variants"]["thinking"]["presence_penalty"] = 9
     data["models"]["packed"]["default_variant"] = "instruct"
     save_registry(data, tmp_path)
-    register_quantized("packed", source=source, alias="short", root=tmp_path, pipeline=PIPELINE)
+    register_quantized(
+        "packed",
+        source=source,
+        alias="short",
+        root=tmp_path,
+        pipeline=PIPELINE,
+        runtime="metal41",
+    )
     entry = load_registry(tmp_path)["models"]["packed"]
     assert entry["default_variant"] == "thinking"
     assert entry["variants"]["thinking"]["presence_penalty"] == 0.0

@@ -233,7 +233,9 @@ def _compare(
 
 
 def main() -> int:
-    root = Path(__file__).resolve().parents[1] / "models"
+    from favlo.cli import repo_root
+
+    root = repo_root() / "models"
     source = root / "Qwen3.8-Flash-Next-h128-fp4-c384-fp4"
     dest = rewrite_fp4(source)
     print(dest.name)

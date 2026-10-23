@@ -51,7 +51,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         quantize(source, dest)
         from favlo.registry import register_quantized
 
-        register_quantized(dest.name, source=source, alias=None, pipeline="ace-step-15-turbo")
+        register_quantized(
+            dest.name,
+            source=source,
+            alias=None,
+            pipeline="ace-step-15-turbo",
+            runtime="metal41",
+        )
         print(dest)
         return 0
     record = root / PACKED_NAME if args.record is None else args.record

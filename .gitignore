@@ -33,4 +33,5 @@ docs/prefix-cache-ssd/
 *.bin
 *.gguf
 models/
+custom-pipelines/
 models.previous/

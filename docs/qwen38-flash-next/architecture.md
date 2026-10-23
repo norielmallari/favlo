@@ -2,7 +2,7 @@
 
 As-built contract for the `qwen38-flash-next` pipeline. The process, the listener, and which files an agent may edit are [../../ARCHITECTURE.md](../../ARCHITECTURE.md). That file wins on those points. This file wins for this pipeline's records, cache, prefix, and kernels. Another pipeline does not edit this tree.
 
-Clients reach this pipeline through `favlo serve`. `GET /v1/models` lists it once a record is registered, and the `model` field on `POST /v1/chat/completions` loads it. Quantize, probe, matmul, kernels, bf16, and complete require `favlo --qwen38-flash-next`. That flag loads `qwen38-flash-next.py`, which loads the `qwen38_flash_next` package. The package does not import another pipeline.
+Clients reach this pipeline through `favlo serve`. `GET /v1/models` lists it once a record is registered, and the `model` field on `POST /v1/chat/completions` loads it. Quantize, probe, matmul, kernels, bf16, and complete require `favlo --qwen38-flash-next`. That flag loads `pipelines/metal41/qwen38-flash-next.py`, which loads the `qwen38_flash_next` package. The package does not import another pipeline.
 
 The target machine is an M5 Pro: 20 shader cores, a neural accelerator beside the shader pipelines in each core, 307 GB/s unified DRAM, and an APFS volume whose device block and allocation block are 4096 bytes. Requires macOS 27 and the matching Metal SDK. The 16-core Neural Engine is not used. Sub-byte tensor planes also require 128-byte alignment inside the record. A 4 KB file offset does not by itself satisfy that.
 
@@ -12,7 +12,7 @@ Registration copies `sampling.py` onto the registry row. The default variant is 
 
 ## In scope
 
-- `qwen38_flash_next` runs three stages for this model: a BF16 calibration prefill, a converter from Hugging Face BF16 shards to native records, and the text runtime. `qwen38-flash-next.py` is the entry the command loads.
+- `qwen38_flash_next` runs three stages for this model: a BF16 calibration prefill, a converter from Hugging Face BF16 shards to native records, and the text runtime. `pipelines/metal41/qwen38-flash-next.py` is the entry the command loads.
 - One sequence at a time. Prefill and decode. Layered kernels.
 - `GET /v1/models` and `POST /v1/chat/completions`, including streaming.
 - The checkpoint chat template. Sampling is temperature, top-p, and top-k.

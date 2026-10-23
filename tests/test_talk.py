@@ -156,6 +156,7 @@ def test_registered_models_reads_the_registry(tmp_path: Path) -> None:
                     "Qwen3.6-35B-A3B-fp4": {
                         "alias": "qwen36-35b-a3b",
                         "pipeline": "qwen36-35b-a3b",
+                        "runtime": "metal41",
                         "kv_cache": "e4m3",
                     }
                 },

@@ -104,6 +104,7 @@ def quantize_main(args: Any) -> int:
             source=source,
             alias=getattr(args, "alias", None),
             pipeline=PIPELINE,
+            runtime="metal41",
             max_prompt_tokens=DEFAULT_MAX_PROMPT_TOKENS,
         )
         finished = True
@@ -912,6 +913,7 @@ def models_main(args: Any) -> int:
                 alias=args.alias,
                 source=args.source,
                 pipeline=PIPELINE,
+                runtime="metal41",
                 max_prompt_tokens=DEFAULT_MAX_PROMPT_TOKENS,
             )
         elif command == "alias":

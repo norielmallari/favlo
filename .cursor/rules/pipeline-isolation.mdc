@@ -8,7 +8,7 @@ Edit one runtime. Leave every other runtime's files untouched. Pipeline tests sh
 
 `favlo serve` is the entry point for inference. The client selects one model through the OpenAI endpoints: `GET /v1/models` lists the registry, and the `model` field on `POST /v1/chat/completions` loads that row's pipeline. Quantize and the other non-serve commands require `favlo --<pipeline>`. A new runtime keeps that flag.
 
-The write set for a runtime is its entry file (`<pipeline>.py`, which sets `PIPELINE` to that stem), its package, `docs/<pipeline>/`, and tests that import only that package. Flash Next's note is `docs/qwen38-flash-next/`. 27B's note is `docs/qwen38-27b/`.
+The write set for a runtime is its entry file (`pipelines/metal41/<pipeline>.py`, which sets `PIPELINE` to that stem), its package beside that file, `docs/<pipeline>/`, and tests that import only that package. Flash Next's note is `docs/qwen38-flash-next/`. 27B's note is `docs/qwen38-27b/`.
 
 A new runtime adds those files and one row in the runtime table in `ARCHITECTURE.md`. The command discovers the entry. Do not edit `src/favlo/cli.py` to register it.
 

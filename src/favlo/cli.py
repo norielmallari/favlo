@@ -15,6 +15,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import ModuleType
 
+RUNTIMES = ("metal41", "cuda")
+
 
 def repo_root() -> Path:
     override = os.environ.get("FAVLO_ROOT")
@@ -28,27 +30,58 @@ def repo_root() -> Path:
     raise FileNotFoundError(message)
 
 
+def pipeline_tree(runtime: str, *, custom: bool = False, root: Path | None = None) -> Path:
+    """The directory that holds one runtime's entry files."""
+    if runtime not in RUNTIMES:
+        message = f"unknown runtime: {runtime}"
+        raise ValueError(message)
+    base = "custom-pipelines" if custom else "pipelines"
+    return (root or repo_root()) / base / runtime
+
+
 def pipeline_names(root: Path | None = None) -> tuple[str, ...]:
-    """Entry files at the checkout root. Each sets ``PIPELINE`` to its filename stem.
+    """Entry stems under the four pipeline trees.
 
     A new runtime is a new file. Discovering it does not edit this module.
+    Two files with the same ``PIPELINE`` stem are an error.
     """
-    found: list[str] = []
-    for path in sorted((root or repo_root()).glob("*.py")):
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except (OSError, SyntaxError):
+    return tuple(sorted(pipeline_entries(root)))
+
+
+def pipeline_entries(root: Path | None = None) -> dict[str, Path]:
+    """Stem to entry file. A duplicate stem raises ``ValueError``."""
+    found: dict[str, Path] = {}
+    for custom in (False, True):
+        for runtime in RUNTIMES:
+            directory = pipeline_tree(runtime, custom=custom, root=root)
+            if not directory.is_dir():
+                continue
+            for path in sorted(directory.glob("*.py")):
+                stem = _pipeline_stem(path)
+                if stem is None:
+                    continue
+                previous = found.get(stem)
+                if previous is not None:
+                    message = f"duplicate pipeline {stem}: {previous} and {path}"
+                    raise ValueError(message)
+                found[stem] = path
+    return found
+
+
+def _pipeline_stem(path: Path) -> str | None:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return None
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
             continue
-        for node in tree.body:
-            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
-                continue
-            target = node.targets[0]
-            if not isinstance(target, ast.Name) or target.id != "PIPELINE":
-                continue
-            if isinstance(node.value, ast.Constant) and node.value.value == path.stem:
-                found.append(path.stem)
-                break
-    return tuple(found)
+        target = node.targets[0]
+        if not isinstance(target, ast.Name) or target.id != "PIPELINE":
+            continue
+        if isinstance(node.value, ast.Constant) and node.value.value == path.stem:
+            return path.stem
+    return None
 
 
 def _help(names: Sequence[str]) -> str:
@@ -64,11 +97,23 @@ def _help(names: Sequence[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def load_pipeline(name: str, root: Path | None = None) -> ModuleType:
-    path = (root or repo_root()) / f"{name}.py"
-    if not path.is_file():
-        message = f"pipeline file is missing: {path}"
-        raise FileNotFoundError(message)
+def load_pipeline(
+    name: str,
+    root: Path | None = None,
+    *,
+    runtime: str | None = None,
+    custom: bool = False,
+) -> ModuleType:
+    if runtime is None:
+        path = pipeline_entries(root).get(name)
+        if path is None:
+            message = f"pipeline file is missing: {name}"
+            raise FileNotFoundError(message)
+    else:
+        path = pipeline_tree(runtime, custom=custom, root=root) / f"{name}.py"
+        if not path.is_file():
+            message = f"pipeline file is missing: {path}"
+            raise FileNotFoundError(message)
     spec = importlib.util.spec_from_file_location(f"{name.replace('-', '_')}_pipeline", path)
     if spec is None or spec.loader is None:
         message = f"cannot load pipeline file: {path}"
@@ -88,7 +133,11 @@ def pipeline_main(module: ModuleType) -> Callable[[Sequence[str]], int]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
-    names = pipeline_names()
+    try:
+        names = pipeline_names()
+    except ValueError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 2
     if not args:
         sys.stderr.write(_help(names))
         return 2
