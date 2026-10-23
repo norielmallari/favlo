@@ -247,10 +247,32 @@ kernel void attend(
     }
 }
 
-// Four queries share each key and value tile. Head dim is 128, so the tile is
-// 4 by 128. The decoder head is 512 and stays on `attend`.
-constant uint Q_BLOCK = 4u;
-constant uint K_BLOCK = 4u;
+// Eight queries share four keys. The four dots land in registers, then the
+// softmax rescales once. Head dim is 128. The decoder head is 512 and stays
+// on `attend`.
+constant uint Q_BLOCK = 8u;
+
+static float4 _lane4(
+    device const float* src, uint token, uint heads, uint kv, uint lane)
+{
+    uint base = (token * heads + kv) * 128u + lane * 4u;
+    return float4(src[base], src[base + 1u], src[base + 2u], src[base + 3u]);
+}
+
+static float _dot4(thread float* q, float4 k)
+{
+    return q[0] * k.x + q[1] * k.y + q[2] * k.z + q[3] * k.w;
+}
+
+static void _mix4(thread float* acc, thread float& sum, float dot, float next_max, float4 v)
+{
+    float weight = exp(dot - next_max);
+    sum += weight;
+    acc[0] += weight * v.x;
+    acc[1] += weight * v.y;
+    acc[2] += weight * v.z;
+    acc[3] += weight * v.w;
+}
 
 kernel void attend_q4(
     device const float* query [[buffer(0)]],
@@ -269,12 +291,9 @@ kernel void attend_q4(
     uint lane = lane_id.x;
     uint head = tgid.x;
     uint q0 = tgid.y * Q_BLOCK;
-    uint span = head_dim >> 5;
-    if (head >= q_heads || span != 4u) {
+    if (head >= q_heads || head_dim != 128u) {
         return;
     }
-    threadgroup float k_tile[K_BLOCK * 128u];
-    threadgroup float v_tile[K_BLOCK * 128u];
     uint group = q_heads / kv_heads;
     uint kv = head / group;
     float scale = rsqrt(float(head_dim));
@@ -300,44 +319,71 @@ kernel void attend_q4(
         }
     }
     if (any_live != 0u) {
-        for (uint key0 = 0u; key0 < limit; key0 += K_BLOCK) {
-            uint tile = min(K_BLOCK, limit - key0);
-            for (uint ki = 0u; ki < tile; ++ki) {
-                uint src = ((key0 + ki) * kv_heads + kv) * head_dim + lane * 4u;
-                uint dst = ki * 128u + lane * 4u;
-                for (uint i = 0u; i < 4u; ++i) {
-                    k_tile[dst + i] = key[src + i];
-                    v_tile[dst + i] = value[src + i];
-                }
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+        uint key_index = 0u;
+        for (; key_index + 4u <= limit; key_index += 4u) {
+            float4 k0 = _lane4(key, key_index, kv_heads, kv, lane);
+            float4 k1 = _lane4(key, key_index + 1u, kv_heads, kv, lane);
+            float4 k2 = _lane4(key, key_index + 2u, kv_heads, kv, lane);
+            float4 k3 = _lane4(key, key_index + 3u, kv_heads, kv, lane);
+            float4 v0 = _lane4(value, key_index, kv_heads, kv, lane);
+            float4 v1 = _lane4(value, key_index + 1u, kv_heads, kv, lane);
+            float4 v2 = _lane4(value, key_index + 2u, kv_heads, kv, lane);
+            float4 v3 = _lane4(value, key_index + 3u, kv_heads, kv, lane);
             for (uint block = 0u; block < Q_BLOCK; ++block) {
                 uint token = q0 + block;
-                if (token >= limit) {
+                if (token >= limit || (causal != 0u && key_index > token)) {
                     continue;
                 }
-                for (uint ki = 0u; ki < tile; ++ki) {
-                    uint key_index = key0 + ki;
-                    if (causal != 0u && key_index > token) {
-                        break;
+                float d0 = simd_sum(_dot4(qv[block], k0)) * scale;
+                float d1 = simd_sum(_dot4(qv[block], k1)) * scale;
+                float d2 = simd_sum(_dot4(qv[block], k2)) * scale;
+                float d3 = simd_sum(_dot4(qv[block], k3)) * scale;
+                if (causal != 0u) {
+                    if (key_index > token) {
+                        d0 = -INFINITY;
                     }
-                    float dot = 0.0f;
-                    uint base = ki * 128u + lane * 4u;
-                    for (uint i = 0u; i < 4u; ++i) {
-                        dot += qv[block][i] * k_tile[base + i];
+                    if (key_index + 1u > token) {
+                        d1 = -INFINITY;
                     }
-                    dot = simd_sum(dot) * scale;
-                    float next_max = max(running_max[block], dot);
-                    float alpha = exp(running_max[block] - next_max);
-                    float weight = exp(dot - next_max);
-                    running_sum[block] = running_sum[block] * alpha + weight;
-                    for (uint i = 0u; i < 4u; ++i) {
-                        acc[block][i] = acc[block][i] * alpha + weight * v_tile[base + i];
+                    if (key_index + 2u > token) {
+                        d2 = -INFINITY;
                     }
-                    running_max[block] = next_max;
+                    if (key_index + 3u > token) {
+                        d3 = -INFINITY;
+                    }
                 }
+                float tile_max = max(max(d0, d1), max(d2, d3));
+                float next_max = max(running_max[block], tile_max);
+                float alpha = exp(running_max[block] - next_max);
+                running_sum[block] *= alpha;
+                for (uint i = 0u; i < 4u; ++i) {
+                    acc[block][i] *= alpha;
+                }
+                _mix4(acc[block], running_sum[block], d0, next_max, v0);
+                _mix4(acc[block], running_sum[block], d1, next_max, v1);
+                _mix4(acc[block], running_sum[block], d2, next_max, v2);
+                _mix4(acc[block], running_sum[block], d3, next_max, v3);
+                running_max[block] = next_max;
             }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        for (; key_index < limit; ++key_index) {
+            float4 kk = _lane4(key, key_index, kv_heads, kv, lane);
+            float4 vv = _lane4(value, key_index, kv_heads, kv, lane);
+            for (uint block = 0u; block < Q_BLOCK; ++block) {
+                uint token = q0 + block;
+                if (token >= limit || (causal != 0u && key_index > token)) {
+                    continue;
+                }
+                float dot = simd_sum(_dot4(qv[block], kk)) * scale;
+                float next_max = max(running_max[block], dot);
+                float alpha = exp(running_max[block] - next_max);
+                running_sum[block] *= alpha;
+                for (uint i = 0u; i < 4u; ++i) {
+                    acc[block][i] *= alpha;
+                }
+                _mix4(acc[block], running_sum[block], dot, next_max, vv);
+                running_max[block] = next_max;
+            }
         }
     }
     for (uint block = 0u; block < Q_BLOCK; ++block) {

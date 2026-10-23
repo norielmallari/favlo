@@ -27,11 +27,11 @@ One modulated block is 4 projections of 3840×3840, 2 of 10240×3840, and 1 of 3
 | `channel_gate` | 3840 | 512 | 1.115 |
 | `silu_mul` | 10240 | 256 | 2.901 |
 | `rope_axes` | 30×128 | 512 | 0.854 |
-| `attend_q4` | 6528×30×128 | 256 | 517.075 |
+| `attend_q4` | 6528×30×128 | 256 | 242.959 |
 
-One block is 764.6 ms. The 256 blocks are 195.74 s.
+One block is 490.5 ms. The 256 blocks are 125.57 s.
 
-`attend_q4` reads the query once, writes the destination once, and walks every key and every value for every query. That is 1,309,326,704,640 bytes per call. Two hundred fifty-six calls are 1301 s at 257.59 GB/s. The measured `attend_q4` is 132.37 s, under that line. Four queries share each key and value tile. The decoder head is 512 and stays on `attend`.
+`attend_q4` reads the query once, writes the destination once, and walks every key and every value for every query. That is 1,309,326,704,640 bytes per call. Two hundred fifty-six calls are 1301 s at 257.59 GB/s. The measured `attend_q4` is 62.60 s, under that line. Eight queries share each key, and four keys are scored before the softmax rescales. The decoder head is 512 and stays on `attend`.
 
 The decoder adds one `attend` over the 160×160 latent, one head of 512, median 5597 ms. The 3×3 convolutions below are `matmul_fp4` on a 4096-row chunk. The last partial chunk is counted as a full chunk. `conv_in`, `conv_out`, the 1×1 shortcuts, and group norm are not in this sum.
 
@@ -44,8 +44,8 @@ The decoder adds one `attend` over the 160×160 latent, one head of 512, median 
 | `matmul_fp4` | 512→256, inner 4608 | 100 | 0.959 |
 | `matmul_fp4` | 256→128, inner 2304 | 400 | 0.256 |
 
-The decoder sum is 7.13 s. One generation is 202.87 s. The 90% test uses that kernel ceiling. The attention bandwidth ceiling is 1301 s.
+The decoder sum is 7.13 s. One generation is 132.70 s. The 90% test uses that kernel ceiling. The attention bandwidth ceiling is 1301 s.
 
-The latent path adds `patchify`, `unpatchify`, `euler`, `sinusoid`, `copy_rows`, `zero_bytes`, `text_positions`, `image_positions`, `joined_positions`, `affine`, and `clip_u8_hwc`. Those dispatches are outside the block sum. At 1280 the medians are 0.046 ms, 0.099 ms, 0.028 ms, 0.007 ms, 0.739 ms for a 6400×3840 copy, 0.014 ms for a 128×3840 copy, 0.446 ms to clear the joined sequence, 0.031 ms to clear the token rows, 0.002 ms for a position table, 0.005 ms for the VAE scale, and 0.054 ms for the uint8 clip. Eight steps of that glue plus the decoder clip are 11.6 ms. The listed kernels are unchanged, so the kernel ceiling stays 202.87 s.
+The latent path adds `patchify`, `unpatchify`, `euler`, `sinusoid`, `copy_rows`, `zero_bytes`, `text_positions`, `image_positions`, `joined_positions`, `affine`, and `clip_u8_hwc`. Those dispatches are outside the block sum. At 1280 the medians are 0.046 ms, 0.099 ms, 0.028 ms, 0.007 ms, 0.739 ms for a 6400×3840 copy, 0.014 ms for a 128×3840 copy, 0.446 ms to clear the joined sequence, 0.031 ms to clear the token rows, 0.002 ms for a position table, 0.005 ms for the VAE scale, and 0.054 ms for the uint8 clip. Eight steps of that glue plus the decoder clip are 11.6 ms. That glue sits outside the 132.70 s sum.
 
-A 1280 generation of the smoke prompt printed `generation_seconds.total` 202.56 s, caption 3.10 s, and decoder 9.75 s. The eight steps were 23.54–24.06 s. That wall clock is within the 202.87 s kernel ceiling.
+A 1280 generation of the smoke prompt printed `generation_seconds.total` 134.36 s, caption 0.17 s, and decoder 9.90 s. The eight steps were 15.48–15.72 s. That wall clock is within 132.70 s / 0.9.

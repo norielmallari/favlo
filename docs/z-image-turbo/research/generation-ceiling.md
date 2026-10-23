@@ -40,3 +40,5 @@ Each listed kernel runs in its own command buffer. The sample is the median of f
 Later finds are appended here. The sections above stay as committed.
 
 23 October 2026. The latent stays on device for patchify, the Euler update, the float32 time basis, the pad fill, and the image/caption join. The VAE scale and the uint8 clip are shaders. The listed block kernels are unchanged, so the 202.87 s sum stands. The added dispatches measure 11.6 ms at 1280 and sit outside that sum. A printed 1280 generation of the smoke prompt was 202.56 s, caption 3.10 s, decoder 9.75 s, steps 23.54–24.06 s.
+
+23 October 2026. `attend_q4` scores four keys into registers and rescales the softmax once per tile. Eight queries share each key load. The same 6528×30×128 dispatch measured 242.959 ms, against 528.848 ms for the previous tile. Two hundred fifty-six calls are 62.60 s. With the other block rows unchanged, one block is 490.5 ms, the 256 blocks are 125.57 s, and the generation sum is 132.70 s. The full-walk bandwidth line stays 1301 s. A printed 1280 generation of the smoke prompt was 134.36 s, caption 0.17 s, decoder 9.90 s, steps 15.48–15.72 s.

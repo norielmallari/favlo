@@ -318,7 +318,7 @@ class Gpu:
             message = f"head dim {head_dim} is not a 32-wide span up to 512"
             raise ValueError(message)
         name = "attend_q4" if head_dim <= 128 else "attend"
-        rows = (seq + 3) // 4 if head_dim <= 128 else seq
+        rows = (seq + 7) // 8 if head_dim <= 128 else seq
         self._dispatch(
             name,
             [query, key, value, dest],
