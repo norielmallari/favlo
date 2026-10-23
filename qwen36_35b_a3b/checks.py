@@ -500,6 +500,72 @@ def check_rope(session: Session) -> None:
     _close("rope tail", got[64:], hidden[64:], atol=0.0)
 
 
+def _router8_expect(logits: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    order = sorted(range(256), key=lambda index: (-float(logits[index]), index))[:8]
+    chosen = logits[order]
+    raised = np.exp(chosen - chosen[0])
+    weights = (raised / np.sum(raised)).astype(np.float32)
+    return np.asarray(order, dtype=np.uint32), weights
+
+
+def check_router_coeff(session: Session) -> None:
+    rng = np.random.default_rng(2)
+    router = rng.normal(scale=0.02, size=(256, 2048)).astype(np.float16)
+    coeff = rng.normal(scale=0.02, size=2048).astype(np.float16)
+    activation = rng.normal(scale=0.02, size=2048).astype(np.float32)
+    router_out = session.zeros(256 * 4)
+    coeff_out = session.zeros(4)
+    session.dispatch(
+        "router_coeff",
+        [
+            session.upload(activation),
+            session.upload(np.ascontiguousarray(router)),
+            session.upload(np.ascontiguousarray(coeff)),
+            router_out,
+            coeff_out,
+        ],
+        [],
+        (257, 1, 1),
+        (32, 1, 1),
+    )
+    expect = router.astype(np.float32) @ activation
+    _close("router coeff rows", session.download_f32(router_out, 256), expect, rtol=1e-3, atol=1e-3)
+    got = float(session.download_f32(coeff_out, 1)[0])
+    logit = float(coeff.astype(np.float32) @ activation)
+    target = 1.0 / (1.0 + np.exp(-logit))
+    if abs(got - target) > 1e-3:
+        message = f"router coeff sigmoid {got} != {target}"
+        raise AssertionError(message)
+
+
+def check_router8(session: Session) -> None:
+    rng = np.random.default_rng(1)
+    cases = [
+        np.arange(256, dtype=np.float32),
+        np.zeros(256, dtype=np.float32),
+        rng.normal(size=256).astype(np.float32),
+    ]
+    tied = cases[2].copy()
+    tied[4] = tied[200]
+    cases.append(tied)
+    for logits in cases:
+        index = session.zeros(8 * 4)
+        weight = session.zeros(8 * 4)
+        session.dispatch(
+            "router8",
+            [session.upload(logits), index, weight],
+            [],
+            (1, 1, 1),
+            (256, 1, 1),
+        )
+        expect_index, expect_weight = _router8_expect(logits)
+        got_index = np.frombuffer(session.download(index, 8 * 4), dtype=np.uint32).copy()
+        if not np.array_equal(got_index, expect_index):
+            message = f"router8 index {got_index.tolist()} != {expect_index.tolist()}"
+            raise AssertionError(message)
+        _close("router8 weight", session.download_f32(weight, 8), expect_weight, atol=1e-5)
+
+
 def check_topk(session: Session) -> None:
     logits = np.arange(256, dtype=np.float32)
     index = session.zeros(8 * 4)
@@ -1170,6 +1236,8 @@ CHECKS = (
     ("conv rows", check_conv_rows),
     ("e4m3", check_e4m3),
     ("rope", check_rope),
+    ("router coeff", check_router_coeff),
+    ("router8", check_router8),
     ("topk", check_topk),
     ("elementwise", check_elementwise),
     ("norms", check_norms),

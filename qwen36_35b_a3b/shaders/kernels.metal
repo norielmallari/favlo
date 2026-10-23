@@ -411,9 +411,9 @@ kernel void prefill_fp4_expert_tile_w(
     op.run(tile_left, tile_right, tile_out);
 }
 
-// Same 64-row job as the fp4 expert tile. fp8 uses the 64×32 matmul2d this
-// pipeline already accepts, twice, so the indirect grid stays 64 columns wide.
-// The whole threadgroup returns before matmul2d when the expert is not fp8.
+// Same 64-row job as the fp4 expert tile. One 64×64 fp8 matmul covers the
+// indirect column tile. The whole threadgroup returns before matmul2d when
+// the expert is not fp8.
 kernel void prefill_fp8_expert_tile_at(
     device half* pack [[buffer(0)]],
     device uchar* file [[buffer(1)]],
@@ -455,15 +455,12 @@ kernel void prefill_fp8_expert_tile_at(
     tensor<device float, dextents<int, 2>, tensor_inline> dest(
         out, dextents<int, 2>(int(cols), 64), array<int, 2>{1, int(cols)});
     constexpr auto desc = matmul2d_descriptor(
-        64, 32, static_cast<int>(dynamic_extent), false, true, false);
+        64, 64, static_cast<int>(dynamic_extent), false, true, false);
     matmul2d<desc, execution_simdgroups<4>> op;
     auto tile_left = left.slice(0, 0);
     auto tile_right = right.slice(0, int(col0));
     auto tile_out = dest.slice(int(col0), 0);
     op.run(tile_left, tile_right, tile_out);
-    auto tile_right_hi = right.slice(0, int(col0) + 32);
-    auto tile_out_hi = dest.slice(int(col0) + 32, 0);
-    op.run(tile_left, tile_right_hi, tile_out_hi);
 }
 
 kernel void prefill_f16(
@@ -1515,45 +1512,64 @@ kernel void silu_mul_slots(
     gated[slot * 512u + row] = silu_f(gate) * up;
 }
 
+// One threadgroup of 256. Eight max-reductions. A tie keeps the lower index,
+// matching a forward scan that inserts only on a strict greater-than.
 kernel void router8(
     device const float* logits [[buffer(0)]],
     device uint* index [[buffer(1)]],
-    device float* weight [[buffer(2)]])
+    device float* weight [[buffer(2)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]])
 {
-    float bestv[8];
-    uint besti[8];
-    for (uint k = 0u; k < 8u; ++k) {
-        bestv[k] = -INFINITY;
-        besti[k] = 0u;
-    }
-    for (uint i = 0u; i < 256u; ++i) {
-        float value = logits[i];
-        uint place = 8u;
-        for (uint k = 0u; k < 8u; ++k) {
-            if (value > bestv[k]) {
-                place = k;
-                break;
+    threadgroup float vals[256];
+    threadgroup float part_v[8];
+    threadgroup uint part_i[8];
+    threadgroup uint chosen[8];
+    vals[tid] = logits[tid];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint pass = 0u; pass < 8u; ++pass) {
+        float value = vals[tid];
+        uint ident = tid;
+        for (uint offset = 16u; offset > 0u; offset >>= 1u) {
+            float other_v = simd_shuffle_xor(value, offset);
+            uint other_i = simd_shuffle_xor(ident, offset);
+            if (other_v > value || (other_v == value && other_i < ident)) {
+                value = other_v;
+                ident = other_i;
             }
         }
-        if (place == 8u) {
-            continue;
+        if (lane == 0u) {
+            part_v[simd] = value;
+            part_i[simd] = ident;
         }
-        for (uint k = 7u; k > place; --k) {
-            bestv[k] = bestv[k - 1u];
-            besti[k] = besti[k - 1u];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0u) {
+            float best = part_v[0];
+            uint best_i = part_i[0];
+            for (uint group = 1u; group < 8u; ++group) {
+                if (part_v[group] > best || (part_v[group] == best && part_i[group] < best_i)) {
+                    best = part_v[group];
+                    best_i = part_i[group];
+                }
+            }
+            chosen[pass] = best_i;
+            vals[best_i] = -INFINITY;
         }
-        bestv[place] = value;
-        besti[place] = i;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    float peak = bestv[0];
+    if (tid != 0u) {
+        return;
+    }
+    float peak = logits[chosen[0]];
     float sum = 0.0f;
     float raised[8];
     for (uint k = 0u; k < 8u; ++k) {
-        raised[k] = exp(bestv[k] - peak);
+        raised[k] = exp(logits[chosen[k]] - peak);
         sum += raised[k];
     }
     for (uint k = 0u; k < 8u; ++k) {
-        index[k] = besti[k];
+        index[k] = chosen[k];
         weight[k] = raised[k] / sum;
     }
 }
@@ -1848,9 +1864,13 @@ kernel void router_coeff(
     uint row [[threadgroup_position_in_grid]])
 {
     device const half* rowp = row < 256u ? router_w + row * 2048u : coeff_w;
+    device const half4* packed = (device const half4*)rowp;
+    device const float4* act = (device const float4*)activation;
     float acc = 0.0f;
-    for (uint i = lane; i < 2048u; i += 32u) {
-        acc += float(rowp[i]) * activation[i];
+    for (uint i = lane; i < 512u; i += 32u) {
+        half4 h = packed[i];
+        float4 a = act[i];
+        acc += float(h.x) * a.x + float(h.y) * a.y + float(h.z) * a.z + float(h.w) * a.w;
     }
     float sum = simd_sum(acc);
     if (lane != 0u) {

@@ -746,7 +746,7 @@ class Qwen36Runtime:
             [(self.router, 0), (self.ids, 0), (self.mix_w, 0)],
             [],
             (1, 1, 1),
-            (1, 1, 1),
+            (256, 1, 1),
         )
         if self.routes is not None:
             self.session.encode(
