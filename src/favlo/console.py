@@ -37,7 +37,6 @@ _FRAME_WAIT = 2.0
 _CSI_FINAL = set(
     "@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
 )
-_WINDOW = 5.0
 _WINDOW_MIN = 0.5
 _SMOOTH = 1.5
 
@@ -80,15 +79,13 @@ class Console:
         self.mode = mode
         self.pipeline = pipeline
         self.stream = stream if stream is not None else sys.stderr
-        self._clock = clock or time.time
+        self._clock = clock or time.perf_counter
         self._sleep = sleep or time.sleep
         self._width = width
         self._color = self._resolve_color() if color is None else color
         self._lock = threading.RLock()
         self._handles: list[Progress] = []
-        self._windows: dict[int, list[tuple[float, int]]] = {}
         self._display: dict[tuple[int, str], tuple[float, float]] = {}
-        self._stage: dict[int, str] = {}
         self._drawn = 0
         self._inline = False
         self._wrap_off = False
@@ -338,6 +335,7 @@ class Console:
         detail: str = "",
         request: int | None = None,
         gauge: tuple[str, int] | None = None,
+        started: float | None = None,
     ) -> Progress:
         if phase not in PHASES:
             message = f"unknown console phase {phase}"
@@ -353,7 +351,7 @@ class Console:
             request=request,
             gauge=gauge,
             pipeline=self.pipeline,
-            started=self._clock(),
+            started=self._clock() if started is None else started,
         )
         with self._lock:
             self._handles.append(progress)
@@ -443,9 +441,7 @@ class Console:
             for progress in self._handles:
                 progress.closed = True
             self._handles.clear()
-            self._windows.clear()
             self._display.clear()
-            self._stage.clear()
             if self.mode == "pretty":
                 self._clear_status_below()
                 self._draft = None
@@ -524,6 +520,7 @@ class Console:
             detail=detail if isinstance(detail, str) else "",
             request=request if isinstance(request, int) else None,
             gauge=_event_gauge(event.get("gauge")),
+            started=_event_stamp(event),
         )
         self._remote[key] = progress
 
@@ -595,10 +592,7 @@ class Console:
         self, progress: Progress, now: float
     ) -> tuple[float | None, float | None, float | None]:
         with self._lock:
-            if progress.phase == "prefill" and progress.unit == "tok":
-                rate, done, aged = self._cumulative_prefill(progress, now)
-            else:
-                rate, done, aged = self._window_rate(progress, now)
+            rate, done, aged = self._cumulative(progress, now)
         display: float | None = None
         eta: float | None = None
         if rate is not None and rate > 0 and progress.total > done:
@@ -607,42 +601,17 @@ class Console:
                 eta = display
         return rate, display, eta
 
-    def _cumulative_prefill(
+    def _cumulative(
         self, progress: Progress, now: float
     ) -> tuple[float | None, int, bool]:
-        """Tokens completed divided by the time since prefill started."""
+        """Work completed divided by the time since the phase started."""
         done = progress.done
         elapsed = now - progress.started
         if done <= 0 or elapsed <= 0:
             return None, done, False
         return done / elapsed, done, elapsed >= _WINDOW_MIN
 
-    def _window_rate(
-        self, progress: Progress, now: float
-    ) -> tuple[float | None, int, bool]:
-        samples = self._windows.setdefault(id(progress), [])
-        samples.append((now, progress.done))
-        cutoff = now - _WINDOW
-        while len(samples) > 1 and samples[0][0] < cutoff:
-            samples.pop(0)
-        if len(samples) > 50:
-            del samples[:-50]
-        done = progress.done
-        if len(samples) < 2:
-            return None, done, False
-        span = samples[-1][0] - samples[0][0]
-        delta = samples[-1][1] - samples[0][1]
-        elapsed = now - progress.started
-        if span >= _WINDOW_MIN and span > 0:
-            rate: float | None = delta / span
-        elif elapsed > 0:
-            rate = done / elapsed
-        else:
-            rate = None
-        return rate, done, span >= _WINDOW_MIN
-
     def _row(self, progress: Progress, now: float) -> str:
-        self._drop_smooth_on_stage(progress)
         rate, _display, eta = self._rates(progress, now)
         shown = self._smooth(progress, "rate", now, rate)
         shown_eta = None
@@ -654,26 +623,13 @@ class Console:
         return self._determinate(progress, shown, shown_eta, gauge)
 
     def _forget(self, progress: Progress) -> None:
-        self._windows.pop(id(progress), None)
         key = id(progress)
         self._display.pop((key, "rate"), None)
         self._display.pop((key, "gauge"), None)
-        self._stage.pop(key, None)
 
-    def _drop_smooth_on_stage(self, progress: Progress) -> None:
-        """A new detail is a new stage. The painted smooth starts over."""
-        key = id(progress)
-        stage = progress.detail
-        if self._stage.get(key) == stage:
-            return
-        seen = key in self._stage
-        self._stage[key] = stage
-        if not seen:
-            return
-        self._display.pop((key, "rate"), None)
-        self._display.pop((key, "gauge"), None)
-
-    def _smooth(self, progress: Progress, name: str, now: float, value: float | None) -> float | None:
+    def _smooth(
+        self, progress: Progress, name: str, now: float, value: float | None
+    ) -> float | None:
         """Exponential smooth of a painted number. The JSON tick stays raw."""
         key = (id(progress), name)
         if value is None:
@@ -970,6 +926,17 @@ def _log_line(event: dict[str, Any]) -> str | None:
     if isinstance(line, str) and line:
         return line
     return None
+
+
+def _event_stamp(event: dict[str, Any]) -> float | None:
+    """Producer clock on a mirrored event. The same counter paints the row."""
+    stamp = event.get("ts")
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+        return None
+    value = float(stamp)
+    if not math.isfinite(value):
+        return None
+    return value
 
 
 def _event_gauge(value: Any) -> tuple[str, int] | None:

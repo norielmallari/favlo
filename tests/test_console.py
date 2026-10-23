@@ -337,7 +337,7 @@ def test_pretty_rate_and_gauge_follow_an_exponential_smooth() -> None:
     assert "prefill 400.00 tok/s (1000 tok in 2.50s)" in stream.getvalue()
 
 
-def test_a_stage_change_restarts_the_smooth() -> None:
+def test_a_stage_change_keeps_the_smooth() -> None:
     from favlo.console import _SMOOTH
 
     ui, stream, clock = _ui("pretty", color=0, width=160)
@@ -351,9 +351,45 @@ def test_a_stage_change_restarts_the_smooth() -> None:
     clock.now += _SMOOTH
     ui.sample()
     painted = [line for line in stream.getvalue().splitlines() if "prefill" in line][-1]
-    assert "400 tok/s" in painted
-    assert "resident 0" in painted
+    assert "621 tok/s" in painted
+    assert "resident 37" in painted
     ui.end(progress, "")
+
+
+def test_a_later_burst_keeps_the_phase_start() -> None:
+    ui, stream, clock = _ui("json")
+    progress = ui.begin("decode", total=0, unit="tok")
+    progress.done = 100
+    clock.now += 10
+    ui.sample()
+    progress.done = 110
+    clock.now += 0.1
+    ui.sample()
+    ticks = [json.loads(line) for line in stream.getvalue().splitlines() if '"tick"' in line]
+    assert ticks[-1]["rate"] == pytest.approx(110 / 10.1)
+    ui.end(progress, "")
+
+
+def test_a_mirrored_phase_starts_at_the_event_time() -> None:
+    ui, stream, clock = _ui("json")
+    clock.now = 1000
+    ui.apply_event(
+        {"type": "begin", "phase": "sample", "total": 100, "unit": "layers", "ts": 900}
+    )
+    clock.now = 910
+    ui.apply_event(
+        {
+            "type": "tick",
+            "phase": "sample",
+            "done": 10,
+            "total": 100,
+            "unit": "layers",
+            "ts": 910,
+        }
+    )
+    ticks = [json.loads(line) for line in stream.getvalue().splitlines() if '"tick"' in line]
+    assert ticks[-1]["rate"] == pytest.approx(1)
+    ui.apply_event({"type": "end", "phase": "sample", "summary": "sample done"})
 
 
 def test_prefill_tok_rate_is_the_cumulative_average() -> None:
