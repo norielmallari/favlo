@@ -60,7 +60,11 @@ class FavloImageGenProvider(StaticImageGenProvider):
         }
 
     def capabilities(self) -> dict[str, Any]:
-        return {"modalities": ["text"], "max_reference_images": 0}
+        return {
+            "modalities": ["text"],
+            "max_reference_images": 0,
+            "creative_controls": ["quality"],
+        }
 
     def generate(
         self,
@@ -144,8 +148,27 @@ class FavloImageGenProvider(StaticImageGenProvider):
 
 
 def register(ctx) -> None:
+    _allow_quality()
     _raise_tool_timeout("image_generate")
     ctx.register_image_gen_provider(FavloImageGenProvider())
+
+
+def _allow_quality() -> None:
+    """The image tool forwards only names in its creative-control table."""
+    try:
+        from tools.image_generation_tool import _CREATIVE_CONTROL_PARAMS
+    except ImportError:
+        return
+    if "quality" in _CREATIVE_CONTROL_PARAMS:
+        return
+    _CREATIVE_CONTROL_PARAMS["quality"] = {
+        "type": "string",
+        "enum": ["auto", "low", "medium", "high", "xhigh", "max", "standard", "hd"],
+        "description": (
+            "PNG zlib level. low is 9, medium is 7, high is 5, xhigh is 3, and max is 1. "
+            "auto, standard, and hd are high."
+        ),
+    }
 
 
 def _raise_tool_timeout(tool_name: str) -> None:

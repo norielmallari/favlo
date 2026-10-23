@@ -18,6 +18,9 @@ def test_plugins_ask_for_a_thirty_minute_tool_budget() -> None:
     assert "httpx.Timeout(TOOL_TIMEOUT_SECONDS)" in image
     assert "DEADLINE_SECONDS = TOOL_TIMEOUT_SECONDS" in video
     assert 'payload["quality"] = quality' in image
+    assert '"creative_controls": ["quality"]' in image
+    assert "_allow_quality" in image
+    assert "_CREATIVE_CONTROL_PARAMS" in image
     assert 'body["quality"] = quality' in video
     assert "/content?quality=" in video
     assert "_allow_quality" in video
