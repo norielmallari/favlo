@@ -28,6 +28,7 @@ A measured mapping onto one machine is a remainder even when the method is publi
 | Remainder with no numbers | `artifacts/implementation-plan/docs/<pipeline>/<slug>.md`. Gitignored. No catalog row. No README link. |
 | Format bound, a checkout table, or this implementation's dispatch or rate table | `docs/<pipeline>/research/<slug>.md` |
 | Published method, no remainder | Leave it in the serving note. Do not open a research file. |
+| A citation of Favlo itself | [CITATION.cff](../../../CITATION.cff). No catalog row. No research file. |
 
 The research file says whether the table is a format bound, a checkout measurement, or a recorded run. Sections, in order: Remainder, Predecessors, Rule, Command, Table, Search, Corrections. Corrections are appended. Earlier sections stay as committed.
 

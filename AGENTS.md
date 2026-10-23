@@ -2,7 +2,7 @@
 
 Rules for coding agents in **Favlo**.
 
-Read this file first. Then read [ARCHITECTURE.md](ARCHITECTURE.md) for the map and the write set. The pipeline being edited has its own note. Papers and specifications are [REFERENCES.md](REFERENCES.md). Measured research claims are [RESEARCH.md](RESEARCH.md). A pipeline's own citations live in its note. The product name and the one-pipeline rule are [README.md](README.md). AI-assisted features are [docs/ai-assistance](docs/ai-assistance/README.md).
+Read this file first. Then read [ARCHITECTURE.md](ARCHITECTURE.md) for the map and the write set. The pipeline being edited has its own note. Papers and specifications are [REFERENCES.md](REFERENCES.md). Measured research claims are [RESEARCH.md](RESEARCH.md). Cite this software from [CITATION.cff](CITATION.cff). A pipeline's own citations live in its note. The product name and the one-pipeline rule are [README.md](README.md). AI-assisted features are [docs/ai-assistance](docs/ai-assistance/README.md).
 
 [ARCHITECTURE.md](ARCHITECTURE.md) wins for the listener, the registry, the console, and which files an agent may edit. A pipeline note wins for that pipeline's kernels.
 
@@ -19,7 +19,7 @@ The files in [`.cursor/rules`](.cursor/rules) are repo rules. Cursor loads them 
 | [python-file-split.mdc](.cursor/rules/python-file-split.mdc) | When editing Python. One module, one responsibility. Imports point one way. |
 | [optimization-llm.mdc](.cursor/rules/optimization-llm.mdc) | When optimizing a language model's prefill or decode. |
 | [optimization-image.mdc](.cursor/rules/optimization-image.mdc) | When optimizing image generation time. |
-| [research-evidence.mdc](.cursor/rules/research-evidence.mdc) | When writing a measured claim. The note records the remainder a search on that date did not find. |
+| [research-evidence.mdc](.cursor/rules/research-evidence.mdc) | When writing a measured claim. The note records the remainder a search on that date did not find. The software citation stays in CITATION.cff. |
 
 ## Changes
 

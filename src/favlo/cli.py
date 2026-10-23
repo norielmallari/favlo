@@ -53,11 +53,13 @@ def pipeline_names(root: Path | None = None) -> tuple[str, ...]:
 
 def _help(names: Sequence[str]) -> str:
     lines = ["usage: favlo serve [--non-interactive]"]
+    lines.append("       favlo hermes-plugins")
     lines.extend(f"       favlo --{name} [args]" for name in names)
     lines.append("")
     lines.append("  serve                  chat on a terminal; the server is a daemon")
     lines.append("  serve --non-interactive")
     lines.append("                         start the server daemon and exit")
+    lines.append("  hermes-plugins         install image and video backends for every profile")
     width = max((len(name) for name in names), default=0)
     for name in names:
         lines.append(f"  --{name.ljust(width)}    {name}")
@@ -99,6 +101,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from favlo.listener import serve_main
 
         return int(serve_main(args[1:]))
+    if args[0] == "hermes-plugins":
+        from favlo.hermes_plugins import main as install_plugins
+
+        return int(install_plugins(args[1:]))
     flag = args[0]
     if not flag.startswith("--") or flag == "--":
         sys.stderr.write(_help(names))

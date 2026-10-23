@@ -15,7 +15,7 @@ The harness scores IFEval, GSM8K, and HumanEval against `serve`. The `model` fie
 The smoke is the first 30 rows of each set, in file order.
 
 <!-- smoke-ifeval -->
-- ifeval: n=30  prompt strict 0.767  prompt loose 0.800  instruction strict 0.822  instruction loose 0.867
+- ifeval: n=30  prompt strict 0.833  prompt loose 0.833  instruction strict 0.867  instruction loose 0.867
 <!-- /smoke-ifeval -->
 
 <!-- smoke-gsm8k -->
@@ -23,7 +23,7 @@ The smoke is the first 30 rows of each set, in file order.
 <!-- /smoke-gsm8k -->
 
 <!-- smoke-humaneval -->
-- humaneval: n=30  28/30  0.933
+- humaneval: n=30  25/30  0.833
 <!-- /smoke-humaneval -->
 
 ## Sample of 100
@@ -31,7 +31,7 @@ The smoke is the first 30 rows of each set, in file order.
 The sample is the first 100 rows of each set, in file order.
 
 <!-- sample-ifeval -->
-not run
+- ifeval: n=100  prompt strict 0.720  prompt loose 0.750  instruction strict 0.810  instruction loose 0.828
 <!-- /sample-ifeval -->
 
 <!-- sample-gsm8k -->

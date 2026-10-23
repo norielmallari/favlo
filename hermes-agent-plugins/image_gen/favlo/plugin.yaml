@@ -1,0 +1,4 @@
+name: favlo_image_gen
+version: 1.0.0
+description: "Local Favlo image generation — Z-Image Turbo via OpenAI /v1/images/generations on localhost:8129."
+kind: backend

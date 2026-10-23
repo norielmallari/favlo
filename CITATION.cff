@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: Favlo
+authors:
+  - family-names: Mallari
+    given-names: Noriel
+version: 0.2.0
+date-released: 2026-10-22
+url: "https://github.com/norielmallari/favlo"
+repository-code: "https://github.com/norielmallari/favlo"
+license: Apache-2.0

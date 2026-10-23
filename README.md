@@ -10,7 +10,7 @@ Favlo AI Runtime: Your Local AI Workhorse
 
 Favlo is a local runtime for Apple Silicon. It serves language-model inference and text-to-image generation. One model is one pipeline. Each pipeline owns its forward, its weight records, and its Metal kernels. `favlo serve` is the entry point. A client selects a registered model with the OpenAI `model` field. A language row answers `POST /v1/chat/completions`. A [Z-Image-Turbo](docs/z-image-turbo/README.md) row, packed from [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo), answers `POST /v1/images/generations` and returns a PNG.
 
-The process contract is [ARCHITECTURE.md](ARCHITECTURE.md). The papers are [REFERENCES.md](REFERENCES.md). Measured research claims are [RESEARCH.md](RESEARCH.md). Agents start at [AGENTS.md](AGENTS.md). AI-assisted features are [docs/ai-assistance](docs/ai-assistance/README.md).
+The process contract is [ARCHITECTURE.md](ARCHITECTURE.md). The papers are [REFERENCES.md](REFERENCES.md). Measured research claims are [RESEARCH.md](RESEARCH.md). Cite this software from [CITATION.cff](CITATION.cff). Agents start at [AGENTS.md](AGENTS.md). AI-assisted features are [docs/ai-assistance](docs/ai-assistance/README.md).
 
 | Pipeline | Note |
 |---|---|
@@ -22,11 +22,12 @@ The process contract is [ARCHITECTURE.md](ARCHITECTURE.md). The papers are [REFE
 ## Requirements
 
 - Apple Silicon
+- Metal 4.1
 - 16 GB of memory
 - Python 3.12 or newer
 - [uv](https://docs.astral.sh/uv/)
 
-8 GB is not enough to run a model capable of real-world agentic workflows.
+Shaders compile at Metal 4.1. A machine that cannot compile that version cannot run a pipeline. 8 GB is not enough to run a model capable of real-world agentic workflows.
 
 ## Install
 

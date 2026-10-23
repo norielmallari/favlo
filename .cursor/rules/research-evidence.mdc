@@ -11,6 +11,14 @@ Split the proposal into the method, the model or task, the measurement, and the 
 
 A measured mapping onto one machine is a claim even when the method is already published. The remainder is this implementation's table: the times, the bandwidth ceiling, or the recorded rate for that pipeline's task. Name the closest published implementation of the same task and the figure it reported. The "not found" sentence names this table. A tile or stride the vendor requires is a constraint. An unmeasured mapping stays a plan.
 
+## Citing this software
+
+[REFERENCES.md](../../REFERENCES.md) and a pipeline note cite the papers, model cards, and vendor documents the implementation uses. [RESEARCH.md](../../RESEARCH.md) indexes measured remainders. Neither file is a citation of Favlo.
+
+The citable software record is [CITATION.cff](../../CITATION.cff) at the repository root. Its version and release date are the release a reader cites. A paper that uses a recorded rate cites that software version and the predecessor papers named in the note. The note does not embed a BibTeX entry for Favlo, and the catalog does not gain a row for the software citation.
+
+A release that changes the version updates `CITATION.cff` in that same change. Do not invent a DOI or an ORCID. The repository URL is the identifier until a DOI is archived.
+
 ## Where a note lives
 
 An idea with no measurement stays at `artifacts/implementation-plan/docs/<pipeline>/<slug>.md`. That tree is gitignored.

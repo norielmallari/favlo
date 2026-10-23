@@ -10,6 +10,7 @@ This file is the map and the write set. It wins for the listener, the registry, 
 |---|---|---|
 | Command discovery | `src/favlo/cli.py` | This file. The command finds each `*-*.py` entry. Adding a runtime does not edit `cli.py`. |
 | Listener and daemon | `src/favlo/listener.py`, `src/favlo/daemon.py` | [docs/serve.md](docs/serve.md) |
+| Hermes plugins | `hermes-agent-plugins/`, `src/favlo/hermes_plugins.py` | [docs/hermes-plugins.md](docs/hermes-plugins.md) |
 | Terminal chat | `src/favlo/talk.py`, `src/favlo/persona.py` | [docs/ai-assistance](docs/ai-assistance/README.md) |
 | Console | `src/favlo/console.py` | [docs/console.md](docs/console.md) |
 | Registry | `src/favlo/registry.py`, `models/registry.json` | This file |
@@ -63,6 +64,8 @@ src/favlo/              process entry; the listener loads the pipeline a request
   prefix.py             SSD prefix store
   setup.py              empty-registry download
   logs.py               rolling server log; size is settings.json log_max_bytes
+  hermes_plugins.py     install image and video backends into every Hermes profile
+hermes-agent-plugins/   Hermes image_gen and video_gen backends
 harness/                file agent, coding agent, worktree agent, and the three benchmarks
 docs/                   as-built notes; see docs/README.md
 ```
@@ -90,6 +93,7 @@ uv run python -m harness.worktree --model qwen36-35b-a3b
 uv run python -m harness.image_agent
 uv run python -m harness.image_persona
 uv run python -m harness.video_agent
+uv run favlo hermes-plugins
 ```
 
 What the harness scores is [docs/harness.md](docs/harness.md). A pipeline's quantize, probe, and matmul commands are that pipeline's note.
