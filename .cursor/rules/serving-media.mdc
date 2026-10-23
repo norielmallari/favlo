@@ -11,9 +11,9 @@ This applies to a new endpoint and to a change in how an existing one returns by
 
 ## Order
 
-1. Produce the bytes the client will receive. An encode scratch, such as an AVI or a raw frame, is input to that step.
-2. Write `~/.favlo/<kind>/<id>.<ext>`. Write a sibling `.tmp`, then replace the final path. The id is the job id. Refuse an id that contains a path separator, `.`, or `..`.
-3. Stream that file on the content response, with the media type of the file. A missing file is 404.
+1. Save the uncompressed file under `~/.favlo/<kind>/<id>.<ext>`. Write a sibling `.tmp`, then replace the final path. The id is the job id. Refuse an id that contains a path separator, `.`, or `..`.
+2. Write the served file from that saved file. A compressed download is a second file beside it. The content response reads the served file.
+3. Stream the served file, with its media type. A missing file is 404.
 4. The job JSON names the id. It carries no filesystem path and no media bytes.
 
 Tests pass a temporary home on the request state. They do not write `~/.favlo`.
@@ -22,7 +22,7 @@ A kept file expires through one integer in `~/.favlo/settings.json`. The sweep d
 
 ## Examples
 
-Video: save `~/.favlo/videos/<id>.mp4`, then `GET /v1/videos/{id}/content` reads that file as `video/mp4`.
+Video: save `~/.favlo/videos/<id>.avi`, encode `<id>.mp4` from that file, then `GET /v1/videos/{id}/content` reads the MP4 as `video/mp4`. A `quality` query encodes that level from the saved AVI when `<id>.<quality>.mp4` is absent, then reads that file.
 
 The same shape for a PNG or an audio clip: one directory per kind, one extension, one content response that reads the file.
 

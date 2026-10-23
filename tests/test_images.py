@@ -3,7 +3,14 @@
 import json
 import os
 
-from favlo.images import image_path, load_image, store_image, sweep_images
+from favlo.images import (
+    image_path,
+    load_image,
+    source_path,
+    store_image,
+    store_source,
+    sweep_images,
+)
 from favlo.logs import settings_path
 
 
@@ -13,14 +20,17 @@ def test_a_fresh_image_stays_and_an_old_one_is_removed(tmp_path) -> None:
         encoding="utf-8",
     )
     images = {"image_old": {"id": "image_old"}, "image_new": {"id": "image_new"}}
+    store_source("image_old", b"RGB8-old", home=tmp_path)
     store_image("image_old", b"old-png", home=tmp_path, images=images)
     store_image("image_new", b"new-png", home=tmp_path, images=images)
     old = image_path(tmp_path, "image_old")
+    old_rgb = source_path(tmp_path, "image_old")
     fresh = image_path(tmp_path, "image_new").stat().st_mtime
     expired = fresh - 120
     os.utime(old, (expired, expired))
     sweep_images(images, home=tmp_path, now=fresh)
     assert not old.is_file()
+    assert not old_rgb.is_file()
     assert "image_old" not in images
     assert load_image("image_new", home=tmp_path) == b"new-png"
     assert "image_new" in images

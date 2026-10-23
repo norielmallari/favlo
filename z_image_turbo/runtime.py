@@ -13,7 +13,6 @@ import objc
 from z_image_turbo.dit import velocity
 from z_image_turbo.formats import TILE_M, pad_to
 from z_image_turbo.metal import Gpu
-from z_image_turbo.png import encode_png
 from z_image_turbo.record import Plane, load
 from z_image_turbo.schedule import STEPS, sigmas
 from z_image_turbo.scratch import MAX_EDGE, Scratch
@@ -57,7 +56,7 @@ class Runtime:
         height: int,
         steps: int,
         seed: int,
-    ) -> tuple[bytes, str, dict[str, Any]]:
+    ) -> tuple[np.ndarray, str, dict[str, Any]]:
         _check_size(width, height, steps)
         wall = time.perf_counter()
         caption_started = time.perf_counter()
@@ -122,7 +121,7 @@ class Runtime:
             "vae": vae_s,
             "steps": times,
         }
-        return encode_png(pixels), digest, timing
+        return pixels, digest, timing
 
 
 def open_runtime(

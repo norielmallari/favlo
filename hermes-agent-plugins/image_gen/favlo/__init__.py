@@ -77,6 +77,7 @@ class FavloImageGenProvider(StaticImageGenProvider):
         if not prompt:
             return prompt_required_error(self.name, aspect)
 
+        quality = kwargs.get("quality")
         model_id = kwargs.get("model_id") or kwargs.get("model") or DEFAULT_MODEL
         api_model = MODELS.get(model_id, {}).get("api_model", model_id)
         api_key = os.environ.get("OPENAI_API_KEY", "")
@@ -90,6 +91,8 @@ class FavloImageGenProvider(StaticImageGenProvider):
             "n": 1,
             "response_format": "b64_json",
         }
+        if isinstance(quality, str) and quality:
+            payload["quality"] = quality
 
         try:
             import httpx
@@ -108,7 +111,8 @@ class FavloImageGenProvider(StaticImageGenProvider):
                     "api_error",
                 )
 
-            result_data = resp.json().get("data", [])
+            body = resp.json()
+            result_data = body.get("data", [])
             if not result_data:
                 return fail("Favlo returned no images", "empty_response")
 
@@ -132,7 +136,7 @@ class FavloImageGenProvider(StaticImageGenProvider):
                 prompt=prompt,
                 aspect_ratio=aspect,
                 provider=self.name,
-                extra={"size": size},
+                extra={"size": size, "quality": body.get("quality")},
             )
         except Exception as exc:
             logger.debug("Favlo generation failed", exc_info=True)

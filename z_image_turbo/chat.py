@@ -13,20 +13,10 @@ import time
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from favlo.images import load_image, store_image
+from favlo.images import load_image, store_source, sweep_images
+from z_image_turbo.png import REPORTED_QUALITY, pack_rgb, write_png
 from z_image_turbo.schedule import STEPS
 from z_image_turbo.scratch import MAX_EDGE
-
-_QUALITY = {
-    "low": "low",
-    "medium": "medium",
-    "high": "high",
-    "xhigh": "xhigh",
-    "max": "max",
-    "auto": "high",
-    "standard": "high",
-    "hd": "high",
-}
 
 
 class ImageRequestError(ValueError):
@@ -80,7 +70,7 @@ def handle_image(
         images: list[dict[str, str]] = []
         timings: list[dict[str, Any]] = []
         for index in range(fields.count):
-            png, _digest, timing = runtime.generate(
+            pixels, _digest, timing = runtime.generate(
                 fields.prompt,
                 fields.width,
                 fields.height,
@@ -88,7 +78,8 @@ def handle_image(
                 fields.seed + index,
             )
             image_id = "image_" + secrets.token_hex(12)
-            store_image(image_id, png, home=root)
+            write_png(store_source(image_id, pack_rgb(pixels), home=root), fields.quality)
+            sweep_images(home=root)
             stored = load_image(image_id, home=root)
             if stored is None:
                 raise RuntimeError("stored image is missing")
@@ -132,7 +123,7 @@ def _fields(body: dict[str, Any]) -> ImageFields:
     quality = _absent_or(
         body,
         "quality",
-        set(_QUALITY),
+        set(REPORTED_QUALITY),
         "quality must be auto, low, medium, high, xhigh, max, standard, or hd",
     )
     prompt = body.get("prompt")
@@ -145,7 +136,7 @@ def _fields(body: dict[str, Any]) -> ImageFields:
         height=height,
         seed=_optional_int(body, "seed", 0, "seed must be an integer"),
         count=_bounded_int(body, "n", 1, 1, 10, "n must be from 1 to 10"),
-        quality=_QUALITY[quality or "auto"],
+        quality=REPORTED_QUALITY[quality or "auto"],
         background="opaque",
         output_format=output_format or "png",
         size=size,

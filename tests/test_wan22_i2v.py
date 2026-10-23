@@ -6,7 +6,7 @@ import base64
 import json
 
 import numpy as np
-from wan22_i2v.chat import _seconds_label, handle_video, video_fields
+from wan22_i2v.chat import VideoRequestError, _seconds_label, handle_video, video_fields
 from wan22_i2v.formats import block_winners, pack_linear, relative_error, restore_linear
 from wan22_i2v.latent import condition_volume, unpatchify
 from wan22_i2v.png import decode_png, encode_png
@@ -33,7 +33,7 @@ from wan22_i2v.source import (
 )
 from wan22_i2v.text import encoder_path, tokenizer_path
 from wan22_i2v.vae import vae_path
-from wan22_i2v.video import avi_meta, write_avi
+from wan22_i2v.video import avi_meta, write_avi, write_mp4
 
 
 def test_setup_writes_each_repo_under_models() -> None:
@@ -195,6 +195,17 @@ def test_video_request_defaults_to_320p_and_81_frames() -> None:
         }
     )
     assert short.frames == 9
+    assert short.quality == "high"
+    level = {"prompt": "move", "image": encoded, "frames": 5, "size": "16x16"}
+    assert video_fields({**level, "quality": "hd"}).quality == "high"
+    assert video_fields({**level, "quality": "standard"}).quality == "high"
+    assert video_fields({**level, "quality": "max"}).quality == "max"
+    try:
+        video_fields({**level, "quality": "ultra"})
+    except VideoRequestError as exc:
+        assert exc.param == "quality"
+    else:
+        raise AssertionError("quality was accepted")
     assert _seconds_label(FIVE_SEC_FRAMES) == "5.0625"
     assert _seconds_label(9) == "0.5625"
 
@@ -226,8 +237,44 @@ class _Broken:
         raise RuntimeError(message)
 
 
+def test_max_quality_asks_for_crf_14(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "clip.avi"
+    source.write_bytes(b"RIFF")
+    seen: dict[str, list[str]] = {}
+
+    def fake_run(command, **_kwargs):
+        seen["command"] = list(command)
+        tmp_path.joinpath("clip.tmp.mp4").write_bytes(b"mp4")
+
+        class _Result:
+            returncode = 0
+            stderr = b""
+
+        return _Result()
+
+    monkeypatch.setattr("favlo.videos.subprocess.run", fake_run)
+    write_mp4(source, "max")
+    command = seen["command"]
+    assert command[command.index("-crf") + 1] == "14"
+
+
+def test_two_content_qualities_share_one_avi(tmp_path) -> None:
+    from favlo.videos import load_video, source_path, store_source
+
+    frames = np.random.default_rng(0).integers(0, 256, size=(5, 16, 16, 3), dtype=np.uint8)
+    store_source("video_q", write_avi(frames, fps=16), home=tmp_path)
+    write_mp4(source_path(tmp_path, "video_q"), "high")
+    low = load_video("video_q", home=tmp_path, quality="low")
+    high = load_video("video_q", home=tmp_path)
+    maximum = load_video("video_q", home=tmp_path, quality="max")
+    assert low is not None and high is not None and maximum is not None
+    assert low[4:8] == high[4:8] == maximum[4:8] == b"ftyp"
+    assert len(maximum) > len(low)
+    assert load_video("video_q", home=tmp_path, quality="max") == maximum
+
+
 def test_video_job_returns_before_the_mp4_is_stored(tmp_path) -> None:
-    from favlo.videos import load_video
+    from favlo.videos import load_video, source_path
 
     handler = _Reply()
     state: dict = {"video_home": tmp_path}
@@ -237,12 +284,14 @@ def test_video_job_returns_before_the_mp4_is_stored(tmp_path) -> None:
     assert handler.payload["status"] == "in_progress"
     assert handler.payload["seconds"] == "0.3125"
     assert handler.payload["size"] == "16x16"
+    assert handler.payload["quality"] == "high"
     job = state["videos"][handler.payload["id"]]
     assert job["status"] == "completed"
     assert job["progress"] == 100
     assert job["stage"] is None
     stored_mp4 = load_video(job["id"], home=tmp_path)
     assert stored_mp4 is not None and stored_mp4[4:8] == b"ftyp"
+    assert source_path(tmp_path, job["id"]).read_bytes()[:4] == b"RIFF"
     failed = _Reply()
     failed_state: dict = {}
     handle_video(failed, _Broken(), body, None, None, failed_state)

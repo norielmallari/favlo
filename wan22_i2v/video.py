@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import struct
-import subprocess
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -70,37 +68,11 @@ def write_avi(frames: np.ndarray, fps: int = 16) -> bytes:
     return b"RIFF" + struct.pack("<I", len(body)) + body
 
 
-def mp4_bytes(avi: bytes) -> bytes:
-    """H.264 MP4 for one AVI clip."""
-    with tempfile.TemporaryDirectory() as directory:
-        dest = Path(directory) / "clip.mp4"
-        result = subprocess.run(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-i",
-                "pipe:0",
-                "-an",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-movflags",
-                "+faststart",
-                str(dest),
-            ],
-            input=avi,
-            capture_output=True,
-            check=False,
-        )
-        if result.returncode != 0 or not dest.is_file():
-            detail = result.stderr.decode("utf-8", errors="replace").strip()
-            message = detail or "ffmpeg failed"
-            raise RuntimeError(message)
-        return dest.read_bytes()
+def write_mp4(source: Path, quality: str = "high") -> Path:
+    """H.264 MP4 beside one saved AVI. The served file is the MP4."""
+    from favlo.videos import encode_mp4
+
+    return encode_mp4(source, quality)
 
 
 def avi_meta(blob: bytes) -> tuple[int, int, int]:

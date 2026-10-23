@@ -1,8 +1,9 @@
-"""Stored PNGs. The process entry owns this module.
+"""Stored images. The process entry owns this module.
 
-Each finished image is ``<home>/images/<id>.png``. ``~/.favlo/settings.json``
-key ``image_ttl_seconds`` is how long that file stays. The default is one day.
-A sweep at startup and after each stored image deletes an older file.
+Each image keeps ``<home>/images/<id>.rgb`` and the PNG encoded from it.
+``~/.favlo/settings.json`` key ``image_ttl_seconds`` is how long both stay.
+The default is one day. A sweep at startup and after each stored PNG deletes
+an older pair.
 """
 
 from __future__ import annotations
@@ -20,6 +21,19 @@ def images_dir(home: Path) -> Path:
     return home / _DIR
 
 
+def store_source(
+    image_id: str,
+    payload: bytes,
+    *,
+    home: Path | None = None,
+) -> Path:
+    """Write the uncompressed RGB. The PNG is encoded from this file."""
+    root = favlo_home() if home is None else home
+    path = source_path(root, image_id)
+    _replace(path, payload)
+    return path
+
+
 def store_image(
     image_id: str,
     payload: bytes,
@@ -30,10 +44,7 @@ def store_image(
     """Write one PNG, then drop images older than the configured expiry."""
     root = favlo_home() if home is None else home
     path = image_path(root, image_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_bytes(payload)
-    temporary.replace(path)
+    _replace(path, payload)
     sweep_images(images, home=root)
     return path
 
@@ -56,29 +67,46 @@ def sweep_images(
     home: Path | None = None,
     now: float | None = None,
 ) -> None:
-    """Delete a PNG whose age has reached ``image_ttl_seconds``."""
+    """Delete a pair once its PNG, or a lone RGB file, has reached the expiry."""
     root = favlo_home() if home is None else home
     folder = images_dir(root)
     if not folder.is_dir():
         return
     ttl = image_ttl_seconds(load_settings(root))
     clock = time.time() if now is None else now
-    for path in folder.glob("*.png"):
+    stems = {path.stem for path in folder.glob("*.png")}
+    stems.update(path.stem for path in folder.glob("*.rgb"))
+    for stem in stems:
+        png = folder / f"{stem}.png"
+        rgb = folder / f"{stem}.rgb"
+        anchor = png if png.is_file() else rgb
         try:
-            modified = path.stat().st_mtime
+            modified = anchor.stat().st_mtime
         except OSError:
             continue
         if clock - modified < ttl:
             continue
-        try:
-            path.unlink()
-        except OSError:
-            continue
+        for suffix in ("png", "rgb"):
+            path = folder / f"{stem}.{suffix}"
+            try:
+                path.unlink()
+            except OSError:
+                continue
         if isinstance(images, dict):
-            images.pop(path.stem, None)
+            images.pop(stem, None)
+
+
+def source_path(home: Path, image_id: str) -> Path:
+    """Uncompressed RGB for one image."""
+    return _image_path(home, image_id, "rgb")
 
 
 def image_path(home: Path, image_id: str) -> Path:
+    """Served PNG for one image."""
+    return _image_path(home, image_id, "png")
+
+
+def _image_path(home: Path, image_id: str, suffix: str) -> Path:
     if (
         not isinstance(image_id, str)
         or not image_id
@@ -89,4 +117,11 @@ def image_path(home: Path, image_id: str) -> Path:
     ):
         message = "refusing image id"
         raise ValueError(message)
-    return images_dir(home) / f"{image_id}.png"
+    return images_dir(home) / f"{image_id}.{suffix}"
+
+
+def _replace(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_bytes(payload)
+    temporary.replace(path)

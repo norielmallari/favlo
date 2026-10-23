@@ -12,6 +12,7 @@ import json
 import logging
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -79,6 +80,7 @@ class FavloVideoGenProvider(VideoGenProvider):
             "supports_audio": False,
             "supports_negative_prompt": False,
             "supports_seed": True,
+            "qualities": ["auto", "low", "medium", "high", "xhigh", "max", "standard", "hd"],
             "supports_upscale": False,
             "max_reference_images": 0,
         }
@@ -98,6 +100,7 @@ class FavloVideoGenProvider(VideoGenProvider):
         seed: int | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        quality = kwargs.get("quality")
         del reference_image_urls, negative_prompt, audio, kwargs
         prompt = (prompt or "").strip()
         model_id = model or DEFAULT_MODEL
@@ -138,10 +141,16 @@ class FavloVideoGenProvider(VideoGenProvider):
             body["seconds"] = str(int(duration))
         if seed is not None:
             body["seed"] = int(seed)
+        if isinstance(quality, str) and quality:
+            body["quality"] = quality
         try:
             job = _create_and_poll(body)
             video_id = str(job["id"])
-            blob = _get_bytes(f"{BASE_URL}/videos/{video_id}/content")
+            content = f"{BASE_URL}/videos/{video_id}/content"
+            if isinstance(quality, str) and quality:
+                quoted = urllib.parse.quote(quality, safe="")
+                content = f"{BASE_URL}/videos/{video_id}/content?quality={quoted}"
+            blob = _get_bytes(content)
             path = save_bytes_video(blob, prefix=model_id, extension="mp4")
         except Exception as exc:
             logger.debug("Favlo video generation failed", exc_info=True)
@@ -166,12 +175,13 @@ class FavloVideoGenProvider(VideoGenProvider):
             aspect_ratio=aspect_ratio,
             duration=reported,
             provider=self.name,
-            extra={"size": body["size"]},
+            extra={"size": body["size"], "quality": job.get("quality")},
         )
 
 
 def register(ctx) -> None:
     _allow_resolutions()
+    _allow_quality()
     _raise_tool_timeout("video_generate")
     ctx.register_video_gen_provider(FavloVideoGenProvider())
 
@@ -205,6 +215,25 @@ def _allow_resolutions() -> None:
     missing = [name for name in ("240p", "320p", "480p", "720p") if name not in enum]
     if missing:
         resolution["enum"] = missing + enum
+
+
+def _allow_quality() -> None:
+    """The static video tool schema has no quality field. The image request does."""
+    try:
+        from tools.video_generation_tool import VIDEO_GENERATE_SCHEMA
+    except ImportError:
+        return
+    parameters = VIDEO_GENERATE_SCHEMA.get("parameters")
+    if not isinstance(parameters, dict):
+        return
+    properties = parameters.setdefault("properties", {})
+    if not isinstance(properties, dict) or "quality" in properties:
+        return
+    properties["quality"] = {
+        "type": "string",
+        "enum": ["auto", "low", "medium", "high", "xhigh", "max", "standard", "hd"],
+        "description": "MP4 quality. auto, standard, and hd are high.",
+    }
 
 
 _SIZES = {

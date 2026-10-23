@@ -21,7 +21,7 @@ from pydantic import Field
 from z_image_turbo.scratch import MAX_EDGE
 
 from favlo.persona import INSTRUCTIONS
-from harness.image_agent import (
+from harness.image_smoke_agent import (
     HOST,
     IMAGE_MODEL,
     JUDGE,

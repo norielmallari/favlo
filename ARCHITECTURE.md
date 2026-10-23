@@ -22,7 +22,7 @@ Shared code is `src/favlo/`. There is no model base class and no kernel that bra
 
 The daemon is a request server. It does not own chat history, tools, or the terminal session. The CLI owns those. Telemetry is one JSON event per line. The terminal paints it as it arrives, and prints the reply after that turn's requests have closed.
 
-`python -m favlo.smoke_lock` is how a pipeline test takes the GPU while the daemon stays up. Acquire closes the resident model when no request is open. Release lets the next chat load one again. The recorded pid is the invoking shell. `uv` and `python` are not that owner. A command started from a shell that already holds the lock leaves the file in place and does not release it. A video job is `POST /v1/videos`, then `GET /v1/videos/{id}` and `GET /v1/videos/{id}/content`. Those two reads do not take the request lock. The MP4 is `~/.favlo/videos/<id>.mp4`. `video_ttl_seconds` in `settings.json` is how long it stays. The default is 86400. A sweep at startup and after each stored clip deletes a file older than that. A PNG from `POST /v1/images/generations` is `~/.favlo/images/<id>.png`. `GET /v1/images/{id}/content` reads that file and does not take the request lock. `image_ttl_seconds` uses the same default and the same sweep. The listener note is [docs/serve.md](docs/serve.md).
+`python -m favlo.smoke_lock` is how a pipeline test takes the GPU while the daemon stays up. Acquire closes the resident model when no request is open. Release lets the next chat load one again. The recorded pid is the invoking shell. `uv` and `python` are not that owner. A command started from a shell that already holds the lock leaves the file in place and does not release it. A video job is `POST /v1/videos`, then `GET /v1/videos/{id}` and `GET /v1/videos/{id}/content`. Those two reads do not take the request lock. The uncompressed AVI is `~/.favlo/videos/<id>.avi`. The served MP4 is `<id>.mp4` beside it, encoded from that AVI. `GET /v1/videos/{id}/content?quality=` encodes another reported level from that AVI into `<id>.<quality>.mp4` when the file is absent. `video_ttl_seconds` in `settings.json` is how long it stays. The default is 86400. A sweep at startup and after each stored clip deletes a file older than that. The uncompressed RGB from `POST /v1/images/generations` is `~/.favlo/images/<id>.rgb`. The served PNG is `<id>.png` beside it, encoded from that file at the request's zlib level. `GET /v1/images/{id}/content` reads the PNG and does not take the request lock. `image_ttl_seconds` uses the same default and the same sweep. The listener note is [docs/serve.md](docs/serve.md).
 
 ## Runtimes
 
@@ -64,8 +64,8 @@ src/favlo/              process entry; the listener loads the pipeline a request
   prefix.py             SSD prefix store
   setup.py              empty-registry download
   logs.py               rolling server log; size is settings.json log_max_bytes
-  videos.py             stored MP4s; video_ttl_seconds drops an older file
-  images.py             stored PNGs; image_ttl_seconds drops an older file
+  videos.py             stored AVI and MP4; a content quality encodes another MP4; video_ttl_seconds drops an older clip
+  images.py             stored RGB and the PNG encoded from it; image_ttl_seconds drops an older pair
   hermes_plugins.py     install image and video backends into every Hermes profile
 hermes-agent-plugins/   Hermes image_gen and video_gen backends
 harness/                file agent, coding agent, worktree agent, and the three benchmarks
@@ -92,9 +92,9 @@ uv run python -m harness --model qwen38-27b
 uv run python -m harness.benchmarks --model qwen38-27b
 uv run python -m harness.coding --model qwen38-27b
 uv run python -m harness.worktree --model qwen36-35b-a3b
-uv run python -m harness.image_agent
+uv run python -m harness.image_smoke_agent
 uv run python -m harness.image_persona
-uv run python -m harness.video_agent
+uv run python -m harness.video_smoke_agent
 uv run favlo hermes-plugins
 ```
 

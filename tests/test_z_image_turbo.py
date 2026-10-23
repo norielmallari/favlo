@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from z_image_turbo.chat import ImageRequestError, _fields, handle_image
 from z_image_turbo.formats import dequant_fp4, pack_fp4, stored_k
-from z_image_turbo.png import encode_png
+from z_image_turbo.png import ZLIB_LEVEL, encode_png, pack_rgb, unpack_rgb, write_png
 from z_image_turbo.record import Plane
 from z_image_turbo.runtime import Runtime, _patchify, _unpatchify
 from z_image_turbo.schedule import sigmas, timestep
@@ -69,6 +69,21 @@ def test_png_signature() -> None:
     image = np.zeros((2, 3, 3), dtype=np.uint8)
     blob = encode_png(image)
     assert blob.startswith(b"\x89PNG\r\n\x1a\n")
+    assert np.array_equal(unpack_rgb(pack_rgb(image)), image)
+
+
+def test_lower_quality_uses_a_higher_zlib_level(tmp_path) -> None:
+    image = np.zeros((64, 64, 3), dtype=np.uint8)
+    image[..., 0] = np.arange(64, dtype=np.uint8)[:, None]
+    image[..., 1] = np.arange(64, dtype=np.uint8)[None, :]
+    assert ZLIB_LEVEL == {"low": 9, "medium": 7, "high": 5, "xhigh": 3, "max": 1}
+    low = encode_png(image, "low")
+    top = encode_png(image, "max")
+    assert low != top
+    assert len(low) < len(top)
+    source = tmp_path / "image_a.rgb"
+    source.write_bytes(pack_rgb(image))
+    assert write_png(source, "low").read_bytes() == low
 
 
 def test_image_request_default_size() -> None:
@@ -152,7 +167,9 @@ def test_image_response_returns_one_png_per_count(tmp_path) -> None:
         def generate(self, prompt: str, width: int, height: int, steps: int, seed: int) -> tuple:
             del prompt, width, height, steps
             timing = {"total": 1.0, "caption": 0.1, "vae": 0.2, "steps": [0.1]}
-            return f"png-{seed}".encode(), "digest", timing
+            image = np.zeros((8, 8, 3), dtype=np.uint8)
+            image[..., 0] = seed
+            return image, "digest", timing
 
     handler = _Handler()
     state = {"image_home": tmp_path}
@@ -161,10 +178,15 @@ def test_image_response_returns_one_png_per_count(tmp_path) -> None:
     data = handler.body["data"]
     assert isinstance(data, list)
     assert len(data) == 2
-    assert base64.b64decode(data[0]["b64_json"]) == b"png-7"
-    assert base64.b64decode(data[1]["b64_json"]) == b"png-8"
-    assert (tmp_path / "images" / f"{data[0]['id']}.png").read_bytes() == b"png-7"
-    assert (tmp_path / "images" / f"{data[1]['id']}.png").read_bytes() == b"png-8"
+    first = np.zeros((8, 8, 3), dtype=np.uint8)
+    first[..., 0] = 7
+    second = np.zeros((8, 8, 3), dtype=np.uint8)
+    second[..., 0] = 8
+    assert base64.b64decode(data[0]["b64_json"]) == encode_png(first, "high")
+    assert base64.b64decode(data[1]["b64_json"]) == encode_png(second, "high")
+    rgb = tmp_path / "images" / f"{data[0]['id']}.rgb"
+    assert np.array_equal(unpack_rgb(rgb.read_bytes()), first)
+    assert (tmp_path / "images" / f"{data[0]['id']}.png").read_bytes() == encode_png(first, "high")
     timings = handler.body["generation_seconds"]
     assert isinstance(timings, list)
     assert len(timings) == 2

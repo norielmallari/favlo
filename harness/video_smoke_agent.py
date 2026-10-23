@@ -3,7 +3,7 @@
 The Microsoft Agent Framework agent calls the image route when the still is
 missing. The still is drawn at the clip's width and height. The next turn
 posts `POST /v1/videos`, polls the job, and saves
-`GET /v1/videos/{id}/content` to ``artifacts/video-agent.mp4``. The 35B
+`GET /v1/videos/{id}/content` to ``artifacts/video-smoke-agent.mp4``. The 35B
 vision tower then reads frame 0, the middle frame, and the last frame of
 that file and must affirm the still sentence. Exit 0 means each of those
 frames was affirmed and the file has the smoke.json frame count at 576×320.
@@ -27,7 +27,7 @@ from agent_framework import Agent, tool
 from agent_framework.openai import OpenAIChatCompletionClient
 from pydantic import Field
 
-from harness.image_agent import affirms
+from harness.image_smoke_agent import affirms
 from harness.video_mp4 import frame_png, save_mp4
 
 JUDGE = "qwen36-35b-a3b:instruct"
@@ -127,7 +127,7 @@ async def _run(
     client.function_invocation_configuration["max_consecutive_errors_per_request"] = 1
     agent = Agent(
         client=client,
-        name="video-agent",
+        name="video-smoke-agent",
         instructions="Call the named tool once. Then stop.",
         tools=tools,
         default_options={"temperature": 0},
@@ -186,7 +186,7 @@ def _listening(port: int) -> bool:
 def _hold_machine(root: Path) -> bool:
     from favlo.smoke_lock import hold
 
-    return hold(root=root, pipeline="wan22-i2v", command="video-agent")
+    return hold(root=root, pipeline="wan22-i2v", command="video-smoke-agent")
 
 
 def _open_server(was_up: bool) -> tuple[int, Any]:
@@ -207,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = args.root.resolve()
     video_note = smoke_paths(root)[1]
-    still = root / "artifacts" / "video-agent.png"
+    still = root / "artifacts" / "video-smoke-agent.png"
     image_body = {
         "model": "Z-Image-Turbo-fp4",
         "prompt": video_note["prompt"],
@@ -261,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
         if not clip:
             print("video is missing", flush=True)
             return 1
-        out = root / "artifacts" / "video-agent.mp4"
+        out = root / "artifacts" / "video-smoke-agent.mp4"
         saved = save_mp4(clip[-1], out)
         print(f"wrote {out} frames {saved[0]} size {saved[1]}x{saved[2]}", flush=True)
         expected = (

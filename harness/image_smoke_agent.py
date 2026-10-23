@@ -1,8 +1,9 @@
-"""Agent that generates one image and checks it with the 35B vision tower.
+"""Agent that generates two images and checks them with the 35B vision tower.
 
-The Microsoft Agent Framework agent calls ``POST /v1/images/generations``.
-The next turn sends that PNG back to the same model and asks whether the
-picture matches the prompt. Exit 0 means the reply affirms it.
+The Microsoft Agent Framework agent calls ``POST /v1/images/generations``
+at ``quality`` ``low``, then ``max``. Each later turn sends that PNG back to
+the same model and asks whether the picture matches the prompt. Exit 0 means
+both replies affirm it and the max file is larger.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ IMAGE_MODEL = "Z-Image-Turbo-fp4"
 HOST = "127.0.0.1"
 PORT = 8129
 QUESTION = "Does this picture show a red cube on a white table? Reply with one word: yes or no."
+QUALITIES = ("low", "max")
 
 
 def affirms(text: str) -> bool:
@@ -89,7 +91,7 @@ async def create_image(
     client.function_invocation_configuration["max_consecutive_errors_per_request"] = 1
     agent = Agent(
         client=client,
-        name="image-agent",
+        name="image-smoke-agent",
         instructions="Call generate_image once with the exact prompt. Then stop.",
         tools=image_tools(port, body, png),
         default_options={"temperature": 0},
@@ -143,7 +145,7 @@ def _listening(port: int) -> bool:
 def _hold_machine(root: Path) -> bool:
     from favlo.smoke_lock import hold
 
-    return hold(root=root, pipeline="qwen36-35b-a3b", command="image-agent")
+    return hold(root=root, pipeline="qwen36-35b-a3b", command="image-smoke-agent")
 
 
 def _open_server(root: Path, was_up: bool) -> tuple[int, Any]:
@@ -158,7 +160,7 @@ def _open_server(root: Path, was_up: bool) -> tuple[int, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Generate an image and check it.")
+    parser = argparse.ArgumentParser(description="Generate a low and a max image and check both.")
     parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument("--judge", default=JUDGE)
     args = parser.parse_args(argv)
@@ -174,18 +176,28 @@ def main(argv: list[str] | None = None) -> int:
         created = _hold_machine(repo_root())
         port, owned = _open_server(root, was_up)
         base = f"http://{HOST}:{port}/v1"
-        print(f"generating on {port}", flush=True)
-        png = asyncio.run(create_image(base, port, body, args.judge))
         (root / "artifacts").mkdir(parents=True, exist_ok=True)
-        (root / "artifacts" / "image-agent.png").write_bytes(png)
-        print("checking", flush=True)
-        reply = judge(port, png, args.judge)
-        print(reply, flush=True)
-        if affirms(reply):
-            print("image matches", flush=True)
-            return 0
-        print("image does not match", flush=True)
-        return 1
+        saved: dict[str, Path] = {}
+        for quality in QUALITIES:
+            print(f"generating {quality} on {port}", flush=True)
+            request = {**body, "quality": quality}
+            png = asyncio.run(create_image(base, port, request, args.judge))
+            out = root / "artifacts" / f"image-smoke-agent-{quality}.png"
+            out.write_bytes(png)
+            saved[quality] = out
+            print(f"wrote {out.name} bytes {out.stat().st_size}", flush=True)
+        if saved["max"].stat().st_size <= saved["low"].stat().st_size:
+            print("max quality is not larger", flush=True)
+            return 1
+        for quality in QUALITIES:
+            print(f"checking {quality}", flush=True)
+            reply = judge(port, saved[quality].read_bytes(), args.judge)
+            print(reply, flush=True)
+            if not affirms(reply):
+                print(f"{quality} image does not match", flush=True)
+                return 1
+        print("images match", flush=True)
+        return 0
     finally:
         if owned is not None:
             from harness.benchmarks.serve import stop_server

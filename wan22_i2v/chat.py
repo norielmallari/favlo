@@ -10,7 +10,7 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
-from favlo.videos import store_video
+from favlo.videos import reported_quality, store_source, sweep_videos
 from wan22_i2v.png import decode_png, resize_rgb
 from wan22_i2v.progress import ClipProgress, clip_label
 from wan22_i2v.schedule import (
@@ -20,7 +20,7 @@ from wan22_i2v.schedule import (
     P320_WIDTH,
     require_geometry,
 )
-from wan22_i2v.video import mp4_bytes
+from wan22_i2v.video import write_mp4
 
 
 class VideoRequestError(ValueError):
@@ -36,6 +36,7 @@ class VideoFields(NamedTuple):
     width: int
     height: int
     seed: int
+    quality: str
 
 
 def handle_chat(
@@ -87,19 +88,15 @@ def handle_video(
             progress,
         )
         progress.stage("mp4")
-        mp4 = mp4_bytes(avi)
+        home = state.get("video_home")
+        root = home if isinstance(home, Path) else None
+        write_mp4(store_source(job["id"], avi, home=root), fields.quality)
     except Exception as exc:
         progress.close(progress.summary(failed=True))
         job["status"] = "failed"
         job["error"] = {"code": type(exc).__name__, "message": str(exc)}
         return
-    home = state.get("video_home")
-    store_video(
-        job["id"],
-        mp4,
-        home=home if isinstance(home, Path) else None,
-        videos=videos,
-    )
+    sweep_videos(videos, home=root)
     job["completed_at"] = int(time.time())
     progress.complete()
     job["status"] = "completed"
@@ -129,7 +126,7 @@ def video_fields(body: dict[str, Any]) -> VideoFields:
     except ValueError as exc:
         raise VideoRequestError(str(exc), "frames") from exc
     resized = resize_rgb(image, height, width)
-    return VideoFields(prompt.strip(), resized, frames, width, height, seed)
+    return VideoFields(prompt.strip(), resized, frames, width, height, seed, _quality(body))
 
 
 def _job(model: str, fields: VideoFields) -> dict[str, Any]:
@@ -146,9 +143,25 @@ def _job(model: str, fields: VideoFields) -> dict[str, Any]:
         "seconds": _seconds_label(fields.frames),
         "size": f"{fields.width}x{fields.height}",
         "frames": fields.frames,
+        "quality": fields.quality,
         "eta": None,
         "error": None,
     }
+
+
+def _quality(body: dict[str, Any]) -> str:
+    value = body.get("quality")
+    if value is None:
+        value = "auto"
+    if not isinstance(value, str):
+        raise VideoRequestError(
+            "quality must be auto, low, medium, high, xhigh, max, standard, or hd",
+            "quality",
+        )
+    try:
+        return reported_quality(value)
+    except ValueError as exc:
+        raise VideoRequestError(str(exc), "quality") from exc
 
 
 def _model_id(body: dict[str, Any], selection: Any) -> str:

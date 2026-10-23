@@ -29,7 +29,7 @@ from favlo.daemon import DAEMON_ENV, alive
 from favlo.images import load_image, sweep_images
 from favlo.logs import attach_process_log
 from favlo.registry import model_objects, one_model, resolve
-from favlo.videos import load_video, sweep_videos
+from favlo.videos import load_video, reported_quality, sweep_videos
 
 _STREAM_WRITE_TIMEOUT = 2.0
 _REQUEST_READ_TIMEOUT = 10.0
@@ -382,6 +382,14 @@ def _form_name(headers: str) -> str:
     return ""
 
 
+def _query_value(path: str, name: str) -> str | None:
+    values = urllib.parse.parse_qs(urllib.parse.urlparse(path).query).get(name)
+    if not values:
+        return None
+    value = values[0].strip()
+    return value or None
+
+
 def _serve_loop(args: Any, state: dict[str, Any]) -> int:
     lock = state.setdefault("lock", threading.Lock())
 
@@ -673,7 +681,27 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
                 )
                 return
             home = state.get("video_home")
-            blob = load_video(video_id, home=home if isinstance(home, Path) else None)
+            root = home if isinstance(home, Path) else None
+            raw = _query_value(self.path, "quality")
+            chosen: str | None = None
+            if raw is not None:
+                try:
+                    chosen = reported_quality(raw)
+                except ValueError as exc:
+                    self._json(
+                        400,
+                        {
+                            "error": {
+                                "message": str(exc),
+                                "type": "invalid_request_error",
+                                "param": "quality",
+                            }
+                        },
+                    )
+                    return
+                if chosen == job.get("quality"):
+                    chosen = None
+            blob = load_video(video_id, home=root, quality=chosen)
             if blob is None:
                 self._json(404, {"error": {"message": "video not found", "type": "not_found"}})
                 return

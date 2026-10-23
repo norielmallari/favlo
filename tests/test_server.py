@@ -790,3 +790,43 @@ def test_video_job_can_be_read_while_it_runs(tmp_path) -> None:
     assert api.body["prompt"] == "gallop"
     assert base64.b64decode(api.body["image"]).startswith(b"\x89PNG\r\n\x1a\n")
 
+
+def test_content_quality_encodes_the_saved_avi(tmp_path, monkeypatch) -> None:
+    from favlo.videos import store_source, store_video
+
+    calls: list[str] = []
+
+    def fake_encode(source, quality, dest=None):
+        del source
+        assert dest is not None
+        calls.append(quality)
+        dest.write_bytes(f"q={quality}".encode())
+        return dest
+
+    monkeypatch.setattr("favlo.videos.encode_mp4", fake_encode)
+    state, thread = _serve_background(_Runtime())
+    state["video_home"] = tmp_path
+    state["videos"] = {
+        "video_test": {"id": "video_test", "status": "completed", "quality": "high"},
+    }
+    store_source("video_test", b"RIFF", home=tmp_path)
+    store_video("video_test", b"high-mp4", home=tmp_path, videos=state["videos"])
+    port = int(state["server"].server_address[1])
+    try:
+        same, kind, body = _http(port, "GET", "/v1/videos/video_test/content?quality=hd")
+        other, other_kind, other_body = _http(
+            port, "GET", "/v1/videos/video_test/content?quality=max"
+        )
+        _again, _again_kind, again_body = _http(
+            port, "GET", "/v1/videos/video_test/content?quality=max"
+        )
+        bad, _bad_kind, bad_body = _http(port, "GET", "/v1/videos/video_test/content?quality=ultra")
+    finally:
+        _stop_background(state, thread)
+    assert same == 200 and body == b"high-mp4" and kind.startswith("video/mp4")
+    assert other == 200 and other_body == b"q=max" and other_kind.startswith("video/mp4")
+    assert again_body == b"q=max"
+    assert calls == ["max"]
+    assert bad == 400
+    assert json.loads(bad_body)["error"]["param"] == "quality"
+

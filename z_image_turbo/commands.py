@@ -63,18 +63,19 @@ def _quantize(source: Path | None, out: Path | None) -> int:
 
 
 def _generate(args: argparse.Namespace) -> int:
+    from z_image_turbo.png import encode_png
     from z_image_turbo.runtime import Runtime
     from z_image_turbo.source import source_dir
 
     record = args.record or source_dir().parent / "Z-Image-Turbo-fp4"
     runtime = Runtime(record)
     try:
-        png, digest, timing = runtime.generate(
+        pixels, digest, timing = runtime.generate(
             args.prompt, args.width, args.height, args.steps, args.seed
         )
     finally:
         runtime.close()
-    args.out.write_bytes(png)
+    args.out.write_bytes(encode_png(pixels))
     print(f"latent {digest}", flush=True)
     print(f"wrote {args.out} steps {len(timing['steps'])}", flush=True)
     return 0
