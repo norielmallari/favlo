@@ -51,7 +51,7 @@ The embed, the query/gate split, RoPE, the top-8 pick, and the key/value store a
 
 ## Prefill
 
-One chunk of 2048 tokens, then a prompt of 65536 tokens as 32 of those chunks. Projections are `prefill_fp4_n64` where the output width is a multiple of 64, and `prefill_fp4_e8m0` for the 32-wide a and b projections. Routed experts are one 64-row tile for each of the 256 experts. `moe_group` is one thread over the 16384 assignments. The Gated DeltaNet recurrence is 32 sub-chunks of 64 tokens (Yang et al., §3.3). A score window is 16384 query rows by up to 4096 keys. The first chunk's limit is 2048 keys, so that chunk is the one 2048-key window per head in the table. A later chunk walks 4096-key windows and, when the limit is not a multiple of 4096, one 2048-key tail. The value product uses token stride 262144.
+One chunk of 2048 tokens, then a prompt of 65536 tokens as 32 of those chunks. Projections are `prefill_fp4_n64` where the output width is a multiple of 64, and `prefill_fp4_e8m0` for the 32-wide a and b projections. Routed experts are one 64-row tile for each of the 256 experts. `moe_group` splits the 16384 assignments into 16 slices and keeps token order inside each expert. The 3366.9 µs row is the single-thread kernel. The Gated DeltaNet recurrence is 32 sub-chunks of 64 tokens (Yang et al., §3.3). A score window is 16384 query rows by up to 4096 keys. The first chunk's limit is 2048 keys, so that chunk is the one 2048-key window per head in the table. A later chunk walks 4096-key windows and, when the limit is not a multiple of 4096, one 2048-key tail. The value product uses token stride 262144.
 
 | Kernel | Count in one chunk | µs per call |
 |---|---:|---:|

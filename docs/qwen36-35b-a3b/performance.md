@@ -26,16 +26,16 @@ Instruct card. `enable_thinking` is false. Omitted sampling fields come from tha
 uv run python -m harness --model qwen36-35b-a3b
 ```
 
-The server stops after the first turn and starts again, so the next turn loads the stored prefix. Later turns stay on that server. This run is `Qwen3.6-35B-A3B-fp8-e20`. It reached 101723 prompt tokens over four requests. The prefill kernel rows in [ceilings.md](ceilings.md) are the fp4-weight measurement.
+The server stops after the first turn and starts again, so the next turn loads the stored prefix. Later turns stay on that server. This run is `Qwen3.6-35B-A3B-fp8-e20`, after `moe_group` splits assignments into 16 slices. It reached 102507 prompt tokens over four requests on 23 October 2026. The prefill kernel rows in [ceilings.md](ceilings.md) are the fp4-weight measurement.
 
 | Request | Prompt tokens | Cache | Prefill | Decode |
 |---|---:|---|---|---|
-| 1 | 361 | miss | 125.46 tok/s (361 tok in 2.88 s) | 53.46 tok/s (31 tok in 0.58 s) |
-| 2 | 46901 | hit 392 | 777.26 tok/s (46509 tok in 59.84 s) | 43.21 tok/s (339 tok in 7.85 s) |
-| 3 | 47277 | prefix load 47240, hit 47240 | 14.45 tok/s (37 tok in 2.56 s) | 29.79 tok/s (40 tok in 1.34 s) |
-| 4 | 101723 | hit 47317 | 433.30 tok/s (54406 tok in 125.56 s) | 34.65 tok/s (373 tok in 10.77 s) |
+| 1 | 361 | miss | 123.61 tok/s (361 tok in 2.92 s) | 56.14 tok/s (31 tok in 0.55 s) |
+| 2 | 46901 | hit 392 | 841.19 tok/s (46509 tok in 55.29 s) | 49.80 tok/s (568 tok in 11.41 s) |
+| 3 | 47506 | prefix load 47469, hit 47469 | 13.96 tok/s (37 tok in 2.65 s) | 30.62 tok/s (40 tok in 1.31 s) |
+| 4 | 102507 | hit 47546 | 436.31 tok/s (54961 tok in 125.97 s) | 39.96 tok/s (821 tok in 20.54 s) |
 
-The summary is prefill 530.88 tok/s (101313 tok in 190.84 s) and decode 38.12 tok/s (783 tok in 20.54 s).
+The summary is prefill 545.24 tok/s (101868 tok in 186.83 s) and decode 43.18 tok/s (1460 tok in 33.81 s). The previous e20 file agent, before that grouping, was 530.88 tok/s prefill over 101313 tokens and 38.12 tok/s decode over 783 tokens.
 
 One resident load of the earlier fp4 record then applied four chunks in order. The first 2048-token chunk of a prompt, the kernel ceiling in [ceilings.md](ceilings.md), is 1521.37 tok/s.
 
@@ -54,14 +54,14 @@ Thinking card. `enable_thinking` is true. Omitted sampling fields come from that
 uv run python -m harness.coding --model qwen36-35b-a3b
 ```
 
-The hidden suite passed. This run is `Qwen3.6-35B-A3B-fp8-e20`. It used two requests and stopped at 572 prompt tokens.
+The hidden suite passed. This run is `Qwen3.6-35B-A3B-fp8-e20`, on 23 October 2026, with the same 16-slice grouping. It used two requests and stopped at 638 prompt tokens.
 
 | Request | Prompt tokens | Cache | Prefill | Decode |
 |---|---:|---|---|---|
-| 1 | 399 | miss | 144.97 tok/s (399 tok in 2.75 s) | 55.00 tok/s (153 tok in 2.78 s) |
-| 2 | 572 | prefix load 399, hit 399 | 434.45 tok/s (173 tok in 0.40 s) | 54.30 tok/s (46 tok in 0.85 s) |
+| 1 | 399 | miss | 138.43 tok/s (399 tok in 2.88 s) | 64.26 tok/s (219 tok in 3.41 s) |
+| 2 | 638 | prefix load 399, hit 399 | 624.60 tok/s (239 tok in 0.38 s) | 60.02 tok/s (95 tok in 1.58 s) |
 
-The summary is prefill 181.59 tok/s (572 tok in 3.15 s) and decode 54.82 tok/s (199 tok in 3.63 s).
+The summary is prefill 195.71 tok/s (638 tok in 3.26 s) and decode 62.93 tok/s (314 tok in 4.99 s). The previous e20 coding agent was 181.59 tok/s prefill over 572 tokens and 54.82 tok/s decode over 199 tokens.
 
 ## File agent, 16GiB
 

@@ -3200,104 +3200,136 @@ kernel void moe_group(
     constant uint& count [[buffer(12)]],
     uint tid [[thread_index_in_threadgroup]])
 {
-    // One thread keeps the stable token order. The other threads only fill the group.
-    if (tid != 0u) {
-        return;
-    }
-    uint counts[256];
-    uint filled[256];
-    uint offsets[256];
-    for (uint expert = 0u; expert < 256u; ++expert) {
-        counts[expert] = 0u;
-        filled[expert] = 0u;
-    }
+    // Sixteen slices keep assignment order inside an expert. Thread 0 builds
+    // the slot list. Each expert then writes its own packed rows.
+    threadgroup uint histo[16][256];
+    threadgroup uint counts[256];
+    threadgroup uint offsets[256];
+    threadgroup uint row_of[256];
     uint nassign = count * 8u;
-    for (uint index = 0u; index < nassign; ++index) {
-        uint expert = ids[index];
-        if (expert >= 256u) {
-            continue;
+    for (uint cell = tid; cell < 16u * 256u; cell += 256u) {
+        histo[cell >> 8u][cell & 255u] = 0u;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint span = (nassign + 15u) >> 4u;
+    if (tid < 16u) {
+        uint begin = tid * span;
+        uint end = begin + span;
+        if (end > nassign) {
+            end = nassign;
         }
-        counts[expert] += 1u;
+        for (uint index = begin; index < end; ++index) {
+            uint expert = ids[index];
+            if (expert < 256u) {
+                histo[tid][expert] += 1u;
+            }
+        }
     }
-    uint cursor = 0u;
-    for (uint expert = 0u; expert < 256u; ++expert) {
-        uint align = (4u - (cursor & 3u)) & 3u;
-        cursor += align;
-        offsets[expert] = cursor;
-        cursor += counts[expert];
-    }
-    for (uint token = 0u; token < count; ++token) {
-        for (uint lane = 0u; lane < 8u; ++lane) {
-            uint expert = ids[token * 8u + lane];
-            if (expert >= 256u) {
-                pack_row[token * 8u + lane] = 0xffffffffu;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0u) {
+        uint cursor = 0u;
+        uint slot = 0u;
+        uint row = 0u;
+        uint job = 0u;
+        for (uint expert = 0u; expert < 256u; ++expert) {
+            uint n = 0u;
+            for (uint slice = 0u; slice < 16u; ++slice) {
+                n += histo[slice][expert];
+            }
+            counts[expert] = n;
+            uint align = (4u - (cursor & 3u)) & 3u;
+            cursor += align;
+            offsets[expert] = cursor;
+            cursor += n;
+            if (n == 0u) {
+                row_of[expert] = 0u;
                 continue;
             }
-            uint at = offsets[expert] + filled[expert];
-            filled[expert] += 1u;
-            csr_i[at] = token;
-            csr_w[at] = mix[token * 8u + lane];
-            csr_lane[at] = lane;
+            uint pad = (n + 63u) & ~63u;
+            expert_of[slot] = expert;
+            slot_n[slot] = n;
+            slot_csr[slot] = offsets[expert];
+            row_base[slot] = row;
+            row_of[expert] = row;
+            uint tiles = pad >> 6u;
+            for (uint tile = 0u; tile < tiles; ++tile) {
+                jobs[job * 2u] = slot;
+                jobs[job * 2u + 1u] = tile;
+                job += 1u;
+            }
+            row += pad;
+            slot += 1u;
+        }
+        info[0] = slot;
+        info[1] = job;
+        info[2] = row;
+        info[3] = 0u;
+        uint jobs_y = job == 0u ? 1u : job;
+        uint rows_g = row == 0u ? 1u : row * 2u;
+        uint zero_g = row == 0u ? 1u : row * 4u;
+        info[4] = jobs_y;
+        info[5] = 1u;
+        info[6] = 1u;
+        info[7] = 0u;
+        info[8] = zero_g;
+        info[9] = 1u;
+        info[10] = 1u;
+        info[11] = 0u;
+        info[12] = 16u;
+        info[13] = jobs_y;
+        info[14] = 1u;
+        info[15] = 0u;
+        info[16] = rows_g;
+        info[17] = 1u;
+        info[18] = 1u;
+        info[19] = 0u;
+        info[20] = rows_g;
+        info[21] = 1u;
+        info[22] = 1u;
+        info[23] = 0u;
+        info[24] = 32u;
+        info[25] = jobs_y;
+        info[26] = 1u;
+        info[27] = 0u;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < 16u) {
+        uint rank[256];
+        for (uint expert = 0u; expert < 256u; ++expert) {
+            uint base = 0u;
+            for (uint slice = 0u; slice < tid; ++slice) {
+                base += histo[slice][expert];
+            }
+            rank[expert] = base;
+        }
+        uint begin = tid * span;
+        uint end = begin + span;
+        if (end > nassign) {
+            end = nassign;
+        }
+        for (uint index = begin; index < end; ++index) {
+            uint expert = ids[index];
+            if (expert >= 256u) {
+                pack_row[index] = 0xffffffffu;
+                continue;
+            }
+            uint at = offsets[expert] + rank[expert];
+            rank[expert] += 1u;
+            csr_i[at] = index >> 3u;
+            csr_w[at] = mix[index];
+            csr_lane[at] = index & 7u;
         }
     }
-    uint slot = 0u;
-    uint row = 0u;
-    uint job = 0u;
-    for (uint expert = 0u; expert < 256u; ++expert) {
-        uint n = counts[expert];
-        if (n == 0u) {
-            continue;
-        }
-        uint pad = (n + 63u) & ~63u;
-        expert_of[slot] = expert;
-        slot_n[slot] = n;
-        slot_csr[slot] = offsets[expert];
-        row_base[slot] = row;
-        uint tiles = pad >> 6u;
-        for (uint tile = 0u; tile < tiles; ++tile) {
-            jobs[job * 2u] = slot;
-            jobs[job * 2u + 1u] = tile;
-            job += 1u;
-        }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (counts[tid] != 0u) {
+        uint n = counts[tid];
+        uint off = offsets[tid];
+        uint row = row_of[tid];
         for (uint local = 0u; local < n; ++local) {
-            uint at = offsets[expert] + local;
+            uint at = off + local;
             pack_row[csr_i[at] * 8u + csr_lane[at]] = row + local;
         }
-        row += pad;
-        slot += 1u;
     }
-    info[0] = slot;
-    info[1] = job;
-    info[2] = row;
-    info[3] = 0u;
-    // Each record is 4 uints, 16 bytes. [0]=gather [1]=zero [2]=gate [3]=silu [4]=cast [5]=down.
-    uint jobs_y = job == 0u ? 1u : job;
-    uint rows_g = row == 0u ? 1u : row * 2u;
-    uint zero_g = row == 0u ? 1u : row * 4u;
-    info[4] = jobs_y;
-    info[5] = 1u;
-    info[6] = 1u;
-    info[7] = 0u;
-    info[8] = zero_g;
-    info[9] = 1u;
-    info[10] = 1u;
-    info[11] = 0u;
-    info[12] = 16u;
-    info[13] = jobs_y;
-    info[14] = 1u;
-    info[15] = 0u;
-    info[16] = rows_g;
-    info[17] = 1u;
-    info[18] = 1u;
-    info[19] = 0u;
-    info[20] = rows_g;
-    info[21] = 1u;
-    info[22] = 1u;
-    info[23] = 0u;
-    info[24] = 32u;
-    info[25] = jobs_y;
-    info[26] = 1u;
-    info[27] = 0u;
 }
 
 kernel void gather_half_grouped(
