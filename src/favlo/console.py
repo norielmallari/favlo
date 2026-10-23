@@ -6,6 +6,7 @@ The process entry owns this module. It imports nothing from a pipeline.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import threading
@@ -38,6 +39,7 @@ _CSI_FINAL = set(
 )
 _WINDOW = 5.0
 _WINDOW_MIN = 0.5
+_SMOOTH = 1.5
 
 
 @dataclass
@@ -85,6 +87,8 @@ class Console:
         self._lock = threading.RLock()
         self._handles: list[Progress] = []
         self._windows: dict[int, list[tuple[float, int]]] = {}
+        self._display: dict[tuple[int, str], tuple[float, float]] = {}
+        self._stage: dict[int, str] = {}
         self._drawn = 0
         self._inline = False
         self._wrap_off = False
@@ -373,7 +377,7 @@ class Console:
         with self._lock:
             if progress in self._handles:
                 self._handles.remove(progress)
-            self._windows.pop(id(progress), None)
+            self._forget(progress)
             remaining = len(self._handles)
             if self.mode == "pretty" and self._draft is not None:
                 if summary:
@@ -412,7 +416,7 @@ class Console:
             message = f"unknown console unit {unit}"
             raise ValueError(message)
         if progress.unit != unit:
-            self._windows.pop(id(progress), None)
+            self._forget(progress)
         progress.total = total
         progress.unit = unit
         progress.detail = detail
@@ -440,6 +444,8 @@ class Console:
                 progress.closed = True
             self._handles.clear()
             self._windows.clear()
+            self._display.clear()
+            self._stage.clear()
             if self.mode == "pretty":
                 self._clear_status_below()
                 self._draft = None
@@ -636,12 +642,72 @@ class Console:
         return rate, done, span >= _WINDOW_MIN
 
     def _row(self, progress: Progress, now: float) -> str:
-        rate, display, _eta = self._rates(progress, now)
+        self._drop_smooth_on_stage(progress)
+        rate, _display, eta = self._rates(progress, now)
+        shown = self._smooth(progress, "rate", now, rate)
+        shown_eta = None
+        if eta is not None and shown is not None and shown > 0 and progress.total > progress.done:
+            shown_eta = (progress.total - progress.done) / shown
+        gauge = self._smooth_gauge(progress, now)
         if progress.total <= 0:
-            return self._indeterminate(progress, now, rate)
-        return self._determinate(progress, rate, display)
+            return self._indeterminate(progress, now, shown, gauge)
+        return self._determinate(progress, shown, shown_eta, gauge)
 
-    def _determinate(self, progress: Progress, rate: float | None, eta: float | None) -> str:
+    def _forget(self, progress: Progress) -> None:
+        self._windows.pop(id(progress), None)
+        key = id(progress)
+        self._display.pop((key, "rate"), None)
+        self._display.pop((key, "gauge"), None)
+        self._stage.pop(key, None)
+
+    def _drop_smooth_on_stage(self, progress: Progress) -> None:
+        """A new detail is a new stage. The painted smooth starts over."""
+        key = id(progress)
+        stage = progress.detail
+        if self._stage.get(key) == stage:
+            return
+        seen = key in self._stage
+        self._stage[key] = stage
+        if not seen:
+            return
+        self._display.pop((key, "rate"), None)
+        self._display.pop((key, "gauge"), None)
+
+    def _smooth(self, progress: Progress, name: str, now: float, value: float | None) -> float | None:
+        """Exponential smooth of a painted number. The JSON tick stays raw."""
+        key = (id(progress), name)
+        if value is None:
+            held = self._display.get(key)
+            return None if held is None else held[1]
+        previous = self._display.get(key)
+        if previous is None:
+            self._display[key] = (now, value)
+            return value
+        last, smoothed = previous
+        dt = now - last
+        if dt > 0:
+            smoothed += (1.0 - math.exp(-dt / _SMOOTH)) * (value - smoothed)
+        self._display[key] = (now, smoothed)
+        return smoothed
+
+    def _smooth_gauge(self, progress: Progress, now: float) -> tuple[str, int] | None:
+        gauge = progress.gauge
+        if gauge is None:
+            self._display.pop((id(progress), "gauge"), None)
+            return None
+        label, value = gauge
+        smoothed = self._smooth(progress, "gauge", now, float(value))
+        if smoothed is None:
+            return None
+        return label, int(round(smoothed))
+
+    def _determinate(
+        self,
+        progress: Progress,
+        rate: float | None,
+        eta: float | None,
+        gauge: tuple[str, int] | None,
+    ) -> str:
         ratio = 0.0 if progress.total <= 0 else min(1.0, progress.done / progress.total)
         percent = f"{int(ratio * 100)}%"
         bar = _bar(ratio, 30)
@@ -656,12 +722,18 @@ class Console:
             parts.append(rate_text)
         if eta is not None:
             parts.append(f"ETA {_eta_text(eta)}")
-        if progress.gauge is not None:
-            label, value = progress.gauge
+        if gauge is not None:
+            label, value = gauge
             parts.append(f"{label} {value:,}")
         return _join_parts(parts)
 
-    def _indeterminate(self, progress: Progress, now: float, rate: float | None) -> str:
+    def _indeterminate(
+        self,
+        progress: Progress,
+        now: float,
+        rate: float | None,
+        gauge: tuple[str, int] | None,
+    ) -> str:
         frame = _SPINNER[int(now * 10) % len(_SPINNER)]
         count = f"{progress.phase} {_count(progress.done, progress.unit)} {progress.unit}"
         parts = [frame]
@@ -671,8 +743,8 @@ class Console:
         rate_text = _rate_text(rate, progress.unit)
         if rate_text:
             parts.append(rate_text)
-        if progress.gauge is not None:
-            label, value = progress.gauge
+        if gauge is not None:
+            label, value = gauge
             parts.append(f"{label} {value:,}")
         elapsed = now - progress.started
         if elapsed >= 0:

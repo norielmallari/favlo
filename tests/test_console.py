@@ -315,6 +315,47 @@ def test_every_phase_ends_in_every_mode(mode: str, phase: str) -> None:
         assert f"{phase} done" in text
 
 
+def test_pretty_rate_and_gauge_follow_an_exponential_smooth() -> None:
+    from favlo.console import _SMOOTH
+
+    ui, stream, clock = _ui("pretty", color=0, width=160)
+    progress = ui.begin("prefill", total=10000, unit="tok")
+    progress.done = 1000
+    progress.gauge = ("resident", 100)
+    clock.now += 1
+    ui.sample()
+    first = [line for line in stream.getvalue().splitlines() if "prefill" in line][-1]
+    assert "1000 tok/s" in first
+    assert "resident 100" in first
+    progress.gauge = ("resident", 0)
+    clock.now += _SMOOTH
+    ui.sample()
+    painted = [line for line in stream.getvalue().splitlines() if "prefill" in line][-1]
+    assert "621 tok/s" in painted
+    assert "resident 37" in painted
+    ui.end(progress, "prefill 400.00 tok/s (1000 tok in 2.50s)")
+    assert "prefill 400.00 tok/s (1000 tok in 2.50s)" in stream.getvalue()
+
+
+def test_a_stage_change_restarts_the_smooth() -> None:
+    from favlo.console import _SMOOTH
+
+    ui, stream, clock = _ui("pretty", color=0, width=160)
+    progress = ui.begin("prefill", total=10000, unit="tok", detail="text")
+    progress.done = 1000
+    progress.gauge = ("resident", 100)
+    clock.now += 1
+    ui.sample()
+    progress.detail = "encode"
+    progress.gauge = ("resident", 0)
+    clock.now += _SMOOTH
+    ui.sample()
+    painted = [line for line in stream.getvalue().splitlines() if "prefill" in line][-1]
+    assert "400 tok/s" in painted
+    assert "resident 0" in painted
+    ui.end(progress, "")
+
+
 def test_prefill_tok_rate_is_the_cumulative_average() -> None:
     ui, stream, clock = _ui("json")
     progress = ui.begin("prefill", total=5000, unit="tok")
