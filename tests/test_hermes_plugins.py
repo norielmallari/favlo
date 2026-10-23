@@ -9,6 +9,18 @@ from favlo.hermes_plugins import edit_config, hermes_root, install, main
 SOURCE = Path(__file__).resolve().parents[1] / "hermes-agent-plugins"
 
 
+def test_plugins_ask_for_a_thirty_minute_tool_budget() -> None:
+    image = (SOURCE / "image_gen" / "favlo" / "__init__.py").read_text(encoding="utf-8")
+    video = (SOURCE / "video_gen" / "favlo" / "__init__.py").read_text(encoding="utf-8")
+    for text in (image, video):
+        assert "TOOL_TIMEOUT_SECONDS = 1800.0" in text
+        assert "entry.execution_timeout = TOOL_TIMEOUT_SECONDS" in text
+    assert "httpx.Timeout(TOOL_TIMEOUT_SECONDS)" in image
+    assert "DEADLINE_SECONDS = TOOL_TIMEOUT_SECONDS" in video
+    for frame in ("416x240", "576x320", "832x480", "1280x720"):
+        assert frame in video
+
+
 def test_edit_config_enables_both_backends_once() -> None:
     original = """\
 known_builtin_toolsets:

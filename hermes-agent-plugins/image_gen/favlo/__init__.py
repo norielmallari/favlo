@@ -33,6 +33,7 @@ MODELS = {
     },
 }
 DEFAULT_MODEL = "z-image-turbo-fp4"
+TOOL_TIMEOUT_SECONDS = 1800.0
 
 
 class FavloImageGenProvider(StaticImageGenProvider):
@@ -97,7 +98,7 @@ class FavloImageGenProvider(StaticImageGenProvider):
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
             url = BASE_URL.rstrip("/") + API_PATH
-            with httpx.Client(timeout=httpx.Timeout(300.0)) as client:
+            with httpx.Client(timeout=httpx.Timeout(TOOL_TIMEOUT_SECONDS)) as client:
                 resp = client.post(url, json=payload, headers=headers)
 
             if resp.status_code != 200:
@@ -139,4 +140,19 @@ class FavloImageGenProvider(StaticImageGenProvider):
 
 
 def register(ctx) -> None:
+    _raise_tool_timeout("image_generate")
     ctx.register_image_gen_provider(FavloImageGenProvider())
+
+
+def _raise_tool_timeout(tool_name: str) -> None:
+    """Hermes stops a tool at 420s unless the registry entry asks for longer."""
+    try:
+        from tools.registry import registry
+    except ImportError:
+        return
+    entry = registry.get_entry(tool_name)
+    if entry is None:
+        return
+    current = entry.execution_timeout
+    if current is None or current < TOOL_TIMEOUT_SECONDS:
+        entry.execution_timeout = TOOL_TIMEOUT_SECONDS

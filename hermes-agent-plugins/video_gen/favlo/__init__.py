@@ -2,7 +2,7 @@
 
 Hermes ``video_generate`` passes ``image_url`` for image-to-video. This backend
 posts that still to Favlo ``POST /v1/videos`` and saves the MP4 from the content
-route. An omitted length stays 81 frames. The frame is 320p, 576×320, or 240p, 416×240.
+route. An omitted length stays 81 frames. The frame is 240p, 320p, 480p, or 720p.
 """
 
 from __future__ import annotations
@@ -29,7 +29,8 @@ BASE_URL = "http://localhost:8129/v1"
 API_MODEL = "Wan2.2-I2V-A14B-fp4"
 DEFAULT_MODEL = "wan22-i2v"
 POLL_SECONDS = 2.0
-DEADLINE_SECONDS = 3600.0
+TOOL_TIMEOUT_SECONDS = 1800.0
+DEADLINE_SECONDS = TOOL_TIMEOUT_SECONDS
 
 
 class FavloVideoGenProvider(VideoGenProvider):
@@ -52,7 +53,7 @@ class FavloVideoGenProvider(VideoGenProvider):
                 "id": DEFAULT_MODEL,
                 "display": "Wan 2.2 I2V",
                 "speed": "local",
-                "strengths": "320p and 240p image-to-video",
+                "strengths": "240p, 320p, 480p, and 720p image-to-video",
                 "modalities": ["image"],
             }
         ]
@@ -72,7 +73,7 @@ class FavloVideoGenProvider(VideoGenProvider):
         return {
             "modalities": ["image"],
             "aspect_ratios": ["16:9", "9:16", "1:1"],
-            "resolutions": ["320p", "240p"],
+            "resolutions": ["240p", "320p", "480p", "720p"],
             "max_duration": 5,
             "min_duration": 1,
             "supports_audio": False,
@@ -171,7 +172,22 @@ class FavloVideoGenProvider(VideoGenProvider):
 
 def register(ctx) -> None:
     _allow_resolutions()
+    _raise_tool_timeout("video_generate")
     ctx.register_video_gen_provider(FavloVideoGenProvider())
+
+
+def _raise_tool_timeout(tool_name: str) -> None:
+    """Hermes stops a tool at 420s unless the registry entry asks for longer."""
+    try:
+        from tools.registry import registry
+    except ImportError:
+        return
+    entry = registry.get_entry(tool_name)
+    if entry is None:
+        return
+    current = entry.execution_timeout
+    if current is None or current < TOOL_TIMEOUT_SECONDS:
+        entry.execution_timeout = TOOL_TIMEOUT_SECONDS
 
 
 def _allow_resolutions() -> None:
@@ -186,7 +202,7 @@ def _allow_resolutions() -> None:
     enum = resolution.get("enum")
     if not isinstance(enum, list):
         return
-    missing = [name for name in ("320p", "240p") if name not in enum]
+    missing = [name for name in ("240p", "320p", "480p", "720p") if name not in enum]
     if missing:
         resolution["enum"] = missing + enum
 
@@ -194,11 +210,13 @@ def _allow_resolutions() -> None:
 _SIZES = {
     "240p": {"16:9": "416x240", "9:16": "240x416", "1:1": "256x256"},
     "320p": {"16:9": "576x320", "9:16": "320x576", "1:1": "512x512"},
+    "480p": {"16:9": "832x480", "9:16": "480x832", "1:1": "640x640"},
+    "720p": {"16:9": "1280x720", "9:16": "720x1280", "1:1": "960x960"},
 }
 
 
 def _size(aspect_ratio: str, resolution: str) -> str:
-    table = _SIZES["240p"] if resolution == "240p" else _SIZES["320p"]
+    table = _SIZES.get(resolution, _SIZES["320p"])
     return table.get(aspect_ratio, table["16:9"])
 
 
