@@ -1,4 +1,0 @@
-name: favlo_video_gen
-version: 1.0.0
-description: "Local Favlo video generation — Wan 2.2 I2V via POST /v1/videos on localhost:8129."
-kind: backend

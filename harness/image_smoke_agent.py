@@ -1,6 +1,6 @@
 """Agent that generates two images and checks them with the 35B vision tower.
 
-The Microsoft Agent Framework agent calls ``POST /v1/images/generations``
+The Microsoft Agent Framework agent calls ``generate_image`` on ``POST /mcp``
 at ``quality`` ``low``, then ``max``. Each later turn sends that PNG back to
 the same model and asks whether the picture matches the prompt. Exit 0 means
 both replies affirm it and the max file is larger.
@@ -12,7 +12,6 @@ import argparse
 import asyncio
 import base64
 import json
-import socket
 import urllib.request
 from pathlib import Path
 from typing import Annotated, Any
@@ -21,10 +20,12 @@ from agent_framework import Agent, tool
 from agent_framework.openai import OpenAIChatCompletionClient
 from pydantic import Field
 
+from harness.mcp_media import generate, read_link
+from harness.server import close_listener, open_listener
+
 JUDGE = "qwen36-35b-a3b:instruct"
 IMAGE_MODEL = "Z-Image-Turbo-fp4"
 HOST = "127.0.0.1"
-PORT = 8129
 QUESTION = "Does this picture show a red cube on a white table? Reply with one word: yes or no."
 QUALITIES = ("low", "max")
 
@@ -74,9 +75,8 @@ def image_tools(port: int, body: dict[str, Any], png: list[bytes]) -> list[objec
         """Generate one image from the exact prompt."""
         if prompt_text.strip() != prompt:
             return f"use this prompt exactly: {prompt}"
-        payload = post_json(port, "/v1/images/generations", body)
-        encoded = payload["data"][0]["b64_json"]
-        png.append(base64.b64decode(encoded))
+        result = generate(port, "generate_image", body)
+        png.append(read_link(port, result, "image/png"))
         return "image ready"
 
     return [generate_image]
@@ -136,29 +136,6 @@ def judge(port: int, png: bytes, model: str = JUDGE) -> str:
     return str(payload["choices"][0]["message"].get("content") or "")
 
 
-def _listening(port: int) -> bool:
-    with socket.socket() as sock:
-        sock.settimeout(0.5)
-        return sock.connect_ex((HOST, port)) == 0
-
-
-def _hold_machine(root: Path) -> bool:
-    from favlo.smoke_lock import hold
-
-    return hold(root=root, pipeline="qwen36-35b-a3b", command="image-smoke-agent")
-
-
-def _open_server(root: Path, was_up: bool) -> tuple[int, Any]:
-    from harness.benchmarks.serve import free_port, start_server
-
-    if was_up:
-        port = free_port()
-        pid, stop, _log = start_server(port)
-        return port, (pid, stop)
-    start_server(PORT)
-    return PORT, None
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate a low and a max image and check both.")
     parser.add_argument("--root", type=Path, default=Path("."))
@@ -166,15 +143,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = args.root.resolve()
     body = smoke_body(root)
-    was_up = _listening(PORT)
-    owned = None
-    created = False
-    from favlo.cli import repo_root
-    from favlo.smoke_lock import release
-
+    listener = None
     try:
-        created = _hold_machine(repo_root())
-        port, owned = _open_server(root, was_up)
+        listener = open_listener()
+        port = listener.port
         base = f"http://{HOST}:{port}/v1"
         (root / "artifacts").mkdir(parents=True, exist_ok=True)
         saved: dict[str, Path] = {}
@@ -199,12 +171,8 @@ def main(argv: list[str] | None = None) -> int:
         print("images match", flush=True)
         return 0
     finally:
-        if owned is not None:
-            from harness.benchmarks.serve import stop_server
-
-            stop_server(owned[0], owned[1])
-        if created:
-            release(root=repo_root())
+        if listener is not None:
+            close_listener(listener)
 
 
 if __name__ == "__main__":

@@ -11,9 +11,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
-import json
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 from agent_framework import Agent, tool
 from agent_framework.openai import OpenAIChatCompletionClient
@@ -25,13 +24,11 @@ from harness.image_smoke_agent import (
     HOST,
     IMAGE_MODEL,
     JUDGE,
-    PORT,
-    _hold_machine,
-    _listening,
-    _open_server,
     affirms,
     post_json,
 )
+from harness.mcp_media import generate, read_link
+from harness.server import close_listener, open_listener
 
 IMAGE_PROMPT = (
     "A cute 2.5D stylized young horse, not a photograph and not a flat cartoon. "
@@ -77,7 +74,7 @@ def judge(port: int, png: bytes) -> str:
     return str(payload["choices"][0]["message"].get("content") or "")
 
 
-def image_tools(port: int, png: list[bytes], timing: list[dict[str, Any]]) -> list[object]:
+def image_tools(port: int, png: list[bytes]) -> list[object]:
     @tool(approval_mode="never_require")
     def generate_image(
         prompt_text: Annotated[str, Field(description="What to draw.")],
@@ -85,9 +82,9 @@ def image_tools(port: int, png: list[bytes], timing: list[dict[str, Any]]) -> li
         """Draw one 2.5D picture of the cute horse mascot."""
         if prompt_text.strip() != IMAGE_PROMPT:
             return f"use this prompt exactly: {IMAGE_PROMPT}"
-        payload = post_json(
+        result = generate(
             port,
-            "/v1/images/generations",
+            "generate_image",
             {
                 "model": IMAGE_MODEL,
                 "prompt": IMAGE_PROMPT,
@@ -96,16 +93,13 @@ def image_tools(port: int, png: list[bytes], timing: list[dict[str, Any]]) -> li
                 "seed": 0,
             },
         )
-        png.append(base64.b64decode(payload["data"][0]["b64_json"]))
-        timing.append(payload["generation_seconds"])
+        png.append(read_link(port, result, "image/png"))
         return "image ready"
 
     return [generate_image]
 
 
-async def create_image(
-    base_url: str, port: int, png: list[bytes], timing: list[dict[str, Any]]
-) -> None:
+async def create_image(base_url: str, port: int, png: list[bytes]) -> None:
     client = OpenAIChatCompletionClient(model=JUDGE, api_key="favlo", base_url=base_url)
     client.function_invocation_configuration["max_iterations"] = 2
     client.function_invocation_configuration["max_consecutive_errors_per_request"] = 1
@@ -118,7 +112,7 @@ async def create_image(
             + " with this prompt exactly, then stop: "
             + IMAGE_PROMPT
         ),
-        tools=image_tools(port, png, timing),
+        tools=image_tools(port, png),
         default_options={"temperature": 0},
     )
     await agent.run(
@@ -135,26 +129,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=Path("."))
     args = parser.parse_args(argv)
     root = args.root.resolve()
-    was_up = _listening(PORT)
-    owned = None
-    created = False
+    listener = None
     png: list[bytes] = []
-    timing: list[dict[str, Any]] = []
-    from favlo.cli import repo_root
-    from favlo.smoke_lock import release
-
     try:
-        created = _hold_machine(repo_root())
-        port, owned = _open_server(root, was_up)
+        listener = open_listener()
+        port = listener.port
         base = f"http://{HOST}:{port}/v1"
         print(f"generating on {port} size {MAX_EDGE}", flush=True)
-        asyncio.run(create_image(base, port, png, timing))
+        asyncio.run(create_image(base, port, png))
         if not png:
             print("the agent did not generate an image", flush=True)
             return 1
         (root / "artifacts").mkdir(parents=True, exist_ok=True)
         (root / "artifacts" / "favlo-horse.png").write_bytes(png[-1])
-        print(json.dumps(timing[-1]), flush=True)
+        print(f"image bytes {len(png[-1])}", flush=True)
         print("checking", flush=True)
         reply = judge(port, png[-1])
         print(reply, flush=True)
@@ -164,12 +152,8 @@ def main(argv: list[str] | None = None) -> int:
         print("image does not match", flush=True)
         return 1
     finally:
-        if owned is not None:
-            from harness.benchmarks.serve import stop_server
-
-            stop_server(owned[0], owned[1])
-        if created:
-            release(root=repo_root())
+        if listener is not None:
+            close_listener(listener)
 
 
 if __name__ == "__main__":

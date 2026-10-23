@@ -22,6 +22,12 @@ One pipeline is resident. A request that names a different folder or a different
 
 `close` returns only after that pipeline's device memory is released. That includes its key/value cache, prefill workspace, decode path, command queue, and open record. A prefix flush may finish first. After `close` returns, the previous runtime holds no Metal buffer, and the next runtime is the one that allocates.
 
+## Media preemption
+
+An image, video, or music pipeline assumes a chat can set `state["preempt"]` while that pipeline holds the GPU. Read the event at each stage boundary, after the Metal command already submitted has finished. On preempt, save the finished stage in a host checkpoint, leave the job `in_progress` with the same id, and return. `close` then releases the device so the chat's model can allocate. The listener calls the same handler again after those chats. The handler loads that checkpoint and continues the unfinished work. Cancel drops the checkpoint and does not resume.
+
+Device buffers do not survive `close`. A value the next stage needs is in the host checkpoint. Each pipeline keeps that checkpoint in its own package.
+
 ## Machine lock
 
 Wait until the machine is free before a test command. That includes `pytest`, `kernels`, `quantize`, `complete`, `bf16`, `probe`, `matmul`, `python -m harness`, and `python -m harness.coding`: any command that compiles shaders, dispatches Metal, loads a checkpoint, quantizes, or starts `favlo serve`. Editing the write set does not wait. Reading another pipeline does not.

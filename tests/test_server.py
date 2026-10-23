@@ -10,6 +10,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import qwen38_flash_next.commands as commands
 from qwen38_flash_next.runtime import RequestClosed
@@ -379,6 +380,31 @@ def test_closed_post_stops_generation() -> None:
         _stop_background(state, thread)
 
 
+def test_a_job_reply_is_frozen_when_json_returns() -> None:
+    from favlo.reply import LiveReply
+
+    gone = threading.Event()
+    reply = LiveReply(gone)
+    job = {"status": "in_progress"}
+    reply.json(200, job)
+    job["status"] = "completed"
+    assert reply.encoded == b'{"status": "in_progress"}'
+    assert reply.payload == {"status": "completed"}
+    gone.set()
+    assert reply.stopped() is False
+
+
+def test_a_stream_stops_when_the_client_is_gone() -> None:
+    from favlo.reply import LiveReply
+
+    gone = threading.Event()
+    reply = LiveReply(gone)
+    reply.begin_events()
+    assert reply.stopped() is False
+    gone.set()
+    assert reply.stopped() is True
+
+
 def _signal_server(sig: int, *, during_request: bool) -> None:
     runtime = _Runtime()
     runtime.hold = during_request
@@ -536,6 +562,8 @@ def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
 
     def opener(selection, console, max_memory=None):
         del console, max_memory
+        if opened:
+            assert opened[-1].closed
         runtime = _Runtime()
         runtime._name = selection.pipeline
         opened.append(runtime)
@@ -646,47 +674,6 @@ def test_resume_clears_the_smoke_hold() -> None:
     assert refused.startswith(b"HTTP/1.1 404")
 
 
-class _VideoApi:
-    def __init__(self) -> None:
-        self.release = threading.Event()
-        self.sent = threading.Event()
-        self.body: dict | None = None
-
-    def handle_video(self, handler, runtime, body, selection, args, state) -> None:
-        del runtime, selection, args
-        self.body = body
-        job = {
-            "id": "video_test",
-            "object": "video",
-            "status": "in_progress",
-            "progress": 0,
-            "model": body.get("model", ""),
-            "prompt": body.get("prompt"),
-            "seconds": "0.5625",
-            "size": body.get("size", "576x320"),
-            "frames": body.get("frames", 81),
-            "created_at": 1,
-            "completed_at": None,
-            "error": None,
-        }
-        state.setdefault("videos", {})[job["id"]] = job
-        handler._json(200, job)
-        self.sent.set()
-        assert self.release.wait(5)
-        from favlo.videos import store_video
-
-        home = state.get("video_home")
-        store_video(
-            job["id"],
-            b"mp4-bytes",
-            home=home if isinstance(home, Path) else None,
-            videos=state.get("videos"),
-        )
-        job["status"] = "completed"
-        job["progress"] = 100
-        job["completed_at"] = 2
-
-
 def _http(
     port: int,
     method: str,
@@ -713,120 +700,524 @@ def _http(
         return exc.code, kind, exc.read()
 
 
-def test_video_job_can_be_read_while_it_runs(tmp_path) -> None:
+def _meta(*, tasks: bool) -> dict[str, Any]:
+    extensions: dict[str, Any] = {}
+    if tasks:
+        extensions["io.modelcontextprotocol/tasks"] = {}
+    return {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {"extensions": extensions},
+        "io.modelcontextprotocol/clientInfo": {"name": "favlo-test", "version": "0"},
+    }
+
+
+def _mcp(
+    port: int,
+    method: str,
+    params: dict | None,
+    *,
+    rpc_id: int = 1,
+    tasks: bool = False,
+    name: str | None = None,
+) -> tuple[int, Any]:
+    body = dict(params or {})
+    body["_meta"] = _meta(tasks=tasks)
+    payload = {"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": body}
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "mcp-protocol-version": "2026-07-28",
+        "mcp-method": method,
+    }
+    if name is not None:
+        headers["mcp-name"] = name
+    return _mcp_raw(port, json.dumps(payload).encode(), headers)
+
+
+def _mcp_raw(port: int, raw: bytes, headers: dict[str, str] | None = None) -> tuple[int, Any]:
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/mcp",
+        data=raw,
+        headers=headers
+        or {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "mcp-protocol-version": "2026-07-28",
+            "mcp-method": "tools/list",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            body = response.read()
+            status = response.status
+    except urllib.error.HTTPError as exc:
+        body = exc.read()
+        status = exc.code
+    try:
+        parsed = json.loads(body.decode())
+    except json.JSONDecodeError:
+        parsed = body.decode()
+    return status, parsed
+
+
+def _tool(
+    port: int,
+    name: str,
+    arguments: dict,
+    *,
+    tasks: bool = True,
+    rpc_id: int = 1,
+) -> tuple[int, Any]:
+    return _mcp(
+        port,
+        "tools/call",
+        {"name": name, "arguments": arguments},
+        rpc_id=rpc_id,
+        tasks=tasks,
+        name=name,
+    )
+
+
+def _task_params(task_id: str) -> dict[str, Any]:
+    return {"taskId": task_id}
+
+
+def _wait_task(port: int, task_id: str) -> dict[str, Any]:
+    deadline = time.monotonic() + 10
+    last: Any = None
+    while time.monotonic() < deadline:
+        _status, body = _mcp(port, "tasks/get", _task_params(task_id), tasks=True)
+        last = body
+        result = body.get("result") if isinstance(body, dict) else None
+        done = {"completed", "failed", "cancelled"}
+        if isinstance(result, dict) and result.get("status") in done:
+            return result
+        time.sleep(0.02)
+    message = f"task {task_id} did not finish: {last}"
+    raise AssertionError(message)
+
+
+def _store_png(home: Path, image_id: str, payload: bytes) -> None:
+    from favlo.images import image_path
+
+    path = image_path(home, image_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+
+
+class _QueueMedia:
+    """Image handler the queue tests drive. It does not touch a GPU."""
+
+    def __init__(self, home: Path) -> None:
+        self.home = home
+        self.order: list[str] = []
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.first_file = threading.Event()
+        self.hold_release = threading.Event()
+        self.log: list[str] = []
+        self.saw_a = threading.Event()
+        self.chat_entered = threading.Event()
+        self.chat_release = threading.Event()
+        self.video_called = False
+
+    def handle_chat(self, reply, runtime, body, selection, args, state) -> None:
+        del runtime, body, selection, args
+        self.log.append("chat")
+        self.chat_entered.set()
+        self.chat_release.wait(5)
+        reply.json(200, {"id": "chat", "choices": []})
+
+    def handle_image(self, reply, runtime, body, selection, args, state) -> None:
+        del runtime, selection, args
+        prompt = body.get("prompt")
+        if prompt == "hold":
+            self.order.append("start")
+            self.entered.set()
+            self.release.wait(5)
+            _store_png(self.home, "image_hold", b"hold")
+            self.order.append("end")
+            reply.json(200, {"data": [{"id": "image_hold", "b64_json": "aG9sZA=="}]})
+            return
+        if prompt == "later":
+            self.order.append("later")
+            _store_png(self.home, "image_later", b"later")
+            reply.json(200, {"data": [{"id": "image_later", "b64_json": "bGF0ZXI="}]})
+            return
+        if prompt == "batch":
+            wrote = []
+            for index in range(int(body.get("n") or 1)):
+                if state["cancel"].is_set():
+                    reply.json(200, {"status": "in_progress", "data": wrote})
+                    return
+                image_id = f"image_{index}"
+                _store_png(self.home, image_id, b"batch")
+                wrote.append({"id": image_id, "b64_json": "YmF0Y2g="})
+                if index == 0:
+                    self.first_file.set()
+                    self.hold_release.wait(5)
+            reply.json(200, {"data": wrote})
+            return
+        if prompt == "pair":
+            _store_png(self.home, "image_a", b"aaa")
+            _store_png(self.home, "image_b", b"bbb")
+            reply.json(
+                200,
+                {
+                    "data": [
+                        {"id": "image_a", "b64_json": "YWFh"},
+                        {"id": "image_b", "b64_json": "YmJi"},
+                    ]
+                },
+            )
+            return
+        if prompt == "big":
+            _store_png(self.home, "image_big", b"x" * (1024 * 1024 + 1))
+            reply.json(200, {"data": [{"id": "image_big", "b64_json": "eA=="}]})
+            return
+        if prompt == "preempt":
+            if "a" not in self.log:
+                self.log.append("a")
+                self.saw_a.set()
+                state["preempt"].wait(5)
+                reply.json(200, {"status": "in_progress", "stages": ["a"]})
+                return
+            self.log.append("b")
+            _store_png(self.home, "image_preempt", b"pre")
+            reply.json(
+                200,
+                {
+                    "status": "completed",
+                    "stages": ["a", "b"],
+                    "data": [{"id": "image_preempt", "b64_json": "cHJl"}],
+                },
+            )
+            return
+        reply.json(400, {"error": {"message": "unknown prompt", "type": "invalid_request_error"}})
+
+    def handle_video(self, reply, runtime, body, selection, args, state) -> None:
+        del runtime, body, selection, args, state
+        self.video_called = True
+        reply.json(
+            200,
+            {"id": "video_called", "status": "completed", "size": "1x1", "seconds": "1"},
+        )
+
+    def handle_music(self, reply, runtime, body, selection, args, state) -> None:
+        del runtime, selection, args, state
+        reply.json(
+            200,
+            {
+                "id": "music_job",
+                "object": "audio.music",
+                "status": "completed",
+                "response_format": body.get("response_format") or "mp3",
+            },
+        )
+
+
+def test_mcp_initialize_lists_tools_and_rejects_a_batch(tmp_path) -> None:
     runtime = _Runtime()
     state, thread = _serve_background(runtime)
-    state["video_home"] = tmp_path
+    state["image_home"] = tmp_path
+    state["module"] = _QueueMedia(tmp_path)
     port = int(state["server"].server_address[1])
-    api = _VideoApi()
     try:
-        missing, _kind, _raw = _http(port, "POST", "/v1/videos", {"prompt": "gallop"})
-        retired, _kind, _raw = _http(port, "POST", "/v1/videos/generations", {"prompt": "gallop"})
-        state["module"] = api
-        posted: dict[str, tuple[int, str, bytes]] = {}
-
-        def _post() -> None:
-            posted["job"] = _http(
-                port,
-                "POST",
-                "/v1/videos",
-                {"prompt": "gallop", "model": "Wan2.2-I2V-A14B-fp4", "frames": 9},
-            )
-
-        worker = threading.Thread(target=_post)
-        worker.start()
-        assert api.sent.wait(3)
-        worker.join(timeout=3)
-        code, kind, raw = _http(port, "GET", "/v1/videos/video_test")
-        early, _early_kind, _early_raw = _http(port, "GET", "/v1/videos/video_test/content")
-        unknown, _unknown_kind, _unknown_raw = _http(port, "GET", "/v1/videos/missing")
-        api.release.set()
-        deadline = time.monotonic() + 3
-        finished = b""
-        while time.monotonic() < deadline:
-            _done, done_kind, finished = _http(port, "GET", "/v1/videos/video_test/content")
-            if finished == b"mp4-bytes":
-                content_type = done_kind
-                break
-            time.sleep(0.02)
-        else:
-            content_type = ""
-        boundary = "favlobound"
-        png = b"\x89PNG\r\n\x1a\nstill"
-        form = (
-            f"--{boundary}\r\n"
-            'Content-Disposition: form-data; name="prompt"\r\n\r\n'
-            "gallop\r\n"
-            f"--{boundary}\r\n"
-            'Content-Disposition: form-data; name="input_reference"; filename="still.png"\r\n'
-            "Content-Type: image/png\r\n"
-            "Content-Transfer-Encoding: binary\r\n\r\n"
-        ).encode() + png + f"\r\n--{boundary}--\r\n".encode()
-        _form_code, _form_kind, _form_raw = _http(
+        status, body = _mcp(port, "server/discover", {})
+        names_status, listed = _mcp(port, "tools/list", {})
+        _refused_status, refused = _tool(
             port,
-            "POST",
-            "/v1/videos",
-            raw=form,
-            content_type=f"multipart/form-data; boundary={boundary}",
+            "generate_image",
+            {"prompt": "hold", "model": "example-model"},
+            tasks=False,
+        )
+        batch_status, batch = _mcp_raw(
+            port,
+            b'[{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}]',
         )
     finally:
-        api.release.set()
         _stop_background(state, thread)
-    assert missing == 404
-    assert retired == 404
-    assert worker.is_alive() is False
-    status, _job_kind, job_raw = posted["job"]
-    job = json.loads(job_raw)
-    assert status == 200
-    assert job["status"] == "in_progress"
-    assert job["object"] == "video"
-    assert kind.startswith("application/json")
-    assert json.loads(raw)["status"] == "in_progress"
-    assert early == 400
-    assert unknown == 404
-    assert finished == b"mp4-bytes"
-    assert content_type.startswith("video/mp4")
-    assert api.body is not None
-    assert api.body["prompt"] == "gallop"
-    assert base64.b64decode(api.body["image"]).startswith(b"\x89PNG\r\n\x1a\n")
-
-
-def test_content_quality_encodes_the_saved_avi(tmp_path, monkeypatch) -> None:
-    from favlo.videos import store_source, store_video
-
-    calls: list[str] = []
-
-    def fake_encode(source, quality, dest=None):
-        del source
-        assert dest is not None
-        calls.append(quality)
-        dest.write_bytes(f"q={quality}".encode())
-        return dest
-
-    monkeypatch.setattr("favlo.videos.encode_mp4", fake_encode)
-    state, thread = _serve_background(_Runtime())
-    state["video_home"] = tmp_path
-    state["videos"] = {
-        "video_test": {"id": "video_test", "status": "completed", "quality": "high"},
+    assert status == 200, body
+    result = body["result"]
+    assert "2026-07-28" in result["supportedVersions"]
+    assert "io.modelcontextprotocol/tasks" in json.dumps(result["capabilities"])
+    assert names_status == 200
+    names = {tool["name"] for tool in listed["result"]["tools"]}
+    assert names == {
+        "list_media_models",
+        "media_status",
+        "media_cancel",
+        "generate_image",
+        "generate_video",
+        "generate_music",
     }
-    store_source("video_test", b"RIFF", home=tmp_path)
-    store_video("video_test", b"high-mp4", home=tmp_path, videos=state["videos"])
+    assert refused["error"]["code"] == -32021, refused
+    assert not state.get("media_order")
+    assert batch_status >= 400
+    assert not isinstance(batch, list)
+
+
+def test_mcp_queue_runs_the_first_image_and_cancel_skips_the_second(tmp_path) -> None:
+    runtime = _Runtime()
+    state, thread = _serve_background(runtime)
+    media = _QueueMedia(tmp_path)
+    state["image_home"] = tmp_path
+    state["module"] = media
     port = int(state["server"].server_address[1])
     try:
-        same, kind, body = _http(port, "GET", "/v1/videos/video_test/content?quality=hd")
-        other, other_kind, other_body = _http(
-            port, "GET", "/v1/videos/video_test/content?quality=max"
+        _status, first = _tool(
+            port, "generate_image", {"prompt": "hold", "model": "example-model"}
         )
-        _again, _again_kind, again_body = _http(
-            port, "GET", "/v1/videos/video_test/content?quality=max"
+        _status, second = _tool(
+            port, "generate_image", {"prompt": "later", "model": "example-model"}
         )
-        bad, _bad_kind, bad_body = _http(port, "GET", "/v1/videos/video_test/content?quality=ultra")
+        assert media.entered.wait(5)
+        assert media.order == ["start"]
+        first_id = first["result"]["taskId"]
+        second_id = second["result"]["taskId"]
+        assert first["result"]["status"] == "working"
+        assert first["result"]["pollIntervalMs"] == 2000
+        assert first_id != second_id
+        _status, cancelled = _tool(port, "media_cancel", {"taskId": second_id})
+        media.release.set()
+        finished = _wait_task(port, first_id)
+        skipped = _wait_task(port, second_id)
+    finally:
+        media.release.set()
+        _stop_background(state, thread)
+    assert media.order == ["start", "end"]
+    assert finished["status"] == "completed"
+    assert skipped["status"] == "cancelled"
+    assert cancelled["result"]["structuredContent"]["status"] == "cancelled" or (
+        cancelled["result"].get("status") == "cancelled"
+    )
+
+
+def test_mcp_cancel_during_a_batch_discards_the_file(tmp_path) -> None:
+    runtime = _Runtime()
+    state, thread = _serve_background(runtime)
+    media = _QueueMedia(tmp_path)
+    state["image_home"] = tmp_path
+    state["module"] = media
+    port = int(state["server"].server_address[1])
+    try:
+        _status, created = _tool(
+            port,
+            "generate_image",
+            {"prompt": "batch", "model": "example-model", "n": 2},
+        )
+        assert media.first_file.wait(5)
+        task_id = created["result"]["taskId"]
+        _tool(port, "media_cancel", {"taskId": task_id})
+        media.hold_release.set()
+        finished = _wait_task(port, task_id)
+    finally:
+        media.hold_release.set()
+        _stop_background(state, thread)
+    assert finished["status"] == "cancelled"
+    assert not (tmp_path / "images" / "image_0.png").exists()
+    assert not (tmp_path / "images" / "image_1.png").exists()
+
+
+def test_mcp_image_results_are_links_and_resources_read_the_file(tmp_path) -> None:
+    runtime = _Runtime()
+    state, thread = _serve_background(runtime)
+    state["image_home"] = tmp_path
+    state["module"] = _QueueMedia(tmp_path)
+    port = int(state["server"].server_address[1])
+    try:
+        _status, pair = _tool(
+            port,
+            "generate_image",
+            {"prompt": "pair", "model": "example-model", "n": 2},
+        )
+        pair_done = _wait_task(port, pair["result"]["taskId"])
+        _status, big = _tool(
+            port,
+            "generate_image",
+            {"prompt": "big", "model": "example-model", "include_image": True},
+        )
+        big_done = _wait_task(port, big["result"]["taskId"])
+        _status, read = _mcp(
+            port,
+            "resources/read",
+            {"uri": "favlo://images/image_a"},
+            name="favlo://images/image_a",
+        )
     finally:
         _stop_background(state, thread)
-    assert same == 200 and body == b"high-mp4" and kind.startswith("video/mp4")
-    assert other == 200 and other_body == b"q=max" and other_kind.startswith("video/mp4")
-    assert again_body == b"q=max"
-    assert calls == ["max"]
-    assert bad == 400
-    assert json.loads(bad_body)["error"]["param"] == "quality"
+    blocks = pair_done["result"]["content"]
+    assert [block["type"] for block in blocks].count("resource_link") == 2
+    assert all(block["type"] != "image" for block in blocks)
+    big_blocks = big_done["result"]["content"]
+    assert any(block["type"] == "resource_link" for block in big_blocks)
+    assert all(block["type"] != "image" for block in big_blocks)
+    blob = read["result"]["contents"][0]["blob"]
+    assert base64.b64decode(blob) == b"aaa"
+
+
+def test_mcp_video_rejects_a_filesystem_path(tmp_path) -> None:
+    runtime = _Runtime()
+    state, thread = _serve_background(runtime)
+    media = _QueueMedia(tmp_path)
+    state["module"] = media
+    port = int(state["server"].server_address[1])
+    try:
+        _status, created = _tool(
+            port,
+            "generate_video",
+            {"prompt": "gallop", "model": "example-model", "image": "/tmp/still.png"},
+        )
+        finished = _wait_task(port, created["result"]["taskId"])
+    finally:
+        _stop_background(state, thread)
+    assert finished["result"]["isError"] is True
+    assert "still" in json.dumps(finished)
+    assert media.video_called is False
+
+
+def test_mcp_chat_preempts_media_and_the_same_task_resumes(tmp_path) -> None:
+    runtime = _Runtime()
+    state, thread = _serve_background(runtime)
+    media = _QueueMedia(tmp_path)
+    state["image_home"] = tmp_path
+    state["module"] = media
+    port = int(state["server"].server_address[1])
+    chat: dict[str, bytes] = {}
+
+    def post_chat() -> None:
+        chat["body"] = _post_json(port, "/v1/chat/completions", {"messages": []})
+
+    try:
+        _status, created = _tool(
+            port, "generate_image", {"prompt": "preempt", "model": "example-model"}
+        )
+        assert media.saw_a.wait(5)
+        worker = threading.Thread(target=post_chat)
+        worker.start()
+        assert media.chat_entered.wait(5)
+        _status, paused = _mcp(
+            port, "tasks/get", _task_params(created["result"]["taskId"]), tasks=True
+        )
+        assert paused["result"]["stage"] == "paused"
+        assert paused["result"]["status"] == "working"
+        media.chat_release.set()
+        worker.join(timeout=5)
+        finished = _wait_task(port, created["result"]["taskId"])
+    finally:
+        media.chat_release.set()
+        _stop_background(state, thread)
+    assert media.log == ["a", "chat", "b"]
+    assert finished["status"] == "completed"
+    assert chat["body"].startswith(b"HTTP/1.1 200")
+
+
+def test_media_http_routes_are_gone(monkeypatch, tmp_path) -> None:
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "models": {
+                    "example-model": {
+                        "pipeline": "z-image-turbo",
+                        "alias": None,
+                        "variants": {},
+                        "context_length": 1536,
+                    },
+                    "text-model": {
+                        "pipeline": "qwen36-35b-a3b",
+                        "alias": None,
+                        "variants": {},
+                        "context_length": 131072,
+                    },
+                },
+            }
+        )
+    )
+    monkeypatch.setattr("favlo.registry.registry_path", lambda root=None: registry)
+    state, thread = _serve_background(_Runtime())
+    port = int(state["server"].server_address[1])
+    paths = (
+        ("POST", "/v1/images/generations", {"prompt": "pair"}),
+        ("POST", "/v1/images/edits", {"prompt": "pair"}),
+        ("POST", "/v1/images/variations", {"prompt": "pair"}),
+        ("GET", "/v1/images/image_a/content", None),
+        ("POST", "/v1/videos", {"prompt": "gallop"}),
+        ("POST", "/v1/videos/generations", {"prompt": "gallop"}),
+        ("GET", "/v1/videos/video_test", None),
+        ("GET", "/v1/videos/video_test/content", None),
+        ("POST", "/v1/audio/music", {"prompt": "theme"}),
+        ("POST", "/v1/audio/speech", {"input": "hello"}),
+        ("GET", "/v1/audio/music/music_test", None),
+        ("GET", "/v1/audio/music/music_test/content", None),
+    )
+    try:
+        for method, route, payload in paths:
+            status, _kind, _raw = _http(port, method, route, payload)
+            assert status == 404, route
+        models_status, _kind, models_raw = _http(port, "GET", "/v1/models")
+        one_status, _kind, one_raw = _http(port, "GET", "/v1/models/text-model")
+        media_status, _kind, _media_raw = _http(port, "GET", "/v1/models/example-model")
+        release_status, _kind, release_raw = _http(
+            port, "POST", "/v1/release", {"pid": os.getpid()}
+        )
+        resume_status, _kind, resume_raw = _http(port, "POST", "/v1/resume", {"pid": os.getpid()})
+    finally:
+        _stop_background(state, thread)
+    assert models_status == 200
+    rows = json.loads(models_raw)["data"]
+    assert [row["id"] for row in rows] == ["text-model"]
+    assert one_status == 200
+    assert json.loads(one_raw)["pipeline"] == "qwen36-35b-a3b"
+    assert media_status == 404
+    assert release_status == 200
+    assert b'"released": true' in release_raw
+    assert resume_status == 200
+    assert b'"resumed": true' in resume_raw
+
+
+def test_language_harness_clients_read_chat_completions() -> None:
+    from harness.benchmarks.serve import Request, complete
+    from harness.coding.loop import _post
+    from harness.coherence import _stream
+    from openai import OpenAI
+
+    state, thread = _serve_background(_Runtime())
+    port = int(state["server"].server_address[1])
+    messages = [{"role": "user", "content": "hello"}]
+    try:
+        text, reason, _tokens = complete(
+            port,
+            messages,
+            8,
+            Request(enable_thinking=False),
+            model="text-model",
+        )
+        posted = _post(
+            port,
+            {
+                "model": "text-model",
+                "messages": messages,
+                "stream": False,
+                "enable_thinking": True,
+            },
+        )
+        _reasoning, content, _led = _stream(
+            port, messages, presence=0.0, window=20, model="text-model"
+        )
+        client = OpenAI(api_key="favlo", base_url=f"http://127.0.0.1:{port}/v1", timeout=30.0)
+        completion = client.chat.completions.create(
+            model="text-model",
+            messages=messages,
+            extra_body={"enable_thinking": False},
+        )
+    finally:
+        _stop_background(state, thread)
+    assert text
+    assert reason
+    assert posted["choices"][0]["message"]["content"]
+    assert content or _reasoning
+    assert completion.choices[0].message.content
 

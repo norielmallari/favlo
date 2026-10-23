@@ -677,20 +677,6 @@ def test_stream_flushes_a_finished_replacement_character() -> None:
     assert text == "\ufffd"
 
 
-def test_peer_closed_after_the_client_disconnects() -> None:
-    import socket
-
-    from favlo.listener import _peer_closed
-
-    server, client = socket.socketpair()
-    try:
-        assert _peer_closed(server) is False
-        client.close()
-        assert _peer_closed(server) is True
-    finally:
-        server.close()
-
-
 def test_closed_client_stops_the_forward() -> None:
     from qwen38_flash_next.runtime import Qwen38Runtime, RequestClosed
 
@@ -826,29 +812,6 @@ def test_release_closes_the_listening_socket() -> None:
     finally:
         probe.close()
     raise AssertionError("listening socket stayed open")
-
-
-def test_a_closed_client_does_not_print_a_traceback(capsys: pytest.CaptureFixture[str]) -> None:
-    from favlo.listener import _SingleRequestServer
-
-    server = _SingleRequestServer(("127.0.0.1", 0), type("Quiet", (), {}))
-    try:
-        try:
-            raise BrokenPipeError(32, "Broken pipe")
-        except BrokenPipeError:
-            server.handle_error(None, ("127.0.0.1", 1))
-        quiet = capsys.readouterr().err
-        assert "Traceback" not in quiet
-        assert "Exception occurred" not in quiet
-        try:
-            raise RuntimeError("boom")
-        except RuntimeError:
-            server.handle_error(None, ("127.0.0.1", 1))
-        logged = capsys.readouterr().err
-        assert "Traceback" in logged
-        assert "boom" in logged
-    finally:
-        server.server_close()
 
 
 def test_omitted_output_limit_is_uncapped() -> None:

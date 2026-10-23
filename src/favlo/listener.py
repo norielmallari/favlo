@@ -12,26 +12,22 @@ import base64
 import inspect
 import json
 import os
-import select
 import signal
-import socket
 import sys
 import threading
 import traceback
-import urllib.parse
 from collections.abc import Sequence
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 from favlo.console import VERSION, Console
 from favlo.daemon import DAEMON_ENV, alive
-from favlo.images import load_image, sweep_images
+from favlo.images import sweep_images
 from favlo.logs import attach_process_log
-from favlo.registry import model_objects, one_model, resolve
-from favlo.videos import load_video, reported_quality, sweep_videos
+from favlo.music import sweep_music
+from favlo.registry import resolve
+from favlo.videos import sweep_videos
 
-_STREAM_WRITE_TIMEOUT = 2.0
 _REQUEST_READ_TIMEOUT = 10.0
 _RELEASE_WAIT = 25.0
 _log_sink: Any = None
@@ -74,24 +70,6 @@ def _report_failure(console: Any) -> None:
         sys.stderr.flush()
         return
     report(text)
-
-
-class _SingleRequestServer(ThreadingHTTPServer):
-    """Each connection has its own thread. One chat completion runs at a time.
-
-    A connection that holds its socket open, such as an editor probing the
-    port, does not hold the chat slot.
-    """
-
-    request_queue_size = 128
-    daemon_threads = True
-    block_on_close = False
-
-    def handle_error(self, request: Any, client_address: Any) -> None:
-        """A peer that closes mid-response is not a server failure."""
-        if isinstance(sys.exception(), (ConnectionError, TimeoutError)):
-            return
-        super().handle_error(request, client_address)
 
 
 class _Shutdown:
@@ -152,23 +130,6 @@ def _release(runtime: Any, shutdown: _Shutdown, server: Any = None) -> None:
         shutdown.disarm()
 
 
-def _peer_closed(sock: socket.socket) -> bool:
-    """True when the client has closed its side or the socket is already dead."""
-    try:
-        readable, _, _ = select.select([sock], [], [], 0)
-    except (OSError, ValueError):
-        return True
-    if not readable:
-        return False
-    try:
-        peeked = sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
-    except BlockingIOError:
-        return False
-    except OSError:
-        return True
-    return peeked == b""
-
-
 def _pipeline_module(name: str) -> Any:
     from favlo.cli import load_pipeline
 
@@ -204,8 +165,7 @@ def _install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
     state["record"] = None
     state["pipeline"] = None
     state["module"] = None
-    if old is not None:
-        old.close()
+    _close_runtime(old)
     ui = getattr(args, "console_ui", None)
     if ui is not None:
         ui.pipeline = selection.pipeline
@@ -221,6 +181,19 @@ def _install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
     if ui is not None and ui.keeps_lines:
         label = selection.alias or selection.folder
         _log(f"loaded {label} {selection.folder}")
+
+
+def _close_runtime(runtime: Any) -> None:
+    """Close one runtime and drain its device objects before the next allocates."""
+    if runtime is None:
+        return
+    import gc
+
+    import objc
+
+    with objc.autorelease_pool():
+        runtime.close()
+        gc.collect()
 
 
 def _smoke_held(state: dict[str, Any]) -> bool:
@@ -245,8 +218,7 @@ def _drop_runtime(state: dict[str, Any], args: Any) -> str | None:
     shutdown = getattr(args, "shutdown", None)
     if shutdown is not None:
         shutdown.runtime = None
-    if old is not None:
-        old.close()
+    _close_runtime(old)
     if isinstance(folder, str) and folder:
         _log(f"released {folder}")
         return folder
@@ -273,6 +245,7 @@ def _bind_request(body: dict[str, Any], state: dict[str, Any], args: Any) -> Any
 def serve(args: Any) -> int:
     sweep_videos()
     sweep_images()
+    sweep_music()
     shutdown = _Shutdown()
     shutdown.arm()
     args.shutdown = shutdown
@@ -304,20 +277,6 @@ def _run_until_stopped(args: Any, state: dict[str, Any], shutdown: _Shutdown) ->
         return 0
     finally:
         _release(state["runtime"], shutdown, state.get("server"))
-
-
-def _request_pid(handler: BaseHTTPRequestHandler) -> int:
-    length = int(handler.headers.get("Content-Length", "0") or "0")
-    raw = handler.rfile.read(length) if length else b"{}"
-    body = json.loads(raw or b"{}")
-    if not isinstance(body, dict):
-        message = "pid is required"
-        raise ValueError(message)
-    pid = body.get("pid")
-    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
-        message = "pid is required"
-        raise ValueError(message)
-    return pid
 
 
 def _video_body(content_type: str, raw: bytes) -> dict[str, Any]:
@@ -382,369 +341,12 @@ def _form_name(headers: str) -> str:
     return ""
 
 
-def _query_value(path: str, name: str) -> str | None:
-    values = urllib.parse.parse_qs(urllib.parse.urlparse(path).query).get(name)
-    if not values:
-        return None
-    value = values[0].strip()
-    return value or None
-
-
 def _serve_loop(args: Any, state: dict[str, Any]) -> int:
-    lock = state.setdefault("lock", threading.Lock())
+    """Listen on one uvicorn server. Chat and MCP share that process."""
+    from favlo.http_app import serve
 
-    class Handler(BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"
-        timeout = _REQUEST_READ_TIMEOUT
-
-        def log_message(self, fmt: str, *log_args: Any) -> None:
-            del fmt, log_args
-
-        def do_GET(self) -> None:  # noqa: N802
-            path = urllib.parse.unquote(self.path.split("?", 1)[0])
-            if path == "/v1/models":
-                self._json(
-                    200,
-                    {
-                        "object": "list",
-                        "data": model_objects(resident=state.get("record")),
-                    },
-                )
-                return
-            prefix = "/v1/models/"
-            if path.startswith(prefix):
-                try:
-                    row = one_model(path[len(prefix) :], resident=state.get("record"))
-                except LookupError as exc:
-                    self._json(404, {"error": {"message": str(exc), "type": "not_found"}})
-                    return
-                self._json(200, row)
-                return
-            if path.startswith("/v1/images/"):
-                self._image(path)
-                return
-            if path.startswith("/v1/videos/"):
-                self._video(path)
-                return
-            self._json(404, {"error": {"message": "not found"}})
-
-        def do_POST(self) -> None:  # noqa: N802
-            route = self.path.split("?", 1)[0]
-            if route == "/v1/release":
-                self._release_for_smoke()
-                return
-            if route == "/v1/resume":
-                self._resume_from_smoke()
-                return
-            if route not in {
-                "/v1/chat/completions",
-                "/v1/images/generations",
-                "/v1/videos",
-            }:
-                self._json(404, {"error": {"message": "not found"}})
-                return
-            self._started = False
-            self._gone = False
-            self._model_id = ""
-            selection = None
-            length = int(self.headers.get("Content-Length", "0") or "0")
-            try:
-                raw = self.rfile.read(length) if length else b"{}"
-            except TimeoutError:
-                self.close_connection = True
-                return
-            self.connection.settimeout(None)
-            if not lock.acquire(blocking=False):
-                _log("waiting for the open request")
-                lock.acquire()
-            opened = False
-            try:
-                if _smoke_held(state):
-                    self._json(
-                        503,
-                        {
-                            "error": {
-                                "message": "the gpu is held for a pipeline smoke",
-                                "type": "busy",
-                            }
-                        },
-                    )
-                    return
-                _log("request open")
-                opened = True
-                try:
-                    if route == "/v1/videos":
-                        body = _video_body(self.headers.get("Content-Type", ""), raw)
-                    else:
-                        body = json.loads(raw or b"{}")
-                except (json.JSONDecodeError, ValueError) as exc:
-                    if route == "/v1/videos":
-                        self._json(
-                            400,
-                            {
-                                "error": {
-                                    "message": str(exc),
-                                    "type": "invalid_request_error",
-                                }
-                            },
-                        )
-                        return
-                    raise
-                selection = _bind_request(body, state, args)
-                if selection is not None:
-                    self._model_id = selection.requested_id
-                runtime = state.get("runtime")
-                module = state.get("module")
-                if runtime is None or module is None:
-                    self._json(
-                        404,
-                        {"error": {"message": "no model is loaded", "type": "not_found"}},
-                    )
-                    return
-                if route == "/v1/images/generations":
-                    image = getattr(module, "handle_image", None)
-                    if not callable(image):
-                        self._json(404, {"error": {"message": "not found"}})
-                        return
-                    image(self, runtime, body, selection, args, state)
-                    return
-                if route == "/v1/videos":
-                    video = getattr(module, "handle_video", None)
-                    if not callable(video):
-                        self._json(404, {"error": {"message": "not found"}})
-                        return
-                    video(self, runtime, body, selection, args, state)
-                    return
-                chat = getattr(module, "handle_chat", None)
-                if not callable(chat):
-                    name = state.get("pipeline") or "pipeline"
-                    self._json(
-                        500,
-                        {
-                            "error": {
-                                "message": f"{name} does not complete a chat",
-                                "type": "RuntimeError",
-                            }
-                        },
-                    )
-                    return
-                chat(self, runtime, body, selection, args, state)
-            except KeyError as exc:
-                self.close_connection = True
-                if self._started:
-                    return
-                self._json(404, {"error": {"message": str(exc), "type": "not_found"}})
-            except LookupError as exc:
-                self.close_connection = True
-                if self._started:
-                    return
-                self._json(404, {"error": {"message": str(exc), "type": "not_found"}})
-            except Exception as exc:
-                _report_failure(getattr(state.get("runtime"), "console", None))
-                self.close_connection = True
-                if self._started:
-                    return
-                self._json(500, {"error": {"message": str(exc), "type": type(exc).__name__}})
-            finally:
-                if opened:
-                    _log("request closed")
-                module = state.get("module")
-                runtime = state.get("runtime")
-                lock.release()
-                if opened:
-                    _schedule_pipeline_heartbeat(module, runtime, selection)
-                try:
-                    self.connection.settimeout(_REQUEST_READ_TIMEOUT)
-                except OSError:
-                    self.close_connection = True
-
-        def _release_for_smoke(self) -> None:
-            try:
-                pid = _request_pid(self)
-            except (TimeoutError, ValueError, json.JSONDecodeError):
-                self.close_connection = True
-                self._json(400, {"error": {"message": "pid is required", "type": "bad_request"}})
-                return
-            if not lock.acquire(blocking=False):
-                self._json(409, {"error": {"message": "a request is open", "type": "busy"}})
-                return
-            try:
-                holder = state.get("smoke_hold")
-                if _smoke_held(state) and holder != pid:
-                    self._json(
-                        409,
-                        {"error": {"message": "a smoke hold is active", "type": "busy"}},
-                    )
-                    return
-                try:
-                    closed = _drop_runtime(state, args)
-                except Exception as exc:
-                    self._json(
-                        500,
-                        {"error": {"message": str(exc), "type": type(exc).__name__}},
-                    )
-                    return
-                state["smoke_hold"] = pid
-                self._json(200, {"released": True, "closed": closed})
-            finally:
-                lock.release()
-
-        def _resume_from_smoke(self) -> None:
-            try:
-                pid = _request_pid(self)
-            except (TimeoutError, ValueError, json.JSONDecodeError):
-                self.close_connection = True
-                self._json(400, {"error": {"message": "pid is required", "type": "bad_request"}})
-                return
-            if not lock.acquire(blocking=False):
-                self._json(409, {"error": {"message": "a request is open", "type": "busy"}})
-                return
-            try:
-                holder = state.get("smoke_hold")
-                if _smoke_held(state) and holder != pid:
-                    self._json(
-                        409,
-                        {"error": {"message": "a smoke hold is active", "type": "busy"}},
-                    )
-                    return
-                state["smoke_hold"] = None
-                self._json(200, {"resumed": True})
-            finally:
-                lock.release()
-
-        def _client_stopped(self) -> bool:
-            if self._gone:
-                return True
-            if _peer_closed(self.connection):
-                self._gone = True
-                return True
-            return False
-
-        def _event(self, payload: dict[str, Any]) -> None:
-            blob = json.dumps(payload).encode()
-            self._send(b"data: " + blob + b"\n\n")
-
-        def _send(self, data: bytes) -> None:
-            try:
-                if getattr(self, "_chunked", False):
-                    if data:
-                        data = f"{len(data):X}\r\n".encode() + data + b"\r\n"
-                    else:
-                        data = b"0\r\n\r\n"
-                self.wfile.write(data)
-                self.wfile.flush()
-            except OSError:
-                self._gone = True
-                message = "client closed"
-                raise OSError(message) from None
-
-        def _image(self, path: str) -> None:
-            rest = path[len("/v1/images/") :]
-            if not rest.endswith("/content"):
-                self._json(404, {"error": {"message": "not found"}})
-                return
-            image_id = rest[: -len("/content")]
-            if not image_id or "/" in image_id:
-                self._json(404, {"error": {"message": "not found"}})
-                return
-            home = state.get("image_home")
-            blob = load_image(image_id, home=home if isinstance(home, Path) else None)
-            if blob is None:
-                self._json(404, {"error": {"message": "image not found", "type": "not_found"}})
-                return
-            self._bytes(200, blob, "image/png")
-
-        def _video(self, path: str) -> None:
-            rest = path[len("/v1/videos/") :]
-            content = rest.endswith("/content")
-            video_id = rest[: -len("/content")] if content else rest
-            if not video_id or "/" in video_id:
-                self._json(404, {"error": {"message": "not found"}})
-                return
-            videos = state.get("videos")
-            job = videos.get(video_id) if isinstance(videos, dict) else None
-            if not isinstance(job, dict):
-                self._json(404, {"error": {"message": "video not found", "type": "not_found"}})
-                return
-            if not content:
-                self._json(200, job)
-                return
-            if job.get("status") != "completed":
-                self._json(
-                    400,
-                    {
-                        "error": {
-                            "message": "video is not ready",
-                            "type": "invalid_request_error",
-                        }
-                    },
-                )
-                return
-            home = state.get("video_home")
-            root = home if isinstance(home, Path) else None
-            raw = _query_value(self.path, "quality")
-            chosen: str | None = None
-            if raw is not None:
-                try:
-                    chosen = reported_quality(raw)
-                except ValueError as exc:
-                    self._json(
-                        400,
-                        {
-                            "error": {
-                                "message": str(exc),
-                                "type": "invalid_request_error",
-                                "param": "quality",
-                            }
-                        },
-                    )
-                    return
-                if chosen == job.get("quality"):
-                    chosen = None
-            blob = load_video(video_id, home=root, quality=chosen)
-            if blob is None:
-                self._json(404, {"error": {"message": "video not found", "type": "not_found"}})
-                return
-            self._bytes(200, blob, "video/mp4")
-
-        def _bytes(self, status: int, payload: bytes, content_type: str) -> None:
-            previous = self.connection.gettimeout()
-            self.connection.settimeout(_STREAM_WRITE_TIMEOUT)
-            try:
-                self.send_response(status)
-                self.send_header("Content-Type", content_type)
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
-                self.wfile.flush()
-            except OSError:
-                self.close_connection = True
-                _log("client closed")
-            else:
-                self.connection.settimeout(previous)
-
-        def _json(self, status: int, payload: dict[str, Any]) -> None:
-            blob = json.dumps(payload).encode()
-            previous = self.connection.gettimeout()
-            self.connection.settimeout(_STREAM_WRITE_TIMEOUT)
-            try:
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(blob)))
-                self.end_headers()
-                self.wfile.write(blob)
-                self.wfile.flush()
-            except OSError:
-                self.close_connection = True
-                _log("client closed")
-            else:
-                self.connection.settimeout(previous)
-
-    server = _SingleRequestServer((args.host, args.port), Handler)
-    state["server"] = server
-    _log(f"listening on http://{args.host}:{args.port}")
-    server.serve_forever()
-    return 0
+    state.setdefault("lock", threading.Lock())
+    return serve(args, state)
 
 
 def serve_main(argv: Sequence[str] | None = None) -> int:

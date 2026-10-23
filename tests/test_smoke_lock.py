@@ -6,7 +6,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from favlo.smoke_lock import acquire, hold, owner_pid, release
+from favlo.smoke_lock import acquire, clear_hold, hold, owner_pid, release
 
 
 class _Scripted(BaseHTTPRequestHandler):
@@ -91,6 +91,20 @@ def test_acquire_holds_the_lock_when_serve_is_down(tmp_path: Path) -> None:
     )
     assert code == 0
     assert (tmp_path / "artifacts" / "pipeline-test.lock").is_file()
+
+
+def test_clear_hold_leaves_the_lock_file(tmp_path: Path) -> None:
+    path = tmp_path / "artifacts" / "pipeline-test.lock"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"pipeline": "qwen38-27b", "pid": os.getpid(), "command": "smoke"}))
+    server, port = _serve(200)
+    try:
+        code = clear_hold(port=port, pid=os.getpid())
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert code == 0
+    assert path.is_file()
 
 
 def test_release_removes_only_this_pid(tmp_path: Path) -> None:

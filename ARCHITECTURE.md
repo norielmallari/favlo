@@ -10,7 +10,6 @@ This file is the map and the write set. It wins for the listener, the registry, 
 |---|---|---|
 | Command discovery | `src/favlo/cli.py` | This file. The command finds each `*-*.py` entry. Adding a runtime does not edit `cli.py`. |
 | Listener and daemon | `src/favlo/listener.py`, `src/favlo/daemon.py` | [docs/serve.md](docs/serve.md) |
-| Hermes plugins | `hermes-agent-plugins/`, `src/favlo/hermes_plugins.py` | [docs/hermes-plugins.md](docs/hermes-plugins.md) |
 | Terminal chat | `src/favlo/talk.py`, `src/favlo/persona.py` | [docs/ai-assistance](docs/ai-assistance/README.md) |
 | Console | `src/favlo/console.py` | [docs/console.md](docs/console.md) |
 | Registry | `src/favlo/registry.py`, `models/registry.json` | This file |
@@ -20,9 +19,9 @@ This file is the map and the write set. It wins for the listener, the registry, 
 
 Shared code is `src/favlo/`. There is no model base class and no kernel that branches on the pipeline. A pipeline task does not change `src/favlo/` to reach into another runtime. A pipeline imports the prefix store and adapts its own buffers.
 
-The daemon is a request server. It does not own chat history, tools, or the terminal session. The CLI owns those. Telemetry is one JSON event per line. The terminal paints it as it arrives, and prints the reply after that turn's requests have closed.
+`POST /mcp` is the FastMCP media queue. A chat sets one event when media holds the GPU. The listener checkpoints that task and closes its device before the chat's model allocates, resumes that same task after the waiting chats, and does not serve a media HTTP route. The daemon is a request server. It does not own chat history, tools, or the terminal session. The CLI owns those. A pipeline writes a reply and does not see a socket. `json` finishes one object, and that object is encoded before the call returns. `begin_events`, `event`, and `done` are one server-sent stream. `stopped` is true when that client has gone. Telemetry is one JSON event per line. The terminal paints it as it arrives, and prints the reply after that turn's requests have closed.
 
-`python -m favlo.smoke_lock` is how a pipeline test takes the GPU while the daemon stays up. Acquire closes the resident model when no request is open. Release lets the next chat load one again. The recorded pid is the invoking shell. `uv` and `python` are not that owner. A command started from a shell that already holds the lock leaves the file in place and does not release it. A video job is `POST /v1/videos`, then `GET /v1/videos/{id}` and `GET /v1/videos/{id}/content`. Those two reads do not take the request lock. The uncompressed AVI is `~/.favlo/videos/<id>.avi`. The served MP4 is `<id>.mp4` beside it, encoded from that AVI. `GET /v1/videos/{id}/content?quality=` encodes another reported level from that AVI into `<id>.<quality>.mp4` when the file is absent. `video_ttl_seconds` in `settings.json` is how long it stays. The default is 86400. A sweep at startup and after each stored clip deletes a file older than that. The uncompressed RGB from `POST /v1/images/generations` is `~/.favlo/images/<id>.rgb`. The served PNG is `<id>.png` beside it, encoded from that file at the request's zlib level. `GET /v1/images/{id}/content` reads the PNG and does not take the request lock. `image_ttl_seconds` uses the same default and the same sweep. The listener note is [docs/serve.md](docs/serve.md).
+`python -m favlo.smoke_lock` is how a pipeline test takes the GPU while the daemon stays up. Acquire closes the resident model when no request is open. Release lets the next chat load one again. The recorded pid is the invoking shell. `uv` and `python` are not that owner. A command started from a shell that already holds the lock leaves the file in place and does not release it. Image, video, and music bytes stay on disk. The uncompressed AVI is `~/.favlo/videos/<id>.avi`. The MP4 is `<id>.mp4` beside it, encoded from that AVI. `video_ttl_seconds` in `settings.json` is how long it stays. The default is 86400. A sweep at startup and after each stored clip deletes a file older than that. The uncompressed RGB is `~/.favlo/images/<id>.rgb`. The PNG is `<id>.png` beside it, encoded from that file at the request's zlib level. `image_ttl_seconds` uses the same default and the same sweep. The WAV is `~/.favlo/music/<id>.wav`. The MP3 and FLAC are encoded from that WAV. `music_ttl_seconds` uses the same default and the same sweep. A client reads a stored file with `resources/read`. A path under `/v1/images`, `/v1/videos`, or `/v1/audio` is 404. The listener note is [docs/serve.md](docs/serve.md).
 
 ## Runtimes
 
@@ -42,7 +41,7 @@ Tests for the listener, the registry, and the console live in `tests/test_cli.py
 
 ## Registry
 
-`models/registry.json` is gitignored. A row stores the folder, the pipeline entry, an alias, the BF16 source path, the key/value mode, the resident percent, `context_length`, and the sampling card copied from that pipeline's `sampling.py`. A row that omits `context_length` uses 131072. The stored names are the `:suffix` ids. A bare model id selects no row. The pipeline applies its default variant, or the row the request selects. `serve` does not register a record it finds on disk. A fresh tree has no rows. `GET /v1/models` lists every registered row, including each sampling suffix that row stores, and each object includes `context_length`.
+`models/registry.json` is gitignored. A row stores the folder, the pipeline entry, an alias, the BF16 source path, the key/value mode, the resident percent, `context_length`, and the sampling card copied from that pipeline's `sampling.py`. A row that omits `context_length` uses 131072. The stored names are the `:suffix` ids. A bare model id selects no row. The pipeline applies its default variant, or the row the request selects. `serve` does not register a record it finds on disk. A fresh tree has no rows. `GET /v1/models` lists every registered language row, including each sampling suffix that row stores, and each object includes `context_length`. A pipeline that defines `handle_image`, `handle_video`, or `handle_music` is omitted, and `GET /v1/models/{id}` for that id is 404.
 
 ## Layout
 
@@ -56,7 +55,10 @@ qwen36_35b_a3b/         Qwen3.6-35B-A3B. It does not import another pipeline.
 src/favlo/              process entry; the listener loads the pipeline a request names
   cli.py                discovers entry files; a new runtime does not edit this
   registry.py           folders, aliases, pipelines, and sampling variants
-  listener.py           HTTP daemon; a terminal starts it and keeps the CLI
+  listener.py           process, model load, and the request lock; a terminal starts it and keeps the CLI
+  http_app.py           ASGI routes for chat and MCP
+  mcp_server.py         FastMCP media queue, Tasks, and favlo:// reads
+  reply.py              the object a pipeline writes; the server turns it into HTTP
   daemon.py             spawn and stop the listener; no pipeline imports
   console.py            status row; no pipeline imports
   talk.py               terminal chat
@@ -64,10 +66,9 @@ src/favlo/              process entry; the listener loads the pipeline a request
   prefix.py             SSD prefix store
   setup.py              empty-registry download
   logs.py               rolling server log; size is settings.json log_max_bytes
-  videos.py             stored AVI and MP4; a content quality encodes another MP4; video_ttl_seconds drops an older clip
+  videos.py             stored AVI and the MP4 encoded from it; video_ttl_seconds drops an older clip
   images.py             stored RGB and the PNG encoded from it; image_ttl_seconds drops an older pair
-  hermes_plugins.py     install image and video backends into every Hermes profile
-hermes-agent-plugins/   Hermes image_gen and video_gen backends
+  music.py              stored WAV and the MP3 or FLAC encoded from it; music_ttl_seconds drops an older clip
 harness/                file agent, coding agent, worktree agent, and the three benchmarks
 docs/                   as-built notes; see docs/README.md
 ```
@@ -95,7 +96,7 @@ uv run python -m harness.worktree --model qwen36-35b-a3b
 uv run python -m harness.image_smoke_agent
 uv run python -m harness.image_persona
 uv run python -m harness.video_smoke_agent
-uv run favlo hermes-plugins
+uv run python -m harness.server status
 ```
 
 What the harness scores is [docs/harness.md](docs/harness.md). A pipeline's quantize, probe, and matmul commands are that pipeline's note.

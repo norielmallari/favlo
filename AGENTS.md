@@ -14,7 +14,7 @@ The files in [`.cursor/rules`](.cursor/rules) are repo rules. Cursor loads them 
 |---|---|
 | [documentation.mdc](.cursor/rules/documentation.mdc) | Always. Public wording, no personal data, official model cards only. |
 | [commit-precheck.mdc](.cursor/rules/commit-precheck.mdc) | Always. Before a commit, check every file for personal data and for NSFW, violent, or racist content. |
-| [pipeline-isolation.mdc](.cursor/rules/pipeline-isolation.mdc) | Always. One write set, a clean close on model switch, and the smoke lock before a pipeline test. |
+| [pipeline-isolation.mdc](.cursor/rules/pipeline-isolation.mdc) | Always. One write set, a clean close on model switch, a host checkpoint when a chat preempts media, and the smoke lock before a pipeline test. |
 | [public-algorithms.mdc](.cursor/rules/public-algorithms.mdc) | Always. Equations come from public papers and map onto Metal. Prefill, the key/value cache, and decode stay allocated. |
 | [python-file-split.mdc](.cursor/rules/python-file-split.mdc) | When editing Python. One module, one responsibility. Imports point one way. |
 | [optimization-llm.mdc](.cursor/rules/optimization-llm.mdc) | When optimizing a language model's prefill or decode. |
@@ -33,6 +33,12 @@ Edit one runtime. Leave every other runtime's files untouched. The write set and
 Adding a model adds an entry file, a package, a `docs/<pipeline>/` note, and one row in the runtime table. Load [bootstrap-new-model](.cursor/skills/bootstrap-new-model/SKILL.md) before creating one. Load [prefix-caching](.cursor/skills/prefix-caching/SKILL.md) before wiring a pipeline to the shared prefix store.
 
 Do not add batching, the Neural Engine, or a kernel that fuses a whole layer. A missing Metal kernel stays missing. It is not replaced by a host GEMV, a CPU matmul, or any other stand-in forward.
+
+## Harness
+
+A media harness does not take the machine lock. It calls the listener. A media harness uses one `favlo serve` on `127.0.0.1:8129`. That is `harness.image`, `harness.image_smoke_agent`, `harness.image_persona`, `harness.video_smoke_agent`, `harness.video_quality_agent`, and `harness.music_smoke_agent`. `python -m harness.server run -- <command>` opens that listener, runs the command, and closes the session. `python -m harness.server status` prints `listening` or `down`. An existing listener is reused and left running. A listener this session started is stopped when the command exits. These commands do not bind a second port. The same session is what those modules call, so running one of them directly follows this rule.
+
+`python -m harness`, `python -m harness.coding`, and `python -m harness.worktree` restart the process they started so a later turn reloads a prefix. They require port 8129 to be free. They do not attach to a listener someone else left running, and they do not bind a second port beside it.
 
 ## Re-implementation
 

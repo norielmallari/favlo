@@ -125,6 +125,29 @@ def acquire(
     return 1
 
 
+def clear_hold(
+    *,
+    host: str = _HOST,
+    port: int = _PORT,
+    pid: int | None = None,
+) -> int:
+    """Clear the listener smoke hold. The lock file stays."""
+    owner = owner_pid() if pid is None else pid
+    code, body = _post(host, port, "/v1/resume", {"pid": owner})
+    if code == 200:
+        return 0
+    if code == 409:
+        error = body.get("error")
+        message = error.get("message") if isinstance(error, dict) else None
+        print(message if isinstance(message, str) and message else "a request is open")
+        return 2
+    if code == 0:
+        print("serve is not listening")
+        return 1
+    print("resume failed")
+    return 1
+
+
 def release(
     *,
     root: Path,

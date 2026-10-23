@@ -8,11 +8,14 @@ authors = [{name = "Noriel Mallari"}]
 requires-python = ">=3.12"
 dependencies = [
     "agent-framework-openai>=1",
+    "fastmcp[tasks]>=2.14",
     "jinja2>=3.1",
     "numpy>=2.1",
     "pyobjc-framework-Metal",
     "safetensors>=0.6",
+    "starlette>=0.41",
     "tokenizers>=0.22",
+    "uvicorn>=0.32",
 ]
 
 [project.optional-dependencies]

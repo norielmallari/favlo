@@ -8,7 +8,7 @@ Favlo AI Runtime: Your Local AI Workhorse
 
 >This app is directly inspired by [oMLX](https://github.com/jundot/omlx). It's an amazing app - I recommend trying that first for general purpose inference before using my more specialized runtime.
 
-Favlo is a local runtime for Apple Silicon. It serves language-model inference and text-to-image generation. One model is one pipeline. Each pipeline owns its forward, its weight records, and its Metal kernels. `favlo serve` is the entry point. A client selects a registered model with the OpenAI `model` field. A language row answers `POST /v1/chat/completions`. A [Z-Image-Turbo](docs/z-image-turbo/README.md) row, packed from [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo), answers `POST /v1/images/generations` and returns a PNG.
+Favlo is a local runtime for Apple Silicon. It serves language-model inference, image generation, video, and music. One model is one pipeline. Each pipeline owns its forward, its weight records, and its Metal kernels. `favlo serve` is the entry point. A client selects a registered language model with the OpenAI `model` field. A language row answers `POST /v1/chat/completions`. Image, video, and music, including a [Z-Image-Turbo](docs/z-image-turbo/README.md) row packed from [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo), run through `POST /mcp`.
 
 The process contract is [ARCHITECTURE.md](ARCHITECTURE.md). The papers are [REFERENCES.md](REFERENCES.md). Measured research claims are [RESEARCH.md](RESEARCH.md). Cite this software from [CITATION.cff](CITATION.cff). Agents start at [AGENTS.md](AGENTS.md). AI-assisted features are [docs/ai-assistance](docs/ai-assistance/README.md).
 

@@ -1,9 +1,9 @@
 """Agent that draws a still, then the shortest 320p clip.
 
-The Microsoft Agent Framework agent calls the image route when the still is
+The Microsoft Agent Framework agent calls ``generate_image`` when the still is
 missing. The still is drawn at the clip's width and height. The next turn
-posts `POST /v1/videos`, polls the job, and saves
-`GET /v1/videos/{id}/content` to ``artifacts/video-smoke-agent.mp4``. The 35B
+calls ``generate_video`` and reads ``favlo://videos/{id}`` into
+``artifacts/video-smoke-agent.mp4``. The 35B
 vision tower then reads frame 0, the middle frame, and the last frame of
 that file and must affirm the still sentence. Exit 0 means each of those
 frames was affirmed and the file has the smoke.json frame count at 576×320.
@@ -16,9 +16,7 @@ import argparse
 import asyncio
 import base64
 import json
-import socket
 import struct
-import time
 import urllib.request
 from pathlib import Path
 from typing import Annotated, Any
@@ -28,11 +26,12 @@ from agent_framework.openai import OpenAIChatCompletionClient
 from pydantic import Field
 
 from harness.image_smoke_agent import affirms
+from harness.mcp_media import generate, read_link
+from harness.server import close_listener, open_listener
 from harness.video_mp4 import frame_png, save_mp4
 
 JUDGE = "qwen36-35b-a3b:instruct"
 HOST = "127.0.0.1"
-PORT = 8129
 
 
 def smoke_paths(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -55,20 +54,12 @@ def post_json(port: int, route: str, body: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def get_json(port: int, route: str) -> dict[str, Any]:
-    request = urllib.request.Request(f"http://{HOST}:{port}{route}")
-    with urllib.request.urlopen(request, timeout=None) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    if not isinstance(payload, dict):
-        message = "response is not an object"
-        raise RuntimeError(message)
-    return payload
-
-
-def get_bytes(port: int, route: str) -> bytes:
-    request = urllib.request.Request(f"http://{HOST}:{port}{route}")
-    with urllib.request.urlopen(request, timeout=None) as response:
-        return response.read()
+def _image_block(path: Path) -> dict[str, str]:
+    return {
+        "type": "image",
+        "data": base64.b64encode(path.read_bytes()).decode("ascii"),
+        "mimeType": "image/png",
+    }
 
 
 def video_tools(
@@ -89,9 +80,9 @@ def video_tools(
             return "image exists"
         if prompt_text.strip() != prompt:
             return f"use this prompt exactly: {prompt}"
-        payload = post_json(port, "/v1/images/generations", image_body)
+        result = generate(port, "generate_image", image_body)
         still.parent.mkdir(parents=True, exist_ok=True)
-        still.write_bytes(base64.b64decode(payload["data"][0]["b64_json"]))
+        still.write_bytes(read_link(port, result, "image/png"))
         return "image ready"
 
     @tool(approval_mode="never_require")
@@ -99,24 +90,38 @@ def video_tools(
         """Generate the 320p clip from the still."""
         if not still.is_file():
             return "image is missing"
-        body = dict(video_body)
-        body["input_reference"] = base64.b64encode(still.read_bytes()).decode("ascii")
-        job = post_json(port, "/v1/videos", body)
-        video_id = str(job["id"])
-        while True:
-            current = get_json(port, f"/v1/videos/{video_id}")
-            status = current.get("status")
-            if status == "completed":
-                break
-            if status == "failed":
-                error = current.get("error")
-                message = error.get("message") if isinstance(error, dict) else "video failed"
-                raise RuntimeError(str(message or "video failed"))
-            time.sleep(0.25)
-        clip.append(get_bytes(port, f"/v1/videos/{video_id}/content"))
+        result = generate(
+            port,
+            "generate_video",
+            {
+                "model": video_body["model"],
+                "prompt": video_body["prompt"],
+                "image": _image_block(still),
+                "size": video_body["size"],
+                "frames": video_body["frames"],
+                "seed": video_body["seed"],
+            },
+        )
+        clip.append(read_link(port, result, "video/mp4"))
         return "video ready"
 
     return [ensure_image, generate_video]
+
+
+def _agent(
+    base_url: str,
+    tools: list[object],
+    name: str,
+    text: str,
+    model: str,
+    iterations: int = 2,
+) -> int:
+    try:
+        asyncio.run(_run(base_url, tools, name, text, model, iterations))
+    except Exception as exc:
+        print(exc, flush=True)
+        return 1
+    return 0
 
 
 async def _run(
@@ -177,29 +182,6 @@ def _png_size(blob: bytes) -> tuple[int, int]:
     return int(width), int(height)
 
 
-def _listening(port: int) -> bool:
-    with socket.socket() as sock:
-        sock.settimeout(0.5)
-        return sock.connect_ex((HOST, port)) == 0
-
-
-def _hold_machine(root: Path) -> bool:
-    from favlo.smoke_lock import hold
-
-    return hold(root=root, pipeline="wan22-i2v", command="video-smoke-agent")
-
-
-def _open_server(was_up: bool) -> tuple[int, Any]:
-    from harness.benchmarks.serve import free_port, start_server
-
-    if was_up:
-        port = free_port()
-        pid, stop, _log = start_server(port)
-        return port, (pid, stop)
-    start_server(PORT)
-    return PORT, None
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Draw a still, then the 320p clip.")
     parser.add_argument("--root", type=Path, default=Path("."))
@@ -222,15 +204,10 @@ def main(argv: list[str] | None = None) -> int:
         "frames": video_note["frames"],
         "seed": video_note["seed"],
     }
-    was_up = _listening(PORT)
-    owned = None
-    created = False
-    from favlo.cli import repo_root
-    from favlo.smoke_lock import release
-
+    listener = None
     try:
-        created = _hold_machine(repo_root())
-        port, owned = _open_server(was_up)
+        listener = open_listener()
+        port = listener.port
         base = f"http://{HOST}:{port}/v1"
         print(f"image on {port}", flush=True)
         expected_size = (int(video_note["width"]), int(video_note["height"]))
@@ -238,8 +215,10 @@ def main(argv: list[str] | None = None) -> int:
             still.unlink()
         sentence = f"Create an image of this exact sentence: {image_body['prompt']}"
         image_tools = video_tools(port, image_body, video_body, still, [])
-        asyncio.run(_run(base, [image_tools[0]], "ensure_image", sentence, args.judge))
+        image_failed = _agent(base, [image_tools[0]], "ensure_image", sentence, args.judge)
         if not still.is_file():
+            if image_failed != 0:
+                return 1
             print("image is missing", flush=True)
             return 1
         if _png_size(still.read_bytes()) != expected_size:
@@ -248,17 +227,17 @@ def main(argv: list[str] | None = None) -> int:
         clip: list[bytes] = []
         video_only = video_tools(port, image_body, video_body, still, clip)
         print("video", flush=True)
-        asyncio.run(
-            _run(
-                base,
-                [video_only[1]],
-                "generate_video",
-                f"Generate the {video_note['frames']}-frame 320p video from the image.",
-                args.judge,
-                iterations=1,
-            )
+        failed = _agent(
+            base,
+            [video_only[1]],
+            "generate_video",
+            f"Generate the {video_note['frames']}-frame 320p video from the image.",
+            args.judge,
+            iterations=1,
         )
         if not clip:
+            if failed != 0:
+                return 1
             print("video is missing", flush=True)
             return 1
         out = root / "artifacts" / "video-smoke-agent.mp4"
@@ -286,12 +265,8 @@ def main(argv: list[str] | None = None) -> int:
         print("frames match", flush=True)
         return 0
     finally:
-        if owned is not None:
-            from harness.benchmarks.serve import stop_server
-
-            stop_server(owned[0], owned[1])
-        if created:
-            release(root=repo_root())
+        if listener is not None:
+            close_listener(listener)
 
 
 if __name__ == "__main__":

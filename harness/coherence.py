@@ -201,7 +201,10 @@ def _stream(
             if payload == "[DONE]":
                 break
             event = json.loads(payload)
-            delta = event["choices"][0].get("delta") or {}
+            choices = event.get("choices")
+            if not isinstance(choices, list) or not choices:
+                continue
+            delta = choices[0].get("delta") or {}
             piece = delta.get("reasoning_content") or ""
             if piece:
                 if not saw_content:

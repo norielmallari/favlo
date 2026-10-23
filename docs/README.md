@@ -38,7 +38,6 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [z-image-turbo/README.md](z-image-turbo/README.md) | Z-Image-Turbo pipeline contract |
 | [wan22-i2v/README.md](wan22-i2v/README.md) | Wan 2.2 I2V pipeline contract |
 | [wan22-i2v/research/clip-ceiling.md](wan22-i2v/research/clip-ceiling.md) | Wan 2.2 I2V 9-frame kernel sum |
-| [hermes-plugins.md](hermes-plugins.md) | Hermes image and video backends |
 | [z-image-turbo/research/generation-ceiling.md](z-image-turbo/research/generation-ceiling.md) | Z-Image-Turbo 1280 generation sum |
 
 Implementation plans, option comparisons, and design sketches are **not** committed here. They belong under `artifacts/implementation-plan/` (gitignored). A measured research remainder lives at `docs/<pipeline>/research/<slug>.md` and does not change the serving note until that behavior ships.
