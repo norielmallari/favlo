@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_LOG_MAX_BYTES = 1024 * 1024
+DEFAULT_VIDEO_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_IMAGE_TTL_SECONDS = 24 * 60 * 60
 _SETTINGS_NAME = "settings.json"
 _LOG_NAME = "favlo.log"
@@ -72,21 +73,31 @@ def configured_thinking_budget(settings: dict[str, Any] | None = None) -> int | 
     return _configured_int(source, "thinking_budget")
 
 
+def video_ttl_seconds(settings: dict[str, Any]) -> int:
+    """How long a stored MP4 stays, in seconds. The default is one day."""
+    return _ttl_seconds(settings, "video_ttl_seconds", DEFAULT_VIDEO_TTL_SECONDS)
+
+
 def image_ttl_seconds(settings: dict[str, Any]) -> int:
     """How long a stored PNG stays, in seconds. The default is one day."""
-    value = settings.get("image_ttl_seconds", DEFAULT_IMAGE_TTL_SECONDS)
+    return _ttl_seconds(settings, "image_ttl_seconds", DEFAULT_IMAGE_TTL_SECONDS)
+
+
+def _ttl_seconds(settings: dict[str, Any], key: str, default: int) -> int:
+    value = settings.get(key, default)
     try:
         ttl = int(value)
     except (TypeError, ValueError):
-        return DEFAULT_IMAGE_TTL_SECONDS
+        return default
     if ttl < 1:
-        return DEFAULT_IMAGE_TTL_SECONDS
+        return default
     return ttl
 
 
 def _default_settings() -> dict[str, Any]:
     return {
         "log_max_bytes": DEFAULT_LOG_MAX_BYTES,
+        "video_ttl_seconds": DEFAULT_VIDEO_TTL_SECONDS,
         "image_ttl_seconds": DEFAULT_IMAGE_TTL_SECONDS,
     }
 

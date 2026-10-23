@@ -29,6 +29,7 @@ from favlo.daemon import DAEMON_ENV, alive
 from favlo.images import load_image, sweep_images
 from favlo.logs import attach_process_log
 from favlo.registry import model_objects, one_model, resolve
+from favlo.videos import load_video, sweep_videos
 
 _STREAM_WRITE_TIMEOUT = 2.0
 _REQUEST_READ_TIMEOUT = 10.0
@@ -270,6 +271,7 @@ def _bind_request(body: dict[str, Any], state: dict[str, Any], args: Any) -> Any
 
 
 def serve(args: Any) -> int:
+    sweep_videos()
     sweep_images()
     shutdown = _Shutdown()
     shutdown.arm()
@@ -670,12 +672,12 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
                     },
                 )
                 return
-            blobs = state.get("video_mp4")
-            blob = blobs.get(video_id) if isinstance(blobs, dict) else None
-            if not isinstance(blob, (bytes, bytearray)):
+            home = state.get("video_home")
+            blob = load_video(video_id, home=home if isinstance(home, Path) else None)
+            if blob is None:
                 self._json(404, {"error": {"message": "video not found", "type": "not_found"}})
                 return
-            self._bytes(200, bytes(blob), "video/mp4")
+            self._bytes(200, blob, "video/mp4")
 
         def _bytes(self, status: int, payload: bytes, content_type: str) -> None:
             previous = self.connection.gettimeout()

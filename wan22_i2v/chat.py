@@ -5,10 +5,12 @@ from __future__ import annotations
 import base64
 import secrets
 import time
+from pathlib import Path
 from typing import Any, NamedTuple
 
 import numpy as np
 
+from favlo.videos import store_video
 from wan22_i2v.png import decode_png, resize_rgb
 from wan22_i2v.progress import ClipProgress, clip_label
 from wan22_i2v.schedule import (
@@ -91,11 +93,13 @@ def handle_video(
         job["status"] = "failed"
         job["error"] = {"code": type(exc).__name__, "message": str(exc)}
         return
-    blobs = state.setdefault("video_mp4", {})
-    if not isinstance(blobs, dict):
-        blobs = {}
-        state["video_mp4"] = blobs
-    blobs[job["id"]] = mp4
+    home = state.get("video_home")
+    store_video(
+        job["id"],
+        mp4,
+        home=home if isinstance(home, Path) else None,
+        videos=videos,
+    )
     job["completed_at"] = int(time.time())
     progress.complete()
     job["status"] = "completed"

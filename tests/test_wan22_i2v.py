@@ -226,9 +226,11 @@ class _Broken:
         raise RuntimeError(message)
 
 
-def test_video_job_returns_before_the_mp4_is_stored() -> None:
+def test_video_job_returns_before_the_mp4_is_stored(tmp_path) -> None:
+    from favlo.videos import load_video
+
     handler = _Reply()
-    state: dict = {}
+    state: dict = {"video_home": tmp_path}
     body = {"prompt": "move", "image": _png(), "frames": 5, "size": "16x16", "model": "row"}
     handle_video(handler, _Clip(), body, None, None, state)
     assert handler.status == 200
@@ -239,7 +241,8 @@ def test_video_job_returns_before_the_mp4_is_stored() -> None:
     assert job["status"] == "completed"
     assert job["progress"] == 100
     assert job["stage"] is None
-    assert state["video_mp4"][job["id"]][4:8] == b"ftyp"
+    stored_mp4 = load_video(job["id"], home=tmp_path)
+    assert stored_mp4 is not None and stored_mp4[4:8] == b"ftyp"
     failed = _Reply()
     failed_state: dict = {}
     handle_video(failed, _Broken(), body, None, None, failed_state)

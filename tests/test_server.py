@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from types import SimpleNamespace
 
 import qwen38_flash_next.commands as commands
@@ -672,7 +673,15 @@ class _VideoApi:
         handler._json(200, job)
         self.sent.set()
         assert self.release.wait(5)
-        state.setdefault("video_mp4", {})[job["id"]] = b"mp4-bytes"
+        from favlo.videos import store_video
+
+        home = state.get("video_home")
+        store_video(
+            job["id"],
+            b"mp4-bytes",
+            home=home if isinstance(home, Path) else None,
+            videos=state.get("videos"),
+        )
         job["status"] = "completed"
         job["progress"] = 100
         job["completed_at"] = 2
@@ -704,9 +713,10 @@ def _http(
         return exc.code, kind, exc.read()
 
 
-def test_video_job_can_be_read_while_it_runs() -> None:
+def test_video_job_can_be_read_while_it_runs(tmp_path) -> None:
     runtime = _Runtime()
     state, thread = _serve_background(runtime)
+    state["video_home"] = tmp_path
     port = int(state["server"].server_address[1])
     api = _VideoApi()
     try:
