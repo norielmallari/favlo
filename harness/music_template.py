@@ -3,7 +3,9 @@
 The input template is the request the generator can be checked against.
 The output template is those same fields as the inspect script measured them.
 Seconds must agree within 0.05. The key must be the same note and mode.
-BPM is an anchor: the estimate may sit within 8 of the request.
+BPM is an anchor: the estimate may sit within 3% of the request, the
+relative just-noticeable difference for a six-interval sequence
+(Drake and Botte, 1993).
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 FIELDS = ("seconds", "key", "bpm")
-BPM_TOLERANCE = 8.0
+BPM_FRACTION = 0.03
 SECONDS_TOLERANCE = 0.05
 _NOTES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 _SPELLING = {
@@ -88,7 +90,7 @@ def compare_templates(expected: str, measured: str) -> list[str]:
             mismatches.append(f"{field} none")
             continue
         gap = abs(float(got) - float(want))
-        limit = SECONDS_TOLERANCE if field == "seconds" else BPM_TOLERANCE
+        limit = SECONDS_TOLERANCE if field == "seconds" else BPM_FRACTION * float(want)
         if gap > limit:
             mismatches.append(f"{field} {got} is {gap:.4f} from {want}")
     return mismatches

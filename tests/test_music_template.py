@@ -43,6 +43,14 @@ def test_nearby_tempo_matches() -> None:
     assert compare_templates(input_template(_note()), output_template(_report())) == []
 
 
+def test_tempo_uses_a_three_percent_band() -> None:
+    slow = {**_note(), "bpm": 80}
+    assert compare_templates(input_template(slow), output_template(_report(bpm="82.0000"))) == []
+    assert compare_templates(input_template(slow), output_template(_report(bpm="86.0000"))) == [
+        "bpm 86.0000 is 6.0000 from 80.0000",
+    ]
+
+
 def test_wrong_key_and_a_far_tempo_are_named() -> None:
     measured = output_template(_report(key="A minor", bpm="120.0000"))
     assert compare_templates(input_template(_note()), measured) == [

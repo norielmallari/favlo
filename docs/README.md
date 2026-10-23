@@ -37,6 +37,8 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen36-35b-a3b/benchmarks.md](qwen36-35b-a3b/benchmarks.md) | Harness scores against `serve` |
 | [z-image-turbo/README.md](z-image-turbo/README.md) | Z-Image-Turbo pipeline contract |
 | [wan22-i2v/README.md](wan22-i2v/README.md) | Wan 2.2 I2V pipeline contract |
+| [ace-step-15-turbo/README.md](ace-step-15-turbo/README.md) | ACE-Step 1.5 XL Turbo pipeline contract |
+| [ace-step-15-turbo/research/dit-mlp-fp4-error.md](ace-step-15-turbo/research/dit-mlp-fp4-error.md) | ACE-Step XL Turbo DiT MLP fp4 error ranking |
 | [wan22-i2v/research/clip-ceiling.md](wan22-i2v/research/clip-ceiling.md) | Wan 2.2 I2V 9-frame kernel sum |
 | [z-image-turbo/research/generation-ceiling.md](z-image-turbo/research/generation-ceiling.md) | Z-Image-Turbo 1280 generation sum |
 

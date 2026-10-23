@@ -1,0 +1,11 @@
+{
+  "model": "acestep-v15-xl-turbo-fp8-fp4",
+  "prompt": "anime opening, J-pop, electric guitar, synth lead, electric bass, punchy drums, uplifting, playful, bright, polished, catchy hook",
+  "lyrics": "[Intro - electric guitar]\n\n[Hook - synth lead]",
+  "seconds": 10,
+  "seed": 0,
+  "vocal_language": "en",
+  "bpm": 168,
+  "keyscale": "D major",
+  "timesignature": "4/4"
+}
