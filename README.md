@@ -68,4 +68,4 @@ Report a problem in this repository's issue tracker.
 
 Copyright 2026 Noriel Mallari
 
-Favlo is licensed under the Apache License, Version 2.0. The terms are in [LICENSE.md](LICENSE.md).
+Favlo is licensed under the Apache License, Version 2.0. The terms are in [LICENSE.md](LICENSE.md). A checkpoint keeps the license named in its pipeline note: [Qwen3.6-35B-A3B](docs/qwen36-35b-a3b/README.md), [Qwen3.8-27B](docs/qwen38-27b/README.md), [Qwen3.8-Flash-Next](docs/qwen38-flash-next/references.md), [Z-Image-Turbo](docs/z-image-turbo/README.md), [Wan 2.2 I2V](docs/wan22-i2v/README.md), and [ACE-Step 1.5 XL Turbo](docs/ace-step-15-turbo/README.md).
