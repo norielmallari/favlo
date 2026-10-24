@@ -62,7 +62,7 @@ from qwen38_27b.layout import (
 from qwen38_27b.prefill import _Workspace
 from qwen38_27b.prefix import open_session, pack_plane, unpack_plane
 from qwen38_27b.resident import DeviceImage
-from qwen38_27b.session import Session, discard, release_buffers
+from qwen38_27b.session import Session, release_buffers
 
 
 class RequestClosed(Exception):
@@ -264,7 +264,7 @@ class Qwen38Runtime:
                 self.close()
 
     def close(self) -> None:
-        """Write the live prefix, then return every device buffer before another pipeline loads."""
+        """Write the live prefix, mark every device buffer reusable, then return it."""
         if getattr(self, "_closed", False):
             return
         self._closed = True
@@ -298,6 +298,13 @@ class Qwen38Runtime:
             for name in _DEVICE_FIELDS:
                 if hasattr(self, name):
                     setattr(self, name, None)
+            if session is not None:
+                finish = getattr(session, "finish", None)
+                if callable(finish):
+                    try:
+                        finish()
+                    except (OSError, RuntimeError):
+                        pass
             release_buffers(buffers)
             if session is not None:
                 try:
@@ -310,10 +317,8 @@ class Qwen38Runtime:
             prefix = None
             adapter = None
             session = None
+            buffers.clear()
             with objc.autorelease_pool():
-                for buffer in buffers:
-                    discard(buffer)
-                buffers.clear()
                 gc.collect()
         finally:
             self._sweep_owner()

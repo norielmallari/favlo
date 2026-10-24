@@ -20,7 +20,7 @@ self._owner = owner or f"{stem}:{id(self)}"
 
 ## Room
 
-`budget()` is reclaimable pages plus `live` plus `pending`. `live` and `pending` are properties. Room for a new span is:
+`budget()` is reclaimable pages plus `live` plus `pending` plus bytes whose heap was released and which the kernel has not yet reported reclaimable. `live` and `pending` are properties. Room for a new span keeps those just-released bytes:
 
 ```python
 ceiling = memory.budget()

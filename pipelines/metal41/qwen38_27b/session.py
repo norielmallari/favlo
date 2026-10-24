@@ -109,7 +109,8 @@ def _clear(buffer: Any, nbytes: int, note: Any = None) -> None:
 
 
 def release_buffer(buffer: Any) -> None:
-    """Return one span. An object without ``release`` stays until ``sweep``."""
+    """Mark one span reusable, then return it."""
+    discard(buffer)
     fn = getattr(buffer, "release", None)
     if callable(fn):
         fn()
@@ -212,23 +213,28 @@ class Session:
         self._load_note = None
 
     def close(self) -> None:
-        """Finish an open pass, then drop the queue and the device."""
+        """Finish an open pass, drop those command buffers, then return this opening's heaps."""
         encoder = getattr(self, "_pass_encoder", None)
         command = getattr(self, "_pass_command", None)
         ready = list(getattr(self, "_pass_ready", ()))
         self._pass_encoder = None
         self._pass_command = None
         self._pass_ready = []
-        if encoder is not None and command is not None:
-            try:
-                encoder.endEncoding()
-                command.commit()
-                ready.append(command)
-                for earlier in ready:
-                    earlier.waitUntilCompleted()
-                    memory.retire(earlier)
-            except (RuntimeError, OSError):
-                pass
+        try:
+            if encoder is not None and command is not None:
+                try:
+                    encoder.endEncoding()
+                    command.commit()
+                    ready.append(command)
+                    for earlier in ready:
+                        earlier.waitUntilCompleted()
+                        memory.retire(earlier)
+                except (RuntimeError, OSError):
+                    pass
+        finally:
+            ready.clear()
+            encoder = None
+            command = None
         for name in ("_pass_held", "_held"):
             held = getattr(self, name, None)
             if isinstance(held, list):

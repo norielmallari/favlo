@@ -387,6 +387,39 @@ def test_close_drops_the_device_before_another_pipeline_loads() -> None:
     assert purged == [4]
 
 
+def test_close_marks_a_span_reusable_before_releasing_it() -> None:
+    runtime = Qwen38Runtime.__new__(Qwen38Runtime)
+    order: list[str] = []
+
+    class _Buffer:
+        def setPurgeableState_(self, state: int) -> None:
+            order.append(f"purge:{state}")
+
+        def release(self) -> None:
+            order.append("release")
+
+        def length(self) -> int:
+            return 32
+
+        def contents(self) -> None:
+            message = "no mapping"
+            raise BufferError(message)
+
+    class _Session:
+        def finish(self) -> None:
+            order.append("finish")
+
+        def close(self) -> None:
+            order.append("sweep")
+
+    runtime.session = _Session()
+    runtime.prefix = None
+    runtime.resident = _Buffer()
+    runtime.console = None
+    runtime.close()
+    assert order == ["finish", "purge:4", "release", "sweep"]
+
+
 def test_extend_cache_releases_the_planes_it_replaces() -> None:
     released: list[str] = []
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 
 from favlo.memory import memory, mint_owner
@@ -62,6 +64,57 @@ def test_sweep_new_leaves_the_recorded_owner() -> None:
         missing = False
     assert missing
     memory.sweep(kept)
+
+
+def _freeze_reclaimable(monkeypatch: Any, value: int) -> dict[str, int]:
+    state = {"n": value}
+    monkeypatch.setattr("favlo.memory.reclaimable_bytes", lambda: state["n"])
+    with memory._lock:
+        memory._reclaim_mark = value
+    return state
+
+
+def test_a_released_heap_stays_in_the_budget_until_the_kernel_reports_it(monkeypatch: Any) -> None:
+    owner = mint_owner("returning")
+    handle = memory.allocate(1 << 20, owner=owner, heap="scratch")
+    with memory._lock:
+        saved = (memory._reclaim_mark, memory._pending, memory._returning)
+    state = _freeze_reclaimable(monkeypatch, 90_000_000_000)
+    try:
+        before = memory.budget()
+        memory.release(handle)
+        handle = None
+        assert memory.budget() == before
+        state["n"] += 1 << 20
+        assert memory.budget() == before
+    finally:
+        if handle is not None:
+            memory.release(handle)
+        memory.sweep(owner)
+        with memory._lock:
+            memory._reclaim_mark, memory._pending, memory._returning = saved
+
+
+def test_discard_then_release_counts_the_span_once(monkeypatch: Any) -> None:
+    owner = mint_owner("returning")
+    handle = memory.allocate(1 << 20, owner=owner, heap="scratch")
+    with memory._lock:
+        saved = (memory._reclaim_mark, memory._pending, memory._returning)
+    state = _freeze_reclaimable(monkeypatch, 90_000_000_000)
+    try:
+        before = memory.budget()
+        memory.discard(handle)
+        memory.release(handle)
+        handle = None
+        assert memory.budget() == before
+        state["n"] += 1 << 20
+        assert memory.budget() == before
+    finally:
+        if handle is not None:
+            memory.release(handle)
+        memory.sweep(owner)
+        with memory._lock:
+            memory._reclaim_mark, memory._pending, memory._returning = saved
 
 
 def test_mint_owner_is_the_stem_and_a_counter() -> None:

@@ -114,6 +114,7 @@ class _Segment:
     mapping: OffsetMap | BumpMap
     queued: bool = False
     tokens: set[int] = field(default_factory=set)
+    departed: int = 0
 
 
 @dataclass
@@ -127,6 +128,7 @@ class _Span:
     kind: str
     storage: str
     released: bool = False
+    advised: bool = False
 
 
 class Memory:
@@ -145,6 +147,7 @@ class Memory:
         self._next = 1
         self._live = 0
         self._pending = 0
+        self._returning = 0
         self._reclaim_mark = 0
         self._fence: Any = None
         self._wait_fence = False
@@ -170,10 +173,10 @@ class Memory:
             return self._pending
 
     def budget(self) -> int:
-        """Bytes a runtime may size from: reclaimable pages plus this process."""
+        """Reclaimable pages, live spans, and bytes a released heap has not yet returned."""
         with self._lock:
             self._retire_pending()
-            return reclaimable_bytes() + self._live + self._pending
+            return reclaimable_bytes() + self._live + self._pending + self._returning
 
     def make_queue(self) -> Any:
         with self._lock:
@@ -327,13 +330,20 @@ class Memory:
         self._advise(handle, int(offset), int(nbytes), 8)
 
     def discard(self, handle: Handle) -> None:
+        """Mark one shared span reusable. The budget keeps it until the kernel reports it."""
         span = self._lookup(handle)
-        if span is None or span.released:
+        if span is None or span.released or span.advised:
             return
         page = int(os.sysconf("SC_PAGE_SIZE"))
         aligned = span.requested - (span.requested % page)
-        if aligned >= page and span.storage == "shared":
-            self.release_span(handle, 0, aligned)
+        if aligned < page or span.storage != "shared":
+            return
+        self._advise(handle, 0, aligned, 7)
+        with self._lock:
+            if span.advised:
+                return
+            self._pending += aligned
+            span.advised = True
 
     def purge(self, handle: Handle, state: int) -> int:
         if self._lookup(handle) is None:
@@ -647,10 +657,14 @@ class Memory:
             self._spans.pop(key, None)
         if self._commands:
             self._deferred.append((span.segment, span.token, set(self._commands)))
-            self._pending += span.requested
+            if not span.advised:
+                self._pending += span.requested
+                span.advised = True
             return
         span.segment.mapping.free(span.token)
         span.segment.tokens.discard(span.token)
+        if not span.advised:
+            span.segment.departed += span.requested
 
     def _id_of(self, span: _Span) -> int | None:
         for key, value in self._spans.items():
@@ -680,6 +694,8 @@ class Memory:
             self._release_once(segment.heap)
             segment.buffer = None
             segment.heap = None
+            self._returning += segment.departed
+            segment.departed = 0
         if changed and self._set is not None:
             self._set.commit()
             if not any(segment.queued for segment in self._segments):
@@ -747,8 +763,12 @@ class Memory:
     def _retire_pending(self) -> None:
         now = reclaimable_bytes()
         delta = now - self._reclaim_mark
-        if delta > 0 and self._pending:
-            self._pending = max(0, self._pending - delta)
+        if delta > 0:
+            take = min(self._returning, delta)
+            self._returning -= take
+            rest = delta - take
+            if rest > 0 and self._pending:
+                self._pending = max(0, self._pending - rest)
         if now > self._reclaim_mark:
             self._reclaim_mark = now
 
