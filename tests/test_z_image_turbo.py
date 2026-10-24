@@ -201,11 +201,11 @@ def test_lower_quality_uses_a_higher_zlib_level(tmp_path) -> None:
 def test_image_request_default_size() -> None:
     fields = _fields({"prompt": "a cat"})
     assert fields.prompt == "a cat"
-    assert (fields.width, fields.height, fields.seed, fields.count) == (1024, 1024, 0, 1)
+    assert (fields.width, fields.height, fields.seed, fields.count) == (1280, 720, 0, 1)
     assert fields.quality == "high"
     assert fields.background == "opaque"
     assert fields.output_format == "png"
-    assert fields.size == "1024x1024"
+    assert fields.size == "1280x720"
     assert fields.safety_identifier is None
 
 
@@ -232,7 +232,7 @@ def test_image_request_accepts_a_standard_body() -> None:
     )
     assert fields.count == 2
     assert fields.seed == 4
-    assert fields.size == "1024x1024"
+    assert fields.size == "1280x720"
     assert fields.quality == "high"
     assert fields.safety_identifier == "reader"
 
@@ -295,7 +295,7 @@ def test_image_response_returns_one_png_per_count(tmp_path) -> None:
     assert len(timings) == 2
     assert reply.body["output_format"] == "png"
     assert reply.body["background"] == "opaque"
-    assert reply.body["size"] == "1024x1024"
+    assert reply.body["size"] == "1280x720"
     assert "usage" not in reply.body
     assert "status" not in reply.body
     assert "revised_prompt" not in data[0]

@@ -416,7 +416,7 @@ def _safety_identifier(body: dict[str, Any]) -> str | None:
 
 def _size(value: Any) -> tuple[int, int, str]:
     if value is None or value == "auto":
-        return 1024, 1024, "1024x1024"
+        return 1280, 720, "1280x720"
     if not isinstance(value, str) or "x" not in value:
         raise ImageRequestError("size must be auto or WIDTHxHEIGHT", "size")
     left, _, right = value.partition("x")

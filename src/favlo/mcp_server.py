@@ -85,13 +85,16 @@ def build_mcp(dispatch: Any, state: dict[str, Any]) -> FastMCP:
     async def generate_image(
         prompt: str,
         model: str,
-        size: str = "auto",
+        size: str = "1280x720",
         n: int = 1,
         quality: str = "high",
         seed: int = 0,
         include_image: bool = False,
     ) -> ToolResult:
-        """Generate one or more PNGs. ``n`` is 1 to 10 and is one task."""
+        """Generate one or more PNGs. ``n`` is 1 to 10 and is one task.
+
+        ``size`` defaults to ``1280x720``. ``auto`` is that same 16:9 frame.
+        """
         body = {
             "prompt": prompt,
             "model": model,
