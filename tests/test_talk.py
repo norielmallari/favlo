@@ -239,6 +239,7 @@ def test_intro_request_names_save_intro() -> None:
     assert "qwen36-35b-a3b" in INSTRUCTIONS
     assert "qwen38-27b" in INSTRUCTIONS
     assert "z-image-turbo" in INSTRUCTIONS
+    assert "wan22-i2v" in INSTRUCTIONS
     assert "run_setup" in INSTRUCTIONS
     assert "Do not use violent, sexual, NSFW, erotic, or obscene language" in system
     assert "longer" in system

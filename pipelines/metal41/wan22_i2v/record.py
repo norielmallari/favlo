@@ -72,11 +72,19 @@ def write_graph_source(dest: Path, seed: int = 0) -> Path:
     return dest
 
 
-def quantize(high: Path, low: Path, dest: Path, config: dict[str, Any]) -> dict[str, Any]:
+def quantize(
+    high: Path,
+    low: Path,
+    dest: Path,
+    config: dict[str, Any],
+    *,
+    high_dir: Path | None = None,
+    low_dir: Path | None = None,
+) -> dict[str, Any]:
     """Pack both experts. The 20% highest-error blocks are stored as fp8."""
     dest.mkdir(parents=True, exist_ok=True)
-    high_promoted = _pack_expert(high, dest / "high", config)
-    low_promoted = _pack_expert(low, dest / "low", config)
+    high_promoted = _pack_expert(high, high_dir or dest / "high", config)
+    low_promoted = _pack_expert(low, low_dir or dest / "low", config)
     _copy_embed(high, dest / "embed.npy", int(config["text_dim"]))
     manifest = {
         "config": config,

@@ -66,6 +66,126 @@ def test_setup_writes_each_repo_under_models() -> None:
     assert low.name == "low.safetensors"
 
 
+def test_a_custom_umt5_replaces_the_default_text_files() -> None:
+    from wan22_i2v.source import file_list, repo_id
+
+    rows = file_list("example-org/example-model", sizes=lambda _repo, name: len(name))
+    stored = [row[2] for row in rows]
+    assert stored[0] == "Wan-AI/Wan2.2-I2V-A14B/Wan2.1_VAE.pth"
+    assert "google/umt5-xxl/models_t5_umt5-xxl-enc-bf16.pth" not in stored
+    assert "google/umt5-xxl/tokenizer.json" not in stored
+    assert stored[1] == "example-org/example-model/models_t5_umt5-xxl-enc-bf16.pth"
+    assert stored[-1] == "example-org/example-model/tokenizer.json"
+    link = "https://huggingface.co/example-org/example-model/tree/main"
+    assert repo_id(link) == "example-org/example-model"
+    assert file_list(link, sizes=lambda _repo, name: len(name))[1][0] == "example-org/example-model"
+
+
+def test_name_is_the_packed_model_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from wan22_i2v.commands import main
+
+    def models_dir(root: Path | None = None) -> Path:
+        del root
+        return tmp_path / "models"
+
+    monkeypatch.setattr("wan22_i2v.source.models_dir", models_dir)
+    monkeypatch.setattr("favlo.registry.models_dir", models_dir)
+    seen: dict[str, Path] = {}
+
+    def quantize(
+        high: Path,
+        low: Path,
+        dest: Path,
+        config: dict,
+        *,
+        high_dir: Path | None = None,
+        low_dir: Path | None = None,
+    ) -> dict:
+        del high, low, config
+        seen["dest"] = dest
+        seen["high"] = high_dir
+        seen["low"] = low_dir
+        dest.mkdir(parents=True)
+        return {"high_promoted": [1], "low_promoted": [2]}
+
+    def quantize_umt5(src: Path | None = None, dest: Path | None = None) -> list[int]:
+        seen["src"] = src
+        seen["text"] = dest
+        assert dest is not None
+        dest.mkdir(parents=True)
+        return [0]
+
+    monkeypatch.setattr("wan22_i2v.record.quantize", quantize)
+    monkeypatch.setattr("wan22_i2v.umt5_pack.quantize_umt5", quantize_umt5)
+    high = tmp_path / "high.safetensors"
+    low = tmp_path / "low.safetensors"
+    high.write_bytes(b"h")
+    low.write_bytes(b"l")
+    named = main(["quantize", "--high", str(high), "--low", str(low), "--name", "example-model"])
+    assert named == 0
+    assert seen["dest"] == tmp_path / "models" / "example-model"
+    registry = json.loads((tmp_path / "models" / "registry.json").read_text())
+    row = registry["models"]["example-model"]
+    assert row["alias"] is None
+    assert row["directory"] == str(tmp_path / "models" / "example-model")
+    assert row["parts"]["high"] == str(tmp_path / "models" / "example-model" / "high")
+    assert row["parts"]["low"] == str(tmp_path / "models" / "example-model" / "low")
+    high_dir = tmp_path / "models" / "example-high"
+    low_dir = tmp_path / "models" / "example-low"
+    custom = main(
+        [
+            "quantize",
+            "--high",
+            str(high),
+            "--low",
+            str(low),
+            "--name",
+            "example-parts",
+            "--high-dir",
+            str(high_dir),
+            "--low-dir",
+            str(low_dir),
+        ]
+    )
+    assert custom == 0
+    assert seen["high"] == high_dir
+    assert seen["low"] == low_dir
+    refused = main(
+        [
+            "quantize",
+            "--high",
+            str(high),
+            "--low",
+            str(low),
+            "--name",
+            "example-model",
+            "--out",
+            "packed",
+        ]
+    )
+    assert refused == 1
+    packed = main(
+        ["quantize-text", "--name", "example-model", "--umt5", "example-org/example-model"]
+    )
+    assert packed == 0
+    assert seen["text"] == tmp_path / "models" / "example-model" / "umt5"
+    assert seen["src"] == models_dir() / "example-org" / "example-model" / (
+        "models_t5_umt5-xxl-enc-bf16.pth"
+    )
+    stored = json.loads((tmp_path / "models" / "registry.json").read_text())
+    umt5 = tmp_path / "models" / "example-model" / "umt5"
+    assert stored["models"]["example-model"]["parts"]["umt5"] == str(umt5)
+    custom_umt5 = tmp_path / "models" / "example-umt5"
+    moved = main(
+        ["quantize-text", "--name", "example-model", "--out", str(custom_umt5)]
+    )
+    assert moved == 0
+    stored = json.loads((tmp_path / "models" / "registry.json").read_text())
+    row = stored["models"]["example-model"]
+    assert row["parts"]["umt5"] == str(custom_umt5)
+    assert row["directory"] == str(tmp_path / "models" / "example-model")
+
+
 def test_resume_keeps_only_full_ranges() -> None:
     done = mask_from_prefix(100, 40, 16)
     assert list(done) == [1, 1, 0, 0, 0, 0, 0]

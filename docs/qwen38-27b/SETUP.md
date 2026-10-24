@@ -54,7 +54,7 @@ The default pack stores every quantized matrix as fp4 and writes `models/Qwen3.8
 uv run favlo --qwen38-27b quantize --src models/Qwen3.8-27B-bf16
 ```
 
-That command registers the folder under the alias `qwen38-27b` in `models/registry.json`. The BF16 checkout stays. A finished directory has `manifest.json` with `complete: true`. Running `quantize` again on that directory returns it when the feed-forward percentage matches. An unfinished directory resumes from `quantize_progress.json`.
+That command registers the folder under the alias `qwen38-27b` in `models/registry.json`. The row stores the directory that was written. The BF16 checkout stays. A finished directory has `manifest.json` with `complete: true`. Running `quantize` again on that directory returns it when the feed-forward percentage matches. An unfinished directory resumes from `quantize_progress.json`.
 
 With no `--src`, `quantize` reads the Hugging Face cache snapshot for [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B). A missing cache is an error. `--src` names a local BF16 checkout, including `models/Qwen3.8-27B-bf16`. `--output` names the packed directory. The alias stays `qwen38-27b`.
 

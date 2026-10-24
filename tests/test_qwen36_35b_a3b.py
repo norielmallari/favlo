@@ -964,6 +964,7 @@ def test_delete_removes_the_record_the_checkout_and_the_prefix(
         "example-model-fp8-e20",
         source=checkout,
         alias="example-alias",
+        directory=packed,
         pipeline="qwen36-35b-a3b",
         runtime="metal41",
     )
@@ -971,6 +972,7 @@ def test_delete_removes_the_record_the_checkout_and_the_prefix(
         "kept-model",
         source=outside,
         alias=None,
+        directory=kept,
         pipeline="qwen36-35b-a3b",
         runtime="metal41",
     )

@@ -46,7 +46,7 @@ The pack stores each matrix as fp4 and writes `models/Z-Image-Turbo-fp4`. Biases
 uv run favlo --z-image-turbo quantize
 ```
 
-That command reads `models/Z-Image-Turbo` and registers the folder `Z-Image-Turbo-fp4` in `models/registry.json`. The client model field is `Z-Image-Turbo-fp4`. A finished directory has `manifest.json` with `complete: true`. Running `quantize` again on that directory returns it. An unfinished directory is replaced.
+That command reads `models/Z-Image-Turbo` and registers the folder `Z-Image-Turbo-fp4` in `models/registry.json`. The row stores `models/Z-Image-Turbo-fp4`. The client model field is `Z-Image-Turbo-fp4`. A finished directory has `manifest.json` with `complete: true`. Running `quantize` again on that directory returns it. An unfinished directory is replaced.
 
 ## Another safetensors file
 

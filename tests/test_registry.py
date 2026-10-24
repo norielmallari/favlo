@@ -99,6 +99,7 @@ def test_registration_stores_the_passed_max_prompt_tokens(tmp_path) -> None:
         "again",
         source=source,
         alias=None,
+        directory=tmp_path / "models" / "again",
         root=tmp_path,
         pipeline=PIPELINE, runtime="metal41",
         max_prompt_tokens=65536,
@@ -204,10 +205,12 @@ def test_quantize_registration_refuses_a_different_source(tmp_path) -> None:
     source.mkdir()
     other = tmp_path / "other"
     other.mkdir()
+    packed = tmp_path / "models" / "packed"
     register_quantized(
         "packed",
         source=source,
         alias="short",
+        directory=packed,
         root=tmp_path,
         pipeline=PIPELINE,
         runtime="metal41",
@@ -219,6 +222,7 @@ def test_quantize_registration_refuses_a_different_source(tmp_path) -> None:
         "packed",
         source=source,
         alias="short",
+        directory=packed,
         root=tmp_path,
         pipeline=PIPELINE,
         runtime="metal41",
@@ -271,13 +275,24 @@ def test_qwen36_registration_uses_that_pipeline_card(tmp_path) -> None:
     assert forced.sampling["presence_penalty"] == 1.5
 
 
+def test_a_row_without_directory_opens_the_models_folder(tmp_path) -> None:
+    _record(tmp_path, "packed")
+    add_model("packed", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
+    data = load_registry(tmp_path)
+    data["models"]["packed"].pop("directory")
+    save_registry(data, tmp_path)
+    assert resolve("packed", root=tmp_path).path == tmp_path / "models" / "packed"
+
+
 def test_reregister_refreshes_the_card_from_the_pipeline(tmp_path) -> None:
     source = tmp_path / "bf16"
     source.mkdir()
+    packed = tmp_path / "elsewhere" / "packed"
     register_quantized(
         "packed",
         source=source,
         alias="short",
+        directory=packed,
         root=tmp_path,
         pipeline=PIPELINE,
         runtime="metal41",
@@ -290,10 +305,19 @@ def test_reregister_refreshes_the_card_from_the_pipeline(tmp_path) -> None:
         "packed",
         source=source,
         alias="short",
+        directory=packed,
         root=tmp_path,
         pipeline=PIPELINE,
         runtime="metal41",
     )
     entry = load_registry(tmp_path)["models"]["packed"]
+    assert entry["directory"] == str(packed)
+    assert resolve("packed", root=tmp_path).path == packed
+    path, selection = choose_complete(
+        model=None, record=None, root=tmp_path, pipeline=PIPELINE
+    )
+    assert path == packed
+    assert selection is not None
+    assert selection.path == packed
     assert entry["default_variant"] == "thinking"
     assert entry["variants"]["thinking"]["presence_penalty"] == 0.0

@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
@@ -43,6 +44,7 @@ class Selection:
     default_variant: str | None = None
     runtime: str = ""
     custom: bool = False
+    parts: dict[str, Path] | None = None
 
 
 def load_registry(root: Path | None = None) -> dict[str, Any]:
@@ -130,6 +132,7 @@ def add_model(
         runtime=runtime,
         custom=custom,
         max_prompt_tokens=max_prompt_tokens,
+        directory=str(path),
     )
     save_registry(data, root)
     return data
@@ -152,21 +155,27 @@ def register_quantized(
     *,
     source: Path,
     alias: str | None,
+    directory: Path,
     root: Path | None = None,
     pipeline: str,
     runtime: str,
     custom: bool = False,
     max_prompt_tokens: int | None = None,
+    parts: Mapping[str, Path] | None = None,
 ) -> None:
     """Write or update the entry for a record this quantize just produced."""
     data = load_registry(root)
     _check_alias(data, alias, folder)
     source_text = str(source)
+    directory_text = str(directory)
+    part_text = _part_text(parts)
     variants, default_variant = pipeline_sampling(pipeline, runtime=runtime, custom=custom)
     current = data["models"].get(folder)
     if current is not None:
         stored = current.get("source")
         if stored and _same_path(stored, source):
+            current["directory"] = directory_text
+            _merge_parts(current, part_text)
             current["variants"] = variants
             current["default_variant"] = default_variant
             current["runtime"] = runtime
@@ -195,8 +204,43 @@ def register_quantized(
         runtime=runtime,
         custom=custom,
         max_prompt_tokens=max_prompt_tokens,
+        directory=directory_text,
+        parts=part_text,
     )
     save_registry(data, root)
+
+
+def set_part(folder: str, name: str, path: Path, root: Path | None = None) -> None:
+    """Record one quantized component directory on an existing row."""
+    data = load_registry(root)
+    entry = data["models"].get(folder)
+    if entry is None:
+        message = f"{folder} is not registered"
+        raise ValueError(message)
+    _merge_parts(entry, {name: str(path)})
+    save_registry(data, root)
+
+
+def stored_directory(entry: dict[str, Any], folder: str, root: Path | None = None) -> Path:
+    """The quantized record stored on the row."""
+    stored = entry.get("directory")
+    if isinstance(stored, str) and stored:
+        return Path(stored)
+    return models_dir(root) / folder
+
+
+def parts_for_directory(path: Path, root: Path | None = None) -> dict[str, Path]:
+    """Component directories for the row whose record is ``path``."""
+    wanted = path.expanduser().resolve()
+    data = load_registry(root)
+    for folder, entry in data["models"].items():
+        try:
+            stored = stored_directory(entry, folder, root).expanduser().resolve()
+        except OSError:
+            continue
+        if stored == wanted:
+            return _parts(entry)
+    return {}
 
 
 def refuse_conflicting_destination(folder: str, source: Path, root: Path | None = None) -> None:
@@ -285,7 +329,8 @@ def choose_complete(
         return selection.path, selection
     if len(entries) == 1:
         folder = entries[0][0]
-        return models_dir(root) / folder, _selection(data, folder, folder, None, root)
+        record_path = stored_directory(entries[0][1], folder, root)
+        return record_path, _selection(data, folder, folder, None, root)
     if not entries:
         message = (
             "no registered model\n"
@@ -344,8 +389,10 @@ def _entry(
     source: str | None,
     pipeline: str,
     runtime: str,
+    directory: str,
     custom: bool = False,
     max_prompt_tokens: int | None = None,
+    parts: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     variants, default_variant = pipeline_sampling(pipeline, runtime=runtime, custom=custom)
     ctx = card_context_length(pipeline, runtime=runtime, custom=custom)
@@ -354,17 +401,47 @@ def _entry(
         "runtime": runtime,
         "alias": alias,
         "source": source,
+        "directory": directory,
         "kv_cache": "e4m3",
         "resident_percent": None,
         "variants": variants,
         "default_variant": default_variant,
         "context_length": ctx if ctx is not None else DEFAULT_CONTEXT_LENGTH,
     }
+    if parts:
+        entry["parts"] = parts
     if custom:
         entry["custom"] = True
     if max_prompt_tokens is not None:
         entry["max_prompt_tokens"] = max_prompt_tokens
     return entry
+
+
+def _part_text(parts: Mapping[str, Path] | None) -> dict[str, str] | None:
+    if not parts:
+        return None
+    return {name: str(path) for name, path in parts.items()}
+
+
+def _merge_parts(entry: dict[str, Any], parts: dict[str, str] | None) -> None:
+    if not parts:
+        return
+    stored = entry.get("parts")
+    if not isinstance(stored, dict):
+        stored = {}
+    stored.update(parts)
+    entry["parts"] = stored
+
+
+def _parts(entry: dict[str, Any]) -> dict[str, Path]:
+    raw = entry.get("parts")
+    if not isinstance(raw, dict):
+        return {}
+    found: dict[str, Path] = {}
+    for name, path in raw.items():
+        if isinstance(name, str) and isinstance(path, str) and path:
+            found[name] = Path(path)
+    return found
 
 
 def _require_complete(path: Path) -> None:
@@ -447,7 +524,7 @@ def _selection(
     percent = entry.get("resident_percent")
     return Selection(
         folder=folder,
-        path=models_dir(root) / folder,
+        path=stored_directory(entry, folder, root),
         pipeline=_pipeline_name(entry, folder),
         alias=alias_text,
         requested_id=requested,
@@ -462,6 +539,7 @@ def _selection(
         default_variant=_default_variant(entry),
         runtime=_require_runtime(entry, folder),
         custom=_custom(entry),
+        parts=_parts(entry),
     )
 
 

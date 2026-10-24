@@ -22,6 +22,7 @@ from favlo.registry import (
     register_quantized,
     save_registry,
     set_alias,
+    stored_directory,
 )
 from qwen38_27b.chat import STOP, decode_text, encode_chat
 from qwen38_27b.checks import format_report, run_checks
@@ -175,6 +176,7 @@ def _quantize(args: argparse.Namespace) -> int:
             output.name,
             source=src,
             alias="qwen38-27b",
+            directory=output,
             pipeline=PIPELINE,
             runtime="metal41",
         )
@@ -224,8 +226,9 @@ def _delete(args: argparse.Namespace) -> int:
             sys.stderr.write(f"{folder} is not a {PIPELINE} model\n")
             return 1
         source = entry.get("source")
-        _drop_prefix(folder, data)
-        _remove_checkout(models_dir() / folder)
+        record = stored_directory(entry, folder)
+        _drop_prefix(record, data, folder)
+        _remove_checkout(record)
         if isinstance(source, str) and source and not _source_shared(data, folder, source):
             _remove_checkout(Path(source))
         data["models"].pop(folder, None)
@@ -266,17 +269,17 @@ def _source_shared(data: dict, folder: str, source: str) -> bool:
     return False
 
 
-def _drop_prefix(folder: str, data: dict) -> None:
-    record = models_dir() / folder
+def _drop_prefix(record: Path, data: dict, folder: str) -> None:
     try:
         digest = checkpoint_digest(record).hex()
     except OSError:
         return
-    for other in data["models"]:
+    for other, entry in data["models"].items():
         if other == folder:
             continue
         try:
-            if checkpoint_digest(models_dir() / other).hex() == digest:
+            other_record = stored_directory(entry, other)
+            if checkpoint_digest(other_record).hex() == digest:
                 return
         except OSError:
             continue

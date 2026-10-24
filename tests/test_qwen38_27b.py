@@ -1234,6 +1234,7 @@ def test_delete_removes_the_record_the_checkout_and_the_prefix(
         "Qwen3.8-27B-fp4",
         source=checkout,
         alias="qwen38-27b",
+        directory=packed,
         pipeline="qwen38-27b",
         runtime="metal41",
     )
@@ -1241,6 +1242,7 @@ def test_delete_removes_the_record_the_checkout_and_the_prefix(
         "Qwen3.8-27B-fp8-fp4",
         source=checkout,
         alias=None,
+        directory=mixed,
         pipeline="qwen38-27b",
         runtime="metal41",
     )
@@ -1248,6 +1250,7 @@ def test_delete_removes_the_record_the_checkout_and_the_prefix(
         "kept-model",
         source=outside,
         alias=None,
+        directory=kept,
         pipeline="qwen38-27b",
         runtime="metal41",
     )
@@ -1255,6 +1258,7 @@ def test_delete_removes_the_record_the_checkout_and_the_prefix(
         "other-model",
         source=outside,
         alias=None,
+        directory=other,
         pipeline="qwen36-35b-a3b",
         runtime="metal41",
     )

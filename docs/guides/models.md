@@ -42,6 +42,12 @@ The official checkpoint is `Tongyi-MAI/Z-Image-Turbo`. The steps are [z-image-tu
 
 `favlo --z-image-turbo setup` downloads that repository into `models/Z-Image-Turbo`. `quantize` packs `models/Z-Image-Turbo-fp4`. `--weights` is one `.safetensors` file or a directory of shards. With no `--name`, the folder is that file or directory name plus `-fp4`. `--name` is the registry id.
 
+## Wan 2.2 I2V
+
+The official checkpoint is `Wan-AI/Wan2.2-I2V-A14B`. The text encoder is `google/umt5-xxl`. The steps are [wan22-i2v/SETUP.md](../wan22-i2v/SETUP.md).
+
+`favlo --wan22-i2v setup` downloads the VAE, the umT5 encoder and tokenizer, and the two expert files. `setup --umt5 example-org/example-model` downloads that text encoder instead. `quantize --high` and `--low` pack `models/Wan2.2-I2V-A14B-fp4`. `--name` is that packed folder and the registry id. The row stores the packed directory, and `--high-dir` and `--low-dir` store the quantized expert directories. `quantize-text` stores the quantized umT5 directory on that row.
+
 ## Register a finished record
 
 `models` lists the registry. `models add` registers a directory under `models/` whose manifest is already complete. `models alias` renames the alias of a folder. The same subcommands exist for each pipeline flag:

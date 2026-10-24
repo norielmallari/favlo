@@ -18,8 +18,8 @@ from favlo.cli import pipeline_names, repo_root
 
 _TIMEOUT = 7200
 _TAIL = 8000
-_SUBCOMMANDS = frozenset({"setup", "quantize", "delete", "download", "models"})
-_HEAVY = frozenset({"setup", "quantize", "delete", "download"})
+_SUBCOMMANDS = frozenset({"setup", "quantize", "quantize-text", "delete", "download", "models"})
+_HEAVY = frozenset({"setup", "quantize", "quantize-text", "delete", "download"})
 _REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _CONSOLE = frozenset({"auto", "pretty", "plain", "json"})
@@ -30,6 +30,7 @@ _SETUP_FLAGS = {
     "--expert-fp8": "percent",
     "--keep-bf16": "bool",
     "--console": "console",
+    "--umt5": "repo",
 }
 _QUANTIZE_FLAGS = {
     "--src": "path",
@@ -37,14 +38,20 @@ _QUANTIZE_FLAGS = {
     "--output": "path",
     "--out": "path",
     "--weights": "path",
+    "--high": "path",
+    "--low": "path",
+    "--config": "path",
     "--tokenizer-source": "path",
     "--name": "name",
     "--alias": "name",
     "--expert-fp8": "percent",
     "--ffn-fp8": "percent",
     "--keep-bf16": "bool",
+    "--high-dir": "path",
+    "--low-dir": "path",
 }
 _DOWNLOAD_FLAGS = {"--check": "bool", "--console": "console"}
+_TEXT_FLAGS = {"--out": "path", "--name": "name", "--umt5": "repo"}
 
 
 def frees_model(argv: Sequence[str]) -> bool:
@@ -118,6 +125,8 @@ def _favlo(argv: Sequence[str], root: Path) -> list[str]:
         _flags(rest, _SETUP_FLAGS, root)
     elif sub == "quantize":
         _flags(rest, _QUANTIZE_FLAGS, root)
+    elif sub == "quantize-text":
+        _flags(rest, _TEXT_FLAGS, root)
     elif sub == "download":
         _flags(rest, _DOWNLOAD_FLAGS, root)
     elif sub == "delete":

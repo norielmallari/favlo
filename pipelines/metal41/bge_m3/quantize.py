@@ -653,6 +653,7 @@ def _register(dest: Path, source: Path) -> None:
         dest.name,
         source=source,
         alias=None,
+        directory=dest,
         pipeline="bge-m3",
         runtime="metal41",
         max_prompt_tokens=limit,

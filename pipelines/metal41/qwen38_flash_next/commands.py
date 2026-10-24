@@ -103,6 +103,7 @@ def quantize_main(args: Any) -> int:
             output.name,
             source=source,
             alias=getattr(args, "alias", None),
+            directory=output,
             pipeline=PIPELINE,
             runtime="metal41",
             max_prompt_tokens=DEFAULT_MAX_PROMPT_TOKENS,

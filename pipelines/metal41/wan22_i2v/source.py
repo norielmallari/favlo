@@ -10,15 +10,18 @@ short file can continue.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 HOST = "https://huggingface.co"
 VAE_REPO = "Wan-AI/Wan2.2-I2V-A14B"
@@ -32,6 +35,8 @@ LOW_FILE = "low.safetensors"
 _CHUNK = 8 << 20
 _WORKERS = 16
 _AGENT = "favlo"
+_REPO_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+_LINK_HOSTS = frozenset({"huggingface.co", "www.huggingface.co", "hf.co"})
 
 # repo, remote name, local path under models/, bytes. Sizes were read from the resolve headers.
 FILES = (
@@ -108,24 +113,86 @@ def expert_paths(folder: Path | None = None) -> tuple[Path, Path]:
     return dest / HIGH_FILE, dest / LOW_FILE
 
 
-def download(dest: Path | None = None) -> Path:
+def repo_id(text: str) -> str:
+    """``org/name``, or the same id taken from a huggingface.co model link."""
+    raw = text.strip()
+    if "://" in raw or raw.startswith(("huggingface.co/", "www.huggingface.co/", "hf.co/")):
+        if "://" not in raw:
+            raw = "https://" + raw
+        parsed = urlparse(raw)
+        host = (parsed.hostname or "").lower()
+        if parsed.username or parsed.password or host not in _LINK_HOSTS:
+            message = "repository link is a huggingface.co model"
+            raise ValueError(message)
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) < 2:
+            message = "repository is org/name or a huggingface.co link"
+            raise ValueError(message)
+        raw = f"{parts[0]}/{parts[1]}"
+    if _REPO_ID.fullmatch(raw) is None:
+        message = "repository is org/name or a huggingface.co link"
+        raise ValueError(message)
+    return raw
+
+
+def file_list(
+    umt5: str | None = None,
+    *,
+    sizes: Callable[[str, str], int] | None = None,
+) -> tuple[tuple[str, str, str, int], ...]:
+    """Download rows. ``umt5`` replaces the default encoder and tokenizer."""
+    if umt5 is None:
+        return FILES
+    repo = repo_id(umt5)
+    lookup = published_size if sizes is None else sizes
+    prefix = f"{UMT5_REPO}/"
+    kept = [row for row in FILES if not row[2].startswith(prefix)]
+    encoder = (repo, ENCODER_FILE, f"{repo}/{ENCODER_FILE}", lookup(repo, ENCODER_FILE))
+    tokenizer = (repo, TOKENIZER_FILE, f"{repo}/{TOKENIZER_FILE}", lookup(repo, TOKENIZER_FILE))
+    return (kept[0], encoder, *kept[1:], tokenizer)
+
+
+def published_size(repo: str, name: str) -> int:
+    """Byte size of one file published by a Hugging Face model repository."""
+    url = f"{HOST}/api/models/{quote(repo, safe='/')}"
+    request = urllib.request.Request(url, headers={"User-Agent": _AGENT})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            body = json.loads(response.read().decode())
+    except (OSError, urllib.error.URLError, json.JSONDecodeError, UnicodeError) as exc:
+        message = f"{repo} file list cannot be read"
+        raise RuntimeError(message) from exc
+    siblings = body.get("siblings") if isinstance(body, dict) else None
+    if isinstance(siblings, list):
+        for item in siblings:
+            if not isinstance(item, dict) or item.get("rfilename") != name:
+                continue
+            size = item.get("size")
+            if isinstance(size, int) and size > 0:
+                return size
+    message = f"{name} is not in {repo}"
+    raise RuntimeError(message)
+
+
+def download(dest: Path | None = None, *, umt5: str | None = None) -> Path:
     """Write the VAE, the umT5 files, and the two experts. Returns ``models/``."""
+    files = file_list(umt5)
     folder = dest or models_dir()
     folder.mkdir(parents=True, exist_ok=True)
-    missing = _missing(folder)
+    missing = _missing(folder, files)
     free = shutil.disk_usage(folder).free
     if free < missing:
         message = f"the checkout needs {_gib(missing)}, {_gib(free)} free"
         raise RuntimeError(message)
-    for repo, remote, local, size in FILES:
+    for repo, remote, local, size in files:
         _fetch(folder, repo, remote, local, size)
         print(f"setup {local}", flush=True)
     return folder
 
 
-def _missing(folder: Path) -> int:
+def _missing(folder: Path, files: tuple[tuple[str, str, str, int], ...] = FILES) -> int:
     total = 0
-    for _repo, _remote, local, size in FILES:
+    for _repo, _remote, local, size in files:
         have = _have(folder / local, size)
         if have < size:
             total += size - have

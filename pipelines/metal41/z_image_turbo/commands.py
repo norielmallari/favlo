@@ -86,6 +86,7 @@ def _quantize(
             dest.name,
             source=origin,
             alias=None,
+            directory=dest,
             pipeline="z-image-turbo",
             runtime="metal41",
             max_prompt_tokens=1536,

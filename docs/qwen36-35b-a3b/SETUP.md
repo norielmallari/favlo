@@ -38,7 +38,7 @@ That command does four things:
 
 1. Downloads [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) into `models/Qwen3.6-35B-A3B-bf16` with plain HTTP. A public checkout does not need a token. A short file continues on the next run.
 2. Packs `models/Qwen3.6-35B-A3B-fp8-e20`. Twenty percent of the routed experts are fp8. The rest of those experts are fp4. The language projections, the token embedding, `lm_head`, the vision tower, and the shared expert are fp8.
-3. Registers the folder under the alias `qwen36-35b-a3b` in `models/registry.json`.
+3. Registers the folder under the alias `qwen36-35b-a3b` in `models/registry.json`. The row stores `models/Qwen3.6-35B-A3B-fp8-e20`.
 4. Removes `models/Qwen3.6-35B-A3B-bf16`. `--keep-bf16` leaves that checkout on disk.
 
 A finished directory has `manifest.json` with `complete: true`. Running `setup` again on that directory registers it, if it is not already registered, and returns.
@@ -106,7 +106,7 @@ The checkout is `models/example-org--example-model-bf16`. It is removed after `m
 uv run favlo --qwen36-35b-a3b setup --repo example-org/example-model --name example-model
 ```
 
-That registers `example-model`. The official alias `qwen36-35b-a3b` stays on `models/Qwen3.6-35B-A3B-fp8-e20`. A different percentage of the official checkpoint is registered under its folder name, such as `Qwen3.6-35B-A3B-fp4`.
+That registers `example-model` and stores `models/example-model` on the row. The official alias `qwen36-35b-a3b` stays on `models/Qwen3.6-35B-A3B-fp8-e20`. A different percentage of the official checkpoint is registered under its folder name, such as `Qwen3.6-35B-A3B-fp4`.
 
 `quantize --name example-model` packs a checkout that is already on disk into that folder and registers the same id. With no `--name` and no `--output`, the folder is the checkout directory name, dropping a trailing `-bf16`, plus the quant format.
 

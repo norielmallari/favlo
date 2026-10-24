@@ -74,6 +74,34 @@ def test_the_image_setup_commands_are_accepted() -> None:
     ]
 
 
+def test_the_video_setup_commands_are_accepted() -> None:
+    from favlo.cli import repo_root
+    from favlo.guides import read_setup
+
+    root = repo_root()
+    guide = read_setup("wan22-i2v")
+    commands = (
+        "uv run favlo --wan22-i2v setup",
+        "uv run favlo --wan22-i2v quantize --high models/example-model/high.safetensors "
+        "--low models/example-model/low.safetensors",
+        "uv run favlo --wan22-i2v quantize --high models/example-model/high.safetensors "
+        "--low models/example-model/low.safetensors --name example-model",
+        "uv run favlo --wan22-i2v quantize --high models/example-model/high.safetensors "
+        "--low models/example-model/low.safetensors --name example-model "
+        "--high-dir models/example-high --low-dir models/example-low",
+        "uv run favlo --wan22-i2v quantize-text",
+        "uv run favlo --wan22-i2v quantize-text --name example-model --out models/example-umt5",
+        "uv run favlo --wan22-i2v setup --umt5 example-org/example-model",
+        "uv run favlo --wan22-i2v quantize-text --name example-model "
+        "--umt5 example-org/example-model",
+    )
+    for command in commands:
+        assert command in guide
+        argv = accepted_argv(command, root)
+        assert frees_model(argv)
+        assert argv[3] == "--wan22-i2v"
+
+
 def test_a_path_and_a_shell_are_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("favlo.setup_run.pipeline_names", _names)
     with pytest.raises(ValueError, match="not a setup step"):

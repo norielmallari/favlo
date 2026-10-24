@@ -149,6 +149,7 @@ def _quantize(args: argparse.Namespace) -> int:
             output.name,
             source=src,
             alias="ternary-bonsai-2",
+            directory=output,
             pipeline=PIPELINE,
             runtime="metal41",
         )

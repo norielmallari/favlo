@@ -55,6 +55,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             dest.name,
             source=source,
             alias=None,
+            directory=dest,
             pipeline="ace-step-15-turbo",
             runtime="metal41",
         )

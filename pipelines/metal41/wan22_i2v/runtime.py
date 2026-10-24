@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -54,11 +55,16 @@ class Runtime:
         *,
         owner: str | None = None,
         max_memory: str | int | None = None,
+        parts: Mapping[str, Path] | None = None,
     ) -> None:
         self.console = console
         self._owner = owner or f"wan22-i2v:{id(self)}"
         self._memory_cap = _parse_memory(max_memory)
         self.path = Path(path)
+        found = {name: Path(value) for name, value in (parts or {}).items()}
+        self.high = found.get("high", self.path / "high")
+        self.low = found.get("low", self.path / "low")
+        self.umt5 = found.get("umt5", self.path / "umt5")
         self.manifest = load_manifest(self.path)
         self.config = self.manifest["config"]
         self.embed = load_embed(self.path)
@@ -173,7 +179,7 @@ class Runtime:
                         int(self.config["text_dim"]),
                         on_text,
                         gpu,
-                        self.path / "umt5",
+                        self.umt5,
                     )
                     table_null = None
                     if cfg:
@@ -184,7 +190,7 @@ class Runtime:
                             int(self.config["text_dim"]),
                             on_text,
                             gpu,
-                            self.path / "umt5",
+                            self.umt5,
                         )
                     self._pause(
                         progress,
@@ -426,7 +432,7 @@ class Runtime:
     ) -> None:
         volume = 36 * lat_t * lat_h * lat_w
         need = (
-            expert_bytes(self.path)
+            expert_bytes(self.path, high=self.high, low=self.low)
             + forward_bytes(self.config, tokens, volume)
             + _latent_device_bytes(lat_t, lat_h, lat_w, frames)
         )
@@ -549,11 +555,19 @@ class Runtime:
             self._resident = None
             gc.collect()
         layers = int(self.config["layers"])
-        expert = load_expert(self.path / name, layers, on_file=tick)
+        expert = load_expert(self._expert(name), layers, on_file=tick)
         with objc.autorelease_pool():
             self._resident = upload_expert(gpu, expert, on_file=tick)
         del expert
         gc.collect()
+
+
+    def _expert(self, name: str) -> Path:
+        if name == "high":
+            return self.high
+        if name == "low":
+            return self.low
+        return self.path / name
 
 
 def open_runtime(
@@ -564,16 +578,17 @@ def open_runtime(
     resident_percent: float | None = None,
     max_memory: str | int | None = None,
     owner: str | None = None,
+    parts: Mapping[str, Path] | None = None,
 ) -> Runtime:
     del kv_cache, resident_percent
-    return Runtime(Path(path), console, owner=owner, max_memory=max_memory)
+    return Runtime(Path(path), console, owner=owner, max_memory=max_memory, parts=parts)
 
 
-def expert_bytes(path: Path) -> int:
+def expert_bytes(path: Path, *, high: Path | None = None, low: Path | None = None) -> int:
     """Largest on-disk expert. One expert is resident at a time."""
     largest = 0
-    for name in ("high", "low"):
-        folder = path / name
+    folders = (high or path / "high", low or path / "low")
+    for folder in folders:
         if not folder.is_dir():
             continue
         total = sum(item.stat().st_size for item in folder.iterdir() if item.is_file())

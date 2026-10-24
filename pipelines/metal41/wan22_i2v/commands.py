@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -12,20 +13,40 @@ import numpy as np
 from wan22_i2v.formats import TILE_M, dequant_fp4, dequant_fp8, pack_linear
 from wan22_i2v.png import decode_png
 from wan22_i2v.schedule import OFFICIAL, P320_HEIGHT, P320_WIDTH, SHORT_FRAMES, STEPS
+from wan22_i2v.source import repo_id
+
+_FOLDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_RECORD = "Wan2.2-I2V-A14B-fp4"
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="favlo --wan22-i2v")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("setup", help="download the VAE, umT5, and the two experts")
+    setup = sub.add_parser("setup", help="download the VAE, umT5, and the two experts")
+    setup.add_argument(
+        "--umt5",
+        type=_umt5_repo,
+        default=None,
+        help="umT5 repository, org/name or a huggingface.co link",
+    )
     sub.add_parser("kernels", help="dispatch the fp4 and fp8 matmul")
     quant = sub.add_parser("quantize", help="pack the high-noise and low-noise experts")
     quant.add_argument("--high", type=Path, required=True)
     quant.add_argument("--low", type=Path, required=True)
     quant.add_argument("--config", type=Path)
-    quant.add_argument("--out", type=Path)
+    quant.add_argument("--out", type=Path, help="packed directory")
+    quant.add_argument("--name", type=_folder_name, default=None, help="folder under models/")
+    quant.add_argument("--high-dir", type=Path, default=None, help="quantized high-noise directory")
+    quant.add_argument("--low-dir", type=Path, default=None, help="quantized low-noise directory")
     text = sub.add_parser("quantize-text", help="pack the umT5 encoder")
-    text.add_argument("--out", type=Path)
+    text.add_argument("--out", type=Path, help="packed umT5 directory")
+    text.add_argument("--name", type=_folder_name, default=None, help="packed model folder")
+    text.add_argument(
+        "--umt5",
+        type=_umt5_repo,
+        default=None,
+        help="umT5 repository already under models/",
+    )
     gen = sub.add_parser("generate", help="write one AVI")
     gen.add_argument("--record", type=Path, required=True)
     gen.add_argument("--image", type=Path, required=True)
@@ -42,10 +63,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "setup":
         from wan22_i2v.source import dit_dir, download, expert_paths, umt5_dir, vae_dir
 
-        download()
+        download(umt5=args.umt5)
         high, low = expert_paths()
         print(vae_dir(), flush=True)
-        print(umt5_dir(), flush=True)
+        print(umt5_dir(repo=args.umt5), flush=True)
         print(dit_dir(), flush=True)
         print(high, flush=True)
         print(low, flush=True)
@@ -86,25 +107,61 @@ def kernels() -> int:
     return 0
 
 
+def _umt5_repo(text: str) -> str:
+    try:
+        return repo_id(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _folder_name(text: str) -> str:
+    if _FOLDER.fullmatch(text) is None:
+        message = "folder name is not a single name"
+        raise argparse.ArgumentTypeError(message)
+    return text
+
+
+def _record_dir(name: str | None, out: Path | None) -> Path:
+    from wan22_i2v.source import models_dir
+
+    if name is not None and out is not None:
+        message = "--name and --out name the same directory"
+        raise ValueError(message)
+    if name is not None:
+        return models_dir() / name
+    if out is not None:
+        return out
+    return models_dir() / _RECORD
+
+
 def _quantize(args: argparse.Namespace) -> int:
-    from favlo.cli import repo_root
     from favlo.registry import register_quantized
     from wan22_i2v.record import quantize
 
-    if args.config is None:
-        config = OFFICIAL
-    else:
-        config = json.loads(args.config.read_text(encoding="utf-8"))
-    dest = args.out or repo_root() / "models" / "Wan2.2-I2V-A14B-fp4"
-    manifest = quantize(args.high, args.low, dest, config)
-    register_quantized(
-        dest.name,
-        source=args.high,
-        alias=None,
-        pipeline="wan22-i2v",
-        runtime="metal41",
-        max_prompt_tokens=int(config["text_len"]),
-    )
+    try:
+        if args.config is None:
+            config = OFFICIAL
+        else:
+            config = json.loads(args.config.read_text(encoding="utf-8"))
+        dest = _record_dir(args.name, args.out)
+        high_dir = args.high_dir or dest / "high"
+        low_dir = args.low_dir or dest / "low"
+        manifest = quantize(
+            args.high, args.low, dest, config, high_dir=high_dir, low_dir=low_dir
+        )
+        register_quantized(
+            dest.name,
+            source=args.high,
+            alias=None,
+            directory=dest,
+            pipeline="wan22-i2v",
+            runtime="metal41",
+            max_prompt_tokens=int(config["text_len"]),
+            parts={"high": high_dir, "low": low_dir},
+        )
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
     print(dest, flush=True)
     print(f"high fp8 blocks {manifest['high_promoted']}", flush=True)
     print(f"low fp8 blocks {manifest['low_promoted']}", flush=True)
@@ -112,11 +169,20 @@ def _quantize(args: argparse.Namespace) -> int:
 
 
 def _quantize_text(args: argparse.Namespace) -> int:
-    from favlo.cli import repo_root
+    from favlo.registry import set_part
+    from wan22_i2v.text import encoder_path
     from wan22_i2v.umt5_pack import quantize_umt5
 
-    dest = args.out or repo_root() / "models" / "Wan2.2-I2V-A14B-fp4" / "umt5"
-    winners = quantize_umt5(dest=dest)
+    try:
+        record = _record_dir(args.name, None)
+        dest = args.out if args.out is not None else record / "umt5"
+        folder = args.name or record.name
+        src = None if args.umt5 is None else encoder_path(repo=args.umt5)
+        winners = quantize_umt5(src=src, dest=dest)
+        set_part(folder, "umt5", dest)
+    except (OSError, ValueError, RuntimeError) as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
     print(dest, flush=True)
     print(f"fp8 layers {winners}", flush=True)
     return 0
@@ -131,7 +197,9 @@ def _generate(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(exc, file=sys.stderr, flush=True)
         return 2
-    runtime = Runtime(args.record)
+    from favlo.registry import parts_for_directory
+
+    runtime = Runtime(args.record, parts=parts_for_directory(args.record))
     try:
         avi, timing = runtime.generate(
             args.prompt,
