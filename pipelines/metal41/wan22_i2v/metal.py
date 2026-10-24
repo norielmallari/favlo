@@ -33,7 +33,7 @@ _NAMES = (
     "layernorm_affine",
     "rope3d",
     "attend",
-    "attend_q8",
+    "attend_q4",
     "patch_embed",
     "conv3d",
     "conv_pack",
@@ -467,13 +467,13 @@ class Gpu:
         scale = float(dim) ** -0.5
         if dim == 128:
             self._dispatch(
-                "attend_q8",
+                "attend_q4",
                 [query, key, value, dest],
                 [
                     struct.pack("IIII", q_len, kv_len, heads, 0),
                     struct.pack("f", scale),
                 ],
-                (heads, (q_len + 7) // 8, 1),
+                (heads, (q_len + 3) // 4, 1),
                 (32, 1, 1),
             )
             return
