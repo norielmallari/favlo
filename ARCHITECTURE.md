@@ -40,6 +40,14 @@ Each runtime is a separate write set. An agent developing one runtime edits that
 
 The entry filename may contain hyphens. The command loads it by path from `pipelines/<runtime>/`. It is not an importable module name. The package beside it uses underscores. The entry sets `PIPELINE` to that filename stem. A runtime's write set is the entry file, the package, `docs/<pipeline>/`, and tests that import only that package. A new runtime adds a row to the table above and its own doc directory. It does not edit another row's package, shaders, tests, or docs. Shipped rows use `runtime` `metal41`. `pipelines/cuda` is empty until a CUDA pipeline names the toolkit it needs. A custom entry lives under `custom-pipelines/<runtime>/` and its registry row sets `custom` true. A missing or unknown `runtime` is an error.
 
+## Failed
+
+A failed pipeline is not discovered and is not served. Its entry is not under `pipelines/metal41` or `pipelines/cuda`. `serve` does not load it, and the command scan does not list its flag.
+
+| Pipeline | Entry | Package | Note |
+|---|---|---|---|
+| `ternary-bonsai-2` | `pipelines/failed/ternary-bonsai-2.py` | `pipelines/failed/ternary_bonsai_2/` | [docs/ternary-bonsai-2/README.md](docs/ternary-bonsai-2/README.md) |
+
 Tests for the listener, the registry, and the console live in `tests/test_cli.py`, `tests/test_server.py`, `tests/test_registry.py`, and `tests/test_console.py`. A pipeline's tests do not import another pipeline.
 
 ## Registry
@@ -51,6 +59,7 @@ Tests for the listener, the registry, and the console live in `tests/test_cli.py
 ```text
 pipelines/metal41/      shipped pipelines that require Metal 4.1
 pipelines/cuda/         empty until a CUDA pipeline exists
+pipelines/failed/       pipelines that are not discovered and are not served
 custom-pipelines/       gitignored; one entry and package per custom model
 src/favlo/              process entry; the listener loads the pipeline a request names
   cli.py                discovers entry files; a new runtime does not edit this
