@@ -2,7 +2,10 @@
 
 Uvicorn serves it. A pipeline receives a :class:`favlo.reply.LiveReply` and
 never a socket. ``GET /v1/models`` does not take the request lock. A chat
-completion does. Image, video, music, and voice run on the MCP queue.
+completion does. An embeddings request uses that same lock, waits until the
+open chat returns, and does not set ``preempt``. A chat that has not started
+waits while an embeddings request is queued or running. Image, video,
+music, and voice run on the MCP queue.
 """
 
 from __future__ import annotations
@@ -127,6 +130,9 @@ def build_app(args: Any, state: dict[str, Any]) -> Starlette:
     async def chat(request: Request) -> Response:
         return await _locked(request, args, state, "chat")
 
+    async def embeddings(request: Request) -> Response:
+        return await _locked(request, args, state, "embed")
+
     routes = [
         Route("/v1/models", models, methods=["GET"]),
         Route("/v1/models/{model_id:path}", model, methods=["GET"]),
@@ -135,6 +141,7 @@ def build_app(args: Any, state: dict[str, Any]) -> Starlette:
         Route("/v1/pipelines/close", pipelines_close, methods=["POST"]),
         Route("/v1/pipelines/reload", pipelines_reload, methods=["POST"]),
         Route("/v1/chat/completions", chat, methods=["POST"]),
+        Route("/v1/embeddings", embeddings, methods=["POST"]),
         *mcp_app.routes,
     ]
     return Starlette(routes=routes, lifespan=mcp_app.lifespan)
@@ -287,6 +294,8 @@ def _prepare_listener(state: dict[str, Any]) -> None:
     state.setdefault("media_yield", False)
     state.setdefault("chat_waiters", 0)
     state.setdefault("chats_running", 0)
+    state.setdefault("embed_waiters", 0)
+    state.setdefault("embed_running", 0)
     state.setdefault("media_gate", threading.Condition())
     state.setdefault("media_tasks", {})
     state.setdefault("media_order", [])
@@ -302,15 +311,27 @@ def _run_locked(
 ) -> None:
     _prepare_listener(state)
     chat = kind == "chat"
+    embed = kind == "embed"
     running = [False]
+    if embed:
+        _embed_arrive(state)
     if chat:
+        _wait_embeds(state)
         _chat_arrive(state)
     try:
         if kind in _MEDIA_KINDS:
             _run_media(args, state, kind, content_type, raw, reply)
         else:
-            _run_once(args, state, kind, content_type, raw, reply, running=running)
+            while True:
+                state["chat_yield"] = False
+                _run_once(args, state, kind, content_type, raw, reply, running=running)
+                if chat and state.get("chat_yield"):
+                    _wait_embeds(state)
+                    continue
+                return
     finally:
+        if embed:
+            _embed_done(state, running[0])
         if chat:
             _chat_done(state, running[0])
 
@@ -372,7 +393,16 @@ def _run_once(
         if not reply.started:
             reply.json(409, {"error": {"message": "the pipeline is closing", "type": "busy"}})
         return
-    if running is not None:
+    if kind == "chat" and _embeds_pending(state):
+        state["chat_yield"] = True
+        lock.release()
+        holds = False
+        return
+    if kind == "embed":
+        _embed_promote(state)
+        if running is not None:
+            running[0] = True
+    elif running is not None:
         _chat_running(state)
         running[0] = True
     opened = False
@@ -419,6 +449,7 @@ def _run_once(
             return
         handler_name = {
             "chat": "handle_chat",
+            "embed": "handle_embed",
             "image": "handle_image",
             "video": "handle_video",
             "music": "handle_music",
@@ -462,11 +493,49 @@ def _run_once(
             lock.release()
         if opened:
             _schedule_pipeline_heartbeat(module, runtime, selection)
-        if not reply.started and not state.get("media_yield"):
+        if not reply.started and not state.get("media_yield") and not state.get("chat_yield"):
             reply.json(
                 500,
                 {"error": {"message": "the pipeline wrote no reply", "type": "RuntimeError"}},
             )
+
+
+def _embeds_pending(state: dict[str, Any]) -> bool:
+    gate: threading.Condition = state["media_gate"]
+    with gate:
+        return state["embed_waiters"] > 0 or state["embed_running"] > 0
+
+
+def _wait_embeds(state: dict[str, Any]) -> None:
+    gate: threading.Condition = state["media_gate"]
+    with gate:
+        while state["embed_waiters"] > 0 or state["embed_running"] > 0:
+            gate.wait(timeout=0.05)
+
+
+def _embed_arrive(state: dict[str, Any]) -> None:
+    gate: threading.Condition = state["media_gate"]
+    with gate:
+        state["embed_waiters"] += 1
+        gate.notify_all()
+
+
+def _embed_promote(state: dict[str, Any]) -> None:
+    gate: threading.Condition = state["media_gate"]
+    with gate:
+        state["embed_waiters"] -= 1
+        state["embed_running"] += 1
+        gate.notify_all()
+
+
+def _embed_done(state: dict[str, Any], running: bool) -> None:
+    gate: threading.Condition = state["media_gate"]
+    with gate:
+        if running:
+            state["embed_running"] -= 1
+        else:
+            state["embed_waiters"] -= 1
+        gate.notify_all()
 
 
 def _chat_arrive(state: dict[str, Any]) -> None:
@@ -674,7 +743,7 @@ def _each_pipeline() -> list[tuple[str, str, Any]]:
 def _hidden_pipelines() -> set[str]:
     names: set[str] = set()
     for _folder, pipeline, module in _each_pipeline():
-        if media_kinds(module):
+        if media_kinds(module) or callable(getattr(module, "handle_embed", None)):
             names.add(pipeline)
     return names
 

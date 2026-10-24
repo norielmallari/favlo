@@ -1437,3 +1437,117 @@ def test_mcp_voice_writes_a_wav_and_the_link_reads_it(tmp_path) -> None:
     assert blob["blob"]
     assert (tmp_path / "voice" / "voice_smoke.wav").is_file()
 
+
+class _EmbedOrder:
+    """Chat holds the lock. An embedding request runs before the next chat."""
+
+    def __init__(self) -> None:
+        self.order: list[str] = []
+        self.hold_entered = threading.Event()
+        self.hold_release = threading.Event()
+        self.embed_saw_preempt = False
+
+    def handle_chat(self, reply, runtime, body, selection, args, state) -> None:
+        del runtime, selection, args, state
+        name = body["messages"][0]["content"]
+        if name == "hold":
+            self.hold_entered.set()
+            self.hold_release.wait(5)
+        self.order.append(f"chat:{name}")
+        reply.json(200, {"id": name, "choices": []})
+
+    def handle_embed(self, reply, runtime, body, selection, args, state) -> None:
+        del runtime, selection, args
+        self.embed_saw_preempt = bool(state["preempt"].is_set())
+        name = body["input"]
+        if name == "hold":
+            self.hold_entered.set()
+            self.hold_release.wait(5)
+        self.order.append(f"embed:{name}")
+        reply.json(200, {"object": "list", "data": [], "model": "", "usage": {}})
+
+
+def _embed_listener() -> tuple[_EmbedOrder, dict, threading.Thread]:
+    module = _EmbedOrder()
+    state: dict = {"runtime": module, "server": None, "module": module}
+    thread = threading.Thread(
+        target=listener._serve_loop,
+        args=(_args(), state),
+        daemon=True,
+    )
+    thread.start()
+    deadline = time.monotonic() + 5
+    while state["server"] is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert state["server"] is not None
+    return module, state, thread
+
+
+def _wait_counter(state: dict, key: str) -> None:
+    deadline = time.monotonic() + 5
+    while int(state.get(key) or 0) < 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert int(state.get(key) or 0) >= 1
+
+
+def test_an_embedding_waits_for_the_open_chat_and_runs_before_the_next() -> None:
+    module, state, thread = _embed_listener()
+    port = int(state["server"].server_address[1])
+    hold = threading.Thread(
+        target=_post_json,
+        args=(port, "/v1/chat/completions", {"messages": [{"role": "user", "content": "hold"}]}),
+    )
+    embed = threading.Thread(
+        target=_post_json,
+        args=(port, "/v1/embeddings", {"input": "bridge", "model": "bge-m3-w8a8"}),
+    )
+    nxt = threading.Thread(
+        target=_post_json,
+        args=(port, "/v1/chat/completions", {"messages": [{"role": "user", "content": "next"}]}),
+    )
+    try:
+        hold.start()
+        assert module.hold_entered.wait(5)
+        nxt.start()
+        _wait_counter(state, "chat_waiters")
+        embed.start()
+        _wait_counter(state, "embed_waiters")
+        assert module.order == []
+        module.hold_release.set()
+        hold.join(5)
+        embed.join(5)
+        nxt.join(5)
+    finally:
+        module.hold_release.set()
+        _stop_background(state, thread)
+    assert module.order == ["chat:hold", "embed:bridge", "chat:next"]
+    assert module.embed_saw_preempt is False
+
+
+def test_a_chat_waits_while_an_embedding_is_running() -> None:
+    module, state, thread = _embed_listener()
+    port = int(state["server"].server_address[1])
+    embed = threading.Thread(
+        target=_post_json,
+        args=(port, "/v1/embeddings", {"input": "hold", "model": "bge-m3-w8a8"}),
+    )
+    chat = threading.Thread(
+        target=_post_json,
+        args=(port, "/v1/chat/completions", {"messages": [{"role": "user", "content": "next"}]}),
+    )
+    try:
+        embed.start()
+        assert module.hold_entered.wait(5)
+        chat.start()
+        time.sleep(0.05)
+        assert module.order == []
+        assert int(state.get("embed_running") or 0) >= 1
+        module.hold_release.set()
+        embed.join(5)
+        chat.join(5)
+    finally:
+        module.hold_release.set()
+        _stop_background(state, thread)
+    assert module.order == ["embed:hold", "chat:next"]
+    assert module.embed_saw_preempt is False
+

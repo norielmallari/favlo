@@ -37,6 +37,7 @@ Each runtime is a separate write set. An agent developing one runtime edits that
 | `z-image-turbo` | `pipelines/metal41/z-image-turbo.py` | `pipelines/metal41/z_image_turbo/` | [docs/z-image-turbo/README.md](docs/z-image-turbo/README.md) |
 | `wan22-i2v` | `pipelines/metal41/wan22-i2v.py` | `pipelines/metal41/wan22_i2v/` | [docs/wan22-i2v/README.md](docs/wan22-i2v/README.md) |
 | `ace-step-15-turbo` | `pipelines/metal41/ace-step-15-turbo.py` | `pipelines/metal41/ace_step_15_turbo/` | [docs/ace-step-15-turbo/README.md](docs/ace-step-15-turbo/README.md) |
+| `bge-m3` | `pipelines/metal41/bge-m3.py` | `pipelines/metal41/bge_m3/` | [docs/bge-m3/README.md](docs/bge-m3/README.md) |
 | `voxcpm2` | `pipelines/metal41/voxcpm2.py` | `pipelines/metal41/voxcpm2/` | [docs/voxcpm2/README.md](docs/voxcpm2/README.md) |
 
 The entry filename may contain hyphens. The command loads it by path from `pipelines/<runtime>/`. It is not an importable module name. The package beside it uses underscores. The entry sets `PIPELINE` to that filename stem. A runtime's write set is the entry file, the package, `docs/<pipeline>/`, and tests that import only that package. A new runtime adds a row to the table above and its own doc directory. It does not edit another row's package, shaders, tests, or docs. Shipped rows use `runtime` `metal41`. `pipelines/cuda` is empty until a CUDA pipeline names the toolkit it needs. A custom entry lives under `custom-pipelines/<runtime>/` and its registry row sets `custom` true. A missing or unknown `runtime` is an error.
@@ -54,7 +55,7 @@ Tests for the listener, the registry, and the console live in `tests/test_cli.py
 
 ## Registry
 
-`models/registry.json` is gitignored. A row stores the folder, the pipeline entry, `runtime`, an alias, the BF16 source path, the key/value mode, the resident percent, `context_length`, and the sampling card copied from that pipeline's `sampling.py`. `runtime` is `metal41` or `cuda`. A shipped row omits `custom`. A custom row sets `custom` true. `serve` loads `pipelines/<runtime>/<pipeline>.py`, or `custom-pipelines/<runtime>/<pipeline>.py` when `custom` is true. A row that omits `context_length` uses 131072. The stored names are the `:suffix` ids. A bare model id selects no row. The pipeline applies its default variant, or the row the request selects. `serve` does not register a record it finds on disk. A fresh tree has no rows. `GET /v1/models` lists every registered language row, including each sampling suffix that row stores, and each object includes `context_length`. A pipeline that defines `handle_image`, `handle_video`, `handle_music`, or `handle_voice` is omitted, and `GET /v1/models/{id}` for that id is 404.
+`models/registry.json` is gitignored. A row stores the folder, the pipeline entry, `runtime`, an alias, the BF16 source path, the key/value mode, the resident percent, `context_length`, and the sampling card copied from that pipeline's `sampling.py`. `runtime` is `metal41` or `cuda`. A shipped row omits `custom`. A custom row sets `custom` true. `serve` loads `pipelines/<runtime>/<pipeline>.py`, or `custom-pipelines/<runtime>/<pipeline>.py` when `custom` is true. A row that omits `context_length` uses 131072. The stored names are the `:suffix` ids. A bare model id selects no row. The pipeline applies its default variant, or the row the request selects. `serve` does not register a record it finds on disk. A fresh tree has no rows. `GET /v1/models` lists every registered language row, including each sampling suffix that row stores, and each object includes `context_length`. A pipeline that defines `handle_image`, `handle_video`, `handle_music`, `handle_voice`, or `handle_embed` is omitted, and `GET /v1/models/{id}` for that id is 404. `POST /v1/embeddings` loads the pipeline that defines `handle_embed`. An embeddings request waits until the open chat completion returns and does not set `preempt`. A chat that has not started waits while an embeddings request is queued or running.
 
 ## Layout
 
@@ -111,6 +112,7 @@ uv run python -m harness.image_smoke_agent
 uv run python -m harness.image_persona
 uv run python -m harness.video_smoke_agent
 uv run python -m harness.voice_smoke_agent
+uv run python -m harness.embeddings_agent
 uv run python -m harness.server status
 ```
 

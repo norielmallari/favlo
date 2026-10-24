@@ -1,0 +1,13 @@
+# BGE-M3
+
+Embeddings for [BAAI/bge-m3](https://huggingface.co/BAAI/bge-m3), MIT. The report is Chen et al., [arXiv:2402.03216](https://arxiv.org/abs/2402.03216). Papers for this pipeline are in [references.md](references.md). The listener and the write set are [../../ARCHITECTURE.md](../../ARCHITECTURE.md).
+
+`favlo --bge-m3 quantize --src <checkout>` reads that directory and writes `models/bge-m3-w8a8`. The checkout is the publisher repository: `pytorch_model.bin`, `colbert_linear.pt`, `sparse_linear.pt`, and `tokenizer.json`. Quantize is the only command that opens it. An interrupted run keeps each length that finished, and the next invocation continues from the next one. Each length that passed is packed into the record and registered before the next length starts. A later length replaces that record when it passes. `embed` loads the record.
+
+The packed program is one W8A8 module. The token and position gathers' index ops stay on the CPU. The projections prefer the Neural Engine, and quantize fails if one of them leaves. Weights are symmetric int8 with one float16 scale per output channel. Activations into each convolution are symmetric int8 over the observed minimum and maximum. Convolution outputs stay float16. Quantize builds `encode_128`, `encode_256`, `encode_512`, `encode_1024`, `encode_2048`, and `encode_4096`. The record lists the functions it contains. The served window is the longest of those functions. After each function is quantized, quantize measures cosine against the float32 encoder on the 128 passages padded to that length. The next function starts only when the minimum is at least 0.96. An input longer than the served window is an error. The tokenizer and the pad live on the host. The dense vector is the L2 norm of hidden row 0, the `<s>` token. Position ids start at 2. `embed` loads the mlprogram through Core ML. `quantize` is the command that imports torch and coremltools. Those two libraries are not Favlo dependencies.
+
+`favlo --bge-m3 embed --text <sentence>` prints the 1024 floats. A missing record is an error. The command does not quantize.
+
+`POST /v1/embeddings` takes `model` and one string `input`. The body is one embedding object and `usage.prompt_tokens`. A pipeline that defines `handle_embed` is omitted from `GET /v1/models`. An embeddings request waits until the open chat completion returns and does not set `preempt`. A chat that has not started waits while an embeddings request is queued or running.
+
+`uv run pytest tests/test_bge_m3.py tests/test_bge_m3_smoke.py` runs the host math. The smoke skips when `models/bge-m3-w8a8` is absent. `python -m harness.embeddings_agent` calls the route on `127.0.0.1:8129`.
