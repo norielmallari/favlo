@@ -1143,19 +1143,26 @@ def test_mcp_image_results_are_links_and_resources_read_the_file(tmp_path) -> No
         _status, read = _mcp(
             port,
             "resources/read",
-            {"uri": "favlo://images/image_a"},
-            name="favlo://images/image_a",
+            {"uri": "favlo://images/image_a.png"},
+            name="favlo://images/image_a.png",
         )
     finally:
         _stop_background(state, thread)
     blocks = pair_done["result"]["content"]
-    assert [block["type"] for block in blocks].count("resource_link") == 2
+    links = [block for block in blocks if block["type"] == "resource_link"]
+    assert [block["uri"] for block in links] == [
+        "favlo://images/image_a.png",
+        "favlo://images/image_b.png",
+    ]
+    assert [block["name"] for block in links] == ["image_a.png", "image_b.png"]
     assert all(block["type"] != "image" for block in blocks)
     big_blocks = big_done["result"]["content"]
     assert any(block["type"] == "resource_link" for block in big_blocks)
     assert all(block["type"] != "image" for block in big_blocks)
-    blob = read["result"]["contents"][0]["blob"]
-    assert base64.b64decode(blob) == b"aaa"
+    content = read["result"]["contents"][0]
+    assert content["uri"] == "favlo://images/image_a.png"
+    assert content["mimeType"] == "image/png"
+    assert base64.b64decode(content["blob"]) == b"aaa"
 
 
 def test_mcp_video_rejects_a_filesystem_path(tmp_path) -> None:

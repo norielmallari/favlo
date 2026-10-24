@@ -51,6 +51,7 @@ _ANNOTATIONS = mcp_types.ToolAnnotations(
     open_world_hint=False,
 )
 _AUDIO = {"mp3": "audio/mpeg", "wav": "audio/wav", "flac": "audio/flac"}
+_IMAGE_EXT = frozenset({"png"})
 
 
 def build_mcp(dispatch: Any, state: dict[str, Any]) -> FastMCP:
@@ -193,8 +194,9 @@ def build_mcp(dispatch: Any, state: dict[str, Any]) -> FastMCP:
 
     @mcp.resource("favlo://images/{image_id}", mime_type="image/png")
     def read_image(image_id: str) -> bytes:
-        """The stored PNG."""
-        raw = load_image(image_id, home=_home(tasks.state, "image_home"))
+        """The stored PNG. A ``.png`` suffix is the same file."""
+        stem, _ext = _split_suffix(image_id, _IMAGE_EXT)
+        raw = load_image(stem, home=_home(tasks.state, "image_home"))
         if raw is None:
             message = "stored image is missing"
             raise ToolError(message)
@@ -369,14 +371,7 @@ def _image_result(
             continue
         image_id = item["id"]
         blocks.append(mcp_types.TextContent(type="text", text=image_id))
-        blocks.append(
-            mcp_types.ResourceLink(
-                type="resource_link",
-                uri=f"favlo://images/{image_id}",
-                name=image_id,
-                mime_type="image/png",
-            )
-        )
+        blocks.append(_image_link(image_id))
         if not include_image:
             continue
         raw = _image_bytes(item, state)
@@ -500,6 +495,25 @@ def _voice_result(
                 )
             )
     return ToolResult(blocks)
+
+
+def _image_link(image_id: str) -> mcp_types.ResourceLink:
+    """A link whose URI path ends in ``.png``."""
+    filename = f"{image_id}.png"
+    return mcp_types.ResourceLink(
+        type="resource_link",
+        uri=f"favlo://images/{filename}",
+        name=filename,
+        mime_type="image/png",
+    )
+
+
+def _split_suffix(value: str, suffixes: frozenset[str]) -> tuple[str, str | None]:
+    """Split a known suffix from an id. A bare id stays whole."""
+    stem, dot, ext = value.rpartition(".")
+    if dot and ext in suffixes and stem and "." not in stem:
+        return stem, ext
+    return value, None
 
 
 def stored_voice(state: dict[str, Any], voice_id: str) -> tuple[bytes, str] | None:
