@@ -33,6 +33,7 @@ _NAMES = (
     "layernorm_affine",
     "rope3d",
     "attend",
+    "attend_q8",
     "patch_embed",
     "conv3d",
     "conv_pack",
@@ -128,6 +129,34 @@ class Gpu:
         self._inflight = []
         for cmd in pending:
             self._finish(cmd)
+
+    def gpu_ms(self) -> float:
+        """Finish earlier buffers, then return this encoder's GPU milliseconds.
+
+        The sample is ``GPUEndTime − GPUStartTime`` for the one buffer that
+        holds the dispatches since the previous finish.
+        """
+        pending = self._inflight
+        self._inflight = []
+        for cmd in pending:
+            self._finish(cmd)
+        if self._enc is None:
+            return 0.0
+        memory.handoff(self._enc, self._cmd)
+        self._enc.endEncoding()
+        cmd = self._cmd
+        self._enc = None
+        self._cmd = None
+        self._held.clear()
+        cmd.commit()
+        cmd.waitUntilCompleted()
+        start = float(cmd.GPUStartTime())
+        end = float(cmd.GPUEndTime())
+        status, error = memory.retire(cmd)
+        if status == int(Metal.MTLCommandBufferStatusError):
+            message = f"metal command failed: {error}"
+            raise RuntimeError(message)
+        return max(0.0, end - start) * 1000.0
 
     def _finish(self, cmd: Any) -> None:
         status, error = memory.retire(cmd)
@@ -435,6 +464,18 @@ class Gpu:
         dim: int,
     ) -> None:
         scale = float(dim) ** -0.5
+        if dim == 128:
+            self._dispatch(
+                "attend_q8",
+                [query, key, value, dest],
+                [
+                    struct.pack("IIII", q_len, kv_len, heads, 0),
+                    struct.pack("f", scale),
+                ],
+                (heads, (q_len + 7) // 8, 1),
+                (32, 1, 1),
+            )
+            return
         self._dispatch(
             "attend",
             [query, key, value, dest],

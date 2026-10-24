@@ -57,8 +57,10 @@ def main(argv: list[str] | None = None) -> int:
 def kernels() -> int:
     _matmul("fp4")
     _matmul("fp8")
+    _attend()
     print("fp4 ok", flush=True)
     print("fp8 ok", flush=True)
+    print("attend ok", flush=True)
     return 0
 
 
@@ -140,3 +142,39 @@ def _matmul(kind: str) -> None:
     if not np.allclose(got, expect, atol=1e-2):
         message = f"{kind} matmul mismatch"
         raise RuntimeError(message)
+
+
+def _attend() -> None:
+    from wan22_i2v.metal import Gpu
+
+    shapes = ((5, 7, 2, 128), (8, 8, 1, 128), (9, 4, 2, 128), (3, 3, 1, 64))
+    rng = np.random.default_rng(0)
+    gpu = Gpu()
+    try:
+        for q_len, kv_len, heads, dim in shapes:
+            query = rng.standard_normal((q_len, heads, dim)).astype(np.float32)
+            key = rng.standard_normal((kv_len, heads, dim)).astype(np.float32)
+            value = rng.standard_normal((kv_len, heads, dim)).astype(np.float32)
+            scale = float(dim) ** -0.5
+            scores = np.einsum("qhd,khd->qkh", query, key) * scale
+            scores -= scores.max(axis=1, keepdims=True)
+            weights = np.exp(scores)
+            weights /= weights.sum(axis=1, keepdims=True)
+            expect = np.einsum("qkh,khd->qhd", weights, value)
+            dest = gpu.empty(q_len * heads * dim * 4)
+            gpu.attend(
+                gpu.upload(query),
+                gpu.upload(key),
+                gpu.upload(value),
+                dest,
+                q_len,
+                kv_len,
+                heads,
+                dim,
+            )
+            got = gpu.read_f32(dest, q_len * heads * dim).reshape(q_len, heads, dim)
+            if not np.allclose(got, expect, atol=2e-3, rtol=2e-3):
+                message = f"attend mismatch {q_len}x{kv_len} heads {heads} dim {dim}"
+                raise RuntimeError(message)
+    finally:
+        gpu.close()

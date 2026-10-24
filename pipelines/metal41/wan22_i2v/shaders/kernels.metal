@@ -485,6 +485,108 @@ kernel void attend(
     }
 }
 
+// One walk of the keys. Eight queries share each key vector, and each lane
+// keeps four channels of those queries. Online softmax is Milakov's running
+// max and sum, so the values are mixed on that same walk. dim is 128.
+kernel void attend_q8(
+    device const float* query [[buffer(0)]],
+    device const float* key [[buffer(1)]],
+    device const float* value [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint4& shape [[buffer(4)]],
+    constant float& scale [[buffer(5)]],
+    uint2 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    uint head = group.x;
+    uint q0 = group.y * 8u;
+    uint q_len = shape.x;
+    uint kv_len = shape.y;
+    uint heads = shape.z;
+    if (head >= heads || q0 >= q_len || kv_len == 0u) {
+        return;
+    }
+    thread float qv[8][4];
+    thread float acc[8][4];
+    thread float running_max[8];
+    thread float running_sum[8];
+    uint channel = tid * 4u;
+    for (uint block = 0u; block < 8u; block++) {
+        running_max[block] = -INFINITY;
+        running_sum[block] = 0.0f;
+        uint row = q0 + block;
+        for (uint lane = 0u; lane < 4u; lane++) {
+            float item = 0.0f;
+            if (row < q_len) {
+                item = query[(row * heads + head) * 128u + channel + lane];
+            }
+            qv[block][lane] = item;
+            acc[block][lane] = 0.0f;
+        }
+    }
+    for (uint key0 = 0u; key0 < kv_len; key0 += 4u) {
+        thread float partial[8][4];
+        for (uint tile = 0u; tile < 4u; tile++) {
+            uint key_index = key0 + tile;
+            float k0 = 0.0f;
+            float k1 = 0.0f;
+            float k2 = 0.0f;
+            float k3 = 0.0f;
+            if (key_index < kv_len) {
+                uint base = (key_index * heads + head) * 128u + channel;
+                k0 = key[base];
+                k1 = key[base + 1u];
+                k2 = key[base + 2u];
+                k3 = key[base + 3u];
+            }
+            for (uint block = 0u; block < 8u; block++) {
+                partial[block][tile] = qv[block][0] * k0 + qv[block][1] * k1
+                    + qv[block][2] * k2 + qv[block][3] * k3;
+            }
+        }
+        thread float dot[8][4];
+        for (uint block = 0u; block < 8u; block++) {
+            for (uint tile = 0u; tile < 4u; tile++) {
+                dot[block][tile] = simd_sum(partial[block][tile]) * scale;
+            }
+        }
+        for (uint tile = 0u; tile < 4u; tile++) {
+            uint key_index = key0 + tile;
+            if (key_index >= kv_len) {
+                continue;
+            }
+            uint vbase = (key_index * heads + head) * 128u + channel;
+            float v0 = value[vbase];
+            float v1 = value[vbase + 1u];
+            float v2 = value[vbase + 2u];
+            float v3 = value[vbase + 3u];
+            for (uint block = 0u; block < 8u; block++) {
+                float next = max(running_max[block], dot[block][tile]);
+                float alpha = exp(running_max[block] - next);
+                float weight = exp(dot[block][tile] - next);
+                running_sum[block] = running_sum[block] * alpha + weight;
+                running_max[block] = next;
+                acc[block][0] = acc[block][0] * alpha + weight * v0;
+                acc[block][1] = acc[block][1] * alpha + weight * v1;
+                acc[block][2] = acc[block][2] * alpha + weight * v2;
+                acc[block][3] = acc[block][3] * alpha + weight * v3;
+            }
+        }
+    }
+    for (uint block = 0u; block < 8u; block++) {
+        uint row = q0 + block;
+        if (row >= q_len || running_sum[block] == 0.0f) {
+            continue;
+        }
+        float inv = 1.0f / running_sum[block];
+        uint base = (row * heads + head) * 128u + channel;
+        destination[base] = acc[block][0] * inv;
+        destination[base + 1u] = acc[block][1] * inv;
+        destination[base + 2u] = acc[block][2] * inv;
+        destination[base + 3u] = acc[block][3] * inv;
+    }
+}
+
 kernel void patch_embed(
     device const float* volume [[buffer(0)]],
     device const half* weight [[buffer(1)]],
