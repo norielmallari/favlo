@@ -55,6 +55,7 @@ _NAMES = (
     "channel_rms",
     "silu_clip",
     "spatial_attend",
+    "spatial_attend_lane",
     "end_pad",
     "nearest2",
     "concat_time",
@@ -718,12 +719,21 @@ class Gpu:
     def spatial_attend(
         self, qkv: Any, dest: Any, channels: int, time: int, height: int, width: int
     ) -> None:
-        count = time * height * width
+        spatial = height * width
+        if channels % 32 == 0 and 0 < channels // 32 <= 12 and spatial > 0:
+            self._dispatch(
+                "spatial_attend_lane",
+                [qkv, dest],
+                self._u(channels, time, height, width),
+                (time, (spatial + 3) // 4, 1),
+                (32, 1, 1),
+            )
+            return
         self._count(
             "spatial_attend",
             [qkv, dest],
             self._u(channels, time, height, width),
-            count,
+            time * spatial,
         )
 
     def end_pad(self, source: Any, dest: Any, shape: tuple[int, int, int, int]) -> None:

@@ -89,10 +89,10 @@ Encode walks the first pixel frame, then two groups of four. Decode walks the th
 | 384×3×80×144 | 384×384×3×3×3 | 8 | 32.772 |
 | 384×4×80×144 | 384×384×3×3×3 | 8 | 32.128 |
 
-The other 49 shapes are 143 calls and add 1.074 s. All 207 calls sum to 5.575 s. `spatial_attend` runs six times at 384 channels over 40×72, median 612.848 ms, 3.677 s. The channel RMS, clipped SiLU, causal cache, resample, and the latent affine are 859 calls and add 0.524 s. The VAE sum is 9.776 s.
+The other 49 shapes are 143 calls and add 1.074 s. All 207 calls sum to 5.575 s. `spatial_attend_lane` runs six times at 384 channels over 40×72, median 419.941 ms, 2.520 s. The channel RMS, clipped SiLU, causal cache, resample, and the latent affine are 859 calls and add 0.524 s. The VAE sum is 8.619 s.
 
 ## Clip
 
-The DiT, the 9-token encoder, and the VAE sum to 46.301 s. The 90% test uses that kernel ceiling. The attention bandwidth ceiling is 17.169 s. The expert pack read and the AVI pack are outside the kernel sum.
+The DiT, the 9-token encoder, and the VAE sum to 45.144 s. The 90% test uses that kernel ceiling. The attention bandwidth ceiling is 17.169 s. The expert pack read and the AVI pack are outside the kernel sum.
 
-A 9-frame 576×320 smoke printed umT5 2.36 s, VAE encode 4.35 s, four steps 9.17 s, 9.17 s, 9.20 s, and 9.20 s, and VAE decode 5.83 s. Those stages sum to 49.28 s, within 46.301 s / 0.9.
+A 9-frame 576×320 smoke printed umT5 2.41 s, VAE encode 2.75 s, four steps 9.09 s, 9.11 s, 9.08 s, and 9.12 s, and VAE decode 4.18 s. Those stages sum to 45.74 s, within 45.144 s / 0.9.

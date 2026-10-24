@@ -58,9 +58,11 @@ def kernels() -> int:
     _matmul("fp4")
     _matmul("fp8")
     _attend()
+    _spatial()
     print("fp4 ok", flush=True)
     print("fp8 ok", flush=True)
     print("attend ok", flush=True)
+    print("spatial ok", flush=True)
     return 0
 
 
@@ -175,6 +177,41 @@ def _attend() -> None:
             got = gpu.read_f32(dest, q_len * heads * dim).reshape(q_len, heads, dim)
             if not np.allclose(got, expect, atol=2e-3, rtol=2e-3):
                 message = f"attend mismatch {q_len}x{kv_len} heads {heads} dim {dim}"
+                raise RuntimeError(message)
+    finally:
+        gpu.close()
+
+
+def _spatial() -> None:
+    from wan22_i2v.metal import Gpu
+
+    shapes = ((32, 1, 2, 3), (384, 1, 2, 2), (48, 1, 2, 2))
+    rng = np.random.default_rng(1)
+    gpu = Gpu()
+    try:
+        for channels, time, height, width in shapes:
+            spatial = height * width
+            qkv = rng.standard_normal((3 * channels, time, height, width)).astype(np.float32)
+            scale = float(channels) ** -0.5
+            expect = np.zeros((channels, time, height, width), dtype=np.float32)
+            for t in range(time):
+                query = qkv[:channels, t].reshape(channels, spatial)
+                key = qkv[channels : 2 * channels, t].reshape(channels, spatial)
+                value = qkv[2 * channels :, t].reshape(channels, spatial)
+                scores = (query.T @ key) * scale
+                scores -= scores.max(axis=1, keepdims=True)
+                weights = np.exp(scores)
+                weights /= weights.sum(axis=1, keepdims=True)
+                expect[:, t] = (value @ weights.T).reshape(channels, height, width)
+            dest = gpu.empty(channels * time * spatial * 4)
+            gpu.spatial_attend(
+                gpu.upload(qkv), dest, channels, time, height, width
+            )
+            got = gpu.read_f32(dest, channels * time * spatial).reshape(
+                channels, time, height, width
+            )
+            if not np.allclose(got, expect, atol=2e-3, rtol=2e-3):
+                message = f"spatial mismatch {channels} {time}x{height}x{width}"
                 raise RuntimeError(message)
     finally:
         gpu.close()

@@ -1117,6 +1117,97 @@ kernel void spatial_attend(
     }
 }
 
+// Four query pixels share each key and value. Thirty-two lanes split the
+// channels. Online softmax is Milakov's running max and sum. channels is a
+// multiple of 32 and at most 384.
+kernel void spatial_attend_lane(
+    device const float* qkv [[buffer(0)]],
+    device float* destination [[buffer(1)]],
+    constant uint& channels [[buffer(2)]],
+    constant uint& time [[buffer(3)]],
+    constant uint& height [[buffer(4)]],
+    constant uint& width [[buffer(5)]],
+    uint2 group [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]])
+{
+    uint spatial = height * width;
+    uint t = group.x;
+    uint q0 = group.y * 4u;
+    uint span = channels / 32u;
+    if (t >= time || q0 >= spatial || spatial == 0u || (channels % 32u) != 0u || span == 0u || span > 12u) {
+        return;
+    }
+    uint plane = time * spatial;
+    float scale = rsqrt(float(channels));
+    thread float qv[4][12];
+    thread float acc[4][12];
+    thread float running_max[4];
+    thread float running_sum[4];
+    uint base = lane * span;
+    for (uint block = 0u; block < 4u; block++) {
+        running_max[block] = -INFINITY;
+        running_sum[block] = 0.0f;
+        uint pix = q0 + block;
+        for (uint i = 0u; i < span; i++) {
+            float item = 0.0f;
+            if (pix < spatial) {
+                item = qkv[(base + i) * plane + t * spatial + pix];
+            }
+            qv[block][i] = item;
+            acc[block][i] = 0.0f;
+        }
+    }
+    for (uint key = 0u; key < spatial; key++) {
+        uint key_at = t * spatial + key;
+        thread float key_v[12];
+        thread float value_v[12];
+        for (uint i = 0u; i < span; i++) {
+            key_v[i] = qkv[(channels + base + i) * plane + key_at];
+            value_v[i] = qkv[(2u * channels + base + i) * plane + key_at];
+        }
+        float partial0 = 0.0f;
+        float partial1 = 0.0f;
+        float partial2 = 0.0f;
+        float partial3 = 0.0f;
+        for (uint i = 0u; i < span; i++) {
+            partial0 += qv[0][i] * key_v[i];
+            partial1 += qv[1][i] * key_v[i];
+            partial2 += qv[2][i] * key_v[i];
+            partial3 += qv[3][i] * key_v[i];
+        }
+        float dot0 = simd_sum(partial0) * scale;
+        float dot1 = simd_sum(partial1) * scale;
+        float dot2 = simd_sum(partial2) * scale;
+        float dot3 = simd_sum(partial3) * scale;
+        float dots[4];
+        dots[0] = dot0;
+        dots[1] = dot1;
+        dots[2] = dot2;
+        dots[3] = dot3;
+        for (uint block = 0u; block < 4u; block++) {
+            float next = max(running_max[block], dots[block]);
+            float alpha = exp(running_max[block] - next);
+            float weight = exp(dots[block] - next);
+            running_sum[block] = running_sum[block] * alpha + weight;
+            running_max[block] = next;
+            for (uint i = 0u; i < span; i++) {
+                acc[block][i] = acc[block][i] * alpha + weight * value_v[i];
+            }
+        }
+    }
+    for (uint block = 0u; block < 4u; block++) {
+        uint pix = q0 + block;
+        if (pix >= spatial || running_sum[block] == 0.0f) {
+            continue;
+        }
+        float inv = 1.0f / running_sum[block];
+        uint pix_at = t * spatial + pix;
+        for (uint i = 0u; i < span; i++) {
+            destination[(base + i) * plane + pix_at] = acc[block][i] * inv;
+        }
+    }
+}
+
 kernel void end_pad(
     device const float* source [[buffer(0)]],
     device float* destination [[buffer(1)]],
