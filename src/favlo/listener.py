@@ -25,6 +25,7 @@ from favlo.daemon import DAEMON_ENV, alive
 from favlo.images import sweep_images
 from favlo.logs import attach_process_log
 from favlo.music import sweep_music
+from favlo.voice import sweep_voice
 from favlo.registry import resolve
 from favlo.videos import sweep_videos
 
@@ -250,6 +251,7 @@ def serve(args: Any) -> int:
     sweep_videos()
     sweep_images()
     sweep_music()
+    sweep_voice()
     shutdown = _Shutdown()
     shutdown.arm()
     args.shutdown = shutdown

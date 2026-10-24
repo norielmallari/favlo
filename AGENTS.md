@@ -24,6 +24,8 @@ The files in [`.cursor/rules`](.cursor/rules) are repo rules. Cursor loads them 
 
 ## Changes
 
+Do not edit, create, or delete a file until the operator gives a go signal. `proceed` is that signal. A plan and a design are not. `continue` keeps the current activity: planning stays planning, and editing stays editing. Reading the tree and answering a question do not need a go signal. A request to undo a change is the go signal for that undo.
+
 Work on `main`. Do not create a branch unless the user asks for one.
 
 Changes stay in this repository. Edit another repository only when the user asks for that repository.
@@ -32,11 +34,11 @@ Edit one runtime. Leave every other runtime's files untouched. The write set and
 
 Adding a model adds an entry file under `pipelines/metal41/`, a package beside it, a `docs/<pipeline>/` note, and one row in the runtime table. Load [bootstrap-new-model](.cursor/skills/bootstrap-new-model/SKILL.md) before creating one. Load [prefix-caching](.cursor/skills/prefix-caching/SKILL.md) before wiring a pipeline to the shared prefix store.
 
-Do not add batching, the Neural Engine, or a kernel that fuses a whole layer. A missing Metal kernel stays missing. It is not replaced by a host GEMV, a CPU matmul, or any other stand-in forward.
+Do not add batching or a kernel that fuses a whole layer. The Neural Engine may run a module. A missing Metal kernel stays missing. It is not replaced by a host GEMV, a CPU matmul, or any other stand-in forward.
 
 ## Harness
 
-A media harness does not take the machine lock. It calls the listener. A media harness uses one `favlo serve` on `127.0.0.1:8129`. That is `harness.image`, `harness.image_smoke_agent`, `harness.image_persona`, `harness.video_smoke_agent`, `harness.video_quality_agent`, and `harness.music_smoke_agent`. `python -m harness.server run -- <command>` opens that listener, runs the command, and closes the session. `python -m harness.server status` prints `listening` or `down`. An existing listener is reused and left running. A listener this session started is stopped when the command exits. These commands do not bind a second port. The same session is what those modules call, so running one of them directly follows this rule.
+A media harness does not take the machine lock. It calls the listener. A media harness uses one `favlo serve` on `127.0.0.1:8129`. That is `harness.image`, `harness.image_smoke_agent`, `harness.image_persona`, `harness.video_smoke_agent`, `harness.video_quality_agent`, `harness.music_smoke_agent`, and `harness.voice_smoke_agent`. `python -m harness.server run -- <command>` opens that listener, runs the command, and closes the session. `python -m harness.server status` prints `listening` or `down`. An existing listener is reused and left running. A listener this session started is stopped when the command exits. These commands do not bind a second port. The same session is what those modules call, so running one of them directly follows this rule.
 
 `python -m harness`, `python -m harness.coding`, and `python -m harness.worktree` restart the process they started so a later turn reloads a prefix. They require port 8129 to be free. They do not attach to a listener someone else left running, and they do not bind a second port beside it.
 

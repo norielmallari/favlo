@@ -16,6 +16,7 @@ DEFAULT_LOG_MAX_BYTES = 1024 * 1024
 DEFAULT_VIDEO_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_IMAGE_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_MUSIC_TTL_SECONDS = 24 * 60 * 60
+DEFAULT_VOICE_TTL_SECONDS = 24 * 60 * 60
 _SETTINGS_NAME = "settings.json"
 _LOG_NAME = "favlo.log"
 
@@ -89,6 +90,11 @@ def music_ttl_seconds(settings: dict[str, Any]) -> int:
     return _ttl_seconds(settings, "music_ttl_seconds", DEFAULT_MUSIC_TTL_SECONDS)
 
 
+def voice_ttl_seconds(settings: dict[str, Any]) -> int:
+    """How long a stored spoken WAV stays, in seconds. The default is one day."""
+    return _ttl_seconds(settings, "voice_ttl_seconds", DEFAULT_VOICE_TTL_SECONDS)
+
+
 def _ttl_seconds(settings: dict[str, Any], key: str, default: int) -> int:
     value = settings.get(key, default)
     try:
@@ -106,6 +112,7 @@ def _default_settings() -> dict[str, Any]:
         "video_ttl_seconds": DEFAULT_VIDEO_TTL_SECONDS,
         "image_ttl_seconds": DEFAULT_IMAGE_TTL_SECONDS,
         "music_ttl_seconds": DEFAULT_MUSIC_TTL_SECONDS,
+        "voice_ttl_seconds": DEFAULT_VOICE_TTL_SECONDS,
     }
 
 

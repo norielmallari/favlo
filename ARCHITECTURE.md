@@ -14,6 +14,7 @@ This file is the map and the write set. It wins for the listener, the registry, 
 | Console | `src/favlo/console.py` | [docs/console.md](docs/console.md) |
 | Registry | `src/favlo/registry.py`, `models/registry.json` | This file |
 | Prefix store | `src/favlo/prefix.py` | [docs/prefix.md](docs/prefix.md) |
+| Memory | `src/favlo/memory.py` | Process singleton. Pipelines hold spans, not Metal buffers |
 | First-run setup | `src/favlo/setup.py` | [docs/guides/models.md](docs/guides/models.md) |
 | Harness | `harness/` | [docs/harness.md](docs/harness.md) |
 
@@ -21,7 +22,7 @@ Shared code is `src/favlo/`. There is no model base class and no kernel that bra
 
 `POST /mcp` is the FastMCP media queue. A chat sets one event when media holds the GPU. The listener checkpoints that task and closes its device before the chat's model allocates, resumes that same task after the waiting chats, and does not serve a media HTTP route. The daemon is a request server. It does not own chat history, tools, or the terminal session. The CLI owns those. A pipeline writes a reply and does not see a socket. `json` finishes one object, and that object is encoded before the call returns. `begin_events`, `event`, and `done` are one server-sent stream. `stopped` is true when that client has gone. Telemetry is one JSON event per line. The terminal paints it as it arrives, and prints the reply after that turn's requests have closed.
 
-`python -m favlo.smoke_lock` is how a pipeline test takes the GPU while the daemon stays up. Acquire closes the resident model when no request is open. Release lets the next chat load one again. The recorded pid is the invoking shell. `uv` and `python` are not that owner. A command started from a shell that already holds the lock leaves the file in place and does not release it. Image, video, and music bytes stay on disk. The uncompressed AVI is `~/.favlo/videos/<id>.avi`. The MP4 is `<id>.mp4` beside it, encoded from that AVI. `video_ttl_seconds` in `settings.json` is how long it stays. The default is 86400. A sweep at startup and after each stored clip deletes a file older than that. The uncompressed RGB is `~/.favlo/images/<id>.rgb`. The PNG is `<id>.png` beside it, encoded from that file at the request's zlib level. `image_ttl_seconds` uses the same default and the same sweep. The WAV is `~/.favlo/music/<id>.wav`. The MP3 and FLAC are encoded from that WAV. `music_ttl_seconds` uses the same default and the same sweep. A client reads a stored file with `resources/read`. A path under `/v1/images`, `/v1/videos`, or `/v1/audio` is 404. The listener note is [docs/serve.md](docs/serve.md).
+`python -m favlo.smoke_lock` is how a pipeline test takes the GPU while the daemon stays up. Acquire closes the resident model when no request is open. Release lets the next chat load one again. The recorded pid is the invoking shell. `uv` and `python` are not that owner. A command started from a shell that already holds the lock leaves the file in place and does not release it. Image, video, and music bytes stay on disk. The uncompressed AVI is `~/.favlo/videos/<id>.avi`. The MP4 is `<id>.mp4` beside it, encoded from that AVI. `video_ttl_seconds` in `settings.json` is how long it stays. The default is 86400. A sweep at startup and after each stored clip deletes a file older than that. The uncompressed RGB is `~/.favlo/images/<id>.rgb`. The PNG is `<id>.png` beside it, encoded from that file at the request's zlib level. `image_ttl_seconds` uses the same default and the same sweep. The WAV is `~/.favlo/music/<id>.wav`. The MP3 and FLAC are encoded from that WAV. `music_ttl_seconds` uses the same default and the same sweep. The spoken WAV is `~/.favlo/voice/<id>.wav`. The MP3 and FLAC are encoded from that WAV. `voice_ttl_seconds` uses the same default and the same sweep. A client reads a stored file with `resources/read`. A path under `/v1/images`, `/v1/videos`, or `/v1/audio` is 404. The listener note is [docs/serve.md](docs/serve.md).
 
 ## Runtimes
 
@@ -35,6 +36,7 @@ Each runtime is a separate write set. An agent developing one runtime edits that
 | `z-image-turbo` | `pipelines/metal41/z-image-turbo.py` | `pipelines/metal41/z_image_turbo/` | [docs/z-image-turbo/README.md](docs/z-image-turbo/README.md) |
 | `wan22-i2v` | `pipelines/metal41/wan22-i2v.py` | `pipelines/metal41/wan22_i2v/` | [docs/wan22-i2v/README.md](docs/wan22-i2v/README.md) |
 | `ace-step-15-turbo` | `pipelines/metal41/ace-step-15-turbo.py` | `pipelines/metal41/ace_step_15_turbo/` | [docs/ace-step-15-turbo/README.md](docs/ace-step-15-turbo/README.md) |
+| `zonos2` | `pipelines/metal41/zonos2.py` | `pipelines/metal41/zonos2/` | [docs/zonos2/README.md](docs/zonos2/README.md) |
 
 The entry filename may contain hyphens. The command loads it by path from `pipelines/<runtime>/`. It is not an importable module name. The package beside it uses underscores. The entry sets `PIPELINE` to that filename stem. A runtime's write set is the entry file, the package, `docs/<pipeline>/`, and tests that import only that package. A new runtime adds a row to the table above and its own doc directory. It does not edit another row's package, shaders, tests, or docs. Shipped rows use `runtime` `metal41`. `pipelines/cuda` is empty until a CUDA pipeline names the toolkit it needs. A custom entry lives under `custom-pipelines/<runtime>/` and its registry row sets `custom` true. A missing or unknown `runtime` is an error.
 
@@ -42,7 +44,7 @@ Tests for the listener, the registry, and the console live in `tests/test_cli.py
 
 ## Registry
 
-`models/registry.json` is gitignored. A row stores the folder, the pipeline entry, `runtime`, an alias, the BF16 source path, the key/value mode, the resident percent, `context_length`, and the sampling card copied from that pipeline's `sampling.py`. `runtime` is `metal41` or `cuda`. A shipped row omits `custom`. A custom row sets `custom` true. `serve` loads `pipelines/<runtime>/<pipeline>.py`, or `custom-pipelines/<runtime>/<pipeline>.py` when `custom` is true. A row that omits `context_length` uses 131072. The stored names are the `:suffix` ids. A bare model id selects no row. The pipeline applies its default variant, or the row the request selects. `serve` does not register a record it finds on disk. A fresh tree has no rows. `GET /v1/models` lists every registered language row, including each sampling suffix that row stores, and each object includes `context_length`. A pipeline that defines `handle_image`, `handle_video`, or `handle_music` is omitted, and `GET /v1/models/{id}` for that id is 404.
+`models/registry.json` is gitignored. A row stores the folder, the pipeline entry, `runtime`, an alias, the BF16 source path, the key/value mode, the resident percent, `context_length`, and the sampling card copied from that pipeline's `sampling.py`. `runtime` is `metal41` or `cuda`. A shipped row omits `custom`. A custom row sets `custom` true. `serve` loads `pipelines/<runtime>/<pipeline>.py`, or `custom-pipelines/<runtime>/<pipeline>.py` when `custom` is true. A row that omits `context_length` uses 131072. The stored names are the `:suffix` ids. A bare model id selects no row. The pipeline applies its default variant, or the row the request selects. `serve` does not register a record it finds on disk. A fresh tree has no rows. `GET /v1/models` lists every registered language row, including each sampling suffix that row stores, and each object includes `context_length`. A pipeline that defines `handle_image`, `handle_video`, `handle_music`, or `handle_voice` is omitted, and `GET /v1/models/{id}` for that id is 404.
 
 ## Layout
 
@@ -62,16 +64,18 @@ src/favlo/              process entry; the listener loads the pipeline a request
   talk.py               terminal chat
   persona.py            voice and saved openings
   prefix.py             SSD prefix store
+  memory.py             device, placement heaps, and span handles
   setup.py              empty-registry download
   logs.py               rolling server log; size is settings.json log_max_bytes
   videos.py             stored AVI and the MP4 encoded from it; video_ttl_seconds drops an older clip
   images.py             stored RGB and the PNG encoded from it; image_ttl_seconds drops an older pair
   music.py              stored WAV and the MP3 or FLAC encoded from it; music_ttl_seconds drops an older clip
+  voice.py              stored spoken WAV and the MP3 or FLAC encoded from it; voice_ttl_seconds drops an older clip
 harness/                file agent, coding agent, worktree agent, and the three benchmarks
 docs/                   as-built notes; see docs/README.md
 ```
 
-Probe, matmul, kernels, bf16, complete, and quantize stay on that pipeline's flag: `favlo --qwen38-flash-next quantize`, and the same flag for the other commands. The process does not batch and does not use the Neural Engine. A pipeline does not fuse a whole layer into one kernel. Prefill, decode, and the calibration prefill are Metal shaders. A missing kernel stays missing.
+Probe, matmul, kernels, bf16, complete, and quantize stay on that pipeline's flag: `favlo --qwen38-flash-next quantize`, and the same flag for the other commands. The process does not batch. The Neural Engine may run a module. A pipeline does not fuse a whole layer into one kernel. Prefill, decode, and the calibration prefill are Metal shaders. A missing kernel stays missing.
 
 ## Commands
 
@@ -94,6 +98,7 @@ uv run python -m harness.worktree --model qwen36-35b-a3b
 uv run python -m harness.image_smoke_agent
 uv run python -m harness.image_persona
 uv run python -m harness.video_smoke_agent
+uv run python -m harness.voice_smoke_agent
 uv run python -m harness.server status
 ```
 

@@ -1,7 +1,7 @@
 """Media tools on the same process as the listener.
 
-FastMCP serves MCP 2026-07-28 at ``/mcp``. ``generate_image``,
-``generate_video``, and ``generate_music`` are optional Tasks. A client that
+FastMCP serves MCP 2026-07-28 at ``/mcp``. ``generate_image``, ``generate_video``, ``generate_music``, and
+``generate_voice`` are optional Tasks. A client that
 advertises ``io.modelcontextprotocol/tasks`` gets a ``CreateTaskResult`` and
 the in-memory worker runs one task at a time. A client that does not gets the
 tool result on that call. ``list_media_models``, ``media_status``, and
@@ -34,11 +34,13 @@ from favlo import __version__
 from favlo.images import load_image
 from favlo.music import load_music, music_dir
 from favlo.videos import load_video
+from favlo.voice import load_voice, voice_dir
 
 _MEDIA = (
     ("image", "handle_image"),
     ("video", "handle_video"),
     ("music", "handle_music"),
+    ("voice", "handle_voice"),
 )
 _POLL = timedelta(seconds=2)
 _TASK = TaskConfig(mode="optional", poll_interval=_POLL)
@@ -64,7 +66,7 @@ def build_mcp(dispatch: Any, state: dict[str, Any]) -> FastMCP:
 
     @mcp.tool(task=False)
     def list_media_models() -> list[dict[str, Any]]:
-        """Registry rows whose pipeline generates an image, a video, or music."""
+        """Registry rows whose pipeline generates an image, a video, music, or voice."""
         return dispatch("list", {})
 
     @mcp.tool(task=False)
@@ -163,6 +165,28 @@ def build_mcp(dispatch: Any, state: dict[str, Any]) -> FastMCP:
         payload = await _run_task(dispatch, "music", body)
         return _music_result(payload, include_audio, tasks.state)
 
+    @mcp.tool(task=_TASK, annotations=_ANNOTATIONS)
+    async def generate_voice(
+        input: str,
+        model: str,
+        voice: str = "",
+        instructions: str = "",
+        response_format: str = "mp3",
+        include_audio: bool = False,
+    ) -> ToolResult:
+        """Speak one line. ``response_format`` is mp3, wav, or flac."""
+        body: dict[str, Any] = {
+            "input": input,
+            "model": model,
+            "response_format": response_format,
+        }
+        if voice:
+            body["voice"] = voice
+        if instructions:
+            body["instructions"] = instructions
+        payload = await _run_task(dispatch, "voice", body)
+        return _voice_result(payload, include_audio, tasks.state)
+
     @mcp.resource("favlo://images/{image_id}", mime_type="image/png")
     def read_image(image_id: str) -> bytes:
         """The stored PNG."""
@@ -180,6 +204,16 @@ def build_mcp(dispatch: Any, state: dict[str, Any]) -> FastMCP:
             message = "stored video is missing"
             raise ToolError(message)
         return raw
+
+    @mcp.resource("favlo://voice/{voice_id}")
+    def read_voice(voice_id: str) -> ResourceResult:
+        """The stored spoken audio. The MIME type is the job's response format."""
+        loaded = stored_voice(tasks.state, voice_id)
+        if loaded is None:
+            message = "stored voice is missing"
+            raise ToolError(message)
+        raw, mime = loaded
+        return ResourceResult([ResourceContent(raw, mime_type=mime)])
 
     @mcp.resource("favlo://music/{music_id}")
     def read_music(music_id: str) -> ResourceResult:
@@ -427,6 +461,87 @@ def _music_result(
                 )
             )
     return ToolResult(blocks)
+
+
+def _voice_result(
+    payload: dict[str, Any], include_audio: bool, state: dict[str, Any]
+) -> ToolResult:
+    if payload.get("status") == "cancelled":
+        return ToolResult([mcp_types.TextContent(type="text", text="cancelled")])
+    voice_id = payload.get("id")
+    if not isinstance(voice_id, str) or not voice_id:
+        message = "the pipeline wrote no voice"
+        raise RuntimeError(message)
+    fmt = payload.get("response_format")
+    if not isinstance(fmt, str) or fmt not in _AUDIO:
+        fmt = "mp3"
+    mime = _AUDIO[fmt]
+    blocks: list[mcp_types.ContentBlock] = [
+        mcp_types.TextContent(type="text", text=voice_id),
+        mcp_types.ResourceLink(
+            type="resource_link",
+            uri=f"favlo://voice/{voice_id}",
+            name=voice_id,
+            mime_type=mime,
+        ),
+    ]
+    if include_audio:
+        loaded = load_voice(voice_id, fmt, home=_home(state, "voice_home"))
+        if loaded is not None and len(loaded[0]) <= _INLINE:
+            blocks.append(
+                mcp_types.AudioContent(
+                    type="audio",
+                    data=base64.b64encode(loaded[0]).decode("ascii"),
+                    mime_type=mime,
+                )
+            )
+    return ToolResult(blocks)
+
+
+def stored_voice(state: dict[str, Any], voice_id: str) -> tuple[bytes, str] | None:
+    """Bytes and MIME type for one stored spoken clip."""
+    home = _home(state, "voice_home")
+    chosen = _voice_format(state, voice_id)
+    if chosen is not None:
+        try:
+            loaded = load_voice(voice_id, chosen, home=home)
+        except ValueError:
+            return None
+        if loaded is not None:
+            return loaded[0], _AUDIO[chosen]
+    try:
+        wav = load_voice(voice_id, "wav", home=home)
+    except ValueError:
+        return None
+    if wav is not None:
+        return wav[0], _AUDIO["wav"]
+    root = home if isinstance(home, Path) else None
+    if root is None:
+        from favlo.logs import favlo_home
+
+        root = favlo_home()
+    folder = voice_dir(root)
+    for fmt, mime in (("wav", "audio/wav"), ("flac", "audio/flac"), ("mp3", "audio/mpeg")):
+        path = folder / f"{voice_id}.{fmt}"
+        try:
+            if path.is_file():
+                return path.read_bytes(), mime
+        except OSError:
+            continue
+    return None
+
+
+def _voice_format(state: dict[str, Any], voice_id: str) -> str | None:
+    jobs = state.get("voice")
+    if not isinstance(jobs, dict):
+        return None
+    job = jobs.get(voice_id)
+    if not isinstance(job, dict):
+        return None
+    fmt = job.get("response_format")
+    if isinstance(fmt, str) and fmt in _AUDIO:
+        return fmt
+    return None
 
 
 def stored_music(state: dict[str, Any], music_id: str) -> tuple[bytes, str] | None:

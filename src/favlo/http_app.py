@@ -2,7 +2,7 @@
 
 Uvicorn serves it. A pipeline receives a :class:`favlo.reply.LiveReply` and
 never a socket. ``GET /v1/models`` does not take the request lock. A chat
-completion does. Image, video, and music run on the MCP queue.
+completion does. Image, video, music, and voice run on the MCP queue.
 """
 
 from __future__ import annotations
@@ -243,7 +243,7 @@ async def _locked(request: Request, args: Any, state: dict[str, Any], kind: str)
     )
 
 
-_MEDIA_KINDS = frozenset({"image", "video", "music"})
+_MEDIA_KINDS = frozenset({"image", "video", "music", "voice"})
 
 
 def _prepare_listener(state: dict[str, Any]) -> None:
@@ -382,6 +382,7 @@ def _run_once(
             "image": "handle_image",
             "video": "handle_video",
             "music": "handle_music",
+            "voice": "handle_voice",
         }[kind]
         call = getattr(module, handler_name, None)
         if not callable(call):
@@ -508,6 +509,7 @@ def _discard_output(state: dict[str, Any], payload: Any) -> None:
 
     from favlo.images import image_path, source_path
     from favlo.music import music_dir
+    from favlo.voice import voice_dir
     from favlo.videos import source_path as video_source
     from favlo.videos import video_path
 
@@ -543,6 +545,17 @@ def _discard_output(state: dict[str, Any], payload: Any) -> None:
         if root is None:
             return
         folder = music_dir(root)
+        for suffix in ("wav", "mp3", "flac"):
+            try:
+                (folder / f"{item_id}.{suffix}").unlink(missing_ok=True)
+            except OSError:
+                continue
+    if item_id.startswith("voice_"):
+        home = state.get("voice_home")
+        root = home if isinstance(home, Path) else None
+        if root is None:
+            return
+        folder = voice_dir(root)
         for suffix in ("wav", "mp3", "flac"):
             try:
                 (folder / f"{item_id}.{suffix}").unlink(missing_ok=True)

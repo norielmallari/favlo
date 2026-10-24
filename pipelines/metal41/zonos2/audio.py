@@ -1,0 +1,79 @@
+"""44.1 kHz mono PCM. Samples outside [-1, 1] clamp. The level is otherwise kept."""
+
+from __future__ import annotations
+
+import wave
+from io import BytesIO
+
+import numpy as np
+
+from zonos2.layout import BOS_ID, EOS_ID, LEGACY_SYMBOLS, SAMPLE_RATE, TEXT_VOCAB
+
+_RATE_BUCKETS = 8
+_QUALITY_COUNTS = (12, 12, 12, 8, 8, 8)
+_BACKGROUND_BUCKETS = 2
+_ACCURATE_BUCKETS = 1
+
+# Published 0.2 s silence, 17 aligned frames. The prompt keeps the first 17 delayed rows.
+SILENCE_FRAMES = np.array(
+    [
+        [568, 778, 338, 524, 967, 360, 728, 550, 90],
+        [568, 778, 10, 674, 364, 981, 741, 378, 731],
+        [568, 804, 10, 674, 364, 981, 568, 378, 731],
+        [568, 804, 10, 674, 364, 981, 568, 378, 731],
+        [568, 804, 10, 674, 364, 981, 568, 378, 731],
+        [568, 804, 10, 674, 364, 981, 568, 378, 731],
+        [568, 804, 10, 674, 364, 981, 568, 378, 731],
+        [568, 804, 10, 674, 364, 981, 568, 378, 731],
+        [568, 804, 10, 674, 364, 981, 568, 378, 731],
+        [568, 804, 10, 674, 364, 981, 568, 378, 731],
+        [568, 804, 10, 674, 364, 981, 568, 378, 731],
+        [568, 804, 10, 674, 364, 981, 568, 378, 731],
+        [568, 804, 10, 674, 364, 981, 568, 378, 731],
+        [568, 804, 10, 674, 364, 981, 568, 378, 731],
+        [568, 804, 10, 674, 364, 981, 568, 378, 731],
+        [568, 804, 10, 674, 364, 981, 568, 378, 731],
+        [568, 778, 721, 842, 264, 974, 989, 507, 308],
+    ],
+    dtype=np.int64,
+)
+
+
+def _conditioning_base() -> int:
+    return TEXT_VOCAB - _RATE_BUCKETS - sum(_QUALITY_COUNTS) - _BACKGROUND_BUCKETS - _ACCURATE_BUCKETS
+
+
+def quality_token(feature: int, bucket: int) -> int:
+    """Text row for one quality bucket. Features follow the checkpoint order."""
+    return _conditioning_base() + _RATE_BUCKETS + sum(_QUALITY_COUNTS[:feature]) + bucket
+
+
+def background_token(clean: bool) -> int:
+    """Clean background is the first marker. Noisy background is the default."""
+    return _conditioning_base() + _RATE_BUCKETS + sum(_QUALITY_COUNTS) + (0 if clean else 1)
+
+
+def accurate_token() -> int:
+    """Accurate mode. Omitting this row is expressive mode."""
+    return _conditioning_base() + _RATE_BUCKETS + sum(_QUALITY_COUNTS) + _BACKGROUND_BUCKETS
+
+
+def text_ids(text: str) -> np.ndarray:
+    """BOS, then each UTF-8 byte at row 192 plus that byte, then EOS."""
+    if not isinstance(text, str) or not text:
+        message = "text is empty"
+        raise ValueError(message)
+    body = [int(byte) + LEGACY_SYMBOLS for byte in text.encode("utf-8")]
+    return np.asarray([BOS_ID, *body, EOS_ID], dtype=np.int64)
+
+
+def encode_wav(samples: np.ndarray) -> bytes:
+    clipped = np.clip(np.ascontiguousarray(samples, dtype=np.float32), -1.0, 1.0)
+    pcm = np.round(clipped * 32767.0).astype("<i2")
+    buffer = BytesIO()
+    with wave.open(buffer, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(SAMPLE_RATE)
+        handle.writeframes(pcm.tobytes())
+    return buffer.getvalue()
