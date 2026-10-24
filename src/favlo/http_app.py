@@ -115,6 +115,12 @@ def build_app(args: Any, state: dict[str, Any]) -> Starlette:
     async def release(request: Request) -> Response:
         return await _release(request, args, state)
 
+    async def pipelines_close(_request: Request) -> Response:
+        return await _pipelines_close(args, state)
+
+    async def pipelines_reload(_request: Request) -> Response:
+        return await _pipelines_reload(args, state)
+
     async def resume(request: Request) -> Response:
         return await _resume(request, state)
 
@@ -126,6 +132,8 @@ def build_app(args: Any, state: dict[str, Any]) -> Starlette:
         Route("/v1/models/{model_id:path}", model, methods=["GET"]),
         Route("/v1/release", release, methods=["POST"]),
         Route("/v1/resume", resume, methods=["POST"]),
+        Route("/v1/pipelines/close", pipelines_close, methods=["POST"]),
+        Route("/v1/pipelines/reload", pipelines_reload, methods=["POST"]),
         Route("/v1/chat/completions", chat, methods=["POST"]),
         *mcp_app.routes,
     ]
@@ -133,8 +141,8 @@ def build_app(args: Any, state: dict[str, Any]) -> Starlette:
 
 
 def _language_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    media = {row["pipeline"] for row in _media_rows()}
-    return [row for row in rows if row.get("pipeline") not in media]
+    hidden = _hidden_pipelines()
+    return [row for row in rows if row.get("pipeline") not in hidden]
 
 
 def _models(_request: Request, state: dict[str, Any]) -> Response:
@@ -147,7 +155,7 @@ def _one_model(request: Request, state: dict[str, Any]) -> Response:
         row = one_model(request.path_params["model_id"], resident=state.get("record"))
     except LookupError as exc:
         return _error(404, str(exc), "not_found")
-    if row.get("pipeline") in {item["pipeline"] for item in _media_rows()}:
+    if row.get("pipeline") in _hidden_pipelines():
         return _error(404, "not found", "not_found")
     return _json_response(row)
 
@@ -192,6 +200,30 @@ async def _resume(request: Request, state: dict[str, Any]) -> Response:
         return _json_response({"resumed": True})
     finally:
         lock.release()
+
+
+async def _pipelines_close(args: Any, state: dict[str, Any]) -> Response:
+    """Close every runtime and leave ``POST /mcp`` up. This does not set the smoke hold."""
+    from favlo.pipelines import pipelines
+
+    _prepare_listener(state)
+    try:
+        closed = await asyncio.to_thread(pipelines.close, state, args)
+    except Exception as exc:
+        return _error(500, str(exc), type(exc).__name__)
+    return _json_response({"unloaded": True, "closed": closed})
+
+
+async def _pipelines_reload(args: Any, state: dict[str, Any]) -> Response:
+    """Close every runtime, drop paused holds, and drop imported pipeline modules."""
+    from favlo.pipelines import pipelines
+
+    _prepare_listener(state)
+    try:
+        closed, modules = await asyncio.to_thread(pipelines.reload, state, args)
+    except Exception as exc:
+        return _error(500, str(exc), type(exc).__name__)
+    return _json_response({"reloaded": True, "closed": closed, "modules": modules})
 
 
 async def _locked(request: Request, args: Any, state: dict[str, Any], kind: str) -> Response:
@@ -329,9 +361,17 @@ def _run_once(
     )
 
     lock: threading.Lock = state["lock"]
+    holds = False
     if not lock.acquire(blocking=False):
         _log("waiting for the open request")
         lock.acquire()
+    holds = True
+    if state.get("unload"):
+        lock.release()
+        holds = False
+        if not reply.started:
+            reply.json(409, {"error": {"message": "the pipeline is closing", "type": "busy"}})
+        return
     if running is not None:
         _chat_running(state)
         running[0] = True
@@ -418,7 +458,8 @@ def _run_once(
         module = state.get("module")
         runtime = state.get("runtime")
         _touch_job(state, reply)
-        lock.release()
+        if holds:
+            lock.release()
         if opened:
             _schedule_pipeline_heartbeat(module, runtime, selection)
         if not reply.started and not state.get("media_yield"):
@@ -607,11 +648,11 @@ def _error_message(payload: dict[str, Any]) -> str:
     return "the pipeline failed"
 
 
-def _media_rows() -> list[dict[str, Any]]:
+def _each_pipeline() -> list[tuple[str, str, Any]]:
     from favlo.cli import load_pipeline
 
     data = load_registry()
-    rows: list[dict[str, Any]] = []
+    found: list[tuple[str, str, Any]] = []
     seen: set[str] = set()
     for folder, entry in data["models"].items():
         pipeline = entry.get("pipeline")
@@ -625,14 +666,32 @@ def _media_rows() -> list[dict[str, Any]]:
             module = load_pipeline(pipeline, runtime=runtime, custom=bool(entry.get("custom")))
         except (FileNotFoundError, ImportError, OSError):
             continue
+        seen.add(pipeline)
+        found.append((folder, pipeline, module))
+    return found
+
+
+def _hidden_pipelines() -> set[str]:
+    names: set[str] = set()
+    for _folder, pipeline, module in _each_pipeline():
+        if media_kinds(module):
+            names.add(pipeline)
+    return names
+
+
+def _media_rows() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for folder, pipeline, module in _each_pipeline():
         kinds = media_kinds(module)
         if not kinds:
             continue
-        seen.add(pipeline)
         row: dict[str, Any] = {"id": folder, "pipeline": pipeline, "media": kinds}
         speakers = getattr(module, "list_voices", None)
         if callable(speakers):
             row["voices"] = speakers()
+        emotions = getattr(module, "list_emotions", None)
+        if callable(emotions):
+            row["emotions"] = emotions()
         rows.append(row)
     return rows
 

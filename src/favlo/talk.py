@@ -107,6 +107,33 @@ def is_quit(text: str) -> bool:
     return text == "/quit"
 
 
+def is_reload(text: str) -> bool:
+    """True when the line reloads every pipeline and stays in the chat."""
+    return text == "/reload"
+
+
+def pipeline_command(host: str, port: int, action: str) -> dict[str, Any]:
+    """Ask the daemon to close or reload. ``action`` is ``close`` or ``reload``."""
+    url = f"http://{host}:{port}/v1/pipelines/{action}"
+    request = urllib.request.Request(
+        url,
+        data=b"{}",
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=3600) as response:
+            body = json.loads(response.read().decode())
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace").strip()
+        message = detail or f"the pipeline command failed ({exc.code})"
+        raise RuntimeError(message) from exc
+    if not isinstance(body, dict):
+        message = "the pipeline command failed"
+        raise RuntimeError(message)
+    return body
+
+
 def start(
     host: str,
     port: int,
@@ -196,6 +223,14 @@ def _run(
             idle.mark()
             if not text:
                 ask(False)
+                continue
+            if is_reload(text):
+                try:
+                    pipeline_command(host, port, "reload")
+                    write(_voice("reloaded"))
+                except (OSError, RuntimeError, ValueError) as exc:
+                    write(str(exc))
+                ask(True)
                 continue
             if is_quit(text):
                 if stop is not None:
@@ -763,8 +798,8 @@ def _guide_tool() -> object:
         """Read one guide.
 
         clients points a program at this server, covers the first terminal line, the idle
-        check, download reminders, and ``/quit`` stops the server. models covers download,
-        quantize, and registration. history is where the name Favlo came from.
+        check, download reminders, ``/reload``, and ``/quit`` stops the server. models covers
+        download, quantize, and registration. history is where the name Favlo came from.
         """
         return load_guide(name)
 

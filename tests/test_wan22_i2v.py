@@ -627,12 +627,63 @@ def test_a_short_ledger_keeps_the_requested_clip(monkeypatch, tmp_path: Path) ->
 
 
 def test_decode_keeps_one_latent_frame_when_the_volume_does_not_fit() -> None:
-    from wan22_i2v.runtime import resident_latent_frames
+    from wan22_i2v.runtime import decode_peak_bytes, resident_latent_frames
 
     frames, height, width, lat_t = 81, 320, 576, 21
+    lat_h, lat_w = height // 8, width // 8
     stage = 3 * 4 * height * width * 4
     full = 3 * frames * height * width * 4
     assert resident_latent_frames(full, frames, height, width, lat_t) == lat_t
     assert resident_latent_frames(stage, frames, height, width, lat_t) == 1
     with pytest.raises(RuntimeError, match="81 frames at 576x320"):
         resident_latent_frames(0, frames, height, width, lat_t)
+    tight = decode_peak_bytes(frames, height, width, lat_t, lat_h, lat_w, stage)
+    wide = decode_peak_bytes(frames, height, width, lat_t, lat_h, lat_w, full)
+    assert tight < wide
+
+
+def test_slim_pack_drops_host_quant_arrays() -> None:
+    from wan22_i2v.formats import LinearPack, slim_pack
+
+    pack = LinearPack(
+        kind="fp4",
+        packed=np.ones(8, dtype=np.uint8),
+        scales=np.ones(2, dtype=np.uint8),
+        bias=np.ones(4, dtype=np.float32),
+        perm=np.arange(4, dtype=np.int32),
+        logical_n=32,
+        logical_k=256,
+        padded_n=32,
+        stored_k=256,
+    )
+    slim = slim_pack(pack)
+    assert slim.logical_n == pack.logical_n
+    assert slim.packed.size == 0
+    assert slim.scales.size == 0
+
+
+def test_vae_release_device_drops_params() -> None:
+    from wan22_i2v.vae import WanVAE
+
+    vae = WanVAE.__new__(WanVAE)
+    vae.weights = {}
+    vae.cache = {}
+    vae._params = {"k": (object(), (1,))}
+    vae._mean = object()
+    vae._std = object()
+    vae._own = False
+    dropped: list[object] = []
+
+    class Gpu:
+        def drop(self, buf: object) -> None:
+            dropped.append(buf)
+
+        def reclaim(self) -> None:
+            return None
+
+    vae.gpu = Gpu()
+    vae.release_device()
+    assert vae._params == {}
+    assert vae._mean is None
+    assert vae._std is None
+    assert len(dropped) == 3

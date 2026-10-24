@@ -182,28 +182,19 @@ def test_interactive_attaches_without_listening_itself(
     assert started == ["talk"]
 
 
-def test_ctrl_c_stops_the_daemon_this_serve_started(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ctrl_c_closes_pipelines_and_leaves_the_daemon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     stopped: list[int] = []
+    closed: list[str] = []
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.setattr("favlo.daemon.ensure", lambda *_a, **_k: (7, True))
     monkeypatch.setattr("favlo.daemon.follow_events", lambda *_a, **_k: None)
     monkeypatch.setattr("favlo.daemon.stop_pid", lambda pid: stopped.append(pid))
-
-    class _Join:
-        def join(self) -> None:
-            raise KeyboardInterrupt
-
-    monkeypatch.setattr("favlo.talk.start", lambda *_a, **_k: _Join())
-    assert listener.serve_main(["--port", "8129"]) == 0
-    assert stopped == [7]
-
-
-def test_ctrl_c_leaves_a_daemon_this_serve_found(monkeypatch: pytest.MonkeyPatch) -> None:
-    stopped: list[int] = []
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
-    monkeypatch.setattr("favlo.daemon.ensure", lambda *_a, **_k: (7, False))
-    monkeypatch.setattr("favlo.daemon.follow_events", lambda *_a, **_k: None)
-    monkeypatch.setattr("favlo.daemon.stop_pid", lambda pid: stopped.append(pid))
+    monkeypatch.setattr(
+        "favlo.talk.pipeline_command",
+        lambda _host, _port, action: closed.append(action),
+    )
 
     class _Join:
         def join(self) -> None:
@@ -212,6 +203,7 @@ def test_ctrl_c_leaves_a_daemon_this_serve_found(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr("favlo.talk.start", lambda *_a, **_k: _Join())
     assert listener.serve_main(["--port", "8129"]) == 0
     assert stopped == []
+    assert closed == ["close"]
 
 
 def test_daemon_process_does_not_spawn_another(

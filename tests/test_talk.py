@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from favlo.persona import INSTRUCTIONS, load_intros, opening, save_intros
-from favlo.talk import Idle, _introduce, intro_request, is_quit, reply, start
+from favlo.talk import Idle, _introduce, intro_request, is_quit, is_reload, reply, start
 
 _LINE = "Hello. I am Favlo, a small horse. Could you spare a carrot?"
 _MORE = "I am Favlo. My ears are up, and a carrot would be very welcome."
@@ -362,6 +362,32 @@ def test_a_bad_intro_file_is_not_replaced(tmp_path: Path) -> None:
     assert lines
     assert "intro file cannot be read" in lines[0]
     assert path.read_text(encoding="utf-8") == "{"
+
+
+def test_reload_stays_in_chat(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    save_intros((_LINE,), tmp_path / "intros.json")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "favlo.talk.pipeline_command",
+        lambda _host, _port, action: calls.append(action),
+    )
+    stopped = threading.Event()
+    lines: list[str] = []
+    thread = start(
+        "127.0.0.1",
+        9,
+        io.StringIO("/reload\n/quit\n"),
+        lines.append,
+        Idle(),
+        stopped.set,
+        home=tmp_path,
+        introduce=_boom,
+    )
+    thread.join(2)
+    assert is_reload("/reload")
+    assert calls == ["reload"]
+    assert stopped.is_set()
+    assert "favlo: reloaded" in lines
 
 
 def test_quit_stops_the_server_and_skips_the_model(tmp_path: Path) -> None:

@@ -70,6 +70,21 @@ class LinearPack:
     stored_k: int
 
 
+def slim_pack(pack: LinearPack) -> LinearPack:
+    """Drop host quant arrays after the device copy exists. Metadata stays for matmul."""
+    return LinearPack(
+        kind=pack.kind,
+        packed=np.empty(0, dtype=np.uint8),
+        scales=np.empty(0, dtype=np.uint8),
+        bias=np.empty(0, dtype=np.float32),
+        perm=np.empty(0, dtype=np.int32),
+        logical_n=pack.logical_n,
+        logical_k=pack.logical_k,
+        padded_n=pack.padded_n,
+        stored_k=pack.stored_k,
+    )
+
+
 def stored_k(logical: int) -> int:
     if logical <= 0:
         message = f"K must be positive, got {logical}"

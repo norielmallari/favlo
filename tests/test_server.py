@@ -461,7 +461,7 @@ def _signal_server(sig: int, *, during_request: bool) -> None:
         if client is not None:
             client.join(timeout=5)
         if not shutdown.closing:
-            listener._release(runtime, shutdown, state.get("server"))
+            listener._release(state, _args(), shutdown)
     assert code == 0
     assert shutdown.signaled
     assert runtime.halted
@@ -1046,6 +1046,28 @@ class _QueueMedia:
         )
 
 
+def test_mcp_answers_after_the_pipeline_is_closed() -> None:
+    from favlo.pipelines import pipelines
+
+    runtime = _Runtime()
+    state, thread = _serve_background(runtime)
+    state["record"] = "example-model"
+    pipelines.add(runtime, ())
+    port = int(state["server"].server_address[1])
+    try:
+        closed = _post_json(port, "/v1/pipelines/close", {})
+        status, listed = _mcp(port, "tools/list", {})
+    finally:
+        _stop_background(state, thread)
+    assert closed.startswith(b"HTTP/1.1 200")
+    assert b'"unloaded": true' in closed
+    assert runtime.closed
+    assert state["runtime"] is None
+    assert status == 200
+    names = {tool["name"] for tool in listed["result"]["tools"]}
+    assert "list_media_models" in names
+
+
 def test_mcp_initialize_lists_tools_and_rejects_a_batch(tmp_path) -> None:
     runtime = _Runtime()
     state, thread = _serve_background(runtime)
@@ -1197,6 +1219,25 @@ def test_mcp_image_results_are_links_and_resources_read_the_file(tmp_path) -> No
     assert base64.b64decode(content["blob"]) == b"aaa"
 
 
+def test_generate_video_schema_names_the_still_and_the_frame_default() -> None:
+    import asyncio
+
+    from favlo.mcp_server import build_mcp
+
+    mcp = build_mcp(lambda *_args: {}, {})
+    tools = asyncio.run(mcp.list_tools(run_middleware=False))
+    video = next(tool for tool in tools if tool.name == "generate_video")
+    description = video.description or ""
+    properties = video.parameters["properties"]
+    assert "image_" in description
+    assert "favlo://videos/" in description
+    assert "81" in properties["frames"]["description"]
+    assert "image_" in properties["image"]["description"]
+    assert "4n+1" in properties["seconds"]["description"]
+    assert "576x320" in properties["size"]["description"]
+    assert "xhigh" in properties["quality"]["description"]
+
+
 def test_mcp_video_rejects_a_filesystem_path(tmp_path) -> None:
     runtime = _Runtime()
     state, thread = _serve_background(runtime)
@@ -1213,7 +1254,7 @@ def test_mcp_video_rejects_a_filesystem_path(tmp_path) -> None:
     finally:
         _stop_background(state, thread)
     assert finished["result"]["isError"] is True
-    assert "still" in json.dumps(finished)
+    assert "image_" in json.dumps(finished)
     assert media.video_called is False
 
 
@@ -1395,3 +1436,4 @@ def test_mcp_voice_writes_a_wav_and_the_link_reads_it(tmp_path) -> None:
     assert blob["mimeType"] == "audio/wav"
     assert blob["blob"]
     assert (tmp_path / "voice" / "voice_smoke.wav").is_file()
+

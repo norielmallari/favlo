@@ -237,6 +237,14 @@ def test_a_blank_line_does_not_call_the_model(
         def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length", "0"))
             self.rfile.read(length)
+            if self.path.startswith("/v1/pipelines/"):
+                body = b'{"unloaded": true, "closed": null}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             posts.append(1)
             _append(log, {"type": "log", "line": "request open"})
             _append(log, {"type": "log", "line": "request closed"})

@@ -6,7 +6,7 @@ The guides the terminal reads are [../guides](../guides). The process contract i
 
 ## Terminal chat
 
-On a terminal, `favlo serve` is the CLI. The server is a daemon. The CLI reads stdin and answers through that daemon's `POST /v1/chat/completions`. The model field is the first folder in the registry. One Microsoft Agent Framework session keeps that history. A line is sent when it is ready. The prompt is `you:`. It starts on a new line after that turn's telemetry. The reply is `favlo:`. Telemetry is painted as it arrives, including the load row. The reply is printed after that turn's requests have closed. The terminal wraps that text. A tool call and a tool result are not printed. `/quit` stops the daemon. Ctrl+C stops the daemon when this terminal started it. Closing the terminal leaves the daemon running. `favlo serve --non-interactive` starts the daemon and exits.
+On a terminal, `favlo serve` is the CLI. The server is a daemon. The CLI reads stdin and answers through that daemon's `POST /v1/chat/completions`. The model field is the first folder in the registry. One Microsoft Agent Framework session keeps that history. A line is sent when it is ready. The prompt is `you:`. It starts on a new line after that turn's telemetry. The reply is `favlo:`. Telemetry is painted as it arrives, including the load row. The reply is printed after that turn's requests have closed. The terminal wraps that text. A tool call and a tool result are not printed. `/quit` closes every open pipeline, then stops the daemon. Ctrl+C closes every open pipeline and exits the CLI. The daemon keeps listening. `/reload` closes every open pipeline, drops the imported pipeline modules, and stays in the chat. Closing the terminal leaves the daemon running. `favlo serve --non-interactive` starts the daemon and exits.
 
 ## Voice
 
@@ -22,7 +22,7 @@ The first start, when `~/.favlo/intros.json` has no lines, sends one chat comple
 
 | Guide | What it covers |
 |---|---|
-| [clients](../guides/clients.md) | Server address, model field, `/quit`, the opening line, the idle check, and download reminders |
+| [clients](../guides/clients.md) | Server address, model field, `/quit`, `/reload`, the opening line, the idle check, and download reminders |
 | [models](../guides/models.md) | Download, quantize, and registration for the supported checkpoints |
 | [history](../guides/history.md) | Where the name Favlo came from |
 

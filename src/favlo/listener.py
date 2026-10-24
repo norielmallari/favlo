@@ -25,9 +25,10 @@ from favlo.daemon import DAEMON_ENV, alive
 from favlo.images import sweep_images
 from favlo.logs import attach_process_log
 from favlo.music import sweep_music
-from favlo.voice import sweep_voice
+from favlo.pipelines import pipelines
 from favlo.registry import resolve
 from favlo.videos import sweep_videos
+from favlo.voice import sweep_voice
 
 _REQUEST_READ_TIMEOUT = 10.0
 _RELEASE_WAIT = 25.0
@@ -108,28 +109,19 @@ class _Shutdown:
         raise KeyboardInterrupt
 
 
-def _release(
-    runtime: Any, shutdown: _Shutdown, server: Any = None, owners: Any = None
-) -> None:
-    """Close the listening socket and the runtime. A signal during this returns."""
+def _release(state: dict[str, Any], args: Any, shutdown: _Shutdown) -> None:
+    """Close the listening socket and every runtime. A signal during this returns."""
     shutdown.closing = True
     try:
+        server = state.get("server")
+        had_runtime = state.get("runtime") is not None or shutdown.runtime is not None
         if server is not None:
             try:
                 server.server_close()
             except OSError:
                 pass
-        if runtime is not None or owners:
-            busy = shutdown.busy
-            held = busy.acquire(timeout=_RELEASE_WAIT) if busy is not None else False
-            try:
-                if runtime is not None:
-                    runtime.close()
-            finally:
-                _sweep_owners(owners)
-                if held and busy is not None:
-                    busy.release()
-        if shutdown.signaled and (runtime is not None or server is not None):
+        pipelines.close(state, args, wait=_RELEASE_WAIT)
+        if shutdown.signaled and (server is not None or had_runtime):
             _log("released")
     finally:
         shutdown.disarm()
@@ -217,7 +209,7 @@ def _install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
     state["pipeline"] = None
     state["module"] = None
     state["memory_owners"] = None
-    _close_runtime(old, previous)
+    pipelines.retire(old, previous)
     ui = getattr(args, "console_ui", None)
     if ui is not None:
         ui.pipeline = selection.pipeline
@@ -230,6 +222,7 @@ def _install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
         raise
     state["runtime"] = runtime
     state["memory_owners"] = _opening_owners(before, runtime)
+    pipelines.add(runtime, state["memory_owners"])
     state["record"] = selection.folder
     state["pipeline"] = selection.pipeline
     state["module"] = _pipeline_module(selection)
@@ -282,7 +275,7 @@ def _drop_runtime(state: dict[str, Any], args: Any) -> str | None:
     shutdown = getattr(args, "shutdown", None)
     if shutdown is not None:
         shutdown.runtime = None
-    _close_runtime(old, owners)
+    pipelines.retire(old, owners)
     if isinstance(folder, str) and folder:
         _log(f"released {folder}")
         return folder
@@ -329,9 +322,7 @@ def serve(args: Any) -> int:
         return 0
     finally:
         if not shutdown.closing:
-            _release(
-                state["runtime"], shutdown, state.get("server"), state.get("memory_owners")
-            )
+            _release(state, args, shutdown)
 
 
 def _run_until_stopped(args: Any, state: dict[str, Any], shutdown: _Shutdown) -> int:
@@ -343,7 +334,7 @@ def _run_until_stopped(args: Any, state: dict[str, Any], shutdown: _Shutdown) ->
         _log("shutting down")
         return 0
     finally:
-        _release(state["runtime"], shutdown, state.get("server"), state.get("memory_owners"))
+        _release(state, args, shutdown)
 
 
 def _video_body(content_type: str, raw: bytes) -> dict[str, Any]:
@@ -499,7 +490,7 @@ def _interactive(args: Any) -> int:
     ui.plate()
     try:
         try:
-            pid, created = ensure(
+            pid, _created = ensure(
                 args.host,
                 args.port,
                 max_memory=args.max_memory,
@@ -509,7 +500,7 @@ def _interactive(args: Any) -> int:
             ui.log(str(exc))
             return 1
         path = telemetry_path(args.port)
-        offset = 0 if created or not path.is_file() else path.stat().st_size
+        offset = 0 if _created or not path.is_file() else path.stat().st_size
         idle = Idle()
         stopped = threading.Event()
 
@@ -522,6 +513,12 @@ def _interactive(args: Any) -> int:
 
         def stop() -> None:
             stopped.set()
+            from favlo.talk import pipeline_command
+
+            try:
+                pipeline_command(args.host, args.port, "close")
+            except (OSError, RuntimeError, ValueError):
+                pass
             stop_pid(pid)
 
         thread = start(
@@ -538,8 +535,12 @@ def _interactive(args: Any) -> int:
         try:
             thread.join()
         except KeyboardInterrupt:
-            if created:
-                stop()
+            from favlo.talk import pipeline_command
+
+            try:
+                pipeline_command(args.host, args.port, "close")
+            except (OSError, RuntimeError, ValueError):
+                pass
             return 0
         finally:
             stopped.set()

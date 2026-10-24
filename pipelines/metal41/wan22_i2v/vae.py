@@ -16,6 +16,7 @@ import io
 import pickle
 import time
 import zipfile
+from functools import lru_cache
 from collections import OrderedDict
 from collections.abc import Callable
 from pathlib import Path
@@ -38,6 +39,22 @@ class _FloatStorage:
 
 def vae_path(root: Path | None = None) -> Path:
     return vae_dir(root) / VAE_FILE
+
+
+@lru_cache(maxsize=2)
+def vae_device_bytes(path: str) -> int:
+    """Float32 bytes if every checkpoint tensor and the latent affine are on device."""
+    weights = load_vae(Path(path))
+    total = sum(int(array.nbytes) for array in weights.values())
+    total += int(LATENT_MEAN.nbytes) + int(LATENT_STD.nbytes)
+    return total
+
+
+def encode_peak_bytes(height: int, width: int, lat_t: int, lat_h: int, lat_w: int) -> int:
+    """Encoder output plus one RGB chunk while weights are resident."""
+    latent = 16 * lat_t * lat_h * lat_w * 4
+    chunk = 3 * 4 * height * width * 4
+    return latent + chunk
 
 
 def load_vae(path: Path) -> dict[str, np.ndarray]:
@@ -111,8 +128,8 @@ class WanVAE:
     """Encode one still into the DiT latent and decode a latent back to pixels."""
 
     def __init__(self, path: Path) -> None:
-        started = time.perf_counter()
-        self.weights = load_vae(path)
+        self.path = Path(path)
+        self.weights: dict[str, np.ndarray] | None = None
         self.cache: dict[str, _Vol | str] = {}
         self.gpu: Gpu | None = None
         self.on_block: Callable[[], None] | None = None
@@ -120,8 +137,14 @@ class WanVAE:
         self._mean: Any = None
         self._std: Any = None
         self._own = False
-        elapsed = time.perf_counter() - started
-        print(f"vae load {elapsed:.2f}s", flush=True)
+
+    def _weights(self) -> dict[str, np.ndarray]:
+        if self.weights is None:
+            started = time.perf_counter()
+            self.weights = load_vae(self.path)
+            elapsed = time.perf_counter() - started
+            print(f"vae load {elapsed:.2f}s", flush=True)
+        return self.weights
 
     def encode(
         self,
@@ -158,6 +181,8 @@ class WanVAE:
             self.gpu.end()
         finally:
             self._clear_cache()
+            if not self._own:
+                self.release_device()
             self._close()
         if latent.shape != (16, lat_t, lat_h, lat_w):
             message = f"encoder emitted {latent.shape}, expected {(16, lat_t, lat_h, lat_w)}"
@@ -208,10 +233,32 @@ class WanVAE:
                 raise RuntimeError(message)
         finally:
             self._clear_cache()
+            if not self._own:
+                self.release_device()
             self._close()
         elapsed = time.perf_counter() - started
         print(f"vae decode {elapsed:.2f}s", flush=True)
         return pixels
+
+    def release_device(self) -> None:
+        """Drop GPU copies of VAE weights. Host ``weights`` stay for a later stage."""
+        gpu = self.gpu
+        if gpu is None:
+            return
+        for buf, _ in list(self._params.values()):
+            gpu.drop(buf)
+        self._params.clear()
+        if self._mean is not None:
+            gpu.drop(self._mean)
+            self._mean = None
+        if self._std is not None:
+            gpu.drop(self._std)
+            self._std = None
+        gpu.reclaim()
+
+    def release_host(self) -> None:
+        """Drop host checkpoint arrays after decode."""
+        self.weights = {}
 
     def _open(
         self,
@@ -315,7 +362,7 @@ class WanVAE:
     def _residual(self, x: _Vol, prefix: str) -> _Vol:
         shortcut = f"{prefix}.shortcut.weight"
         skip = None
-        if shortcut in self.weights:
+        if shortcut in self._weights():
             skip = self._project(x, shortcut, f"{prefix}.shortcut.bias")
         hidden = self._rms(x, f"{prefix}.residual.0.gamma")
         hidden = self._causal(f"{prefix}.residual.2", self._take(hidden, self._silu(hidden)))
@@ -411,7 +458,7 @@ class WanVAE:
         return self._up_spatial(stacked, prefix)
 
     def _causal(self, name: str, x: _Vol) -> _Vol:
-        kt = int(self.weights[f"{name}.weight"].shape[2])
+        kt = int(self._weights()[f"{name}.weight"].shape[2])
         previous = self.cache.get(name)
         cached = previous if isinstance(previous, _Vol) else None
         if kt > 1:
@@ -582,7 +629,7 @@ class WanVAE:
         if found is not None:
             buf, shape = found
             return buf, (shape[0], shape[1], shape[2], shape[3], shape[4])
-        array = np.ascontiguousarray(self.weights[name], dtype=np.float32)
+        array = np.ascontiguousarray(self._weights()[name], dtype=np.float32)
         if time:
             array = array[:, :, None]
         if array.ndim == 2:
@@ -601,7 +648,7 @@ class WanVAE:
         found = self._params.get(name)
         if found is not None:
             return found[0]
-        flat = np.ascontiguousarray(self.weights[name].reshape(-1), dtype=np.float32)
+        flat = np.ascontiguousarray(self._weights()[name].reshape(-1), dtype=np.float32)
         buf = self._gpu().keep(self._gpu().upload(flat))
         self._params[name] = (buf, tuple(int(v) for v in flat.shape))
         return buf

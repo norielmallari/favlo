@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from wan22_i2v.formats import TILE_M, LinearPack, pad_to, stored_k
+from wan22_i2v.formats import TILE_M, LinearPack, pad_to, slim_pack, stored_k
 from wan22_i2v.metal import Gpu
 from wan22_i2v.schedule import rope_axes
 
@@ -55,11 +55,12 @@ def upload_expert(
         owned.append(buf)
         if on_file is not None:
             on_file()
+    packs = {name: slim_pack(pack) for name, pack in expert.packs.items()}
     return Resident(
-        packs=expert.packs,
+        packs=packs,
         weights=weights,
         halves=halves,
-        host=expert.halves,
+        host={},
         owned=owned,
     )
 

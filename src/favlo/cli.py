@@ -11,11 +11,13 @@ import ast
 import importlib.util
 import os
 import sys
+import threading
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import ModuleType
 
 RUNTIMES = ("metal41", "cuda")
+_IMPORTS = threading.Lock()
 
 
 def repo_root() -> Path:
@@ -114,13 +116,60 @@ def load_pipeline(
         if not path.is_file():
             message = f"pipeline file is missing: {path}"
             raise FileNotFoundError(message)
-    spec = importlib.util.spec_from_file_location(f"{name.replace('-', '_')}_pipeline", path)
-    if spec is None or spec.loader is None:
-        message = f"cannot load pipeline file: {path}"
-        raise ImportError(message)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    with _IMPORTS:
+        spec = importlib.util.spec_from_file_location(f"{name.replace('-', '_')}_pipeline", path)
+        if spec is None or spec.loader is None:
+            message = f"cannot load pipeline file: {path}"
+            raise ImportError(message)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+
+def pipeline_roots(root: Path | None = None) -> tuple[Path, ...]:
+    """Pipeline trees that exist in this checkout."""
+    found: list[Path] = []
+    for custom in (False, True):
+        for runtime in RUNTIMES:
+            directory = pipeline_tree(runtime, custom=custom, root=root)
+            if directory.is_dir():
+                found.append(directory.resolve())
+    return tuple(found)
+
+
+def drop_pipeline_modules(root: Path | None = None) -> int:
+    """Drop imported pipeline packages so the next load reads the files again.
+
+    The lock is the same one ``load_pipeline`` holds. A module under ``src/favlo`` stays.
+    """
+    with _IMPORTS:
+        roots = pipeline_roots(root)
+        names = [
+            name
+            for name, module in list(sys.modules.items())
+            if module is not None and _module_under(module, roots)
+        ]
+        for name in names:
+            sys.modules.pop(name, None)
+        return len(names)
+
+
+def _module_under(module: ModuleType, roots: tuple[Path, ...]) -> bool:
+    file = getattr(module, "__file__", None)
+    if isinstance(file, str) and file and _path_under(Path(file), roots):
+        return True
+    paths = getattr(module, "__path__", None)
+    if paths is None:
+        return False
+    return any(_path_under(Path(str(item)), roots) for item in paths)
+
+
+def _path_under(path: Path, roots: tuple[Path, ...]) -> bool:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    return any(resolved.is_relative_to(root) for root in roots)
 
 
 def pipeline_main(module: ModuleType) -> Callable[[Sequence[str]], int]:

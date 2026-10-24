@@ -29,7 +29,7 @@ INSTRUCTIONS = (
     "how to download or quantize a supported model, or how to register one, "
     "call read_guide before you answer. "
     "Use clients for the server address, the model field, the first terminal line, "
-    "the idle check, download reminders, and stopping the server with /quit. "
+    "the idle check, download reminders, /reload, and stopping the server with /quit. "
     "Use models for download, quantize, and registration. "
     "When someone asks which models are registered, or which model id to send, "
     "call list_models before you answer. Report only the lines it returns. "

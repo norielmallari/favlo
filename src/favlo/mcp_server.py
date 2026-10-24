@@ -53,6 +53,10 @@ _ANNOTATIONS = mcp_types.ToolAnnotations(
 _AUDIO = {"mp3": "audio/mpeg", "wav": "audio/wav", "flac": "audio/flac"}
 _IMAGE_EXT = frozenset({"png"})
 _VIDEO_EXT = frozenset({"mp4"})
+_STILL = (
+    'image is an id starting with image_ from generate_image, or {"type": "image", "data": "<base64 png>"}. '
+    "A path and a favlo:// URI are refused."
+)
 
 
 def build_mcp(dispatch: Any, state: dict[str, Any]) -> FastMCP:
@@ -117,7 +121,21 @@ def build_mcp(dispatch: Any, state: dict[str, Any]) -> FastMCP:
         seed: int = 0,
         quality: str = "high",
     ) -> ToolResult:
-        """Generate one clip. The still is a stored image id or a PNG block."""
+        """Generate one MP4. Read it with resources/read at favlo://videos/{id}.mp4.
+
+        image is an id starting with image_ from generate_image, or {"type": "image", "data": "<base64 png>"}.
+        A filesystem path and a favlo:// URI are refused. Omitting frames and seconds yields 81 frames at 16 fps.
+
+        Args:
+            prompt: Motion prompt. The still is the first frame.
+            model: Video model id from list_media_models.
+            image: Id starting with image_, or {"type": "image", "data": "<base64 png>"}.
+            size: WIDTHxHEIGHT. Both edges are multiples of 16. 576x320 is 320p. 416x240 is 240p.
+            seconds: Duration as text, such as 5. Empty omits it. Used only when frames is omitted, and the count snaps to 4n+1 at 16 fps.
+            frames: Frame count 4n+1. 0 omits it. When seconds is also omitted, the clip is 81 frames.
+            seed: Integer seed. The default is 0.
+            quality: auto, low, medium, high, xhigh, max, standard, or hd. auto, standard, and hd are stored as high.
+        """
         body: dict[str, Any] = {
             "prompt": prompt,
             "model": model,
@@ -182,6 +200,7 @@ def build_mcp(dispatch: Any, state: dict[str, Any]) -> FastMCP:
         """Speak one line.
 
         ``voice`` is a speaker id from ``list_media_models``.
+        A square-bracket tag in ``input`` is an emotion id from that row.
         ``response_format`` is mp3, wav, or flac.
         """
         body: dict[str, Any] = {
@@ -330,13 +349,13 @@ async def _already_cancelled(task_id: str) -> bool:
 def _still(image: Any, state: dict[str, Any]) -> str:
     if isinstance(image, dict):
         if image.get("type") != "image":
-            raise RuntimeError("the still is a stored image id or a PNG image block")
+            raise RuntimeError(_STILL)
         data = image.get("data")
         if not isinstance(data, str) or not data:
-            raise RuntimeError("the still is a stored image id or a PNG image block")
+            raise RuntimeError(_STILL)
         return data
     if not isinstance(image, str) or not image or _is_path(image):
-        raise RuntimeError("the still is a stored image id or a PNG image block")
+        raise RuntimeError(_STILL)
     if image.startswith("image_"):
         raw = load_image(image, home=_home(state, "image_home"))
         if raw is None:

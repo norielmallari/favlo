@@ -21,7 +21,14 @@ from wan22_i2v.progress import ClipProgress, clip_label, sample_total
 from wan22_i2v.record import half_names, linear_names, load_embed, load_expert, load_manifest
 from wan22_i2v.schedule import expert_name, geometry, mask_latent, sigmas, timesteps
 from wan22_i2v.text import _LAYERS, encode_prompt, encoder_path, tokenizer_path
-from wan22_i2v.vae import DECODER_BLOCKS, ENCODER_BLOCKS, WanVAE, vae_path
+from wan22_i2v.vae import (
+    DECODER_BLOCKS,
+    ENCODER_BLOCKS,
+    WanVAE,
+    encode_peak_bytes,
+    vae_device_bytes,
+    vae_path,
+)
 from wan22_i2v.video import write_avi
 
 
@@ -177,9 +184,15 @@ class Runtime:
                             step_times=step_times,
                         ),
                     )
+                if vae is not None:
+                    vae.release_device()
+                    vae.release_host()
+                gpu.end()
+                gpu.reclaim()
                 knots = sigmas()
                 loaded: str | None = None
                 start = hold.step if hold is not None and hold.stage == "step" else 0
+                self._fit_dit_step(frames, width, height, lat_t, lat_h, lat_w, tokens)
                 with objc.autorelease_pool():
                     volume_size = int(np.prod((36, lat_t, lat_h, lat_w)))
                     self._forward = Forward(gpu, self.config, tokens, volume_size)
@@ -189,6 +202,7 @@ class Runtime:
                         continue
                     name = expert_name(float(timestep), boundary)
                     if loaded != name:
+                        self._fit_dit_step(frames, width, height, lat_t, lat_h, lat_w, tokens)
                         progress.stage("load")
                         if reload_quietly(hold, name, index):
                             progress.counting(False)
@@ -256,17 +270,22 @@ class Runtime:
                 self._drop_forward()
                 gpu.drop(cond)
                 gpu.drop(mask)
+                gpu.end()
+                gpu.reclaim()
                 progress.stage("decode")
                 if vae is not None:
+                    self._fit_vae_decode(frames, width, height, lat_t, lat_h, lat_w)
+                    decode_room = self._ledger_room()
                     pixels = vae.decode(
                         noise,
                         noise_shape,
                         on_block=progress.advance,
                         gpu=gpu,
                         resident_frames=resident_latent_frames(
-                            self._room(), frames, height, width, lat_t
+                            decode_room, frames, height, width, lat_t
                         ),
                     )
+                    vae.release_host()
                 else:
                     pixels = stride_decode(latent, frames)
                 self._pause(
@@ -325,13 +344,75 @@ class Runtime:
         lat_w: int,
         tokens: int,
     ) -> None:
-        """Require one expert and the scratch for every frame of this clip."""
-        room = self._room()
-        weights = expert_bytes(self.path)
-        scratch = forward_bytes(self.config, tokens, 36 * lat_t * lat_h * lat_w)
-        if weights + scratch > room:
-            raise RuntimeError(f"scratch for {frames} frames at {width}x{height} does not fit")
+        """Require each stage of this clip fits before the first device commit."""
+        self._fit_dit_step(frames, width, height, lat_t, lat_h, lat_w, tokens)
+        path = vae_path()
+        if path.is_file():
+            self._fit_vae_encode(frames, width, height, lat_t, lat_h, lat_w, path)
+            self._fit_vae_decode(frames, width, height, lat_t, lat_h, lat_w)
+
+    def _fit_dit_step(
+        self,
+        frames: int,
+        width: int,
+        height: int,
+        lat_t: int,
+        lat_h: int,
+        lat_w: int,
+        tokens: int,
+    ) -> None:
+        volume = 36 * lat_t * lat_h * lat_w
+        need = (
+            expert_bytes(self.path)
+            + forward_bytes(self.config, tokens, volume)
+            + _latent_device_bytes(lat_t, lat_h, lat_w, frames)
+        )
+        self._require_room(need, frames, width, height)
+
+    def _fit_vae_encode(
+        self,
+        frames: int,
+        width: int,
+        height: int,
+        lat_t: int,
+        lat_h: int,
+        lat_w: int,
+        path: Path,
+    ) -> None:
+        need = vae_device_bytes(str(path.resolve())) + encode_peak_bytes(
+            height, width, lat_t, lat_h, lat_w
+        )
+        self._require_room(need, frames, width, height)
+
+    def _fit_vae_decode(
+        self,
+        frames: int,
+        width: int,
+        height: int,
+        lat_t: int,
+        lat_h: int,
+        lat_w: int,
+    ) -> None:
+        room = self._ledger_room()
         resident_latent_frames(room, frames, height, width, lat_t)
+        path = vae_path()
+        if not path.is_file():
+            return
+        need = vae_device_bytes(str(path.resolve())) + decode_peak_bytes(
+            frames, height, width, lat_t, lat_h, lat_w, room
+        )
+        self._require_room(need, frames, width, height)
+
+    def _ledger_room(self) -> int:
+        """Finish device work so ``pending`` does not shrink the decode budget."""
+        gpu = getattr(self, "gpu", None)
+        if gpu is not None:
+            gpu.end()
+        return self._room()
+
+    def _require_room(self, need: int, frames: int, width: int, height: int) -> None:
+        if need > self._ledger_room():
+            raise RuntimeError(f"scratch for {frames} frames at {width}x{height} does not fit")
 
     def _room(self) -> int:
         ceiling = memory.budget()
@@ -406,6 +487,8 @@ class Runtime:
         expert = load_expert(self.path / name, layers, on_file=tick)
         with objc.autorelease_pool():
             self._resident = upload_expert(gpu, expert, on_file=tick)
+        del expert
+        gc.collect()
 
 
 def open_runtime(
@@ -431,6 +514,31 @@ def expert_bytes(path: Path) -> int:
         total = sum(item.stat().st_size for item in folder.iterdir() if item.is_file())
         largest = max(largest, total)
     return largest
+
+
+def _latent_device_bytes(lat_t: int, lat_h: int, lat_w: int, frames: int) -> int:
+    cell = 16 * lat_t * lat_h * lat_w * 4
+    mask = int(np.prod(mask_latent(frames).shape)) * 4
+    return 2 * cell + mask
+
+
+def decode_peak_bytes(
+    frames: int,
+    height: int,
+    width: int,
+    lat_t: int,
+    lat_h: int,
+    lat_w: int,
+    room: int,
+) -> int:
+    """Latent grid on device plus the largest float video slice the window emits."""
+    resident = resident_latent_frames(room, frames, height, width, lat_t)
+    grid = 16 * lat_t * lat_h * lat_w * 4
+    if resident >= lat_t:
+        out_frames = frames
+    else:
+        out_frames = min(frames, 1 + (resident - 1) * 4)
+    return grid + 3 * out_frames * height * width * 4
 
 
 def resident_latent_frames(room: int, frames: int, height: int, width: int, lat_t: int) -> int:
