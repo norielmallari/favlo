@@ -104,7 +104,7 @@ class Roundtrip:
 
     def __init__(self) -> None:
         metal = _metal()
-        self._owner = "flash-probe"
+        self._owner = f"qwen38-flash-next:{id(self)}"
         self.metal = metal
         self.device = memory.device
         options = metal.MTLCompileOptions.alloc().init()
@@ -553,6 +553,13 @@ def matmul_reference_tile() -> dict[str, Any]:
 def check_int4_gemm() -> dict[str, Any]:
     tile = matmul_reference_tile()
     gemm = Int4Gemm()
+    try:
+        return _check_int4_gemm(gemm, tile)
+    finally:
+        memory.sweep(gemm._owner)
+
+
+def _check_int4_gemm(gemm: Int4Gemm, tile: dict[str, Any]) -> dict[str, Any]:
     prefill = np_from_f32(
         gemm.prefill_int4(
             tile["activation"],
@@ -625,17 +632,21 @@ def np_from_f32(blob: bytes) -> Any:
 
 
 def probe(*, as_json: bool) -> int:
+    trip = Roundtrip()
     try:
-        report = Roundtrip().measure()
-    except Exception as exc:
-        sys.stderr.write(f"{type(exc).__name__}: {exc}\n")
-        return 1
-    if as_json:
-        json.dump(report, sys.stdout, indent=2)
-        sys.stdout.write("\n")
-    else:
-        sys.stdout.write(summarize(report) + "\n")
-    return 0 if report["ok"] else 1
+        try:
+            report = trip.measure()
+        except Exception as exc:
+            sys.stderr.write(f"{type(exc).__name__}: {exc}\n")
+            return 1
+        if as_json:
+            json.dump(report, sys.stdout, indent=2)
+            sys.stdout.write("\n")
+        else:
+            sys.stdout.write(summarize(report) + "\n")
+        return 0 if report["ok"] else 1
+    finally:
+        memory.sweep(trip._owner)
 
 
 def matmul() -> int:

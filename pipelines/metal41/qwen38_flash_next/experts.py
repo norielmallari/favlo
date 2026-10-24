@@ -380,7 +380,7 @@ class ExpertAtlas:
 def _allocate(gpu: Any, candidates: tuple[int, ...]) -> tuple[Any, int]:
     from favlo.memory import memory
 
-    owner = getattr(gpu, "_owner", "flash")
+    owner = gpu._owner
     for nbytes in candidates:
         try:
             buffer = memory.allocate(int(nbytes), owner=owner)

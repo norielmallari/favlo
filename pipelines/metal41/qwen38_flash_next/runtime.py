@@ -185,6 +185,7 @@ class Qwen38Runtime:
         self._prefill_seconds = 0.0
         self._prefill_open = None
         self._decode_open = None
+        self._owner = f"qwen38-flash-next:{id(self)}"
         self.gpu = None
         self.store = None
         self.files = None
@@ -202,7 +203,7 @@ class Qwen38Runtime:
         resident_percent: float | None = None,
         kv_cache: str = DEFAULT_KV_CACHE,
     ) -> None:
-        self.gpu = MetalSession()
+        self.gpu = MetalSession(self._owner)
         _log(f"shaders ready on {_device_name(self.gpu.device)}")
         self.root = root
         config = json.loads((root / "config.json").read_text())
@@ -556,6 +557,11 @@ class Qwen38Runtime:
             except Exception:
                 pass
             self.gpu = None
+        owner = getattr(self, "_owner", None)
+        if isinstance(owner, str) and owner:
+            from favlo.memory import memory
+
+            memory.sweep(owner)
         if isinstance(files, QuantRecord):
             files.close()
         store = getattr(self, "store", None)

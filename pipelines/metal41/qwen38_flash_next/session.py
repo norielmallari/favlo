@@ -169,7 +169,7 @@ def _device_name(device: Any) -> str:
     return str(name() if callable(name) else name)
 
 
-def _shared_buffer(blob: bytes, owner: str = "flash") -> Any:
+def _shared_buffer(blob: bytes, owner: str) -> Any:
     if blob:
         return memory.upload(blob, owner=owner)
     return memory.allocate(16, owner=owner, zero=True)
@@ -178,9 +178,9 @@ def _shared_buffer(blob: bytes, owner: str = "flash") -> Any:
 class Int4Gemm:
     """Prefill matmul2d and decode shader dot for int4 weights with E8M0 scales."""
 
-    def __init__(self) -> None:
+    def __init__(self, owner: str | None = None) -> None:
         metal = _metal()
-        self._owner = "flash"
+        self._owner = owner or f"qwen38-flash-next:{id(self)}"
         device = memory.device
         options = metal.MTLCompileOptions.alloc().init()
         options.setLanguageVersion_((4 << 16) + 1)
@@ -236,7 +236,7 @@ class Int4Gemm:
         if rows % 64 or cols % 32 or inner % 32:
             message = "prefill tile requires rows multiple of 64 and cols, inner multiple of 32"
             raise ValueError(message)
-        destination = _shared_buffer(b"\x00" * (rows * cols * 4))
+        destination = _shared_buffer(b"\x00" * (rows * cols * 4), self._owner)
         self._dispatch_prefill(
             activation, weights, scales, destination, rows, cols, inner, pipeline
         )
@@ -249,7 +249,7 @@ class Int4Gemm:
         if cols < 1 or inner % 32:
             message = "decode requires a positive column count and inner multiple of 32"
             raise ValueError(message)
-        destination = _shared_buffer(b"\x00" * (cols * 4))
+        destination = _shared_buffer(b"\x00" * (cols * 4), self._owner)
         self._dispatch_decode(activation, weights, scales, destination, cols, inner)
         return _buffer_bytes(destination, cols * 4)
 
@@ -265,13 +265,13 @@ class Int4Gemm:
         pipeline: Any = None,
     ) -> None:
         buffers = (
-            _shared_buffer(activation),
-            _shared_buffer(weights),
-            _shared_buffer(scales),
+            _shared_buffer(activation, self._owner),
+            _shared_buffer(weights, self._owner),
+            _shared_buffer(scales, self._owner),
             destination,
-            _shared_buffer(rows.to_bytes(4, "little")),
-            _shared_buffer(cols.to_bytes(4, "little")),
-            _shared_buffer(inner.to_bytes(4, "little")),
+            _shared_buffer(rows.to_bytes(4, "little"), self._owner),
+            _shared_buffer(cols.to_bytes(4, "little"), self._owner),
+            _shared_buffer(inner.to_bytes(4, "little"), self._owner),
         )
         width = self.prefill.threadExecutionWidth()
         self._encode(
@@ -291,12 +291,12 @@ class Int4Gemm:
         inner: int,
     ) -> None:
         buffers = (
-            _shared_buffer(activation),
-            _shared_buffer(weights),
-            _shared_buffer(scales),
+            _shared_buffer(activation, self._owner),
+            _shared_buffer(weights, self._owner),
+            _shared_buffer(scales, self._owner),
             destination,
-            _shared_buffer(cols.to_bytes(4, "little")),
-            _shared_buffer(inner.to_bytes(4, "little")),
+            _shared_buffer(cols.to_bytes(4, "little"), self._owner),
+            _shared_buffer(inner.to_bytes(4, "little"), self._owner),
         )
         self._encode(
             self.decode,
@@ -500,16 +500,16 @@ def trim_page_cache(
 class MetalSession:
     """Decode dots, prefill matmul2d, the GDN delta, and grouped-query attention."""
 
-    def __init__(self) -> None:
+    def __init__(self, owner: str | None = None) -> None:
         self._closed = False
-        self.gemm = Int4Gemm()
+        self._owner = owner or f"qwen38-flash-next:{id(self)}"
+        self.gemm = Int4Gemm(self._owner)
         self.device = self.gemm.device
         self.metal = self.gemm.metal
         width = self.gemm.decode.threadExecutionWidth()
         if int(width) != 32:
             message = f"shader dot assumes simd width 32, device reported {width}"
             raise RuntimeError(message)
-        self._owner = self.gemm._owner
         self.queue = memory.make_queue()
         self.launch_count = 0
         self.command_count = 0

@@ -1,0 +1,38 @@
+---
+description: Pipeline-agnostic memory ledger. Owner strings, budget, sweep, and the one knob a runtime may shrink.
+globs: **/*.py
+alwaysApply: false
+---
+
+# Memory management
+
+`src/favlo/memory.py` is the only allocator. `memory` is the process singleton. Device, residency set, and command queues stay process-owned. Heaps are per owner, kind (`resident`, `scratch`, `private`), and storage (`shared` or `private`). A pipeline does not call `newBufferWithLength` or keep a second allocator.
+
+## Owner
+
+`open_runtime` accepts `owner` and `max_memory` and forwards both. Stamp `_owner` before the first allocate:
+
+```python
+self._owner = owner or f"{stem}:{id(self)}"
+```
+
+`stem` is the flag stem (`wan22-i2v`, `z-image-turbo`). Every `allocate` and `upload` in that opening uses that string. `sweep` matches the whole string. `close` sweeps it in `finally`, including when `open` fails after a span exists. A missing record raises `FileNotFoundError` before `Gpu()`. The listener passes `mint_owner(stem)` when the signature includes `owner`, records `runtime._owner`, and sweeps that opening after `close`.
+
+## Room
+
+`budget()` is reclaimable pages plus `live` plus `pending`. `live` and `pending` are properties. Room for a new span is:
+
+```python
+ceiling = memory.budget()
+if cap is not None:
+    ceiling = min(ceiling, cap)
+room = max(0, ceiling - memory.live - memory.pending)
+```
+
+`max_memory` is the cap: `32GiB`, `512MiB`, `g`/`m`/`gb`/`mb`, or a positive byte count. Empty means uncapped. Copy the parser into the pipeline that reads it. Read the ledger when the job starts and again at `complete`. A step does not re-read it.
+
+## Fit
+
+Weights plus the requested working set must fit in `room` before the first commit. The request keeps its resolution, frame count, and duration. Shrink the one knob that pipeline owns, down to the minimum that still runs that request. When the minimum does not fit, raise `RuntimeError` and name the request. Do not drop layers, substitute a host GEMV, or change the packed quant. 16 GB is the product floor. It is not free memory and it is not `budget()`.
+
+`release` returns a span the caller has dropped. Leave a buffer a later command or a live local still names. `sweep` waits out tracked command buffers, then frees that owner's spans and idle heaps.
