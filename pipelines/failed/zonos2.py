@@ -1,7 +1,7 @@
-"""ZONOS2 pipeline.
+"""Failed ZONOS2 pipeline.
 
-``favlo --zonos2`` loads this file by path. The model lives in the ``zonos2``
-package beside it. This file does not import another pipeline.
+The command scan does not load this file. The package beside it is
+``zonos2``. The note is ``docs/zonos2``.
 """
 
 from __future__ import annotations

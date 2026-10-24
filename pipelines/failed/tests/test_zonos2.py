@@ -16,6 +16,7 @@ from zonos2.audio import (
     accurate_token,
     background_token,
     encode_wav,
+    normalize_loudness,
     quality_token,
     read_wav,
     text_ids,
@@ -23,6 +24,7 @@ from zonos2.audio import (
 from zonos2.checkpoint import id_tables, list_tensors, read_tensor
 from zonos2.codec import _compile, _dispatch_conv
 from zonos2.delay import shear, unshear
+from zonos2.emotion import conditioning_tokens, delta_for, list_emotions, parse
 from zonos2.formats import (
     choose_promoted,
     dequant_fp4,
@@ -84,6 +86,27 @@ def test_bytes_are_the_text_rows_and_the_wav_is_mono():
     gate, up = split_w13(fused)
     assert np.array_equal(gate, fused[0::2])
     assert np.array_equal(up, fused[1::2])
+
+
+def test_loudness_matches_a_quiet_clip_to_a_loud_one():
+    tone = np.sin(2 * np.pi * 220 * np.arange(8820) / 44100).astype(np.float32)
+    start = 882 * 12
+    quiet = np.zeros(44100, dtype=np.float32)
+    loud = np.zeros(44100, dtype=np.float32)
+    quiet[start : start + 8820] = tone * np.float32(0.02)
+    loud[start : start + 8820] = tone * np.float32(0.2)
+    quiet_out = normalize_loudness(quiet)
+    loud_out = normalize_loudness(loud)
+    quiet_rms = float(np.sqrt(np.mean(np.square(quiet_out[start : start + 8820]))))
+    loud_rms = float(np.sqrt(np.mean(np.square(loud_out[start : start + 8820]))))
+    assert abs(quiet_rms - 0.05) < 1e-4
+    assert abs(loud_rms - 0.05) < 1e-4
+    spike = np.zeros(44100, dtype=np.float32)
+    spike[0] = 1.0
+    capped = normalize_loudness(spike)
+    assert abs(float(capped[0]) - 0.99) < 1e-5
+    silence = normalize_loudness(np.zeros(44100, dtype=np.float32))
+    assert float(np.max(np.abs(silence))) == 0.0
 
 
 def test_balancing_bias_ranks_after_the_softmax():
@@ -261,18 +284,24 @@ def test_attention_and_codec_release_transient_spans():
     values = np.zeros((8, 4), dtype=np.float32)
     weight = np.zeros((4, 4, 3), dtype=np.float32)
     bias = np.zeros(4, dtype=np.float32)
+    owner = "zonos2-span"
     before = memory.live
-    for _ in range(4):
-        got = _dispatch_conv(device, queue, pipelines["conv1d"], values, weight, bias, 0, 1)
-        assert got.shape == (8, 4)
-    session = Session()
-    query = np.zeros((16, 128), dtype=np.float32)
-    for steps in (2, 8, 32):
-        key = np.zeros((steps, 4, 128), dtype=np.float32)
-        attended = session.attend(query, key, key)
-        assert attended.shape == (16, 128)
-        assert np.isfinite(attended).all()
-    session.close()
+    try:
+        for _ in range(4):
+            got = _dispatch_conv(
+                device, queue, pipelines["conv1d"], values, weight, bias, 0, 1, owner
+            )
+            assert got.shape == (8, 4)
+        session = Session()
+        query = np.zeros((16, 128), dtype=np.float32)
+        for steps in (2, 8, 32):
+            key = np.zeros((steps, 4, 128), dtype=np.float32)
+            attended = session.attend(query, key, key)
+            assert attended.shape == (16, 128)
+            assert np.isfinite(attended).all()
+        session.close()
+    finally:
+        memory.sweep(owner)
     assert memory.live == before
 
 
@@ -286,3 +315,43 @@ def test_the_collection_is_two_speaker_vectors():
     assert not np.allclose(first, second)
     with pytest.raises(ValueError, match="collection"):
         load("missing")
+
+
+def test_emotion_tags_split_the_line():
+    plain = parse("Hello.")
+    assert [(span.text, span.weights) for span in plain] == [("Hello.", None)]
+    one = parse("[happy] Hello.")
+    assert one[0].text == "Hello."
+    assert one[0].weights == (("happy", 1.0),)
+    mixed = parse("[happy:0.5][sad] Hello.")
+    assert mixed[0].weights == (("happy", 0.5), ("sad", 1.0))
+    split = parse("[happy] Hello. [sad] Goodbye.")
+    assert [span.text for span in split] == ["Hello.", "Goodbye."]
+    assert split[0].weights == (("happy", 1.0),)
+    assert split[1].weights == (("sad", 1.0),)
+    leading = parse("Hello. [angry] Wait.")
+    assert [span.weights for span in leading] == [None, (("angry", 1.0),)]
+    assert parse("[Happy] Go.")[0].weights == (("happy", 1.0),)
+    assert parse("[valence:-1][arousal:1] Run.")[0].weights == (("valence", -1.0), ("arousal", 1.0))
+    with pytest.raises(ValueError, match="no words"):
+        parse("[happy] [sad]")
+    with pytest.raises(ValueError, match="collection"):
+        parse("[nope] Hi")
+    with pytest.raises(ValueError, match="collection"):
+        parse("[excited] Go.")
+    with pytest.raises(ValueError, match="incomplete"):
+        parse("[happy")
+    with pytest.raises(ValueError, match="incomplete"):
+        parse("Hi]")
+    with pytest.raises(ValueError, match="empty"):
+        parse("")
+    names = [item["id"] for item in list_emotions()]
+    assert names == ["happy", "sad", "angry", "surprised", "valence", "arousal"]
+    happy = delta_for((("happy", 1.0),))
+    assert happy is not None and happy.shape == (2048,)
+    direction = np.load(Path("pipelines/failed/zonos2/emotions/happy.npy"))
+    assert np.allclose(happy, direction * np.float32(3.0))
+    assert delta_for(()) is None
+    assert delta_for(None) is None
+    assert conditioning_tokens(trailing=True) == (517, 518, 511)
+    assert conditioning_tokens(trailing=False) == (517, 518)

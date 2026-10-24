@@ -1,4 +1,4 @@
-"""44.1 kHz mono PCM. Samples outside [-1, 1] clamp. The level is otherwise kept."""
+"""44.1 kHz mono PCM. encode_wav clamps samples outside [-1, 1]."""
 
 from __future__ import annotations
 
@@ -9,6 +9,11 @@ from pathlib import Path
 import numpy as np
 
 from zonos2.layout import BOS_ID, EOS_ID, LEGACY_SYMBOLS, SAMPLE_RATE, TEXT_VOCAB
+
+_SPEECH_RMS = 0.05
+_LOUDNESS_PEAK = 0.99
+_SPEECH_FRAME = 882
+_SPEECH_GATE = 0.01
 
 _RATE_BUCKETS = 8
 _QUALITY_COUNTS = (12, 12, 12, 8, 8, 8)
@@ -82,6 +87,34 @@ def read_wav(path: Path) -> tuple[np.ndarray, int]:
     if channels > 1:
         pcm = pcm.reshape(-1, channels).mean(axis=1)
     return np.ascontiguousarray(pcm, dtype=np.float32), rate
+
+
+def normalize_loudness(samples: np.ndarray) -> np.ndarray:
+    """Scale 20 ms frames at or above 0.01 so their RMS is 0.05. The peak stays at or under 0.99."""
+    audio = np.ascontiguousarray(samples, dtype=np.float32).reshape(-1)
+    level = _speech_rms(audio)
+    if not np.isfinite(level) or level < 1e-6:
+        return audio
+    scaled = audio * np.float32(_SPEECH_RMS / level)
+    peak = float(np.max(np.abs(scaled))) if scaled.size else 0.0
+    if peak > _LOUDNESS_PEAK:
+        scaled = scaled * np.float32(_LOUDNESS_PEAK / peak)
+    return np.ascontiguousarray(scaled, dtype=np.float32)
+
+
+def _speech_rms(audio: np.ndarray) -> float:
+    frame = _SPEECH_FRAME
+    kept = [
+        audio[start : start + frame]
+        for start in range(0, max(audio.size - frame + 1, 0), frame)
+        if float(np.sqrt(np.mean(audio[start : start + frame] ** 2))) >= _SPEECH_GATE
+    ]
+    if not kept:
+        if audio.size == 0:
+            return 0.0
+        return float(np.sqrt(np.mean(audio * audio)))
+    speech = np.concatenate(kept)
+    return float(np.sqrt(np.mean(np.square(speech))))
 
 
 def encode_wav(samples: np.ndarray) -> bytes:

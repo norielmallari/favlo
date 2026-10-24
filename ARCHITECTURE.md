@@ -36,7 +36,6 @@ Each runtime is a separate write set. An agent developing one runtime edits that
 | `z-image-turbo` | `pipelines/metal41/z-image-turbo.py` | `pipelines/metal41/z_image_turbo/` | [docs/z-image-turbo/README.md](docs/z-image-turbo/README.md) |
 | `wan22-i2v` | `pipelines/metal41/wan22-i2v.py` | `pipelines/metal41/wan22_i2v/` | [docs/wan22-i2v/README.md](docs/wan22-i2v/README.md) |
 | `ace-step-15-turbo` | `pipelines/metal41/ace-step-15-turbo.py` | `pipelines/metal41/ace_step_15_turbo/` | [docs/ace-step-15-turbo/README.md](docs/ace-step-15-turbo/README.md) |
-| `zonos2` | `pipelines/metal41/zonos2.py` | `pipelines/metal41/zonos2/` | [docs/zonos2/README.md](docs/zonos2/README.md) |
 
 The entry filename may contain hyphens. The command loads it by path from `pipelines/<runtime>/`. It is not an importable module name. The package beside it uses underscores. The entry sets `PIPELINE` to that filename stem. A runtime's write set is the entry file, the package, `docs/<pipeline>/`, and tests that import only that package. A new runtime adds a row to the table above and its own doc directory. It does not edit another row's package, shaders, tests, or docs. Shipped rows use `runtime` `metal41`. `pipelines/cuda` is empty until a CUDA pipeline names the toolkit it needs. A custom entry lives under `custom-pipelines/<runtime>/` and its registry row sets `custom` true. A missing or unknown `runtime` is an error.
 
@@ -47,6 +46,7 @@ A failed pipeline is not discovered and is not served. Its entry is not under `p
 | Pipeline | Entry | Package | Note |
 |---|---|---|---|
 | `ternary-bonsai-2` | `pipelines/failed/ternary-bonsai-2.py` | `pipelines/failed/ternary_bonsai_2/` | [docs/ternary-bonsai-2/README.md](docs/ternary-bonsai-2/README.md) |
+| `zonos2` | `pipelines/failed/zonos2.py` | `pipelines/failed/zonos2/` | [docs/zonos2/README.md](docs/zonos2/README.md) |
 
 Tests for the listener, the registry, and the console live in `tests/test_cli.py`, `tests/test_server.py`, `tests/test_registry.py`, and `tests/test_console.py`. A pipeline's tests do not import another pipeline.
 

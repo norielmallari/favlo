@@ -8,7 +8,8 @@ from typing import Any
 
 import numpy as np
 
-from zonos2.audio import encode_wav, text_ids
+from zonos2.audio import encode_wav, normalize_loudness
+from zonos2.emotion import delta_for, parse
 
 
 class Runtime:
@@ -20,11 +21,23 @@ class Runtime:
         self._model = None
 
     def speak(self, text: str, speaker: np.ndarray | None = None, max_frames: int | None = None) -> np.ndarray:
+        spans = parse(text)
         if self._model is None:
             from zonos2.forward import Model
 
             self._model = Model.open(self.path, self._owner)
-        return self._model.speak(text, speaker, max_frames=max_frames)
+        waves = [
+            self._model.speak(
+                span.text,
+                speaker,
+                max_frames=max_frames,
+                delta=delta_for(span.weights),
+                trailing=index == len(spans) - 1,
+            )
+            for index, span in enumerate(spans)
+        ]
+        joined = waves[0] if len(waves) == 1 else np.concatenate(waves)
+        return normalize_loudness(joined)
 
     def close(self) -> None:
         model = self._model
@@ -85,7 +98,7 @@ def handle_voice(reply: Any, runtime: Runtime, body: dict, selection: Any, args:
     if not isinstance(text, str):
         message = "input is required"
         raise ValueError(message)
-    text_ids(text)
+    parse(text)
     fmt = body.get("response_format") or "mp3"
     if fmt not in {"mp3", "wav", "flac"}:
         message = "response_format must be mp3, wav, or flac"

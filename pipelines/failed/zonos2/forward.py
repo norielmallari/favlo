@@ -8,10 +8,11 @@ from pathlib import Path
 
 import numpy as np
 
-from zonos2.audio import SILENCE_FRAMES, accurate_token, background_token, quality_token, text_ids
+from zonos2.audio import SILENCE_FRAMES, text_ids
 from zonos2.checks import rms_norm, softcap, swiglu
 from zonos2.codec import Decoder
 from zonos2.delay import shear, unshear
+from zonos2.emotion import conditioning_tokens
 from zonos2.layout import (
     CODEBOOKS,
     CONTEXT,
@@ -48,8 +49,19 @@ class Model:
         record = load_record(session, path)
         return cls(record, session, Decoder(path.parent / "dac" / "model.safetensors", owner))
 
-    def speak(self, text: str, speaker: np.ndarray | None = None, max_frames: int | None = None) -> np.ndarray:
-        prefix = self._prefix(text, speaker)
+    def speak(
+        self,
+        text: str,
+        speaker: np.ndarray | None = None,
+        max_frames: int | None = None,
+        *,
+        delta: np.ndarray | None = None,
+        trailing: bool = True,
+    ) -> np.ndarray:
+        self.keys = [np.zeros((0, KV_HEADS, HEAD_DIM), dtype=np.float32) for _ in range(LAYERS)]
+        self.values = [np.zeros((0, KV_HEADS, HEAD_DIM), dtype=np.float32) for _ in range(LAYERS)]
+        self.router_state = [None] * LAYERS
+        prefix = self._prefix(text, speaker, delta, trailing)
         hidden = prefix[0]
         for position, vector in enumerate(prefix):
             hidden = self._stack(vector, position)
@@ -92,7 +104,13 @@ class Model:
             raise RuntimeError(message)
         return self.decoder.waveform(usable.astype(np.int64))
 
-    def _prefix(self, text: str, speaker: np.ndarray | None) -> list[np.ndarray]:
+    def _prefix(
+        self,
+        text: str,
+        speaker: np.ndarray | None,
+        delta: np.ndarray | None,
+        trailing: bool,
+    ) -> list[np.ndarray]:
         source = np.zeros(SPEAKER_DIM, dtype=np.float32) if speaker is None else speaker.astype(np.float32)
         if source.shape != (SPEAKER_DIM,):
             message = "the speaker vector is 2048 floats"
@@ -101,8 +119,14 @@ class Model:
         projected += self.record.speaker_lda_bias
         voice = self.session.gemm(projected.reshape(1, -1), self.record.speaker)[0]
         voice += self.record.speaker_bias
-        rows = [voice, self._text_row(background_token(False)), self._text_row(accurate_token())]
-        rows.append(self._text_row(quality_token(5, 3)))
+        if delta is not None:
+            if delta.shape != (DIM,) or not np.isfinite(delta).all():
+                message = "the emotion delta is 2048 floats"
+                raise ValueError(message)
+            voice = voice + delta
+        rows = [voice]
+        for token in conditioning_tokens(trailing=trailing):
+            rows.append(self._text_row(token))
         for code in text_ids(text):
             rows.append(self._text_row(int(code)))
         opened = shear(SILENCE_FRAMES)[: SILENCE_FRAMES.shape[0]]

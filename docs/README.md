@@ -39,7 +39,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [z-image-turbo/README.md](z-image-turbo/README.md) | Z-Image-Turbo pipeline contract |
 | [wan22-i2v/README.md](wan22-i2v/README.md) | Wan 2.2 I2V pipeline contract |
 | [ace-step-15-turbo/README.md](ace-step-15-turbo/README.md) | ACE-Step 1.5 XL Turbo pipeline contract |
-| [zonos2/README.md](zonos2/README.md) | ZONOS2 pipeline contract |
+| [zonos2/README.md](zonos2/README.md) | Failed ZONOS2 pipeline |
 | [zonos2/references.md](zonos2/references.md) | Papers and specifications for the ZONOS2 pipeline |
 | [ace-step-15-turbo/research/dit-mlp-fp4-error.md](ace-step-15-turbo/research/dit-mlp-fp4-error.md) | ACE-Step XL Turbo DiT MLP fp4 error ranking |
 | [zonos2/research/moe-fp4-error.md](zonos2/research/moe-fp4-error.md) | ZONOS2 MoE fp4 error ranking |
