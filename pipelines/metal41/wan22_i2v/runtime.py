@@ -337,7 +337,7 @@ class Runtime:
         ceiling = memory.budget()
         if self._memory_cap is not None:
             ceiling = min(ceiling, self._memory_cap)
-        return max(0, ceiling - memory.live() - memory.pending())
+        return max(0, ceiling - memory.live - memory.pending)
 
     def _sweep_owner(self) -> None:
         owner = getattr(self, "_owner", None)

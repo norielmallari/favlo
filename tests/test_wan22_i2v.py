@@ -595,6 +595,24 @@ def test_forward_scratch_grows_with_the_clip() -> None:
     assert longer > short
 
 
+def test_room_subtracts_live_and_pending(monkeypatch) -> None:
+    from wan22_i2v import runtime as runtime_mod
+
+    runtime = runtime_mod.Runtime.__new__(runtime_mod.Runtime)
+    runtime._memory_cap = 80
+
+    class Ledger:
+        @staticmethod
+        def budget() -> int:
+            return 100
+
+        live = 30
+        pending = 10
+
+    monkeypatch.setattr(runtime_mod, "memory", Ledger())
+    assert runtime._room() == 40
+
+
 def test_a_short_ledger_keeps_the_requested_clip(monkeypatch, tmp_path: Path) -> None:
     from wan22_i2v import runtime as runtime_mod
 
