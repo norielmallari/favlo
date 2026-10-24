@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 import objc
 
+from favlo.memory import memory
 from z_image_turbo.dit import velocity
 from z_image_turbo.formats import TILE_M, pad_to
 from z_image_turbo.hold import ImageHold, ImagePaused, ask
@@ -19,15 +20,26 @@ from z_image_turbo.metal import Gpu, reclaimable_bytes, wait_until_reclaimed
 from z_image_turbo.progress import ImageProgress, LoadProgress, sample_total
 from z_image_turbo.record import Plane, load, weight_bytes
 from z_image_turbo.schedule import STEPS, sigmas
-from z_image_turbo.scratch import MAX_EDGE, Scratch
+from z_image_turbo.scratch import MAX_EDGE, Scratch, scratch_bytes
 from z_image_turbo.text import embed_caption, prompt_ids
+
+_ONES = 1024 * 4
 
 
 class Runtime:
-    def __init__(self, path: Path, console: Any = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        console: Any = None,
+        *,
+        owner: str | None = None,
+        max_memory: str | int | None = None,
+    ) -> None:
         self.path = path
         self.console = console
         self._closed = True
+        self._owner = owner or f"z-image-turbo:{id(self)}"
+        self._memory_cap = _parse_memory(max_memory)
         self.gpu = None
         self.weights = {}
         self.scratch = None
@@ -39,16 +51,29 @@ class Runtime:
         """Load the record after ``close`` has dropped the previous device."""
         if not self._closed:
             return
-        self.gpu = Gpu()
-        # The process has no run loop. Drain the pool so only this object keeps the buffers.
-        with objc.autorelease_pool():
-            self.weights = self._load(self.path)
-            self.scratch = Scratch(self.gpu)
-            self.ones = self.gpu.keep(self.gpu.upload(np.ones(1024, dtype=np.float32)))
-            if self.source is None:
-                self.source = _source_of(self.path)
-            self.gpu.end()
-        self._closed = False
+        record_bytes = weight_bytes(self.path)
+        if record_bytes > self._room():
+            message = "the packed record does not fit"
+            raise RuntimeError(message)
+        self.gpu = Gpu(self._owner)
+        try:
+            # The process has no run loop. Drain the pool so only this object keeps the buffers.
+            with objc.autorelease_pool():
+                self.weights = self._load(self.path)
+                if self._room() < _ONES:
+                    message = "the packed record does not fit"
+                    raise RuntimeError(message)
+                self.ones = self.gpu.keep(self.gpu.upload(np.ones(1024, dtype=np.float32)))
+                if self._room() >= scratch_bytes(MAX_EDGE, MAX_EDGE):
+                    self.scratch = Scratch(self.gpu)
+                if self.source is None:
+                    self.source = _source_of(self.path)
+                self.gpu.end()
+            self._closed = False
+        except Exception:
+            self._closed = False
+            self.close()
+            raise
 
     def close(self) -> None:
         """Finish device work and drop every buffer before another pipeline allocates."""
@@ -58,21 +83,59 @@ class Runtime:
         freed = gpu.held_bytes() if gpu is not None and hasattr(gpu, "held_bytes") else 0
         before = reclaimable_bytes() if freed else 0
         self._closed = True
-        with objc.autorelease_pool():
-            if gpu is not None:
-                gpu.close()
-            for plane in self.weights.values():
-                plane.release()
-            self.weights.clear()
-            scratch = self.scratch
+        try:
+            with objc.autorelease_pool():
+                if gpu is not None:
+                    gpu.close()
+                for plane in self.weights.values():
+                    plane.release()
+                self.weights.clear()
+                scratch = self.scratch
+                self.scratch = None
+                if scratch is not None:
+                    scratch.release()
+                self.ones = None
+                self.gpu = None
+                gc.collect()
+            if freed:
+                wait_until_reclaimed(before, freed)
+        finally:
+            self._sweep_owner()
+
+    def _sweep_owner(self) -> None:
+        """Return this opening's spans. ``Gpu.close`` sweeps the same string."""
+        owner = getattr(self, "_owner", None)
+        if isinstance(owner, str) and owner:
+            memory.sweep(owner)
+
+    def _room(self) -> int:
+        """Bytes a new span may take. ``max_memory`` caps the ledger."""
+        ceiling = memory.budget()
+        cap = getattr(self, "_memory_cap", None)
+        if cap is not None:
+            ceiling = min(ceiling, cap)
+        return max(0, ceiling - memory.live - memory.pending)
+
+    def _reserve_scratch(self, width: int, height: int) -> None:
+        """Hold scratch for this image. A short ledger keeps the requested size."""
+        scratch = self.scratch
+        if scratch is not None and scratch.covers(width, height):
+            return
+        needed = scratch_bytes(width, height)
+        preferred = scratch_bytes(MAX_EDGE, MAX_EDGE)
+        held = 0 if scratch is None else scratch_bytes(scratch.width, scratch.height)
+        room = self._room() + held
+        if room >= preferred:
+            chosen = (MAX_EDGE, MAX_EDGE)
+        elif room >= needed:
+            chosen = (width, height)
+        else:
+            message = f"scratch for {width}x{height} does not fit"
+            raise RuntimeError(message)
+        if scratch is not None:
+            scratch.release()
             self.scratch = None
-            if scratch is not None:
-                scratch.release()
-            self.ones = None
-            self.gpu = None
-            gc.collect()
-        if freed:
-            wait_until_reclaimed(before, freed)
+        self.scratch = Scratch(self.gpu, chosen[0], chosen[1])
 
     def _load(self, path: Path) -> dict[str, Plane]:
         loading = LoadProgress(self.console, path.name)
@@ -103,6 +166,7 @@ class Runtime:
         if getattr(self, "_closed", False):
             self._open()
         _check_size(width, height, steps)
+        self._reserve_scratch(width, height)
         if done_steps and latent is None:
             message = "a resumed step needs its latent"
             raise ValueError(message)
@@ -329,9 +393,49 @@ def open_runtime(
     console: Any = None,
     resident_percent: float | None = None,
     max_memory: str | int | None = None,
+    owner: str | None = None,
 ) -> Runtime:
-    del kv_cache, resident_percent, max_memory
-    return Runtime(Path(path), console)
+    del kv_cache, resident_percent
+    return Runtime(Path(path), console, owner=owner, max_memory=max_memory)
+
+
+def _parse_memory(text: str | int | None) -> int | None:
+    """``32GiB``, ``512MiB``, or a byte count. Empty leaves the ledger uncapped."""
+    if text is None or text == "":
+        return None
+    if isinstance(text, int):
+        if text < 1:
+            message = f"maximum memory {text} is not positive"
+            raise ValueError(message)
+        return text
+    raw = str(text).strip().replace("_", "")
+    suffix = ""
+    digits = raw
+    for ending, name in (
+        ("gib", "GiB"),
+        ("mib", "MiB"),
+        ("gb", "GiB"),
+        ("mb", "MiB"),
+        ("g", "GiB"),
+        ("m", "MiB"),
+    ):
+        if raw.lower().endswith(ending):
+            suffix = name
+            digits = raw[: -len(ending)]
+            break
+    try:
+        number = int(digits)
+    except ValueError as exc:
+        message = f"maximum memory {text} is not a byte count"
+        raise ValueError(message) from exc
+    if number < 1:
+        message = f"maximum memory {text} is not positive"
+        raise ValueError(message)
+    if suffix == "GiB":
+        return number << 30
+    if suffix == "MiB":
+        return number << 20
+    return number
 
 
 def _decode_image(

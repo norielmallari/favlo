@@ -1,4 +1,4 @@
-"""One recorded generate. Set ZIMAGE_SMOKE=1. This is not part of a default run."""
+"""Shader checks run on every pytest. Set ZIMAGE_SMOKE=1 to generate the recorded image."""
 
 from __future__ import annotations
 
@@ -9,11 +9,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("ZIMAGE_SMOKE") != "1",
-    reason="set ZIMAGE_SMOKE=1 to generate",
-)
-
 ROOT = Path(__file__).resolve().parents[1]
 RECORD = ROOT / "models" / "Z-Image-Turbo-fp4"
 NOTE = ROOT / "docs" / "z-image-turbo" / "smoke.json"
@@ -23,6 +18,16 @@ WIDTH = 512
 HEIGHT = 512
 
 
+def test_kernels() -> None:
+    from z_image_turbo.commands import kernels
+
+    assert kernels() == 0
+
+
+@pytest.mark.skipif(
+    os.environ.get("ZIMAGE_SMOKE") != "1",
+    reason="set ZIMAGE_SMOKE=1 to generate",
+)
 def test_generate_matches_the_recorded_latent() -> None:
     if not (RECORD / "manifest.json").is_file():
         pytest.skip("packed record is not present")

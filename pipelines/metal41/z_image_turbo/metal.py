@@ -114,8 +114,8 @@ _NAMES = (
 class Gpu:
     """One device and one command encoder. ``end`` waits for the batch."""
 
-    def __init__(self) -> None:
-        self._owner = f"z-image:{id(self)}"
+    def __init__(self, owner: str | None = None) -> None:
+        self._owner = owner or f"z-image-turbo:{id(self)}"
         self.device = memory.device
         self.queue = memory.make_queue()
         source = _SHADER.read_text(encoding="utf-8")
@@ -185,6 +185,14 @@ class Gpu:
         """Keep this buffer until ``close``. Other buffers are temporary."""
         self._kept.add(id(buf))
         return buf
+
+    def forget(self, buf: Any) -> None:
+        """Release one kept buffer before ``close``."""
+        self._kept.discard(id(buf))
+        self._owned = [item for item in self._owned if item is not buf]
+        release = getattr(buf, "release", None)
+        if callable(release):
+            release()
 
     def reclaim(self) -> None:
         """Finish the open command buffer and release temporary buffers.

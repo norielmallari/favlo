@@ -19,50 +19,87 @@ DIT_HIDDEN = 3840
 DIT_FFN = 10240
 
 
+def scratch_bytes(width: int, height: int) -> int:
+    """Bytes of the scratch buffers for one image of this size."""
+    return sum(_sizes(width, height).values())
+
+
+def _sizes(width: int, height: int) -> dict[str, int]:
+    image = (width // 16) * (height // 16)
+    cap_rows = pad_to(MAX_CAPTION, TILE_M)
+    image_rows = pad_to(image, TILE_M)
+    seq_rows = pad_to(MAX_CAPTION + image, TILE_M)
+    latent_n = 16 * (height // 8) * (width // 8)
+    pos_bytes = seq_rows * 3 * 4
+    return {
+        "text_h": cap_rows * TEXT_HIDDEN * 4,
+        "text_h2": cap_rows * TEXT_HIDDEN * 4,
+        "text_q": cap_rows * TEXT_Q * 4,
+        "text_k": cap_rows * TEXT_Q * 4,
+        "text_v": cap_rows * TEXT_Q * 4,
+        "text_a": cap_rows * TEXT_Q * 4,
+        "text_ffn": cap_rows * TEXT_FFN * 4,
+        "text_ffn2": cap_rows * TEXT_FFN * 4,
+        "text_out": cap_rows * TEXT_FFN * 4,
+        "cap": cap_rows * DIT_HIDDEN * 4,
+        "image": image_rows * DIT_HIDDEN * 4,
+        "image2": image_rows * DIT_HIDDEN * 4,
+        "seq": seq_rows * DIT_HIDDEN * 4,
+        "seq2": seq_rows * DIT_HIDDEN * 4,
+        "q": seq_rows * DIT_HIDDEN * 4,
+        "k": seq_rows * DIT_HIDDEN * 4,
+        "v": seq_rows * DIT_HIDDEN * 4,
+        "attn": seq_rows * DIT_HIDDEN * 4,
+        "ffn": seq_rows * DIT_FFN * 4,
+        "ffn2": seq_rows * DIT_FFN * 4,
+        "out": seq_rows * DIT_FFN * 4,
+        "wide": 64 * 15360 * 4,
+        "mod": 64 * 15360 * 4,
+        "cond": 64 * 1024 * 4,
+        "time": 64 * 256 * 4,
+        "tokens": image_rows * 256 * 4,
+        "latent": latent_n * 4,
+        "vel": latent_n * 4,
+        "pos_noise": pos_bytes,
+        "pos_text": pos_bytes,
+        "pos_main": pos_bytes,
+    }
+
+
 class Scratch:
-    def __init__(self, gpu: Gpu) -> None:
-        image = (MAX_EDGE // 16) ** 2
+    def __init__(self, gpu: Gpu, width: int = MAX_EDGE, height: int = MAX_EDGE) -> None:
+        sizes = _sizes(width, height)
+        image = (width // 16) * (height // 16)
+        self.width = width
+        self.height = height
+        self._gpu = gpu
         self.cap_rows = pad_to(MAX_CAPTION, TILE_M)
         self.image_rows = pad_to(image, TILE_M)
         self.seq_rows = pad_to(MAX_CAPTION + image, TILE_M)
-        self.text_h = gpu.keep(gpu.empty(self.cap_rows * TEXT_HIDDEN * 4))
-        self.text_h2 = gpu.keep(gpu.empty(self.cap_rows * TEXT_HIDDEN * 4))
-        self.text_q = gpu.keep(gpu.empty(self.cap_rows * TEXT_Q * 4))
-        self.text_k = gpu.keep(gpu.empty(self.cap_rows * TEXT_Q * 4))
-        self.text_v = gpu.keep(gpu.empty(self.cap_rows * TEXT_Q * 4))
-        self.text_a = gpu.keep(gpu.empty(self.cap_rows * TEXT_Q * 4))
-        self.text_ffn = gpu.keep(gpu.empty(self.cap_rows * TEXT_FFN * 4))
-        self.text_ffn2 = gpu.keep(gpu.empty(self.cap_rows * TEXT_FFN * 4))
-        self.text_out = gpu.keep(gpu.empty(self.cap_rows * TEXT_FFN * 4))
-        self.cap = gpu.keep(gpu.empty(self.cap_rows * DIT_HIDDEN * 4))
-        self.image = gpu.keep(gpu.empty(self.image_rows * DIT_HIDDEN * 4))
-        self.image2 = gpu.keep(gpu.empty(self.image_rows * DIT_HIDDEN * 4))
-        self.seq = gpu.keep(gpu.empty(self.seq_rows * DIT_HIDDEN * 4))
-        self.seq2 = gpu.keep(gpu.empty(self.seq_rows * DIT_HIDDEN * 4))
-        self.q = gpu.keep(gpu.empty(self.seq_rows * DIT_HIDDEN * 4))
-        self.k = gpu.keep(gpu.empty(self.seq_rows * DIT_HIDDEN * 4))
-        self.v = gpu.keep(gpu.empty(self.seq_rows * DIT_HIDDEN * 4))
-        self.attn = gpu.keep(gpu.empty(self.seq_rows * DIT_HIDDEN * 4))
-        self.ffn = gpu.keep(gpu.empty(self.seq_rows * DIT_FFN * 4))
-        self.ffn2 = gpu.keep(gpu.empty(self.seq_rows * DIT_FFN * 4))
-        self.out = gpu.keep(gpu.empty(self.seq_rows * DIT_FFN * 4))
-        self.wide = gpu.keep(gpu.empty(64 * 15360 * 4))
-        self.mod = gpu.keep(gpu.empty(64 * 15360 * 4))
-        self.cond = gpu.keep(gpu.empty(64 * 1024 * 4))
-        self.time = gpu.keep(gpu.empty(64 * 256 * 4))
-        self.tokens = gpu.keep(gpu.empty(self.image_rows * 256 * 4))
-        latent_n = 16 * (MAX_EDGE // 8) ** 2
-        self.latent = gpu.keep(gpu.empty(latent_n * 4))
-        self.vel = gpu.keep(gpu.empty(latent_n * 4))
-        pos_bytes = self.seq_rows * 3 * 4
-        self.pos_noise = gpu.keep(gpu.empty(pos_bytes))
-        self.pos_text = gpu.keep(gpu.empty(pos_bytes))
-        self.pos_main = gpu.keep(gpu.empty(pos_bytes))
+        self.latent_count = 16 * (height // 8) * (width // 8)
+        for name, nbytes in sizes.items():
+            setattr(self, name, gpu.keep(gpu.empty(nbytes)))
+
+    def covers(self, width: int, height: int) -> bool:
+        """True when these buffers can hold an image of this size."""
+        image = (width // 16) * (height // 16)
+        latent = 16 * (height // 8) * (width // 8)
+        return (
+            self.image_rows >= pad_to(image, TILE_M)
+            and self.seq_rows >= pad_to(MAX_CAPTION + image, TILE_M)
+            and self.latent_count >= latent
+        )
 
     def release(self) -> None:
         """Drop every scratch buffer. The device then can free that memory."""
+        gpu = getattr(self, "_gpu", None)
+        self._gpu = None
         for name in _BUFFERS:
+            buf = getattr(self, name, None)
             setattr(self, name, None)
+            forget = getattr(gpu, "forget", None)
+            if buf is not None and callable(forget):
+                forget(buf)
 
 
 _BUFFERS = (

@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
         print(download(), flush=True)
         return 0
     if args.command == "kernels":
-        return _kernels()
+        return kernels()
     if args.command == "quantize":
         return _quantize(args.source, args.out)
     if args.command == "generate":
@@ -82,7 +82,7 @@ def _generate(args: argparse.Namespace) -> int:
     return 0
 
 
-def _kernels() -> int:
+def kernels() -> int:
     from z_image_turbo.metal import Gpu
 
     gpu = Gpu()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import threading
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -22,9 +23,9 @@ from z_image_turbo.progress import (
     sample_total,
 )
 from z_image_turbo.record import Plane, load, weight_bytes
-from z_image_turbo.runtime import Runtime, _patchify, _unpatchify
+from z_image_turbo.runtime import Runtime, _patchify, _unpatchify, open_runtime
 from z_image_turbo.schedule import sigmas, timestep
-from z_image_turbo.scratch import MAX_EDGE, Scratch
+from z_image_turbo.scratch import MAX_EDGE, Scratch, scratch_bytes
 
 
 def test_stored_k_pads_a_conv_row() -> None:
@@ -67,6 +68,105 @@ def test_embedded_time_is_the_complement() -> None:
 def test_max_edge_is_the_training_square() -> None:
     assert MAX_EDGE == 1280
     assert MAX_EDGE % 16 == 0
+
+
+def _covering_scratch() -> Scratch:
+    scratch = Scratch.__new__(Scratch)
+    scratch.width = 16
+    scratch.height = 16
+    scratch.image_rows = 64
+    scratch.seq_rows = 1600
+    scratch.latent_count = 64
+    return scratch
+
+
+def test_open_runtime_forwards_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake(path, console=None, *, owner=None, max_memory=None):
+        captured["path"] = path
+        captured["owner"] = owner
+        captured["max_memory"] = max_memory
+        return "runtime"
+
+    monkeypatch.setattr("z_image_turbo.runtime.Runtime", fake)
+    assert open_runtime(Path("record"), owner="z-image-turbo:7", max_memory="16GiB") == "runtime"
+    assert captured["owner"] == "z-image-turbo:7"
+    assert captured["max_memory"] == "16GiB"
+
+
+def test_a_missing_record_keeps_the_passed_owner(tmp_path: Path) -> None:
+    owner = "z-image-turbo:7"
+    held: dict[str, str] = {}
+
+    class _Probe(Runtime):
+        def __init__(self, path: Path, console=None, *, owner=None, max_memory=None) -> None:
+            try:
+                super().__init__(path, console, owner=owner, max_memory=max_memory)
+            except FileNotFoundError:
+                held["owner"] = self._owner
+                raise
+
+    with pytest.raises(FileNotFoundError):
+        _Probe(tmp_path, owner=owner)
+    assert held["owner"] == owner
+
+
+def test_a_missing_record_mints_an_owner(tmp_path: Path) -> None:
+    held: dict[str, str] = {}
+
+    class _Probe(Runtime):
+        def __init__(self, path: Path, console=None, *, owner=None, max_memory=None) -> None:
+            try:
+                super().__init__(path, console, owner=owner, max_memory=max_memory)
+            except FileNotFoundError:
+                held["owner"] = self._owner
+                raise
+
+    with pytest.raises(FileNotFoundError):
+        _Probe(tmp_path)
+    minted = held["owner"]
+    assert minted.startswith("z-image-turbo:")
+    assert minted != "z-image-turbo:7"
+
+
+def test_scratch_shrinks_with_the_image() -> None:
+    assert scratch_bytes(512, 512) < scratch_bytes(MAX_EDGE, MAX_EDGE)
+
+
+def test_a_short_ledger_refuses_the_requested_image() -> None:
+    runtime = Runtime.__new__(Runtime)
+    runtime.scratch = None
+    runtime._memory_cap = None
+    runtime._room = lambda: scratch_bytes(16, 32) - 1
+    with pytest.raises(RuntimeError, match="16x32"):
+        runtime._reserve_scratch(16, 32)
+    assert runtime.scratch is None
+
+
+def test_a_tight_ledger_reserves_the_requested_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    created: dict[str, tuple[int, int]] = {}
+
+    def fake_scratch(gpu, width=MAX_EDGE, height=MAX_EDGE):
+        del gpu
+        created["size"] = (width, height)
+        scratch = Scratch.__new__(Scratch)
+        scratch.width = width
+        scratch.height = height
+        scratch.image_rows = 1
+        scratch.seq_rows = 1
+        scratch.latent_count = 1
+        return scratch
+
+    monkeypatch.setattr("z_image_turbo.runtime.Scratch", fake_scratch)
+    runtime = Runtime.__new__(Runtime)
+    runtime.gpu = object()
+    runtime.scratch = None
+    needed = scratch_bytes(512, 512)
+    runtime._room = lambda: needed
+    runtime._reserve_scratch(512, 512)
+    assert created["size"] == (512, 512)
+    assert needed < scratch_bytes(MAX_EDGE, MAX_EDGE)
 
 
 def test_shifted_knots_have_eight_intervals() -> None:
@@ -436,6 +536,7 @@ def test_generate_closes_the_sample_row(monkeypatch) -> None:
 
     monkeypatch.setattr(Runtime, "_run", _run)
     runtime = Runtime.__new__(Runtime)
+    runtime.scratch = _covering_scratch()
     runtime.console = _bars(store)
     pixels, digest, timing = runtime.generate("a cat", 16, 16, 8, 0)
     assert digest == "digest"
@@ -458,6 +559,7 @@ def test_a_paused_generate_closes_the_sample_row(monkeypatch) -> None:
 
     monkeypatch.setattr(Runtime, "_run", _run)
     runtime = Runtime.__new__(Runtime)
+    runtime.scratch = _covering_scratch()
     runtime.console = _bars(store)
     latent = np.zeros((16, 2, 2), dtype=np.float32)
     with pytest.raises(ImagePaused):
@@ -476,6 +578,7 @@ def test_a_cancelled_generate_closes_the_sample_row(monkeypatch) -> None:
 
     monkeypatch.setattr(Runtime, "_run", _run)
     runtime = Runtime.__new__(Runtime)
+    runtime.scratch = _covering_scratch()
     runtime.console = _bars(store)
     with pytest.raises(ImagePaused):
         runtime.generate("a cat", 16, 16, 8, 0)
@@ -491,6 +594,7 @@ def test_a_failed_generate_closes_the_sample_row(monkeypatch) -> None:
 
     monkeypatch.setattr(Runtime, "_run", _run)
     runtime = Runtime.__new__(Runtime)
+    runtime.scratch = _covering_scratch()
     runtime.console = _bars(store)
     with pytest.raises(RuntimeError, match="latent is not finite"):
         runtime.generate("a cat", 16, 16, 8, 0)
@@ -505,6 +609,7 @@ def test_generate_without_a_console_prints_the_lines(monkeypatch, capsys) -> Non
 
     monkeypatch.setattr(Runtime, "_run", _run)
     runtime = Runtime.__new__(Runtime)
+    runtime.scratch = _covering_scratch()
     runtime.console = None
     runtime.generate("a cat", 16, 16, 8, 0)
     text = capsys.readouterr().out
