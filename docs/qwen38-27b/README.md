@@ -1,8 +1,8 @@
 # Qwen3.8-27B
 
-As-built note for the `qwen38-27b` pipeline. The process contract is [../../ARCHITECTURE.md](../../ARCHITECTURE.md). This directory wins for this pipeline's records and kernels. Another pipeline does not edit it.
+As-built note for the `qwen38-27b` pipeline. Download, pack, and the first chat are [SETUP.md](SETUP.md). The process contract is [../../ARCHITECTURE.md](../../ARCHITECTURE.md). This directory wins for this pipeline's records and kernels. Another pipeline does not edit it.
 
-Clients reach this pipeline through `favlo serve`. `GET /v1/models` lists it once a record is registered, and the `model` field on `POST /v1/chat/completions` loads it. `kernels`, `quantize`, `bf16`, `complete`, and `models` require `favlo --qwen38-27b`. That flag loads `pipelines/metal41/qwen38-27b.py`, which loads `qwen38_27b`. The package does not import `qwen38_flash_next` or `qwen36_35b_a3b`.
+Clients reach this pipeline through `favlo serve`. `GET /v1/models` lists it once a record is registered, and the `model` field on `POST /v1/chat/completions` loads it. `download`, `quantize`, `delete`, `kernels`, `bf16`, `complete`, and `models` require `favlo --qwen38-27b`. That flag loads `pipelines/metal41/qwen38-27b.py`, which loads `qwen38_27b`. The package does not import `qwen38_flash_next` or `qwen36_35b_a3b`.
 
 The official checkpoint is [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B). Those weights are under the Apache License, Version 2.0. Device spans come from the process memory manager. The wire budget is that manager's reclaimable bytes plus the spans it still holds. `open_runtime` takes `owner` and every span from that opening uses it. `close` sweeps that string. A command that omits `owner` mints one from this runtime's id. The fit still starts at a 2048-token chunk.
 
@@ -15,6 +15,8 @@ The DeltaNet state is float32, 48 heads of `128×128`. The step decays the state
 ## Record
 
 `quantize` streams a Hugging Face BF16 checkout into `models/Qwen3.8-27B-fp4`. Every matrix is fp4 E2M1 with an E8M0 scale every 32 along K. That includes the embedding, the projections, the feed-forward, `lm_head`, the MTP block, and the vision tower. Rows are stored as a multiple of 64 and K as a multiple of 256. One-dimensional parameters stay float16: RMSNorm gains, `A_log`, `dt_bias`, and biases. The depthwise convolution stays float16 with shape `[10240, 4]`. `--ffn-fp8` is a percentage of the 64 language feed-forward layers. Omitting it, or passing an empty value, promotes none. `100` stores all 64 as fp8 E4M3 and writes `models/Qwen3.8-27B-fp8`. A percentage in between writes `models/Qwen3.8-27B-fp8-fp4`. The layer count is the largest whole number that does not exceed that percentage, so `20` is 12 layers. Those layers are the highest BF16-to-fp4 relative errors. Gate, up, and down move together. The MTP feed-forward stays fp4. A partial percentage writes `ffn_error.json` before packing. A finished directory has `manifest.json` with `complete: true`. Running quantize again on that directory returns it when the percentage matches. An unfinished directory resumes from `quantize_progress.json`. The format bound is [research/ffn-fp8-budget.md](research/ffn-fp8-budget.md). Prefill reads an fp8 feed-forward matrix with `prefill_fp8_n64`. Decode reads gate, up, and down with `gemv_fp8_x4`. A decode step submits every 4 layers as its own command buffer.
+
+`delete <folder-or-alias>` removes that registry row, the packed directory under `models/`, a checkout still under `models/` when no other row uses it, and that record's prefix files under `~/.favlo/prefix/qwen38-27b/`. A checkout outside `models/` stays. A `:instruct` or `:thinking` suffix deletes that same model.
 
 `bf16` does not run a layer against the stored BF16 values.
 

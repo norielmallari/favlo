@@ -237,6 +237,7 @@ def test_intro_request_names_save_intro() -> None:
     assert "one short sentence" in INSTRUCTIONS
     assert "read_setup" in INSTRUCTIONS
     assert "qwen36-35b-a3b" in INSTRUCTIONS
+    assert "qwen38-27b" in INSTRUCTIONS
     assert "run_setup" in INSTRUCTIONS
     assert "Do not use violent, sexual, NSFW, erotic, or obscene language" in system
     assert "longer" in system

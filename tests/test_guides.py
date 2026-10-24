@@ -40,16 +40,20 @@ def test_history_is_the_carrot_naming() -> None:
     assert "gave him his name" in text
 
 
-def test_the_35b_setup_guide_is_loaded_by_pipeline_id() -> None:
+def test_setup_guides_load_by_pipeline_id() -> None:
     assert "qwen36-35b-a3b" in setup_pipelines()
+    assert "qwen38-27b" in setup_pipelines()
     text = read_setup("qwen36-35b-a3b")
     assert "uv run favlo --qwen36-35b-a3b setup" in text
     assert "--keep-bf16" in text
     assert "delete" in text
+    later = read_setup("qwen38-27b")
+    assert "uv run favlo --qwen38-27b download" in later
+    assert "uv run favlo --qwen38-27b delete qwen38-27b" in later
     with pytest.raises(ValueError, match="unknown setup guide"):
         read_setup("../qwen36-35b-a3b")
-    with pytest.raises(ValueError, match="unknown setup guide qwen38-27b"):
-        read_setup("qwen38-27b")
+    with pytest.raises(ValueError, match="unknown setup guide"):
+        read_setup("qwen38-flash-next")
 
 
 def test_an_unknown_guide_is_rejected() -> None:

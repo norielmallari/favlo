@@ -1161,3 +1161,92 @@ def test_shader_dispatches_match_the_host_formulas() -> None:
     report = run_checks()
     failed = [name for name, ok, _detail in report["rows"] if not ok]
     assert report["ok"], failed
+
+
+def test_delete_removes_the_record_the_checkout_and_the_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    from favlo.prefix import checkpoint_digest
+    from favlo.registry import register_quantized
+    from qwen38_27b.commands import main
+
+    def models_dir(root: Path | None = None) -> Path:
+        del root
+        return tmp_path / "models"
+
+    prefix_root = tmp_path / "prefix"
+    monkeypatch.setattr("qwen38_27b.commands.models_dir", models_dir)
+    monkeypatch.setattr("favlo.registry.models_dir", models_dir)
+    monkeypatch.setattr("qwen38_27b.commands.default_prefix_dir", lambda: prefix_root)
+    packed = tmp_path / "models" / "Qwen3.8-27B-fp4"
+    packed.mkdir(parents=True)
+    (packed / "manifest.json").write_text(json.dumps({"complete": True}) + "\n")
+    mixed = tmp_path / "models" / "Qwen3.8-27B-fp8-fp4"
+    mixed.mkdir()
+    (mixed / "manifest.json").write_text(json.dumps({"complete": True, "mixed": True}) + "\n")
+    checkout = tmp_path / "models" / "Qwen3.8-27B-bf16"
+    checkout.mkdir()
+    (checkout / "config.json").write_text("{}\n")
+    kept = tmp_path / "models" / "kept-model"
+    kept.mkdir()
+    (kept / "manifest.json").write_text(json.dumps({"complete": True, "kept": True}) + "\n")
+    outside = tmp_path / "outside-bf16"
+    outside.mkdir()
+    other = tmp_path / "models" / "other-model"
+    other.mkdir()
+    (other / "manifest.json").write_text("{}\n")
+    register_quantized(
+        "Qwen3.8-27B-fp4",
+        source=checkout,
+        alias="qwen38-27b",
+        pipeline="qwen38-27b",
+        runtime="metal41",
+    )
+    register_quantized(
+        "Qwen3.8-27B-fp8-fp4",
+        source=checkout,
+        alias=None,
+        pipeline="qwen38-27b",
+        runtime="metal41",
+    )
+    register_quantized(
+        "kept-model",
+        source=outside,
+        alias=None,
+        pipeline="qwen38-27b",
+        runtime="metal41",
+    )
+    register_quantized(
+        "other-model",
+        source=outside,
+        alias=None,
+        pipeline="qwen36-35b-a3b",
+        runtime="metal41",
+    )
+    digest = checkpoint_digest(packed).hex()
+    partition = prefix_root / "qwen38-27b" / digest
+    partition.mkdir(parents=True)
+    (partition / "cache.bin").write_bytes(b"x")
+    assert main(["delete", "other-model"]) == 1
+    assert other.is_dir()
+    assert main(["delete", "qwen38-27b:instruct"]) == 0
+    assert not packed.exists()
+    assert checkout.is_dir()
+    assert not partition.exists()
+    assert mixed.is_dir()
+    assert main(["delete", "Qwen3.8-27B-fp8-fp4"]) == 0
+    assert not mixed.exists()
+    assert not checkout.exists()
+    assert outside.is_dir()
+    assert kept.is_dir()
+    registry = json.loads((tmp_path / "models" / "registry.json").read_text())
+    assert "Qwen3.8-27B-fp4" not in registry["models"]
+    assert "Qwen3.8-27B-fp8-fp4" not in registry["models"]
+    assert "kept-model" in registry["models"]
+    assert "other-model" in registry["models"]
+    assert main(["delete", "kept-model"]) == 0
+    assert not kept.exists()
+    assert outside.is_dir()
+    assert other.is_dir()

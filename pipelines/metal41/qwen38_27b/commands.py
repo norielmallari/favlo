@@ -5,18 +5,22 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from favlo.hf_cache import snapshot_dir
+from favlo.prefix import checkpoint_digest, default_prefix_dir
 from favlo.registry import (
     add_model,
     choose_complete,
     format_listing,
+    load_registry,
     models_dir,
     register_quantized,
+    save_registry,
     set_alias,
 )
 from qwen38_27b.chat import STOP, decode_text, encode_chat
@@ -61,6 +65,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     complete.add_argument("--kv-cache", choices=("e4m3",), default="e4m3")
     complete.add_argument("--max-memory", default=None, help="maximum bytes, such as 32GiB")
     sub.add_parser("kernels", help="compile the shader library and run the dispatch checks")
+    delete = sub.add_parser("delete", help="remove a packed model and its registry row")
+    delete.add_argument("model", help="folder name or alias")
     models = sub.add_parser("models", help="list or edit the flavor registry")
     models_sub = models.add_subparsers(dest="models_command")
     add = models_sub.add_parser("add", help="register a finished record directory")
@@ -82,6 +88,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _quantize(args)
     if args.command == "download":
         return _download(args)
+    if args.command == "delete":
+        return _delete(args)
     if args.command == "complete":
         return _complete(args)
     sys.stderr.write("qwen38-27b bf16 layer check is not this command\n")
@@ -196,6 +204,104 @@ def _complete(args: argparse.Namespace) -> int:
         return 1
     sys.stdout.write(text + "\n")
     return 0
+
+
+def _delete(args: argparse.Namespace) -> int:
+    """Drop one packed model, its prefix partition, a private checkout, and the row."""
+    text = args.model.strip()
+    base = text.split(":", 1)[0] if ":" in text else text
+    if not base:
+        sys.stderr.write("model id is empty\n")
+        return 1
+    try:
+        data = load_registry()
+        folder = _registered_folder(data, base)
+        if folder is None:
+            sys.stderr.write(f"unknown model {text}\n")
+            return 1
+        entry = data["models"][folder]
+        if entry.get("pipeline") != PIPELINE:
+            sys.stderr.write(f"{folder} is not a {PIPELINE} model\n")
+            return 1
+        source = entry.get("source")
+        _drop_prefix(folder, data)
+        _remove_checkout(models_dir() / folder)
+        if isinstance(source, str) and source and not _source_shared(data, folder, source):
+            _remove_checkout(Path(source))
+        data["models"].pop(folder, None)
+        save_registry(data)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
+    sys.stdout.write(f"deleted {folder}\n")
+    return 0
+
+
+def _registered_folder(data: dict, base: str) -> str | None:
+    models = data["models"]
+    if base in models:
+        return base
+    for folder, entry in models.items():
+        if entry.get("alias") == base:
+            return folder
+    return None
+
+
+def _source_shared(data: dict, folder: str, source: str) -> bool:
+    try:
+        wanted = Path(source).expanduser().resolve()
+    except OSError:
+        return True
+    for other, entry in data["models"].items():
+        if other == folder:
+            continue
+        stored = entry.get("source")
+        if not isinstance(stored, str) or not stored:
+            continue
+        try:
+            if Path(stored).expanduser().resolve() == wanted:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _drop_prefix(folder: str, data: dict) -> None:
+    record = models_dir() / folder
+    try:
+        digest = checkpoint_digest(record).hex()
+    except OSError:
+        return
+    for other in data["models"]:
+        if other == folder:
+            continue
+        try:
+            if checkpoint_digest(models_dir() / other).hex() == digest:
+                return
+        except OSError:
+            continue
+    partition = default_prefix_dir() / PIPELINE / digest
+    if partition.is_symlink() or not partition.is_dir():
+        return
+    root = default_prefix_dir().resolve()
+    target = partition.resolve()
+    if target == root or root not in target.parents:
+        return
+    shutil.rmtree(target)
+
+
+def _remove_checkout(path: Path) -> None:
+    """Remove a directory that lives under ``models/``."""
+    root = models_dir().resolve()
+    try:
+        target = path.expanduser().resolve()
+    except OSError:
+        return
+    if target == root or root not in target.parents:
+        return
+    if path.is_symlink() or not target.is_dir():
+        return
+    shutil.rmtree(target)
 
 
 def _kernels() -> int:
