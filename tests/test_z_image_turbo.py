@@ -22,7 +22,7 @@ from z_image_turbo.progress import (
     ImageProgress,
     sample_total,
 )
-from z_image_turbo.record import Plane, load, weight_bytes
+from z_image_turbo.record import Plane, load, quantize, weight_bytes
 from z_image_turbo.runtime import Runtime, _patchify, _unpatchify, open_runtime
 from z_image_turbo.schedule import sigmas, timestep
 from z_image_turbo.scratch import MAX_EDGE, Scratch, scratch_bytes
@@ -671,6 +671,44 @@ def test_a_plain_console_keeps_the_load_print(monkeypatch, tmp_path) -> None:
     assert runtime._load(tmp_path) == {}
 
 
+def test_quantize_accepts_one_safetensors_file(tmp_path: Path) -> None:
+    weights = tmp_path / "custom.safetensors"
+    matrix = np.arange(64 * 32, dtype=np.float32).reshape(64, 32)
+    _write_safetensors(
+        weights,
+        {
+            "layers.0.weight": matrix,
+            "cap_pad_token": np.ones(4, dtype=np.float32),
+        },
+    )
+    tokenizer = tmp_path / "tokenizer-tree"
+    (tokenizer / "tokenizer").mkdir(parents=True)
+    dest = tmp_path / "packed"
+    quantize(weights, dest, tokenizer_source=tokenizer)
+    body = json.loads((dest / "manifest.json").read_text(encoding="utf-8"))
+    assert body["complete"] is True
+    assert body["source"] == str(tokenizer.resolve())
+    assert body["tensors"]["layers.0.weight"]["plane"] == "fp4"
+    assert body["tensors"]["cap_pad_token"]["plane"] == "f16"
+
+
+def test_quantize_accepts_a_directory_of_safetensors(tmp_path: Path) -> None:
+    folder = tmp_path / "shards"
+    folder.mkdir()
+    _write_safetensors(
+        folder / "a.safetensors",
+        {"layers.0.weight": np.ones((64, 32), dtype=np.float32)},
+    )
+    _write_safetensors(
+        folder / "b.safetensors",
+        {"layers.1.weight": np.ones((64, 32), dtype=np.float32)},
+    )
+    dest = tmp_path / "packed"
+    quantize(folder, dest, tokenizer_source=tmp_path / "tok")
+    body = json.loads((dest / "manifest.json").read_text(encoding="utf-8"))
+    assert set(body["tensors"]) == {"layers.0.weight", "layers.1.weight"}
+
+
 def test_load_counts_bytes_and_skips_the_print(tmp_path, capsys) -> None:
     weights = tmp_path / "weights"
     weights.mkdir()
@@ -700,6 +738,31 @@ def test_load_counts_bytes_and_skips_the_print(tmp_path, capsys) -> None:
     assert capsys.readouterr().out == ""
     load(tmp_path, _Upload())
     assert capsys.readouterr().out == "load 0/2\nload 2 tensors\n"
+
+
+def _write_safetensors(path: Path, arrays: dict[str, np.ndarray]) -> None:
+    import struct
+
+    header: dict[str, object] = {}
+    offset = 0
+    blobs: list[bytes] = []
+    for name, array in arrays.items():
+        raw = np.ascontiguousarray(array).tobytes()
+        dtype = "F32" if array.dtype == np.float32 else "F16"
+        header[name] = {
+            "dtype": dtype,
+            "shape": list(array.shape),
+            "data_offsets": [offset, offset + len(raw)],
+        }
+        blobs.append(raw)
+        offset += len(raw)
+    header["__metadata__"] = {}
+    payload = json.dumps(header).encode("utf-8")
+    with path.open("wb") as handle:
+        handle.write(struct.pack("<Q", len(payload)))
+        handle.write(payload)
+        for blob in blobs:
+            handle.write(blob)
 
 
 class _Row:

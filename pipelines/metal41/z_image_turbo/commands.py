@@ -17,8 +17,23 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("setup", help="download Tongyi-MAI/Z-Image-Turbo from the repository")
     sub.add_parser("kernels", help="dispatch the fp4 matmul and the attention shader")
-    quant = sub.add_parser("quantize", help="pack the checkpoint to fp4")
-    quant.add_argument("--source", type=Path)
+    quant = sub.add_parser("quantize", help="pack safetensors weights to fp4")
+    quant.add_argument(
+        "--weights",
+        "-w",
+        type=Path,
+        help="one .safetensors file or a directory of shards",
+    )
+    quant.add_argument(
+        "--source",
+        type=Path,
+        help="Diffusers checkout; same as --weights when omitted",
+    )
+    quant.add_argument(
+        "--tokenizer-source",
+        type=Path,
+        help="tree with tokenizer/ when weights are not a full checkout",
+    )
     quant.add_argument("--out", type=Path)
     gen = sub.add_parser("generate", help="write one PNG")
     gen.add_argument("--prompt", required=True)
@@ -37,23 +52,28 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "kernels":
         return kernels()
     if args.command == "quantize":
-        return _quantize(args.source, args.out)
+        return _quantize(args.weights, args.source, args.tokenizer_source, args.out)
     if args.command == "generate":
         return _generate(args)
     return 2
 
 
-def _quantize(source: Path | None, out: Path | None) -> int:
+def _quantize(
+    weights: Path | None,
+    source: Path | None,
+    tokenizer_source: Path | None,
+    out: Path | None,
+) -> int:
     from favlo.registry import register_quantized
     from z_image_turbo.record import quantize
     from z_image_turbo.source import source_dir
 
-    origin = source or source_dir()
+    origin = weights or source or source_dir()
     dest = out or origin.parent / "Z-Image-Turbo-fp4"
-    quantize(origin, dest)
+    quantize(origin, dest, tokenizer_source=tokenizer_source)
     register_quantized(
         dest.name,
-        source=origin,
+        source=tokenizer_source or (origin if origin.is_dir() else source_dir()),
         alias=None,
         pipeline="z-image-turbo",
         runtime="metal41",

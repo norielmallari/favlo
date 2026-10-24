@@ -43,7 +43,12 @@ class Plane:
         self.scale = None
 
 
-def quantize(source: Path, dest: Path) -> Path:
+def quantize(
+    weights: Path,
+    dest: Path,
+    *,
+    tokenizer_source: Path | None = None,
+) -> Path:
     """Pack generate-path weights. The VAE encoder is left unpacked."""
     manifest_path = dest / "manifest.json"
     if manifest_path.is_file():
@@ -52,14 +57,21 @@ def quantize(source: Path, dest: Path) -> Path:
             return dest
     if dest.exists():
         shutil.rmtree(dest)
-    weights = dest / "weights"
-    weights.mkdir(parents=True)
+    root = _tokenizer_root(weights, tokenizer_source)
+    weights = weights.resolve()
+    out_weights = dest / "weights"
+    out_weights.mkdir(parents=True)
     tensors: dict[str, Any] = {}
-    for shard, header, data_start in _shards(source):
+    seen: set[str] = set()
+    for shard, header, data_start in _shards(weights):
         print(f"quantize {shard.name}", flush=True)
         for key, info in header.items():
             if key == "__metadata__" or key.startswith("encoder."):
                 continue
+            if key in seen:
+                message = f"tensor {key} appears in more than one safetensors file"
+                raise ValueError(message)
+            seen.add(key)
             array = _read(shard, info, data_start)
             kind = _kind(key, array.shape)
             entry: dict[str, Any] = {
@@ -69,15 +81,15 @@ def quantize(source: Path, dest: Path) -> Path:
             if kind == "f16":
                 raw = np.ascontiguousarray(array, dtype=np.float32).astype(np.float16)
                 file_name = f"{key}.f16"
-                (weights / file_name).write_bytes(raw.tobytes())
+                (out_weights / file_name).write_bytes(raw.tobytes())
                 entry["file"] = f"weights/{file_name}"
             else:
                 matrix = array.reshape(array.shape[0], -1)
                 packed, scales, stored = pack_fp4(matrix)
                 data_name = f"{key}.fp4"
                 scale_name = f"{key}.scale"
-                (weights / data_name).write_bytes(np.ascontiguousarray(packed).tobytes())
-                (weights / scale_name).write_bytes(np.ascontiguousarray(scales).tobytes())
+                (out_weights / data_name).write_bytes(np.ascontiguousarray(packed).tobytes())
+                (out_weights / scale_name).write_bytes(np.ascontiguousarray(scales).tobytes())
                 entry["logical_k"] = int(matrix.shape[1])
                 entry["stored_k"] = int(stored)
                 entry["file"] = f"weights/{data_name}"
@@ -88,7 +100,7 @@ def quantize(source: Path, dest: Path) -> Path:
         "complete": True,
         "format": "z-image-turbo-fp4",
         "source_repo": "Tongyi-MAI/Z-Image-Turbo",
-        "source": str(source.resolve()),
+        "source": str(root.resolve()),
         "tile_m": 64,
         "tile_n": 32,
         "tensors": tensors,
@@ -168,7 +180,56 @@ def _kind(key: str, shape: tuple[int, ...]) -> str:
     raise ValueError(message)
 
 
-def _shards(source: Path) -> list[tuple[Path, dict[str, Any], int]]:
+def _tokenizer_root(weights: Path, tokenizer_source: Path | None) -> Path:
+    if tokenizer_source is not None:
+        return tokenizer_source.resolve()
+    if weights.is_dir() and _is_diffusers_layout(weights):
+        return weights.resolve()
+    from z_image_turbo.source import source_dir
+
+    fallback = source_dir()
+    if (fallback / "tokenizer" / "tokenizer.json").is_file():
+        return fallback
+    message = (
+        "tokenizer source is required when weights are not a full Diffusers checkout; "
+        "pass --tokenizer-source"
+    )
+    raise FileNotFoundError(message)
+
+
+def _is_diffusers_layout(source: Path) -> bool:
+    return (
+        (source / "text_encoder" / "model.safetensors.index.json").is_file()
+        and (source / "transformer" / "diffusion_pytorch_model.safetensors.index.json").is_file()
+        and (source / "vae" / "diffusion_pytorch_model.safetensors").is_file()
+    )
+
+
+def _shards(weights: Path) -> list[tuple[Path, dict[str, Any], int]]:
+    if weights.is_file():
+        if weights.suffix != ".safetensors":
+            message = f"weights must be a .safetensors file, got {weights.name}"
+            raise ValueError(message)
+        header, data_start = _header(weights)
+        return [(weights, header, data_start)]
+    if not weights.is_dir():
+        message = f"weights path is missing: {weights}"
+        raise FileNotFoundError(message)
+    if _is_diffusers_layout(weights):
+        return _shards_diffusers(weights)
+    shards = sorted(weights.rglob("*.safetensors"))
+    if not shards:
+        message = f"no safetensors under {weights}"
+        raise FileNotFoundError(message)
+    return [_shard_entry(shard) for shard in shards]
+
+
+def _shard_entry(path: Path) -> tuple[Path, dict[str, Any], int]:
+    header, data_start = _header(path)
+    return path, header, data_start
+
+
+def _shards_diffusers(source: Path) -> list[tuple[Path, dict[str, Any], int]]:
     found: list[tuple[Path, dict[str, Any], int]] = []
     text_index = source / "text_encoder" / "model.safetensors.index.json"
     dit_index = source / "transformer" / "diffusion_pytorch_model.safetensors.index.json"
