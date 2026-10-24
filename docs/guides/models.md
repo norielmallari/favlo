@@ -6,7 +6,7 @@ Three pipelines are supported. A packed record is registered in `models/registry
 
 ## Qwen3.6-35B-A3B
 
-The official checkpoint is `Qwen/Qwen3.6-35B-A3B`.
+The official checkpoint is `Qwen/Qwen3.6-35B-A3B`. The steps are [qwen36-35b-a3b/SETUP.md](../qwen36-35b-a3b/SETUP.md).
 
 On a terminal, `favlo serve` with an empty registry downloads that checkpoint, packs `models/Qwen3.6-35B-A3B-fp8-e20`, registers the alias `qwen36-35b-a3b`, and removes the BF16 checkout. The next `serve` continues from the files already written.
 
@@ -15,6 +15,8 @@ The same download and pack, without opening the socket:
 ```bash
 favlo --qwen36-35b-a3b setup
 ```
+
+`setup --repo example-org/example-model` downloads another repository that uses the same tensor names. `--repo` also accepts a `https://huggingface.co/org/name` link. With no `--name`, the folder and the registry id are the model name plus the quant format, `models/example-model-fp8-e20` by default. `--name example-model` uses that folder instead. `--expert-fp8` is a percentage from 0 to 100. The default is 20 (`-fp8-e20`). `0` appends `-fp4`. `100` appends `-fp8-e100`. The official alias stays `qwen36-35b-a3b` on the default official pack. `--keep-bf16` leaves the checkout. `delete <folder-or-alias>` removes that row, the packed directory, and a checkout still under `models/`.
 
 `favlo --qwen36-35b-a3b quantize` does not download. It reads `models/Qwen3.6-35B-A3B-bf16`, or the checkout named by `--src`. `--expert-fp8` is a percentage from 0 to 100. The default is 20, which writes `models/Qwen3.6-35B-A3B-fp8-e20`. 0 writes `models/Qwen3.6-35B-A3B-fp4`.
 

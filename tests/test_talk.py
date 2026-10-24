@@ -235,6 +235,9 @@ def test_intro_request_names_save_intro() -> None:
     assert "You refuse violent, sexual, NSFW, erotic, and obscene requests." in INSTRUCTIONS
     assert "You refuse sexual or romantic content." in INSTRUCTIONS
     assert "one short sentence" in INSTRUCTIONS
+    assert "read_setup" in INSTRUCTIONS
+    assert "qwen36-35b-a3b" in INSTRUCTIONS
+    assert "run_setup" in INSTRUCTIONS
     assert "Do not use violent, sexual, NSFW, erotic, or obscene language" in system
     assert "longer" in system
     assert "emojis" in system

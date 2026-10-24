@@ -755,12 +755,18 @@ async def _pair(
         base_url=base,
         async_client=http,
     )
-    client.function_invocation_configuration["max_iterations"] = 4
+    client.function_invocation_configuration["max_iterations"] = 6
     agent = Agent(
         client=client,
         name="favlo",
         instructions=INSTRUCTIONS,
-        tools=[_guide_tool(), _models_tool(), _suggestions_tool(home)],
+        tools=[
+            _guide_tool(),
+            _models_tool(),
+            _suggestions_tool(home),
+            _setup_guide_tool(),
+            _setup_run_tool(base),
+        ],
         default_options={
             "max_tokens": 400,
             "extra_body": {"enable_thinking": False},
@@ -827,6 +833,81 @@ def registered_models(root: Path | None = None) -> str:
     if not listing:
         return "no models are registered"
     return listing
+
+
+def _setup_guide_tool() -> object:
+    from typing import Annotated
+
+    from agent_framework import tool
+    from pydantic import Field
+
+    from favlo.guides import read_setup as load_setup
+
+    @tool(approval_mode="never_require")
+    def read_setup(
+        pipeline: Annotated[str, Field(description="Pipeline id, such as qwen36-35b-a3b.")],
+    ) -> str:
+        """Read one pipeline's setup guide.
+
+        Call this when someone wants to set up, download, quantize, or delete a model.
+        qwen36-35b-a3b is Qwen3.6-35B-A3B. The result is that pipeline's setup page.
+        A pipeline with no setup page names the ones that have one.
+        """
+        return load_setup(pipeline)
+
+    return read_setup
+
+
+def _setup_run_tool(base: str) -> object:
+    from typing import Annotated
+
+    from agent_framework import tool
+    from pydantic import Field
+
+    from favlo.setup_run import accepted_argv, frees_model, run_setup_command
+
+    @tool(approval_mode="never_require")
+    def run_setup(
+        command: Annotated[
+            str,
+            Field(description="One command copied from the setup guide."),
+        ],
+    ) -> str:
+        """Run one setup-guide command in this install.
+
+        The working directory is the folder where Favlo is installed. A path cannot
+        leave that folder. This is not a shell: pipes, cd, and other programs are refused.
+        """
+        try:
+            argv = accepted_argv(command, _install())
+        except ValueError as exc:
+            return str(exc)
+        if frees_model(argv):
+            closed = _close_resident(base)
+            if closed is not None:
+                return closed
+        try:
+            return run_setup_command(command)
+        except ValueError as exc:
+            return str(exc)
+
+    return run_setup
+
+
+def _install() -> Path:
+    from favlo.cli import repo_root
+
+    return repo_root()
+
+
+def _close_resident(base: str) -> str | None:
+    request = urllib.request.Request(base + "/pipelines/close", data=b"", method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            response.read()
+    except (OSError, urllib.error.URLError) as exc:
+        return f"could not close the open model: {exc}"
+    return None
 
 
 def _models_tool() -> object:

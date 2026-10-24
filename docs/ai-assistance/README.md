@@ -28,6 +28,14 @@ The first start, when `~/.favlo/intros.json` has no lines, sends one chat comple
 
 A question the guide does not answer stays unanswered.
 
+## Setup guides
+
+`read_setup` returns `docs/<pipeline>/SETUP.md`. The argument is the pipeline id, the same stem as `favlo --<pipeline>`. `qwen36-35b-a3b` is Qwen3.6-35B-A3B. The chat calls it when someone wants to set up, download, quantize, or delete that model. A pipeline with no setup page is an error that names the pipelines that have one. The page is not part of the standing instructions. It is loaded when the chat asks for it.
+
+## Setup commands
+
+`run_setup` runs one command from that page. The working directory is the checkout where Favlo is installed. `FAVLO_ROOT` is that directory. The command is not a shell: there is no `cd`, no pipe, and a path has to stay inside the checkout. It accepts `uv sync --extra dev` and `uv run favlo --<pipeline>` with `setup`, `quantize`, `delete`, `download`, or `models`, and the flags those setup pages use. `setup`, `quantize`, `delete`, and `download` close the resident model first. `serve` is not one of these commands.
+
 ## Registered models
 
 `list_models` reads `models/registry.json` and returns one line per record: the folder, the pipeline, the alias, and the key/value mode. An unregistered complete record is named on its own line. An empty registry returns `no models are registered`. The chat calls this when someone asks which models are registered. Download and quantize stay in the models guide.

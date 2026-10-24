@@ -761,6 +761,263 @@ def test_empty_function_has_no_parameters() -> None:
     assert function_has_parameters(with_path, "read_file") is True
 
 
+def test_a_named_folder_is_the_registry_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from qwen36_35b_a3b.commands import main
+
+    def models_dir(root: Path | None = None) -> Path:
+        del root
+        return tmp_path / "models"
+
+    monkeypatch.setattr("qwen36_35b_a3b.commands.models_dir", models_dir)
+    monkeypatch.setattr("favlo.registry.models_dir", models_dir)
+    monkeypatch.setenv("FAVLO_SKIP_PLATE", "1")
+
+    def list_files(host: str = "", repo: str = "") -> list[tuple[str, int]]:
+        del host
+        seen["repo"] = repo
+        return [("config.json", 2)]
+
+    def download(dest: Path, files: list[tuple[str, int]], on_progress, **kwargs: object) -> None:
+        del files
+        seen["download_repo"] = kwargs.get("repo")
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "config.json").write_text("{}\n")
+        on_progress(2, 2, "config.json")
+
+    def quantize(src: Path, output: Path, on_bytes=None, expert_fp8: float = 20) -> Path:
+        del src
+        seen["expert_fp8"] = expert_fp8
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "manifest.json").write_text(json.dumps({"complete": True}) + "\n")
+        if on_bytes is not None:
+            on_bytes(1, output.name)
+        return output
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr("qwen36_35b_a3b.commands.list_files", list_files)
+    monkeypatch.setattr("qwen36_35b_a3b.commands.download", download)
+    monkeypatch.setattr("qwen36_35b_a3b.commands.quantize", quantize)
+    monkeypatch.setattr("qwen36_35b_a3b.commands.shortfall", lambda *_args, **_kwargs: None)
+    code = main(
+        [
+            "setup",
+            "--repo",
+            "example-org/example-model",
+            "--name",
+            "example-model",
+            "--console",
+            "plain",
+        ]
+    )
+    assert code == 0
+    assert seen["repo"] == "example-org/example-model"
+    assert seen["download_repo"] == "example-org/example-model"
+    assert seen["expert_fp8"] == 20
+    checkout = tmp_path / "models" / "example-org--example-model-bf16"
+    assert not checkout.exists()
+    record = tmp_path / "models" / "example-model"
+    assert (record / "manifest.json").is_file()
+    registry = json.loads((tmp_path / "models" / "registry.json").read_text())
+    row = registry["models"]["example-model"]
+    assert row["alias"] is None
+    assert row["pipeline"] == "qwen36-35b-a3b"
+    from favlo.registry import resolve
+
+    selection = resolve("example-model:instruct")
+    assert selection.folder == "example-model"
+    assert selection.variant == "instruct"
+    assert selection.path == record
+
+
+def test_an_omitted_name_appends_the_quant_format(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from qwen36_35b_a3b.commands import _checkout_name, _folder_name, _packed_dir, _repo_id, main
+
+    def models_dir(root: Path | None = None) -> Path:
+        del root
+        return tmp_path / "models"
+
+    monkeypatch.setattr("qwen36_35b_a3b.commands.models_dir", models_dir)
+    monkeypatch.setattr("favlo.registry.models_dir", models_dir)
+    monkeypatch.setenv("FAVLO_SKIP_PLATE", "1")
+    _src, output, alias = _packed_dir("example-org/example-model", None, 20)
+    assert output.name == "example-model-fp8-e20"
+    assert alias is None
+    _src, output, alias = _packed_dir("example-org/example-model", None, 0)
+    assert output.name == "example-model-fp4"
+    _src, official, alias = _packed_dir("Qwen/Qwen3.6-35B-A3B", None, 20)
+    assert official.name == "Qwen3.6-35B-A3B-fp8-e20"
+    assert alias == "qwen36-35b-a3b"
+    assert _repo_id("example-org/example-model") == "example-org/example-model"
+    assert (
+        _repo_id("https://huggingface.co/example-org/example-model/tree/main")
+        == "example-org/example-model"
+    )
+    assert _repo_id("https://hf.co/example-org/example-model/") == "example-org/example-model"
+    assert _folder_name("example-model") == "example-model"
+    assert _checkout_name("Qwen/Qwen3.6-35B-A3B") == "Qwen3.6-35B-A3B-bf16"
+    assert _checkout_name("example-org/example-model") == "example-org--example-model-bf16"
+    with pytest.raises(argparse.ArgumentTypeError):
+        _repo_id("example-model")
+    with pytest.raises(argparse.ArgumentTypeError):
+        _repo_id("https://example.com/example-org/example-model")
+    with pytest.raises(argparse.ArgumentTypeError):
+        _folder_name("example/model")
+    assert main(["setup", "--repo", "example-model"]) == 2
+    assert main(["quantize", "--name", "example/model"]) == 2
+    assert main(["setup", "--expert-fp8", "101"]) == 2
+
+    seen: dict[str, object] = {}
+
+    def quantize(src: Path, output: Path, on_bytes=None, expert_fp8: float = 20) -> Path:
+        del src
+        seen["expert_fp8"] = expert_fp8
+        seen["output"] = output.name
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "manifest.json").write_text(json.dumps({"complete": True}) + "\n")
+        if on_bytes is not None:
+            on_bytes(1, output.name)
+        return output
+
+    monkeypatch.setattr(
+        "qwen36_35b_a3b.commands.list_files", lambda **_kwargs: [("config.json", 2)]
+    )
+    monkeypatch.setattr(
+        "qwen36_35b_a3b.commands.download",
+        lambda dest, files, on_progress, **_kwargs: (
+            dest.mkdir(parents=True, exist_ok=True),
+            on_progress(2, 2, "config.json"),
+        ),
+    )
+    monkeypatch.setattr("qwen36_35b_a3b.commands.quantize", quantize)
+    monkeypatch.setattr("qwen36_35b_a3b.commands.shortfall", lambda *_args, **_kwargs: None)
+    code = main(
+        ["setup", "--repo", "example-org/example-model", "--expert-fp8", "0", "--console", "plain"]
+    )
+    assert code == 0
+    assert seen["output"] == "example-model-fp4"
+    assert seen["expert_fp8"] == 0
+    registry = json.loads((tmp_path / "models" / "registry.json").read_text())
+    assert registry["models"]["example-model-fp4"]["alias"] is None
+
+
+def test_keep_bf16_leaves_the_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from qwen36_35b_a3b.commands import main
+
+    def models_dir(root: Path | None = None) -> Path:
+        del root
+        return tmp_path / "models"
+
+    monkeypatch.setattr("qwen36_35b_a3b.commands.models_dir", models_dir)
+    monkeypatch.setattr("favlo.registry.models_dir", models_dir)
+    checkout = tmp_path / "models" / "example-org--example-model-bf16"
+    checkout.mkdir(parents=True)
+    (checkout / "config.json").write_text("{}\n")
+
+    def quantize(src: Path, output: Path, expert_fp8: float = 20) -> Path:
+        del src, expert_fp8
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "manifest.json").write_text(json.dumps({"complete": True}) + "\n")
+        return output
+
+    monkeypatch.setattr("qwen36_35b_a3b.commands.quantize", quantize)
+    kept = main(
+        ["quantize", "--src", str(checkout), "--name", "example-kept", "--keep-bf16"]
+    )
+    assert kept == 0
+    assert checkout.is_dir()
+    removed = main(["quantize", "--src", str(checkout), "--name", "example-dropped"])
+    assert removed == 0
+    assert not checkout.exists()
+    assert (tmp_path / "models" / "example-kept").is_dir()
+    assert (tmp_path / "models" / "example-dropped").is_dir()
+
+
+def test_delete_removes_the_record_the_checkout_and_the_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from favlo.prefix import checkpoint_digest
+    from favlo.registry import register_quantized
+    from qwen36_35b_a3b.commands import main
+
+    def models_dir(root: Path | None = None) -> Path:
+        del root
+        return tmp_path / "models"
+
+    prefix_root = tmp_path / "prefix"
+    monkeypatch.setattr("qwen36_35b_a3b.commands.models_dir", models_dir)
+    monkeypatch.setattr("favlo.registry.models_dir", models_dir)
+    monkeypatch.setattr("qwen36_35b_a3b.commands.default_prefix_dir", lambda: prefix_root)
+    packed = tmp_path / "models" / "example-model-fp8-e20"
+    packed.mkdir(parents=True)
+    (packed / "manifest.json").write_text(json.dumps({"complete": True}) + "\n")
+    checkout = tmp_path / "models" / "example-org--example-model-bf16"
+    checkout.mkdir()
+    (checkout / "config.json").write_text("{}\n")
+    kept = tmp_path / "models" / "kept-model"
+    kept.mkdir()
+    (kept / "manifest.json").write_text(json.dumps({"complete": True, "kept": True}) + "\n")
+    outside = tmp_path / "outside-bf16"
+    outside.mkdir()
+    register_quantized(
+        "example-model-fp8-e20",
+        source=checkout,
+        alias="example-alias",
+        pipeline="qwen36-35b-a3b",
+        runtime="metal41",
+    )
+    register_quantized(
+        "kept-model",
+        source=outside,
+        alias=None,
+        pipeline="qwen36-35b-a3b",
+        runtime="metal41",
+    )
+    digest = checkpoint_digest(packed).hex()
+    partition = prefix_root / "qwen36-35b-a3b" / digest
+    partition.mkdir(parents=True)
+    (partition / "cache.bin").write_bytes(b"x")
+    assert main(["delete", "example-alias:instruct"]) == 0
+    assert not packed.exists()
+    assert not checkout.exists()
+    assert not partition.exists()
+    assert outside.is_dir()
+    assert kept.is_dir()
+    registry = json.loads((tmp_path / "models" / "registry.json").read_text())
+    assert "example-model-fp8-e20" not in registry["models"]
+    assert "kept-model" in registry["models"]
+    assert main(["delete", "kept-model"]) == 0
+    assert not kept.exists()
+    assert outside.is_dir()
+
+
+def test_quantize_name_is_the_registry_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from qwen36_35b_a3b.commands import main
+
+    def models_dir(root: Path | None = None) -> Path:
+        del root
+        return tmp_path / "models"
+
+    monkeypatch.setattr("qwen36_35b_a3b.commands.models_dir", models_dir)
+    monkeypatch.setattr("favlo.registry.models_dir", models_dir)
+    src = tmp_path / "checkout"
+    src.mkdir()
+
+    def quantize(src: Path, output: Path, expert_fp8: float = 20) -> Path:
+        del src, expert_fp8
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "manifest.json").write_text(json.dumps({"complete": True}) + "\n")
+        return output
+
+    monkeypatch.setattr("qwen36_35b_a3b.commands.quantize", quantize)
+    code = main(["quantize", "--src", str(src), "--name", "example-model", "--expert-fp8", "0"])
+    assert code == 0
+    registry = json.loads((tmp_path / "models" / "registry.json").read_text())
+    assert registry["models"]["example-model"]["alias"] is None
+    assert (tmp_path / "models" / "example-model" / "manifest.json").is_file()
+
+
 def test_quantize_accepts_a_budget_from_zero_to_one_hundred() -> None:
     from qwen36_35b_a3b.commands import _expert_budget, main
 

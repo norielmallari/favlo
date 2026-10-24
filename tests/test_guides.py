@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from favlo.guides import read_guide
+from favlo.guides import read_guide, read_setup, setup_pipelines
 
 
 def test_clients_guide_names_this_server() -> None:
@@ -38,6 +38,18 @@ def test_history_is_the_carrot_naming() -> None:
     assert "Celestia" in text
     assert "carrots" in text
     assert "gave him his name" in text
+
+
+def test_the_35b_setup_guide_is_loaded_by_pipeline_id() -> None:
+    assert "qwen36-35b-a3b" in setup_pipelines()
+    text = read_setup("qwen36-35b-a3b")
+    assert "uv run favlo --qwen36-35b-a3b setup" in text
+    assert "--keep-bf16" in text
+    assert "delete" in text
+    with pytest.raises(ValueError, match="unknown setup guide"):
+        read_setup("../qwen36-35b-a3b")
+    with pytest.raises(ValueError, match="unknown setup guide qwen38-27b"):
+        read_setup("qwen38-27b")
 
 
 def test_an_unknown_guide_is_rejected() -> None:
