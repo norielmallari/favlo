@@ -77,22 +77,22 @@ The token-row read from the checkpoint is outside this sum.
 
 ## VAE
 
-Encode walks the first pixel frame, then two groups of four. Decode walks the three latent frames. A convolution of at least 32 output channels, 1024 outputs, and 64 taps is `conv_pack` once, then `conv_im2col`, half `matmul_f16`, and `conv_scatter` for each 8192-row tile. That dispatch is one command buffer. Smaller convolutions stay on float `conv3d`. The shapes at or above 0.25 s in aggregate:
+Encode walks the first pixel frame, then two groups of four. Decode walks the three latent frames. A convolution of at least 32 output channels, 1024 outputs, and 64 taps is `conv_pack` once, then `conv_im2col`, half `matmul_f16`, and `conv_scatter` for each 4096-row tile. That dispatch is one command buffer. Smaller convolutions stay on float `conv3d`. The shapes at or above 0.25 s in aggregate:
 
 | Input | Weight | Count | ms |
 |---|---|---:|---:|
-| 96×5×320×576 | 96×96×3×3×3 | 10 | 118.624 |
-| 96×6×320×576 | 96×96×3×3×3 | 10 | 118.490 |
-| 192×6×160×288 | 192×192×3×3×3 | 9 | 73.077 |
-| 192×5×160×288 | 192×192×3×3×3 | 9 | 72.541 |
-| 96×1×320×576 | 96×96×3×3×3 | 10 | 29.946 |
-| 384×3×80×144 | 384×384×3×3×3 | 8 | 32.772 |
-| 384×4×80×144 | 384×384×3×3×3 | 8 | 32.128 |
+| 96×5×320×576 | 96×96×3×3×3 | 10 | 126.830 |
+| 96×6×320×576 | 96×96×3×3×3 | 10 | 152.645 |
+| 192×6×160×288 | 192×192×3×3×3 | 9 | 106.856 |
+| 192×5×160×288 | 192×192×3×3×3 | 9 | 88.863 |
+| 96×1×320×576 | 96×96×3×3×3 | 10 | 25.382 |
+| 384×3×80×144 | 384×384×3×3×3 | 8 | 45.172 |
+| 384×4×80×144 | 384×384×3×3×3 | 8 | 60.824 |
 
-The other 49 shapes are 143 calls and add 1.074 s. All 207 calls sum to 5.575 s. `spatial_attend_lane` runs six times at 384 channels over 40×72, median 419.941 ms, 2.520 s. The channel RMS, clipped SiLU, causal cache, resample, and the latent affine are 859 calls and add 0.524 s. The VAE sum is 8.619 s.
+The other 49 shapes are 143 calls and add 1.074 s. All 207 calls sum to 6.733 s. `spatial_attend_lane` runs six times at 384 channels over 40×72, median 419.941 ms, 2.520 s. The channel RMS, clipped SiLU, causal cache, resample, and the latent affine are 859 calls and add 0.524 s. The VAE sum is 9.777 s.
 
 ## Clip
 
-The DiT, the 9-token encoder, and the VAE sum to 40.773 s. The 90% test uses that kernel ceiling. The attention bandwidth ceiling is 34.234 s. The expert pack read and the AVI pack are outside the kernel sum.
+The DiT, the 9-token encoder, and the VAE sum to 41.931 s. The 90% test uses that kernel ceiling. The attention bandwidth ceiling is 34.234 s. The expert pack read and the AVI pack are outside the kernel sum.
 
-A 9-frame 576×320 smoke printed umT5 2.41 s, VAE encode 2.76 s, four steps 8.00 s, 8.04 s, 7.99 s, and 8.04 s, and VAE decode 4.17 s. Those stages sum to 41.41 s, within 40.773 s / 0.9.
+A 9-frame 576×320 smoke printed umT5 2.42 s, VAE encode 2.61 s, four steps 8.02 s, 8.03 s, 8.02 s, and 8.04 s, and VAE decode 3.94 s. Those stages sum to 41.08 s, within 41.931 s / 0.9.

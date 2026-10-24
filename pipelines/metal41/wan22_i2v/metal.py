@@ -903,7 +903,7 @@ class Gpu:
         k_pad = pad_to(k_raw, K_ALIGN)
         n_pad = pad_to(cout, TILE_N)
         packed = self._packed_conv(weight, cout, cin, kt, kh, kw, k_raw, k_pad, n_pad)
-        chunk = 8192
+        chunk = 4096
         columns = self._fit_conv("_conv_col", chunk * k_pad * 2)
         tile = self._fit_conv("_conv_tile", chunk * n_pad * 4)
         spatial = tout * hout * wout
