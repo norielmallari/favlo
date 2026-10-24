@@ -62,6 +62,61 @@ def _config() -> dict:
     }
 
 
+def test_open_runtime_forwards_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    from qwen38_27b.runtime import open_runtime
+
+    captured: dict[str, object] = {}
+
+    def fake(path: Path, **kwargs: object) -> str:
+        captured["path"] = path
+        captured.update(kwargs)
+        return "runtime"
+
+    monkeypatch.setattr("qwen38_27b.runtime.Qwen38Runtime", fake)
+    assert open_runtime(Path("record"), owner="qwen38-27b:7") == "runtime"
+    assert captured["owner"] == "qwen38-27b:7"
+    assert captured["max_memory"] is None
+
+
+def test_a_missing_record_keeps_the_passed_owner(tmp_path: Path) -> None:
+    from qwen38_27b.forward import Qwen38Runtime
+
+    owner = "qwen38-27b:7"
+    held: dict[str, str] = {}
+
+    class _Probe(Qwen38Runtime):
+        def __init__(self, path: Path, **kwargs: object) -> None:
+            try:
+                super().__init__(path, **kwargs)
+            except FileNotFoundError:
+                held["owner"] = self._owner
+                raise
+
+    with pytest.raises(FileNotFoundError):
+        _Probe(tmp_path, owner=owner)
+    assert held["owner"] == owner
+
+
+def test_a_missing_record_mints_an_owner(tmp_path: Path) -> None:
+    from qwen38_27b.forward import Qwen38Runtime
+
+    held: dict[str, str] = {}
+
+    class _Probe(Qwen38Runtime):
+        def __init__(self, path: Path, **kwargs: object) -> None:
+            try:
+                super().__init__(path, **kwargs)
+            except FileNotFoundError:
+                held["owner"] = self._owner
+                raise
+
+    with pytest.raises(FileNotFoundError):
+        _Probe(tmp_path)
+    minted = held["owner"]
+    assert minted.startswith("qwen38-27b:")
+    assert minted != "qwen38-27b:7"
+
+
 def test_text_shapes_follow_the_checkpoint_config() -> None:
     shapes = text_shapes(_config())
     assert shapes.hidden == 5120

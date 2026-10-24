@@ -16,6 +16,7 @@ def open_runtime(
     console: Any = None,
     resident_percent: float | None = None,
     max_memory: str | int | None = None,
+    owner: str | None = None,
 ) -> Qwen38Runtime:
     """Load the resident fp4 record and the fp8 key/value cache."""
     del resident_percent
@@ -24,6 +25,7 @@ def open_runtime(
         kv_cache=kv_cache,
         console=console,
         max_memory=max_memory,
+        owner=owner,
     )
 
 

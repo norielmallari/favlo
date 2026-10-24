@@ -166,8 +166,10 @@ class Qwen38Runtime:
         console: Any = None,
         resident_percent: float | None = None,
         max_memory: str | int | None = None,
+        owner: str | None = None,
     ) -> None:
         del resident_percent
+        self._owner = owner or f"qwen38-27b:{id(self)}"
         self.root = Path(path)
         self.console = console
         self.kv_cache = kv_mode(kv_cache)
@@ -224,7 +226,7 @@ class Qwen38Runtime:
             startup_bytes(plan.weights, plan.positions, slots=plan.slots, drafts=plan.mtp)
         )
         try:
-            self.session = Session()
+            self.session = Session(self._owner)
             self.session._load_note = self._note_load
             self._record = (self.root / "resident.bin").open("rb")
             zeros = self.session.zeros
@@ -266,51 +268,68 @@ class Qwen38Runtime:
         if getattr(self, "_closed", False):
             return
         self._closed = True
-        prefix = getattr(self, "prefix", None)
+        try:
+            prefix = getattr(self, "prefix", None)
+            session = getattr(self, "session", None)
+            if prefix is not None and session is not None:
+                try:
+                    prefix.flush()
+                except (OSError, RuntimeError):
+                    pass
+            adapter = getattr(prefix, "adapter", None) if prefix is not None else None
+            if adapter is not None:
+                adapter.runtime = None
+            self.prefix = None
+            buffers = _device_buffers(self)
+            self._end_open_progress()
+            self._prefill = None
+            weights = getattr(self, "weights", None)
+            if weights is not None:
+                weights.close()
+            self.weights = None
+            record = getattr(self, "_record", None)
+            self._record = None
+            if record is not None:
+                record.close()
+            for name in ("k_cache", "v_cache", "_held"):
+                held = getattr(self, name, None)
+                if isinstance(held, list):
+                    held.clear()
+            for name in _DEVICE_FIELDS:
+                if hasattr(self, name):
+                    setattr(self, name, None)
+            if session is not None:
+                try:
+                    session.close()
+                except (OSError, RuntimeError):
+                    pass
+            self.session = None
+            weights = None
+            record = None
+            prefix = None
+            adapter = None
+            session = None
+            with objc.autorelease_pool():
+                for buffer in buffers:
+                    discard(buffer)
+                buffers.clear()
+                gc.collect()
+        finally:
+            self._sweep_owner()
+
+    def _sweep_owner(self) -> None:
+        """Return this opening's spans. ``session.close`` sweeps the same string."""
         session = getattr(self, "session", None)
-        if prefix is not None and session is not None:
-            try:
-                prefix.flush()
-            except (OSError, RuntimeError):
-                pass
-        adapter = getattr(prefix, "adapter", None) if prefix is not None else None
-        if adapter is not None:
-            adapter.runtime = None
-        self.prefix = None
-        buffers = _device_buffers(self)
-        self._end_open_progress()
-        self._prefill = None
-        weights = getattr(self, "weights", None)
-        if weights is not None:
-            weights.close()
-        self.weights = None
-        record = getattr(self, "_record", None)
-        self._record = None
-        if record is not None:
-            record.close()
-        for name in ("k_cache", "v_cache", "_held"):
-            held = getattr(self, name, None)
-            if isinstance(held, list):
-                held.clear()
-        for name in _DEVICE_FIELDS:
-            if hasattr(self, name):
-                setattr(self, name, None)
         if session is not None:
             try:
                 session.close()
             except (OSError, RuntimeError):
                 pass
-        self.session = None
-        weights = None
-        record = None
-        prefix = None
-        adapter = None
-        session = None
-        with objc.autorelease_pool():
-            for buffer in buffers:
-                discard(buffer)
-            buffers.clear()
-            gc.collect()
+            self.session = None
+        owner = getattr(self, "_owner", None)
+        if not isinstance(owner, str) or not owner:
+            return
+        memory.sweep(owner)
 
     def ensure(self, needed: int) -> bool:
         """Grow the cache so ``needed`` positions fit. Leave the device alone when it cannot."""
