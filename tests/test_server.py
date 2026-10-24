@@ -603,6 +603,100 @@ def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
     assert state["pipeline"] == "qwen38-27b"
 
 
+def _selection(folder: str, pipeline: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        folder=folder,
+        pipeline=pipeline,
+        runtime="metal41",
+        custom=False,
+        alias=None,
+        resident_percent=None,
+        kv_cache="e4m3",
+        path=folder,
+    )
+
+
+def test_open_runtime_passes_owner_when_accepted(monkeypatch) -> None:
+    seen: dict[str, str] = {}
+
+    def opener(path, *, kv_cache, console, resident_percent, owner):
+        del kv_cache, console, resident_percent
+        seen["path"] = path
+        seen["owner"] = owner
+        return SimpleNamespace(_owner=owner)
+
+    module = SimpleNamespace(open_runtime=opener)
+    monkeypatch.setattr(listener, "_pipeline_module", lambda _selection: module)
+    runtime = listener._open_runtime(_selection("record", "z-image-turbo"), None, None)
+    assert seen["path"] == "record"
+    assert seen["owner"].startswith("z-image-turbo:")
+    assert runtime._owner == seen["owner"]
+
+
+def test_open_runtime_omits_owner_when_absent(monkeypatch) -> None:
+    def opener(path, *, kv_cache, console, resident_percent):
+        del kv_cache, console, resident_percent
+        return SimpleNamespace(path=path)
+
+    module = SimpleNamespace(open_runtime=opener)
+    monkeypatch.setattr(listener, "_pipeline_module", lambda _selection: module)
+    runtime = listener._open_runtime(_selection("record", "wan22-i2v"), None, None)
+    assert runtime.path == "record"
+
+
+def test_a_failed_open_sweeps_spans_from_that_attempt(monkeypatch) -> None:
+    from favlo.memory import memory
+
+    held = memory.allocate(4096, owner="listener-held", zero=True)
+
+    def opener(selection, console, max_memory=None):
+        del selection, console, max_memory
+        memory.allocate(4096, owner="listener-failed", zero=True)
+        message = "open failed"
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(listener, "_open_runtime", opener)
+    state: dict = {"runtime": None, "record": None, "pipeline": None, "module": None}
+    try:
+        try:
+            listener._install_runtime(state, _args(), _selection("rec", "z-image-turbo"))
+        except RuntimeError as exc:
+            assert str(exc) == "open failed"
+        else:
+            message = "open should fail"
+            raise AssertionError(message)
+        assert state["runtime"] is None
+        assert "listener-failed" not in memory.owners()
+        assert memory.nbytes(held) >= 16
+    finally:
+        memory.sweep("listener-held")
+        memory.sweep("listener-failed")
+
+
+def test_close_sweeps_the_owner_recorded_at_open(monkeypatch) -> None:
+    from favlo.memory import memory
+
+    owner = "listener-resident"
+
+    def opener(selection, console, max_memory=None):
+        del selection, console, max_memory
+        memory.allocate(4096, owner=owner, zero=True)
+        runtime = _Runtime()
+        runtime._owner = owner
+        return runtime
+
+    monkeypatch.setattr(listener, "_open_runtime", opener)
+    state: dict = {"runtime": None, "record": None, "pipeline": None, "module": None}
+    try:
+        listener._install_runtime(state, _args(), _selection("rec", "z-image-turbo"))
+        assert owner in memory.owners()
+        listener._drop_runtime(state, _args())
+        assert owner not in memory.owners()
+        assert state["runtime"] is None
+    finally:
+        memory.sweep(owner)
+
+
 def _post_json(port: int, path: str, payload: dict) -> bytes:
     body = json.dumps(payload).encode()
     head = (

@@ -392,6 +392,13 @@ class Memory:
             self._free_span(span)
             self._drop_idle_segments()
 
+    def owners(self) -> frozenset[str]:
+        """Owner strings that still have a live span."""
+        with self._lock:
+            return frozenset(
+                span.owner for span in self._spans.values() if not span.released and span.owner
+            )
+
     def sweep(self, owner: str) -> None:
         with self._lock:
             self._retire_commands()
@@ -400,6 +407,18 @@ class Memory:
                 self._free_span(span)
             self._drop_idle_segments()
             self._retire_pending()
+
+    def sweep_new(self, kept: Any) -> None:
+        """Sweep owners that were not in ``kept``. Owners in ``kept`` stay."""
+        keep = {owner for owner in kept if isinstance(owner, str)}
+        with self._lock:
+            fresh = {
+                span.owner
+                for span in self._spans.values()
+                if not span.released and span.owner and span.owner not in keep
+            }
+        for owner in fresh:
+            self.sweep(owner)
 
     def complete(self) -> None:
         """Wait for tracked command buffers, then rewind scratch."""
@@ -842,6 +861,21 @@ def _as_bytes(data: bytes | Any) -> bytes:
 
 
 memory = Memory()
+_lease = 0
+_lease_lock = threading.Lock()
+
+
+def mint_owner(stem: str) -> str:
+    """An owner string for one opening. The token is a process counter.
+
+    A pipeline that still stamps ``id()`` keeps that string. ``sweep`` matches
+    the whole string.
+    """
+    global _lease
+    with _lease_lock:
+        _lease += 1
+        token = _lease
+    return f"{stem}:{token}"
 
 
 def bind(encoder: Any, index: int, handle: Any, offset: int = 0) -> None:

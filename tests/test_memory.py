@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from favlo.memory import memory
+from favlo.memory import memory, mint_owner
 from favlo.offset import OffsetMap, bin_size
 
 
@@ -42,3 +42,30 @@ def test_shared_span_round_trip() -> None:
     else:
         missing = False
     assert missing
+
+
+def test_sweep_new_leaves_the_recorded_owner() -> None:
+    kept = "test-memory-kept"
+    fresh = "test-memory-fresh"
+    held = memory.allocate(4096, owner=kept, zero=True)
+    before = memory.owners()
+    made = memory.allocate(4096, owner=fresh, zero=True)
+    memory.sweep_new(before)
+    assert kept in memory.owners()
+    assert fresh not in memory.owners()
+    assert memory.nbytes(held) >= 16
+    try:
+        memory.nbytes(made)
+    except KeyError:
+        missing = True
+    else:
+        missing = False
+    assert missing
+    memory.sweep(kept)
+
+
+def test_mint_owner_is_the_stem_and_a_counter() -> None:
+    first = mint_owner("z-image-turbo")
+    second = mint_owner("z-image-turbo")
+    assert first.startswith("z-image-turbo:")
+    assert first != second

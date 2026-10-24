@@ -36,6 +36,12 @@ Adding a model adds an entry file under `pipelines/metal41/`, a package beside i
 
 Do not add batching or a kernel that fuses a whole layer. The Neural Engine may run a module. A missing Metal kernel stays missing. It is not replaced by a host GEMV, a CPU matmul, or any other stand-in forward.
 
+## Memory
+
+Every pipeline has a degraded mode. It runs under memory pressure and on a machine with 16 GB of memory. The design is [pipeline-memory-strategies.md](artifacts/implementation-plan/docs/unified-memory-management/pipeline-memory-strategies.md). The listener already records an opening's owners and sweeps them after `close`. The per-pipeline work is [pipeline-handoff.md](artifacts/implementation-plan/docs/unified-memory-management/pipeline-handoff.md).
+
+A pipeline reads `memory.budget()` when it opens and shrinks the one knob it owns until its minimum working set fits. It refuses to open when that minimum does not fit. A media request keeps the resolution, the frame count, and the duration it named. The next read of the ledger is at `complete`. `open_runtime` accepts `owner` and uses it for every allocate in that opening. When the argument is absent, the pipeline keeps minting its own owner string.
+
 ## Harness
 
 A media harness does not take the machine lock. It calls the listener. A media harness uses one `favlo serve` on `127.0.0.1:8129`. That is `harness.image`, `harness.image_smoke_agent`, `harness.image_persona`, `harness.video_smoke_agent`, `harness.video_quality_agent`, `harness.music_smoke_agent`, and `harness.voice_smoke_agent`. `python -m harness.server run -- <command>` opens that listener, runs the command, and closes the session. `python -m harness.server status` prints `listening` or `down`. An existing listener is reused and left running. A listener this session started is stopped when the command exits. These commands do not bind a second port. The same session is what those modules call, so running one of them directly follows this rule.

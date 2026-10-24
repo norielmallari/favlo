@@ -14,11 +14,11 @@ This file is the map and the write set. It wins for the listener, the registry, 
 | Console | `src/favlo/console.py` | [docs/console.md](docs/console.md) |
 | Registry | `src/favlo/registry.py`, `models/registry.json` | This file |
 | Prefix store | `src/favlo/prefix.py` | [docs/prefix.md](docs/prefix.md) |
-| Memory | `src/favlo/memory.py` | Process singleton. Pipelines hold spans, not Metal buffers |
+| Memory | `src/favlo/memory.py` | Process singleton. The listener records an opening's owners and sweeps them after close |
 | First-run setup | `src/favlo/setup.py` | [docs/guides/models.md](docs/guides/models.md) |
 | Harness | `harness/` | [docs/harness.md](docs/harness.md) |
 
-Shared code is `src/favlo/`. There is no model base class and no kernel that branches on the pipeline. A pipeline task does not change `src/favlo/` to reach into another runtime. A pipeline imports the prefix store and adapts its own buffers.
+Shared code is `src/favlo/`. There is no model base class and no kernel that branches on the pipeline. A pipeline task does not change `src/favlo/` to reach into another runtime. A pipeline imports the prefix store and adapts its own buffers. The listener passes `owner` into `open_runtime` when that function accepts it, records the owners created during that open, and sweeps them after `close`. An open that raises sweeps the owners that appeared during the call.
 
 `POST /mcp` is the FastMCP media queue. A chat sets one event when media holds the GPU. The listener checkpoints that task and closes its device before the chat's model allocates, resumes that same task after the waiting chats, and does not serve a media HTTP route. The daemon is a request server. It does not own chat history, tools, or the terminal session. The CLI owns those. A pipeline writes a reply and does not see a socket. `json` finishes one object, and that object is encoded before the call returns. `begin_events`, `event`, and `done` are one server-sent stream. `stopped` is true when that client has gone. Telemetry is one JSON event per line. The terminal paints it as it arrives, and prints the reply after that turn's requests have closed.
 

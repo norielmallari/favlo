@@ -4,7 +4,7 @@ As-built listener and daemon. The map and the write set are [../ARCHITECTURE.md]
 
 `favlo serve` on a terminal is the CLI. `favlo serve --non-interactive` starts the daemon and exits. The daemon listens on `127.0.0.1:8129` with nothing loaded. It does not read the terminal. Closing the terminal leaves the daemon running. A later `favlo serve` attaches to the daemon already listening on that address. `/quit` stops the daemon. Ctrl+C stops the daemon when this terminal started it.
 
-`--max-memory` is passed to a pipeline whose `open_runtime` accepts it, as the maximum bytes that runtime may allocate.
+`--max-memory` is passed to a pipeline whose `open_runtime` accepts it, as the maximum bytes that runtime may allocate. `owner` is passed the same way. The listener sweeps the owners recorded for that opening after `close`, and sweeps spans created during an `open_runtime` that raises. A pipeline that does not accept `owner` keeps the owner string it already mints.
 
 A pipeline writes a reply and does not see a socket. `json` is the HTTP body, encoded before that call returns. A video or music job then keeps updating the stored job. A stream is `begin_events`, then `event`, then `done`. `stopped` is true when the client has gone. A chat completion checks that and ends the forward.
 

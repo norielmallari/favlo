@@ -22,6 +22,16 @@ One pipeline is resident. A request that names a different folder or a different
 
 `close` returns only after that pipeline's device memory is released. That includes its key/value cache, prefill workspace, decode path, command queue, and open record. A prefix flush may finish first. After `close` returns, the previous runtime holds no Metal buffer, and the next runtime is the one that allocates.
 
+Spans for one runtime share one owner string. The string is the flag stem, a colon, and `id()` of the object `open_runtime` returns, taken once when that runtime opens:
+
+```text
+qwen38-27b:4317261824
+```
+
+`allocate`, `upload`, and `sweep` use that string. A cache, a codec, or a probe in that pipeline passes the same string. `close` sweeps it. After `close` returns, that owner has no span left. A command outside `favlo serve` uses the same format for the session it opens, and that session's `close` sweeps the string before the command returns.
+
+The listener records every owner that gained a span during `open_runtime`, and `runtime._owner` when that attribute is a string. It sweeps those strings after `close`. An `open_runtime` that raises sweeps every owner that appeared during the call. `open_runtime` receives `owner` when its signature includes that parameter. A pipeline that omits the parameter keeps the `id()` string above. `mint_owner` supplies the listener's string. Its token is a process counter.
+
 ## Media preemption
 
 An image, video, or music pipeline assumes a chat can set `state["preempt"]` while that pipeline holds the GPU. Read the event at each stage boundary, after the Metal command already submitted has finished. On preempt, save the finished stage in a host checkpoint, leave the job `in_progress` with the same id, and return. `close` then releases the device so the chat's model can allocate. The listener calls the same handler again after those chats. The handler loads that checkpoint and continues the unfinished work. Cancel drops the checkpoint and does not resume.

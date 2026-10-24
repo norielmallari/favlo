@@ -108,7 +108,9 @@ class _Shutdown:
         raise KeyboardInterrupt
 
 
-def _release(runtime: Any, shutdown: _Shutdown, server: Any = None) -> None:
+def _release(
+    runtime: Any, shutdown: _Shutdown, server: Any = None, owners: Any = None
+) -> None:
     """Close the listening socket and the runtime. A signal during this returns."""
     shutdown.closing = True
     try:
@@ -117,12 +119,14 @@ def _release(runtime: Any, shutdown: _Shutdown, server: Any = None) -> None:
                 server.server_close()
             except OSError:
                 pass
-        if runtime is not None:
+        if runtime is not None or owners:
             busy = shutdown.busy
             held = busy.acquire(timeout=_RELEASE_WAIT) if busy is not None else False
             try:
-                runtime.close()
+                if runtime is not None:
+                    runtime.close()
             finally:
+                _sweep_owners(owners)
                 if held and busy is not None:
                     busy.release()
         if shutdown.signaled and (runtime is not None or server is not None):
@@ -141,8 +145,18 @@ def _pipeline_module(selection: Any) -> Any:
     )
 
 
+def _accepts(opener: Any, name: str) -> bool:
+    try:
+        parameters = inspect.signature(opener).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in parameters
+
+
 def _open_runtime(selection: Any, console: Any, max_memory: str | None) -> Any:
     """The pipeline named on the registry row. The previous runtime is already closed."""
+    from favlo.memory import mint_owner
+
     module = _pipeline_module(selection)
     opener = getattr(module, "open_runtime", None)
     if not callable(opener):
@@ -153,9 +167,38 @@ def _open_runtime(selection: Any, console: Any, max_memory: str | None) -> Any:
         "console": console,
         "resident_percent": selection.resident_percent,
     }
-    if "max_memory" in inspect.signature(opener).parameters:
+    if _accepts(opener, "max_memory"):
         kwargs["max_memory"] = max_memory
+    if _accepts(opener, "owner"):
+        kwargs["owner"] = mint_owner(selection.pipeline)
     return opener(selection.path, **kwargs)
+
+
+def _opening_owners(before: Any, runtime: Any) -> tuple[str, ...]:
+    """Owners this open added, plus the runtime's own string when it has one."""
+    from favlo.memory import memory
+
+    found = set(memory.owners()) - set(before)
+    owner = getattr(runtime, "_owner", None)
+    if isinstance(owner, str) and owner:
+        found.add(owner)
+    return tuple(owner for owner in found if owner)
+
+
+def _sweep_owners(owners: Any) -> None:
+    if not owners:
+        return
+    from favlo.memory import memory
+
+    for owner in owners:
+        if isinstance(owner, str) and owner:
+            memory.sweep(owner)
+
+
+def _sweep_new(before: Any) -> None:
+    from favlo.memory import memory
+
+    memory.sweep_new(before)
 
 
 def _install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
@@ -165,18 +208,28 @@ def _install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
         and state.get("pipeline") == selection.pipeline
     ):
         return
+    from favlo.memory import memory
+
     old = state.get("runtime")
+    previous = state.get("memory_owners")
     state["runtime"] = None
     state["record"] = None
     state["pipeline"] = None
     state["module"] = None
-    _close_runtime(old)
+    state["memory_owners"] = None
+    _close_runtime(old, previous)
     ui = getattr(args, "console_ui", None)
     if ui is not None:
         ui.pipeline = selection.pipeline
         ui.load_detail = selection.alias or selection.folder
-    runtime = _open_runtime(selection, ui, getattr(args, "max_memory", None))
+    before = memory.owners()
+    try:
+        runtime = _open_runtime(selection, ui, getattr(args, "max_memory", None))
+    except Exception:
+        _sweep_new(before)
+        raise
     state["runtime"] = runtime
+    state["memory_owners"] = _opening_owners(before, runtime)
     state["record"] = selection.folder
     state["pipeline"] = selection.pipeline
     state["module"] = _pipeline_module(selection)
@@ -188,17 +241,21 @@ def _install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
         _log(f"loaded {label} {selection.folder}")
 
 
-def _close_runtime(runtime: Any) -> None:
-    """Close one runtime and drain its device objects before the next allocates."""
-    if runtime is None:
+def _close_runtime(runtime: Any, owners: Any = None) -> None:
+    """Close one runtime and sweep the owners recorded for that opening."""
+    if runtime is None and not owners:
         return
     import gc
 
     import objc
 
-    with objc.autorelease_pool():
-        runtime.close()
-        gc.collect()
+    try:
+        if runtime is not None:
+            with objc.autorelease_pool():
+                runtime.close()
+                gc.collect()
+    finally:
+        _sweep_owners(owners)
 
 
 def _smoke_held(state: dict[str, Any]) -> bool:
@@ -215,15 +272,17 @@ def _smoke_held(state: dict[str, Any]) -> bool:
 def _drop_runtime(state: dict[str, Any], args: Any) -> str | None:
     """Close the resident pipeline and leave the listener up."""
     old = state.get("runtime")
+    owners = state.get("memory_owners")
     folder = state.get("record")
     state["runtime"] = None
     state["record"] = None
     state["pipeline"] = None
     state["module"] = None
+    state["memory_owners"] = None
     shutdown = getattr(args, "shutdown", None)
     if shutdown is not None:
         shutdown.runtime = None
-    _close_runtime(old)
+    _close_runtime(old, owners)
     if isinstance(folder, str) and folder:
         _log(f"released {folder}")
         return folder
@@ -270,7 +329,9 @@ def serve(args: Any) -> int:
         return 0
     finally:
         if not shutdown.closing:
-            _release(state["runtime"], shutdown, state.get("server"))
+            _release(
+                state["runtime"], shutdown, state.get("server"), state.get("memory_owners")
+            )
 
 
 def _run_until_stopped(args: Any, state: dict[str, Any], shutdown: _Shutdown) -> int:
@@ -282,7 +343,7 @@ def _run_until_stopped(args: Any, state: dict[str, Any], shutdown: _Shutdown) ->
         _log("shutting down")
         return 0
     finally:
-        _release(state["runtime"], shutdown, state.get("server"))
+        _release(state["runtime"], shutdown, state.get("server"), state.get("memory_owners"))
 
 
 def _video_body(content_type: str, raw: bytes) -> dict[str, Any]:
