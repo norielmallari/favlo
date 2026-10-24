@@ -2,12 +2,13 @@
 
 Eight-step text-to-image pipeline for [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo). `favlo --z-image-turbo` loads `pipelines/metal41/z-image-turbo.py`. The DiT, the Qwen3 caption encoder, and the VAE decoder run as Metal shaders. The latent stays on the device across the eight steps. Patchify, the Euler update, the time sinusoid, the pad-token fill, the image and caption join, the RoPE index tables, the VAE scale, and the uint8 clip are shaders. The tokenizer and the PNG container stay on the host. The fp4 pack is offline. `matmul2d` consumes fp4 E2M1 weights with an E8M0 scale. Biases, norms, and the two pad tokens stay float16. Activations stay float32. The fp4 matmul reads float16, so a row whose peak exceeds 60000 is scaled into that range and the product is scaled back. A noise-refiner output projection reached 81884. The VAE encoder is not packed. Those weights are under the Apache License, Version 2.0.
 
-`setup` downloads the repository into `models/Z-Image-Turbo` from the Hugging Face resolve URL. `quantize` packs fp4 weights into `models/Z-Image-Turbo-fp4` and registers that folder. `--weights` is one `.safetensors` file or a directory of shards; with no flag, quantize uses the setup checkout. A weights-only path needs `--tokenizer-source` pointing at a tree that contains `tokenizer/`, unless the default setup checkout is already present. `generate` writes one PNG. `kernels` dispatches the fp4 matmul on a synthetic tile of 64 by 32 and checks it against the dequantized matrix.
+Download, pack, and the first image are [SETUP.md](SETUP.md). `setup` downloads the repository into `models/Z-Image-Turbo` from the Hugging Face resolve URL. `quantize` packs fp4 weights into `models/Z-Image-Turbo-fp4` and registers that folder. `--weights` is one `.safetensors` file or a directory of shards; with no flag, quantize uses the setup checkout. With no `--name` and no `--out`, that file or directory is packed to `models/<name>-fp4`. `--name` is the folder under `models/` and the registry id. A weights-only path uses `models/Z-Image-Turbo` for the tokenizer when that checkout is present. Otherwise pass `--tokenizer-source`. `generate` writes one PNG. `kernels` dispatches the fp4 matmul on a synthetic tile of 64 by 32 and checks it against the dequantized matrix.
 
 ```text
 uv run favlo --z-image-turbo setup
 uv run favlo --z-image-turbo quantize
-uv run favlo --z-image-turbo quantize --weights path/to/weights.safetensors --tokenizer-source models/Z-Image-Turbo --out models/Z-Image-Turbo-fp4
+uv run favlo --z-image-turbo quantize --weights models/example-model.safetensors
+uv run favlo --z-image-turbo quantize --weights models/example-model.safetensors --name example-model
 uv run favlo --z-image-turbo kernels
 uv run favlo --z-image-turbo generate --prompt "a red cube on a white table" --out example.png
 ```

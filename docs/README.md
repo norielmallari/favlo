@@ -39,6 +39,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen38-27b/benchmarks.md](qwen38-27b/benchmarks.md) | Harness scores against `serve` |
 | [qwen36-35b-a3b/benchmarks.md](qwen36-35b-a3b/benchmarks.md) | Harness scores against `serve` |
 | [z-image-turbo/README.md](z-image-turbo/README.md) | Z-Image-Turbo pipeline contract |
+| [z-image-turbo/SETUP.md](z-image-turbo/SETUP.md) | Z-Image-Turbo download, pack, and first image |
 | [wan22-i2v/README.md](wan22-i2v/README.md) | Wan 2.2 I2V pipeline contract |
 | [ace-step-15-turbo/README.md](ace-step-15-turbo/README.md) | ACE-Step 1.5 XL Turbo pipeline contract |
 | [zonos2/README.md](zonos2/README.md) | Failed ZONOS2 pipeline |

@@ -43,6 +43,7 @@ def test_history_is_the_carrot_naming() -> None:
 def test_setup_guides_load_by_pipeline_id() -> None:
     assert "qwen36-35b-a3b" in setup_pipelines()
     assert "qwen38-27b" in setup_pipelines()
+    assert "z-image-turbo" in setup_pipelines()
     text = read_setup("qwen36-35b-a3b")
     assert "uv run favlo --qwen36-35b-a3b setup" in text
     assert "--keep-bf16" in text
@@ -50,6 +51,9 @@ def test_setup_guides_load_by_pipeline_id() -> None:
     later = read_setup("qwen38-27b")
     assert "uv run favlo --qwen38-27b download" in later
     assert "uv run favlo --qwen38-27b delete qwen38-27b" in later
+    image = read_setup("z-image-turbo")
+    assert "uv run favlo --z-image-turbo setup" in image
+    assert "--weights models/example-model.safetensors" in image
     with pytest.raises(ValueError, match="unknown setup guide"):
         read_setup("../qwen36-35b-a3b")
     with pytest.raises(ValueError, match="unknown setup guide"):

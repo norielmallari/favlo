@@ -709,6 +709,53 @@ def test_quantize_accepts_a_directory_of_safetensors(tmp_path: Path) -> None:
     assert set(body["tensors"]) == {"layers.0.weight", "layers.1.weight"}
 
 
+def test_a_custom_safetensors_file_is_its_own_registry_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from z_image_turbo.commands import main
+
+    def models_dir(root: Path | None = None) -> Path:
+        del root
+        return tmp_path / "models"
+
+    monkeypatch.setattr("favlo.registry.models_dir", models_dir)
+    monkeypatch.setattr(
+        "z_image_turbo.source.source_dir",
+        lambda: tmp_path / "models" / "Z-Image-Turbo",
+    )
+    weights = tmp_path / "incoming" / "example-model.safetensors"
+    weights.parent.mkdir()
+    weights.write_bytes(b"st")
+    seen: dict[str, Path] = {}
+
+    def quantize(origin: Path, dest: Path, tokenizer_source: Path | None = None) -> Path:
+        del tokenizer_source
+        seen["origin"] = origin
+        seen["dest"] = dest
+        dest.mkdir(parents=True)
+        (dest / "manifest.json").write_text("{}\n")
+        return dest
+
+    monkeypatch.setattr("z_image_turbo.record.quantize", quantize)
+    assert main(["quantize"]) == 0
+    assert seen["dest"] == tmp_path / "models" / "Z-Image-Turbo-fp4"
+    assert main(["quantize", "--weights", str(weights)]) == 0
+    assert seen["dest"] == tmp_path / "models" / "example-model-fp4"
+    named = main(["quantize", "--weights", str(weights), "--name", "example-model"])
+    assert named == 0
+    assert seen["dest"] == tmp_path / "models" / "example-model"
+    registry = json.loads((tmp_path / "models" / "registry.json").read_text())
+    assert registry["models"]["example-model"]["alias"] is None
+    assert registry["models"]["example-model"]["source"] == str(weights)
+    refused = main(
+        ["quantize", "--weights", str(weights), "--name", "example-model", "--out", "packed"]
+    )
+    assert refused == 1
+    spaced = tmp_path / "bad name.safetensors"
+    spaced.write_bytes(b"st")
+    assert main(["quantize", "--weights", str(spaced)]) == 1
+
+
 def test_load_counts_bytes_and_skips_the_print(tmp_path, capsys) -> None:
     weights = tmp_path / "weights"
     weights.mkdir()

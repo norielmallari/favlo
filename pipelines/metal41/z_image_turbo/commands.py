@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -34,7 +35,12 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="tree with tokenizer/ when weights are not a full checkout",
     )
-    quant.add_argument("--out", type=Path)
+    quant.add_argument("--out", type=Path, help="packed directory")
+    quant.add_argument(
+        "--name",
+        default=None,
+        help="folder under models/; this name is the registry id",
+    )
     gen = sub.add_parser("generate", help="write one PNG")
     gen.add_argument("--prompt", required=True)
     gen.add_argument("--width", type=int, default=1024)
@@ -52,10 +58,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "kernels":
         return kernels()
     if args.command == "quantize":
-        return _quantize(args.weights, args.source, args.tokenizer_source, args.out)
+        return _quantize(args.weights, args.source, args.tokenizer_source, args.out, args.name)
     if args.command == "generate":
         return _generate(args)
     return 2
+
+
+_FOLDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def _quantize(
@@ -63,24 +72,54 @@ def _quantize(
     source: Path | None,
     tokenizer_source: Path | None,
     out: Path | None,
+    name: str | None,
 ) -> int:
     from favlo.registry import register_quantized
     from z_image_turbo.record import quantize
     from z_image_turbo.source import source_dir
 
     origin = weights or source or source_dir()
-    dest = out or origin.parent / "Z-Image-Turbo-fp4"
-    quantize(origin, dest, tokenizer_source=tokenizer_source)
-    register_quantized(
-        dest.name,
-        source=tokenizer_source or (origin if origin.is_dir() else source_dir()),
-        alias=None,
-        pipeline="z-image-turbo",
-        runtime="metal41",
-        max_prompt_tokens=1536,
-    )
+    try:
+        dest = _record_dir(origin, name, out)
+        quantize(origin, dest, tokenizer_source=tokenizer_source)
+        register_quantized(
+            dest.name,
+            source=origin,
+            alias=None,
+            pipeline="z-image-turbo",
+            runtime="metal41",
+            max_prompt_tokens=1536,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
     print(dest, flush=True)
     return 0
+
+
+def _record_dir(origin: Path, name: str | None, out: Path | None) -> Path:
+    """Packed directory. A custom file is ``<stem>-fp4`` under ``models/``."""
+    from favlo.registry import models_dir
+
+    if name is not None and out is not None:
+        message = "--name and --out name the same directory"
+        raise ValueError(message)
+    if name is not None:
+        _check_folder(name)
+        return models_dir() / name
+    if out is not None:
+        return out
+    stem = origin.stem if origin.suffix == ".safetensors" else origin.name
+    if not stem.endswith("-fp4"):
+        stem = f"{stem}-fp4"
+    _check_folder(stem)
+    return models_dir() / stem
+
+
+def _check_folder(name: str) -> None:
+    if _FOLDER.fullmatch(name) is None:
+        message = f"{name} is not a folder name; pass --name"
+        raise ValueError(message)
 
 
 def _generate(args: argparse.Namespace) -> int:

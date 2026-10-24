@@ -44,6 +44,36 @@ def test_a_setup_command_runs_in_the_install(
     assert "packed" in text
 
 
+def test_the_image_setup_commands_are_accepted() -> None:
+    from favlo.cli import repo_root
+    from favlo.guides import read_setup
+
+    root = repo_root()
+    guide = read_setup("z-image-turbo")
+    commands = (
+        "uv sync --extra dev",
+        "uv run favlo --z-image-turbo setup",
+        "uv run favlo --z-image-turbo quantize",
+        "uv run favlo --z-image-turbo quantize --weights models/example-model.safetensors",
+        "uv run favlo --z-image-turbo quantize --weights models/example-model.safetensors "
+        "--name example-model",
+    )
+    for command in commands:
+        assert command in guide
+        argv = accepted_argv(command, root)
+        if command != "uv sync --extra dev":
+            assert frees_model(argv)
+            assert argv[3:5] == ["--z-image-turbo", command.split()[4]]
+    tokenizer = (
+        "uv run favlo --z-image-turbo quantize --weights models/example-model.safetensors "
+        "--tokenizer-source models/Z-Image-Turbo"
+    )
+    assert accepted_argv(tokenizer, root)[-2:] == [
+        "--tokenizer-source",
+        "models/Z-Image-Turbo",
+    ]
+
+
 def test_a_path_and_a_shell_are_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("favlo.setup_run.pipeline_names", _names)
     with pytest.raises(ValueError, match="not a setup step"):
@@ -60,6 +90,17 @@ def test_a_path_and_a_shell_are_refused(tmp_path: Path, monkeypatch: pytest.Monk
     delete = accepted_argv("favlo --qwen36-35b-a3b delete example-model:instruct", tmp_path)
     assert delete[-2:] == ["delete", "example-model:instruct"]
     assert accepted_argv("uv sync --extra dev", tmp_path) == ["uv", "sync", "--extra", "dev"]
+    packed = accepted_argv(
+        "uv run favlo --example-pipeline quantize "
+        "--weights models/example-model.safetensors --name example-model",
+        tmp_path,
+    )
+    assert packed[-4:] == [
+        "--weights",
+        "models/example-model.safetensors",
+        "--name",
+        "example-model",
+    ]
     assert not frees_model(["uv", "sync", "--extra", "dev"])
 
 

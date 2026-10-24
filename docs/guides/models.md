@@ -36,6 +36,12 @@ The official checkpoint is `Qwen/Qwen3.8-Flash-Next`.
 
 `favlo --qwen38-flash-next quantize` does not download. `--source` is required, and that directory must contain `config.json`. `--alias` sets the registry alias. `--output` sets the record directory. When `--output` is omitted, the directory name comes from the expert widths in the source.
 
+## Z-Image-Turbo
+
+The official checkpoint is `Tongyi-MAI/Z-Image-Turbo`. The steps are [z-image-turbo/SETUP.md](../z-image-turbo/SETUP.md).
+
+`favlo --z-image-turbo setup` downloads that repository into `models/Z-Image-Turbo`. `quantize` packs `models/Z-Image-Turbo-fp4`. `--weights` is one `.safetensors` file or a directory of shards. With no `--name`, the folder is that file or directory name plus `-fp4`. `--name` is the registry id.
+
 ## Register a finished record
 
 `models` lists the registry. `models add` registers a directory under `models/` whose manifest is already complete. `models alias` renames the alias of a folder. The same subcommands exist for each pipeline flag:

@@ -847,13 +847,14 @@ def _setup_guide_tool() -> object:
     def read_setup(
         pipeline: Annotated[
             str,
-            Field(description="Pipeline id, such as qwen36-35b-a3b or qwen38-27b."),
+            Field(description="Pipeline id, such as qwen36-35b-a3b, qwen38-27b, or z-image-turbo."),
         ],
     ) -> str:
         """Read one pipeline's setup guide.
 
         Call this when someone wants to set up, download, quantize, or delete a model.
         qwen36-35b-a3b is Qwen3.6-35B-A3B. qwen38-27b is Qwen3.8-27B.
+        z-image-turbo is Z-Image-Turbo.
         The result is that pipeline's setup page.
         A pipeline with no setup page names the ones that have one.
         """
