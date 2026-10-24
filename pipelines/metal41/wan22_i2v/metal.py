@@ -995,7 +995,7 @@ class Gpu:
                 struct.pack("I", width),
                 struct.pack("I", dim),
             ],
-            ((tokens + threads - 1) // threads, 1, 1),
+            ((dim + threads - 1) // threads, tokens, 1),
             (threads, 1, 1),
         )
 

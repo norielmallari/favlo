@@ -598,33 +598,34 @@ kernel void patch_embed(
     constant uint& height [[buffer(6)]],
     constant uint& width [[buffer(7)]],
     constant uint& dim [[buffer(8)]],
-    uint token [[thread_position_in_grid]])
+    uint2 group [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]])
 {
+    uint token = group.y;
+    uint o = group.x * 64u + lane;
     uint grid_h = height / 2u;
     uint grid_w = width / 2u;
     uint spatial = grid_h * grid_w;
-    if (token >= time * spatial) {
+    if (token >= time * spatial || o >= dim) {
         return;
     }
     uint t = token / spatial;
     uint rem = token - t * spatial;
     uint ph = rem / grid_w;
     uint pw = rem - ph * grid_w;
-    for (uint o = 0u; o < dim; o++) {
-        float acc = float(bias[o]);
-        for (uint c = 0u; c < channels; c++) {
-            for (uint kh = 0u; kh < 2u; kh++) {
-                for (uint kw = 0u; kw < 2u; kw++) {
-                    uint ih = ph * 2u + kh;
-                    uint iw = pw * 2u + kw;
-                    float value = volume[((c * time + t) * height + ih) * width + iw];
-                    uint index = (((o * channels + c) * 2u + kh) * 2u + kw);
-                    acc += value * float(weight[index]);
-                }
+    float acc = float(bias[o]);
+    for (uint c = 0u; c < channels; c++) {
+        for (uint kh = 0u; kh < 2u; kh++) {
+            for (uint kw = 0u; kw < 2u; kw++) {
+                uint ih = ph * 2u + kh;
+                uint iw = pw * 2u + kw;
+                float value = volume[((c * time + t) * height + ih) * width + iw];
+                uint index = (((o * channels + c) * 2u + kh) * 2u + kw);
+                acc += value * float(weight[index]);
             }
         }
-        tokens[token * dim + o] = acc;
     }
+    tokens[token * dim + o] = acc;
 }
 
 kernel void conv3d(

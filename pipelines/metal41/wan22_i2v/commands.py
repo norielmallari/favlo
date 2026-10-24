@@ -59,10 +59,12 @@ def kernels() -> int:
     _matmul("fp8")
     _attend()
     _spatial()
+    _patch()
     print("fp4 ok", flush=True)
     print("fp8 ok", flush=True)
     print("attend ok", flush=True)
     print("spatial ok", flush=True)
+    print("patch ok", flush=True)
     return 0
 
 
@@ -212,6 +214,55 @@ def _spatial() -> None:
             )
             if not np.allclose(got, expect, atol=2e-3, rtol=2e-3):
                 message = f"spatial mismatch {channels} {time}x{height}x{width}"
+                raise RuntimeError(message)
+    finally:
+        gpu.close()
+
+
+def _patch() -> None:
+    from wan22_i2v.metal import Gpu
+
+    rng = np.random.default_rng(2)
+    cases = ((4, 2, 4, 4, 70), (36, 1, 2, 2, 64))
+    gpu = Gpu()
+    try:
+        for channels, time, height, width, dim in cases:
+            volume = rng.standard_normal((channels, time, height, width)).astype(np.float32)
+            weight = rng.standard_normal((dim, channels, 2, 2)).astype(np.float16)
+            bias = rng.standard_normal(dim).astype(np.float16)
+            grid_h = height // 2
+            grid_w = width // 2
+            spatial = grid_h * grid_w
+            tokens = time * spatial
+            expect = np.zeros((tokens, dim), dtype=np.float32)
+            for token in range(tokens):
+                frame = token // spatial
+                rem = token - frame * spatial
+                ph = rem // grid_w
+                pw = rem - ph * grid_w
+                for out in range(dim):
+                    acc = float(bias[out])
+                    for channel in range(channels):
+                        for kh in range(2):
+                            for kw in range(2):
+                                value = volume[channel, frame, ph * 2 + kh, pw * 2 + kw]
+                                acc += float(value) * float(weight[out, channel, kh, kw])
+                    expect[token, out] = acc
+            dest = gpu.empty(tokens * dim * 4)
+            gpu.patch(
+                gpu.upload(volume),
+                gpu.upload(weight),
+                gpu.upload(bias),
+                dest,
+                channels,
+                time,
+                height,
+                width,
+                dim,
+            )
+            got = gpu.read_f32(dest, tokens * dim).reshape(tokens, dim)
+            if not np.allclose(got, expect, atol=2e-2, rtol=2e-2):
+                message = f"patch mismatch {channels} {time}x{height}x{width} dim {dim}"
                 raise RuntimeError(message)
     finally:
         gpu.close()

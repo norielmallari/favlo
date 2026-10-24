@@ -54,10 +54,10 @@ The 512-row `matmul_fp4` with K 5120 counts the cross k and v projections and th
 | `gelu_tanh` | 13824 | 160 | 0.864 |
 | `add_half` | 6×5120 | 160 | 0.002 |
 | `copy_f32` | 5120 | 1124 | 0.002 |
-| `patch_embed` | 36×3×40×72 | 4 | 24.447 |
+| `patch_embed` | 36×3×40×72 | 4 | 2.490 |
 | `zero_bytes` | token rows | 4 | 0.199 |
 
-The gather, rescale, and bias for the text, time, and head projections, plus `gelu_tanh` on the text rows, `silu`, `add_embed_half`, `sinusoid`, `unpatchify`, `condition36`, and `axpy`, add 0.002 s. The unrounded median sum for the DiT is 32.105 s.
+The gather, rescale, and bias for the text, time, and head projections, plus `gelu_tanh` on the text rows, `silu`, `add_embed_half`, `sinusoid`, `unpatchify`, `condition36`, and `axpy`, add 0.002 s. The unrounded median sum for the DiT is 32.017 s.
 
 `attend_q4` reads each query once, writes the destination once, and walks each key and each value once for every group of four queries. One self-attention call is 47,864,217,600 bytes. One hundred sixty calls are 27.643 s at 277.04 GB/s. The measured self-attention is 8.300 s. One cross-attention call is 11,413,094,400 bytes. One hundred sixty calls are 6.591 s at the same bandwidth. The measured cross-attention is 1.706 s.
 
@@ -93,6 +93,6 @@ The other 49 shapes are 143 calls and add 1.074 s. All 207 calls sum to 6.733 s.
 
 ## Clip
 
-The DiT, the 9-token encoder, and the VAE sum to 41.931 s. The 90% test uses that kernel ceiling. The attention bandwidth ceiling is 34.234 s. The expert pack read and the AVI pack are outside the kernel sum.
+The DiT, the 9-token encoder, and the VAE sum to 41.843 s. The 90% test uses that kernel ceiling. The attention bandwidth ceiling is 34.234 s. The expert pack read and the AVI pack are outside the kernel sum.
 
-A 9-frame 576×320 smoke printed umT5 2.42 s, VAE encode 2.61 s, four steps 8.02 s, 8.03 s, 8.02 s, and 8.04 s, and VAE decode 3.94 s. Those stages sum to 41.08 s, within 41.931 s / 0.9.
+A 9-frame 576×320 smoke printed umT5 2.42 s, VAE encode 2.61 s, four steps 8.01 s, 8.02 s, 8.00 s, and 8.04 s, and VAE decode 3.96 s. Those stages sum to 41.06 s, within 41.843 s / 0.9.
