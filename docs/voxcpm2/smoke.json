@@ -1,0 +1,7 @@
+{
+  "input": "The small brown fox spoke one short line.",
+  "instructions": "",
+  "model": "VoxCPM2",
+  "sample_rate": 48000,
+  "max_seconds": 8
+}

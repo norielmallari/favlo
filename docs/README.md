@@ -41,6 +41,8 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [ace-step-15-turbo/README.md](ace-step-15-turbo/README.md) | ACE-Step 1.5 XL Turbo pipeline contract |
 | [zonos2/README.md](zonos2/README.md) | Failed ZONOS2 pipeline |
 | [zonos2/references.md](zonos2/references.md) | Papers and specifications for the ZONOS2 pipeline |
+| [voxcpm2/README.md](voxcpm2/README.md) | VoxCPM2 pipeline contract |
+| [voxcpm2/references.md](voxcpm2/references.md) | Papers and specifications for the VoxCPM2 pipeline |
 | [ace-step-15-turbo/research/dit-mlp-fp4-error.md](ace-step-15-turbo/research/dit-mlp-fp4-error.md) | ACE-Step XL Turbo DiT MLP fp4 error ranking |
 | [zonos2/research/moe-fp4-error.md](zonos2/research/moe-fp4-error.md) | ZONOS2 MoE fp4 error ranking |
 | [wan22-i2v/research/clip-ceiling.md](wan22-i2v/research/clip-ceiling.md) | Wan 2.2 I2V 9-frame kernel sum |

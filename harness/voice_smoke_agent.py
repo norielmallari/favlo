@@ -1,9 +1,10 @@
 """Agent that generates one spoken line through MCP.
 
 The agent calls ``generate_voice`` on ``POST /mcp`` and reads
-``favlo://voice/{id}.wav``. The saved file is checked for 44.1 kHz, mono,
-a level above the silence floor, and a duration inside the context cap.
-The command does not take the machine lock. This command is not part of pytest.
+``favlo://voice/{id}.wav``. The saved file is checked for the sample rate
+in ``docs/voxcpm2/smoke.json``, mono, a level above the silence floor, and
+a duration inside that note's cap. The command does not take the machine
+lock. This command is not part of pytest.
 """
 
 from __future__ import annotations
@@ -25,7 +26,6 @@ from harness.server import close_listener, open_listener
 JUDGE = "qwen36-35b-a3b:instruct"
 HOST = "127.0.0.1"
 RMS_FLOOR = 1e-4
-CONTEXT_SECONDS = 6144 * 512 / 44100
 
 
 def voice_tool(port: int, body: dict[str, Any], out: Path, reports: list[str]) -> object:
@@ -55,14 +55,14 @@ def _report(path: Path) -> str:
     return f"rate {rate}\nchannels {channels}\nseconds {seconds:.3f}\nrms {rms:.6f}\n"
 
 
-def report_ok(text: str) -> bool:
+def report_ok(text: str, *, rate: int, max_seconds: float) -> bool:
     fields: dict[str, str] = {}
     for line in text.splitlines():
         key, _, value = line.partition(" ")
         if key in {"rate", "channels", "seconds", "rms"} and value:
             fields[key] = value.split()[0]
     try:
-        rate = int(fields["rate"])
+        got_rate = int(fields["rate"])
         channels = int(fields["channels"])
         duration = float(fields["seconds"])
         rms = float(fields["rms"])
@@ -70,8 +70,8 @@ def report_ok(text: str) -> bool:
         return False
     return (
         channels == 1
-        and rate == 44_100
-        and 0.0 < duration <= CONTEXT_SECONDS
+        and got_rate == rate
+        and 0.0 < duration <= max_seconds
         and rms > RMS_FLOOR
     )
 
@@ -101,8 +101,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=Path("."))
     args = parser.parse_args(argv)
     root = args.root.resolve()
-    note = json.loads((root / "docs" / "zonos2" / "smoke.json").read_text(encoding="utf-8"))
+    note = json.loads((root / "docs" / "voxcpm2" / "smoke.json").read_text(encoding="utf-8"))
     body = {"input": note["input"], "model": note["model"]}
+    instructions = note.get("instructions")
+    if isinstance(instructions, str) and instructions:
+        body["instructions"] = instructions
+    rate = int(note["sample_rate"])
+    max_seconds = float(note["max_seconds"])
     listener = None
     try:
         listener = open_listener()
@@ -115,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
             print("voice file was not written", flush=True)
             return 1
         print(reports[-1], end="", flush=True)
-        if not report_ok(reports[-1]):
+        if not report_ok(reports[-1], rate=rate, max_seconds=max_seconds):
             print("voice file failed the format check", flush=True)
             return 1
         return 0

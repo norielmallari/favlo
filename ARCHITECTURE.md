@@ -36,6 +36,7 @@ Each runtime is a separate write set. An agent developing one runtime edits that
 | `z-image-turbo` | `pipelines/metal41/z-image-turbo.py` | `pipelines/metal41/z_image_turbo/` | [docs/z-image-turbo/README.md](docs/z-image-turbo/README.md) |
 | `wan22-i2v` | `pipelines/metal41/wan22-i2v.py` | `pipelines/metal41/wan22_i2v/` | [docs/wan22-i2v/README.md](docs/wan22-i2v/README.md) |
 | `ace-step-15-turbo` | `pipelines/metal41/ace-step-15-turbo.py` | `pipelines/metal41/ace_step_15_turbo/` | [docs/ace-step-15-turbo/README.md](docs/ace-step-15-turbo/README.md) |
+| `voxcpm2` | `pipelines/metal41/voxcpm2.py` | `pipelines/metal41/voxcpm2/` | [docs/voxcpm2/README.md](docs/voxcpm2/README.md) |
 
 The entry filename may contain hyphens. The command loads it by path from `pipelines/<runtime>/`. It is not an importable module name. The package beside it uses underscores. The entry sets `PIPELINE` to that filename stem. A runtime's write set is the entry file, the package, `docs/<pipeline>/`, and tests that import only that package. A new runtime adds a row to the table above and its own doc directory. It does not edit another row's package, shaders, tests, or docs. Shipped rows use `runtime` `metal41`. `pipelines/cuda` is empty until a CUDA pipeline names the toolkit it needs. A custom entry lives under `custom-pipelines/<runtime>/` and its registry row sets `custom` true. A missing or unknown `runtime` is an error.
 
