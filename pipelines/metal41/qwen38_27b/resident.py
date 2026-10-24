@@ -106,7 +106,17 @@ class DeviceImage:
         self.offsets = {}
         self._staged_offsets = {}
         if mapping is not None:
+            _discard_mapping(mapping)
             mapping.close()
+
+
+def _discard_mapping(mapping: mmap.mmap) -> None:
+    """Mark the weight file's cached pages reusable before the mapping closes."""
+    for advice in (mmap.MADV_FREE, mmap.MADV_FREE_REUSABLE):
+        try:
+            mapping.madvise(advice)
+        except (OSError, BufferError, ValueError):
+            continue
 
 
 def _fill(

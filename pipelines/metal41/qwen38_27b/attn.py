@@ -15,6 +15,7 @@ import struct
 from typing import Any
 
 from qwen38_27b.layout import CHUNK, FULL_LAYERS, GROUP, HEAD, KV_HEADS
+from qwen38_27b.session import release_buffer, release_buffers
 
 TILE = 256
 SCORE = 2048
@@ -48,23 +49,37 @@ def value_block_bytes(positions: int) -> int:
 
 
 def bind_plane(runtime: Any) -> None:
-    """Allocate the score, probability, and value-block scratch."""
+    """Allocate the score, probability, and value-block scratch.
+
+    The previous scratch is released after the new buffers exist.
+    """
     rows = GROUP * CHUNK
     zeros = runtime.session.zeros
-    runtime.plane_q = zeros(rows * HEAD * 2)
-    runtime.plane_scores = zeros(rows * SCORE * 4)
-    runtime.plane_probs = zeros(rows * SCORE * 4)
-    runtime.plane_prob_half = zeros(rows * SCORE * 2)
-    runtime.plane_row_scale = zeros(rows * 4)
-    runtime.plane_parts = zeros(value_block_bytes(runtime.max_pos))
-    runtime.plane_partial = zeros(rows * HEAD * 4)
-    runtime.plane_acc = zeros(rows * HEAD * 4)
-    runtime.plane_max = zeros(rows * 4)
-    runtime.plane_sum = zeros(rows * 4)
     slots = int(getattr(runtime, "kv_slots", FULL_LAYERS))
-    runtime.plane_tail = zeros(slots * KV_HEADS * 32 * HEAD * 4)
-    runtime.plane_chunk_max = zeros(rows * (SCORE // TILE) * 4)
-    runtime.plane_chunk_sum = zeros(rows * (SCORE // TILE) * 4)
+    made: dict[str, Any] = {}
+    try:
+        made["plane_q"] = zeros(rows * HEAD * 2)
+        made["plane_scores"] = zeros(rows * SCORE * 4)
+        made["plane_probs"] = zeros(rows * SCORE * 4)
+        made["plane_prob_half"] = zeros(rows * SCORE * 2)
+        made["plane_row_scale"] = zeros(rows * 4)
+        made["plane_parts"] = zeros(value_block_bytes(runtime.max_pos))
+        made["plane_partial"] = zeros(rows * HEAD * 4)
+        made["plane_acc"] = zeros(rows * HEAD * 4)
+        made["plane_max"] = zeros(rows * 4)
+        made["plane_sum"] = zeros(rows * 4)
+        made["plane_tail"] = zeros(slots * KV_HEADS * 32 * HEAD * 4)
+        made["plane_chunk_max"] = zeros(rows * (SCORE // TILE) * 4)
+        made["plane_chunk_sum"] = zeros(rows * (SCORE // TILE) * 4)
+    except RuntimeError:
+        release_buffers(made.values())
+        raise
+    previous = [getattr(runtime, name, None) for name in made]
+    for name, buf in made.items():
+        setattr(runtime, name, buf)
+    for buf in previous:
+        if buf is not None:
+            release_buffer(buf)
 
 
 def attend_plane(

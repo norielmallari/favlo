@@ -62,7 +62,7 @@ from qwen38_27b.layout import (
 from qwen38_27b.prefill import _Workspace
 from qwen38_27b.prefix import open_session, pack_plane, unpack_plane
 from qwen38_27b.resident import DeviceImage
-from qwen38_27b.session import Session, discard
+from qwen38_27b.session import Session, discard, release_buffers
 
 
 class RequestClosed(Exception):
@@ -298,6 +298,7 @@ class Qwen38Runtime:
             for name in _DEVICE_FIELDS:
                 if hasattr(self, name):
                     setattr(self, name, None)
+            release_buffers(buffers)
             if session is not None:
                 try:
                     session.close()
@@ -454,70 +455,63 @@ class Qwen38Runtime:
         self._held = [self.resident, self.history, self.state, *self.k_cache, *self.v_cache]
 
     def _extend_cache(self, plan: Any, count: int, saved: list[tuple[int, str, bytes]]) -> None:
-        """Replace the key/value planes. The weight buffer stays."""
+        """Replace the key/value planes and release the planes they replace."""
         assert self.session is not None
-        old_positions = self.max_pos
-        old_slots = self.kv_slots
-        self.k_cache = []
-        self.v_cache = []
-        self.plane_parts = None
+        old = [getattr(self, "plane_parts", None), *self.k_cache, *self.v_cache]
         zeros = self.session.zeros
+        made: list[Any] = []
         try:
             parts = zeros(value_block_bytes(plan.positions))
+            made.append(parts)
             one = plane_bytes(plan.positions)
-            new_k = [zeros(one) for _ in range(plan.slots)]
-            new_v = [zeros(one) for _ in range(plan.slots)]
+            new_k: list[Any] = []
+            new_v: list[Any] = []
+            for _slot in range(plan.slots):
+                new_k.append(zeros(one))
+                made.append(new_k[-1])
+            for _slot in range(plan.slots):
+                new_v.append(zeros(one))
+                made.append(new_v[-1])
         except RuntimeError:
-            self._restore_cache(old_positions, old_slots, count, saved)
+            release_buffers(made)
             raise
         self.plane_parts = parts
         self.k_cache = new_k
         self.v_cache = new_v
         self.max_pos = plan.positions
         self.wire = plan
+        release_buffers(old)
         self._restore_planes(count, saved)
         self._held = [self.resident, self.history, self.state, *self.k_cache, *self.v_cache]
 
-    def _restore_cache(
-        self,
-        positions: int,
-        slots: int,
-        count: int,
-        saved: list[tuple[int, str, bytes]],
-    ) -> None:
-        """Put the previous planes back after a longer cache was refused."""
-        if self.session is None:
-            return
-        zeros = self.session.zeros
-        try:
-            self.plane_parts = zeros(value_block_bytes(positions))
-            one = plane_bytes(positions)
-            self.k_cache = [zeros(one) for _ in range(slots)]
-            self.v_cache = [zeros(one) for _ in range(slots)]
-        except RuntimeError as exc:
-            if "device refused" not in str(exc):
-                raise
-            return
-        self._restore_planes(count, saved)
-
     def _release_elastic(self) -> None:
+        """Drop the weight image, the cache, and the scratch, and return their spans."""
         weights = getattr(self, "weights", None)
+        image = getattr(weights, "buffer", None) if weights is not None else None
         if weights is not None:
             weights.close()
         self.weights = None
+        resident = getattr(self, "resident", None)
         self.resident = None
+        caches = [*getattr(self, "k_cache", ()), *getattr(self, "v_cache", ())]
         self.k_cache = []
         self.v_cache = []
+        hold = getattr(self, "hold", None)
         self.hold = None
+        scratch: list[Any] = []
         for name in _SCRATCH_FIELDS:
-            if hasattr(self, name):
+            item = getattr(self, name, None)
+            if item is not None:
+                scratch.append(item)
                 setattr(self, name, None)
         work = getattr(self, "_prefill", None)
+        mix = getattr(work, "mix", None) if work is not None else None
         if work is not None:
             work.mix = None
         held = getattr(self, "_held", None)
         if isinstance(held, list):
             held.clear()
+        release_buffers((image, resident, hold, mix, *caches, *scratch))
 
     def _capture_planes(self) -> tuple[int, list[tuple[int, str, bytes]]]:
         count = min(int(self.filled), int(self.max_pos))

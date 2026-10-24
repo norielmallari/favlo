@@ -387,6 +387,125 @@ def test_close_drops_the_device_before_another_pipeline_loads() -> None:
     assert purged == [4]
 
 
+def test_extend_cache_releases_the_planes_it_replaces() -> None:
+    released: list[str] = []
+
+    class _Buf:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def release(self) -> None:
+            released.append(self.name)
+
+    class _Session:
+        def zeros(self, _nbytes: int) -> _Buf:
+            return _Buf("new")
+
+    runtime = Qwen38Runtime.__new__(Qwen38Runtime)
+    old_k = _Buf("k")
+    old_v = _Buf("v")
+    old_parts = _Buf("parts")
+    runtime.session = _Session()
+    runtime.k_cache = [old_k]
+    runtime.v_cache = [old_v]
+    runtime.plane_parts = old_parts
+    runtime.resident = None
+    runtime.history = None
+    runtime.state = None
+    plan = SimpleNamespace(positions=4096, slots=1)
+    runtime._extend_cache(plan, 0, [])
+    assert released == ["parts", "k", "v"]
+    assert runtime.k_cache[0].name == "new"
+    assert runtime.max_pos == 4096
+
+
+def test_extend_cache_keeps_the_old_planes_when_the_device_refuses() -> None:
+    released: list[str] = []
+
+    class _Buf:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def release(self) -> None:
+            released.append(self.name)
+
+    class _Session:
+        def zeros(self, _nbytes: int) -> _Buf:
+            made = _Buf("partial")
+            released.append("allocated")
+            if released.count("allocated") > 1:
+                message = "device refused a longer cache"
+                raise RuntimeError(message)
+            return made
+
+    runtime = Qwen38Runtime.__new__(Qwen38Runtime)
+    old = _Buf("old")
+    runtime.session = _Session()
+    runtime.k_cache = [old]
+    runtime.v_cache = [old]
+    runtime.plane_parts = old
+    plan = SimpleNamespace(positions=4096, slots=1)
+    with pytest.raises(RuntimeError, match="device refused"):
+        runtime._extend_cache(plan, 0, [])
+    assert runtime.k_cache == [old]
+    assert "old" not in released
+    assert "partial" in released
+
+
+def test_release_elastic_returns_the_weight_image() -> None:
+    released: list[str] = []
+
+    class _Buf:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def release(self) -> None:
+            released.append(self.name)
+
+    class _Weights:
+        def __init__(self) -> None:
+            self.buffer = _Buf("image")
+
+        def close(self) -> None:
+            self.buffer = None
+
+    runtime = Qwen38Runtime.__new__(Qwen38Runtime)
+    runtime.weights = _Weights()
+    runtime.resident = runtime.weights.buffer
+    plane = _Buf("plane")
+    runtime.k_cache = [plane]
+    runtime.v_cache = []
+    runtime.hold = None
+    runtime.plane_q = _Buf("scratch")
+    runtime._prefill = SimpleNamespace(mix=None)
+    runtime._held = [plane]
+    runtime._release_elastic()
+    assert released == ["image", "plane", "scratch"]
+    assert runtime.weights is None
+    assert runtime.k_cache == []
+    assert runtime.plane_q is None
+
+
+def test_image_close_drops_the_weight_file_mapping(tmp_path: Path) -> None:
+    import mmap
+
+    from qwen38_27b.resident import DeviceImage
+
+    path = tmp_path / "resident.bin"
+    path.write_bytes(b"x" * 8192)
+    handle = path.open("rb")
+    mapping = mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ)
+    image = DeviceImage.__new__(DeviceImage)
+    image._map = mapping
+    image._view = None
+    image.buffer = None
+    image.offsets = {}
+    image._staged_offsets = {}
+    image.close()
+    assert mapping.closed
+    handle.close()
+
+
 def test_session_close_finishes_an_open_pass() -> None:
     from qwen38_27b.session import Session
 

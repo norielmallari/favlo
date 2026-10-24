@@ -108,6 +108,23 @@ def _clear(buffer: Any, nbytes: int, note: Any = None) -> None:
             note(step)
 
 
+def release_buffer(buffer: Any) -> None:
+    """Return one span. An object without ``release`` stays until ``sweep``."""
+    fn = getattr(buffer, "release", None)
+    if callable(fn):
+        fn()
+
+
+def release_buffers(buffers: Any) -> None:
+    """Return each span once. ``None`` and a repeated object are skipped."""
+    seen: set[int] = set()
+    for buffer in buffers:
+        if buffer is None or id(buffer) in seen:
+            continue
+        seen.add(id(buffer))
+        release_buffer(buffer)
+
+
 def discard(buffer: Any) -> None:
     """Return a shared buffer's pages so the next pipeline can allocate them."""
     if buffer is None:
