@@ -1,7 +1,7 @@
 """Agent that generates the 10 second music smoke.
 
 The Microsoft Agent Framework agent calls ``generate_music`` on ``POST /mcp``
-and reads ``favlo://music/{id}``. The saved file is
+and reads ``favlo://music/{id}.wav``. The saved file is
 analyzed by `harness/inspect_wav.py`. Exit 0 means the file is 10 seconds,
 48 kHz, stereo, and above the silence floor, and the inspect template matches
 the request template. The command does not take the machine lock. The judge
