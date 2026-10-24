@@ -1014,6 +1014,37 @@ class _QueueMedia:
             },
         )
 
+    def handle_voice(self, reply, runtime, body, selection, args, state) -> None:
+        del runtime, selection, args
+        import wave
+        from io import BytesIO
+
+        import numpy as np
+
+        from favlo.voice import store_wav
+
+        tone = np.sin(np.linspace(0.0, 40.0, 4410, dtype=np.float32)) * np.float32(0.2)
+        pcm = np.round(np.clip(tone, -1.0, 1.0) * 32767.0).astype("<i2")
+        buffer = BytesIO()
+        with wave.open(buffer, "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(44100)
+            handle.writeframes(pcm.tobytes())
+        voice_id = "voice_smoke"
+        store_wav(voice_id, buffer.getvalue(), home=self.home, output_format="wav")
+        state.setdefault("voice", {})[voice_id] = {"response_format": body.get("response_format") or "wav"}
+        state["voice_home"] = self.home
+        reply.json(
+            200,
+            {
+                "id": voice_id,
+                "object": "audio.voice",
+                "status": "completed",
+                "response_format": "wav",
+            },
+        )
+
 
 def test_mcp_initialize_lists_tools_and_rejects_a_batch(tmp_path) -> None:
     runtime = _Runtime()
@@ -1049,6 +1080,7 @@ def test_mcp_initialize_lists_tools_and_rejects_a_batch(tmp_path) -> None:
         "generate_image",
         "generate_video",
         "generate_music",
+        "generate_voice",
     }
     assert inline_status == 200, inline
     assert "error" not in inline
@@ -1331,3 +1363,35 @@ def test_language_harness_clients_read_chat_completions() -> None:
     assert content or _reasoning
     assert completion.choices[0].message.content
 
+
+def test_mcp_voice_writes_a_wav_and_the_link_reads_it(tmp_path) -> None:
+    runtime = _Runtime()
+    state, thread = _serve_background(runtime)
+    state["voice_home"] = tmp_path
+    state["module"] = _QueueMedia(tmp_path)
+    port = int(state["server"].server_address[1])
+    try:
+        status, called = _tool(
+            port,
+            "generate_voice",
+            {"input": "The small brown fox spoke one short line.", "model": "example-model", "response_format": "wav"},
+            tasks=False,
+        )
+        _read_status, read = _mcp(
+            port,
+            "resources/read",
+            {"uri": "favlo://voice/voice_smoke.wav"},
+            name="favlo://voice/voice_smoke.wav",
+        )
+    finally:
+        _stop_background(state, thread)
+    assert status == 200, called
+    content = called["result"]["content"]
+    assert content[1]["uri"] == "favlo://voice/voice_smoke.wav"
+    assert content[1]["name"] == "voice_smoke.wav"
+    assert content[1]["mimeType"] == "audio/wav"
+    blob = read["result"]["contents"][0]
+    assert blob["uri"] == "favlo://voice/voice_smoke.wav"
+    assert blob["mimeType"] == "audio/wav"
+    assert blob["blob"]
+    assert (tmp_path / "voice" / "voice_smoke.wav").is_file()

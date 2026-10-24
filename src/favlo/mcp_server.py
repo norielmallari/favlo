@@ -52,6 +52,7 @@ _ANNOTATIONS = mcp_types.ToolAnnotations(
 )
 _AUDIO = {"mp3": "audio/mpeg", "wav": "audio/wav", "flac": "audio/flac"}
 _IMAGE_EXT = frozenset({"png"})
+_VIDEO_EXT = frozenset({"mp4"})
 
 
 def build_mcp(dispatch: Any, state: dict[str, Any]) -> FastMCP:
@@ -204,8 +205,9 @@ def build_mcp(dispatch: Any, state: dict[str, Any]) -> FastMCP:
 
     @mcp.resource("favlo://videos/{video_id}", mime_type="video/mp4")
     def read_video(video_id: str) -> bytes:
-        """The stored MP4."""
-        raw = load_video(video_id, home=_home(tasks.state, "video_home"))
+        """The stored MP4. A ``.mp4`` suffix is the same file."""
+        stem, _ext = _split_suffix(video_id, _VIDEO_EXT)
+        raw = load_video(stem, home=_home(tasks.state, "video_home"))
         if raw is None:
             message = "stored video is missing"
             raise ToolError(message)
@@ -213,23 +215,13 @@ def build_mcp(dispatch: Any, state: dict[str, Any]) -> FastMCP:
 
     @mcp.resource("favlo://voice/{voice_id}")
     def read_voice(voice_id: str) -> ResourceResult:
-        """The stored spoken audio. The MIME type is the job's response format."""
-        loaded = stored_voice(tasks.state, voice_id)
-        if loaded is None:
-            message = "stored voice is missing"
-            raise ToolError(message)
-        raw, mime = loaded
-        return ResourceResult([ResourceContent(raw, mime_type=mime)])
+        """The stored spoken audio. A suffix selects that encoding."""
+        return _read_audio(tasks.state, voice_id, "voice", stored_voice, load_voice)
 
     @mcp.resource("favlo://music/{music_id}")
     def read_music(music_id: str) -> ResourceResult:
-        """The stored audio. The MIME type is the job's response format."""
-        loaded = stored_music(tasks.state, music_id)
-        if loaded is None:
-            message = "stored music is missing"
-            raise ToolError(message)
-        raw, mime = loaded
-        return ResourceResult([ResourceContent(raw, mime_type=mime)])
+        """The stored audio. A suffix selects that encoding."""
+        return _read_audio(tasks.state, music_id, "music", stored_music, load_music)
 
     return mcp
 
@@ -371,7 +363,7 @@ def _image_result(
             continue
         image_id = item["id"]
         blocks.append(mcp_types.TextContent(type="text", text=image_id))
-        blocks.append(_image_link(image_id))
+        blocks.append(_media_link("images", image_id, "png", "image/png"))
         if not include_image:
             continue
         raw = _image_bytes(item, state)
@@ -417,12 +409,7 @@ def _video_result(payload: dict[str, Any]) -> ToolResult:
     return ToolResult(
         [
             mcp_types.TextContent(type="text", text=text),
-            mcp_types.ResourceLink(
-                type="resource_link",
-                uri=f"favlo://videos/{video_id}",
-                name=video_id,
-                mime_type="video/mp4",
-            ),
+            _media_link("videos", video_id, "mp4", "video/mp4"),
         ]
     )
 
@@ -442,12 +429,7 @@ def _music_result(
     mime = _AUDIO[fmt]
     blocks: list[mcp_types.ContentBlock] = [
         mcp_types.TextContent(type="text", text=music_id),
-        mcp_types.ResourceLink(
-            type="resource_link",
-            uri=f"favlo://music/{music_id}",
-            name=music_id,
-            mime_type=mime,
-        ),
+        _media_link("music", music_id, fmt, mime),
     ]
     if include_audio:
         loaded = load_music(music_id, fmt, home=_home(state, "music_home"))
@@ -477,12 +459,7 @@ def _voice_result(
     mime = _AUDIO[fmt]
     blocks: list[mcp_types.ContentBlock] = [
         mcp_types.TextContent(type="text", text=voice_id),
-        mcp_types.ResourceLink(
-            type="resource_link",
-            uri=f"favlo://voice/{voice_id}",
-            name=voice_id,
-            mime_type=mime,
-        ),
+        _media_link("voice", voice_id, fmt, mime),
     ]
     if include_audio:
         loaded = load_voice(voice_id, fmt, home=_home(state, "voice_home"))
@@ -497,14 +474,14 @@ def _voice_result(
     return ToolResult(blocks)
 
 
-def _image_link(image_id: str) -> mcp_types.ResourceLink:
-    """A link whose URI path ends in ``.png``."""
-    filename = f"{image_id}.png"
+def _media_link(kind: str, item_id: str, ext: str, mime: str) -> mcp_types.ResourceLink:
+    """A link whose URI path ends in the file extension."""
+    filename = f"{item_id}.{ext}"
     return mcp_types.ResourceLink(
         type="resource_link",
-        uri=f"favlo://images/{filename}",
+        uri=f"favlo://{kind}/{filename}",
         name=filename,
-        mime_type="image/png",
+        mime_type=mime,
     )
 
 
@@ -514,6 +491,32 @@ def _split_suffix(value: str, suffixes: frozenset[str]) -> tuple[str, str | None
     if dot and ext in suffixes and stem and "." not in stem:
         return stem, ext
     return value, None
+
+
+def _read_audio(
+    state: dict[str, Any],
+    value: str,
+    kind: str,
+    stored: Any,
+    load: Any,
+) -> ResourceResult:
+    """Bytes for one clip. A suffix names the encoding. A bare id uses the job."""
+    stem, ext = _split_suffix(value, frozenset(_AUDIO))
+    if ext is not None:
+        try:
+            loaded = load(stem, ext, home=_home(state, f"{kind}_home"))
+        except ValueError:
+            loaded = None
+        if loaded is None:
+            message = f"stored {kind} is missing"
+            raise ToolError(message)
+        return ResourceResult([ResourceContent(loaded[0], mime_type=_AUDIO[ext])])
+    found = stored(state, value)
+    if found is None:
+        message = f"stored {kind} is missing"
+        raise ToolError(message)
+    raw, mime = found
+    return ResourceResult([ResourceContent(raw, mime_type=mime)])
 
 
 def stored_voice(state: dict[str, Any], voice_id: str) -> tuple[bytes, str] | None:

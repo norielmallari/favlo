@@ -1,7 +1,7 @@
 """Agent that generates one spoken line through MCP.
 
 The agent calls ``generate_voice`` on ``POST /mcp`` and reads
-``favlo://voice/{id}``. The saved file is checked for 44.1 kHz, mono,
+``favlo://voice/{id}.wav``. The saved file is checked for 44.1 kHz, mono,
 a level above the silence floor, and a duration inside the context cap.
 The command does not take the machine lock. This command is not part of pytest.
 """
