@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import time
 from collections.abc import Callable
@@ -14,7 +15,7 @@ import objc
 from z_image_turbo.dit import velocity
 from z_image_turbo.formats import TILE_M, pad_to
 from z_image_turbo.hold import ImageHold, ImagePaused, ask
-from z_image_turbo.metal import Gpu
+from z_image_turbo.metal import Gpu, reclaimable_bytes, wait_until_reclaimed
 from z_image_turbo.progress import ImageProgress, LoadProgress, sample_total
 from z_image_turbo.record import Plane, load, weight_bytes
 from z_image_turbo.schedule import STEPS, sigmas
@@ -26,23 +27,40 @@ class Runtime:
     def __init__(self, path: Path, console: Any = None) -> None:
         self.path = path
         self.console = console
-        self._closed = False
+        self._closed = True
+        self.gpu = None
+        self.weights = {}
+        self.scratch = None
+        self.ones = None
+        self.source = None
+        self._open()
+
+    def _open(self) -> None:
+        """Load the record after ``close`` has dropped the previous device."""
+        if not self._closed:
+            return
         self.gpu = Gpu()
         # The process has no run loop. Drain the pool so only this object keeps the buffers.
         with objc.autorelease_pool():
-            self.weights = self._load(path)
+            self.weights = self._load(self.path)
             self.scratch = Scratch(self.gpu)
             self.ones = self.gpu.keep(self.gpu.upload(np.ones(1024, dtype=np.float32)))
-            self.source = _source_of(path)
+            if self.source is None:
+                self.source = _source_of(self.path)
             self.gpu.end()
+        self._closed = False
 
     def close(self) -> None:
         """Finish device work and drop every buffer before another pipeline allocates."""
         if self._closed:
             return
+        gpu = self.gpu
+        freed = gpu.held_bytes() if gpu is not None and hasattr(gpu, "held_bytes") else 0
+        before = reclaimable_bytes() if freed else 0
         self._closed = True
         with objc.autorelease_pool():
-            self.gpu.close()
+            if gpu is not None:
+                gpu.close()
             for plane in self.weights.values():
                 plane.release()
             self.weights.clear()
@@ -51,6 +69,10 @@ class Runtime:
             if scratch is not None:
                 scratch.release()
             self.ones = None
+            self.gpu = None
+            gc.collect()
+        if freed:
+            wait_until_reclaimed(before, freed)
 
     def _load(self, path: Path) -> dict[str, Plane]:
         loading = LoadProgress(self.console, path.name)
@@ -78,6 +100,8 @@ class Runtime:
         step_times: list[float] | None = None,
         spent: float = 0.0,
     ) -> tuple[np.ndarray, str, dict[str, Any]]:
+        if getattr(self, "_closed", False):
+            self._open()
         _check_size(width, height, steps)
         if done_steps and latent is None:
             message = "a resumed step needs its latent"

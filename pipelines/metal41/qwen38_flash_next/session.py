@@ -16,6 +16,7 @@ from typing import Any
 
 import numpy as np
 
+from favlo.memory import memory
 from qwen38_flash_next.formats import (
     BLOCK,
     IO_CHUNK,
@@ -168,14 +169,10 @@ def _device_name(device: Any) -> str:
     return str(name() if callable(name) else name)
 
 
-def _shared_buffer(device: Any, blob: bytes) -> Any:
-    metal = _metal()
-    buffer = device.newBufferWithLength_options_(
-        max(len(blob), 16), metal.MTLResourceStorageModeShared
-    )
+def _shared_buffer(blob: bytes, owner: str = "flash") -> Any:
     if blob:
-        _buffer_view(buffer, len(blob))[:] = blob
-    return buffer
+        return memory.upload(blob, owner=owner)
+    return memory.allocate(16, owner=owner, zero=True)
 
 
 class Int4Gemm:
@@ -183,10 +180,8 @@ class Int4Gemm:
 
     def __init__(self) -> None:
         metal = _metal()
-        device = metal.MTLCreateSystemDefaultDevice()
-        if device is None:
-            message = "this Mac has no Metal device"
-            raise RuntimeError(message)
+        self._owner = "flash"
+        device = memory.device
         options = metal.MTLCompileOptions.alloc().init()
         options.setLanguageVersion_((4 << 16) + 1)
         library, error = _objc_pair(
@@ -197,6 +192,7 @@ class Int4Gemm:
             raise RuntimeError(message)
         self.metal = metal
         self.device = device
+        self.queue = memory.make_queue()
         self.prefill = self._pipeline(library, "prefill_fp4_e8m0")
         self.prefill_fp8 = self._pipeline(library, "prefill_fp8_e8m0")
         self.decode = self._pipeline(library, "decode_int4_e8m0")
@@ -240,7 +236,7 @@ class Int4Gemm:
         if rows % 64 or cols % 32 or inner % 32:
             message = "prefill tile requires rows multiple of 64 and cols, inner multiple of 32"
             raise ValueError(message)
-        destination = _shared_buffer(self.device, b"\x00" * (rows * cols * 4))
+        destination = _shared_buffer(b"\x00" * (rows * cols * 4))
         self._dispatch_prefill(
             activation, weights, scales, destination, rows, cols, inner, pipeline
         )
@@ -253,7 +249,7 @@ class Int4Gemm:
         if cols < 1 or inner % 32:
             message = "decode requires a positive column count and inner multiple of 32"
             raise ValueError(message)
-        destination = _shared_buffer(self.device, b"\x00" * (cols * 4))
+        destination = _shared_buffer(b"\x00" * (cols * 4))
         self._dispatch_decode(activation, weights, scales, destination, cols, inner)
         return _buffer_bytes(destination, cols * 4)
 
@@ -269,13 +265,13 @@ class Int4Gemm:
         pipeline: Any = None,
     ) -> None:
         buffers = (
-            _shared_buffer(self.device, activation),
-            _shared_buffer(self.device, weights),
-            _shared_buffer(self.device, scales),
+            _shared_buffer(activation),
+            _shared_buffer(weights),
+            _shared_buffer(scales),
             destination,
-            _shared_buffer(self.device, rows.to_bytes(4, "little")),
-            _shared_buffer(self.device, cols.to_bytes(4, "little")),
-            _shared_buffer(self.device, inner.to_bytes(4, "little")),
+            _shared_buffer(rows.to_bytes(4, "little")),
+            _shared_buffer(cols.to_bytes(4, "little")),
+            _shared_buffer(inner.to_bytes(4, "little")),
         )
         width = self.prefill.threadExecutionWidth()
         self._encode(
@@ -295,12 +291,12 @@ class Int4Gemm:
         inner: int,
     ) -> None:
         buffers = (
-            _shared_buffer(self.device, activation),
-            _shared_buffer(self.device, weights),
-            _shared_buffer(self.device, scales),
+            _shared_buffer(activation),
+            _shared_buffer(weights),
+            _shared_buffer(scales),
             destination,
-            _shared_buffer(self.device, cols.to_bytes(4, "little")),
-            _shared_buffer(self.device, inner.to_bytes(4, "little")),
+            _shared_buffer(cols.to_bytes(4, "little")),
+            _shared_buffer(inner.to_bytes(4, "little")),
         )
         self._encode(
             self.decode,
@@ -310,15 +306,16 @@ class Int4Gemm:
         )
 
     def _encode(self, pipeline: Any, buffers: tuple[Any, ...], groups: Any, threads: Any) -> None:
-        command = self.device.newCommandQueue().commandBuffer()
+        command = memory.command_buffer(self.queue)
         encoder = command.computeCommandEncoder()
         encoder.setComputePipelineState_(pipeline)
         for index, buffer in enumerate(buffers):
-            encoder.setBuffer_offset_atIndex_(buffer, 0, index)
+            memory.bind(encoder, index, buffer, 0)
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(groups, threads)
         encoder.endEncoding()
         command.commit()
         command.waitUntilCompleted()
+        memory.retire(command)
 
 
 _log_sink: Any = None
@@ -512,7 +509,8 @@ class MetalSession:
         if int(width) != 32:
             message = f"shader dot assumes simd width 32, device reported {width}"
             raise RuntimeError(message)
-        self.queue = self.device.newCommandQueue()
+        self._owner = self.gemm._owner
+        self.queue = memory.make_queue()
         self.launch_count = 0
         self.command_count = 0
         self.gpu_seconds = 0.0
@@ -681,9 +679,7 @@ class MetalSession:
         return pipeline
 
     def alloc(self, nbytes: int) -> Any:
-        return self.device.newBufferWithLength_options_(
-            max(nbytes, 16), self.metal.MTLResourceStorageModeShared
-        )
+        return memory.allocate(max(int(nbytes), 16), owner=self._owner)
 
     def begin_scratch(self, nbytes: int, *, copies: int = 1) -> None:
         copies = 2 if copies > 1 else 1
@@ -949,12 +945,12 @@ class MetalSession:
     ) -> None:
         self.flush()
         started = time.perf_counter()
-        command = self.queue.commandBuffer()
+        command = memory.command_buffer(self.queue)
         encoder = command.computeCommandEncoder()
         encoder.setComputePipelineState_(pipeline)
         offsets = buffer_offsets or ((0,) * len(buffers))
         for index, buffer in enumerate(buffers):
-            encoder.setBuffer_offset_atIndex_(buffer, offsets[index], index)
+            memory.bind(encoder, index, buffer, offsets[index])
         for offset, blob in enumerate(constants):
             encoder.setBytes_length_atIndex_(blob, len(blob), len(buffers) + offset)
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(groups, threads)
@@ -968,8 +964,11 @@ class MetalSession:
         gpu_end = float(command.GPUEndTime())
         if gpu_end > gpu_start:
             self.gpu_seconds += gpu_end - gpu_start
-        if int(command.status()) != 4:
-            message = f"Metal command status {command.status()} {command.error()}"
+        status = int(command.status())
+        error = command.error()
+        memory.retire(command)
+        if status != 4:
+            message = f"Metal command status {status} {error}"
             raise RuntimeError(message)
 
     def _size(self, width: int, height: int = 1, depth: int = 1) -> Any:
@@ -986,26 +985,27 @@ class MetalSession:
     ) -> None:
         started = time.perf_counter()
         if self._command is None:
-            self._command = self.queue.commandBuffer()
+            self._command = memory.command_buffer(self.queue)
             self._batch_launches = 0
         if self._encoder is None:
             self._encoder = self._command.computeCommandEncoder()
         encoder = self._encoder
         encoder.setComputePipelineState_(pipeline)
         for index, (buffer, offset) in enumerate(bindings):
-            encoder.setBuffer_offset_atIndex_(buffer, int(offset), index)
+            memory.bind(encoder, index, buffer, int(offset))
         base = len(bindings)
         for index, blob in enumerate(constants):
             self._held_constants.append(blob)
             encoder.setBytes_length_atIndex_(blob, len(blob), base + index)
         for buffer, offset, index in late:
-            encoder.setBuffer_offset_atIndex_(buffer, int(offset), index)
+            memory.bind(encoder, index, buffer, int(offset))
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(groups, threads)
         self._batch_launches += 1
         self.host_encode += time.perf_counter() - started
 
     def _enqueue_open(self) -> None:
         if self._encoder is not None:
+            memory.handoff(self._encoder, self._command)
             self._encoder.endEncoding()
             self._encoder = None
         if self._command is None:
@@ -1080,6 +1080,7 @@ class MetalSession:
         self._cache_mode = None
         self._presence_ids = None
         gc.collect()
+        memory.sweep(self._owner)
         self.queue = None
         self.gemm = None
         self.device = None
@@ -1108,8 +1109,11 @@ class MetalSession:
             self._recycle(retained)
             if waited_for > ready:
                 ready = waited_for
-            if int(command.status()) != 4:
-                message = f"Metal command status {command.status()} {command.error()}"
+            status = int(command.status())
+            error = command.error()
+            memory.retire(command)
+            if status != 4:
+                message = f"Metal command status {status} {error}"
                 raise RuntimeError(message)
         self.encode_seconds += time.perf_counter() - started
         self._retain.clear()
@@ -2054,22 +2058,8 @@ class MetalSession:
         return dst
 
     def upload_resident(self, blob: bytes) -> Any:
-        """Copy one super-expert image into a buffer that stays resident."""
-        staging = _shared_buffer(self.device, blob)
-        private = self.device.newBufferWithLength_options_(
-            len(blob), self.metal.MTLResourceStorageModePrivate
-        )
-        if private is None:
-            return staging
-        command = self.queue.commandBuffer()
-        blit = command.blitCommandEncoder()
-        blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size_(
-            staging, 0, private, 0, len(blob)
-        )
-        blit.endEncoding()
-        command.commit()
-        command.waitUntilCompleted()
-        return private
+        """Copy one super-expert image into a private span that stays resident."""
+        return memory.upload(blob, owner=self._owner, storage="private")
 
     def gdn_dev(
         self, state: Any, query: Dev, key: Dev, value: Dev, alpha: Dev, beta: Dev
@@ -2284,7 +2274,7 @@ class MetalSession:
             self._encoder.endEncoding()
             self._encoder = None
         if self._command is None:
-            self._command = self.queue.commandBuffer()
+            self._command = memory.command_buffer(self.queue)
             self._batch_launches = 0
         self._command.encodeWaitForEvent_value_(self._event, value)
         if value > self._command_wait:

@@ -95,23 +95,50 @@ def cache_growth_bytes(tokens: int, per_token: int) -> int:
     return max(live, doubling)
 
 
+def resident_hold(image_bytes: int, experts: int, pins: int) -> int:
+    """Bytes one stage keeps: one layer, plus every pin.
+
+    A stage protects the experts it loads and every pin. Pins on other layers
+    are not in this layer's images, so ``pins`` counts them again.
+    """
+    if image_bytes <= 0:
+        raise ValueError("image_bytes")
+    if experts < 0 or pins < 0:
+        raise ValueError("experts")
+    images = experts + pins
+    if images == 0:
+        return PAGE
+    return _page_up(images * image_bytes)
+
+
 def atlas_budget(
     *,
     memory: int,
     content_bytes: int,
     footprint: int,
     growth: int,
+    hold: int = PAGE,
 ) -> int:
     """Largest atlas that leaves headroom, the live process, and one cache growth.
 
     ``content_bytes`` is the hot and cold expert files. The atlas is not larger
-    than the bytes it can hold.
+    than the bytes it can hold. ``hold`` is the bytes one stage keeps. When the
+    room after headroom is smaller than ``hold`` and those bytes are free after
+    the process and the cache growth, the atlas is ``hold`` and the headroom is
+    what remains.
     """
-    reserve = HEADROOM + max(0, growth)
-    room = memory - max(0, footprint) - reserve
-    if room < PAGE:
-        return PAGE
-    cap = _page_down(room)
+    need = _page_up(hold) if hold > PAGE else PAGE
+    spent = max(0, footprint) + max(0, growth)
+    free = memory - spent
+    room = free - HEADROOM
+    if room >= need:
+        cap = _page_down(room)
+    elif free >= need:
+        cap = need
+    elif free >= PAGE:
+        cap = _page_down(free)
+    else:
+        cap = PAGE
     if content_bytes > 0:
         cap = min(cap, _page_down(content_bytes))
     if cap < PAGE:
@@ -175,6 +202,15 @@ def _page_down(nbytes: int) -> int:
     if nbytes < PAGE:
         return 0
     return nbytes - (nbytes % PAGE)
+
+
+def _page_up(nbytes: int) -> int:
+    if nbytes <= 0:
+        return 0
+    rest = nbytes % PAGE
+    if rest == 0:
+        return nbytes
+    return nbytes + (PAGE - rest)
 
 
 def _ladder_cap(content_bytes: int, memory: int) -> int:

@@ -2,14 +2,76 @@
 
 from __future__ import annotations
 
+import ctypes
+import os
 import struct
+import time
 from pathlib import Path
 from typing import Any
 
+import Metal
 import numpy as np
 
-import Metal
+from favlo.memory import memory
 from z_image_turbo.formats import TILE_M, TILE_N, pad_to
+
+_LIBC = ctypes.CDLL(None, use_errno=True)
+_LIBC.host_statistics64.argtypes = [
+    ctypes.c_uint,
+    ctypes.c_int,
+    ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_uint),
+]
+_LIBC.host_statistics64.restype = ctypes.c_int
+_LIBC.mach_host_self.restype = ctypes.c_uint
+
+
+class _VMStats(ctypes.Structure):
+    _fields_ = (
+        ("free_count", ctypes.c_uint),
+        ("active_count", ctypes.c_uint),
+        ("inactive_count", ctypes.c_uint),
+        ("wire_count", ctypes.c_uint),
+        ("zero_fill_count", ctypes.c_uint),
+        ("reactivations", ctypes.c_uint64),
+        ("pageins", ctypes.c_uint64),
+        ("pageouts", ctypes.c_uint64),
+        ("faults", ctypes.c_uint64),
+        ("cow_faults", ctypes.c_uint64),
+        ("lookups", ctypes.c_uint64),
+        ("hits", ctypes.c_uint64),
+        ("purges", ctypes.c_uint64),
+        ("purgeable_count", ctypes.c_uint),
+        ("speculative_count", ctypes.c_uint),
+    )
+
+
+def reclaimable_bytes() -> int:
+    """Bytes the next pipeline can take. Wired device pages are not included."""
+    page = int(os.sysconf("SC_PAGE_SIZE"))
+    count = ctypes.c_uint(ctypes.sizeof(_VMStats) // 4)
+    stats = _VMStats()
+    kern = _LIBC.host_statistics64(
+        _LIBC.mach_host_self(),
+        ctypes.c_int(4),
+        ctypes.byref(stats),
+        ctypes.byref(count),
+    )
+    if kern != 0:
+        return page * int(os.sysconf("SC_PHYS_PAGES"))
+    reclaimable = stats.free_count + stats.inactive_count + stats.speculative_count
+    return int(reclaimable) * page
+
+
+def wait_until_reclaimed(before: int, freed: int) -> None:
+    """Block until ``freed`` bytes show up as reclaimable, at most two seconds."""
+    if freed < 1:
+        return
+    target = before + freed // 2
+    deadline = time.perf_counter() + 2.0
+    while reclaimable_bytes() < target and time.perf_counter() < deadline:
+        time.sleep(0.05)
+
 
 _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"
 _NAMES = (
@@ -53,16 +115,13 @@ class Gpu:
     """One device and one command encoder. ``end`` waits for the batch."""
 
     def __init__(self) -> None:
-        device = Metal.MTLCreateSystemDefaultDevice()
-        if device is None:
-            message = "Metal device is missing"
-            raise RuntimeError(message)
-        self.device = device
-        self.queue = device.newCommandQueue()
+        self._owner = f"z-image:{id(self)}"
+        self.device = memory.device
+        self.queue = memory.make_queue()
         source = _SHADER.read_text(encoding="utf-8")
         options = Metal.MTLCompileOptions.alloc().init()
         options.setLanguageVersion_((4 << 16) + 1)
-        library, error = device.newLibraryWithSource_options_error_(source, options, None)
+        library, error = self.device.newLibraryWithSource_options_error_(source, options, None)
         if library is None:
             message = f"shader compile failed: {error}"
             raise RuntimeError(message)
@@ -72,7 +131,7 @@ class Gpu:
             if fn is None:
                 message = f"shader is missing {name}"
                 raise RuntimeError(message)
-            pipe, pipe_error = device.newComputePipelineStateWithFunction_error_(fn, None)
+            pipe, pipe_error = self.device.newComputePipelineStateWithFunction_error_(fn, None)
             if pipe is None:
                 message = f"pipeline {name} failed: {pipe_error}"
                 raise RuntimeError(message)
@@ -101,19 +160,26 @@ class Gpu:
         return current
 
     def end(self) -> None:
-        if self._enc is None:
+        """Wait for the open command buffer, then release it so its buffers can go."""
+        enc = self._enc
+        cmd = self._cmd
+        if enc is None or cmd is None:
             return
-        self._enc.endEncoding()
-        self._cmd.commit()
-        self._cmd.waitUntilCompleted()
-        status = int(self._cmd.status())
-        error = self._cmd.error()
         self._enc = None
         self._cmd = None
+        status = 0
+        error = None
+        enc.endEncoding()
+        cmd.commit()
+        status, error = memory.retire(cmd)
         self._held.clear()
         if status == int(Metal.MTLCommandBufferStatusError):
             message = f"metal command failed: {error}"
             raise RuntimeError(message)
+
+    def held_bytes(self) -> int:
+        """Bytes of the buffers ``close`` is about to release."""
+        return sum(int(buf.length()) for buf in self._owned if hasattr(buf, "length"))
 
     def keep(self, buf: Any) -> Any:
         """Keep this buffer until ``close``. Other buffers are temporary."""
@@ -150,6 +216,7 @@ class Gpu:
         self.pipes.clear()
         self.queue = None
         self.device = None
+        memory.sweep(self._owner)
 
     def _release_owned(self, *, keep: bool) -> None:
         kept: list[Any] = []
@@ -163,30 +230,19 @@ class Gpu:
         if not keep:
             self._kept.clear()
         for buf in temps:
-            buf.release()
+            release = getattr(buf, "release", None)
+            if callable(release):
+                release()
         temps.clear()
 
     def upload(self, array: np.ndarray) -> Any:
-        data = np.ascontiguousarray(array)
-        raw = data.tobytes()
-        buf = self.device.newBufferWithBytes_length_options_(
-            raw, len(raw), Metal.MTLResourceStorageModeShared
-        )
-        if buf is None:
-            message = "Metal buffer allocation failed"
-            raise RuntimeError(message)
+        buf = memory.upload(array, owner=self._owner)
         self._owned.append(buf)
         return buf
 
     def empty(self, nbytes: int) -> Any:
-        buf = self.device.newBufferWithLength_options_(
-            int(nbytes), Metal.MTLResourceStorageModeShared
-        )
-        if buf is None:
-            message = f"Metal buffer allocation failed for {nbytes} bytes"
-            raise RuntimeError(message)
+        buf = memory.allocate(int(nbytes), owner=self._owner, zero=True)
         self._owned.append(buf)
-        self.zero(buf, int(nbytes))
         return buf
 
     def read_f32(self, buf: Any, count: int) -> np.ndarray:
@@ -792,13 +848,13 @@ class Gpu:
         offsets: list[int] | None = None,
     ) -> None:
         if self._enc is None:
-            self._cmd = self.queue.commandBuffer()
+            self._cmd = memory.command_buffer(self.queue)
             self._enc = self._cmd.computeCommandEncoder()
         enc = self._enc
         enc.setComputePipelineState_(self.pipes[name])
         for index, buf in enumerate(buffers):
             shift = 0 if offsets is None else offsets[index]
-            enc.setBuffer_offset_atIndex_(buf, shift, index)
+            memory.bind(enc, index, buf, shift)
         for index, blob in enumerate(constants):
             self._held.append(blob)
             enc.setBytes_length_atIndex_(blob, len(blob), len(buffers) + index)

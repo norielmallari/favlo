@@ -19,21 +19,19 @@ import time
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import objc
 
-import numpy as np
-
+from favlo.memory import memory
 from qwen38_27b.attn import bind_plane, value_block_bytes
 from qwen38_27b.budget import (
     choose_wire,
     group_tensors,
-    growth_budget,
     same_weight_image,
     startup_bytes,
 )
 from qwen38_27b.cache import (
     DEFAULT_CONTEXT_LENGTH,
-    available_bytes,
     kv_mode,
     layer_cache_bytes,
     max_position,
@@ -215,7 +213,7 @@ class Qwen38Runtime:
         self.k_cache = []
         self.v_cache = []
         plan = choose_wire(
-            available_bytes() if self._memory_cap is None else self._memory_cap,
+            memory.budget() if self._memory_cap is None else self._memory_cap,
             2048,
             self._group,
             self._limit,
@@ -390,7 +388,7 @@ class Qwen38Runtime:
     def _budget(self) -> int:
         if self._memory_cap is not None:
             return self._memory_cap
-        return available_bytes() + self._held_bytes()
+        return memory.budget()
 
     def _growth_budget(self) -> int:
         """Bytes the next image may use while the host copy of the live cache stays."""
@@ -398,7 +396,7 @@ class Qwen38Runtime:
             return self._memory_cap
         count = min(int(self.filled), int(self.max_pos))
         packed = sequence_cache_bytes(count, self.kv_slots) if count > 0 and self.k_cache else 0
-        return growth_budget(available_bytes(), self._held_bytes(), packed)
+        return max(0, memory.budget() - packed)
 
     def _held_bytes(self) -> int:
         if self.weights is None or not self.max_pos:

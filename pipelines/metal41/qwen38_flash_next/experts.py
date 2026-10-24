@@ -378,12 +378,15 @@ class ExpertAtlas:
 
 
 def _allocate(gpu: Any, candidates: tuple[int, ...]) -> tuple[Any, int]:
+    from favlo.memory import memory
+
+    owner = getattr(gpu, "_owner", "flash")
     for nbytes in candidates:
-        buffer = gpu.device.newBufferWithLength_options_(
-            nbytes, gpu.metal.MTLResourceStorageModeShared
-        )
-        if buffer is not None:
-            loosen_buffer(buffer)
-            return buffer, nbytes
+        try:
+            buffer = memory.allocate(int(nbytes), owner=owner)
+        except RuntimeError:
+            continue
+        loosen_buffer(buffer)
+        return buffer, nbytes
     message = "unable to allocate a resident expert atlas"
     raise RuntimeError(message)

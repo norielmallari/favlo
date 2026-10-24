@@ -209,6 +209,29 @@ def _picture(seed: int) -> np.ndarray:
     return image
 
 
+def test_the_image_request_releases_the_runtime(tmp_path) -> None:
+    class _Runtime:
+        def __init__(self) -> None:
+            self.closed = 0
+
+        def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **_extra):
+            del prompt, width, height, steps
+            timing = {"total": 1.0, "caption": 0.1, "vae": 0.2, "steps": [0.1]}
+            return _picture(seed), "digest", timing
+
+        def close(self) -> None:
+            self.closed += 1
+
+    runtime = _Runtime()
+    reply = MemoryReply()
+    state = {"image_home": tmp_path}
+    handle_image(reply, runtime, {"prompt": "a cat", "seed": 1}, None, None, state)
+    assert reply.status == 200
+    assert runtime.closed == 1
+    handle_image(reply, runtime, {"prompt": "a cat", "size": "3x3"}, None, None, state)
+    assert runtime.closed == 2
+
+
 def test_preempt_keeps_a_stored_image_and_the_same_id(tmp_path) -> None:
     preempt = threading.Event()
 

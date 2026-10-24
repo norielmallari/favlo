@@ -38,6 +38,7 @@ from qwen38_flash_next.context import (
     machine_memory,
     process_footprint,
     resident_candidates,
+    resident_hold,
     residual_bytes_per_token,
     scratch_bytes,
 )
@@ -2199,8 +2200,25 @@ class Qwen38Runtime:
             content_bytes=getattr(self, "_tier_bytes", 0),
             footprint=process_footprint(),
             growth=growth,
+            hold=self._atlas_hold(),
         )
         return atlas_fallbacks(budget)
+
+    def _atlas_hold(self) -> int:
+        """One layer of expert images, plus every pin."""
+        files = self.files
+        if not isinstance(files, QuantRecord):
+            return PAGE
+        image = max(
+            int(files.slot),
+            int(files.cold_slot),
+            int(files.narrow_slot),
+            int(files.super_slot),
+        )
+        if image <= 0:
+            return PAGE
+        pins = sum(len(row) for row in files.super)
+        return resident_hold(image, self.experts, pins)
 
     def _refit_atlas(self) -> None:
         """Release an atlas that was sized for a shorter sequence.
@@ -2236,6 +2254,7 @@ class Qwen38Runtime:
             content_bytes=getattr(self, "_tier_bytes", 0),
             footprint=int(base) + added,
             growth=growth,
+            hold=self._atlas_hold(),
         )
         if int(self.atlas.budget) <= budget + (1 << 30):
             return

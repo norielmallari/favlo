@@ -6,11 +6,11 @@ import struct
 from pathlib import Path
 from typing import Any
 
+import Metal
 import numpy as np
 
-import Metal
-
 from ace_step_15_turbo.pack import TILE_M, TILE_N
+from favlo.memory import memory
 
 _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"
 _NAMES = (
@@ -55,16 +55,13 @@ class Gpu:
     """One device. ``wait`` ends the command buffer and returns its GPU milliseconds."""
 
     def __init__(self) -> None:
-        device = Metal.MTLCreateSystemDefaultDevice()
-        if device is None:
-            message = "Metal device is missing"
-            raise RuntimeError(message)
-        self.device = device
-        self.queue = device.newCommandQueue()
+        self._owner = f"ace:{id(self)}"
+        self.device = memory.device
+        self.queue = memory.make_queue()
         source = _SHADER.read_text(encoding="utf-8")
         options = Metal.MTLCompileOptions.alloc().init()
         options.setLanguageVersion_((4 << 16) + 1)
-        library, error = device.newLibraryWithSource_options_error_(source, options, None)
+        library, error = self.device.newLibraryWithSource_options_error_(source, options, None)
         if library is None:
             message = f"shader compile failed: {error}"
             raise RuntimeError(message)
@@ -74,7 +71,9 @@ class Gpu:
             if function is None:
                 message = f"shader is missing {name}"
                 raise RuntimeError(message)
-            pipe, pipe_error = device.newComputePipelineStateWithFunction_error_(function, None)
+            pipe, pipe_error = self.device.newComputePipelineStateWithFunction_error_(
+                function, None
+            )
             if pipe is None:
                 message = f"pipeline {name} failed: {pipe_error}"
                 raise RuntimeError(message)
@@ -109,11 +108,7 @@ class Gpu:
 
     def buffer(self, nbytes: int) -> Any:
         size = max(128, (int(nbytes) + 127) // 128 * 128)
-        mode = Metal.MTLResourceStorageModeShared
-        buf = self.device.newBufferWithLength_options_(size, mode)
-        if buf is None:
-            message = f"Metal buffer of {size} bytes was not created"
-            raise RuntimeError(message)
+        buf = memory.allocate(size, owner=self._owner)
         self._held.append(buf)
         return buf
 
@@ -155,6 +150,7 @@ class Gpu:
         error = self._cmd.error()
         start = float(self._cmd.GPUStartTime())
         end = float(self._cmd.GPUEndTime())
+        memory.retire(self._cmd)
         self._enc = None
         self._cmd = None
         elapsed = max(0.0, end - start)
@@ -167,7 +163,7 @@ class Gpu:
     def _begin(self) -> None:
         if self._enc is not None:
             return
-        self._cmd = self.queue.commandBuffer()
+        self._cmd = memory.command_buffer(self.queue)
         self._enc = self._cmd.computeCommandEncoder()
 
     def _encode(
@@ -184,7 +180,7 @@ class Gpu:
         pipe = self.pipes[name]
         encoder.setComputePipelineState_(pipe)
         for index, buf in enumerate(buffers):
-            encoder.setBuffer_offset_atIndex_(buf, 0, index)
+            memory.bind(encoder, index, buf, 0)
         base = len(buffers)
         for offset, (value, kind) in enumerate(zip(constants, kinds, strict=True)):
             blob = struct.pack("<" + kind, value)
@@ -214,7 +210,7 @@ class Gpu:
         encoder = self._enc
         encoder.setComputePipelineState_(self.pipes[name])
         for index, buf in enumerate(buffers):
-            encoder.setBuffer_offset_atIndex_(buf, 0, index)
+            memory.bind(encoder, index, buf, 0)
         base = len(buffers)
         for offset, (value, kind) in enumerate(zip(constants, kinds, strict=True)):
             blob = struct.pack("<" + kind, value)
@@ -578,3 +574,4 @@ class Gpu:
         self._held.clear()
         self._clip.clear()
         self._resident.clear()
+        memory.sweep(self._owner)

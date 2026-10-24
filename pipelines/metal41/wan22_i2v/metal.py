@@ -8,10 +8,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import Metal
 import numpy as np
 import objc
 
-import Metal
+from favlo.memory import memory
 from wan22_i2v.formats import K_ALIGN, TILE_M, TILE_N, LinearPack, pad_to
 
 _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"
@@ -67,18 +68,15 @@ class Gpu:
     """One device and one command encoder. ``end`` waits for the batch."""
 
     def __init__(self, on_pipeline: Callable[[], None] | None = None) -> None:
-        device = Metal.MTLCreateSystemDefaultDevice()
-        if device is None:
-            message = "Metal device is missing"
-            raise RuntimeError(message)
-        self.device = device
-        self.queue = device.newCommandQueue()
+        self._owner = f"wan:{id(self)}"
+        self.device = memory.device
+        self.queue = memory.make_queue()
         self.pipes: dict[str, Any] = {}
         with objc.autorelease_pool():
             source = _SHADER.read_text(encoding="utf-8")
             options = Metal.MTLCompileOptions.alloc().init()
             options.setLanguageVersion_((4 << 16) + 1)
-            library, error = device.newLibraryWithSource_options_error_(source, options, None)
+            library, error = self.device.newLibraryWithSource_options_error_(source, options, None)
             if library is None:
                 message = f"shader compile failed: {error}"
                 raise RuntimeError(message)
@@ -87,7 +85,7 @@ class Gpu:
                 if fn is None:
                     message = f"shader is missing {name}"
                     raise RuntimeError(message)
-                pipe, pipe_error = device.newComputePipelineStateWithFunction_error_(fn, None)
+                pipe, pipe_error = self.device.newComputePipelineStateWithFunction_error_(fn, None)
                 if pipe is None:
                     message = f"pipeline {name} failed: {pipe_error}"
                     raise RuntimeError(message)
@@ -112,6 +110,7 @@ class Gpu:
         """Commit the open encoder and leave the previous buffer running."""
         if self._enc is None:
             return
+        memory.handoff(self._enc, self._cmd)
         self._enc.endEncoding()
         self._cmd.commit()
         self._inflight.append(self._cmd)
@@ -129,9 +128,9 @@ class Gpu:
             self._finish(cmd)
 
     def _finish(self, cmd: Any) -> None:
-        cmd.waitUntilCompleted()
-        if int(cmd.status()) == int(Metal.MTLCommandBufferStatusError):
-            message = f"metal command failed: {cmd.error()}"
+        status, error = memory.retire(cmd)
+        if status == int(Metal.MTLCommandBufferStatusError):
+            message = f"metal command failed: {error}"
             raise RuntimeError(message)
 
     def keep(self, buf: Any) -> Any:
@@ -180,29 +179,17 @@ class Gpu:
             self.pipes.clear()
             self.queue = None
             self.device = None
+            memory.sweep(self._owner)
             gc.collect()
 
     def upload(self, array: np.ndarray) -> Any:
-        data = np.ascontiguousarray(array)
-        raw = data.tobytes()
-        buf = self.device.newBufferWithBytes_length_options_(
-            raw, len(raw), Metal.MTLResourceStorageModeShared
-        )
-        if buf is None:
-            message = "Metal buffer allocation failed"
-            raise RuntimeError(message)
+        buf = memory.upload(array, owner=self._owner)
         self._owned.append(buf)
         return buf
 
     def empty(self, nbytes: int) -> Any:
-        buf = self.device.newBufferWithLength_options_(
-            int(nbytes), Metal.MTLResourceStorageModeShared
-        )
-        if buf is None:
-            message = f"Metal buffer allocation failed for {nbytes} bytes"
-            raise RuntimeError(message)
+        buf = memory.allocate(int(nbytes), owner=self._owner, zero=True)
         self._owned.append(buf)
-        self.zero(buf, int(nbytes))
         return buf
 
     def read_f32(self, buf: Any, count: int) -> np.ndarray:
@@ -545,12 +532,7 @@ class Gpu:
         return result
 
     def _alloc(self, nbytes: int) -> Any:
-        buf = self.device.newBufferWithLength_options_(
-            int(nbytes), Metal.MTLResourceStorageModeShared
-        )
-        if buf is None:
-            message = f"Metal buffer allocation failed for {nbytes} bytes"
-            raise RuntimeError(message)
+        buf = memory.allocate(int(nbytes), owner=self._owner)
         self._owned.append(buf)
         return buf
 
@@ -982,12 +964,12 @@ class Gpu:
         threads: tuple[int, int, int],
     ) -> None:
         if self._enc is None:
-            self._cmd = self.queue.commandBuffer()
+            self._cmd = memory.command_buffer(self.queue)
             self._enc = self._cmd.computeCommandEncoder()
         enc = self._enc
         enc.setComputePipelineState_(self.pipes[name])
         for index, buf in enumerate(buffers):
-            enc.setBuffer_offset_atIndex_(buf, 0, index)
+            memory.bind(enc, index, buf, 0)
         for index, blob in enumerate(constants):
             self._held.append(blob)
             enc.setBytes_length_atIndex_(blob, len(blob), len(buffers) + index)

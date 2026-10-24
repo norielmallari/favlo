@@ -14,6 +14,7 @@ from qwen38_flash_next.context import (
     PREFILL_CHUNK,
     atlas_budget,
     atlas_fallbacks,
+    resident_hold,
     block_score,
     cache_growth_bytes,
     process_footprint,
@@ -64,6 +65,57 @@ def test_atlas_budget_keeps_headroom_and_the_expert_files() -> None:
         memory=memory, content_bytes=0, footprint=footprint, growth=growth
     )
     assert open_budget == memory - HEADROOM - footprint - growth
+
+
+def test_a_tight_room_keeps_one_layer_and_the_pins() -> None:
+    image = 2_785_280
+    hold = resident_hold(image, 512, 5)
+    assert hold == (512 + 5) * image
+    memory = 48 << 30
+    footprint = 42 << 30
+    growth = 64 << 20
+    budget = atlas_budget(
+        memory=memory,
+        content_bytes=64 << 30,
+        footprint=footprint,
+        growth=growth,
+        hold=hold,
+    )
+    assert budget == hold
+    assert memory - footprint - growth - budget > (4 << 30)
+
+
+def test_hold_does_not_shrink_a_larger_atlas() -> None:
+    memory = 48 << 30
+    footprint = 8 << 30
+    growth = 1 << 30
+    budget = atlas_budget(
+        memory=memory,
+        content_bytes=0,
+        footprint=footprint,
+        growth=growth,
+        hold=1 << 30,
+    )
+    assert budget == memory - HEADROOM - footprint - growth
+
+
+def test_hold_stays_inside_the_expert_files_and_the_free_bytes() -> None:
+    held = atlas_budget(
+        memory=48 << 30,
+        content_bytes=1 << 30,
+        footprint=40 << 30,
+        growth=0,
+        hold=4 << 30,
+    )
+    assert held == 1 << 30
+    tight = atlas_budget(
+        memory=48 << 30,
+        content_bytes=0,
+        footprint=47 << 30,
+        growth=0,
+        hold=2 << 30,
+    )
+    assert tight == 1 << 30
 
 
 def test_atlas_fallbacks_start_at_the_budget() -> None:

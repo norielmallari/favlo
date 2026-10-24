@@ -10,6 +10,8 @@ from typing import Any
 
 import numpy as np
 
+from favlo.memory import memory
+
 # Darwin <sys/mman.h>. The kernel may reuse these pages instead of keeping them.
 _MADV_FREE_REUSABLE = 7
 # MTLPurgeableStateEmpty.
@@ -161,10 +163,8 @@ class Session:
 
     def __init__(self) -> None:
         metal = _metal()
-        device = metal.MTLCreateSystemDefaultDevice()
-        if device is None:
-            message = "this Mac has no Metal device"
-            raise RuntimeError(message)
+        self._owner = f"qwen27:{id(self)}"
+        device = memory.device
         options = metal.MTLCompileOptions.alloc().init()
         options.setLanguageVersion_((4 << 16) + 1)
         source = _SHADER.read_text(encoding="utf-8") + "\n" + _VISION.read_text(encoding="utf-8")
@@ -176,7 +176,7 @@ class Session:
             raise RuntimeError(message)
         self.metal = metal
         self.device = device
-        self.queue = device.newCommandQueue()
+        self.queue = memory.make_queue()
         self.shared = metal.MTLResourceStorageModeShared
         self.pipes: dict[str, Any] = {}
         for name in KERNELS:
@@ -209,6 +209,7 @@ class Session:
                 ready.append(command)
                 for earlier in ready:
                     earlier.waitUntilCompleted()
+                    memory.retire(earlier)
             except (RuntimeError, OSError):
                 pass
         for name in ("_pass_held", "_held"):
@@ -218,6 +219,9 @@ class Session:
                     discard(buffer)
                 held.clear()
         self.pipes = {}
+        owner = getattr(self, "_owner", None)
+        if owner is not None:
+            memory.sweep(owner)
         self.queue = None
         self.device = None
         self.metal = None
@@ -232,14 +236,13 @@ class Session:
             raw = np.ascontiguousarray(blob).tobytes()
         else:
             raw = bytes(blob)
-        buffer = self.device.newBufferWithLength_options_(max(len(raw), 16), self.shared)
         if raw:
-            memoryview(buffer.contents().as_buffer(len(raw)))[:] = raw
-        return buffer
+            return memory.upload(raw, owner=self._owner)
+        return memory.allocate(16, owner=self._owner, zero=True)
 
     def allocate(self, nbytes: int) -> Any | None:
         """A shared buffer, or None when the device refuses the length."""
-        return self.device.newBufferWithLength_options_(max(nbytes, 16), self.shared)
+        return memory.allocate(max(int(nbytes), 16), owner=self._owner)
 
     def zeros(self, nbytes: int) -> Any:
         buffer = self.allocate(nbytes)
@@ -265,11 +268,11 @@ class Session:
     ) -> None:
         self._held.extend(buffers)
         self._held.extend(constants)
-        command = self.queue.commandBuffer()
+        command = memory.command_buffer(self.queue)
         encoder = command.computeCommandEncoder()
         encoder.setComputePipelineState_(self.pipes[name])
         for index, buffer in enumerate(buffers):
-            encoder.setBuffer_offset_atIndex_(buffer, 0, index)
+            memory.bind(encoder, index, buffer, 0)
         base = len(buffers)
         for index, blob in enumerate(constants):
             encoder.setBytes_length_atIndex_(blob, len(blob), base + index)
@@ -280,24 +283,28 @@ class Session:
         encoder.endEncoding()
         command.commit()
         command.waitUntilCompleted()
+        status = int(command.status())
+        error = command.error()
+        memory.retire(command)
         self._held.clear()
-        if int(command.status()) != 4:
-            message = f"{name} command status {command.status()} {command.error()}"
+        if status != 4:
+            message = f"{name} command status {status} {error}"
             raise RuntimeError(message)
 
     def begin(self) -> None:
         self._pass_held: list[Any] = []
         self._pass_ready: list[Any] = []
-        self._pass_command = self.queue.commandBuffer()
+        self._pass_command = memory.command_buffer(self.queue)
         self._pass_encoder = self._pass_command.computeCommandEncoder()
 
     def submit(self) -> None:
         """Commit the open encoder and start another. The device runs the first while the host encodes the next."""
+        memory.handoff(self._pass_encoder, self._pass_command)
         self._pass_encoder.endEncoding()
         command = self._pass_command
         command.commit()
         self._pass_ready.append(command)
-        self._pass_command = self.queue.commandBuffer()
+        self._pass_command = memory.command_buffer(self.queue)
         self._pass_encoder = self._pass_command.computeCommandEncoder()
 
     def encode(
@@ -312,7 +319,7 @@ class Session:
         encoder.setComputePipelineState_(self.pipes[name])
         for index, (buffer, offset) in enumerate(bindings):
             self._pass_held.append(buffer)
-            encoder.setBuffer_offset_atIndex_(buffer, int(offset), index)
+            memory.bind(encoder, index, buffer, int(offset))
         base = len(bindings)
         for index, blob in enumerate(constants):
             self._pass_held.append(blob)
@@ -333,8 +340,11 @@ class Session:
         self._pass_ready = []
         for earlier in ready:
             earlier.waitUntilCompleted()
-            if int(earlier.status()) != 4:
-                message = f"command status {earlier.status()} {earlier.error()}"
+            status = int(earlier.status())
+            error = earlier.error()
+            memory.retire(earlier)
+            if status != 4:
+                message = f"command status {status} {error}"
                 raise RuntimeError(message)
         self._pass_held.clear()
 
@@ -352,8 +362,11 @@ class Session:
             ready.append(command)
         for earlier in ready:
             earlier.waitUntilCompleted()
-            if int(earlier.status()) != 4:
-                message = f"command status {earlier.status()} {earlier.error()}"
+            status = int(earlier.status())
+            error = earlier.error()
+            memory.retire(earlier)
+            if status != 4:
+                message = f"command status {status} {error}"
                 raise RuntimeError(message)
         held = getattr(self, "_pass_held", None)
         if isinstance(held, list):

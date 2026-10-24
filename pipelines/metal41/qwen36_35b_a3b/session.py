@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import objc
+
+from favlo.memory import memory
 
 KERNELS = (
     "prefill_fp4_e8m0",
@@ -182,10 +183,8 @@ class Session:
 
     def __init__(self) -> None:
         metal = _metal()
-        device = metal.MTLCreateSystemDefaultDevice()
-        if device is None:
-            message = "this Mac has no Metal device"
-            raise RuntimeError(message)
+        self._owner = f"qwen36:{id(self)}"
+        device = memory.device
         options = metal.MTLCompileOptions.alloc().init()
         options.setLanguageVersion_((4 << 16) + 1)
         source = _SHADER.read_text(encoding="utf-8")
@@ -197,7 +196,7 @@ class Session:
             raise RuntimeError(message)
         self.metal = metal
         self.device = device
-        self.queue = device.newCommandQueue()
+        self.queue = memory.make_queue()
         self.shared = metal.MTLResourceStorageModeShared
         self.pipes: dict[str, Any] = {}
         self._recording = False
@@ -230,17 +229,15 @@ class Session:
             raw = np.ascontiguousarray(blob).tobytes()
         else:
             raw = bytes(blob)
-        with objc.autorelease_pool():
-            buffer = self.device.newBufferWithLength_options_(max(len(raw), 16), self.shared)
-            if raw:
-                memoryview(buffer.contents().as_buffer(len(raw)))[:] = raw
-            return self._keep(buffer)
+        if raw:
+            buffer = memory.upload(raw, owner=self._owner)
+        else:
+            buffer = memory.allocate(16, owner=self._owner, zero=True)
+        return self._keep(buffer)
 
     def allocate(self, nbytes: int) -> Any | None:
         """A shared buffer, or None when the device refuses the length."""
-        with objc.autorelease_pool():
-            buffer = self.device.newBufferWithLength_options_(max(nbytes, 16), self.shared)
-            return self._keep(buffer)
+        return self._keep(memory.allocate(max(int(nbytes), 16), owner=self._owner))
 
     def close(self) -> None:
         """Wait for the queue and drop every buffer this session allocated."""
@@ -255,6 +252,7 @@ class Session:
         self._owned.clear()
         self.pipes.clear()
         self._load_note = None
+        memory.sweep(self._owner)
         self.queue = None
         self.device = None
         self.metal = None
@@ -288,11 +286,11 @@ class Session:
     ) -> None:
         self._held.extend(buffers)
         self._held.extend(constants)
-        command = self.queue.commandBuffer()
+        command = memory.command_buffer(self.queue)
         encoder = command.computeCommandEncoder()
         encoder.setComputePipelineState_(self.pipes[name])
         for index, buffer in enumerate(buffers):
-            encoder.setBuffer_offset_atIndex_(buffer, 0, index)
+            memory.bind(encoder, index, buffer, 0)
         base = len(buffers)
         for index, blob in enumerate(constants):
             encoder.setBytes_length_atIndex_(blob, len(blob), base + index)
@@ -303,15 +301,18 @@ class Session:
         encoder.endEncoding()
         command.commit()
         command.waitUntilCompleted()
+        status = int(command.status())
+        error = command.error()
+        memory.retire(command)
         self._held.clear()
-        if int(command.status()) != 4:
-            message = f"{name} command status {command.status()} {command.error()}"
+        if status != 4:
+            message = f"{name} command status {status} {error}"
             raise RuntimeError(message)
 
     def begin(self) -> None:
         self._recording = True
         self._pass_held: list[Any] = []
-        self._pass_command = self.queue.commandBuffer()
+        self._pass_command = memory.command_buffer(self.queue)
         self._pass_encoder = self._pass_command.computeCommandEncoder()
 
     def encode(
@@ -332,7 +333,7 @@ class Session:
         encoder.setComputePipelineState_(self.pipes[name])
         for index, (buffer, offset) in enumerate(bindings):
             held.append(buffer)
-            encoder.setBuffer_offset_atIndex_(buffer, int(offset), index)
+            memory.bind(encoder, index, buffer, int(offset))
         base = len(bindings)
         for index, blob in enumerate(constants):
             held.append(blob)
@@ -355,6 +356,7 @@ class Session:
         A kernel can fill an indirect-dispatch buffer, and the next encoder
         reads that buffer when the command buffer runs.
         """
+        memory.handoff(self._pass_encoder, self._pass_command)
         self._pass_encoder.endEncoding()
         self._pass_encoder = self._pass_command.computeCommandEncoder()
 
@@ -372,17 +374,13 @@ class Session:
         encoder.setComputePipelineState_(self.pipes[name])
         for index, (buffer, offset) in enumerate(bindings):
             self._pass_held.append(buffer)
-            encoder.setBuffer_offset_atIndex_(buffer, int(offset), index)
+            memory.bind(encoder, index, buffer, int(offset))
         base = len(bindings)
         for index, blob in enumerate(constants):
             self._pass_held.append(blob)
             encoder.setBytes_length_atIndex_(blob, len(blob), base + index)
         self._pass_held.append(indirect)
-        encoder.dispatchThreadgroupsWithIndirectBuffer_indirectBufferOffset_threadsPerThreadgroup_(
-            indirect,
-            int(indirect_offset),
-            self._size(threads),
-        )
+        memory.bind_indirect(encoder, indirect, int(indirect_offset), self._size(threads))
 
     def commit(self) -> None:
         """Commit the open encoder and leave it in flight."""
@@ -390,6 +388,7 @@ class Session:
             message = "commit without an open command buffer"
             raise RuntimeError(message)
         self._recording = False
+        memory.handoff(self._pass_encoder, self._pass_command)
         self._pass_encoder.endEncoding()
         command = self._pass_command
         command.commit()
@@ -428,9 +427,12 @@ class Session:
 
     def _finish(self, command: Any, held: list[Any]) -> None:
         command.waitUntilCompleted()
+        status = int(command.status())
+        error = command.error()
+        memory.retire(command)
         del held
-        if int(command.status()) != 4:
-            message = f"command status {command.status()} {command.error()}"
+        if status != 4:
+            message = f"command status {status} {error}"
             raise RuntimeError(message)
 
     def prefill(

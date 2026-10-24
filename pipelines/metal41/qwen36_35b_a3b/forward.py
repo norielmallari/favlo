@@ -17,7 +17,6 @@ from qwen36_35b_a3b.atlas import (
     MIN_IMAGES,
     ExpertAtlas,
     atlas_slots,
-    available_bytes,
     read_expert_layout,
 )
 from qwen36_35b_a3b.attn import attend_plane, bind_plane, plane_bytes, resize_plane
@@ -202,7 +201,9 @@ class _Pending:
 
     def __init__(self, session: Any, pos: int) -> None:
         self.pos = pos
-        self.command = session.queue.commandBuffer()
+        from favlo.memory import memory
+
+        self.command = memory.command_buffer(session.queue)
         self.encoder = self.command.computeCommandEncoder()
         self.held: list[Any] = []
 
@@ -214,11 +215,16 @@ class _Pending:
         self.held = []
 
     def discard(self) -> None:
+        command = self.command
         if self.encoder is not None:
             self.encoder.endEncoding()
             self.encoder = None
         self.command = None
         self.held = []
+        if command is not None:
+            from favlo.memory import memory
+
+            memory.retire(command)
 
 
 class Qwen36Runtime:
@@ -253,7 +259,9 @@ class Qwen36Runtime:
             raise RuntimeError(message)
         resident_bytes = (self.root / "resident.bin").stat().st_size
         cap = parse_memory(max_memory)
-        self.max_memory = available_bytes() if cap is None else cap
+        from favlo.memory import memory
+
+        self.max_memory = memory.budget() if cap is None else cap
         self._resident_bytes = resident_bytes
         card = max_position(self.root)
         fixed = _reserved_bytes(resident_bytes, 0, 0)
@@ -987,6 +995,7 @@ class Qwen36Runtime:
             self.session.begin()
             self._embed(token)
             self.session.commit()
+            self.session.wait_inflight()
             pending.commit(self.session)
         else:
             if pending is not None:

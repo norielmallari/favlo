@@ -66,6 +66,20 @@ def handle_image(
     state: dict[str, Any],
 ) -> None:
     del selection, args
+    try:
+        _handle_image(reply, runtime, body, state)
+    finally:
+        release = getattr(runtime, "close", None)
+        if callable(release):
+            release()
+
+
+def _handle_image(
+    reply: Any,
+    runtime: Any,
+    body: dict[str, Any],
+    state: dict[str, Any],
+) -> None:
     home = state.get("image_home")
     root = home if isinstance(home, Path) else None
     try:

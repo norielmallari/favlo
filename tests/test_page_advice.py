@@ -123,9 +123,10 @@ def test_evict_bytes_drops_victims_and_keeps_the_atlas() -> None:
         atlas.resident[(0, expert)] = offset
         atlas.expert_run[(0, expert)] = key
         atlas.eviction.insert(key, PAGE)
+    kept = atlas.atlas
     freed = atlas.evict_bytes(PAGE, {(0, 0)})
     assert freed >= PAGE
-    assert atlas.atlas is gpu.device.buffer
+    assert atlas.atlas is kept
     assert (0, 0) in atlas.resident
     assert len(atlas.resident) < 3
 

@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 import objc
 
+from favlo.memory import memory
 from qwen38_flash_next.formats import (
     BLOCK,
     FP8_PATTERN,
@@ -103,17 +104,14 @@ class Roundtrip:
 
     def __init__(self) -> None:
         metal = _metal()
-        device = metal.MTLCreateSystemDefaultDevice()
-        if device is None:
-            message = "this Mac has no Metal device"
-            raise RuntimeError(message)
+        self._owner = "flash-probe"
         self.metal = metal
-        self.device = device
+        self.device = memory.device
         options = metal.MTLCompileOptions.alloc().init()
         # Metal 4.1. PyObjC does not export MTLLanguageVersion4_1.
         options.setLanguageVersion_((4 << 16) + 1)
         library, error = _objc_pair(
-            device.newLibraryWithSource_options_error_(SHADER, options, None)
+            self.device.newLibraryWithSource_options_error_(SHADER, options, None)
         )
         if library is None:
             message = f"shader library failed to compile: {error}"
@@ -268,12 +266,7 @@ class Roundtrip:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     def _buffer(self, length: int) -> Any:
-        mode = self.metal.MTLResourceStorageModeShared
-        buffer = self.device.newBufferWithLength_options_(length, mode)
-        if buffer is None:
-            message = f"Metal buffer of {length} bytes was not created"
-            raise RuntimeError(message)
-        return buffer
+        return memory.allocate(max(int(length), 16), owner=self._owner, zero=True)
 
     def _write_read(
         self,
@@ -297,7 +290,7 @@ class Roundtrip:
         descriptor.setUsage_(metal.MTLTensorUsageCompute)
         descriptor.setStorageMode_(metal.MTLStorageModeShared)
         attachments = metal.MTLTensorBufferAttachments.alloc().init()
-        attachments.setBuffer_offset_forPlane_(buffer, 0, PLANE_DATA)
+        memory.bind_plane(attachments, PLANE_DATA, buffer, 0)
         if with_scale:
             plane = metal.MTLTensorAuxiliaryPlaneDescriptor.alloc().init()
             plane.setDataType_(TENSOR_E8M0)
@@ -305,7 +298,7 @@ class Roundtrip:
             planes = metal.MTLTensorAuxiliaryPlaneDescriptorMap.alloc().init()
             planes.setDescriptor_forPlane_(plane, PLANE_SCALES)
             descriptor.setAuxiliaryPlanes_(planes)
-            attachments.setBuffer_offset_forPlane_(buffer, 128, PLANE_SCALES)
+            memory.bind_plane(attachments, PLANE_SCALES, buffer, 128)
         tensor, error = _objc_pair(
             self.device.newTensorWithDescriptor_attachments_error_(descriptor, attachments, None)
         )
@@ -391,9 +384,9 @@ class Roundtrip:
         out = self._buffer(max(count, 16))
         _fill_buffer(out, max(count, 16), 0)
         encoder, command = self._encoder("copy_bytes")
-        encoder.setBuffer_offset_atIndex_(source, source_offset, 0)
-        encoder.setBuffer_offset_atIndex_(out, 0, 1)
-        encoder.setBuffer_offset_atIndex_(count_buf, 0, 2)
+        memory.bind(encoder, 0, source, source_offset)
+        memory.bind(encoder, 1, out, 0)
+        memory.bind(encoder, 2, count_buf, 0)
         self._commit(encoder, command, max(count, 1))
         return _buffer_bytes(out, count)
 
@@ -409,12 +402,12 @@ class Roundtrip:
         out = self._buffer(out_bytes)
         _fill_buffer(out, out_bytes, 0)
         encoder, command = self._encoder(kernel)
-        encoder.setBuffer_offset_atIndex_(source, source_offset, 0)
+        memory.bind(encoder, 0, source, source_offset)
         if scale_buffer is None:
-            encoder.setBuffer_offset_atIndex_(out, 0, 1)
+            memory.bind(encoder, 1, out, 0)
         else:
-            encoder.setBuffer_offset_atIndex_(scale_buffer, scale_offset, 1)
-            encoder.setBuffer_offset_atIndex_(out, 0, 2)
+            memory.bind(encoder, 1, scale_buffer, scale_offset)
+            memory.bind(encoder, 2, out, 0)
         self._commit(encoder, command, 1)
         return _buffer_bytes(out, out_bytes)
 
@@ -429,8 +422,8 @@ class Roundtrip:
         if created is None:
             message = f"pipeline state failed for {kernel}: {error}"
             raise RuntimeError(message)
-        queue = self.device.newCommandQueue()
-        command = queue.commandBuffer()
+        queue = memory.make_queue()
+        command = memory.command_buffer(queue)
         encoder = command.computeCommandEncoder()
         encoder.setComputePipelineState_(created)
         return encoder, command
@@ -441,6 +434,7 @@ class Roundtrip:
         encoder.endEncoding()
         command.commit()
         command.waitUntilCompleted()
+        memory.retire(command)
 
 
 def _byte_payload(codes: Sequence[int]) -> bytes:
