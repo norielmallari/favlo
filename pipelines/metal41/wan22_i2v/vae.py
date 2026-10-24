@@ -173,6 +173,7 @@ class WanVAE:
         on_pipeline: Callable[[], None] | None = None,
         on_block: Callable[[], None] | None = None,
         gpu: Gpu | None = None,
+        resident_frames: int | None = None,
     ) -> np.ndarray:
         """Device latent ``[16, T, H, W]`` to uint8 ``[frames, height, width, 3]``."""
         expected = 1 + (int(shape[1]) - 1) * 4
@@ -183,22 +184,28 @@ class WanVAE:
             z = self._project(restored, "conv2.weight", "conv2.bias")
             self._free(restored)
             pieces: list[_Vol] = []
+            host: list[np.ndarray] = []
+            window = shape[1] if resident_frames is None else max(1, min(resident_frames, shape[1]))
             for index in range(shape[1]):
                 frame = self._slice(z, index, 1)
                 pieces.append(self._decoder(frame))
                 self._free(frame)
-            self._free(z)
-            video = pieces[0]
-            for extra in pieces[1:]:
-                joined = self._concat(video, extra)
+                if len(pieces) < window and index + 1 < shape[1]:
+                    continue
+                video = pieces[0]
+                for extra in pieces[1:]:
+                    joined = self._concat(video, extra)
+                    self._free(video)
+                    self._free(extra)
+                    video = joined
+                host.append(self._u8(video))
                 self._free(video)
-                self._free(extra)
-                video = joined
-            if video.shape[1] != expected:
-                message = f"decoder emitted {video.shape[1]} frames, expected {expected}"
+                pieces = []
+            self._free(z)
+            pixels = host[0] if len(host) == 1 else np.concatenate(host, axis=0)
+            if pixels.shape[0] != expected:
+                message = f"decoder emitted {pixels.shape[0]} frames, expected {expected}"
                 raise RuntimeError(message)
-            pixels = self._u8(video)
-            self._free(video)
         finally:
             self._clear_cache()
             self._close()

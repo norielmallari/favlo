@@ -2,7 +2,7 @@
 
 The still is 416×240. ``generate_image`` runs only when that PNG is missing.
 ``generate_video`` then runs twice, at ``quality`` ``low`` and ``max``, with
-no chat between them. Each result is read from ``favlo://videos/{id}`` and
+no chat between them. Each result is read from ``favlo://videos/{id}.mp4`` and
 saved as ``artifacts/video-quality-low.mp4`` and
 ``artifacts/video-quality-max.mp4``. Exit 0 means both files are 5 frames at
 416×240 and the max file is larger. This command is not part of pytest. The

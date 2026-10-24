@@ -31,7 +31,7 @@ That starts the daemon and returns. A later `favlo serve` attaches to it. `/quit
 
 `list_media_models`, `media_status`, and `media_cancel` run immediately.
 
-`generate_image`, `generate_video`, and `generate_music` return a task when the client advertises `io.modelcontextprotocol/tasks`. The GPU starts when the one worker reaches that task. Poll `media_status` with the `taskId` every 2 seconds until `completed`, `failed`, or `cancelled`. Then `resources/read` the `favlo://` link in the result. A client that does not advertise the extension receives the finished tool result on that same call. Image and music bytes are inlined only when the caller asked and the file is at most 1 MiB. Video is always a `favlo://videos/{id}` link.
+`generate_image`, `generate_video`, and `generate_music` return a task when the client advertises `io.modelcontextprotocol/tasks`. The GPU starts when the one worker reaches that task. Poll `media_status` with the `taskId` every 2 seconds until `completed`, `failed`, or `cancelled`. Then `resources/read` the `favlo://` link in the result. A client that does not advertise the extension receives the finished tool result on that same call. Image and music bytes are inlined only when the caller asked and the file is at most 1 MiB. Video is always a `favlo://videos/{id}.mp4` link.
 
 The still on `generate_video` is a stored image id or a PNG image block. A filesystem path is refused. `quality` is an argument of that call. Image `n` from 1 to 10 is one task.
 

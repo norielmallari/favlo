@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import base64
 import json
+from pathlib import Path
 
 import numpy as np
+import pytest
+
 from wan22_i2v.chat import VideoRequestError, _seconds_label, handle_video, video_fields
 from wan22_i2v.formats import block_winners, pack_linear, relative_error, restore_linear
 from wan22_i2v.hold import ClipHold, ClipPaused, reload_quietly
@@ -551,3 +554,67 @@ def test_close_drops_the_device_and_the_expert() -> None:
     assert runtime.gpu is None
     assert runtime._resident is None
     runtime.close()
+
+
+def test_open_runtime_forwards_the_listener_owner(monkeypatch) -> None:
+    from wan22_i2v import runtime as runtime_mod
+
+    seen: dict[str, object] = {}
+
+    def fake(
+        path: Path,
+        console: object = None,
+        *,
+        owner: str | None = None,
+        max_memory: object = None,
+    ) -> str:
+        del path, console
+        seen["owner"] = owner
+        seen["cap"] = max_memory
+        return "runtime"
+
+    monkeypatch.setattr(runtime_mod, "Runtime", fake)
+    opened = runtime_mod.open_runtime(Path("record"), owner="wan22-i2v:4", max_memory="16GiB")
+    assert opened == "runtime"
+    assert seen == {"owner": "wan22-i2v:4", "cap": "16GiB"}
+
+
+def test_missing_record_raises_before_the_device(tmp_path: Path) -> None:
+    from wan22_i2v.runtime import Runtime
+
+    with pytest.raises(FileNotFoundError):
+        Runtime(tmp_path / "missing", owner="wan22-i2v:4")
+
+
+def test_forward_scratch_grows_with_the_clip() -> None:
+    from wan22_i2v.dit import forward_bytes
+
+    config = {"dim": 64, "ffn": 128, "text_len": 8, "text_dim": 32, "freq_dim": 16}
+    short = forward_bytes(config, 16, 36 * 2 * 4 * 4)
+    longer = forward_bytes(config, 160, 36 * 20 * 4 * 4)
+    assert longer > short
+
+
+def test_a_short_ledger_keeps_the_requested_clip(monkeypatch, tmp_path: Path) -> None:
+    from wan22_i2v import runtime as runtime_mod
+
+    runtime = runtime_mod.Runtime.__new__(runtime_mod.Runtime)
+    runtime.path = tmp_path
+    runtime._memory_cap = 1
+    runtime.config = {"dim": 128, "ffn": 256, "text_len": 16, "text_dim": 32, "freq_dim": 16}
+    monkeypatch.setattr(runtime, "_room", lambda: 1)
+    lat_t, lat_h, lat_w, tokens = geometry(5, 320, 576)
+    with pytest.raises(RuntimeError, match="5 frames at 576x320"):
+        runtime._reserve(5, 576, 320, lat_t, lat_h, lat_w, tokens)
+
+
+def test_decode_keeps_one_latent_frame_when_the_volume_does_not_fit() -> None:
+    from wan22_i2v.runtime import resident_latent_frames
+
+    frames, height, width, lat_t = 81, 320, 576, 21
+    stage = 3 * 4 * height * width * 4
+    full = 3 * frames * height * width * 4
+    assert resident_latent_frames(full, frames, height, width, lat_t) == lat_t
+    assert resident_latent_frames(stage, frames, height, width, lat_t) == 1
+    with pytest.raises(RuntimeError, match="81 frames at 576x320"):
+        resident_latent_frames(0, frames, height, width, lat_t)

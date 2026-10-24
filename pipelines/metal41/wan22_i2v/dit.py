@@ -101,6 +101,31 @@ _FORWARD_BUFFERS = (
 )
 
 
+def forward_bytes(config: dict[str, Any], tokens: int, volume_size: int) -> int:
+    """Bytes ``Forward`` allocates for this token count and latent volume."""
+    dim = int(config["dim"])
+    ffn = int(config["ffn"])
+    rows = pad_to(tokens, TILE_M)
+    text_rows = pad_to(int(config["text_len"]), TILE_M)
+    freq = int(config["freq_dim"])
+    text_dim = int(config["text_dim"])
+    span = stored_k(max(dim, ffn, text_dim, freq))
+    return (
+        rows * span * 2
+        + 7 * rows * dim * 4
+        + rows * ffn * 4
+        + 64 * dim * 6 * 4
+        + rows * 64 * 4
+        + text_rows * dim * 4
+        + text_rows * text_dim * 4
+        + 64 * freq * 4
+        + volume_size * 4
+        + 5 * dim * 4
+        + dim * 6 * 4
+        + (volume_size // 36) * 16 * 4
+    )
+
+
 class Forward:
     """Device scratch for one geometry. The latent grid stays on the device."""
 

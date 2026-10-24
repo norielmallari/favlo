@@ -10,7 +10,8 @@ from typing import Any
 import numpy as np
 import objc
 
-from wan22_i2v.dit import Forward, drop_expert, upload_expert
+from favlo.memory import memory
+from wan22_i2v.dit import Forward, drop_expert, forward_bytes, upload_expert
 from wan22_i2v.formats import TILE_M, pad_to
 from wan22_i2v.hold import ClipHold, ClipPaused, interrupt, reload_quietly
 from wan22_i2v.latent import stride_decode, stride_encode
@@ -27,8 +28,17 @@ from wan22_i2v.video import write_avi
 class Runtime:
     """One packed Wan record. One expert is on device at a time."""
 
-    def __init__(self, path: Path, console: Any = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        console: Any = None,
+        *,
+        owner: str | None = None,
+        max_memory: str | int | None = None,
+    ) -> None:
         self.console = console
+        self._owner = owner or f"wan22-i2v:{id(self)}"
+        self._memory_cap = _parse_memory(max_memory)
         self.path = Path(path)
         self.manifest = load_manifest(self.path)
         self.config = self.manifest["config"]
@@ -39,27 +49,30 @@ class Runtime:
 
     def close(self) -> None:
         """Drop the expert and the device buffers. The process has no run loop."""
-        forward = self._forward
-        resident = self._resident
-        gpu = self.gpu
-        if forward is None and resident is None and gpu is None:
-            return
-        self._forward = None
-        self._resident = None
-        self.gpu = None
-        with objc.autorelease_pool():
-            if forward is not None:
-                forward.release()
-            forward = None
-            if resident is not None and gpu is not None:
-                drop_expert(gpu, resident)
-            elif resident is not None:
-                _clear_resident(resident)
-            resident = None
-            if gpu is not None:
-                gpu.close()
-            gpu = None
-            gc.collect()
+        try:
+            forward = self._forward
+            resident = self._resident
+            gpu = self.gpu
+            if forward is None and resident is None and gpu is None:
+                return
+            self._forward = None
+            self._resident = None
+            self.gpu = None
+            with objc.autorelease_pool():
+                if forward is not None:
+                    forward.release()
+                forward = None
+                if resident is not None and gpu is not None:
+                    drop_expert(gpu, resident)
+                elif resident is not None:
+                    _clear_resident(resident)
+                resident = None
+                if gpu is not None:
+                    gpu.close()
+                gpu = None
+                gc.collect()
+        finally:
+            self._sweep_owner()
 
     def generate(
         self,
@@ -110,6 +123,7 @@ class Runtime:
             avi = hold.avi if hold is not None and hold.avi is not None else None
             pixels = hold.pixels if hold is not None and hold.pixels is not None else None
             if avi is None and pixels is None:
+                self._reserve(frames, width, height, lat_t, lat_h, lat_w, tokens)
                 progress.stage("compile")
                 if hold is not None and hold.reached("compile"):
                     progress.counting(False)
@@ -249,6 +263,9 @@ class Runtime:
                         noise_shape,
                         on_block=progress.advance,
                         gpu=gpu,
+                        resident_frames=resident_latent_frames(
+                            self._room(), frames, height, width, lat_t
+                        ),
                     )
                 else:
                     pixels = stride_decode(latent, frames)
@@ -298,9 +315,38 @@ class Runtime:
         elif resident is not None:
             _clear_resident(resident)
 
+    def _reserve(
+        self,
+        frames: int,
+        width: int,
+        height: int,
+        lat_t: int,
+        lat_h: int,
+        lat_w: int,
+        tokens: int,
+    ) -> None:
+        """Require one expert and the scratch for every frame of this clip."""
+        room = self._room()
+        weights = expert_bytes(self.path)
+        scratch = forward_bytes(self.config, tokens, 36 * lat_t * lat_h * lat_w)
+        if weights + scratch > room:
+            raise RuntimeError(f"scratch for {frames} frames at {width}x{height} does not fit")
+        resident_latent_frames(room, frames, height, width, lat_t)
+
+    def _room(self) -> int:
+        ceiling = memory.budget()
+        if self._memory_cap is not None:
+            ceiling = min(ceiling, self._memory_cap)
+        return max(0, ceiling - memory.live() - memory.pending())
+
+    def _sweep_owner(self) -> None:
+        owner = getattr(self, "_owner", None)
+        if isinstance(owner, str):
+            memory.sweep(owner)
+
     def _open(self, on_pipeline: Any = None) -> Gpu:
         if self.gpu is None:
-            self.gpu = Gpu(on_pipeline=on_pipeline)
+            self.gpu = Gpu(on_pipeline=on_pipeline, owner=self._owner)
         return self.gpu
 
     def _load_stop(
@@ -369,9 +415,74 @@ def open_runtime(
     console: Any = None,
     resident_percent: float | None = None,
     max_memory: str | int | None = None,
+    owner: str | None = None,
 ) -> Runtime:
-    del kv_cache, resident_percent, max_memory
-    return Runtime(Path(path), console)
+    del kv_cache, resident_percent
+    return Runtime(Path(path), console, owner=owner, max_memory=max_memory)
+
+
+def expert_bytes(path: Path) -> int:
+    """Largest on-disk expert. One expert is resident at a time."""
+    largest = 0
+    for name in ("high", "low"):
+        folder = path / name
+        if not folder.is_dir():
+            continue
+        total = sum(item.stat().st_size for item in folder.iterdir() if item.is_file())
+        largest = max(largest, total)
+    return largest
+
+
+def resident_latent_frames(room: int, frames: int, height: int, width: int, lat_t: int) -> int:
+    """How many decoded latent frames stay on device. The clip length stays the request."""
+    if _pixel_bytes(frames, height, width) <= room:
+        return lat_t
+    if _pixel_bytes(min(4, frames), height, width) <= room:
+        return 1
+    raise RuntimeError(f"scratch for {frames} frames at {width}x{height} does not fit")
+
+
+def _pixel_bytes(frames: int, height: int, width: int) -> int:
+    return 3 * frames * height * width * 4
+
+
+def _parse_memory(text: str | int | None) -> int | None:
+    """``32GiB``, ``512MiB``, or a byte count. Empty leaves the ledger uncapped."""
+    if text is None or text == "":
+        return None
+    if isinstance(text, int):
+        if text < 1:
+            message = f"maximum memory {text} is not positive"
+            raise ValueError(message)
+        return text
+    raw = str(text).strip().replace("_", "")
+    suffix = ""
+    digits = raw
+    for ending, name in (
+        ("gib", "GiB"),
+        ("mib", "MiB"),
+        ("gb", "GiB"),
+        ("mb", "MiB"),
+        ("g", "GiB"),
+        ("m", "MiB"),
+    ):
+        if raw.lower().endswith(ending):
+            suffix = name
+            digits = raw[: -len(ending)]
+            break
+    try:
+        number = int(digits)
+    except ValueError as exc:
+        message = f"maximum memory {text} is not a byte count"
+        raise ValueError(message) from exc
+    if number < 1:
+        message = f"maximum memory {text} is not positive"
+        raise ValueError(message)
+    if suffix == "GiB":
+        return number << 30
+    if suffix == "MiB":
+        return number << 20
+    return number
 
 
 def _volume(gpu: Gpu, buf: Any, shape: tuple[int, ...]) -> np.ndarray:

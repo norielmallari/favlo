@@ -67,8 +67,10 @@ _NAMES = (
 class Gpu:
     """One device and one command encoder. ``end`` waits for the batch."""
 
-    def __init__(self, on_pipeline: Callable[[], None] | None = None) -> None:
-        self._owner = f"wan:{id(self)}"
+    def __init__(
+        self, on_pipeline: Callable[[], None] | None = None, *, owner: str | None = None
+    ) -> None:
+        self._owner = owner or f"wan22-i2v:{id(self)}"
         self.device = memory.device
         self.queue = memory.make_queue()
         self.pipes: dict[str, Any] = {}
