@@ -238,8 +238,10 @@ class Qwen36Runtime:
         console: Any = None,
         resident_percent: float | None = None,
         max_memory: str | int | None = None,
+        owner: str | None = None,
     ) -> None:
         del resident_percent
+        self._owner = owner or f"qwen36-35b-a3b:{id(self)}"
         self.root = Path(path)
         self.routes = RouteScratch(LAYERS, EXPERTS)
         self._firing_open = False
@@ -303,7 +305,7 @@ class Qwen36Runtime:
         self._load_progress = self._begin_load(load_total)
         summary = ""
         try:
-            self.session = Session()
+            self.session = Session(self._owner)
             self.session._load_note = self._note_load
             self.resident = _file_buffer(self.session, self.root / "resident.bin")
             self.atlas = ExpertAtlas(
@@ -373,6 +375,9 @@ class Qwen36Runtime:
                 f"loaded {self.root.name} kv {self.kv_cache} context {self.max_pos} "
                 f"atlas {self.atlas.slots} images memory {used}/{self.max_memory}"
             )
+        except Exception:
+            self._sweep_owner()
+            raise
         finally:
             session = getattr(self, "session", None)
             if session is not None:
@@ -409,38 +414,54 @@ class Qwen36Runtime:
         if getattr(self, "_closed", False):
             return
         self._closed = True
-        self._drop_pending()
-        prefix = getattr(self, "prefix", None)
+        try:
+            self._drop_pending()
+            prefix = getattr(self, "prefix", None)
+            session = getattr(self, "session", None)
+            if prefix is not None and session is not None:
+                try:
+                    prefix.flush()
+                except OSError:
+                    pass
+            if session is not None:
+                session.close()
+            self._prefill = None
+            held = getattr(self, "_held", None)
+            if held is not None:
+                held.clear()
+            atlas = getattr(self, "atlas", None)
+            if atlas is not None:
+                atlas.close()
+            for name in _DEVICE_BUFFERS:
+                current = getattr(self, name, None)
+                if isinstance(current, list):
+                    current.clear()
+                else:
+                    setattr(self, name, None)
+            self.atlas = None
+            self.prefix = None
+            self.session = None
+            current = None
+            session = None
+            atlas = None
+            prefix = None
+            held = None
+            gc.collect()
+        finally:
+            self._sweep_owner()
+
+    def _sweep_owner(self) -> None:
+        """Return this opening's spans. ``session.close`` sweeps the same string."""
         session = getattr(self, "session", None)
-        if prefix is not None and session is not None:
-            try:
-                prefix.flush()
-            except OSError:
-                pass
         if session is not None:
             session.close()
-        self._prefill = None
-        held = getattr(self, "_held", None)
-        if held is not None:
-            held.clear()
-        atlas = getattr(self, "atlas", None)
-        if atlas is not None:
-            atlas.close()
-        for name in _DEVICE_BUFFERS:
-            current = getattr(self, name, None)
-            if isinstance(current, list):
-                current.clear()
-            else:
-                setattr(self, name, None)
-        self.atlas = None
-        self.prefix = None
-        self.session = None
-        current = None
-        session = None
-        atlas = None
-        prefix = None
-        held = None
-        gc.collect()
+            self.session = None
+        owner = getattr(self, "_owner", None)
+        if not isinstance(owner, str) or not owner:
+            return
+        from favlo.memory import memory
+
+        memory.sweep(owner)
 
     def _note_routes(self) -> None:
         """Read the router ids copied before remap. One token, forty layers."""

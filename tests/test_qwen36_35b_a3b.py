@@ -49,6 +49,61 @@ from qwen36_35b_a3b.tools import (
 )
 
 
+def test_open_runtime_forwards_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    from qwen36_35b_a3b.runtime import open_runtime
+
+    captured: dict[str, object] = {}
+
+    def fake(path: Path, **kwargs: object) -> str:
+        captured["path"] = path
+        captured.update(kwargs)
+        return "runtime"
+
+    monkeypatch.setattr("qwen36_35b_a3b.runtime.Qwen36Runtime", fake)
+    assert open_runtime(Path("record"), owner="qwen36-35b-a3b:7") == "runtime"
+    assert captured["owner"] == "qwen36-35b-a3b:7"
+    assert captured["max_memory"] is None
+
+
+def test_a_missing_record_keeps_the_passed_owner(tmp_path: Path) -> None:
+    from qwen36_35b_a3b.forward import Qwen36Runtime
+
+    owner = "qwen36-35b-a3b:7"
+    held: dict[str, str] = {}
+
+    class _Probe(Qwen36Runtime):
+        def __init__(self, path: Path, **kwargs: object) -> None:
+            try:
+                super().__init__(path, **kwargs)
+            except FileNotFoundError:
+                held["owner"] = self._owner
+                raise
+
+    with pytest.raises(FileNotFoundError):
+        _Probe(tmp_path, owner=owner)
+    assert held["owner"] == owner
+
+
+def test_a_missing_record_mints_an_owner(tmp_path: Path) -> None:
+    from qwen36_35b_a3b.forward import Qwen36Runtime
+
+    held: dict[str, str] = {}
+
+    class _Probe(Qwen36Runtime):
+        def __init__(self, path: Path, **kwargs: object) -> None:
+            try:
+                super().__init__(path, **kwargs)
+            except FileNotFoundError:
+                held["owner"] = self._owner
+                raise
+
+    with pytest.raises(FileNotFoundError):
+        _Probe(tmp_path)
+    minted = held["owner"]
+    assert minted.startswith("qwen36-35b-a3b:")
+    assert minted != "qwen36-35b-a3b:7"
+
+
 def test_fp4_tie_picks_the_even_code() -> None:
     block = np.zeros((1, 32), dtype=np.float32)
     block[0, 0] = 6.0

@@ -181,9 +181,9 @@ def _objc_pair(result: Any) -> tuple[Any, str | None]:
 class Session:
     """One Metal device. Compiling the library fails if a kernel has no pipeline."""
 
-    def __init__(self) -> None:
+    def __init__(self, owner: str | None = None) -> None:
         metal = _metal()
-        self._owner = f"qwen36:{id(self)}"
+        self._owner = owner or f"qwen36-35b-a3b:{id(self)}"
         device = memory.device
         options = metal.MTLCompileOptions.alloc().init()
         options.setLanguageVersion_((4 << 16) + 1)

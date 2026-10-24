@@ -4,7 +4,7 @@ As-built note for the `qwen36-35b-a3b` pipeline. The process contract is [../../
 
 Clients reach this pipeline through `favlo serve`. `GET /v1/models` lists it once a record is registered, and the `model` field on `POST /v1/chat/completions` loads it. `kernels`, `quantize`, `bf16`, `complete`, and `models` require `favlo --qwen36-35b-a3b`. That flag loads `pipelines/metal41/qwen36-35b-a3b.py`, which loads `qwen36_35b_a3b`. The package does not import `qwen38_flash_next` or `qwen38_27b`.
 
-The official checkpoint is [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B). Those weights are under the Apache License, Version 2.0. Device spans come from the process memory manager. The atlas budget is that manager's reclaimable bytes plus the spans it still holds.
+The official checkpoint is [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B). Those weights are under the Apache License, Version 2.0. Device spans come from the process memory manager. The atlas budget is that manager's reclaimable bytes plus the spans it still holds. `open_runtime` takes `owner` and every span from that opening uses it. `close` sweeps that string. A command that omits `owner` mints one from this runtime's id. The context still starts at 2048 tokens and grows until eight expert images no longer fit.
 
 ## Kernels
 
