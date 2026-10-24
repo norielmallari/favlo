@@ -43,10 +43,10 @@ class Model:
         self.router_state: list[np.ndarray | None] = [None] * LAYERS
 
     @classmethod
-    def open(cls, path: Path) -> Model:
-        session = Session()
+    def open(cls, path: Path, owner: str) -> Model:
+        session = Session(owner)
         record = load_record(session, path)
-        return cls(record, session, Decoder(path.parent / "dac" / "model.safetensors"))
+        return cls(record, session, Decoder(path.parent / "dac" / "model.safetensors", owner))
 
     def speak(self, text: str, speaker: np.ndarray | None = None, max_frames: int | None = None) -> np.ndarray:
         prefix = self._prefix(text, speaker)

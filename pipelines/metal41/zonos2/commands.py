@@ -13,6 +13,7 @@ from zonos2.checkpoint import id_tables, list_tensors
 from zonos2.metal import run_checks
 from zonos2.pack import quantize as pack_record
 from zonos2.runtime import open_runtime
+from zonos2.speaker import Encoder
 
 
 def _inspect(src: Path) -> int:
@@ -47,6 +48,10 @@ def main(argv: list[str] | None = None) -> int:
     generate.add_argument("--text", required=True)
     generate.add_argument("--speaker", type=Path, default=None)
     generate.add_argument("--out", type=Path, required=True)
+    encode = sub.add_parser("encode", help="write a 2048-float speaker vector from a wav")
+    encode.add_argument("--wav", type=Path, required=True)
+    encode.add_argument("--src", type=Path, default=Path("models/qwen3-speaker"))
+    encode.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "kernels":
         run_checks()
@@ -57,6 +62,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "quantize":
         record = pack_record(args.src, args.out)
         sys.stdout.write(f"packed {record.name}\n")
+        return 0
+    if args.command == "encode":
+        vector = Encoder(args.src / "model.safetensors").embed(args.wav)
+        np.save(args.out, vector)
+        sys.stdout.write(f"wrote {args.out.name}\n")
         return 0
     speaker = None
     if args.speaker is not None:

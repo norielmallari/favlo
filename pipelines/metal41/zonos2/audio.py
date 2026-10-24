@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import wave
 from io import BytesIO
+from pathlib import Path
 
 import numpy as np
 
@@ -65,6 +66,22 @@ def text_ids(text: str) -> np.ndarray:
         raise ValueError(message)
     body = [int(byte) + LEGACY_SYMBOLS for byte in text.encode("utf-8")]
     return np.asarray([BOS_ID, *body, EOS_ID], dtype=np.int64)
+
+
+def read_wav(path: Path) -> tuple[np.ndarray, int]:
+    """16-bit PCM wav. Stereo is averaged to one channel."""
+    with wave.open(str(path), "rb") as handle:
+        channels = handle.getnchannels()
+        width = handle.getsampwidth()
+        rate = handle.getframerate()
+        frames = handle.readframes(handle.getnframes())
+    if width != 2 or channels < 1 or rate < 1 or not frames:
+        message = "the wav is not 16-bit PCM"
+        raise ValueError(message)
+    pcm = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+    if channels > 1:
+        pcm = pcm.reshape(-1, channels).mean(axis=1)
+    return np.ascontiguousarray(pcm, dtype=np.float32), rate
 
 
 def encode_wav(samples: np.ndarray) -> bytes:

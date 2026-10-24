@@ -16,13 +16,14 @@ class Runtime:
         self.path = path
         self.kv_cache = kv_cache
         self.resident_percent = resident_percent
+        self._owner = f"zonos2:{id(self)}"
         self._model = None
 
     def speak(self, text: str, speaker: np.ndarray | None = None, max_frames: int | None = None) -> np.ndarray:
         if self._model is None:
             from zonos2.forward import Model
 
-            self._model = Model.open(self.path)
+            self._model = Model.open(self.path, self._owner)
         return self._model.speak(text, speaker, max_frames=max_frames)
 
     def close(self) -> None:
@@ -33,7 +34,7 @@ class Runtime:
             session.close()
         from favlo.memory import memory
 
-        memory.sweep("zonos")
+        memory.sweep(self._owner)
 
 
 def open_runtime(
@@ -60,6 +61,17 @@ def open_runtime(
     return Runtime(record, kv_cache=kv_cache, resident_percent=resident_percent)
 
 
+def _speaker(name: Any) -> np.ndarray | None:
+    if name is None or name == "":
+        return None
+    if not isinstance(name, str):
+        message = "voice is not in the collection"
+        raise ValueError(message)
+    from zonos2.voices import load
+
+    return load(name)
+
+
 def handle_chat(reply: Any, runtime: Runtime, body: dict, selection: Any, args: Any, state: dict) -> None:
     del reply, runtime, body, selection, args, state
     message = "zonos2 does not serve chat completions"
@@ -78,7 +90,8 @@ def handle_voice(reply: Any, runtime: Runtime, body: dict, selection: Any, args:
     if fmt not in {"mp3", "wav", "flac"}:
         message = "response_format must be mp3, wav, or flac"
         raise ValueError(message)
-    samples = runtime.speak(text)
+    speaker = _speaker(body.get("voice"))
+    samples = runtime.speak(text, speaker)
     from favlo.voice import store_wav
 
     voice_id = "voice_" + secrets.token_hex(12)

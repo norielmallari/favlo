@@ -19,12 +19,13 @@ _DILATIONS = (1, 3, 9)
 class Decoder:
     """Sum the nine codebook projections, then the decoder stack, then tanh."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, owner: str | None = None) -> None:
         from safetensors import safe_open
 
         if not path.is_file():
             message = "DAC weights are not in models/dac/model.safetensors"
             raise FileNotFoundError(message)
+        self._owner = owner or f"zonos2:{id(self)}"
         self._device, self._queue, self._pipelines = _compile()
         with safe_open(path, framework="numpy") as handle:
             self._conv1 = _load_conv(handle, "decoder.conv1")
@@ -76,7 +77,15 @@ class Decoder:
         dilation: int = 1,
     ) -> np.ndarray:
         return _dispatch_conv(
-            self._device, self._queue, self._pipelines["conv1d"], values, weight, bias, padding, dilation
+            self._device,
+            self._queue,
+            self._pipelines["conv1d"],
+            values,
+            weight,
+            bias,
+            padding,
+            dilation,
+            self._owner,
         )
 
     def _transpose(
@@ -91,10 +100,13 @@ class Decoder:
             bias,
             stride,
             padding,
+            self._owner,
         )
 
     def _snake(self, values: np.ndarray, alpha: np.ndarray) -> np.ndarray:
-        return _dispatch_snake(self._device, self._queue, self._pipelines["snake"], values, alpha)
+        return _dispatch_snake(
+            self._device, self._queue, self._pipelines["snake"], values, alpha, self._owner
+        )
 
 
 def seconds(frames: int) -> float:
@@ -103,28 +115,35 @@ def seconds(frames: int) -> float:
 
 def check_codec() -> None:
     """One conv, one transposed conv, and Snake against the host formula."""
-    device, queue, pipelines = _compile()
-    rng = np.random.default_rng(4)
-    values = rng.standard_normal((5, 3)).astype(np.float32)
-    weight = rng.standard_normal((4, 3, 3)).astype(np.float32)
-    bias = rng.standard_normal(4).astype(np.float32)
-    got = _dispatch_conv(device, queue, pipelines["conv1d"], values, weight, bias, 1, 1)
-    _close(got, _conv_host(values, weight, bias, 1, 1), "conv")
-    values = rng.standard_normal((12, 2)).astype(np.float32)
-    weight = rng.standard_normal((3, 2, 3)).astype(np.float32)
-    bias = rng.standard_normal(3).astype(np.float32)
-    got = _dispatch_conv(device, queue, pipelines["conv1d"], values, weight, bias, 3, 3)
-    _close(got, _conv_host(values, weight, bias, 3, 3), "dilated conv")
-    values = rng.standard_normal((3, 2)).astype(np.float32)
-    weight = rng.standard_normal((2, 3, 4)).astype(np.float32)
-    bias = rng.standard_normal(3).astype(np.float32)
-    got = _dispatch_transpose(device, queue, pipelines["conv_transpose1d"], values, weight, bias, 2, 1)
-    _close(got, _transpose_host(values, weight, bias, 2, 1), "transpose")
-    values = rng.standard_normal((4, 3)).astype(np.float32)
-    alpha = np.array([0.5, 1.0, 2.0], dtype=np.float32)
-    got = _dispatch_snake(device, queue, pipelines["snake"], values, alpha)
-    wave = np.sin(alpha * values)
-    _close(got, values + wave * wave / alpha, "snake")
+    holder = object()
+    owner = f"zonos2:{id(holder)}"
+    try:
+        device, queue, pipelines = _compile()
+        rng = np.random.default_rng(4)
+        values = rng.standard_normal((5, 3)).astype(np.float32)
+        weight = rng.standard_normal((4, 3, 3)).astype(np.float32)
+        bias = rng.standard_normal(4).astype(np.float32)
+        got = _dispatch_conv(device, queue, pipelines["conv1d"], values, weight, bias, 1, 1, owner)
+        _close(got, _conv_host(values, weight, bias, 1, 1), "conv")
+        values = rng.standard_normal((12, 2)).astype(np.float32)
+        weight = rng.standard_normal((3, 2, 3)).astype(np.float32)
+        bias = rng.standard_normal(3).astype(np.float32)
+        got = _dispatch_conv(device, queue, pipelines["conv1d"], values, weight, bias, 3, 3, owner)
+        _close(got, _conv_host(values, weight, bias, 3, 3), "dilated conv")
+        values = rng.standard_normal((3, 2)).astype(np.float32)
+        weight = rng.standard_normal((2, 3, 4)).astype(np.float32)
+        bias = rng.standard_normal(3).astype(np.float32)
+        got = _dispatch_transpose(
+            device, queue, pipelines["conv_transpose1d"], values, weight, bias, 2, 1, owner
+        )
+        _close(got, _transpose_host(values, weight, bias, 2, 1), "transpose")
+        values = rng.standard_normal((4, 3)).astype(np.float32)
+        alpha = np.array([0.5, 1.0, 2.0], dtype=np.float32)
+        got = _dispatch_snake(device, queue, pipelines["snake"], values, alpha, owner)
+        wave = np.sin(alpha * values)
+        _close(got, values + wave * wave / alpha, "snake")
+    finally:
+        memory.sweep(owner)
 
 
 def _compile():
@@ -195,7 +214,9 @@ def _alpha(handle, name: str) -> np.ndarray:
     return np.ascontiguousarray(handle.get_tensor(name).reshape(-1), dtype=np.float32)
 
 
-def _dispatch_conv(device, queue, pipeline, values, weight, bias, padding: int, dilation: int) -> np.ndarray:
+def _dispatch_conv(
+    device, queue, pipeline, values, weight, bias, padding: int, dilation: int, owner: str
+) -> np.ndarray:
 
     data = np.ascontiguousarray(values, dtype=np.float32)
     kernel = np.ascontiguousarray(weight, dtype=np.float32)
@@ -203,7 +224,7 @@ def _dispatch_conv(device, queue, pipeline, values, weight, bias, padding: int, 
     length, in_channels = data.shape
     out_channels = kernel.shape[0]
     out = np.zeros((length, out_channels), dtype=np.float32)
-    buffers = [_buffer(device, item) for item in (data, kernel, offset, out)]
+    buffers = [_buffer(device, item, owner) for item in (data, kernel, offset, out)]
     scalars = [
         np.uint32(length),
         np.uint32(in_channels),
@@ -212,11 +233,13 @@ def _dispatch_conv(device, queue, pipeline, values, weight, bias, padding: int, 
         np.int32(padding),
         np.int32(dilation),
     ]
-    _encode(queue, device, pipeline, buffers, scalars, (length, out_channels, 1), out)
+    _encode(queue, device, pipeline, buffers, scalars, (length, out_channels, 1), out, owner)
     return out.reshape(length, out_channels)
 
 
-def _dispatch_transpose(device, queue, pipeline, values, weight, bias, stride: int, padding: int) -> np.ndarray:
+def _dispatch_transpose(
+    device, queue, pipeline, values, weight, bias, stride: int, padding: int, owner: str
+) -> np.ndarray:
     data = np.ascontiguousarray(values, dtype=np.float32)
     kernel = np.ascontiguousarray(weight, dtype=np.float32)
     offset = np.ascontiguousarray(bias, dtype=np.float32)
@@ -225,7 +248,7 @@ def _dispatch_transpose(device, queue, pipeline, values, weight, bias, stride: i
     taps = kernel.shape[-1]
     out_length = (in_length - 1) * stride - 2 * padding + taps
     out = np.zeros((out_length, out_channels), dtype=np.float32)
-    buffers = [_buffer(device, item) for item in (data, kernel, offset, out)]
+    buffers = [_buffer(device, item, owner) for item in (data, kernel, offset, out)]
     scalars = [
         np.uint32(in_length),
         np.uint32(out_length),
@@ -235,24 +258,24 @@ def _dispatch_transpose(device, queue, pipeline, values, weight, bias, stride: i
         np.uint32(stride),
         np.int32(padding),
     ]
-    _encode(queue, device, pipeline, buffers, scalars, (out_length, out_channels, 1), out)
+    _encode(queue, device, pipeline, buffers, scalars, (out_length, out_channels, 1), out, owner)
     return out.reshape(out_length, out_channels)
 
 
-def _dispatch_snake(device, queue, pipeline, values, alpha) -> np.ndarray:
+def _dispatch_snake(device, queue, pipeline, values, alpha, owner: str) -> np.ndarray:
     data = np.ascontiguousarray(values, dtype=np.float32)
     scale = np.ascontiguousarray(alpha, dtype=np.float32)
     out = np.zeros_like(data)
-    buffers = [_buffer(device, item) for item in (data, scale, out)]
-    _encode(queue, device, pipeline, buffers, [np.uint32(data.shape[1])], (data.size, 1, 1), out)
+    buffers = [_buffer(device, item, owner) for item in (data, scale, out)]
+    _encode(queue, device, pipeline, buffers, [np.uint32(data.shape[1])], (data.size, 1, 1), out, owner)
     return out.reshape(data.shape)
 
 
-def _encode(queue, device, pipeline, buffers, scalars, grid, out) -> None:
+def _encode(queue, device, pipeline, buffers, scalars, grid, out, owner: str) -> None:
     import Metal
 
     with objc.autorelease_pool():
-        extra = [_buffer(device, np.array([value], dtype=value.dtype)) for value in scalars]
+        extra = [_buffer(device, np.array([value], dtype=value.dtype), owner) for value in scalars]
         command = memory.command_buffer(queue)
         encoder = command.computeCommandEncoder()
         encoder.setComputePipelineState_(pipeline)
@@ -264,14 +287,16 @@ def _encode(queue, device, pipeline, buffers, scalars, grid, out) -> None:
         encoder.endEncoding()
         command.commit()
         command.waitUntilCompleted()
-        memory.retire(command)
         view = buffers[-1 if out is not None else 0].contents().as_buffer(out.nbytes)
         out[:] = np.frombuffer(view, dtype=np.float32).reshape(out.shape)
+        memory.retire(command)
+        for handle in (*buffers, *extra):
+            memory.release(handle)
 
 
-def _buffer(device, array: np.ndarray):
+def _buffer(device, array: np.ndarray, owner: str):
     del device
-    return memory.upload(np.ascontiguousarray(array), owner="zonos")
+    return memory.upload(np.ascontiguousarray(array), owner=owner)
 
 
 def _conv_host(values, weight, bias, padding: int, dilation: int) -> np.ndarray:

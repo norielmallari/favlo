@@ -174,7 +174,11 @@ def build_mcp(dispatch: Any, state: dict[str, Any]) -> FastMCP:
         response_format: str = "mp3",
         include_audio: bool = False,
     ) -> ToolResult:
-        """Speak one line. ``response_format`` is mp3, wav, or flac."""
+        """Speak one line.
+
+        ``voice`` is a speaker id from ``list_media_models``.
+        ``response_format`` is mp3, wav, or flac.
+        """
         body: dict[str, Any] = {
             "input": input,
             "model": model,

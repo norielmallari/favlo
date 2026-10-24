@@ -8,13 +8,23 @@ import pickle
 import zipfile
 from pathlib import Path
 
+import numpy as np
 import pytest
 
-import numpy as np
-
+from favlo.memory import memory
+from zonos2.audio import (
+    accurate_token,
+    background_token,
+    encode_wav,
+    quality_token,
+    read_wav,
+    text_ids,
+)
 from zonos2.checkpoint import id_tables, list_tensors, read_tensor
+from zonos2.codec import _compile, _dispatch_conv
 from zonos2.delay import shear, unshear
 from zonos2.formats import (
+    choose_promoted,
     dequant_fp4,
     dequant_fp8,
     promote_count,
@@ -23,13 +33,14 @@ from zonos2.formats import (
     relative_error,
     scale_exponent,
 )
-from zonos2.audio import accurate_token, background_token, encode_wav, quality_token, text_ids
-from zonos2.formats import choose_promoted
-from zonos2.pack import matrix_plane, split_w13
-from zonos2.layout import FP8_PERCENT, OUTPUT_ROWS, TEXT_ROWS, dense_layers, moe_layers, topk
 from zonos2.forward import choose_experts
+from zonos2.layout import FP8_PERCENT, OUTPUT_ROWS, TEXT_ROWS, dense_layers, moe_layers, topk
+from zonos2.mel import RATE, log_mel, mel_filterbank
+from zonos2.pack import matrix_plane, split_w13
 from zonos2.sampling import DEFAULT_VARIANT, VARIANTS
+from zonos2.session import Session
 from zonos2.signals import voice_ok
+from zonos2.voices import list_voices, load
 
 
 def test_open_runtime_refuses_a_bf16_checkout(tmp_path: Path):
@@ -223,3 +234,55 @@ def test_checkpoint_lists_views_and_ignores_float_embeddings(tmp_path: Path):
     values = read_tensor(archive_path, by_name["text"])
     assert values.shape == (4,)
     assert np.allclose(values, np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32))
+
+
+def test_log_mel_peaks_on_the_slaney_corner_and_a_wav_roundtrips(tmp_path: Path):
+    bank = mel_filterbank()
+    assert bank.shape == (128, 513)
+    assert float(bank.min()) >= 0.0
+    tone = np.sin(2.0 * math.pi * 1000.0 * np.arange(RATE) / RATE).astype(np.float32)
+    features = log_mel(tone, RATE)
+    assert features.shape == (93, 128)
+    assert np.isfinite(features).all()
+    mel_1k = 1000.0 / (200.0 / 3.0)
+    mel_hi = mel_1k + math.log(12.0) / (math.log(6.4) / 27.0)
+    centers = np.linspace(0.0, mel_hi, 130)[1:-1]
+    expect = int(np.argmin(np.abs(centers - mel_1k)))
+    assert int(features.mean(axis=0).argmax()) == expect
+    path = tmp_path / "clip.wav"
+    path.write_bytes(encode_wav(np.array([0.25, -0.5], dtype=np.float32)))
+    wave, rate = read_wav(path)
+    assert rate == 44100
+    assert wave.tolist() == pytest.approx([0.25, -0.5], abs=1e-4)
+
+
+def test_attention_and_codec_release_transient_spans():
+    device, queue, pipelines = _compile()
+    values = np.zeros((8, 4), dtype=np.float32)
+    weight = np.zeros((4, 4, 3), dtype=np.float32)
+    bias = np.zeros(4, dtype=np.float32)
+    before = memory.live
+    for _ in range(4):
+        got = _dispatch_conv(device, queue, pipelines["conv1d"], values, weight, bias, 0, 1)
+        assert got.shape == (8, 4)
+    session = Session()
+    query = np.zeros((16, 128), dtype=np.float32)
+    for steps in (2, 8, 32):
+        key = np.zeros((steps, 4, 128), dtype=np.float32)
+        attended = session.attend(query, key, key)
+        assert attended.shape == (16, 128)
+        assert np.isfinite(attended).all()
+    session.close()
+    assert memory.live == before
+
+
+def test_the_collection_is_two_speaker_vectors():
+    listed = list_voices()
+    assert [item["id"] for item in listed] == ["heather-lawrence", "soprano-harmony"]
+    first = load("heather-lawrence")
+    second = load("soprano-harmony")
+    assert first.shape == second.shape == (2048,)
+    assert np.isfinite(first).all() and np.isfinite(second).all()
+    assert not np.allclose(first, second)
+    with pytest.raises(ValueError, match="collection"):
+        load("missing")

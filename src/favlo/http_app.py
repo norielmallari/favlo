@@ -629,7 +629,11 @@ def _media_rows() -> list[dict[str, Any]]:
         if not kinds:
             continue
         seen.add(pipeline)
-        rows.append({"id": folder, "pipeline": pipeline, "media": kinds})
+        row: dict[str, Any] = {"id": folder, "pipeline": pipeline, "media": kinds}
+        speakers = getattr(module, "list_voices", None)
+        if callable(speakers):
+            row["voices"] = speakers()
+        rows.append(row)
     return rows
 
 

@@ -63,10 +63,10 @@ class Weight:
 class Session:
     """One device, one queue, and the three matmul pipelines."""
 
-    def __init__(self) -> None:
+    def __init__(self, owner: str | None = None) -> None:
         import Metal
 
-        self._owner = f"zonos:{id(self)}"
+        self._owner = owner or f"zonos2:{id(self)}"
         self.device = memory.device
         options = Metal.MTLCompileOptions.alloc().init()
         options.setLanguageVersion_(_LANGUAGE)
@@ -218,6 +218,8 @@ class Session:
             view = buffers[3].contents().as_buffer(out.nbytes)
             copied = np.frombuffer(view, dtype=np.float32).reshape(16, 128).copy()
             memory.retire(command)
+            for handle in (*buffers, steps_buf):
+                memory.release(handle)
             return copied
 
     def _reuse(self, cache: dict[tuple[int, int], Weight], matrix: np.ndarray, kind: str) -> Weight:
@@ -314,6 +316,13 @@ def _fit(array: np.ndarray, rows: int) -> np.ndarray:
 def check_gemms() -> None:
     """One padded tile of each plane against the host dequant."""
     session = Session()
+    try:
+        _check_gemms(session)
+    finally:
+        session.close()
+
+
+def _check_gemms(session: Session) -> None:
     rng = np.random.default_rng(2)
     left = rng.standard_normal((3, 256)).astype(np.float32)
     weight = rng.standard_normal((70, 256)).astype(np.float32)
