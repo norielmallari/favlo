@@ -1236,6 +1236,9 @@ def test_generate_video_schema_names_the_still_and_the_frame_default() -> None:
     assert "4n+1" in properties["seconds"]["description"]
     assert "576x320" in properties["size"]["description"]
     assert "xhigh" in properties["quality"]["description"]
+    assert "sample negative" in properties["negative_prompt"]["description"]
+    assert "[low, high]" in properties["guidance_scale"]["description"]
+    assert "40" in properties["steps"]["description"]
 
 
 def test_mcp_video_rejects_a_filesystem_path(tmp_path) -> None:

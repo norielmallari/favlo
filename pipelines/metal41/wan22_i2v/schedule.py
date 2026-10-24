@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 FPS = 16
 SHIFT = 5.0
 STEPS = 4
+MAX_STEPS = 40
 BOUNDARY = 900.0
+SAMPLE_NEG_PROMPT = (
+    "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，"
+    "最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，"
+    "画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，"
+    "杂乱的背景，三条腿，背景人很多，倒着走"
+)
 SHORT_FRAMES = 5
 FIVE_SEC_FRAMES = 81
 P320_WIDTH = 576
@@ -109,6 +118,49 @@ def expert_name(timestep: float, boundary: float = BOUNDARY) -> str:
     if timestep >= boundary:
         return "high"
     return "low"
+
+
+def require_steps(steps: int) -> int:
+    """Euler steps on the shifted grid. The distill default is four."""
+    if steps < 1 or steps > MAX_STEPS:
+        message = f"steps must be from 1 to {MAX_STEPS}, got {steps}"
+        raise ValueError(message)
+    return steps
+
+
+def require_guidance(low: float, high: float) -> tuple[float, float]:
+    """Low-noise scale, then the high-noise scale. Both 1 skip the uncond forward."""
+    pair = (float(low), float(high))
+    if not math.isfinite(pair[0]) or not math.isfinite(pair[1]):
+        message = f"guidance scales must be finite, got {low}, {high}"
+        raise ValueError(message)
+    return pair
+
+
+def guide_scale(timestep: float, low: float, high: float, boundary: float = BOUNDARY) -> float:
+    """High-noise scale at and above the boundary, then the low-noise scale."""
+    if timestep >= boundary:
+        return high
+    return low
+
+
+def velocity_walks(
+    times: np.ndarray, low: float, high: float, boundary: float = BOUNDARY
+) -> int:
+    """DiT walks. A step whose scale is 1 runs once. Any other scale runs twice."""
+    walks = 0
+    for timestep in times[:-1]:
+        scale = guide_scale(float(timestep), low, high, boundary)
+        walks += 1 if scale == 1.0 else 2
+    return walks
+
+
+def resolved_negative(text: str) -> str:
+    """A blank negative is Wan's published sample string."""
+    stripped = text.strip()
+    if stripped:
+        return stripped
+    return SAMPLE_NEG_PROMPT
 
 
 def require_geometry(frames: int, height: int, width: int) -> None:

@@ -257,8 +257,8 @@ class WanVAE:
         gpu.reclaim()
 
     def release_host(self) -> None:
-        """Drop host checkpoint arrays after decode."""
-        self.weights = {}
+        """Drop host checkpoint arrays. The next encode or decode loads them again."""
+        self.weights = None
 
     def _open(
         self,

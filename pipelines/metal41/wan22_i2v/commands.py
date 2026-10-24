@@ -11,7 +11,7 @@ import numpy as np
 
 from wan22_i2v.formats import TILE_M, dequant_fp4, dequant_fp8, pack_linear
 from wan22_i2v.png import decode_png
-from wan22_i2v.schedule import OFFICIAL, P320_HEIGHT, P320_WIDTH, SHORT_FRAMES
+from wan22_i2v.schedule import OFFICIAL, P320_HEIGHT, P320_WIDTH, SHORT_FRAMES, STEPS
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -24,6 +24,8 @@ def main(argv: list[str] | None = None) -> int:
     quant.add_argument("--low", type=Path, required=True)
     quant.add_argument("--config", type=Path)
     quant.add_argument("--out", type=Path)
+    text = sub.add_parser("quantize-text", help="pack the umT5 encoder")
+    text.add_argument("--out", type=Path)
     gen = sub.add_parser("generate", help="write one AVI")
     gen.add_argument("--record", type=Path, required=True)
     gen.add_argument("--image", type=Path, required=True)
@@ -32,6 +34,9 @@ def main(argv: list[str] | None = None) -> int:
     gen.add_argument("--width", type=int, default=P320_WIDTH)
     gen.add_argument("--height", type=int, default=P320_HEIGHT)
     gen.add_argument("--seed", type=int, default=0)
+    gen.add_argument("--negative-prompt", default="")
+    gen.add_argument("--guidance-scale", type=float, nargs="+")
+    gen.add_argument("--steps", type=int, default=STEPS)
     gen.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
     if args.command == "setup":
@@ -49,9 +54,22 @@ def main(argv: list[str] | None = None) -> int:
         return kernels()
     if args.command == "quantize":
         return _quantize(args)
+    if args.command == "quantize-text":
+        return _quantize_text(args)
     if args.command == "generate":
         return _generate(args)
     return 2
+
+
+def _guidance(values: list[float] | None) -> tuple[float, float]:
+    if not values:
+        return (1.0, 1.0)
+    if len(values) == 1:
+        return (values[0], values[0])
+    if len(values) == 2:
+        return (values[0], values[1])
+    message = "guidance-scale is one number or a low, high pair"
+    raise ValueError(message)
 
 
 def kernels() -> int:
@@ -93,14 +111,38 @@ def _quantize(args: argparse.Namespace) -> int:
     return 0
 
 
+def _quantize_text(args: argparse.Namespace) -> int:
+    from favlo.cli import repo_root
+    from wan22_i2v.umt5_pack import quantize_umt5
+
+    dest = args.out or repo_root() / "models" / "Wan2.2-I2V-A14B-fp4" / "umt5"
+    winners = quantize_umt5(dest=dest)
+    print(dest, flush=True)
+    print(f"fp8 layers {winners}", flush=True)
+    return 0
+
+
 def _generate(args: argparse.Namespace) -> int:
     from wan22_i2v.runtime import Runtime
 
     image = decode_png(args.image.read_bytes())
+    try:
+        guidance = _guidance(args.guidance_scale)
+    except ValueError as exc:
+        print(exc, file=sys.stderr, flush=True)
+        return 2
     runtime = Runtime(args.record)
     try:
         avi, timing = runtime.generate(
-            args.prompt, image, args.frames, args.width, args.height, args.seed
+            args.prompt,
+            image,
+            args.frames,
+            args.width,
+            args.height,
+            args.seed,
+            negative_prompt=args.negative_prompt,
+            guidance=guidance,
+            steps=args.steps,
         )
     finally:
         runtime.close()

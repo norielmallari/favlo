@@ -120,6 +120,9 @@ def build_mcp(dispatch: Any, state: dict[str, Any]) -> FastMCP:
         frames: int = 0,
         seed: int = 0,
         quality: str = "high",
+        negative_prompt: str = "",
+        guidance_scale: float | list[float] | None = None,
+        steps: int = 0,
     ) -> ToolResult:
         """Generate one MP4. Read it with resources/read at favlo://videos/{id}.mp4.
 
@@ -135,6 +138,9 @@ def build_mcp(dispatch: Any, state: dict[str, Any]) -> FastMCP:
             frames: Frame count 4n+1. 0 omits it. When seconds is also omitted, the clip is 81 frames.
             seed: Integer seed. The default is 0.
             quality: auto, low, medium, high, xhigh, max, standard, or hd. auto, standard, and hd are stored as high.
+            negative_prompt: Empty uses Wan's sample negative. Encoded only when scale is not 1.
+            guidance_scale: One number or [low, high]. Default 1 skips the uncond forward.
+            steps: Euler steps from 1 to 40. 0 uses 4.
         """
         body: dict[str, Any] = {
             "prompt": prompt,
@@ -148,6 +154,12 @@ def build_mcp(dispatch: Any, state: dict[str, Any]) -> FastMCP:
             body["seconds"] = seconds
         if frames:
             body["frames"] = frames
+        if negative_prompt:
+            body["negative_prompt"] = negative_prompt
+        if guidance_scale is not None:
+            body["guidance_scale"] = guidance_scale
+        if steps:
+            body["steps"] = steps
         payload = await _run_task(dispatch, "video", body)
         return _video_result(payload)
 

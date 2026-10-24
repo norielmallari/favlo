@@ -19,7 +19,10 @@ from wan22_i2v.schedule import (
     FPS,
     P320_HEIGHT,
     P320_WIDTH,
+    STEPS,
     require_geometry,
+    require_guidance,
+    require_steps,
 )
 from wan22_i2v.video import write_mp4
 
@@ -38,6 +41,9 @@ class VideoFields(NamedTuple):
     height: int
     seed: int
     quality: str
+    negative_prompt: str
+    guidance: tuple[float, float]
+    steps: int
 
 
 def handle_chat(
@@ -101,6 +107,9 @@ def handle_video(
                 fields.height,
                 fields.seed,
                 progress,
+                negative_prompt=fields.negative_prompt,
+                guidance=fields.guidance,
+                steps=fields.steps,
             )
         reason = _reason(state)
         if reason:
@@ -151,7 +160,18 @@ def video_fields(body: dict[str, Any]) -> VideoFields:
     except ValueError as exc:
         raise VideoRequestError(str(exc), "frames") from exc
     resized = resize_rgb(image, height, width)
-    return VideoFields(prompt.strip(), resized, frames, width, height, seed, _quality(body))
+    return VideoFields(
+        prompt.strip(),
+        resized,
+        frames,
+        width,
+        height,
+        seed,
+        _quality(body),
+        _negative(body),
+        _guidance(body),
+        _steps(body),
+    )
 
 
 def _reason(state: dict[str, Any]) -> str | None:
@@ -180,6 +200,9 @@ def _held(state: dict[str, Any], fields: VideoFields) -> dict[str, Any] | None:
         and job.get("frames") == fields.frames
         and job.get("quality") == fields.quality
         and job.get("size") == f"{fields.width}x{fields.height}"
+        and job.get("negative_prompt") == fields.negative_prompt
+        and job.get("guidance_scale") == [fields.guidance[0], fields.guidance[1]]
+        and job.get("steps") == fields.steps
     )
     state.pop("video_hold", None)
     if not same or not isinstance(job, dict) or not isinstance(hold, ClipHold):
@@ -202,6 +225,9 @@ def _job(model: str, fields: VideoFields) -> dict[str, Any]:
         "size": f"{fields.width}x{fields.height}",
         "frames": fields.frames,
         "quality": fields.quality,
+        "negative_prompt": fields.negative_prompt,
+        "guidance_scale": [fields.guidance[0], fields.guidance[1]],
+        "steps": fields.steps,
         "eta": None,
         "error": None,
     }
@@ -265,6 +291,55 @@ def _frames(body: dict[str, Any]) -> int:
         counted = int(round(float(seconds) * FPS))
         return 1 + 4 * int(round((counted - 1) / 4))
     return FIVE_SEC_FRAMES
+
+
+def _negative(body: dict[str, Any]) -> str:
+    value = body.get("negative_prompt", "")
+    if value is None:
+        value = ""
+    if not isinstance(value, str):
+        raise VideoRequestError("negative_prompt must be text", "negative_prompt")
+    return value.strip()
+
+
+def _guidance(body: dict[str, Any]) -> tuple[float, float]:
+    value = body.get("guidance_scale")
+    if value is None:
+        return (1.0, 1.0)
+    if isinstance(value, (list, tuple)):
+        if len(value) == 1:
+            low = high = _scale(value[0])
+        elif len(value) == 2:
+            low, high = _scale(value[0]), _scale(value[1])
+        else:
+            raise VideoRequestError(
+                "guidance_scale must be a number or a low, high pair",
+                "guidance_scale",
+            )
+    else:
+        low = high = _scale(value)
+    try:
+        return require_guidance(low, high)
+    except ValueError as exc:
+        raise VideoRequestError(str(exc), "guidance_scale") from exc
+
+
+def _scale(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise VideoRequestError(
+            "guidance_scale must be a number or a low, high pair",
+            "guidance_scale",
+        )
+    return float(value)
+
+
+def _steps(body: dict[str, Any]) -> int:
+    if "steps" not in body or body.get("steps") is None:
+        return STEPS
+    try:
+        return require_steps(_whole(body.get("steps"), "steps"))
+    except ValueError as exc:
+        raise VideoRequestError(str(exc), "steps") from exc
 
 
 def _whole(value: Any, name: str) -> int:

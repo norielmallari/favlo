@@ -19,7 +19,19 @@ from wan22_i2v.metal import _NAMES, Gpu
 from wan22_i2v.png import resize_rgb
 from wan22_i2v.progress import ClipProgress, clip_label, sample_total
 from wan22_i2v.record import half_names, linear_names, load_embed, load_expert, load_manifest
-from wan22_i2v.schedule import expert_name, geometry, mask_latent, sigmas, timesteps
+from wan22_i2v.schedule import (
+    STEPS,
+    expert_name,
+    geometry,
+    guide_scale,
+    mask_latent,
+    require_guidance,
+    require_steps,
+    resolved_negative,
+    sigmas,
+    timesteps,
+    velocity_walks,
+)
 from wan22_i2v.text import _LAYERS, encode_prompt, encoder_path, tokenizer_path
 from wan22_i2v.vae import (
     DECODER_BLOCKS,
@@ -90,13 +102,21 @@ class Runtime:
         height: int,
         seed: int,
         progress: ClipProgress | None = None,
+        negative_prompt: str = "",
+        guidance: tuple[float, float] = (1.0, 1.0),
+        steps: int = STEPS,
     ) -> tuple[bytes, dict[str, Any]]:
         image = resize_rgb(image, height, width)
         lat_t, lat_h, lat_w, tokens = geometry(frames, height, width)
-        times = timesteps()
+        steps = require_steps(steps)
+        low, high = require_guidance(guidance[0], guidance[1])
+        times = timesteps(steps)
         layers = int(self.config["layers"])
         boundary = float(self.config["boundary"])
+        cfg = low != 1.0 or high != 1.0
         text_layers = _LAYERS if _text_encoder(int(self.config["text_dim"])) else 0
+        if cfg and text_layers:
+            text_layers *= 2
         vae_file = vae_path().is_file()
         own = progress is None
         if progress is None:
@@ -106,7 +126,7 @@ class Runtime:
             )
         progress.open(
             sample_total(
-                steps=len(times) - 1,
+                steps=velocity_walks(times, low, high, boundary),
                 dit_layers=layers,
                 loads=_loads(times, boundary),
                 weights=2 * (len(linear_names(layers)) + len(half_names(layers))),
@@ -139,19 +159,41 @@ class Runtime:
                 self._pause(progress, ClipHold(stage="compile", step_times=step_times))
                 if hold is not None and hold.table is not None:
                     table = hold.table
+                    table_null = hold.table_null
+                    if cfg and table_null is None:
+                        message = "the paused clip is missing the negative context"
+                        raise RuntimeError(message)
                 else:
                     progress.stage("text")
+                    on_text = progress.advance if text_layers else None
                     table = _context(
                         prompt,
                         self.embed,
                         int(self.config["text_len"]),
                         int(self.config["text_dim"]),
-                        progress.advance if text_layers else None,
+                        on_text,
                         gpu,
+                        self.path / "umt5",
                     )
+                    table_null = None
+                    if cfg:
+                        table_null = _context(
+                            resolved_negative(negative_prompt),
+                            self.embed,
+                            int(self.config["text_len"]),
+                            int(self.config["text_dim"]),
+                            on_text,
+                            gpu,
+                            self.path / "umt5",
+                        )
                     self._pause(
                         progress,
-                        ClipHold(stage="text", table=table, step_times=step_times),
+                        ClipHold(
+                            stage="text",
+                            table=table,
+                            table_null=table_null,
+                            step_times=step_times,
+                        ),
                     )
                 weights = vae_path()
                 vae = WanVAE(weights) if weights.is_file() else None
@@ -178,6 +220,7 @@ class Runtime:
                         ClipHold(
                             stage="encode",
                             table=table,
+                            table_null=table_null,
                             noise=_volume(gpu, noise, noise_shape),
                             cond=_volume(gpu, cond, noise_shape),
                             mask=_volume(gpu, mask, mask_shape),
@@ -189,7 +232,7 @@ class Runtime:
                     vae.release_host()
                 gpu.end()
                 gpu.reclaim()
-                knots = sigmas()
+                knots = sigmas(steps)
                 loaded: str | None = None
                 start = hold.step if hold is not None and hold.stage == "step" else 0
                 self._fit_dit_step(frames, width, height, lat_t, lat_h, lat_w, tokens)
@@ -197,6 +240,7 @@ class Runtime:
                     volume_size = int(np.prod((36, lat_t, lat_h, lat_w)))
                     self._forward = Forward(gpu, self.config, tokens, volume_size)
                 count = 16 * lat_t * lat_h * lat_w
+                spare = gpu.keep(gpu.empty(count * 4)) if cfg else None
                 for index, timestep in enumerate(times[:-1]):
                     if index < start:
                         continue
@@ -214,6 +258,7 @@ class Runtime:
                                 index,
                                 name,
                                 table,
+                                table_null,
                                 noise,
                                 cond,
                                 mask,
@@ -241,6 +286,21 @@ class Runtime:
                             (lat_t, lat_h, lat_w),
                             on_layer=progress.advance,
                         )
+                        scale = guide_scale(float(timestep), low, high, boundary)
+                        if scale != 1.0:
+                            if table_null is None or spare is None:
+                                message = "the negative context is missing"
+                                raise RuntimeError(message)
+                            gpu.copy_f32(forward.vel, 0, spare, count)
+                            forward.velocity(
+                                self._resident,
+                                table_null,
+                                float(timestep),
+                                (lat_t, lat_h, lat_w),
+                                on_layer=progress.advance,
+                            )
+                            gpu.axpy(spare, forward.vel, -1.0, count)
+                            gpu.axpy(forward.vel, spare, scale, count)
                         gpu.axpy(
                             noise,
                             forward.vel,
@@ -257,6 +317,7 @@ class Runtime:
                             step=index + 1,
                             expert=name,
                             table=table,
+                            table_null=table_null,
                             noise=_volume(gpu, noise, noise_shape),
                             cond=_volume(gpu, cond, noise_shape),
                             mask=_volume(gpu, mask, mask_shape),
@@ -268,6 +329,8 @@ class Runtime:
                     message = "latent is not finite"
                     raise RuntimeError(message)
                 self._drop_forward()
+                if spare is not None:
+                    gpu.drop(spare)
                 gpu.drop(cond)
                 gpu.drop(mask)
                 gpu.end()
@@ -436,6 +499,7 @@ class Runtime:
         index: int,
         name: str,
         table: np.ndarray,
+        table_null: np.ndarray | None,
         noise: Any,
         cond: Any,
         mask: Any,
@@ -460,6 +524,7 @@ class Runtime:
                     step=index,
                     expert=name if quiet else None,
                     table=table,
+                    table_null=table_null,
                     noise=_volume(gpu, noise, noise_shape),
                     cond=_volume(gpu, cond, noise_shape),
                     mask=_volume(gpu, mask, mask_shape),
@@ -620,11 +685,12 @@ def _context(
     width: int,
     on_layer: Any = None,
     gpu: Any = None,
+    pack: Path | None = None,
 ) -> np.ndarray:
     rows = pad_to(length, TILE_M)
     table = np.zeros((rows, width), dtype=np.float32)
     if _text_encoder(width):
-        vectors = encode_prompt(prompt, on_layer=on_layer, gpu=gpu)
+        vectors = encode_prompt(prompt, on_layer=on_layer, gpu=gpu, pack=pack)
         count = min(int(vectors.shape[0]), length, rows)
         if count:
             table[:count] = vectors[:count]

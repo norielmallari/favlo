@@ -30,6 +30,7 @@ class ClipHold:
     expert: str | None = None
     done: int = 0
     table: np.ndarray | None = None
+    table_null: np.ndarray | None = None
     noise: np.ndarray | None = None
     cond: np.ndarray | None = None
     mask: np.ndarray | None = None

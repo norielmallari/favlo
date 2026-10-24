@@ -20,12 +20,16 @@ from wan22_i2v.schedule import (
     FIVE_SEC_FRAMES,
     P320_HEIGHT,
     P320_WIDTH,
+    SAMPLE_NEG_PROMPT,
     SHORT_FRAMES,
     expert_name,
     geometry,
+    guide_scale,
     mask_latent,
     promote_count,
+    resolved_negative,
     timesteps,
+    velocity_walks,
 )
 from wan22_i2v.source import (
     FILES,
@@ -71,6 +75,7 @@ def test_resume_keeps_only_full_ranges() -> None:
 
 def test_promote_count_is_eight_blocks() -> None:
     assert promote_count(40) == 8
+    assert promote_count(24) == 4
     assert promote_count(1) == 0
 
 
@@ -96,6 +101,14 @@ def test_euler_grid_and_expert_switch() -> None:
     assert times[3] == np.float32(625)
     assert times[4] == np.float32(0)
     assert [expert_name(float(value)) for value in times[:-1]] == ["high", "high", "low", "low"]
+    assert velocity_walks(times, 1, 1) == 4
+    assert velocity_walks(times, 3.5, 3.5) == 8
+    assert velocity_walks(times, 1.0, 3.5) == 6
+    assert guide_scale(900, 1, 3.5) == 3.5
+    assert guide_scale(833.3, 1, 3.5) == 1
+    assert resolved_negative("  ") == SAMPLE_NEG_PROMPT
+    assert resolved_negative(" blur ") == "blur"
+    assert timesteps(8).shape == (9,)
 
 
 def test_umt5_buckets_are_bidirectional() -> None:
@@ -200,6 +213,35 @@ def test_video_request_defaults_to_320p_and_81_frames() -> None:
     )
     assert short.frames == 9
     assert short.quality == "high"
+    assert short.negative_prompt == ""
+    assert short.guidance == (1.0, 1.0)
+    assert short.steps == 4
+    guided = video_fields(
+        {
+            "prompt": "move",
+            "image": encoded,
+            "frames": 5,
+            "size": "16x16",
+            "negative_prompt": " blur ",
+            "guidance_scale": [2, 4.5],
+            "steps": 8,
+        }
+    )
+    assert guided.negative_prompt == "blur"
+    assert guided.guidance == (2.0, 4.5)
+    assert guided.steps == 8
+    both = video_fields(
+        {"prompt": "move", "image": encoded, "frames": 5, "size": "16x16", "guidance_scale": 3.5}
+    )
+    assert both.guidance == (3.5, 3.5)
+    try:
+        video_fields(
+            {"prompt": "move", "image": encoded, "frames": 5, "size": "16x16", "steps": 41}
+        )
+    except VideoRequestError as exc:
+        assert exc.param == "steps"
+    else:
+        raise AssertionError("steps was accepted")
     level = {"prompt": "move", "image": encoded, "frames": 5, "size": "16x16"}
     assert video_fields({**level, "quality": "hd"}).quality == "high"
     assert video_fields({**level, "quality": "standard"}).quality == "high"
@@ -225,8 +267,8 @@ class _Reply:
 
 
 class _Clip:
-    def generate(self, prompt, image, frames, width, height, seed, progress=None):
-        del prompt, image, seed
+    def generate(self, prompt, image, frames, width, height, seed, progress=None, **_rest):
+        del prompt, image, seed, _rest
         if progress is not None:
             progress.stage("text")
             progress.advance()
@@ -235,8 +277,8 @@ class _Clip:
 
 
 class _Broken:
-    def generate(self, prompt, image, frames, width, height, seed, progress=None):
-        del prompt, image, frames, width, height, seed, progress
+    def generate(self, prompt, image, frames, width, height, seed, progress=None, **_rest):
+        del prompt, image, frames, width, height, seed, progress, _rest
         message = "vae missing"
         raise RuntimeError(message)
 
@@ -304,6 +346,43 @@ def test_video_job_returns_before_the_mp4_is_stored(tmp_path) -> None:
     assert stored["status"] == "failed"
     assert stored["progress"] == 0
     assert stored["error"]["message"] == "vae missing"
+
+
+def test_video_job_passes_guidance_into_generate(tmp_path) -> None:
+    seen: dict[str, object] = {}
+
+    class _Seen:
+        def generate(self, prompt, image, frames, width, height, seed, progress=None, **kwargs):
+            del image, seed
+            seen["prompt"] = prompt
+            seen["kwargs"] = kwargs
+            if progress is not None:
+                progress.stage("text")
+                progress.advance()
+            clip = np.zeros((frames, height, width, 3), dtype=np.uint8)
+            return write_avi(clip, fps=16), {"steps": [1]}
+
+    handler = _Reply()
+    body = {
+        "prompt": "move",
+        "image": _png(),
+        "frames": 5,
+        "size": "16x16",
+        "model": "row",
+        "negative_prompt": " blur ",
+        "guidance_scale": [1, 3.5],
+        "steps": 6,
+    }
+    handle_video(handler, _Seen(), body, None, None, {"video_home": tmp_path})
+    assert seen["prompt"] == "move"
+    assert seen["kwargs"] == {
+        "negative_prompt": "blur",
+        "guidance": (1.0, 3.5),
+        "steps": 6,
+    }
+    assert handler.payload["guidance_scale"] == [1.0, 3.5]
+    assert handler.payload["steps"] == 6
+    assert handler.payload["negative_prompt"] == "blur"
 
 
 def test_progress_counts_finished_stages() -> None:
@@ -411,8 +490,8 @@ class _Pausing:
         self.state = state
         self.stages: list[str | None] = []
 
-    def generate(self, prompt, image, frames, width, height, seed, progress=None):
-        del prompt, image, seed
+    def generate(self, prompt, image, frames, width, height, seed, progress=None, **_rest):
+        del prompt, image, seed, _rest
         hold = getattr(progress, "hold", None)
         self.stages.append(None if hold is None else hold.stage)
         if hold is not None and hold.reached("text"):
@@ -478,6 +557,7 @@ def test_expert_load_checkpoints_the_unfinished_step(monkeypatch) -> None:
         1,
         "high_noise",
         table,
+        None,
         object(),
         object(),
         object(),
