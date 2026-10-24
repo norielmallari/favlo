@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import struct
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -54,8 +55,8 @@ def _size(width: int, height: int = 1, depth: int = 1) -> Any:
 class Gpu:
     """One device. ``wait`` ends the command buffer and returns its GPU milliseconds."""
 
-    def __init__(self) -> None:
-        self._owner = f"ace:{id(self)}"
+    def __init__(self, owner: str | None = None) -> None:
+        self._owner = owner or f"ace-step-15-turbo:{id(self)}"
         self.device = memory.device
         self.queue = memory.make_queue()
         source = _SHADER.read_text(encoding="utf-8")
@@ -98,9 +99,23 @@ class Gpu:
         return buf
 
     def reclaim(self, *alive: Any) -> None:
-        """Wait, then drop activations that are not weights or clip state."""
+        """Wait, then free activations the caller has dropped."""
         self.wait()
+        keep = {id(buf) for buf in (*self._resident, *self._clip, *alive)}
+        dropped: list[Any] = []
+        seen: set[int] = set()
+        for buf in self._held:
+            identity = id(buf)
+            if identity in keep or identity in seen:
+                continue
+            seen.add(identity)
+            dropped.append(buf)
         self._held = [*self._resident, *self._clip, *alive]
+        for buf in dropped:
+            release = getattr(buf, "release", None)
+            # Three references remain when the caller has let the buffer go.
+            if callable(release) and sys.getrefcount(buf) <= 3:
+                release()
 
     def end_clip(self) -> None:
         self._clip.clear()

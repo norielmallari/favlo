@@ -12,9 +12,10 @@ from tokenizers import Tokenizer
 from ace_step_15_turbo.graph import generate
 from ace_step_15_turbo.hold import ClipHold, ClipPaused, interrupt
 from ace_step_15_turbo.metal import Gpu
-from ace_step_15_turbo.record import load
+from ace_step_15_turbo.record import load, weight_bytes
 from ace_step_15_turbo.request import MusicRequest, parse_music
-from ace_step_15_turbo.schedule import STEPS
+from ace_step_15_turbo.schedule import LYRIC_LIMIT, STEPS, TEXT_LIMIT, latent_frames
+from favlo.memory import memory
 
 _UNITS = 28 + 8 + 4 + 32 * STEPS + 7
 
@@ -26,9 +27,10 @@ def open_runtime(
     console: Any,
     resident_percent: float | None,
     max_memory: str | int | None = None,
+    owner: str | None = None,
 ) -> "Runtime":
-    del kv_cache, resident_percent, max_memory
-    return Runtime(path, console)
+    del kv_cache, resident_percent
+    return Runtime(path, console, owner=owner, max_memory=max_memory)
 
 
 def handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any, args: Any, state: dict[str, Any]) -> None:
@@ -119,13 +121,25 @@ def handle_music(
 
 
 class Runtime:
-    def __init__(self, path: Path, console: Any) -> None:
+    def __init__(
+        self,
+        path: Path,
+        console: Any = None,
+        *,
+        owner: str | None = None,
+        max_memory: str | int | None = None,
+    ) -> None:
         self.console = console
         self.path = Path(path)
         self.gpu: Gpu | None = None
         self.weights: dict[str, Any] = {}
-        self.tokenizer = Tokenizer.from_file(str(self.path / "tokenizer.json"))
         self._halted = False
+        self._owner = owner or f"ace-step-15-turbo:{id(self)}"
+        self._memory_cap = _parse_memory(max_memory)
+        tokenizer = self.path / "tokenizer.json"
+        if not tokenizer.is_file():
+            raise FileNotFoundError(tokenizer)
+        self.tokenizer = Tokenizer.from_file(str(tokenizer))
         self._open()
 
     def halt(self) -> None:
@@ -142,6 +156,7 @@ class Runtime:
         if gpu is None:
             message = "the music device is closed"
             raise RuntimeError(message)
+        self._reserve_step(float(fields.seconds))
         gpu.seconds = 0.0
         gpu.end_clip()
         try:
@@ -171,17 +186,48 @@ class Runtime:
         """Open the device and load the record when a pause closed them."""
         if self.weights:
             return
-        self.gpu = Gpu()
-        self.weights = load(self.gpu, self.path)
-        self.gpu.reclaim()
+        record = weight_bytes(self.path)
+        if record > self._room():
+            message = "the packed record does not fit"
+            raise RuntimeError(message)
+        self.gpu = Gpu(self._owner)
+        try:
+            self.weights = load(self.gpu, self.path)
+            self.gpu.reclaim()
+        except Exception:
+            self.close()
+            raise
 
     def close(self) -> None:
         """Drop the device. A later ``generate`` opens it again."""
         gpu = self.gpu
         self.gpu = None
         self.weights = {}
-        if gpu is not None:
-            gpu.close()
+        try:
+            if gpu is not None:
+                gpu.close()
+        finally:
+            self._sweep_owner()
+
+    def _sweep_owner(self) -> None:
+        """Return this opening's spans. ``Gpu.close`` sweeps the same string."""
+        owner = getattr(self, "_owner", None)
+        if isinstance(owner, str) and owner:
+            memory.sweep(owner)
+
+    def _room(self) -> int:
+        """Bytes a new span may take. ``max_memory`` caps the ledger."""
+        ceiling = memory.budget()
+        cap = getattr(self, "_memory_cap", None)
+        if cap is not None:
+            ceiling = min(ceiling, cap)
+        return max(0, ceiling - memory.live - memory.pending)
+
+    def _reserve_step(self, seconds: float) -> None:
+        """Require scratch for one diffusion step. The duration stays the request."""
+        if step_scratch_bytes(seconds) > self._room():
+            message = f"scratch for {seconds:g} seconds does not fit"
+            raise RuntimeError(message)
 
 
 class _Progress:
@@ -198,6 +244,119 @@ class _Progress:
         elapsed = time.monotonic() - self.started
         remain = _UNITS - self.done
         self.job["eta"] = 0 if self.done == 0 or remain <= 0 else int(elapsed / self.done * remain)
+
+
+def step_scratch_bytes(seconds: float) -> int:
+    """Bytes of one diffusion step at this duration, plus the condition cache."""
+    frames = latent_frames(seconds)
+    if frames % 2:
+        frames += 1
+    tokens = frames // 2
+    width = 2560
+    ffn = 9728
+    heads = 32
+    kv_heads = 8
+    dim = 128
+    cond = TEXT_LIMIT + 1 + LYRIC_LIMIT
+    total = 0
+
+    def add(nbytes: int) -> None:
+        nonlocal total
+        total += max(128, (int(nbytes) + 127) // 128 * 128)
+
+    def linear(rows: int, inner: int, cols: int) -> None:
+        padded = ((rows + 63) // 64) * 64
+        add(padded * inner * 4)
+        add(padded * inner * 2)
+        add(padded * cols * 4)
+
+    add(frames * 64 * 4)
+    add(frames * 64 * 4)
+    add(frames * 64 * 4)
+    add(frames * 64 * 4)
+    add(3 * 64 * frames * 4)
+    add(width * tokens * 4)
+    add(width * tokens * 4)
+    add(tokens * dim * 4)
+    add(tokens * dim * 4)
+    add(6 * width * 4)
+    for _chunk in range(6):
+        add(width * 4)
+    for _norm in range(5):
+        add(tokens * width * 4)
+    add(tokens * width * 4)
+    add(tokens * width * 4)
+    linear(tokens, width, heads * dim)
+    linear(tokens, width, kv_heads * dim)
+    linear(tokens, width, kv_heads * dim)
+    add(tokens * heads * dim * 4)
+    add(tokens * kv_heads * dim * 4)
+    add(tokens * heads * dim * 4)
+    add(tokens * kv_heads * dim * 4)
+    for _quant in range(2):
+        count = tokens * kv_heads * dim
+        add(count)
+        add(count // 32)
+    add(tokens * heads * dim * 4)
+    linear(tokens, heads * dim, width)
+    linear(tokens, width, heads * dim)
+    add(tokens * heads * dim * 4)
+    add(tokens * heads * dim * 4)
+    linear(tokens, heads * dim, width)
+    linear(tokens, width, ffn)
+    linear(tokens, width, ffn)
+    add(tokens * ffn * 4)
+    linear(tokens, ffn, width)
+    add(TEXT_LIMIT * 2048 * 4)
+    add(LYRIC_LIMIT * 2048 * 4)
+    add(2048 * 4)
+    add(cond * 2048 * 4)
+    for _layer in range(32):
+        count = cond * kv_heads * dim
+        add(count)
+        add(max(count // 32, 1))
+        add(count)
+        add(max(count // 32, 1))
+    return total
+
+
+def _parse_memory(text: str | int | None) -> int | None:
+    """``32GiB``, ``512MiB``, or a byte count. Empty leaves the ledger uncapped."""
+    if text is None or text == "":
+        return None
+    if isinstance(text, int):
+        if text < 1:
+            message = f"maximum memory {text} is not positive"
+            raise ValueError(message)
+        return text
+    raw = str(text).strip().replace("_", "")
+    suffix = ""
+    digits = raw
+    for ending, name in (
+        ("gib", "GiB"),
+        ("mib", "MiB"),
+        ("gb", "GiB"),
+        ("mb", "MiB"),
+        ("g", "GiB"),
+        ("m", "MiB"),
+    ):
+        if raw.lower().endswith(ending):
+            suffix = name
+            digits = raw[: -len(ending)]
+            break
+    try:
+        number = int(digits)
+    except ValueError as exc:
+        message = f"maximum memory {text} is not a byte count"
+        raise ValueError(message) from exc
+    if number < 1:
+        message = f"maximum memory {text} is not positive"
+        raise ValueError(message)
+    if suffix == "GiB":
+        return number << 30
+    if suffix == "MiB":
+        return number << 20
+    return number
 
 
 def _job(model: str, fields: Any) -> dict[str, Any]:

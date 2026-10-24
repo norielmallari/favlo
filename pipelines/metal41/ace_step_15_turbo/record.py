@@ -283,6 +283,21 @@ def _write_json(path: Path, body: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def weight_bytes(folder: Path) -> int:
+    """Bytes ``load`` uploads from a packed record."""
+    index = json.loads((folder / "index.json").read_text(encoding="utf-8"))
+    total = 0
+    seen: set[str] = set()
+    for meta in index["tensors"].values():
+        for key in ("file", "scale"):
+            name = meta.get(key)
+            if not isinstance(name, str) or name in seen:
+                continue
+            seen.add(name)
+            total += (folder / name).stat().st_size
+    return total
+
+
 def load(gpu: Any, folder: Path) -> dict[str, Plane]:
     """Upload the packed record. Weights stay resident."""
     index = json.loads((folder / "index.json").read_text(encoding="utf-8"))

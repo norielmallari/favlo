@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -10,8 +12,8 @@ from ace_step_15_turbo.hold import ClipHold, ClipPaused
 from ace_step_15_turbo.pack import dequant_fp4, dequant_fp8, pack_fp4, pack_fp8, promote_count, promoted_ids
 from ace_step_15_turbo.pcm import wav_bytes, wav_info
 from ace_step_15_turbo.request import parse_music
-from ace_step_15_turbo.runtime import handle_music
-from ace_step_15_turbo.schedule import condition_text, latent_frames, timestep_schedule
+from ace_step_15_turbo.runtime import Runtime, handle_music, open_runtime, step_scratch_bytes
+from ace_step_15_turbo.schedule import MAX_SECONDS, condition_text, latent_frames, timestep_schedule
 from favlo.music import music_dir, store_wav
 
 
@@ -19,6 +21,77 @@ def test_ten_seconds_is_250_frames() -> None:
     assert latent_frames(10) == 250
     with pytest.raises(ValueError):
         latent_frames(9)
+
+
+def test_open_runtime_forwards_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake(path, console=None, *, owner=None, max_memory=None):
+        captured["path"] = path
+        captured["owner"] = owner
+        captured["max_memory"] = max_memory
+        return "runtime"
+
+    monkeypatch.setattr("ace_step_15_turbo.runtime.Runtime", fake)
+    assert open_runtime(
+        Path("record"),
+        kv_cache="e4m3",
+        console=None,
+        resident_percent=None,
+        owner="ace-step-15-turbo:7",
+        max_memory="16GiB",
+    ) == "runtime"
+    assert captured["owner"] == "ace-step-15-turbo:7"
+    assert captured["max_memory"] == "16GiB"
+
+
+def test_a_missing_record_keeps_the_passed_owner(tmp_path: Path) -> None:
+    owner = "ace-step-15-turbo:7"
+    held: dict[str, str] = {}
+
+    class _Probe(Runtime):
+        def __init__(self, path, console=None, *, owner=None, max_memory=None) -> None:
+            try:
+                super().__init__(path, console, owner=owner, max_memory=max_memory)
+            except FileNotFoundError:
+                held["owner"] = self._owner
+                raise
+
+    with pytest.raises(FileNotFoundError):
+        _Probe(tmp_path, owner=owner)
+    assert held["owner"] == owner
+
+
+def test_a_missing_record_mints_an_owner(tmp_path: Path) -> None:
+    held: dict[str, str] = {}
+
+    class _Probe(Runtime):
+        def __init__(self, path, console=None, *, owner=None, max_memory=None) -> None:
+            try:
+                super().__init__(path, console, owner=owner, max_memory=max_memory)
+            except FileNotFoundError:
+                held["owner"] = self._owner
+                raise
+
+    with pytest.raises(FileNotFoundError):
+        _Probe(tmp_path)
+    minted = held["owner"]
+    assert minted.startswith("ace-step-15-turbo:")
+    assert minted != "ace-step-15-turbo:7"
+
+
+def test_step_scratch_grows_with_the_duration() -> None:
+    assert step_scratch_bytes(10) < step_scratch_bytes(MAX_SECONDS)
+
+
+def test_a_short_ledger_keeps_the_requested_duration() -> None:
+    runtime = Runtime.__new__(Runtime)
+    runtime._memory_cap = None
+    runtime._room = lambda: step_scratch_bytes(30) - 1
+    seconds = 30.0
+    with pytest.raises(RuntimeError, match="30 seconds"):
+        runtime._reserve_step(seconds)
+    assert seconds == 30.0
 
 
 def test_shift_three_nodes() -> None:

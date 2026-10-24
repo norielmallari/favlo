@@ -1,6 +1,6 @@
 # ACE-Step 1.5 XL Turbo
 
-Stereo music from a caption and optional lyrics. The official base model is [ACE-Step/acestep-v15-xl-turbo](https://huggingface.co/ACE-Step/acestep-v15-xl-turbo). Favlo reads the Diffusers split [ACE-Step/acestep-v15-xl-turbo-diffusers](https://huggingface.co/ACE-Step/acestep-v15-xl-turbo-diffusers) and serves the packed directory `acestep-v15-xl-turbo-fp8-fp4`. Both checkpoints are under the MIT License. `favlo --ace-step-15-turbo` loads `pipelines/metal41/ace-step-15-turbo.py`. Device spans come from the process memory manager.
+Stereo music from a caption and optional lyrics. The official base model is [ACE-Step/acestep-v15-xl-turbo](https://huggingface.co/ACE-Step/acestep-v15-xl-turbo). Favlo reads the Diffusers split [ACE-Step/acestep-v15-xl-turbo-diffusers](https://huggingface.co/ACE-Step/acestep-v15-xl-turbo-diffusers) and serves the packed directory `acestep-v15-xl-turbo-fp8-fp4`. Both checkpoints are under the MIT License. `favlo --ace-step-15-turbo` loads `pipelines/metal41/ace-step-15-turbo.py`. Device spans come from the process memory manager. `open_runtime` takes `owner` and `max_memory`. Every span from that opening uses the owner, and `close` sweeps it. An omitted owner is minted from this runtime's id. A diffusion step returns the activations it does not keep, so the live scratch is one step. That step is reserved for the requested duration, and the duration stays the request. A ledger that cannot hold the weights, or that step, raises before the draw.
 
 ```text
 uv run favlo --ace-step-15-turbo setup
