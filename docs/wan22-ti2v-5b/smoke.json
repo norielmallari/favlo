@@ -1,0 +1,11 @@
+{
+  "prompt": "A horse gallops at speed, its raised foreleg driving down and the trailing legs swinging forward into the next stride, mane and tail whipping. Fixed camera.",
+  "seed": 0,
+  "width": 832,
+  "height": 480,
+  "i2v_width": 832,
+  "i2v_height": 480,
+  "frames": 9,
+  "fps": 24,
+  "model": "Wan2.2-TI2V-5B-int8"
+}

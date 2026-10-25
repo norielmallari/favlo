@@ -36,6 +36,7 @@ Each runtime is a separate write set. An agent developing one runtime edits that
 | `qwen36-35b-a3b` | `pipelines/metal41/qwen36-35b-a3b.py` | `pipelines/metal41/qwen36_35b_a3b/` | [docs/qwen36-35b-a3b/README.md](docs/qwen36-35b-a3b/README.md) |
 | `z-image-turbo` | `pipelines/metal41/z-image-turbo.py` | `pipelines/metal41/z_image_turbo/` | [docs/z-image-turbo/README.md](docs/z-image-turbo/README.md) |
 | `wan22-i2v` | `pipelines/metal41/wan22-i2v.py` | `pipelines/metal41/wan22_i2v/` | [docs/wan22-i2v/README.md](docs/wan22-i2v/README.md) |
+| `wan22-ti2v-5b` | `pipelines/metal41/wan22-ti2v-5b.py` | `pipelines/metal41/wan22_ti2v_5b/` | [docs/wan22-ti2v-5b/README.md](docs/wan22-ti2v-5b/README.md) |
 | `ace-step-15-turbo` | `pipelines/metal41/ace-step-15-turbo.py` | `pipelines/metal41/ace_step_15_turbo/` | [docs/ace-step-15-turbo/README.md](docs/ace-step-15-turbo/README.md) |
 | `bge-m3` | `pipelines/metal41/bge-m3.py` | `pipelines/metal41/bge_m3/` | [docs/bge-m3/README.md](docs/bge-m3/README.md) |
 | `voxcpm2` | `pipelines/metal41/voxcpm2.py` | `pipelines/metal41/voxcpm2/` | [docs/voxcpm2/README.md](docs/voxcpm2/README.md) |
