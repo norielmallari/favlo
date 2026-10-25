@@ -39,7 +39,7 @@ from wan22_i2v.schedule import (
     timesteps,
     velocity_walks,
 )
-from wan22_i2v.text import _LAYERS, encode_prompt, encoder_path, tokenizer_path
+from wan22_i2v.text import _LAYERS, encode_prompt, tokenizer_path
 from wan22_i2v.vae import (
     DECODER_BLOCKS,
     ENCODER_BLOCKS,
@@ -79,7 +79,12 @@ class Runtime:
         self._forward: Forward | None = None
 
     def close(self) -> None:
-        """Drop the expert and the device buffers. The process has no run loop."""
+        """Drop the expert and the device buffers, then wait until those pages return."""
+        from favlo.memory import memory, reclaimable_bytes
+
+        owner = self._owner if isinstance(getattr(self, "_owner", None), str) else ""
+        before = reclaimable_bytes()
+        held = memory.owner_bytes().get(owner, 0)
         try:
             forward = self._forward
             resident = self._resident
@@ -104,6 +109,8 @@ class Runtime:
                 gc.collect()
         finally:
             self._sweep_owner()
+            freed = held - memory.owner_bytes().get(owner, 0)
+            memory.confirm_released(before, max(freed, 0))
 
     def generate(
         self,
@@ -126,7 +133,7 @@ class Runtime:
         layers = int(self.config["layers"])
         boundary = float(self.config["boundary"])
         cfg = low != 1.0 or high != 1.0
-        text_layers = _LAYERS if _text_encoder(int(self.config["text_dim"])) else 0
+        text_layers = _LAYERS if _text_encoder(int(self.config["text_dim"]), self.umt5) else 0
         if cfg and text_layers:
             text_layers *= 2
         vae_file = vae_path().is_file()
@@ -174,13 +181,20 @@ class Runtime:
                         raise RuntimeError(message)
                 else:
                     progress.stage("text")
-                    on_text = progress.advance if text_layers else None
+
+                    def on_text() -> None:
+                        progress.advance()
+                        self._after_commit(
+                            progress, ClipHold(stage="compile", step_times=step_times)
+                        )
+
+                    on_text_cb = on_text if text_layers else None
                     table = _context(
                         prompt,
                         self.embed,
                         int(self.config["text_len"]),
                         int(self.config["text_dim"]),
-                        on_text,
+                        on_text_cb,
                         gpu,
                         self.umt5,
                     )
@@ -191,7 +205,7 @@ class Runtime:
                             self.embed,
                             int(self.config["text_len"]),
                             int(self.config["text_dim"]),
-                            on_text,
+                            on_text_cb,
                             gpu,
                             self.umt5,
                         )
@@ -215,8 +229,21 @@ class Runtime:
                     mask = gpu.keep(gpu.upload(hold.mask))
                 else:
                     progress.stage("encode")
+
+                    def on_encode() -> None:
+                        progress.advance()
+                        self._after_commit(
+                            progress,
+                            ClipHold(
+                                stage="text",
+                                table=table,
+                                table_null=table_null,
+                                step_times=step_times,
+                            ),
+                        )
+
                     if vae is not None:
-                        cond = vae.encode(image, frames, on_block=progress.advance, gpu=gpu)
+                        cond = vae.encode(image, frames, on_block=on_encode, gpu=gpu)
                     else:
                         cond = gpu.keep(gpu.upload(stride_encode(image, frames)))
                     noise_np = np.random.default_rng(seed).standard_normal(noise_shape)
@@ -283,6 +310,26 @@ class Runtime:
                         progress.counting(True)
                         loaded = name
                     progress.stage(name)
+
+                    def on_layer() -> None:
+                        progress.advance()
+                        if interrupt(progress) is None:
+                            return
+                        self._pause(
+                            progress,
+                            ClipHold(
+                                stage="step",
+                                step=index,
+                                expert=name,
+                                table=table,
+                                table_null=table_null,
+                                noise=_volume(gpu, noise, noise_shape),
+                                cond=_volume(gpu, cond, noise_shape),
+                                mask=_volume(gpu, mask, mask_shape),
+                                step_times=list(step_times),
+                            ),
+                        )
+
                     started = time.perf_counter()
                     with objc.autorelease_pool():
                         forward = self._forward
@@ -295,7 +342,7 @@ class Runtime:
                             table,
                             float(timestep),
                             (lat_t, lat_h, lat_w),
-                            on_layer=progress.advance,
+                            on_layer=on_layer,
                         )
                         scale = guide_scale(float(timestep), low, high, boundary)
                         if scale != 1.0:
@@ -309,7 +356,7 @@ class Runtime:
                                 table_null,
                                 float(timestep),
                                 (lat_t, lat_h, lat_w),
-                                on_layer=progress.advance,
+                                on_layer=on_layer,
                             )
                             gpu.axpy(spare, forward.vel, -1.0, count)
                             gpu.axpy(forward.vel, spare, scale, count)
@@ -343,18 +390,36 @@ class Runtime:
                 self._drop_forward()
                 if spare is not None:
                     gpu.drop(spare)
-                gpu.drop(cond)
-                gpu.drop(mask)
                 gpu.end()
                 gpu.reclaim()
                 progress.stage("decode")
+
+                def on_decode() -> None:
+                    progress.advance()
+                    if interrupt(progress) is None:
+                        return
+                    self._pause(
+                        progress,
+                        ClipHold(
+                            stage="step",
+                            step=len(times) - 1,
+                            expert=loaded,
+                            table=table,
+                            table_null=table_null,
+                            noise=latent,
+                            cond=_volume(gpu, cond, noise_shape),
+                            mask=_volume(gpu, mask, mask_shape),
+                            step_times=list(step_times),
+                        ),
+                    )
+
                 if vae is not None:
                     self._fit_vae_decode(frames, width, height, lat_t, lat_h, lat_w)
                     decode_room = self._ledger_room()
                     pixels = vae.decode(
                         noise,
                         noise_shape,
-                        on_block=progress.advance,
+                        on_block=on_decode,
                         gpu=gpu,
                         resident_frames=resident_latent_frames(
                             decode_room, frames, height, width, lat_t
@@ -363,6 +428,8 @@ class Runtime:
                     vae.release_host()
                 else:
                     pixels = stride_decode(latent, frames)
+                gpu.drop(cond)
+                gpu.drop(mask)
                 self._pause(
                     progress,
                     ClipHold(stage="decode", pixels=pixels, step_times=list(step_times)),
@@ -386,6 +453,12 @@ class Runtime:
         if own:
             progress.close(progress.summary())
         return avi, {"steps": step_times}
+
+    def _after_commit(self, progress: ClipProgress, hold: ClipHold) -> None:
+        """Stop after the committed dispatch when a chat or a cancel is waiting."""
+        if interrupt(progress) is None:
+            return
+        self._pause(progress, hold)
 
     def _pause(self, progress: ClipProgress, hold: ClipHold) -> None:
         reason = interrupt(progress)
@@ -723,8 +796,14 @@ def _loads(times: np.ndarray, boundary: float) -> int:
     return loads
 
 
-def _text_encoder(width: int) -> bool:
-    return width == 4096 and encoder_path().is_file() and tokenizer_path().is_file()
+def _text_encoder(width: int, pack: Path | None) -> bool:
+    """The int8 pack named for this clip, plus the tokenizer.
+
+    The BF16 encoder is the quantize source. A clip does not open it.
+    """
+    if width != 4096 or pack is None:
+        return False
+    return (Path(pack) / "manifest.json").is_file() and tokenizer_path().is_file()
 
 
 def _context(
@@ -738,7 +817,7 @@ def _context(
 ) -> np.ndarray:
     rows = pad_to(length, TILE_M)
     table = np.zeros((rows, width), dtype=np.float32)
-    if _text_encoder(width):
+    if _text_encoder(width, pack):
         vectors = encode_prompt(prompt, on_layer=on_layer, gpu=gpu, pack=pack)
         count = min(int(vectors.shape[0]), length, rows)
         if count:

@@ -277,6 +277,48 @@ def test_condition_is_noise_then_mask_then_latent() -> None:
     assert np.all(volume[20:] == 1)
 
 
+def test_a_clip_encodes_with_the_int8_pack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from wan22_i2v.commands import main
+    from wan22_i2v.runtime import _text_encoder
+
+    def models_dir(root: Path | None = None) -> Path:
+        del root
+        return tmp_path / "models"
+
+    monkeypatch.setattr("wan22_i2v.source.models_dir", models_dir)
+    monkeypatch.setattr("favlo.registry.models_dir", models_dir)
+    monkeypatch.setattr("wan22_i2v.runtime.tokenizer_path", lambda: tmp_path / "tokenizer.json")
+
+    def quantize_int8(
+        high: Path,
+        low: Path,
+        dest: Path,
+        config: dict,
+        *,
+        high_dir: Path | None = None,
+        low_dir: Path | None = None,
+    ) -> dict:
+        del high, low, config, high_dir, low_dir
+        dest.mkdir(parents=True)
+        return {"high_worst": 0.0, "low_worst": 0.0}
+
+    monkeypatch.setattr("wan22_i2v.record.quantize_int8", quantize_int8)
+    high = tmp_path / "high.safetensors"
+    low = tmp_path / "low.safetensors"
+    high.write_bytes(b"h")
+    low.write_bytes(b"l")
+    assert main(["quantize", "--int8", "--high", str(high), "--low", str(low)]) == 0
+    stored = json.loads((tmp_path / "models" / "registry.json").read_text())
+    pack = tmp_path / "models" / "google" / "umt5-xxl-int8"
+    assert stored["models"]["Wan2.2-I2V-A14B-int8"]["parts"]["umt5"] == str(pack)
+    assert _text_encoder(4096, pack) is False
+    pack.mkdir(parents=True)
+    (pack / "manifest.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "tokenizer.json").write_text("{}", encoding="utf-8")
+    assert _text_encoder(4096, pack) is True
+    assert _text_encoder(4096, tmp_path / "missing") is False
+
+
 def test_int8_roundtrip_stays_within_half_a_step() -> None:
     weight = np.array([[2.0, -1.0, 0.25, 0.0], [0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
     bias = np.array([0.5, -0.25], dtype=np.float32)
@@ -798,6 +840,40 @@ def test_expert_load_checkpoints_the_unfinished_step(monkeypatch) -> None:
     assert host.saved.step == 1
 
 
+def test_a_committed_layer_checkpoints_before_the_step_updates(monkeypatch) -> None:
+    import wan22_i2v.runtime as runtime_mod
+    from wan22_i2v.runtime import Runtime
+
+    monkeypatch.setattr(runtime_mod, "_volume", lambda *_args, **_kwargs: np.zeros((1,)))
+
+    class _Host:
+        def __init__(self) -> None:
+            self.saved: ClipHold | None = None
+
+        def _pause(self, progress, hold) -> None:
+            hold.done = progress.done
+            self.saved = hold
+            raise ClipPaused("preempt", hold)
+
+    host = _Host()
+    progress = ClipProgress(console=None, clip="clip")
+    progress.interrupt = lambda: None
+    hold = ClipHold(stage="step", step=2, expert="high")
+    Runtime._after_commit(host, progress, hold)
+    assert host.saved is None
+    progress.interrupt = lambda: "preempt"
+    progress.done = 9
+    try:
+        Runtime._after_commit(host, progress, hold)
+    except ClipPaused:
+        pass
+    assert host.saved is not None
+    assert host.saved.stage == "step"
+    assert host.saved.step == 2
+    assert host.saved.expert == "high"
+    assert host.saved.done == 9
+
+
 def test_cancel_discards_the_hold(tmp_path) -> None:
     state: dict = {"video_home": tmp_path, "preempt": _Flag(), "cancel": _Flag()}
     runtime = _Pausing(state)
@@ -849,6 +925,39 @@ def test_close_drops_the_device_and_the_expert() -> None:
     assert runtime.gpu is None
     assert runtime._resident is None
     runtime.close()
+
+
+def test_close_confirms_the_bytes_it_sweeps(monkeypatch: pytest.MonkeyPatch) -> None:
+    from wan22_i2v.runtime import Runtime
+
+    seen = {"live": 4096}
+
+    class _Ledger:
+        def owner_bytes(self) -> dict[str, int]:
+            return {"wan22-i2v:9": seen["live"]}
+
+        def sweep(self, owner: str) -> None:
+            seen["swept"] = owner
+            seen["live"] = 0
+
+        def confirm_released(self, before: int, nbytes: int) -> bool:
+            seen["before"] = before
+            seen["nbytes"] = nbytes
+            return True
+
+    ledger = _Ledger()
+    monkeypatch.setattr("wan22_i2v.runtime.memory", ledger)
+    monkeypatch.setattr("favlo.memory.memory", ledger)
+    monkeypatch.setattr("favlo.memory.reclaimable_bytes", lambda: 80)
+    runtime = Runtime.__new__(Runtime)
+    runtime.gpu = None
+    runtime._forward = None
+    runtime._resident = None
+    runtime._owner = "wan22-i2v:9"
+    runtime.close()
+    assert seen["swept"] == "wan22-i2v:9"
+    assert seen["before"] == 80
+    assert seen["nbytes"] == 4096
 
 
 def test_open_runtime_forwards_the_listener_owner(monkeypatch) -> None:

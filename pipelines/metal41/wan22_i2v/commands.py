@@ -24,7 +24,6 @@ from wan22_i2v.source import repo_id
 
 _FOLDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _RECORD = "Wan2.2-I2V-A14B-fp4"
-_SERVED = "Wan2.2-I2V-A14B-fp8-e50"
 _INT8 = "Wan2.2-I2V-A14B-int8"
 
 
@@ -158,6 +157,16 @@ def _record_dir(name: str | None, out: Path | None, percent: int = PROMOTE_PERCE
     return models_dir() / _RECORD
 
 
+def _parts(high_dir: Path, low_dir: Path, *, int8: bool) -> dict[str, Path]:
+    """Expert directories, and the int8 encoder a clip reads."""
+    parts = {"high": high_dir, "low": low_dir}
+    if int8:
+        from wan22_i2v.umt5_pack import shared_pack_dir
+
+        parts["umt5"] = shared_pack_dir()
+    return parts
+
+
 def _quantize(args: argparse.Namespace) -> int:
     from favlo.registry import register_quantized
     from wan22_i2v.record import quantize
@@ -205,7 +214,7 @@ def _quantize(args: argparse.Namespace) -> int:
             pipeline="wan22-i2v",
             runtime="metal41",
             max_prompt_tokens=int(config["text_len"]),
-            parts={"high": high_dir, "low": low_dir},
+            parts=_parts(high_dir, low_dir, int8=bool(args.int8)),
         )
     except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
         sys.stderr.write(f"{exc}\n")

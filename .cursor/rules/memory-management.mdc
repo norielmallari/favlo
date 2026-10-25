@@ -36,3 +36,7 @@ room = max(0, ceiling - memory.live - memory.pending)
 Weights plus the requested working set must fit in `room` before the first commit. The request keeps its resolution, frame count, and duration. Shrink the one knob that pipeline owns, down to the minimum that still runs that request. When the minimum does not fit, raise `RuntimeError` and name the request. Do not drop layers, substitute a host GEMV, or change the packed quant. 16 GB is the product floor. It is not free memory and it is not `budget()`.
 
 `release` returns a span the caller has dropped. Leave a buffer a later command or a live local still names. `sweep` waits out tracked command buffers, then frees that owner's spans and idle heaps.
+
+## Release
+
+`close` sweeps the owner, then `memory.confirm_released` waits until those bytes are reclaimable. Sample the reclaimable total and the owner's bytes before the sweep. A chat preemption runs that wait in the process that allocated the spans, before the handler returns. The listener stores the opening report. The wait uses the bytes this process held.

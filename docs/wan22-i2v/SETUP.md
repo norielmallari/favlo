@@ -86,7 +86,7 @@ That stores `models/example-high` and `models/example-low` on the `example-model
 uv run favlo --wan22-i2v quantize-text
 ```
 
-That command reads `models/google/umt5-xxl/models_t5_umt5-xxl-enc-bf16.pth` and writes `models/google/umt5-xxl-int8`. Every linear is symmetric int8. The token embedding, the RMSNorm weights, and the relative buckets stay float16. The registry row stores that directory, and another pipeline can use the same folder. Without this pack, the text context is zeros.
+That command reads `models/google/umt5-xxl/models_t5_umt5-xxl-enc-bf16.pth` and writes `models/google/umt5-xxl-int8`. Every linear is symmetric int8. The token embedding, the RMSNorm weights, and the relative buckets stay float16. The registry row stores that directory, and a clip encodes with it. The BF16 file is not opened during a clip. Another pipeline can use the same folder. Without the pack, the prompt bytes index the embedding table.
 
 `--name` writes `models/<name>/umt5` and stores that directory on the row `quantize` registered. `--out` is the quantized umT5 directory, and `--name` is the registry id it belongs to. `--umt5` reads the encoder downloaded for that repository. `quantize` registers the row before `quantize-text` records the umT5 directory.
 
