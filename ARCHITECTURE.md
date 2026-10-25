@@ -90,7 +90,7 @@ harness/                file agent, coding agent, worktree agent, and the three 
 docs/                   as-built notes; see docs/README.md
 ```
 
-Probe, matmul, kernels, bf16, complete, and quantize stay on that pipeline's flag: `favlo --qwen38-flash-next quantize`, and the same flag for the other commands. The process does not batch. The Neural Engine may run a module. A pipeline does not fuse a whole layer into one kernel. Prefill, decode, and the calibration prefill are Metal shaders. A missing kernel stays missing.
+Probe, matmul, kernels, bf16, complete, and quantize stay on that pipeline's flag: `favlo --qwen38-flash-next quantize`, and the same flag for the other commands. The listener runs one request. A language-model pipeline does not fuse a whole layer into one kernel. An image, video, music, or voice pipeline may place several kernels of one generation in one command buffer and may fuse those kernels. Prefill, decode, and the calibration prefill are Metal shaders. A missing kernel stays missing. The Neural Engine may run a module.
 
 ## Commands
 

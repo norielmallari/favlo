@@ -11,6 +11,7 @@ from wan22_ti2v_5b.spec import FP16_MAX, TILE_M, TILE_N, TILE_N_I8
 
 _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"
 _THREADS = 128
+_HEAD_BUDGET = 512 * 1024 * 1024
 
 
 class Gpu:
@@ -19,9 +20,13 @@ class Gpu:
         self.queue = memory.make_queue()
         self._lib = _library()
         self._pipes: dict[str, object] = {}
+        self._resident_handles: dict[object, object] = {}
+        self._resident_alive: list[np.ndarray] = []
 
     def close(self) -> None:
         memory.sweep(self.owner)
+        self._resident_handles.clear()
+        self._resident_alive.clear()
 
     def upload(self, array: np.ndarray):
         raw = np.ascontiguousarray(array)
@@ -37,6 +42,53 @@ class Gpu:
 
     def release(self, handle) -> None:
         memory.release(handle)
+
+    def _resident(self, array: np.ndarray, view: np.ndarray | None = None, factory=None):
+        """Upload ``array`` once. ``factory`` builds the bytes on a miss."""
+        key = id(array)
+        found = self._resident_handles.get(key)
+        if found is None:
+            if factory is not None:
+                payload = factory()
+            elif view is not None:
+                payload = view
+            else:
+                payload = array
+            found = self.upload(payload)
+            self._resident_handles[key] = found
+            self._resident_alive.append(array)
+        return found
+
+    def _resident_f16(self, packed: np.ndarray, padded_n: int, cols: int, out_n: int):
+        key = (id(packed), padded_n, cols, out_n)
+        found = self._resident_handles.get(key)
+        if found is None:
+            weight = np.zeros((padded_n, cols), dtype=np.float16)
+            weight[:out_n] = np.ascontiguousarray(packed, dtype=np.float16)
+            found = self.upload(weight)
+            self._resident_handles[key] = found
+            self._resident_alive.append(packed)
+        return found
+
+    def _resident_conv(
+        self,
+        source: np.ndarray,
+        shaped: np.ndarray,
+        padded_n: int,
+        k_pad: int,
+        out_c: int,
+        taps: int,
+    ):
+        key = (id(source), padded_n, k_pad, out_c, taps)
+        found = self._resident_handles.get(key)
+        if found is None:
+            flat = np.ascontiguousarray(shaped, dtype=np.float16).reshape(out_c, taps)
+            pad = np.zeros((padded_n, k_pad), dtype=np.float16)
+            pad[:out_c, :taps] = flat
+            found = self.upload(pad)
+            self._resident_handles[key] = found
+            self._resident_alive.append(source)
+        return found
 
     def linear(
         self,
@@ -65,16 +117,15 @@ class Gpu:
         padded_n = _pad(out_n, TILE_N)
         host = np.zeros((padded_m, cols), dtype=np.float16)
         host[:rows] = np.ascontiguousarray(left, dtype=np.float16)
+        left_h = self.upload(host)
         if kind == "f16":
-            weight = np.zeros((padded_n, cols), dtype=np.float16)
-            weight[:out_n] = np.ascontiguousarray(packed, dtype=np.float16)
+            weight_h = self._resident_f16(packed, padded_n, cols, out_n)
         else:
             weight = np.ascontiguousarray(packed)
             if int(weight.shape[0]) != padded_n:
                 message = f"{kind} N {weight.shape[0]} is not padded to {padded_n}"
                 raise RuntimeError(message)
-        left_h = self.upload(host)
-        weight_h = self.upload(weight)
+            weight_h = self.upload(weight)
         scale_h = self.upload(scales) if scales is not None else self.zeros(16)
         dest = self.zeros(padded_m * padded_n * 4)
         stride_a = cols
@@ -92,7 +143,8 @@ class Gpu:
             raise RuntimeError(message)
         values = self.download(dest, np.float32, (padded_m, padded_n))[:rows, :out_n]
         self.release(left_h)
-        self.release(weight_h)
+        if kind != "f16":
+            self.release(weight_h)
         self.release(scale_h)
         self.release(dest)
         if bias is not None:
@@ -129,17 +181,19 @@ class Gpu:
         if bias is not None:
             bias_row[:logical] = np.ascontiguousarray(bias, dtype=np.float16).reshape(-1)[:out_n]
         left_h = self.upload(codes)
-        weight_h = self.upload(np.ascontiguousarray(packed))
+        weight_h = self._resident(packed)
         row_h = self.upload(row_scale)
-        scale_h = self.upload(np.ascontiguousarray(scales, dtype=np.float32))
+        scale_h = self._resident(scales)
         bias_h = self.upload(bias_row)
         dest = self.zeros(padded_m * out_n * 4)
         dims = np.array([padded_m, out_n, cols, cols, cols], dtype=np.int32)
-        self._gemm("gemm_i8", (left_h, weight_h, dest), dims, scales=False, tile_n=TILE_N_I8)
         shape = np.array([padded_m, out_n, logical], dtype=np.int32)
-        self._launch("scale_i8", (dest, row_h, scale_h, bias_h), shape.tobytes(), padded_m * out_n)
+        group = _Dispatch(self)
+        group.gemm("gemm_i8", (left_h, weight_h, dest), dims, tile_n=TILE_N_I8)
+        group.launch("scale_i8", (dest, row_h, scale_h, bias_h), shape.tobytes(), padded_m * out_n)
+        group.finish("linear_i8")
         values = self.download(dest, np.float32, (padded_m, out_n))[:rows, :logical]
-        for handle in (left_h, weight_h, row_h, scale_h, bias_h, dest):
+        for handle in (left_h, row_h, bias_h, dest):
             self.release(handle)
         return values
 
@@ -195,6 +249,84 @@ class Gpu:
         self.release(dest)
         return values
 
+    def gemm_half_heads(
+        self,
+        left: np.ndarray,
+        right: np.ndarray,
+        *,
+        transpose_right: bool,
+    ) -> np.ndarray:
+        """``left`` is ``[heads, M, K]``. One command buffer per chunk of heads."""
+        heads = int(left.shape[0])
+        rows = int(left.shape[1])
+        if transpose_right:
+            cols = int(right.shape[1])
+        else:
+            cols = int(right.shape[2])
+        padded_m = _pad(rows, TILE_M)
+        padded_n = _pad(cols, TILE_N)
+        dest_bytes = padded_m * padded_n * 4
+        chunk = max(1, _HEAD_BUDGET // max(dest_bytes, 1))
+        parts = [
+            self._gemm_half_chunk(
+                left[start : min(heads, start + chunk)],
+                right[start : min(heads, start + chunk)],
+                transpose_right=transpose_right,
+            )
+            for start in range(0, heads, chunk)
+        ]
+        if len(parts) == 1:
+            return parts[0]
+        return np.concatenate(parts, axis=0)
+
+    def _gemm_half_chunk(
+        self,
+        left: np.ndarray,
+        right: np.ndarray,
+        *,
+        transpose_right: bool,
+    ) -> np.ndarray:
+        count = int(left.shape[0])
+        rows = int(left.shape[1])
+        k_left = int(left.shape[2])
+        if transpose_right:
+            cols = int(right.shape[1])
+            k_dim = int(right.shape[2])
+            name = "gemm_f16_tn"
+        else:
+            cols = int(right.shape[2])
+            k_dim = int(right.shape[1])
+            name = "gemm_f16_nn"
+        padded_m = _pad(rows, TILE_M)
+        padded_n = _pad(cols, TILE_N)
+        group = _Dispatch(self)
+        staged = []
+        for index in range(count):
+            host = np.zeros((padded_m, k_left), dtype=np.float16)
+            host[:rows] = left[index]
+            if transpose_right:
+                weight = np.zeros((padded_n, k_dim), dtype=np.float16)
+                weight[:cols] = right[index]
+                stride_right = k_dim
+            else:
+                weight = np.zeros((k_dim, padded_n), dtype=np.float16)
+                weight[:, :cols] = right[index]
+                stride_right = padded_n
+            left_h = self.upload(host)
+            right_h = self.upload(weight)
+            dest = self.zeros(padded_m * padded_n * 4)
+            dims = np.array([padded_m, padded_n, k_left, k_left, stride_right], dtype=np.int32)
+            group.gemm(name, (left_h, right_h, dest), dims, tile_n=TILE_N)
+            staged.append((left_h, right_h, dest))
+        group.finish(name)
+        out = np.empty((count, rows, cols), dtype=np.float32)
+        for index, (left_h, right_h, dest) in enumerate(staged):
+            out[index] = self.download(dest, np.float32, (padded_m, padded_n))[:rows, :cols]
+            self.release(left_h)
+            self.release(right_h)
+            self.release(dest)
+        return out
+
     def _gemm(
         self,
         name: str,
@@ -204,26 +336,9 @@ class Gpu:
         scales: bool,
         tile_n: int = TILE_N,
     ) -> None:
-        groups_x = int(dims[1]) // tile_n
-        groups_y = int(dims[0]) // TILE_M
-        dims_h = self.upload(dims)
-        command = memory.command_buffer(self.queue)
-        encoder = command.computeCommandEncoder()
-        encoder.setComputePipelineState_(self._pipe(name))
-        for index, handle in enumerate(handles):
-            bind(encoder, index, handle)
-        bind(encoder, len(handles), dims_h)
-        encoder.dispatchThreadgroups_threadsPerThreadgroup_(
-            _size(groups_x, groups_y, 1),
-            _size(_THREADS, 1, 1),
-        )
-        encoder.endEncoding()
-        command.commit()
-        status, error = memory.retire(command)
-        self.release(dims_h)
-        if int(status) != 4:
-            message = f"{name} status {status} {error}"
-            raise RuntimeError(message)
+        group = _Dispatch(self)
+        group.gemm(name, handles, dims, tile_n=tile_n)
+        group.finish(name)
         del scales
 
     def conv3d(
@@ -238,6 +353,7 @@ class Gpu:
     ) -> np.ndarray:
         """``source`` is ``[C, T, H, W]``. A wide convolution is im2col plus ``matmul2d``."""
         in_c, frames, height, width = (int(v) for v in source.shape)
+        origin = weight
         if weight.ndim == 4:
             weight = weight.reshape(
                 weight.shape[0], weight.shape[1], 1, weight.shape[2], weight.shape[3]
@@ -256,13 +372,12 @@ class Gpu:
         k_pad = _pad(taps, 64)
         use_gemm = out_c >= 32 and outputs >= 1024 and taps >= 64
         if not use_gemm:
-            return self._conv_small(source, weight, bias, stride, padding, out_t, out_h, out_w)
+            return self._conv_small(
+                source, weight, bias, stride, padding, out_t, out_h, out_w, origin
+            )
         padded_n = _pad(out_c, TILE_N)
-        flat = np.ascontiguousarray(weight, dtype=np.float16).reshape(out_c, taps)
-        weight_pad = np.zeros((padded_n, k_pad), dtype=np.float16)
-        weight_pad[:out_c, :taps] = flat
         src_h = self.upload(np.ascontiguousarray(source, dtype=np.float32))
-        weight_h = self.upload(weight_pad)
+        weight_h = self._resident_conv(origin, weight, padded_n, k_pad, out_c, taps)
         pieces = []
         row0 = 0
         while row0 < outputs:
@@ -287,60 +402,51 @@ class Gpu:
                 row0,
             )
             col_h = self.upload(columns)
-            self._launch("im2col_f16", (src_h, col_h), args.tobytes(), valid * taps)
             dest = self.zeros(padded_m * padded_n * 4)
             dims = np.array([padded_m, padded_n, k_pad, k_pad, k_pad], dtype=np.int32)
-            self._gemm("gemm_f16_tn", (col_h, weight_h, dest), dims, scales=False)
+            group = _Dispatch(self)
+            group.launch("im2col_f16", (src_h, col_h), args.tobytes(), valid * taps)
+            group.gemm("gemm_f16_tn", (col_h, weight_h, dest), dims, tile_n=TILE_N)
+            group.finish("conv3d")
             pieces.append(self.download(dest, np.float32, (padded_m, padded_n))[:valid, :out_c])
             self.release(col_h)
             self.release(dest)
             row0 += valid
         values = np.concatenate(pieces, axis=0)
         self.release(src_h)
-        self.release(weight_h)
         if bias is not None:
             values = values + bias.astype(np.float32).reshape(1, -1)
         values = _store_half(values)
         ordered = values.reshape(out_t, out_h, out_w, out_c)
         return np.transpose(ordered, (3, 0, 1, 2)).astype(np.float32)
 
-    def _conv_small(self, source, weight, bias, stride, padding, out_t, out_h, out_w):
+    def _conv_small(self, source, weight, bias, stride, padding, out_t, out_h, out_w, origin):
         in_c, frames, height, width = (int(v) for v in source.shape)
         out_c, _ic, kt, kh, kw = (int(v) for v in weight.shape)
         args = _conv_args(
             out_c, in_c, frames, height, width, kt, kh, kw, padding, stride, out_t, out_h, out_w, 0
         )
         src_h = self.upload(np.ascontiguousarray(source, dtype=np.float32))
-        w_h = self.upload(np.ascontiguousarray(weight, dtype=np.float32))
-        if bias is None:
-            bias = np.zeros(out_c, dtype=np.float32)
-        b_h = self.upload(np.ascontiguousarray(bias, dtype=np.float32))
+        w_h = self._resident(origin, factory=lambda: np.ascontiguousarray(weight, dtype=np.float32))
+        ephemeral = bias is None
+        if ephemeral:
+            b_h = self.upload(np.zeros(out_c, dtype=np.float32))
+        else:
+            b_h = self._resident(bias, factory=lambda: np.ascontiguousarray(bias, dtype=np.float32))
         dest = self.zeros(out_c * out_t * out_h * out_w * 4)
         threads = out_c * out_t * out_h * out_w
         self._launch("conv3d_f32", (src_h, w_h, b_h, dest), args.tobytes(), threads)
         values = self.download(dest, np.float32, (out_c, out_t, out_h, out_w))
-        for handle in (src_h, w_h, b_h, dest):
-            self.release(handle)
+        self.release(src_h)
+        self.release(dest)
+        if ephemeral:
+            self.release(b_h)
         return values
 
     def _launch(self, name: str, handles, constants: bytes, threads: int) -> None:
-        blob = self.upload(np.frombuffer(constants, dtype=np.uint8))
-        command = memory.command_buffer(self.queue)
-        encoder = command.computeCommandEncoder()
-        encoder.setComputePipelineState_(self._pipe(name))
-        for index, handle in enumerate(handles):
-            bind(encoder, index, handle)
-        bind(encoder, len(handles), blob)
-        width = 256
-        groups = max(1, (threads + width - 1) // width)
-        encoder.dispatchThreadgroups_threadsPerThreadgroup_(_size(groups, 1, 1), _size(width, 1, 1))
-        encoder.endEncoding()
-        command.commit()
-        status, error = memory.retire(command)
-        self.release(blob)
-        if int(status) != 4:
-            message = f"{name} status {status} {error}"
-            raise RuntimeError(message)
+        group = _Dispatch(self)
+        group.launch(name, handles, constants, threads)
+        group.finish(name)
 
     def _pipe(self, name: str):
         found = self._pipes.get(name)
@@ -356,6 +462,56 @@ class Gpu:
             raise RuntimeError(message)
         self._pipes[name] = pipe
         return pipe
+
+
+class _Dispatch:
+    """Several kernels, one commit, one wait."""
+
+    def __init__(self, gpu: Gpu) -> None:
+        self.gpu = gpu
+        self.command = memory.command_buffer(gpu.queue)
+        self.encoder = self.command.computeCommandEncoder()
+        self._blobs: list = []
+
+    def gemm(self, name: str, handles, dims: np.ndarray, *, tile_n: int) -> None:
+        dims_h = self.gpu.upload(np.ascontiguousarray(dims))
+        self._blobs.append(dims_h)
+        groups_x = int(dims[1]) // tile_n
+        groups_y = int(dims[0]) // TILE_M
+        encoder = self.encoder
+        encoder.setComputePipelineState_(self.gpu._pipe(name))
+        for index, handle in enumerate(handles):
+            bind(encoder, index, handle)
+        bind(encoder, len(handles), dims_h)
+        encoder.dispatchThreadgroups_threadsPerThreadgroup_(
+            _size(groups_x, groups_y, 1),
+            _size(_THREADS, 1, 1),
+        )
+
+    def launch(self, name: str, handles, constants: bytes, threads: int) -> None:
+        blob = self.gpu.upload(np.frombuffer(constants, dtype=np.uint8))
+        self._blobs.append(blob)
+        encoder = self.encoder
+        encoder.setComputePipelineState_(self.gpu._pipe(name))
+        for index, handle in enumerate(handles):
+            bind(encoder, index, handle)
+        bind(encoder, len(handles), blob)
+        width = 256
+        groups = max(1, (threads + width - 1) // width)
+        encoder.dispatchThreadgroups_threadsPerThreadgroup_(
+            _size(groups, 1, 1),
+            _size(width, 1, 1),
+        )
+
+    def finish(self, label: str) -> None:
+        self.encoder.endEncoding()
+        self.command.commit()
+        status, error = memory.retire(self.command)
+        for blob in self._blobs:
+            self.gpu.release(blob)
+        if int(status) != 4:
+            message = f"{label} status {status} {error}"
+            raise RuntimeError(message)
 
 
 def _library():

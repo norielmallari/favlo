@@ -34,6 +34,7 @@ class DiT:
         manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
         self.gelu = gelu_erf if manifest.get("gelu") == "erf" else gelu_tanh
         self.layers = int(manifest["layers"])
+        self._cached_text: np.ndarray | None = None
         self.patch = load_matrix(root / "patch.npy")
         self.text0 = load_matrix(root / "text0.npy")
         self.text2 = load_matrix(root / "text2.npy")
@@ -57,10 +58,16 @@ class DiT:
         """``latent`` is ``[48, T, H, W]``. ``token_time`` matches the token grid."""
         time, height, width = grid
         tokens = self._patch(latent)
-        context = self._embed_text(text, text_mask)
+        if self._cached_text is not text:
+            context = self._embed_text(text, text_mask)
+            self._cached_text = text
+            for block in self._blocks:
+                projected = apply(self.gpu, context, block.cross_k)
+                block.cross_key = qk_norm(projected, block.cross_norm_k)
+                block.cross_value = apply(self.gpu, context, block.cross_v)
         temb, proj = self._times(token_time.reshape(-1))
         for index in range(self.layers):
-            tokens = self._block(tokens, temb, proj, context, text_mask, index, height, width)
+            tokens = self._block(tokens, temb, proj, text, text_mask, index, height, width)
         out = self._head(tokens, temb)
         return _unpatch(out, time, height, width)
 
@@ -107,6 +114,7 @@ class DiT:
         height: int,
         width: int,
     ) -> np.ndarray:
+        del text
         del text_mask
         block = self._blocks[index]
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = np.split(
@@ -129,13 +137,11 @@ class DiT:
         tokens = tokens + update * gate_msa
         normed = layernorm(tokens, block.norm3, block.norm3_bias)
         query = qk_norm(apply(self.gpu, normed, block.cross_q), block.cross_norm_q)
-        key = qk_norm(apply(self.gpu, text, block.cross_k), block.cross_norm_k)
-        value = apply(self.gpu, text, block.cross_v)
         mixed = attend(
             self.gpu,
             split_heads(query, HEADS),
-            split_heads(key, HEADS),
-            split_heads(value, HEADS),
+            split_heads(block.cross_key, HEADS),
+            split_heads(block.cross_value, HEADS),
         )
         tokens = tokens + apply(self.gpu, merge_heads(mixed), block.cross_o)
         normed = layernorm(tokens)

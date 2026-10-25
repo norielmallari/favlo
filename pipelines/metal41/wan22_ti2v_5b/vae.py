@@ -42,6 +42,7 @@ class WanVae:
         self.gpu = gpu
         self._archive: Archive | None = None
         self.path = path
+        self._weights: dict[tuple, np.ndarray] = {}
 
     def close(self) -> None:
         if self._archive is not None:
@@ -103,7 +104,7 @@ class WanVae:
         hidden = self._residual(archive, hidden, "encoder.middle.0", cache)
         hidden = self._attend(archive, hidden, "encoder.middle.1")
         hidden = self._residual(archive, hidden, "encoder.middle.2", cache)
-        hidden = _silu(_rms(hidden, archive.tensor("encoder.head.0.gamma")))
+        hidden = _silu(_rms(hidden, self._weight(archive, "encoder.head.0.gamma")))
         return self._cached(archive, hidden, "encoder.head.2", cache)
 
     def _decode_chunk(
@@ -133,15 +134,15 @@ class WanVae:
             if index < 3:
                 hidden = self._up(archive, hidden, f"{stem}.3", time=time, cache=cache)
                 hidden = hidden + _dup_up(entered, out_channels, 2 if time else 1, 2, first=first)
-        hidden = _silu(_rms(hidden, archive.tensor("decoder.head.0.gamma")))
+        hidden = _silu(_rms(hidden, self._weight(archive, "decoder.head.0.gamma")))
         return self._cached(archive, hidden, "decoder.head.2", cache)
 
     def _residual(
         self, archive: Archive, hidden: np.ndarray, prefix: str, cache: _Cache
     ) -> np.ndarray:
-        updated = _silu(_rms(hidden, archive.tensor(f"{prefix}.residual.0.gamma")))
+        updated = _silu(_rms(hidden, self._weight(archive, f"{prefix}.residual.0.gamma")))
         updated = self._cached(archive, updated, f"{prefix}.residual.2", cache)
-        updated = _silu(_rms(updated, archive.tensor(f"{prefix}.residual.3.gamma")))
+        updated = _silu(_rms(updated, self._weight(archive, f"{prefix}.residual.3.gamma")))
         updated = self._cached(archive, updated, f"{prefix}.residual.6", cache)
         shortcut = f"{prefix}.shortcut.weight"
         if shortcut in archive.keys():
@@ -151,7 +152,7 @@ class WanVae:
     def _cached(self, archive: Archive, hidden: np.ndarray, name: str, cache: _Cache) -> np.ndarray:
         slot = cache.slot()
         previous = _remember(cache, slot, hidden)
-        weight = archive.tensor(f"{name}.weight")
+        weight = self._weight(archive, f"{name}.weight")
         pad_t = int(weight.shape[2]) - 1
         data = hidden
         if isinstance(previous, np.ndarray) and pad_t > 0:
@@ -176,8 +177,8 @@ class WanVae:
         cache: _Cache,
     ) -> np.ndarray:
         padded = np.pad(hidden, ((0, 0), (0, 0), (0, 1), (0, 1)))
-        weight = archive.tensor(f"{prefix}.resample.1.weight")
-        bias = archive.tensor(f"{prefix}.resample.1.bias")
+        weight = self._weight(archive, f"{prefix}.resample.1.weight")
+        bias = self._weight(archive, f"{prefix}.resample.1.bias")
         hidden = self.gpu.conv3d(
             padded,
             weight,
@@ -219,8 +220,8 @@ class WanVae:
             hidden = self._time_up(archive, hidden, prefix, cache)
         _channels, frames, height, width = hidden.shape
         spatial = np.repeat(np.repeat(hidden, 2, axis=2), 2, axis=3)
-        weight = archive.tensor(f"{prefix}.resample.1.weight")
-        bias = archive.tensor(f"{prefix}.resample.1.bias")
+        weight = self._weight(archive, f"{prefix}.resample.1.weight")
+        bias = self._weight(archive, f"{prefix}.resample.1.bias")
         return self.gpu.conv3d(
             spatial,
             weight,
@@ -264,36 +265,58 @@ class WanVae:
 
     def _attend(self, archive: Archive, hidden: np.ndarray, prefix: str) -> np.ndarray:
         channels, frames, height, width = hidden.shape
-        gamma = archive.tensor(f"{prefix}.norm.gamma")
-        qkv_w = archive.tensor(f"{prefix}.to_qkv.weight").reshape(channels * 3, channels)
-        qkv_b = archive.tensor(f"{prefix}.to_qkv.bias")
-        proj_w = archive.tensor(f"{prefix}.proj.weight").reshape(channels, channels)
-        proj_b = archive.tensor(f"{prefix}.proj.bias")
-        pieces = []
+        tokens = height * width
+        gamma = self._weight(archive, f"{prefix}.norm.gamma").reshape(channels, 1, 1)
+        qkv_w = self._shaped(archive, f"{prefix}.to_qkv.weight", (channels * 3, channels))
+        qkv_b = self._weight(archive, f"{prefix}.to_qkv.bias")
+        proj_w = self._shaped(archive, f"{prefix}.proj.weight", (channels, channels))
+        proj_b = self._weight(archive, f"{prefix}.proj.bias")
+        flats = []
         for frame in range(frames):
-            plane = hidden[:, frame]
-            normed = _rms(plane, gamma.reshape(channels, 1, 1))
-            flat = normed.reshape(channels, -1).T.astype(np.float16)
-            mixed = self.gpu.linear(flat, qkv_w.astype(np.float16), None, kind="f16", bias=qkv_b)
-            query, key, value = np.split(mixed, 3, axis=1)
-            scale = channels**-0.5
-            scores = self.gpu.gemm_half(
-                query.astype(np.float16),
-                key.astype(np.float16),
-                transpose_right=True,
-            )
-            scores = scores * np.float32(scale)
-            weights = _softmax(scores).astype(np.float16)
-            mixed = self.gpu.gemm_half(weights, value.astype(np.float16), transpose_right=False)
-            projected = self.gpu.linear(
-                mixed.astype(np.float16),
-                proj_w.astype(np.float16),
-                None,
-                kind="f16",
-                bias=proj_b,
-            )
-            pieces.append(plane + projected.T.reshape(channels, height, width))
+            normed = _rms(hidden[:, frame], gamma)
+            flats.append(normed.reshape(channels, -1).T)
+        left = np.concatenate(flats, axis=0).astype(np.float16)
+        mixed = self.gpu.linear(left, qkv_w, None, kind="f16", bias=qkv_b)
+        mixed = mixed.reshape(frames, tokens, channels * 3)
+        query, key, value = np.split(mixed, 3, axis=2)
+        scale = np.float32(channels**-0.5)
+        scores = self.gpu.gemm_half_heads(
+            query.astype(np.float16),
+            key.astype(np.float16),
+            transpose_right=True,
+        )
+        weights = _softmax(scores * scale).astype(np.float16)
+        mixed = self.gpu.gemm_half_heads(weights, value.astype(np.float16), transpose_right=False)
+        projected = self.gpu.linear(
+            mixed.reshape(frames * tokens, channels).astype(np.float16),
+            proj_w,
+            None,
+            kind="f16",
+            bias=proj_b,
+        )
+        projected = projected.reshape(frames, tokens, channels)
+        pieces = [
+            hidden[:, frame] + projected[frame].T.reshape(channels, height, width)
+            for frame in range(frames)
+        ]
         return np.stack(pieces, axis=1)
+
+    def _weight(self, archive: Archive, name: str) -> np.ndarray:
+        key = (name,)
+        found = self._weights.get(key)
+        if found is None:
+            found = np.ascontiguousarray(archive.tensor(name))
+            self._weights[key] = found
+        return found
+
+    def _shaped(self, archive: Archive, name: str, shape: tuple[int, ...]) -> np.ndarray:
+        key = (name, shape)
+        found = self._weights.get(key)
+        if found is None:
+            raw = archive.tensor(name).reshape(shape)
+            found = np.ascontiguousarray(raw, dtype=np.float16)
+            self._weights[key] = found
+        return found
 
     def _conv(
         self,
@@ -306,8 +329,8 @@ class WanVae:
         padding: tuple[int, int, int] | None = None,
         out_size: tuple[int, int, int] | None = None,
     ) -> np.ndarray:
-        weight = archive.tensor(f"{name}.weight")
-        bias = archive.tensor(f"{name}.bias")
+        weight = self._weight(archive, f"{name}.weight")
+        bias = self._weight(archive, f"{name}.bias")
         if weight.ndim == 5 and padding is None:
             pad_t = int(weight.shape[2]) - 1 if causal else int(weight.shape[2]) // 2
             pad_h = int(weight.shape[3]) // 2
@@ -431,6 +454,6 @@ def _dup_up(
 
 
 def _softmax(scores: np.ndarray) -> np.ndarray:
-    peak = np.max(scores, axis=1, keepdims=True)
+    peak = np.max(scores, axis=-1, keepdims=True)
     weights = np.exp(scores - peak)
-    return weights / np.sum(weights, axis=1, keepdims=True)
+    return weights / np.sum(weights, axis=-1, keepdims=True)

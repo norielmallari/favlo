@@ -70,26 +70,22 @@ def attend(
     key_mask: np.ndarray | None = None,
     scaled: bool = True,
 ) -> np.ndarray:
-    """One head at a time. ``query`` is ``[heads, tokens, dim]``.
+    """Every head, then one wait. ``query`` is ``[heads, tokens, dim]``.
 
     The diffusion transformer scales by ``1/sqrt(dim)``. umT5 does not: the
     relative bucket bias is added to the raw dot product.
     """
-    heads, q_len, dim = query.shape
+    dim = int(query.shape[2])
     scale = np.float32(dim**-0.5 if scaled else 1.0)
-    out = np.empty((heads, q_len, value.shape[2]), dtype=np.float32)
-    for head in range(heads):
-        scores = gpu.gemm_half(
-            query[head].astype(np.float16),
-            key[head].astype(np.float16),
-            transpose_right=True,
-        )
-        scores = scores * scale
-        if bias is not None:
-            scores = scores + bias[head].astype(np.float32)
-        if key_mask is not None:
-            scores[:, ~key_mask] = np.float32(-1.0e30)
-        weights = softmax(scores).astype(np.float16)
-        mixed = gpu.gemm_half(weights, value[head].astype(np.float16), transpose_right=False)
-        out[head] = mixed
-    return out
+    scores = gpu.gemm_half_heads(
+        query.astype(np.float16),
+        key.astype(np.float16),
+        transpose_right=True,
+    )
+    scores = scores * scale
+    if bias is not None:
+        scores = scores + bias.astype(np.float32)
+    if key_mask is not None:
+        scores[:, :, ~key_mask] = np.float32(-1.0e30)
+    weights = softmax(scores).astype(np.float16)
+    return gpu.gemm_half_heads(weights, value.astype(np.float16), transpose_right=False)

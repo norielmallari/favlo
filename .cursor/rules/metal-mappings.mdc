@@ -18,7 +18,7 @@ constexpr auto desc = matmul2d_descriptor(
 matmul2d<desc, execution_simdgroups<4>> op;
 ```
 
-A quantized tensor can also be dequantized into a cooperative tensor and passed back into `matmul2d` when `is_compatible_as_left_input` or `is_compatible_as_right_input` is true. Reductions are the same TensorOps set. A missing kernel stays missing. A host GEMV or a CPU matmul is not a stand-in. Do not fuse a whole layer.
+A quantized tensor can also be dequantized into a cooperative tensor and passed back into `matmul2d` when `is_compatible_as_left_input` or `is_compatible_as_right_input` is true. Reductions are the same TensorOps set. A missing kernel stays missing. A host GEMV or a CPU matmul is not a stand-in. A language-model pipeline does not fuse a whole layer. An image, video, music, or voice pipeline may place several kernels of one generation in one command buffer and may fuse those kernels.
 
 ## Planes
 

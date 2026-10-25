@@ -1,6 +1,6 @@
 # Ceilings
 
-Kernel ceilings from `uv run favlo --wan22-ti2v-5b ceilings` on 25 October 2026. Each time is one command buffer, then a wait, the median of three dispatches after one discarded sample. Host uploads sit outside the timed region.
+Kernel ceilings from `uv run favlo --wan22-ti2v-5b ceilings` on 25 October 2026. Each time is one command buffer, then a wait, the median of three dispatches after one discarded sample. Host uploads sit outside the timed region. A generation may submit several of these kernels before it waits. This table still times each kernel on its own.
 
 These rows time the 576×320, 9-frame token grid: four knots, 30 blocks, token rows padded from 540 to 576. The served smoke is 832×480 and 9 frames for both clips. A native clip is 1280×704, 121 frames, token rows padded from 27280 to 27328. Self-attention counts one query tile of 64 against 27296 keys.
 

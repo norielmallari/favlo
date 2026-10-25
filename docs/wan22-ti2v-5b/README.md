@@ -29,7 +29,11 @@ float32. It is the 48-channel Wan2.2 autoencoder. Pixels are grouped 2×2
 into 12 channels with the width offset outside the height offset, then
 restored the same way. The VAE walks one latent frame at a time and keeps
 the causal cache. A wide convolution is float16 im2col plus `matmul2d`,
-4096 output rows at a time. A narrow one is float `conv3d`.
+4096 output rows at a time, and those two kernels share one command buffer.
+A narrow one is float `conv3d`. An int8 product and its scale share one
+command buffer. Attention submits every head before each wait. The prompt's
+cross-attention key and value stay for the four knots. Weights already on
+the device stay until close.
 
 The decoder's resident frame tile shrinks until one latent frame fits. A
 request keeps the resolution, frame count, and duration it named. Open
