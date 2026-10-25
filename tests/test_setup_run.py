@@ -84,6 +84,7 @@ def test_the_music_setup_commands_are_accepted() -> None:
         "uv sync --extra dev",
         "uv run favlo --ace-step-15-turbo setup",
         "uv run favlo --ace-step-15-turbo quantize",
+        "uv run favlo --ace-step-15-turbo delete acestep-v15-xl-turbo-fp8-fp4",
     )
     for command in commands:
         assert command in guide

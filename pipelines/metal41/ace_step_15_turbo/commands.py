@@ -1,9 +1,11 @@
-"""``kernels``, ``quantize``, ``generate``, and ``setup``."""
+"""``kernels``, ``quantize``, ``generate``, ``setup``, and ``delete``."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import sys
 import urllib.request
 from pathlib import Path
 from typing import Sequence
@@ -36,6 +38,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     gen.add_argument("--out", type=Path, required=True)
     setup = sub.add_parser("setup")
     setup.add_argument("--dest", type=Path, default=None)
+    delete = sub.add_parser("delete", help="remove one packed model")
+    delete.add_argument("model")
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.command == "kernels":
         run_kernels()
@@ -61,6 +65,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(dest)
         return 0
+    if args.command == "delete":
+        return _delete(args)
     record = root / PACKED_NAME if args.record is None else args.record
     runtime = open_runtime(record, kv_cache="e4m3", console=None, resident_percent=None)
     try:
@@ -84,6 +90,82 @@ def main(argv: Sequence[str] | None = None) -> int:
     temporary.replace(args.out)
     print(args.out)
     return 0
+
+
+def _delete(args: argparse.Namespace) -> int:
+    """Drop one packed model and its registry row. A missing checkout stays missing."""
+    from favlo.registry import load_registry, models_dir, save_registry, stored_directory
+
+    text = args.model.strip()
+    base = text.split(":", 1)[0] if ":" in text else text
+    if not base:
+        sys.stderr.write("model id is empty\n")
+        return 1
+    try:
+        data = load_registry()
+        folder = _registered_folder(data, base)
+        if folder is None:
+            sys.stderr.write(f"unknown model {text}\n")
+            return 1
+        entry = data["models"][folder]
+        if entry.get("pipeline") != "ace-step-15-turbo":
+            sys.stderr.write(f"{folder} is not an ace-step-15-turbo model\n")
+            return 1
+        source = entry.get("source")
+        record = stored_directory(entry, folder)
+        _remove_under_models(record, models_dir())
+        if isinstance(source, str) and source and not _source_shared(data, folder, source):
+            _remove_under_models(Path(source), models_dir())
+        data["models"].pop(folder, None)
+        save_registry(data)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
+    sys.stdout.write(f"deleted {folder}\n")
+    return 0
+
+
+def _registered_folder(data: dict, base: str) -> str | None:
+    models = data["models"]
+    if base in models:
+        return base
+    for folder, entry in models.items():
+        if entry.get("alias") == base:
+            return folder
+    return None
+
+
+def _source_shared(data: dict, folder: str, source: str) -> bool:
+    try:
+        wanted = Path(source).expanduser().resolve()
+    except OSError:
+        return True
+    for other, entry in data["models"].items():
+        if other == folder:
+            continue
+        stored = entry.get("source")
+        if not isinstance(stored, str) or not stored:
+            continue
+        try:
+            if Path(stored).expanduser().resolve() == wanted:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _remove_under_models(path: Path, root: Path) -> None:
+    """Remove a directory under ``models/``. A missing path is left missing."""
+    try:
+        base = root.expanduser().resolve()
+        target = path.expanduser().resolve()
+    except OSError:
+        return
+    if target == base or base not in target.parents:
+        return
+    if path.is_symlink() or not target.is_dir():
+        return
+    shutil.rmtree(target)
 
 
 def _models() -> Path:

@@ -56,6 +56,14 @@ A finished directory has `manifest.json` with `complete: true`. Running `quantiz
 
 `--source` names the checkout. `--dest` names the packed directory. With no flags, those are the two directories above.
 
+## Delete
+
+```bash
+uv run favlo --ace-step-15-turbo delete acestep-v15-xl-turbo-fp8-fp4
+```
+
+`delete` takes the folder name. The command removes that registry row and the packed directory stored on the row when that directory is under `models/`. A checkout that is already gone stays gone. A checkout that is still under `models/` and is not used by another row is removed with the pack. A checkout outside `models/` is left in place.
+
 ## Make a clip
 
 Start the listener:

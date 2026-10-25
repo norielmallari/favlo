@@ -522,3 +522,71 @@ def _brute_dependency(pos: int) -> tuple[int, int]:
             lo, hi = residual(lo, hi, dilation)
         lo, hi = transpose(lo, hi, stride * 2, stride // 2, stride)
     return conv(lo, hi, 7, 3, 1, 1)
+
+
+def test_delete_removes_the_packed_model_when_the_checkout_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    from ace_step_15_turbo.commands import main
+    from favlo.registry import register_quantized
+
+    def models_dir(root: Path | None = None) -> Path:
+        del root
+        return tmp_path / "models"
+
+    monkeypatch.setattr("favlo.registry.models_dir", models_dir)
+    packed = tmp_path / "models" / "acestep-v15-xl-turbo-fp8-fp4"
+    packed.mkdir(parents=True)
+    (packed / "manifest.json").write_text(json.dumps({"complete": True}) + "\n")
+    checkout = tmp_path / "models" / "acestep-v15-xl-turbo"
+    outside = tmp_path / "outside-bf16"
+    outside.mkdir()
+    other = tmp_path / "models" / "other-model"
+    other.mkdir()
+    (other / "manifest.json").write_text("{}\n")
+    kept = tmp_path / "models" / "kept-pack"
+    kept.mkdir()
+    (kept / "manifest.json").write_text(json.dumps({"complete": True}) + "\n")
+    register_quantized(
+        packed.name,
+        source=checkout,
+        alias=None,
+        directory=packed,
+        pipeline="ace-step-15-turbo",
+        runtime="metal41",
+    )
+    register_quantized(
+        kept.name,
+        source=outside,
+        alias=None,
+        directory=kept,
+        pipeline="ace-step-15-turbo",
+        runtime="metal41",
+    )
+    register_quantized(
+        other.name,
+        source=outside,
+        alias=None,
+        directory=other,
+        pipeline="qwen38-27b",
+        runtime="metal41",
+    )
+    removed = main(["delete", "acestep-v15-xl-turbo-fp8-fp4:default"])
+    assert removed == 0
+    assert not packed.exists()
+    assert not checkout.exists()
+    assert kept.is_dir()
+    assert outside.is_dir()
+    refused = main(["delete", "other-model"])
+    assert refused == 1
+    assert other.is_dir()
+    registry = json.loads((tmp_path / "models" / "registry.json").read_text())
+    assert "acestep-v15-xl-turbo-fp8-fp4" not in registry["models"]
+    assert "kept-pack" in registry["models"]
+    assert "other-model" in registry["models"]
+    gone = main(["delete", "kept-pack"])
+    assert gone == 0
+    assert not kept.exists()
+    assert outside.is_dir()

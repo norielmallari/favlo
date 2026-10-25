@@ -5,6 +5,7 @@ Stereo music from a caption and optional lyrics. The official base model is [ACE
 ```text
 uv run favlo --ace-step-15-turbo setup
 uv run favlo --ace-step-15-turbo quantize
+uv run favlo --ace-step-15-turbo delete acestep-v15-xl-turbo-fp8-fp4
 uv run favlo --ace-step-15-turbo kernels
 uv run favlo --ace-step-15-turbo generate --prompt "anime opening, J-pop, electric guitar, synth lead, electric bass, punchy drums, uplifting, playful, bright, polished, catchy hook" --lyrics "[Intro - electric guitar]
 

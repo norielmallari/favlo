@@ -52,7 +52,7 @@ The official checkpoint is `Wan-AI/Wan2.2-I2V-A14B`. The text encoder is `google
 
 The official checkpoint is `ACE-Step/acestep-v15-xl-turbo`. `setup` downloads the Diffusers split `ACE-Step/acestep-v15-xl-turbo-diffusers`. The steps are [ace-step-15-turbo/SETUP.md](../ace-step-15-turbo/SETUP.md).
 
-`favlo --ace-step-15-turbo setup` writes `models/acestep-v15-xl-turbo`. That checkout holds the text encoder, the tokenizer, the condition encoder, the transformer, and the VAE. `quantize` packs `models/acestep-v15-xl-turbo-fp8-fp4` and stores that directory on the row.
+`favlo --ace-step-15-turbo setup` writes `models/acestep-v15-xl-turbo`. That checkout holds the text encoder, the tokenizer, the condition encoder, the transformer, and the VAE. `quantize` packs `models/acestep-v15-xl-turbo-fp8-fp4` and stores that directory on the row. `delete <folder>` removes that row and the packed directory.
 
 ## Register a finished record
 

@@ -62,6 +62,7 @@ def test_setup_guides_load_by_pipeline_id() -> None:
     music = read_setup("ace-step-15-turbo")
     assert "uv run favlo --ace-step-15-turbo setup" in music
     assert "uv run favlo --ace-step-15-turbo quantize" in music
+    assert "uv run favlo --ace-step-15-turbo delete acestep-v15-xl-turbo-fp8-fp4" in music
     with pytest.raises(ValueError, match="unknown setup guide"):
         read_setup("../qwen36-35b-a3b")
     with pytest.raises(ValueError, match="unknown setup guide"):
