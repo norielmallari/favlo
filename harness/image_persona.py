@@ -20,13 +20,8 @@ from pydantic import Field
 from z_image_turbo.scratch import MAX_EDGE
 
 from favlo.persona import INSTRUCTIONS
-from harness.image_smoke_agent import (
-    HOST,
-    IMAGE_MODEL,
-    JUDGE,
-    affirms,
-    post_json,
-)
+from harness.harness_model import judge_model
+from harness.image_smoke_agent import HOST, IMAGE_MODEL, affirms, post_json
 from harness.mcp_media import generate, read_link
 from harness.server import close_listener, open_listener
 
@@ -47,13 +42,13 @@ QUESTION = (
 ASK = "Draw a picture of yourself."
 
 
-def judge(port: int, png: bytes) -> str:
+def judge(port: int, png: bytes, model: str) -> str:
     encoded = base64.b64encode(png).decode("ascii")
     payload = post_json(
         port,
         "/v1/chat/completions",
         {
-            "model": JUDGE,
+            "model": model,
             "temperature": 0,
             "max_tokens": 8,
             "enable_thinking": False,
@@ -99,8 +94,8 @@ def image_tools(port: int, png: list[bytes]) -> list[object]:
     return [generate_image]
 
 
-async def create_image(base_url: str, port: int, png: list[bytes]) -> None:
-    client = OpenAIChatCompletionClient(model=JUDGE, api_key="favlo", base_url=base_url)
+async def create_image(base_url: str, port: int, png: list[bytes], model: str) -> None:
+    client = OpenAIChatCompletionClient(model=model, api_key="favlo", base_url=base_url)
     client.function_invocation_configuration["max_iterations"] = 2
     client.function_invocation_configuration["max_consecutive_errors_per_request"] = 1
     agent = Agent(
@@ -129,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=Path("."))
     args = parser.parse_args(argv)
     root = args.root.resolve()
+    model = judge_model(root)
     listener = None
     png: list[bytes] = []
     try:
@@ -136,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
         port = listener.port
         base = f"http://{HOST}:{port}/v1"
         print(f"generating on {port} size {MAX_EDGE}", flush=True)
-        asyncio.run(create_image(base, port, png))
+        asyncio.run(create_image(base, port, png, model))
         if not png:
             print("the agent did not generate an image", flush=True)
             return 1
@@ -144,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
         (root / "artifacts" / "favlo-horse.png").write_bytes(png[-1])
         print(f"image bytes {len(png[-1])}", flush=True)
         print("checking", flush=True)
-        reply = judge(port, png[-1])
+        reply = judge(port, png[-1], model)
         print(reply, flush=True)
         if affirms(reply):
             print("image matches", flush=True)

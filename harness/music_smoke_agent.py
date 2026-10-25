@@ -22,9 +22,9 @@ from agent_framework.openai import OpenAIChatCompletionClient
 from harness.inspect_wav import inspect_file
 from harness.mcp_media import generate, read_link
 from harness.music_template import compare_templates, input_template, smoke_body
+from harness.harness_model import judge_model
 from harness.server import close_listener, open_listener
 
-JUDGE = "qwen36-35b-a3b:instruct"
 HOST = "127.0.0.1"
 RMS_FLOOR = 1e-4
 
@@ -63,8 +63,8 @@ def report_ok(text: str, seconds: float) -> bool:
     return channels == 2 and rate == 48_000 and abs(duration - seconds) <= 0.05 and rms > RMS_FLOOR
 
 
-async def _run(base_url: str, music: object) -> None:
-    client = OpenAIChatCompletionClient(model=JUDGE, api_key="favlo", base_url=base_url)
+async def _run(base_url: str, music: object, model: str) -> None:
+    client = OpenAIChatCompletionClient(model=model, api_key="favlo", base_url=base_url)
     client.function_invocation_configuration["max_iterations"] = 2
     client.function_invocation_configuration["max_consecutive_errors_per_request"] = 1
     agent = Agent(
@@ -88,6 +88,7 @@ async def _run(base_url: str, music: object) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate the 10 second music smoke.")
     parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument("--model", default=None, help="chat model id; default is the registry default")
     args = parser.parse_args(argv)
     root = args.root.resolve()
     note_path = root / "docs" / "ace-step-15-turbo" / "smoke.json"
@@ -105,7 +106,8 @@ def main(argv: list[str] | None = None) -> int:
         out = root / "artifacts" / "music-smoke-agent.wav"
         reports: list[str] = []
         print("music", flush=True)
-        asyncio.run(_run(f"http://{HOST}:{port}/v1", music_tool(port, body, out, reports)))
+        model = args.model or judge_model(root)
+        asyncio.run(_run(f"http://{HOST}:{port}/v1", music_tool(port, body, out, reports), model))
         if not reports:
             print("music file was not written", flush=True)
             return 1

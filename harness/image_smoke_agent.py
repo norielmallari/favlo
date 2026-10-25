@@ -20,10 +20,10 @@ from agent_framework import Agent, tool
 from agent_framework.openai import OpenAIChatCompletionClient
 from pydantic import Field
 
+from harness.harness_model import judge_model
 from harness.mcp_media import generate, read_link
 from harness.server import close_listener, open_listener
 
-JUDGE = "qwen36-35b-a3b:instruct"
 IMAGE_MODEL = "Z-Image-Turbo-fp4"
 HOST = "127.0.0.1"
 QUESTION = "Does this picture show a red cube on a white table? Reply with one word: yes or no."
@@ -83,7 +83,7 @@ def image_tools(port: int, body: dict[str, Any], png: list[bytes]) -> list[objec
 
 
 async def create_image(
-    base_url: str, port: int, body: dict[str, Any], model: str = JUDGE
+    base_url: str, port: int, body: dict[str, Any], model: str
 ) -> bytes:
     png: list[bytes] = []
     client = OpenAIChatCompletionClient(model=model, api_key="favlo", base_url=base_url)
@@ -109,7 +109,7 @@ async def create_image(
     return png[-1]
 
 
-def judge(port: int, png: bytes, model: str = JUDGE) -> str:
+def judge(port: int, png: bytes, model: str) -> str:
     encoded = base64.b64encode(png).decode("ascii")
     payload = post_json(
         port,
@@ -139,9 +139,14 @@ def judge(port: int, png: bytes, model: str = JUDGE) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate a low and a max image and check both.")
     parser.add_argument("--root", type=Path, default=Path("."))
-    parser.add_argument("--judge", default=JUDGE)
+    parser.add_argument(
+        "--judge",
+        default=None,
+        help="chat model id for generation and vision checks; default is the registry default",
+    )
     args = parser.parse_args(argv)
     root = args.root.resolve()
+    judge_id = args.judge or judge_model(root)
     body = smoke_body(root)
     listener = None
     try:
@@ -153,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
         for quality in QUALITIES:
             print(f"generating {quality} on {port}", flush=True)
             request = {**body, "quality": quality}
-            png = asyncio.run(create_image(base, port, request, args.judge))
+            png = asyncio.run(create_image(base, port, request, judge_id))
             out = root / "artifacts" / f"image-smoke-agent-{quality}.png"
             out.write_bytes(png)
             saved[quality] = out
@@ -163,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         for quality in QUALITIES:
             print(f"checking {quality}", flush=True)
-            reply = judge(port, saved[quality].read_bytes(), args.judge)
+            reply = judge(port, saved[quality].read_bytes(), judge_id)
             print(reply, flush=True)
             if not affirms(reply):
                 print(f"{quality} image does not match", flush=True)

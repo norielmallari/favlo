@@ -295,9 +295,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--presence-penalty", type=float, default=0.0)
     parser.add_argument("--penalty-window", type=int, default=20)
-    parser.add_argument("--model", default="qwen38-flash-next")
+    parser.add_argument("--model", default=None, help="chat model id; default is the registry default")
     args = parser.parse_args(argv)
     from favlo.cli import repo_root
+    from harness.harness_model import judge_model
     from favlo.daemon import ensure, follow, stop_pid, telemetry_path
 
     port = args.port or _free_port()
@@ -311,12 +312,13 @@ def main(argv: list[str] | None = None) -> int:
     follow(telemetry_path(port), on_line, follow_stop, offset=0)
     try:
         _wait_listening(pid, log)
+        model = args.model or judge_model(repo_root())
         problems = run(
             port,
             log,
             presence=args.presence_penalty,
             window=args.penalty_window,
-            model=args.model,
+            model=model,
         )
     except (
         OSError,

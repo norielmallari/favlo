@@ -25,12 +25,12 @@ from agent_framework import Agent, tool
 from agent_framework.openai import OpenAIChatCompletionClient
 from pydantic import Field
 
+from harness.harness_model import judge_model
 from harness.image_smoke_agent import affirms
 from harness.mcp_media import generate, read_link
 from harness.server import close_listener, open_listener
 from harness.video_mp4 import frame_png, save_mp4
 
-JUDGE = "qwen36-35b-a3b:instruct"
 HOST = "127.0.0.1"
 
 
@@ -185,9 +185,14 @@ def _png_size(blob: bytes) -> tuple[int, int]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Draw a still, then the 320p clip.")
     parser.add_argument("--root", type=Path, default=Path("."))
-    parser.add_argument("--judge", default=JUDGE)
+    parser.add_argument(
+        "--judge",
+        default=None,
+        help="chat model id; default is the registry default",
+    )
     args = parser.parse_args(argv)
     root = args.root.resolve()
+    judge_id = args.judge or judge_model(root)
     video_note = smoke_paths(root)[1]
     still = root / "artifacts" / "video-smoke-agent.png"
     image_body = {
@@ -215,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
             still.unlink()
         sentence = f"Create an image of this exact sentence: {image_body['prompt']}"
         image_tools = video_tools(port, image_body, video_body, still, [])
-        image_failed = _agent(base, [image_tools[0]], "ensure_image", sentence, args.judge)
+        image_failed = _agent(base, [image_tools[0]], "ensure_image", sentence, judge_id)
         if not still.is_file():
             if image_failed != 0:
                 return 1
@@ -232,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
             [video_only[1]],
             "generate_video",
             f"Generate the {video_note['frames']}-frame 320p video from the image.",
-            args.judge,
+            judge_id,
             iterations=1,
         )
         if not clip:
@@ -257,7 +262,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             seen.append(index)
             print(f"checking frame {index}", flush=True)
-            reply = check_still(port, frame_png(out, index), sentence, args.judge)
+            reply = check_still(port, frame_png(out, index), sentence, judge_id)
             print(reply, flush=True)
             if not affirms(reply):
                 print("frame does not match", flush=True)

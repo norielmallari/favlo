@@ -143,10 +143,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Create, edit, and confirm one file.")
     parser.add_argument("--base-url", default="http://127.0.0.1:8129/v1")
     parser.add_argument("--workspace", type=Path, required=True)
-    parser.add_argument("--model", default="qwen38-flash-next")
+    parser.add_argument("--model", default=None, help="chat model id; default is the registry default")
     args = parser.parse_args(argv)
+    from harness.harness_model import judge_model
+
+    model = args.model or judge_model()
     calls, text = asyncio.run(
-        run_file_task(args.base_url, args.workspace, model=args.model)
+        run_file_task(args.base_url, args.workspace, model=model)
     )
     if calls_in_order(calls) and text == EDITED:
         print(f"confirmed {FILENAME}")
