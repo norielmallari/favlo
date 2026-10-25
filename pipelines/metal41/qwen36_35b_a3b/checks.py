@@ -18,10 +18,29 @@ from qwen36_35b_a3b.formats import (
     pack_fp4_matrix,
     pack_fp8_matrix,
     quantize_fp4,
+    quantize_fp8,
 )
 from qwen36_35b_a3b.session import Session
 
 EPS = np.float32(1e-6)
+
+
+def _close_codes(name: str, got: np.ndarray, expect: np.ndarray) -> None:
+    """A one-code gap is the peak scale landing on a rounding boundary."""
+    gap = np.abs(got.astype(np.int16) - expect.astype(np.int16))
+    if int(np.max(gap)) > 1:
+        message = f"{name} codes differ by {int(np.max(gap))}"
+        raise AssertionError(message)
+
+
+def _close_ulp(name: str, got: np.ndarray, expect: np.ndarray) -> None:
+    """One float32 ulp. The peak divided by 127 can land on either side."""
+    gap = np.abs(got.astype(np.float64) - expect.astype(np.float64))
+    room = np.spacing(expect.astype(np.float32)).astype(np.float64)
+    if np.any(gap > room):
+        delta = float(np.max(gap))
+        message = f"{name} max abs {delta}"
+        raise AssertionError(message)
 
 
 def _close(
@@ -1218,9 +1237,110 @@ def check_fp8_expert(session: Session) -> None:
     _close("fp8 and fp4 partials", session.download_f32(hidden, 2048), summed)
 
 
+def _channel_i8(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    peak = np.max(np.abs(matrix), axis=1)
+    scale = np.where(peak > 0.0, peak / np.float32(127.0), np.float32(0.0)).astype(np.float32)
+    inv = np.zeros_like(peak)
+    np.divide(np.float32(127.0), peak, out=inv, where=peak > 0.0)
+    codes = np.rint(matrix * inv[:, None])
+    return np.clip(codes, -127, 127).astype(np.int8), scale
+
+
+def check_i8_prefill(session: Session) -> None:
+    """Packed fp4 and fp8 restore into int8, then a 64-row int8 tile."""
+    rng = np.random.default_rng(7)
+    cases = (
+        ("fp4", 64, 64, 256),
+        ("fp8", 64, 64, 256),
+    )
+    for kind, rows, cols, inner in cases:
+        activation = rng.normal(scale=0.25, size=(rows, inner)).astype(np.float16)
+        activation[0, :] = np.float16(0.0)
+        weight = rng.normal(scale=0.25, size=(cols, inner)).astype(np.float32)
+        weight[1, :] = np.float32(0.0)
+        if kind == "fp4":
+            data, scales = quantize_fp4(weight)
+            restored = dequant_fp4(data, scales, cols, inner)
+            restore = "restore_fp4_i8"
+        else:
+            data, scales = quantize_fp8(weight)
+            restored = dequant_fp8(data, scales, cols, inner)
+            restore = "restore_fp8_i8"
+        expect_codes, expect_scale = _channel_i8(restored)
+        act_codes, act_scale = _channel_i8(activation.astype(np.float32))
+        stage = session.zeros(cols * inner + cols * 4)
+        act = session.zeros(rows * inner)
+        act_factors = session.zeros(rows * 4)
+        destination = session.zeros(rows * cols * 4)
+        width = int(session.pipes["prefill_i8_n64"].threadExecutionWidth())
+        session.begin()
+        session.encode(
+            restore,
+            [
+                (session.upload(np.frombuffer(data, dtype=np.uint8)), 0),
+                (session.upload(np.frombuffer(scales, dtype=np.uint8)), 0),
+                (stage, 0),
+                (stage, cols * inner),
+            ],
+            [np.uint32(cols).tobytes(), np.uint32(inner).tobytes()],
+            (cols, 1, 1),
+            (256, 1, 1),
+        )
+        session.encode(
+            "quantize_half_i8",
+            [
+                (session.upload(np.ascontiguousarray(activation)), 0),
+                (act, 0),
+                (act_factors, 0),
+            ],
+            [np.uint32(rows).tobytes(), np.uint32(inner).tobytes()],
+            (rows, 1, 1),
+            (256, 1, 1),
+        )
+        session.encode(
+            "prefill_i8_n64",
+            [(act, 0), (stage, 0), (destination, 0)],
+            [
+                np.uint32(rows).tobytes(),
+                np.uint32(cols).tobytes(),
+                np.uint32(inner).tobytes(),
+            ],
+            (cols // 64, rows // 64, 1),
+            (width * 4, 1, 1),
+        )
+        session.encode(
+            "scale_i8_f32",
+            [(destination, 0), (act_factors, 0), (stage, cols * inner)],
+            [np.uint32(rows).tobytes(), np.uint32(cols).tobytes()],
+            ((rows * cols + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+        session.end()
+        raw = session.download(stage, cols * inner + cols * 4)
+        got_codes = np.frombuffer(raw[: cols * inner], dtype=np.int8).reshape(cols, inner)
+        got_scale = np.frombuffer(raw[cols * inner :], dtype=np.float32)
+        _close_codes(f"{kind} int8 restore", got_codes, expect_codes)
+        _close_ulp(f"{kind} int8 scale", got_scale, expect_scale)
+        got_act = np.frombuffer(session.download(act, rows * inner), dtype=np.int8).reshape(
+            rows, inner
+        )
+        got_act_scale = session.download_f32(act_factors, rows)
+        _close_codes(f"{kind} int8 activation", got_act, act_codes)
+        _close_ulp(f"{kind} int8 act scale", got_act_scale, act_scale)
+        acc = got_act.astype(np.int64) @ got_codes.astype(np.int64).T
+        expect = (
+            acc
+            * got_act_scale.astype(np.float64)[:, None]
+            * got_scale.astype(np.float64)[None, :]
+        ).astype(np.float32)
+        got = session.download_f32(destination, rows * cols).reshape(rows, cols)
+        _close(f"{kind} int8 tile", got, expect, rtol=1e-5, atol=1e-4)
+
+
 CHECKS = (
     ("fp4 tile", check_fp4_tile),
     ("fp8 tile", check_fp8_tile),
+    ("int8 prefill", check_i8_prefill),
     ("fp4 gemv", check_fp4_gemv),
     ("fp4 wide", check_wide_fp4),
     ("32-row", check_rows_32),

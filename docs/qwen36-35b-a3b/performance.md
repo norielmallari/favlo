@@ -26,7 +26,7 @@ Instruct card. `enable_thinking` is false. Omitted sampling fields come from tha
 uv run python -m harness --model qwen36-35b-a3b
 ```
 
-The server stops after the first turn and starts again, so the next turn loads the stored prefix. Later turns stay on that server. This run is `Qwen3.6-35B-A3B-fp8-e20`, after `moe_group` splits assignments into 16 slices. It reached 102507 prompt tokens over four requests on 23 October 2026. The prefill kernel rows in [ceilings.md](ceilings.md) are the fp4-weight measurement.
+The server stops after the first turn and starts again, so the next turn loads the stored prefix. Later turns stay on that server. This run is `Qwen3.6-35B-A3B-fp8-e20`, after `moe_group` splits assignments into 16 slices. It reached 102507 prompt tokens over four requests on 23 October 2026, before the resident projections restored into an int8 stage.
 
 | Request | Prompt tokens | Cache | Prefill | Decode |
 |---|---:|---|---|---|
@@ -37,7 +37,18 @@ The server stops after the first turn and starts again, so the next turn loads t
 
 The summary is prefill 545.24 tok/s (101868 tok in 186.83 s) and decode 43.18 tok/s (1460 tok in 33.81 s). The previous e20 file agent, before that grouping, was 530.88 tok/s prefill over 101313 tokens and 38.12 tok/s decode over 783 tokens.
 
-One resident load of the earlier fp4 record then applied four chunks in order. The first 2048-token chunk of a prompt, the kernel ceiling in [ceilings.md](ceilings.md), is 1521.37 tok/s.
+On 25 October 2026 the same command ran after the resident projections restored into an int8 stage. It reached 104740 prompt tokens over four requests.
+
+| Request | Prompt tokens | Cache | Prefill | Decode |
+|---|---:|---|---|---|
+| 1 | 366 | miss | 670.63 tok/s (366 tok in 0.55 s) | 57.13 tok/s (37 tok in 0.65 s) |
+| 2 | 47117 | hit 403 | 847.61 tok/s (46714 tok in 55.11 s) | 49.52 tok/s (356 tok in 7.19 s) |
+| 3 | 47515 | prefix load 47473, hit 47473 | 139.57 tok/s (42 tok in 0.30 s) | 35.00 tok/s (46 tok in 1.31 s) |
+| 4 | 104740 | hit 47561 | 443.18 tok/s (57179 tok in 129.02 s) | 40.36 tok/s (910 tok in 22.55 s) |
+
+The summary is prefill 563.85 tok/s (104301 tok in 184.98 s) and decode 42.56 tok/s (1349 tok in 31.70 s). The prefill kernel ceiling for 65536 tokens is 832.32 tok/s. The decode kernel ceiling at context 65536 is 58.23 tok/s.
+
+One resident load of the earlier fp4 record then applied four chunks in order. The first 2048-token chunk ceiling for that fp4 forward was 1521.37 tok/s.
 
 | Chunk | Position | Tokens | Prefill |
 |---|---:|---:|---|
@@ -62,6 +73,15 @@ The hidden suite passed. This run is `Qwen3.6-35B-A3B-fp8-e20`, on 23 October 20
 | 2 | 638 | prefix load 399, hit 399 | 624.60 tok/s (239 tok in 0.38 s) | 60.02 tok/s (95 tok in 1.58 s) |
 
 The summary is prefill 195.71 tok/s (638 tok in 3.26 s) and decode 62.93 tok/s (314 tok in 4.99 s). The previous e20 coding agent was 181.59 tok/s prefill over 572 tokens and 54.82 tok/s decode over 199 tokens.
+
+On 25 October 2026 the same command ran after the resident projections restored into an int8 stage. The hidden suite passed. It used two requests and stopped at 663 prompt tokens.
+
+| Request | Prompt tokens | Cache | Prefill | Decode |
+|---|---:|---|---|---|
+| 1 | 399 | miss | 692.67 tok/s (399 tok in 0.58 s) | 63.22 tok/s (244 tok in 3.86 s) |
+| 2 | 663 | prefix load 399, hit 399 | 663.69 tok/s (264 tok in 0.40 s) | 64.00 tok/s (161 tok in 2.52 s) |
+
+The summary is prefill 676.53 tok/s (663 tok in 0.98 s) and decode 63.48 tok/s (405 tok in 6.38 s).
 
 ## File agent, 16GiB
 

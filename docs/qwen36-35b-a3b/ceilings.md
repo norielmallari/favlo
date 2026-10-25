@@ -51,25 +51,44 @@ The embed, the query/gate split, RoPE, the top-8 pick, and the key/value store a
 
 ## Prefill
 
-One chunk of 2048 tokens, then a prompt of 65536 tokens as 32 of those chunks. Projections are `prefill_fp4_n64` where the output width is a multiple of 64, and `prefill_fp4_e8m0` for the 32-wide a and b projections. Routed experts are one 64-row tile for each of the 256 experts. `moe_group` splits the 16384 assignments into 16 slices and keeps token order inside each expert. The 3366.9 µs row is the single-thread kernel. The Gated DeltaNet recurrence is 32 sub-chunks of 64 tokens (Yang et al., §3.3). A score window is 16384 query rows by up to 4096 keys. The first chunk's limit is 2048 keys, so that chunk is the one 2048-key window per head in the table. A later chunk walks 4096-key windows and, when the limit is not a multiple of 4096, one 2048-key tail. The value product uses token stride 262144.
+One chunk of 2048 tokens, then a prompt of 65536 tokens as 32 of those chunks. The resident projections restore an fp8 matrix into a per-row int8 stage, quantize the half activation, multiply with `prefill_i8_n64`, and scale the int32 product back to float. `in_proj_a` and `in_proj_b` stay on `prefill_fp4_e8m0`. Routed experts are one 64-row tile for each of the 256 experts. `moe_group` splits the 16384 assignments into 16 slices and keeps token order inside each expert. The 3366.9 µs row is the single-thread kernel. The Gated DeltaNet recurrence is 32 sub-chunks of 64 tokens (Yang et al., §3.3). A score window is 16384 query rows by up to 4096 keys. The first chunk's limit is 2048 keys, so that chunk is the one 2048-key window per head in the table. A later chunk walks 4096-key windows and, when the limit is not a multiple of 4096, one 2048-key tail. The value product uses token stride 262144.
+
+The int8 rows are one command buffer each, the median of four samples after one discarded sample, measured on 25 October 2026. qkv and q are the same 8192 by 2048 shape. That restore was still falling after seven dispatches, from 1455 µs to 579 µs, and the matmul from 1886 µs to 1112 µs. The repeated dispatch settled at 288.0 µs and 1112.9 µs. Those settled figures are the qkv and q rows. The other int8 rows had already settled.
 
 | Kernel | Count in one chunk | µs per call |
 |---|---:|---:|
-| `prefill_fp4_n64` qkv | 30 | 2705.7 |
-| `prefill_fp4_n64` z | 30 | 1369.9 |
+| `quantize_half_i8` 2048 | 80 | 178.9 |
+| `quantize_half_i8` 4096 | 40 | 316.5 |
+| `quantize_half_i8` 512 | 40 | 75.9 |
+| `restore_fp8_i8` qkv | 30 | 288.0 |
+| `prefill_i8_n64` qkv | 30 | 1112.9 |
+| `scale_i8_f32` qkv | 30 | 490.0 |
+| `restore_fp8_i8` z | 30 | 142.9 |
+| `prefill_i8_n64` z | 30 | 556.7 |
+| `scale_i8_f32` z | 30 | 229.2 |
 | `prefill_fp4_e8m0` a | 30 | 52.6 |
 | `prefill_fp4_e8m0` b | 30 | 52.4 |
-| `prefill_fp4_n64` out | 30 | 1410.8 |
+| `restore_fp8_i8` out | 30 | 138.5 |
+| `prefill_i8_n64` out | 30 | 572.3 |
+| `scale_i8_f32` out | 30 | 60.2 |
 | `gdn_conv_rows` | 30 | 484.6 |
 | `gdn_l2_rows` | 30 | 220.5 |
 | `gdn_chunk_solve` | 960 | 316.4 |
 | `gdn_chunk_out` | 960 | 102.4 |
 | `gdn_chunk_state` | 960 | 151.0 |
 | `gdn_y_norm` | 30 | 363.5 |
-| `prefill_fp4_n64` q | 10 | 2705.7 |
-| `prefill_fp4_n64` k | 10 | 195.2 |
-| `prefill_fp4_n64` v | 10 | 195.2 |
-| `prefill_fp4_n64` o | 10 | 1411.7 |
+| `restore_fp8_i8` q | 10 | 288.0 |
+| `prefill_i8_n64` q | 10 | 1112.9 |
+| `scale_i8_f32` q | 10 | 495.4 |
+| `restore_fp8_i8` k | 10 | 21.2 |
+| `prefill_i8_n64` k | 10 | 73.9 |
+| `scale_i8_f32` k | 10 | 12.9 |
+| `restore_fp8_i8` v | 10 | 21.1 |
+| `prefill_i8_n64` v | 10 | 73.8 |
+| `scale_i8_f32` v | 10 | 12.8 |
+| `restore_fp8_i8` o | 10 | 138.2 |
+| `prefill_i8_n64` o | 10 | 571.7 |
+| `scale_i8_f32` o | 10 | 60.3 |
 | `prefill_fp8_n64` score | 20 | 651.8 |
 | `kv_softmax_max_rows` | 20 | 245.5 |
 | `kv_softmax_prob_rows` | 20 | 1074.5 |
@@ -78,8 +97,12 @@ One chunk of 2048 tokens, then a prompt of 65536 tokens as 32 of those chunks. P
 | `prefill_fp8_n64_stride` | 20 | 775.9 |
 | `kv_scale_partial` | 20 | 60.6 |
 | `kv_acc_add` | 20 | 161.0 |
-| `prefill_fp4_n64` shared up | 40 | 362.3 |
-| `prefill_fp4_n64` shared down | 40 | 180.8 |
+| `restore_fp8_i8` shared up | 40 | 38.9 |
+| `prefill_i8_n64` shared up | 40 | 144.2 |
+| `scale_i8_f32` shared up | 40 | 28.2 |
+| `restore_fp8_i8` shared down | 40 | 25.2 |
+| `prefill_i8_n64` shared down | 40 | 72.2 |
+| `scale_i8_f32` shared down | 40 | 59.8 |
 | `prefill_fp4_expert_tile` gate | 40 | 4199.8 |
 | `prefill_fp4_expert_tile` down | 40 | 2004.3 |
 | `prefill_f16` router | 40 | 139.8 |
@@ -93,10 +116,10 @@ One chunk of 2048 tokens, then a prompt of 65536 tokens as 32 of those chunks. P
 | `scatter_add_grouped` | 40 | 609.1 |
 | `residual_rows` | 40 | 55.9 |
 
-The attention window is the only part of a chunk that changes with the keys already stored. Without that window, one chunk is 1267.066 ms. A 2048-key window is `prefill_fp8_n64` 651.8 µs, `kv_softmax_max_rows` 245.5 µs, `kv_softmax_prob_rows` 1074.5 µs, `kv_softmax_close` 61.9 µs, `kv_cast_probs` 923.4 µs, `prefill_fp8_n64_stride` 775.9 µs, `kv_scale_partial` 60.6 µs, and `kv_acc_add` 161.0 µs, 3954.6 µs together. A 4096-key window is `prefill_fp8_n64` 1295.8 µs, `kv_softmax_max_rows` 370.5 µs, `kv_softmax_prob_rows` 1564.6 µs, `kv_softmax_close` 63.9 µs, `kv_cast_probs` 2422.4 µs, `prefill_fp8_n64_stride` 1570.1 µs, `kv_scale_partial` 60.6 µs, and `kv_acc_add` 177.7 µs, 7525.6 µs together. The first chunk, one 2048-key window per head, is 1346.2 ms, 1521.37 tok/s.
+The attention window is the only part of a chunk that changes with the keys already stored. Without that window, one chunk is 1216.963 ms. A 2048-key window is `prefill_fp8_n64` 651.8 µs, `kv_softmax_max_rows` 245.5 µs, `kv_softmax_prob_rows` 1074.5 µs, `kv_softmax_close` 61.9 µs, `kv_cast_probs` 923.4 µs, `prefill_fp8_n64_stride` 775.9 µs, `kv_scale_partial` 60.6 µs, and `kv_acc_add` 161.0 µs, 3954.6 µs together. A 4096-key window is `prefill_fp8_n64` 1295.8 µs, `kv_softmax_max_rows` 370.5 µs, `kv_softmax_prob_rows` 1564.6 µs, `kv_softmax_close` 63.9 µs, `kv_cast_probs` 2422.4 µs, `prefill_fp8_n64_stride` 1570.1 µs, `kv_scale_partial` 60.6 µs, and `kv_acc_add` 177.7 µs, 7525.6 µs together. The first chunk, one 2048-key window per head, is 1296.1 ms, 1580.18 tok/s.
 
-A prompt of 65536 tokens is 32 chunks. Chunk n sees n×2048 keys: the floor of n/2 windows of 4096 keys, and one 2048-key window when n is odd. One head walks 256 windows of 4096 keys and 16 windows of 2048 keys. Ten layers and two heads make 20 of each. That prompt is 80342.7 ms, 815.71 tok/s. That is the kernel ceiling for prefill.
+A prompt of 65536 tokens is 32 chunks. Chunk n sees n×2048 keys: the floor of n/2 windows of 4096 keys, and one 2048-key window when n is odd. One head walks 256 windows of 4096 keys and 16 windows of 2048 keys. Ten layers and two heads make 20 of each. That prompt is 78739.4 ms, 832.32 tok/s. That is the kernel ceiling for prefill.
 
-The byte count repeats the projections, all 256 expert images, and the float16 routers on every chunk, and adds the GDN state read and write, the K and V bytes of each window, the float32 score and probability writes, the float16 probability scratch, and one float scale per row per window. On this record the projections and the shared expert are fp8, and 2,048 of the 10,240 expert images are fp8. One first chunk is 28,688,637,952 bytes. The 65536-token prompt is 4,257,677,574,144 bytes, 14.06 s at 302.74 GB/s, 4659.90 tok/s. The 90% test for prefill uses a kernel ceiling measured on the kernels the forward launches. The rows above are not that measurement.
+The byte count repeats the projections, all 256 expert images, and the float16 routers on every chunk, and adds the GDN state read and write, the K and V bytes of each window, the float32 score and probability writes, the float16 probability scratch, and one float scale per row per window. On this record the projections and the shared expert are fp8, and 2,048 of the 10,240 expert images are fp8. One first chunk is 28,688,637,952 bytes. The 65536-token prompt is 4,257,677,574,144 bytes, 14.06 s at 302.74 GB/s, 4659.90 tok/s. The 90% test for prefill uses this kernel ceiling. The int8 rows are the resident projections the forward launches. The packed-tile rows for `in_proj_a`, `in_proj_b`, and the routed experts remain the earlier fp4-weight measurement.
 
 The embed, the coefficient row, the top-8 pick, the query/gate split, RoPE, the key/value store, and the grouped SiLU after the expert tile are not in this total.

@@ -1,14 +1,17 @@
-"""Chunked prompt prefill. Projections are fp4 matmul2d tiles of 64 rows.
+"""Chunked prompt prefill. Resident projections restore into an int8 stage.
 
-Decode stays a GEMV. A chunk is at most 2048 tokens so a routed expert's
-group is large enough for that tile. The groups are built on device, and the
-layer stays one command buffer. The Gated DeltaNet scan is chunks of 64,
-with the state update and the outputs dispatched across the chunk and the 32
-heads. The short convolution is one thread per token and channel. Float
-attention is one dispatch per layer. fp8 and fp4 attention
-scores and value mixes are ``matmul2d`` tiles. Expert groups are gathered,
-multiplied, and scattered back onto the token rows. A widths file
-dispatches the fp8 expert tile when that expert's width byte is 8.
+The stage is one matrix at a time, built from the packed fp4 or fp8 bytes,
+and dropped after the epilogue. Decode stays a GEMV on those packed bytes.
+A chunk is at most 2048 tokens so a routed expert's group is large enough
+for a 64-row tile. The groups are built on device, and the layer stays one
+command buffer. The Gated DeltaNet scan is chunks of 64, with the state
+update and the outputs dispatched across the chunk and the 32 heads. The
+short convolution is one thread per token and channel. Float attention is
+one dispatch per layer. fp8 and fp4 attention scores and value mixes are
+``matmul2d`` tiles. Expert groups are gathered, multiplied, and scattered
+back onto the token rows. A widths file dispatches the fp8 expert tile when
+that expert's width byte is 8. ``in_proj_a``, ``in_proj_b``, and the routed
+experts stay on the packed tiles.
 """
 
 from __future__ import annotations
@@ -26,6 +29,21 @@ CHUNK = 2048
 HIDDEN = 2048
 HEAD = 256
 EPS = 1e-6
+# The qkv projection is the widest resident matrix: 8192 by 2048, plus one float scale per row.
+I8_STAGE = 8192 * 2048 + 8192 * 4
+# The output projection reads a 4096-wide activation.
+I8_ACT = CHUNK * 4096
+_I8_NAMES = (
+    "in_proj_qkv.weight",
+    "in_proj_z.weight",
+    "out_proj.weight",
+    "q_proj.weight",
+    "k_proj.weight",
+    "v_proj.weight",
+    "o_proj.weight",
+    "shared_expert.gate_up",
+    "shared_expert.down_proj.weight",
+)
 _GDN_CHUNK = 64
 _GATE_SCALE = 1_048_576
 _DOWN_SCALE = 524_288
@@ -57,6 +75,9 @@ class _Workspace:
         self.hidden = zeros(cap * HIDDEN * 4)
         self.normed = zeros(cap * HIDDEN * 4)
         self.half = zeros(cap * 4096 * 2)
+        self.i8_stage = zeros(I8_STAGE)
+        self.i8_act = zeros(I8_ACT)
+        self.i8_act_scale = zeros(cap * 4)
         self.wide = zeros(cap * 8192 * 4)
         self.mixed = zeros(cap * 8192 * 4)
         self.z = zeros(cap * 4096 * 4)
@@ -111,6 +132,9 @@ def workspace_bytes() -> int:
         cap * HIDDEN * 4
         + cap * HIDDEN * 4
         + cap * 4096 * 2
+        + I8_STAGE
+        + I8_ACT
+        + cap * 4
         + cap * 8192 * 4
         + cap * 8192 * 4
         + cap * 4096 * 4
@@ -280,8 +304,9 @@ def _embed(runtime: Any, work: _Workspace, count: int) -> None:
 def _gdn(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) -> None:
     base = f"model.language_model.layers.{layer}.linear_attn."
     _cast(runtime, work.normed, work.half, rows * HIDDEN)
-    _matmul(runtime, work.half, base + "in_proj_qkv.weight", work.wide, rows)
-    _matmul(runtime, work.half, base + "in_proj_z.weight", work.z, rows)
+    _quantize_i8(runtime, work, rows, HIDDEN)
+    _matmul_i8(runtime, work, base + "in_proj_qkv.weight", work.wide, rows)
+    _matmul_i8(runtime, work, base + "in_proj_z.weight", work.z, rows)
     _matmul(runtime, work.half, base + "in_proj_a.weight", work.ab, rows)
     _matmul(runtime, work.half, base + "in_proj_b.weight", work.ab2, rows)
     slot = layer - (layer // 4)
@@ -326,7 +351,8 @@ def _gdn(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) -> N
         (128, 1, 1),
     )
     _cast(runtime, work.y, work.half, rows * 4096)
-    _matmul(runtime, work.half, base + "out_proj.weight", work.down, rows)
+    _quantize_i8(runtime, work, rows, 4096)
+    _matmul_i8(runtime, work, base + "out_proj.weight", work.down, rows)
     _add(runtime, work, count)
 
 
@@ -392,9 +418,10 @@ def _attend(
 ) -> None:
     base = f"model.language_model.layers.{layer}.self_attn."
     _cast(runtime, work.normed, work.half, rows * HIDDEN)
-    _matmul(runtime, work.half, base + "q_proj.weight", work.wide, rows)
-    _matmul(runtime, work.half, base + "k_proj.weight", work.kv, rows)
-    _matmul(runtime, work.half, base + "v_proj.weight", work.vv, rows)
+    _quantize_i8(runtime, work, rows, HIDDEN)
+    _matmul_i8(runtime, work, base + "q_proj.weight", work.wide, rows)
+    _matmul_i8(runtime, work, base + "k_proj.weight", work.kv, rows)
+    _matmul_i8(runtime, work, base + "v_proj.weight", work.vv, rows)
     runtime.session.encode(
         "split_q_gate_rows",
         [(work.wide, 0), (work.query, 0), (work.gate, 0)],
@@ -459,7 +486,8 @@ def _attend(
             slot=slot,
         )
     _cast(runtime, work.attn, work.half, rows * 4096)
-    _matmul(runtime, work.half, base + "o_proj.weight", work.down, rows)
+    _quantize_i8(runtime, work, rows, 4096)
+    _matmul_i8(runtime, work, base + "o_proj.weight", work.down, rows)
     _add(runtime, work, count)
 
 
@@ -634,7 +662,8 @@ def _expert_pass(
     """One grouped expert pass. ``shared`` runs the shared expert on the first pass."""
     if shared:
         _cast(runtime, work.normed, work.half, rows * HIDDEN)
-        _matmul(runtime, work.half, prefix + "shared_expert.gate_up", work.gate_up, rows)
+        _quantize_i8(runtime, work, rows, HIDDEN)
+        _matmul_i8(runtime, work, prefix + "shared_expert.gate_up", work.gate_up, rows)
         runtime.session.encode(
             "silu_mul_rows",
             [(work.gate_up, 0), (work.gated, 0)],
@@ -643,7 +672,8 @@ def _expert_pass(
             (256, 1, 1),
         )
         _cast(runtime, work.gated, work.half, rows * 512)
-        _matmul(runtime, work.half, prefix + "shared_expert.down_proj.weight", work.down, rows)
+        _quantize_i8(runtime, work, rows, 512)
+        _matmul_i8(runtime, work, prefix + "shared_expert.down_proj.weight", work.down, rows)
         runtime.session.encode(
             "scatter_add_rows",
             [(work.hidden, 0), (work.down, 0), (work.iota, 0), (work.coeff, 0)],
@@ -759,6 +789,62 @@ def _expert_pass(
         [_u32(HIDDEN), _u32(count)],
         (count, 1, 1),
         threads,
+    )
+
+
+def _quantize_i8(runtime: Any, work: _Workspace, rows: int, inner: int) -> None:
+    if rows * inner > I8_ACT:
+        message = f"int8 activation {rows} by {inner} exceeds the stage"
+        raise RuntimeError(message)
+    runtime.session.encode(
+        "quantize_half_i8",
+        [(work.half, 0), (work.i8_act, 0), (work.i8_act_scale, 0)],
+        [_u32(rows), _u32(inner)],
+        (rows, 1, 1),
+        (256, 1, 1),
+    )
+
+
+def _matmul_i8(runtime: Any, work: _Workspace, name: str, dest: Any, rows: int) -> None:
+    buf, offset, entry = runtime._loc(name)
+    cols, inner = (int(value) for value in entry["stored_shape"])
+    kind = entry.get("dtype", "fp4")
+    if kind not in {"fp4", "fp8"} or not name.endswith(_I8_NAMES):
+        message = f"{name} is not an int8 prefill matrix"
+        raise RuntimeError(message)
+    if cols * inner + cols * 4 > I8_STAGE:
+        message = f"{name} int8 stage {cols} by {inner} does not fit"
+        raise RuntimeError(message)
+    if cols % 64 or rows % 64 or inner % 128:
+        message = f"{name} tile {rows} by {cols} by {inner} is not a 64-row int8 tile"
+        raise RuntimeError(message)
+    scale = cols * inner
+    runtime.session.encode(
+        "restore_fp8_i8" if kind == "fp8" else "restore_fp4_i8",
+        [
+            (buf, offset),
+            (buf, runtime._scale(entry, offset)),
+            (work.i8_stage, 0),
+            (work.i8_stage, scale),
+        ],
+        [_u32(cols), _u32(inner)],
+        (cols, 1, 1),
+        (256, 1, 1),
+    )
+    runtime.session.encode(
+        "prefill_i8_n64",
+        [(work.i8_act, 0), (work.i8_stage, 0), (dest, 0)],
+        [_u32(rows), _u32(cols), _u32(inner)],
+        (cols // 64, rows // 64, 1),
+        _i8_threads(runtime),
+    )
+    n = rows * cols
+    runtime.session.encode(
+        "scale_i8_f32",
+        [(dest, 0), (work.i8_act_scale, 0), (work.i8_stage, scale)],
+        [_u32(rows), _u32(cols)],
+        ((n + 255) // 256, 1, 1),
+        (256, 1, 1),
     )
 
 
@@ -994,6 +1080,11 @@ def _cast_at(
 
 def _tile_threads(runtime: Any) -> tuple[int, int, int]:
     width = int(runtime.session.pipes["prefill_fp4_e8m0"].threadExecutionWidth())
+    return (width * 4, 1, 1)
+
+
+def _i8_threads(runtime: Any) -> tuple[int, int, int]:
+    width = int(runtime.session.pipes["prefill_i8_n64"].threadExecutionWidth())
     return (width * 4, 1, 1)
 
 
