@@ -566,10 +566,16 @@ def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
             assert opened[-1].closed
         runtime = _Runtime()
         runtime._name = selection.pipeline
+        runtime.counts = {}
+        runtime.proxy = SimpleNamespace()
         opened.append(runtime)
         return runtime
 
-    monkeypatch.setattr(listener, "_open_runtime", opener)
+    def start(selection, args):
+        del args
+        return opener(selection, None)
+
+    monkeypatch.setattr(listener, "_start_pipeline", start)
     state: dict = {"runtime": None, "record": None, "pipeline": None}
     args = _args()
     first = SimpleNamespace(
@@ -655,7 +661,10 @@ def test_a_failed_open_sweeps_spans_from_that_attempt(monkeypatch) -> None:
         message = "open failed"
         raise RuntimeError(message)
 
-    monkeypatch.setattr(listener, "_open_runtime", opener)
+    def start(selection, bound_args):
+        return opener(selection, None, getattr(bound_args, "max_memory", None))
+
+    monkeypatch.setattr(listener, "_start_pipeline", start)
     state: dict = {"runtime": None, "record": None, "pipeline": None, "module": None}
     try:
         try:
@@ -683,9 +692,14 @@ def test_close_sweeps_the_owner_recorded_at_open(monkeypatch) -> None:
         memory.allocate(4096, owner=owner, zero=True)
         runtime = _Runtime()
         runtime._owner = owner
+        runtime.counts = {owner: 4096}
+        runtime.proxy = SimpleNamespace()
         return runtime
 
-    monkeypatch.setattr(listener, "_open_runtime", opener)
+    def start(selection, bound_args):
+        return opener(selection, None, getattr(bound_args, "max_memory", None))
+
+    monkeypatch.setattr(listener, "_start_pipeline", start)
     state: dict = {"runtime": None, "record": None, "pipeline": None, "module": None}
     try:
         listener._install_runtime(state, _args(), _selection("rec", "z-image-turbo"))
@@ -1111,6 +1125,44 @@ def test_mcp_initialize_lists_tools_and_rejects_a_batch(tmp_path) -> None:
     assert not state.get("media_order")
     assert batch_status >= 400
     assert not isinstance(batch, list)
+
+
+def test_legacy_initialize_is_rejected(tmp_path) -> None:
+    runtime = _Runtime()
+    state, thread = _serve_background(runtime)
+    state["image_home"] = tmp_path
+    port = int(state["server"].server_address[1])
+    raw = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "favlo-test", "version": "0"},
+            },
+        }
+    ).encode()
+    try:
+        status, body = _mcp_raw(
+            port,
+            raw,
+            {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+                "mcp-protocol-version": "2025-06-18",
+                "mcp-method": "initialize",
+            },
+        )
+        discover_status, discovered = _mcp(port, "server/discover", {})
+    finally:
+        _stop_background(state, thread)
+    assert status == 200, body
+    assert body["error"]["code"] == -32022
+    assert body["id"] == 7
+    assert discover_status == 200
+    assert "2026-07-28" in discovered["result"]["supportedVersions"]
 
 
 def test_mcp_queue_runs_the_first_image_and_cancel_skips_the_second(tmp_path) -> None:

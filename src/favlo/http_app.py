@@ -101,6 +101,89 @@ def serve(args: Any, state: dict[str, Any]) -> int:
     return 0
 
 
+def _reject_legacy_initialize(mcp_app: Any) -> None:
+    """`initialize` for a pre-2026-07-28 client returns -32022 so the client discovers."""
+    route = mcp_app.routes[0]
+    route.app = _LegacyInitialize(route.app)
+    route.endpoint = route.app
+
+
+class _LegacyInitialize:
+    """Reject a legacy handshake. `server/discover` remains the negotiation."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http" or scope.get("method") != "POST":
+            await self.app(scope, receive, send)
+            return
+        body = b""
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            if message["type"] != "http.request":
+                continue
+            body += message.get("body", b"")
+            if not message.get("more_body", False):
+                break
+        rejected = _legacy_initialize_error(body)
+        if rejected is None:
+            sent = False
+
+            async def replay() -> dict[str, Any]:
+                nonlocal sent
+                if sent:
+                    return {"type": "http.disconnect"}
+                sent = True
+                return {"type": "http.request", "body": body, "more_body": False}
+
+            await self.app(scope, replay, send)
+            return
+        payload = json.dumps(rejected).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [
+                    [b"content-type", b"application/json"],
+                    [b"content-length", str(len(payload)).encode()],
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": payload})
+
+
+def _legacy_initialize_error(body: bytes) -> dict[str, Any] | None:
+    try:
+        message = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(message, dict) or message.get("method") != "initialize":
+        return None
+    params = message.get("params")
+    requested = params.get("protocolVersion") if isinstance(params, dict) else None
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    version = None
+    if isinstance(meta, dict):
+        version = meta.get("io.modelcontextprotocol/protocolVersion")
+    if requested == "2026-07-28" and version == "2026-07-28":
+        return None
+    return {
+        "jsonrpc": "2.0",
+        "id": message.get("id"),
+        "error": {
+            "code": -32022,
+            "message": "Unsupported protocol version",
+            "data": {
+                "supported": ["2026-07-28"],
+                "requested": requested if isinstance(requested, str) else "",
+            },
+        },
+    }
+
+
 def build_app(args: Any, state: dict[str, Any]) -> Starlette:
     _prepare_listener(state)
 
@@ -109,6 +192,7 @@ def build_app(args: Any, state: dict[str, Any]) -> Starlette:
 
     mcp = build_mcp(dispatch, state)
     mcp_app = mcp.http_app(path="/mcp", stateless_http=True, json_response=True)
+    _reject_legacy_initialize(mcp_app)
     async def models(request: Request) -> Response:
         return _models(request, state)
 
@@ -480,7 +564,12 @@ def _run_once(
             if not reply.started:
                 reply.json(404, {"error": {"message": str(exc), "type": "not_found"}})
         except Exception as exc:
-            _report_failure(getattr(state.get("runtime"), "console", None))
+            from favlo.pipeline_worker import ChildExited
+
+            if isinstance(exc, ChildExited):
+                _abandon_child(state, args)
+            else:
+                _report_failure(getattr(state.get("runtime"), "console", None))
             if not reply.started:
                 reply.json(500, {"error": {"message": str(exc), "type": type(exc).__name__}})
     finally:
@@ -498,6 +587,16 @@ def _run_once(
                 500,
                 {"error": {"message": "the pipeline wrote no reply", "type": "RuntimeError"}},
             )
+
+
+def _abandon_child(state: dict[str, Any], args: Any) -> None:
+    """Drop a pipeline process that exited on its own and forget its owners."""
+    from favlo.listener import _drop_runtime
+    from favlo.pipeline_worker import PipelineChild
+
+    runtime = state.get("runtime")
+    if isinstance(runtime, PipelineChild):
+        _drop_runtime(state, args)
 
 
 def _embeds_pending(state: dict[str, Any]) -> bool:

@@ -11,7 +11,6 @@ handler through the same lock as ``POST /v1``. Chat completion is not a tool.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 from datetime import timedelta
 from pathlib import Path
@@ -340,7 +339,9 @@ async def _run_task(dispatch: Any, kind: str, body: dict[str, Any]) -> dict[str,
     task_id = info.task_id if info is not None else ""
     if task_id and await _already_cancelled(task_id):
         return {"status": "cancelled"}
-    payload = await asyncio.to_thread(dispatch, kind, body, task_id)
+    from favlo.jobs import execute
+
+    payload = await execute(task_id, lambda: dispatch(kind, body, task_id))
     if not isinstance(payload, dict):
         message = "the pipeline wrote no reply"
         raise ToolError(message)

@@ -9,6 +9,7 @@ then drops the imported pipeline modules.
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from typing import Any
 
 _HOLDS = ("image_hold", "video_hold", "music_hold")
@@ -112,7 +113,9 @@ class Pipelines:
             shutdown.runtime = None
         if drop_modules:
             for key in _HOLDS:
-                state.pop(key, None)
+                value = state.pop(key, None)
+                if isinstance(value, Path):
+                    value.unlink(missing_ok=True)
         cancel = state.get("cancel")
         if isinstance(cancel, threading.Event):
             cancel.clear()

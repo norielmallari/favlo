@@ -146,6 +146,20 @@ def test_a_request_after_unload_does_not_open(monkeypatch) -> None:
     assert reply.status == 409
 
 
+def test_reload_drops_a_checkpoint_file(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("favlo.cli.drop_pipeline_modules", lambda root=None: 0)
+    checkpoint = tmp_path / "video_hold.pkl"
+    checkpoint.write_bytes(b"hold")
+    state = _state()
+    state["video_hold"] = checkpoint
+    try:
+        pipelines.reload(state, SimpleNamespace())
+        assert "video_hold" not in state
+        assert not checkpoint.exists()
+    finally:
+        pipelines.close(_state(), SimpleNamespace())
+
+
 def test_reload_drops_a_paused_hold(monkeypatch) -> None:
     monkeypatch.setattr("favlo.cli.drop_pipeline_modules", lambda root=None: 0)
     state = _state()

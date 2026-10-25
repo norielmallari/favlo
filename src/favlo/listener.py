@@ -145,6 +145,19 @@ def _accepts(opener: Any, name: str) -> bool:
     return name in parameters
 
 
+def _start_pipeline(selection: Any, args: Any) -> Any:
+    """Open the pipeline in its own process. The daemon keeps the handle."""
+    from favlo.pipeline_worker import PipelineChild
+
+    child = PipelineChild(
+        selection,
+        getattr(args, "max_memory", None),
+        console=getattr(args, "console_ui", None),
+    )
+    child.open()
+    return child
+
+
 def _open_runtime(selection: Any, console: Any, max_memory: str | None) -> Any:
     """The pipeline named on the registry row. The previous runtime is already closed."""
     from favlo.memory import mint_owner
@@ -218,19 +231,26 @@ def _install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
         ui.load_detail = selection.alias or selection.folder
     before = memory.owners()
     try:
-        runtime = _open_runtime(selection, ui, getattr(args, "max_memory", None))
+        child = _start_pipeline(selection, args)
     except Exception:
         _sweep_new(before)
         raise
-    state["runtime"] = runtime
-    state["memory_owners"] = _opening_owners(before, runtime)
-    pipelines.add(runtime, state["memory_owners"])
+
+    def _crashed() -> None:
+        if state.get("runtime") is child:
+            _drop_runtime(state, args)
+
+    child.on_crash = _crashed
+    memory.report(getattr(child, "counts", {}) or {})
+    state["runtime"] = child
+    state["memory_owners"] = tuple(child.counts)
+    pipelines.add(child, state["memory_owners"])
     state["record"] = selection.folder
     state["pipeline"] = selection.pipeline
-    state["module"] = _pipeline_module(selection)
+    state["module"] = child.proxy
     shutdown = getattr(args, "shutdown", None)
     if shutdown is not None:
-        shutdown.runtime = runtime
+        shutdown.runtime = child
     if ui is not None and ui.keeps_lines:
         label = selection.alias or selection.folder
         _log(f"loaded {label} {selection.folder}")

@@ -148,6 +148,7 @@ class Memory:
         self._live = 0
         self._pending = 0
         self._returning = 0
+        self._reported: dict[str, int] = {}
         self._reclaim_mark = 0
         self._fence: Any = None
         self._wait_fence = False
@@ -173,10 +174,44 @@ class Memory:
             return self._pending
 
     def budget(self) -> int:
-        """Reclaimable pages, live spans, and bytes a released heap has not yet returned."""
+        """Reclaimable pages, live spans, reported child bytes, and heaps not yet returned."""
         with self._lock:
             self._retire_pending()
-            return reclaimable_bytes() + self._live + self._pending + self._returning
+            reported = sum(self._reported.values())
+            return reclaimable_bytes() + self._live + self._pending + self._returning + reported
+
+    def report(self, counts: dict[str, int]) -> None:
+        """Remember bytes a pipeline process reported. This does not create a device."""
+        with self._lock:
+            for owner, nbytes in counts.items():
+                if isinstance(owner, str) and owner:
+                    self._reported[owner] = max(int(nbytes), 0)
+
+    def forget(self, owners: Any) -> None:
+        """Drop reported bytes for owners whose process has exited."""
+        with self._lock:
+            self._forget_locked(owners)
+
+    def reported(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self._reported)
+
+    def owner_bytes(self) -> dict[str, int]:
+        """Live bytes per owner. Reads the span table and does not create a device."""
+        with self._lock:
+            counts: dict[str, int] = {}
+            for span in self._spans.values():
+                if span.released or not span.owner:
+                    continue
+                counts[span.owner] = counts.get(span.owner, 0) + span.requested
+            return counts
+
+    def _forget_locked(self, owners: Any) -> None:
+        if not owners:
+            return
+        for owner in owners:
+            if isinstance(owner, str) and owner:
+                self._reported.pop(owner, None)
 
     def make_queue(self) -> Any:
         with self._lock:
@@ -411,6 +446,7 @@ class Memory:
 
     def sweep(self, owner: str) -> None:
         with self._lock:
+            self._forget_locked((owner,))
             self._retire_commands()
             spans = [span for span in self._spans.values() if span.owner == owner]
             for span in spans:
