@@ -1,6 +1,6 @@
 # Ceilings
 
-Kernel and bandwidth ceilings for one 576×320 clip of 9 frames and 4 Euler steps. The latent is 3×40×72, which is 2160 tokens. `matmul2d` rows are padded to 2176. Eight of the forty blocks are fp8. Text, time, and the head stay fp4. Reuse these figures while the kernels named here are unchanged. Recompute this note when one of them changes.
+Kernel and bandwidth ceilings for one 576×320 clip of 9 frames and 4 Euler steps. The latent is 3×40×72, which is 2160 tokens. `matmul2d` rows are padded to 2176. Eight of the forty blocks are fp8. Text and time stay fp4. The head weight is float16; these times were measured when it was fp4. Reuse these figures while the kernels named here are unchanged. Recompute this note when one of them changes.
 
 Each time is one command buffer, then a wait. The time is `GPUEndTime − GPUStartTime`. Each kernel is timed alone. The figure is the median of five dispatches after one discarded sample.
 

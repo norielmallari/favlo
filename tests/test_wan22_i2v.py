@@ -14,8 +14,8 @@ from wan22_i2v.formats import block_winners, pack_linear, relative_error, restor
 from wan22_i2v.hold import ClipHold, ClipPaused, reload_quietly
 from wan22_i2v.latent import condition_volume, unpatchify
 from wan22_i2v.png import decode_png, encode_png
-from wan22_i2v.progress import ClipProgress, clip_label, sample_total
-from wan22_i2v.record import quantize, write_graph_source
+from wan22_i2v.progress import ClipProgress, clip_label, stage_shares
+from wan22_i2v.record import load_expert, quantize, write_graph_source
 from wan22_i2v.schedule import (
     FIVE_SEC_FRAMES,
     P320_HEIGHT,
@@ -100,7 +100,9 @@ def test_name_is_the_packed_model_id(tmp_path: Path, monkeypatch: pytest.MonkeyP
         *,
         high_dir: Path | None = None,
         low_dir: Path | None = None,
+        percent: int = 20,
     ) -> dict:
+        del percent
         del high, low, config
         seen["dest"] = dest
         seen["high"] = high_dir
@@ -195,6 +197,7 @@ def test_resume_keeps_only_full_ranges() -> None:
 
 def test_promote_count_is_eight_blocks() -> None:
     assert promote_count(40) == 8
+    assert promote_count(40, 50) == 20
     assert promote_count(24) == 4
     assert promote_count(1) == 0
 
@@ -305,7 +308,36 @@ def test_graph_quantize_promotes_nothing(tmp_path) -> None:
     )
     assert manifest["high_promoted"] == []
     assert manifest["low_promoted"] == []
+    assert manifest["fp8_percent"] == 20
+    high = tmp_path / "record" / "high"
+    head = high / "head.head.weight.npy"
+    assert head.is_file()
+    assert not (high / "head.head.weight.npz").is_file()
+    assert (high / "head.head.bias.npy").is_file()
     assert (tmp_path / "record" / "embed.npy").is_file()
+    loaded = load_expert(high, int(config["layers"]))
+    assert loaded.halves["head.head.weight"].dtype == np.float16
+    assert loaded.halves["head.head.weight"].shape == (64, 128)
+    weight = np.array(loaded.halves["head.head.weight"], dtype=np.float32)
+    bias = np.array(loaded.halves["head.head.bias"], dtype=np.float32)
+    head.unlink()
+    (high / "head.head.bias.npy").unlink()
+    packed = pack_linear(weight, bias, "fp4")
+    np.savez(
+        high / "head.head.weight.npz",
+        kind=np.array(packed.kind),
+        packed=packed.packed,
+        scales=packed.scales,
+        bias=packed.bias,
+        perm=packed.perm,
+        logical_n=np.int32(packed.logical_n),
+        logical_k=np.int32(packed.logical_k),
+        padded_n=np.int32(packed.padded_n),
+        stored_k=np.int32(packed.stored_k),
+    )
+    restored = load_expert(high, int(config["layers"]))
+    assert restored.halves["head.head.weight"].shape == (64, 128)
+    assert restored.halves["head.head.bias"].shape == (64,)
 
 
 def _png() -> str:
@@ -505,6 +537,27 @@ def test_video_job_passes_guidance_into_generate(tmp_path) -> None:
     assert handler.payload["negative_prompt"] == "blur"
 
 
+def test_stage_shares_sum_to_100() -> None:
+    shares = stage_shares(text=True, vae=True, loads=2, steps=4)
+    assert shares["text"] == 8
+    assert shares["encode"] == 8
+    assert shares["load"] == [4, 4]
+    assert shares["decode"] == 12
+    assert shares["pack"] == 2
+    assert sum(shares["step"]) == 62
+    wide = stage_shares(text=True, vae=True, loads=2, steps=80)
+    total = (
+        wide["text"]
+        + wide["encode"]
+        + sum(wide["load"])
+        + sum(wide["step"])
+        + wide["decode"]
+        + wide["pack"]
+    )
+    assert total == 100
+    assert all(part >= 1 for part in wide["step"])
+
+
 def test_progress_counts_finished_stages() -> None:
     job = {"status": "in_progress", "progress": 0, "stage": None}
     row: dict[str, object] = {}
@@ -536,35 +589,45 @@ def test_progress_counts_finished_stages() -> None:
 
     label = clip_label(576, 320, 81, 16)
     assert label == "576x320 81 frames 5.0625s"
-    assert (
-        sample_total(
-            steps=4,
-            dit_layers=40,
-            loads=2,
-            weights=20,
-            text_layers=24,
-            vae_blocks=21 * 36,
-            pipelines=19,
-            gpus=3,
-        )
-        == 24 + 40 + 160 + 756 + 57
-    )
     progress = ClipProgress(job=job, console=_Console(), clip=label)
-    progress.open(9)
+    progress.open(
+        text_layers=2,
+        pipelines=1,
+        loads=1,
+        steps=1,
+        encode_blocks=1,
+        decode_blocks=1,
+        dit_layers=2,
+        files=2,
+    )
+    progress.stage("compile")
     assert row["line"] == label
     assert row["phase"] == "sample"
     assert row["unit"] == "layers"
-    assert row["total"] == 9
-    assert row["detail"] == ""
+    assert row["total"] == 3
+    assert row["detail"] == "compile"
+    progress.advance()
     progress.stage("text")
     assert row["handle"].detail == "text"
     progress.advance()
+    progress.advance()
     assert job["stage"] == "text"
-    assert job["progress"] == 11
+    assert job["progress"] == 8
     assert isinstance(job["eta"], int)
-    for _ in range(7):
-        progress.advance()
-    assert job["progress"] == 88
+    progress.stage("load")
+    assert row["phase"] == "load"
+    assert row["unit"] == "files"
+    assert row["total"] == 2
+    assert row["summary"] == "text 3/3 layers"
+    assert row["closed"] == 3
+    progress.advance()
+    progress.advance()
+    assert job["progress"] == 12
+    progress.stage("high")
+    assert row["unit"] == "layers"
+    assert row["detail"] == "high"
+    progress.advance()
+    progress.advance()
     assert job["status"] == "in_progress"
     progress.note("step 0 expert high 1.00s")
     assert row["line"] == "step 0 expert high 1.00s"
@@ -573,9 +636,8 @@ def test_progress_counts_finished_stages() -> None:
     progress.close(progress.summary())
     assert job["progress"] == 100
     assert job["stage"] is None
-    assert row["summary"] == "sample 9/9 layers"
     assert job["eta"] == 0
-    assert row["closed"] == 9
+    assert row["closed"] == 2
 
 
 def test_hold_keeps_a_finished_step_and_reloads_its_expert_quietly() -> None:
@@ -767,8 +829,9 @@ def test_open_runtime_forwards_the_listener_owner(monkeypatch) -> None:
         *,
         owner: str | None = None,
         max_memory: object = None,
+        parts: object = None,
     ) -> str:
-        del path, console
+        del path, console, parts
         seen["owner"] = owner
         seen["cap"] = max_memory
         return "runtime"
@@ -818,6 +881,8 @@ def test_a_short_ledger_keeps_the_requested_clip(monkeypatch, tmp_path: Path) ->
 
     runtime = runtime_mod.Runtime.__new__(runtime_mod.Runtime)
     runtime.path = tmp_path
+    runtime.high = tmp_path / "high"
+    runtime.low = tmp_path / "low"
     runtime._memory_cap = 1
     runtime.config = {"dim": 128, "ffn": 256, "text_len": 16, "text_dim": 32, "freq_dim": 16}
     monkeypatch.setattr(runtime, "_room", lambda: 1)

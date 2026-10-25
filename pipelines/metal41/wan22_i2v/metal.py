@@ -604,6 +604,9 @@ class Gpu:
         groups = (int(count) + threads - 1) // threads
         self._dispatch(name, buffers, constants, (groups, 1, 1), (threads, 1, 1))
 
+    def add_bias(self, data: Any, bias: Any, rows: int, cols: int, logical: int) -> None:
+        self._span("add_bias", [data, bias], rows, cols, [struct.pack("I", logical)])
+
     def matmul_f16(
         self, act: Any, weight: Any, dest: Any, rows: int, cols: int, inner: int
     ) -> None:

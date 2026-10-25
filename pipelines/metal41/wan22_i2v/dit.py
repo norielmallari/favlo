@@ -111,12 +111,13 @@ def forward_bytes(config: dict[str, Any], tokens: int, volume_size: int) -> int:
     freq = int(config["freq_dim"])
     text_dim = int(config["text_dim"])
     span = stored_k(max(dim, ffn, text_dim, freq))
+    head_cols = int(config.get("out_dim", 16)) * 4
     return (
         rows * span * 2
         + 7 * rows * dim * 4
         + rows * ffn * 4
         + 64 * dim * 6 * 4
-        + rows * 64 * 4
+        + rows * head_cols * 4
         + text_rows * dim * 4
         + text_rows * text_dim * 4
         + 64 * freq * 4
@@ -147,6 +148,7 @@ class Forward:
         self.freq = int(config["freq_dim"])
         self.text_dim = int(config["text_dim"])
         self.text_len = text_len
+        self.head_cols = int(config["out_dim"]) * 4
         span = stored_k(max(dim, ffn, self.text_dim, self.freq))
         self.half = gpu.keep(gpu.empty(self.rows * span * 2))
         self.x = gpu.keep(gpu.empty(self.rows * dim * 4))
@@ -158,7 +160,7 @@ class Forward:
         self.proj = gpu.keep(gpu.empty(self.rows * dim * 4))
         self.hidden = gpu.keep(gpu.empty(self.rows * ffn * 4))
         self.wide = gpu.keep(gpu.empty(64 * dim * 6 * 4))
-        self.head_out = gpu.keep(gpu.empty(self.rows * 64 * 4))
+        self.head_out = gpu.keep(gpu.empty(self.rows * self.head_cols * 4))
         self.text = gpu.keep(gpu.empty(self.text_rows * dim * 4))
         self.embed = gpu.keep(gpu.empty(self.text_rows * self.text_dim * 4))
         self.time_src = gpu.keep(gpu.empty(64 * self.freq * 4))
@@ -325,7 +327,22 @@ class Forward:
         self.gpu.layernorm(self.x, self.nrm, self.rows, self.dim, self.eps)
         self._bind(0, 1)
         self.gpu.modulate(self.nrm, self.shift, self.scale, self.rows, self.dim, self.dim)
-        self._linear(self.nrm, self.dim, self.rows, "head.head.weight", self.head_out, resident)
+        self.gpu.cast_half(self.nrm, self.half, self.rows * self.dim)
+        self.gpu.matmul_f16(
+            self.half,
+            resident.halves["head.head.weight"],
+            self.head_out,
+            self.rows,
+            self.head_cols,
+            self.dim,
+        )
+        self.gpu.add_bias(
+            self.head_out,
+            resident.halves["head.head.bias"],
+            self.rows,
+            self.head_cols,
+            self.head_cols,
+        )
 
     def _rms(self, values: Any, weight: Any, rows: int) -> None:
         self.gpu.rmsnorm(values, weight, values, rows, self.dim, self.eps)

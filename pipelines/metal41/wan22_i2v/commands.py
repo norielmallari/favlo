@@ -12,11 +12,19 @@ import numpy as np
 
 from wan22_i2v.formats import TILE_M, dequant_fp4, dequant_fp8, pack_linear
 from wan22_i2v.png import decode_png
-from wan22_i2v.schedule import OFFICIAL, P320_HEIGHT, P320_WIDTH, SHORT_FRAMES, STEPS
+from wan22_i2v.schedule import (
+    OFFICIAL,
+    P320_HEIGHT,
+    P320_WIDTH,
+    PROMOTE_PERCENT,
+    SHORT_FRAMES,
+    STEPS,
+)
 from wan22_i2v.source import repo_id
 
 _FOLDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _RECORD = "Wan2.2-I2V-A14B-fp4"
+_SERVED = "Wan2.2-I2V-A14B-fp8-e50"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -38,6 +46,12 @@ def main(argv: list[str] | None = None) -> int:
     quant.add_argument("--name", type=_folder_name, default=None, help="folder under models/")
     quant.add_argument("--high-dir", type=Path, default=None, help="quantized high-noise directory")
     quant.add_argument("--low-dir", type=Path, default=None, help="quantized low-noise directory")
+    quant.add_argument(
+        "--fp8-percent",
+        type=int,
+        default=PROMOTE_PERCENT,
+        help="share of blocks stored as fp8",
+    )
     text = sub.add_parser("quantize-text", help="pack the umT5 encoder")
     text.add_argument("--out", type=Path, help="packed umT5 directory")
     text.add_argument("--name", type=_folder_name, default=None, help="packed model folder")
@@ -121,7 +135,7 @@ def _folder_name(text: str) -> str:
     return text
 
 
-def _record_dir(name: str | None, out: Path | None) -> Path:
+def _record_dir(name: str | None, out: Path | None, percent: int = PROMOTE_PERCENT) -> Path:
     from wan22_i2v.source import models_dir
 
     if name is not None and out is not None:
@@ -131,6 +145,8 @@ def _record_dir(name: str | None, out: Path | None) -> Path:
         return models_dir() / name
     if out is not None:
         return out
+    if percent != PROMOTE_PERCENT:
+        return models_dir() / f"Wan2.2-I2V-A14B-fp8-e{percent}"
     return models_dir() / _RECORD
 
 
@@ -143,11 +159,18 @@ def _quantize(args: argparse.Namespace) -> int:
             config = OFFICIAL
         else:
             config = json.loads(args.config.read_text(encoding="utf-8"))
-        dest = _record_dir(args.name, args.out)
+        percent = int(args.fp8_percent)
+        dest = _record_dir(args.name, args.out, percent)
         high_dir = args.high_dir or dest / "high"
         low_dir = args.low_dir or dest / "low"
         manifest = quantize(
-            args.high, args.low, dest, config, high_dir=high_dir, low_dir=low_dir
+            args.high,
+            args.low,
+            dest,
+            config,
+            high_dir=high_dir,
+            low_dir=low_dir,
+            percent=percent,
         )
         register_quantized(
             dest.name,
@@ -174,7 +197,7 @@ def _quantize_text(args: argparse.Namespace) -> int:
     from wan22_i2v.umt5_pack import quantize_umt5
 
     try:
-        record = _record_dir(args.name, None)
+        record = _record_dir(args.name or _SERVED, None)
         dest = args.out if args.out is not None else record / "umt5"
         folder = args.name or record.name
         src = None if args.umt5 is None else encoder_path(repo=args.umt5)

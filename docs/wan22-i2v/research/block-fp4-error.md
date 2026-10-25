@@ -35,3 +35,7 @@ The sort key is the worst of the ten relative errors in one block. The budget is
 ## Corrections
 
 Later finds are appended here. The sections above stay as committed.
+
+25 October 2026. The head weight and its bias are stored as float16 and sit outside this ranking. The eight-block lists above are the 20% pack.
+
+25 October 2026. `--fp8-percent 50` stores twenty of the forty blocks in each expert as fp8 and writes `models/Wan2.2-I2V-A14B-fp8-e50`. The high-noise blocks are 2, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, and 27. The low-noise blocks are 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 21, 22, 24, and 26. Queries that day: "Wan2.2-I2V-A14B fp8 blocks 2 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 high noise", then "Wan2.2 I2V fp4 relative RMS 50 percent promote blocks low-noise 3 4 5 6 7 8 21 22 24 26". The search did not find those two lists.

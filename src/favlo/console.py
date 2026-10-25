@@ -20,7 +20,7 @@ from typing import Any, TextIO
 from favlo.logs import RollingLog
 
 PHASES = ("load", "download", "quantize", "prefill", "decode", "sample")
-UNITS = ("tok", "layers", "bytes", "shards", "experts", "stages")
+UNITS = ("tok", "layers", "bytes", "shards", "experts", "stages", "files", "blocks")
 VERSION = "0.2.0"
 SCHEMA = 1
 
@@ -987,7 +987,7 @@ def _rate_text(rate: float | None, unit: str) -> str:
         return ""
     shown = rate
     suffix = "/s"
-    if unit in {"layers", "shards", "experts"} and rate < 0.5:
+    if unit in {"layers", "shards", "experts", "files", "blocks"} and rate < 0.5:
         shown = rate * 60
         suffix = "/min"
     if unit == "bytes":

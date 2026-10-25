@@ -46,7 +46,7 @@ The official checkpoint is `Tongyi-MAI/Z-Image-Turbo`. The steps are [z-image-tu
 
 The official checkpoint is `Wan-AI/Wan2.2-I2V-A14B`. The text encoder is `google/umt5-xxl`. The steps are [wan22-i2v/SETUP.md](../wan22-i2v/SETUP.md).
 
-`favlo --wan22-i2v setup` downloads the VAE, the umT5 encoder and tokenizer, and the two expert files. `setup --umt5 example-org/example-model` downloads that text encoder instead. `quantize --high` and `--low` pack `models/Wan2.2-I2V-A14B-fp4`. `--name` is that packed folder and the registry id. The row stores the packed directory, and `--high-dir` and `--low-dir` store the quantized expert directories. `quantize-text` stores the quantized umT5 directory on that row.
+`favlo --wan22-i2v setup` downloads the VAE, the umT5 encoder and tokenizer, and the two expert files. `setup --umt5 example-org/example-model` downloads that text encoder instead. `quantize --high` and `--low` with `--fp8-percent 50` pack `models/Wan2.2-I2V-A14B-fp8-e50`. The default percent is 20, which writes `models/Wan2.2-I2V-A14B-fp4`. `--name` is that packed folder and the registry id. The row stores the packed directory, and `--high-dir` and `--low-dir` store the quantized expert directories. `quantize-text` stores the quantized umT5 directory on that row.
 
 ## Register a finished record
 

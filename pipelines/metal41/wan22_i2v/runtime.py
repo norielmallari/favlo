@@ -18,7 +18,7 @@ from wan22_i2v.hold import ClipHold, ClipPaused, interrupt, reload_quietly
 from wan22_i2v.latent import stride_decode, stride_encode
 from wan22_i2v.metal import _NAMES, Gpu
 from wan22_i2v.png import resize_rgb
-from wan22_i2v.progress import ClipProgress, clip_label, sample_total
+from wan22_i2v.progress import ClipProgress, clip_label
 from wan22_i2v.record import half_names, linear_names, load_embed, load_expert, load_manifest
 from wan22_i2v.schedule import (
     STEPS,
@@ -131,24 +131,20 @@ class Runtime:
                 clip=clip_label(width, height, frames, int(self.config["fps"])),
             )
         progress.open(
-            sample_total(
-                steps=velocity_walks(times, low, high, boundary),
-                dit_layers=layers,
-                loads=_loads(times, boundary),
-                weights=2 * (len(linear_names(layers)) + len(half_names(layers))),
-                text_layers=text_layers,
-                vae_blocks=lat_t * (ENCODER_BLOCKS + DECODER_BLOCKS) if vae_file else 0,
-                pipelines=len(_NAMES),
-                gpus=1,
-            )
+            text_layers=text_layers,
+            pipelines=len(_NAMES),
+            loads=_loads(times, boundary),
+            steps=velocity_walks(times, low, high, boundary),
+            encode_blocks=lat_t * ENCODER_BLOCKS if vae_file else 0,
+            decode_blocks=lat_t * DECODER_BLOCKS if vae_file else 0,
+            dit_layers=layers,
+            files=2 * (len(linear_names(layers)) + len(half_names(layers))),
         )
         hold = getattr(progress, "hold", None)
         if hold is not None and not isinstance(hold, ClipHold):
             hold = None
         if hold is not None:
-            progress.done = hold.done
-            if progress.row is not None:
-                progress.row.done = progress.done
+            progress.restore(hold.done, hold.stage)
         step_times = list(hold.step_times) if hold is not None else []
         noise_shape = (16, lat_t, lat_h, lat_w)
         mask_shape = mask_latent(frames).shape
@@ -157,9 +153,10 @@ class Runtime:
             pixels = hold.pixels if hold is not None and hold.pixels is not None else None
             if avi is None and pixels is None:
                 self._reserve(frames, width, height, lat_t, lat_h, lat_w, tokens)
-                progress.stage("compile")
                 if hold is not None and hold.reached("compile"):
                     progress.counting(False)
+                else:
+                    progress.stage("compile")
                 gpu = self._open(progress.advance)
                 progress.counting(True)
                 self._pause(progress, ClipHold(stage="compile", step_times=step_times))
@@ -253,9 +250,10 @@ class Runtime:
                     name = expert_name(float(timestep), boundary)
                     if loaded != name:
                         self._fit_dit_step(frames, width, height, lat_t, lat_h, lat_w, tokens)
-                        progress.stage("load")
                         if reload_quietly(hold, name, index):
                             progress.counting(False)
+                        else:
+                            progress.stage("load")
                         self._use(
                             name,
                             progress.advance,
@@ -298,6 +296,7 @@ class Runtime:
                                 message = "the negative context is missing"
                                 raise RuntimeError(message)
                             gpu.copy_f32(forward.vel, 0, spare, count)
+                            progress.stage(name)
                             forward.velocity(
                                 self._resident,
                                 table_null,

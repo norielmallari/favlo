@@ -22,7 +22,7 @@ from wan22_i2v.formats import (
     relative_error,
     restore_linear,
 )
-from wan22_i2v.schedule import GRAPH, promote_count
+from wan22_i2v.schedule import GRAPH, PROMOTE_PERCENT, promote_count
 
 
 def linear_names(layers: int) -> list[str]:
@@ -32,7 +32,6 @@ def linear_names(layers: int) -> list[str]:
         "time_embedding.0.weight",
         "time_embedding.2.weight",
         "time_projection.1.weight",
-        "head.head.weight",
     ]
     for layer in range(layers):
         for part in ("self_attn", "cross_attn"):
@@ -44,7 +43,13 @@ def linear_names(layers: int) -> list[str]:
 
 
 def half_names(layers: int) -> list[str]:
-    names = ["patch_embedding.weight", "patch_embedding.bias", "head.modulation"]
+    names = [
+        "patch_embedding.weight",
+        "patch_embedding.bias",
+        "head.modulation",
+        "head.head.weight",
+        "head.head.bias",
+    ]
     for layer in range(layers):
         names.append(f"blocks.{layer}.modulation")
         names.append(f"blocks.{layer}.norm3.weight")
@@ -80,14 +85,19 @@ def quantize(
     *,
     high_dir: Path | None = None,
     low_dir: Path | None = None,
+    percent: int = PROMOTE_PERCENT,
 ) -> dict[str, Any]:
-    """Pack both experts. The 20% highest-error blocks are stored as fp8."""
+    """Pack both experts. ``percent`` of the blocks are stored as fp8."""
+    if percent < 0 or percent > 100:
+        message = f"fp8 percent is 0 through 100, got {percent}"
+        raise ValueError(message)
     dest.mkdir(parents=True, exist_ok=True)
-    high_promoted = _pack_expert(high, high_dir or dest / "high", config)
-    low_promoted = _pack_expert(low, low_dir or dest / "low", config)
+    high_promoted = _pack_expert(high, high_dir or dest / "high", config, percent)
+    low_promoted = _pack_expert(low, low_dir or dest / "low", config, percent)
     _copy_embed(high, dest / "embed.npy", int(config["text_dim"]))
     manifest = {
         "config": config,
+        "fp8_percent": percent,
         "high_promoted": high_promoted,
         "low_promoted": low_promoted,
     }
@@ -124,17 +134,48 @@ def load_expert(
         )
     halves: dict[str, np.ndarray] = {}
     for name in half_names(layers):
-        halves[name] = np.load(path / f"{name}.npy")
+        halves[name] = _half_array(path, name)
         if on_file is not None:
             on_file()
     return Expert(packs=packs, halves=halves)
 
 
-def _pack_expert(path: Path, dest: Path, config: dict[str, Any]) -> list[int]:
+def _half_array(path: Path, name: str) -> np.ndarray:
+    npy = path / f"{name}.npy"
+    if npy.is_file():
+        return np.load(npy)
+    if name == "head.head.weight":
+        return np.ascontiguousarray(_restored_head(path).astype(np.float16))
+    if name == "head.head.bias":
+        blob = np.load(path / "head.head.weight.npz")
+        return np.ascontiguousarray(blob["bias"])
+    message = f"{name} is missing"
+    raise FileNotFoundError(message)
+
+
+def _restored_head(path: Path) -> np.ndarray:
+    blob = np.load(path / "head.head.weight.npz")
+    pack = LinearPack(
+        kind=str(blob["kind"].item()),
+        packed=np.ascontiguousarray(blob["packed"]),
+        scales=np.ascontiguousarray(blob["scales"]),
+        bias=np.ascontiguousarray(blob["bias"]),
+        perm=np.ascontiguousarray(blob["perm"]),
+        logical_n=int(blob["logical_n"]),
+        logical_k=int(blob["logical_k"]),
+        padded_n=int(blob["padded_n"]),
+        stored_k=int(blob["stored_k"]),
+    )
+    return restore_linear(pack)
+
+
+def _pack_expert(
+    path: Path, dest: Path, config: dict[str, Any], percent: int
+) -> list[int]:
     dest.mkdir(parents=True, exist_ok=True)
     layers = int(config["layers"])
     scores = _score_blocks(path, layers)
-    winners = block_winners(scores, promote_count(layers))
+    winners = block_winners(scores, promote_count(layers, percent))
     print(f"pack {path.name} fp8 {winners}", flush=True)
     chosen = set(winners)
     with safe_open(path, framework="numpy") as handle:
@@ -151,10 +192,17 @@ def _pack_expert(path: Path, dest: Path, config: dict[str, Any]) -> list[int]:
             print(f"write {name}", flush=True)
         for name in half_names(layers):
             dest_path = dest / f"{name}.npy"
+            (dest / f"{name}.npz").unlink(missing_ok=True)
             if _half_ready(dest_path):
                 continue
-            array = as_float32(handle.get_tensor(name)).astype(np.float16)
-            np.save(dest_path, array)
+            if name not in keys:
+                if name != "head.head.bias":
+                    message = f"{name} is missing"
+                    raise RuntimeError(message)
+                array = np.zeros(int(config["out_dim"]) * 4, dtype=np.float16)
+            else:
+                array = as_float32(handle.get_tensor(name)).astype(np.float16)
+            np.save(dest_path, np.ascontiguousarray(array))
             print(f"write {name}", flush=True)
     return winners
 

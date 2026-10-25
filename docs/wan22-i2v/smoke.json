@@ -7,5 +7,5 @@
   "frames": 9,
   "fps": 16,
   "five_second_frames": 81,
-  "model": "Wan2.2-I2V-A14B-fp4"
+  "model": "Wan2.2-I2V-A14B-fp8-e50"
 }
