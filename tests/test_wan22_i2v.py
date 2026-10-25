@@ -25,11 +25,13 @@ from wan22_i2v.schedule import (
     expert_name,
     geometry,
     guide_scale,
+    list_resolutions,
     mask_latent,
     promote_count,
     resolved_negative,
     timesteps,
     velocity_walks,
+    video_modes,
 )
 from wan22_i2v.source import (
     FILES,
@@ -206,6 +208,34 @@ def test_tied_block_keeps_the_lower_index() -> None:
     scores = {0: 0.1, 1: 0.5, 2: 0.5, 3: 0.2}
     assert block_winners(scores, 2) == [1, 2]
     assert block_winners(scores, 1) == [1]
+
+
+def test_video_mode_is_image_to_video() -> None:
+    assert video_modes() == ("i2v",)
+
+
+def test_listed_resolutions_are_the_four_buckets() -> None:
+    listed = list_resolutions()
+    assert [row["size"] for row in listed] == [
+        "416x240",
+        "240x416",
+        "576x320",
+        "320x576",
+        "832x480",
+        "480x832",
+        "1280x720",
+        "720x1280",
+    ]
+    assert [row["name"] for row in listed] == [
+        "240p",
+        "240p",
+        "320p",
+        "320p",
+        "480p",
+        "480p",
+        "720p",
+        "720p",
+    ]
 
 
 def test_shortest_320p_and_five_seconds() -> None:

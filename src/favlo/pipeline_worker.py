@@ -3,8 +3,10 @@
 The daemon spawns this module and keeps the registry, the job queue, and the
 memory ledger. This process loads the pipeline and creates the Metal device.
 Its console events are forwarded to the daemon, which writes the telemetry
-the CLI paints. A crash ends this process. The daemon waits until the pages
-that process wired are reclaimable, drops the ledger entry, and fails the job.
+the CLI paints. Before this process exits it sweeps its owners and blocks
+until the ledger says those heaps are gone. A crash ends this process. The
+daemon then blocks the next call until the pages that process wired are back,
+drops the ledger entry, and fails the job.
 """
 
 from __future__ import annotations
@@ -98,28 +100,33 @@ class PipelineChild:
         self._forgotten = False
         self._released = threading.Event()
         self._busy = False
+        self.admission: Any = None
 
     def open(self) -> None:
         """Spawn the process and wait until it has reported its owners."""
-        self._start()
-        self._send(
-            {
-                "op": "open",
-                "selection": _selection_payload(self.selection),
-                "max_memory": self.max_memory,
-            }
-        )
-        message = self._next({"opened", "error", "gone"})
-        if message["op"] != "opened":
-            self.close()
-            detail = message.get("message") or "pipeline process failed"
-            raise RuntimeError(str(detail))
-        counts = message.get("owners")
-        if isinstance(counts, dict):
-            self.counts = {str(key): int(value) for key, value in counts.items()}
-        else:
-            self.counts = {}
-        self._note_resident()
+        self._hold_memory()
+        try:
+            self._start()
+            self._send(
+                {
+                    "op": "open",
+                    "selection": _selection_payload(self.selection),
+                    "max_memory": self.max_memory,
+                }
+            )
+            message = self._next({"opened", "error", "gone"})
+            if message["op"] != "opened":
+                self.close()
+                detail = message.get("message") or "pipeline process failed"
+                raise RuntimeError(str(detail))
+            counts = message.get("owners")
+            if isinstance(counts, dict):
+                self.counts = {str(key): int(value) for key, value in counts.items()}
+            else:
+                self.counts = {}
+            self._note_resident()
+        finally:
+            self._release_memory()
 
     def call(self, kind: str, reply: Any, body: dict[str, Any], state: dict[str, Any]) -> None:
         """Run one handler in the child and copy its reply onto ``reply``."""
@@ -144,18 +151,26 @@ class PipelineChild:
                     "body": body,
                     "homes": _homes(state),
                     "holds": _hold_paths(state),
+                    "preempt": _flagged(state, "preempt"),
+                    "disconnect": bool(callable(getattr(reply, "stopped", None)) and reply.stopped()),
                 }
             )
             while True:
                 message = self._next({"result", "event", "stream", "done", "error", "gone"})
                 op = message["op"]
                 if op == "stream":
-                    reply.begin_events()
                     streamed = True
+                    try:
+                        reply.begin_events()
+                    except OSError:
+                        pass
                 elif op == "event":
                     payload = message.get("payload")
                     if isinstance(payload, dict):
-                        reply.event(payload)
+                        try:
+                            reply.event(payload)
+                        except OSError:
+                            pass
                 elif op == "done":
                     reply.done()
                 elif op == "gone":
@@ -187,29 +202,29 @@ class PipelineChild:
         self._signal("halt")
 
     def close(self) -> None:
-        """Ask the process to exit, confirm its pages, then drop its owners."""
+        """Ask the process to exit, then drop its owners once the ledger is clear."""
         from favlo.memory import reclaimable_bytes
 
-        with self._write_lock:
-            already = self._shut
-            self._shut = True
-            if self._release_from is None:
-                self._release_from = reclaimable_bytes()
-        if not already:
-            self._signal("halt")
-            try:
-                self._send({"op": "close"})
-            except ChildExited:
-                pass
-            proc = self._proc
-            if proc is not None and proc.poll() is None:
+        self._hold_memory()
+        try:
+            with self._write_lock:
+                already = self._shut
+                self._shut = True
+                if self._release_from is None:
+                    self._release_from = reclaimable_bytes()
+            if not already:
+                self._signal("halt")
                 try:
-                    proc.wait(timeout=25)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=5)
-        self._forget()
-        self._released.wait()
+                    self._send({"op": "close"})
+                except ChildExited:
+                    pass
+                proc = self._proc
+                if proc is not None and proc.poll() is None:
+                    proc.wait()
+            self._forget()
+            self._released.wait()
+        finally:
+            self._release_memory()
 
     def _start(self) -> None:
         from favlo.memory import reclaimable_bytes
@@ -269,16 +284,14 @@ class PipelineChild:
     def _watch(self, reply: Any, state: dict[str, Any], stop: threading.Event) -> None:
         sent: set[str] = set()
         while not stop.is_set():
-            if "preempt" not in sent and _flagged(state, "preempt"):
+            if _flagged(state, "preempt"):
                 self._signal("preempt")
-                sent.add("preempt")
             if "cancel" not in sent and _flagged(state, "cancel"):
                 self._signal("cancel")
                 sent.add("cancel")
             stopped = getattr(reply, "stopped", None)
-            if "disconnect" not in sent and callable(stopped) and stopped():
+            if callable(stopped) and stopped():
                 self._signal("disconnect")
-                sent.add("disconnect")
             stop.wait(0.05)
 
     def _read_stdout(self) -> None:
@@ -335,6 +348,16 @@ class PipelineChild:
         dropped = 0 if self._baseline is None else max(0, self._baseline - current)
         self._held = max(dropped, sum(self.counts.values()))
 
+    def _hold_memory(self) -> None:
+        hold = getattr(self.admission, "hold_memory", None)
+        if callable(hold):
+            hold()
+
+    def _release_memory(self) -> None:
+        release = getattr(self.admission, "release_memory", None)
+        if callable(release):
+            release()
+
     def _forget(self) -> None:
         with self._write_lock:
             if self._forgotten:
@@ -345,14 +368,17 @@ class PipelineChild:
                 before = self._while_resident
             held = self._held
             owners = tuple(self.counts)
+            proc = self._proc
         from favlo.memory import memory
 
+        self._hold_memory()
         try:
-            confirmed = before is None or memory.confirm_released(before, held)
-            if not confirmed:
-                _log_line("memory release was not confirmed")
+            code = proc.returncode if proc is not None else None
+            if code not in (None, 0) and before is not None:
+                memory.confirm_released(before, held)
             memory.forget(owners)
         finally:
+            self._release_memory()
             self._released.set()
 
 
@@ -450,6 +476,22 @@ def main() -> None:
     max_memory: str | None = None
     stub = os.environ.get("FAVLO_WORKER_STUB") == "1"
     console = _pipeline_console(proto)
+    try:
+        _serve_child(proto, control, runtime, module, selection, max_memory, stub, console)
+    finally:
+        _release_process()
+
+
+def _serve_child(
+    proto: Any,
+    control: dict[str, threading.Event],
+    runtime: Any,
+    module: Any,
+    selection: Any,
+    max_memory: str | None,
+    stub: bool,
+    console: Any,
+) -> None:
     for line in sys.stdin.buffer:
         try:
             message = json.loads(line.decode("utf-8"))
@@ -628,6 +670,10 @@ def _call(
         raise RuntimeError(text)
     for flag in control.values():
         flag.clear()
+    if message.get("preempt"):
+        control["preempt"].set()
+    if message.get("disconnect"):
+        control["disconnect"].set()
     if control["halt"].is_set():
         _halt_runtime()
     state = _child_state(message, control)
@@ -700,6 +746,15 @@ def _shutdown(runtime: Any) -> None:
     close = getattr(runtime, "close", None)
     if callable(close):
         close()
+
+
+def _release_process() -> None:
+    """Sweep every owner and block until the ledger says the heaps are gone."""
+    from favlo.memory import memory
+
+    for owner in tuple(memory.owners()):
+        memory.sweep(owner)
+    memory.wait_released()
 
 
 _WRITE = threading.Lock()
@@ -786,8 +841,6 @@ class _ChildReply:
         _emit(self._proto, {"op": "done"})
 
     def stopped(self) -> bool:
-        if not self._stream:
-            return False
         return self._disconnected.is_set()
 
 

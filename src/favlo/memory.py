@@ -19,7 +19,6 @@ from favlo.offset import BumpMap, OffsetMap, align, bin_size
 
 _PAGE = 4096
 _SLAB = 64 << 20
-_RECLAIM_WAIT = 5.0
 _RECLAIM_PAUSE = 0.05
 _EMPTY = 4
 _NONVOLATILE = 2
@@ -195,23 +194,42 @@ class Memory:
         with self._lock:
             self._forget_locked(owners)
 
-    def confirm_released(self, before: int, nbytes: int, *, timeout: float = _RECLAIM_WAIT) -> bool:
-        """Wait until reclaimable pages cover ``nbytes`` that were wired at ``before``.
+    def confirm_released(
+        self, before: int, nbytes: int, *, timeout: float | None = None
+    ) -> bool:
+        """Block until reclaimable pages cover ``nbytes`` that were wired at ``before``.
 
         ``before`` is the reclaimable count while those pages were still wired.
-        The count is confirmed when that total has risen by ``nbytes``, within
-        one heap slab. A count of one slab or less is already confirmed. The
-        wait stops after ``timeout`` seconds.
+        The release is confirmed when that total has risen by ``nbytes``, within
+        one heap slab. A count of one slab or less is already confirmed.
+        ``timeout`` stops the check early and returns false. The daemon does
+        not pass one: the next call waits until the check passes.
         """
         if nbytes <= _SLAB:
             return True
         target = before + nbytes - _SLAB
-        deadline = time.monotonic() + timeout
+        deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             if reclaimable_bytes() >= target:
                 return True
-            if time.monotonic() >= deadline:
+            if deadline is not None and time.monotonic() >= deadline:
                 return False
+            time.sleep(_RECLAIM_PAUSE)
+
+    def settled(self) -> bool:
+        """True when every span is gone and no command still holds a freed one.
+
+        Pending and returning bytes stay in the budget until the kernel reports
+        them. They do not keep this process alive.
+        """
+        with self._lock:
+            if self._deferred or self._commands:
+                return False
+            return not any(not span.released for span in self._spans.values())
+
+    def wait_released(self) -> None:
+        """Block until :meth:`settled`. A clock does not decide the release."""
+        while not self.settled():
             time.sleep(_RECLAIM_PAUSE)
 
     def reported(self) -> dict[str, int]:

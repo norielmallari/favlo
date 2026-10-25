@@ -51,6 +51,7 @@ class LiveReply:
     def __init__(self, disconnected: threading.Event) -> None:
         self.model_id = ""
         self.started = False
+        self.disconnected = disconnected
         self._disconnected = disconnected
         self._ready = threading.Event()
         self._kind = ""

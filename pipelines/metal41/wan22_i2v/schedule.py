@@ -19,8 +19,20 @@ SAMPLE_NEG_PROMPT = (
 )
 SHORT_FRAMES = 5
 FIVE_SEC_FRAMES = 81
+P240_WIDTH = 416
+P240_HEIGHT = 240
 P320_WIDTH = 576
 P320_HEIGHT = 320
+P480_WIDTH = 832
+P480_HEIGHT = 480
+P720_WIDTH = 1280
+P720_HEIGHT = 720
+_BUCKETS = (
+    ("240p", P240_WIDTH, P240_HEIGHT),
+    ("320p", P320_WIDTH, P320_HEIGHT),
+    ("480p", P480_WIDTH, P480_HEIGHT),
+    ("720p", P720_WIDTH, P720_HEIGHT),
+)
 TEXT_LEN = 512
 PROMOTE_PERCENT = 20
 
@@ -96,6 +108,20 @@ LATENT_STD = np.array(
     ],
     dtype=np.float32,
 )
+
+
+def video_modes() -> tuple[str, ...]:
+    """This pipeline is image-to-video only."""
+    return ("i2v",)
+
+
+def list_resolutions() -> list[dict[str, str]]:
+    """Landscape and portrait sizes for each served bucket."""
+    rows: list[dict[str, str]] = []
+    for name, width, height in _BUCKETS:
+        rows.append({"name": name, "orientation": "landscape", "size": f"{width}x{height}"})
+        rows.append({"name": name, "orientation": "portrait", "size": f"{height}x{width}"})
+    return rows
 
 
 def sigmas(steps: int = STEPS, shift: float = SHIFT) -> np.ndarray:

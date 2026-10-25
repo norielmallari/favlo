@@ -117,6 +117,23 @@ def test_discard_then_release_counts_the_span_once(monkeypatch: Any) -> None:
             memory._reclaim_mark, memory._pending, memory._returning = saved
 
 
+def test_confirm_released_blocks_until_the_pages_are_back(monkeypatch: Any) -> None:
+    before = 4_000_000_000
+    held = (64 << 20) + (32 << 20)
+    state = {"calls": 0}
+
+    def reclaimable() -> int:
+        state["calls"] += 1
+        if state["calls"] < 3:
+            return before
+        return before + held
+
+    monkeypatch.setattr("favlo.memory.reclaimable_bytes", reclaimable)
+    monkeypatch.setattr("favlo.memory._RECLAIM_PAUSE", 0.01)
+    assert memory.confirm_released(before, held) is True
+    assert state["calls"] >= 3
+
+
 def test_confirm_released_treats_one_slab_as_already_free() -> None:
     assert memory.confirm_released(0, 64 << 20, timeout=0.0) is True
 

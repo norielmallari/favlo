@@ -108,7 +108,7 @@ Start the listener:
 uv run favlo serve
 ```
 
-The daemon listens on `http://127.0.0.1:8129`. The model id is `Wan2.2-I2V-A14B-int8`. A video client calls `generate_video`. The still is an image id from `generate_image`, or a PNG block. A filesystem path is refused. The default size is 576×320. The default length is 81 frames, which is 5 seconds at 16 fps. A frame count is `4n+1`. The shortest moving clip is 5 frames. The default step count is 4.
+The daemon listens on `http://127.0.0.1:8129`. The model id is `Wan2.2-I2V-A14B-int8`. A video client calls `generate_video_i2v`. The still is an image id from `generate_image`, or a PNG block. A filesystem path is refused. `size` is required. `list_video_models_i2v` lists the landscape and portrait sizes for 240p, 320p, 480p, and 720p. The `generate` command still defaults to 576×320. The default length is 81 frames, which is 5 seconds at 16 fps. A frame count is `4n+1`. The shortest moving clip is 5 frames. The default step count is 4.
 
 From the checkout, without the listener:
 

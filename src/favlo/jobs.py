@@ -1,8 +1,9 @@
-"""Media job queue.
+"""MCP worker turnstile.
 
-The daemon owns this queue. One job runs at a time. The MCP task transport
-enqueues work here, and the call that created the task has already returned.
-A pipeline crash fails that job. The next job starts when it reaches the head.
+One media task runs at a time. The call that created the task has already
+returned. A pipeline crash fails that job. The next job starts when it
+reaches the head. GPU admission across chats, embeddings, and media is
+:class:`favlo.schedule.Scheduler`.
 """
 
 from __future__ import annotations

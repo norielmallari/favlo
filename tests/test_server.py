@@ -340,6 +340,30 @@ def test_requests_wait_until_the_current_one_finishes() -> None:
         _stop_background(state, thread)
 
 
+def test_a_queued_chat_whose_client_left_does_not_run() -> None:
+    runtime = _Runtime()
+    runtime.hold = True
+    state, thread = _serve_background(runtime)
+    port = int(state["server"].server_address[1])
+    holder = threading.Thread(target=_exchange, args=(port, "hold"))
+    try:
+        holder.start()
+        assert runtime.entered.wait(3)
+        sock = _open_request(port, "gone", stream=False)
+        _wait_waiting(state, "chat")
+        sock.close()
+        deadline = time.monotonic() + 3
+        while state["schedule"].waiting("chat") and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert state["schedule"].waiting("chat") == 0
+        runtime.release.set()
+        holder.join(5)
+    finally:
+        runtime.release.set()
+        _stop_background(state, thread)
+    assert [name for _kind, name in runtime.order] == ["hold", "hold"]
+
+
 def test_dropped_client_stops_the_request_and_the_next_one_runs() -> None:
     runtime = _Runtime()
     runtime.watch_cancel = True
@@ -1079,7 +1103,7 @@ def test_mcp_answers_after_the_pipeline_is_closed() -> None:
     assert state["runtime"] is None
     assert status == 200
     names = {tool["name"] for tool in listed["result"]["tools"]}
-    assert "list_media_models" in names
+    assert "list_video_models_i2v" in names
 
 
 def test_mcp_initialize_lists_tools_and_rejects_a_batch(tmp_path) -> None:
@@ -1110,14 +1134,19 @@ def test_mcp_initialize_lists_tools_and_rejects_a_batch(tmp_path) -> None:
     assert names_status == 200
     names = {tool["name"] for tool in listed["result"]["tools"]}
     assert names == {
-        "list_media_models",
+        "list_image_models",
+        "list_video_models_i2v",
+        "list_video_models_t2v",
+        "list_music_models",
+        "list_voice_models",
         "media_status",
         "media_cancel",
         "remember",
         "recall",
         "forget",
         "generate_image",
-        "generate_video",
+        "generate_video_i2v",
+        "generate_video_t2v",
         "generate_music",
         "generate_voice",
     }
@@ -1168,6 +1197,42 @@ def test_legacy_initialize_is_rejected(tmp_path) -> None:
     assert "2026-07-28" in discovered["result"]["supportedVersions"]
 
 
+def test_a_queued_or_paused_task_stays_ongoing() -> None:
+    from favlo.mcp_server import _working_fields
+
+    state = {
+        "media_tasks": {
+            "run": {
+                "started": True,
+                "paused": False,
+                "job": {"status": "in_progress", "progress": 40, "stage": "high", "eta": 12},
+            },
+            "wait": {"started": False, "paused": False, "job": None},
+            "hold": {
+                "started": True,
+                "paused": True,
+                "job": {"status": "in_progress", "progress": 40, "stage": "high", "eta": 12},
+            },
+            "fresh": {"started": True, "paused": False, "job": None},
+        },
+        "media_order": ["run", "wait", "hold", "fresh"],
+        "videos": {"video_x": {"status": "in_progress", "progress": 3, "stage": "encode"}},
+    }
+    queued = _working_fields(state, "wait")
+    paused = _working_fields(state, "hold")
+    running = _working_fields(state, "run")
+    fresh = _working_fields(state, "fresh")
+    assert queued == {"position": 0, "statusMessage": "task is ongoing"}
+    assert paused == {
+        "statusMessage": "task is ongoing",
+        "stage": "paused",
+        "progress": 40,
+        "eta": 12,
+    }
+    assert running == {"progress": 40, "eta": 12, "stage": "high"}
+    assert fresh == {"progress": 3, "stage": "encode"}
+
+
 def test_mcp_queue_runs_the_first_image_and_cancel_skips_the_second(tmp_path) -> None:
     runtime = _Runtime()
     state, thread = _serve_background(runtime)
@@ -1189,6 +1254,10 @@ def test_mcp_queue_runs_the_first_image_and_cancel_skips_the_second(tmp_path) ->
         assert first["result"]["status"] == "working"
         assert first["result"]["pollIntervalMs"] == 2000
         assert first_id != second_id
+        _status, queued = _mcp(port, "tasks/get", _task_params(second_id), tasks=True)
+        assert queued["result"]["status"] == "working"
+        assert queued["result"]["statusMessage"] == "task is ongoing"
+        assert queued["result"]["position"] == 0
         _status, cancelled = _tool(port, "media_cancel", {"taskId": second_id})
         media.release.set()
         finished = _wait_task(port, first_id)
@@ -1281,17 +1350,21 @@ def test_generate_video_schema_names_the_still_and_the_frame_default() -> None:
 
     mcp = build_mcp(lambda *_args: {}, {}, lambda _text: [0.0] * 1024)
     tools = asyncio.run(mcp.list_tools(run_middleware=False))
-    video = next(tool for tool in tools if tool.name == "generate_video")
-    description = video.description or ""
-    properties = video.parameters["properties"]
-    assert "image_" in description
+    i2v = next(tool for tool in tools if tool.name == "generate_video_i2v")
+    t2v = next(tool for tool in tools if tool.name == "generate_video_t2v")
+    description = i2v.description or ""
+    properties = i2v.parameters["properties"]
+    assert "image_" in description or "image_" in properties["image"]["description"]
     assert "favlo://videos/" in description
-    assert "model default" in properties["frames"]["description"]
+    assert "4n+1" in properties["frames"]["description"]
     assert "81" not in properties["frames"]["description"]
     assert "16 fps" not in description
-    assert "image_" in properties["image"]["description"]
-    assert "4n+1" in properties["seconds"]["description"]
-    assert "576x320" in properties["size"]["description"]
+    assert "image" in i2v.parameters["required"]
+    assert "size" in i2v.parameters["required"]
+    assert "list_video_models_i2v" in properties["size"]["description"]
+    assert "image" not in t2v.parameters["properties"]
+    assert "size" in t2v.parameters["required"]
+    assert "list_video_models_t2v" in t2v.parameters["properties"]["size"]["description"]
     assert "xhigh" in properties["quality"]["description"]
     assert "sample negative" in properties["negative_prompt"]["description"]
     assert "[low, high]" in properties["guidance_scale"]["description"]
@@ -1307,8 +1380,13 @@ def test_mcp_video_rejects_a_filesystem_path(tmp_path) -> None:
     try:
         _status, created = _tool(
             port,
-            "generate_video",
-            {"prompt": "gallop", "model": "example-model", "image": "/tmp/still.png"},
+            "generate_video_i2v",
+            {
+                "prompt": "gallop",
+                "model": "example-model",
+                "size": "576x320",
+                "image": "/tmp/still.png",
+            },
         )
         finished = _wait_task(port, created["result"]["taskId"])
     finally:
@@ -1343,6 +1421,7 @@ def test_mcp_chat_preempts_media_and_the_same_task_resumes(tmp_path) -> None:
         )
         assert paused["result"]["stage"] == "paused"
         assert paused["result"]["status"] == "working"
+        assert paused["result"]["statusMessage"] == "task is ongoing"
         media.chat_release.set()
         worker.join(timeout=5)
         finished = _wait_task(port, created["result"]["taskId"])
@@ -1543,11 +1622,12 @@ def _embed_listener() -> tuple[_EmbedOrder, dict, threading.Thread]:
     return module, state, thread
 
 
-def _wait_counter(state: dict, key: str) -> None:
+def _wait_waiting(state: dict, kind: str) -> None:
+    schedule = state["schedule"]
     deadline = time.monotonic() + 5
-    while int(state.get(key) or 0) < 1 and time.monotonic() < deadline:
+    while schedule.waiting(kind) < 1 and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert int(state.get(key) or 0) >= 1
+    assert schedule.waiting(kind) >= 1
 
 
 def test_an_embedding_waits_for_the_open_chat_and_runs_before_the_next() -> None:
@@ -1569,9 +1649,9 @@ def test_an_embedding_waits_for_the_open_chat_and_runs_before_the_next() -> None
         hold.start()
         assert module.hold_entered.wait(5)
         nxt.start()
-        _wait_counter(state, "chat_waiters")
+        _wait_waiting(state, "chat")
         embed.start()
-        _wait_counter(state, "embed_waiters")
+        _wait_waiting(state, "embed")
         assert module.order == []
         module.hold_release.set()
         hold.join(5)
@@ -1601,7 +1681,7 @@ def test_a_chat_waits_while_an_embedding_is_running() -> None:
         chat.start()
         time.sleep(0.05)
         assert module.order == []
-        assert int(state.get("embed_running") or 0) >= 1
+        assert state["schedule"].running() == "embed"
         module.hold_release.set()
         embed.join(5)
         chat.join(5)
@@ -1610,4 +1690,169 @@ def test_a_chat_waits_while_an_embedding_is_running() -> None:
         _stop_background(state, thread)
     assert module.order == ["embed:hold", "chat:next"]
     assert module.embed_saw_preempt is False
+
+
+class _ForegroundMedia:
+    """One image call yields to the foreground queue, then finishes."""
+
+    def __init__(self) -> None:
+        self.order: list[str] = []
+        self.ready = threading.Event()
+        self.hold = threading.Event()
+
+    def handle_image(self, reply, runtime, body, selection, args, state) -> None:
+        del runtime, body, selection, args
+        if not self.order:
+            self.ready.set()
+            assert self.hold.wait(5)
+            self.ready.clear()
+            self.hold.clear()
+        if state["preempt"].is_set():
+            self.order.append("yield")
+            reply.json(200, {"status": "in_progress"})
+            return
+        self.order.append("resume")
+        reply.json(200, {"data": [{"id": "image_queue"}]})
+
+    def handle_chat(self, reply, runtime, body, selection, args, state) -> None:
+        del runtime, selection, args, state
+        self.order.append("chat:" + body["messages"][0]["content"])
+        reply.json(200, {"id": "chat", "choices": []})
+
+    def handle_embed(self, reply, runtime, body, selection, args, state) -> None:
+        del runtime, selection, args, state
+        self.order.append("embed:" + str(body.get("input")))
+        reply.json(200, {"object": "list", "data": [], "model": "", "usage": {}})
+
+
+def _foreground_listener(module):
+    state: dict = {"runtime": module, "server": None, "module": module}
+    thread = threading.Thread(
+        target=listener._serve_loop,
+        args=(_args(), state),
+        daemon=True,
+    )
+    thread.start()
+    deadline = time.monotonic() + 5
+    while state["server"] is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert state["server"] is not None
+    return state, thread
+
+
+def test_the_foreground_queue_drains_before_media_resumes() -> None:
+    module = _ForegroundMedia()
+    state, thread = _foreground_listener(module)
+    port = int(state["server"].server_address[1])
+    image: dict[str, Any] = {}
+
+    def post_image() -> None:
+        image["result"] = _tool(
+            port,
+            "generate_image",
+            {"prompt": "queue", "model": "example-model"},
+            tasks=False,
+        )
+
+    embed = threading.Thread(
+        target=_post_json,
+        args=(port, "/v1/embeddings", {"input": "ahead", "model": "bge-m3-int8"}),
+    )
+    chat = threading.Thread(
+        target=_post_json,
+        args=(port, "/v1/chat/completions", {"messages": [{"role": "user", "content": "later"}]}),
+    )
+    worker = threading.Thread(target=post_image)
+    try:
+        worker.start()
+        assert module.ready.wait(5)
+        embed.start()
+        _wait_waiting(state, "embed")
+        chat.start()
+        _wait_waiting(state, "chat")
+        assert state["preempt"].is_set()
+        assert module.order == []
+        module.hold.set()
+        worker.join(5)
+        embed.join(5)
+        chat.join(5)
+    finally:
+        module.hold.set()
+        _stop_background(state, thread)
+    assert module.order == ["yield", "embed:ahead", "chat:later", "resume"]
+    assert "image_queue" in json.dumps(image["result"])
+
+
+class _TwoSlices:
+    """Each media slice waits, so a later chat still preempts the next slice."""
+
+    def __init__(self) -> None:
+        self.order: list[str] = []
+        self.phase = 0
+        self.ready = threading.Event()
+        self.hold = threading.Event()
+
+    def handle_image(self, reply, runtime, body, selection, args, state) -> None:
+        del runtime, body, selection, args
+        self.phase += 1
+        if self.phase < 3:
+            self.ready.set()
+            assert self.hold.wait(5)
+            self.ready.clear()
+            self.hold.clear()
+            assert state["preempt"].is_set()
+            self.order.append(f"yield{self.phase}")
+            reply.json(200, {"status": "in_progress"})
+            return
+        self.order.append("resume")
+        reply.json(200, {"data": [{"id": "image_queue"}]})
+
+    def handle_chat(self, reply, runtime, body, selection, args, state) -> None:
+        del runtime, selection, args, state
+        self.order.append("chat:" + body["messages"][0]["content"])
+        reply.json(200, {"id": "chat", "choices": []})
+
+
+def test_a_later_chat_preempts_the_next_media_slice() -> None:
+    module = _TwoSlices()
+    state, thread = _foreground_listener(module)
+    port = int(state["server"].server_address[1])
+
+    def post_image() -> None:
+        _tool(
+            port,
+            "generate_image",
+            {"prompt": "queue", "model": "example-model"},
+            tasks=False,
+        )
+
+    def post_chat(name: str) -> None:
+        _post_json(
+            port,
+            "/v1/chat/completions",
+            {"messages": [{"role": "user", "content": name}]},
+        )
+
+    worker = threading.Thread(target=post_image)
+    first = threading.Thread(target=post_chat, args=("one",))
+    second = threading.Thread(target=post_chat, args=("two",))
+    try:
+        worker.start()
+        assert module.ready.wait(5)
+        module.ready.clear()
+        first.start()
+        _wait_waiting(state, "chat")
+        module.hold.set()
+        assert module.ready.wait(5)
+        module.ready.clear()
+        second.start()
+        _wait_waiting(state, "chat")
+        module.hold.set()
+        worker.join(5)
+        first.join(5)
+        second.join(5)
+    finally:
+        module.hold.set()
+        _stop_background(state, thread)
+    assert module.order == ["yield1", "chat:one", "yield2", "chat:two", "resume"]
 

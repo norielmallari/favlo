@@ -39,4 +39,4 @@ Weights plus the requested working set must fit in `room` before the first commi
 
 ## Release
 
-`close` sweeps the owner, then `memory.confirm_released` waits until those bytes are reclaimable. Sample the reclaimable total and the owner's bytes before the sweep. A chat preemption runs that wait in the process that allocated the spans, before the handler returns. The listener stores the opening report. The wait uses the bytes this process held.
+`close` sweeps the owner. The release is done when that owner has no live span and no command still holds a freed span. `memory.wait_released` returns on that check. Pending and returning bytes stay in the budget until the kernel reports them. They do not keep the process alive, and they do not keep the next call queued. A chat preemption runs the check in the process that allocated the spans, before the handler returns. The listener stores the opening report. The daemon does not admit the next call while an allocation or a release is still open. A partial drop uses `memory.confirm_released` for the bytes that sweep freed and blocks until those pages are back.

@@ -1,11 +1,12 @@
 """One ASGI application for chat and MCP.
 
 Uvicorn serves it. A pipeline receives a :class:`favlo.reply.LiveReply` and
-never a socket. ``GET /v1/models`` does not take the request lock. A chat
-completion does. An embeddings request uses that same lock, waits until the
-open chat returns, and does not set ``preempt``. A chat that has not started
-waits while an embeddings request is queued or running. Image, video,
-music, and voice run on the MCP queue.
+never a socket. ``GET /v1/models`` does not take the request lock. The daemon
+admits the GPU through :class:`favlo.schedule.Scheduler`: embeddings, then
+chats, then media. An embedding waits until the open chat returns. A chat
+that has not started waits while an embedding is queued or running. Either
+one preempts media and leaves ``preempt`` set until that foreground queue
+is empty. Image, video, music, and voice run on the MCP queue.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from favlo.memory_notes import DIM, EMBED_MODEL
 from favlo.mcp_server import build_mcp, media_kinds
 from favlo.registry import load_registry, model_objects, one_model
 from favlo.reply import LiveReply
+from favlo.schedule import ClientClosed, Scheduler, ensure
 
 _MAX_BODY = 64 * 1024 * 1024
 
@@ -399,17 +401,11 @@ _MEDIA_KINDS = frozenset({"image", "video", "music", "voice"})
 
 
 def _prepare_listener(state: dict[str, Any]) -> None:
+    ensure(state)
     state.setdefault("lock", threading.Lock())
-    state.setdefault("preempt", threading.Event())
     state.setdefault("cancel", threading.Event())
-    state.setdefault("media_holds", False)
     state.setdefault("media_task", None)
     state.setdefault("media_yield", False)
-    state.setdefault("chat_waiters", 0)
-    state.setdefault("chats_running", 0)
-    state.setdefault("embed_waiters", 0)
-    state.setdefault("embed_running", 0)
-    state.setdefault("media_gate", threading.Condition())
     state.setdefault("media_tasks", {})
     state.setdefault("media_order", [])
 
@@ -423,30 +419,26 @@ def _run_locked(
     reply: LiveReply,
 ) -> None:
     _prepare_listener(state)
-    chat = kind == "chat"
-    embed = kind == "embed"
-    running = [False]
-    if embed:
-        _embed_arrive(state)
-    if chat:
-        _wait_embeds(state)
-        _chat_arrive(state)
+    schedule: Scheduler = state["schedule"]
+    ticket = None
+    cancel = getattr(reply, "disconnected", None)
+    if kind != "chat" or not isinstance(cancel, threading.Event):
+        cancel = None
     try:
+        if kind in {"embed", "chat"}:
+            try:
+                ticket = schedule.acquire(kind, cancel=cancel)
+            except ClientClosed:
+                return
+        if cancel is not None and cancel.is_set():
+            return
         if kind in _MEDIA_KINDS:
             _run_media(args, state, kind, content_type, raw, reply)
         else:
-            while True:
-                state["chat_yield"] = False
-                _run_once(args, state, kind, content_type, raw, reply, running=running)
-                if chat and state.get("chat_yield"):
-                    _wait_embeds(state)
-                    continue
-                return
+            _run_once(args, state, kind, content_type, raw, reply)
     finally:
-        if embed:
-            _embed_done(state, running[0])
-        if chat:
-            _chat_done(state, running[0])
+        if ticket is not None:
+            schedule.release(ticket)
 
 
 def _run_media(
@@ -457,22 +449,22 @@ def _run_media(
     raw: bytes,
     reply: LiveReply,
 ) -> None:
-    """Run one media call. A preempted in-progress job is resumed after chats."""
-    state["media_holds"] = True
-    try:
-        while True:
+    """Run one media call. Resume it only after the foreground queue drains."""
+    schedule: Scheduler = state["schedule"]
+    while True:
+        ticket = schedule.acquire("media")
+        try:
             state["media_yield"] = False
-            _run_once(args, state, kind, content_type, raw, reply, running=None)
+            _run_once(args, state, kind, content_type, raw, reply)
             if state["cancel"].is_set():
                 _discard_output(state, reply.payload)
                 return
             if state.get("media_yield") or _paused(state, reply):
                 _mark_paused(state)
-                _drain_chats(state)
                 continue
             return
-    finally:
-        state["media_holds"] = False
+        finally:
+            schedule.release(ticket)
 
 
 def _run_once(
@@ -482,8 +474,6 @@ def _run_once(
     content_type: str,
     raw: bytes,
     reply: LiveReply,
-    *,
-    running: list[bool] | None,
 ) -> None:
     from favlo.listener import (
         _bind_request,
@@ -506,27 +496,14 @@ def _run_once(
         if not reply.started:
             reply.json(409, {"error": {"message": "the pipeline is closing", "type": "busy"}})
         return
-    if kind == "chat" and _embeds_pending(state):
-        state["chat_yield"] = True
-        lock.release()
-        holds = False
-        return
-    if kind == "embed":
-        _embed_promote(state)
-        if running is not None:
-            running[0] = True
-    elif running is not None:
-        _chat_running(state)
-        running[0] = True
     opened = False
     selection = None
     try:
-        if kind in _MEDIA_KINDS and _chats_waiting(state):
+        schedule: Scheduler = state["schedule"]
+        if kind in _MEDIA_KINDS and schedule.foreground():
             state["media_yield"] = True
-            state["preempt"].set()
             return
         if kind in _MEDIA_KINDS:
-            state["preempt"].clear()
             _clear_paused(state)
         if _smoke_held(state):
             reply.json(
@@ -611,7 +588,7 @@ def _run_once(
             lock.release()
         if opened:
             _schedule_pipeline_heartbeat(module, runtime, selection)
-        if not reply.started and not state.get("media_yield") and not state.get("chat_yield"):
+        if not reply.started and not state.get("media_yield"):
             reply.json(
                 500,
                 {"error": {"message": "the pipeline wrote no reply", "type": "RuntimeError"}},
@@ -626,83 +603,6 @@ def _abandon_child(state: dict[str, Any], args: Any) -> None:
     runtime = state.get("runtime")
     if isinstance(runtime, PipelineChild):
         _drop_runtime(state, args)
-
-
-def _embeds_pending(state: dict[str, Any]) -> bool:
-    gate: threading.Condition = state["media_gate"]
-    with gate:
-        return state["embed_waiters"] > 0 or state["embed_running"] > 0
-
-
-def _wait_embeds(state: dict[str, Any]) -> None:
-    gate: threading.Condition = state["media_gate"]
-    with gate:
-        while state["embed_waiters"] > 0 or state["embed_running"] > 0:
-            gate.wait(timeout=0.05)
-
-
-def _embed_arrive(state: dict[str, Any]) -> None:
-    gate: threading.Condition = state["media_gate"]
-    with gate:
-        state["embed_waiters"] += 1
-        gate.notify_all()
-
-
-def _embed_promote(state: dict[str, Any]) -> None:
-    gate: threading.Condition = state["media_gate"]
-    with gate:
-        state["embed_waiters"] -= 1
-        state["embed_running"] += 1
-        gate.notify_all()
-
-
-def _embed_done(state: dict[str, Any], running: bool) -> None:
-    gate: threading.Condition = state["media_gate"]
-    with gate:
-        if running:
-            state["embed_running"] -= 1
-        else:
-            state["embed_waiters"] -= 1
-        gate.notify_all()
-
-
-def _chat_arrive(state: dict[str, Any]) -> None:
-    gate: threading.Condition = state["media_gate"]
-    with gate:
-        if state.get("media_holds"):
-            state["preempt"].set()
-        state["chat_waiters"] += 1
-
-
-def _chat_running(state: dict[str, Any]) -> None:
-    gate: threading.Condition = state["media_gate"]
-    with gate:
-        state["chat_waiters"] -= 1
-        state["chats_running"] += 1
-        gate.notify_all()
-
-
-def _chat_done(state: dict[str, Any], running: bool) -> None:
-    gate: threading.Condition = state["media_gate"]
-    with gate:
-        if running:
-            state["chats_running"] -= 1
-        else:
-            state["chat_waiters"] -= 1
-        gate.notify_all()
-
-
-def _chats_waiting(state: dict[str, Any]) -> bool:
-    gate: threading.Condition = state["media_gate"]
-    with gate:
-        return state["chat_waiters"] > 0
-
-
-def _drain_chats(state: dict[str, Any]) -> None:
-    gate: threading.Condition = state["media_gate"]
-    with gate:
-        while state["chat_waiters"] > 0 or state["chats_running"] > 0:
-            gate.wait(timeout=0.05)
 
 
 def _paused(state: dict[str, Any], reply: LiveReply) -> bool:
@@ -809,7 +709,13 @@ def _mcp_dispatch(
     task_id: str = "",
 ) -> Any:
     if kind == "list":
-        return _media_rows()
+        media = body.get("media") if isinstance(body, dict) else None
+        mode = body.get("mode") if isinstance(body, dict) else None
+        if media not in {"image", "video", "music", "voice"}:
+            return []
+        if media == "video" and mode not in {"i2v", "t2v"}:
+            return []
+        return _media_rows(media, mode if isinstance(mode, str) else None)
     _prepare_listener(state)
     if task_id:
         record = state["media_tasks"].get(task_id)
@@ -876,19 +782,29 @@ def _hidden_pipelines() -> set[str]:
     return names
 
 
-def _media_rows() -> list[dict[str, Any]]:
+def _media_rows(media: str, mode: str | None = None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for folder, pipeline, module in _each_pipeline():
         kinds = media_kinds(module)
-        if not kinds:
+        if media not in kinds:
             continue
-        row: dict[str, Any] = {"id": folder, "pipeline": pipeline, "media": kinds}
-        speakers = getattr(module, "list_voices", None)
-        if callable(speakers):
-            row["voices"] = speakers()
-        emotions = getattr(module, "list_emotions", None)
-        if callable(emotions):
-            row["emotions"] = emotions()
+        if media == "video":
+            modes = getattr(module, "video_modes", None)
+            offered = modes() if callable(modes) else ()
+            if mode not in offered:
+                continue
+        row: dict[str, Any] = {"id": folder, "pipeline": pipeline, "media": [media]}
+        if media == "voice":
+            speakers = getattr(module, "list_voices", None)
+            if callable(speakers):
+                row["voices"] = speakers()
+            emotions = getattr(module, "list_emotions", None)
+            if callable(emotions):
+                row["emotions"] = emotions()
+        if media == "video":
+            listed = getattr(module, "list_resolutions", None)
+            if callable(listed):
+                row["resolutions"] = listed()
         rows.append(row)
     return rows
 

@@ -1,12 +1,15 @@
 """Media tools on the same process as the listener.
 
-FastMCP serves MCP 2026-07-28 at ``/mcp``. ``generate_image``, ``generate_video``, ``generate_music``, and
+FastMCP serves MCP 2026-07-28 at ``/mcp``. ``generate_image``,
+``generate_video_i2v``, ``generate_video_t2v``, ``generate_music``, and
 ``generate_voice`` are optional Tasks. A client that
 advertises ``io.modelcontextprotocol/tasks`` gets a ``CreateTaskResult`` and
 the in-memory worker runs one task at a time. A client that does not gets the
-tool result on that call. ``list_media_models``, ``media_status``, and
-``media_cancel`` run in the request. A generate tool calls the pipeline
-handler through the same lock as ``POST /v1``. Chat completion is not a tool.
+tool result on that call. ``list_image_models``, ``list_video_models_i2v``,
+``list_video_models_t2v``, ``list_music_models``, ``list_voice_models``,
+``media_status``, and ``media_cancel`` run in the request. A generate
+tool calls the pipeline handler through the same lock as ``POST /v1``.
+Chat completion is not a tool.
 """
 
 from __future__ import annotations
@@ -74,8 +77,9 @@ def build_mcp(
 ) -> FastMCP:
     """Tools close over ``dispatch(kind, body, task_id)``.
 
-    ``kind`` is ``list``, ``image``, ``video``, or ``music``. A generate call
-    passes the task id the worker is running. ``list`` ignores it. Task
+    ``kind`` is ``list``, ``image``, ``video``, ``music``, or ``voice``. A
+    generate call passes the task id the worker is running. ``list`` reads
+    ``media`` from the body, and ``mode`` when the media is video. Task
     records are stored on ``state``.
     """
     mcp = FastMCP("Favlo", version=__version__)
@@ -83,9 +87,29 @@ def build_mcp(
     mcp.add_extension(tasks)
 
     @mcp.tool(task=False)
-    def list_media_models() -> list[dict[str, Any]]:
-        """Registry rows whose pipeline generates an image, a video, music, or voice."""
-        return dispatch("list", {})
+    def list_image_models() -> list[dict[str, Any]]:
+        """Registry rows whose pipeline generates an image."""
+        return dispatch("list", {"media": "image"})
+
+    @mcp.tool(task=False)
+    def list_video_models_i2v() -> list[dict[str, Any]]:
+        """Image-to-video rows, with each row's resolutions."""
+        return dispatch("list", {"media": "video", "mode": "i2v"})
+
+    @mcp.tool(task=False)
+    def list_video_models_t2v() -> list[dict[str, Any]]:
+        """Text-to-video rows, with each row's resolutions."""
+        return dispatch("list", {"media": "video", "mode": "t2v"})
+
+    @mcp.tool(task=False)
+    def list_music_models() -> list[dict[str, Any]]:
+        """Registry rows whose pipeline generates music."""
+        return dispatch("list", {"media": "music"})
+
+    @mcp.tool(task=False)
+    def list_voice_models() -> list[dict[str, Any]]:
+        """Registry rows whose pipeline speaks. A row lists voices and emotions when defined."""
+        return dispatch("list", {"media": "voice"})
 
     @mcp.tool(task=False)
     async def media_status(taskId: str) -> dict[str, Any]:
@@ -137,38 +161,19 @@ def build_mcp(
         payload = await _run_task(dispatch, "image", body)
         return _image_result(payload, include_image, tasks.state)
 
-    @mcp.tool(task=_TASK, annotations=_ANNOTATIONS)
-    async def generate_video(
+    async def _generate_video(
         prompt: str,
         model: str,
-        image: str | dict[str, Any] | None = None,
-        size: str = "576x320",
-        seconds: str = "",
-        frames: int = 0,
-        seed: int = 0,
-        quality: str = "high",
-        negative_prompt: str = "",
-        guidance_scale: float | list[float] | None = None,
-        steps: int = 0,
+        size: str,
+        image: str | dict[str, Any] | None,
+        seconds: str,
+        frames: int,
+        seed: int,
+        quality: str,
+        negative_prompt: str,
+        guidance_scale: float | list[float] | None,
+        steps: int,
     ) -> ToolResult:
-        """Generate one MP4. Read it with resources/read at favlo://videos/{id}.mp4.
-
-        image is an id starting with image_ from generate_image, or {"type": "image", "data": "<base64 png>"}.
-        A filesystem path and a favlo:// URI are refused. Omitting frames and seconds uses the model's default frame count.
-
-        Args:
-            prompt: Motion prompt. The still is the first frame.
-            model: Video model id from list_media_models.
-            image: Id starting with image_, or {"type": "image", "data": "<base64 png>"}.
-            size: WIDTHxHEIGHT. Both edges are multiples of 16. 576x320 is 320p. 416x240 is 240p.
-            seconds: Duration as text, such as 5. Empty omits it. Used only when frames is omitted, and the count snaps to 4n+1.
-            frames: Frame count 4n+1. 0 omits it. When seconds is also omitted, the model default applies.
-            seed: Integer seed. The default is 0.
-            quality: auto, low, medium, high, xhigh, max, standard, or hd. auto, standard, and hd are stored as high.
-            negative_prompt: Empty uses Wan's sample negative. Encoded only when scale is not 1.
-            guidance_scale: One number or [low, high]. Default 1 skips the uncond forward.
-            steps: Euler steps from 1 to 40. 0 uses 4.
-        """
         body: dict[str, Any] = {
             "prompt": prompt,
             "model": model,
@@ -190,6 +195,90 @@ def build_mcp(
             body["steps"] = steps
         payload = await _run_task(dispatch, "video", body)
         return _video_result(payload)
+
+    @mcp.tool(task=_TASK, annotations=_ANNOTATIONS)
+    async def generate_video_i2v(
+        prompt: str,
+        model: str,
+        size: str,
+        image: str | dict[str, Any],
+        seconds: str = "",
+        frames: int = 0,
+        seed: int = 0,
+        quality: str = "high",
+        negative_prompt: str = "",
+        guidance_scale: float | list[float] | None = None,
+        steps: int = 0,
+    ) -> ToolResult:
+        """Generate one MP4 from a still. Read favlo://videos/{id}.mp4.
+
+        Args:
+            prompt: Motion prompt. The still is the first frame.
+            model: Model id from list_video_models_i2v.
+            size: Required WIDTHxHEIGHT from list_video_models_i2v.
+            image: Id starting with image_, or a PNG block.
+            seconds: Duration text. Empty omits it. Snaps to 4n+1.
+            frames: Frame count 4n+1. 0 omits it.
+            seed: Integer seed. The default is 0.
+            quality: auto, low, medium, high, xhigh, max, standard, or hd.
+            negative_prompt: Empty uses Wan's sample negative.
+            guidance_scale: One number or [low, high]. Default 1.
+            steps: Euler steps from 1 to 40. 0 uses 4.
+        """
+        return await _generate_video(
+            prompt,
+            model,
+            size,
+            image,
+            seconds,
+            frames,
+            seed,
+            quality,
+            negative_prompt,
+            guidance_scale,
+            steps,
+        )
+
+    @mcp.tool(task=_TASK, annotations=_ANNOTATIONS)
+    async def generate_video_t2v(
+        prompt: str,
+        model: str,
+        size: str,
+        seconds: str = "",
+        frames: int = 0,
+        seed: int = 0,
+        quality: str = "high",
+        negative_prompt: str = "",
+        guidance_scale: float | list[float] | None = None,
+        steps: int = 0,
+    ) -> ToolResult:
+        """Generate one MP4 from text. Read favlo://videos/{id}.mp4.
+
+        Args:
+            prompt: Motion prompt.
+            model: Model id from list_video_models_t2v.
+            size: Required WIDTHxHEIGHT from list_video_models_t2v.
+            seconds: Duration text. Empty omits it. Snaps to 4n+1.
+            frames: Frame count 4n+1. 0 omits it.
+            seed: Integer seed. The default is 0.
+            quality: auto, low, medium, high, xhigh, max, standard, or hd.
+            negative_prompt: Empty uses Wan's sample negative.
+            guidance_scale: One number or [low, high]. Default 1.
+            steps: Euler steps from 1 to 40. 0 uses 4.
+        """
+        return await _generate_video(
+            prompt,
+            model,
+            size,
+            None,
+            seconds,
+            frames,
+            seed,
+            quality,
+            negative_prompt,
+            guidance_scale,
+            steps,
+        )
 
     @mcp.tool(task=_TASK, annotations=_ANNOTATIONS)
     async def generate_music(
@@ -239,7 +328,7 @@ def build_mcp(
     ) -> ToolResult:
         """Speak one line.
 
-        ``voice`` is a speaker id from ``list_media_models``.
+        ``voice`` is a speaker id from ``list_voice_models``.
         A square-bracket tag in ``input`` is an emotion id from that row.
         ``response_format`` is mp3, wav, or flac.
         """
@@ -694,13 +783,15 @@ def _working_fields(state: dict[str, Any], task_id: str) -> dict[str, Any]:
     record = (state.get("media_tasks") or {}).get(task_id)
     fields: dict[str, Any] = {}
     position = _position(state, task_id)
+    paused = isinstance(record, dict) and bool(record.get("paused"))
     if position is not None:
         fields["position"] = position
-    if isinstance(record, dict) and record.get("paused"):
+    if position is not None or paused:
+        fields["statusMessage"] = "task is ongoing"
+    if paused:
         fields["stage"] = "paused"
-        return fields
     job = record.get("job") if isinstance(record, dict) else None
-    if not isinstance(job, dict):
+    if not isinstance(job, dict) and position is None and not paused:
         job = _live_job(state)
     if not isinstance(job, dict):
         return fields
@@ -708,7 +799,7 @@ def _working_fields(state: dict[str, Any], task_id: str) -> dict[str, Any]:
         fields["progress"] = job.get("progress")
     if job.get("eta") is not None:
         fields["eta"] = job.get("eta")
-    if isinstance(job.get("stage"), str):
+    if not paused and isinstance(job.get("stage"), str):
         fields["stage"] = job.get("stage")
     return fields
 

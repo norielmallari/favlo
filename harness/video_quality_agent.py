@@ -1,7 +1,7 @@
 """Draw a 240p still, then two clips at low and max.
 
 The still is 416×240. ``generate_image`` runs only when that PNG is missing.
-``generate_video`` then runs twice, at ``quality`` ``low`` and ``max``, with
+``generate_video_i2v`` then runs twice, at ``quality`` ``low`` and ``max``, with
 no chat between them. Each result is read from ``favlo://videos/{id}.mp4`` and
 saved as ``artifacts/video-quality-low.mp4`` and
 ``artifacts/video-quality-max.mp4``. Exit 0 means both files are 5 frames at
@@ -101,7 +101,7 @@ def _draw_still(port: int, body: dict[str, Any], still: Path) -> tuple[int, int]
 def _clip(port: int, body: dict[str, Any], still: Path, quality: str) -> bytes:
     result = generate(
         port,
-        "generate_video",
+        "generate_video_i2v",
         {
             "model": body["model"],
             "prompt": body["prompt"],

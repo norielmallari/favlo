@@ -2,7 +2,7 @@
 
 The Microsoft Agent Framework agent calls ``generate_image`` when the still is
 missing. The still is drawn at the clip's width and height. The next turn
-calls ``generate_video`` and reads ``favlo://videos/{id}.mp4`` into
+calls ``generate_video_i2v`` and reads ``favlo://videos/{id}.mp4`` into
 ``artifacts/video-smoke-agent.mp4``. The 35B
 vision tower then reads frame 0, the middle frame, and the last frame of
 that file and must affirm the still sentence. Exit 0 means each of those
@@ -92,7 +92,7 @@ def video_tools(
             return "image is missing"
         result = generate(
             port,
-            "generate_video",
+            "generate_video_i2v",
             {
                 "model": video_body["model"],
                 "prompt": video_body["prompt"],

@@ -145,7 +145,7 @@ def _accepts(opener: Any, name: str) -> bool:
     return name in parameters
 
 
-def _start_pipeline(selection: Any, args: Any) -> Any:
+def _start_pipeline(selection: Any, args: Any, schedule: Any = None) -> Any:
     """Open the pipeline in its own process. The daemon keeps the handle."""
     from favlo.pipeline_worker import PipelineChild
 
@@ -154,6 +154,7 @@ def _start_pipeline(selection: Any, args: Any) -> Any:
         getattr(args, "max_memory", None),
         console=getattr(args, "console_ui", None),
     )
+    child.admission = schedule
     child.open()
     return child
 
@@ -229,9 +230,12 @@ def _install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
     if ui is not None:
         ui.pipeline = selection.pipeline
         ui.load_detail = selection.alias or selection.folder
+    from favlo.schedule import ensure
+
+    schedule = ensure(state)
     before = memory.owners()
     try:
-        child = _start_pipeline(selection, args)
+        child = _start_pipeline(selection, args, schedule)
     except Exception:
         _sweep_new(before)
         raise
