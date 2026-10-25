@@ -17,7 +17,7 @@ Read that file first. If it records a ceiling and the designed kernels match the
 
 Recompute when the file is missing or any designed kernel changed. For the phase being optimized (prefill or decode):
 
-- Count the bytes the designed forward reads and writes for one token, including the attention window that kernel actually walks. Divide by the streaming bandwidth measured on this machine. That is the bandwidth ceiling.
+- Count the bytes the designed forward reads and writes for one token, including the attention window that kernel actually walks. Divide by the streaming bandwidth measured on an M5 Pro with 48 GB. That is the bandwidth ceiling.
 - Time each designed kernel in its own command buffer, then wait. Compose one token from those isolated times. That is the kernel ceiling.
 - Do not add `GPUStartTime` / `GPUEndTime` intervals that overlap across in-flight buffers.
 - Do not edit production code to take the measurement. A missing kernel stays missing; do not substitute another forward.

@@ -4,7 +4,7 @@ alwaysApply: false
 ---
 # Public algorithms, Metal mapping
 
-Every equation in a pipeline comes from a public paper, spec, or vendor document, then mapped onto a Metal op this machine actually runs. Another repository's source, tests, comments, or design notes are not a reference. Porting them pulls in that runtime's layout and hides the Metal mapping.
+Every equation in a pipeline comes from a public paper, spec, or vendor document, then mapped onto a Metal op an M5 Pro with 48 GB runs. Another repository's source, tests, comments, or design notes are not a reference. Porting them pulls in that runtime's layout and hides the Metal mapping.
 
 Score a formula on this runtime's own forward. An int4 argmax is not evidence the equation is right. Check the BF16 shader dot of the checkpoint values.
 

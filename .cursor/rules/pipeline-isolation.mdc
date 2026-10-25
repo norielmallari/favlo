@@ -14,7 +14,7 @@ A new runtime adds those files and one row in the runtime table in `ARCHITECTURE
 
 Do not edit another pipeline's package, shaders, tests, or docs. Do not add a base class or a kernel that branches on the pipeline. Do not change `src/favlo/` unless the task is the listener, the registry, or the console. Registration loads `sampling.py` from the pipeline that owns the row. Do not pass a sampling card into the registry.
 
-A pipeline's kernels, records, and cache are described in that pipeline's `docs/<pipeline>/` note. Root `ARCHITECTURE.md` is the process and the write set.
+A pipeline's kernels, records, and cache are described in that pipeline's `docs/<pipeline>/` note. Synthetic `matmul2d` dtype rates are [docs/synthetic-matmul2d.md](../../docs/synthetic-matmul2d.md). Root `ARCHITECTURE.md` is the process and the write set.
 
 ## Model switch
 

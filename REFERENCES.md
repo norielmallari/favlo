@@ -67,7 +67,7 @@ IEEE Std 754-2019. Round-ties-to-even.
 
 ## Metal storage
 
-Apple. *Metal Shading Language Specification.* Metal 4.1 on this machine. `unpack` of `packed_int4b` is signed two's complement, −8..7, and element 0 is the low nibble. That is the int4 layout a pipeline probe measures. `unpack` does not accept `int2b` here, so int2 is packed by a shift: the low two bits are element 0, and the codes are two's complement −2..1.
+Apple. *Metal Shading Language Specification.* Metal 4.1 on an M5 Pro with 48 GB. `unpack` of `packed_int4b` is signed two's complement, −8..7, and element 0 is the low nibble. That is the int4 layout a pipeline probe measures. `unpack` does not accept `int2b` here, so int2 is packed by a shift: the low two bits are element 0, and the codes are two's complement −2..1.
 
 Apple. `MTLTensor` in the macOS 27 SDK. For int4, int8, int2, fp8, and E8M0, every stride after the innermost is a multiple of 128 bytes, and a quantized data plane's buffer offset is 128-byte aligned. The innermost stride is 1. The scales plane is `MTLTensorDataTypeMetalFloat8UE8M0` with block factors `{32, 1}`. A buffer-backed tensor with auxiliary planes is created with per-plane attachments. A device-allocated tensor uses an opaque layout and is the resident copy.
 

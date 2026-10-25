@@ -22,7 +22,7 @@ The directory stem in the note is the official repository name plus the weight q
 
 ## Tone and shape
 
-Use calm, neutral sentences. State what the project does and what the reader can run. Skip slogans, urgency, and notes about a particular machine.
+Use calm, neutral sentences. State what the project does and what the reader can run. Skip slogans and urgency. A measured time names the machine: an M5 Pro with 48 GB. A hostname, a home directory, a serial number, and a user name stay out.
 
 Outside a block quote, a claim by the author is in the third person. Write "the author", not "I", "me", or "my".
 
@@ -32,7 +32,7 @@ A public README says what the project is, how to install it, one minimal command
 
 Wrong: "Fixed the crash on the user's M5 at `/Users/user/Models`. Email me at user@example.com."
 
-Right: "The server listens on `127.0.0.1:8000`. A missing checkpoint path is reported and the process exits."
+Right: "On an M5 Pro with 48 GB the dispatch measured 15.084 ms. The server listens on `127.0.0.1:8000`. A missing checkpoint path is reported and the process exits."
 
 Wrong, outside a block quote: "I admire this work, and I recommend it before trying Favlo."
 

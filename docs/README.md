@@ -8,6 +8,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [console.md](console.md) | Shared status row |
 | [prefix.md](prefix.md) | SSD prefix store |
 | [harness.md](harness.md) | File agent, coding agent, and worktree agent |
+| [synthetic-matmul2d.md](synthetic-matmul2d.md) | Synthetic `matmul2d` dtype rates |
 | [ai-assistance/README.md](ai-assistance/README.md) | AI-assisted features on `favlo serve` |
 | [qwen38-flash-next/architecture.md](qwen38-flash-next/architecture.md) | Qwen3.8-Flash-Next pipeline contract |
 | [qwen38-flash-next/research/int2-miss.md](qwen38-flash-next/research/int2-miss.md) | Qwen3.8-Flash-Next int2 reconstruction bound |

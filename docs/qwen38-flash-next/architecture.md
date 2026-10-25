@@ -4,7 +4,7 @@ As-built contract for the `qwen38-flash-next` pipeline. The process, the listene
 
 Clients reach this pipeline through `favlo serve`. `GET /v1/models` lists it once a record is registered, and the `model` field on `POST /v1/chat/completions` loads it. Quantize, probe, matmul, kernels, bf16, and complete require `favlo --qwen38-flash-next`. That flag loads `pipelines/metal41/qwen38-flash-next.py`, which loads the `qwen38_flash_next` package. The package does not import another pipeline.
 
-Device spans come from the process memory manager. The target machine is an M5 Pro: 20 shader cores, a neural accelerator beside the shader pipelines in each core, 307 GB/s unified DRAM, and an APFS volume whose device block and allocation block are 4096 bytes. Requires macOS 27 and the matching Metal SDK. The 16-core Neural Engine is not used. Sub-byte tensor planes also require 128-byte alignment inside the record. A 4 KB file offset does not by itself satisfy that.
+Device spans come from the process memory manager. The target machine is an M5 Pro with 48 GB: 20 shader cores, a neural accelerator beside the shader pipelines in each core, 307 GB/s unified DRAM, and an APFS volume whose device block and allocation block are 4096 bytes. Requires macOS 27 and the matching Metal SDK. The 16-core Neural Engine is not used. Sub-byte tensor planes also require 128-byte alignment inside the record. A 4 KB file offset does not by itself satisfy that.
 
 Layouts are in [record.md](record.md). The n-gram hash is in [ngram.md](ngram.md). The kernel schedule is in [schedule.md](schedule.md). The recorded prefill and decode rates are in [performance.md](performance.md). The file-reading sum is a measurement in [research/recorded-forward.md](research/recorded-forward.md). The probe is in [probe.md](probe.md). The papers are in [references.md](references.md). Implementation plans are not in this tree. This file wins if one of those notes disagrees with it.
 
@@ -127,7 +127,7 @@ The kernel map, the quantize workers, and the host steps are in [schedule.md](sc
 
 ## Probe
 
-`favlo --qwen38-flash-next probe` measures one block of 32 on this GPU before an expert table is packed. Nibble order and the int4 endpoints are in [probe.md](probe.md). `matmul` checks one fp4 E2M1 tile and one fp8 E4M3 tile through `matmul2d`, and the fp4 tile through the decode shader dot. It does not load the checkpoint.
+`favlo --qwen38-flash-next probe` measures one block of 32 on an M5 Pro with 48 GB before an expert table is packed. Nibble order and the int4 endpoints are in [probe.md](probe.md). `matmul` checks one fp4 E2M1 tile and one fp8 E4M3 tile through `matmul2d`, and the fp4 tile through the decode shader dot. It does not load the checkpoint.
 
 ## Build order
 

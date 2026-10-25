@@ -9,7 +9,7 @@ A public commit records an artifact and a date. It does not establish that the i
 
 Split the proposal into the method, the model or task, the measurement, and the mechanism. Name the closest public predecessor for each part, with a link and one sentence on what that work already did. Papers, model cards, and shipped code all count. The sentence this repo may own is only the remainder.
 
-A measured mapping onto one machine is a claim even when the method is already published. The remainder is this implementation's table: the times, the bandwidth ceiling, or the recorded rate for that pipeline's task. Name the closest published implementation of the same task and the figure it reported. The "not found" sentence names this table. A tile or stride the vendor requires is a constraint. An unmeasured mapping stays a plan.
+A measured mapping onto one machine is a claim even when the method is already published. A measurement from this repository names that machine as an M5 Pro with 48 GB. The remainder is this implementation's table: the times, the bandwidth ceiling, or the recorded rate for that pipeline's task. Name the closest published implementation of the same task and the figure it reported. The "not found" sentence names this table. A tile or stride the vendor requires is a constraint. An unmeasured mapping stays a plan.
 
 ## Citing this software
 

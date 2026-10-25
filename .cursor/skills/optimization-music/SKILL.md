@@ -15,7 +15,7 @@ The ceiling is a computation on the designed kernels for one generation at the d
 
 Recompute when the file is missing or any designed kernel changed. For one generation at that design point:
 
-- Count the bytes the designed kernels read and write. Divide by the streaming bandwidth measured on this machine. That is the bandwidth ceiling.
+- Count the bytes the designed kernels read and write. Divide by the streaming bandwidth measured on an M5 Pro with 48 GB. That is the bandwidth ceiling.
 - Time each designed kernel in its own command buffer, then wait. Compose one generation from those isolated times. That is the kernel ceiling.
 - Do not add `GPUStartTime` / `GPUEndTime` intervals that overlap across in-flight buffers.
 - Do not edit production code to take the measurement. A missing kernel stays missing; do not substitute another forward.
