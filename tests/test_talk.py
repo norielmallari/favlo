@@ -152,12 +152,28 @@ def test_registered_models_reads_the_registry(tmp_path: Path) -> None:
         json.dumps(
             {
                 "version": 1,
+                "default": "qwen36-35b-a3b:instruct",
                 "models": {
                     "Qwen3.6-35B-A3B-fp4": {
                         "alias": "qwen36-35b-a3b",
                         "pipeline": "qwen36-35b-a3b",
                         "runtime": "metal41",
                         "kv_cache": "e4m3",
+                        "variants": {
+                            "thinking": {
+                                "temperature": 1.0,
+                                "top_p": 0.95,
+                                "top_k": 20,
+                                "presence_penalty": 1.5,
+                            },
+                            "instruct": {
+                                "temperature": 0.7,
+                                "top_p": 0.8,
+                                "top_k": 20,
+                                "presence_penalty": 1.5,
+                            },
+                        },
+                        "default_variant": "thinking",
                     }
                 },
             }
@@ -167,7 +183,7 @@ def test_registered_models_reads_the_registry(tmp_path: Path) -> None:
     assert registered_models(tmp_path) == (
         "Qwen3.6-35B-A3B-fp4 pipeline qwen36-35b-a3b alias qwen36-35b-a3b kv e4m3"
     )
-    assert chat_model_id(tmp_path) == "Qwen3.6-35B-A3B-fp4"
+    assert chat_model_id(tmp_path) == "qwen36-35b-a3b:instruct"
 
 
 def test_a_tool_update_is_not_spoken() -> None:
@@ -301,6 +317,7 @@ def test_a_missing_intro_is_one_completion(tmp_path: Path) -> None:
             json.dumps(
                 {
                     "version": 1,
+                    "default": "qwen36-35b-a3b:instruct",
                     "models": {
                         "Qwen3.6-35B-A3B-fp4": {
                             "alias": "qwen36-35b-a3b",
@@ -321,7 +338,7 @@ def test_a_missing_intro_is_one_completion(tmp_path: Path) -> None:
         server.server_close()
     assert line == _LINE
     assert len(posts) == 1
-    assert posts[0]["model"] == "Qwen3.6-35B-A3B-fp4"
+    assert posts[0]["model"] == "qwen36-35b-a3b:instruct"
     assert posts[0]["tool_choice"] == {"type": "function", "function": {"name": "save_intro"}}
     assert posts[0]["enable_thinking"] is False
     assert load_intros(tmp_path / "intros.json")[:2] == (_LINE, _MORE)

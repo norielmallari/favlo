@@ -46,13 +46,17 @@ The official checkpoint is `Tongyi-MAI/Z-Image-Turbo`. The steps are [z-image-tu
 
 The official checkpoint is `Wan-AI/Wan2.2-I2V-A14B`. The text encoder is `google/umt5-xxl`. The steps are [wan22-i2v/SETUP.md](../wan22-i2v/SETUP.md).
 
-`favlo --wan22-i2v setup` downloads the VAE, the umT5 encoder and tokenizer, and the two expert files. `setup --umt5 example-org/example-model` downloads that text encoder instead. `quantize --high` and `--low` with `--fp8-percent 50` pack `models/Wan2.2-I2V-A14B-fp8-e50`. The default percent is 20, which writes `models/Wan2.2-I2V-A14B-fp4`. `--name` is that packed folder and the registry id. The row stores the packed directory, and `--high-dir` and `--low-dir` store the quantized expert directories. `quantize-text` stores the quantized umT5 directory on that row.
+`favlo --wan22-i2v setup` downloads the VAE, the umT5 encoder and tokenizer, and the two expert files. `setup --umt5 example-org/example-model` downloads that text encoder instead. `quantize --int8` packs `models/Wan2.2-I2V-A14B-int8`. That folder is the served record. `quantize --high` and `--low` with `--fp8-percent 50` pack `models/Wan2.2-I2V-A14B-fp8-e50`. The default percent is 20, which writes `models/Wan2.2-I2V-A14B-fp4`. `--name` is that packed folder and the registry id. The row stores the packed directory, and `--high-dir` and `--low-dir` store the quantized expert directories. `quantize-text` writes `models/google/umt5-xxl-int8` and stores that directory on the row. Another pipeline can use the same folder.
 
 ## ACE-Step
 
 The official checkpoint is `ACE-Step/acestep-v15-xl-turbo`. `setup` downloads the Diffusers split `ACE-Step/acestep-v15-xl-turbo-diffusers`. The steps are [ace-step-15-turbo/SETUP.md](../ace-step-15-turbo/SETUP.md).
 
 `favlo --ace-step-15-turbo setup` writes `models/acestep-v15-xl-turbo`. That checkout holds the text encoder, the tokenizer, the condition encoder, the transformer, and the VAE. `quantize` packs `models/acestep-v15-xl-turbo-fp8-fp4` and stores that directory on the row. `delete <folder>` removes that row and the packed directory.
+
+## Default chat model
+
+`models/registry.json` may set top-level `"default"` to a variant id such as `qwen36-35b-a3b:instruct`. The first registered language model writes that field to its instruct variant when it is still unset. Agent harnesses and the terminal read it when no model flag is passed.
 
 ## Register a finished record
 

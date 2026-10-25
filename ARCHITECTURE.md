@@ -77,6 +77,7 @@ src/favlo/              process entry; the listener loads the pipeline a request
   persona.py            voice and saved openings
   prefix.py             SSD prefix store
   memory.py             device, placement heaps, and span handles
+  memory_notes.py       ~/.favlo/memory.db for MCP remember, recall, and forget
   pipelines.py          the daemon registry of the pipeline process
   setup.py              empty-registry download
   logs.py               rolling server log; size is settings.json log_max_bytes

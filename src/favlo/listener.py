@@ -329,6 +329,7 @@ def serve(args: Any) -> int:
     shutdown = _Shutdown()
     shutdown.arm()
     args.shutdown = shutdown
+    memory_home = os.environ.get("FAVLO_MEMORY_HOME")
     state: dict[str, Any] = {
         "runtime": None,
         "server": None,
@@ -337,6 +338,8 @@ def serve(args: Any) -> int:
         "pipeline": None,
         "requests": 0,
     }
+    if memory_home:
+        state["memory_home"] = Path(memory_home)
     try:
         return _run_until_stopped(args, state, shutdown)
     except KeyboardInterrupt:

@@ -766,6 +766,7 @@ async def _pair(
             _suggestions_tool(home),
             _setup_guide_tool(),
             _setup_run_tool(base),
+            *_memory_tools(base, home),
         ],
         default_options={
             "max_tokens": 400,
@@ -787,6 +788,54 @@ def _with_opening(session: Any, path: Path, shown: str | None = None) -> Any:
     if not messages:
         messages.append(Message("assistant", [line]))
     return session
+
+
+def _memory_tools(base: str, home: Path | None) -> tuple[object, object, object]:
+    from typing import Annotated
+
+    from agent_framework import tool
+    from pydantic import Field
+
+    from favlo.memory_mcp import (
+        FORGET_DESCRIPTION,
+        RECALL_DESCRIPTION,
+        REMEMBER_DESCRIPTION,
+        embed_http,
+        forget_text,
+        open_store,
+        recall_text,
+        remember_text,
+    )
+
+    store = open_store(home)
+
+    def embed(text: str) -> list[float] | str:
+        return embed_http(base, text)
+
+    @tool(approval_mode="never_require", description=REMEMBER_DESCRIPTION)
+    def remember(
+        text: Annotated[str, Field(description="One sentence to store.")],
+    ) -> str:
+        return remember_text(store, embed, text, client="favlo")
+
+    @tool(approval_mode="never_require", description=RECALL_DESCRIPTION)
+    def recall(
+        query: Annotated[str, Field(description="What to look for.")],
+    ) -> str:
+        rows = recall_text(store, embed, query)
+        if isinstance(rows, str):
+            return rows
+        if not rows:
+            return "no memories matched"
+        return json.dumps(rows, indent=2)
+
+    @tool(approval_mode="never_require", description=FORGET_DESCRIPTION)
+    def forget(
+        id: Annotated[str, Field(description="Id from recall or remember.")],  # noqa: A002
+    ) -> str:
+        return forget_text(store, id)
+
+    return remember, recall, forget
 
 
 def _guide_tool() -> object:
@@ -813,16 +862,14 @@ def _guide_tool() -> object:
 
 
 def chat_model_id(root: Path | None = None) -> str:
-    """The folder the terminal sends as ``model``."""
-    from favlo.registry import load_registry
+    """The model id the terminal sends on chat requests."""
+    from favlo.registry import default_llm_id
 
-    models = load_registry(root).get("models")
-    if isinstance(models, dict):
-        for folder in models:
-            if isinstance(folder, str) and folder and ":" not in folder:
-                return folder
-    message = "no model is registered"
-    raise RuntimeError(message)
+    try:
+        return default_llm_id(root)
+    except LookupError:
+        message = "no model is registered"
+        raise RuntimeError(message) from None
 
 
 def registered_models(root: Path | None = None) -> str:

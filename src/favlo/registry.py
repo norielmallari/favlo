@@ -56,8 +56,10 @@ def load_registry(root: Path | None = None) -> dict[str, Any]:
         message = "registry.json is not an object"
         raise ValueError(message)
     data.setdefault("version", 1)
-    data.pop("default", None)
     data.setdefault("models", {})
+    default = data.get("default")
+    if default is not None and not isinstance(default, str):
+        data.pop("default", None)
     if not isinstance(data["models"], dict):
         message = "registry models is not an object"
         raise ValueError(message)
@@ -93,6 +95,20 @@ def list_unregistered(root: Path | None = None) -> list[str]:
     return found
 
 
+def default_llm_id(root: Path | None = None) -> str:
+    """The chat model id harnesses and the terminal use when none is named."""
+    data = load_registry(root)
+    stored = data.get("default")
+    if isinstance(stored, str) and stored.strip():
+        return stored.strip()
+    for _folder, entry in data["models"].items():
+        if not isinstance(entry, dict) or not _is_language_model_entry(entry):
+            continue
+        return _language_model_id(entry, _folder)
+    message = "no default language model is registered"
+    raise LookupError(message)
+
+
 def format_listing(root: Path | None = None) -> str:
     data = load_registry(root)
     lines: list[str] = []
@@ -125,7 +141,7 @@ def add_model(
     if folder in data["models"]:
         message = f"{folder} is already registered"
         raise ValueError(message)
-    data["models"][folder] = _entry(
+    entry = _entry(
         alias=alias,
         source=source,
         pipeline=pipeline,
@@ -134,6 +150,8 @@ def add_model(
         max_prompt_tokens=max_prompt_tokens,
         directory=str(path),
     )
+    data["models"][folder] = entry
+    _ensure_default_llm(data, folder, alias, entry)
     save_registry(data, root)
     return data
 
@@ -193,11 +211,12 @@ def register_quantized(
                 current["context_length"] = ctx
             else:
                 current.setdefault("context_length", DEFAULT_CONTEXT_LENGTH)
+            _ensure_default_llm(data, folder, alias, current)
             save_registry(data, root)
             return
         message = f"{folder} is already registered for a different source"
         raise ValueError(message)
-    data["models"][folder] = _entry(
+    entry = _entry(
         alias=alias,
         source=source_text,
         pipeline=pipeline,
@@ -207,6 +226,8 @@ def register_quantized(
         directory=directory_text,
         parts=part_text,
     )
+    data["models"][folder] = entry
+    _ensure_default_llm(data, folder, alias, entry)
     save_registry(data, root)
 
 
@@ -381,6 +402,45 @@ def _require_runtime(entry: dict[str, Any], folder: str) -> str:
 
 def _custom(entry: dict[str, Any]) -> bool:
     return bool(entry.get("custom"))
+
+
+def _is_language_model_entry(entry: dict[str, Any]) -> bool:
+    variants = entry.get("variants")
+    if not isinstance(variants, dict):
+        return False
+    return "instruct" in variants or "thinking" in variants
+
+
+def _language_variant(entry: dict[str, Any]) -> str:
+    variants = entry.get("variants")
+    if not isinstance(variants, dict) or not variants:
+        message = "language model row has no variants"
+        raise LookupError(message)
+    if "instruct" in variants:
+        return "instruct"
+    if "thinking" in variants:
+        return "thinking"
+    message = "language model row has no instruct or thinking variant"
+    raise LookupError(message)
+
+
+def _language_model_id(entry: dict[str, Any], folder: str) -> str:
+    alias = entry.get("alias")
+    base = alias if isinstance(alias, str) and alias else folder
+    return f"{base}:{_language_variant(entry)}"
+
+
+def _ensure_default_llm(
+    data: dict[str, Any],
+    folder: str,
+    alias: str | None,
+    entry: dict[str, Any],
+) -> None:
+    if data.get("default"):
+        return
+    if not _is_language_model_entry(entry):
+        return
+    data["default"] = _language_model_id(entry, folder)
 
 
 def _entry(

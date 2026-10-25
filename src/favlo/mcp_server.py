@@ -30,6 +30,15 @@ from fastmcp_tasks.models import CreateTaskResult, GetTaskParams, GetTaskResult
 from mcp.shared.exceptions import MCPError
 
 from favlo import __version__
+from favlo.memory_mcp import (
+    FORGET_DESCRIPTION,
+    RECALL_DESCRIPTION,
+    REMEMBER_DESCRIPTION,
+    forget_text,
+    open_store,
+    recall_text,
+    remember_text,
+)
 from favlo.images import load_image
 from favlo.music import load_music, music_dir
 from favlo.videos import load_video
@@ -58,7 +67,11 @@ _STILL = (
 )
 
 
-def build_mcp(dispatch: Any, state: dict[str, Any]) -> FastMCP:
+def build_mcp(
+    dispatch: Any,
+    state: dict[str, Any],
+    embed: Any,
+) -> FastMCP:
     """Tools close over ``dispatch(kind, body, task_id)``.
 
     ``kind`` is ``list``, ``image``, ``video``, or ``music``. A generate call
@@ -83,6 +96,21 @@ def build_mcp(dispatch: Any, state: dict[str, Any]) -> FastMCP:
     async def media_cancel(taskId: str) -> dict[str, Any]:
         """Cancel one task. A second call returns the same status."""
         return await tasks.cancel(taskId)
+
+    store = open_store(state.get("memory_home"))
+
+    @mcp.tool(task=False, description=REMEMBER_DESCRIPTION)
+    def remember(text: str, client: str = "") -> str:
+        who = client.strip() or None
+        return remember_text(store, embed, text, client=who)
+
+    @mcp.tool(task=False, description=RECALL_DESCRIPTION)
+    def recall(query: str) -> Any:
+        return recall_text(store, embed, query)
+
+    @mcp.tool(task=False, description=FORGET_DESCRIPTION)
+    def forget(id: str) -> str:  # noqa: A002
+        return forget_text(store, id)
 
     @mcp.tool(task=_TASK, annotations=_ANNOTATIONS)
     async def generate_image(
@@ -113,7 +141,7 @@ def build_mcp(dispatch: Any, state: dict[str, Any]) -> FastMCP:
     async def generate_video(
         prompt: str,
         model: str,
-        image: str | dict[str, Any],
+        image: str | dict[str, Any] | None = None,
         size: str = "576x320",
         seconds: str = "",
         frames: int = 0,
@@ -126,15 +154,15 @@ def build_mcp(dispatch: Any, state: dict[str, Any]) -> FastMCP:
         """Generate one MP4. Read it with resources/read at favlo://videos/{id}.mp4.
 
         image is an id starting with image_ from generate_image, or {"type": "image", "data": "<base64 png>"}.
-        A filesystem path and a favlo:// URI are refused. Omitting frames and seconds yields 81 frames at 16 fps.
+        A filesystem path and a favlo:// URI are refused. Omitting frames and seconds uses the model's default frame count.
 
         Args:
             prompt: Motion prompt. The still is the first frame.
             model: Video model id from list_media_models.
             image: Id starting with image_, or {"type": "image", "data": "<base64 png>"}.
             size: WIDTHxHEIGHT. Both edges are multiples of 16. 576x320 is 320p. 416x240 is 240p.
-            seconds: Duration as text, such as 5. Empty omits it. Used only when frames is omitted, and the count snaps to 4n+1 at 16 fps.
-            frames: Frame count 4n+1. 0 omits it. When seconds is also omitted, the clip is 81 frames.
+            seconds: Duration as text, such as 5. Empty omits it. Used only when frames is omitted, and the count snaps to 4n+1.
+            frames: Frame count 4n+1. 0 omits it. When seconds is also omitted, the model default applies.
             seed: Integer seed. The default is 0.
             quality: auto, low, medium, high, xhigh, max, standard, or hd. auto, standard, and hd are stored as high.
             negative_prompt: Empty uses Wan's sample negative. Encoded only when scale is not 1.
@@ -147,8 +175,9 @@ def build_mcp(dispatch: Any, state: dict[str, Any]) -> FastMCP:
             "size": size,
             "seed": seed,
             "quality": quality,
-            "image": _still(image, tasks.state),
         }
+        if image is not None:
+            body["image"] = _still(image, tasks.state)
         if seconds:
             body["seconds"] = seconds
         if frames:

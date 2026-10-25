@@ -1113,6 +1113,9 @@ def test_mcp_initialize_lists_tools_and_rejects_a_batch(tmp_path) -> None:
         "list_media_models",
         "media_status",
         "media_cancel",
+        "remember",
+        "recall",
+        "forget",
         "generate_image",
         "generate_video",
         "generate_music",
@@ -1276,14 +1279,16 @@ def test_generate_video_schema_names_the_still_and_the_frame_default() -> None:
 
     from favlo.mcp_server import build_mcp
 
-    mcp = build_mcp(lambda *_args: {}, {})
+    mcp = build_mcp(lambda *_args: {}, {}, lambda _text: [0.0] * 1024)
     tools = asyncio.run(mcp.list_tools(run_middleware=False))
     video = next(tool for tool in tools if tool.name == "generate_video")
     description = video.description or ""
     properties = video.parameters["properties"]
     assert "image_" in description
     assert "favlo://videos/" in description
-    assert "81" in properties["frames"]["description"]
+    assert "model default" in properties["frames"]["description"]
+    assert "81" not in properties["frames"]["description"]
+    assert "16 fps" not in description
     assert "image_" in properties["image"]["description"]
     assert "4n+1" in properties["seconds"]["description"]
     assert "576x320" in properties["size"]["description"]

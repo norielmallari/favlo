@@ -18,6 +18,18 @@ from typing import Any
 _HOST = "127.0.0.1"
 
 
+def call_tool(port: int, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Run one immediate MCP tool and return the tool result object."""
+    _post(port, "server/discover", {})
+    return _post(
+        port,
+        "tools/call",
+        {"name": name, "arguments": arguments},
+        tasks=False,
+        header_name=name,
+    )
+
+
 def generate(port: int, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Run one generate tool and return the completed tool result."""
     _post(port, "server/discover", {})

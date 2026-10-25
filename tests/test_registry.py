@@ -7,6 +7,7 @@ import pytest
 from favlo.registry import (
     add_model,
     choose_complete,
+    default_llm_id,
     format_listing,
     list_unregistered,
     load_registry,
@@ -57,6 +58,16 @@ def test_unknown_suffix_names_the_registered_ids(tmp_path) -> None:
     with pytest.raises(LookupError, match="short") as raised:
         resolve("short:draft", root=tmp_path)
     assert "packed" in str(raised.value)
+
+
+def test_default_llm_id_uses_the_registry_row(tmp_path) -> None:
+    _record(tmp_path, "packed")
+    add_model("packed", alias="short", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
+    assert default_llm_id(tmp_path) == "short:instruct"
+    data = load_registry(tmp_path)
+    data["default"] = "short:thinking"
+    save_registry(data, tmp_path)
+    assert default_llm_id(tmp_path) == "short:thinking"
 
 
 def test_listing_includes_folder_alias_and_variants(tmp_path) -> None:
@@ -144,7 +155,7 @@ def test_choose_complete_lists_models_when_default_is_unset(tmp_path) -> None:
     _record(tmp_path, "two")
     add_model("two", alias="second", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
     data = load_registry(tmp_path)
-    assert "default" not in data
+    assert data["default"] == "one:instruct"
     data["extra"] = {"kept": True}
     save_registry(data, tmp_path)
     with pytest.raises(LookupError, match="pass --model"):
@@ -178,7 +189,7 @@ def test_a_second_pipeline_is_listed_without_a_default(tmp_path) -> None:
     add_model(flash, alias="qwen38-flash-next", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
     add_model(dense, alias="qwen38-27b", root=tmp_path, pipeline="qwen38-27b", runtime="metal41")
     data = load_registry(tmp_path)
-    assert "default" not in data
+    assert data["default"] == "qwen38-flash-next:instruct"
     assert resolve("qwen38-flash-next", root=tmp_path).folder == flash
     assert resolve("qwen38-flash-next", root=tmp_path).pipeline == "qwen38-flash-next"
     selected = resolve("qwen38-27b", root=tmp_path)
@@ -216,7 +227,7 @@ def test_quantize_registration_refuses_a_different_source(tmp_path) -> None:
         runtime="metal41",
     )
     stored = load_registry(tmp_path)
-    assert "default" not in stored
+    assert stored["default"] == "short:instruct"
     assert list(stored["models"]) == ["packed"]
     register_quantized(
         "packed",

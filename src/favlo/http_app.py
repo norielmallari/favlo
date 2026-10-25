@@ -21,6 +21,7 @@ from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 from starlette.routing import Route
 
+from favlo.memory_notes import DIM, EMBED_MODEL
 from favlo.mcp_server import build_mcp, media_kinds
 from favlo.registry import load_registry, model_objects, one_model
 from favlo.reply import LiveReply
@@ -184,13 +185,41 @@ def _legacy_initialize_error(body: bytes) -> dict[str, Any] | None:
     }
 
 
+def embed_input(
+    args: Any,
+    state: dict[str, Any],
+    text: str,
+    model: str = EMBED_MODEL,
+) -> list[float] | str:
+    """Run one embeddings request on the listener queue. Returns a vector or a sentence."""
+    body = {"model": model, "input": text}
+    reply = LiveReply(threading.Event())
+    _run_locked(args, state, "embed", "application/json", json.dumps(body).encode(), reply)
+    payload = reply.payload
+    if reply.status >= 400 or not isinstance(payload, dict):
+        return "embeddings are not available"
+    data = payload.get("data")
+    if not isinstance(data, list) or not data:
+        return "embeddings are not available"
+    row = data[0]
+    if not isinstance(row, dict):
+        return "embeddings are not available"
+    vector = row.get("embedding")
+    if not isinstance(vector, list) or len(vector) != DIM:
+        return "embeddings are not available"
+    return [float(value) for value in vector]
+
+
 def build_app(args: Any, state: dict[str, Any]) -> Starlette:
     _prepare_listener(state)
 
     def dispatch(kind: str, body: dict[str, Any], task_id: str = "") -> Any:
         return _mcp_dispatch(args, state, kind, body, task_id)
 
-    mcp = build_mcp(dispatch, state)
+    def embed(text: str) -> list[float] | str:
+        return embed_input(args, state, text)
+
+    mcp = build_mcp(dispatch, state, embed)
     mcp_app = mcp.http_app(path="/mcp", stateless_http=True, json_response=True)
     _reject_legacy_initialize(mcp_app)
     async def models(request: Request) -> Response:

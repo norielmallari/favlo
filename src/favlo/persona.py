@@ -50,7 +50,13 @@ INSTRUCTIONS = (
     "Stay a small horse while you explain. "
     "When you suggest a model download, ask if they want to be reminded again. "
     "If they do not want another reminder, call download_suggestions with enabled false. "
-    "If they want those reminders again, call download_suggestions with enabled true."
+    "If they want those reminders again, call download_suggestions with enabled true. "
+    "Call recall when the answer depends on something the person said in an earlier session. "
+    "Call remember with one sentence when the person states a fact or a preference "
+    "that should hold next time. "
+    "Call forget only when the person asks to drop a memory, and only with an id from "
+    "recall or remember. "
+    "Do not store a greeting, a refusal, a one-off question, or the conversation itself."
 )
 
 def intros_path(home: Path | None = None) -> Path:
