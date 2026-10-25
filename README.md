@@ -14,9 +14,9 @@ The process contract is [ARCHITECTURE.md](ARCHITECTURE.md). The papers are [REFE
 
 | Pipeline | Note |
 |---|---|
-| `qwen38-flash-next` | [Qwen3.8-Flash-Next](docs/qwen38-flash-next/architecture.md) |
-| `qwen38-27b` | [Qwen3.8-27B](docs/qwen38-27b/README.md) |
 | `qwen36-35b-a3b` | [Qwen3.6-35B-A3B](docs/qwen36-35b-a3b/README.md) |
+| `qwen38-27b` | [Qwen3.8-27B](docs/qwen38-27b/README.md) |
+| `qwen38-flash-next` | [Qwen3.8-Flash-Next](docs/qwen38-flash-next/architecture.md) |
 | `z-image-turbo` | [Z-Image-Turbo](docs/z-image-turbo/README.md) |
 | `wan22-i2v` | [Wan 2.2 I2V](docs/wan22-i2v/README.md) |
 | `wan22-ti2v-5b` | [Wan2.2 TI2V-5B](docs/wan22-ti2v-5b/README.md) |
@@ -51,13 +51,17 @@ uv run favlo serve
 uv run favlo serve --non-interactive
 ```
 
-`favlo serve` on a terminal is the CLI. `favlo serve --non-interactive` starts the server daemon and exits. The daemon listens on `127.0.0.1:8129`. On a terminal, an empty registry downloads [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B), packs `models/Qwen3.6-35B-A3B-fp8-e20`, and then the daemon listens. The steps are [docs/qwen36-35b-a3b/SETUP.md](docs/qwen36-35b-a3b/SETUP.md). Quantize and the other non-serve commands use that model's flag, as in `favlo --qwen38-flash-next quantize`. Chat completions and image generation are both served from that daemon. The listener is [docs/serve.md](docs/serve.md). The image request is [docs/z-image-turbo/README.md](docs/z-image-turbo/README.md). The terminal session is [docs/guides/clients.md](docs/guides/clients.md). The assisted features on that session are [docs/ai-assistance](docs/ai-assistance/README.md).
+`favlo serve` on a terminal is the CLI. `favlo serve --non-interactive` starts the server daemon and exits. The daemon listens on `127.0.0.1:8129`. Chat completions and image generation are both served from that daemon.
+
+## Startup
+
+On a terminal, an empty registry downloads [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B), packs `models/Qwen3.6-35B-A3B-fp8-e20`, and then the daemon listens. The steps are [docs/qwen36-35b-a3b/SETUP.md](docs/qwen36-35b-a3b/SETUP.md). Quantize and the other non-serve commands use that model's flag, as in `favlo --qwen38-flash-next quantize`. The listener is [docs/serve.md](docs/serve.md). The image request is [docs/z-image-turbo/README.md](docs/z-image-turbo/README.md). The terminal session is [docs/guides/clients.md](docs/guides/clients.md). The assisted features on that session are [docs/ai-assistance](docs/ai-assistance/README.md).
 
 ## Methodology
 
-A pipeline equation comes from a public paper, a published specification, or a vendor document, then maps onto a Metal operation. Another application's source is not a reference. The process citations are [REFERENCES.md](REFERENCES.md). A pipeline's own citations are in that pipeline's note.
+A pipeline equation comes from a public document, then maps onto a Metal operation. Another application's source is not a reference. The process citations are [REFERENCES.md](REFERENCES.md). A pipeline's own citations are in that pipeline's note.
 
-The prompt and the generated tokens are separate phases. Patel et al., *Splitwise* ([arXiv:2311.18677](https://arxiv.org/abs/2311.18677)), and Zhong et al., *DistServe* ([arXiv:2401.09670](https://arxiv.org/abs/2401.09670)), split those phases. The key/value cache is what crosses the boundary. Agrawal et al., *SARATHI* ([arXiv:2308.16369](https://arxiv.org/abs/2308.16369)), compute a prompt in chunks. Prefill and decode are Metal shaders. A missing kernel stays missing.
+The prompt and the generated tokens are separate phases. The key/value cache is what crosses the boundary. A prompt is computed in chunks. Prefill and decode are Metal shaders. A missing kernel stays missing.
 
 Weights follow the Open Compute Project *Microscaling Formats (MX) Specification*: a block of 32 values and an E8M0 scale. Apple's Metal tensor documents name `matmul2d` and that scale plane. WWDC26 session 330 is the tensor-op session. The Metal shading-language specification is the unpack and storage reference.
 
