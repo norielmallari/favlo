@@ -26,7 +26,7 @@ Use calm, neutral sentences. State what the project does and what the reader can
 
 Outside a block quote, a claim by the author is in the third person. Write "the author", not "I", "me", or "my".
 
-A public README says what the project is, how to install it, one minimal command, the license, and where to report a problem. Keep the as-built detail in linked docs such as ARCHITECTURE.md. Prefer relative links between files in the repo.
+A public README says what the project is, how to install it, one minimal command, the license, and where to report a problem. Name a pipeline only in the Pipeline table. Keep the as-built detail in linked docs such as ARCHITECTURE.md. Prefer relative links between files in the repo.
 
 ## Examples
 

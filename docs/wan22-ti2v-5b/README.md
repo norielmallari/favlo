@@ -23,7 +23,8 @@ The last knot decodes `x0`.
 
 Self-attention, cross-attention, and the feed-forward are symmetric int8,
 one float scale per output row. `quantize` prints the relative RMS of each
-matrix. The worst matrix was `blocks.11.ffn.2` at 0.014504. The feed-forward
+matrix. The worst matrix was `blocks.11.ffn.2` at 0.014504
+([research/int8-weight-error.md](research/int8-weight-error.md)). The feed-forward
 activation is tanh-GELU (tanh versus erf max abs 0.000473). Time,
 text, the patch, the head, norms, and modulation stay float16. The VAE stays
 float32. It is the 48-channel Wan2.2 autoencoder. Pixels are grouped 2×2
@@ -38,7 +39,10 @@ A narrow one is float `conv3d`. An int8 product and its scale share one
 command buffer. Attention submits every head before each wait. A knot keeps
 the residual stream on the device and submits its 30 blocks before it waits.
 The prompt's cross-attention key and value stay for the four knots. Weights
-already on the device stay until close.
+already on the device stay until close. On an M5 Pro with 48 GB the isolated
+DiT sum at 576×320 and 9 frames is 4.267 s. A printed 832×480 9-frame text
+clip decoded in 18.942 s and the still clip decoded in 15.315 s. That
+measurement is [research/clip-ceiling.md](research/clip-ceiling.md).
 
 The decoder's resident frame tile shrinks until one latent frame fits. A
 request keeps the resolution, frame count, and duration it named. Open
