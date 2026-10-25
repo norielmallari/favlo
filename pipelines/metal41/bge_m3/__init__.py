@@ -1,4 +1,4 @@
-"""BGE-M3 embeddings on the Neural Engine."""
+"""BGE-M3 dense embeddings from the int8 GPU record."""
 
 from bge_m3.commands import main
 from bge_m3.runtime import handle_embed, open_runtime

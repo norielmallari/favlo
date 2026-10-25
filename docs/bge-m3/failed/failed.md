@@ -1,0 +1,11 @@
+# Failed Neural Engine window
+
+The W8A8 Neural Engine path does not pack a function longer than 512 that returns the same dense vector as the next shorter function. Embeddings move to the GPU. The serving contract is [../README.md](../README.md). The model card is [BAAI/bge-m3](https://huggingface.co/BAAI/bge-m3).
+
+`encode_128`, `encode_256`, and `encode_512` are one function each, and those three are the saved record. The same 128 tokens scored cosine 0.99999988 on `encode_128` and `encode_256`, and the largest element difference rounds to 0. Adding one more token on `encode_256` scored 0.94090939. The pack does not move the vector. An extra token does. A longer function has to clear that same bar: minimum cosine 0.999 against the next shorter function, on every calibration passage that fits in both.
+
+`encode_1024` with the embedding table inside the quantized function left the Neural Engine. Before activation quantization the CPU ops were `ios18.cast` and `ios18.gather`. After it, the plan reported 194 `ios18.quantize` and `ios18.dequantize` ops on the CPU, and the CPU names were `ios18.cast`, `ios18.dequantize`, `ios18.gather`, and `ios18.quantize`. The length was not saved. Splitting each 1024-wide pointwise projection into narrower convolutions left 388 of those quantize and dequantize ops on the CPU. That width split is not in the tree.
+
+Exporting the token and position lookup as its own float16 function, and quantizing only the transformer body, kept the quantized function on the Neural Engine. The body's CPU list was empty. The lookup's CPU ops were `ios18.cast` and `ios18.gather`. On the 128 calibration passages the body scored minimum cosine 0.9664071798324585 and mean 0.9720328082330525 against the float32 encoder. The 0.96 gate passed. The same passages against `encode_512` scored minimum 0.9633959531784058 and mean 0.9717894862405956. The 0.999 gate failed, and the length was discarded. `encode_2048` and `encode_4096` were not built.
+
+The float comparison for the saved functions, minimum then mean, is `encode_128` 0.9650123119354248 and 0.971996599342674, `encode_256` those same two figures, and `encode_512` 0.9631344079971313 and 0.9721027533523738. The saved Neural Engine record stops at 512 tokens. The server loads the GPU record.

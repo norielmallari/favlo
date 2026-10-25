@@ -7,13 +7,9 @@ from pathlib import Path
 
 import numpy as np
 
+from bge_m3.pack import pack_int8, restore_int8
 from bge_m3.passages import passages
-from bge_m3.quantize import (
-    _COSINE_MIN,
-    _PACK_STAMP,
-    _finished,
-    _partial,
-)
+from bge_m3.quantize import _COSINE_MIN, _finished
 from bge_m3.text import (
     BUCKETS,
     HIDDEN,
@@ -23,12 +19,26 @@ from bge_m3.text import (
     l2_normalize,
     lexical_max,
     pad_ids,
+    padded_length,
     position_ids,
 )
 
 
 def test_position_ids_start_at_two_and_pads_stay() -> None:
     assert position_ids([0, 5, 9, PAD_ID, PAD_ID]) == [2, 3, 4, PAD_ID, PAD_ID]
+
+
+def test_the_sequence_pads_to_the_matmul_tile() -> None:
+    assert padded_length(1) == 64
+    assert padded_length(64) == 64
+    assert padded_length(65) == 128
+    assert padded_length(4096) == 4096
+    try:
+        padded_length(4097)
+    except ValueError as exc:
+        assert "4096" in str(exc)
+    else:
+        raise AssertionError("expected a length error")
 
 
 def test_the_next_bucket_covers_the_token_count() -> None:
@@ -83,14 +93,13 @@ def test_lexical_weight_keeps_the_max_relu() -> None:
     assert PAD_ID not in weights
 
 
-def test_coreml_array_keeps_int32_values() -> None:
-    from bge_m3.program import multiarray_from_numpy, numpy_from_multiarray
-
-    source = np.arange(6, dtype=np.int32).reshape(1, 6)
-    copied = numpy_from_multiarray(multiarray_from_numpy(source))
-    assert copied.dtype == np.int32
-    assert copied.shape == (1, 6)
-    assert copied.tolist() == source.tolist()
+def test_int8_roundtrip_stays_within_half_a_step() -> None:
+    weight = np.linspace(-1.0, 1.0, 128 * 256, dtype=np.float32).reshape(128, 256)
+    codes, scale = pack_int8(weight)
+    restored = restore_int8(codes, scale)
+    step = np.maximum(scale, np.float32(1e-12))
+    ratio = np.max(np.abs(restored - weight) / step[:, None])
+    assert float(ratio) <= 1.0 + 1e-5
 
 
 def test_calibration_is_128_short_passages() -> None:
@@ -115,7 +124,7 @@ def test_only_a_complete_directory_counts_as_finished(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     body = json.loads((dest / "manifest.json").read_text(encoding="utf-8"))
-    body["functions"] = ["encode_128", "encode_256", "encode_512"]
+    body["quant"] = "w8a8"
     (dest / "manifest.json").write_text(json.dumps(body), encoding="utf-8")
     assert not _finished(dest)
 
@@ -124,59 +133,17 @@ def test_the_cosine_gate_is_the_quantized_line() -> None:
     assert _COSINE_MIN == 0.96
 
 
-def test_a_stamp_mismatch_drops_saved_lengths(tmp_path: Path) -> None:
-    dest = tmp_path / "bge-m3-w8a8"
-    dest.mkdir()
-    cache = tmp_path / ".bge-m3-w8a8.partial"
-    cache.mkdir()
-    (cache / "stamp").write_text("old", encoding="utf-8")
-    package = cache / "encode_128.mlpackage"
-    package.mkdir()
-    (package / "Manifest.json").write_text("{}", encoding="utf-8")
-    kept = _partial(dest)
-    assert kept == cache
-    assert not package.exists()
-    assert (cache / "stamp").read_text(encoding="utf-8") == _PACK_STAMP
-
-
-def test_an_interrupted_save_is_dropped_and_a_finished_length_stays(tmp_path: Path) -> None:
-    dest = tmp_path / "bge-m3-w8a8"
-    dest.mkdir()
-    cache = tmp_path / ".bge-m3-w8a8.partial"
-    cache.mkdir()
-    (cache / "stamp").write_text(_PACK_STAMP, encoding="utf-8")
-    done = cache / "encode_128.mlpackage"
-    done.mkdir()
-    (done / "Manifest.json").write_text("{}", encoding="utf-8")
-    broken = cache / "encode_256.mlpackage"
-    broken.mkdir()
-    (cache / "encode_512.saving.mlpackage").mkdir()
-    (cache / "encode_128.cosine.json.saving").write_text("{", encoding="utf-8")
-    _partial(dest)
-    assert (done / "Manifest.json").is_file()
-    assert not broken.exists()
-    assert not (cache / "encode_512.saving.mlpackage").exists()
-    assert not (cache / "encode_128.cosine.json.saving").exists()
-
-
 def _record(root: Path) -> Path:
-    dest = root / "bge-m3-w8a8"
-    package = dest / "model.mlpackage"
-    package.mkdir(parents=True)
-    (package / "Manifest.json").write_text("{}", encoding="utf-8")
+    dest = root / "bge-m3-int8"
+    dest.mkdir(parents=True)
+    np.savez(dest / "weights.npz", word=np.zeros(4, dtype=np.float16))
     (dest / "tokenizer.json").write_text("{}", encoding="utf-8")
     (dest / "cosine.json").write_text(
         json.dumps({"passages": 128, "min": 0.995, "mean": 0.995}),
         encoding="utf-8",
     )
     (dest / "manifest.json").write_text(
-        json.dumps(
-            {
-                "complete": True,
-                "quant": "w8a8",
-                "functions": [f"encode_{length}" for length in (128, 256, 512, 1024, 2048, 4096)],
-            }
-        ),
+        json.dumps({"complete": True, "quant": "int8", "hidden": HIDDEN, "context": 4096}),
         encoding="utf-8",
     )
     return dest

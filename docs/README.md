@@ -48,6 +48,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [zonos2/references.md](zonos2/references.md) | Papers and specifications for the ZONOS2 pipeline |
 | [bge-m3/README.md](bge-m3/README.md) | BGE-M3 pipeline contract |
 | [bge-m3/references.md](bge-m3/references.md) | Papers and specifications for the BGE-M3 pipeline |
+| [bge-m3/failed/failed.md](bge-m3/failed/failed.md) | Failed BGE-M3 Neural Engine window above 512 |
 | [voxcpm2/README.md](voxcpm2/README.md) | VoxCPM2 pipeline contract |
 | [voxcpm2/references.md](voxcpm2/references.md) | Papers and specifications for the VoxCPM2 pipeline |
 | [ace-step-15-turbo/research/dit-mlp-fp4-error.md](ace-step-15-turbo/research/dit-mlp-fp4-error.md) | ACE-Step XL Turbo DiT MLP fp4 error ranking |

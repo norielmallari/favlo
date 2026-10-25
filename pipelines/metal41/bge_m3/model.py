@@ -25,7 +25,7 @@ EPS = 1e-5
 
 
 class _Pointwise(nn.Module):
-    """A 1×1 convolution. The Neural Engine runs this shape of projection."""
+    """A 1×1 convolution. The sequence axis stays whole so the quantize pair can fuse."""
 
     def __init__(self, in_channels: int, out_channels: int) -> None:
         super().__init__()
@@ -92,17 +92,29 @@ class Encoder(nn.Module):
         self.feed_forward = nn.ModuleList(_FeedForward() for _ in range(LAYERS))
         self.colbert = _Pointwise(HIDDEN, HIDDEN)
 
+    def embed_tokens(self, input_ids: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
+        """Token, position, and type rows, then the embedding LayerNorm."""
+        hidden = self.word(input_ids) + self.position(position_ids) + self.type_row
+        return self.embed_norm(hidden)
+
+    def encode_hidden(
+        self,
+        hidden: torch.Tensor,
+        key_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """The transformer body. ``hidden`` is the embedding LayerNorm output."""
+        for attention, feed_forward in zip(self.attention, self.feed_forward, strict=True):
+            hidden = feed_forward(attention(hidden, key_mask))
+        return hidden, self.colbert(hidden)
+
     def forward(
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
         key_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        hidden = self.word(input_ids) + self.position(position_ids) + self.type_row
-        hidden = self.embed_norm(hidden)
-        for attention, feed_forward in zip(self.attention, self.feed_forward, strict=True):
-            hidden = feed_forward(attention(hidden, key_mask))
-        return hidden, self.colbert(hidden)
+        hidden = self.embed_tokens(input_ids, position_ids)
+        return self.encode_hidden(hidden, key_mask)
 
 
 def load_encoder(source: Path) -> Encoder:

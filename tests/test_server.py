@@ -1554,7 +1554,7 @@ def test_an_embedding_waits_for_the_open_chat_and_runs_before_the_next() -> None
     )
     embed = threading.Thread(
         target=_post_json,
-        args=(port, "/v1/embeddings", {"input": "bridge", "model": "bge-m3-w8a8"}),
+        args=(port, "/v1/embeddings", {"input": "bridge", "model": "bge-m3-int8"}),
     )
     nxt = threading.Thread(
         target=_post_json,
@@ -1584,7 +1584,7 @@ def test_a_chat_waits_while_an_embedding_is_running() -> None:
     port = int(state["server"].server_address[1])
     embed = threading.Thread(
         target=_post_json,
-        args=(port, "/v1/embeddings", {"input": "hold", "model": "bge-m3-w8a8"}),
+        args=(port, "/v1/embeddings", {"input": "hold", "model": "bge-m3-int8"}),
     )
     chat = threading.Thread(
         target=_post_json,

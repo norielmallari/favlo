@@ -13,13 +13,19 @@ from bge_m3.quantize import RECORD
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="favlo --bge-m3")
     sub = parser.add_subparsers(dest="command", required=True)
-    quant = sub.add_parser("quantize", help="pack the checkout to W8A8")
+    sub.add_parser("kernels", help="dispatch the int8 matmul and one attention head")
+    quant = sub.add_parser("quantize", help="pack the checkout to int8")
     quant.add_argument("--src", type=Path, required=True)
     quant.add_argument("--out", type=Path)
-    embed = sub.add_parser("embed", help="print one dense vector from the packed program")
+    embed = sub.add_parser("embed", help="print one dense vector from the packed record")
     embed.add_argument("--text", required=True)
     embed.add_argument("--record", type=Path)
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
+    if args.command == "kernels":
+        from bge_m3.gpu import check_kernels
+
+        check_kernels()
+        return 0
     if args.command == "quantize":
         return _quantize(args.src, args.out)
     if args.command == "embed":

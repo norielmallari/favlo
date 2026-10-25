@@ -14,7 +14,7 @@ from bge_m3.text import HIDDEN
 def _record() -> Path | None:
     from favlo.cli import repo_root
 
-    path = repo_root() / "models" / "bge-m3-w8a8"
+    path = repo_root() / "models" / "bge-m3-int8"
     manifest = path / "manifest.json"
     if not manifest.is_file():
         return None
@@ -24,7 +24,7 @@ def _record() -> Path | None:
 def test_packed_program_returns_a_unit_dense_vector() -> None:
     path = _record()
     if path is None:
-        pytest.skip("models/bge-m3-w8a8 is not packed")
+        pytest.skip("models/bge-m3-int8 is not packed")
     runtime = Runtime(path)
     try:
         result = runtime.embed("A stone bridge under a clear sky.")
@@ -39,13 +39,13 @@ def test_packed_program_returns_a_unit_dense_vector() -> None:
 def test_an_input_past_the_packed_window_is_an_error() -> None:
     path = _record()
     if path is None:
-        pytest.skip("models/bge-m3-w8a8 is not packed")
+        pytest.skip("models/bge-m3-int8 is not packed")
     runtime = Runtime(path)
     try:
-        text = "word " * 600
+        text = "word " * 8000
         count = len(runtime.tokenizer.encode(text).ids)
-        assert count > runtime.buckets[-1]
-        with pytest.raises(ValueError, match=str(runtime.buckets[-1])):
+        assert count > runtime.limit
+        with pytest.raises(ValueError, match=str(runtime.limit)):
             runtime.embed(text)
     finally:
         runtime.close()

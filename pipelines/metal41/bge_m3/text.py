@@ -13,6 +13,12 @@ import numpy as np
 
 PAD_ID = 1
 HIDDEN = 1024
+HEADS = 16
+HEAD = 64
+INTERMEDIATE = 4096
+LAYERS = 24
+TILE = 64
+LIMIT = 4096
 BUCKETS = (128, 256, 512, 1024, 2048, 4096)
 
 
@@ -27,6 +33,17 @@ def bucket_for(count: int, buckets: tuple[int, ...] = BUCKETS) -> int:
     limit = buckets[-1] if buckets else 0
     message = f"input is {count} tokens and the limit is {limit}"
     raise ValueError(message)
+
+
+def padded_length(count: int) -> int:
+    """Rows the matmul tile needs. The pad id fills the extra rows."""
+    if count < 1:
+        message = "input is empty"
+        raise ValueError(message)
+    if count > LIMIT:
+        message = f"input is {count} tokens and the limit is {LIMIT}"
+        raise ValueError(message)
+    return ((count + TILE - 1) // TILE) * TILE
 
 
 def lengths_from_names(names: list[str]) -> tuple[int, ...]:
