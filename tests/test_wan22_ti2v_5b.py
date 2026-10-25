@@ -12,7 +12,7 @@ from wan22_ti2v_5b.activations import apply_rope
 from wan22_ti2v_5b.avi import encode_avi
 from wan22_ti2v_5b.png import decode_png, encode_png
 from wan22_ti2v_5b.quant import pack_fp4, pack_int8, relative_rms, score_matrix
-from wan22_ti2v_5b.request import VideoRequestError, parse_request
+from wan22_ti2v_5b.request import VideoRequestError, list_resolutions, parse_request, video_modes
 from wan22_ti2v_5b.runtime import _require_int8_pack
 from wan22_ti2v_5b.schedule import (
     blend,
@@ -24,6 +24,17 @@ from wan22_ti2v_5b.schedule import (
     token_count,
 )
 from wan22_ti2v_5b.vae import _patch, _unpatch
+
+
+def test_video_modes_cover_text_and_image() -> None:
+    assert video_modes() == ("i2v", "t2v")
+
+
+def test_listed_resolutions_are_the_two_frames() -> None:
+    assert list_resolutions() == [
+        {"name": "1280x704", "orientation": "landscape", "size": "1280x704"},
+        {"name": "704x1280", "orientation": "portrait", "size": "704x1280"},
+    ]
 
 
 def test_pixel_patch_is_color_then_width_then_height() -> None:

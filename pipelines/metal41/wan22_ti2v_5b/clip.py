@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -98,7 +99,9 @@ class Clip:
             print(f"knot {state.step} {knots[state.step]:.6f}", flush=True)
             state.latent = blend(state.latent, _image(state), state.mask)
             clock = token_timesteps(state.mask, float(int(knots[state.step])))
+            started = time.perf_counter()
             velocity = self.dit.velocity(state.latent, clock, state.text, state.text_valid, tokens)
+            print(f"dit {time.perf_counter() - started:.3f}s", flush=True)
             clean = x0_from_velocity(state.latent, sigma, velocity)
             if state.step + 1 < len(knots):
                 fresh = rng.standard_normal(state.latent.shape).astype(np.float32)
@@ -113,7 +116,9 @@ class Clip:
             if stop is not None and stop(pause=True):
                 return {"id": state.video_id, "status": "in_progress"}, state
         print("decode", flush=True)
+        started = time.perf_counter()
         frames = self.vae.decode(state.latent.astype(np.float32))
+        print(f"decode {time.perf_counter() - started:.3f}s", flush=True)
         payload = _store(state, frames, home, videos)
         return payload, None
 

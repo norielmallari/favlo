@@ -8,10 +8,11 @@ open the BF16 encoder file. The tokenizer is `tokenizer.json` beside the
 source download. This pipeline does not pack the encoder. The VAE is the
 float32 `Wan2.2_VAE.pth` from that card.
 
-`generate_video` takes an optional still. Omitting it samples from text.
-Passing a PNG conditions the first latent frame. The clip is 24 fps. The
-default body is 121 frames at `1280x704`. `frames` wins when `seconds` is
-also set. `seconds` snaps to `4n+1`. Edges are multiples of 32. `steps` is
+`generate_video_t2v` samples from text. `generate_video_i2v` conditions the
+first latent frame on a PNG. This pipeline is listed by both
+`list_video_models_t2v` and `list_video_models_i2v`. The clip is 24 fps.
+Both tools require `size`. Those lists name `1280x704` and `704x1280`. An
+omitted frame count is 121. `frames` wins when `seconds` is also set. `seconds` snaps to `4n+1`. Edges are multiples of 32. `steps` is
 0 or 4. `guidance_scale` is omitted or 1. `negative_prompt` is accepted and
 not encoded.
 
@@ -28,12 +29,16 @@ text, the patch, the head, norms, and modulation stay float16. The VAE stays
 float32. It is the 48-channel Wan2.2 autoencoder. Pixels are grouped 2×2
 into 12 channels with the width offset outside the height offset, then
 restored the same way. The VAE walks one latent frame at a time and keeps
-the causal cache. A wide convolution is float16 im2col plus `matmul2d`,
-4096 output rows at a time, and those two kernels share one command buffer.
+the causal cache. A wide convolution is float16 im2col plus a 64-wide `matmul2d`,
+4096 output rows at a time. Every tile of that convolution, the bias, and
+the float16 rounding share one submission. The convolution scratch stays
+allocated for the next one. A residual's channel RMS, SiLU, and convolution
+share one submission too.
 A narrow one is float `conv3d`. An int8 product and its scale share one
-command buffer. Attention submits every head before each wait. The prompt's
-cross-attention key and value stay for the four knots. Weights already on
-the device stay until close.
+command buffer. Attention submits every head before each wait. A knot keeps
+the residual stream on the device and submits its 30 blocks before it waits.
+The prompt's cross-attention key and value stay for the four knots. Weights
+already on the device stay until close.
 
 The decoder's resident frame tile shrinks until one latent frame fits. A
 request keeps the resolution, frame count, and duration it named. Open

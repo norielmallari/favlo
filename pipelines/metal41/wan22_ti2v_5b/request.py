@@ -39,6 +39,19 @@ class VideoRequest:
         return f"{self.width}x{self.height}"
 
 
+def video_modes() -> tuple[str, ...]:
+    """Text-to-video and image-to-video share this pipeline."""
+    return ("i2v", "t2v")
+
+
+def list_resolutions() -> list[dict[str, str]]:
+    """The two served frames. Landscape is wider."""
+    return [
+        {"name": "1280x704", "orientation": "landscape", "size": "1280x704"},
+        {"name": "704x1280", "orientation": "portrait", "size": "704x1280"},
+    ]
+
+
 def parse_request(body: dict) -> VideoRequest:
     prompt = body.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():

@@ -104,8 +104,13 @@ class WanVae:
         hidden = self._residual(archive, hidden, "encoder.middle.0", cache)
         hidden = self._attend(archive, hidden, "encoder.middle.1")
         hidden = self._residual(archive, hidden, "encoder.middle.2", cache)
-        hidden = _silu(_rms(hidden, self._weight(archive, "encoder.head.0.gamma")))
-        return self._cached(archive, hidden, "encoder.head.2", cache)
+        return self._cached(
+            archive,
+            hidden,
+            "encoder.head.2",
+            cache,
+            gamma=self._weight(archive, "encoder.head.0.gamma"),
+        )
 
     def _decode_chunk(
         self,
@@ -134,22 +139,46 @@ class WanVae:
             if index < 3:
                 hidden = self._up(archive, hidden, f"{stem}.3", time=time, cache=cache)
                 hidden = hidden + _dup_up(entered, out_channels, 2 if time else 1, 2, first=first)
-        hidden = _silu(_rms(hidden, self._weight(archive, "decoder.head.0.gamma")))
-        return self._cached(archive, hidden, "decoder.head.2", cache)
+        return self._cached(
+            archive,
+            hidden,
+            "decoder.head.2",
+            cache,
+            gamma=self._weight(archive, "decoder.head.0.gamma"),
+        )
 
     def _residual(
         self, archive: Archive, hidden: np.ndarray, prefix: str, cache: _Cache
     ) -> np.ndarray:
-        updated = _silu(_rms(hidden, self._weight(archive, f"{prefix}.residual.0.gamma")))
-        updated = self._cached(archive, updated, f"{prefix}.residual.2", cache)
-        updated = _silu(_rms(updated, self._weight(archive, f"{prefix}.residual.3.gamma")))
-        updated = self._cached(archive, updated, f"{prefix}.residual.6", cache)
+        updated = self._cached(
+            archive,
+            hidden,
+            f"{prefix}.residual.2",
+            cache,
+            gamma=self._weight(archive, f"{prefix}.residual.0.gamma"),
+        )
+        updated = self._cached(
+            archive,
+            updated,
+            f"{prefix}.residual.6",
+            cache,
+            gamma=self._weight(archive, f"{prefix}.residual.3.gamma"),
+        )
         shortcut = f"{prefix}.shortcut.weight"
         if shortcut in archive.keys():
             hidden = self._conv(archive, hidden, f"{prefix}.shortcut", causal=True)
         return updated + hidden
 
-    def _cached(self, archive: Archive, hidden: np.ndarray, name: str, cache: _Cache) -> np.ndarray:
+    def _cached(
+        self,
+        archive: Archive,
+        hidden: np.ndarray,
+        name: str,
+        cache: _Cache,
+        gamma: np.ndarray | None = None,
+    ) -> np.ndarray:
+        if gamma is not None:
+            return self._cached_activated(archive, hidden, gamma, name, cache)
         slot = cache.slot()
         previous = _remember(cache, slot, hidden)
         weight = self._weight(archive, f"{name}.weight")
@@ -166,6 +195,38 @@ class WanVae:
             padding=(pad_t, int(weight.shape[3]) // 2, int(weight.shape[4]) // 2),
             out_size=(int(hidden.shape[1]), int(hidden.shape[2]), int(hidden.shape[3])),
         )
+
+    def _cached_activated(
+        self,
+        archive: Archive,
+        hidden: np.ndarray,
+        gamma: np.ndarray,
+        name: str,
+        cache: _Cache,
+    ) -> np.ndarray:
+        slot = cache.slot()
+        previous = cache.slots[slot]
+        weight = self._weight(archive, f"{name}.weight")
+        bias = self._weight(archive, f"{name}.bias")
+        pad_t = int(weight.shape[2]) - 1
+        prev = previous if isinstance(previous, np.ndarray) and pad_t > 0 else None
+        if prev is not None:
+            pad_t -= int(prev.shape[1])
+        output, tail = self.gpu.activated_conv(
+            hidden,
+            gamma,
+            weight,
+            bias,
+            prev,
+            stride=(1, 1, 1),
+            padding=(pad_t, int(weight.shape[3]) // 2, int(weight.shape[4]) // 2),
+            out_size=(int(hidden.shape[1]), int(hidden.shape[2]), int(hidden.shape[3])),
+            tail=_CACHE_T,
+        )
+        if tail.shape[1] < _CACHE_T and isinstance(previous, np.ndarray):
+            tail = np.concatenate((previous[:, -1:], tail), axis=1)
+        cache.slots[slot] = np.ascontiguousarray(tail)
+        return output
 
     def _down(
         self,
@@ -273,7 +334,7 @@ class WanVae:
         proj_b = self._weight(archive, f"{prefix}.proj.bias")
         flats = []
         for frame in range(frames):
-            normed = _rms(hidden[:, frame], gamma)
+            normed = self.gpu.channel_rms(hidden[:, frame], gamma)
             flats.append(normed.reshape(channels, -1).T)
         left = np.concatenate(flats, axis=0).astype(np.float16)
         mixed = self.gpu.linear(left, qkv_w, None, kind="f16", bias=qkv_b)
@@ -451,6 +512,63 @@ def _dup_up(
     if first:
         return expanded[:, factor_t - 1 :]
     return expanded
+
+
+def check_activate(gpu: Gpu) -> None:
+    """Device channel RMS and SiLU match the host formulas."""
+    rng = np.random.default_rng(5)
+    values = rng.standard_normal((4, 2, 3, 3)).astype(np.float32)
+    gamma = rng.standard_normal((4, 1, 1, 1)).astype(np.float32)
+    paired = gpu.rms_silu(values, gamma)
+    expect = _silu(_rms(values, gamma))
+    if float(np.max(np.abs(paired - expect))) > 1e-5:
+        message = "device activation drifted"
+        raise RuntimeError(message)
+    frame = np.ascontiguousarray(values[:, 0])
+    lone = gpu.channel_rms(frame, gamma.reshape(4, 1, 1))
+    expect = _rms(frame, gamma.reshape(4, 1, 1))
+    if float(np.max(np.abs(lone - expect))) > 1e-5:
+        message = "device channel rms drifted"
+        raise RuntimeError(message)
+    print("vae activate ok", flush=True)
+
+
+def check_fused_conv(gpu: Gpu) -> None:
+    """The fused activation and convolution match the separate calls."""
+    rng = np.random.default_rng(6)
+    source = rng.standard_normal((32, 4, 16, 16)).astype(np.float32)
+    gamma = rng.standard_normal((32, 1, 1, 1)).astype(np.float32)
+    weight = rng.standard_normal((32, 32, 3, 3, 3)).astype(np.float32) * np.float32(0.02)
+    bias = rng.standard_normal(32).astype(np.float32)
+    previous = rng.standard_normal((32, 2, 16, 16)).astype(np.float32)
+    activated = gpu.rms_silu(source, gamma)
+    joined = np.concatenate((previous, activated), axis=1)
+    expect = gpu.conv3d(
+        joined,
+        weight,
+        bias,
+        stride=(1, 1, 1),
+        padding=(0, 1, 1),
+        out_size=(4, 16, 16),
+    )
+    got, tail = gpu.activated_conv(
+        source,
+        gamma,
+        weight,
+        bias,
+        previous,
+        stride=(1, 1, 1),
+        padding=(0, 1, 1),
+        out_size=(4, 16, 16),
+        tail=2,
+    )
+    if float(np.max(np.abs(got - expect))) > 1e-4:
+        message = "fused conv drifted"
+        raise RuntimeError(message)
+    if float(np.max(np.abs(tail - activated[:, -2:]))) > 1e-5:
+        message = "fused conv tail drifted"
+        raise RuntimeError(message)
+    print("fused conv ok", flush=True)
 
 
 def _softmax(scores: np.ndarray) -> np.ndarray:

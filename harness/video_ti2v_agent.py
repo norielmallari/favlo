@@ -2,7 +2,7 @@
 
 The text clip omits the still and uses ``width`` and ``height``. The still
 clip draws one PNG at ``i2v_width`` and ``i2v_height``, then passes that PNG
-to ``generate_video``. Exit 0 means both files match
+to ``generate_video_t2v`` and ``generate_video_i2v``. Exit 0 means both files match
 ``docs/wan22-ti2v-5b/smoke.json`` and the vision tower affirms frame
 0, the middle frame, and the last frame of the still clip. This command is
 not part of pytest.
@@ -87,7 +87,7 @@ def video_tools(
     @tool(approval_mode="never_require")
     def generate_text_video() -> str:
         """Generate the text clip. Do not pass an image."""
-        result = generate(port, "generate_video", dict(video_body))
+        result = generate(port, "generate_video_t2v", dict(video_body))
         text_clip.append(read_link(port, result, "video/mp4"))
         return "text video ready"
 
@@ -100,7 +100,7 @@ def video_tools(
         if still_size is not None:
             body["size"] = still_size
         body["image"] = _image_block(still)
-        result = generate(port, "generate_video", body)
+        result = generate(port, "generate_video_i2v", body)
         still_clip.append(read_link(port, result, "video/mp4"))
         return "still video ready"
 

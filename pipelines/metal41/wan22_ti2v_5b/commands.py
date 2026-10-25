@@ -95,6 +95,12 @@ def _kernels() -> int:
         _check_kind(gpu, "fp8")
         _check_int8(gpu)
         _check_conv(gpu)
+        from wan22_ti2v_5b.stream import check_stream
+        from wan22_ti2v_5b.vae import check_activate, check_fused_conv
+
+        check_stream(gpu)
+        check_activate(gpu)
+        check_fused_conv(gpu)
     finally:
         gpu.close()
     print("kernels ok", flush=True)

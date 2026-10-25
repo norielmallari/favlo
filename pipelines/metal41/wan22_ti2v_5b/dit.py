@@ -24,6 +24,7 @@ from wan22_ti2v_5b.activations import (
 )
 from wan22_ti2v_5b.gpu import Gpu
 from wan22_ti2v_5b.spec import HEADS, IN_DIM
+from wan22_ti2v_5b.stream import Stream
 from wan22_ti2v_5b.weights import apply, attend, load_matrix
 
 
@@ -35,6 +36,8 @@ class DiT:
         self.gelu = gelu_erf if manifest.get("gelu") == "erf" else gelu_tanh
         self.layers = int(manifest["layers"])
         self._cached_text: np.ndarray | None = None
+        self._cached_context: np.ndarray | None = None
+        self._stream: Stream | None = None
         self.patch = load_matrix(root / "patch.npy")
         self.text0 = load_matrix(root / "text0.npy")
         self.text2 = load_matrix(root / "text2.npy")
@@ -59,15 +62,15 @@ class DiT:
         time, height, width = grid
         tokens = self._patch(latent)
         if self._cached_text is not text:
-            context = self._embed_text(text, text_mask)
+            self._cached_context = self._embed_text(text, text_mask)
             self._cached_text = text
-            for block in self._blocks:
-                projected = apply(self.gpu, context, block.cross_k)
-                block.cross_key = qk_norm(projected, block.cross_norm_k)
-                block.cross_value = apply(self.gpu, context, block.cross_v)
+        if self.gelu is not gelu_tanh:
+            message = "device block expects tanh GELU"
+            raise RuntimeError(message)
+        if self._stream is None:
+            self._stream = Stream(self.gpu)
         temb, proj = self._times(token_time.reshape(-1))
-        for index in range(self.layers):
-            tokens = self._block(tokens, temb, proj, text, text_mask, index, height, width)
+        tokens = self._stream.run(tokens, proj, self._blocks, self._cached_context, height, width)
         out = self._head(tokens, temb)
         return _unpatch(out, time, height, width)
 
