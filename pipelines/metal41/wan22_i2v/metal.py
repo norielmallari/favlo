@@ -15,6 +15,14 @@ import objc
 from favlo.memory import memory
 from wan22_i2v.formats import K_ALIGN, TILE_M, TILE_N, LinearPack, pad_to
 
+
+class BufferView:
+    """A byte window of a span. Dispatches bind ``offset`` inside ``base``."""
+
+    def __init__(self, base: Any, offset: int) -> None:
+        self.base = base
+        self.offset = int(offset)
+
 _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"
 _NAMES = (
     "matmul_fp4",
@@ -1025,7 +1033,10 @@ class Gpu:
         enc = self._enc
         enc.setComputePipelineState_(self.pipes[name])
         for index, buf in enumerate(buffers):
-            memory.bind(enc, index, buf, 0)
+            if isinstance(buf, BufferView):
+                memory.bind(enc, index, buf.base, buf.offset)
+            else:
+                memory.bind(enc, index, buf, 0)
         for index, blob in enumerate(constants):
             self._held.append(blob)
             enc.setBytes_length_atIndex_(blob, len(blob), len(buffers) + index)

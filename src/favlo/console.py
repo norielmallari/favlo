@@ -670,8 +670,9 @@ class Console:
         done = _count(progress.done, progress.unit)
         total = _count(progress.total, progress.unit)
         count = f"{done}/{total}" if progress.unit == "bytes" else f"{done}/{total} {progress.unit}"
-        parts = [progress.phase, bar, percent, count]
-        if progress.detail:
+        label = _row_label(progress)
+        parts = [label, bar, percent, count]
+        if progress.detail and progress.detail != label:
             parts.append(progress.detail)
         rate_text = _rate_text(rate, progress.unit)
         if rate_text:
@@ -691,9 +692,10 @@ class Console:
         gauge: tuple[str, int] | None,
     ) -> str:
         frame = _SPINNER[int(now * 10) % len(_SPINNER)]
-        count = f"{progress.phase} {_count(progress.done, progress.unit)} {progress.unit}"
+        label = _row_label(progress)
+        count = f"{label} {_count(progress.done, progress.unit)} {progress.unit}"
         parts = [frame]
-        if progress.detail:
+        if progress.detail and progress.detail != label:
             parts.append(progress.detail)
         parts.append(count)
         rate_text = _rate_text(rate, progress.unit)
@@ -723,7 +725,7 @@ class Console:
             if self._color == 0:
                 return line
         phase, _, rest = line.partition(" ")
-        if phase in PHASES or phase in _SPINNER:
+        if phase in PHASES or phase in _SPINNER or rest.startswith(_BAR_LEFT):
             body = rest
             head = self._paint(phase, accent=True)
             if body.startswith(_BAR_LEFT):
@@ -1007,6 +1009,13 @@ def _eta_text(seconds: float) -> str:
         return f"{minutes}:{secs:02d}"
     hours, rem = divmod(int(seconds), 3600)
     return f"{hours}:{rem // 60:02d}"
+
+
+def _row_label(progress: Progress) -> str:
+    """The word painted on the row. A sample row uses its stage detail."""
+    if progress.phase == "sample" and progress.detail:
+        return progress.detail
+    return progress.phase
 
 
 def _join_parts(parts: list[str]) -> str:

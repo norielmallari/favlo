@@ -21,10 +21,10 @@ _ROW = {
     "compile": ("sample", "layers", "compile", "text"),
     "text": ("sample", "layers", "text", "text"),
     "encode": ("sample", "blocks", "encode", "encode"),
-    "load": ("load", "files", "expert", "load"),
+    "load": ("load", "files", "load", "load"),
     "high": ("sample", "layers", "high", "step"),
     "low": ("sample", "layers", "low", "step"),
-    "decode": ("decode", "blocks", "vae", "decode"),
+    "decode": ("decode", "blocks", "decode", "decode"),
     "pack": ("", "", "pack", "pack"),
 }
 

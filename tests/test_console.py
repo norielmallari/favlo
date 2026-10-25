@@ -315,6 +315,23 @@ def test_every_phase_ends_in_every_mode(mode: str, phase: str) -> None:
         assert f"{phase} done" in text
 
 
+def test_a_sample_row_is_labeled_with_its_stage() -> None:
+    ui, stream, clock = _ui("pretty", color=0, width=160)
+    progress = ui.begin("sample", total=24, unit="layers", detail="text")
+    progress.done = 3
+    clock.now += 1
+    ui.sample()
+    line = [item for item in stream.getvalue().splitlines() if "layers" in item][-1]
+    assert "text ▕" in line
+    assert "sample" not in line
+    progress.detail = "high"
+    ui.sample()
+    later = [item for item in stream.getvalue().splitlines() if "layers" in item][-1]
+    assert "high ▕" in later
+    assert "sample" not in later
+    assert "text ▕" not in later
+
+
 def test_pretty_rate_and_gauge_follow_an_exponential_smooth() -> None:
     from favlo.console import _SMOOTH
 

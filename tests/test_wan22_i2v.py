@@ -851,11 +851,44 @@ def test_missing_record_raises_before_the_device(tmp_path: Path) -> None:
 
 def test_forward_scratch_grows_with_the_clip() -> None:
     from wan22_i2v.dit import forward_bytes
+    from wan22_i2v.formats import TILE_M, TILE_N, pad_to, stored_k
 
     config = {"dim": 64, "ffn": 128, "text_len": 8, "text_dim": 32, "freq_dim": 16}
     short = forward_bytes(config, 16, 36 * 2 * 4 * 4)
     longer = forward_bytes(config, 160, 36 * 20 * 4 * 4)
     assert longer > short
+    dim = 5120
+    ffn = 13824
+    rows = pad_to(64, TILE_M)
+    text_rows = pad_to(512, TILE_M)
+    span = stored_k(max(dim, ffn, 4096, 256))
+    slab = max(3 * pad_to(dim, TILE_N), pad_to(ffn, TILE_N))
+    volume = 36 * 4
+    official = {
+        "dim": dim,
+        "ffn": ffn,
+        "text_len": 512,
+        "text_dim": 4096,
+        "freq_dim": 256,
+        "out_dim": 16,
+    }
+    expected = (
+        rows * span * 2
+        + 2 * rows * dim * 4
+        + rows * slab * 4
+        + 64 * dim * 6 * 4
+        + rows * 64 * 4
+        + text_rows * dim * 4
+        + text_rows * 4096 * 4
+        + 64 * 256 * 4
+        + volume * 4
+        + 5 * dim * 4
+        + dim * 6 * 4
+        + (volume // 36) * 16 * 4
+    )
+    assert forward_bytes(official, 64, volume) == expected
+    separate = 5 * rows * dim * 4 + rows * ffn * 4 - rows * slab * 4
+    assert separate > 0
 
 
 def test_room_subtracts_live_and_pending(monkeypatch) -> None:

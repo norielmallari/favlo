@@ -8,8 +8,8 @@ from typing import Any
 
 import numpy as np
 
-from wan22_i2v.formats import TILE_M, LinearPack, pad_to, slim_pack, stored_k
-from wan22_i2v.metal import Gpu
+from wan22_i2v.formats import TILE_M, TILE_N, LinearPack, pad_to, slim_pack, stored_k
+from wan22_i2v.metal import BufferView, Gpu
 from wan22_i2v.schedule import rope_axes
 
 
@@ -65,6 +65,22 @@ def upload_expert(
     )
 
 
+def upload_linear(gpu: Gpu, pack: LinearPack) -> tuple[LinearPack, dict[str, Any]]:
+    """Copy one matrix to the device. The caller drops the host pack."""
+    buffers = {
+        "packed": gpu.keep(gpu.upload(pack.packed)),
+        "scales": gpu.keep(gpu.upload(pack.scales)),
+        "bias": gpu.keep(gpu.upload(pack.bias)),
+        "perm": gpu.keep(gpu.upload(pack.perm)),
+    }
+    return slim_pack(pack), buffers
+
+
+def upload_half(gpu: Gpu, array: np.ndarray) -> Any:
+    """Copy one float16 weight to the device."""
+    return gpu.keep(gpu.upload(np.ascontiguousarray(array, dtype=np.float16)))
+
+
 def drop_expert(gpu: Gpu, resident: Resident) -> None:
     for buf in resident.owned:
         gpu.unkeep(buf)
@@ -80,12 +96,7 @@ _FORWARD_BUFFERS = (
     "half",
     "x",
     "nrm",
-    "q",
-    "k",
-    "v",
-    "attn",
-    "proj",
-    "hidden",
+    "slab",
     "wide",
     "head_out",
     "text",
@@ -102,6 +113,11 @@ _FORWARD_BUFFERS = (
 )
 
 
+def _slab_cols(dim: int, ffn: int) -> int:
+    """Columns for query, key, and attention, or for the FFN hidden when it is wider."""
+    return max(3 * pad_to(dim, TILE_N), pad_to(ffn, TILE_N))
+
+
 def forward_bytes(config: dict[str, Any], tokens: int, volume_size: int) -> int:
     """Bytes ``Forward`` allocates for this token count and latent volume."""
     dim = int(config["dim"])
@@ -114,8 +130,8 @@ def forward_bytes(config: dict[str, Any], tokens: int, volume_size: int) -> int:
     head_cols = int(config.get("out_dim", 16)) * 4
     return (
         rows * span * 2
-        + 7 * rows * dim * 4
-        + rows * ffn * 4
+        + 2 * rows * dim * 4
+        + rows * _slab_cols(dim, ffn) * 4
         + 64 * dim * 6 * 4
         + rows * head_cols * 4
         + text_rows * dim * 4
@@ -150,15 +166,17 @@ class Forward:
         self.text_len = text_len
         self.head_cols = int(config["out_dim"]) * 4
         span = stored_k(max(dim, ffn, self.text_dim, self.freq))
+        self.lane = pad_to(dim, TILE_N)
+        self.slab_cols = _slab_cols(dim, ffn)
         self.half = gpu.keep(gpu.empty(self.rows * span * 2))
         self.x = gpu.keep(gpu.empty(self.rows * dim * 4))
         self.nrm = gpu.keep(gpu.empty(self.rows * dim * 4))
-        self.q = gpu.keep(gpu.empty(self.rows * dim * 4))
-        self.k = gpu.keep(gpu.empty(self.rows * dim * 4))
-        self.v = gpu.keep(gpu.empty(self.rows * dim * 4))
-        self.attn = gpu.keep(gpu.empty(self.rows * dim * 4))
-        self.proj = gpu.keep(gpu.empty(self.rows * dim * 4))
-        self.hidden = gpu.keep(gpu.empty(self.rows * ffn * 4))
+        self.slab = gpu.keep(gpu.empty(self.rows * self.slab_cols * 4))
+        lane_bytes = self.rows * self.lane * 4
+        self.q = BufferView(self.slab, 0)
+        self.k = BufferView(self.slab, lane_bytes)
+        self.attn = BufferView(self.slab, 2 * lane_bytes)
+        self.hidden = BufferView(self.slab, 0)
         self.wide = gpu.keep(gpu.empty(64 * dim * 6 * 4))
         self.head_out = gpu.keep(gpu.empty(self.rows * self.head_cols * 4))
         self.text = gpu.keep(gpu.empty(self.text_rows * dim * 4))
@@ -185,6 +203,10 @@ class Forward:
         """Drop the Python references to the scratch buffers."""
         for name in _FORWARD_BUFFERS:
             setattr(self, name, None)
+        self.q = None
+        self.k = None
+        self.attn = None
+        self.hidden = None
 
     def detach(self, gpu: Gpu) -> None:
         """Release the scratch buffers back to the device."""
@@ -228,12 +250,12 @@ class Forward:
             self.text_dim,
             self.text_rows,
             "text_embedding.0.weight",
-            self.proj,
+            self.nrm,
             resident,
         )
-        self.gpu.pointwise("gelu_tanh", self.proj, self.text_rows, self.dim, self.dim)
+        self.gpu.pointwise("gelu_tanh", self.nrm, self.text_rows, self.dim, self.dim)
         self._linear(
-            self.proj, self.dim, self.text_rows, "text_embedding.2.weight", self.text, resident
+            self.nrm, self.dim, self.text_rows, "text_embedding.2.weight", self.text, resident
         )
 
     def _time(self, resident: Resident, timestep: float) -> None:
@@ -241,10 +263,10 @@ class Forward:
         self.gpu.sinusoid(self.time_src, self.freq, float(timestep))
         self._linear(self.time_src, self.freq, 64, "time_embedding.0.weight", self.nrm, resident)
         self.gpu.pointwise("silu", self.nrm, 64, self.dim, self.dim)
-        self._linear(self.nrm, self.dim, 64, "time_embedding.2.weight", self.proj, resident)
-        self.gpu.copy_f32(self.proj, 0, self.time_embed, self.dim)
-        self.gpu.pointwise("silu", self.proj, 64, self.dim, self.dim)
-        self._linear(self.proj, self.dim, 64, "time_projection.1.weight", self.wide, resident)
+        self._linear(self.nrm, self.dim, 64, "time_embedding.2.weight", self.x, resident)
+        self.gpu.copy_f32(self.x, 0, self.time_embed, self.dim)
+        self.gpu.pointwise("silu", self.x, 64, self.dim, self.dim)
+        self._linear(self.x, self.dim, 64, "time_projection.1.weight", self.wide, resident)
 
     def _patch(self, resident: Resident, grid: tuple[int, int, int]) -> None:
         self.gpu.zero(self.x, self.rows * self.dim * 4)
@@ -283,10 +305,10 @@ class Forward:
         self._linear(self.nrm, self.dim, self.rows, f"{prefix}.ffn.0.weight", self.hidden, resident)
         self.gpu.pointwise("gelu_tanh", self.hidden, self.rows, self.ffn, self.ffn)
         self._linear(
-            self.hidden, self.ffn, self.rows, f"{prefix}.ffn.2.weight", self.proj, resident
+            self.hidden, self.ffn, self.rows, f"{prefix}.ffn.2.weight", self.nrm, resident
         )
         self._bind_gate(5)
-        self.gpu.gate(self.x, self.proj, self.gate, self.rows, self.dim, self.dim)
+        self.gpu.gate(self.x, self.nrm, self.gate, self.rows, self.dim, self.dim)
 
     def _self_attn(self, resident: Resident, prefix: str, grid: tuple[int, int, int]) -> None:
         self.gpu.layernorm(self.x, self.nrm, self.rows, self.dim, self.eps)
@@ -295,30 +317,37 @@ class Forward:
         stem = f"{prefix}.self_attn"
         self._linear(self.nrm, self.dim, self.rows, f"{stem}.q.weight", self.q, resident)
         self._linear(self.nrm, self.dim, self.rows, f"{stem}.k.weight", self.k, resident)
-        self._linear(self.nrm, self.dim, self.rows, f"{stem}.v.weight", self.v, resident)
+        self._linear(self.nrm, self.dim, self.rows, f"{stem}.v.weight", self.nrm, resident)
         self._rms(self.q, resident.halves[f"{stem}.norm_q.weight"], self.rows)
         self._rms(self.k, resident.halves[f"{stem}.norm_k.weight"], self.rows)
         self.gpu.rope(self.q, self.tokens, self.heads, self.head_dim, grid, self.axes)
         self.gpu.rope(self.k, self.tokens, self.heads, self.head_dim, grid, self.axes)
         self.gpu.attend(
-            self.q, self.k, self.v, self.attn, self.tokens, self.tokens, self.heads, self.head_dim
+            self.q, self.k, self.nrm, self.attn, self.tokens, self.tokens, self.heads, self.head_dim
         )
-        self._linear(self.attn, self.dim, self.rows, f"{stem}.o.weight", self.proj, resident)
+        self._linear(self.attn, self.dim, self.rows, f"{stem}.o.weight", self.nrm, resident)
         self._bind_gate(2)
-        self.gpu.gate(self.x, self.proj, self.gate, self.rows, self.dim, self.dim)
+        self.gpu.gate(self.x, self.nrm, self.gate, self.rows, self.dim, self.dim)
 
     def _cross(self, resident: Resident, prefix: str) -> None:
         stem = f"{prefix}.cross_attn"
         self._linear(self.nrm, self.dim, self.rows, f"{stem}.q.weight", self.q, resident)
         self._rms(self.q, resident.halves[f"{stem}.norm_q.weight"], self.rows)
         self._linear(self.text, self.dim, self.text_rows, f"{stem}.k.weight", self.k, resident)
-        self._linear(self.text, self.dim, self.text_rows, f"{stem}.v.weight", self.v, resident)
+        self._linear(self.text, self.dim, self.text_rows, f"{stem}.v.weight", self.nrm, resident)
         self._rms(self.k, resident.halves[f"{stem}.norm_k.weight"], self.text_rows)
         self.gpu.attend(
-            self.q, self.k, self.v, self.attn, self.tokens, self.text_len, self.heads, self.head_dim
+            self.q,
+            self.k,
+            self.nrm,
+            self.attn,
+            self.tokens,
+            self.text_len,
+            self.heads,
+            self.head_dim,
         )
-        self._linear(self.attn, self.dim, self.rows, f"{stem}.o.weight", self.proj, resident)
-        self.gpu.gate(self.x, self.proj, self.ones, self.rows, self.dim, self.dim)
+        self._linear(self.attn, self.dim, self.rows, f"{stem}.o.weight", self.nrm, resident)
+        self.gpu.gate(self.x, self.nrm, self.ones, self.rows, self.dim, self.dim)
 
     def _head(self, resident: Resident) -> None:
         self.gpu.add_embed_half(

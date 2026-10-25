@@ -12,14 +12,20 @@ import numpy as np
 import objc
 
 from favlo.memory import memory
-from wan22_i2v.dit import Forward, drop_expert, forward_bytes, upload_expert
+from wan22_i2v.dit import Forward, drop_expert, forward_bytes
 from wan22_i2v.formats import TILE_M, pad_to
 from wan22_i2v.hold import ClipHold, ClipPaused, interrupt, reload_quietly
 from wan22_i2v.latent import stride_decode, stride_encode
 from wan22_i2v.metal import _NAMES, Gpu
 from wan22_i2v.png import resize_rgb
 from wan22_i2v.progress import ClipProgress, clip_label
-from wan22_i2v.record import half_names, linear_names, load_embed, load_expert, load_manifest
+from wan22_i2v.record import (
+    half_names,
+    linear_names,
+    load_embed,
+    load_manifest,
+    stream_expert,
+)
 from wan22_i2v.schedule import (
     STEPS,
     expert_name,
@@ -138,7 +144,7 @@ class Runtime:
             encode_blocks=lat_t * ENCODER_BLOCKS if vae_file else 0,
             decode_blocks=lat_t * DECODER_BLOCKS if vae_file else 0,
             dit_layers=layers,
-            files=2 * (len(linear_names(layers)) + len(half_names(layers))),
+            files=len(linear_names(layers)) + len(half_names(layers)),
         )
         hold = getattr(progress, "hold", None)
         if hold is not None and not isinstance(hold, ClipHold):
@@ -554,10 +560,8 @@ class Runtime:
             self._resident = None
             gc.collect()
         layers = int(self.config["layers"])
-        expert = load_expert(self._expert(name), layers, on_file=tick)
         with objc.autorelease_pool():
-            self._resident = upload_expert(gpu, expert, on_file=tick)
-        del expert
+            self._resident = stream_expert(gpu, self._expert(name), layers, on_file=tick)
         gc.collect()
 
 

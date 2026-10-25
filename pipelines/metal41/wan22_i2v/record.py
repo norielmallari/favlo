@@ -12,7 +12,7 @@ import numpy as np
 from safetensors import safe_open
 from safetensors.numpy import save_file
 
-from wan22_i2v.dit import Expert
+from wan22_i2v.dit import Expert, Resident, upload_half, upload_linear
 from wan22_i2v.formats import (
     BLOCK_MATRICES,
     LinearPack,
@@ -113,31 +113,73 @@ def load_embed(path: Path) -> np.ndarray:
     return np.load(path / "embed.npy")
 
 
-def load_expert(
-    path: Path, layers: int, on_file: Callable[[], None] | None = None
-) -> Expert:
-    packs: dict[str, LinearPack] = {}
-    for name in linear_names(layers):
-        blob = np.load(path / f"{name}.npz")
-        if on_file is not None:
-            on_file()
-        packs[name] = LinearPack(
+def load_linear(path: Path, name: str) -> LinearPack:
+    """Load one packed matrix and close the file before the caller uploads it."""
+    with np.load(path / f"{name}.npz") as blob:
+        pack = LinearPack(
             kind=str(blob["kind"].item()),
-            packed=np.ascontiguousarray(blob["packed"]),
-            scales=np.ascontiguousarray(blob["scales"]),
-            bias=np.ascontiguousarray(blob["bias"]),
-            perm=np.ascontiguousarray(blob["perm"]),
+            packed=np.array(blob["packed"], copy=True),
+            scales=np.array(blob["scales"], copy=True),
+            bias=np.array(blob["bias"], copy=True),
+            perm=np.array(blob["perm"], copy=True),
             logical_n=int(blob["logical_n"]),
             logical_k=int(blob["logical_k"]),
             padded_n=int(blob["padded_n"]),
             stored_k=int(blob["stored_k"]),
         )
+    return pack
+
+
+def load_half(path: Path, name: str) -> np.ndarray:
+    """Load one float16 weight into an array the caller can drop after upload."""
+    return np.array(_half_array(path, name), copy=True)
+
+
+def load_expert(
+    path: Path, layers: int, on_file: Callable[[], None] | None = None
+) -> Expert:
+    packs: dict[str, LinearPack] = {}
+    for name in linear_names(layers):
+        packs[name] = load_linear(path, name)
+        if on_file is not None:
+            on_file()
     halves: dict[str, np.ndarray] = {}
     for name in half_names(layers):
-        halves[name] = _half_array(path, name)
+        halves[name] = load_half(path, name)
         if on_file is not None:
             on_file()
     return Expert(packs=packs, halves=halves)
+
+
+def stream_expert(
+    gpu: Any,
+    path: Path,
+    layers: int,
+    on_file: Callable[[], None] | None = None,
+) -> Resident:
+    """Upload one matrix at a time so the host copy is never the whole expert."""
+    packs: dict[str, LinearPack] = {}
+    weights: dict[str, dict[str, Any]] = {}
+    owned: list[Any] = []
+    for name in linear_names(layers):
+        pack = load_linear(path, name)
+        slim, buffers = upload_linear(gpu, pack)
+        del pack
+        packs[name] = slim
+        weights[name] = buffers
+        owned.extend(buffers.values())
+        if on_file is not None:
+            on_file()
+    halves: dict[str, Any] = {}
+    for name in half_names(layers):
+        array = load_half(path, name)
+        buf = upload_half(gpu, array)
+        del array
+        halves[name] = buf
+        owned.append(buf)
+        if on_file is not None:
+            on_file()
+    return Resident(packs=packs, weights=weights, halves=halves, host={}, owned=owned)
 
 
 def _half_array(path: Path, name: str) -> np.ndarray:
