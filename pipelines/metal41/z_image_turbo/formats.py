@@ -1,8 +1,9 @@
-"""fp4 E2M1 pack and the tile constants for this checkpoint.
+"""fp4 E2M1 and symmetric int8 packs, and the tile constants for this checkpoint.
 
 Stored K is the logical K rounded up to a multiple of 256 so a packed row is a
-multiple of 128 bytes. The scale is E8M0, one byte per 32 values along K.
+multiple of 128 bytes. The fp4 scale is E8M0, one byte per 32 values along K.
 The power of two rounds up so the block peak fits the fp4 endpoint 6.
+Int8 stores one float32 scale per output row and pads that row count to 128.
 """
 
 from __future__ import annotations
@@ -11,7 +12,9 @@ import numpy as np
 
 TILE_M = 64
 TILE_N = 32
+INT8_TILE_N = 128
 K_ALIGN = 256
+INT8_MAX = np.float32(127.0)
 FP4_LEVELS = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
 FP4_MAX = 6.0
 
@@ -83,6 +86,50 @@ def dequant_fp4(packed: np.ndarray, scales: np.ndarray, sk: int) -> np.ndarray:
     values = (mag * sign).reshape(rows, sk // 32, 32)
     factor = np.exp2(scales.astype(np.float32) - 127.0)
     return (values * factor[..., None]).reshape(rows, sk)
+
+
+def pack_int8(weight: np.ndarray) -> tuple[np.ndarray, np.ndarray, int, int]:
+    """Pack ``[N, K]`` float32 into symmetric int8 codes and one scale per row.
+
+    N is padded to 128 and K to the fp4 alignment. A zero row stores scale 0.
+    Codes are ``-127..127``. ``-128`` is unused. Extra rows and columns are 0.
+    """
+    if weight.ndim != 2:
+        message = f"int8 matrix must be rank 2, got {weight.shape}"
+        raise ValueError(message)
+    matrix = np.ascontiguousarray(weight, dtype=np.float32)
+    logical_n, logical_k = matrix.shape
+    sk = stored_k(logical_k)
+    padded_n = pad_to(logical_n, INT8_TILE_N)
+    padded = np.zeros((padded_n, sk), dtype=np.float32)
+    padded[:logical_n, :logical_k] = matrix
+    peak = np.max(np.abs(padded), axis=1)
+    scale = np.zeros(peak.shape, dtype=np.float32)
+    inverse = np.zeros(peak.shape, dtype=np.float32)
+    live = peak > 0
+    scale[live] = peak[live] / INT8_MAX
+    inverse[live] = INT8_MAX / peak[live]
+    codes = np.rint(padded * inverse[:, None])
+    codes = np.clip(codes, -127, 127).astype(np.int8)
+    return np.ascontiguousarray(codes), np.ascontiguousarray(scale), sk, padded_n
+
+
+def restore_int8(
+    codes: np.ndarray, scales: np.ndarray, logical_n: int, logical_k: int
+) -> np.ndarray:
+    """Float32 logical matrix. ``code × scale[row]``."""
+    values = codes.astype(np.float32) * scales.astype(np.float32)[:, None]
+    return np.ascontiguousarray(values[:logical_n, :logical_k])
+
+
+def relative_error(restored: np.ndarray, source: np.ndarray) -> float:
+    """RMS of the residual divided by RMS of the source. A zero source scores 0."""
+    residual = restored.astype(np.float32) - source.astype(np.float32)
+    denom = float(np.sqrt(np.mean(np.square(source.astype(np.float32)))))
+    if denom == 0.0:
+        return 0.0
+    numer = float(np.sqrt(np.mean(np.square(residual))))
+    return numer / denom
 
 
 def as_float32(array: np.ndarray, dtype_name: str) -> np.ndarray:

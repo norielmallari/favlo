@@ -40,7 +40,7 @@ The official checkpoint is `Qwen/Qwen3.8-Flash-Next`.
 
 The official checkpoint is `Tongyi-MAI/Z-Image-Turbo`. The steps are [z-image-turbo/SETUP.md](../z-image-turbo/SETUP.md).
 
-`favlo --z-image-turbo setup` downloads that repository into `models/Z-Image-Turbo`. `quantize` packs `models/Z-Image-Turbo-fp4`. `--weights` is one `.safetensors` file or a directory of shards. With no `--name`, the folder is that file or directory name plus `-fp4`. `--name` is the registry id.
+`favlo --z-image-turbo setup` downloads that repository into `models/Z-Image-Turbo`. `quantize` packs `models/Z-Image-Turbo-fp4`. `quantize --int8` packs `models/Z-Image-Turbo-int8` from that checkout. `--weights` is one `.safetensors` file or a directory of shards. With no `--name`, the folder is that file or directory name plus `-fp4`, or `-int8` when `--int8` is set. `--name` is the registry id.
 
 ## Wan 2.2 I2V
 

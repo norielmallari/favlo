@@ -48,9 +48,17 @@ uv run favlo --z-image-turbo quantize
 
 That command reads `models/Z-Image-Turbo` and registers the folder `Z-Image-Turbo-fp4` in `models/registry.json`. The row stores `models/Z-Image-Turbo-fp4`. The client model field is `Z-Image-Turbo-fp4`. A finished directory has `manifest.json` with `complete: true`. Running `quantize` again on that directory returns it. An unfinished directory is replaced.
 
+`quantize --int8` reads the same checkout. It packs each matrix as symmetric int8 with one float32 scale per output row and writes `models/Z-Image-Turbo-int8`. The fp4 record is not an input. Biases, norms, and the two pad tokens stay float16. The VAE encoder is not packed. The command prints each matrix's relative RMS and the worst matrix.
+
+```bash
+uv run favlo --z-image-turbo quantize --int8
+```
+
+The client model field is `Z-Image-Turbo-int8`. A finished int8 directory is returned on the next run. The fp4 directory stays. On this machine a 1280 generation of the smoke prompt from that record printed 51.74 s, caption 0.15 s, decoder 9.27 s, steps 5.24–5.37 s. A 512 generation printed 4.43 s, with each step at 0.44 s.
+
 ## Another safetensors file
 
-`--weights` is one `.safetensors` file, or a directory of those files. With no `--name` and no `--out`, the packed folder is that file name without `.safetensors`, or that directory name, plus `-fp4`, under `models/`. A name that already ends in `-fp4` is kept. The folder is the registry id.
+`--weights` is one `.safetensors` file, or a directory of those files. With no `--name` and no `--out`, the packed folder is that file name without `.safetensors`, or that directory name, plus `-fp4`, under `models/`. `--int8` uses `-int8` instead. A name that already ends in that suffix is kept. The folder is the registry id.
 
 ```bash
 uv run favlo --z-image-turbo quantize --weights models/example-model.safetensors

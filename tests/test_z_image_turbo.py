@@ -12,7 +12,7 @@ import pytest
 
 from favlo.reply import MemoryReply
 from z_image_turbo.chat import ImageRequestError, _fields, handle_image
-from z_image_turbo.formats import dequant_fp4, pack_fp4, stored_k
+from z_image_turbo.formats import dequant_fp4, pack_fp4, pack_int8, relative_error, restore_int8, stored_k
 from z_image_turbo.hold import ImageHold, ImageJob, ImagePaused
 from z_image_turbo.png import ZLIB_LEVEL, encode_png, pack_rgb, unpack_rgb, write_png
 from z_image_turbo.progress import (
@@ -32,6 +32,23 @@ def test_stored_k_pads_a_conv_row() -> None:
     assert stored_k(144) == 256
     assert stored_k(256) == 256
     assert stored_k(1152) == 1280
+
+
+def test_pack_int8_pads_and_restores_the_peak() -> None:
+    weight = np.zeros((3, 40), dtype=np.float32)
+    weight[0, 0] = 127.0
+    weight[1, 3] = -63.5
+    codes, scales, stored, padded = pack_int8(weight)
+    assert stored == 256
+    assert padded == 128
+    assert codes.shape == (128, 256)
+    assert scales.shape == (128,)
+    assert int(codes[0, 0]) == 127
+    assert scales[0] == np.float32(1.0)
+    assert scales[2] == np.float32(0.0)
+    restored = restore_int8(codes, scales, 3, 40)
+    assert relative_error(restored, weight) < 0.01
+    assert restored[0, 0] == np.float32(127.0)
 
 
 def test_pack_preserves_an_fp4_codepoint() -> None:
@@ -690,6 +707,26 @@ def test_quantize_accepts_one_safetensors_file(tmp_path: Path) -> None:
     assert body["source"] == str(tokenizer.resolve())
     assert body["tensors"]["layers.0.weight"]["plane"] == "fp4"
     assert body["tensors"]["cap_pad_token"]["plane"] == "f16"
+    assert body["format"] == "z-image-turbo-fp4"
+
+
+def test_quantize_int8_packs_from_the_float_weights(tmp_path: Path) -> None:
+    weights = tmp_path / "custom.safetensors"
+    matrix = np.arange(8 * 32, dtype=np.float32).reshape(8, 32)
+    _write_safetensors(weights, {"layers.0.weight": matrix})
+    tokenizer = tmp_path / "tokenizer-tree"
+    (tokenizer / "tokenizer").mkdir(parents=True)
+    dest = tmp_path / "packed"
+    quantize(weights, dest, tokenizer_source=tokenizer, kind="int8")
+    body = json.loads((dest / "manifest.json").read_text(encoding="utf-8"))
+    entry = body["tensors"]["layers.0.weight"]
+    assert body["format"] == "z-image-turbo-int8"
+    assert body["tile_n"] == 128
+    assert entry["plane"] == "int8"
+    assert entry["padded_n"] == 128
+    assert entry["stored_k"] == 256
+    codes = np.frombuffer((dest / entry["file"]).read_bytes(), dtype=np.int8)
+    assert codes.size == 128 * 256
 
 
 def test_quantize_accepts_a_directory_of_safetensors(tmp_path: Path) -> None:
@@ -728,10 +765,16 @@ def test_a_custom_safetensors_file_is_its_own_registry_id(
     weights.write_bytes(b"st")
     seen: dict[str, Path] = {}
 
-    def quantize(origin: Path, dest: Path, tokenizer_source: Path | None = None) -> Path:
+    def quantize(
+        origin: Path,
+        dest: Path,
+        tokenizer_source: Path | None = None,
+        kind: str = "fp4",
+    ) -> Path:
         del tokenizer_source
         seen["origin"] = origin
         seen["dest"] = dest
+        seen["kind"] = kind
         dest.mkdir(parents=True)
         (dest / "manifest.json").write_text("{}\n")
         return dest
@@ -754,6 +797,11 @@ def test_a_custom_safetensors_file_is_its_own_registry_id(
     spaced = tmp_path / "bad name.safetensors"
     spaced.write_bytes(b"st")
     assert main(["quantize", "--weights", str(spaced)]) == 1
+    assert main(["quantize", "--int8"]) == 0
+    assert seen["dest"] == tmp_path / "models" / "Z-Image-Turbo-int8"
+    assert seen["kind"] == "int8"
+    assert main(["quantize", "--weights", str(weights), "--int8"]) == 0
+    assert seen["dest"] == tmp_path / "models" / "example-model-int8"
 
 
 def test_load_counts_bytes_and_skips_the_print(tmp_path, capsys) -> None:

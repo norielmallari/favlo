@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from z_image_turbo.formats import TILE_M, TILE_N, pad_to, stored_k
+from z_image_turbo.formats import INT8_TILE_N, TILE_M, TILE_N, pad_to, stored_k
 from z_image_turbo.metal import Gpu
 from z_image_turbo.ops import project
 from z_image_turbo.record import Plane
@@ -116,7 +116,8 @@ def _conv(
     dest = _alloc(gpu, bank, out_ch, source.height, source.width)
     logical = int(np.prod(weight.shape[1:]))
     sk = weight.stored_k or stored_k(logical)
-    cols = pad_to(out_ch, TILE_N)
+    tile_n = INT8_TILE_N if weight.plane == "int8" else TILE_N
+    cols = weight.padded_n if weight.plane == "int8" else pad_to(out_ch, tile_n)
     act = _ws(gpu, ws, "act", CHUNK * sk * 2)
     out = _ws(gpu, ws, "out", CHUNK * cols * 4)
     pixels = source.height * source.width
@@ -136,7 +137,25 @@ def _conv(
             origin,
             count,
         )
-        gpu.matmul(act, weight.data, weight.scale, out, rows, cols, sk)
+        if weight.plane == "int8":
+            gpu.project_i8(
+                act,
+                "f16",
+                weight.data,
+                weight.scale,
+                None,
+                out,
+                rows,
+                out_ch,
+                logical,
+                sk,
+                cols,
+                sk,
+                dest_stride=cols,
+                acc=out,
+            )
+        else:
+            gpu.matmul(act, weight.data, weight.scale, out, rows, cols, sk)
         gpu.scatter_bias(
             out,
             bias.data,

@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from z_image_turbo.formats import TILE_M, TILE_N, dequant_fp4, pack_fp4
+from z_image_turbo.formats import TILE_M, TILE_N, dequant_fp4, pack_fp4, pack_int8
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -18,7 +18,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("setup", help="download Tongyi-MAI/Z-Image-Turbo from the repository")
     sub.add_parser("kernels", help="dispatch the fp4 matmul and the attention shader")
-    quant = sub.add_parser("quantize", help="pack safetensors weights to fp4")
+    quant = sub.add_parser("quantize", help="pack safetensors weights")
     quant.add_argument(
         "--weights",
         "-w",
@@ -41,6 +41,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="folder under models/; this name is the registry id",
     )
+    quant.add_argument(
+        "--int8",
+        action="store_true",
+        help="pack symmetric int8 from the original weights",
+    )
     gen = sub.add_parser("generate", help="write one PNG")
     gen.add_argument("--prompt", required=True)
     gen.add_argument("--width", type=int, default=1024)
@@ -58,7 +63,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "kernels":
         return kernels()
     if args.command == "quantize":
-        return _quantize(args.weights, args.source, args.tokenizer_source, args.out, args.name)
+        return _quantize(
+            args.weights,
+            args.source,
+            args.tokenizer_source,
+            args.out,
+            args.name,
+            int8=args.int8,
+        )
     if args.command == "generate":
         return _generate(args)
     return 2
@@ -73,6 +85,8 @@ def _quantize(
     tokenizer_source: Path | None,
     out: Path | None,
     name: str | None,
+    *,
+    int8: bool = False,
 ) -> int:
     from favlo.registry import register_quantized
     from z_image_turbo.record import quantize
@@ -80,8 +94,8 @@ def _quantize(
 
     origin = weights or source or source_dir()
     try:
-        dest = _record_dir(origin, name, out)
-        quantize(origin, dest, tokenizer_source=tokenizer_source)
+        dest = _record_dir(origin, name, out, int8=int8)
+        quantize(origin, dest, tokenizer_source=tokenizer_source, kind="int8" if int8 else "fp4")
         register_quantized(
             dest.name,
             source=origin,
@@ -98,8 +112,10 @@ def _quantize(
     return 0
 
 
-def _record_dir(origin: Path, name: str | None, out: Path | None) -> Path:
-    """Packed directory. A custom file is ``<stem>-fp4`` under ``models/``."""
+def _record_dir(
+    origin: Path, name: str | None, out: Path | None, *, int8: bool = False
+) -> Path:
+    """Packed directory. A custom file is ``<stem>-fp4`` or ``<stem>-int8``."""
     from favlo.registry import models_dir
 
     if name is not None and out is not None:
@@ -111,8 +127,9 @@ def _record_dir(origin: Path, name: str | None, out: Path | None) -> Path:
     if out is not None:
         return out
     stem = origin.stem if origin.suffix == ".safetensors" else origin.name
-    if not stem.endswith("-fp4"):
-        stem = f"{stem}-fp4"
+    suffix = "-int8" if int8 else "-fp4"
+    if not stem.endswith(suffix):
+        stem = f"{stem}{suffix}"
     _check_folder(stem)
     return models_dir() / stem
 
@@ -198,6 +215,9 @@ def _kernel_checks(gpu: Any) -> int:
     if not _close(got, ref):
         print("kernels conv-K mismatch", flush=True)
         return 1
+    if not _int8(gpu):
+        print("kernels int8 mismatch", flush=True)
+        return 1
     if not _attention(gpu):
         print("kernels attention mismatch", flush=True)
         return 1
@@ -206,6 +226,46 @@ def _kernel_checks(gpu: Any) -> int:
         return 1
     print("kernels ok", flush=True)
     return 0
+
+
+def _int8(gpu: Any) -> bool:
+    """One padded int8 tile against the same quantize and the int32 product."""
+    rows = TILE_M
+    logical_n = 96
+    logical_k = 144
+    rng = np.random.default_rng(2)
+    weight = rng.normal(0.0, 0.02, size=(logical_n, logical_k)).astype(np.float32)
+    bias = rng.normal(0.0, 0.01, size=(logical_n,)).astype(np.float32)
+    activation = rng.normal(0.0, 0.5, size=(rows, logical_k)).astype(np.float32)
+    codes, scales, stored, padded = pack_int8(weight)
+    peak = np.max(np.abs(activation), axis=1)
+    row_scale = np.where(peak > 0, peak / np.float32(127.0), np.float32(0.0))
+    inverse = np.where(peak > 0, np.float32(127.0) / peak, np.float32(0.0))
+    act_codes = np.clip(np.rint(activation * inverse[:, None]), -127, 127).astype(np.int32)
+    wide = np.zeros((rows, stored), dtype=np.int32)
+    wide[:, :logical_k] = act_codes
+    product = wide @ codes.astype(np.int32).T
+    expect = product.astype(np.float32) * row_scale[:, None] * scales.astype(np.float32)[None, :]
+    expect = expect[:, :logical_n] + bias.astype(np.float32)
+    dest = gpu.empty(rows * logical_n * 4)
+    acc = gpu.empty(rows * padded * 4)
+    gpu.project_i8(
+        gpu.upload(activation),
+        "f32",
+        gpu.upload(codes),
+        gpu.upload(scales),
+        gpu.upload(bias.astype(np.float16)),
+        dest,
+        rows,
+        logical_n,
+        logical_k,
+        stored,
+        padded,
+        logical_k,
+        acc=acc,
+    )
+    got = gpu.read_f32(dest, rows * logical_n).reshape(rows, logical_n)
+    return bool(np.allclose(got, expect, rtol=1e-4, atol=1e-4))
 
 
 def _attention(gpu: object) -> bool:

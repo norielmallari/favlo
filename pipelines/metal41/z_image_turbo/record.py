@@ -1,4 +1,4 @@
-"""Pack the Turbo checkpoint and load the fp4 record onto the device."""
+"""Pack the Turbo checkpoint and load an fp4 or int8 record onto the device."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 
-from z_image_turbo.formats import as_float32, pack_fp4
+from z_image_turbo.formats import as_float32, pack_fp4, pack_int8, relative_error, restore_int8
 from z_image_turbo.metal import Gpu
 
 _PAD = {"cap_pad_token", "x_pad_token"}
@@ -29,12 +29,14 @@ class Plane:
         stored_k: int,
         data: Any,
         scale: Any | None,
+        padded_n: int = 0,
     ) -> None:
         self.name = name
         self.plane = plane
         self.shape = shape
         self.logical_k = logical_k
         self.stored_k = stored_k
+        self.padded_n = padded_n
         self.data = data
         self.scale = scale
 
@@ -48,12 +50,21 @@ def quantize(
     dest: Path,
     *,
     tokenizer_source: Path | None = None,
+    kind: str = "fp4",
 ) -> Path:
-    """Pack generate-path weights. The VAE encoder is left unpacked."""
+    """Pack generate-path weights. The VAE encoder is left unpacked.
+
+    ``kind`` ``int8`` reads the original floating weights. It does not read an
+    fp4 record. A finished directory of the same format is returned as it is.
+    """
+    if kind not in {"fp4", "int8"}:
+        message = f"kind must be fp4 or int8, got {kind}"
+        raise ValueError(message)
+    fmt = "z-image-turbo-int8" if kind == "int8" else "z-image-turbo-fp4"
     manifest_path = dest / "manifest.json"
     if manifest_path.is_file():
         body = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if body.get("complete") is True:
+        if body.get("complete") is True and body.get("format") == fmt:
             return dest
     if dest.exists():
         shutil.rmtree(dest)
@@ -63,6 +74,8 @@ def quantize(
     out_weights.mkdir(parents=True)
     tensors: dict[str, Any] = {}
     seen: set[str] = set()
+    worst = 0.0
+    worst_name = ""
     for shard, header, data_start in _shards(weights):
         print(f"quantize {shard.name}", flush=True)
         for key, info in header.items():
@@ -73,16 +86,38 @@ def quantize(
                 raise ValueError(message)
             seen.add(key)
             array = _read(shard, info, data_start)
-            kind = _kind(key, array.shape)
+            plane = _kind(key, array.shape)
+            if plane == "fp4" and kind == "int8":
+                plane = "int8"
             entry: dict[str, Any] = {
-                "plane": kind,
+                "plane": plane,
                 "shape": list(array.shape),
             }
-            if kind == "f16":
+            if plane == "f16":
                 raw = np.ascontiguousarray(array, dtype=np.float32).astype(np.float16)
                 file_name = f"{key}.f16"
                 (out_weights / file_name).write_bytes(raw.tobytes())
                 entry["file"] = f"weights/{file_name}"
+            elif plane == "int8":
+                matrix = np.ascontiguousarray(array.reshape(array.shape[0], -1), dtype=np.float32)
+                codes, scales, stored, padded = pack_int8(matrix)
+                error = relative_error(
+                    restore_int8(codes, scales, matrix.shape[0], matrix.shape[1]),
+                    matrix,
+                )
+                data_name = f"{key}.i8"
+                scale_name = f"{key}.scale"
+                (out_weights / data_name).write_bytes(codes.tobytes())
+                (out_weights / scale_name).write_bytes(scales.tobytes())
+                entry["logical_k"] = int(matrix.shape[1])
+                entry["stored_k"] = int(stored)
+                entry["padded_n"] = int(padded)
+                entry["file"] = f"weights/{data_name}"
+                entry["scale"] = f"weights/{scale_name}"
+                print(f"int8 {key} {error:.6f}", flush=True)
+                if error >= worst:
+                    worst = error
+                    worst_name = key
             else:
                 matrix = array.reshape(array.shape[0], -1)
                 packed, scales, stored = pack_fp4(matrix)
@@ -96,13 +131,15 @@ def quantize(
                 entry["scale"] = f"weights/{scale_name}"
             tensors[key] = entry
             del array
+    if kind == "int8":
+        print(f"int8 worst {worst_name} {worst:.6f}", flush=True)
     body = {
         "complete": True,
-        "format": "z-image-turbo-fp4",
+        "format": fmt,
         "source_repo": "Tongyi-MAI/Z-Image-Turbo",
         "source": str(root.resolve()),
         "tile_m": 64,
-        "tile_n": 32,
+        "tile_n": 128 if kind == "int8" else 32,
         "tensors": tensors,
     }
     temporary = manifest_path.with_suffix(".json.tmp")
@@ -135,11 +172,17 @@ def load(
         scale_bytes = 0
         stored = int(entry.get("stored_k") or 0)
         logical = int(entry.get("logical_k") or 0)
+        padded = int(entry.get("padded_n") or 0)
         if entry["plane"] == "fp4":
             scale_raw = (path / entry["scale"]).read_bytes()
             scale_bytes = len(scale_raw)
             data = gpu.keep(gpu.upload(np.frombuffer(raw, dtype=np.uint8)))
             scale = gpu.keep(gpu.upload(np.frombuffer(scale_raw, dtype=np.uint8)))
+        elif entry["plane"] == "int8":
+            scale_raw = (path / entry["scale"]).read_bytes()
+            scale_bytes = len(scale_raw)
+            data = gpu.keep(gpu.upload(np.frombuffer(raw, dtype=np.int8)))
+            scale = gpu.keep(gpu.upload(np.frombuffer(scale_raw, dtype=np.float32)))
         elif entry["plane"] == "f16":
             data = gpu.keep(gpu.upload(np.frombuffer(raw, dtype=np.float16)))
         else:
@@ -153,6 +196,7 @@ def load(
             stored,
             data,
             scale,
+            padded,
         )
         if on_bytes is not None:
             on_bytes(len(raw) + scale_bytes)

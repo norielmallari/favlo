@@ -1,4 +1,4 @@
-"""Shared projection. The matmul tile is 64 by 32."""
+"""Shared projection. fp4 uses a 64 by 32 tile. int8 uses a 64 by 128 tile."""
 
 from __future__ import annotations
 
@@ -20,9 +20,29 @@ def project(
     inner: int,
 ) -> None:
     cols = int(weight.shape[0])
-    if weight.stored_k != inner:
+    if weight.stored_k != inner and weight.plane != "int8":
         message = f"{weight.name} stored K {weight.stored_k} != {inner}"
         raise ValueError(message)
+    if weight.plane == "int8":
+        if weight.logical_k > inner:
+            message = f"{weight.name} logical K {weight.logical_k} exceeds {inner}"
+            raise ValueError(message)
+        gpu.project_i8(
+            act,
+            "f32",
+            weight.data,
+            weight.scale,
+            None if bias is None else bias.data,
+            dest_f16,
+            rows,
+            cols,
+            weight.logical_k,
+            weight.stored_k,
+            weight.padded_n,
+            inner,
+            acc=dest_f32,
+        )
+        return
     linear(
         gpu,
         act,

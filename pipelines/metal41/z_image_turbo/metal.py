@@ -13,7 +13,7 @@ import Metal
 import numpy as np
 
 from favlo.memory import memory
-from z_image_turbo.formats import TILE_M, TILE_N, pad_to
+from z_image_turbo.formats import INT8_TILE_N, TILE_M, TILE_N, pad_to
 
 _LIBC = ctypes.CDLL(None, use_errno=True)
 _LIBC.host_statistics64.argtypes = [
@@ -76,6 +76,11 @@ def wait_until_reclaimed(before: int, freed: int) -> None:
 _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"
 _NAMES = (
     "matmul_fp4",
+    "quantize_i8",
+    "quantize_half_i8",
+    "matmul_i8",
+    "scale_i8",
+    "gather_i8",
     "zero_bytes",
     "rmsnorm",
     "layernorm",
@@ -146,6 +151,8 @@ class Gpu:
         self._half_bytes = 0
         self._inv: Any = None
         self._inv_bytes = 0
+        self._i8acc: Any = None
+        self._i8acc_bytes = 0
         width = int(self.pipes["matmul_fp4"].threadExecutionWidth())
         self._matmul_threads = (width * 4, 1, 1)
 
@@ -220,8 +227,10 @@ class Gpu:
         self._release_owned(keep=False)
         self._half = None
         self._inv = None
+        self._i8acc = None
         self._half_bytes = 0
         self._inv_bytes = 0
+        self._i8acc_bytes = 0
         self.pipes.clear()
         self.queue = None
         self.device = None
@@ -316,6 +325,88 @@ class Gpu:
             [struct.pack("I", rows), struct.pack("I", cols), struct.pack("I", inner)],
             (cols // TILE_N, rows // TILE_M, 1),
             self._matmul_threads,
+        )
+
+    def project_i8(
+        self,
+        src: Any,
+        src_kind: str,
+        weight: Any,
+        col_scale: Any,
+        bias: Any | None,
+        dest: Any,
+        rows: int,
+        logical_n: int,
+        logical_k: int,
+        stored_k: int,
+        padded_n: int,
+        src_cols: int,
+        *,
+        dest_stride: int | None = None,
+        acc: Any | None = None,
+    ) -> None:
+        """Quantize one activation, multiply int8 × int8, then apply the scales.
+
+        ``src_kind`` is ``f32`` or ``f16``. ``dest`` receives float32 of
+        ``dest_stride`` columns. The bias is added when ``bias`` is present.
+        """
+        if src_kind not in {"f32", "f16"}:
+            message = f"int8 activation kind {src_kind}"
+            raise ValueError(message)
+        if rows % TILE_M or padded_n % INT8_TILE_N or stored_k % 256:
+            message = (
+                f"int8 tile mismatch rows={rows} cols={padded_n} inner={stored_k}"
+            )
+            raise ValueError(message)
+        if logical_n > padded_n or logical_k > stored_k:
+            message = f"int8 logical {logical_n}×{logical_k} exceeds {padded_n}×{stored_k}"
+            raise ValueError(message)
+        stride = logical_n if dest_stride is None else dest_stride
+        codes = self._workspace("_half", rows * stored_k)
+        factors = self._workspace("_inv", rows * 4)
+        name = "quantize_i8" if src_kind == "f32" else "quantize_half_i8"
+        self._dispatch(
+            name,
+            [src, codes, factors],
+            [
+                struct.pack("I", rows),
+                struct.pack("I", logical_k),
+                struct.pack("I", stored_k),
+                struct.pack("I", src_cols),
+            ],
+            (rows, 1, 1),
+            (128, 1, 1),
+        )
+        need = rows * padded_n * 4
+        product = acc
+        if product is None or int(product.length()) < need:
+            product = self._workspace("_i8acc", need)
+        self._dispatch(
+            "matmul_i8",
+            [codes, weight, product],
+            [
+                struct.pack("I", rows),
+                struct.pack("I", padded_n),
+                struct.pack("I", stored_k),
+            ],
+            (padded_n // INT8_TILE_N, rows // TILE_M, 1),
+            self._matmul_threads,
+        )
+        count = rows * padded_n
+        threads = 256
+        dummy = bias if bias is not None else dest
+        self._dispatch(
+            "scale_i8",
+            [product, factors, col_scale, dummy, dest],
+            [
+                struct.pack("I", rows),
+                struct.pack("I", padded_n),
+                struct.pack("I", logical_n),
+                struct.pack("I", stride),
+                struct.pack("I", 0 if bias is None else 1),
+            ],
+            ((count + threads - 1) // threads, 1, 1),
+            (threads, 1, 1),
         )
 
     def rmsnorm(
@@ -484,6 +575,30 @@ class Gpu:
     ) -> None:
         self._dispatch(
             "gather_fp4",
+            [ids, table, scales, dest],
+            [
+                struct.pack("I", seq),
+                struct.pack("I", limit),
+                struct.pack("I", hidden),
+                struct.pack("I", stored),
+            ],
+            ((hidden + 31) // 32, seq, 1),
+            (32, 1, 1),
+        )
+
+    def gather_i8(
+        self,
+        ids: Any,
+        table: Any,
+        scales: Any,
+        dest: Any,
+        seq: int,
+        limit: int,
+        hidden: int,
+        stored: int,
+    ) -> None:
+        self._dispatch(
+            "gather_i8",
             [ids, table, scales, dest],
             [
                 struct.pack("I", seq),

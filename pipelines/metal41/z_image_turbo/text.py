@@ -88,7 +88,8 @@ def _prefill(
     on_layer: Callable[[], None] | None = None,
 ) -> Any:
     table = weights["model.embed_tokens.weight"]
-    gpu.gather_fp4(
+    gather = gpu.gather_i8 if table.plane == "int8" else gpu.gather_fp4
+    gather(
         gpu.upload(np.ascontiguousarray(ids)),
         table.data,
         table.scale,
