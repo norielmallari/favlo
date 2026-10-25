@@ -378,15 +378,23 @@ class ExpertAtlas:
 
 
 def _allocate(gpu: Any, candidates: tuple[int, ...]) -> tuple[Any, int]:
-    from favlo.memory import memory
+    owner = getattr(gpu, "_owner", None)
+    if isinstance(owner, str) and owner:
+        from favlo.memory import memory
 
-    owner = gpu._owner
-    for nbytes in candidates:
-        try:
-            buffer = memory.allocate(int(nbytes), owner=owner)
-        except RuntimeError:
-            continue
-        loosen_buffer(buffer)
-        return buffer, nbytes
+        for nbytes in candidates:
+            try:
+                buffer = memory.allocate(int(nbytes), owner=owner)
+            except RuntimeError:
+                continue
+            loosen_buffer(buffer)
+            return buffer, nbytes
+    else:
+        for nbytes in candidates:
+            buffer = gpu.alloc(int(nbytes))
+            if buffer is None:
+                continue
+            loosen_buffer(buffer)
+            return buffer, nbytes
     message = "unable to allocate a resident expert atlas"
     raise RuntimeError(message)
