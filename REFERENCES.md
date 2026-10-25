@@ -59,7 +59,7 @@ Used from that spec:
 
 The converter uses the other algorithm: round the power of two **up**, so the peak fits in the format without clamping. For fp4 E2M1 the positive endpoint is 6. For fp8 E4M3 it is 448. For int2 it is 1. `scale = 2^{ceil(log2(amax / qmax))}`, stored as `e = log2(scale) + 127`, clamped to `0..254`. A zero block stores exponent 0. Reconstruct `value × 2^(e − 127)`.
 
-Open Compute Project. *OCP Microscaling Formats (MX) Specification.* The fp4 E2M1 magnitudes are `0, 0.5, 1, 1.5, 2, 3, 4, 6`, and bit 3 of the nibble is the sign. *OCP 8-bit Floating Point Specification.* E4M3FN is the finite format whose largest value is 448 and whose all-ones mantissa at the top exponent is NaN. Metal names these `metal_fp4_e2m1` and `metal_fp8_e4m3`. The half × int8 `matmul2d` op compiles on this GPU and its dispatch does not complete, so integer int8 is not a weight plane.
+Open Compute Project. *OCP Microscaling Formats (MX) Specification.* The fp4 E2M1 magnitudes are `0, 0.5, 1, 1.5, 2, 3, 4, 6`, and bit 3 of the nibble is the sign. *OCP 8-bit Floating Point Specification.* E4M3FN is the finite format whose largest value is 448 and whose all-ones mantissa at the top exponent is NaN. Metal names these `metal_fp4_e2m1` and `metal_fp8_e4m3`. A half × int8 `matmul2d` with no scale plane completes. The same op with an E8M0 scale plane compiles, and that dispatch does not complete, so scaled integer int8 is not a weight plane.
 
 Bita Darvish Rouhani et al. *OCP Microscaling Formats for Deep Learning.* September 2023. Cited by the MX spec.
 
