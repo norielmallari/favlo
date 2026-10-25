@@ -490,6 +490,225 @@ kernel void prefill_fp8_m8(
     op.run(tile_left, tile_right, tile_out);
 }
 
+// One output row. The E8M0 groups are collapsed to one scale, the row peak over 127.
+static void restore_row_i8(
+    device const uchar* packed,
+    device const uchar* row_scale,
+    device int8_t* codes,
+    device float* factors,
+    uint row,
+    uint inner,
+    uint lane,
+    uint span,
+    bool fp8,
+    threadgroup float* parts)
+{
+    float peak = 0.0f;
+    for (uint col = lane; col < inner; col += span) {
+        float unit = 0.0f;
+        if (fp8) {
+            unit = e4m3_code(packed[row * inner + col]);
+        } else {
+            uint byte = packed[row * (inner >> 1) + (col >> 1)];
+            uint nibble = (col & 1u) ? (byte >> 4) : (byte & 0xFu);
+            unit = fp4_e2m1(nibble);
+        }
+        peak = max(peak, fabs(unit * e8m0_code(row_scale[col >> 5])));
+    }
+    float grouped = simd_max(peak);
+    if ((lane & 31u) == 0u) {
+        parts[lane >> 5] = grouped;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0u) {
+        float total = 0.0f;
+        uint nsimd = span >> 5;
+        for (uint s = 0u; s < nsimd; ++s) {
+            total = max(total, parts[s]);
+        }
+        parts[0] = total;
+        factors[row] = total > 0.0f ? total / 127.0f : 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float total = parts[0];
+    float inv = total > 0.0f ? 127.0f / total : 0.0f;
+    device int8_t* crow = codes + row * inner;
+    for (uint col = lane; col < inner; col += span) {
+        float unit = 0.0f;
+        if (fp8) {
+            unit = e4m3_code(packed[row * inner + col]);
+        } else {
+            uint byte = packed[row * (inner >> 1) + (col >> 1)];
+            uint nibble = (col & 1u) ? (byte >> 4) : (byte & 0xFu);
+            unit = fp4_e2m1(nibble);
+        }
+        float value = unit * e8m0_code(row_scale[col >> 5]) * inv;
+        int code = int(rint(value));
+        crow[col] = int8_t(clamp(code, -127, 127));
+    }
+}
+
+kernel void restore_fp4_i8(
+    device const uchar* packed [[buffer(0)]],
+    device const uchar* scales [[buffer(1)]],
+    device int8_t* codes [[buffer(2)]],
+    device float* factors [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]],
+    uint span [[threads_per_threadgroup]])
+{
+    threadgroup float parts[8];
+    if (row >= rows) {
+        return;
+    }
+    restore_row_i8(
+        packed, scales + row * (inner >> 5), codes, factors, row, inner, lane, span, false, parts);
+}
+
+kernel void restore_fp8_i8(
+    device const uchar* packed [[buffer(0)]],
+    device const uchar* scales [[buffer(1)]],
+    device int8_t* codes [[buffer(2)]],
+    device float* factors [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]],
+    uint span [[threads_per_threadgroup]])
+{
+    threadgroup float parts[8];
+    if (row >= rows) {
+        return;
+    }
+    restore_row_i8(
+        packed, scales + row * (inner >> 5), codes, factors, row, inner, lane, span, true, parts);
+}
+
+// One token. The scale is that row's peak over 127.
+kernel void quantize_half_i8(
+    device const half* src [[buffer(0)]],
+    device int8_t* codes [[buffer(1)]],
+    device float* factors [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]],
+    uint span [[threads_per_threadgroup]])
+{
+    if (row >= rows) {
+        return;
+    }
+    device const half* srow = src + row * inner;
+    float peak = 0.0f;
+    for (uint col = lane; col < inner; col += span) {
+        peak = max(peak, fabs(float(srow[col])));
+    }
+    float grouped = simd_max(peak);
+    threadgroup float parts[8];
+    if ((lane & 31u) == 0u) {
+        parts[lane >> 5] = grouped;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0u) {
+        float total = 0.0f;
+        uint nsimd = span >> 5;
+        for (uint s = 0u; s < nsimd; ++s) {
+            total = max(total, parts[s]);
+        }
+        parts[0] = total;
+        factors[row] = total > 0.0f ? total / 127.0f : 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float total = parts[0];
+    float inv = total > 0.0f ? 127.0f / total : 0.0f;
+    device int8_t* crow = codes + row * inner;
+    for (uint col = lane; col < inner; col += span) {
+        int code = int(rint(float(srow[col]) * inv));
+        crow[col] = int8_t(clamp(code, -127, 127));
+    }
+}
+
+kernel void prefill_i8_n64(
+    device int8_t* activation [[buffer(0)]],
+    device int8_t* weights [[buffer(1)]],
+    device int32_t* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    tensor<device int8_t, dextents<int, 2>, tensor_inline> left(
+        activation,
+        dextents<int, 2>(int(inner), int(rows)),
+        array<int, 2>{1, int(inner)});
+    tensor<device int8_t, dextents<int, 2>, tensor_inline> right(
+        weights,
+        dextents<int, 2>(int(inner), int(cols)),
+        array<int, 2>{1, int(inner)});
+    tensor<device int32_t, dextents<int, 2>, tensor_inline> out(
+        destination,
+        dextents<int, 2>(int(cols), int(rows)),
+        array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(
+        64, 64, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, int(tgid.y) * 64);
+    auto tile_right = right.slice(0, int(tgid.x) * 64);
+    auto tile_out = out.slice(int(tgid.x) * 64, int(tgid.y) * 64);
+    op.run(tile_left, tile_right, tile_out);
+}
+
+kernel void prefill_i8_m32(
+    device int8_t* activation [[buffer(0)]],
+    device int8_t* weights [[buffer(1)]],
+    device int32_t* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    tensor<device int8_t, dextents<int, 2>, tensor_inline> left(
+        activation,
+        dextents<int, 2>(int(inner), int(rows)),
+        array<int, 2>{1, int(inner)});
+    tensor<device int8_t, dextents<int, 2>, tensor_inline> right(
+        weights,
+        dextents<int, 2>(int(inner), int(cols)),
+        array<int, 2>{1, int(inner)});
+    tensor<device int32_t, dextents<int, 2>, tensor_inline> out(
+        destination,
+        dextents<int, 2>(int(cols), int(rows)),
+        array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(
+        32, 128, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, int(tgid.y) * 32);
+    auto tile_right = right.slice(0, int(tgid.x) * 128);
+    auto tile_out = out.slice(int(tgid.x) * 128, int(tgid.y) * 32);
+    op.run(tile_left, tile_right, tile_out);
+}
+
+// Token scale times channel scale. The int32 product and the float result share the buffer.
+kernel void scale_i8_f32(
+    device int* acc [[buffer(0)]],
+    device const float* row_scale [[buffer(1)]],
+    device const float* col_scale [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint n = rows * cols;
+    if (gid >= n) {
+        return;
+    }
+    uint col = gid % cols;
+    uint row = gid / cols;
+    float value = float(acc[gid]) * row_scale[row] * col_scale[col];
+    ((device float*)acc)[gid] = value;
+}
+
 kernel void gemv_fp4(
     device const half* activation [[buffer(0)]],
     device const uchar* weights [[buffer(1)]],

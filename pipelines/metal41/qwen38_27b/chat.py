@@ -84,6 +84,17 @@ def decode_text(root: Path, ids: list[int]) -> str:
     return load_tokenizer(root).decode(ids, skip_special_tokens=False)
 
 
+def keeps_token_ids(tokenizer: Tokenizer, produced: list[int], token: int) -> bool:
+    """True when ``produced + [token]`` is the encoding of its own text.
+
+    A later prompt encodes that text again. A split such as ``/P`` + ``LE``
+    for ``/PLE`` is not that encoding, so the stored prefix would stop matching.
+    """
+    trial = [*produced, int(token)]
+    text = tokenizer.decode(trial, skip_special_tokens=False)
+    return list(tokenizer.encode(text).ids) == trial
+
+
 def _raise(message: str) -> None:
     raise ValueError(message)
 

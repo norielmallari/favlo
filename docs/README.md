@@ -9,6 +9,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [prefix.md](prefix.md) | SSD prefix store |
 | [harness.md](harness.md) | File agent, coding agent, and worktree agent |
 | [synthetic-matmul2d.md](synthetic-matmul2d.md) | Synthetic `matmul2d` dtype rates |
+| [synthetic-decode.md](synthetic-decode.md) | Synthetic one-token GEMV and `matmul2d` rates |
 | [ai-assistance/README.md](ai-assistance/README.md) | AI-assisted features on `favlo serve` |
 | [qwen38-flash-next/architecture.md](qwen38-flash-next/architecture.md) | Qwen3.8-Flash-Next pipeline contract |
 | [qwen38-flash-next/research/int2-miss.md](qwen38-flash-next/research/int2-miss.md) | Qwen3.8-Flash-Next int2 reconstruction bound |
@@ -25,6 +26,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen38-27b/research/kernel-ceilings.md](qwen38-27b/research/kernel-ceilings.md) | Qwen3.8-27B isolated projection sum |
 | [qwen38-27b/research/recorded-forward.md](qwen38-27b/research/recorded-forward.md) | Qwen3.8-27B recorded prefill and decode sums |
 | [qwen38-27b/research/mixed-agent-forward.md](qwen38-27b/research/mixed-agent-forward.md) | Qwen3.8-27B mixed-record agent forward |
+| [qwen38-27b/research/int8-prefill.md](qwen38-27b/research/int8-prefill.md) | Qwen3.8-27B int8 prefill recorded rates |
 | [qwen36-35b-a3b/README.md](qwen36-35b-a3b/README.md) | Qwen3.6-35B-A3B pipeline contract |
 | [qwen36-35b-a3b/SETUP.md](qwen36-35b-a3b/SETUP.md) | Qwen3.6-35B-A3B download, pack, and first chat |
 | [qwen36-35b-a3b/research/fp16-peak-restore.md](qwen36-35b-a3b/research/fp16-peak-restore.md) | Qwen3.6-35B-A3B float16 peak-restore bound |

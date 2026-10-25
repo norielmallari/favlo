@@ -1057,7 +1057,7 @@ class Qwen38Runtime:
             nxt = self.step(suffix[-1], len(prompt) - 1, logits=True, rope=self._rope_at(len(prompt) - 1))
             assert nxt is not None
             counts: dict[int, int] = {}
-            chosen = self._pick(nxt, counts)
+            chosen = self._stable_draw([], self._pick(nxt, counts), counts)
             sampled_at = time.perf_counter()
             prefill_elapsed = max(sampled_at - started, 0.0)
             self._prefill_seconds = prefill_elapsed
@@ -1135,7 +1135,7 @@ class Qwen38Runtime:
                     break
                 nxt_id = step_new(chosen, pos, logits=True)
                 assert nxt_id is not None
-                chosen = self._pick(nxt_id, counts)
+                chosen = self._stable_draw(out, self._pick(nxt_id, counts), counts)
                 last_sample = time.perf_counter()
             if self._mtp_tries:
                 self._status(f"mtp {self._mtp_accepts}/{self._mtp_tries}")
@@ -1185,6 +1185,52 @@ class Qwen38Runtime:
             self._logit_bias,
             self._rng,
         )
+
+    def _tokenizer(self) -> Any:
+        tokenizer = getattr(self, "_tokenizer", None)
+        if tokenizer is None:
+            from qwen38_27b.chat import load_tokenizer
+
+            tokenizer = load_tokenizer(self.root)
+            self._tokenizer = tokenizer
+        return tokenizer
+
+    def _stable_draw(self, produced: list[int], chosen: int, counts: dict[int, int]) -> int:
+        """Redraw until the token is the encoding of the text it adds.
+
+        The next prompt encodes the decoded completion. A token that would
+        resegment the text already drawn is skipped, and the draw repeats.
+        """
+        from qwen38_27b.chat import keeps_token_ids
+
+        tokenizer = self._tokenizer()
+        if keeps_token_ids(tokenizer, produced, chosen):
+            return int(chosen)
+        raw = self._logits()
+        first = int(chosen)
+        banned: list[int] = []
+        for _ in range(64):
+            banned.append(int(chosen))
+            scores = np.array(raw, dtype=np.float64, copy=True)
+            scores[banned] = -np.inf
+            if not np.isfinite(scores).any():
+                return first
+            chosen = sample_token(
+                scores,
+                self._temperature,
+                self._top_p,
+                self._top_k,
+                self._presence,
+                self._frequency,
+                counts,
+                self._logit_bias,
+                self._rng,
+            )
+            if not np.isfinite(scores[int(chosen)]):
+                return first
+            if keeps_token_ids(tokenizer, produced, int(chosen)):
+                return int(chosen)
+        return first
 
     def _store_prefix(self) -> None:
         try:

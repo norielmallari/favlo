@@ -15,7 +15,15 @@ from qwen38_27b.budget import (
     tensor_span,
 )
 from qwen38_27b.cache import cache_bytes, plane_bytes, sequence_cache_bytes
-from qwen38_27b.chat import _reasoning_effort, _stream, decode_text, encode_chat, encode_text
+from qwen38_27b.chat import (
+    _reasoning_effort,
+    _stream,
+    decode_text,
+    encode_chat,
+    encode_text,
+    keeps_token_ids,
+    load_tokenizer,
+)
 from qwen38_27b.commands import installed_record
 from qwen38_27b.convert import record_name
 from qwen38_27b.checks import run_checks
@@ -230,6 +238,22 @@ def test_wired_spans_are_read_in_file_order(tmp_path: Path) -> None:
     with path.open("rb") as handle:
         with pytest.raises(RuntimeError, match="overlaps"):
             _fill(handle, memoryview(bytearray(16)), [("a", 10, 0, 8), ("b", 12, 4, 4)], None)
+
+
+def test_a_retokenized_split_is_not_kept() -> None:
+    root = installed_record()
+    if root is None or not (root / "tokenizer.json").is_file():
+        pytest.skip("quantized record is not installed")
+    tokenizer = load_tokenizer(root)
+    prefix = encode_text(root, "The file uses conv")
+    slash_p = encode_text(root, "conv/P")[-1]
+    ell = encode_text(root, "LE")[0]
+    assert keeps_token_ids(tokenizer, prefix, slash_p)
+    assert not keeps_token_ids(tokenizer, prefix + [slash_p], ell)
+    produced: list[int] = []
+    for token in encode_text(root, "The file uses conv/PLE history, KV caches."):
+        assert keeps_token_ids(tokenizer, produced, token)
+        produced.append(token)
 
 
 def test_empty_think_turn_stays_a_prefix_of_the_next_prompt() -> None:

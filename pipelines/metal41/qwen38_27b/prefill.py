@@ -1,11 +1,10 @@
 """Chunked prompt prefill. Projections are ``matmul2d`` tiles of 64 rows.
 
-The down projection uses a 32×128 tile. Gate, up, and the attention projections stay 64×64.
-
-SiLU runs on the gate, then multiplies by the up projection, then the down
-projection. A promoted feed-forward matrix is fp8. The others are fp4.
-Gated DeltaNet and full attention run in the same command buffer as that
-layer's feed-forward. Decode stays a GEMV.
+Feed-forward gate, up, and down, and the Gated DeltaNet qkv, z, and out, are
+restored from the packed matrix into one int8 stage and multiplied as
+int8 × int8. The down projection uses a 32×128 tile. Attention projections,
+``in_proj_a``, and ``in_proj_b`` stay half × fp4 or half × fp8. Decode stays
+a GEMV and does not read the stage.
 """
 
 from __future__ import annotations
@@ -33,6 +32,12 @@ from qwen38_27b.layout import (
 )
 
 
+# One feed-forward gate: int8 codes plus one float scale per output channel.
+I8_STAGE = INTERMEDIATE * HIDDEN + INTERMEDIATE * 4
+# Widest activation the stage multiplies. The half buffer is full on the down cast.
+I8_ACT = CHUNK * INTERMEDIATE
+
+
 def workspace_bytes(*, drafts: bool = False) -> int:
     """Bytes of the chunk workspace, reserved before the cache is sized."""
     cap = CHUNK
@@ -48,6 +53,9 @@ def workspace_bytes(*, drafts: bool = False) -> int:
         + cap * KV_PROJ * 4
         + cap * AB * 4
         + cap * AB * 4
+        + cap * 4
+        + I8_STAGE
+        + I8_ACT
         + cap * 4
     )
     if drafts:
@@ -71,7 +79,20 @@ class _Workspace:
         self.ab = zeros(cap * AB * 4)
         self.ab2 = zeros(cap * AB * 4)
         self.tokens = zeros(cap * 4)
+        self.i8_stage = zeros(I8_STAGE)
+        self.i8_act = zeros(I8_ACT)
+        self.i8_act_scale = zeros(cap * 4)
         self.mix = zeros(cap * MIX * 4) if drafts else None
+
+
+_I8_WEIGHTS = (
+    "mlp.gate_proj.weight",
+    "mlp.up_proj.weight",
+    "mlp.down_proj.weight",
+    "linear_attn.in_proj_qkv.weight",
+    "linear_attn.in_proj_z.weight",
+    "linear_attn.out_proj.weight",
+)
 
 
 def prefill_ids(
@@ -209,8 +230,9 @@ def _embed(runtime: Any, work: _Workspace, count: int, dest: Any = None) -> None
 
 def _gdn(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) -> None:
     _cast_half(runtime, work, work.normed, count * HIDDEN, rows, HIDDEN)
-    _matmul(runtime, work.half, runtime.weight(layer, "linear_attn.in_proj_qkv.weight"), work.big0, rows)
-    _matmul(runtime, work.half, runtime.weight(layer, "linear_attn.in_proj_z.weight"), work.big1, rows)
+    _quantize_act(runtime, work, rows, HIDDEN)
+    _matmul_i8(runtime, work, runtime.weight(layer, "linear_attn.in_proj_qkv.weight"), work.big0, rows)
+    _matmul_i8(runtime, work, runtime.weight(layer, "linear_attn.in_proj_z.weight"), work.big1, rows)
     _matmul(runtime, work.half, runtime.weight(layer, "linear_attn.in_proj_a.weight"), work.ab, rows)
     _matmul(runtime, work.half, runtime.weight(layer, "linear_attn.in_proj_b.weight"), work.ab2, rows)
     slot = runtime.linear_slot[layer]
@@ -245,7 +267,8 @@ def _gdn(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) -> N
         (128, 1, 1),
     )
     _cast_half(runtime, work, work.big2, count * Z_WIDTH, rows, Z_WIDTH)
-    _matmul(runtime, work.half, runtime.weight(layer, "linear_attn.out_proj.weight"), work.big0, rows)
+    _quantize_act(runtime, work, rows, Z_WIDTH)
+    _matmul_i8(runtime, work, runtime.weight(layer, "linear_attn.out_proj.weight"), work.big0, rows)
     _add(runtime, work, count, work.big0)
 
 
@@ -336,8 +359,9 @@ def _ffn(
     if layer is not None:
         runtime.prepare_ffn(layer)
     _cast_half(runtime, work, work.normed, count * HIDDEN, rows, HIDDEN)
-    _matmul(runtime, work.half, weight("mlp.gate_proj.weight"), work.big0, rows)
-    _matmul(runtime, work.half, weight("mlp.up_proj.weight"), work.big1, rows)
+    _quantize_act(runtime, work, rows, HIDDEN)
+    _matmul_i8(runtime, work, weight("mlp.gate_proj.weight"), work.big0, rows)
+    _matmul_i8(runtime, work, weight("mlp.up_proj.weight"), work.big1, rows)
     runtime.session.encode(
         "swiglu_f32",
         [(work.big0, 0), (work.big1, 0), (work.big2, 0)],
@@ -346,8 +370,71 @@ def _ffn(
         (256, 1, 1),
     )
     _cast_half(runtime, work, work.big2, rows * INTERMEDIATE, rows, INTERMEDIATE)
-    _matmul(runtime, work.half, weight("mlp.down_proj.weight"), work.big0, rows)
+    _quantize_act(runtime, work, rows, INTERMEDIATE)
+    _matmul_i8(runtime, work, weight("mlp.down_proj.weight"), work.big0, rows)
     _add(runtime, work, count, work.big0)
+
+
+def _quantize_act(runtime: Any, work: _Workspace, rows: int, inner: int) -> None:
+    if rows * inner > I8_ACT:
+        message = f"int8 activation {rows}x{inner} exceeds the stage"
+        raise RuntimeError(message)
+    runtime.session.encode(
+        "quantize_half_i8",
+        [(work.half, 0), (work.i8_act, 0), (work.i8_act_scale, 0)],
+        [_u32(rows), _u32(inner)],
+        (rows, 1, 1),
+        (256, 1, 1),
+    )
+
+
+def _matmul_i8(runtime: Any, work: _Workspace, name: str, dest: Any, rows: int) -> None:
+    buf, offset, entry = runtime.locate(name)
+    cols, inner = (int(value) for value in entry["stored_shape"])
+    kind = str(entry.get("dtype", "fp4"))
+    wide = name.endswith("mlp.down_proj.weight")
+    if kind not in {"fp4", "fp8"} or not name.endswith(_I8_WEIGHTS):
+        message = f"{name} is not an int8 prefill matrix"
+        raise RuntimeError(message)
+    if cols * inner + cols * 4 > I8_STAGE:
+        message = f"{name} int8 stage {cols}x{inner} does not fit"
+        raise RuntimeError(message)
+    if wide:
+        if cols % 128 or rows % 32:
+            message = f"{name} tile {rows}x{cols}x{inner} is not a 32x128 int8 tile"
+            raise RuntimeError(message)
+        kernel = "prefill_i8_m32"
+        groups = (cols // 128, rows // 32, 1)
+    else:
+        if cols % 64 or rows % 64 or inner % 128:
+            message = f"{name} tile {rows}x{cols}x{inner} is not a 64-row int8 tile"
+            raise RuntimeError(message)
+        kernel = "prefill_i8_n64"
+        groups = (cols // 64, rows // 64, 1)
+    scale = cols * inner
+    runtime.session.encode(
+        "restore_fp8_i8" if kind == "fp8" else "restore_fp4_i8",
+        [(buf, offset), (buf, runtime.scale_offset(entry, offset)), (work.i8_stage, 0), (work.i8_stage, scale)],
+        [_u32(cols), _u32(inner)],
+        (cols, 1, 1),
+        (256, 1, 1),
+    )
+    width = int(runtime.session.pipes[kernel].threadExecutionWidth())
+    runtime.session.encode(
+        kernel,
+        [(work.i8_act, 0), (work.i8_stage, 0), (dest, 0)],
+        [_u32(rows), _u32(cols), _u32(inner)],
+        groups,
+        (width * 4, 1, 1),
+    )
+    n = rows * cols
+    runtime.session.encode(
+        "scale_i8_f32",
+        [(dest, 0), (work.i8_act_scale, 0), (work.i8_stage, scale)],
+        [_u32(rows), _u32(cols)],
+        ((n + 255) // 256, 1, 1),
+        (256, 1, 1),
+    )
 
 
 def _matmul(runtime: Any, half: Any, name: str, dest: Any, rows: int) -> None:
