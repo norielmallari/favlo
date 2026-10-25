@@ -81,6 +81,7 @@ _NAMES = (
     "layernorm",
     "rope_axes",
     "attend",
+    "attend_flash",
     "attend_q4",
     "scale_to_half",
     "bias_cast",
@@ -381,8 +382,10 @@ class Gpu:
         if head_dim % 32 or head_dim > 512:
             message = f"head dim {head_dim} is not a 32-wide span up to 512"
             raise ValueError(message)
-        name = "attend_q4" if head_dim <= 128 else "attend"
-        rows = (seq + 7) // 8 if head_dim <= 128 else seq
+        flash = head_dim <= 128
+        name = "attend_flash" if flash else "attend"
+        rows = (seq + 31) // 32 if flash else seq
+        threads = (128, 1, 1) if flash else (32, 1, 1)
         self._dispatch(
             name,
             [query, key, value, dest],
@@ -395,7 +398,7 @@ class Gpu:
                 struct.pack("I", 1 if causal else 0),
             ],
             (q_heads, rows, 1),
-            (32, 1, 1),
+            threads,
         )
 
     def scale_to_half(self, source: Any, dest: Any, inv: Any, rows: int, inner: int) -> None:

@@ -274,6 +274,167 @@ static void _mix4(thread float* acc, thread float& sum, float dot, float next_ma
     acc[3] += weight * v.w;
 }
 
+// One query tile of 32 and one key tile of 32. Q, K, and V stay float.
+// Scores stay in the threadgroup. Head dim 512 stays on `attend`.
+constant int FQ = 32;
+constant int FK = 32;
+constant int FD = 128;
+
+kernel void attend_flash(
+    device float* query [[buffer(0)]],
+    device float* key [[buffer(1)]],
+    device float* value [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& seq [[buffer(4)]],
+    constant uint& limit [[buffer(5)]],
+    constant uint& q_heads [[buffer(6)]],
+    constant uint& kv_heads [[buffer(7)]],
+    constant uint& head_dim [[buffer(8)]],
+    constant uint& causal [[buffer(9)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    uint head = tgid.x;
+    uint q0 = tgid.y * uint(FQ);
+    if (head >= q_heads || head_dim != uint(FD) || q0 >= seq) {
+        return;
+    }
+    if (q0 >= limit) {
+        for (uint i = tid; i < uint(FQ) * uint(FD); i += 128u) {
+            uint r = i / uint(FD);
+            uint c = i - r * uint(FD);
+            uint q = q0 + r;
+            if (q < seq) {
+                destination[(q * q_heads + head) * uint(FD) + c] = 0.0f;
+            }
+        }
+        return;
+    }
+    uint group = q_heads / kv_heads;
+    uint kv = head / group;
+    float scale = rsqrt(float(FD));
+    threadgroup float scores[FQ * FK];
+    threadgroup float prob[FQ * FK];
+    threadgroup float mrun[FQ];
+    threadgroup float lrun[FQ];
+    threadgroup float alpha_row[FQ];
+    if (tid < uint(FQ)) {
+        mrun[tid] = -INFINITY;
+        lrun[tid] = 0.0f;
+    }
+    device float* qbase = query + head * uint(FD);
+    device float* kbase = key + kv * uint(FD);
+    device float* vbase = value + kv * uint(FD);
+    int qstride = int(q_heads * uint(FD));
+    int kstride = int(kv_heads * uint(FD));
+    tensor<device float, dextents<int, 2>, tensor_inline> queries(
+        qbase,
+        dextents<int, 2>(FD, int(seq)),
+        array<int, 2>{1, qstride});
+    tensor<device float, dextents<int, 2>, tensor_inline> keys(
+        kbase,
+        dextents<int, 2>(FD, int(seq)),
+        array<int, 2>{1, kstride});
+    tensor<device float, dextents<int, 2>, tensor_inline> values(
+        vbase,
+        dextents<int, 2>(FD, int(seq)),
+        array<int, 2>{1, kstride});
+    auto tile_q = queries.slice(0, int(q0));
+    constexpr auto qk_desc = matmul2d_descriptor(FQ, FK, FD, false, true, false);
+    matmul2d<qk_desc, execution_simdgroups<4>> qk_op;
+    constexpr auto pv_desc = matmul2d_descriptor(FQ, FD, FK, false, false, false);
+    matmul2d<pv_desc, execution_simdgroups<4>> pv_op;
+    tensor<threadgroup float, dextents<int, 2>, tensor_inline> tile_p(
+        prob, dextents<int, 2>(FK, FQ));
+    float oreg[32];
+    for (int i = 0; i < 32; ++i) {
+        oreg[i] = 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint k0 = 0u; k0 < limit; k0 += uint(FK)) {
+        auto tile_k = keys.slice(0, int(k0));
+        auto score_tile = qk_op.get_destination_cooperative_tensor<decltype(tile_q), decltype(tile_k), float>();
+        qk_op.run(tile_q, tile_k, score_tile);
+        for (uint16_t i = 0u; i < score_tile.get_capacity(); ++i) {
+            if (!score_tile.is_valid_element(i)) {
+                continue;
+            }
+            auto ix = score_tile.get_multidimensional_index(i);
+            uint c = uint(ix[0]);
+            uint r = uint(ix[1]);
+            uint q = q0 + r;
+            uint key_index = k0 + c;
+            float dot = -INFINITY;
+            bool live = r < uint(FQ) && c < uint(FK) && q < limit && key_index < limit;
+            if (causal != 0u && key_index > q) {
+                live = false;
+            }
+            if (live) {
+                dot = score_tile[i] * scale;
+            }
+            scores[r * uint(FK) + c] = dot;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid < uint(FQ)) {
+            float row_max = -INFINITY;
+            for (uint c = 0u; c < uint(FK); ++c) {
+                row_max = max(row_max, scores[tid * uint(FK) + c]);
+            }
+            float next = max(mrun[tid], row_max);
+            float rescale = 0.0f;
+            if (mrun[tid] != -INFINITY) {
+                rescale = exp(mrun[tid] - next);
+            }
+            alpha_row[tid] = rescale;
+            float sum = 0.0f;
+            for (uint c = 0u; c < uint(FK); ++c) {
+                float weight = 0.0f;
+                float dot = scores[tid * uint(FK) + c];
+                if (dot != -INFINITY) {
+                    weight = exp(dot - next);
+                }
+                prob[tid * uint(FK) + c] = weight;
+                sum += weight;
+            }
+            lrun[tid] = lrun[tid] * rescale + sum;
+            mrun[tid] = next;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        auto tile_v = values.slice(0, int(k0));
+        auto mixed = pv_op.get_destination_cooperative_tensor<decltype(tile_p), decltype(tile_v), float>();
+        pv_op.run(tile_p, tile_v, mixed);
+        for (uint16_t i = 0u; i < mixed.get_capacity(); ++i) {
+            if (!mixed.is_valid_element(i) || i >= 32u) {
+                continue;
+            }
+            auto ix = mixed.get_multidimensional_index(i);
+            uint r = uint(ix[1]);
+            oreg[i] = oreg[i] * alpha_row[r] + mixed[i];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    auto tile_v0 = values.slice(0, 0);
+    auto layout = pv_op.get_destination_cooperative_tensor<decltype(tile_p), decltype(tile_v0), float>();
+    for (uint16_t i = 0u; i < layout.get_capacity(); ++i) {
+        if (!layout.is_valid_element(i) || i >= 32u) {
+            continue;
+        }
+        auto ix = layout.get_multidimensional_index(i);
+        uint c = uint(ix[0]);
+        uint r = uint(ix[1]);
+        uint q = q0 + r;
+        if (q >= seq || c >= uint(FD)) {
+            continue;
+        }
+        device float* out = destination + (q * q_heads + head) * uint(FD) + c;
+        if (q >= limit || lrun[r] == 0.0f) {
+            *out = 0.0f;
+        } else {
+            *out = oreg[i] / lrun[r];
+        }
+    }
+}
+
 kernel void attend_q4(
     device const float* query [[buffer(0)]],
     device const float* key [[buffer(1)]],
