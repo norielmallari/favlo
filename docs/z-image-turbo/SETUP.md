@@ -54,7 +54,7 @@ That command reads `models/Z-Image-Turbo` and registers the folder `Z-Image-Turb
 uv run favlo --z-image-turbo quantize --int8
 ```
 
-The client model field is `Z-Image-Turbo-int8`. A finished int8 directory is returned on the next run. The fp4 directory stays. On this machine a 1280 generation of the smoke prompt from that record printed 51.74 s, caption 0.15 s, decoder 9.27 s, steps 5.24–5.37 s. A 512 generation printed 4.43 s, with each step at 0.44 s.
+The client model field is `Z-Image-Turbo-int8`. A finished int8 directory is returned on the next run. The fp4 directory stays. On this machine a 1280 generation of the smoke prompt from that record printed 51.74 s, caption 0.15 s, decoder 9.27 s, steps 5.24–5.37 s. A 1024 generation printed 26.01 s, caption 0.16 s, decoder 4.63 s, steps 2.65–2.66 s. A 512 generation printed 4.43 s, with each step at 0.44 s.
 
 ## Another safetensors file
 

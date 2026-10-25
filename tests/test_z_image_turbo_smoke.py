@@ -1,4 +1,4 @@
-"""Shader checks run on every pytest. Set ZIMAGE_SMOKE=1 to generate the recorded image."""
+"""Shader checks run on every pytest. Set ZIMAGE_SMOKE=1 to generate the recorded images."""
 
 from __future__ import annotations
 
@@ -14,8 +14,7 @@ RECORD = ROOT / "models" / "Z-Image-Turbo-fp4"
 NOTE = ROOT / "docs" / "z-image-turbo" / "smoke.json"
 PROMPT = "a red cube on a white table"
 SEED = 0
-WIDTH = 512
-HEIGHT = 512
+SIZES = ((512, 512), (1024, 1024))
 
 
 def test_kernels() -> None:
@@ -34,21 +33,33 @@ def test_generate_matches_the_recorded_latent() -> None:
     from z_image_turbo.runtime import Runtime
 
     runtime = Runtime(RECORD)
+    digests: dict[tuple[int, int], str] = {}
     try:
-        _png, digest, timing = runtime.generate(PROMPT, WIDTH, HEIGHT, 8, SEED)
-        times = timing["steps"]
+        for width, height in SIZES:
+            _png, digest, timing = runtime.generate(PROMPT, width, height, 8, SEED)
+            assert timing["steps"]
+            assert len(digest) == hashlib.sha256().digest_size * 2
+            digests[(width, height)] = digest
     finally:
         runtime.close()
-    assert times
+    picture = digests[(512, 512)]
     if not NOTE.is_file():
         NOTE.write_text(
             json.dumps(
                 {
                     "prompt": PROMPT,
                     "seed": SEED,
-                    "width": WIDTH,
-                    "height": HEIGHT,
-                    "latent_sha256": digest,
+                    "width": 512,
+                    "height": 512,
+                    "latent_sha256": picture,
+                    "sizes": [
+                        {
+                            "width": width,
+                            "height": height,
+                            "latent_sha256": digests[(width, height)],
+                        }
+                        for width, height in SIZES
+                    ],
                 },
                 indent=2,
             )
@@ -57,5 +68,12 @@ def test_generate_matches_the_recorded_latent() -> None:
         )
         return
     stored = json.loads(NOTE.read_text(encoding="utf-8"))
-    assert stored["latent_sha256"] == digest
-    assert len(digest) == hashlib.sha256().digest_size * 2
+    assert stored["width"] == 512
+    assert stored["height"] == 512
+    assert stored["latent_sha256"] == picture
+    recorded = [(int(item["width"]), int(item["height"])) for item in stored["sizes"]]
+    assert recorded == list(SIZES)
+    for width, height in SIZES:
+        match = next(item for item in stored["sizes"] if int(item["width"]) == width)
+        assert int(match["height"]) == height
+        assert match["latent_sha256"] == digests[(width, height)]

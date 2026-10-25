@@ -3,5 +3,17 @@
   "seed": 0,
   "width": 512,
   "height": 512,
-  "latent_sha256": "0eafe40ea1cae5517c22eb816be408b971e6c76f8f7ae1689daabeee71dea9b4"
+  "latent_sha256": "0eafe40ea1cae5517c22eb816be408b971e6c76f8f7ae1689daabeee71dea9b4",
+  "sizes": [
+    {
+      "width": 512,
+      "height": 512,
+      "latent_sha256": "0eafe40ea1cae5517c22eb816be408b971e6c76f8f7ae1689daabeee71dea9b4"
+    },
+    {
+      "width": 1024,
+      "height": 1024,
+      "latent_sha256": "3a8dc022cd30d43ce3cd3a0a650c8e8458227cceeb29cf467923614a5ac33b9d"
+    }
+  ]
 }
