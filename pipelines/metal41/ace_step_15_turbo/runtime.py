@@ -14,7 +14,8 @@ from ace_step_15_turbo.hold import ClipHold, ClipPaused, interrupt
 from ace_step_15_turbo.metal import Gpu
 from ace_step_15_turbo.record import load, weight_bytes
 from ace_step_15_turbo.request import MusicRequest, parse_music
-from ace_step_15_turbo.schedule import LYRIC_LIMIT, STEPS, TEXT_LIMIT, latent_frames
+from ace_step_15_turbo.schedule import HOP, LYRIC_LIMIT, STEPS, TEXT_LIMIT, latent_frames
+from ace_step_15_turbo.tiles import tile_frames
 from favlo.memory import memory
 
 _UNITS = 28 + 8 + 4 + 32 * STEPS + 7
@@ -224,8 +225,8 @@ class Runtime:
         return max(0, ceiling - memory.live - memory.pending)
 
     def _reserve_step(self, seconds: float) -> None:
-        """Require scratch for one diffusion step. The duration stays the request."""
-        if step_scratch_bytes(seconds) > self._room():
+        """Require room for one step or the decoder peak. The duration stays the request."""
+        if max(step_scratch_bytes(seconds), decoder_bytes(seconds)) > self._room():
             message = f"scratch for {seconds:g} seconds does not fit"
             raise RuntimeError(message)
 
@@ -244,6 +245,15 @@ class _Progress:
         elapsed = time.monotonic() - self.started
         remain = _UNITS - self.done
         self.job["eta"] = 0 if self.done == 0 or remain <= 0 else int(elapsed / self.done * remain)
+
+
+def decoder_bytes(seconds: float) -> int:
+    """Bytes of the skip plus the branch being written, at the widest tile."""
+    frames = latent_frames(seconds)
+    if frames % 2:
+        frames += 1
+    one = 128 * tile_frames(frames) * HOP * 4
+    return one * 3
 
 
 def step_scratch_bytes(seconds: float) -> int:

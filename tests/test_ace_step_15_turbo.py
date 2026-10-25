@@ -12,8 +12,21 @@ from ace_step_15_turbo.hold import ClipHold, ClipPaused
 from ace_step_15_turbo.pack import dequant_fp4, dequant_fp8, pack_fp4, pack_fp8, promote_count, promoted_ids
 from ace_step_15_turbo.pcm import wav_bytes, wav_info
 from ace_step_15_turbo.request import parse_music
-from ace_step_15_turbo.runtime import Runtime, handle_music, open_runtime, step_scratch_bytes
-from ace_step_15_turbo.schedule import MAX_SECONDS, condition_text, latent_frames, timestep_schedule
+from ace_step_15_turbo.runtime import (
+    Runtime,
+    decoder_bytes,
+    handle_music,
+    open_runtime,
+    step_scratch_bytes,
+)
+from ace_step_15_turbo.schedule import (
+    HOP,
+    MAX_SECONDS,
+    condition_text,
+    latent_frames,
+    timestep_schedule,
+)
+from ace_step_15_turbo.tiles import dependency, plan, tile_frames
 from favlo.music import music_dir, store_wav
 
 
@@ -82,6 +95,43 @@ def test_a_missing_record_mints_an_owner(tmp_path: Path) -> None:
 
 def test_step_scratch_grows_with_the_duration() -> None:
     assert step_scratch_bytes(10) < step_scratch_bytes(MAX_SECONDS)
+
+
+def test_omitted_duration_is_30_seconds() -> None:
+    fields = parse_music({"prompt": "solo piano"})
+    assert fields.seconds == 30
+
+
+def test_decoder_peak_is_one_tile() -> None:
+    frames = latent_frames(30)
+    if frames % 2:
+        frames += 1
+    one = 128 * tile_frames(frames) * HOP * 4
+    assert decoder_bytes(30) == one * 3
+    assert decoder_bytes(10) == decoder_bytes(180)
+    full = 3 * 128 * frames * HOP * 4
+    assert decoder_bytes(30) < full
+
+
+def test_tiles_cover_the_clip_and_its_neighborhood() -> None:
+    frames = 250
+    covered = 0
+    for latent_lo, latent_hi, audio_lo, audio_hi in plan(frames):
+        assert 0 <= latent_lo < latent_hi <= frames
+        assert audio_lo == covered
+        assert audio_hi > audio_lo
+        positions = range(audio_lo, audio_hi, 64)
+        for pos in (*positions, audio_hi - 1):
+            lo, hi = dependency(pos, pos)
+            assert latent_lo <= max(0, lo)
+            assert latent_hi >= min(frames, hi + 1)
+        covered = audio_hi
+    assert covered == frames * HOP
+
+
+def test_dependency_matches_the_convolution_taps() -> None:
+    for pos in (0, 1, 100, 1919, 1920, 50_000):
+        assert dependency(pos, pos) == _brute_dependency(pos)
 
 
 def test_a_short_ledger_keeps_the_requested_duration() -> None:
@@ -204,6 +254,20 @@ def test_a_finished_latent_skips_the_dit() -> None:
 
         def clip(self, buf: np.ndarray) -> np.ndarray:
             return buf
+
+        def zeros(self, count: int) -> np.ndarray:
+            return np.zeros(count, dtype=np.float32)
+
+        def span(
+            self,
+            src: np.ndarray,
+            dst: np.ndarray,
+            count: int,
+            src_offset: int,
+            dst_offset: int,
+        ) -> None:
+            flat = np.ravel(src)
+            dst[dst_offset : dst_offset + count] = flat[src_offset : src_offset + count]
 
     text = np.zeros((1, 2048), dtype=np.float32)
     hold = ClipHold(
@@ -423,3 +487,38 @@ def test_a_different_prompt_drops_the_paused_clip(tmp_path) -> None:
     assert state["music"][paused]["status"] == "in_progress"
     assert state["music"][reply.payload["id"]]["status"] == "completed"
     assert "music_hold" not in state
+
+
+def _brute_dependency(pos: int) -> tuple[int, int]:
+    """Every convolution tap, walked backward from one output sample."""
+
+    def conv(
+        lo: int,
+        hi: int,
+        kernel: int,
+        pad: int,
+        stride: int,
+        dilation: int,
+    ) -> tuple[int, int]:
+        return lo * stride - pad, hi * stride + (kernel - 1) * dilation - pad
+
+    def transpose(lo: int, hi: int, kernel: int, pad: int, stride: int) -> tuple[int, int]:
+        found: list[int] = []
+        for sample in range(lo, hi + 1):
+            for tap in range(kernel):
+                numer = sample + pad - tap
+                if numer >= 0 and numer % stride == 0:
+                    found.append(numer // stride)
+        return min(found), max(found)
+
+    def residual(lo: int, hi: int, dilation: int) -> tuple[int, int]:
+        lo, hi = conv(lo, hi, 1, 0, 1, 1)
+        pad = ((7 - 1) * dilation) // 2
+        return conv(lo, hi, 7, pad, 1, dilation)
+
+    lo, hi = conv(pos, pos, 7, 3, 1, 1)
+    for stride in (2, 4, 4, 6, 10):
+        for dilation in (9, 3, 1):
+            lo, hi = residual(lo, hi, dilation)
+        lo, hi = transpose(lo, hi, stride * 2, stride // 2, stride)
+    return conv(lo, hi, 7, 3, 1, 1)

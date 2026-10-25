@@ -1,4 +1,4 @@
-"""16-bit stereo WAV. The samples are already peak-normalized on device."""
+"""16-bit stereo WAV. The samples are already peak-normalized."""
 
 from __future__ import annotations
 

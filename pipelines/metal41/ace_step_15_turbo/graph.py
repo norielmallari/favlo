@@ -16,10 +16,11 @@ from ace_step_15_turbo.schedule import (
     STEPS,
     TEXT_LIMIT,
     TIMBRE_FRAMES,
+    condition_text,
     latent_frames,
     timestep_schedule,
 )
-from ace_step_15_turbo.schedule import condition_text
+from ace_step_15_turbo.tiles import plan
 
 HEAD_DIM = 128
 SLIDING = 128
@@ -207,11 +208,7 @@ def generate(
             gpu.euler(noise, velocity, float(nodes[step + 1] - nodes[step]), 64 * frames)
             gpu.reclaim()
             _boundary_device(gpu, progress, "step", step=step + 1, noise=(noise, (64, frames)), **kept)
-    wave = _decode(gpu, weights, noise, frames, progress)
-    gpu.normalize_peak(wave, 2 * frames * HOP, PEAK)
-    gpu.reclaim(wave)
-    gpu.wait()
-    audio = gpu.read(wave, 2 * frames * HOP, np.dtype(np.float32)).reshape(2, frames * HOP)
+    audio = _decode_tiled(gpu, weights, noise, frames, progress)
     return _wav(audio, seconds, progress)
 
 
@@ -611,14 +608,62 @@ def _dit_layer(
     return hidden
 
 
+def _decode_tiled(
+    gpu: Any,
+    weights: dict[str, Plane],
+    noise: Any,
+    frames: int,
+    progress: Progress | None,
+) -> np.ndarray:
+    """Waveform for the whole clip. Each tile is one second plus its latent neighborhood."""
+    audio = np.zeros((2, frames * HOP), dtype=np.float32)
+    for latent_lo, latent_hi, audio_lo, audio_hi in plan(frames):
+        _boundary_device(gpu, progress, "step", step=STEPS, noise=(noise, (64, frames)))
+        count = latent_hi - latent_lo
+        window = _latent_window(gpu, noise, frames, latent_lo, count)
+        wave = _decode(gpu, weights, window, count, None)
+        tile = gpu.read(wave, 2 * count * HOP, np.dtype(np.float32)).reshape(2, count * HOP)
+        local_lo = audio_lo - latent_lo * HOP
+        local_hi = audio_hi - latent_lo * HOP
+        if local_lo < 0 or local_hi > tile.shape[1]:
+            message = f"tile audio [{audio_lo}, {audio_hi}) is outside the crop"
+            raise RuntimeError(message)
+        audio[:, audio_lo:audio_hi] = tile[:, local_lo:local_hi]
+        gpu.reclaim(window, wave)
+        del window, wave
+        gpu.reclaim()
+        if progress is not None:
+            progress("vae")
+    peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+    if peak > 0.0:
+        audio *= np.float32(PEAK / peak)
+    return audio
+
+
+def _latent_window(gpu: Any, noise: Any, frames: int, start: int, count: int) -> Any:
+    """Channel-major latent slice. Frames outside the clip stay zero."""
+    dest = gpu.zeros(64 * count)
+    src_lo = max(0, start)
+    src_hi = min(frames, start + count)
+    copy = src_hi - src_lo
+    if copy <= 0:
+        return dest
+    dst_lo = src_lo - start
+    for channel in range(64):
+        gpu.span(noise, dest, copy, channel * frames + src_lo, channel * count + dst_lo)
+    return dest
+
+
 def _decode(gpu: Any, weights: dict[str, Plane], latent: Any, frames: int, progress: Progress | None) -> Any:
     channels = [2048, 1024, 512, 256, 128, 128]
     strides = [10, 6, 4, 4, 2]
     hidden, length = _conv(gpu, weights, latent, "decoder.conv1", 64, 2048, 7, frames, 3, 1, 1)
+    gpu.reclaim(hidden)
     if progress is not None:
         progress("vae")
     for index, stride in enumerate(strides):
         hidden = _snake(gpu, weights, hidden, f"decoder.block.{index}.snake1", channels[index], length)
+        gpu.reclaim(hidden)
         kernel = stride * 2
         hidden, length = _conv_t(
             gpu,
@@ -632,12 +677,24 @@ def _decode(gpu: Any, weights: dict[str, Plane], latent: Any, frames: int, progr
             stride // 2,
             stride,
         )
+        gpu.reclaim(hidden)
         for unit, dilation in ((1, 1), (2, 3), (3, 9)):
-            hidden = _residual(gpu, weights, hidden, f"decoder.block.{index}.res_unit{unit}", channels[index + 1], length, dilation)
+            hidden = _residual(
+                gpu,
+                weights,
+                hidden,
+                f"decoder.block.{index}.res_unit{unit}",
+                channels[index + 1],
+                length,
+                dilation,
+            )
+            gpu.reclaim(hidden)
         if progress is not None:
             progress("vae")
     hidden = _snake(gpu, weights, hidden, "decoder.snake1", 128, length)
+    gpu.reclaim(hidden)
     hidden, length = _conv(gpu, weights, hidden, "decoder.conv2", 128, 2, 7, length, 3, 1, 1)
+    gpu.reclaim(hidden)
     if progress is not None:
         progress("vae")
     expected = frames * HOP
@@ -655,17 +712,34 @@ def _snake(gpu: Any, weights: dict[str, Plane], values: Any, prefix: str, channe
 
 
 def _residual(gpu: Any, weights: dict[str, Plane], values: Any, prefix: str, channels: int, length: int, dilation: int) -> Any:
-    hidden = _snake(gpu, weights, values, f"{prefix}.snake1", channels, length)
-    hidden, out_len = _conv(gpu, weights, hidden, f"{prefix}.conv1", channels, channels, 7, length, ((7 - 1) * dilation) // 2, 1, dilation)
+    branch = _snake(gpu, weights, values, f"{prefix}.snake1", channels, length)
+    branch, out_len = _conv(
+        gpu,
+        weights,
+        branch,
+        f"{prefix}.conv1",
+        channels,
+        channels,
+        7,
+        length,
+        ((7 - 1) * dilation) // 2,
+        1,
+        dilation,
+    )
     if out_len != length:
         message = f"{prefix} changed the length"
         raise RuntimeError(message)
-    hidden = _snake(gpu, weights, hidden, f"{prefix}.snake2", channels, length)
-    hidden, out_len = _conv(gpu, weights, hidden, f"{prefix}.conv2", channels, channels, 1, length, 0, 1, 1)
+    gpu.reclaim(branch, values)
+    branch = _snake(gpu, weights, branch, f"{prefix}.snake2", channels, length)
+    gpu.reclaim(branch, values)
+    point, out_len = _conv(gpu, weights, branch, f"{prefix}.conv2", channels, channels, 1, length, 0, 1, 1)
     if out_len != length:
         message = f"{prefix} pointwise changed the length"
         raise RuntimeError(message)
-    gpu.add(values, hidden, channels * length)
+    gpu.add(values, point, channels * length)
+    branch = None
+    point = None
+    gpu.reclaim(values)
     return values
 
 

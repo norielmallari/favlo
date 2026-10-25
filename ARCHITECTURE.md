@@ -112,6 +112,7 @@ uv run python -m harness.image_smoke_agent
 uv run python -m harness.image_persona
 uv run python -m harness.video_smoke_agent
 uv run python -m harness.voice_smoke_agent
+uv run python -m harness.music_long_agent
 uv run python -m harness.embeddings_agent
 uv run python -m harness.server status
 ```

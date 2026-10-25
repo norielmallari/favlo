@@ -68,7 +68,7 @@ def parse_music(body: dict) -> MusicRequest:
 
 
 def _seconds(body: dict) -> float:
-    raw = body.get("duration", body.get("seconds", 60))
+    raw = body.get("duration", body.get("seconds", 30))
     try:
         seconds = float(raw)
     except (TypeError, ValueError) as exc:
