@@ -45,6 +45,7 @@ def test_setup_guides_load_by_pipeline_id() -> None:
     assert "qwen38-27b" in setup_pipelines()
     assert "z-image-turbo" in setup_pipelines()
     assert "wan22-i2v" in setup_pipelines()
+    assert "ace-step-15-turbo" in setup_pipelines()
     text = read_setup("qwen36-35b-a3b")
     assert "uv run favlo --qwen36-35b-a3b setup" in text
     assert "--keep-bf16" in text
@@ -58,6 +59,9 @@ def test_setup_guides_load_by_pipeline_id() -> None:
     video = read_setup("wan22-i2v")
     assert "uv run favlo --wan22-i2v setup" in video
     assert "uv run favlo --wan22-i2v quantize-text" in video
+    music = read_setup("ace-step-15-turbo")
+    assert "uv run favlo --ace-step-15-turbo setup" in music
+    assert "uv run favlo --ace-step-15-turbo quantize" in music
     with pytest.raises(ValueError, match="unknown setup guide"):
         read_setup("../qwen36-35b-a3b")
     with pytest.raises(ValueError, match="unknown setup guide"):

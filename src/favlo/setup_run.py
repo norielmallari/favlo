@@ -31,6 +31,7 @@ _SETUP_FLAGS = {
     "--keep-bf16": "bool",
     "--console": "console",
     "--umt5": "repo",
+    "--dest": "path",
 }
 _QUANTIZE_FLAGS = {
     "--src": "path",
@@ -49,6 +50,7 @@ _QUANTIZE_FLAGS = {
     "--keep-bf16": "bool",
     "--high-dir": "path",
     "--low-dir": "path",
+    "--dest": "path",
 }
 _DOWNLOAD_FLAGS = {"--check": "bool", "--console": "console"}
 _TEXT_FLAGS = {"--out": "path", "--name": "name", "--umt5": "repo"}

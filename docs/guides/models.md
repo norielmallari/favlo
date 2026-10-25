@@ -48,6 +48,12 @@ The official checkpoint is `Wan-AI/Wan2.2-I2V-A14B`. The text encoder is `google
 
 `favlo --wan22-i2v setup` downloads the VAE, the umT5 encoder and tokenizer, and the two expert files. `setup --umt5 example-org/example-model` downloads that text encoder instead. `quantize --high` and `--low` with `--fp8-percent 50` pack `models/Wan2.2-I2V-A14B-fp8-e50`. The default percent is 20, which writes `models/Wan2.2-I2V-A14B-fp4`. `--name` is that packed folder and the registry id. The row stores the packed directory, and `--high-dir` and `--low-dir` store the quantized expert directories. `quantize-text` stores the quantized umT5 directory on that row.
 
+## ACE-Step
+
+The official checkpoint is `ACE-Step/acestep-v15-xl-turbo`. `setup` downloads the Diffusers split `ACE-Step/acestep-v15-xl-turbo-diffusers`. The steps are [ace-step-15-turbo/SETUP.md](../ace-step-15-turbo/SETUP.md).
+
+`favlo --ace-step-15-turbo setup` writes `models/acestep-v15-xl-turbo`. That checkout holds the text encoder, the tokenizer, the condition encoder, the transformer, and the VAE. `quantize` packs `models/acestep-v15-xl-turbo-fp8-fp4` and stores that directory on the row.
+
 ## Register a finished record
 
 `models` lists the registry. `models add` registers a directory under `models/` whose manifest is already complete. `models alias` renames the alias of a folder. The same subcommands exist for each pipeline flag:

@@ -43,6 +43,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [wan22-i2v/README.md](wan22-i2v/README.md) | Wan 2.2 I2V pipeline contract |
 | [wan22-i2v/SETUP.md](wan22-i2v/SETUP.md) | Wan 2.2 I2V download, pack, and first clip |
 | [ace-step-15-turbo/README.md](ace-step-15-turbo/README.md) | ACE-Step 1.5 XL Turbo pipeline contract |
+| [ace-step-15-turbo/SETUP.md](ace-step-15-turbo/SETUP.md) | ACE-Step download, pack, and first clip |
 | [zonos2/README.md](zonos2/README.md) | Failed ZONOS2 pipeline |
 | [zonos2/references.md](zonos2/references.md) | Papers and specifications for the ZONOS2 pipeline |
 | [bge-m3/README.md](bge-m3/README.md) | BGE-M3 pipeline contract |

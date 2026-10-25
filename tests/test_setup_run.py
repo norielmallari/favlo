@@ -74,6 +74,35 @@ def test_the_image_setup_commands_are_accepted() -> None:
     ]
 
 
+def test_the_music_setup_commands_are_accepted() -> None:
+    from favlo.cli import repo_root
+    from favlo.guides import read_setup
+
+    root = repo_root()
+    guide = read_setup("ace-step-15-turbo")
+    commands = (
+        "uv sync --extra dev",
+        "uv run favlo --ace-step-15-turbo setup",
+        "uv run favlo --ace-step-15-turbo quantize",
+    )
+    for command in commands:
+        assert command in guide
+        argv = accepted_argv(command, root)
+        if command != "uv sync --extra dev":
+            assert frees_model(argv)
+            assert argv[3] == "--ace-step-15-turbo"
+    packed = (
+        "uv run favlo --ace-step-15-turbo quantize --source models/acestep-v15-xl-turbo "
+        "--dest models/acestep-v15-xl-turbo-fp8-fp4"
+    )
+    assert accepted_argv(packed, root)[-4:] == [
+        "--source",
+        "models/acestep-v15-xl-turbo",
+        "--dest",
+        "models/acestep-v15-xl-turbo-fp8-fp4",
+    ]
+
+
 def test_the_video_setup_commands_are_accepted() -> None:
     from favlo.cli import repo_root
     from favlo.guides import read_setup

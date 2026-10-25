@@ -855,6 +855,7 @@ def _setup_guide_tool() -> object:
         Call this when someone wants to set up, download, quantize, or delete a model.
         qwen36-35b-a3b is Qwen3.6-35B-A3B. qwen38-27b is Qwen3.8-27B.
         z-image-turbo is Z-Image-Turbo. wan22-i2v is Wan 2.2 I2V.
+        ace-step-15-turbo is ACE-Step.
         The result is that pipeline's setup page.
         A pipeline with no setup page names the ones that have one.
         """
