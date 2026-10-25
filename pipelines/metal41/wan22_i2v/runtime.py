@@ -70,7 +70,7 @@ class Runtime:
         found = {name: Path(value) for name, value in (parts or {}).items()}
         self.high = found.get("high", self.path / "high")
         self.low = found.get("low", self.path / "low")
-        self.umt5 = found.get("umt5", self.path / "umt5")
+        self.umt5 = _umt5_dir(found.get("umt5"), self.path)
         self.manifest = load_manifest(self.path)
         self.config = self.manifest["config"]
         self.embed = load_embed(self.path)
@@ -604,6 +604,18 @@ def open_runtime(
 ) -> Runtime:
     del kv_cache, resident_percent
     return Runtime(Path(path), console, owner=owner, max_memory=max_memory, parts=parts)
+
+
+def _umt5_dir(named: Path | None, record: Path) -> Path:
+    """Use the record's encoder, or the shared pack under ``models/google``."""
+    from wan22_i2v.umt5_pack import shared_pack_dir
+
+    if named is not None:
+        return Path(named)
+    local = record / "umt5"
+    if (local / "manifest.json").is_file():
+        return local
+    return shared_pack_dir()
 
 
 def expert_bytes(path: Path, *, high: Path | None = None, low: Path | None = None) -> int:

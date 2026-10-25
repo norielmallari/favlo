@@ -13,7 +13,7 @@ import numpy as np
 import objc
 
 from favlo.memory import memory
-from wan22_i2v.formats import K_ALIGN, TILE_M, TILE_N, LinearPack, pad_to
+from wan22_i2v.formats import INT8_TILE_N, K_ALIGN, TILE_M, TILE_N, LinearPack, pad_to
 
 
 class BufferView:
@@ -27,6 +27,9 @@ _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"
 _NAMES = (
     "matmul_fp4",
     "matmul_fp8",
+    "quantize_i8",
+    "matmul_i8",
+    "scale_i8",
     "zero_bytes",
     "gather_half",
     "scale_gather",
@@ -337,6 +340,9 @@ class Gpu:
         half: Any,
     ) -> None:
         """Gather, ``matmul2d``, and bias. ``dest`` is tight ``[rows, padded_n]``."""
+        if pack.kind == "int8":
+            self._project_i8(src, src_cols, rows, pack, dest, uploaded, half)
+            return
         factors = self._factor_buffer(rows)
         self._dispatch(
             "scale_gather",
@@ -373,6 +379,60 @@ class Gpu:
             rows,
             pack.padded_n,
             [struct.pack("I", pack.logical_n)],
+        )
+
+    def _project_i8(
+        self,
+        src: Any,
+        src_cols: int,
+        rows: int,
+        pack: LinearPack,
+        dest: Any,
+        uploaded: dict[str, Any],
+        codes: Any,
+    ) -> None:
+        """Per-row int8 codes, int8 ``matmul2d``, then the scale and the bias."""
+        if rows % TILE_M or pack.padded_n % INT8_TILE_N or pack.stored_k % 128:
+            message = (
+                f"int8 tile mismatch rows={rows} cols={pack.padded_n} inner={pack.stored_k}"
+            )
+            raise ValueError(message)
+        factors = self._factor_buffer(rows)
+        self._dispatch(
+            "quantize_i8",
+            [src, codes, factors],
+            [
+                struct.pack("I", rows),
+                struct.pack("I", pack.logical_k),
+                struct.pack("I", pack.stored_k),
+                struct.pack("I", src_cols),
+            ],
+            (rows, 1, 1),
+            (128, 1, 1),
+        )
+        self._dispatch(
+            "matmul_i8",
+            [codes, uploaded["packed"], dest],
+            [
+                struct.pack("I", rows),
+                struct.pack("I", pack.padded_n),
+                struct.pack("I", pack.stored_k),
+            ],
+            (pack.padded_n // INT8_TILE_N, rows // TILE_M, 1),
+            self._matmul_threads,
+        )
+        count = rows * pack.padded_n
+        threads = 256
+        self._dispatch(
+            "scale_i8",
+            [dest, factors, uploaded["scales"], uploaded["bias"]],
+            [
+                struct.pack("I", rows),
+                struct.pack("I", pack.padded_n),
+                struct.pack("I", pack.logical_n),
+            ],
+            ((count + threads - 1) // threads, 1, 1),
+            (threads, 1, 1),
         )
 
     def _factor_buffer(self, rows: int) -> Any:

@@ -25,6 +25,7 @@ from wan22_i2v.source import repo_id
 _FOLDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _RECORD = "Wan2.2-I2V-A14B-fp4"
 _SERVED = "Wan2.2-I2V-A14B-fp8-e50"
+_INT8 = "Wan2.2-I2V-A14B-int8"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -37,7 +38,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="umT5 repository, org/name or a huggingface.co link",
     )
-    sub.add_parser("kernels", help="dispatch the fp4 and fp8 matmul")
+    sub.add_parser("kernels", help="dispatch the fp4, fp8, and int8 matmul")
     quant = sub.add_parser("quantize", help="pack the high-noise and low-noise experts")
     quant.add_argument("--high", type=Path, required=True)
     quant.add_argument("--low", type=Path, required=True)
@@ -51,6 +52,11 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=PROMOTE_PERCENT,
         help="share of blocks stored as fp8",
+    )
+    quant.add_argument(
+        "--int8",
+        action="store_true",
+        help="pack every DiT linear as per-channel int8",
     )
     text = sub.add_parser("quantize-text", help="pack the umT5 encoder")
     text.add_argument("--out", type=Path, help="packed umT5 directory")
@@ -110,11 +116,13 @@ def _guidance(values: list[float] | None) -> tuple[float, float]:
 def kernels() -> int:
     _matmul("fp4")
     _matmul("fp8")
+    _matmul_i8()
     _attend()
     _spatial()
     _patch()
     print("fp4 ok", flush=True)
     print("fp8 ok", flush=True)
+    print("int8 ok", flush=True)
     print("attend ok", flush=True)
     print("spatial ok", flush=True)
     print("patch ok", flush=True)
@@ -160,18 +168,35 @@ def _quantize(args: argparse.Namespace) -> int:
         else:
             config = json.loads(args.config.read_text(encoding="utf-8"))
         percent = int(args.fp8_percent)
-        dest = _record_dir(args.name, args.out, percent)
+        if args.int8 and args.name is None and args.out is None:
+            from wan22_i2v.source import models_dir
+
+            dest = models_dir() / _INT8
+        else:
+            dest = _record_dir(args.name, args.out, percent)
         high_dir = args.high_dir or dest / "high"
         low_dir = args.low_dir or dest / "low"
-        manifest = quantize(
-            args.high,
-            args.low,
-            dest,
-            config,
-            high_dir=high_dir,
-            low_dir=low_dir,
-            percent=percent,
-        )
+        if args.int8:
+            from wan22_i2v.record import quantize_int8
+
+            manifest = quantize_int8(
+                args.high,
+                args.low,
+                dest,
+                config,
+                high_dir=high_dir,
+                low_dir=low_dir,
+            )
+        else:
+            manifest = quantize(
+                args.high,
+                args.low,
+                dest,
+                config,
+                high_dir=high_dir,
+                low_dir=low_dir,
+                percent=percent,
+            )
         register_quantized(
             dest.name,
             source=args.high,
@@ -186,8 +211,12 @@ def _quantize(args: argparse.Namespace) -> int:
         sys.stderr.write(f"{exc}\n")
         return 1
     print(dest, flush=True)
-    print(f"high fp8 blocks {manifest['high_promoted']}", flush=True)
-    print(f"low fp8 blocks {manifest['low_promoted']}", flush=True)
+    if args.int8:
+        print(f"int8 high worst {manifest['high_worst']:.6f}", flush=True)
+        print(f"int8 low worst {manifest['low_worst']:.6f}", flush=True)
+    else:
+        print(f"high fp8 blocks {manifest['high_promoted']}", flush=True)
+        print(f"low fp8 blocks {manifest['low_promoted']}", flush=True)
     return 0
 
 
@@ -197,17 +226,18 @@ def _quantize_text(args: argparse.Namespace) -> int:
     from wan22_i2v.umt5_pack import quantize_umt5
 
     try:
-        record = _record_dir(args.name or _SERVED, None)
-        dest = args.out if args.out is not None else record / "umt5"
-        folder = args.name or record.name
+        from wan22_i2v.umt5_pack import shared_pack_dir
+
+        folder = args.name or _INT8
+        dest = args.out if args.out is not None else shared_pack_dir()
         src = None if args.umt5 is None else encoder_path(repo=args.umt5)
-        winners = quantize_umt5(src=src, dest=dest)
+        worst = quantize_umt5(src=src, dest=dest)
         set_part(folder, "umt5", dest)
     except (OSError, ValueError, RuntimeError) as exc:
         sys.stderr.write(f"{exc}\n")
         return 1
     print(dest, flush=True)
-    print(f"fp8 layers {winners}", flush=True)
+    print(f"int8 umt5 worst {float(worst):.6f}", flush=True)
     return 0
 
 
@@ -278,6 +308,44 @@ def _matmul(kind: str) -> None:
         gpu.close()
     if not np.allclose(got, expect, atol=1e-2):
         message = f"{kind} matmul mismatch"
+        raise RuntimeError(message)
+
+
+def _matmul_i8() -> None:
+    from wan22_i2v.metal import Gpu
+
+    rows = TILE_M
+    cols = 128
+    inner = 256
+    rng = np.random.default_rng(0)
+    weight = rng.normal(0.0, 0.02, size=(cols, inner)).astype(np.float32)
+    bias = rng.normal(0.0, 0.01, size=(cols,)).astype(np.float32)
+    activation = rng.normal(0.0, 0.5, size=(rows, inner)).astype(np.float32)
+    pack = pack_linear(weight, bias, "int8")
+    peak = np.max(np.abs(activation), axis=1)
+    row_scale = np.where(peak > 0, peak / np.float32(127.0), np.float32(0.0)).astype(np.float32)
+    inverse = np.where(peak > 0, np.float32(127.0) / peak, np.float32(0.0)).astype(np.float32)
+    codes = np.clip(np.rint(activation * inverse[:, None]), -127, 127).astype(np.int32)
+    product = codes @ pack.packed[:cols, :inner].astype(np.int32).T
+    expect = product.astype(np.float32) * row_scale[:, None] * pack.scales[:cols].astype(np.float32)
+    expect += bias.astype(np.float32)
+    gpu = Gpu()
+    try:
+        src = gpu.upload(activation)
+        dest = gpu.empty(rows * pack.padded_n * 4)
+        half = gpu.empty(rows * pack.stored_k * 2)
+        uploaded = {
+            "packed": gpu.upload(pack.packed),
+            "scales": gpu.upload(pack.scales),
+            "bias": gpu.upload(pack.bias),
+            "perm": gpu.upload(pack.perm),
+        }
+        gpu.project(src, inner, rows, pack, dest, uploaded, half)
+        got = gpu.read_f32(dest, rows * cols).reshape(rows, cols)
+    finally:
+        gpu.close()
+    if not np.allclose(got, expect, rtol=1e-4, atol=1e-4):
+        message = "int8 matmul mismatch"
         raise RuntimeError(message)
 
 

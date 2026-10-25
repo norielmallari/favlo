@@ -8,6 +8,7 @@ import numpy as np
 
 TILE_M = 64
 TILE_N = 32
+INT8_TILE_N = 128
 K_ALIGN = 256
 FP4_LEVELS = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
 FP4_MAX = np.float32(6.0)
@@ -199,13 +200,31 @@ def dequant_fp8(packed: np.ndarray, scales: np.ndarray, sk: int) -> np.ndarray:
     return (values * factor[..., None]).reshape(packed.shape[0], sk)
 
 
+def pack_int8_matrix(weight: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-output-channel symmetric int8. ``weight`` is already padded, row-major."""
+    if weight.ndim != 2:
+        message = f"matrix must be rank 2, got {weight.shape}"
+        raise ValueError(message)
+    peak = np.max(np.abs(weight), axis=1)
+    scale = np.zeros(peak.shape, dtype=np.float32)
+    live = peak > 0
+    scale[live] = peak[live] / np.float32(127.0)
+    inverse = np.zeros(peak.shape, dtype=np.float32)
+    inverse[live] = np.float32(127.0) / peak[live]
+    codes = np.rint(weight * inverse[:, None])
+    codes = np.clip(codes, -127, 127).astype(np.int8)
+    return np.ascontiguousarray(codes), np.ascontiguousarray(scale)
+
+
 def pack_linear(weight: np.ndarray, bias: np.ndarray | None, kind: str) -> LinearPack:
-    """Permute K, pad N to the matmul tile, then pack."""
-    if kind not in {"fp4", "fp8"}:
-        message = f"kind must be fp4 or fp8, got {kind}"
+    """Permute K, pad N to the matmul tile, then pack. int8 keeps source K order."""
+    if kind not in {"fp4", "fp8", "int8"}:
+        message = f"kind must be fp4, fp8, or int8, got {kind}"
         raise ValueError(message)
     matrix = np.ascontiguousarray(weight, dtype=np.float32)
     logical_n, logical_k = matrix.shape
+    if kind == "int8":
+        return _pack_int8(matrix, bias, logical_n, logical_k)
     sk = stored_k(logical_k)
     padded_n = pad_to(logical_n, TILE_N)
     padded = np.zeros((padded_n, logical_k), dtype=np.float32)
@@ -232,8 +251,38 @@ def pack_linear(weight: np.ndarray, bias: np.ndarray | None, kind: str) -> Linea
     )
 
 
+def _pack_int8(
+    matrix: np.ndarray, bias: np.ndarray | None, logical_n: int, logical_k: int
+) -> LinearPack:
+    sk = stored_k(logical_k)
+    padded_n = pad_to(logical_n, INT8_TILE_N)
+    padded = np.zeros((padded_n, sk), dtype=np.float32)
+    padded[:logical_n, :logical_k] = matrix
+    packed, scales = pack_int8_matrix(padded)
+    if bias is None:
+        stored_bias = np.zeros(logical_n, dtype=np.float16)
+    else:
+        stored_bias = np.ascontiguousarray(bias, dtype=np.float16).reshape(logical_n)
+    return LinearPack(
+        kind="int8",
+        packed=packed,
+        scales=scales,
+        bias=stored_bias,
+        perm=np.arange(sk, dtype=np.uint32),
+        logical_n=logical_n,
+        logical_k=logical_k,
+        padded_n=padded_n,
+        stored_k=sk,
+    )
+
+
 def restore_linear(pack: LinearPack) -> np.ndarray:
     """Float32 logical matrix, K put back in source order."""
+    if pack.kind == "int8":
+        codes = np.asarray(pack.packed, dtype=np.float32)
+        scales = np.asarray(pack.scales, dtype=np.float32)
+        restored = codes * scales[:, None]
+        return np.ascontiguousarray(restored[: pack.logical_n, : pack.logical_k])
     if pack.kind == "fp4":
         restored = dequant_fp4(pack.packed, pack.scales, pack.stored_k)
     else:

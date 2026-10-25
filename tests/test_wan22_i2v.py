@@ -15,7 +15,7 @@ from wan22_i2v.hold import ClipHold, ClipPaused, reload_quietly
 from wan22_i2v.latent import condition_volume, unpatchify
 from wan22_i2v.png import decode_png, encode_png
 from wan22_i2v.progress import ClipProgress, clip_label, stage_shares
-from wan22_i2v.record import load_expert, quantize, write_graph_source
+from wan22_i2v.record import load_expert, quantize, quantize_int8, write_graph_source
 from wan22_i2v.schedule import (
     FIVE_SEC_FRAMES,
     P320_HEIGHT,
@@ -110,12 +110,12 @@ def test_name_is_the_packed_model_id(tmp_path: Path, monkeypatch: pytest.MonkeyP
         dest.mkdir(parents=True)
         return {"high_promoted": [1], "low_promoted": [2]}
 
-    def quantize_umt5(src: Path | None = None, dest: Path | None = None) -> list[int]:
+    def quantize_umt5(src: Path | None = None, dest: Path | None = None) -> float:
         seen["src"] = src
         seen["text"] = dest
         assert dest is not None
         dest.mkdir(parents=True)
-        return [0]
+        return 0.0
 
     monkeypatch.setattr("wan22_i2v.record.quantize", quantize)
     monkeypatch.setattr("wan22_i2v.umt5_pack.quantize_umt5", quantize_umt5)
@@ -170,12 +170,12 @@ def test_name_is_the_packed_model_id(tmp_path: Path, monkeypatch: pytest.MonkeyP
         ["quantize-text", "--name", "example-model", "--umt5", "example-org/example-model"]
     )
     assert packed == 0
-    assert seen["text"] == tmp_path / "models" / "example-model" / "umt5"
+    assert seen["text"] == tmp_path / "models" / "google" / "umt5-xxl-int8"
     assert seen["src"] == models_dir() / "example-org" / "example-model" / (
         "models_t5_umt5-xxl-enc-bf16.pth"
     )
     stored = json.loads((tmp_path / "models" / "registry.json").read_text())
-    umt5 = tmp_path / "models" / "example-model" / "umt5"
+    umt5 = tmp_path / "models" / "google" / "umt5-xxl-int8"
     assert stored["models"]["example-model"]["parts"]["umt5"] == str(umt5)
     custom_umt5 = tmp_path / "models" / "example-umt5"
     moved = main(
@@ -275,6 +275,39 @@ def test_condition_is_noise_then_mask_then_latent() -> None:
     assert np.all(volume[16:20, 0] == 1)
     assert np.all(volume[16:20, 1] == 0)
     assert np.all(volume[20:] == 1)
+
+
+def test_int8_roundtrip_stays_within_half_a_step() -> None:
+    weight = np.array([[2.0, -1.0, 0.25, 0.0], [0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+    bias = np.array([0.5, -0.25], dtype=np.float32)
+    pack = pack_linear(weight, bias, "int8")
+    restored = restore_linear(pack)
+    assert pack.kind == "int8"
+    assert pack.packed.dtype == np.int8
+    assert int(pack.packed.min()) >= -127
+    assert int(pack.packed.max()) <= 127
+    assert restored.shape == weight.shape
+    step = 2.0 / 254.0
+    assert np.max(np.abs(restored[0] - weight[0])) <= step + 1e-5
+    assert restored[0, 0] == pytest.approx(2.0)
+    assert np.all(restored[1] == 0.0)
+    assert relative_error(restored, weight) < 0.02
+    assert pack.bias.dtype == np.float16
+
+
+def test_graph_int8_pack_keeps_the_head_in_half(tmp_path: Path) -> None:
+    source = write_graph_source(tmp_path / "source")
+    config = json.loads((source / "config.json").read_text(encoding="utf-8"))
+    manifest = quantize_int8(
+        source / "high.safetensors",
+        source / "low.safetensors",
+        tmp_path / "record",
+        config,
+    )
+    assert manifest["weight"] == "int8"
+    loaded = load_expert(tmp_path / "record" / "high", int(config["layers"]))
+    assert loaded.packs["blocks.0.ffn.0.weight"].kind == "int8"
+    assert loaded.halves["head.head.weight"].dtype == np.float16
 
 
 def test_fp4_roundtrip_of_a_codepoint() -> None:

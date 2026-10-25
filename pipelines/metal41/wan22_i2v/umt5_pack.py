@@ -1,7 +1,8 @@
 """Packed umT5 encoder.
 
-Linears are fp4, except the four layers with the highest fp4 error, which are
-fp8. The token embedding, RMSNorm weights, and relative buckets stay half.
+Linears are per-channel int8. The token embedding, RMSNorm weights, and
+relative buckets stay half. The pack lives under ``models/google`` so other
+pipelines can share it.
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ import numpy as np
 
 from wan22_i2v.formats import TILE_M, LinearPack, pack_linear, pad_to, relative_error, restore_linear
 from wan22_i2v.metal import Gpu
-from wan22_i2v.schedule import promote_count
 from wan22_i2v.text import (
     _EPS,
     _FFN,
@@ -45,8 +45,15 @@ def pack_dir(record: Path) -> Path:
     return Path(record) / "umt5"
 
 
-def quantize_umt5(src: Path | None = None, dest: Path | None = None) -> list[int]:
-    """Pack the bf16 encoder. Returns the fp8 layer indices."""
+def shared_pack_dir(root: Path | None = None) -> Path:
+    """Int8 encoder under ``models/google``, shared by every pipeline that uses umT5."""
+    from wan22_i2v.source import models_dir
+
+    return models_dir(root) / "google" / "umt5-xxl-int8"
+
+
+def quantize_umt5(src: Path | None = None, dest: Path | None = None) -> float:
+    """Pack the bf16 encoder as int8. Returns the worst relative RMS."""
     weights = src or encoder_path()
     if dest is None:
         message = "umT5 pack directory is missing"
@@ -67,31 +74,31 @@ def quantize_umt5(src: Path | None = None, dest: Path | None = None) -> list[int
                 f"{prefix}.pos_embedding.embedding.weight",
                 dest / f"{prefix}.pos.npy",
             )
-        scores = _score(archive, meta, dest)
-    finally:
-        archive.close()
-    winners = block_winners_local(scores)
-    archive = zipfile.ZipFile(weights)
-    try:
-        meta = _metadata(archive)
-        chosen = set(winners)
+        worst = 0.0
+        worst_name = ""
         for layer in range(_LAYERS):
-            kind = "fp8" if layer in chosen else "fp4"
             for suffix in _MATRICES:
                 name = f"blocks.{layer}.{suffix}"
                 path = dest / f"{name}.npz"
-                if _stored_kind(path) == kind:
+                if _stored_kind(path) == "int8":
                     continue
-                _save(path, pack_linear(_matrix(archive, meta, name), None, kind))
-                print(f"write {name} {kind}", flush=True)
+                weight = _matrix(archive, meta, name)
+                pack = pack_linear(weight, None, "int8")
+                error = relative_error(restore_linear(pack), weight)
+                _save(path, pack)
+                del weight, pack
+                print(f"int8 {name} {error:.6f}", flush=True)
+                if error >= worst:
+                    worst = error
+                    worst_name = name
     finally:
         archive.close()
     (dest / "manifest.json").write_text(
-        json.dumps({"fp8": winners}),
+        json.dumps({"weight": "int8", "worst": worst, "worst_name": worst_name}),
         encoding="utf-8",
     )
-    print(f"umt5 fp8 {winners}", flush=True)
-    return winners
+    print(f"umt5 int8 worst {worst_name} {worst:.6f}", flush=True)
+    return worst
 
 
 class PackedEncoder:
@@ -100,7 +107,7 @@ class PackedEncoder:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         manifest = json.loads((self.path / "manifest.json").read_text(encoding="utf-8"))
-        self.fp8 = [int(layer) for layer in manifest["fp8"]]
+        self.weight = str(manifest.get("weight", "fp4"))
 
     def run(self, ids: np.ndarray, on_layer: Any, gpu: Gpu) -> np.ndarray:
         rows = int(ids.shape[0])
@@ -189,39 +196,6 @@ class PackedEncoder:
         gpu.end()
         gpu.drop(scale)
         return dest
-
-
-def _score(archive: zipfile.ZipFile, meta: dict[str, tuple], dest: Path) -> dict[int, float]:
-    path = dest / "scores.json"
-    found: dict[str, float] = {}
-    if path.is_file():
-        found = json.loads(path.read_text(encoding="utf-8"))
-    scores: dict[int, float] = {}
-    for layer in range(_LAYERS):
-        key = str(layer)
-        ready = all(_stored_kind(dest / f"blocks.{layer}.{suffix}.npz") == "fp4" for suffix in _MATRICES)
-        if key in found and ready:
-            scores[layer] = float(found[key])
-            continue
-        worst = 0.0
-        for suffix in _MATRICES:
-            name = f"blocks.{layer}.{suffix}"
-            weight = _matrix(archive, meta, name)
-            pack = pack_linear(weight, None, "fp4")
-            worst = max(worst, relative_error(restore_linear(pack), weight))
-            _save(dest / f"{name}.npz", pack)
-            del weight, pack
-        scores[layer] = worst
-        found[key] = worst
-        path.write_text(json.dumps(found), encoding="utf-8")
-        print(f"score umt5 {layer} {worst:.6f}", flush=True)
-    return scores
-
-
-def block_winners_local(scores: dict[int, float]) -> list[int]:
-    from wan22_i2v.formats import block_winners
-
-    return block_winners(scores, promote_count(_LAYERS))
 
 
 def _tensor(archive: zipfile.ZipFile, meta: dict[str, tuple], name: str) -> np.ndarray:

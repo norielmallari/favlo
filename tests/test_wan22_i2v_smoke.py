@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-RECORD = ROOT / "models" / "Wan2.2-I2V-A14B-fp8-e50"
+RECORD = ROOT / "models" / "Wan2.2-I2V-A14B-int8"
 NOTE = ROOT / "docs" / "wan22-i2v" / "smoke.json"
 OUT = ROOT / "artifacts" / "wan22-i2v-smoke.mp4"
 

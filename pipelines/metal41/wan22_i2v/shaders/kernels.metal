@@ -78,6 +78,103 @@ kernel void matmul_fp8(
     op.run(tile_left, tile_right, tile_out);
 }
 
+constant int TILE_N_I8 = 128;
+
+kernel void quantize_i8(
+    device const float* src [[buffer(0)]],
+    device int8_t* dst [[buffer(1)]],
+    device float* factor [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& logical_k [[buffer(4)]],
+    constant uint& stored_k [[buffer(5)]],
+    constant uint& src_cols [[buffer(6)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint lane [[thread_position_in_threadgroup]])
+{
+    if (row >= rows) {
+        return;
+    }
+    float peak = 0.0f;
+    for (uint col = lane; col < logical_k; col += 128u) {
+        peak = max(peak, abs(src[row * src_cols + col]));
+    }
+    float grouped = simd_max(peak);
+    threadgroup float parts[4];
+    if ((lane & 31u) == 0u) {
+        parts[lane >> 5] = grouped;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float total = max(max(parts[0], parts[1]), max(parts[2], parts[3]));
+    float scale = total > 0.0f ? total / 127.0f : 0.0f;
+    float inv = total > 0.0f ? 127.0f / total : 0.0f;
+    if (lane == 0u) {
+        factor[row] = scale;
+    }
+    for (uint col = lane; col < stored_k; col += 128u) {
+        float value = 0.0f;
+        if (col < logical_k) {
+            value = src[row * src_cols + col] * inv;
+        }
+        int code = int(rint(value));
+        code = clamp(code, -127, 127);
+        dst[row * stored_k + col] = int8_t(code);
+    }
+}
+
+kernel void matmul_i8(
+    device int8_t* activation [[buffer(0)]],
+    device int8_t* weights [[buffer(1)]],
+    device int32_t* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    tensor<device int8_t, dextents<int, 2>, tensor_inline> left(
+        activation,
+        dextents<int, 2>(int(inner), int(rows)),
+        array<int, 2>{1, int(inner)});
+    tensor<device int8_t, dextents<int, 2>, tensor_inline> right(
+        weights,
+        dextents<int, 2>(int(inner), int(cols)),
+        array<int, 2>{1, int(inner)});
+    tensor<device int32_t, dextents<int, 2>, tensor_inline> out(
+        destination,
+        dextents<int, 2>(int(cols), int(rows)),
+        array<int, 2>{1, int(cols)});
+
+    constexpr auto desc = matmul2d_descriptor(
+        64, 128, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, int(tgid.y) * TILE_M);
+    auto tile_right = right.slice(0, int(tgid.x) * TILE_N_I8);
+    auto tile_out = out.slice(int(tgid.x) * TILE_N_I8, int(tgid.y) * TILE_M);
+    op.run(tile_left, tile_right, tile_out);
+}
+
+kernel void scale_i8(
+    device int* acc [[buffer(0)]],
+    device const float* row_scale [[buffer(1)]],
+    device const float* col_scale [[buffer(2)]],
+    device const half* bias [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& cols [[buffer(5)]],
+    constant uint& logical [[buffer(6)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint n = rows * cols;
+    if (gid >= n) {
+        return;
+    }
+    uint col = gid % cols;
+    uint row = gid / cols;
+    float value = float(acc[gid]) * row_scale[row] * col_scale[col];
+    if (col < logical) {
+        value += float(bias[col]);
+    }
+    ((device float*)acc)[gid] = value;
+}
+
 kernel void zero_bytes(
     device uchar* data [[buffer(0)]],
     constant uint& n [[buffer(1)]],

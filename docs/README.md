@@ -55,6 +55,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [zonos2/research/moe-fp4-error.md](zonos2/research/moe-fp4-error.md) | ZONOS2 MoE fp4 error ranking |
 | [wan22-i2v/research/clip-ceiling.md](wan22-i2v/research/clip-ceiling.md) | Wan 2.2 I2V 9-frame kernel sum |
 | [wan22-i2v/research/block-fp4-error.md](wan22-i2v/research/block-fp4-error.md) | Wan 2.2 I2V fp8 block ranking |
+| [wan22-i2v/research/int8-weight-error.md](wan22-i2v/research/int8-weight-error.md) | Wan 2.2 I2V int8 weight error |
 | [z-image-turbo/research/generation-ceiling.md](z-image-turbo/research/generation-ceiling.md) | Z-Image-Turbo 1280 generation sum |
 | [bge-m3/research/recorded-encode.md](bge-m3/research/recorded-encode.md) | BGE-M3 warm encode times |
 

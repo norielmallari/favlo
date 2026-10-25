@@ -105,6 +105,61 @@ def quantize(
     return manifest
 
 
+def quantize_int8(
+    high: Path,
+    low: Path,
+    dest: Path,
+    config: dict[str, Any],
+    *,
+    high_dir: Path | None = None,
+    low_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Pack both experts as per-channel int8 from the original weights."""
+    dest.mkdir(parents=True, exist_ok=True)
+    high_worst = pack_int8_expert(high, high_dir or dest / "high", config)
+    low_worst = pack_int8_expert(low, low_dir or dest / "low", config)
+    _copy_embed(high, dest / "embed.npy", int(config["text_dim"]))
+    manifest = {
+        "config": config,
+        "weight": "int8",
+        "high_promoted": [],
+        "low_promoted": [],
+        "high_worst": high_worst,
+        "low_worst": low_worst,
+    }
+    (dest / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return manifest
+
+
+def pack_int8_expert(path: Path, dest: Path, config: dict[str, Any]) -> float:
+    """Pack one expert. Returns the worst relative RMS against the source matrix."""
+    dest.mkdir(parents=True, exist_ok=True)
+    layers = int(config["layers"])
+    worst = 0.0
+    worst_name = ""
+    with safe_open(path, framework="numpy") as handle:
+        keys = set(handle.keys())
+        for name in linear_names(layers):
+            dest_path = dest / f"{name}.npz"
+            if _stored_int8(dest_path):
+                continue
+            weight = as_float32(handle.get_tensor(name))
+            bias_name = name.replace(".weight", ".bias")
+            bias = as_float32(handle.get_tensor(bias_name)) if bias_name in keys else None
+            pack = pack_linear(weight, bias, "int8")
+            error = relative_error(restore_linear(pack), weight)
+            _save_pack(dest_path, pack)
+            del weight
+            del pack
+            print(f"int8 {name} {error:.6f}", flush=True)
+            if error >= worst:
+                worst = error
+                worst_name = name
+        _write_halves(handle, keys, dest, config, layers)
+    print(f"int8 worst {path.name} {worst_name} {worst:.6f}", flush=True)
+    return worst
+
+
 def load_manifest(path: Path) -> dict[str, Any]:
     return json.loads((path / "manifest.json").read_text(encoding="utf-8"))
 
@@ -232,21 +287,27 @@ def _pack_expert(
             bias = as_float32(handle.get_tensor(bias_name)) if bias_name in keys else None
             _save_pack(dest_path, pack_linear(weight, bias, kind))
             print(f"write {name}", flush=True)
-        for name in half_names(layers):
-            dest_path = dest / f"{name}.npy"
-            (dest / f"{name}.npz").unlink(missing_ok=True)
-            if _half_ready(dest_path):
-                continue
-            if name not in keys:
-                if name != "head.head.bias":
-                    message = f"{name} is missing"
-                    raise RuntimeError(message)
-                array = np.zeros(int(config["out_dim"]) * 4, dtype=np.float16)
-            else:
-                array = as_float32(handle.get_tensor(name)).astype(np.float16)
-            np.save(dest_path, np.ascontiguousarray(array))
-            print(f"write {name}", flush=True)
+        _write_halves(handle, keys, dest, config, layers)
     return winners
+
+
+def _write_halves(
+    handle: Any, keys: set[str], dest: Path, config: dict[str, Any], layers: int
+) -> None:
+    for name in half_names(layers):
+        dest_path = dest / f"{name}.npy"
+        (dest / f"{name}.npz").unlink(missing_ok=True)
+        if _half_ready(dest_path):
+            continue
+        if name not in keys:
+            if name != "head.head.bias":
+                message = f"{name} is missing"
+                raise RuntimeError(message)
+            array = np.zeros(int(config["out_dim"]) * 4, dtype=np.float16)
+        else:
+            array = as_float32(handle.get_tensor(name)).astype(np.float16)
+        np.save(dest_path, np.ascontiguousarray(array))
+        print(f"write {name}", flush=True)
 
 
 def _score_blocks(path: Path, layers: int) -> dict[int, float]:
@@ -270,6 +331,17 @@ def _copy_embed(path: Path, dest: Path, text_dim: int) -> None:
         else:
             array = np.zeros((256, text_dim), dtype=np.float16)
     np.save(dest, array)
+
+
+def _stored_int8(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        kind = str(np.load(path)["kind"].item())
+    except (OSError, ValueError, EOFError, zipfile.BadZipFile):
+        path.unlink(missing_ok=True)
+        return False
+    return kind == "int8"
 
 
 def _stored_kind(path: Path) -> str | None:
