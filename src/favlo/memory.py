@@ -11,6 +11,7 @@ from __future__ import annotations
 import ctypes
 import os
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,6 +19,8 @@ from favlo.offset import BumpMap, OffsetMap, align, bin_size
 
 _PAGE = 4096
 _SLAB = 64 << 20
+_RECLAIM_WAIT = 5.0
+_RECLAIM_PAUSE = 0.05
 _EMPTY = 4
 _NONVOLATILE = 2
 _READ = 1
@@ -191,6 +194,25 @@ class Memory:
         """Drop reported bytes for owners whose process has exited."""
         with self._lock:
             self._forget_locked(owners)
+
+    def confirm_released(self, before: int, nbytes: int, *, timeout: float = _RECLAIM_WAIT) -> bool:
+        """Wait until reclaimable pages cover ``nbytes`` that were wired at ``before``.
+
+        ``before`` is the reclaimable count while those pages were still wired.
+        The count is confirmed when that total has risen by ``nbytes``, within
+        one heap slab. A count of one slab or less is already confirmed. The
+        wait stops after ``timeout`` seconds.
+        """
+        if nbytes <= _SLAB:
+            return True
+        target = before + nbytes - _SLAB
+        deadline = time.monotonic() + timeout
+        while True:
+            if reclaimable_bytes() >= target:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(_RECLAIM_PAUSE)
 
     def reported(self) -> dict[str, int]:
         with self._lock:

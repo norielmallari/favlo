@@ -255,6 +255,7 @@ class Runtime:
                         continue
                     name = expert_name(float(timestep), boundary)
                     if loaded != name:
+                        self._release_resident(gpu)
                         self._fit_dit_step(frames, width, height, lat_t, lat_h, lat_w, tokens)
                         if reload_quietly(hold, name, index):
                             progress.counting(False)
@@ -436,12 +437,15 @@ class Runtime:
         tokens: int,
     ) -> None:
         volume = 36 * lat_t * lat_h * lat_w
+        forward = forward_bytes(self.config, tokens, volume)
         need = (
             expert_bytes(self.path, high=self.high, low=self.low)
-            + forward_bytes(self.config, tokens, volume)
+            + forward
             + _latent_device_bytes(lat_t, lat_h, lat_w, frames)
         )
-        self._require_room(need, frames, width, height)
+        if getattr(self, "_forward", None) is not None:
+            need -= forward
+        self._require_room(max(need, 0), frames, width, height)
 
     def _fit_vae_encode(
         self,
@@ -544,6 +548,21 @@ class Runtime:
             )
 
         return stop
+
+    def _release_resident(self, gpu: Gpu) -> None:
+        """Drop the expert and wait until those pages are reclaimable."""
+        if self._resident is None:
+            return
+        from favlo.memory import memory, reclaimable_bytes
+
+        owner = self._owner if isinstance(self._owner, str) else ""
+        before = reclaimable_bytes()
+        held = memory.owner_bytes().get(owner, 0)
+        drop_expert(gpu, self._resident)
+        self._resident = None
+        gc.collect()
+        freed = held - memory.owner_bytes().get(owner, 0)
+        memory.confirm_released(before, max(freed, 0))
 
     def _use(self, name: str, on_file: Any, stop: Any = None) -> None:
         def tick() -> None:

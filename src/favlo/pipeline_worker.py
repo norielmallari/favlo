@@ -3,8 +3,8 @@
 The daemon spawns this module and keeps the registry, the job queue, and the
 memory ledger. This process loads the pipeline and creates the Metal device.
 Its console events are forwarded to the daemon, which writes the telemetry
-the CLI paints. A crash ends this process. The daemon drops the ledger entry
-and fails the job.
+the CLI paints. A crash ends this process. The daemon waits until the pages
+that process wired are reclaimable, drops the ledger entry, and fails the job.
 """
 
 from __future__ import annotations
@@ -88,10 +88,15 @@ class PipelineChild:
         self.on_crash: Any = None
         self._proc: subprocess.Popen[bytes] | None = None
         self._control: int | None = None
+        self._baseline: int | None = None
+        self._while_resident: int | None = None
+        self._release_from: int | None = None
+        self._held = 0
         self._messages: queue.Queue[dict[str, Any]] = queue.Queue()
         self._write_lock = threading.Lock()
         self._shut = False
         self._forgotten = False
+        self._released = threading.Event()
         self._busy = False
 
     def open(self) -> None:
@@ -114,6 +119,7 @@ class PipelineChild:
             self.counts = {str(key): int(value) for key, value in counts.items()}
         else:
             self.counts = {}
+        self._note_resident()
 
     def call(self, kind: str, reply: Any, body: dict[str, Any], state: dict[str, Any]) -> None:
         """Run one handler in the child and copy its reply onto ``reply``."""
@@ -181,10 +187,14 @@ class PipelineChild:
         self._signal("halt")
 
     def close(self) -> None:
-        """Ask the process to exit, then drop its reported owners."""
+        """Ask the process to exit, confirm its pages, then drop its owners."""
+        from favlo.memory import reclaimable_bytes
+
         with self._write_lock:
             already = self._shut
             self._shut = True
+            if self._release_from is None:
+                self._release_from = reclaimable_bytes()
         if not already:
             self._signal("halt")
             try:
@@ -199,8 +209,12 @@ class PipelineChild:
                     proc.kill()
                     proc.wait(timeout=5)
         self._forget()
+        self._released.wait()
 
     def _start(self) -> None:
+        from favlo.memory import reclaimable_bytes
+
+        self._baseline = reclaimable_bytes()
         read_fd, write_fd = os.pipe()
         os.set_inheritable(read_fd, True)
         env = dict(os.environ)
@@ -312,13 +326,34 @@ class PipelineChild:
             message = self._messages.get()
         return message
 
+    def _note_resident(self) -> None:
+        """Bytes this child took out of the reclaimable count."""
+        from favlo.memory import reclaimable_bytes
+
+        current = reclaimable_bytes()
+        self._while_resident = current
+        dropped = 0 if self._baseline is None else max(0, self._baseline - current)
+        self._held = max(dropped, sum(self.counts.values()))
+
     def _forget(self) -> None:
-        if self._forgotten:
-            return
-        self._forgotten = True
+        with self._write_lock:
+            if self._forgotten:
+                return
+            self._forgotten = True
+            before = self._release_from
+            if before is None:
+                before = self._while_resident
+            held = self._held
+            owners = tuple(self.counts)
         from favlo.memory import memory
 
-        memory.forget(self.counts)
+        try:
+            confirmed = before is None or memory.confirm_released(before, held)
+            if not confirmed:
+                _log_line("memory release was not confirmed")
+            memory.forget(owners)
+        finally:
+            self._released.set()
 
 
 def _homes(state: dict[str, Any]) -> dict[str, str]:

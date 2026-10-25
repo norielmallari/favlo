@@ -117,6 +117,33 @@ def test_discard_then_release_counts_the_span_once(monkeypatch: Any) -> None:
             memory._reclaim_mark, memory._pending, memory._returning = saved
 
 
+def test_confirm_released_treats_one_slab_as_already_free() -> None:
+    assert memory.confirm_released(0, 64 << 20, timeout=0.0) is True
+
+
+def test_confirm_released_waits_until_the_pages_return(monkeypatch: Any) -> None:
+    before = 4_000_000_000
+    held = (64 << 20) + (32 << 20)
+    state = {"n": before, "calls": 0}
+
+    def reclaimable() -> int:
+        state["calls"] += 1
+        if state["calls"] < 3:
+            return state["n"]
+        return state["n"] + held
+
+    monkeypatch.setattr("favlo.memory.reclaimable_bytes", reclaimable)
+    monkeypatch.setattr("favlo.memory._RECLAIM_PAUSE", 0.01)
+    assert memory.confirm_released(before, held, timeout=1.0) is True
+    assert state["calls"] >= 3
+
+
+def test_confirm_released_times_out_while_the_pages_stay_wired(monkeypatch: Any) -> None:
+    monkeypatch.setattr("favlo.memory.reclaimable_bytes", lambda: 4_000_000_000)
+    monkeypatch.setattr("favlo.memory._RECLAIM_PAUSE", 0.01)
+    assert memory.confirm_released(4_000_000_000, (64 << 20) + (32 << 20), timeout=0.05) is False
+
+
 def test_mint_owner_is_the_stem_and_a_counter() -> None:
     first = mint_owner("z-image-turbo")
     second = mint_owner("z-image-turbo")
