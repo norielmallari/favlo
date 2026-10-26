@@ -10,8 +10,13 @@ overwrites the expanded image-pad rows with that output.
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
+import socket
 import struct
+import urllib.error
+import urllib.parse
+import urllib.request
 import zlib
 from typing import Any
 
@@ -33,9 +38,13 @@ CHANNELS = 3
 PATCH_DIM = CHANNELS * TEMPORAL * PATCH * PATCH
 MERGE_DIM = HIDDEN * MERGE * MERGE
 WIDE = 4608
-MAX_PATCHES = 32 * 32
-MAX_PIXELS = 512 * 512
-MIN_PIXELS = FACTOR * FACTOR
+# preprocessor_config.json on Qwen/Qwen3.6-35B-A3B: shortest_edge and longest_edge.
+MIN_PIXELS = 65536
+MAX_PIXELS = 16777216
+MAX_RATIO = 200
+MAX_PATCHES = MAX_PIXELS // (PATCH * PATCH)
+MAX_IMAGE_BYTES = 64 * 1024 * 1024
+_FETCH_SECONDS = 30.0
 EPS = np.float32(1e-6)
 THETA = 10000.0
 
@@ -53,19 +62,31 @@ _EXPECTED = {
 }
 
 
-def smart_size(height: int, width: int) -> tuple[int, int]:
-    """Nearest factor-aligned size inside the tower's pixel bounds."""
+def smart_size(
+    height: int,
+    width: int,
+    *,
+    min_pixels: int = MIN_PIXELS,
+    max_pixels: int = MAX_PIXELS,
+) -> tuple[int, int]:
+    """Nearest factor-aligned size inside the processor pixel bounds."""
     if height < 1 or width < 1:
         message = f"image size {width}x{height} is empty"
         raise RuntimeError(message)
+    if min_pixels < 1 or max_pixels < min_pixels:
+        message = f"image pixels {min_pixels}..{max_pixels} are empty"
+        raise RuntimeError(message)
+    if max(height, width) / min(height, width) > MAX_RATIO:
+        message = f"image aspect {width}x{height} exceeds {MAX_RATIO}"
+        raise RuntimeError(message)
     h_bar = max(FACTOR, round(height / FACTOR) * FACTOR)
     w_bar = max(FACTOR, round(width / FACTOR) * FACTOR)
-    if h_bar * w_bar > MAX_PIXELS:
-        beta = ((height * width) / MAX_PIXELS) ** 0.5
+    if h_bar * w_bar > max_pixels:
+        beta = ((height * width) / max_pixels) ** 0.5
         h_bar = max(FACTOR, int(height / beta / FACTOR) * FACTOR)
         w_bar = max(FACTOR, int(width / beta / FACTOR) * FACTOR)
-    elif h_bar * w_bar < MIN_PIXELS:
-        beta = (MIN_PIXELS / (height * width)) ** 0.5
+    elif h_bar * w_bar < min_pixels:
+        beta = (min_pixels / (height * width)) ** 0.5
         h_bar = int(np.ceil(height * beta / FACTOR) * FACTOR)
         w_bar = int(np.ceil(width * beta / FACTOR) * FACTOR)
     return int(h_bar), int(w_bar)
@@ -117,7 +138,22 @@ def decode_png(blob: bytes) -> np.ndarray:
     return np.ascontiguousarray(rows)
 
 
-def pack_image(rgb: np.ndarray) -> tuple[np.ndarray, int, int]:
+def decode_image(blob: bytes) -> np.ndarray:
+    """RGB uint8 from a PNG, JPEG, GIF, or WebP payload."""
+    if blob.startswith(b"\x89PNG\r\n\x1a\n"):
+        try:
+            return decode_png(blob)
+        except RuntimeError:
+            pass
+    return _decode_bitmap(blob)
+
+
+def pack_image(
+    rgb: np.ndarray,
+    *,
+    min_pixels: int = MIN_PIXELS,
+    max_pixels: int = MAX_PIXELS,
+) -> tuple[np.ndarray, int, int]:
     """Normalized patches ``[count, 1536]`` and the patch grid.
 
     The flatten order is merge block, then channel, time, and the patch square.
@@ -125,7 +161,12 @@ def pack_image(rgb: np.ndarray) -> tuple[np.ndarray, int, int]:
     if rgb.ndim != 3 or rgb.shape[2] != 3 or rgb.dtype != np.uint8:
         message = f"image is {rgb.shape} {rgb.dtype}"
         raise RuntimeError(message)
-    height, width = smart_size(int(rgb.shape[0]), int(rgb.shape[1]))
+    height, width = smart_size(
+        int(rgb.shape[0]),
+        int(rgb.shape[1]),
+        min_pixels=min_pixels,
+        max_pixels=max_pixels,
+    )
     if rgb.shape[0] != height or rgb.shape[1] != width:
         rgb = _resize(rgb, height, width)
     values = rgb.astype(np.float32) / np.float32(255.0)
@@ -292,8 +333,10 @@ def prepare_prompt(runtime: Any, messages: list[dict[str, Any]], ids: list[int])
     rows: list[np.ndarray] = []
     lengths: list[int] = []
     grids: list[tuple[int, int]] = []
-    for blob in blobs:
-        embedded, grid_h, grid_w = embed_image(runtime, blob)
+    for blob, low, high in blobs:
+        embedded, grid_h, grid_w = embed_image(
+            runtime, blob, min_pixels=low, max_pixels=high
+        )
         merged_h = grid_h // MERGE
         merged_w = grid_w // MERGE
         if embedded.shape[0] != merged_h * merged_w:
@@ -320,11 +363,19 @@ def prepare_prompt(runtime: Any, messages: list[dict[str, Any]], ids: list[int])
     return expanded
 
 
-def embed_image(runtime: Any, blob: bytes) -> tuple[np.ndarray, int, int]:
-    """Merged rows ``[tokens, 2048]`` and the patch grid for one PNG."""
+def embed_image(
+    runtime: Any,
+    blob: bytes,
+    *,
+    min_pixels: int = MIN_PIXELS,
+    max_pixels: int = MAX_PIXELS,
+) -> tuple[np.ndarray, int, int]:
+    """Merged rows ``[tokens, 2048]`` and the patch grid for one still image."""
     vision, _image_id = _vision_config(runtime.root)
     _check_config(vision)
-    pixels, grid_h, grid_w = pack_image(decode_png(blob))
+    pixels, grid_h, grid_w = pack_image(
+        decode_image(blob), min_pixels=min_pixels, max_pixels=max_pixels
+    )
     patches = int(pixels.shape[0])
     _note(runtime, f"vision patches {patches}")
     bufs = _Buffers(runtime.session, patches)
@@ -636,8 +687,8 @@ def _check_config(vision: dict[str, Any]) -> None:
         raise RuntimeError(message)
 
 
-def _image_blobs(messages: list[dict[str, Any]]) -> list[bytes]:
-    blobs: list[bytes] = []
+def _image_blobs(messages: list[dict[str, Any]]) -> list[tuple[bytes, int, int]]:
+    blobs: list[tuple[bytes, int, int]] = []
     for message in messages:
         if not isinstance(message, dict):
             continue
@@ -646,7 +697,8 @@ def _image_blobs(messages: list[dict[str, Any]]) -> list[bytes]:
             continue
         for item in content:
             if isinstance(item, dict) and _is_image(item):
-                blobs.append(_image_bytes(item))
+                low, high = _pixel_bounds(item)
+                blobs.append((_image_bytes(item), low, high))
     return blobs
 
 
@@ -663,11 +715,144 @@ def _image_bytes(item: dict[str, Any]) -> bytes:
         raise RuntimeError(message)
     if raw.startswith("data:"):
         header, _, payload = raw.partition(",")
-        if ";base64" not in header:
+        if "base64" not in header:
             message = "image data url is not base64"
             raise RuntimeError(message)
-        return base64.b64decode(payload)
-    return base64.b64decode(raw)
+        try:
+            return base64.b64decode("".join(payload.split()), validate=True)
+        except (ValueError, TypeError) as exc:
+            message = "image data url is not base64"
+            raise RuntimeError(message) from exc
+    if "://" in raw:
+        if not raw.startswith(("http://", "https://")):
+            message = "image url must be http or https"
+            raise RuntimeError(message)
+        return _fetch_image(raw)
+    try:
+        return base64.b64decode(raw, validate=True)
+    except (ValueError, TypeError) as exc:
+        message = "image url must be http, https, or base64"
+        raise RuntimeError(message) from exc
+
+
+def _pixel_bounds(item: dict[str, Any]) -> tuple[int, int]:
+    nested = item.get("image_url")
+    if not isinstance(nested, dict):
+        nested = {}
+    low = _pixel_field(item, nested, "min_pixels")
+    high = _pixel_field(item, nested, "max_pixels")
+    detail = nested.get("detail", item.get("detail"))
+    if detail is not None and detail not in {"auto", "low", "high", "original"}:
+        message = f"image detail {detail} is unsupported"
+        raise RuntimeError(message)
+    if low is None and high is None:
+        if detail == "low":
+            return MIN_PIXELS, MIN_PIXELS
+        return MIN_PIXELS, MAX_PIXELS
+    low = MIN_PIXELS if low is None else low
+    high = MAX_PIXELS if high is None else high
+    if low < MIN_PIXELS or high > MAX_PIXELS or low > high:
+        message = f"image pixels {low}..{high} are outside {MIN_PIXELS}..{MAX_PIXELS}"
+        raise RuntimeError(message)
+    return low, high
+
+
+def _pixel_field(item: dict[str, Any], nested: dict[str, Any], key: str) -> int | None:
+    value = item[key] if key in item else nested.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        message = f"image {key} is not an integer"
+        raise RuntimeError(message)
+    return value
+
+
+def _fetch_image(url: str) -> bytes:
+    _check_url(url)
+    opener = urllib.request.build_opener(_PublicRedirect())
+    request = urllib.request.Request(url, headers={"User-Agent": "favlo"})
+    try:
+        with opener.open(request, timeout=_FETCH_SECONDS) as response:
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                block = response.read(65536)
+                if not block:
+                    break
+                total += len(block)
+                if total > MAX_IMAGE_BYTES:
+                    message = "image url is too large"
+                    raise RuntimeError(message)
+                chunks.append(block)
+    except urllib.error.URLError as exc:
+        message = "image url could not be fetched"
+        raise RuntimeError(message) from exc
+    if not chunks:
+        message = "image url is empty"
+        raise RuntimeError(message)
+    return b"".join(chunks)
+
+
+def _check_url(url: str) -> None:
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname
+    if parsed.scheme not in {"http", "https"} or not host:
+        message = "image url must be http or https"
+        raise RuntimeError(message)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        found = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        message = "image url did not resolve"
+        raise RuntimeError(message) from exc
+    for info in found:
+        address = ipaddress.ip_address(info[4][0])
+        if not address.is_global:
+            message = "image url is not a public address"
+            raise RuntimeError(message)
+
+
+class _PublicRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        _check_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _decode_bitmap(blob: bytes) -> np.ndarray:
+    from AppKit import NSBitmapImageRep
+    from Foundation import NSData
+
+    data = NSData.dataWithBytes_length_(blob, len(blob))
+    rep = NSBitmapImageRep.imageRepWithData_(data)
+    if rep is None:
+        message = "image format is unsupported"
+        raise RuntimeError(message)
+    width = int(rep.pixelsWide())
+    height = int(rep.pixelsHigh())
+    channels = int(rep.bitsPerPixel()) // 8
+    row_bytes = int(rep.bytesPerRow())
+    if (
+        width < 1
+        or height < 1
+        or channels < 3
+        or int(rep.bitsPerSample()) != 8
+        or bool(rep.isPlanar())
+        or row_bytes < width * channels
+    ):
+        message = "image format is unsupported"
+        raise RuntimeError(message)
+    raw = np.frombuffer(rep.bitmapData(), dtype=np.uint8, count=row_bytes * height)
+    view = raw.reshape(height, row_bytes)[:, : width * channels]
+    rgb = view.reshape(height, width, channels)
+    return np.ascontiguousarray(rgb[:, :, :3])
 
 
 def _merge_ids(grid_h: int, grid_w: int) -> tuple[np.ndarray, np.ndarray]:
