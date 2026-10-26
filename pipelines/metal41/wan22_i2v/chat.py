@@ -15,6 +15,7 @@ from wan22_i2v.hold import ClipHold, ClipPaused
 from wan22_i2v.png import decode_png, resize_rgb
 from wan22_i2v.progress import ClipProgress, clip_label
 from wan22_i2v.schedule import (
+    frames_from_duration,
     FIVE_SEC_FRAMES,
     FPS,
     P320_HEIGHT,
@@ -277,6 +278,19 @@ def _image_bytes(body: dict[str, Any]) -> bytes:
 
 
 def _frames(body: dict[str, Any]) -> int:
+    if "duration" in body and body.get("duration") is not None:
+        duration = body.get("duration")
+        if isinstance(duration, str):
+            try:
+                duration = float(duration)
+            except ValueError as exc:
+                raise VideoRequestError("duration must be a number", "duration") from exc
+        if isinstance(duration, bool) or not isinstance(duration, (int, float)):
+            raise VideoRequestError("duration must be a number", "duration")
+        try:
+            return frames_from_duration(float(duration))
+        except ValueError as exc:
+            raise VideoRequestError(str(exc), "duration") from exc
     if "frames" in body and body.get("frames") is not None:
         return _whole(body.get("frames"), "frames")
     if "seconds" in body and body.get("seconds") is not None:

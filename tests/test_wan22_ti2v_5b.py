@@ -114,6 +114,14 @@ def test_int8_relative_rms_is_finite() -> None:
     assert np.isfinite(relative_rms(weight, dequant))
 
 
+def test_duration_floors_to_four_n_plus_one() -> None:
+    from wan22_ti2v_5b.schedule import frames_from_duration
+
+    assert frames_from_duration(5.0) == 117
+    body = parse_request({"prompt": "a pond", "duration": 5.0})
+    assert body.frames == 117
+
+
 def test_request_defaults_and_the_step_guard() -> None:
     body = parse_request({"prompt": "a pond"})
     assert (body.width, body.height, body.frames) == (1280, 704, 121)

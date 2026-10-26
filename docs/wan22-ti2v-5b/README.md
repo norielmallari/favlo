@@ -11,8 +11,8 @@ float32 `Wan2.2_VAE.pth` from that card.
 `generate_video_t2v` samples from text. `generate_video_i2v` conditions the
 first latent frame on a PNG. This pipeline is listed by both
 `list_video_models_t2v` and `list_video_models_i2v`. The clip is 24 fps.
-Both tools require `size`. Those lists name `1280x704` and `704x1280`. An
-omitted frame count is 121. `frames` wins when `seconds` is also set. `seconds` snaps to `4n+1`. Edges are multiples of 32. `steps` is
+Both tools require `size`. Those lists name `1280x704` and `704x1280`. MCP
+`duration` is clip length in seconds. An omitted `duration` is 121 frames. Edges are multiples of 32. `steps` is
 0 or 4. `guidance_scale` is omitted or 1. `negative_prompt` is accepted and
 not encoded.
 

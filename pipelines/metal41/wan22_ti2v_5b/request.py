@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from wan22_ti2v_5b.png import decode_png
-from wan22_ti2v_5b.schedule import snap_frames
+from wan22_ti2v_5b.schedule import frames_from_duration, snap_frames
 from wan22_ti2v_5b.spec import FPS
 
 _DEFAULT_SIZE = (1280, 704)
@@ -105,6 +105,21 @@ def _size(value: object) -> tuple[int, int]:
 
 
 def _frames(body: dict) -> int:
+    duration = body.get("duration")
+    if duration is not None and duration != "":
+        if isinstance(duration, str):
+            try:
+                duration = float(duration)
+            except ValueError as exc:
+                message = "duration must be a number"
+                raise VideoRequestError(message) from exc
+        if isinstance(duration, bool) or not isinstance(duration, (int, float)):
+            message = "duration must be a number"
+            raise VideoRequestError(message)
+        try:
+            return frames_from_duration(float(duration))
+        except ValueError as exc:
+            raise VideoRequestError(str(exc)) from exc
     frames = body.get("frames") or 0
     seconds = body.get("seconds") or ""
     if frames:

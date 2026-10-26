@@ -40,6 +40,15 @@ def require_knots(values: tuple[float, ...]) -> None:
             raise RuntimeError(message)
 
 
+def frames_from_duration(seconds: float) -> int:
+    """Largest ``4n+1`` frame count that fits in ``seconds`` at ``FPS``."""
+    if seconds <= 0:
+        message = "duration must be positive"
+        raise ValueError(message)
+    counted = max(int(seconds * FPS), 5)
+    return 1 + 4 * ((counted - 1) // 4)
+
+
 def snap_frames(seconds: float) -> int:
     """Nearest ``4n+1`` count at 24 fps, and at least 5 frames."""
     raw = max(int(round(seconds * FPS)), 5)

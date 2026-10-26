@@ -1356,8 +1356,10 @@ def test_generate_video_schema_names_the_still_and_the_frame_default() -> None:
     properties = i2v.parameters["properties"]
     assert "image_" in description or "image_" in properties["image"]["description"]
     assert "favlo://videos/" in description
-    assert "4n+1" in properties["frames"]["description"]
-    assert "81" not in properties["frames"]["description"]
+    assert "duration" in properties
+    assert "frames" not in properties
+    assert "seconds" in properties["duration"]["description"]
+    assert "4n+1" not in properties["duration"]["description"]
     assert "16 fps" not in description
     assert "image" in i2v.parameters["required"]
     assert "size" in i2v.parameters["required"]

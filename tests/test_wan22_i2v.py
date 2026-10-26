@@ -450,6 +450,13 @@ def _png() -> str:
     return base64.b64encode(encode_png(image)).decode("ascii")
 
 
+def test_duration_floors_to_four_n_plus_one() -> None:
+    from wan22_i2v.schedule import frames_from_duration
+
+    assert frames_from_duration(5.0) == 77
+    assert video_fields({"prompt": "move", "image": _png(), "duration": 5.0}).frames == 77
+
+
 def test_video_request_defaults_to_320p_and_81_frames() -> None:
     encoded = _png()
     fields = video_fields({"prompt": " move ", "image": encoded})

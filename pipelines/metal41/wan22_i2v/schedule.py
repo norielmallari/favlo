@@ -19,6 +19,16 @@ SAMPLE_NEG_PROMPT = (
 )
 SHORT_FRAMES = 5
 FIVE_SEC_FRAMES = 81
+
+
+def frames_from_duration(seconds: float) -> int:
+    """Largest ``4n+1`` frame count that fits in ``seconds`` at ``FPS``."""
+    if seconds <= 0:
+        message = "duration must be positive"
+        raise ValueError(message)
+    counted = max(int(seconds * FPS), SHORT_FRAMES)
+    return 1 + 4 * ((counted - 1) // 4)
+
 P240_WIDTH = 416
 P240_HEIGHT = 240
 P320_WIDTH = 576

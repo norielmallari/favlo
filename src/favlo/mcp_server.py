@@ -166,8 +166,7 @@ def build_mcp(
         model: str,
         size: str,
         image: str | dict[str, Any] | None,
-        seconds: str,
-        frames: int,
+        duration: float | None,
         seed: int,
         quality: str,
         negative_prompt: str,
@@ -183,10 +182,8 @@ def build_mcp(
         }
         if image is not None:
             body["image"] = _still(image, tasks.state)
-        if seconds:
-            body["seconds"] = seconds
-        if frames:
-            body["frames"] = frames
+        if duration is not None:
+            body["duration"] = duration
         if negative_prompt:
             body["negative_prompt"] = negative_prompt
         if guidance_scale is not None:
@@ -202,8 +199,7 @@ def build_mcp(
         model: str,
         size: str,
         image: str | dict[str, Any],
-        seconds: str = "",
-        frames: int = 0,
+        duration: float | None = None,
         seed: int = 0,
         quality: str = "high",
         negative_prompt: str = "",
@@ -217,8 +213,7 @@ def build_mcp(
             model: Model id from list_video_models_i2v.
             size: Required WIDTHxHEIGHT from list_video_models_i2v.
             image: Id starting with image_, or a PNG block.
-            seconds: Duration text. Empty omits it. Snaps to 4n+1.
-            frames: Frame count 4n+1. 0 omits it.
+            duration: Clip length in seconds. Omitted uses the model default.
             seed: Integer seed. The default is 0.
             quality: auto, low, medium, high, xhigh, max, standard, or hd.
             negative_prompt: Empty uses Wan's sample negative.
@@ -230,8 +225,7 @@ def build_mcp(
             model,
             size,
             image,
-            seconds,
-            frames,
+            duration,
             seed,
             quality,
             negative_prompt,
@@ -244,8 +238,7 @@ def build_mcp(
         prompt: str,
         model: str,
         size: str,
-        seconds: str = "",
-        frames: int = 0,
+        duration: float | None = None,
         seed: int = 0,
         quality: str = "high",
         negative_prompt: str = "",
@@ -258,8 +251,7 @@ def build_mcp(
             prompt: Motion prompt.
             model: Model id from list_video_models_t2v.
             size: Required WIDTHxHEIGHT from list_video_models_t2v.
-            seconds: Duration text. Empty omits it. Snaps to 4n+1.
-            frames: Frame count 4n+1. 0 omits it.
+            duration: Clip length in seconds. Omitted uses the model default.
             seed: Integer seed. The default is 0.
             quality: auto, low, medium, high, xhigh, max, standard, or hd.
             negative_prompt: Empty uses Wan's sample negative.
@@ -271,8 +263,7 @@ def build_mcp(
             model,
             size,
             None,
-            seconds,
-            frames,
+            duration,
             seed,
             quality,
             negative_prompt,
