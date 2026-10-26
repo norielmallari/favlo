@@ -19,7 +19,7 @@ This file is the map and the write set. It wins for the listener, the registry, 
 | First-run setup | `src/favlo/setup.py` | [docs/guides/models.md](docs/guides/models.md) |
 | Harness | `harness/` | [docs/harness.md](docs/harness.md) |
 
-Shared code is `src/favlo/`. There is no model base class and no kernel that branches on the pipeline. A pipeline task does not change `src/favlo/` to reach into another runtime. A pipeline imports the prefix store and adapts its own buffers. The listener passes `owner` into `open_runtime` when that function accepts it, records the owners created during that open, and sweeps them after `close`. An open that raises sweeps the owners that appeared during the call.
+Shared code is `src/favlo/`. `Pipeline` in `pipeline.py` is the daemon call. `LanguagePipeline`, `EmbeddingsPipeline`, and `MediaPipeline` extend it. A served language model inherits `LanguagePipeline`. A served embedding model inherits `EmbeddingsPipeline`. A served image, video, music, or voice pipeline inherits `MediaPipeline`. None of those classes run a forward, name stages, or branch on the pipeline. A failed pipeline inherits none of them. A kernel does not branch on the pipeline. A new abstract method on `Pipeline` updates every subclass of every seam in that same change. A new abstract method on one seam updates every subclass of that seam. A pipeline task does not change `src/favlo/` to reach into another runtime. A pipeline imports the prefix store and adapts its own buffers. The listener passes `owner` into `open_runtime` when that function accepts it, records the owners created during that open, and sweeps them after `close`. An open that raises sweeps the owners that appeared during the call.
 
 `POST /mcp` is the FastMCP media queue. The daemon owns the GPU admission queues in `schedule.py`: embeddings, then chats that have not started, then media. A foreground arrival preempts media. `preempt` stays set until that foreground queue is empty. The listener checkpoints the media task and closes its device before the foreground model allocates, resumes that same task only after the foreground queue has drained, and does not serve a media HTTP route. The daemon is a request server. `pipelines` is the daemon registry of the one pipeline process. `close` halts that process. The next call waits until the ledger says those pages are released, then the daemon drops the ledger entry. A pipeline crash fails the running job and leaves the daemon up. `POST /mcp` stays up with none loaded. It does not own chat history, tools, or the terminal session. The CLI owns those. A pipeline writes a reply and does not see a socket. `json` finishes one object, and that object is encoded before the call returns. `begin_events`, `event`, and `done` are one server-sent stream. `stopped` is true when that client has gone. Telemetry is one JSON event per line. The pipeline process forwards those events to the daemon. The terminal paints them as they arrive, and prints the reply after that turn's requests have closed.
 
@@ -71,6 +71,10 @@ src/favlo/              process entry; the listener loads the pipeline a request
   listener.py           process, model load, and the request lock; a terminal starts it and keeps the CLI
   http_app.py           ASGI routes for chat and MCP
   schedule.py           foreground queue and media queue; the daemon admits the GPU
+  pipeline.py           daemon call every served seam extends
+  language_pipeline.py  disconnect shell a served language model inherits
+  embeddings_pipeline.py list object a served embedding model inherits
+  media_pipeline.py     listener contract a served media pipeline inherits
   mcp_server.py         FastMCP media queue, Tasks, and favlo:// reads
   reply.py              the object a pipeline writes; the server turns it into HTTP
   daemon.py             spawn and stop the listener; no pipeline imports
@@ -114,6 +118,8 @@ uv run python -m harness.worktree --model qwen36-35b-a3b
 uv run python -m harness.image_smoke_agent
 uv run python -m harness.image_persona
 uv run python -m harness.video_smoke_agent
+uv run python -m harness.media_pipeline
+uv run python -m harness.language_pipeline
 uv run python -m harness.voice_smoke_agent
 uv run python -m harness.music_long_agent
 uv run python -m harness.embeddings_agent

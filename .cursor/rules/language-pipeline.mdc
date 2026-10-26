@@ -1,0 +1,28 @@
+---
+description: How a served language model implements LanguagePipeline, and when to run the language harness.
+globs: src/favlo/pipeline.py,src/favlo/language_pipeline.py,harness/language_pipeline.py,tests/test_language_pipeline.py,pipelines/metal41/qwen36_35b_a3b/**,pipelines/metal41/qwen38_27b/**,pipelines/metal41/qwen38_flash_next/**,docs/qwen36-35b-a3b/**,docs/qwen38-27b/**,docs/qwen38-flash-next/**
+alwaysApply: false
+---
+
+# Language pipelines
+
+A served language model inherits `LanguagePipeline` in `src/favlo/language_pipeline.py`. That class extends `Pipeline`. A media pipeline does not inherit it. A failed pipeline does not. The class is the disconnect shell around one chat completion. It does not encode a prompt, sample a token, or parse a tool call.
+
+Bind `handle_chat = Pipeline()`. `complete` is the pipeline's own chat, including its sampler and its stream. `RequestClosed` subclasses `ClientClosed`.
+
+`on_open` is the work that already sits outside the try. qwen36 and qwen38-27b reset `_halted` and set `runtime._stop` there. Flash Next only calls `open_request` there. `prepare` is inside the outer try and outside the disconnect try. Only Flash Next uses it, for the tool fields and the sampler. `on_finish` keeps that pipeline's current order and always runs after `prepare`. Hooks are called directly. Do not swallow a hook exception.
+
+A new abstract method on `LanguagePipeline` updates every served language subclass in that same change. A new abstract method on `Pipeline` updates every subclass of every seam.
+
+After a change to this shell, run:
+
+```text
+uv run pytest tests/test_language_pipeline.py
+uv run python -m harness.language_pipeline
+```
+
+The harness is the one agent for the registry default chat model and `bge-m3-int8`. It does not take the machine lock. It uses one `favlo serve` on `127.0.0.1:8129`. Exit 0 means `check_embeddings` ran and every paraphrase cosine beat every cross-topic cosine. A kernel or quantize edit that leaves `complete`, the disconnect shell, and the reply alone does not run the harness.
+
+Wrong: a shared sampler in `LanguagePipeline`, or a second harness per language model.
+
+Right: `complete` raises `RequestClosed`, and the shell clears `runtime._stop`.

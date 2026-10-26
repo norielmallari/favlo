@@ -11,6 +11,8 @@ from typing import Any
 
 import numpy as np
 
+from favlo.pipeline import ClientClosed
+
 from qwen36_35b_a3b.atlas import (
     EXPERTS,
     LAYERS,
@@ -167,7 +169,7 @@ def _file_buffer(session: Session, path: Path) -> Any:
     return buffer
 
 
-class RequestClosed(Exception):
+class RequestClosed(ClientClosed):
     """The client closed, or the listener asked the forward to stop."""
 
 

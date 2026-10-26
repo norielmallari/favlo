@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from typing import Any
 
 import numpy as np
 
@@ -28,6 +29,7 @@ def generate(
     min_len: int,
     steps: int,
     seed: int | None,
+    stop: Any = None,
 ) -> np.ndarray:
     """Speak ``text`` and return one float32 waveform at the decoder rate."""
     if max_len < 1:
@@ -99,6 +101,8 @@ def generate(
     rng = np.random.default_rng() if seed is None else np.random.default_rng(seed)
     patches: list[np.ndarray] = []
     for index in range(max_len):
+        if stop is not None:
+            stop()
         sys.stderr.write(f"voxcpm2 patch {index + 1}\n")
         sys.stderr.flush()
         mu = condition(session, store, lm_hidden, res_hidden)

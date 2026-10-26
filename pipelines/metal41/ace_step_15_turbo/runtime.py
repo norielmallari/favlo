@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import secrets
 import time
 from pathlib import Path
 from typing import Any
@@ -10,12 +9,13 @@ from typing import Any
 from tokenizers import Tokenizer
 
 from ace_step_15_turbo.graph import generate
-from ace_step_15_turbo.hold import ClipHold, ClipPaused, interrupt
+from ace_step_15_turbo.hold import ClipHold, ClipPaused
 from ace_step_15_turbo.metal import Gpu
 from ace_step_15_turbo.record import load, weight_bytes
 from ace_step_15_turbo.request import MusicRequest, parse_music
 from ace_step_15_turbo.schedule import HOP, LYRIC_LIMIT, STEPS, TEXT_LIMIT, latent_frames
 from ace_step_15_turbo.tiles import tile_frames
+from favlo.media_pipeline import MediaCall, MediaPipeline, MediaRequestError
 from favlo.memory import memory
 
 _UNITS = 28 + 8 + 4 + 32 * STEPS + 7
@@ -47,78 +47,94 @@ def handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any, 
     )
 
 
-def handle_music(
-    reply: Any,
-    runtime: "Runtime",
-    body: dict[str, Any],
-    selection: Any,
-    args: Any,
-    state: dict[str, Any],
-) -> None:
-    del args
-    model = body.get("model")
-    if not isinstance(model, str) or not model:
-        _reject(reply, "model is required")
-        return
-    try:
-        fields = parse_music(body)
-    except ValueError as exc:
-        _reject(reply, str(exc))
-        return
-    if selection is not None:
-        requested = getattr(selection, "requested_id", "")
-        if isinstance(requested, str) and requested:
-            model = requested
-    jobs = state.setdefault("music", {})
-    if not isinstance(jobs, dict):
-        jobs = {}
-        state["music"] = jobs
-    held = _held(state, fields)
-    if held is None:
-        job = _job(model, fields)
-        jobs[job["id"]] = job
-        hold = None
-    else:
-        job = held["job"]
-        hold = held["hold"]
-        jobs[job["id"]] = job
-    if getattr(reply, "payload", None) is not job:
-        reply.json(200, job)
-    progress = _Progress(job, done=0 if hold is None else hold.done)
-    progress.hold = hold
-    progress.interrupt = lambda: _stop_reason(state, runtime)
-    home = state.get("music_home")
-    root = home if isinstance(home, Path) else None
-    try:
-        if hold is not None and hold.wav is not None:
-            wav = hold.wav
+class Pipeline(MediaPipeline):
+    """ACE-Step's listener contract. The graph stays in this package."""
+
+    kind = "music"
+    id_prefix = "music_"
+    object_name = "audio.music"
+    table_name = "music"
+    id_hex = 16
+
+    def parse(self, body: dict[str, Any]) -> MusicRequest:
+        model = body.get("model")
+        if not isinstance(model, str) or not model:
+            raise MediaRequestError("model is required", "model")
+        try:
+            return parse_music(body)
+        except ValueError as exc:
+            raise MediaRequestError(str(exc)) from exc
+
+    def describe(self, request: MusicRequest) -> dict[str, Any]:
+        from favlo.logs import favlo_home, load_settings, music_ttl_seconds
+
+        seconds = request.seconds
+        label = str(int(seconds)) if float(seconds).is_integer() else str(seconds)
+        created = int(time.time())
+        return {
+            "expires_at": created + music_ttl_seconds(load_settings(favlo_home())),
+            "stage": "text",
+            "prompt": request.prompt,
+            "lyrics": request.lyrics,
+            "seconds": label,
+            "response_format": request.output_format,
+        }
+
+    def identity(self, request: MusicRequest) -> tuple[Any, ...]:
+        return _identity(request)
+
+    def matches(self, request: MusicRequest, identity: Any) -> bool:
+        return identity == self.identity(request)
+
+    def halted(self, runtime: Any) -> bool:
+        return bool(getattr(runtime, "_halted", False))
+
+    def generate(
+        self,
+        runtime: Any,
+        request: MusicRequest,
+        hold: Any,
+        job: dict[str, Any],
+        stop: Any,
+        call: MediaCall,
+    ) -> bytes:
+        kept = hold if isinstance(hold, ClipHold) else None
+        progress = _Progress(job, done=0 if kept is None else kept.done)
+        progress.hold = kept
+        progress.interrupt = stop
+        call.progress = progress
+        if kept is not None and kept.wav is not None:
+            wav = kept.wav
         else:
-            wav = runtime.generate(fields, progress, hold)
-        reason = interrupt(progress)
+            wav = runtime.generate(request, progress, kept)
+        reason = stop()
         if reason:
             raise ClipPaused(reason, ClipHold(stage="encode", wav=wav, done=progress.done))
-        job["stage"] = "encode"
+        return wav
+
+    def pack(
+        self,
+        runtime: Any,
+        request: MusicRequest,
+        result: bytes,
+        job: dict[str, Any],
+        home: Path | None,
+        table: dict[str, Any],
+        call: MediaCall,
+    ) -> None:
+        del runtime, call
         from favlo.music import store_wav
 
-        store_wav(job["id"], wav, home=root, music=jobs, output_format=fields.output_format)
-    except ClipPaused as paused:
+        job["stage"] = "encode"
+        store_wav(job["id"], result, home=home, music=table, output_format=request.output_format)
+        return None
+
+    def on_pause(self, runtime: Any, reason: str, call: MediaCall) -> None:
+        del reason, call
         _release(runtime)
-        if paused.reason == "cancel":
-            state.pop("music_hold", None)
-            return
-        state["music_hold"] = {"job": job, "hold": paused.hold, "request": _identity(fields)}
-        return
-    except Exception as exc:
-        state.pop("music_hold", None)
-        job["status"] = "failed"
-        job["error"] = {"message": str(exc), "type": type(exc).__name__}
-        return
-    state.pop("music_hold", None)
-    job["completed_at"] = int(time.time())
-    job["progress"] = 100
-    job["eta"] = 0
-    job["status"] = "completed"
-    job["stage"] = "encode"
+
+
+handle_music = Pipeline()
 
 
 class Runtime:
@@ -369,51 +385,6 @@ def _parse_memory(text: str | int | None) -> int | None:
     return number
 
 
-def _job(model: str, fields: Any) -> dict[str, Any]:
-    from favlo.logs import favlo_home, load_settings, music_ttl_seconds
-
-    created = int(time.time())
-    seconds = fields.seconds
-    label = str(int(seconds)) if float(seconds).is_integer() else str(seconds)
-    return {
-        "id": "music_" + secrets.token_hex(16),
-        "object": "audio.music",
-        "created_at": created,
-        "completed_at": None,
-        "expires_at": created + music_ttl_seconds(load_settings(favlo_home())),
-        "status": "in_progress",
-        "model": model,
-        "progress": 0,
-        "eta": None,
-        "stage": "text",
-        "prompt": fields.prompt,
-        "lyrics": fields.lyrics,
-        "seconds": label,
-        "response_format": fields.output_format,
-        "error": None,
-    }
-
-
-def _reject(reply: Any, message: str) -> None:
-    reply.json(400, {"error": {"message": message, "type": "invalid_request_error"}})
-
-
-def _stop_reason(state: dict[str, Any], runtime: Any) -> str | None:
-    if getattr(runtime, "_halted", False):
-        return "cancel"
-    return _reason(state)
-
-
-def _reason(state: dict[str, Any]) -> str | None:
-    cancel = state.get("cancel")
-    if getattr(cancel, "is_set", lambda: False)():
-        return "cancel"
-    preempt = state.get("preempt")
-    if getattr(preempt, "is_set", lambda: False)():
-        return "preempt"
-    return None
-
-
 def _identity(fields: MusicRequest) -> tuple[Any, ...]:
     return (
         fields.prompt,
@@ -426,25 +397,6 @@ def _identity(fields: MusicRequest) -> tuple[Any, ...]:
         fields.timesignature,
         fields.output_format,
     )
-
-
-def _held(state: dict[str, Any], fields: MusicRequest) -> dict[str, Any] | None:
-    """The paused clip when this request is that same job. A mismatch is dropped."""
-    held = state.get("music_hold")
-    if not isinstance(held, dict):
-        return None
-    job = held.get("job")
-    hold = held.get("hold")
-    same = (
-        isinstance(job, dict)
-        and isinstance(hold, ClipHold)
-        and job.get("status") == "in_progress"
-        and held.get("request") == _identity(fields)
-    )
-    state.pop("music_hold", None)
-    if not same or not isinstance(job, dict) or not isinstance(hold, ClipHold):
-        return None
-    return {"job": job, "hold": hold}
 
 
 def _release(runtime: Any) -> None:

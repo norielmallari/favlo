@@ -371,14 +371,14 @@ def test_preempt_keeps_a_stored_image_and_the_same_id(tmp_path) -> None:
     assert reply.body["status"] == "in_progress"
     assert reply.body["stage"] == "decode"
     assert len(reply.body["data"]) == 1
-    assert state["image_hold"].id == reply.body["id"]
+    assert state["image_hold"]["hold"].id == reply.body["id"]
     assert runtime.seeds == [7, 8]
     preempt.clear()
     handle_image(reply, runtime, {"prompt": "a cat", "n": 2, "seed": 7}, None, None, state)
     assert "status" not in reply.body
     assert len(reply.body["data"]) == 2
     assert runtime.seeds == [7, 8]
-    assert "image_hold" not in state
+    assert state.get("image_hold") is None
 
 
 def test_a_paused_step_resumes_with_its_latent(tmp_path) -> None:
@@ -437,7 +437,7 @@ def test_cancel_drops_the_checkpoint_and_skips_the_remaining_image(tmp_path) -> 
     handle_image(reply, runtime, {"prompt": "a cat", "n": 2, "seed": 7}, None, None, state)
     assert reply.body["status"] == "in_progress"
     assert len(reply.body["data"]) == 1
-    assert "image_hold" not in state
+    assert state.get("image_hold") is None
     assert (tmp_path / "images" / f"{reply.body['data'][0]['id']}.png").is_file()
     handle_image(reply, runtime, {"prompt": "a cat", "n": 2, "seed": 7}, None, None, state)
     assert runtime.seeds == [7, 8, 7, 8]

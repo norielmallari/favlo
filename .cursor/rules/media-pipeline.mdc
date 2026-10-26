@@ -1,0 +1,36 @@
+---
+description: How a served media pipeline implements MediaPipeline, and when to extend and run the preemption harness.
+globs: src/favlo/media_pipeline.py,src/favlo/pipeline_worker.py,src/favlo/pipelines.py,harness/media_pipeline.py,tests/test_media_pipeline.py,tests/test_media_pipeline_harness.py,pipelines/metal41/z_image_turbo/**,pipelines/metal41/wan22_i2v/**,pipelines/metal41/wan22_ti2v_5b/**,pipelines/metal41/ace_step_15_turbo/**,pipelines/metal41/voxcpm2/**,docs/z-image-turbo/**,docs/wan22-i2v/**,docs/wan22-ti2v-5b/**,docs/ace-step-15-turbo/**,docs/voxcpm2/**,docs/harness.md
+alwaysApply: false
+---
+
+# Media pipelines
+
+A served image, video, music, or voice pipeline inherits `MediaPipeline` in `src/favlo/media_pipeline.py`. `MediaPipeline` extends `Pipeline`. A language model, an embedding model, and a failed pipeline do not inherit `MediaPipeline`. The class is the listener seam. It does not run a forward, name stages, acquire a scheduler ticket, or free device memory.
+
+Bind `handle_<kind> = Pipeline()`. `__call__` is `handle`. The subclass implements `parse`, `generate`, and `pack`. The checkpoint type stays in the pipeline package. `ClipPaused` and `ImagePaused` subclass `MediaPaused`.
+
+`generate` calls `stop()` at a stage boundary, after the Metal command already submitted has finished. Preempt raises `MediaPaused("preempt", hold)` with the host values the next stage needs. Cancel raises `MediaPaused("cancel", None)`. Device buffers do not go in the hold. They do not survive `close`. Resume calls `generate` again with that hold and the same job id.
+
+Clear a hold with `state[key] = None`. Do not `pop` the key. The exported keys are `image_hold`, `video_hold`, `music_hold`, and `voice_hold`, the same tuple in `pipeline_worker.py` and `pipelines.py`. A new kind adds its key to both tuples in that change.
+
+`parse` or `generate` raises `MediaRequestError` for a bad body. That is a 400. Any other exception fails the job with `error` `{"message", "type"}`. `describe` copies the job keys MCP already reads (`size`, `seconds`, `response_format`). `reply.json` runs once with the job before `generate`. Call it again only when `pack` or `working` returns a different dict. A new abstract method updates every subclass in that same change. One pipeline note records that pipeline's checkpoint. Do not describe another pipeline there.
+
+## Preemption harness
+
+One agent covers every served media pipeline: `python -m harness.media_pipeline`. The order is `image`, `i2v`, `t2v`, `music`, `voice`. Do not add a second preemption agent.
+
+A new served media pipeline adds one probe in that module: a name on `_PROBES`, a body in `probes()` taken from that pipeline's `smoke.json` at the shortest length that still reaches a `stop()` check, a file `artifacts/media-preempt-<name>.*`, and a shape check in `accept`. The same change adds the package and its `docs/<pipeline>/` path to this rule's globs, and one sentence in `docs/harness.md`.
+
+Run both checks before the change is done when the edit touches `MediaPipeline`, a hold tuple, or a media pipeline's `parse`, `generate`, `pack`, pause, or job dict:
+
+```text
+uv run pytest tests/test_media_pipeline.py tests/test_media_pipeline_harness.py
+uv run python -m harness.media_pipeline
+```
+
+The pytest does not open a listener and does not take the machine lock. The harness uses one `favlo serve` on `127.0.0.1:8129` and does not take the lock. If `artifacts/pipeline-test.lock` is held by a live pid, wait. Exit 0 means every probe paused with `task is ongoing` and that same task finished. A kernel, shader, or quantize edit that leaves the request, the checkpoint, and the job dict alone does not run the harness.
+
+Wrong: a host matmul standing in for a missing kernel, a popped hold, or one preemption agent per pipeline.
+
+Right: `MediaPaused("preempt", hold)` after the command finishes, `state["video_hold"] = None` when the job completes, and one new row in `_PROBES`.

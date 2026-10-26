@@ -8,6 +8,6 @@ The packed record is one int8 weight image on the GPU. Each projection is symmet
 
 `favlo --bge-m3 embed --text <sentence>` prints the 1024 floats. A missing record is an error. The command does not quantize. A warm encode of that record is [research/recorded-encode.md](research/recorded-encode.md).
 
-`POST /v1/embeddings` takes `model` and one string `input`. The body is one embedding object and `usage.prompt_tokens`. A pipeline that defines `handle_embed` is omitted from `GET /v1/models`. An embeddings request waits until the open chat completion returns. It sits ahead of a chat that has not started, and it preempts media. A chat that has not started waits while an embeddings request is queued or running.
+`handle_embed` is an `EmbeddingsPipeline`. `embed` returns the vector and the token count. The list object is the class. `POST /v1/embeddings` takes `model` and one string `input`. The body is one embedding object and `usage.prompt_tokens`. A pipeline that defines `handle_embed` is omitted from `GET /v1/models`. An embeddings request waits until the open chat completion returns. It sits ahead of a chat that has not started, and it preempts media. A chat that has not started waits while an embeddings request is queued or running.
 
 `uv run pytest tests/test_bge_m3.py tests/test_bge_m3_smoke.py` runs the host math. The smoke skips when `models/bge-m3-int8` is absent. `python -m harness.embeddings_agent` posts several sentences to the route on `127.0.0.1:8129` and checks that paraphrase cosines exceed cross-topic cosines.

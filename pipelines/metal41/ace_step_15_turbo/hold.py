@@ -11,16 +11,16 @@ from typing import Any
 
 import numpy as np
 
+from favlo.media_pipeline import MediaPaused
+
 _STAGES = ("start", "text", "lyric", "timbre", "step", "decode", "encode")
 
 
-class ClipPaused(Exception):
+class ClipPaused(MediaPaused):
     """The clip stopped between stages. The job stays in progress."""
 
     def __init__(self, reason: str, hold: ClipHold) -> None:
-        super().__init__(reason)
-        self.reason = reason
-        self.hold = hold
+        super().__init__(reason, hold)
 
 
 @dataclass

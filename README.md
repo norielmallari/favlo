@@ -8,7 +8,7 @@ Favlo AI Runtime: Your Local AI Workhorse
 
 >This app is directly inspired by [oMLX](https://github.com/jundot/omlx). It's an amazing app - I recommend trying that first for general purpose inference before using my more specialized runtime.
 
-Favlo is a local runtime for Apple Silicon. One machine serves language-model inference and content generation: image, video, music, and voice. One model is one pipeline. Each pipeline owns its forward, its weight records, and its Metal kernels. `favlo serve` is the entry point. A client selects a registered language model with the OpenAI `model` field. A language row answers `POST /v1/chat/completions`. Agents reach the content-generation models through MCP at `POST /mcp`.
+Favlo is a local runtime for Apple Silicon. One machine serves language-model inference, embeddings, and content generation: image, video, music, and voice. One model is one pipeline. Each pipeline owns its forward, its weight records, and its Metal kernels. `favlo serve` is the entry point. A client selects a registered language model with the OpenAI `model` field. A language row answers `POST /v1/chat/completions`. An embeddings row answers `POST /v1/embeddings`. Agents reach the content-generation models through MCP at `POST /mcp`.
 
 The process contract is [ARCHITECTURE.md](ARCHITECTURE.md). The papers are [REFERENCES.md](REFERENCES.md). Measured research claims are [RESEARCH.md](RESEARCH.md). Cite this software from [CITATION.cff](CITATION.cff). Agents start at [AGENTS.md](AGENTS.md). AI-assisted features are [docs/ai-assistance](docs/ai-assistance/README.md).
 
@@ -51,7 +51,7 @@ uv run favlo serve
 uv run favlo serve --non-interactive
 ```
 
-`favlo serve` on a terminal is the CLI. `favlo serve --non-interactive` starts the server daemon and exits. The daemon listens on `127.0.0.1:8129`. Chat completions and image generation are both served from that daemon.
+`favlo serve` on a terminal is the CLI. `favlo serve --non-interactive` starts the server daemon and exits. The daemon listens on `127.0.0.1:8129`. Chat and embeddings are HTTP routes on that daemon. Image, video, music, and voice are MCP.
 
 ## Startup
 
@@ -69,7 +69,17 @@ Weights follow the Open Compute Project *Microscaling Formats (MX) Specification
 
 `src/favlo/memory.py` is the allocator for every device span. A pipeline receives a handle, and the heap stays with the owner of that opening. `close` frees that owner's spans. The next request waits until those pages are reclaimable, and stays queued while an allocation or a release is still open. At open, the pipeline reads the budget and shrinks the one knob it owns until the request fits. The request keeps the resolution, the frame count, and the duration it named. When the minimum working set does not fit, the pipeline refuses to open.
 
-## Pipeline management
+## Pipeline architecture
+
+`Pipeline` in `src/favlo/pipeline.py` is the call the daemon makes. Three classes extend it. Each one writes the reply its route already returns. The forward, the sampler, and the kernels stay in the pipeline package.
+
+| Class | Route | What the class owns |
+|---|---|---|
+| `LanguagePipeline` | `POST /v1/chat/completions` | The disconnect shell around one chat completion |
+| `EmbeddingsPipeline` | `POST /v1/embeddings` | The embeddings list object |
+| `MediaPipeline` | `POST /mcp` | The job, the pause, and the host checkpoint |
+
+A served language model inherits `LanguagePipeline` and binds `handle_chat`. A served embedding model inherits `EmbeddingsPipeline` and binds `handle_embed`. A served image, video, music, or voice pipeline inherits `MediaPipeline` and binds `handle_image`, `handle_video`, `handle_music`, or `handle_voice`. A pipeline that is not served inherits none of them. The map is [ARCHITECTURE.md](ARCHITECTURE.md).
 
 The daemon records the one pipeline process. That process loads the registry row the request named and creates the device. The row stores the packed record, the pipeline entry, and the sampling card. A different row halts the process and waits until its pages are reclaimable. A crash fails the job that was running. The daemon stays up, drops that process from the ledger, and listens for the next request.
 

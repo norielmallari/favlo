@@ -1,0 +1,19 @@
+---
+description: How a served embedding model implements EmbeddingsPipeline.
+globs: src/favlo/embeddings_pipeline.py,src/favlo/pipeline.py,pipelines/metal41/bge_m3/**,docs/bge-m3/**,harness/language_pipeline.py,harness/embeddings_agent.py
+alwaysApply: false
+---
+
+# Embedding pipelines
+
+A served embedding model inherits `EmbeddingsPipeline` in `src/favlo/embeddings_pipeline.py`. That class extends `Pipeline`. A language model and a media pipeline do not inherit it. The class writes the OpenAI list object. It does not normalize a vector or choose a hidden size.
+
+Bind `handle_embed = Pipeline()`. `embed` returns the vector and the token count. `parse` rejects a missing or blank string with `input must be a string` and `param` `input`. A `ValueError` from `embed` is a 400 with `param` `None`. The `model` field is `selection.requested_id`, or `""` when the selection is missing. It does not read `body["model"]`.
+
+A new abstract method on `EmbeddingsPipeline` updates every served embedding subclass in that same change.
+
+The language harness posts this route. After a change to `embed` or the list object, run `uv run python -m harness.language_pipeline`. That command is in [language-pipeline.mdc](language-pipeline.mdc). `python -m harness.embeddings_agent` remains the direct check of the same six sentences.
+
+Wrong: copying the list object into the pipeline package, or catching `ValueError` around the reply builder.
+
+Right: `embed` returns `(vector, tokens)` and the class writes `usage.prompt_tokens`.

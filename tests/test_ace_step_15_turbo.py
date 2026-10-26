@@ -428,7 +428,7 @@ def test_preempt_pauses_and_the_same_job_resumes(tmp_path) -> None:
     assert runtime.holds == [None, "text"]
     assert second.payload["id"] == job["id"]
     assert job["status"] == "completed"
-    assert "music_hold" not in state
+    assert state.get("music_hold") is None
     assert (music_dir(tmp_path) / f"{job['id']}.wav").is_file()
 
 
@@ -447,7 +447,7 @@ def test_halt_stops_the_clip_like_cancel(tmp_path) -> None:
     handle_music(reply, runtime, _body(), None, None, state)
     job = state["music"][reply.payload["id"]]
     assert job["status"] == "in_progress"
-    assert "music_hold" not in state
+    assert state.get("music_hold") is None
 
 
 def test_cancel_discards_the_music_hold(tmp_path) -> None:
@@ -464,7 +464,7 @@ def test_cancel_discards_the_music_hold(tmp_path) -> None:
     handle_music(reply, runtime, _body(), None, None, state)
     job = state["music"][reply.payload["id"]]
     assert job["status"] == "in_progress"
-    assert "music_hold" not in state
+    assert state.get("music_hold") is None
     assert not music_dir(tmp_path).exists() or not any(music_dir(tmp_path).glob("*.wav"))
 
 
@@ -486,7 +486,7 @@ def test_a_different_prompt_drops_the_paused_clip(tmp_path) -> None:
     assert reply.payload["id"] != paused
     assert state["music"][paused]["status"] == "in_progress"
     assert state["music"][reply.payload["id"]]["status"] == "completed"
-    assert "music_hold" not in state
+    assert state.get("music_hold") is None
 
 
 def _brute_dependency(pos: int) -> tuple[int, int]:

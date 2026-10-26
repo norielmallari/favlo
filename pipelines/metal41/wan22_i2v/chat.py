@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import base64
-import secrets
-import time
 from pathlib import Path
 from typing import Any, NamedTuple
 
 import numpy as np
 
+from favlo.media_pipeline import MediaCall, MediaPipeline, MediaRequestError
 from favlo.videos import reported_quality, store_source, sweep_videos
 from wan22_i2v.hold import ClipHold, ClipPaused
 from wan22_i2v.png import decode_png, resize_rgb
@@ -28,10 +27,9 @@ from wan22_i2v.schedule import (
 from wan22_i2v.video import write_mp4
 
 
-class VideoRequestError(ValueError):
+class VideoRequestError(MediaRequestError):
     def __init__(self, message: str, param: str | None) -> None:
-        super().__init__(message)
-        self.param = param
+        super().__init__(message, param)
 
 
 class VideoFields(NamedTuple):
@@ -59,83 +57,123 @@ def handle_chat(
     _reject(reply, "wan22-i2v generates video at POST /v1/videos", None)
 
 
-def handle_video(
-    reply: Any,
-    runtime: Any,
-    body: dict[str, Any],
-    selection: Any,
-    args: Any,
-    state: dict[str, Any],
-) -> None:
-    del args
-    try:
-        fields = video_fields(body)
-    except VideoRequestError as exc:
-        _reject(reply, str(exc), exc.param)
-        return
-    videos = state.setdefault("videos", {})
-    if not isinstance(videos, dict):
-        videos = {}
-        state["videos"] = videos
-    held = _held(state, fields)
-    if held is None:
-        job = _job(_model_id(body, selection), fields)
-        videos[job["id"]] = job
-        hold = None
-    else:
-        job = held["job"]
-        hold = held["hold"]
-    if getattr(reply, "payload", None) is not job:
-        reply.json(200, job)
-    progress = ClipProgress(
-        job=job,
-        console=getattr(runtime, "console", None),
-        clip=clip_label(fields.width, fields.height, fields.frames, FPS),
-    )
-    progress.hold = hold
-    progress.interrupt = lambda: _reason(state)
-    home = state.get("video_home")
-    root = home if isinstance(home, Path) else None
-    try:
-        if hold is not None and hold.avi is not None:
+class Pipeline(MediaPipeline):
+    """Wan I2V's listener contract. The DiT stays in the runtime."""
+
+    kind = "video"
+    id_prefix = "video_"
+    object_name = "video"
+    table_name = "videos"
+
+    def parse(self, body: dict[str, Any]) -> VideoFields:
+        return video_fields(body)
+
+    def describe(self, request: VideoFields) -> dict[str, Any]:
+        return {
+            "prompt": request.prompt,
+            "seconds": _seconds_label(request.frames),
+            "size": f"{request.width}x{request.height}",
+            "frames": request.frames,
+            "quality": request.quality,
+            "negative_prompt": request.negative_prompt,
+            "guidance_scale": [request.guidance[0], request.guidance[1]],
+            "steps": request.steps,
+        }
+
+    def identity(self, request: VideoFields) -> tuple[Any, ...]:
+        return (
+            request.seed,
+            request.prompt,
+            request.frames,
+            request.quality,
+            f"{request.width}x{request.height}",
+            request.negative_prompt,
+            (request.guidance[0], request.guidance[1]),
+            request.steps,
+        )
+
+    def matches(self, request: VideoFields, identity: Any) -> bool:
+        return identity == self.identity(request)
+
+    def generate(
+        self,
+        runtime: Any,
+        request: VideoFields,
+        hold: Any,
+        job: dict[str, Any],
+        stop: Any,
+        call: MediaCall,
+    ) -> bytes:
+        progress = ClipProgress(
+            job=job,
+            console=getattr(runtime, "console", None),
+            clip=clip_label(request.width, request.height, request.frames, FPS),
+        )
+        progress.hold = hold if isinstance(hold, ClipHold) else None
+        progress.interrupt = stop
+        call.progress = progress
+        if isinstance(hold, ClipHold) and hold.avi is not None:
             avi = hold.avi
         else:
             avi, _timing = runtime.generate(
-                fields.prompt,
-                fields.image,
-                fields.frames,
-                fields.width,
-                fields.height,
-                fields.seed,
+                request.prompt,
+                request.image,
+                request.frames,
+                request.width,
+                request.height,
+                request.seed,
                 progress,
-                negative_prompt=fields.negative_prompt,
-                guidance=fields.guidance,
-                steps=fields.steps,
+                negative_prompt=request.negative_prompt,
+                guidance=request.guidance,
+                steps=request.steps,
             )
-        reason = _reason(state)
+        reason = stop()
         if reason:
             raise ClipPaused(reason, ClipHold(stage="pack", avi=avi, done=progress.done))
-        progress.stage("mp4")
-        write_mp4(store_source(job["id"], avi, home=root), fields.quality)
-    except ClipPaused as paused:
-        progress.close("sample paused" if paused.reason == "preempt" else "sample cancelled")
-        if paused.reason == "cancel":
-            state.pop("video_hold", None)
+        return avi
+
+    def pack(
+        self,
+        runtime: Any,
+        request: VideoFields,
+        result: bytes,
+        job: dict[str, Any],
+        home: Path | None,
+        table: dict[str, Any],
+        call: MediaCall,
+    ) -> None:
+        del runtime
+        progress = call.progress
+        if progress is not None:
+            progress.stage("mp4")
+        write_mp4(store_source(job["id"], result, home=home), request.quality)
+        sweep_videos(table, home=home)
+        return None
+
+    def on_pause(self, runtime: Any, reason: str, call: MediaCall) -> None:
+        del runtime
+        progress = call.progress
+        if progress is None:
             return
-        state["video_hold"] = {"job": job, "seed": fields.seed, "hold": paused.hold}
-        return
-    except Exception as exc:
-        state.pop("video_hold", None)
+        progress.close("sample paused" if reason == "preempt" else "sample cancelled")
+
+    def on_fail(self, runtime: Any, exc: BaseException, call: MediaCall) -> None:
+        del runtime, exc
+        progress = call.progress
+        if progress is None:
+            return
         progress.close(progress.summary(failed=True))
-        job["status"] = "failed"
-        job["error"] = {"code": type(exc).__name__, "message": str(exc)}
-        return
-    state.pop("video_hold", None)
-    sweep_videos(videos, home=root)
-    job["completed_at"] = int(time.time())
-    progress.complete()
-    job["status"] = "completed"
-    progress.close(progress.summary())
+
+    def on_complete(self, runtime: Any, call: MediaCall) -> None:
+        del runtime
+        progress = call.progress
+        if progress is None:
+            return
+        progress.complete()
+        progress.close(progress.summary())
+
+
+handle_video = Pipeline()
 
 
 def video_fields(body: dict[str, Any]) -> VideoFields:
@@ -175,65 +213,6 @@ def video_fields(body: dict[str, Any]) -> VideoFields:
     )
 
 
-def _reason(state: dict[str, Any]) -> str | None:
-    cancel = state.get("cancel")
-    if getattr(cancel, "is_set", lambda: False)():
-        return "cancel"
-    preempt = state.get("preempt")
-    if getattr(preempt, "is_set", lambda: False)():
-        return "preempt"
-    return None
-
-
-def _held(state: dict[str, Any], fields: VideoFields) -> dict[str, Any] | None:
-    """The paused clip when this request is that same job. A mismatch is dropped."""
-    held = state.get("video_hold")
-    if not isinstance(held, dict):
-        return None
-    job = held.get("job")
-    hold = held.get("hold")
-    same = (
-        isinstance(job, dict)
-        and isinstance(hold, ClipHold)
-        and job.get("status") == "in_progress"
-        and held.get("seed") == fields.seed
-        and job.get("prompt") == fields.prompt
-        and job.get("frames") == fields.frames
-        and job.get("quality") == fields.quality
-        and job.get("size") == f"{fields.width}x{fields.height}"
-        and job.get("negative_prompt") == fields.negative_prompt
-        and job.get("guidance_scale") == [fields.guidance[0], fields.guidance[1]]
-        and job.get("steps") == fields.steps
-    )
-    state.pop("video_hold", None)
-    if not same or not isinstance(job, dict) or not isinstance(hold, ClipHold):
-        return None
-    return {"job": job, "hold": hold}
-
-
-def _job(model: str, fields: VideoFields) -> dict[str, Any]:
-    return {
-        "id": "video_" + secrets.token_hex(12),
-        "object": "video",
-        "created_at": int(time.time()),
-        "completed_at": None,
-        "status": "in_progress",
-        "model": model,
-        "progress": 0,
-        "stage": None,
-        "prompt": fields.prompt,
-        "seconds": _seconds_label(fields.frames),
-        "size": f"{fields.width}x{fields.height}",
-        "frames": fields.frames,
-        "quality": fields.quality,
-        "negative_prompt": fields.negative_prompt,
-        "guidance_scale": [fields.guidance[0], fields.guidance[1]],
-        "steps": fields.steps,
-        "eta": None,
-        "error": None,
-    }
-
-
 def _quality(body: dict[str, Any]) -> str:
     value = body.get("quality")
     if value is None:
@@ -247,17 +226,6 @@ def _quality(body: dict[str, Any]) -> str:
         return reported_quality(value)
     except ValueError as exc:
         raise VideoRequestError(str(exc), "quality") from exc
-
-
-def _model_id(body: dict[str, Any], selection: Any) -> str:
-    if selection is not None:
-        requested = getattr(selection, "requested_id", "")
-        if isinstance(requested, str) and requested:
-            return requested
-    model = body.get("model")
-    if isinstance(model, str):
-        return model
-    return ""
 
 
 def _image_bytes(body: dict[str, Any]) -> bytes:

@@ -12,6 +12,7 @@ from jinja2 import Environment
 from tokenizers import Tokenizer
 
 from qwen36_35b_a3b.cache import DEFAULT_CONTEXT_LENGTH
+from favlo.language_pipeline import LanguagePipeline
 from qwen36_35b_a3b.forward import RequestClosed
 from qwen36_35b_a3b.sampling import VARIANTS, mode_card, requested_thinking
 from qwen36_35b_a3b.tools import (
@@ -184,37 +185,43 @@ def _raise(message: str) -> None:
     raise ValueError(message)
 
 
-def handle_chat(
-    reply: Any,
-    runtime: Any,
-    body: dict[str, Any],
-    selection: Any,
-    args: Any,
-    state: dict[str, Any],
-) -> None:
+class Pipeline(LanguagePipeline):
     """One non-streaming or streaming chat completion."""
-    del args, state
-    from qwen36_35b_a3b.firing import finish_request, open_request
 
-    runtime._halted = False
-    runtime._stop = reply.stopped
-    open_request(runtime)
-    finished = False
-    try:
+    def on_open(self, runtime: Any, reply: Any, selection: Any) -> None:
+        from qwen36_35b_a3b.firing import open_request
+
+        del selection
+        runtime._halted = False
+        runtime._stop = reply.stopped
+        open_request(runtime)
+
+    def client_closed(self, exc: OSError) -> bool:
+        return str(exc) == "client closed"
+
+    def complete(
+        self,
+        reply: Any,
+        runtime: Any,
+        body: dict[str, Any],
+        selection: Any,
+        args: Any,
+        state: dict[str, Any],
+    ) -> None:
+        del args, state
         _handle_chat(reply, runtime, body, selection)
-        finished = True
-    except RequestClosed:
-        runtime._status("client closed")
-    except OSError as exc:
-        if str(exc) != "client closed":
-            raise
-        runtime._status("client closed")
-    finally:
+
+    def on_finish(self, runtime: Any, selection: Any, *, complete: bool) -> None:
+        from qwen36_35b_a3b.firing import finish_request
+
         runtime._vision_at = None
         runtime._rope_positions = None
         runtime._rope_delta = 0
         runtime._stop = None
-        finish_request(runtime, selection, complete=finished)
+        finish_request(runtime, selection, complete=complete)
+
+
+handle_chat = Pipeline()
 
 
 def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any) -> None:

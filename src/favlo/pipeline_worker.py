@@ -21,7 +21,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-_HOLDS = ("image_hold", "video_hold", "music_hold")
+_HOLDS = ("image_hold", "video_hold", "music_hold", "voice_hold")
 _KINDS = {
     "chat": "handle_chat",
     "embed": "handle_embed",

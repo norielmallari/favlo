@@ -23,6 +23,7 @@ import numpy as np
 import objc
 
 from favlo.memory import memory
+from favlo.pipeline import ClientClosed
 from qwen38_27b.attn import bind_plane, value_block_bytes
 from qwen38_27b.budget import (
     choose_wire,
@@ -65,7 +66,7 @@ from qwen38_27b.resident import DeviceImage
 from qwen38_27b.session import Session, release_buffers
 
 
-class RequestClosed(Exception):
+class RequestClosed(ClientClosed):
     """The client went away or the process was signaled."""
 
 

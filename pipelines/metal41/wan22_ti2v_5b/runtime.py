@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-import secrets
 from pathlib import Path
 
 from favlo.cli import repo_root
+from favlo.media_pipeline import MediaCall, MediaPaused, MediaPipeline
 from favlo.memory import memory
 from favlo.registry import models_dir
 from wan22_ti2v_5b.clip import Clip, ClipHold
@@ -80,42 +80,64 @@ def open_runtime(
     return Runtime(record, owner_name, budget, DiT(record, gpu), text, vae, gpu)
 
 
-def handle_video(reply, runtime: Runtime, body: dict, selection, args, state: dict) -> None:
-    del selection, args
-    try:
-        held = state.get("video_hold")
-        if isinstance(held, ClipHold):
-            request = held.request
-            video_id = held.video_id
-        else:
-            request = parse_request(body)
-            video_id = "video_" + secrets.token_hex(4)
-            held = None
+class Pipeline(MediaPipeline):
+    """Wan TI2V's listener contract. The clip sampler stays in this package."""
+
+    kind = "video"
+    id_prefix = "video_"
+    object_name = "video"
+    table_name = "videos"
+    id_hex = 4
+
+    def parse(self, body: dict) -> VideoRequest:
+        return parse_request(body)
+
+    def describe(self, request: VideoRequest) -> dict:
+        return {
+            "prompt": request.prompt,
+            "seconds": request.seconds,
+            "size": request.size,
+            "frames": request.frames,
+            "quality": request.quality,
+        }
+
+    def generate(self, runtime, request, hold, job, stop, call: MediaCall):
         _require_fit(runtime, request)
-        videos = state.setdefault("videos", {})
+        kept = hold if isinstance(hold, ClipHold) else None
+
+        def gate(pause: bool = False) -> bool:
+            reason = stop()
+            if reason == "cancel":
+                return True
+            return bool(pause and reason == "preempt")
+
         payload, paused = runtime.clip.sample(
             request,
-            video_id=video_id,
-            home=state.get("video_home"),
-            videos=videos,
-            hold=held,
-            stop=_stop(state),
+            video_id=job["id"],
+            home=call.home,
+            videos=call.table,
+            hold=kept,
+            stop=gate,
         )
         if paused is not None:
-            state["video_hold"] = paused
-            videos[video_id] = {
-                "id": video_id,
-                "status": "in_progress",
-                "size": request.size,
-                "seconds": request.seconds,
-                "progress": paused.step / 4,
-            }
-            reply.json(200, {"status": "in_progress", "id": video_id, "size": request.size})
-            return
-        state["video_hold"] = None
-        reply.json(200, payload)
-    except VideoRequestError as exc:
-        reply.json(400, {"error": str(exc)})
+            job["progress"] = min(99, int(100 * paused.step / 4))
+            job["size"] = request.size
+            job["seconds"] = request.seconds
+            raise MediaPaused("preempt", paused)
+        if isinstance(payload, dict) and payload.get("status") == "cancelled":
+            raise MediaPaused("cancel", None)
+        return payload
+
+    def pack(self, runtime, request, result, job, home, table, call):
+        del runtime, request, job, home, table, call
+        if isinstance(result, dict) and result.get("status") == "completed":
+            result["progress"] = 100
+        if isinstance(result, dict):
+            return result
+        return None
+
+
+handle_video = Pipeline()
 
 
 def handle_chat(reply, runtime, body, selection, args, state) -> None:
@@ -129,17 +151,6 @@ def _require_fit(runtime: Runtime, request: VideoRequest) -> None:
         return
     message = "the clip does not fit the memory budget"
     raise VideoRequestError(message)
-
-
-def _stop(state: dict):
-    def stop(pause: bool = False) -> bool:
-        cancel = state.get("cancel")
-        if cancel is not None and cancel.is_set():
-            return True
-        preempt = state.get("preempt")
-        return bool(pause and preempt is not None and preempt.is_set())
-
-    return stop
 
 
 def _budget(limit: str | None) -> int:

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import secrets
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 
+from favlo.media_pipeline import MediaCall, MediaPaused, MediaPipeline, MediaRequestError
 from voxcpm2.audio import encode_wav
 from voxcpm2.config import ModelConfig, load_config
 from voxcpm2.metal import Session
@@ -68,6 +68,7 @@ class Runtime:
         min_len: int = 2,
         steps: int = 10,
         seed: int | None = None,
+        stop: Any = None,
     ) -> np.ndarray:
         """One waveform. ``instructions`` is a parenthetical style prefix."""
         line = style_line(text, instructions).strip()
@@ -86,6 +87,7 @@ class Runtime:
             min_len=min_len,
             steps=steps,
             seed=seed,
+            stop=stop,
         )
 
     def _open(self) -> tuple[Session, Store, Decoder, LineTokenizer]:
@@ -180,53 +182,69 @@ def handle_chat(
     )
 
 
-def handle_voice(
-    reply: Any,
-    runtime: Runtime,
-    body: dict[str, Any],
-    selection: Any,
-    args: Any,
-    state: dict[str, Any],
-) -> None:
-    """Write one spoken WAV, then the reply names that id."""
-    del selection, args
-    text = body.get("input")
-    if not isinstance(text, str) or not text.strip():
-        message = "input is required"
-        raise ValueError(message)
-    named = body.get("voice")
-    if isinstance(named, str) and named.strip():
-        message = "a named voice needs a reference clip; this opening speaks with an empty voice"
-        raise ValueError(message)
-    fmt = body.get("response_format") or "mp3"
-    if fmt not in {"mp3", "wav", "flac"}:
-        message = "response_format must be mp3, wav, or flac"
-        raise ValueError(message)
-    instructions = body.get("instructions")
-    if instructions is None:
-        instructions = ""
-    if not isinstance(instructions, str):
-        message = "instructions must be a string"
-        raise ValueError(message)
-    samples = runtime.speak(text, instructions=instructions)
-    from favlo.voice import store_wav
+class VoiceRequest(NamedTuple):
+    text: str
+    instructions: str
+    output_format: str
 
-    voice_id = "voice_" + secrets.token_hex(12)
-    home = state.get("voice_home")
-    root = home if isinstance(home, Path) else None
-    jobs = state.setdefault("voice", {})
-    payload = encode_wav(samples, runtime.config.out_sample_rate)
-    store_wav(voice_id, payload, home=root, voice=jobs, output_format=fmt)
-    jobs[voice_id] = {"response_format": fmt}
-    reply.json(
-        200,
-        {
-            "id": voice_id,
+
+class Pipeline(MediaPipeline):
+    """VoxCPM2's listener contract. Speech stays in the runtime."""
+
+    kind = "voice"
+    id_prefix = "voice_"
+    object_name = "audio.voice"
+    table_name = "voice"
+
+    def parse(self, body: dict[str, Any]) -> VoiceRequest:
+        text = body.get("input")
+        if not isinstance(text, str) or not text.strip():
+            raise MediaRequestError("input is required", "input")
+        named = body.get("voice")
+        if isinstance(named, str) and named.strip():
+            raise MediaRequestError(
+                "a named voice needs a reference clip; this opening speaks with an empty voice",
+                "voice",
+            )
+        fmt = body.get("response_format") or "mp3"
+        if fmt not in {"mp3", "wav", "flac"}:
+            raise MediaRequestError("response_format must be mp3, wav, or flac", "response_format")
+        instructions = body.get("instructions")
+        if instructions is None:
+            instructions = ""
+        if not isinstance(instructions, str):
+            raise MediaRequestError("instructions must be a string", "instructions")
+        return VoiceRequest(text, instructions, fmt)
+
+    def describe(self, request: VoiceRequest) -> dict[str, Any]:
+        return {"response_format": request.output_format}
+
+    def generate(self, runtime: Runtime, request: VoiceRequest, hold: Any, job: dict[str, Any], stop: Any, call: MediaCall):
+        del hold, job, call
+
+        def gate() -> None:
+            reason = stop()
+            if reason:
+                raise MediaPaused(reason, None)
+
+        return runtime.speak(request.text, instructions=request.instructions, stop=gate)
+
+    def pack(self, runtime: Runtime, request: VoiceRequest, result: Any, job: dict[str, Any], home: Path | None, table: dict[str, Any], call: MediaCall):
+        del call
+        from favlo.voice import store_wav
+
+        payload = encode_wav(result, runtime.config.out_sample_rate)
+        store_wav(job["id"], payload, home=home, voice=table, output_format=request.output_format)
+        table[job["id"]] = {"response_format": request.output_format}
+        return {
+            "id": job["id"],
             "object": "audio.voice",
             "status": "completed",
-            "response_format": fmt,
-        },
-    )
+            "response_format": request.output_format,
+        }
+
+
+handle_voice = Pipeline()
 
 
 def _room(max_memory: str | int | None) -> int:

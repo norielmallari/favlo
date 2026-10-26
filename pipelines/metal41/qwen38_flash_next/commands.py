@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from favlo.console import Console
+from favlo.language_pipeline import LanguagePipeline
 from favlo.registry import (
     add_model,
     choose_complete,
@@ -676,23 +677,27 @@ def open_runtime(
     )
 
 
-def handle_chat(
-    reply: Any,
-    runtime: Any,
-    body: dict[str, Any],
-    selection: Any,
-    args: Any,
-    state: dict[str, Any],
-) -> None:
+class Pipeline(LanguagePipeline):
     """One chat completion on a runtime this pipeline opened."""
-    open_request(runtime)
-    finished = False
-    try:
+
+    def on_open(self, runtime: Any, reply: Any, selection: Any) -> None:
+        del reply, selection
+        open_request(runtime)
+
+    def prepare(
+        self,
+        reply: Any,
+        runtime: Any,
+        body: dict[str, Any],
+        selection: Any,
+        args: Any,
+        state: dict[str, Any],
+    ) -> None:
+        del args, state
         messages = body["messages"]
         tools = body.get("tools")
         requested = requested_thinking(body)
         enable_thinking, card = mode_card(selection, requested)
-        max_tokens = _request_limit(body)
         prompt_cap = DEFAULT_MAX_PROMPT_TOKENS
         if selection is not None:
             stored = getattr(selection, "max_prompt_tokens", None)
@@ -702,7 +707,6 @@ def handle_chat(
         presence_default = None
         if isinstance(card, dict) and "presence_penalty" in card:
             presence_default = float(card["presence_penalty"])
-        stream = bool(body.get("stream", False))
         runtime._stop = reply.stopped
         runtime.tool_names = tool_names(tools)
         runtime.required_function = required_function(body.get("tool_choice"))
@@ -714,68 +718,108 @@ def handle_chat(
             frequency=0.0 if frequency is None else float(frequency),
             window=_penalty_window(body),
         )
-        try:
-            prompt = runtime.encode_chat(
-                messages,
-                tools,
+        self._fields = {
+            "messages": messages,
+            "tools": tools,
+            "enable_thinking": enable_thinking,
+            "max_tokens": _request_limit(body),
+            "prompt_cap": prompt_cap,
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k,
+            "stream": bool(body.get("stream", False)),
+        }
+
+    def complete(
+        self,
+        reply: Any,
+        runtime: Any,
+        body: dict[str, Any],
+        selection: Any,
+        args: Any,
+        state: dict[str, Any],
+    ) -> None:
+        del selection, state
+        fields = self._fields
+        messages = fields["messages"]
+        tools = fields["tools"]
+        enable_thinking = fields["enable_thinking"]
+        prompt = runtime.encode_chat(
+            messages,
+            tools,
+            enable_thinking,
+            reasoning_effort=_reasoning_effort(body),
+            continue_final=bool(body.get("continue_final_message")),
+        )
+        if fields["stream"]:
+            _stream_chat(
+                reply,
+                runtime,
+                prompt,
+                fields["max_tokens"],
+                fields["temperature"],
+                fields["top_p"],
+                fields["top_k"],
+                _prompt_text(messages),
                 enable_thinking,
-                reasoning_effort=_reasoning_effort(body),
-                continue_final=bool(body.get("continue_final_message")),
+                args,
+                fields["prompt_cap"],
+                tool_choice=body.get("tool_choice"),
             )
-            if stream:
-                _stream_chat(
-                    reply,
-                    runtime,
-                    prompt,
-                    max_tokens,
-                    temperature,
-                    top_p,
-                    top_k,
-                    _prompt_text(messages),
-                    enable_thinking,
-                    args,
-                    prompt_cap,
-                    tool_choice=body.get("tool_choice"),
-                )
-            else:
-                tokens = runtime.generate(prompt, max_tokens, temperature, top_p, top_k)
-                text = runtime.decode(tokens)
-                content, calls, reasoning = split_completion(
-                    text,
-                    enable_thinking=enable_thinking,
-                    tool_choice=body.get("tool_choice"),
-                )
-                _append_transcript(args.transcript, _prompt_text(messages), text)
-                if calls:
-                    reason = "tool_calls"
-                else:
-                    reason = "length" if runtime._hit_limit else "stop"
-                reply.json(
-                    200,
-                    _completion(
-                        content,
-                        len(prompt),
-                        len(tokens),
-                        reason,
-                        calls,
-                        reasoning if enable_thinking else "",
-                        runtime,
-                        reply.model_id,
-                        prompt_cap,
-                    ),
-                )
-            finished = True
-        except (RequestClosed, OSError):
-            _log("client closed")
-            persist = getattr(runtime, "_persist_prefix", None)
-            if persist is not None:
-                persist()
-    finally:
-        finish_request(runtime, selection, complete=finished)
+            return
+        tokens = runtime.generate(
+            prompt,
+            fields["max_tokens"],
+            fields["temperature"],
+            fields["top_p"],
+            fields["top_k"],
+        )
+        text = runtime.decode(tokens)
+        content, calls, reasoning = split_completion(
+            text,
+            enable_thinking=enable_thinking,
+            tool_choice=body.get("tool_choice"),
+        )
+        _append_transcript(args.transcript, _prompt_text(messages), text)
+        if calls:
+            reason = "tool_calls"
+        else:
+            reason = "length" if runtime._hit_limit else "stop"
+        reply.json(
+            200,
+            _completion(
+                content,
+                len(prompt),
+                len(tokens),
+                reason,
+                calls,
+                reasoning if enable_thinking else "",
+                runtime,
+                reply.model_id,
+                fields["prompt_cap"],
+            ),
+        )
+
+    def client_closed(self, exc: OSError) -> bool:
+        del exc
+        return True
+
+    def on_disconnect(self, runtime: Any) -> None:
+        _log("client closed")
+        persist = getattr(runtime, "_persist_prefix", None)
+        if persist is not None:
+            persist()
+
+    def on_finish(self, runtime: Any, selection: Any, *, complete: bool) -> None:
+        finish_request(runtime, selection, complete=complete)
         runtime._stop = None
         runtime.tool_names = []
         runtime.required_function = None
         runtime.required_closes = False
+        self._fields = None
+
+
+handle_chat = Pipeline()
 
 
 def _stream_chat(

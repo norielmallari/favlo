@@ -66,7 +66,7 @@ class Scheduler:
             while self._holding or not self._is_next(ticket):
                 if cancel is not None and cancel.is_set():
                     raise ClientClosed()
-                if not noted and (self._holding or self._behind_media(ticket)):
+                if not noted:
                     noted = True
                     holding = self._holding > 0
                     self._cond.release()
@@ -158,13 +158,6 @@ class Scheduler:
             self._running = None
         self._sync_preempt()
         self._cond.notify_all()
-
-    def _behind_media(self, ticket: _Ticket) -> bool:
-        return (
-            ticket.kind in _FOREGROUND
-            and self._running is not None
-            and self._running.kind == "media"
-        )
 
     def _sync_preempt(self) -> None:
         media = self._running is not None and self._running.kind == "media"

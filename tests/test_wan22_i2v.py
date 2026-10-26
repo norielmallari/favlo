@@ -816,7 +816,7 @@ def test_preempt_pauses_and_the_same_job_resumes(tmp_path) -> None:
     assert runtime.stages == [None, "text"]
     assert second.payload["id"] == job["id"]
     assert job["status"] == "completed"
-    assert "video_hold" not in state
+    assert state.get("video_hold") is None
     stored = load_video(job["id"], home=tmp_path)
     assert stored is not None and stored[4:8] == b"ftyp"
 
@@ -920,7 +920,7 @@ def test_cancel_discards_the_hold(tmp_path) -> None:
     handle_video(reply, runtime, body, None, None, state)
     job = state["videos"][reply.payload["id"]]
     assert job["status"] == "in_progress"
-    assert "video_hold" not in state
+    assert state.get("video_hold") is None
 
 
 def test_close_drops_the_device_and_the_expert() -> None:

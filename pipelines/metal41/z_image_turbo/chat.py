@@ -16,16 +16,16 @@ from typing import Any, NamedTuple
 import numpy as np
 
 from favlo.images import load_image, store_source, sweep_images
+from favlo.media_pipeline import MediaCall, MediaPaused, MediaPipeline, MediaRequestError
 from z_image_turbo.hold import ImageHold, ImageJob, ImagePaused
 from z_image_turbo.png import REPORTED_QUALITY, pack_rgb, write_png
 from z_image_turbo.schedule import STEPS
 from z_image_turbo.scratch import MAX_EDGE
 
 
-class ImageRequestError(ValueError):
+class ImageRequestError(MediaRequestError):
     def __init__(self, message: str, param: str | None) -> None:
-        super().__init__(message)
-        self.param = param
+        super().__init__(message, param)
 
 
 class ImageFields(NamedTuple):
@@ -57,84 +57,118 @@ def handle_chat(
     )
 
 
-def handle_image(
-    reply: Any,
-    runtime: Any,
-    body: dict[str, Any],
-    selection: Any,
-    args: Any,
-    state: dict[str, Any],
-) -> None:
-    del selection, args
-    try:
-        _handle_image(reply, runtime, body, state)
-    finally:
+class Pipeline(MediaPipeline):
+    """Z-Image's listener contract. The DiT stays in the runtime."""
+
+    kind = "image"
+    id_prefix = "image_"
+    object_name = "image"
+
+    def parse(self, body: dict[str, Any]) -> ImageFields:
+        return _fields(body)
+
+    def identity(self, request: ImageFields) -> tuple[Any, ...]:
+        return (
+            request.prompt,
+            request.seed,
+            request.width,
+            request.height,
+            request.count,
+            request.quality,
+        )
+
+    def matches(self, request: ImageFields, identity: Any) -> bool:
+        return identity == self.identity(request)
+
+    def generate(
+        self,
+        runtime: Any,
+        request: ImageFields,
+        hold: Any,
+        job: dict[str, Any],
+        stop: Any,
+        call: MediaCall,
+    ) -> ImageJob:
+        del job
+        home = call.home
+        image = hold if isinstance(hold, ImageJob) else ImageJob(
+            id="image_" + secrets.token_hex(12),
+            created=int(time.time()),
+            prompt=request.prompt,
+            seed=request.seed,
+            width=request.width,
+            height=request.height,
+            count=request.count,
+            quality=request.quality,
+        )
+        call.image = image
+        try:
+            while image.index < request.count:
+                reason = stop()
+                if reason == "cancel" or _yields(reason, image):
+                    raise MediaPaused(reason or "preempt", image)
+                pixels, timing = _draw(runtime, request, image, stop)
+                reason = stop()
+                if reason == "cancel":
+                    raise MediaPaused("cancel", image)
+                if reason == "preempt":
+                    image.hold = _decoded(pixels, timing)
+                    raise MediaPaused("preempt", image)
+                image.images.append(_store(pixels, request.quality, home))
+                image.timings.append(timing)
+                image.index += 1
+                image.hold = None
+        except ImagePaused as paused:
+            image.hold = paused.hold
+            raise MediaPaused(paused.reason, image) from paused
+        except (TypeError, ValueError) as exc:
+            text = str(exc)
+            param = "prompt" if text.startswith("caption length") else None
+            raise MediaRequestError(text, param) from exc
+        return image
+
+    def pack(
+        self,
+        runtime: Any,
+        request: ImageFields,
+        result: ImageJob,
+        job: dict[str, Any],
+        home: Path | None,
+        table: dict[str, Any],
+        call: MediaCall,
+    ) -> dict[str, Any]:
+        del runtime, job, home, table, call
+        return _finished(result, request)
+
+    def working(self, request: ImageFields, job: dict[str, Any], hold: Any) -> dict[str, Any] | None:
+        del job
+        if isinstance(hold, ImageJob):
+            return _working(hold, request)
+        return None
+
+    def on_finish(self, runtime: Any, call: MediaCall) -> None:
+        del call
         release = getattr(runtime, "close", None)
         if callable(release):
             release()
 
 
-def _handle_image(
-    reply: Any,
-    runtime: Any,
-    body: dict[str, Any],
-    state: dict[str, Any],
-) -> None:
-    home = state.get("image_home")
-    root = home if isinstance(home, Path) else None
-    try:
-        fields = _fields(body)
-    except ImageRequestError as exc:
-        _reject(reply, str(exc), exc.param)
-        return
-    job = _resume(state, fields)
-    if job is None:
-        job = ImageJob(
-            id="image_" + secrets.token_hex(12),
-            created=int(time.time()),
-            prompt=fields.prompt,
-            seed=fields.seed,
-            width=fields.width,
-            height=fields.height,
-            count=fields.count,
-            quality=fields.quality,
-        )
-    try:
-        while job.index < fields.count:
-            if _paused(state, job):
-                _keep(reply, state, job, fields, _reason(state) == "cancel")
-                return
-            pixels, timing = _draw(runtime, fields, job, state)
-            if _reason(state) == "cancel":
-                _keep(reply, state, job, fields, True)
-                return
-            if _reason(state) == "preempt":
-                job.hold = _decoded(pixels, timing)
-                _keep(reply, state, job, fields, False)
-                return
-            job.images.append(_store(pixels, fields.quality, root))
-            job.timings.append(timing)
-            job.index += 1
-            job.hold = None
-    except ImagePaused as paused:
-        job.hold = paused.hold
-        _keep(reply, state, job, fields, paused.reason == "cancel")
-        return
-    except (TypeError, ValueError) as exc:
-        state.pop("image_hold", None)
-        text = str(exc)
-        param = "prompt" if text.startswith("caption length") else None
-        _reject(reply, text, param)
-        return
-    state.pop("image_hold", None)
-    reply.json(200, _finished(job, fields))
+handle_image = Pipeline()
+
+
+def _yields(reason: str | None, job: ImageJob) -> bool:
+    """Preempt before a draw yields. A decoded image is stored instead."""
+    if reason != "preempt":
+        return False
+    held = job.hold
+    return held is None or held.pixels is None
 
 
 def _draw(
     runtime: Any,
     fields: ImageFields,
     job: ImageJob,
-    state: dict[str, Any],
+    stop: Any,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     hold = job.hold
     if hold is not None and hold.pixels is not None:
@@ -156,7 +190,7 @@ def _draw(
         fields.height,
         STEPS,
         fields.seed + job.index,
-        stop=lambda: _reason(state),
+        stop=stop,
         latent=latent,
         done_steps=done,
         step_times=times,
@@ -186,57 +220,6 @@ def _decoded(pixels: np.ndarray, timing: dict[str, Any]) -> ImageHold:
         vae_s=float(timing.get("vae") or 0.0),
         spent=float(timing.get("total") or 0.0),
     )
-
-
-def _keep(
-    reply: Any,
-    state: dict[str, Any],
-    job: ImageJob,
-    fields: ImageFields,
-    cancel: bool,
-) -> None:
-    reply.json(200, _working(job, fields))
-    if cancel:
-        state.pop("image_hold", None)
-        return
-    state["image_hold"] = job
-
-
-def _paused(state: dict[str, Any], job: ImageJob) -> bool:
-    reason = _reason(state)
-    if reason == "cancel":
-        return True
-    if reason != "preempt":
-        return False
-    hold = job.hold
-    return hold is None or hold.pixels is None
-
-
-def _reason(state: dict[str, Any]) -> str | None:
-    cancel = state.get("cancel")
-    if getattr(cancel, "is_set", lambda: False)():
-        return "cancel"
-    preempt = state.get("preempt")
-    if getattr(preempt, "is_set", lambda: False)():
-        return "preempt"
-    return None
-
-
-def _resume(state: dict[str, Any], fields: ImageFields) -> ImageJob | None:
-    held = state.pop("image_hold", None)
-    if not isinstance(held, ImageJob):
-        return None
-    same = (
-        held.prompt == fields.prompt
-        and held.seed == fields.seed
-        and held.width == fields.width
-        and held.height == fields.height
-        and held.count == fields.count
-        and held.quality == fields.quality
-    )
-    if not same:
-        return None
-    return held
 
 
 def _finished(job: ImageJob, fields: ImageFields) -> dict[str, Any]:

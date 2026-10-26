@@ -12,14 +12,14 @@ from typing import Any
 
 import numpy as np
 
+from favlo.media_pipeline import MediaPaused
 
-class ImagePaused(Exception):
+
+class ImagePaused(MediaPaused):
     """The image stopped between stages. The job stays in progress."""
 
     def __init__(self, reason: str, hold: ImageHold) -> None:
-        super().__init__(reason)
-        self.reason = reason
-        self.hold = hold
+        super().__init__(reason, hold)
 
 
 @dataclass

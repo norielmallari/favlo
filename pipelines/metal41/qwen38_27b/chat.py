@@ -16,6 +16,7 @@ from jinja2 import Environment
 from tokenizers import Tokenizer
 
 from qwen38_27b.cache import DEFAULT_CONTEXT_LENGTH
+from favlo.language_pipeline import LanguagePipeline
 from qwen38_27b.forward import RequestClosed
 from qwen38_27b.sampling import VARIANTS, mode_card, requested_thinking
 from qwen38_27b.tools import (
@@ -173,24 +174,28 @@ def _forced_call(root: Path, tools: Any, required: str | None) -> tuple[list[int
     return encode_text(root, text), True
 
 
-def handle_chat(
-    reply: Any,
-    runtime: Any,
-    body: dict[str, Any],
-    selection: Any,
-    args: Any,
-    state: dict[str, Any],
-) -> None:
+class Pipeline(LanguagePipeline):
     """One non-streaming or streaming chat completion. The next token is an argmax."""
-    del args, state
-    runtime._halted = False
-    runtime._stop = reply.stopped
-    try:
+
+    def on_open(self, runtime: Any, reply: Any, selection: Any) -> None:
+        del selection
+        runtime._halted = False
+        runtime._stop = reply.stopped
+
+    def complete(
+        self,
+        reply: Any,
+        runtime: Any,
+        body: dict[str, Any],
+        selection: Any,
+        args: Any,
+        state: dict[str, Any],
+    ) -> None:
+        del args, state
         _handle_chat(reply, runtime, body, selection)
-    except RequestClosed:
-        runtime._status("client closed")
-    finally:
-        runtime._stop = None
+
+
+handle_chat = Pipeline()
 
 
 def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any) -> None:

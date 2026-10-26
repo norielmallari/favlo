@@ -2,8 +2,9 @@
 
 ``server/discover`` is the 2026-07-28 probe. A generate call advertises
 ``io.modelcontextprotocol/tasks``, then polls ``tasks/get`` and reads the
-``favlo://`` link. A dropped connection is one ``RuntimeError``. Judge turns
-stay on ``POST /v1/chat/completions``.
+``favlo://`` link. ``start_task`` returns that id while the task is still
+working. A dropped connection is one ``RuntimeError``. Judge turns stay on
+``POST /v1/chat/completions``.
 """
 
 from __future__ import annotations
@@ -30,8 +31,8 @@ def call_tool(port: int, name: str, arguments: dict[str, Any]) -> dict[str, Any]
     )
 
 
-def generate(port: int, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Run one generate tool and return the completed tool result."""
+def start_task(port: int, name: str, arguments: dict[str, Any]) -> str:
+    """Create one generate task and return its id without waiting."""
     _post(port, "server/discover", {})
     created = _post(
         port,
@@ -40,10 +41,24 @@ def generate(port: int, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         tasks=True,
         header_name=name,
     )
-    task_id = str(created["taskId"])
+    task_id = created.get("taskId")
+    if not isinstance(task_id, str) or not task_id:
+        message = "the task was not created"
+        raise RuntimeError(message)
+    return task_id
+
+
+def task_view(port: int, task_id: str) -> dict[str, Any]:
+    """The current ``tasks/get`` record for one task."""
+    return _post(port, "tasks/get", {"taskId": task_id}, tasks=True)
+
+
+def generate(port: int, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Run one generate tool and return the completed tool result."""
+    task_id = start_task(port, name, arguments)
     deadline = time.monotonic() + 3600
     while time.monotonic() < deadline:
-        current = _post(port, "tasks/get", {"taskId": task_id}, tasks=True)
+        current = task_view(port, task_id)
         status = current.get("status")
         if status == "completed":
             result = current.get("result")

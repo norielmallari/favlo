@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 from tokenizers import Tokenizer
 
+from favlo.embeddings_pipeline import EmbeddingsPipeline
 from bge_m3.gpu import Gpu, fit_length
 from bge_m3.text import (
     HIDDEN,
@@ -160,49 +161,12 @@ def open_runtime(
     return Runtime(Path(path), owner=owner, max_memory=max_memory)
 
 
-def handle_embed(
-    reply: Any,
-    runtime: Runtime,
-    body: dict[str, Any],
-    selection: Any,
-    args: Any,
-    state: dict[str, Any],
-) -> None:
+class Pipeline(EmbeddingsPipeline):
     """``POST /v1/embeddings``. One string in, one dense vector out."""
-    del args, state
-    text = body.get("input")
-    if not isinstance(text, str) or not text.strip():
-        reply.json(
-            400,
-            {
-                "error": {
-                    "message": "input must be a string",
-                    "type": "invalid_request_error",
-                    "param": "input",
-                }
-            },
-        )
-        return
-    try:
+
+    def embed(self, runtime: Runtime, text: str) -> tuple[list[float], int]:
         result = runtime.embed(text)
-    except ValueError as exc:
-        reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
-        return
-    model = ""
-    if selection is not None:
-        model = str(getattr(selection, "requested_id", "") or "")
-    reply.json(
-        200,
-        {
-            "object": "list",
-            "model": model,
-            "data": [
-                {
-                    "object": "embedding",
-                    "index": 0,
-                    "embedding": result.vector,
-                }
-            ],
-            "usage": {"prompt_tokens": result.tokens, "total_tokens": result.tokens},
-        },
-    )
+        return result.vector, result.tokens
+
+
+handle_embed = Pipeline()

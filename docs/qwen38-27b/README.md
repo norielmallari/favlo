@@ -2,7 +2,7 @@
 
 As-built note for the `qwen38-27b` pipeline. Download, pack, and the first chat are [SETUP.md](SETUP.md). The process contract is [../../ARCHITECTURE.md](../../ARCHITECTURE.md). This directory wins for this pipeline's records and kernels. Another pipeline does not edit it.
 
-Clients reach this pipeline through `favlo serve`. `GET /v1/models` lists it once a record is registered, and the `model` field on `POST /v1/chat/completions` loads it. `download`, `quantize`, `delete`, `kernels`, `bf16`, `complete`, and `models` require `favlo --qwen38-27b`. That flag loads `pipelines/metal41/qwen38-27b.py`, which loads `qwen38_27b`. The package does not import `qwen38_flash_next` or `qwen36_35b_a3b`.
+`handle_chat` is a `LanguagePipeline`. The completion, the sampler, and the stream stay in this package. Clients reach this pipeline through `favlo serve`. `GET /v1/models` lists it once a record is registered, and the `model` field on `POST /v1/chat/completions` loads it. `download`, `quantize`, `delete`, `kernels`, `bf16`, `complete`, and `models` require `favlo --qwen38-27b`. That flag loads `pipelines/metal41/qwen38-27b.py`, which loads `qwen38_27b`. The package does not import `qwen38_flash_next` or `qwen36_35b_a3b`.
 
 The official checkpoint is [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B). Those weights are under the Apache License, Version 2.0. Device spans come from the process memory manager. The wire budget is that manager's reclaimable bytes plus the spans it still holds. `open_runtime` takes `owner` and every span from that opening uses it. `close` sweeps that string. A command that omits `owner` mints one from this runtime's id. The fit still starts at a 2048-token chunk.
 

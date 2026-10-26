@@ -21,6 +21,9 @@ The files in [`.cursor/rules`](.cursor/rules) are repo rules. Cursor loads them 
 | [optimization-image.mdc](.cursor/rules/optimization-image.mdc) | When optimizing image generation time. |
 | [research-evidence.mdc](.cursor/rules/research-evidence.mdc) | When writing a measured claim. The note records the remainder a search on that date did not find. The software citation stays in CITATION.cff. |
 | [serving-media.mdc](.cursor/rules/serving-media.mdc) | When an API returns generated media. Save the file, then stream that file. |
+| [media-pipeline.mdc](.cursor/rules/media-pipeline.mdc) | When editing a served media pipeline or `MediaPipeline`. Inherit the listener contract, and run the one preemption harness after that contract changes. |
+| [language-pipeline.mdc](.cursor/rules/language-pipeline.mdc) | When editing a served language model or `LanguagePipeline`. Keep the completion in the pipeline, and run the language harness after the disconnect shell changes. |
+| [embeddings-pipeline.mdc](.cursor/rules/embeddings-pipeline.mdc) | When editing a served embedding model or `EmbeddingsPipeline`. Return the vector and the token count, and let the class write the list object. |
 
 ## Changes
 
@@ -30,7 +33,7 @@ Work on `main`. Do not create a branch unless the user asks for one.
 
 Changes stay in this repository. Edit another repository only when the user asks for that repository.
 
-Edit one runtime. Leave every other runtime's files untouched. The write set and the runtime table are in [ARCHITECTURE.md](ARCHITECTURE.md). Do not edit `src/favlo/cli.py` to register a runtime. Do not edit another pipeline's package, shaders, tests, or docs. Do not add a base class or a kernel that branches on the pipeline.
+Edit one runtime. Leave every other runtime's files untouched. The write set and the runtime table are in [ARCHITECTURE.md](ARCHITECTURE.md). Do not edit `src/favlo/cli.py` to register a runtime. Do not edit another pipeline's package, shaders, tests, or docs. A served media pipeline inherits `MediaPipeline`. A language-model pipeline does not. Do not add a kernel that branches on the pipeline. A new abstract method on `MediaPipeline` updates every subclass in that same change.
 
 Adding a model adds an entry file under `pipelines/metal41/`, a package beside it, a `docs/<pipeline>/` note, and one row in the runtime table. Load [bootstrap-new-model](.cursor/skills/bootstrap-new-model/SKILL.md) before creating one. Load [prefix-caching](.cursor/skills/prefix-caching/SKILL.md) before wiring a pipeline to the shared prefix store.
 
@@ -44,7 +47,7 @@ A pipeline reads `memory.budget()` when it opens and shrinks the one knob it own
 
 ## Harness
 
-A media harness does not take the machine lock. It calls the listener. A media harness uses one `favlo serve` on `127.0.0.1:8129`. That is `harness.image`, `harness.image_smoke_agent`, `harness.image_persona`, `harness.video_smoke_agent`, `harness.video_ti2v_agent`, `harness.video_quality_agent`, `harness.music_smoke_agent`, `harness.music_long_agent`, `harness.voice_smoke_agent`, `harness.embeddings_agent`, and `harness.memory_agent`. `python -m harness.server run -- <command>` opens that listener, runs the command, and closes the session. `python -m harness.server status` prints `listening` or `down`. An existing listener is reused and left running. A listener this session started is stopped when the command exits. These commands do not bind a second port. The same session is what those modules call, so running one of them directly follows this rule.
+A media harness does not take the machine lock. It calls the listener. A media harness uses one `favlo serve` on `127.0.0.1:8129`. That is `harness.image`, `harness.image_smoke_agent`, `harness.image_persona`, `harness.video_smoke_agent`, `harness.video_ti2v_agent`, `harness.video_quality_agent`, `harness.media_pipeline`, `harness.language_pipeline`, `harness.music_smoke_agent`, `harness.music_long_agent`, `harness.voice_smoke_agent`, `harness.embeddings_agent`, and `harness.memory_agent`. `python -m harness.server run -- <command>` opens that listener, runs the command, and closes the session. `python -m harness.server status` prints `listening` or `down`. An existing listener is reused and left running. A listener this session started is stopped when the command exits. These commands do not bind a second port. The same session is what those modules call, so running one of them directly follows this rule.
 
 `python -m harness`, `python -m harness.coding`, and `python -m harness.worktree` restart the process they started so a later turn reloads a prefix. They require port 8129 to be free. They do not attach to a listener someone else left running, and they do not bind a second port beside it.
 

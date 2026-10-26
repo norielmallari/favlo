@@ -41,7 +41,7 @@ No personal data: no names, home directories, hostnames, or volume paths. A clai
 
 ## Isolation
 
-Leave every other pipeline's entry, package, shaders, tests, and docs untouched. Do not import another pipeline. Do not add a base class, a shared runner, or a kernel that branches on the pipeline. Do not change `src/favlo/` unless the task is the listener, the registry, the console, or the prefix store. A pipeline that keeps a sequence cache imports that store. Load [prefix-caching](../prefix-caching/SKILL.md) before writing the adapter.
+Leave every other pipeline's entry, package, shaders, tests, and docs untouched. Do not import another pipeline. A served media pipeline inherits `MediaPipeline` and binds `handle_<kind>` to an instance. A served language model inherits `LanguagePipeline` and binds `handle_chat` to an instance. A served embedding model inherits `EmbeddingsPipeline` and binds `handle_embed` to an instance. Do not add another base class, a shared runner, or a kernel that branches on the pipeline. Do not change `src/favlo/` unless the task is the listener, the registry, the console, or the prefix store. A pipeline that keeps a sequence cache imports that store. Load [prefix-caching](../prefix-caching/SKILL.md) before writing the adapter.
 
 Re-implement the math from this model's papers, model card, and the vendor documents. Another pipeline's source, tests, comments, and design notes are not a reference. Another application's tree is not a reference.
 

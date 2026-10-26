@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import objc
 
+from favlo.pipeline import ClientClosed
 from favlo.prefix import (
     DEFAULT_BUDGET,
     PrefixHeader,
@@ -151,7 +152,7 @@ def span_expert_bits(hot: int, cold: int, super_bits: int) -> bool:
     return routed and super_bits in (4, 8)
 
 
-class RequestClosed(Exception):
+class RequestClosed(ClientClosed):
     """The client closed the socket while a forward was still running."""
 
 

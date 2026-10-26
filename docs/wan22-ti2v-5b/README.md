@@ -8,7 +8,7 @@ open the BF16 encoder file. The tokenizer is `tokenizer.json` beside the
 source download. This pipeline does not pack the encoder. The VAE is the
 float32 `Wan2.2_VAE.pth` from that card.
 
-`generate_video_t2v` samples from text. `generate_video_i2v` conditions the
+`handle_video` is a `MediaPipeline`. `generate_video_t2v` samples from text. `generate_video_i2v` conditions the
 first latent frame on a PNG. This pipeline is listed by both
 `list_video_models_t2v` and `list_video_models_i2v`. The clip is 24 fps.
 Both tools require `size`. Those lists name `1280x704` and `704x1280`. MCP

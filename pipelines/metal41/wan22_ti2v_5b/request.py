@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from favlo.media_pipeline import MediaRequestError
 from wan22_ti2v_5b.png import decode_png
 from wan22_ti2v_5b.schedule import frames_from_duration, snap_frames
 from wan22_ti2v_5b.spec import FPS
@@ -15,8 +16,11 @@ _DEFAULT_SIZE = (1280, 704)
 _DEFAULT_FRAMES = 121
 
 
-class VideoRequestError(ValueError):
+class VideoRequestError(MediaRequestError):
     """The body cannot be sampled."""
+
+    def __init__(self, message: str, param: str | None = None) -> None:
+        super().__init__(message, param)
 
 
 @dataclass

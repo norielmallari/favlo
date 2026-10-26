@@ -595,8 +595,8 @@ def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
         opened.append(runtime)
         return runtime
 
-    def start(selection, args):
-        del args
+    def start(selection, args, schedule=None):
+        del args, schedule
         return opener(selection, None)
 
     monkeypatch.setattr(listener, "_start_pipeline", start)
@@ -685,7 +685,8 @@ def test_a_failed_open_sweeps_spans_from_that_attempt(monkeypatch) -> None:
         message = "open failed"
         raise RuntimeError(message)
 
-    def start(selection, bound_args):
+    def start(selection, bound_args, schedule=None):
+        del schedule
         return opener(selection, None, getattr(bound_args, "max_memory", None))
 
     monkeypatch.setattr(listener, "_start_pipeline", start)
@@ -720,7 +721,8 @@ def test_close_sweeps_the_owner_recorded_at_open(monkeypatch) -> None:
         runtime.proxy = SimpleNamespace()
         return runtime
 
-    def start(selection, bound_args):
+    def start(selection, bound_args, schedule=None):
+        del schedule
         return opener(selection, None, getattr(bound_args, "max_memory", None))
 
     monkeypatch.setattr(listener, "_start_pipeline", start)
