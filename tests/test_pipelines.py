@@ -6,6 +6,7 @@ import importlib
 import shutil
 import sys
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -140,7 +141,6 @@ def test_a_request_after_unload_does_not_open(monkeypatch) -> None:
         "application/json",
         b"{}",
         reply,
-        running=[False],
     )
     assert called == []
     assert reply.status == 409
@@ -157,6 +157,49 @@ def test_reload_drops_a_checkpoint_file(monkeypatch, tmp_path: Path) -> None:
         assert "video_hold" not in state
         assert not checkpoint.exists()
     finally:
+        pipelines.close(_state(), SimpleNamespace())
+
+
+def test_reload_drops_waiting_queues(monkeypatch) -> None:
+    monkeypatch.setattr("favlo.cli.drop_pipeline_modules", lambda root=None: 0)
+    from favlo.http_app import _mcp_dispatch
+    from favlo.schedule import ClientClosed, Scheduler
+
+    schedule = Scheduler()
+    state = _state()
+    state["schedule"] = schedule
+    state["media_tasks"] = {
+        "running": {"started": True, "paused": False},
+        "queued": {"started": False, "paused": False},
+    }
+    state["media_order"] = ["running", "queued"]
+    held = schedule.acquire("media")
+    closed = threading.Event()
+
+    def wait_chat() -> None:
+        try:
+            schedule.acquire("chat")
+        except ClientClosed:
+            closed.set()
+
+    chat = threading.Thread(target=wait_chat)
+    chat.start()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and schedule.waiting("chat") != 1:
+        time.sleep(0.01)
+    try:
+        pipelines.reload(state, SimpleNamespace())
+        assert closed.wait(2)
+        assert schedule.waiting("chat") == 0
+        assert state["media_tasks"]["queued"]["dropped"] is True
+        assert state["media_tasks"]["running"].get("dropped") is not True
+        assert state["media_order"] == ["running"]
+        assert _mcp_dispatch(SimpleNamespace(), state, "image", {"prompt": "a cat"}, "queued") == {
+            "status": "cancelled"
+        }
+    finally:
+        schedule.release(held)
+        chat.join(2)
         pipelines.close(_state(), SimpleNamespace())
 
 

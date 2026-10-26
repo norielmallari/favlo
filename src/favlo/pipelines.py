@@ -2,7 +2,7 @@
 
 ``pipelines`` is the only registry of runtimes this process has opened.
 ``close`` halts every one of them, then calls ``close`` so a media pipeline
-can open its device again on the next request. ``reload`` does that and
+can open its device again on the next request. ``reload`` does that, drops every waiter, and
 then drops the imported pipeline modules.
 """
 
@@ -59,8 +59,9 @@ class Pipelines:
                 lock.release()
 
     def reload(self, state: dict[str, Any], args: Any) -> tuple[str | None, int]:
-        """Close every runtime, drop paused holds, and drop imported pipeline modules."""
+        """Close every runtime, drop the queues, and drop imported pipeline modules."""
         self._halt(state, args)
+        _flush_queues(state)
         lock: threading.Lock = state.setdefault("lock", threading.Lock())
         lock.acquire()
         try:
@@ -136,6 +137,29 @@ def _owners(owners: Any) -> tuple[str, ...]:
     if not owners:
         return ()
     return tuple(owner for owner in owners if isinstance(owner, str) and owner)
+
+
+def _flush_queues(state: dict[str, Any]) -> None:
+    from favlo.schedule import Scheduler
+
+    schedule = state.get("schedule")
+    if isinstance(schedule, Scheduler):
+        schedule.flush()
+    _drop_waiting_tasks(state)
+
+
+def _drop_waiting_tasks(state: dict[str, Any]) -> None:
+    tasks = state.get("media_tasks")
+    if not isinstance(tasks, dict):
+        return
+    dropped: set[str] = set()
+    for task_id, record in tasks.items():
+        if isinstance(task_id, str) and isinstance(record, dict) and not record.get("started"):
+            record["dropped"] = True
+            dropped.add(task_id)
+    order = state.get("media_order")
+    if isinstance(order, list) and dropped:
+        state["media_order"] = [item for item in order if item not in dropped]
 
 
 def _halt(runtime: Any) -> None:

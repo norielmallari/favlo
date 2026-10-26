@@ -309,6 +309,41 @@ def test_an_unknown_kind_does_not_enter_the_queue() -> None:
     assert schedule.foreground() is False
 
 
+def test_flush_drops_every_waiter_and_the_running_request_stays() -> None:
+    schedule = Scheduler()
+    media = schedule.acquire("media")
+    closed: list[str] = []
+
+    def wait(kind: str) -> None:
+        try:
+            schedule.acquire(kind)
+        except ClientClosed:
+            closed.append(kind)
+
+    threads = [threading.Thread(target=wait, args=(kind,)) for kind in ("embed", "chat", "media")]
+    for thread in threads:
+        thread.start()
+    _wait_until(
+        lambda: schedule.waiting("embed") == 1
+        and schedule.waiting("chat") == 1
+        and schedule.waiting("media") == 1
+    )
+    assert schedule.preempt.is_set() is True
+    epoch = schedule.epoch
+    schedule.flush()
+    for thread in threads:
+        thread.join(2)
+    assert sorted(closed) == ["chat", "embed", "media"]
+    assert schedule.waiting("embed") == schedule.waiting("chat") == schedule.waiting("media") == 0
+    assert schedule.preempt.is_set() is False
+    assert schedule.running() == "media"
+    assert schedule.epoch == epoch + 1
+    schedule.release(media)
+    chat = schedule.acquire("chat")
+    assert schedule.running() == "chat"
+    schedule.release(chat)
+
+
 def test_a_second_release_leaves_the_queue_idle() -> None:
     schedule = Scheduler()
     ticket = schedule.acquire("chat")

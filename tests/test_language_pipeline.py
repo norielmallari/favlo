@@ -106,7 +106,7 @@ def test_a_blank_embedding_is_a_400() -> None:
     Pipe().handle(reply, None, {"input": "  "}, None, None, {})
     assert reply.status == 400
     error = reply.payload["error"]
-    assert error["message"] == "input must be a string"
+    assert error["message"] == "input must be a non-empty string or array of strings"
     assert error["param"] == "input"
     assert error["code"] is None
 
@@ -136,6 +136,20 @@ def test_an_embedding_reply_uses_the_selection_id() -> None:
     assert reply.payload["model"] == "bge-m3-int8"
     assert reply.payload["data"][0]["embedding"] == [5.0]
     assert reply.payload["usage"] == {"prompt_tokens": 3, "total_tokens": 3}
+
+
+def test_an_embedding_array_returns_one_object_per_string() -> None:
+    class Pipe(EmbeddingsPipeline):
+        def embed(self, runtime, text):
+            del runtime
+            return [float(len(text))], len(text)
+
+    reply = _Reply()
+    Pipe().handle(reply, None, {"input": ["ab", "cde"]}, None, None, {})
+    assert reply.payload["data"][0]["embedding"] == [2.0]
+    assert reply.payload["data"][1]["embedding"] == [3.0]
+    assert reply.payload["data"][1]["index"] == 1
+    assert reply.payload["usage"] == {"prompt_tokens": 5, "total_tokens": 5}
 
 
 def test_an_embedding_without_a_selection_has_an_empty_model() -> None:

@@ -4,7 +4,8 @@ Two queues. The foreground queue is embeddings, then chats that have not
 started. The media queue runs only when the foreground queue is empty.
 A foreground arrival preempts media at its next safe point and leaves
 ``preempt`` set until that queue has drained. An embedding does not preempt
-a chat that already holds the GPU.
+a chat that already holds the GPU. ``flush`` drops every waiter. The request
+that holds admission stays until it releases.
 """
 
 from __future__ import annotations
@@ -45,6 +46,8 @@ class Scheduler:
         self._media: deque[_Ticket] = deque()
         self._running: _Ticket | None = None
         self._holding = 0
+        self._dropped: set[int] = set()
+        self.epoch = 0
         self.preempt = threading.Event()
 
     def acquire(self, kind: str, cancel: threading.Event | None = None) -> _Ticket:
@@ -64,7 +67,8 @@ class Scheduler:
             self._queue(kind).append(ticket)
             self._sync_preempt()
             while self._holding or not self._is_next(ticket):
-                if cancel is not None and cancel.is_set():
+                if id(ticket) in self._dropped or (cancel is not None and cancel.is_set()):
+                    self._dropped.discard(id(ticket))
                     raise ClientClosed()
                 if not noted:
                     noted = True
@@ -88,6 +92,16 @@ class Scheduler:
         finally:
             self._cond.release()
         return ticket
+
+    def flush(self) -> None:
+        """Drop every waiter. The request that holds admission stays until it releases."""
+        with self._cond:
+            self.epoch += 1
+            for queue in (self._embeds, self._chats, self._media):
+                while queue:
+                    self._dropped.add(id(queue.popleft()))
+            self._sync_preempt()
+            self._cond.notify_all()
 
     def release(self, ticket: _Ticket) -> None:
         """Drop a running request and wake whoever is next."""

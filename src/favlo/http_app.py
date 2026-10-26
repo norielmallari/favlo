@@ -337,7 +337,7 @@ async def _pipelines_close(args: Any, state: dict[str, Any]) -> Response:
 
 
 async def _pipelines_reload(args: Any, state: dict[str, Any]) -> Response:
-    """Close every runtime, drop paused holds, and drop imported pipeline modules."""
+    """Close every runtime, drop the queues, and drop imported pipeline modules."""
     from favlo.pipelines import pipelines
 
     _prepare_listener(state)
@@ -429,6 +429,7 @@ def _run_locked(
             try:
                 ticket = schedule.acquire(kind, cancel=cancel)
             except ClientClosed:
+                _leave_cleared(reply)
                 return
         if cancel is not None and cancel.is_set():
             return
@@ -451,11 +452,23 @@ def _run_media(
 ) -> None:
     """Run one media call. Resume it only after the foreground queue drains."""
     schedule: Scheduler = state["schedule"]
+    epoch = schedule.epoch
     while True:
-        ticket = schedule.acquire("media")
         try:
+            ticket = schedule.acquire("media")
+        except ClientClosed:
+            _leave_cleared(reply)
+            return
+        try:
+            if schedule.epoch != epoch:
+                _leave_cleared(reply)
+                return
             state["media_yield"] = False
             _run_once(args, state, kind, content_type, raw, reply)
+            if schedule.epoch != epoch:
+                _discard_output(state, reply.payload)
+                _leave_cleared(reply)
+                return
             if state["cancel"].is_set():
                 _discard_output(state, reply.payload)
                 return
@@ -605,6 +618,14 @@ def _abandon_child(state: dict[str, Any], args: Any) -> None:
         _drop_runtime(state, args)
 
 
+def _leave_cleared(reply: LiveReply) -> None:
+    """A flushed waiter leaves. A call that already started reports cancelled."""
+    if reply.started:
+        reply.json(200, {"status": "cancelled"})
+        return
+    reply.json(409, {"error": {"message": "the queue was cleared", "type": "busy"}})
+
+
 def _paused(state: dict[str, Any], reply: LiveReply) -> bool:
     if not state["preempt"].is_set():
         return False
@@ -720,6 +741,8 @@ def _mcp_dispatch(
     if task_id:
         record = state["media_tasks"].get(task_id)
         if isinstance(record, dict):
+            if record.get("dropped"):
+                return {"status": "cancelled"}
             record["started"] = True
             record["paused"] = False
         state["cancel"].clear()
