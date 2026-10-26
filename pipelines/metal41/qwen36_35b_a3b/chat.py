@@ -17,6 +17,8 @@ from qwen36_35b_a3b.forward import RequestClosed
 from qwen36_35b_a3b.sampling import VARIANTS, mode_card, requested_thinking
 from qwen36_35b_a3b.tools import (
     StreamText,
+    decode_shown_text,
+    decode_unicode_escapes,
     function_has_parameters,
     normalize_messages,
     parse_tool_calls,
@@ -289,13 +291,15 @@ def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any)
     content, calls = parse_tool_calls(visible if visible else text)
     if not emit_tools:
         calls = []
-        content = visible if visible else text
+        content = decode_shown_text(visible if visible else text)
     if calls:
         reason = "tool_calls"
     else:
         reason = "length" if runtime._hit_limit else "stop"
         if not thinking:
-            content = text
+            content = decode_shown_text(text)
+    if reasoning:
+        reasoning = decode_unicode_escapes(reasoning)
     reply.json(
         200,
         _completion(

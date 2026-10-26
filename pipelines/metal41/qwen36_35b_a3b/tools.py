@@ -11,13 +11,57 @@ _CALL = re.compile(
     re.DOTALL,
 )
 _PARAM = re.compile(r"<parameter=([^\n>]+)>\n?(.*?)</parameter>", re.DOTALL)
+_UNICODE = re.compile(r"\\u([0-9a-fA-F]{4})")
+_UNICODE_TAIL = re.compile(r"(?:\\u[0-9a-fA-F]{0,3}|\\)$")
+_HIGH_SURROGATE = re.compile(r"\\u[Dd][89ABab][0-9A-Fa-f]{2}$")
+
+
+def decode_unicode_escapes(text: str) -> str:
+    """Replace each ``\\uXXXX`` escape with its character."""
+    if "\\u" not in text:
+        return text
+    replaced = _UNICODE.sub(lambda match: chr(int(match.group(1), 16)), text)
+    if any(0xD800 <= ord(char) <= 0xDFFF for char in replaced):
+        return replaced.encode("utf-16-le", "surrogatepass").decode("utf-16-le")
+    return replaced
+
+
+def decode_shown_text(text: str) -> str:
+    """Decode ``\\uXXXX`` in reply text. A JSON parameter body stays encoded."""
+    if "\\u" not in text:
+        return text
+    parts: list[str] = []
+    cursor = 0
+    for match in _PARAM.finditer(text):
+        parts.append(decode_unicode_escapes(text[cursor : match.start()]))
+        raw = match.group(0)
+        value = match.group(2)
+        if _json_container(value.strip()) is None:
+            decoded = decode_unicode_escapes(value)
+            rel = match.start(2) - match.start()
+            raw = raw[:rel] + decoded + raw[match.end(2) - match.start() :]
+        parts.append(raw)
+        cursor = match.end()
+    parts.append(decode_unicode_escapes(text[cursor:]))
+    return "".join(parts)
+
+
+def _unicode_tail(text: str) -> tuple[str, str]:
+    """A trailing incomplete ``\\uXXXX``, or a high surrogate waiting for its pair."""
+    match = _UNICODE_TAIL.search(text)
+    if match is not None:
+        return text[: match.start()], match.group(0)
+    match = _HIGH_SURROGATE.search(text)
+    if match is not None:
+        return text[: match.start()], match.group(0)
+    return text, ""
 
 
 def parse_tool_calls(text: str) -> tuple[str | None, list[dict[str, Any]]]:
     """Leading text, then each complete ``<tool_call>`` block."""
     matches = list(_CALL.finditer(text))
     if not matches:
-        return text, []
+        return decode_unicode_escapes(text), []
     calls = []
     for index, match in enumerate(matches):
         arguments = {
@@ -33,7 +77,7 @@ def parse_tool_calls(text: str) -> tuple[str | None, list[dict[str, Any]]]:
                 },
             }
         )
-    prefix = text[: matches[0].start()].strip()
+    prefix = decode_unicode_escapes(text[: matches[0].start()].strip())
     return (prefix or None), calls
 
 
@@ -43,7 +87,7 @@ def _parameter_value(value: str) -> Any:
     parsed = _json_container(text.strip())
     if parsed is not None:
         return parsed
-    return text
+    return decode_unicode_escapes(text)
 
 
 def _json_container(text: str) -> Any | None:
@@ -160,6 +204,8 @@ class StreamText:
         self._held = ""
         self._call = ""
         self._in_call = False
+        self._escape_tail = ""
+        self._escape_channel: str | None = None
 
     def push(self, piece: str) -> list[tuple[str, str]]:
         if piece == "":
@@ -178,15 +224,47 @@ class StreamText:
             self._call = ""
             self._in_call = False
             self._held = ""
+            flushed = self._flush_escape()
             if self._keep_calls and xml:
-                return [("content", xml)]
-            return []
+                shown = decode_shown_text(xml)
+                if shown:
+                    flushed.append(("content", shown))
+            return flushed
         if not self._held:
-            return []
+            return self._flush_escape()
         channel = "reasoning" if self._reasoning else "content"
         emit = self._held
         self._held = ""
-        return [(channel, emit)]
+        return self._show(channel, emit, final=True)
+
+    def _show(self, channel: str, text: str, *, final: bool = False) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        if self._escape_channel not in (None, channel):
+            out.extend(self._flush_escape())
+        self._escape_channel = channel
+        combined = self._escape_tail + text
+        if final:
+            self._escape_tail = ""
+            self._escape_channel = None
+            shown = decode_unicode_escapes(combined)
+            if shown:
+                out.append((channel, shown))
+            return out
+        body, self._escape_tail = _unicode_tail(combined)
+        shown = decode_unicode_escapes(body)
+        if shown:
+            out.append((channel, shown))
+        return out
+
+    def _flush_escape(self) -> list[tuple[str, str]]:
+        channel = self._escape_channel
+        tail = self._escape_tail
+        self._escape_channel = None
+        self._escape_tail = ""
+        if channel is None or tail == "":
+            return []
+        shown = decode_unicode_escapes(tail)
+        return [(channel, shown)] if shown else []
 
     def _push_reasoning(self) -> list[tuple[str, str]]:
         at = self._held.find(_THINK_CLOSE)
@@ -194,14 +272,12 @@ class StreamText:
             keep = _held_suffix(self._held, _THINK_CLOSE)
             emit = self._held[:-keep] if keep else self._held
             self._held = self._held[-keep:] if keep else ""
-            return [("reasoning", emit)] if emit else []
+            return self._show("reasoning", emit) if emit else []
         reasoning = self._held[:at]
         rest = self._held[at + len(_THINK_CLOSE) :]
         self._held = ""
         self._reasoning = False
-        out: list[tuple[str, str]] = []
-        if reasoning:
-            out.append(("reasoning", reasoning))
+        out = self._show("reasoning", reasoning, final=True) if reasoning else self._flush_escape()
         out.extend(self.push(rest.lstrip("\n")))
         return out
 
@@ -212,15 +288,17 @@ class StreamText:
             self._call = self._held[at:]
             self._held = ""
             self._in_call = True
-            return [("content", emit)] if emit else []
+            if emit:
+                return self._show("content", emit, final=True)
+            return self._flush_escape()
         keep = _held_suffix(self._held, _TOOL_OPEN)
         if keep == 0:
             emit = self._held
             self._held = ""
-            return [("content", emit)] if emit else []
+            return self._show("content", emit) if emit else []
         emit = self._held[:-keep]
         self._held = self._held[-keep:]
-        return [("content", emit)] if emit else []
+        return self._show("content", emit) if emit else []
 
 
 def split_thinking(text: str, thinking: bool) -> tuple[str, str]:

@@ -722,6 +722,54 @@ def test_a_json_array_parameter_is_a_list() -> None:
     ]
 
 
+def test_a_string_parameter_decodes_a_unicode_escape() -> None:
+    text = (
+        "it\\u0027s\n<tool_call>\n<function=create_file>\n"
+        "<parameter=path>\nnote\\u0027s.txt\n</parameter>\n"
+        "<parameter=body>\n"
+        '{"note": "say \\u0022hi\\u0022"}\n'
+        "</parameter>\n</function>\n</tool_call>"
+    )
+    content, calls = parse_tool_calls(text)
+    assert content == "it's"
+    arguments = json.loads(calls[0]["function"]["arguments"])
+    assert arguments["path"] == "note's.txt"
+    assert arguments["body"] == {"note": 'say "hi"'}
+
+
+def test_a_reply_without_a_call_decodes_a_unicode_escape() -> None:
+    content, calls = parse_tool_calls("it\\u0027s fine")
+    assert content == "it's fine"
+    assert calls == []
+
+
+def test_reply_text_decodes_a_split_unicode_escape() -> None:
+    gate = StreamText(False)
+    assert gate.push("it\\u00") == [("content", "it")]
+    assert gate.push("27!") == [("content", "'!")]
+    assert gate.finish() == []
+
+
+def test_a_split_surrogate_pair_becomes_one_character() -> None:
+    gate = StreamText(False)
+    assert gate.push("\\uD83D") == []
+    assert gate.push("\\uDE00") == [("content", "\U0001f600")]
+
+
+def test_kept_call_text_leaves_a_json_parameter_encoded() -> None:
+    gate = StreamText(False, keep_calls=True)
+    xml = (
+        "<tool_call>\n<function=create_file>\n"
+        "<parameter=path>\nnote\\u0027s.txt\n</parameter>\n"
+        "<parameter=body>\n"
+        '{"note": "say \\u0022hi\\u0022"}\n'
+        "</parameter>\n</function>\n</tool_call>"
+    )
+    assert gate.push(xml) == []
+    shown = xml.replace("\\u0027", "'")
+    assert gate.finish() == [("content", shown)]
+
+
 def test_tool_call_text_becomes_an_openai_call() -> None:
     text = (
         "ok\n<tool_call>\n<function=create_file>\n"
