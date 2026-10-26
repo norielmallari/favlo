@@ -105,8 +105,8 @@ class Pipeline(MediaPipeline):
         try:
             while image.index < request.count:
                 reason = stop()
-                if reason == "cancel" or _yields(reason, image):
-                    raise MediaPaused(reason or "preempt", image)
+                if reason == "cancel":
+                    raise MediaPaused("cancel", image)
                 pixels, timing = _draw(runtime, request, image, stop)
                 reason = stop()
                 if reason == "cancel":
@@ -154,14 +154,6 @@ class Pipeline(MediaPipeline):
 
 
 handle_image = Pipeline()
-
-
-def _yields(reason: str | None, job: ImageJob) -> bool:
-    """Preempt before a draw yields. A decoded image is stored instead."""
-    if reason != "preempt":
-        return False
-    held = job.hold
-    return held is None or held.pixels is None
 
 
 def _draw(

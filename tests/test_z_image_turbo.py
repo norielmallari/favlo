@@ -418,6 +418,50 @@ def test_a_paused_step_resumes_with_its_latent(tmp_path) -> None:
     assert job_id
 
 
+def test_a_waiting_chat_still_draws_the_next_step(tmp_path) -> None:
+    preempt = threading.Event()
+    preempt.set()
+    called: list[int] = []
+
+    class _Runtime:
+        def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **extra):
+            del prompt, width, height, steps, seed
+            called.append(extra.get("done_steps") or 0)
+            raise ImagePaused(
+                "preempt",
+                ImageHold(stage="step", step=1, latent=np.arange(4, dtype=np.float32), times=[0.2]),
+            )
+
+        def close(self) -> None:
+            return None
+
+    runtime = _Runtime()
+    reply = MemoryReply()
+    state = {"image_home": tmp_path, "preempt": preempt, "cancel": threading.Event()}
+    handle_image(reply, runtime, {"prompt": "a cat", "seed": 1}, None, None, state)
+    assert called == [0]
+    assert reply.body["status"] == "in_progress"
+    assert reply.body["stage"] == "step"
+    assert state["image_hold"]["hold"].hold.step == 1
+
+
+def test_cancel_before_the_draw_skips_the_runtime(tmp_path) -> None:
+    class _Runtime:
+        def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **_extra):
+            del prompt, width, height, steps, seed
+            raise AssertionError("draw")
+
+        def close(self) -> None:
+            return None
+
+    reply = MemoryReply()
+    state = {"image_home": tmp_path, "preempt": threading.Event(), "cancel": threading.Event()}
+    state["cancel"].set()
+    handle_image(reply, _Runtime(), {"prompt": "a cat", "seed": 1}, None, None, state)
+    assert reply.body["status"] == "in_progress"
+    assert state.get("image_hold") is None
+
+
 def test_cancel_drops_the_checkpoint_and_skips_the_remaining_image(tmp_path) -> None:
     class _Runtime:
         def __init__(self) -> None:

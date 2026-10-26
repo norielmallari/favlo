@@ -241,16 +241,17 @@ class Runtime:
                 )
             self.gpu.reclaim()
             caption_s = time.perf_counter() - caption_started
-            self._stop(
-                stop,
-                stage="step" if done_steps else "caption",
-                step=done_steps,
-                latent=latent,
-                times=times,
-                caption_s=caption_s,
-                spent=spent,
-                wall=wall,
-            )
+            if ask(stop) == "cancel":
+                self._stop(
+                    stop,
+                    stage="step" if done_steps else "caption",
+                    step=done_steps,
+                    latent=latent,
+                    times=times,
+                    caption_s=caption_s,
+                    spent=spent,
+                    wall=wall,
+                )
         image_rows = pad_to(patch_h * patch_w, TILE_M)
         if latent is None:
             noise = np.random.default_rng(seed).standard_normal((16, latent_h, latent_w))
