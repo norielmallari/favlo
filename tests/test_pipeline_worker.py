@@ -45,6 +45,34 @@ class _ChatSaw:
         reply.json(200, {"id": "chat", "choices": []})
 
 
+def test_a_clean_exit_waits_for_the_pages_taken_while_resident(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    class _Ledger:
+        def confirm_released(self, before: int, nbytes: int, timeout: float | None = None) -> bool:
+            seen["before"] = before
+            seen["nbytes"] = nbytes
+            seen["timeout"] = timeout
+            return True
+
+        def forget(self, owners: object) -> None:
+            seen["owners"] = owners
+
+    monkeypatch.setattr("favlo.memory.memory", _Ledger())
+    child = PipelineChild(SimpleNamespace(), None)
+    child._proc = SimpleNamespace(returncode=0)
+    child._baseline = 40_000_000_000
+    child._while_resident = 16_000_000_000
+    child._release_from = 50_000
+    child._held = 30_000_000_000
+    child.counts = {"chat": 30_000_000_000}
+    child._forget()
+    assert seen["before"] == 16_000_000_000
+    assert seen["nbytes"] == 24_000_000_000
+    assert seen["timeout"] is None
+    assert seen["owners"] == ("chat",)
+
+
 def test_a_disconnected_chat_is_stopped_before_it_streams() -> None:
     module = _ChatSaw()
     _call(

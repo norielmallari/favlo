@@ -18,7 +18,7 @@ Clear a hold with `state[key] = None`. Do not `pop` the key. The exported keys a
 
 ## Preemption harness
 
-One agent covers every served media pipeline: `python -m harness.media_pipeline`. The order is `image`, `i2v`, `t2v`, `music`, `voice`. Do not add a second preemption agent.
+One agent covers every served media pipeline: `python -m harness.media_pipeline`. The order is `image`, `i2v`, `t2v`, `music`, `voice`. Names after the command run that subset in the same order, as in `python -m harness.media_pipeline i2v`. An omitted list runs every name. Do not add a second preemption agent.
 
 A new served media pipeline adds one probe in that module: a name on `_PROBES`, a body in `probes()` taken from that pipeline's `smoke.json` at the shortest length that still reaches a `stop()` check, a file `artifacts/media-preempt-<name>.*`, and a shape check in `accept`. The same change adds the package and its `docs/<pipeline>/` path to this rule's globs, and one sentence in `docs/harness.md`.
 
@@ -29,7 +29,7 @@ uv run pytest tests/test_media_pipeline.py tests/test_media_pipeline_harness.py
 uv run python -m harness.media_pipeline
 ```
 
-The pytest does not open a listener and does not take the machine lock. The harness uses one `favlo serve` on `127.0.0.1:8129` and does not take the lock. If `artifacts/pipeline-test.lock` is held by a live pid, wait. Exit 0 means every probe paused with `task is ongoing` and that same task finished. A kernel, shader, or quantize edit that leaves the request, the checkpoint, and the job dict alone does not run the harness.
+The pytest does not open a listener and does not take the machine lock. The harness uses one `favlo serve` on `127.0.0.1:8129` and does not take the lock. If `artifacts/pipeline-test.lock` is held by a live pid, wait. Exit 0 means every selected probe paused with `task is ongoing` and that same task finished. A kernel, shader, or quantize edit that leaves the request, the checkpoint, and the job dict alone does not run the harness.
 
 Wrong: a host matmul standing in for a missing kernel, a popped hold, or one preemption agent per pipeline.
 

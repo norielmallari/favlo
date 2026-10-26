@@ -4,9 +4,9 @@ The daemon spawns this module and keeps the registry, the job queue, and the
 memory ledger. This process loads the pipeline and creates the Metal device.
 Its console events are forwarded to the daemon, which writes the telemetry
 the CLI paints. Before this process exits it sweeps its owners and blocks
-until the ledger says those heaps are gone. A crash ends this process. The
-daemon then blocks the next call until the pages that process wired are back,
-drops the ledger entry, and fails the job.
+until the ledger says those heaps are gone. When the process exits, including
+a clean close, the daemon blocks the next call until the pages that process
+wired are back, then drops the ledger entry. A crash also fails the job.
 """
 
 from __future__ import annotations
@@ -363,10 +363,17 @@ class PipelineChild:
             if self._forgotten:
                 return
             self._forgotten = True
-            before = self._release_from
-            if before is None:
-                before = self._while_resident
-            held = self._held
+            # Wait for the kernel gap measured while the process was resident.
+            # The ledger's byte count can be larger than the pages the kernel
+            # wired, and a count taken at close can already include a release.
+            before = self._while_resident
+            baseline = self._baseline
+            if before is not None and baseline is not None:
+                held = max(0, baseline - before)
+            else:
+                held = self._held
+                if before is None:
+                    before = self._release_from
             owners = tuple(self.counts)
             proc = self._proc
         from favlo.memory import memory
@@ -374,7 +381,7 @@ class PipelineChild:
         self._hold_memory()
         try:
             code = proc.returncode if proc is not None else None
-            if code not in (None, 0) and before is not None:
+            if before is not None and code is not None:
                 memory.confirm_released(before, held)
             memory.forget(owners)
         finally:

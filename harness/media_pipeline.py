@@ -5,8 +5,10 @@ starts a task with the matching MCP tool. The next turn is a chat
 completion, which preempts that task. The tool polls ``media_status`` and
 ``tasks/get``, then reads the file. The cases are an image, the Wan 2.2
 I2V clip, the Wan 2.2 TI2V text clip, a music clip, and a spoken line.
-Exit 0 means each task was paused with ``task is ongoing`` and the same
-task finished at that case's shape. This command is not part of pytest.
+Exit 0 means each selected task was paused with ``task is ongoing`` and
+the same task finished at that case's shape. Names after the command run
+that subset, in catalog order. An omitted list runs every probe. This
+command is not part of pytest.
 """
 
 from __future__ import annotations
@@ -117,6 +119,21 @@ def wav_fields(blob: bytes) -> tuple[int, int, float, float]:
     seconds = frames / rate if rate else 0.0
     rms = float(np.sqrt(np.mean(np.square(pcm)))) if pcm.size else 0.0
     return rate, channels, seconds, rms
+
+
+def select_probes(cases: list[Probe], names: list[str] | None) -> list[Probe]:
+    """The named probes in catalog order. An empty list is every probe."""
+    if tuple(case.name for case in cases) != _PROBES:
+        message = "the probe list is not the served media pipelines"
+        raise ValueError(message)
+    wanted = list(_PROBES if not names else names)
+    unknown = [name for name in wanted if name not in _PROBES]
+    if unknown:
+        message = f"unknown media pipeline {unknown[0]}"
+        raise ValueError(message)
+    chosen = set(wanted)
+    by_name = {case.name: case for case in cases}
+    return [by_name[name] for name in _PROBES if name in chosen]
 
 
 def probes(root: Path, still: Path) -> list[Probe]:
@@ -512,19 +529,27 @@ def _voice_bounds(root: Path) -> tuple[int, float]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Preempt each served media pipeline and require recovery.")
+    parser = argparse.ArgumentParser(description="Preempt served media pipelines and require recovery.")
     parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument("--judge", default=None, help="chat model id; default is the registry default")
+    parser.add_argument(
+        "pipelines",
+        nargs="*",
+        metavar="pipeline",
+        help="probe names to run, in catalog order; omitted runs every served media pipeline",
+    )
     args = parser.parse_args(argv)
     root = args.root.resolve()
     judge_id = args.judge or judge_model(root)
     still = root / "artifacts" / "video-smoke-agent.png"
-    if not still.is_file() or _png_size(still.read_bytes()) != (WIDTH, HEIGHT):
-        print(f"still is not {WIDTH}x{HEIGHT}", flush=True)
-        return 1
-    cases = probes(root, still)
-    if tuple(case.name for case in cases) != _PROBES:
-        print("the probe list is not the served media pipelines", flush=True)
+    if not args.pipelines or "i2v" in args.pipelines:
+        if not still.is_file() or _png_size(still.read_bytes()) != (WIDTH, HEIGHT):
+            print(f"still is not {WIDTH}x{HEIGHT}", flush=True)
+            return 1
+    try:
+        cases = select_probes(probes(root, still), args.pipelines)
+    except ValueError as exc:
+        print(exc, flush=True)
         return 1
     voice_rate, voice_max = _voice_bounds(root)
     listener = None

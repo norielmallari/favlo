@@ -198,9 +198,10 @@ Calls `generate_voice` for the model, line, and instructions in `docs/voxcpm2/sm
 
 ```bash
 python -m harness.media_pipeline
+python -m harness.media_pipeline i2v
 ```
 
-One Microsoft Agent Framework agent preempts each served media pipeline in turn: image (`Z-Image-Turbo-fp4`), I2V (5 frames at 576×320), T2V (5 frames at 1280×704), music (10 second smoke), and voice (voxcpm2 smoke). Each case starts the MCP task; the next turn is a chat completion that preempts it. The tool polls `media_status` and `tasks/get` and reads the file into `artifacts/media-preempt-*`. Exit 0 means every task was paused with `task is ongoing` and the same task finished at the expected shape. Uses the listener session. Not part of `pytest`. `tests/test_media_pipeline_harness.py` checks the pause-then-complete rule without a listener.
+One Microsoft Agent Framework agent preempts served media pipelines: image (`Z-Image-Turbo-fp4`), I2V (5 frames at 576×320), T2V (5 frames at 1280×704), music (10 second smoke), and voice (voxcpm2 smoke). Names after the command run that subset, in that order. An omitted list runs every one. Each case starts the MCP task; the next turn is a chat completion that preempts it. The tool polls `media_status` and `tasks/get` and reads the file into `artifacts/media-preempt-*`. Exit 0 means every selected task was paused with `task is ongoing` and the same task finished at the expected shape. Uses the listener session. Not part of `pytest`. `tests/test_media_pipeline_harness.py` checks the pause-then-complete rule and the name filter without a listener.
 
 ## Helpers
 
