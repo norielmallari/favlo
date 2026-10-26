@@ -130,6 +130,14 @@ python -m harness.image_smoke_agent
 
 A Microsoft Agent Framework agent on the registry default chat model calls `generate_image` twice for `Z-Image-Turbo-fp4` with the prompt, size, and seed in `docs/z-image-turbo/smoke.json`, at `quality` `low` and then `max`. Each PNG is read with `resources/read` and written to `artifacts/image-smoke-agent-low.png` or `artifacts/image-smoke-agent-max.png`. The next turns send each PNG to the same model and ask whether the picture matches the prompt. Exit 0 means both replies affirm it and the max file is larger. Uses the listener session. Not part of `pytest`.
 
+### Image attachment
+
+```bash
+python -m harness.image_attachment
+```
+
+Posts one chat completion to `qwen38-27b` with `artifacts/favlo-horse.png`. The user content is a text part, then an `image_url` part whose URL is `data:image/png;base64,` and whose `detail` is `auto`. Thinking is off and temperature is 0. The question does not name the animal. Exit 0 means `prompt_tokens` is at least the merged patch count and the reply names a horse plus two marks that are only in the picture: blue, desk, blaze, bandana, chestnut, mane, or hoof. A refusal, including a problem with analysis, fails. Uses the listener session. Does not take the machine lock. Not part of `pytest`. `tests/test_image_attachment.py` checks the request and the reply rule without a listener.
+
 ### Image persona
 
 ```bash

@@ -41,7 +41,10 @@ def bind_request(runtime: Any, prompt: list[int], hit: int) -> None:
 
     prepared = getattr(runtime, "_vision_prepared", None)
     if not prepared:
-        prepared = [prepare_image(blob) for blob in images]
+        prepared = [
+            prepare_image(blob, min_pixels=low, max_pixels=high)
+            for blob, low, high in images
+        ]
     merged = [merged_grid(grid) for _patches, grid in prepared]
     positions, nxt = language_positions(prompt, merged)
     runtime._rope_ids = positions
@@ -52,10 +55,20 @@ def bind_request(runtime: Any, prompt: list[int], hit: int) -> None:
         message = f"{len(slots)} image tokens, the grids need {expected}"
         raise RuntimeError(message)
     if not any(index >= hit for index in slots):
+        _note(runtime, f"vision cached {expected}")
         return
+    patch_count = sum(int(item[0].shape[0]) for item in prepared)
+    _note(runtime, f"vision patches {patch_count}")
     rows = _encode(runtime, prepared)
+    _note(runtime, f"vision merged {expected}")
     runtime._vision_rows = rows
     runtime._vision_map = {slot: row for row, slot in enumerate(slots)}
+
+
+def _note(runtime: Any, text: str) -> None:
+    note = getattr(runtime, "_status", None)
+    if callable(note):
+        note(text)
 
 
 def scatter(runtime: Any, hidden: Any, pos0: int, count: int) -> None:

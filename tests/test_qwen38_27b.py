@@ -256,6 +256,26 @@ def test_a_retokenized_split_is_not_kept() -> None:
         produced.append(token)
 
 
+def test_the_draw_tokenizer_is_not_the_lookup_method(monkeypatch: pytest.MonkeyPatch) -> None:
+    from qwen38_27b.forward import Qwen38Runtime
+
+    class _Codec:
+        def decode(self, ids: list[int], skip_special_tokens: bool = False) -> str:
+            del ids, skip_special_tokens
+            return "ok"
+
+        def encode(self, text: str) -> SimpleNamespace:
+            del text
+            return SimpleNamespace(ids=[1])
+
+    codec = _Codec()
+    monkeypatch.setattr("qwen38_27b.chat.load_tokenizer", lambda root: codec)
+    runtime = object.__new__(Qwen38Runtime)
+    runtime.root = Path(".")
+    assert runtime._tokenizer() is codec
+    assert runtime._tokenizer().decode([1]) == "ok"
+
+
 def test_empty_think_turn_stays_a_prefix_of_the_next_prompt() -> None:
     root = installed_record()
     if root is None or not (root / "chat_template.jinja").is_file():
@@ -1181,11 +1201,68 @@ def test_image_tokens_use_the_merged_grid() -> None:
     assert nxt == 4
 
 
+def test_an_image_is_logged_before_its_bytes_are_read() -> None:
+    import base64
+    import struct
+    import zlib
+
+    from qwen38_27b.vision import IMAGE_PAD, collect_images, log_prepared
+
+    def png_of(image: np.ndarray) -> bytes:
+        height, width, _channels = image.shape
+        raw = b"".join(b"\x00" + image[row].tobytes() for row in range(height))
+
+        def chunk(kind: bytes, payload: bytes) -> bytes:
+            check = zlib.crc32(kind + payload) & 0xFFFFFFFF
+            return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", check)
+
+        return b"".join(
+            (
+                b"\x89PNG\r\n\x1a\n",
+                chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)),
+                chunk(b"IDAT", zlib.compress(raw)),
+                chunk(b"IEND", b""),
+            )
+        )
+
+    lines: list[str] = []
+    blob = png_of(np.zeros((8, 8, 3), dtype=np.uint8))
+    encoded = base64.b64encode(blob).decode()
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64," + encoded}}
+            ],
+        }
+    ]
+    found = collect_images(messages, note=lines.append)
+    assert lines == ["vision image 1"]
+    assert found[0][0] == blob
+    patches = np.zeros((16, 8), dtype=np.float32)
+    runtime = SimpleNamespace(_status=lines.append)
+    log_prepared(runtime, [(patches, (4, 4))])
+    assert lines[-1] == "vision image 1 patches 16 grid 4x4 merged 4"
+
+    from qwen38_27b.tower import bind_request
+
+    cached: list[str] = []
+    prompt = [IMAGE_PAD] * 4
+    tower = SimpleNamespace(
+        _status=cached.append,
+        _vision_images=found,
+        _vision_prepared=[(patches, (4, 4))],
+    )
+    bind_request(tower, prompt, 4)
+    assert cached == ["vision cached 4"]
+    assert tower._vision_rows is None
+
+
 def test_png_round_trip_and_square_grid() -> None:
     import struct
     import zlib
 
-    from qwen38_27b.vision import decode_png, merged_grid, prepare_image
+    from qwen38_27b.vision import _paeth, decode_png, merged_grid, prepare_image
 
     def png_of(image: np.ndarray) -> bytes:
         height, width, _channels = image.shape
@@ -1207,11 +1284,138 @@ def test_png_round_trip_and_square_grid() -> None:
     small = np.zeros((8, 8, 3), dtype=np.uint8)
     small[:, :, 0] = 255
     assert decode_png(png_of(small)).shape == (8, 8, 3)
+
+    def png_filtered(image: np.ndarray) -> bytes:
+        height, width, channels = image.shape
+        raw = image.reshape(height, width * channels)
+        previous = np.zeros(width * channels, dtype=np.uint8)
+        rows = bytearray()
+        for row_index, source in enumerate(raw):
+            kind = row_index % 5
+            stored = source.astype(np.int16).copy()
+            for index, value in enumerate(source.tolist()):
+                left = int(source[index - channels]) if index >= channels else 0
+                up = int(previous[index])
+                upper_left = int(previous[index - channels]) if index >= channels else 0
+                if kind == 1:
+                    stored[index] = value - left
+                elif kind == 2:
+                    stored[index] = value - up
+                elif kind == 3:
+                    stored[index] = value - ((left + up) // 2)
+                elif kind == 4:
+                    stored[index] = value - _paeth(left, up, upper_left)
+            rows.append(kind)
+            rows.extend(np.asarray(stored, dtype=np.uint8).tobytes())
+            previous = source
+        color = 2 if channels == 3 else 6
+
+        def chunk(kind: bytes, payload: bytes) -> bytes:
+            check = zlib.crc32(kind + payload) & 0xFFFFFFFF
+            return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", check)
+
+        return b"".join(
+            (
+                b"\x89PNG\r\n\x1a\n",
+                chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, color, 0, 0, 0)),
+                chunk(b"IDAT", zlib.compress(bytes(rows))),
+                chunk(b"IEND", b""),
+            )
+        )
+
+    portrait = np.arange(6 * 5 * 3, dtype=np.uint8).reshape(6, 5, 3)
+    assert np.array_equal(decode_png(png_filtered(portrait)), portrait)
+    rgba = np.arange(6 * 5 * 4, dtype=np.uint8).reshape(6, 5, 4)
+    assert np.array_equal(decode_png(png_filtered(rgba)), rgba[:, :, :3])
     square = np.zeros((512, 512, 3), dtype=np.uint8)
     patches, grid = prepare_image(png_of(square))
     assert grid == (32, 32)
     assert merged_grid(grid) == (16, 16)
     assert patches.shape == (32 * 32, 3 * 2 * 16 * 16)
+
+
+def test_chat_image_accepts_a_data_url_and_the_processor_budget() -> None:
+    import base64
+    import struct
+    import zlib
+
+    from AppKit import NSBitmapImageRep, NSColor, NSGIFFileType, NSJPEGFileType
+
+    from qwen38_27b.vision import (
+        MAX_PIXELS,
+        MIN_PIXELS,
+        _image_bytes,
+        _pixel_bounds,
+        _smart_size,
+        decode_image,
+    )
+
+    assert _smart_size(256, 256) == (256, 256)
+    assert _smart_size(512, 512) == (512, 512)
+    assert _smart_size(32, 32) == (256, 256)
+    assert _smart_size(8192, 8192) == (4096, 4096)
+    assert _smart_size(1024, 1024, max_pixels=MIN_PIXELS) == (256, 256)
+    with pytest.raises(RuntimeError, match="aspect"):
+        _smart_size(1, 401)
+
+    def png_of(image: np.ndarray) -> bytes:
+        height, width, _channels = image.shape
+        raw = b"".join(b"\x00" + image[row].tobytes() for row in range(height))
+
+        def chunk(kind: bytes, payload: bytes) -> bytes:
+            check = zlib.crc32(kind + payload) & 0xFFFFFFFF
+            return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", check)
+
+        return b"".join(
+            (
+                b"\x89PNG\r\n\x1a\n",
+                chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)),
+                chunk(b"IDAT", zlib.compress(raw)),
+                chunk(b"IEND", b""),
+            )
+        )
+
+    alloc = NSBitmapImageRep.alloc()
+    name = (
+        "initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_"
+        "samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_"
+    )
+    rep = getattr(alloc, name)(
+        None, 8, 8, 8, 3, False, False, "NSCalibratedRGBColorSpace", 24, 24
+    )
+    color = NSColor.colorWithCalibratedRed_green_blue_alpha_(1, 0, 0, 1)
+    for y in range(8):
+        for x in range(8):
+            rep.setColor_atX_y_(color, x, y)
+
+    def bitmap(kind: int) -> bytes:
+        data = rep.representationUsingType_properties_(kind, None)
+        assert data is not None
+        return bytes(data)
+
+    jpeg = bitmap(NSJPEGFileType)
+    encoded = base64.b64encode(jpeg).decode()
+    part = {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + encoded}}
+    decoded = decode_image(_image_bytes(part))
+    assert decoded.shape == (8, 8, 3)
+    assert int(decoded[:, :, 0].min()) > 200
+    assert int(decoded[:, :, 1].max()) < 30
+    assert decode_image(bitmap(NSGIFFileType)).shape[2] == 3
+    blank = base64.b64encode(png_of(np.zeros((8, 8, 3), dtype=np.uint8))).decode()
+    raw = {"type": "image_url", "image_url": {"url": blank}}
+    assert decode_image(_image_bytes(raw)).shape == (8, 8, 3)
+    low = {"type": "image_url", "image_url": {"url": "x", "detail": "low"}}
+    assert _pixel_bounds(low) == (MIN_PIXELS, MIN_PIXELS)
+    high = {"type": "image_url", "image_url": {"url": "x", "detail": "high"}}
+    assert _pixel_bounds(high)[1] == MAX_PIXELS
+    sized = {"type": "image", "min_pixels": 65536, "max_pixels": 262144}
+    assert _pixel_bounds(sized) == (65536, 262144)
+    with pytest.raises(RuntimeError, match="public address"):
+        _image_bytes({"image_url": {"url": "http://127.0.0.1/still.png"}})
+    with pytest.raises(RuntimeError, match="http or https"):
+        _image_bytes({"image_url": {"url": "file:///still.png"}})
+    with pytest.raises(RuntimeError, match="outside"):
+        _pixel_bounds({"image_url": {"url": "x"}, "max_pixels": MAX_PIXELS + 1})
 
 
 def test_shader_dispatches_match_the_host_formulas() -> None:

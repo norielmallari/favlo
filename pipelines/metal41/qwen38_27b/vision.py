@@ -2,16 +2,25 @@
 
 The chat template writes one ``<|image_pad|>``. This module expands that token
 to the merged grid and builds the interleaved temporal, height, and width
-positions. Pixel values follow the checkpoint processor: rescale by 1/255,
-then mean 0.5 and standard deviation 0.5. A side that is already a multiple
-of 32 is kept. Any other side is resampled with Catmull-Rom so both sides
-stay on that grid and the pixel count stays inside the processor limits.
+positions. A chat image is an ``http`` or ``https`` URL, a data URL, or
+base64, and PNG, JPEG, GIF, and WebP decode to RGB. Pixel values follow the
+checkpoint processor: rescale by 1/255, then mean 0.5 and standard deviation
+0.5. A side that is already a multiple of 32 is kept. Any other side is
+resampled with Catmull-Rom so both sides stay on that grid and the pixel
+count stays inside 65536 through 16777216. ``detail`` and per-part
+``min_pixels`` and ``max_pixels`` choose the budget inside those edges.
 """
 
 from __future__ import annotations
 
+import base64
+import ipaddress
 import math
+import socket
 import struct
+import urllib.error
+import urllib.parse
+import urllib.request
 import zlib
 from typing import Any
 
@@ -24,20 +33,28 @@ MERGE = 2
 FACTOR = PATCH * MERGE
 MIN_PIXELS = 65536
 MAX_PIXELS = 16777216
+MAX_RATIO = 200
+MAX_IMAGE_BYTES = 64 * 1024 * 1024
 CHANNELS = 3
+_FETCH_SECONDS = 30.0
 
 _PNG = b"\x89PNG\r\n\x1a\n"
 
 
-def collect_images(messages: list[dict[str, Any]]) -> list[bytes]:
-    """PNG bytes in the order the chat template emits image placeholders."""
-    found: list[bytes] = []
+def collect_images(
+    messages: list[dict[str, Any]], *, note: Any = None
+) -> list[tuple[bytes, int, int]]:
+    """Image bytes and the pixel budget, in placeholder order.
+
+    ``note`` receives ``vision image N`` before that image's bytes are read.
+    """
+    found: list[tuple[bytes, int, int]] = []
     for index, message in enumerate(messages):
         if not isinstance(message, dict):
             continue
         if index == 0 and message.get("role") == "system":
             continue
-        _walk_content(message.get("content"), found)
+        _walk_content(message.get("content"), found, note)
     return found
 
 
@@ -101,10 +118,17 @@ def language_positions(ids: list[int], merged: list[tuple[int, int]]) -> tuple[n
     return positions, cursor
 
 
-def prepare_image(png: bytes) -> tuple[np.ndarray, tuple[int, int]]:
+def prepare_image(
+    blob: bytes,
+    *,
+    min_pixels: int = MIN_PIXELS,
+    max_pixels: int = MAX_PIXELS,
+) -> tuple[np.ndarray, tuple[int, int]]:
     """Normalized patches in merge-block order, and the patch grid ``(h, w)``."""
-    image = decode_png(png)
-    height, width = _smart_size(image.shape[0], image.shape[1])
+    image = decode_image(blob)
+    height, width = _smart_size(
+        image.shape[0], image.shape[1], min_pixels=min_pixels, max_pixels=max_pixels
+    )
     if (height, width) != image.shape[:2]:
         image = _resize(image, height, width)
     pixels = image.astype(np.float32) * np.float32(1.0 / 255.0)
@@ -117,6 +141,19 @@ def prepare_image(png: bytes) -> tuple[np.ndarray, tuple[int, int]]:
 def merged_grid(grid: tuple[int, int]) -> tuple[int, int]:
     height, width = grid
     return height // MERGE, width // MERGE
+
+
+def log_prepared(runtime: Any, prepared: list[tuple[np.ndarray, tuple[int, int]]]) -> None:
+    """Log each still's patch grid and merged token count."""
+    note = getattr(runtime, "_status", None)
+    if not callable(note):
+        return
+    for index, (patches, grid) in enumerate(prepared, start=1):
+        height, width = merged_grid(grid)
+        note(
+            f"vision image {index} patches {int(patches.shape[0])} "
+            f"grid {grid[0]}x{grid[1]} merged {height * width}"
+        )
 
 
 def decode_png(blob: bytes) -> np.ndarray:
@@ -161,14 +198,24 @@ def decode_png(blob: bytes) -> np.ndarray:
         cursor += 1
         current = np.frombuffer(raw[cursor : cursor + stride], dtype=np.uint8).copy()
         cursor += stride
-        _unfilter(filt, current, previous)
+        _unfilter(filt, current, previous, channels)
         previous = current
         view = current.reshape(width, channels)
         rows[row] = view[:, :3]
     return rows
 
 
-def _walk_content(content: Any, found: list[bytes]) -> None:
+def decode_image(blob: bytes) -> np.ndarray:
+    """RGB uint8 from a PNG, JPEG, GIF, or WebP payload."""
+    if blob.startswith(_PNG):
+        try:
+            return decode_png(blob)
+        except (RuntimeError, ValueError):
+            pass
+    return _decode_bitmap(blob)
+
+
+def _walk_content(content: Any, found: list[tuple[bytes, int, int]], note: Any) -> None:
     if isinstance(content, str) or content is None:
         return
     if not isinstance(content, list):
@@ -181,43 +228,193 @@ def _walk_content(content: Any, found: list[bytes]) -> None:
             message = "video input is not supported"
             raise RuntimeError(message)
         if kind in {"image", "image_url"} or "image" in item or "image_url" in item:
-            found.append(_image_bytes(item))
+            if callable(note):
+                note(f"vision image {len(found) + 1}")
+            low, high = _pixel_bounds(item)
+            found.append((_image_bytes(item), low, high))
 
 
 def _image_bytes(item: dict[str, Any]) -> bytes:
-    payload = item.get("image_url", item.get("image", item.get("url")))
-    if isinstance(payload, dict):
-        payload = payload.get("url")
-    if not isinstance(payload, str) or not payload:
-        message = "image content has no url"
-        raise ValueError(message)
-    if payload.startswith("data:"):
-        marker = "base64,"
-        found = payload.find(marker)
-        if found < 0:
+    raw = item.get("image_url", item.get("image", item.get("url")))
+    if isinstance(raw, dict):
+        raw = raw.get("url")
+    if not isinstance(raw, str) or not raw:
+        message = "image part has no data"
+        raise RuntimeError(message)
+    if raw.startswith("data:"):
+        header, _, payload = raw.partition(",")
+        if "base64" not in header:
             message = "image data url is not base64"
-            raise ValueError(message)
-        import base64
+            raise RuntimeError(message)
+        try:
+            return base64.b64decode("".join(payload.split()), validate=True)
+        except (ValueError, TypeError) as exc:
+            message = "image data url is not base64"
+            raise RuntimeError(message) from exc
+    if "://" in raw:
+        if not raw.startswith(("http://", "https://")):
+            message = "image url must be http or https"
+            raise RuntimeError(message)
+        return _fetch_image(raw)
+    try:
+        return base64.b64decode(raw, validate=True)
+    except (ValueError, TypeError) as exc:
+        message = "image url must be http, https, or base64"
+        raise RuntimeError(message) from exc
 
-        return base64.b64decode(payload[found + len(marker) :])
-    message = "image url must be a data url"
-    raise ValueError(message)
+
+def _pixel_bounds(item: dict[str, Any]) -> tuple[int, int]:
+    nested = item.get("image_url")
+    if not isinstance(nested, dict):
+        nested = item.get("image")
+    if not isinstance(nested, dict):
+        nested = {}
+    low = _pixel_field(item, nested, "min_pixels")
+    high = _pixel_field(item, nested, "max_pixels")
+    detail = nested.get("detail", item.get("detail"))
+    if detail is not None and detail not in {"auto", "low", "high", "original"}:
+        message = f"image detail {detail} is unsupported"
+        raise RuntimeError(message)
+    if low is None and high is None:
+        if detail == "low":
+            return MIN_PIXELS, MIN_PIXELS
+        return MIN_PIXELS, MAX_PIXELS
+    low = MIN_PIXELS if low is None else low
+    high = MAX_PIXELS if high is None else high
+    if low < MIN_PIXELS or high > MAX_PIXELS or low > high:
+        message = f"image pixels {low}..{high} are outside {MIN_PIXELS}..{MAX_PIXELS}"
+        raise RuntimeError(message)
+    return low, high
 
 
-def _smart_size(height: int, width: int) -> tuple[int, int]:
+def _pixel_field(item: dict[str, Any], nested: dict[str, Any], key: str) -> int | None:
+    value = item[key] if key in item else nested.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        message = f"image {key} is not an integer"
+        raise RuntimeError(message)
+    return value
+
+
+def _fetch_image(url: str) -> bytes:
+    _check_url(url)
+    opener = urllib.request.build_opener(_PublicRedirect())
+    request = urllib.request.Request(url, headers={"User-Agent": "favlo"})
+    try:
+        with opener.open(request, timeout=_FETCH_SECONDS) as response:
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                block = response.read(65536)
+                if not block:
+                    break
+                total += len(block)
+                if total > MAX_IMAGE_BYTES:
+                    message = "image url is too large"
+                    raise RuntimeError(message)
+                chunks.append(block)
+    except urllib.error.URLError as exc:
+        message = "image url could not be fetched"
+        raise RuntimeError(message) from exc
+    if not chunks:
+        message = "image url is empty"
+        raise RuntimeError(message)
+    return b"".join(chunks)
+
+
+def _check_url(url: str) -> None:
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname
+    if parsed.scheme not in {"http", "https"} or not host:
+        message = "image url must be http or https"
+        raise RuntimeError(message)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        found = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        message = "image url did not resolve"
+        raise RuntimeError(message) from exc
+    for info in found:
+        address = ipaddress.ip_address(info[4][0])
+        if not address.is_global:
+            message = "image url is not a public address"
+            raise RuntimeError(message)
+
+
+class _PublicRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        _check_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _decode_bitmap(blob: bytes) -> np.ndarray:
+    from AppKit import NSBitmapImageRep
+    from Foundation import NSData
+
+    data = NSData.dataWithBytes_length_(blob, len(blob))
+    rep = NSBitmapImageRep.imageRepWithData_(data)
+    if rep is None:
+        message = "image format is unsupported"
+        raise RuntimeError(message)
+    width = int(rep.pixelsWide())
+    height = int(rep.pixelsHigh())
+    channels = int(rep.bitsPerPixel()) // 8
+    row_bytes = int(rep.bytesPerRow())
+    if (
+        width < 1
+        or height < 1
+        or channels < 3
+        or int(rep.bitsPerSample()) != 8
+        or bool(rep.isPlanar())
+        or row_bytes < width * channels
+    ):
+        message = "image format is unsupported"
+        raise RuntimeError(message)
+    raw = np.frombuffer(rep.bitmapData(), dtype=np.uint8, count=row_bytes * height)
+    view = raw.reshape(height, row_bytes)[:, : width * channels]
+    rgb = view.reshape(height, width, channels)
+    return np.ascontiguousarray(rgb[:, :, :3])
+
+
+def _smart_size(
+    height: int,
+    width: int,
+    *,
+    min_pixels: int = MIN_PIXELS,
+    max_pixels: int = MAX_PIXELS,
+) -> tuple[int, int]:
     """The Qwen2-VL resize: multiples of 32 inside the pixel limits."""
+    if height < 1 or width < 1:
+        message = f"image size {width}x{height} is empty"
+        raise RuntimeError(message)
+    if min_pixels < 1 or max_pixels < min_pixels:
+        message = f"image pixels {min_pixels}..{max_pixels} are empty"
+        raise RuntimeError(message)
+    if max(height, width) / min(height, width) > MAX_RATIO:
+        message = f"image aspect {width}x{height} exceeds {MAX_RATIO}"
+        raise RuntimeError(message)
+
     def nearest(value: int) -> int:
         return max(FACTOR, int(math.floor(value / FACTOR + 0.5)) * FACTOR)
 
     out_h = nearest(height)
     out_w = nearest(width)
     pixels = out_h * out_w
-    if pixels > MAX_PIXELS:
-        beta = math.sqrt((height * width) / MAX_PIXELS)
+    if pixels > max_pixels:
+        beta = math.sqrt((height * width) / max_pixels)
         out_h = max(FACTOR, int(math.floor(height / beta / FACTOR)) * FACTOR)
         out_w = max(FACTOR, int(math.floor(width / beta / FACTOR)) * FACTOR)
-    elif pixels < MIN_PIXELS:
-        beta = math.sqrt(MIN_PIXELS / (height * width))
+    elif pixels < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
         out_h = int(math.ceil(height * beta / FACTOR)) * FACTOR
         out_w = int(math.ceil(width * beta / FACTOR)) * FACTOR
     return out_h, out_w
@@ -281,12 +478,13 @@ def _patches(pixels: np.ndarray, grid_h: int, grid_w: int) -> np.ndarray:
     return packed
 
 
-def _unfilter(kind: int, current: np.ndarray, previous: np.ndarray) -> None:
+def _unfilter(kind: int, current: np.ndarray, previous: np.ndarray, channels: int) -> None:
+    """Undo one PNG scanline. The left neighbor is one pixel, ``channels`` bytes back."""
     if kind == 0:
         return
     if kind == 1:
         for index in range(len(current)):
-            left = int(current[index - 1]) if index else 0
+            left = int(current[index - channels]) if index >= channels else 0
             current[index] = (int(current[index]) + left) & 0xFF
         return
     if kind == 2:
@@ -294,15 +492,15 @@ def _unfilter(kind: int, current: np.ndarray, previous: np.ndarray) -> None:
         return
     if kind == 3:
         for index in range(len(current)):
-            left = int(current[index - 1]) if index else 0
+            left = int(current[index - channels]) if index >= channels else 0
             current[index] = (int(current[index]) + ((left + int(previous[index])) // 2)) & 0xFF
         return
     if kind == 4:
         for index in range(len(current)):
-            left = int(current[index - 1]) if index else 0
+            left = int(current[index - channels]) if index >= channels else 0
             up = int(previous[index])
-            ul = int(previous[index - 1]) if index else 0
-            current[index] = (int(current[index]) + _paeth(left, up, ul)) & 0xFF
+            upper_left = int(previous[index - channels]) if index >= channels else 0
+            current[index] = (int(current[index]) + _paeth(left, up, upper_left)) & 0xFF
         return
     message = f"PNG filter {kind} is not supported"
     raise ValueError(message)

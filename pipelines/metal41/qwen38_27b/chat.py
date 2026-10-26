@@ -212,13 +212,28 @@ def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any)
     frequency = _frequency(body)
     bias = _logit_bias(body)
     draw = _rng(body)
-    from qwen38_27b.vision import collect_images, expand_image_tokens, merged_grid, prepare_image
+    from qwen38_27b.vision import (
+        collect_images,
+        expand_image_tokens,
+        log_prepared,
+        merged_grid,
+        prepare_image,
+    )
 
-    images = collect_images(messages)
+    noted = getattr(runtime, "_status", None)
+
+    def _vision_note(text: str) -> None:
+        if callable(noted):
+            noted(text)
+
+    images = collect_images(messages, note=_vision_note)
     prompt = encode_chat(
         runtime.root, messages, body.get("tools"), thinking, _reasoning_effort(body)
     )
-    prepared = [prepare_image(blob) for blob in images]
+    prepared = [
+        prepare_image(blob, min_pixels=low, max_pixels=high) for blob, low, high in images
+    ]
+    log_prepared(runtime, prepared)
     if prepared:
         counts = []
         for _patches, grid in prepared:

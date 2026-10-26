@@ -1188,12 +1188,12 @@ class Qwen38Runtime:
         )
 
     def _tokenizer(self) -> Any:
-        tokenizer = getattr(self, "_tokenizer", None)
+        tokenizer = getattr(self, "_loaded_tokenizer", None)
         if tokenizer is None:
             from qwen38_27b.chat import load_tokenizer
 
             tokenizer = load_tokenizer(self.root)
-            self._tokenizer = tokenizer
+            self._loaded_tokenizer = tokenizer
         return tokenizer
 
     def _stable_draw(self, produced: list[int], chosen: int, counts: dict[int, int]) -> int:
