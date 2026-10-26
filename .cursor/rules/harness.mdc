@@ -1,0 +1,17 @@
+---
+description: Keep docs/harness.md in sync when harness entry points or shared harness behavior change.
+globs: harness/**,docs/harness.md
+alwaysApply: false
+---
+
+# Harness documentation
+
+[docs/harness.md](../docs/harness.md) is the catalog of `python -m harness.*` clients and shared listener or lock rules.
+
+When you add, remove, or rename a harness module, change what a harness calls on `serve` or `POST /mcp`, change exit criteria or artifact paths, or change whether a harness takes the machine lock or uses `harness.server`, update `docs/harness.md` in the same change.
+
+Give each runnable harness its own `###` subsection under the right group (language, image, video, music, voice, media preemption, or helpers). The subsection title is a short descriptive name, not the CLI. Put the command in a fenced `bash` block immediately under the title, then the prose. Mention `pytest` or `tests/test_*` when a harness has a unit test that runs without a listener.
+
+Shared infrastructure (`harness.server`, machine lock, default chat model) stays in the opening sections; do not duplicate those paragraphs in every subsection.
+
+Follow [documentation.mdc](documentation.mdc) for tone and placeholders.
