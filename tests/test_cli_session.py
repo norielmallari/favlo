@@ -225,6 +225,55 @@ def test_a_failed_intro_is_printed_without_the_voice(
     assert stopped == [7]
 
 
+def test_quit_stops_a_daemon_whose_close_does_not_return(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    stream = io.StringIO()
+    _home(monkeypatch, tmp_path)
+    release = threading.Event()
+    posts = {"n": 0}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            self.rfile.read(length)
+            posts["n"] += 1
+            if self.path == "/v1/pipelines/close":
+                release.wait(30)
+            _append(log, {"type": "log", "line": "request open"})
+            _append(log, {"type": "log", "line": "request closed"})
+            body = b"busy"
+            self.send_response(500)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server, port = _server(Handler)
+    log = tmp_path / "logs" / f"serve-{port}.log"
+    box: dict[str, list[int]] = {}
+
+    def run() -> None:
+        box["stopped"] = _serve(monkeypatch, stream, "/quit\n", port)
+
+    thread = threading.Thread(target=run)
+    try:
+        _append(log, {"type": "log", "line": f"listening on http://127.0.0.1:{port}"})
+        thread.start()
+        thread.join(2)
+        assert not thread.is_alive()
+        assert box["stopped"] == [7]
+        assert posts["n"] >= 1
+    finally:
+        release.set()
+        thread.join(2)
+        server.shutdown()
+        server.server_close()
+
+
 def test_a_blank_line_does_not_call_the_model(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -73,6 +73,32 @@ def test_a_clean_exit_waits_for_the_pages_taken_while_resident(monkeypatch) -> N
     assert seen["owners"] == ("chat",)
 
 
+def test_a_short_reclaim_still_drops_the_owners(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+    lines: list[str] = []
+
+    class _Ledger:
+        def confirm_released(self, before: int, nbytes: int, timeout: float | None = None) -> bool:
+            del before, nbytes, timeout
+            return False
+
+        def forget(self, owners: object) -> None:
+            seen["owners"] = owners
+
+    monkeypatch.setattr("favlo.memory.memory", _Ledger())
+    monkeypatch.setattr("favlo.pipeline_worker._log_line", lines.append)
+    child = PipelineChild(SimpleNamespace(), None)
+    child._proc = SimpleNamespace(returncode=0)
+    child._baseline = 40_000_000_000
+    child._while_resident = 16_000_000_000
+    child._release_from = 50_000
+    child._held = 30_000_000_000
+    child.counts = {"chat": 30_000_000_000}
+    child._forget()
+    assert seen["owners"] == ("chat",)
+    assert lines == ["reclaimable pages stopped short"]
+
+
 def test_a_disconnected_chat_is_stopped_before_it_streams() -> None:
     module = _ChatSaw()
     _call(

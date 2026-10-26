@@ -542,12 +542,6 @@ def _interactive(args: Any) -> int:
 
         def stop() -> None:
             stopped.set()
-            from favlo.talk import pipeline_command
-
-            try:
-                pipeline_command(args.host, args.port, "close")
-            except (OSError, RuntimeError, ValueError):
-                pass
             stop_pid(pid)
 
         thread = start(

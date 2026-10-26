@@ -20,6 +20,7 @@ from favlo.offset import BumpMap, OffsetMap, align, bin_size
 _PAGE = 4096
 _SLAB = 64 << 20
 _RECLAIM_PAUSE = 0.05
+_RECLAIM_QUIET = 2.0
 _EMPTY = 4
 _NONVOLATILE = 2
 _READ = 1
@@ -202,17 +203,26 @@ class Memory:
         ``before`` is the reclaimable count while those pages were still wired.
         The release is confirmed when that total has risen by ``nbytes``, within
         one heap slab. A count of one slab or less is already confirmed.
-        ``timeout`` stops the check early and returns false. The daemon does
-        not pass one: the next call waits until the check passes.
+        ``timeout`` stops the check early and returns false. With no timeout,
+        a reclaimable count that stops rising also returns false.
         """
         if nbytes <= _SLAB:
             return True
         target = before + nbytes - _SLAB
         deadline = None if timeout is None else time.monotonic() + timeout
+        high = -1
+        quiet = time.monotonic()
         while True:
-            if reclaimable_bytes() >= target:
+            current = reclaimable_bytes()
+            if current >= target:
                 return True
-            if deadline is not None and time.monotonic() >= deadline:
+            now = time.monotonic()
+            if deadline is not None and now >= deadline:
+                return False
+            if current > high:
+                high = current
+                quiet = now
+            elif deadline is None and now - quiet >= _RECLAIM_QUIET:
                 return False
             time.sleep(_RECLAIM_PAUSE)
 

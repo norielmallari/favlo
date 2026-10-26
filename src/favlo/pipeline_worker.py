@@ -382,7 +382,8 @@ class PipelineChild:
         try:
             code = proc.returncode if proc is not None else None
             if before is not None and code is not None:
-                memory.confirm_released(before, held)
+                if not memory.confirm_released(before, held):
+                    _log_line("reclaimable pages stopped short")
             memory.forget(owners)
         finally:
             self._release_memory()

@@ -155,6 +155,13 @@ def test_confirm_released_waits_until_the_pages_return(monkeypatch: Any) -> None
     assert state["calls"] >= 3
 
 
+def test_confirm_released_ends_when_the_count_stops_rising(monkeypatch: Any) -> None:
+    monkeypatch.setattr("favlo.memory.reclaimable_bytes", lambda: 4_000_000_000)
+    monkeypatch.setattr("favlo.memory._RECLAIM_PAUSE", 0.01)
+    monkeypatch.setattr("favlo.memory._RECLAIM_QUIET", 0.05)
+    assert memory.confirm_released(4_000_000_000, (64 << 20) + (32 << 20)) is False
+
+
 def test_confirm_released_times_out_while_the_pages_stay_wired(monkeypatch: Any) -> None:
     monkeypatch.setattr("favlo.memory.reclaimable_bytes", lambda: 4_000_000_000)
     monkeypatch.setattr("favlo.memory._RECLAIM_PAUSE", 0.01)
