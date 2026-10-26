@@ -1,0 +1,17 @@
+---
+description: Keep MCP.md in sync when the media MCP server tools, resources, or task behavior change.
+globs: src/favlo/mcp_server.py,src/favlo/memory_mcp.py,tests/test_server.py
+alwaysApply: false
+---
+
+# MCP server documentation
+
+`MCP.md` at the repository root is the public catalog of Favlo’s `POST /mcp` tools and `favlo://` resources.
+
+When you add, remove, or rename a tool or resource, change tool parameters or defaults, change optional-task behavior, or change what generate tools return (links, inline media, task fields), update `MCP.md` in the same change.
+
+`docs/serve.md` stays the listener note: transport, queue, preemption, logging, and client wiring. Do not duplicate the full tool tables there; add or adjust a single pointer to `MCP.md` if the serve note still names tools inline.
+
+Do not document chat completion or OpenAI HTTP routes in `MCP.md`. Do not add HTTP `/v1/images`, `/v1/videos`, or `/v1/audio` routes to satisfy MCP clients.
+
+Follow [documentation.mdc](documentation.mdc) for tone and placeholders.

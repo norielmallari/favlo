@@ -8,7 +8,7 @@ Favlo AI Runtime: Your Local AI Workhorse
 
 >This app is directly inspired by [oMLX](https://github.com/jundot/omlx). It's an amazing app - I recommend trying that first for general purpose inference before using my more specialized runtime.
 
-Favlo is a local runtime for Apple Silicon. One machine serves language-model inference, embeddings, and content generation: image, video, music, and voice. One model is one pipeline. Each pipeline owns its forward, its weight records, and its Metal kernels. `favlo serve` is the entry point. A client selects a registered language model with the OpenAI `model` field. A language row answers `POST /v1/chat/completions`. An embeddings row answers `POST /v1/embeddings`. Agents reach the content-generation models through MCP at `POST /mcp`.
+Favlo is a local runtime for Apple Silicon. One machine serves language-model inference, embeddings, and content generation: image, video, music, and voice. One model is one pipeline. Each pipeline owns its forward, its weight records, and its Metal kernels. `favlo serve` is the entry point. A client selects a registered language model with the OpenAI `model` field. A language row answers `POST /v1/chat/completions`. An embeddings row answers `POST /v1/embeddings`. Agents reach the content-generation models through MCP at `POST /mcp`. The tool catalog is [MCP.md](MCP.md).
 
 The process contract is [ARCHITECTURE.md](ARCHITECTURE.md). The papers are [REFERENCES.md](REFERENCES.md). Measured research claims are [RESEARCH.md](RESEARCH.md). Cite this software from [CITATION.cff](CITATION.cff). Agents start at [AGENTS.md](AGENTS.md). AI-assisted features are [docs/ai-assistance](docs/ai-assistance/README.md).
 
