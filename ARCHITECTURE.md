@@ -10,7 +10,7 @@ This file is the map and the write set. It wins for the listener, the registry, 
 |---|---|---|
 | Command discovery | `src/favlo/cli.py` | This file. The command scans `pipelines/metal41`, `pipelines/cuda`, and `custom-pipelines/`. Adding a runtime does not edit `cli.py`. |
 | Listener and daemon | `src/favlo/listener.py`, `src/favlo/daemon.py` | [docs/serve.md](docs/serve.md) |
-| Terminal chat | `src/favlo/talk.py`, `src/favlo/persona.py` | [docs/ai-assistance](docs/ai-assistance/README.md) |
+| Terminal chat | `src/favlo/talk.py`, `src/favlo/persona.py`, `src/favlo/config_tools.py` | [docs/ai-assistance](docs/ai-assistance/README.md). The persona is the horse. The terminal instructions add the opening line and the memory tools. The configuration tool group adds the guide, setup, model, and download-reminder tools, and the terminal enables that group. |
 | Console | `src/favlo/console.py` | [docs/console.md](docs/console.md) |
 | Registry | `src/favlo/registry.py`, `models/registry.json` | This file |
 | Prefix store | `src/favlo/prefix.py` | [docs/prefix.md](docs/prefix.md) |
@@ -81,6 +81,7 @@ src/favlo/              process entry; the listener loads the pipeline a request
   console.py            status row; no pipeline imports
   talk.py               terminal chat
   persona.py            voice and saved openings
+  config_tools.py       configuration tool group for the terminal and the web
   prefix.py             SSD prefix store
   memory.py             device, placement heaps, and span handles
   memory_notes.py       ~/.favlo/memory.db for MCP remember, recall, and forget

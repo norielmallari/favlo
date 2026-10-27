@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from favlo.persona import INSTRUCTIONS, load_intros, opening, save_intros
+from favlo.persona import INSTRUCTIONS, PERSONA, TERMINAL, load_intros, opening, save_intros
 from favlo.talk import Idle, _introduce, intro_request, is_quit, is_reload, reply, start
 
 _LINE = "Hello. I am Favlo, a small horse. Could you spare a carrot?"
@@ -141,7 +141,8 @@ def test_a_saved_line_does_not_ask_again(tmp_path: Path) -> None:
 
 
 def test_registered_models_reads_the_registry(tmp_path: Path) -> None:
-    from favlo.talk import chat_model_id, registered_models
+    from favlo.config_tools import registered_models
+    from favlo.talk import chat_model_id
 
     assert registered_models(tmp_path) == "no models are registered"
     with pytest.raises(RuntimeError, match="no model is registered"):
@@ -240,6 +241,20 @@ def test_one_opening_is_not_enough() -> None:
     assert accepted_openings(lines) == lines
 
 
+def test_the_configuration_group_names_the_terminal_tools() -> None:
+    from favlo.config_tools import tools
+
+    built = tools("http://127.0.0.1:8129/v1", None)
+    names = [getattr(item, "name", None) or getattr(item, "__name__", None) for item in built]
+    assert names == [
+        "read_guide",
+        "list_models",
+        "download_suggestions",
+        "read_setup",
+        "run_setup",
+    ]
+
+
 def test_intro_request_names_save_intro() -> None:
     body = intro_request("qwen36-35b-a3b")
     assert body["model"] == "qwen36-35b-a3b"
@@ -248,6 +263,16 @@ def test_intro_request_names_save_intro() -> None:
     assert body["max_tokens"] == 1200
     system = body["messages"][0]["content"]
     assert system.startswith(INSTRUCTIONS)
+    assert PERSONA in INSTRUCTIONS
+    assert TERMINAL in INSTRUCTIONS
+    assert "read_setup" not in PERSONA
+    from favlo.config_tools import INSTRUCTIONS as CONFIG
+
+    assert "You live in this terminal" not in CONFIG
+    assert "Call recall" not in CONFIG
+    assert CONFIG in TERMINAL
+    assert "terminal" not in PERSONA.lower()
+    assert "read_setup" in TERMINAL
     assert "You refuse violent, sexual, NSFW, erotic, and obscene requests." in INSTRUCTIONS
     assert "You refuse sexual or romantic content." in INSTRUCTIONS
     assert "one short sentence" in INSTRUCTIONS

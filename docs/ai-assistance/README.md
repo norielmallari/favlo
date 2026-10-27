@@ -10,7 +10,7 @@ On a terminal, `favlo serve` is the CLI. The server is a daemon. The CLI reads s
 
 ## Voice
 
-The voice is a small horse who likes carrots. A line is sent to the model. The instructions tell the model to refuse violent, sexual, NSFW, erotic, and obscene requests, including fiction and hypotheticals, and sexual or romantic content. A refusal is one short sentence and does not describe the request.
+The voice is a small horse who likes carrots. That persona is separate from the terminal instructions. A line is sent to the model with both. The persona tells the model to refuse violent, sexual, NSFW, erotic, and obscene requests, including fiction and hypotheticals, and sexual or romantic content. A refusal is one short sentence and does not describe the request. The terminal instructions add the opening line and the memory tools. The configuration tool group adds the guide, setup, model, and download-reminder tools. The terminal enables that group.
 
 ## Opening line
 

@@ -29,6 +29,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TextIO
 
+from favlo.config_tools import tools as configuration_tools
 from favlo.persona import INSTRUCTIONS, intros_path, opening, rotate_opening, save_intros
 
 Turn = Callable[[str], str]
@@ -632,33 +633,6 @@ def _download_tool(root: Path, home: Path | None) -> object:
     return download_qwen38_27b
 
 
-def _suggestions_tool(home: Path | None) -> object:
-    from typing import Annotated
-
-    from agent_framework import tool
-    from pydantic import Field
-
-    from favlo.machine import set_suggestions
-
-    @tool(approval_mode="never_require")
-    def download_suggestions(
-        enabled: Annotated[
-            bool,
-            Field(
-                description="False stops idle model-download reminders. True turns them back on."
-            ),
-        ],
-    ) -> str:
-        """Turn idle model-download reminders on or off.
-
-        Call this when the person says they do not want another reminder, or when they ask for
-        those reminders again.
-        """
-        return set_suggestions(enabled, home)
-
-    return download_suggestions
-
-
 async def _once(
     base: str,
     text: str,
@@ -779,11 +753,7 @@ async def _pair(
         name="favlo",
         instructions=INSTRUCTIONS,
         tools=[
-            _guide_tool(),
-            _models_tool(),
-            _suggestions_tool(home),
-            _setup_guide_tool(),
-            _setup_run_tool(base),
+            *configuration_tools(base, home),
             *_memory_tools(base, home),
         ],
         default_options={
@@ -856,29 +826,6 @@ def _memory_tools(base: str, home: Path | None) -> tuple[object, object, object]
     return remember, recall, forget
 
 
-def _guide_tool() -> object:
-    from typing import Annotated
-
-    from agent_framework import tool
-    from pydantic import Field
-
-    from favlo.guides import read_guide as load_guide
-
-    @tool(approval_mode="never_require")
-    def read_guide(
-        name: Annotated[str, Field(description="clients, models, or history.")],
-    ) -> str:
-        """Read one guide.
-
-        clients points a program at this server, covers the first terminal line, the idle
-        check, download reminders, ``/reload``, and ``/quit`` stops the server. models covers
-        download, quantize, and registration. history is where the name Favlo came from.
-        """
-        return load_guide(name)
-
-    return read_guide
-
-
 def chat_model_id(root: Path | None = None) -> str:
     """The model id the terminal sends on chat requests."""
     from favlo.registry import default_llm_id
@@ -888,113 +835,6 @@ def chat_model_id(root: Path | None = None) -> str:
     except LookupError:
         message = "no model is registered"
         raise RuntimeError(message) from None
-
-
-def registered_models(root: Path | None = None) -> str:
-    """The registry listing. An empty registry says so."""
-    from favlo.registry import format_listing
-
-    listing = format_listing(root).strip()
-    if not listing:
-        return "no models are registered"
-    return listing
-
-
-def _setup_guide_tool() -> object:
-    from typing import Annotated
-
-    from agent_framework import tool
-    from pydantic import Field
-
-    from favlo.guides import read_setup as load_setup
-
-    @tool(approval_mode="never_require")
-    def read_setup(
-        pipeline: Annotated[
-            str,
-            Field(description="Pipeline id, such as wan22-i2v."),
-        ],
-    ) -> str:
-        """Read one pipeline's setup guide.
-
-        Call this when someone wants to set up, download, quantize, or delete a model.
-        qwen36-35b-a3b is Qwen3.6-35B-A3B. qwen38-27b is Qwen3.8-27B.
-        z-image-turbo is Z-Image-Turbo. wan22-i2v is Wan 2.2 I2V.
-        ace-step-15-turbo is ACE-Step.
-        The result is that pipeline's setup page.
-        A pipeline with no setup page names the ones that have one.
-        """
-        return load_setup(pipeline)
-
-    return read_setup
-
-
-def _setup_run_tool(base: str) -> object:
-    from typing import Annotated
-
-    from agent_framework import tool
-    from pydantic import Field
-
-    from favlo.setup_run import accepted_argv, frees_model, run_setup_command
-
-    @tool(approval_mode="never_require")
-    def run_setup(
-        command: Annotated[
-            str,
-            Field(description="One command copied from the setup guide."),
-        ],
-    ) -> str:
-        """Run one setup-guide command in this install.
-
-        The working directory is the folder where Favlo is installed. A path cannot
-        leave that folder. This is not a shell: pipes, cd, and other programs are refused.
-        """
-        try:
-            argv = accepted_argv(command, _install())
-        except ValueError as exc:
-            return str(exc)
-        if frees_model(argv):
-            closed = _close_resident(base)
-            if closed is not None:
-                return closed
-        try:
-            return run_setup_command(command)
-        except ValueError as exc:
-            return str(exc)
-
-    return run_setup
-
-
-def _install() -> Path:
-    from favlo.cli import repo_root
-
-    return repo_root()
-
-
-def _close_resident(base: str) -> str | None:
-    request = urllib.request.Request(base + "/pipelines/close", data=b"", method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            response.read()
-    except (OSError, urllib.error.URLError) as exc:
-        return f"could not close the open model: {exc}"
-    return None
-
-
-def _models_tool() -> object:
-    from agent_framework import tool
-
-    @tool(approval_mode="never_require")
-    def list_models() -> str:
-        """List the registered models.
-
-        Each line is one record: folder, pipeline, alias, and key/value mode.
-        An unregistered complete record is named too. This is the live registry,
-        not the download guide.
-        """
-        return registered_models()
-
-    return list_models
 
 
 def _hold(active: bool, hold: Callable[[bool], None] | None) -> None:
