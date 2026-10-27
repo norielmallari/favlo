@@ -9,10 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from harness.benchmarks.serve import Request, completion_body
-from harness.coding.workspace import PROMPT, TOOLS, arguments_of, dispatch
+from harness.coding.session import session_for
+from harness.coding.workspace import PROMPT, TOOLS, arguments_of, dispatch, prepare_workspace
 
-# A stuck model ends here. The suite does not score this bound.
-SESSION_ROUNDS = 8
+# Six tools, then status polls, then a stop. The suite does not score this bound.
+SESSION_ROUNDS = 16
 
 
 def chat_body(model: str, messages: list[dict[str, Any]], request: Request) -> dict[str, object]:
@@ -33,27 +34,39 @@ def run_session(
     model: str,
     request: Request,
     workspace: Path,
-) -> None:
-    """Let the model write files, then return. The caller grades the workspace."""
+) -> list[str]:
+    """Let the model use the tools, then return the ones that succeeded."""
+    prepare_workspace(workspace)
+    session = session_for(workspace)
     messages: list[dict[str, Any]] = [{"role": "user", "content": PROMPT}]
-    for _ in range(SESSION_ROUNDS):
-        payload = _post(port, chat_body(model, messages, request))
-        message = _assistant(payload)
-        messages.append(message)
-        calls = message.get("tool_calls")
-        if not isinstance(calls, list) or not calls:
-            return
-        for index, call in enumerate(calls):
-            if not isinstance(call, dict):
-                continue
-            name, arguments = arguments_of(call)
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": str(call.get("id") or f"call_{index}"),
-                    "content": dispatch(workspace, name, arguments),
-                }
-            )
+    try:
+        for _ in range(SESSION_ROUNDS):
+            payload = _post(port, chat_body(model, messages, request))
+            message = _assistant(payload)
+            messages.append(message)
+            calls = message.get("tool_calls")
+            if not isinstance(calls, list) or not calls:
+                return list(session.calls)
+            for index, call in enumerate(calls):
+                if not isinstance(call, dict):
+                    continue
+                name, arguments = arguments_of(call)
+                tool_call_id = str(call.get("id") or f"call_{index}")
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": dispatch(
+                            workspace,
+                            name,
+                            arguments,
+                            tool_call_id=tool_call_id,
+                        ),
+                    }
+                )
+        return list(session.calls)
+    finally:
+        session.close()
 
 
 def _post(port: int, body: dict[str, object]) -> dict[str, Any]:

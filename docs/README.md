@@ -8,6 +8,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [console.md](console.md) | Shared status row |
 | [prefix.md](prefix.md) | SSD prefix store |
 | [harness.md](harness.md) | File agent, coding agent, and worktree agent |
+| [coding-primitives.md](coding-primitives.md) | Tool contract for the coding harness |
 | [synthetic-matmul2d.md](synthetic-matmul2d.md) | Synthetic `matmul2d` dtype rates |
 | [synthetic-decode.md](synthetic-decode.md) | Synthetic one-token GEMV and `matmul2d` rates |
 | [ai-assistance/README.md](ai-assistance/README.md) | AI-assisted features on `favlo serve` |

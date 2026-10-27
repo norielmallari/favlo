@@ -1,7 +1,8 @@
 """Build one Python module through ``serve`` and grade it.
 
 The model id is the pipeline name. The request sets ``enable_thinking`` true
-and leaves every other sampling field unset. The hidden suite is the result.
+and leaves every other sampling field unset. The task uses every coding tool.
+Exit 0 means the hidden suite passed and each tool returned successfully.
 Each request's server prefill and decode lines are the thinking series.
 
     uv run python -m harness.coding --model qwen38-27b
@@ -17,6 +18,7 @@ from pathlib import Path
 from harness.benchmarks.serve import Request, Server
 from harness.coding.grade import grade
 from harness.coding.loop import run_session
+from harness.coding.workspace import missing_tools
 from harness.file_session import format_request, format_summary, parse_requests
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -44,18 +46,23 @@ def main(argv: list[str] | None = None) -> int:
     server = Server(args.max_memory)
     try:
         server.start()
-        run_session(server.port, stem, Request(enable_thinking=True), workspace)
+        calls = run_session(server.port, stem, Request(enable_thinking=True), workspace)
         _print_rates(server.log)
         result = grade(workspace)
+        absent = missing_tools(calls)
     finally:
         server.stop()
         if created:
             release(root=root)
     sys.stdout.write(result.stdout)
     sys.stderr.write(result.stderr)
-    if result.returncode == 0:
-        print("passed")
-    return result.returncode
+    if result.returncode != 0:
+        return result.returncode
+    if absent:
+        print("missing tools: " + ", ".join(absent))
+        return 1
+    print("passed")
+    return 0
 
 
 def _print_rates(log: object) -> None:

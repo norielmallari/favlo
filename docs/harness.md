@@ -70,7 +70,7 @@ Starts `serve` on a free port (or `--port`), runs two thinking-mode turns agains
 python -m harness.coding --model <id>
 ```
 
-Starts `serve` and sets `enable_thinking` true on the bare model id. The model writes `ledger.py` through tools. A pytest file outside the workspace is the result. Exit 0 is a pass. Prints each request's prefill and decode line. Takes the machine lock. Not part of `pytest`.
+Starts `serve` and sets `enable_thinking` true on the bare model id. The workspace begins with `notes/brief.txt`. The model uses `glob`, `grep_search`, `read_file`, `write_file`, `edit`, and `run_shell_command` to write `ledger.py`. A pytest file outside the workspace is the result. Exit 0 means that suite passed and each of those tools returned successfully. Prints each request's prefill and decode line. Takes the machine lock. Not part of `pytest`. `tests/test_coding_harness.py` and `tests/test_coding_tools.py` check the request and the tools without a listener. The tool contract is [coding-primitives.md](coding-primitives.md).
 
 ### Worktree summarization
 

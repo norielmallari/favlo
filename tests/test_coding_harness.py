@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 from harness.benchmarks.serve import Request, apply_sampling, card_model_id
 from harness.coding.grade import grade
 from harness.coding.loop import chat_body
-from harness.coding.workspace import dispatch, locate
+from harness.coding.session import REQUIRED_TOOLS
+from harness.coding.workspace import PROMPT, dispatch, locate
 
 _MODULE = "def collect(before, after):\n    return after - before\n"
 
@@ -31,18 +33,40 @@ def test_thinking_body_omits_sampling_fields() -> None:
     assert "presence_penalty" not in body
     assert "max_tokens" not in body
     assert body["tools"]
+    names = [item["function"]["name"] for item in body["tools"]]
+    assert names == list(REQUIRED_TOOLS)
 
 
 def test_path_stays_inside_the_workspace(tmp_path: Path) -> None:
     locate(tmp_path, "ledger.py")
     with pytest.raises(ValueError):
         locate(tmp_path, "../ledger.py")
+    outside = tmp_path.parent / "outside.txt"
+    outside.write_text("nope", encoding="utf-8")
+    (tmp_path / "escape").symlink_to(outside)
+    with pytest.raises(ValueError):
+        locate(tmp_path, "escape")
+
+
+def test_prompt_names_every_tool() -> None:
+    for name in REQUIRED_TOOLS:
+        assert name in PROMPT
 
 
 def test_hidden_suite_passes_a_correct_module(tmp_path: Path) -> None:
-    assert dispatch(tmp_path, "write_file", {"path": "ledger.py", "content": _MODULE}) == (
-        "wrote ledger.py"
+    body = json.loads(
+        dispatch(
+            tmp_path,
+            "write_file",
+            {
+                "file_path": "ledger.py",
+                "content": _MODULE,
+                "idempotency_key": "create-ledger",
+            },
+        )
     )
+    assert body["file_path"] == "ledger.py"
+    assert body["content_hash"]
     result = grade(tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
 
