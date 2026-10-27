@@ -29,6 +29,8 @@ A media harness does not take that lock. It calls the listener on `127.0.0.1:812
 
 Agent harnesses that call `POST /v1/chat/completions` take their chat model from the top-level `"default"` field in `models/registry.json` when `--model` or `--judge` is omitted. The first registered language model sets that field to its instruct variant when it is still unset. See [guides/models.md](guides/models.md).
 
+An Agent Framework harness opens the chat client in `src/favlo/chat_client.py`. That client sends `reasoning_content` on the next request. A harness does not supply its own response parser or message preparer.
+
 ## Listener wrapper
 
 Wraps the shared listener on port 8129. Other harness modules use the same attach-or-start behavior when they call into `harness.server`.
@@ -55,6 +57,14 @@ python -m harness.file_agent --base-url http://127.0.0.1:8129/v1 --workspace <di
 ```
 
 File tools driven by the chat endpoint. The agent creates a note, replaces its text, and confirms the file. `pytest` includes this check: it starts `serve` and checks that create, edit, and confirm land in the workspace. The command above is the same client against an already running server. Not a prefix-rate run (`python -m harness`).
+
+### Chat scenarios
+
+```bash
+python -m harness.chat_agent [--model <id>] [--scenario <name>]
+```
+
+Reuses the listener on `127.0.0.1:8129` and does not take the machine lock. Each scenario is a short conversation through the shared chat client. `thinking-follow-up` asks two questions with thinking on. The second request must extend the first request's stored prefix, and both turns must return a reply. `--scenario` runs one named conversation. The default runs every scenario. Exit 0 means every selected scenario held. Not part of `pytest`. `tests/test_chat_agent.py` checks the prefix rule without a listener.
 
 ### Thinking persona coherence
 
@@ -144,7 +154,7 @@ Posts one chat completion to `qwen38-27b` with `artifacts/favlo-horse.png`. The 
 python -m harness.image_persona
 ```
 
-The agent instructions are the terminal persona. The user asks that horse to draw a picture of himself. The image prompt is a cute 2.5D horse with a white blaze and large blue eyes, sitting at a desk. The image call is `Z-Image-Turbo-fp4` at the pipeline's maximum edge, seed 0. Prints the PNG byte count. The next turn asks whether the picture shows that stylized horse rather than a photograph. Exit 0 means the reply affirms it. The PNG is `artifacts/favlo-horse.png`. Uses the listener session. Not part of `pytest`.
+The agent instructions are the horse persona. The user asks that horse to draw a picture of himself. The image prompt is a cute 2.5D horse with a white blaze and large blue eyes, sitting at a desk. The image call is `Z-Image-Turbo-fp4` at the pipeline's maximum edge, seed 0. Prints the PNG byte count. The next turn asks whether the picture shows that stylized horse rather than a photograph. Exit 0 means the reply affirms it. The PNG is `artifacts/favlo-horse.png`. Uses the listener session. Not part of `pytest`.
 
 ## Video
 

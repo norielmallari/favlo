@@ -28,7 +28,7 @@ The official checkpoint is `Qwen/Qwen3.8-27B`. The steps are [qwen38-27b/SETUP.m
 
 `favlo --qwen38-27b quantize` does not download. With no `--src`, it reads the Hugging Face cache snapshot for that repository. A missing cache is an error. `--src` names a local BF16 checkout, including `models/Qwen3.8-27B-bf16`. A uniform pack is `models/Qwen3.8-27B-fp4`. `--ffn-fp8 100` writes `models/Qwen3.8-27B-fp8`. Any other percentage writes `models/Qwen3.8-27B-fp8-fp4`. The record is registered under the alias `qwen38-27b`. `delete <folder-or-alias>` removes that row, the packed directory, and a checkout still under `models/`.
 
-An idle `favlo serve` may start that download when the machine has at least 16 GB of memory and the volume has room. It asks whether to remind them again. `download_suggestions` turns those reminders off or back on. Packing the record stays `quantize`.
+`download_suggestions` stores whether download reminders are enabled. Packing the record stays `quantize`.
 
 ## Qwen3.8-Flash-Next
 
@@ -56,7 +56,7 @@ The official checkpoint is `ACE-Step/acestep-v15-xl-turbo`. `setup` downloads th
 
 ## Default chat model
 
-`models/registry.json` may set top-level `"default"` to a variant id such as `qwen36-35b-a3b:instruct`. The first registered language model writes that field to its instruct variant when it is still unset. Agent harnesses and the terminal read it when no model flag is passed.
+`models/registry.json` may set top-level `"default"` to a variant id such as `qwen36-35b-a3b:instruct`. The first registered language model writes that field to its instruct variant when it is still unset. Agent harnesses and Favlo web read it when no model is chosen.
 
 ## Register a finished record
 

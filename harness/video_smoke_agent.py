@@ -22,9 +22,9 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from agent_framework import Agent, tool
-from agent_framework.openai import OpenAIChatCompletionClient
 from pydantic import Field
 
+from favlo.chat_client import open_chat_client
 from harness.harness_model import judge_model
 from harness.image_smoke_agent import affirms
 from harness.mcp_media import generate, read_link
@@ -127,7 +127,7 @@ def _agent(
 async def _run(
     base_url: str, tools: list[object], name: str, text: str, model: str, iterations: int = 2
 ) -> None:
-    client = OpenAIChatCompletionClient(model=model, api_key="favlo", base_url=base_url)
+    client = open_chat_client(model, base_url)
     client.function_invocation_configuration["max_iterations"] = iterations
     client.function_invocation_configuration["max_consecutive_errors_per_request"] = 1
     agent = Agent(

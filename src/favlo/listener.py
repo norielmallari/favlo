@@ -571,11 +571,11 @@ def _start_daemon(args: Any) -> int:
 
 
 def _interactive(args: Any) -> int:
-    """First-run setup on a terminal, then chat against the daemon."""
+    """First-run setup on a terminal, then the operator console."""
     from favlo.cli import repo_root
     from favlo.daemon import DaemonError, ensure, follow_events, stop_pid, telemetry_path
     from favlo.setup import prepare
-    from favlo.talk import Idle, start
+    from favlo.talk import start
 
     if sys.stdin.isatty():
         code = prepare(repo_root(), stdin_tty=True, console=args.console)
@@ -596,11 +596,13 @@ def _interactive(args: Any) -> int:
             return 1
         path = telemetry_path(args.port)
         offset = 0 if _created or not path.is_file() else path.stat().st_size
-        idle = Idle()
+        listening = f"listening on http://{args.host}:{args.port}"
+        ui.log(listening)
         stopped = threading.Event()
 
         def on_event(event: dict[str, Any]) -> None:
-            if event.get("type") == "log" and event.get("line") == f"favlo {VERSION}":
+            line = event.get("line")
+            if event.get("type") == "log" and line in {f"favlo {VERSION}", listening}:
                 return
             ui.apply_event(event)
 
@@ -615,11 +617,8 @@ def _interactive(args: Any) -> int:
             args.port,
             sys.stdin,
             ui.say,
-            idle,
             stop,
-            draft=ui.draft,
             prompt=ui.prompt,
-            hold=ui.hold,
         )
         try:
             thread.join()

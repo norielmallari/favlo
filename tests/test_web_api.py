@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 import time
@@ -37,7 +38,7 @@ def test_the_default_agent_is_the_horse(client: TestClient) -> None:
     assert favlo["name"] == "Favlo"
     assert favlo["persona"] == PERSONA
     assert favlo["default_model_id"] is None
-    assert favlo["tool_groups"] == ["favlo-config"]
+    assert favlo["tool_groups"] == ["favlo-config", "session"]
     channels = client.get("/channels").json()["channels"]
     match = next(row for row in channels if row["agent_id"] == "agent_favlo")
     assert match["name"] == "Favlo"
@@ -70,6 +71,54 @@ def test_the_default_agent_is_seeded_once(tmp_path: Path) -> None:
     names = [row["name"] for row in second.agents()]
     second.close()
     assert names.count("Favlo") == 1
+
+
+def test_clear_session_drops_the_stored_turns_and_the_memory(tmp_path: Path) -> None:
+    import asyncio
+
+    from agent_framework import AgentSession, InMemoryHistoryProvider
+
+    from web_api.bus import Bus
+    from web_api.chat import turn_setup
+    from web_api.db import FAVLO_SESSION_ID
+    from web_api.session_tools import clear_current_session
+    from web_api.store import Store
+
+    store = Store(tmp_path / "app.db")
+    try:
+        _status, started, _events = store.begin_message("hello", FAVLO_SESSION_ID, "Hello")
+        store.complete_run(started["run_id"], "Hi", "thought")
+        session = AgentSession()
+        bucket = session.state.setdefault(InMemoryHistoryProvider.DEFAULT_SOURCE_ID, {})
+        bucket["messages"] = ["kept"]
+        text = asyncio.run(clear_current_session(store, FAVLO_SESSION_ID, Bus(), session))
+        assert text == "This session is clear."
+        assert bucket["messages"] == []
+        snapshot = store.session_snapshot(FAVLO_SESSION_ID)
+        assert snapshot["messages"] == []
+        assert snapshot["runs"] == []
+        missing = asyncio.run(clear_current_session(store, "session_missing", None, None))
+        assert missing == "That session does not exist."
+        _status, running, _events = store.begin_message("stay", FAVLO_SESSION_ID, "Stay")
+        events = store.clear_session_messages(FAVLO_SESSION_ID)
+        assert events[0]["type"] == "session.cleared"
+        kept = store.session_snapshot(FAVLO_SESSION_ID)
+        assert kept["messages"] == []
+        assert [row["id"] for row in kept["runs"]] == [running["run_id"]]
+        instructions, enabled = turn_setup(
+            "You are Favlo.",
+            "Favlo",
+            ["session"],
+            "http://127.0.0.1:8129/v1",
+            store,
+            "agent_favlo",
+            FAVLO_SESSION_ID,
+            Bus(),
+        )
+        assert "clear_session" in instructions
+        assert [item.name for item in enabled] == ["clear_session"]
+    finally:
+        store.close()
 
 
 def test_the_configuration_group_adds_its_instructions() -> None:
@@ -203,6 +252,33 @@ def _session(
     conn.close()
 
 
+def test_a_new_agent_stores_the_chosen_tools(client: TestClient) -> None:
+    created = client.post(
+        "/agents",
+        headers={"Idempotency-Key": "tools-on"},
+        json={
+            "name": "Reed",
+            "persona": "A short persona.",
+            "default_model_id": None,
+            "tool_groups": ["heartbeats", "conversation"],
+        },
+    )
+    assert created.status_code == 201
+    assert created.json()["agent"]["tool_groups"] == ["conversation", "heartbeats"]
+    rejected = client.post(
+        "/agents",
+        headers={"Idempotency-Key": "tools-bad"},
+        json={
+            "name": "Reed",
+            "persona": "A short persona.",
+            "default_model_id": None,
+            "tool_groups": ["missing"],
+        },
+    )
+    assert rejected.status_code == 400
+    assert rejected.json()["message"] == "That tool group is not available."
+
+
 def test_a_new_agent_leaves_configuration_tools_off(client: TestClient) -> None:
     created = _agent(client, "River", "tools-off")
     assert created["agent"]["tool_groups"] == []
@@ -211,6 +287,7 @@ def test_a_new_agent_leaves_configuration_tools_off(client: TestClient) -> None:
         {"id": "favlo-config", "name": "Configuration tools"},
         {"id": "conversation", "name": "Conversation tools"},
         {"id": "heartbeats", "name": "Heartbeat tools"},
+        {"id": "session", "name": "Session tools"},
     ]
     agents = client.get("/agents").json()["agents"]
     favlo = next(row for row in agents if row["id"] == "agent_favlo")
@@ -290,7 +367,7 @@ def test_favlo_runs_with_the_configuration_group(tmp_path: Path) -> None:
         )
         assert sent.status_code == 202
         _wait(test_client, "session_favlo")
-    assert seen == [["favlo-config"]]
+    assert seen == [["favlo-config", "session"]]
 
 
 def test_two_agents_get_separate_channels(client: TestClient) -> None:
@@ -416,11 +493,150 @@ def test_a_reply_is_stored_on_that_agents_session(client: TestClient, tmp_path: 
     snapshot = _wait(client, session_id)
     bodies = [row["body"] for row in snapshot["messages"]]
     assert bodies == ["Hello", "Hello there"]
+    assert [row["reasoning"] for row in snapshot["messages"]] == [None, None]
     other_snapshot = client.get(f"/sessions/{other['channel']['session_id']}").json()
     assert other_snapshot["messages"] == []
     stored = sqlite3.connect(tmp_path / "app.db")
     kinds = [row[0] for row in stored.execute("SELECT type FROM event")]
     assert "run.delta" not in kinds
+
+
+def test_reasoning_is_stored_beside_the_reply(tmp_path: Path) -> None:
+    from web_api.chat import ReplyPiece
+
+    async def reply(**_kwargs: object):
+        yield ReplyPiece("reasoning", "Looking")
+        yield ReplyPiece("content", "Hello")
+
+    app = create_app(tmp_path, reply=reply)
+    with TestClient(app) as test_client:
+        model = test_client.post(
+            "/provider-models",
+            headers={"Idempotency-Key": "model-reason"},
+            json={
+                "provider_id": "provider_local",
+                "model_id": "example-model",
+                "display_name": "Example",
+            },
+        )
+        assert model.status_code == 201
+        settings = test_client.get("/settings").json()
+        saved = test_client.patch(
+            "/settings",
+            json={
+                "expected_revision": settings["revision"],
+                "default_model_id": model.json()["id"],
+                "exchange_budget": 10,
+            },
+        )
+        assert saved.status_code == 200
+        sent = test_client.post(
+            "/sessions/session_favlo/messages",
+            headers={"Idempotency-Key": "reason-1"},
+            json={"text": "Hello"},
+        )
+        assert sent.status_code == 202
+        snapshot = _wait(test_client, "session_favlo")
+    assistant = snapshot["messages"][-1]
+    assert assistant["body"] == "Hello"
+    assert assistant["reasoning"] == "Looking"
+    stored = sqlite3.connect(tmp_path / "app.db")
+    payload = stored.execute(
+        "SELECT body FROM event WHERE type = 'message.created' ORDER BY sequence DESC LIMIT 1"
+    ).fetchone()[0]
+    assert json.loads(payload)["payload"]["reasoning"] == "Looking"
+
+
+def test_an_empty_reply_keeps_its_reasoning(tmp_path: Path) -> None:
+    from web_api.store import Store
+
+    store = Store(tmp_path / "app.db")
+    _status, started, _events = store.begin_message("empty", "session_favlo", "hello")
+    events = store.note_empty_reply(started["run_id"], "User handed over carrots.")
+    prior = store.run_context(started["run_id"])
+    store.close()
+    created = next(event for event in events if event["type"] == "message.created")
+    failed = next(event for event in events if event["type"] == "run.failed")
+    assert created["payload"]["reasoning"] == "User handed over carrots."
+    assert created["payload"]["text"] == ""
+    assert failed["payload"]["message"] == "The model returned an empty reply."
+    assert prior["run"]["status"] == "failed"
+
+
+def test_the_next_turn_includes_stored_reasoning(tmp_path: Path) -> None:
+    from web_api.store import Store
+
+    store = Store(tmp_path / "app.db")
+    _status, first, _events = store.begin_message("one", "session_favlo", "hello")
+    store.complete_run(first["run_id"], "Hi", "Looking")
+    _status, second, _events = store.begin_message("two", "session_favlo", "again")
+    prior = store.run_context(second["run_id"])["prior"]
+    store.close()
+    assert prior == [
+        {"role": "user", "text": "hello", "reasoning": ""},
+        {"role": "assistant", "text": "Hi", "reasoning": "Looking"},
+    ]
+
+
+def test_reasoning_content_stays_out_of_the_reply() -> None:
+    from agent_framework import Content
+
+    from favlo.chat_client import read_reasoning
+    from web_api.chat import assistant_piece, reasoning_piece
+
+    class Delta:
+        reasoning_content = "Looking"
+
+    parsed = read_reasoning(Delta(), [Content.from_text(text="Hi")])
+
+    class Update:
+        role = "assistant"
+        contents = parsed
+
+        @property
+        def text(self) -> str:
+            return "Hi"
+
+    assert reasoning_piece(Update()) == "Looking"
+    assert assistant_piece(Update()) == "Hi"
+    assert read_reasoning(object(), parsed) == parsed
+
+
+def test_tool_markup_stays_out_of_the_reply() -> None:
+    from web_api.chat import spoken_text
+
+    call = '<tool_call>\n{"name": "remember"}\n</tool_call>'
+    assert spoken_text(call) == ""
+    assert spoken_text(f"Looking.\n{call}") == "Looking."
+    assert spoken_text("Here <tool") == "Here"
+    assert spoken_text(f"{call}\nQwen3.6-35B-A3B-fp4") == "Qwen3.6-35B-A3B-fp4"
+
+
+def test_an_older_message_table_gains_reasoning(tmp_path: Path) -> None:
+    from web_api.db import connect, migrate
+
+    path = tmp_path / "app.db"
+    conn = connect(path)
+    conn.execute(
+        """
+        CREATE TABLE message (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            body TEXT NOT NULL,
+            actor_kind TEXT NOT NULL,
+            actor_id TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+    again = connect(path)
+    migrate(again)
+    names = {row[1] for row in again.execute("PRAGMA table_info(message)")}
+    again.close()
+    assert "reasoning" in names
 
 
 def test_model_ids_come_from_the_models_payload() -> None:
@@ -656,6 +872,144 @@ def test_an_agent_changes_and_deletes_only_its_own_heartbeat(tmp_path: Path) -> 
         assert removed == f"Heartbeat {row['id']} was deleted."
         assert list_heartbeats(store, "agent_favlo") == "No heartbeats are stored."
         assert "Stay." in list_heartbeats(store, other["agent"]["id"])
+
+
+def test_deleting_an_agent_removes_its_downstream_rows(client: TestClient, tmp_path: Path) -> None:
+    model = client.post(
+        "/provider-models",
+        headers={"Idempotency-Key": "delete-model"},
+        json={
+            "provider_id": "provider_local",
+            "model_id": "example-model",
+            "display_name": "Example",
+        },
+    )
+    assert model.status_code == 201
+    settings = client.get("/settings").json()
+    saved = client.patch(
+        "/settings",
+        json={
+            "expected_revision": settings["revision"],
+            "default_model_id": model.json()["id"],
+            "exchange_budget": 10,
+        },
+    )
+    assert saved.status_code == 200
+    created = _agent(client, "Reed", "delete-reed")
+    kept = _agent(client, "Cedar", "delete-cedar")
+    agent_id = created["agent"]["id"]
+    session_id = created["channel"]["session_id"]
+    channel_id = created["channel"]["id"]
+    patched = client.patch(
+        f"/agents/{agent_id}",
+        json={
+            "expected_revision": created["agent"]["revision"],
+            "name": "Reed",
+            "persona": "A short persona.",
+            "default_model_id": None,
+            "tool_groups": ["conversation"],
+        },
+    )
+    assert patched.status_code == 200
+    beat = client.post(
+        "/heartbeats",
+        headers={"Idempotency-Key": "delete-beat"},
+        json={
+            "agent_id": agent_id,
+            "cron_expression": "15 * * * *",
+            "timezone": "UTC",
+            "instructions": "Check the garden.",
+            "enabled": True,
+        },
+    )
+    assert beat.status_code == 201
+    started = client.post(
+        f"/heartbeats/{beat.json()['id']}/run",
+        headers={"Idempotency-Key": "delete-run"},
+    )
+    assert started.status_code == 202
+    heartbeat_session = started.json()["session_id"]
+    _wait(client, heartbeat_session)
+    server = client.post(
+        "/mcp-servers",
+        headers={"Idempotency-Key": "delete-mcp"},
+        json={
+            "agent_id": agent_id,
+            "name": "Notes",
+            "transport": "http",
+            "url": "http://127.0.0.1:9/mcp",
+            "tools": [
+                {
+                    "name": "generate_image",
+                    "description": "Draw",
+                    "schema": {"type": "object"},
+                }
+            ],
+        },
+    )
+    assert server.status_code == 201
+    client.app.state.store.begin_mcp_task(
+        {
+            "remote_id": "task-1",
+            "server_id": server.json()["id"],
+            "agent_id": agent_id,
+            "session_id": session_id,
+            "tool_name": "generate_image",
+            "poll_interval_ms": 1000,
+        }
+    )
+    sent = client.post(
+        f"/sessions/{session_id}/messages",
+        headers={"Idempotency-Key": "delete-message"},
+        json={"text": "Hello"},
+    )
+    assert sent.status_code == 202
+    _wait(client, session_id)
+
+    removed = client.delete(f"/agents/{agent_id}")
+    assert removed.status_code == 200
+    assert removed.json()["name"] == "Reed"
+    again = client.delete(f"/agents/{agent_id}")
+    assert again.status_code == 404
+    refused = client.delete("/agents/agent_favlo")
+    assert refused.status_code == 400
+    assert refused.json()["message"] == "Favlo stays."
+    missing = client.delete("/agents/agent_missing")
+    assert missing.status_code == 404
+
+    names = [row["name"] for row in client.get("/agents").json()["agents"]]
+    assert "Reed" not in names
+    assert "Cedar" in names
+    assert "Favlo" in names
+    channels = client.get("/channels").json()["channels"]
+    assert channel_id not in [row["id"] for row in channels]
+    assert kept["channel"]["id"] in [row["id"] for row in channels]
+
+    stored = sqlite3.connect(tmp_path / "app.db")
+    for table, column, value in (
+        ("agent", "id", agent_id),
+        ("agent_tool_group", "agent_id", agent_id),
+        ("channel", "id", channel_id),
+        ("channel_member", "agent_id", agent_id),
+        ("session", "id", session_id),
+        ("session", "id", heartbeat_session),
+        ("message", "session_id", session_id),
+        ("message", "session_id", heartbeat_session),
+        ("run", "agent_id", agent_id),
+        ("heartbeat", "agent_id", agent_id),
+        ("mcp_server", "agent_id", agent_id),
+        ("mcp_tool", "server_id", server.json()["id"]),
+        ("mcp_tool_group", "server_id", server.json()["id"]),
+        ("mcp_task", "agent_id", agent_id),
+        ("event", "stream_id", f"session:{session_id}"),
+        ("event", "stream_id", f"session:{heartbeat_session}"),
+    ):
+        count = stored.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE {column} = ?",
+            (value,),
+        ).fetchone()[0]
+        assert count == 0, table
+    stored.close()
 
 
 def _agent(client: TestClient, name: str, key: str) -> dict:

@@ -1,4 +1,4 @@
-"""The setup pages the terminal chat is allowed to quote."""
+"""The setup pages the configuration tools are allowed to quote."""
 
 from __future__ import annotations
 
@@ -12,13 +12,11 @@ def test_clients_guide_names_this_server() -> None:
     assert "http://127.0.0.1:8129/v1" in text
     assert "qwen36-35b-a3b" in text
     assert "API key" in text
-    assert "/quit" in text
-    assert "save_intro" in text
-    assert "intros.json" in text
-    assert "5 minutes" in text
-    assert "heartbeat_seconds" in text
-    assert "Qwen/Qwen3.8-27B" in text
-    assert "download_suggestions" in text
+    assert "quit" in text
+    assert "reload" in text
+    assert "operator console" in text
+    assert "does not call a model" in text
+    assert "Qwen3.6-35B-A3B" in text
 
 
 def test_models_guide_names_the_official_checkpoints() -> None:

@@ -16,7 +16,7 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Configuration' })).toBeVisible();
   await page.getByRole('tab', { name: 'Orchestration' }).click();
   await expect(page.getByText('Maximum turns', { exact: true })).toBeVisible();
-  await expect(page.getByRole('textbox', { name: 'Server heartbeat' })).toHaveValue('5');
+  await expect(page.getByRole('textbox', { name: 'Server heartbeat' })).toHaveCount(0);
   const saveTurns = page.getByRole('button', { name: 'Save maximum turns' });
   const box = await saveTurns.boundingBox();
   if (box == null) {

@@ -1669,6 +1669,13 @@ def test_media_http_routes_are_gone(monkeypatch, tmp_path) -> None:
                         "variants": {},
                         "context_length": 131072,
                     },
+                    "missing-model": {
+                        "pipeline": "missing-pipeline",
+                        "runtime": "metal41",
+                        "alias": None,
+                        "variants": {"default": {}},
+                        "context_length": 1024,
+                    },
                 },
             }
         )
@@ -1697,6 +1704,7 @@ def test_media_http_routes_are_gone(monkeypatch, tmp_path) -> None:
         models_status, _kind, models_raw = _http(port, "GET", "/v1/models")
         one_status, _kind, one_raw = _http(port, "GET", "/v1/models/text-model")
         media_status, _kind, _media_raw = _http(port, "GET", "/v1/models/example-model")
+        missing_status, _kind, _missing_raw = _http(port, "GET", "/v1/models/missing-model")
         release_status, _kind, release_raw = _http(
             port, "POST", "/v1/release", {"pid": os.getpid()}
         )
@@ -1709,6 +1717,7 @@ def test_media_http_routes_are_gone(monkeypatch, tmp_path) -> None:
     assert one_status == 200
     assert json.loads(one_raw)["pipeline"] == "qwen36-35b-a3b"
     assert media_status == 404
+    assert missing_status == 404
     assert release_status == 200
     assert b'"released": true' in release_raw
     assert resume_status == 200

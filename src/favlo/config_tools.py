@@ -1,4 +1,4 @@
-"""The configuration tool group shared by the terminal and the web."""
+"""The configuration tool group. Favlo web enables it on the Favlo agent."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ INSTRUCTIONS = (
     "When someone asks how to connect a client, which address or model id to use, "
     "how to download or quantize a supported model, or how to register one, "
     "call read_guide before you answer. "
-    "Use clients for the server address, the model field, the first terminal line, "
-    "the idle check, download reminders, /reload, and stopping the server with /quit. "
+    "Use clients for the server address, the model field, reload, "
+    "and stopping the server with quit. "
     "Use models for which checkpoints can be downloaded and how registration works. "
     "When someone wants to set up Qwen3.6-35B-A3B, call read_setup with qwen36-35b-a3b "
     "before you answer. When someone wants to set up Qwen3.8-27B, call read_setup with "
@@ -31,15 +31,12 @@ INSTRUCTIONS = (
     "call list_models before you answer. Report only the lines it returns. "
     "When someone asks where your name came from, or who Amanda and Celestia are, "
     "call read_guide with history and tell that story. Do not add events it does not contain. "
-    "Answer from that guide. If the guide does not say it, say you do not know. "
-    "When you suggest a model download, ask if they want to be reminded again. "
-    "If they do not want another reminder, call download_suggestions with enabled false. "
-    "If they want those reminders again, call download_suggestions with enabled true."
+    "Answer from that guide. If the guide does not say it, say you do not know."
 )
 
 
 def tools(base: str, home: Path | None) -> list[object]:
-    """The configuration tools, in the order the terminal offers them."""
+    """The configuration tools, in the order the group offers them."""
     return [
         _guide_tool(),
         _models_tool(),
@@ -73,8 +70,8 @@ def _guide_tool() -> object:
     ) -> str:
         """Read one guide.
 
-        clients points a program at this server, covers the first terminal line, the idle
-        check, download reminders, ``/reload``, and ``/quit`` stops the server. models covers
+        clients points a program at this server, covers ``reload``,
+        and ``quit`` stops the server. models covers
         download, quantize, and registration. history is where the name Favlo came from.
         """
         return load_guide(name)
@@ -94,15 +91,12 @@ def _suggestions_tool(home: Path | None) -> object:
     def download_suggestions(
         enabled: Annotated[
             bool,
-            Field(
-                description="False stops idle model-download reminders. True turns them back on."
-            ),
+            Field(description="False stores download reminders as off. True stores them as on."),
         ],
     ) -> str:
-        """Turn idle model-download reminders on or off.
+        """Store whether download reminders are enabled.
 
-        Call this when the person says they do not want another reminder, or when they ask for
-        those reminders again.
+        The terminal does not start a reminder on its own. This records the preference.
         """
         return set_suggestions(enabled, home)
 

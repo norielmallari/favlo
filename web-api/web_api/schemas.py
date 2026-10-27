@@ -11,6 +11,7 @@ class AgentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     persona: str = ""
     default_model_id: str | None = None
+    tool_groups: list[str] | None = None
 
 
 class AgentUpdate(BaseModel):
@@ -35,10 +36,6 @@ class ModelCreate(BaseModel):
 class ModelUpdate(BaseModel):
     expected_revision: int = Field(ge=1)
     enabled: bool
-
-
-class HeartbeatInterval(BaseModel):
-    minutes: int = Field(ge=1, le=1440)
 
 
 class SettingsUpdate(BaseModel):

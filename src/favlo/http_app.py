@@ -265,8 +265,8 @@ def build_app(args: Any, state: dict[str, Any]) -> Starlette:
 
 
 def _language_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    hidden = _hidden_pipelines()
-    return [row for row in rows if row.get("pipeline") not in hidden]
+    listed = _language_pipelines()
+    return [row for row in rows if row.get("pipeline") in listed]
 
 
 def _models(_request: Request, state: dict[str, Any]) -> Response:
@@ -279,7 +279,7 @@ def _one_model(request: Request, state: dict[str, Any]) -> Response:
         row = one_model(request.path_params["model_id"], resident=state.get("record"))
     except LookupError as exc:
         return _error(404, str(exc), "not_found")
-    if row.get("pipeline") in _hidden_pipelines():
+    if row.get("pipeline") not in _language_pipelines():
         return _error(404, "not found", "not_found")
     return _json_response(row)
 
@@ -833,12 +833,23 @@ def _each_pipeline() -> list[tuple[str, str, Any]]:
     return found
 
 
-def _hidden_pipelines() -> set[str]:
+def _language_pipelines() -> set[str]:
+    """Pipelines that ``GET /v1/models`` lists.
+
+    A media or embeddings handler stays off this list. Those rows are the
+    media MCP tools. A pipeline file that cannot be loaded is omitted.
+    """
     names: set[str] = set()
     for _folder, pipeline, module in _each_pipeline():
-        if media_kinds(module) or callable(getattr(module, "handle_embed", None)):
+        if _is_language_module(module):
             names.add(pipeline)
     return names
+
+
+def _is_language_module(module: Any) -> bool:
+    if media_kinds(module) or callable(getattr(module, "handle_embed", None)):
+        return False
+    return callable(getattr(module, "handle_chat", None))
 
 
 def _media_rows(media: str, mode: str | None = None) -> list[dict[str, Any]]:

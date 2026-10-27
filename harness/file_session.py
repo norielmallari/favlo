@@ -25,10 +25,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
-from agent_framework import Agent, Content, tool
-from agent_framework.openai import OpenAIChatCompletionClient
+from agent_framework import Agent, tool
 from openai import AsyncOpenAI
 from pydantic import Field
+
+from favlo.chat_client import open_chat_client
 
 TARGET_TOKENS = 65536
 INSTRUCTIONS = (
@@ -456,80 +457,9 @@ def _completions(log: Log) -> str:
     return "\n---\n".join(blocks[-2:])
 
 
-def _content_text(content: object) -> str:
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return ""
-    parts: list[str] = []
-    for item in content:
-        if isinstance(item, str):
-            parts.append(item)
-        elif isinstance(item, dict) and item.get("type") == "text":
-            parts.append(str(item.get("text") or ""))
-    return "".join(parts)
-
-
-def read_reasoning(message: object, contents: list[Content]) -> list[Content]:
-    """Keep a ``reasoning_content`` delta as reasoning, not as the reply."""
-    extra = getattr(message, "model_extra", None) or {}
-    text = extra.get("reasoning_content") if isinstance(extra, dict) else None
-    if not isinstance(text, str) or text == "":
-        found = getattr(message, "reasoning_content", None)
-        text = found if isinstance(found, str) else ""
-    if text == "":
-        return contents
-    return [*contents, Content.from_text_reasoning(text=text)]
-
-
-def echo_reasoning(message: object, built: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Put reasoning back on ``reasoning_content`` for the chat template.
-
-    The chat client copies reasoning into ``content``. The template then writes
-    an empty think block. A reply that already contains the call XML is left
-    as that text, so the template does not write the call a second time.
-    """
-    if getattr(message, "role", None) != "assistant":
-        return built
-    reasoning = "".join(
-        part.text or ""
-        for part in getattr(message, "contents", ())
-        if getattr(part, "type", None) == "text_reasoning"
-        and not getattr(part, "protected_data", None)
-    )
-    if not reasoning:
-        return built
-    kept: list[dict[str, object]] = []
-    placed = False
-    for item in built:
-        if item.get("role") != "assistant":
-            kept.append(item)
-            continue
-        text = _content_text(item.get("content"))
-        if text == reasoning and "tool_calls" not in item:
-            continue
-        copied = dict(item)
-        if not placed:
-            copied["reasoning_content"] = reasoning
-            placed = True
-        if "<tool_call>" in text:
-            copied.pop("tool_calls", None)
-        kept.append(copied)
-    if not placed:
-        kept.append({"role": "assistant", "reasoning_content": reasoning, "content": ""})
-    return kept
-
-
 def _open_agent(base_url: str, model: str, read: object) -> tuple[AsyncOpenAI, Agent]:
     http = AsyncOpenAI(api_key="favlo", base_url=base_url, timeout=3600.0)
-    client = OpenAIChatCompletionClient(
-        model=model_stem(model),
-        api_key="favlo",
-        base_url=base_url,
-        async_client=http,
-        response_parser=read_reasoning,
-        message_preparer=echo_reasoning,
-    )
+    client = open_chat_client(model_stem(model), base_url, async_client=http)
     # One tool call, then the framework asks for a reply with tools disabled.
     client.function_invocation_configuration["max_iterations"] = 1
     agent = Agent(

@@ -1,4 +1,4 @@
-"""Setup guides the terminal chat reads back to the operator."""
+"""Setup guides the configuration tools read back."""
 
 from __future__ import annotations
 

@@ -54,6 +54,14 @@ A media harness does not take the machine lock. It calls the listener. A media h
 
 `python -m harness`, `python -m harness.coding`, and `python -m harness.worktree` restart the process they started so a later turn reloads a prefix. They require port 8129 to be free. They do not attach to a listener someone else left running, and they do not bind a second port beside it.
 
+`harness.chat_agent` uses that same listener and does not take the machine lock.
+
+A test agent harness uses the shared chat client. It does not add a response parser, a message preparer, or another patch of its own. A field the next turn must send is set where chat messages are built.
+
+## Chat
+
+A chat debug uses the Favlo horse only. That is the seeded agent named Favlo, on its channel session. Do not read, quote, or score a chat that belongs to any other agent.
+
 ## Re-implementation
 
 Write algorithms from public research documents: papers, published specifications, and vendor hardware documentation. Do not open another application's tree and port its implementation. That covers local checkouts of inference runtimes and of corpus builders. Do not launch another application's environment.

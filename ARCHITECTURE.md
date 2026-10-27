@@ -10,7 +10,8 @@ This file is the map and the write set. It wins for the listener, the registry, 
 |---|---|---|
 | Command discovery | `src/favlo/cli.py` | This file. The command scans `pipelines/metal41`, `pipelines/cuda`, and `custom-pipelines/`. Adding a runtime does not edit `cli.py`. |
 | Listener and daemon | `src/favlo/listener.py`, `src/favlo/daemon.py` | [docs/serve.md](docs/serve.md) |
-| Terminal chat | `src/favlo/talk.py`, `src/favlo/persona.py`, `src/favlo/config_tools.py` | [docs/ai-assistance](docs/ai-assistance/README.md). The persona is the horse. The terminal instructions add the opening line and the memory tools. The configuration tool group adds the guide, setup, model, and download-reminder tools, and the terminal enables that group. |
+| Operator console | `src/favlo/talk.py` | [docs/serve.md](docs/serve.md). `quit` and `reload` are the commands. `/quit` and `/reload` are the same commands. The console does not call a model. |
+| Persona and configuration tools | `src/favlo/persona.py`, `src/favlo/config_tools.py` | [docs/ai-assistance](docs/ai-assistance/README.md). The persona is the horse. Favlo web stores it on the Favlo agent and enables the configuration tool group there. |
 | Console | `src/favlo/console.py` | [docs/console.md](docs/console.md) |
 | Registry | `src/favlo/registry.py`, `models/registry.json` | This file |
 | Prefix store | `src/favlo/prefix.py` | [docs/prefix.md](docs/prefix.md) |
@@ -21,7 +22,7 @@ This file is the map and the write set. It wins for the listener, the registry, 
 
 Shared code is `src/favlo/`. `Pipeline` in `pipeline.py` is the daemon call. `LanguagePipeline`, `EmbeddingsPipeline`, and `MediaPipeline` extend it. A served language model inherits `LanguagePipeline`. A served embedding model inherits `EmbeddingsPipeline`. A served image, video, music, or voice pipeline inherits `MediaPipeline`. None of those classes run a forward, name stages, or branch on the pipeline. A failed pipeline inherits none of them. A kernel does not branch on the pipeline. A new abstract method on `Pipeline` updates every subclass of every seam in that same change. A new abstract method on one seam updates every subclass of that seam. A pipeline task does not change `src/favlo/` to reach into another runtime. A pipeline imports the prefix store and adapts its own buffers. The listener passes `owner` into `open_runtime` when that function accepts it, records the owners created during that open, and sweeps them after `close`. An open that raises sweeps the owners that appeared during the call.
 
-`POST /mcp` is the FastMCP media queue. The daemon owns the GPU admission queues in `schedule.py`: embeddings, then chats that have not started, then media. A chat preempts media. `preempt` stays set until the chat queue is empty. An embeddings request does not set `preempt`. `/reload` drops every waiter in both queues. A waiter does not run. The request that holds the GPU is cancelled, and the runtime closes. The listener checkpoints the media task and closes its device before the chat model allocates, resumes that same task only after the foreground queue has drained, and does not serve a media HTTP route. The daemon is a request server. `pipelines` is the daemon registry of open pipeline processes. One chat or media process stays resident. An embeddings process opens beside it for that request and closes when the request returns. `close` halts every registered process. The next call waits until the ledger says those pages are released. A reclaimable count that stops rising ends that wait, and the daemon drops the ledger entry. A pipeline crash fails the running job and leaves the daemon up. `POST /mcp` stays up with none loaded. It does not own chat history, tools, or the terminal session. The CLI owns those. A pipeline writes a reply and does not see a socket. `json` finishes one object, and that object is encoded before the call returns. `begin_events`, `event`, and `done` are one server-sent stream. `stopped` is true when that client has gone. Telemetry is one JSON event per line. The pipeline process forwards those events to the daemon. The terminal paints them as they arrive, and prints the reply after that turn's requests have closed.
+`POST /mcp` is the FastMCP media queue. The daemon owns the GPU admission queues in `schedule.py`: embeddings, then chats that have not started, then media. A chat preempts media. `preempt` stays set until the chat queue is empty. An embeddings request does not set `preempt`. `reload` drops every waiter in both queues. A waiter does not run. The request that holds the GPU is cancelled, and the runtime closes. The listener checkpoints the media task and closes its device before the chat model allocates, resumes that same task only after the foreground queue has drained, and does not serve a media HTTP route. The daemon is a request server. `pipelines` is the daemon registry of open pipeline processes. One chat or media process stays resident. An embeddings process opens beside it for that request and closes when the request returns. `close` halts every registered process. The next call waits until the ledger says those pages are released. A reclaimable count that stops rising ends that wait, and the daemon drops the ledger entry. A pipeline crash fails the running job and leaves the daemon up. `POST /mcp` stays up with none loaded. It does not own chat history or tools. Favlo web owns those. The operator console reads `quit` and `reload` and does not keep a session. A pipeline writes a reply and does not see a socket. `json` finishes one object, and that object is encoded before the call returns. `begin_events`, `event`, and `done` are one server-sent stream. `stopped` is true when that client has gone. Telemetry is one JSON event per line. The pipeline process forwards those events to the daemon. The operator console paints them as they arrive.
 
 `python -m favlo.smoke_lock` is how a pipeline test takes the GPU while the daemon stays up. Acquire closes the resident model when no request is open. Release lets the next chat load one again. The recorded pid is the invoking shell. `uv` and `python` are not that owner. A command started from a shell that already holds the lock leaves the file in place and does not release it. Image, video, and music bytes stay on disk. The uncompressed AVI is `~/.favlo/videos/<id>.avi`. The MP4 is `<id>.mp4` beside it, encoded from that AVI. `video_ttl_seconds` in `settings.json` is how long it stays. The default is 86400. A sweep at startup and after each stored clip deletes a file older than that. The uncompressed RGB is `~/.favlo/images/<id>.rgb`. The PNG is `<id>.png` beside it, encoded from that file at the request's zlib level. `image_ttl_seconds` uses the same default and the same sweep. The WAV is `~/.favlo/music/<id>.wav`. The MP3 and FLAC are encoded from that WAV. `music_ttl_seconds` uses the same default and the same sweep. The spoken WAV is `~/.favlo/voice/<id>.wav`. The MP3 and FLAC are encoded from that WAV. `voice_ttl_seconds` uses the same default and the same sweep. A client reads a stored file with `resources/read`. A path under `/v1/images`, `/v1/videos`, or `/v1/audio` is 404. The listener note is [docs/serve.md](docs/serve.md).
 
@@ -69,7 +70,7 @@ src/favlo/              process entry; the listener loads the pipeline a request
   cli.py                discovers entry files; a new runtime does not edit this
   web_host.py           starts the web API and the Expo app; it does not start the listener. It does not start when the registry has no language model. The first run stores that registry model as the application default
   registry.py           folders, aliases, pipelines, and sampling variants
-  listener.py           process, model load, and the request lock; a terminal starts it and keeps the CLI
+  listener.py           process, model load, and the request lock; a terminal starts it and keeps the operator console
   http_app.py           ASGI routes for chat and MCP
   schedule.py           foreground queue and media queue; the daemon admits the GPU
   pipeline.py           daemon call every served seam extends
@@ -80,22 +81,23 @@ src/favlo/              process entry; the listener loads the pipeline a request
   reply.py              the object a pipeline writes; the server turns it into HTTP
   daemon.py             spawn and stop the listener; no pipeline imports
   console.py            status row; no pipeline imports
-  talk.py               terminal chat
-  persona.py            voice and saved openings
-  config_tools.py       configuration tool group for the terminal and the web
+  talk.py               operator console; quit and reload
+  chat_client.py        Agent Framework chat client; reasoning stays on reasoning_content
+  persona.py            horse persona
+  config_tools.py       configuration tool group for the web
   prefix.py             SSD prefix store
   memory.py             device, placement heaps, and span handles
   memory_notes.py       ~/.favlo/memory.db for MCP remember, recall, and forget
   pipelines.py          the daemon registry of the pipeline process
   setup.py              empty-registry download
-  logs.py               rolling server log; size is settings.json log_max_bytes; heartbeat_seconds is the terminal quiet interval
+  logs.py               rolling server log; size is settings.json log_max_bytes
   videos.py             stored AVI and the MP4 encoded from it; video_ttl_seconds drops an older clip
   images.py             stored RGB and the PNG encoded from it; image_ttl_seconds drops an older pair
   music.py              stored WAV and the MP3 or FLAC encoded from it; music_ttl_seconds drops an older clip
   voice.py              stored spoken WAV and the MP3 or FLAC encoded from it; voice_ttl_seconds drops an older clip
-web-api/                FastAPI process for favlo web, package web_api
-web-spa/                Expo web app
-harness/                file agent, coding agent, worktree agent, and the three benchmarks
+web-api/                FastAPI process for favlo web, package web_api. The note is web-api/README.md
+web-spa/                Expo web app. The note is web-spa/README.md
+harness/                file agent, coding agent, worktree agent, chat agent, and the three benchmarks
 docs/                   as-built notes; see docs/README.md
 ```
 

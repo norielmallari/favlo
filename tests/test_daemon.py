@@ -1,5 +1,6 @@
 """The serve daemon starts once and the terminal does not become that process."""
 
+import io
 import sys
 import threading
 import time
@@ -18,7 +19,6 @@ from favlo.daemon import (
     stop_pid,
     telemetry_event,
 )
-from favlo.talk import Idle
 
 
 class _Proc:
@@ -130,16 +130,6 @@ def test_the_daemon_starts_a_pipeline_heartbeat() -> None:
     assert {thread.name for thread in threading.enumerate()} == before
 
 
-def test_note_closed_ignores_a_close_without_an_open() -> None:
-    idle = Idle()
-    idle.note_closed()
-    assert idle.quiet(0)
-    idle.enter()
-    assert not idle.quiet(0)
-    idle.note_closed()
-    assert idle.quiet(0)
-
-
 def test_non_interactive_reports_a_daemon_error(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -161,9 +151,11 @@ def test_non_interactive_starts_the_daemon_and_exits(
     assert captured.err == ""
 
 
-def test_interactive_attaches_without_listening_itself(
+def test_interactive_prints_the_listening_line(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    stream = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", stream)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.setattr("favlo.setup.prepare", lambda *_a, **_k: 0)
     monkeypatch.setattr("favlo.daemon.ensure", lambda *_a, **_k: (7, False))
@@ -180,6 +172,7 @@ def test_interactive_attaches_without_listening_itself(
     monkeypatch.setattr("favlo.talk.start", start)
     assert listener.serve_main(["--port", "8129"]) == 0
     assert started == ["talk"]
+    assert "listening on http://127.0.0.1:8129\n" in stream.getvalue()
 
 
 def test_ctrl_c_closes_pipelines_and_leaves_the_daemon(

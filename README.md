@@ -51,11 +51,13 @@ uv run favlo serve
 uv run favlo serve --non-interactive
 ```
 
-`favlo serve` on a terminal is the CLI. `favlo serve --non-interactive` starts the server daemon and exits. The daemon listens on `127.0.0.1:8129`. Chat and embeddings are HTTP routes on that daemon. Image, video, music, and voice are MCP.
+`favlo serve` on a terminal is the operator console. It prints `listening on http://127.0.0.1:8129`. `favlo serve --non-interactive` starts the server daemon and exits. The daemon listens on `127.0.0.1:8129`. Chat and embeddings are HTTP routes on that daemon. Image, video, music, and voice are MCP.
+
+`uv run favlo web` starts the workspace beside that listener. The API is [web-api/README.md](web-api/README.md). The app is [web-spa/README.md](web-spa/README.md).
 
 ## Startup
 
-On a terminal, an empty registry downloads [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B), packs `models/Qwen3.6-35B-A3B-fp8-e20`, and then the daemon listens. The steps are [docs/qwen36-35b-a3b/SETUP.md](docs/qwen36-35b-a3b/SETUP.md). Quantize and the other non-serve commands use that model's flag, as in `favlo --qwen38-flash-next quantize`. The listener is [docs/serve.md](docs/serve.md). The image request is [docs/z-image-turbo/README.md](docs/z-image-turbo/README.md). The terminal session is [docs/guides/clients.md](docs/guides/clients.md). The assisted features on that session are [docs/ai-assistance](docs/ai-assistance/README.md).
+On a terminal, an empty registry downloads [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B), packs `models/Qwen3.6-35B-A3B-fp8-e20`, and then the daemon listens. The steps are [docs/qwen36-35b-a3b/SETUP.md](docs/qwen36-35b-a3b/SETUP.md). Quantize and the other non-serve commands use that model's flag, as in `favlo --qwen38-flash-next quantize`. The listener is [docs/serve.md](docs/serve.md). The image request is [docs/z-image-turbo/README.md](docs/z-image-turbo/README.md). The operator console is [docs/guides/clients.md](docs/guides/clients.md). Assisted features are [docs/ai-assistance](docs/ai-assistance/README.md).
 
 ## Methodology
 

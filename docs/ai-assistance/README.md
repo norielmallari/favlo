@@ -2,19 +2,11 @@
 
 These are the behaviors on `favlo serve` where a model writes or decides. Pipeline math, kernels, and quantize stay in that pipeline's note. A change to a feature on this page updates this folder in the same change.
 
-The guides the terminal reads are [../guides](../guides). The process contract is [../../ARCHITECTURE.md](../../ARCHITECTURE.md).
-
-## Terminal chat
-
-On a terminal, `favlo serve` is the CLI. The server is a daemon. The CLI reads stdin and answers through that daemon's `POST /v1/chat/completions`. The model field is the first folder in the registry. One Microsoft Agent Framework session keeps that history. A line is sent when it is ready. The prompt is `you:`. It starts on a new line after that turn's telemetry. The reply is `favlo:`. Telemetry is painted as it arrives, including the load row. The reply is printed after that turn's requests have closed. The terminal wraps that text. A tool call and a tool result are not printed. `/quit` stops the daemon. The daemon closes every open pipeline. A daemon that stays up is killed. Ctrl+C closes every open pipeline and exits the CLI. The daemon keeps listening. `/reload` closes every open pipeline, drops every waiter in the foreground queue and the media queue, drops a media task that has not started, drops the imported pipeline modules, and stays in the chat. A waiter does not run. The request that holds the GPU is cancelled. Closing the terminal leaves the daemon running. `favlo serve --non-interactive` starts the daemon and exits.
+The guides the configuration tools read are [../guides](../guides). The process contract is [../../ARCHITECTURE.md](../../ARCHITECTURE.md). The operator console is [../serve.md](../serve.md).
 
 ## Voice
 
-The voice is a small horse who likes carrots. That persona is separate from the terminal instructions. A line is sent to the model with both. The persona tells the model to refuse violent, sexual, NSFW, erotic, and obscene requests, including fiction and hypotheticals, and sexual or romantic content. A refusal is one short sentence and does not describe the request. The terminal instructions add the opening line and the memory tools. The configuration tool group adds the guide, setup, model, and download-reminder tools. The terminal enables that group. Favlo web enables the same group on an agent from that agent's details, and the Favlo agent has it on.
-
-## Opening line
-
-The first start, when `~/.favlo/intros.json` has no lines, sends one chat completion immediately. That request includes the persona and asks for six different introductions, each with emojis. Fewer than four distinct lines is not stored. `tool_choice` names `save_intro`. The daemon opens the load row when it reads the record. The first start prints the first saved line. Each later start prints the next line, then the first again, and does not call the model until someone types. The line just shown is stored as the assistant's first turn.
+The voice is a small horse who likes carrots. Favlo web stores that persona on the agent named Favlo. The configuration tool group adds the guide, setup, model, and download-reminder tools. Favlo web enables that group from an agent's details, and the Favlo agent has it on. The API note is [../../web-api/README.md](../../web-api/README.md). The app note is [../../web-spa/README.md](../../web-spa/README.md).
 
 ## Guides
 
@@ -22,7 +14,7 @@ The first start, when `~/.favlo/intros.json` has no lines, sends one chat comple
 
 | Guide | What it covers |
 |---|---|
-| [clients](../guides/clients.md) | Server address, model field, `/quit`, `/reload`, the opening line, the idle check, and download reminders |
+| [clients](../guides/clients.md) | Server address, model field, `quit`, and `reload` |
 | [models](../guides/models.md) | Download, quantize, and registration for the supported checkpoints |
 | [history](../guides/history.md) | Where the name Favlo came from |
 
@@ -40,20 +32,18 @@ A question the guide does not answer stays unanswered.
 
 `list_models` reads `models/registry.json` and returns one line per record: the folder, the pipeline, the alias, and the key/value mode. An unregistered complete record is named on its own line. An empty registry returns `no models are registered`. The chat calls this when someone asks which models are registered. Download and quantize stay in the models guide.
 
+## Session tools
+
+Favlo web enables Session tools from an agent's details. The switch starts off, and the Favlo agent has it on. The tool is `clear_session`. Each turn builds a new in-memory Agent Framework session and copies the stored messages into it. That session is not written to the database. The user message and the reply are. `clear_session` deletes the stored messages for the session the agent is in, drops finished runs on that session, and clears the in-memory session for the turn in progress. The open chat drops the transcript when that clear arrives.
+
 ## Conversation tools
 
 Favlo web enables Conversation tools from an agent's details. The switch starts off. The tools are `list_conversations`, `search_messages`, and `read_recent_messages`. List names the stored agent sessions, channels, and workspace chats. Search matches message text and returns a short snippet with the conversation id. Read returns the latest messages from that conversation, oldest first. The read count is capped at 50 and the search count at 20. While the switch is on, the tools read every one of those conversations.
 
 ## MCP media
 
-Favlo web connects an agent to an MCP server from that agent's details. The transport is HTTP or stdio. Test connection calls `tools/list` on MCP `2026-07-28` and stores the catalog. The client advertises `io.modelcontextprotocol/tasks`. `generate_image`, `generate_video_i2v`, `generate_video_t2v`, `generate_music`, and `generate_voice` then return a task handle. The web API polls `tasks/get` at `pollIntervalMs` until the task is completed, failed, or cancelled, and writes that result into the agent session that called the tool. A disabled server or a disabled tool group is left out of the next turn. A task already running still finishes.
+Favlo web connects an agent to an MCP server from that agent's details. The transport is HTTP or stdio. Test connection calls `tools/list` on MCP `2026-07-28` and stores the catalog. The client advertises `io.modelcontextprotocol/tasks`. `generate_image`, `generate_video_i2v`, `generate_video_t2v`, `generate_music`, and `generate_voice` then return a task handle. The web API polls `tasks/get` at `pollIntervalMs` until the task is completed, failed, or cancelled, and writes that result into the agent session that called the tool. A failed result, including a completed task whose text is a tool error, starts another turn in that session. The turn instructions require `generate_image`, `generate_video_i2v`, `generate_video_t2v`, `generate_music`, and `generate_voice` to pass a model id returned by `list_image_models`, `list_video_models_i2v`, `list_video_models_t2v`, `list_music_models`, or `list_voice_models`. That follow-up turn calls the matching list tool and retries the generate tool with an id from that list. The turn tells the user it is generating that file. It does not write a `favlo://` link, an image id, or a claim that the file is already ready. That file arrives in a later message. A disabled server or a disabled tool group is left out of the next turn. A task already running still finishes.
 
 ## Shared memory
 
-`POST /mcp` lists `remember`, `recall`, and `forget`. They read and write `~/.favlo/memory.db`. A recall ranks stored sentences with the BGE-M3 dense vector from `POST /v1/embeddings`. Hermes and other MCP clients call the same three tools on the listener. The terminal chat registers the same names and uses that database. The store is not injected into anyone's prompt.
-
-## Idle download suggestion
-
-After the quiet interval with no completion from this terminal and no typing, one session checks the machine. `~/.favlo/settings.json` key `heartbeat_seconds` is that interval. The default is 5 minutes. A value below 60 seconds uses the default. `machine` reports physical memory and free disk. When the machine has at least 16 GB and the volume can hold the published files, `download_qwen38_27b` starts `favlo --qwen38-27b download` into `models/Qwen3.8-27B-bf16`. The line asks whether to remind them again.
-
-`download_suggestions` stores the answer in `~/.favlo/suggestions.json`. `enabled` false stops later idle suggestions. `enabled` true turns them back on. A missing file leaves reminders on. A machine that is not ready, or a checkout that is already downloading or present, does not call the model and does not print. Packing the record stays `favlo --qwen38-27b quantize`. The log for that download is `~/.favlo/logs/qwen38-27b-download.log`. A pipeline heartbeat runs in the daemon after the request closes, not in this terminal.
+`POST /mcp` lists `remember`, `recall`, and `forget`. They read and write `~/.favlo/memory.db`. A recall ranks stored sentences with the BGE-M3 dense vector from `POST /v1/embeddings`. Hermes and other MCP clients call the same three tools on the listener. Favlo web can enable that group on an agent. The store is not injected into anyone's prompt.

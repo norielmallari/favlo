@@ -71,9 +71,10 @@ export function Composer({ value, working, onChange, onSend }: Props) {
 }
 
 const styles = StyleSheet.create({
-  row: { flexDirection: 'row', gap: 8, alignItems: 'flex-end' },
+  row: { flexDirection: 'row', gap: 8, alignItems: 'flex-end', maxWidth: '100%', minWidth: 0 },
   input: {
     flex: 1,
+    minWidth: 0,
     minHeight: 44,
     maxHeight: 160,
     borderWidth: 1,

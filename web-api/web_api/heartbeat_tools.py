@@ -13,7 +13,7 @@ INSTRUCTIONS = (
     "Call list_heartbeats to see the schedules already stored for you. "
     "Call add_heartbeat with a five-field cron expression, a timezone, and the "
     "instructions for that run. Call update_heartbeat to change one of yours. "
-    "Call delete_heartbeat to remove one of yours. The schedule is stored for you."
+    "Call delete_heartbeat to remove one of yours. The schedule runs when that minute arrives."
 )
 
 

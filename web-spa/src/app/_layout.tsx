@@ -22,7 +22,7 @@ export default function RootLayout() {
   }
   return (
     <ThemeProvider>
-      <View style={{ flex: 1 }}>
+      <View style={{ flex: 1, width: '100%', maxWidth: '100%', overflow: 'hidden' }}>
         <Stack screenOptions={{ headerShown: false }} />
       </View>
     </ThemeProvider>

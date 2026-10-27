@@ -26,7 +26,7 @@ If nothing is listening, from this repo:
 uv run favlo serve --non-interactive
 ```
 
-That starts the daemon and returns. A later `favlo serve` attaches to it. `/quit` from the terminal that owns it is how a person stops it. An agent does not stop it.
+That starts the daemon and returns. A later `favlo serve` attaches to it. `quit` from the terminal that owns it stops it. `/quit` is the same command. An agent does not stop it.
 
 `POST /mcp` answers only after the daemon is up. If the `favlo` tools are missing after that POST succeeds, reload the `favlo` server in Cursor. Do not register a second server.
 

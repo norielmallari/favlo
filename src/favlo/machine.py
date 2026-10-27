@@ -1,4 +1,4 @@
-"""Memory and disk for the idle check. The listener does not import a pipeline.
+"""Memory and disk for a model download. The listener does not import a pipeline.
 
 16 GB is the memory this runtime requires. Qwen3.8-27B is offered when the
 machine has that much physical memory, the checkout is not already here, and

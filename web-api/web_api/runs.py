@@ -7,12 +7,12 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from web_api.bus import Bus
-from web_api.chat import stream_reply
+from web_api.chat import ReplyPiece, stream_reply
 from web_api.events import envelope
 from web_api.ids import mint
 from web_api.store import Store
 
-Reply = Callable[..., AsyncIterator[str]]
+Reply = Callable[..., AsyncIterator[str | ReplyPiece]]
 
 
 def _delta(context: dict[str, Any], run_id: str, agui: dict[str, Any]) -> dict[str, Any]:
@@ -46,6 +46,7 @@ async def perform(
         return
     message_id = mint("message")
     parts: list[str] = []
+    reasoning: list[str] = []
     try:
         await bus.publish(
             _delta(
@@ -71,7 +72,24 @@ async def perform(
             if cancel.is_set():
                 await _publish(bus, store.finish_run(run_id, "cancelled", None))
                 return
-            extra = piece[len("".join(parts)) :] if piece.startswith("".join(parts)) else piece
+            kind, incoming = _piece(piece)
+            if kind == "reasoning":
+                if incoming:
+                    reasoning.append(incoming)
+                    await bus.publish(
+                        _delta(
+                            context,
+                            run_id,
+                            {
+                                "type": "REASONING_MESSAGE_CONTENT",
+                                "messageId": message_id,
+                                "delta": incoming,
+                            },
+                        )
+                    )
+                continue
+            joined = "".join(parts)
+            extra = incoming[len(joined) :] if incoming.startswith(joined) else incoming
             if not extra:
                 continue
             parts.append(extra)
@@ -86,19 +104,28 @@ async def perform(
             await _publish(bus, store.finish_run(run_id, "cancelled", None))
             return
         text = "".join(parts).strip()
+        thought = "".join(reasoning).strip()
         if not text:
-            await _publish(
-                bus,
-                store.finish_run(run_id, "failed", "The model returned an empty reply."),
+            events = (
+                store.note_empty_reply(run_id, thought)
+                if thought
+                else store.finish_run(run_id, "failed", "The model returned an empty reply.")
             )
+            await _publish(bus, events)
             return
         await bus.publish(
             _delta(context, run_id, {"type": "TEXT_MESSAGE_END", "messageId": message_id})
         )
-        await _publish(bus, store.complete_run(run_id, text))
+        await _publish(bus, store.complete_run(run_id, text, "".join(reasoning).strip()))
     except Exception as exc:
         message = str(exc).strip() or "The listener did not complete the reply."
         await _publish(bus, store.finish_run(run_id, "failed", message[:400]))
+
+
+def _piece(piece: str | ReplyPiece) -> tuple[str, str]:
+    if isinstance(piece, ReplyPiece):
+        return piece.kind, piece.text
+    return "content", piece
 
 
 async def _publish(bus: Bus, events: list[dict[str, Any]]) -> None:

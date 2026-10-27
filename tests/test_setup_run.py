@@ -163,7 +163,7 @@ def test_a_path_and_a_shell_are_refused(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_a_refused_command_does_not_need_the_server() -> None:
-    from favlo.talk import _setup_run_tool
+    from favlo.config_tools import _setup_run_tool
 
     tool = _setup_run_tool("http://127.0.0.1:9/v1")
     text = tool.func("rm -rf .")
@@ -174,7 +174,7 @@ def test_close_posts_before_a_heavy_command() -> None:
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    from favlo.talk import _close_resident
+    from favlo.config_tools import _close_resident
 
     seen: list[str] = []
 

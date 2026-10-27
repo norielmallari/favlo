@@ -1,6 +1,6 @@
 """Favlo draws a picture of himself at the largest edge the machine can hold.
 
-The agent instructions are the terminal persona. The user asks for a picture
+The agent instructions are the horse persona. The user asks for a picture
 of that horse. The image prompt is the 2.5D mascot: a chestnut horse with a
 white blaze and large blue eyes, sitting at a desk. The image call uses
 ``MAX_EDGE`` on each side. Exit 0 means the 35B vision check affirms it.
@@ -15,15 +15,15 @@ from pathlib import Path
 from typing import Annotated
 
 from agent_framework import Agent, tool
-from agent_framework.openai import OpenAIChatCompletionClient
 from pydantic import Field
-from z_image_turbo.scratch import MAX_EDGE
 
-from favlo.persona import INSTRUCTIONS
+from favlo.chat_client import open_chat_client
+from favlo.persona import PERSONA
 from harness.harness_model import judge_model
 from harness.image_smoke_agent import HOST, IMAGE_MODEL, affirms, post_json
 from harness.mcp_media import generate, read_link
 from harness.server import close_listener, open_listener
+from z_image_turbo.scratch import MAX_EDGE
 
 IMAGE_PROMPT = (
     "A cute 2.5D stylized young horse, not a photograph and not a flat cartoon. "
@@ -95,14 +95,14 @@ def image_tools(port: int, png: list[bytes]) -> list[object]:
 
 
 async def create_image(base_url: str, port: int, png: list[bytes], model: str) -> None:
-    client = OpenAIChatCompletionClient(model=model, api_key="favlo", base_url=base_url)
+    client = open_chat_client(model, base_url)
     client.function_invocation_configuration["max_iterations"] = 2
     client.function_invocation_configuration["max_consecutive_errors_per_request"] = 1
     agent = Agent(
         client=client,
         name="favlo",
         instructions=(
-            INSTRUCTIONS
+            PERSONA
             + " When someone asks for a picture of you, call generate_image once"
             + " with this prompt exactly, then stop: "
             + IMAGE_PROMPT

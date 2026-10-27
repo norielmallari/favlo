@@ -592,14 +592,15 @@ def test_another_clients_request_prints_the_prompt_again() -> None:
     ui.apply_event({"type": "tick", "phase": "load", "done": 41, "total": 100, "unit": "bytes"})
     ui.apply_event({"type": "end", "phase": "load", "summary": "loaded record"})
     ui.apply_event({"type": "log", "line": "prefix store 10 tokens"})
-    assert not stream.getvalue().rstrip().endswith("you:")
+    assert "you:" not in stream.getvalue()
     ui.apply_event({"type": "log", "line": "request closed"})
     text = stream.getvalue()
     assert "request open" not in text
     assert "request closed" not in text
+    assert "you:" not in text
     assert text.index("41") < text.index("loaded record")
-    assert text.index("prefix store 10 tokens") < text.rindex("you:")
-    assert text.rstrip().endswith("you:")
+    assert text.rstrip().endswith("prefix store 10 tokens")
+    assert ui._at_prompt is True
 
 
 def test_a_closed_request_leaves_an_untouched_prompt() -> None:
@@ -607,7 +608,8 @@ def test_a_closed_request_leaves_an_untouched_prompt() -> None:
     ui.prompt()
     ui.apply_event({"type": "log", "line": "request open"})
     ui.apply_event({"type": "log", "line": "request closed"})
-    assert stream.getvalue() == "you: "
+    assert stream.getvalue() == ""
+    assert ui._at_prompt is True
 
 
 def test_a_held_turn_does_not_print_the_prompt_when_the_request_closes() -> None:
@@ -618,7 +620,8 @@ def test_a_held_turn_does_not_print_the_prompt_when_the_request_closes() -> None
     ui.apply_event({"type": "begin", "phase": "decode", "total": 0, "unit": "tok"})
     ui.apply_event({"type": "end", "phase": "decode", "summary": "decode settled"})
     ui.apply_event({"type": "log", "line": "request closed"})
-    assert stream.getvalue().count("you:") == 1
+    assert "you:" not in stream.getvalue()
+    assert ui._at_prompt is False
 
 
 def test_the_prompt_starts_on_the_line_after_telemetry() -> None:
@@ -630,8 +633,9 @@ def test_the_prompt_starts_on_the_line_after_telemetry() -> None:
     ui.prompt(True)
     text = stream.getvalue()
     assert "prefix store 10 tokens\n" in text
-    assert text.index("prefix store 10 tokens") < text.index("you:")
+    assert "you:" not in text
     assert "tokensyou:" not in text
+    assert ui._at_prompt is True
 
 
 def test_the_frame_waits_until_every_request_closes() -> None:
@@ -656,7 +660,8 @@ def test_the_frame_waits_until_every_request_closes() -> None:
     ui.prompt(True)
     text = stream.getvalue()
     assert text.index("prefix store 10 tokens") < text.index("favlo: Hello")
-    assert text.index("favlo: Hello") < text.index("you:")
+    assert "you:" not in text
+    assert ui._at_prompt is True
     assert "request open" not in text
     assert "request closed" not in text
 

@@ -8,6 +8,7 @@ from pathlib import Path
 from favlo.config_tools import GROUP_ID
 from favlo.persona import PERSONA
 from web_api.events import now
+from web_api.session_tools import GROUP_ID as SESSION_GROUP_ID
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS provider (
@@ -65,7 +66,8 @@ CREATE TABLE IF NOT EXISTS message (
     body TEXT NOT NULL,
     actor_kind TEXT NOT NULL,
     actor_id TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    reasoning TEXT
 );
 CREATE TABLE IF NOT EXISTS run (
     id TEXT PRIMARY KEY,
@@ -74,7 +76,8 @@ CREATE TABLE IF NOT EXISTS run (
     status TEXT NOT NULL,
     error TEXT,
     started_at TEXT,
-    finished_at TEXT
+    finished_at TEXT,
+    cue TEXT
 );
 CREATE TABLE IF NOT EXISTS event (
     id TEXT PRIMARY KEY,
@@ -141,7 +144,8 @@ CREATE TABLE IF NOT EXISTS heartbeat (
     instructions TEXT NOT NULL,
     enabled INTEGER NOT NULL,
     revision INTEGER NOT NULL,
-    session_id TEXT
+    session_id TEXT,
+    fired_minute TEXT
 );
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
@@ -171,6 +175,14 @@ def migrate(conn: sqlite3.Connection) -> None:
     columns = {row[1] for row in conn.execute("PRAGMA table_info(heartbeat)")}
     if "session_id" not in columns:
         conn.execute("ALTER TABLE heartbeat ADD COLUMN session_id TEXT")
+    if "fired_minute" not in columns:
+        conn.execute("ALTER TABLE heartbeat ADD COLUMN fired_minute TEXT")
+    message_columns = {row[1] for row in conn.execute("PRAGMA table_info(message)")}
+    if "reasoning" not in message_columns:
+        conn.execute("ALTER TABLE message ADD COLUMN reasoning TEXT")
+    run_columns = {row[1] for row in conn.execute("PRAGMA table_info(run)")}
+    if "cue" not in run_columns:
+        conn.execute("ALTER TABLE run ADD COLUMN cue TEXT")
     row = conn.execute("SELECT id FROM settings WHERE id = 1").fetchone()
     if row is None:
         conn.execute(
@@ -190,6 +202,7 @@ def migrate(conn: sqlite3.Connection) -> None:
         )
     _seed_favlo(conn)
     _seed_config_group(conn)
+    _seed_session_group(conn)
     conn.commit()
 
 
@@ -233,3 +246,17 @@ def _seed_config_group(conn: sqlite3.Connection) -> None:
             (FAVLO_AGENT_ID, GROUP_ID),
         )
     conn.execute("INSERT INTO meta (key, value) VALUES ('favlo_config_seed', '1')")
+
+
+def _seed_session_group(conn: sqlite3.Connection) -> None:
+    """Enable the session group for Favlo once. A later choice stays."""
+    marked = conn.execute("SELECT key FROM meta WHERE key = 'favlo_session_seed'").fetchone()
+    if marked is not None:
+        return
+    exists = conn.execute("SELECT id FROM agent WHERE id = ?", (FAVLO_AGENT_ID,)).fetchone()
+    if exists is not None:
+        conn.execute(
+            "INSERT OR IGNORE INTO agent_tool_group (agent_id, group_id) VALUES (?, ?)",
+            (FAVLO_AGENT_ID, SESSION_GROUP_ID),
+        )
+    conn.execute("INSERT INTO meta (key, value) VALUES ('favlo_session_seed', '1')")

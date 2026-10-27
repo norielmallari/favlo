@@ -4,11 +4,9 @@ from pathlib import Path
 
 import pytest
 from harness.file_session import (
-    echo_reasoning,
     extensions_hold,
     model_stem,
     parse_requests,
-    read_reasoning,
     read_repository_file,
     source_files,
 )
@@ -142,49 +140,3 @@ decode 1.00 tok/s (1 tok in 1.00s)
 """
     assert extensions_hold(parse_requests(warm))
 
-
-class _Part:
-    def __init__(self, kind: str, text: str) -> None:
-        self.type = kind
-        self.text = text
-        self.protected_data = None
-
-
-class _Message:
-    def __init__(self, contents: list[_Part]) -> None:
-        self.role = "assistant"
-        self.contents = contents
-
-
-def test_reasoning_returns_on_its_own_field() -> None:
-    message = _Message(
-        [
-            _Part("text_reasoning", "look\n"),
-            _Part("text", "<tool_call>\n<function=read_file>\n"),
-        ]
-    )
-    built = [
-        {"role": "assistant", "content": [{"type": "text", "text": "look\n"}]},
-        {
-            "role": "assistant",
-            "content": "<tool_call>\n<function=read_file>\n",
-            "tool_calls": [{"id": "call_0"}],
-        },
-    ]
-    echoed = echo_reasoning(message, built)
-    assert echoed == [
-        {
-            "role": "assistant",
-            "content": "<tool_call>\n<function=read_file>\n",
-            "reasoning_content": "look\n",
-        }
-    ]
-
-
-def test_reasoning_delta_is_not_reply_text() -> None:
-    class _Delta:
-        model_extra = {"reasoning_content": "look"}
-
-    parsed = read_reasoning(_Delta(), [])
-    assert parsed[0].type == "text_reasoning"
-    assert parsed[0].text == "look"

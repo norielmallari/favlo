@@ -13,8 +13,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "web-api"))
 
 from web_api.bus import Bus  # noqa: E402
+from web_api.db import FAVLO_AGENT_ID, FAVLO_SESSION_ID  # noqa: E402
 from web_api.mcp_client import list_tools  # noqa: E402
-from web_api.mcp_tools import call_tool, groups_from, prepare_catalog  # noqa: E402
+from web_api.mcp_tasks import _finish, settle  # noqa: E402
+from web_api.mcp_tools import INSTRUCTIONS, _description, call_tool, groups_from, prepare_catalog  # noqa: E402
 from web_api.store import Store, _mcp_fields  # noqa: E402
 
 
@@ -186,5 +188,73 @@ def test_save_keeps_a_disabled_group_and_lists_its_tools(tmp_path: Path) -> None
         assert image["enabled"] is False
         assert image["tools"] == ["generate_image", "list_image_models"]
         assert [row["name"] for row in store.enabled_mcp_tools("agent_favlo")] == ["echo"]
+    finally:
+        store.close()
+
+
+def test_media_instructions_require_a_listed_model_id() -> None:
+    assert "list_image_models" in INSTRUCTIONS
+    assert "list_video_models_i2v" in INSTRUCTIONS
+    assert "list_video_models_t2v" in INSTRUCTIONS
+    assert "list_music_models" in INSTRUCTIONS
+    assert "list_voice_models" in INSTRUCTIONS
+    assert "Do not invent a model id" in INSTRUCTIONS
+    assert "Do not write a favlo:// link" in INSTRUCTIONS
+    assert "tell the user you are generating" in INSTRUCTIONS
+    assert "do not reuse a model id from an earlier message" in INSTRUCTIONS
+    described = _description(
+        {"name": "generate_image", "description": "Generate one or more PNGs."}
+    )
+    assert "Call list_image_models first" in described
+
+
+def test_a_finished_image_stays_finished() -> None:
+    status, text = settle("generate_image", "completed", "favlo://images/image_abc.png")
+    assert status == "completed"
+    assert text.startswith("generate_image finished.")
+    cancelled, note = settle("generate_image", "cancelled", "")
+    assert cancelled == "cancelled"
+    assert note == "generate_image was cancelled."
+
+
+def test_an_unknown_model_result_starts_a_correction_turn(tmp_path: Path) -> None:
+    store = Store(tmp_path / "app.db")
+    try:
+        task = store.begin_mcp_task(
+            {
+                "remote_id": "task-1",
+                "server_id": "server-1",
+                "agent_id": FAVLO_AGENT_ID,
+                "session_id": FAVLO_SESSION_ID,
+                "tool_name": "generate_image",
+                "poll_interval_ms": 1000,
+            }
+        )
+        asyncio.run(
+            _finish(
+                store,
+                Bus(),
+                task,
+                "completed",
+                "Error calling tool 'generate_image': unknown model flux-schnell",
+            )
+        )
+        snapshot = store.session_snapshot(FAVLO_SESSION_ID)
+        bodies = [message["body"] for message in snapshot["messages"]]
+        assert any(
+            body.startswith("generate_image failed.") and "unknown model" in body for body in bodies
+        )
+        running = [row for row in snapshot["runs"] if row["status"] == "running"]
+        assert len(running) == 1
+        context = store.run_context(running[0]["id"])
+        assert "list_image_models" in context["user_text"]
+        assert "generate_image again" in context["user_text"]
+        assert context["prior"][-1]["role"] == "assistant"
+        assert "unknown model" in context["prior"][-1]["text"]
+        again, _events, waiting = store.begin_task_correction(
+            FAVLO_SESSION_ID, FAVLO_AGENT_ID, "again"
+        )
+        assert again is None
+        assert waiting is True
     finally:
         store.close()

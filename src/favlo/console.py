@@ -240,11 +240,10 @@ class Console:
             self._redraw()
 
     def prompt(self, after_output: bool = False) -> None:
-        """``you:`` at the start of a line. The turn's telemetry is already drawn."""
+        """A bare line. Telemetry already on screen stays above it."""
         with self._lock:
             if after_output and self._column != 0:
                 self._write("\n")
-            self._write("you: ")
             self._at_prompt = True
             self._restore_prompt = False
 
@@ -845,7 +844,7 @@ class Console:
             self._wrap_off = False
 
     def _note_prompt_displaced(self) -> None:
-        """A foreign request is painting over ``you:``. Print it again when that request closes."""
+        """A foreign request is painting over the prompt. Restore the bare line when it closes."""
         with self._lock:
             if not self._at_prompt or self._holding:
                 return

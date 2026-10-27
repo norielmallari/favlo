@@ -9,7 +9,7 @@ import { Frame } from '@/components/Frame';
 import { focusRingInset, Pressable } from '@/components/Pressable';
 import { useTheme } from '@/theme/Theme';
 
-type Model = {
+export type Model = {
   id: string;
   provider_id: string;
   model_id: string;
@@ -17,14 +17,13 @@ type Model = {
   enabled: boolean;
   revision: number;
 };
-type Provider = { id: string; name: string; base_url: string; models: Model[] };
-type Settings = {
+export type Provider = { id: string; name: string; base_url: string; models: Model[] };
+export type Settings = {
   default_model_id: string | null;
   exchange_budget: number;
   revision: number;
-  heartbeat_minutes?: number;
 };
-type Agent = {
+export type Agent = {
   id: string;
   name: string;
   persona: string;
@@ -32,7 +31,7 @@ type Agent = {
   revision: number;
   tool_groups: string[];
 };
-type ToolGroup = { id: string; name: string };
+export type ToolGroup = { id: string; name: string };
 type Heartbeat = {
   id: string;
   agent_id: string;
@@ -88,7 +87,6 @@ export function SettingsScreen() {
   const [agentId, setAgentId] = useState<string | null>(null);
   const [section, setSection] = useState<Section>('agents');
   const [budget, setBudget] = useState('10');
-  const [heartbeatMinutes, setHeartbeatMinutes] = useState('5');
   const [status, setStatus] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -96,8 +94,6 @@ export function SettingsScreen() {
   const [drawer, setDrawer] = useState<'sections' | null>(null);
   const [showDetail, setShowDetail] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [draftName, setDraftName] = useState('');
-  const [draftPersona, setDraftPersona] = useState('');
   const [heartbeats, setHeartbeats] = useState<Heartbeat[]>([]);
   const [heartbeatId, setHeartbeatId] = useState<string | null>(null);
   const [creatingHeartbeat, setCreatingHeartbeat] = useState(false);
@@ -149,7 +145,6 @@ export function SettingsScreen() {
     });
     setSettings(nextSettings);
     setBudget(String(nextSettings.exchange_budget));
-    setHeartbeatMinutes(String(nextSettings.heartbeat_minutes ?? 5));
   }
 
   useEffect(() => {
@@ -290,43 +285,19 @@ export function SettingsScreen() {
     }
   }
 
-  async function saveHeartbeatInterval() {
-    const value = Number(heartbeatMinutes);
-    if (!Number.isInteger(value) || value < 1) {
-      setError('The server heartbeat is a whole number of minutes.');
-      return;
-    }
-    try {
-      const next = await api<{ minutes: number }>('/server-heartbeat', {
-        method: 'PUT',
-        body: JSON.stringify({ minutes: value }),
-      });
-      setHeartbeatMinutes(String(next.minutes));
-      setSaved('Server heartbeat saved.');
-      setError(null);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'The server heartbeat was not saved.');
-    }
+  function rememberAgent(row: Agent) {
+    setCreating(false);
+    setAgentId(row.id);
+    setShowDetail(true);
+    void reload();
   }
 
-  async function createAgent() {
-    try {
-      const created = await api<{ agent: Agent }>('/agents', {
-        method: 'POST',
-        headers: { 'Idempotency-Key': idempotencyKey() },
-        body: JSON.stringify({ name: draftName, persona: draftPersona, default_model_id: null }),
-      });
-      setCreating(false);
-      setDraftName('');
-      setDraftPersona('');
-      setAgentId(created.agent.id);
-      setShowDetail(true);
-      setSaved(`${created.agent.name} was created.`);
-      setError(null);
-      await reload();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'The agent was not created.');
-    }
+  function forgetAgent(row: Agent) {
+    setCreating(false);
+    setSaved(`${row.name} was deleted.`);
+    setError(null);
+    setAgentId((current) => (current === row.id ? null : current));
+    void reload();
   }
 
   const field = {
@@ -342,7 +313,7 @@ export function SettingsScreen() {
 
   return (
     <Frame link={{ label: 'Chat', onPress: () => router.push('/') }}>
-      <View style={{ flex: 1 }}>
+      <View style={{ flex: 1, minWidth: 0, maxWidth: '100%' }}>
         {!wide ? (
           <View style={{ flexDirection: 'row', gap: 8, padding: 8 }}>
             <Pressable accessibilityRole="button" accessibilityLabel="Sections" onPress={() => setDrawer('sections')} style={button(palette.surface)}>
@@ -350,7 +321,7 @@ export function SettingsScreen() {
             </Pressable>
           </View>
         ) : null}
-        <View style={{ flex: 1, flexDirection: 'row' }}>
+        <View style={{ flex: 1, flexDirection: 'row', minWidth: 0, maxWidth: '100%' }}>
           {showSections ? (
             <View
               accessibilityLabel="Configuration sections"
@@ -469,26 +440,20 @@ export function SettingsScreen() {
                   <Pressable
                     accessibilityRole="button"
                     accessibilityLabel="New agent"
-                    onPress={() => {
-                      setCreating(true);
-                      setDraftName('');
-                      setDraftPersona('');
-                    }}
+                    onPress={() => setCreating(true)}
                     style={button(palette.accent)}
                   >
                     <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>New agent</Text>
                   </Pressable>
                   {creating ? (
-                    <View style={{ gap: 8 }}>
-                      <Text accessibilityRole="header" aria-level={2} style={heading(palette.textPrimary)}>New agent</Text>
-                      <Text style={label(palette.textPrimary)}>Name</Text>
-                      <TextInput accessibilityLabel="Agent name" value={draftName} onChangeText={setDraftName} style={field} />
-                      <Text style={label(palette.textPrimary)}>Persona</Text>
-                      <TextInput accessibilityLabel="Persona" multiline value={draftPersona} onChangeText={setDraftPersona} style={[field, { minHeight: 88 }]} />
-                      <Pressable accessibilityRole="button" accessibilityLabel="Create agent" onPress={() => void createAgent()} style={button(palette.accent)}>
-                        <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>Create agent</Text>
-                      </Pressable>
-                    </View>
+                    <AgentForm
+                      agent={null}
+                      groups={groups}
+                      providers={providers}
+                      settings={settings}
+                      onSuccess={setSaved}
+                      onSaved={rememberAgent}
+                    />
                   ) : agent != null ? (
                     <AgentForm
                       key={`${agent.id}:${agent.revision}`}
@@ -497,7 +462,8 @@ export function SettingsScreen() {
                       providers={providers}
                       settings={settings}
                       onSuccess={setSaved}
-                      onSaved={() => void reload()}
+                      onSaved={rememberAgent}
+                      onDeleted={forgetAgent}
                     />
                   ) : (
                     <Text style={{ color: palette.textPrimary, fontSize: 16 }}>Choose an agent.</Text>
@@ -513,11 +479,6 @@ export function SettingsScreen() {
                   </View>
                   <Pressable accessibilityRole="button" accessibilityLabel="Save maximum turns" onPress={() => void saveBudget()} style={button(palette.surface)}>
                     <Text style={{ color: palette.textPrimary, fontSize: 14, fontWeight: '600' }}>Save maximum turns</Text>
-                  </Pressable>
-                  <Text style={label(palette.textPrimary)}>Server heartbeat</Text>
-                  <TextInput accessibilityLabel="Server heartbeat" value={heartbeatMinutes} onChangeText={setHeartbeatMinutes} keyboardType="number-pad" style={field} />
-                  <Pressable accessibilityRole="button" accessibilityLabel="Save server heartbeat" onPress={() => void saveHeartbeatInterval()} style={button(palette.surface)}>
-                    <Text style={{ color: palette.textPrimary, fontSize: 14, fontWeight: '600' }}>Save server heartbeat</Text>
                   </Pressable>
                 </View>
               ) : null}
@@ -898,25 +859,28 @@ function modelRow(providers: Provider[], rowId: string | null): Model | undefine
   return providers.flatMap((provider) => provider.models).find((model) => model.id === rowId);
 }
 
-function AgentForm({
+export function AgentForm({
   agent,
   groups,
   providers,
   settings,
   onSuccess,
   onSaved,
+  onDeleted,
 }: {
-  agent: Agent;
+  agent: Agent | null;
   groups: ToolGroup[];
   providers: Provider[];
   settings: Settings | null;
   onSuccess: (message: string) => void;
-  onSaved: () => void;
+  onSaved: (agent: Agent) => void;
+  onDeleted?: (agent: Agent) => void;
 }) {
   const { palette } = useTheme();
-  const current = modelRow(providers, agent.default_model_id ?? settings?.default_model_id ?? null);
-  const [name, setName] = useState(agent.name);
-  const [persona, setPersona] = useState(agent.persona);
+  const creating = agent == null;
+  const current = modelRow(providers, agent?.default_model_id ?? settings?.default_model_id ?? null);
+  const [name, setName] = useState(agent?.name ?? '');
+  const [persona, setPersona] = useState(agent?.persona ?? '');
   const [providerId, setProviderId] = useState(
     current?.provider_id ?? providers.find((item) => item.id === 'provider_local')?.id ?? providers[0]?.id ?? '',
   );
@@ -924,7 +888,7 @@ function AgentForm({
   const [modelId, setModelId] = useState(
     current != null && current.provider_id === providerId ? current.model_id : hosted[0]?.model_id ?? '',
   );
-  const [enabled, setEnabled] = useState(agent.tool_groups);
+  const [enabled, setEnabled] = useState(agent?.tool_groups ?? []);
   const [providerFocused, setProviderFocused] = useState(false);
   const [modelFocused, setModelFocused] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -935,36 +899,70 @@ function AgentForm({
     setModelId(models.some((model) => model.model_id === modelId) ? modelId : models[0]?.model_id ?? '');
   }
 
+  async function remove() {
+    if (agent == null) {
+      return;
+    }
+    try {
+      await api(`/agents/${agent.id}`, { method: 'DELETE' });
+      onSuccess(`${agent.name} was deleted.`);
+      onDeleted?.(agent);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'The agent was not deleted.');
+    }
+  }
+
   async function save() {
     const row = hosted.find((model) => model.model_id === modelId);
+    const modelRowId = row?.id ?? null;
     try {
-      await api(`/agents/${agent.id}`, {
+      if (agent == null) {
+        const created = await api<{ agent: Agent }>('/agents', {
+          method: 'POST',
+          headers: { 'Idempotency-Key': idempotencyKey() },
+          body: JSON.stringify({
+            name,
+            persona,
+            default_model_id: modelRowId,
+            tool_groups: enabled,
+          }),
+        });
+        onSuccess(`${created.agent.name} was created.`);
+        onSaved(created.agent);
+        return;
+      }
+      const updated = await api<Agent>(`/agents/${agent.id}`, {
         method: 'PATCH',
         body: JSON.stringify({
           expected_revision: agent.revision,
           name,
           persona,
-          default_model_id: row?.id ?? null,
+          default_model_id: modelRowId,
           tool_groups: enabled,
         }),
       });
       onSuccess(`${name.trim() || agent.name} was saved.`);
-      onSaved();
+      onSaved(updated);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'The agent was not saved.');
     }
   }
 
+  const nameLabel = creating ? 'Agent name' : `Name for ${agent.name}`;
+  const personaLabel = creating ? 'Persona' : `Persona for ${agent.name}`;
+  const providerLabel = creating ? 'Provider' : `Provider for ${agent.name}`;
+  const modelLabel = creating ? 'Model' : `Model for ${agent.name}`;
+
   return (
     <View style={{ gap: 8 }}>
-      <Text accessibilityRole="header" aria-level={2} style={heading(palette.textPrimary)}>{agent.name}</Text>
-      <Text style={label(palette.textPrimary)}>Name for {agent.name}</Text>
-      <TextInput accessibilityLabel={`Name for ${agent.name}`} value={name} onChangeText={setName} style={fieldStyle(palette)} />
-      <Text style={label(palette.textPrimary)}>Persona for {agent.name}</Text>
-      <TextInput accessibilityLabel={`Persona for ${agent.name}`} multiline value={persona} onChangeText={setPersona} style={[fieldStyle(palette), { minHeight: 88 }]} />
-      <Text style={label(palette.textPrimary)}>Provider for {agent.name}</Text>
+      <Text accessibilityRole="header" aria-level={2} style={heading(palette.textPrimary)}>{creating ? 'New agent' : agent.name}</Text>
+      <Text style={label(palette.textPrimary)}>{creating ? 'Name' : nameLabel}</Text>
+      <TextInput accessibilityLabel={nameLabel} value={name} onChangeText={setName} style={fieldStyle(palette)} />
+      <Text style={label(palette.textPrimary)}>{creating ? 'Persona' : personaLabel}</Text>
+      <TextInput accessibilityLabel={personaLabel} multiline value={persona} onChangeText={setPersona} style={[fieldStyle(palette), { minHeight: 88 }]} />
+      <Text style={label(palette.textPrimary)}>{providerLabel}</Text>
       <Picker
-        accessibilityLabel={`Provider for ${agent.name}`}
+        accessibilityLabel={providerLabel}
         selectedValue={providerId}
         onValueChange={(value) => chooseProvider(String(value))}
         onFocus={() => setProviderFocused(true)}
@@ -975,9 +973,9 @@ function AgentForm({
           <Picker.Item key={item.id} label={item.name} value={item.id} color={palette.textPrimary} />
         ))}
       </Picker>
-      <Text style={label(palette.textPrimary)}>Model for {agent.name}</Text>
+      <Text style={label(palette.textPrimary)}>{modelLabel}</Text>
       <Picker
-        accessibilityLabel={`Model for ${agent.name}`}
+        accessibilityLabel={modelLabel}
         selectedValue={modelId}
         onValueChange={(value) => setModelId(String(value))}
         onFocus={() => setModelFocused(true)}
@@ -992,7 +990,7 @@ function AgentForm({
       <Text style={label(palette.textPrimary)}>Tools</Text>
       {groups.map((group) => {
         const on = enabled.includes(group.id);
-        const box = `${group.name} for ${agent.name}`;
+        const box = creating ? group.name : `${group.name} for ${agent.name}`;
         return (
           <SettingSwitch
             key={group.id}
@@ -1004,9 +1002,26 @@ function AgentForm({
           />
         );
       })}
-      <Pressable accessibilityRole="button" accessibilityLabel={`Save ${agent.name}`} onPress={() => void save()} style={button(palette.surface)}>
-        <Text style={{ color: palette.textPrimary, fontSize: 14, fontWeight: '600' }}>Save {agent.name}</Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={creating ? 'Create agent' : `Save ${agent.name}`}
+        onPress={() => void save()}
+        style={button(creating ? palette.accent : palette.surface)}
+      >
+        <Text style={{ color: creating ? palette.onAccent : palette.textPrimary, fontSize: 14, fontWeight: '600' }}>
+          {creating ? 'Create agent' : `Save ${agent.name}`}
+        </Text>
       </Pressable>
+      {!creating && agent.id !== 'agent_favlo' ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`Delete ${agent.name}`}
+          onPress={() => void remove()}
+          style={button(palette.danger)}
+        >
+          <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>{`Delete ${agent.name}`}</Text>
+        </Pressable>
+      ) : null}
       {error ? <Text accessibilityRole="alert" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text> : null}
     </View>
   );

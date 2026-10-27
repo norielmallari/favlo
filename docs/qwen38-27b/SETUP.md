@@ -81,7 +81,7 @@ Start the listener:
 uv run favlo serve
 ```
 
-The daemon listens on `http://127.0.0.1:8129`. The terminal prompt is `you:`. A line is sent when it is ready. The reply is `favlo:`. `/quit` stops the daemon.
+The daemon listens on `http://127.0.0.1:8129`. The terminal is the operator console. `quit` stops the daemon. `reload` unloads the open pipelines and stays attached. Chat is `POST /v1/chat/completions` or Favlo web.
 
 From another terminal:
 

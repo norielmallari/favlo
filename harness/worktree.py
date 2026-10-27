@@ -33,6 +33,7 @@ from agent_framework.openai import OpenAIChatCompletionClient
 from openai import AsyncOpenAI
 from pydantic import Field
 
+from favlo.chat_client import open_chat_client
 from harness.coding.workspace import locate
 from harness.file_session import (
     Log,
@@ -325,19 +326,9 @@ def _open_agent(
     gate: SummaryGate,
     http: AsyncOpenAI,
 ) -> tuple[OpenAIChatCompletionClient, Agent]:
-    client = OpenAIChatCompletionClient(
-        model=model,
-        api_key="favlo",
-        base_url=base_url,
-        async_client=http,
-    )
+    client = open_chat_client(model, base_url, async_client=http)
     client.function_invocation_configuration["max_iterations"] = 1
-    summary_client = OpenAIChatCompletionClient(
-        model=model,
-        api_key="favlo",
-        base_url=base_url,
-        async_client=http,
-    )
+    summary_client = open_chat_client(model, base_url, async_client=http)
     strategy = SummarizationStrategy(
         client=_InstructSummarizer(summary_client),
         target_count=4,

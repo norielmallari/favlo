@@ -1,10 +1,9 @@
 import { useFocusEffect, useRouter } from 'expo-router';
-import { useCallback, useEffect, useRef, useState, type ComponentRef } from 'react';
+import { createElement, useCallback, useEffect, useRef, useState, type ComponentRef } from 'react';
 import {
   Platform,
   ScrollView,
   Text,
-  TextInput,
   useWindowDimensions,
   View,
   type NativeScrollEvent,
@@ -15,19 +14,35 @@ import { api, idempotencyKey, socketUrl } from '@/api/client';
 import { Composer } from '@/components/Composer';
 import { Confirmation } from '@/components/Confirmation';
 import { Frame } from '@/components/Frame';
-import { MessageBody } from '@/components/MessageBody';
+import { MarkdownText } from '@/components/MarkdownText';
+import { humanText, MessageBody } from '@/components/MessageBody';
 import { focusRingInset, Pressable } from '@/components/Pressable';
+import { AgentForm, type Provider, type Settings, type ToolGroup } from '@/components/SettingsScreen';
+import { Thinking } from '@/components/Thinking';
+import { transcriptScrollbar } from '@/components/scrollbar';
+import { workingShimmer } from '@/components/working';
 import { Workspaces } from '@/components/Workspaces';
 import { useTheme } from '@/theme/Theme';
 
 type Channel = { id: string; name: string; agent_id: string; session_id: string };
-type ChatMessage = { id: string; role: string; body: string };
+type ChatMessage = { id: string; role: string; body: string; reasoning?: string };
 type Snapshot = {
-  messages: { id: string; role: string; body: string }[];
+  messages: { id: string; role: string; body: string; reasoning?: string | null }[];
   runs: { status: string; error: string | null }[];
   cursor: number;
 };
 const LATEST_SLACK = 64;
+
+export function showsMessage(text?: string, reasoning?: string | null): boolean {
+  return Boolean(text) || Boolean(reasoning && reasoning.trim());
+}
+
+export function clearedTranscript(
+  event: { type: string; stream_id?: string },
+  sessionId: string | undefined,
+): boolean {
+  return sessionId != null && event.type === 'session.cleared' && event.stream_id === `session:${sessionId}`;
+}
 
 export function keepLatest(following: boolean, placed: boolean, fromBottom: number): boolean {
   if (!placed) {
@@ -44,6 +59,7 @@ type AgentEvent = {
     message_id?: string;
     role?: string;
     text?: string;
+    reasoning?: string;
     message?: string;
     status?: string;
     agui?: { type?: string; delta?: string };
@@ -53,7 +69,7 @@ type AgentEvent = {
 export function ChatScreen() {
   const router = useRouter();
   const { palette } = useTheme();
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
   const wide = width >= 1024;
   const drawerWidth = width < 600 ? width : 360;
   const cursorRef = useRef(0);
@@ -66,16 +82,17 @@ export function ChatScreen() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState('');
   const [live, setLive] = useState('');
+  const [thinking, setThinking] = useState('');
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const [drawer, setDrawer] = useState<'channels' | 'workspaces' | null>(null);
   const [creating, setCreating] = useState(false);
-  const [name, setName] = useState('');
-  const [persona, setPersona] = useState('');
-  const [hasDefault, setHasDefault] = useState(false);
-  const [channelWidth, setChannelWidth] = useState(280);
+  const [createToken, setCreateToken] = useState(0);
+  const [providers, setProviders] = useState<Provider[]>([]);
+  const [groups, setGroups] = useState<ToolGroup[]>([]);
+  const [settings, setSettings] = useState<Settings | null>(null);
 
   const channel = channels.find((item) => item.id === selected) ?? null;
 
@@ -98,21 +115,31 @@ export function ChatScreen() {
   useFocusEffect(
     useCallback(() => {
       let active = true;
-      void api<{ default_model_id: string | null }>('/settings')
-        .then((body) => {
-          if (active) {
-            setHasDefault(body.default_model_id != null);
+      void loadChannels().catch((caught: Error) => setNotice(caught.message));
+      void Promise.all([
+        api<{ providers: Provider[] }>('/providers'),
+        api<{ groups: ToolGroup[] }>('/tool-groups'),
+        api<Settings>('/settings'),
+      ])
+        .then(([listedProviders, listedGroups, nextSettings]) => {
+          if (!active) {
+            return;
           }
+          setProviders(listedProviders.providers);
+          setGroups(listedGroups.groups);
+          setSettings(nextSettings);
         })
         .catch(() => {
           if (active) {
-            setHasDefault(false);
+            setProviders([]);
+            setGroups([]);
+            setSettings(null);
           }
         });
       return () => {
         active = false;
       };
-    }, []),
+    }, [loadChannels]),
   );
 
   useEffect(() => {
@@ -123,11 +150,12 @@ export function ChatScreen() {
     setDraft(stored);
     void api<Snapshot>(`/sessions/${channel.session_id}`).then((snapshot) => {
       cursorRef.current = snapshot.cursor;
-      setMessages(snapshot.messages.map((item) => ({ id: item.id, role: item.role, body: item.body })));
+      setMessages(snapshot.messages.map(chatMessage));
       const latest = snapshot.runs.at(-1);
       setWorking(latest?.status === 'running');
       setError(latest?.status === 'failed' ? latest.error : null);
       setLive('');
+      setThinking('');
     }).catch((caught: Error) => setNotice(caught.message));
   }, [channel]);
 
@@ -145,7 +173,7 @@ export function ChatScreen() {
 
   useEffect(() => {
     showLatest();
-  }, [messages, live, showLatest]);
+  }, [messages, live, thinking, width, height, showLatest]);
 
   const noteScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { layoutMeasurement, contentOffset, contentSize } = event.nativeEvent;
@@ -211,33 +239,53 @@ export function ChatScreen() {
       return;
     }
     seen.current.add(event.event_id);
-    if (event.type === 'agent.created') {
+    if (event.type === 'agent.created' || event.type === 'agent.deleted') {
       void loadChannels();
       return;
     }
     if (event.stream_id !== `session:${channel?.session_id}`) {
       return;
     }
-    if (event.type === 'message.created' && event.payload?.message_id && event.payload.text) {
+    if (
+      event.type === 'message.created' &&
+      event.payload?.message_id &&
+      showsMessage(event.payload.text, event.payload.reasoning)
+    ) {
       const id = event.payload.message_id;
       const role = event.payload.role ?? 'assistant';
-      const body = event.payload.text;
-      setMessages((current) => (current.some((item) => item.id === id) ? current : [...current, { id, role, body }]));
+      const body = event.payload.text ?? '';
+      setMessages((current) =>
+        current.some((item) => item.id === id)
+          ? current
+          : [...current, chatMessage({ id, role, body, reasoning: event.payload?.reasoning })],
+      );
       if (role === 'assistant') {
         setLive('');
+        setThinking('');
         setWorking(false);
       }
+    }
+    if (clearedTranscript(event, channel?.session_id)) {
+      setMessages([]);
+      setLive('');
+      setThinking('');
+      setError(null);
     }
     if (event.type === 'run.started') {
       setWorking(true);
       setError(null);
+      setThinking('');
     }
     if (event.type === 'run.delta' && event.payload?.agui?.type === 'TEXT_MESSAGE_CONTENT') {
       setLive((current) => current + (event.payload?.agui?.delta ?? ''));
     }
+    if (event.type === 'run.delta' && event.payload?.agui?.type === 'REASONING_MESSAGE_CONTENT') {
+      setThinking((current) => current + (event.payload?.agui?.delta ?? ''));
+    }
     if (event.type === 'run.failed' || event.type === 'run.cancelled') {
       setWorking(false);
       setLive('');
+      setThinking('');
       setError(event.type === 'run.failed' ? (event.payload?.message ?? 'The reply failed.') : null);
     }
   }
@@ -274,41 +322,25 @@ export function ChatScreen() {
     }
   }
 
-  async function createAgent() {
-    try {
-      await api('/agents', {
-        method: 'POST',
-        headers: { 'Idempotency-Key': idempotencyKey() },
-        body: JSON.stringify({ name, persona, default_model_id: null }),
-      });
-      setCreating(false);
-      setName('');
-      setPersona('');
-      setSaved(`${name.trim()} was created.`);
-      await loadChannels();
-    } catch (caught) {
-      setNotice(caught instanceof Error ? caught.message : 'The agent was not created.');
-    }
-  }
-
-  const hasReply = messages.some((item) => item.role === 'assistant') || live !== '';
+  const shown = humanText(live);
+  const liveThinking = thinking.trim();
+  const hasReply = messages.some((item) => item.role === 'assistant') || shown !== '' || liveThinking !== '';
   const transcript = (
     <>
       {messages.map((item) => (
-        <View
+        <TranscriptTurn
           key={item.id}
-          accessibilityLabel={`${item.role === 'user' ? 'You' : channel?.name ?? 'Agent'} said: ${item.body}`}
-        >
-          <Text style={{ color: palette.textPrimary, fontSize: 16, lineHeight: 24, fontWeight: '600' }}>
-            {item.role === 'user' ? 'You' : channel?.name}
-          </Text>
-          <MessageBody body={item.body} />
-        </View>
+          name={item.role === 'user' ? 'You' : channel?.name ?? 'Agent'}
+          body={item.body}
+          reasoning={item.reasoning}
+          color={palette.textPrimary}
+        />
       ))}
-      {live !== '' ? (
-        <Text accessibilityLabel={`${channel?.name ?? 'Agent'} said: ${live}`} style={{ color: palette.textPrimary, fontSize: 16, lineHeight: 24 }}>
-          {live}
-        </Text>
+      {liveThinking !== '' ? <Thinking text={liveThinking} settled={false} /> : null}
+      {shown !== '' ? (
+        <View accessibilityLabel={`${channel?.name ?? 'Agent'} said: ${shown}`}>
+          <MarkdownText text={shown} color={palette.textPrimary} />
+        </View>
       ) : null}
     </>
   );
@@ -322,7 +354,7 @@ export function ChatScreen() {
       }}
       link={{ label: 'Configuration', onPress: () => router.push('/settings') }}
     >
-      <View style={{ flex: 1 }}>
+      <View style={{ flex: 1, minWidth: 0, maxWidth: '100%' }}>
         {!wide ? (
           <View style={{ flexDirection: 'row', gap: 8, padding: 8 }}>
             <Pressable accessibilityRole="button" accessibilityLabel="Channels" onPress={() => setDrawer('channels')} style={barButton(palette.surface, palette.borderStrong)}>
@@ -333,12 +365,12 @@ export function ChatScreen() {
             </Pressable>
           </View>
         ) : null}
-        <View style={{ flex: 1, flexDirection: 'row' }}>
+        <View style={{ flex: 1, flexDirection: 'row', minWidth: 0, maxWidth: '100%' }}>
           {(wide || drawer === 'channels') && (
             <View
               accessibilityLabel="Channels"
               style={{
-                width: wide ? channelWidth : drawerWidth,
+                width: wide ? 280 : drawerWidth,
                 borderRightWidth: 1,
                 borderRightColor: palette.border,
                 backgroundColor: palette.surface,
@@ -365,45 +397,31 @@ export function ChatScreen() {
                 </Pressable>
               ))}
               </View>
-              <Pressable accessibilityRole="button" accessibilityLabel="New agent" onPress={() => setCreating(true)} style={barButton(palette.accent, palette.accent)}>
+              <Pressable accessibilityRole="button" accessibilityLabel="New agent" onPress={() => { setCreateToken((value) => value + 1); setCreating(true); }} style={barButton(palette.accent, palette.accent)}>
                 <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>New agent</Text>
               </Pressable>
-              {wide ? (
-                <Pressable
-                  accessibilityRole="adjustable"
-                  accessibilityLabel="Channels width"
-                  accessibilityValue={{ min: 220, max: 480, now: channelWidth }}
-                  aria-valuemin={220}
-                  aria-valuemax={480}
-                  aria-valuenow={channelWidth}
-                  accessibilityActions={[{ name: 'increment' }, { name: 'decrement' }]}
-                  onAccessibilityAction={(event) => {
-                    const next = event.nativeEvent.actionName === 'increment' ? channelWidth + 16 : channelWidth - 16;
-                    setChannelWidth(Math.min(480, Math.max(220, next)));
-                  }}
-                  style={{ minHeight: 44, width: 44, justifyContent: 'center' }}
-                >
-                  <Text style={{ color: palette.textSecondary, fontSize: 12 }}>Width</Text>
-                </Pressable>
-              ) : (
+              {!wide ? (
                 <Pressable accessibilityRole="button" accessibilityLabel="Close channels" onPress={() => setDrawer(null)} style={{ minHeight: 44, justifyContent: 'center' }}>
                   <Text style={{ color: palette.accent, fontSize: 14 }}>Close</Text>
                 </Pressable>
-              )}
+              ) : null}
             </View>
           )}
-          <View accessibilityLabel="Conversation" style={{ flex: 1, padding: 16, gap: 12 }}>
+          <View accessibilityLabel="Conversation" style={{ flex: 1, minWidth: 0, maxWidth: '100%', padding: 16, gap: 12 }}>
             {channel == null ? (
               <Text style={{ color: palette.textPrimary, fontSize: 16, lineHeight: 24 }}>Create an agent to start a conversation.</Text>
             ) : (
               <Text accessibilityRole="header" aria-level={2} style={heading(palette.textPrimary)}>{channel.name}</Text>
             )}
+            {hasReply && Platform.OS === 'web'
+              ? createElement('style', { 'data-testid': 'transcript-scrollbar' }, transcriptScrollbar(palette.borderStrong, palette.background, palette.textSecondary))
+              : null}
             {hasReply ? (
               <ScrollView
                 ref={transcriptRef}
                 testID="transcript"
-                style={{ flex: 1 }}
-                contentContainerStyle={{ gap: 16 }}
+                style={{ flex: 1, minWidth: 0, maxWidth: '100%' }}
+                contentContainerStyle={{ gap: 16, maxWidth: '100%' }}
                 onContentSizeChange={showLatest}
                 onScroll={noteScroll}
                 scrollEventThrottle={16}
@@ -414,7 +432,18 @@ export function ChatScreen() {
               <View style={{ flex: 1, justifyContent: 'flex-end', gap: 16 }}>{transcript}</View>
             )}
             {working ? (
-              <Text accessibilityLiveRegion="polite" style={{ color: palette.textSecondary, fontSize: 14 }}>Working</Text>
+              <>
+                {Platform.OS === 'web'
+                  ? createElement('style', { 'data-testid': 'working-shimmer' }, workingShimmer(palette.textSecondary))
+                  : null}
+                <Text
+                  testID="working"
+                  accessibilityLiveRegion="polite"
+                  style={{ color: palette.textSecondary, fontSize: 14 }}
+                >
+                  Working
+                </Text>
+              </>
             ) : null}
             {error ? (
               <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text>
@@ -446,21 +475,24 @@ export function ChatScreen() {
         </View>
         {creating ? (
           <View accessibilityViewIsModal style={{ position: 'absolute', inset: 0, backgroundColor: palette.overlay, justifyContent: 'center', padding: 16 }}>
-            <View style={{ backgroundColor: palette.surface, borderRadius: 8, padding: 16, gap: 12, maxWidth: 480, alignSelf: 'center', width: '100%' }}>
-              <Text accessibilityRole="header" aria-level={2} style={heading(palette.textPrimary)}>New agent</Text>
-              <TextInput accessibilityLabel="Agent name" value={name} onChangeText={setName} style={field(palette)} />
-              <TextInput accessibilityLabel="Persona" multiline value={persona} onChangeText={setPersona} style={[field(palette), { minHeight: 88 }]} />
-              <Text style={{ color: palette.textSecondary, fontSize: 12 }}>
-                {hasDefault
-                  ? 'This agent uses the application default.'
-                  : 'Choose a model in configuration. This agent uses the application default.'}
-              </Text>
-              <Pressable accessibilityRole="button" accessibilityLabel="Create agent" onPress={() => void createAgent()} style={barButton(palette.accent, palette.accent)}>
-                <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>Create agent</Text>
-              </Pressable>
-              <Pressable accessibilityRole="button" accessibilityLabel="Close new agent" onPress={() => setCreating(false)} style={{ minHeight: 44, justifyContent: 'center' }}>
-                <Text style={{ color: palette.accent, fontSize: 14 }}>Close</Text>
-              </Pressable>
+            <View style={{ backgroundColor: palette.surface, borderRadius: 8, maxWidth: 480, alignSelf: 'center', width: '100%', maxHeight: height - 32, overflow: 'hidden' }}>
+              <ScrollView contentContainerStyle={{ padding: 16, gap: 12 }}>
+                <AgentForm
+                  key={createToken}
+                  agent={null}
+                  groups={groups}
+                  providers={providers}
+                  settings={settings}
+                  onSuccess={setSaved}
+                  onSaved={() => {
+                    setCreating(false);
+                    void loadChannels();
+                  }}
+                />
+                <Pressable accessibilityRole="button" accessibilityLabel="Close new agent" onPress={() => setCreating(false)} style={{ minHeight: 44, justifyContent: 'center' }}>
+                  <Text style={{ color: palette.accent, fontSize: 14 }}>Close</Text>
+                </Pressable>
+              </ScrollView>
             </View>
           </View>
         ) : null}
@@ -468,6 +500,38 @@ export function ChatScreen() {
       </View>
     </Frame>
   );
+}
+
+function TranscriptTurn({
+  name,
+  body,
+  reasoning,
+  color,
+}: {
+  name: string;
+  body: string;
+  reasoning?: string;
+  color: string;
+}) {
+  const [empty, setEmpty] = useState(false);
+  const reportEmpty = useCallback(() => setEmpty(true), []);
+  if (empty) {
+    return null;
+  }
+  return (
+    <View accessibilityLabel={`${name} said: ${humanText(body)}`}>
+      <Text style={{ color, fontSize: 16, lineHeight: 24, fontWeight: '600' }}>{name}</Text>
+      {reasoning ? <Thinking text={reasoning} settled /> : null}
+      <MessageBody body={body} onEmpty={reportEmpty} />
+    </View>
+  );
+}
+
+function chatMessage(item: { id: string; role: string; body: string; reasoning?: string | null }): ChatMessage {
+  const reasoning = item.reasoning?.trim() ?? '';
+  return reasoning
+    ? { id: item.id, role: item.role, body: item.body, reasoning }
+    : { id: item.id, role: item.role, body: item.body };
 }
 
 function readDraft(sessionId: string): string {
@@ -488,19 +552,6 @@ const menuRows = { gap: focusRingInset * 2, padding: focusRingInset };
 
 function heading(color: string) {
   return { color, fontSize: 18, lineHeight: 24, fontWeight: '600' as const };
-}
-
-function field(palette: { textPrimary: string; surface: string; borderStrong: string }) {
-  return {
-    minHeight: 44,
-    borderWidth: 1,
-    borderColor: palette.borderStrong,
-    borderRadius: 6,
-    paddingHorizontal: 12,
-    color: palette.textPrimary,
-    backgroundColor: palette.surface,
-    fontSize: 16,
-  };
 }
 
 function barButton(background: string, border: string) {

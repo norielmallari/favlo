@@ -6,9 +6,8 @@ import asyncio
 
 from fastapi import APIRouter, Request
 
-from favlo.logs import favlo_home, heartbeat_seconds, load_settings, set_heartbeat_seconds
 from web_api.http import json_body
-from web_api.schemas import HeartbeatInterval, SettingsUpdate
+from web_api.schemas import SettingsUpdate
 
 router = APIRouter()
 
@@ -16,8 +15,6 @@ router = APIRouter()
 @router.get("/settings")
 async def read_settings(request: Request):
     body = await asyncio.to_thread(request.app.state.store.settings)
-    seconds = await asyncio.to_thread(heartbeat_seconds, load_settings(favlo_home()))
-    body["heartbeat_minutes"] = seconds // 60
     return json_body(200, body)
 
 
@@ -30,9 +27,3 @@ async def update_settings(body: SettingsUpdate, request: Request):
         body.exchange_budget,
     )
     return json_body(200, updated)
-
-
-@router.put("/server-heartbeat")
-async def write_heartbeat(body: HeartbeatInterval):
-    seconds = await asyncio.to_thread(set_heartbeat_seconds, favlo_home(), body.minutes * 60)
-    return json_body(200, {"minutes": seconds // 60})

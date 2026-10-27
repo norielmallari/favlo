@@ -25,9 +25,9 @@ from typing import Any, NamedTuple
 
 import numpy as np
 from agent_framework import Agent, tool
-from agent_framework.openai import OpenAIChatCompletionClient
 from openai import AsyncOpenAI
 
+from favlo.chat_client import open_chat_client
 from harness.harness_model import judge_model
 from harness.mcp_media import call_tool, read_link, start_task, task_view
 from harness.music_template import smoke_body
@@ -495,12 +495,7 @@ def _agent(base_url: str, tools: list[object], name: str, text: str, model: str)
 
 async def _run(base_url: str, tools: list[object], name: str, text: str, model: str) -> None:
     http = AsyncOpenAI(api_key="favlo", base_url=base_url, timeout=None, max_retries=0)
-    client = OpenAIChatCompletionClient(
-        model=model,
-        api_key="favlo",
-        base_url=base_url,
-        async_client=http,
-    )
+    client = open_chat_client(model, base_url, async_client=http)
     client.function_invocation_configuration["max_iterations"] = 1
     client.function_invocation_configuration["max_consecutive_errors_per_request"] = 1
     agent = Agent(

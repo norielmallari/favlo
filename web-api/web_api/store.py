@@ -6,18 +6,21 @@ import hashlib
 import json
 import sqlite3
 import threading
+from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse, urlunparse
+from zoneinfo import ZoneInfo
 
 from favlo.config_tools import GROUP_ID
 from web_api.conversation import GROUP_ID as CONVERSATION_GROUP_ID
-from web_api.cron import ScheduleError, check_cron, check_timezone
-from web_api.db import LOCAL_PROVIDER_ID, connect, migrate
+from web_api.cron import ScheduleError, check_cron, check_timezone, due
+from web_api.db import FAVLO_AGENT_ID, LOCAL_PROVIDER_ID, connect, migrate
 from web_api.events import envelope, now
 from web_api.heartbeat_tools import GROUP_ID as HEARTBEAT_GROUP_ID
 from web_api.ids import mint
 from web_api.mcp_groups import ORDER as MCP_GROUP_ORDER
 from web_api.mcp_groups import group_for
+from web_api.session_tools import GROUP_ID as SESSION_GROUP_ID
 
 
 class Conflict(Exception):
@@ -32,7 +35,7 @@ class Rejected(Exception):
     pass
 
 
-_KNOWN_GROUPS = {GROUP_ID, CONVERSATION_GROUP_ID, HEARTBEAT_GROUP_ID}
+_KNOWN_GROUPS = {GROUP_ID, CONVERSATION_GROUP_ID, HEARTBEAT_GROUP_ID, SESSION_GROUP_ID}
 
 
 def _agent_record(conn: sqlite3.Connection, row: Any) -> dict[str, Any]:
@@ -48,6 +51,7 @@ def _agent_record(conn: sqlite3.Connection, row: Any) -> dict[str, Any]:
 def _heartbeat_record(row: Any) -> dict[str, Any]:
     item = dict(row)
     item["enabled"] = bool(item["enabled"])
+    item.pop("fired_minute", None)
     return item
 
 
@@ -234,6 +238,56 @@ def _replace_groups(conn: sqlite3.Connection, agent_id: str, groups: list[str]) 
             "INSERT INTO agent_tool_group (agent_id, group_id) VALUES (?, ?)",
             (agent_id, group_id),
         )
+
+
+def _owned_sessions(conn: sqlite3.Connection, agent_id: str) -> list[str]:
+    """Sessions whose participant is this agent, plus its sole agent channel."""
+    found = [
+        item["id"]
+        for item in conn.execute(
+            "SELECT id FROM session WHERE participant_id = ?",
+            (agent_id,),
+        )
+    ]
+    channels = conn.execute(
+        """
+        SELECT c.id FROM channel c
+        JOIN channel_member m ON m.channel_id = c.id
+        WHERE m.agent_id = ? AND c.kind = 'agent'
+        """,
+        (agent_id,),
+    ).fetchall()
+    for channel in channels:
+        others = conn.execute(
+            """
+            SELECT 1 FROM channel_member
+            WHERE channel_id = ? AND agent_id != ?
+            """,
+            (channel["id"], agent_id),
+        ).fetchone()
+        if others is not None:
+            continue
+        for item in conn.execute(
+            "SELECT id FROM session WHERE channel_id = ?",
+            (channel["id"],),
+        ):
+            if item["id"] not in found:
+                found.append(item["id"])
+    return found
+
+
+def _rows(conn: sqlite3.Connection, statement: str, ids: list[str]) -> list[sqlite3.Row]:
+    if not ids:
+        return []
+    marks = ", ".join("?" for _ in ids)
+    return list(conn.execute(f"{statement} ({marks})", ids))
+
+
+def _execute_in(conn: sqlite3.Connection, statement: str, ids: list[str]) -> None:
+    if not ids:
+        return
+    marks = ", ".join("?" for _ in ids)
+    conn.execute(f"{statement} ({marks})", ids)
 
 
 def _hash(body: dict[str, Any]) -> str:
@@ -661,15 +715,21 @@ class Store:
                 """,
                 (session_id, channel_id, agent_id, created),
             )
-            result = {
-                "agent": {
+            groups = body.get("tool_groups")
+            if groups is not None:
+                _replace_groups(conn, agent_id, groups)
+            agent = _agent_record(
+                conn,
+                {
                     "id": agent_id,
                     "name": name,
                     "persona": persona,
                     "default_model_id": model_id,
                     "revision": 1,
-                    "tool_groups": [],
                 },
+            )
+            result = {
+                "agent": agent,
                 "channel": {
                     "id": channel_id,
                     "kind": "agent",
@@ -744,6 +804,107 @@ class Store:
                 },
             )
             return updated, []
+
+        return self._write(write)
+
+    def delete_agent(
+        self, agent_id: str
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
+        """Remove one agent and the rows that belong to it.
+
+        Tasks name a server and a session, so they go first. Tool rows go
+        before servers. Heartbeats name a session, so they go before sessions.
+        Messages, runs, and events go before the sessions they sit on. Membership
+        goes before an agent channel that would otherwise be empty. The agent
+        row is last.
+        """
+
+        def write(
+            conn: sqlite3.Connection,
+        ) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
+            row = conn.execute("SELECT * FROM agent WHERE id = ?", (agent_id,)).fetchone()
+            if row is None:
+                raise NotFound("That agent does not exist.")
+            if agent_id == FAVLO_AGENT_ID:
+                raise Rejected("Favlo stays.")
+            sessions = _owned_sessions(conn, agent_id)
+            running = [
+                item["id"]
+                for item in conn.execute(
+                    "SELECT id FROM run WHERE status = 'running' AND agent_id = ?",
+                    (agent_id,),
+                )
+            ]
+            active = _rows(
+                conn,
+                "SELECT id FROM run WHERE status = 'running' AND session_id IN",
+                sessions,
+            )
+            for item in active:
+                if item["id"] not in running:
+                    running.append(item["id"])
+            servers = [
+                item["id"]
+                for item in conn.execute(
+                    "SELECT id FROM mcp_server WHERE agent_id = ?",
+                    (agent_id,),
+                )
+            ]
+            conn.execute("DELETE FROM mcp_task WHERE agent_id = ?", (agent_id,))
+            _execute_in(conn, "DELETE FROM mcp_tool WHERE server_id IN", servers)
+            _execute_in(conn, "DELETE FROM mcp_tool_group WHERE server_id IN", servers)
+            conn.execute("DELETE FROM mcp_server WHERE agent_id = ?", (agent_id,))
+            conn.execute("DELETE FROM heartbeat WHERE agent_id = ?", (agent_id,))
+            _execute_in(conn, "DELETE FROM message WHERE session_id IN", sessions)
+            conn.execute(
+                "DELETE FROM message WHERE actor_kind = 'agent' AND actor_id = ?",
+                (agent_id,),
+            )
+            _execute_in(conn, "DELETE FROM run WHERE session_id IN", sessions)
+            conn.execute("DELETE FROM run WHERE agent_id = ?", (agent_id,))
+            _execute_in(
+                conn,
+                "DELETE FROM event WHERE stream_id IN",
+                [f"session:{session_id}" for session_id in sessions],
+            )
+            _execute_in(conn, "DELETE FROM session WHERE id IN", sessions)
+            channels = [
+                item["channel_id"]
+                for item in conn.execute(
+                    """
+                    SELECT channel_id FROM channel_member
+                    WHERE agent_id = ?
+                    """,
+                    (agent_id,),
+                )
+            ]
+            conn.execute("DELETE FROM channel_member WHERE agent_id = ?", (agent_id,))
+            _execute_in(
+                conn,
+                "DELETE FROM channel WHERE id IN",
+                [
+                    channel_id
+                    for channel_id in channels
+                    if conn.execute(
+                        "SELECT 1 FROM channel_member WHERE channel_id = ?",
+                        (channel_id,),
+                    ).fetchone()
+                    is None
+                ],
+            )
+            conn.execute("DELETE FROM agent_tool_group WHERE agent_id = ?", (agent_id,))
+            conn.execute("DELETE FROM agent WHERE id = ?", (agent_id,))
+            result = {"id": agent_id, "name": row["name"]}
+            events = [
+                self._event(
+                    conn,
+                    stream_id="app",
+                    event_type="agent.deleted",
+                    payload=result,
+                    actor={"kind": "user", "id": "local"},
+                )
+            ]
+            return result, events, running
 
         return self._write(write)
 
@@ -884,6 +1045,54 @@ class Store:
 
         return self._write(write)
 
+    def abandoned_runs(self) -> list[str]:
+        """Runs still marked running. The process that owned them is gone."""
+
+        def read(conn: sqlite3.Connection) -> list[str]:
+            rows = conn.execute("SELECT id FROM run WHERE status = 'running'").fetchall()
+            return [row["id"] for row in rows]
+
+        return self._read(read)
+
+    def dispatch_heartbeats(
+        self, moment: datetime
+    ) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
+        """Start each enabled heartbeat whose cron matches this minute.
+
+        A minute already considered is left alone. A heartbeat that still has a
+        running reply consumes the minute and does not start another run.
+        """
+        if moment.tzinfo is None:
+            raise ScheduleError("A heartbeat time needs a timezone.")
+
+        def write(
+            conn: sqlite3.Connection,
+        ) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
+            rows = conn.execute("SELECT * FROM heartbeat WHERE enabled = 1").fetchall()
+            started: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+            for row in rows:
+                local = moment.astimezone(ZoneInfo(row["timezone"]))
+                if not due(row["cron_expression"], local):
+                    continue
+                slot = local.strftime("%Y-%m-%dT%H:%M%z")
+                if row["fired_minute"] == slot:
+                    continue
+                session_id = self._ensure_heartbeat_session(conn, row)
+                active = conn.execute(
+                    "SELECT id FROM run WHERE session_id = ? AND status = 'running'",
+                    (session_id,),
+                ).fetchone()
+                conn.execute(
+                    "UPDATE heartbeat SET fired_minute = ? WHERE id = ?",
+                    (slot, row["id"]),
+                )
+                if active is not None:
+                    continue
+                started.append(self._start_heartbeat_run(conn, row, session_id))
+            return started
+
+        return self._write(write)
+
     def begin_heartbeat_run(
         self, key: str | None, heartbeat_id: str
     ) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
@@ -896,80 +1105,91 @@ class Store:
             row = conn.execute("SELECT * FROM heartbeat WHERE id = ?", (heartbeat_id,)).fetchone()
             if row is None:
                 raise NotFound("That heartbeat does not exist.")
-            session_id = row["session_id"]
-            created = now()
-            if not session_id:
-                session_id = mint("session")
-                conn.execute(
-                    """
-                    INSERT INTO session (id, kind, channel_id, participant_id, created_at)
-                    VALUES (?, 'heartbeat', NULL, ?, ?)
-                    """,
-                    (session_id, row["agent_id"], created),
-                )
-                conn.execute(
-                    "UPDATE heartbeat SET session_id = ? WHERE id = ?",
-                    (session_id, heartbeat_id),
-                )
+            session_id = self._ensure_heartbeat_session(conn, row)
             active = conn.execute(
                 "SELECT id FROM run WHERE session_id = ? AND status = 'running'",
                 (session_id,),
             ).fetchone()
             if active is not None:
                 raise Conflict("A reply is already in progress.")
-            text = str(row["instructions"] or "").strip() or "Run this heartbeat."
-            message_id = mint("message")
-            run_id = mint("run")
-            command_id = mint("cmd")
-            actor = {"kind": "user", "id": "local"}
-            conn.execute(
-                """
-                INSERT INTO message (id, session_id, role, body, actor_kind, actor_id, created_at)
-                VALUES (?, ?, 'user', ?, 'user', 'local', ?)
-                """,
-                (message_id, session_id, text, created),
-            )
-            conn.execute(
-                """
-                INSERT INTO run (id, session_id, agent_id, status, error, started_at, finished_at)
-                VALUES (?, ?, ?, 'running', NULL, ?, NULL)
-                """,
-                (run_id, session_id, row["agent_id"], created),
-            )
-            stream_id = f"session:{session_id}"
-            events = [
-                self._event(
-                    conn,
-                    stream_id=stream_id,
-                    event_type="message.created",
-                    payload={"message_id": message_id, "role": "user", "text": text},
-                    session_id=session_id,
-                    actor=actor,
-                    correlation_id=command_id,
-                ),
-                self._event(
-                    conn,
-                    stream_id=stream_id,
-                    event_type="run.started",
-                    payload={"status": "running"},
-                    session_id=session_id,
-                    run_id=run_id,
-                    actor=actor,
-                    correlation_id=command_id,
-                ),
-            ]
-            result = {
-                "command_id": command_id,
-                "status": "accepted",
-                "session_id": session_id,
-                "run_id": run_id,
-                "message_id": message_id,
-                "text": text,
-            }
+            result, events = self._start_heartbeat_run(conn, row, session_id)
             self._remember(conn, key or "", body, 202, result)
             return 202, result, events
 
         return self._write(write)
+
+    def _ensure_heartbeat_session(self, conn: sqlite3.Connection, row: sqlite3.Row) -> str:
+        session_id = row["session_id"]
+        if session_id:
+            return str(session_id)
+        session_id = mint("session")
+        conn.execute(
+            """
+            INSERT INTO session (id, kind, channel_id, participant_id, created_at)
+            VALUES (?, 'heartbeat', NULL, ?, ?)
+            """,
+            (session_id, row["agent_id"], now()),
+        )
+        conn.execute(
+            "UPDATE heartbeat SET session_id = ? WHERE id = ?",
+            (session_id, row["id"]),
+        )
+        return session_id
+
+    def _start_heartbeat_run(
+        self, conn: sqlite3.Connection, row: sqlite3.Row, session_id: str
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        text = str(row["instructions"] or "").strip() or "Run this heartbeat."
+        message_id = mint("message")
+        run_id = mint("run")
+        command_id = mint("cmd")
+        created = now()
+        actor = {"kind": "user", "id": "local"}
+        conn.execute(
+            """
+            INSERT INTO message (id, session_id, role, body, actor_kind, actor_id, created_at)
+            VALUES (?, ?, 'user', ?, 'user', 'local', ?)
+            """,
+            (message_id, session_id, text, created),
+        )
+        conn.execute(
+            """
+            INSERT INTO run (id, session_id, agent_id, status, error, started_at, finished_at)
+            VALUES (?, ?, ?, 'running', NULL, ?, NULL)
+            """,
+            (run_id, session_id, row["agent_id"], created),
+        )
+        stream_id = f"session:{session_id}"
+        events = [
+            self._event(
+                conn,
+                stream_id=stream_id,
+                event_type="message.created",
+                payload={"message_id": message_id, "role": "user", "text": text},
+                session_id=session_id,
+                actor=actor,
+                correlation_id=command_id,
+            ),
+            self._event(
+                conn,
+                stream_id=stream_id,
+                event_type="run.started",
+                payload={"status": "running"},
+                session_id=session_id,
+                run_id=run_id,
+                actor=actor,
+                correlation_id=command_id,
+            ),
+        ]
+        result = {
+            "command_id": command_id,
+            "status": "accepted",
+            "session_id": session_id,
+            "run_id": run_id,
+            "message_id": message_id,
+            "text": text,
+        }
+        return result, events
 
     def list_conversations(self, kind: str, limit: int) -> list[dict[str, Any]]:
         clause = _KIND_SQL[kind]
@@ -1392,6 +1612,87 @@ class Store:
 
         return self._write(write)
 
+    def clear_session_messages(self, session_id: str) -> list[dict[str, Any]]:
+        """Delete the stored turns for one session and say that it was cleared."""
+
+        def write(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            session = conn.execute("SELECT * FROM session WHERE id = ?", (session_id,)).fetchone()
+            if session is None:
+                raise NotFound("That session does not exist.")
+            conn.execute("DELETE FROM message WHERE session_id = ?", (session_id,))
+            conn.execute(
+                "DELETE FROM run WHERE session_id = ? AND status != 'running'",
+                (session_id,),
+            )
+            return [
+                self._event(
+                    conn,
+                    stream_id=f"session:{session_id}",
+                    event_type="session.cleared",
+                    payload={"session_id": session_id},
+                    channel_id=session["channel_id"],
+                    session_id=session_id,
+                    actor={"kind": "agent", "id": session["participant_id"] or ""},
+                )
+            ]
+
+        return self._write(write)
+
+    def begin_task_correction(
+        self, session_id: str, agent_id: str, cue: str
+    ) -> tuple[str | None, list[dict[str, Any]], bool]:
+        """Start a turn that answers a failed task.
+
+        The cue is the model prompt. It is not a chat message. A running reply
+        returns waiting so the caller can try again after that reply ends.
+        """
+
+        def write(
+            conn: sqlite3.Connection,
+        ) -> tuple[str | None, list[dict[str, Any]], bool]:
+            text = cue.strip()
+            if not text:
+                return None, [], False
+            session = conn.execute(
+                "SELECT * FROM session WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            if session is None:
+                return None, [], False
+            active = conn.execute(
+                "SELECT id FROM run WHERE session_id = ? AND status = 'running'",
+                (session_id,),
+            ).fetchone()
+            if active is not None:
+                return None, [], True
+            run_id = mint("run")
+            created = now()
+            conn.execute(
+                """
+                INSERT INTO run (
+                    id, session_id, agent_id, status, error, started_at, finished_at, cue
+                )
+                VALUES (?, ?, ?, 'running', NULL, ?, NULL, ?)
+                """,
+                (run_id, session_id, agent_id, created, text),
+            )
+            actor = {"kind": "agent", "id": agent_id}
+            events = [
+                self._event(
+                    conn,
+                    stream_id=f"session:{session_id}",
+                    event_type="run.started",
+                    payload={"status": "running"},
+                    channel_id=session["channel_id"],
+                    session_id=session_id,
+                    run_id=run_id,
+                    actor=actor,
+                )
+            ]
+            return run_id, events, False
+
+        return self._write(write)
+
     def channels(self) -> list[dict[str, Any]]:
         def read(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             rows = conn.execute(
@@ -1546,10 +1847,14 @@ class Store:
             ).fetchone()
             agent = _agent_record(conn, agent_row) if agent_row is not None else None
             history = [
-                {"role": row["role"], "text": row["body"]}
+                {
+                    "role": row["role"],
+                    "text": row["body"],
+                    "reasoning": row["reasoning"] or "",
+                }
                 for row in conn.execute(
                     """
-                    SELECT role, body FROM message
+                    SELECT role, body, reasoning FROM message
                     WHERE session_id = ? AND role IN ('user', 'assistant')
                     ORDER BY rowid
                     """,
@@ -1574,8 +1879,13 @@ class Store:
                 if found is not None and found["model_enabled"] and found["provider_enabled"]:
                     model = str(found["model_id"])
                     base_url = str(found["base_url"])
-            user_text = history[-1]["text"] if history else ""
-            prior = history[:-1]
+            cue = str(run["cue"] or "").strip()
+            if cue:
+                user_text = cue
+                prior = history
+            else:
+                user_text = history[-1]["text"] if history else ""
+                prior = history[:-1]
             return {
                 "run": dict(run),
                 "session": dict(session),
@@ -1588,7 +1898,7 @@ class Store:
 
         return self._read(read)
 
-    def complete_run(self, run_id: str, text: str) -> list[dict[str, Any]]:
+    def complete_run(self, run_id: str, text: str, reasoning: str = "") -> list[dict[str, Any]]:
         def write(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             run = conn.execute("SELECT * FROM run WHERE id = ?", (run_id,)).fetchone()
             if run is None or run["status"] != "running":
@@ -1599,12 +1909,15 @@ class Store:
             ).fetchone()
             message_id = mint("message")
             created = now()
+            stored = reasoning.strip()
             conn.execute(
                 """
-                INSERT INTO message (id, session_id, role, body, actor_kind, actor_id, created_at)
-                VALUES (?, ?, 'assistant', ?, 'agent', ?, ?)
+                INSERT INTO message (
+                    id, session_id, role, body, actor_kind, actor_id, created_at, reasoning
+                )
+                VALUES (?, ?, 'assistant', ?, 'agent', ?, ?, ?)
                 """,
-                (message_id, run["session_id"], text, run["agent_id"], created),
+                (message_id, run["session_id"], text, run["agent_id"], created, stored or None),
             )
             conn.execute(
                 "UPDATE run SET status = 'completed', finished_at = ? WHERE id = ?",
@@ -1612,12 +1925,15 @@ class Store:
             )
             stream_id = f"session:{run['session_id']}"
             actor = {"kind": "agent", "id": run["agent_id"]}
+            payload: dict[str, Any] = {"message_id": message_id, "role": "assistant", "text": text}
+            if stored:
+                payload["reasoning"] = stored
             return [
                 self._event(
                     conn,
                     stream_id=stream_id,
                     event_type="message.created",
-                    payload={"message_id": message_id, "role": "assistant", "text": text},
+                    payload=payload,
                     channel_id=session["channel_id"],
                     session_id=run["session_id"],
                     run_id=run_id,
@@ -1628,6 +1944,68 @@ class Store:
                     stream_id=stream_id,
                     event_type="run.completed",
                     payload={"status": "completed"},
+                    channel_id=session["channel_id"],
+                    session_id=run["session_id"],
+                    run_id=run_id,
+                    actor=actor,
+                ),
+            ]
+
+        return self._write(write)
+
+    def note_empty_reply(self, run_id: str, reasoning: str) -> list[dict[str, Any]]:
+        """Store reasoning from a reply that drew no text, then fail the run."""
+
+        def write(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            run = conn.execute("SELECT * FROM run WHERE id = ?", (run_id,)).fetchone()
+            if run is None or run["status"] != "running":
+                return []
+            session = conn.execute(
+                "SELECT * FROM session WHERE id = ?",
+                (run["session_id"],),
+            ).fetchone()
+            message_id = mint("message")
+            created = now()
+            stored = reasoning.strip()
+            conn.execute(
+                """
+                INSERT INTO message (
+                    id, session_id, role, body, actor_kind, actor_id, created_at, reasoning
+                )
+                VALUES (?, ?, 'assistant', '', 'agent', ?, ?, ?)
+                """,
+                (message_id, run["session_id"], run["agent_id"], created, stored),
+            )
+            conn.execute(
+                "UPDATE run SET status = 'failed', error = ?, finished_at = ? WHERE id = ?",
+                ("The model returned an empty reply.", created, run_id),
+            )
+            stream_id = f"session:{run['session_id']}"
+            actor = {"kind": "agent", "id": run["agent_id"]}
+            return [
+                self._event(
+                    conn,
+                    stream_id=stream_id,
+                    event_type="message.created",
+                    payload={
+                        "message_id": message_id,
+                        "role": "assistant",
+                        "text": "",
+                        "reasoning": stored,
+                    },
+                    channel_id=session["channel_id"],
+                    session_id=run["session_id"],
+                    run_id=run_id,
+                    actor=actor,
+                ),
+                self._event(
+                    conn,
+                    stream_id=stream_id,
+                    event_type="run.failed",
+                    payload={
+                        "status": "failed",
+                        "message": "The model returned an empty reply.",
+                    },
                     channel_id=session["channel_id"],
                     session_id=run["session_id"],
                     run_id=run_id,
