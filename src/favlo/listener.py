@@ -1,18 +1,16 @@
-"""The one listener. A request names a pipeline, and that pipeline loads.
+"""The one listener. It accepts a request and writes the reply.
 
-This module does not import a pipeline. ``open_runtime`` and ``handle_chat``
-come from the entry file the registry row names. After the request closes,
-a pipeline that defines ``idle_heartbeat`` runs that function here. A chat
-or a media request replaces the resident runtime when the folder or the
-pipeline differs. An embeddings request opens its own process beside that
-runtime and closes it when the request returns.
+The pipeline manager chooses the runtime, admits the request, and sweeps
+that runtime's owners after close and after a crash. This module does not
+import a pipeline and does not open one. After the request closes, a pipeline
+that defines ``idle_heartbeat`` runs that function here. The operator console
+reads ``quit`` and ``reload``.
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
-import inspect
 import json
 import os
 import signal
@@ -29,7 +27,6 @@ from favlo.images import sweep_images
 from favlo.logs import attach_process_log
 from favlo.music import sweep_music
 from favlo.pipelines import pipelines
-from favlo.registry import resolve
 from favlo.videos import sweep_videos
 from favlo.voice import sweep_voice
 
@@ -130,155 +127,6 @@ def _release(state: dict[str, Any], args: Any, shutdown: _Shutdown) -> None:
         shutdown.disarm()
 
 
-def _pipeline_module(selection: Any) -> Any:
-    from favlo.cli import load_pipeline
-
-    return load_pipeline(
-        selection.pipeline,
-        runtime=selection.runtime,
-        custom=selection.custom,
-    )
-
-
-def _accepts(opener: Any, name: str) -> bool:
-    try:
-        parameters = inspect.signature(opener).parameters
-    except (TypeError, ValueError):
-        return False
-    return name in parameters
-
-
-def _start_pipeline(selection: Any, args: Any, schedule: Any = None) -> Any:
-    """Open the pipeline in its own process. The daemon keeps the handle."""
-    from favlo.pipeline_worker import PipelineChild
-
-    child = PipelineChild(
-        selection,
-        getattr(args, "max_memory", None),
-        console=getattr(args, "console_ui", None),
-    )
-    child.admission = schedule
-    child.open()
-    return child
-
-
-def _open_runtime(selection: Any, console: Any, max_memory: str | None) -> Any:
-    """The pipeline named on the registry row. The previous runtime is already closed."""
-    from favlo.memory import mint_owner
-
-    module = _pipeline_module(selection)
-    opener = getattr(module, "open_runtime", None)
-    if not callable(opener):
-        message = f"{selection.pipeline} does not open a runtime"
-        raise RuntimeError(message)
-    kwargs: dict[str, Any] = {
-        "kv_cache": selection.kv_cache,
-        "console": console,
-        "resident_percent": selection.resident_percent,
-    }
-    if _accepts(opener, "max_memory"):
-        kwargs["max_memory"] = max_memory
-    if _accepts(opener, "owner"):
-        kwargs["owner"] = mint_owner(selection.pipeline)
-    if _accepts(opener, "parts"):
-        kwargs["parts"] = selection.parts or {}
-    return opener(selection.path, **kwargs)
-
-
-def _opening_owners(before: Any, runtime: Any) -> tuple[str, ...]:
-    """Owners this open added, plus the runtime's own string when it has one."""
-    from favlo.memory import memory
-
-    found = set(memory.owners()) - set(before)
-    owner = getattr(runtime, "_owner", None)
-    if isinstance(owner, str) and owner:
-        found.add(owner)
-    return tuple(owner for owner in found if owner)
-
-
-def _sweep_owners(owners: Any) -> None:
-    if not owners:
-        return
-    from favlo.memory import memory
-
-    for owner in owners:
-        if isinstance(owner, str) and owner:
-            memory.sweep(owner)
-
-
-def _sweep_new(before: Any) -> None:
-    from favlo.memory import memory
-
-    memory.sweep_new(before)
-
-
-def _install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
-    if (
-        state.get("runtime") is not None
-        and state.get("record") == selection.folder
-        and state.get("pipeline") == selection.pipeline
-    ):
-        return
-    from favlo.memory import memory
-
-    old = state.get("runtime")
-    previous = state.get("memory_owners")
-    state["runtime"] = None
-    state["record"] = None
-    state["pipeline"] = None
-    state["module"] = None
-    state["memory_owners"] = None
-    pipelines.retire(old, previous)
-    ui = getattr(args, "console_ui", None)
-    if ui is not None:
-        ui.pipeline = selection.pipeline
-        ui.load_detail = selection.alias or selection.folder
-    from favlo.schedule import ensure
-
-    schedule = ensure(state)
-    before = memory.owners()
-    try:
-        child = _start_pipeline(selection, args, schedule)
-    except Exception:
-        _sweep_new(before)
-        raise
-
-    def _crashed() -> None:
-        if state.get("runtime") is child:
-            _drop_runtime(state, args)
-
-    child.on_crash = _crashed
-    memory.report(getattr(child, "counts", {}) or {})
-    state["runtime"] = child
-    state["memory_owners"] = tuple(child.counts)
-    pipelines.add(child, state["memory_owners"])
-    state["record"] = selection.folder
-    state["pipeline"] = selection.pipeline
-    state["module"] = child.proxy
-    shutdown = getattr(args, "shutdown", None)
-    if shutdown is not None:
-        shutdown.runtime = child
-    if ui is not None and ui.keeps_lines:
-        label = selection.alias or selection.folder
-        _log(f"loaded {label} {selection.folder}")
-
-
-def _close_runtime(runtime: Any, owners: Any = None) -> None:
-    """Close one runtime and sweep the owners recorded for that opening."""
-    if runtime is None and not owners:
-        return
-    import gc
-
-    import objc
-
-    try:
-        if runtime is not None:
-            with objc.autorelease_pool():
-                runtime.close()
-                gc.collect()
-    finally:
-        _sweep_owners(owners)
-
 
 def _smoke_held(state: dict[str, Any]) -> bool:
     """True when a live smoke pid still owns the GPU. A dead pid clears the hold."""
@@ -289,106 +137,6 @@ def _smoke_held(state: dict[str, Any]) -> bool:
         state["smoke_hold"] = None
         return False
     return True
-
-
-def _drop_runtime(state: dict[str, Any], args: Any) -> str | None:
-    """Close the resident pipeline and leave the listener up."""
-    old = state.get("runtime")
-    owners = state.get("memory_owners")
-    folder = state.get("record")
-    state["runtime"] = None
-    state["record"] = None
-    state["pipeline"] = None
-    state["module"] = None
-    state["memory_owners"] = None
-    shutdown = getattr(args, "shutdown", None)
-    if shutdown is not None:
-        shutdown.runtime = None
-    pipelines.retire(old, owners)
-    if isinstance(folder, str) and folder:
-        _log(f"released {folder}")
-        return folder
-    return None
-
-
-def _bind_request(body: dict[str, Any], state: dict[str, Any], args: Any) -> Any:
-    """Load the requested folder when serve was started with an empty process."""
-    if not getattr(args, "lazy", False):
-        return None
-    model = body.get("model")
-    if not isinstance(model, str) or not model:
-        message = "model is required"
-        raise LookupError(message)
-    selection = resolve(model, resident=state.get("record"))
-    _install_runtime(state, args, selection)
-    runtime = state.get("runtime")
-    state["requests"] = int(state.get("requests") or 0) + 1
-    if runtime is not None:
-        runtime._request_id = state["requests"]
-    return selection
-
-
-def _embed_selection(body: dict[str, Any], state: dict[str, Any]) -> Any:
-    """The embeddings row named by this request. A model that does not embed is refused."""
-    model = body.get("model")
-    if not isinstance(model, str) or not model:
-        message = "model is required"
-        raise LookupError(message)
-    selection = resolve(model, resident=state.get("record"))
-    module = _pipeline_module(selection)
-    if not callable(getattr(module, "handle_embed", None)):
-        message = f"{selection.pipeline} does not embed"
-        raise LookupError(message)
-    return selection
-
-
-def _restore_console(ui: Any, saved: Any) -> None:
-    if ui is None or saved is None:
-        return
-    ui.pipeline, ui.load_detail = saved
-
-
-def _open_embed(state: dict[str, Any], args: Any, selection: Any) -> Any:
-    """Open an embeddings process beside the resident model. That model stays."""
-    from favlo.memory import memory
-    from favlo.schedule import ensure
-
-    ui = getattr(args, "console_ui", None)
-    saved = None
-    if ui is not None:
-        saved = (ui.pipeline, ui.load_detail)
-        ui.pipeline = selection.pipeline
-        ui.load_detail = selection.alias or selection.folder
-    schedule = ensure(state)
-    before = memory.owners()
-    try:
-        child = _start_pipeline(selection, args, schedule)
-    except Exception:
-        _sweep_new(before)
-        _restore_console(ui, saved)
-        raise
-    child._embed_console = saved
-    memory.report(getattr(child, "counts", {}) or {})
-    pipelines.add(child, tuple(getattr(child, "counts", {}) or ()))
-    if ui is not None and ui.keeps_lines:
-        label = selection.alias or selection.folder
-        _log(f"loaded {label} {selection.folder}")
-    return child
-
-
-def _close_embed(child: Any, args: Any) -> None:
-    """Close the embeddings process opened for one request."""
-    if child is None:
-        return
-    folder = getattr(getattr(child, "selection", None), "folder", None)
-    ui = getattr(args, "console_ui", None)
-    saved = getattr(child, "_embed_console", None)
-    try:
-        pipelines.retire(child, tuple(getattr(child, "counts", {}) or ()))
-    finally:
-        _restore_console(ui, saved)
-    if isinstance(folder, str) and folder:
-        _log(f"released {folder}")
 
 
 def serve(args: Any) -> int:

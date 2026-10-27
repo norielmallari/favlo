@@ -16,6 +16,7 @@ import qwen38_flash_next.commands as commands
 from qwen38_flash_next.runtime import RequestClosed
 
 from favlo import listener
+from favlo.pipelines import drop_runtime, install_runtime, open_runtime
 
 
 class _Encoded:
@@ -524,13 +525,13 @@ def test_lazy_stream_uses_the_runtime_loaded_for_the_request(monkeypatch) -> Non
         "module": commands,
     }
 
-    def bind(body, bound_state, bound_args):
-        del body, bound_args
+    def bind(body, bound_state, bound_args, kind="chat"):
+        del body, bound_args, kind
         bound_state["runtime"] = runtime
         bound_state["record"] = "packed"
         return SimpleNamespace(requested_id="packed", enable_thinking=None, sampling=None)
 
-    monkeypatch.setattr(listener, "_bind_request", bind)
+    monkeypatch.setattr("favlo.pipelines.bind_request", bind)
     args = _args()
     args.lazy = True
     thread = threading.Thread(target=listener._serve_loop, args=(args, state), daemon=True)
@@ -599,7 +600,7 @@ def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
         del args, schedule
         return opener(selection, None)
 
-    monkeypatch.setattr(listener, "_start_pipeline", start)
+    monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
     state: dict = {"runtime": None, "record": None, "pipeline": None}
     args = _args()
     first = SimpleNamespace(
@@ -622,11 +623,11 @@ def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
         kv_cache="e4m3",
         path="dense",
     )
-    listener._install_runtime(state, args, first)
-    listener._install_runtime(state, args, first)
+    install_runtime(state, args, first)
+    install_runtime(state, args, first)
     assert len(opened) == 1
     assert state["pipeline"] == "qwen38-flash-next"
-    listener._install_runtime(state, args, second)
+    install_runtime(state, args, second)
     assert opened[0].closed
     assert state["runtime"] is opened[1]
     assert state["record"] == "dense"
@@ -682,15 +683,13 @@ def test_an_embedding_request_leaves_the_resident_runtime(monkeypatch) -> None:
         opened.append(child)
         return child
 
-    monkeypatch.setattr(listener, "_start_pipeline", start)
+    monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
     monkeypatch.setattr(
-        listener,
-        "resolve",
+        "favlo.registry.resolve",
         lambda model, resident=None: _selection("bge-m3-int8", "bge-m3"),
     )
     monkeypatch.setattr(
-        listener,
-        "_pipeline_module",
+        "favlo.pipelines.pipeline_module",
         lambda selection: SimpleNamespace(handle_embed=handle_embed),
     )
     args = _args()
@@ -734,15 +733,13 @@ def test_an_embedding_child_exit_keeps_the_resident_runtime(monkeypatch) -> None
         opened.append(child)
         return child
 
-    monkeypatch.setattr(listener, "_start_pipeline", start)
+    monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
     monkeypatch.setattr(
-        listener,
-        "resolve",
+        "favlo.registry.resolve",
         lambda model, resident=None: _selection("bge-m3-int8", "bge-m3"),
     )
     monkeypatch.setattr(
-        listener,
-        "_pipeline_module",
+        "favlo.pipelines.pipeline_module",
         lambda selection: SimpleNamespace(handle_embed=handle_embed),
     )
     args = _args()
@@ -782,15 +779,13 @@ def test_the_resident_embeddings_model_closes_when_the_request_returns(monkeypat
         del selection, args, schedule
         raise AssertionError("a second embeddings process opened")
 
-    monkeypatch.setattr(listener, "_start_pipeline", start)
+    monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
     monkeypatch.setattr(
-        listener,
-        "resolve",
+        "favlo.registry.resolve",
         lambda model, resident=None: _selection("bge-m3-int8", "bge-m3"),
     )
     monkeypatch.setattr(
-        listener,
-        "_pipeline_module",
+        "favlo.pipelines.pipeline_module",
         lambda selection: SimpleNamespace(handle_embed=handle_embed),
     )
     args = _args()
@@ -820,13 +815,12 @@ def test_an_embedding_request_refuses_a_model_that_does_not_embed(monkeypatch) -
         del selection, args, schedule
         raise AssertionError("a model that does not embed was opened")
 
-    monkeypatch.setattr(listener, "_start_pipeline", start)
+    monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
     monkeypatch.setattr(
-        listener,
-        "resolve",
+        "favlo.registry.resolve",
         lambda model, resident=None: _selection("qwen", "qwen36-35b-a3b"),
     )
-    monkeypatch.setattr(listener, "_pipeline_module", lambda selection: SimpleNamespace())
+    monkeypatch.setattr("favlo.pipelines.pipeline_module", lambda selection: SimpleNamespace())
     args = _args()
     args.lazy = True
     reply = _embed_reply()
@@ -841,6 +835,93 @@ def test_an_embedding_request_refuses_a_model_that_does_not_embed(monkeypatch) -
     assert reply.status == 404
     assert resident.closed is False
     assert state["runtime"] is resident
+
+
+def test_an_image_request_does_not_enter_the_chat_runtime(monkeypatch) -> None:
+    from favlo.http_app import _run_once
+
+    resident = _Runtime()
+    resident.counts = {}
+    state = _embed_state(resident)
+    state["module"] = SimpleNamespace(handle_chat=lambda *_args: None)
+
+    def start(selection, args, schedule=None):
+        del selection, args, schedule
+        raise AssertionError("the chat runtime was opened for an image")
+
+    monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
+    monkeypatch.setattr(
+        "favlo.registry.resolve",
+        lambda model, resident=None: _selection("qwen", "qwen36-35b-a3b"),
+    )
+    monkeypatch.setattr("favlo.pipelines.pipeline_module", lambda selection: SimpleNamespace())
+    args = _args()
+    args.lazy = True
+    reply = _embed_reply()
+    _run_once(
+        args,
+        state,
+        "image",
+        "application/json",
+        b'{"model": "qwen", "prompt": "a horse"}',
+        reply,
+    )
+    assert reply.status == 404
+    assert resident.closed is False
+    assert state["runtime"] is resident
+    assert state["pipeline"] == "qwen36-35b-a3b"
+
+
+def test_an_image_request_opens_the_image_runtime(monkeypatch) -> None:
+    from favlo.http_app import _run_once
+
+    resident = _Runtime()
+    resident.counts = {}
+    state = _embed_state(resident)
+    opened: list[_Runtime] = []
+
+    def handle_image(reply, runtime, body, selection, args, request_state) -> None:
+        del body, args, request_state
+        assert runtime is opened[0]
+        assert selection.pipeline == "z-image-turbo"
+        reply.json(200, {"data": [{"id": "image_ok"}]})
+
+    def start(selection, args, schedule=None):
+        del args, schedule
+        child = _Runtime()
+        child.counts = {}
+        child.selection = selection
+        child.proxy = SimpleNamespace(handle_image=handle_image)
+        opened.append(child)
+        return child
+
+    monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
+    monkeypatch.setattr(
+        "favlo.registry.resolve",
+        lambda model, resident=None: _selection("z-image-turbo", "z-image-turbo"),
+    )
+    monkeypatch.setattr(
+        "favlo.pipelines.pipeline_module",
+        lambda selection: SimpleNamespace(handle_image=handle_image),
+    )
+    args = _args()
+    args.lazy = True
+    reply = _embed_reply()
+    try:
+        _run_once(
+            args,
+            state,
+            "image",
+            "application/json",
+            b'{"model": "z-image-turbo", "prompt": "a horse"}',
+            reply,
+        )
+        assert reply.status == 200
+        assert resident.closed is True
+        assert state["pipeline"] == "z-image-turbo"
+        assert state["runtime"] is opened[0]
+    finally:
+        drop_runtime(state, args)
 
 
 def _selection(folder: str, pipeline: str) -> SimpleNamespace:
@@ -867,8 +948,8 @@ def test_open_runtime_passes_owner_when_accepted(monkeypatch) -> None:
         return SimpleNamespace(_owner=owner)
 
     module = SimpleNamespace(open_runtime=opener)
-    monkeypatch.setattr(listener, "_pipeline_module", lambda _selection: module)
-    runtime = listener._open_runtime(_selection("record", "z-image-turbo"), None, None)
+    monkeypatch.setattr("favlo.pipelines.pipeline_module", lambda _selection: module)
+    runtime = open_runtime(_selection("record", "z-image-turbo"), None, None)
     assert seen["path"] == "record"
     assert seen["owner"].startswith("z-image-turbo:")
     assert runtime._owner == seen["owner"]
@@ -880,8 +961,8 @@ def test_open_runtime_omits_owner_when_absent(monkeypatch) -> None:
         return SimpleNamespace(path=path)
 
     module = SimpleNamespace(open_runtime=opener)
-    monkeypatch.setattr(listener, "_pipeline_module", lambda _selection: module)
-    runtime = listener._open_runtime(_selection("record", "wan22-i2v"), None, None)
+    monkeypatch.setattr("favlo.pipelines.pipeline_module", lambda _selection: module)
+    runtime = open_runtime(_selection("record", "wan22-i2v"), None, None)
     assert runtime.path == "record"
 
 
@@ -900,11 +981,11 @@ def test_a_failed_open_sweeps_spans_from_that_attempt(monkeypatch) -> None:
         del schedule
         return opener(selection, None, getattr(bound_args, "max_memory", None))
 
-    monkeypatch.setattr(listener, "_start_pipeline", start)
+    monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
     state: dict = {"runtime": None, "record": None, "pipeline": None, "module": None}
     try:
         try:
-            listener._install_runtime(state, _args(), _selection("rec", "z-image-turbo"))
+            install_runtime(state, _args(), _selection("rec", "z-image-turbo"))
         except RuntimeError as exc:
             assert str(exc) == "open failed"
         else:
@@ -936,12 +1017,12 @@ def test_close_sweeps_the_owner_recorded_at_open(monkeypatch) -> None:
         del schedule
         return opener(selection, None, getattr(bound_args, "max_memory", None))
 
-    monkeypatch.setattr(listener, "_start_pipeline", start)
+    monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
     state: dict = {"runtime": None, "record": None, "pipeline": None, "module": None}
     try:
-        listener._install_runtime(state, _args(), _selection("rec", "z-image-turbo"))
+        install_runtime(state, _args(), _selection("rec", "z-image-turbo"))
         assert owner in memory.owners()
-        listener._drop_runtime(state, _args())
+        drop_runtime(state, _args())
         assert owner not in memory.owners()
         assert state["runtime"] is None
     finally:

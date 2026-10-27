@@ -1,4 +1,4 @@
-"""GPU admission for the daemon.
+"""GPU admission for the pipeline manager.
 
 Two queues. The foreground queue is embeddings, then chats that have not
 started. The media queue runs only when the foreground queue is empty.
@@ -27,7 +27,7 @@ class _Ticket:
 
 
 def ensure(state: dict) -> Scheduler:
-    """The listener's scheduler, created on the first use of ``state``."""
+    """The pipeline manager's scheduler, created on the first use of ``state``."""
     found = state.get("schedule")
     if not isinstance(found, Scheduler):
         found = Scheduler()
@@ -37,7 +37,7 @@ def ensure(state: dict) -> Scheduler:
 
 
 class Scheduler:
-    """The daemon's admission queues. One listener owns one scheduler."""
+    """Admission queues. The pipeline manager admits one request at a time."""
 
     def __init__(self) -> None:
         self._cond = threading.Condition()

@@ -963,11 +963,11 @@ def test_openai_client_receives_a_token_before_generation_ends(monkeypatch: pyte
         "requests": 0,
     }
 
-    def bind(body, bound_state, bound_args):
-        del body, bound_state, bound_args
+    def bind(body, bound_state, bound_args, kind="chat"):
+        del body, bound_state, bound_args, kind
         return SimpleNamespace(requested_id="qwen38-27b", variant=None, sampling=None)
 
-    monkeypatch.setattr(listener, "_bind_request", bind)
+    monkeypatch.setattr("favlo.pipelines.bind_request", bind)
     args = SimpleNamespace(host="127.0.0.1", port=0, lazy=False, transcript=None, max_memory=None)
     thread = threading.Thread(target=listener._serve_loop, args=(args, state), daemon=True)
     thread.start()

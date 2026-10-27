@@ -1,7 +1,7 @@
 """One pipeline process.
 
-The daemon spawns this module and keeps the registry, the job queue, and the
-memory ledger. This process loads the pipeline and creates the Metal device.
+The pipeline manager spawns this module and keeps the registry, the job queue,
+and the memory ledger. This process loads the pipeline and creates the Metal device.
 Its console events are forwarded to the daemon, which writes the telemetry
 the CLI paints. Before this process exits it sweeps its owners and blocks
 until the ledger says those heaps are gone. When the process exits, including
@@ -33,6 +33,12 @@ _KINDS = {
 _RUNTIME: list[Any] = []
 
 
+def _served_kinds(module: Any, stub: bool) -> list[str]:
+    if stub:
+        return list(_KINDS)
+    return [kind for kind, name in _KINDS.items() if callable(getattr(module, name, None))]
+
+
 class ChildExited(RuntimeError):
     """The pipeline process ended before the call returned."""
 
@@ -47,7 +53,7 @@ class _Proxy:
 
     def __getattr__(self, name: str) -> Any:
         kind = self._kinds.get(name)
-        if kind is None:
+        if kind is None or kind not in self._child.kinds:
             message = f"{type(self).__name__} has no {name}"
             raise AttributeError(message)
 
@@ -86,6 +92,7 @@ class PipelineChild:
         self.stub = stub
         self._ui = console
         self.counts: dict[str, int] = {}
+        self.kinds: set[str] = set()
         self.proxy = _Proxy(self)
         self.on_crash: Any = None
         self._proc: subprocess.Popen[bytes] | None = None
@@ -124,6 +131,9 @@ class PipelineChild:
                 self.counts = {str(key): int(value) for key, value in counts.items()}
             else:
                 self.counts = {}
+            reported = message.get("kinds")
+            if isinstance(reported, list):
+                self.kinds = {str(item) for item in reported}
             self._note_resident()
         finally:
             self._release_memory()
@@ -512,7 +522,14 @@ def _serve_child(
             if op == "open":
                 runtime, module, selection, max_memory = _open(message, stub, console)
                 _RUNTIME[:] = [runtime]
-                _emit(proto, {"op": "opened", "owners": _owners(runtime)})
+                _emit(
+                    proto,
+                    {
+                        "op": "opened",
+                        "owners": _owners(runtime),
+                        "kinds": _served_kinds(module, stub),
+                    },
+                )
             elif op == "call":
                 _call(
                     proto,
@@ -599,7 +616,7 @@ def _open(
 ) -> tuple[Any, Any, Any, str | None]:
     if stub:
         return SimpleNamespace(halt=lambda: None, close=lambda: None), None, None, None
-    from favlo.listener import _open_runtime, _pipeline_module
+    from favlo.pipelines import open_runtime, pipeline_module
     from favlo.registry import Selection
 
     raw = message.get("selection")
@@ -631,22 +648,22 @@ def _open(
         custom=bool(raw.get("custom")),
         parts={str(key): Path(str(path)) for key, path in parts.items()},
     )
-    module = _pipeline_module(selection)
+    module = pipeline_module(selection)
     if console is not None:
         console.pipeline = selection.pipeline
         console.load_detail = selection.alias or selection.folder
-    runtime = _open_runtime(selection, console, limit)
+    runtime = open_runtime(selection, console, limit)
     return runtime, module, selection, limit
 
 
 def _owners(runtime: Any) -> dict[str, int]:
     if os.environ.get("FAVLO_WORKER_STUB") == "1":
         return {"stub": 32}
-    from favlo.listener import _opening_owners
     from favlo.memory import memory
+    from favlo.pipelines import opening_owners
 
     counts = memory.owner_bytes()
-    for owner in _opening_owners(frozenset(), runtime):
+    for owner in opening_owners(frozenset(), runtime):
         counts.setdefault(owner, 0)
     return counts
 

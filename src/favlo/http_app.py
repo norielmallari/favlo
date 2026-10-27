@@ -1,14 +1,14 @@
 """One ASGI application for chat and MCP.
 
 Uvicorn serves it. A pipeline receives a :class:`favlo.reply.LiveReply` and
-never a socket. ``GET /v1/models`` does not take the request lock. The daemon
-admits the GPU through :class:`favlo.schedule.Scheduler`: embeddings, then
-chats, then media. An embedding waits until the open chat returns. A chat
-that has not started waits while an embedding is queued or running. A chat
-preempts media and leaves ``preempt`` set until the chat queue is empty.
-An embedding does not set ``preempt``. It opens beside the resident model
-and closes when the request returns. Image, video, music, and voice run
-on the MCP queue.
+never a socket. ``GET /v1/models`` does not take the request lock. The
+pipeline manager admits the GPU: embeddings, then chats, then media. An
+embedding waits until the open chat returns. A chat that has not started
+waits while an embedding is queued or running. A chat preempts media and
+leaves ``preempt`` set until the chat queue is empty. An embedding does not
+set ``preempt``. It opens beside the resident model and closes when the
+request returns. Image, video, music, and voice run on the MCP queue. The
+manager opens the runtime that serves the request.
 """
 
 from __future__ import annotations
@@ -24,11 +24,21 @@ from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 from starlette.routing import Route
 
-from favlo.memory_notes import DIM, EMBED_MODEL
 from favlo.mcp_server import build_mcp, media_kinds
+from favlo.memory_notes import DIM, EMBED_MODEL
+from favlo.pipelines import (
+    admission,
+    admission_epoch,
+    admit,
+    close_embed,
+    drop_runtime,
+    foreground_busy,
+    handler_for,
+    open_for,
+    release_admission,
+)
 from favlo.registry import load_registry, model_objects, one_model
 from favlo.reply import LiveReply
-from favlo.schedule import ClientClosed, Scheduler, ensure
 
 _MAX_BODY = 64 * 1024 * 1024
 
@@ -285,7 +295,7 @@ def _one_model(request: Request, state: dict[str, Any]) -> Response:
 
 
 async def _release(request: Request, args: Any, state: dict[str, Any]) -> Response:
-    from favlo.listener import _drop_runtime, _smoke_held
+    from favlo.listener import _smoke_held
 
     pid, error = await _pid(request)
     if error is not None:
@@ -298,7 +308,7 @@ async def _release(request: Request, args: Any, state: dict[str, Any]) -> Respon
         if _smoke_held(state) and holder != pid:
             return _error(409, "a smoke hold is active", "busy")
         try:
-            closed = _drop_runtime(state, args)
+            closed = drop_runtime(state, args)
         except Exception as exc:
             return _error(500, str(exc), type(exc).__name__)
         state["smoke_hold"] = pid
@@ -403,7 +413,7 @@ _MEDIA_KINDS = frozenset({"image", "video", "music", "voice"})
 
 
 def _prepare_listener(state: dict[str, Any]) -> None:
-    ensure(state)
+    admission(state)
     state.setdefault("lock", threading.Lock())
     state.setdefault("cancel", threading.Event())
     state.setdefault("media_task", None)
@@ -421,16 +431,14 @@ def _run_locked(
     reply: LiveReply,
 ) -> None:
     _prepare_listener(state)
-    schedule: Scheduler = state["schedule"]
     ticket = None
     cancel = getattr(reply, "disconnected", None)
     if kind != "chat" or not isinstance(cancel, threading.Event):
         cancel = None
     try:
         if kind in {"embed", "chat"}:
-            try:
-                ticket = schedule.acquire(kind, cancel=cancel)
-            except ClientClosed:
+            ticket = admit(state, kind, cancel=cancel)
+            if ticket is None:
                 _leave_cleared(reply)
                 return
         if cancel is not None and cancel.is_set():
@@ -441,7 +449,7 @@ def _run_locked(
             _run_once(args, state, kind, content_type, raw, reply)
     finally:
         if ticket is not None:
-            schedule.release(ticket)
+            release_admission(state, ticket)
 
 
 def _run_media(
@@ -453,21 +461,19 @@ def _run_media(
     reply: LiveReply,
 ) -> None:
     """Run one media call. Resume it only after the foreground queue drains."""
-    schedule: Scheduler = state["schedule"]
-    epoch = schedule.epoch
+    epoch = admission_epoch(state)
     while True:
-        try:
-            ticket = schedule.acquire("media")
-        except ClientClosed:
+        ticket = admit(state, "media")
+        if ticket is None:
             _leave_cleared(reply)
             return
         try:
-            if schedule.epoch != epoch:
+            if admission_epoch(state) != epoch:
                 _leave_cleared(reply)
                 return
             state["media_yield"] = False
             _run_once(args, state, kind, content_type, raw, reply)
-            if schedule.epoch != epoch:
+            if admission_epoch(state) != epoch:
                 _discard_output(state, reply.payload)
                 _leave_cleared(reply)
                 return
@@ -479,7 +485,7 @@ def _run_media(
                 continue
             return
         finally:
-            schedule.release(ticket)
+            release_admission(state, ticket)
 
 
 def _run_once(
@@ -491,12 +497,7 @@ def _run_once(
     reply: LiveReply,
 ) -> None:
     from favlo.listener import (
-        _bind_request,
-        _close_embed,
-        _drop_runtime,
-        _embed_selection,
         _log,
-        _open_embed,
         _report_failure,
         _schedule_pipeline_heartbeat,
         _smoke_held,
@@ -520,8 +521,7 @@ def _run_once(
     embed_child = None
     drop_embed = False
     try:
-        schedule: Scheduler = state["schedule"]
-        if kind in _MEDIA_KINDS and schedule.foreground():
+        if kind in _MEDIA_KINDS and foreground_busy(state):
             state["media_yield"] = True
             return
         if kind in _MEDIA_KINDS:
@@ -547,46 +547,22 @@ def _run_once(
             reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
             return
         try:
-            if kind == "embed" and getattr(args, "lazy", False):
-                selection = _embed_selection(body, state)
-                same = (
-                    state.get("runtime") is not None
-                    and state.get("record") == selection.folder
-                    and state.get("pipeline") == selection.pipeline
-                )
-                if same:
-                    drop_embed = True
-                    runtime = state.get("runtime")
-                    module = state.get("module")
-                else:
-                    embed_child = _open_embed(state, args, selection)
-                    runtime = embed_child
-                    module = embed_child.proxy
-                state["requests"] = int(state.get("requests") or 0) + 1
-                if runtime is not None:
-                    runtime._request_id = state["requests"]
-            else:
-                selection = _bind_request(body, state, args)
-                runtime = state.get("runtime")
-                module = state.get("module")
+            prepared = open_for(kind, body, state, args)
         except LookupError as exc:
             reply.json(404, {"error": {"message": str(exc), "type": "not_found"}})
             return
+        selection = prepared.selection
+        runtime = prepared.runtime
+        module = prepared.module
+        embed_child = prepared.embed_child
+        drop_embed = prepared.drop_embed
         if selection is not None:
             reply.model_id = selection.requested_id
         if runtime is None or module is None:
             reply.json(404, {"error": {"message": "no model is loaded", "type": "not_found"}})
             return
-        handler_name = {
-            "chat": "handle_chat",
-            "embed": "handle_embed",
-            "image": "handle_image",
-            "video": "handle_video",
-            "music": "handle_music",
-            "voice": "handle_voice",
-        }[kind]
-        call = getattr(module, handler_name, None)
-        if not callable(call):
+        call = handler_for(kind, module)
+        if call is None:
             if kind == "chat":
                 name = state.get("pipeline") or "pipeline"
                 reply.json(
@@ -624,9 +600,9 @@ def _run_once(
     finally:
         try:
             if embed_child is not None:
-                _close_embed(embed_child, args)
+                close_embed(embed_child, args)
             elif drop_embed:
-                _drop_runtime(state, args)
+                drop_runtime(state, args)
             if opened:
                 _log("request closed")
             module = state.get("module")
@@ -645,13 +621,12 @@ def _run_once(
 
 
 def _abandon_child(state: dict[str, Any], args: Any) -> None:
-    """Drop a pipeline process that exited on its own and forget its owners."""
-    from favlo.listener import _drop_runtime
+    """Drop a pipeline process that exited on its own and sweep its owners."""
     from favlo.pipeline_worker import PipelineChild
 
     runtime = state.get("runtime")
     if isinstance(runtime, PipelineChild):
-        _drop_runtime(state, args)
+        drop_runtime(state, args)
 
 
 def _leave_cleared(reply: LiveReply) -> None:

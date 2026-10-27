@@ -124,7 +124,7 @@ def test_a_request_after_unload_does_not_open(monkeypatch) -> None:
     def bind(*_args: object, **_kwargs: object) -> None:
         called.append(1)
 
-    monkeypatch.setattr("favlo.listener._bind_request", bind)
+    monkeypatch.setattr("favlo.pipelines.bind_request", bind)
     state = _state()
     state["unload"] = True
     reply = SimpleNamespace(started=False, status=0, payload=None)

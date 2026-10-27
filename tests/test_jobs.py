@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from favlo.console import Console
-from favlo.jobs import run
+from favlo.pipelines import run_job
 from favlo.memory import memory
 from favlo.pipeline_worker import ChildExited, PipelineChild, _ProtocolStream
 from favlo.reply import MemoryReply
@@ -53,8 +53,8 @@ def test_one_job_runs_at_a_time() -> None:
         order.append(3)
         return "second"
 
-    first_thread = threading.Thread(target=lambda: run("a", first))
-    second_thread = threading.Thread(target=lambda: run("b", second))
+    first_thread = threading.Thread(target=lambda: run_job("a", first))
+    second_thread = threading.Thread(target=lambda: run_job("b", second))
     first_thread.start()
     assert started.wait(2)
     second_thread.start()

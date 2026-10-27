@@ -448,9 +448,9 @@ async def _run_task(dispatch: Any, kind: str, body: dict[str, Any]) -> dict[str,
     task_id = info.task_id if info is not None else ""
     if task_id and await _already_cancelled(task_id):
         return {"status": "cancelled"}
-    from favlo.jobs import execute
+    from favlo.pipelines import execute_job
 
-    payload = await execute(task_id, lambda: dispatch(kind, body, task_id))
+    payload = await execute_job(task_id, lambda: dispatch(kind, body, task_id))
     if not isinstance(payload, dict):
         message = "the pipeline wrote no reply"
         raise ToolError(message)

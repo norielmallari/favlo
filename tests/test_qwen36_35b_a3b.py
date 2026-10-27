@@ -638,11 +638,11 @@ def test_openai_client_streams_the_completion(monkeypatch: pytest.MonkeyPatch) -
         "requests": 0,
     }
 
-    def bind(body, bound_state, bound_args):
-        del body, bound_state, bound_args
+    def bind(body, bound_state, bound_args, kind="chat"):
+        del body, bound_state, bound_args, kind
         return SimpleNamespace(requested_id="qwen36-35b-a3b", variant=None, sampling=None)
 
-    monkeypatch.setattr(listener, "_bind_request", bind)
+    monkeypatch.setattr("favlo.pipelines.bind_request", bind)
     args = SimpleNamespace(host="127.0.0.1", port=0, lazy=False, transcript=None)
     thread = threading.Thread(target=listener._serve_loop, args=(args, state), daemon=True)
     thread.start()
