@@ -17,6 +17,7 @@ DEFAULT_VIDEO_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_IMAGE_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_MUSIC_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_VOICE_TTL_SECONDS = 24 * 60 * 60
+DEFAULT_HEARTBEAT_SECONDS = 5 * 60
 _SETTINGS_NAME = "settings.json"
 _LOG_NAME = "favlo.log"
 
@@ -113,7 +114,44 @@ def _default_settings() -> dict[str, Any]:
         "image_ttl_seconds": DEFAULT_IMAGE_TTL_SECONDS,
         "music_ttl_seconds": DEFAULT_MUSIC_TTL_SECONDS,
         "voice_ttl_seconds": DEFAULT_VOICE_TTL_SECONDS,
+        "heartbeat_seconds": DEFAULT_HEARTBEAT_SECONDS,
     }
+
+
+def heartbeat_seconds(settings: dict[str, Any]) -> int:
+    """Quiet seconds before the terminal's own check. The default is 5 minutes."""
+    value = settings.get("heartbeat_seconds", DEFAULT_HEARTBEAT_SECONDS)
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_HEARTBEAT_SECONDS
+    if seconds < 60:
+        return DEFAULT_HEARTBEAT_SECONDS
+    return seconds
+
+
+def set_heartbeat_seconds(home: Path, seconds: int) -> int:
+    """Store ``heartbeat_seconds``. A value below 60 is refused."""
+    if seconds < 60:
+        message = "heartbeat_seconds is at least 60"
+        raise ValueError(message)
+    path = settings_path(home)
+    current: dict[str, Any]
+    if path.is_file():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            current = _default_settings()
+        else:
+            current = raw if isinstance(raw, dict) else _default_settings()
+    else:
+        current = _default_settings()
+        home.mkdir(parents=True, exist_ok=True)
+    current["heartbeat_seconds"] = seconds
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+    return seconds
 
 
 def log_max_bytes(settings: dict[str, Any]) -> int:

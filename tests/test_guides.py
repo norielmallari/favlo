@@ -15,7 +15,8 @@ def test_clients_guide_names_this_server() -> None:
     assert "/quit" in text
     assert "save_intro" in text
     assert "intros.json" in text
-    assert "30 minutes" in text
+    assert "5 minutes" in text
+    assert "heartbeat_seconds" in text
     assert "Qwen/Qwen3.8-27B" in text
     assert "download_suggestions" in text
 

@@ -7,7 +7,6 @@ import threading
 from pathlib import Path
 
 import pytest
-from qwen38_27b.fetch import remaining_download, shortfall
 
 from favlo.machine import (
     MIN_RAM_BYTES,
@@ -20,6 +19,7 @@ from favlo.machine import (
 )
 from favlo.registry import save_registry
 from favlo.talk import HEARTBEAT_QUIET, HEARTBEAT_SECONDS, Idle, _ask_again, heartbeat_loop
+from qwen38_27b.fetch import remaining_download, shortfall
 
 
 def test_reminders_start_on_and_can_be_turned_off(tmp_path: Path) -> None:
@@ -57,8 +57,8 @@ def test_a_suggestion_is_kept_for_the_reply() -> None:
     assert "remind" in messages[-1].text
 
 
-def test_the_idle_check_waits_thirty_minutes() -> None:
-    assert HEARTBEAT_SECONDS == 30 * 60
+def test_the_idle_check_waits_five_minutes() -> None:
+    assert HEARTBEAT_SECONDS == 5 * 60
 
 
 def test_typing_starts_the_quiet_interval_over() -> None:

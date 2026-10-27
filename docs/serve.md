@@ -26,4 +26,4 @@ The daemon writes one JSON event per line to `~/.favlo/logs/serve-<port>.log`. D
 
 A terminal `favlo serve` whose registry has no rows checks that a small shader compiles at Metal 4.1, then runs `favlo --qwen36-35b-a3b setup` before the daemon starts. The checkpoint and the packed directory are [guides/models.md](guides/models.md). `--non-interactive` does not download. A pipe does not download. A failed check or a failed download exits. The next `serve` on a terminal continues from the files already written.
 
-A pipeline heartbeat runs in the daemon after the request closes. The terminal's only heartbeat is the agent check in [ai-assistance/README.md](ai-assistance/README.md).
+A pipeline heartbeat runs in the daemon after the request closes. The terminal's only heartbeat is the agent check in [ai-assistance/README.md](ai-assistance/README.md). Key `heartbeat_seconds` is how long that terminal stays quiet before the check. The default is 300. A value below 60 uses 300.

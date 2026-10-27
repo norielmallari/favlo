@@ -46,6 +46,6 @@ A question the guide does not answer stays unanswered.
 
 ## Idle download suggestion
 
-After 30 minutes with no completion from this terminal and no typing, one session checks the machine. `machine` reports physical memory and free disk. When the machine has at least 16 GB and the volume can hold the published files, `download_qwen38_27b` starts `favlo --qwen38-27b download` into `models/Qwen3.8-27B-bf16`. The line asks whether to remind them again.
+After the quiet interval with no completion from this terminal and no typing, one session checks the machine. `~/.favlo/settings.json` key `heartbeat_seconds` is that interval. The default is 5 minutes. A value below 60 seconds uses the default. `machine` reports physical memory and free disk. When the machine has at least 16 GB and the volume can hold the published files, `download_qwen38_27b` starts `favlo --qwen38-27b download` into `models/Qwen3.8-27B-bf16`. The line asks whether to remind them again.
 
 `download_suggestions` stores the answer in `~/.favlo/suggestions.json`. `enabled` false stops later idle suggestions. `enabled` true turns them back on. A missing file leaves reminders on. A machine that is not ready, or a checkout that is already downloading or present, does not call the model and does not print. Packing the record stays `favlo --qwen38-27b quantize`. The log for that download is `~/.favlo/logs/qwen38-27b-download.log`. A pipeline heartbeat runs in the daemon after the request closes, not in this terminal.

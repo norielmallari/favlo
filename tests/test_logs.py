@@ -3,15 +3,20 @@
 import io
 import json
 
+import pytest
+
 from favlo.console import Console
 from favlo.logs import (
     DEFAULT_LOG_MAX_BYTES,
     RollingLog,
     configured_thinking_budget,
     ensure_settings,
+    heartbeat_seconds,
+    load_settings,
     log_max_bytes,
     log_path,
     output_token_limit,
+    set_heartbeat_seconds,
     settings_path,
 )
 
@@ -24,6 +29,16 @@ def test_a_missing_settings_file_uses_one_mebibyte(tmp_path) -> None:
     settings_path(tmp_path).write_text(json.dumps(stored), encoding="utf-8")
     assert log_max_bytes(ensure_settings(tmp_path)) == 4096
     assert json.loads(settings_path(tmp_path).read_text(encoding="utf-8"))["log_max_bytes"] == 4096
+
+
+def test_the_quiet_interval_defaults_to_five_minutes(tmp_path) -> None:
+    assert heartbeat_seconds({}) == 300
+    assert heartbeat_seconds({"heartbeat_seconds": 12}) == 300
+    assert heartbeat_seconds({"heartbeat_seconds": "nope"}) == 300
+    assert set_heartbeat_seconds(tmp_path, 120) == 120
+    assert heartbeat_seconds(load_settings(tmp_path)) == 120
+    with pytest.raises(ValueError):
+        set_heartbeat_seconds(tmp_path, 30)
 
 
 def test_a_bad_log_cap_falls_back(tmp_path) -> None:

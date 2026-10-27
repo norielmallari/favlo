@@ -9,11 +9,11 @@ registered model to call ``save_intro``. This start prints the first saved
 line, as ``favlo:``. Each later start prints the next line, then the first
 again. A reply streams as the tokens arrive, and the terminal wraps it.
 The daemon's prefill and decode rows stay on the line under that reply.
-The model is not called again until someone types. After 30
-minutes with no completion from this terminal and no typing, one more
-session checks free disk and memory and may start the Qwen3.8-27B download.
-Five minutes is a pause in a conversation, and that turn would occupy the
-only request slot.
+The model is not called again until someone types. After the quiet interval
+with no completion from this terminal and no typing, one more session checks
+free disk and memory and may start the Qwen3.8-27B download. The interval is
+``heartbeat_seconds`` in ``~/.favlo/settings.json``. The default is five
+minutes. A value below 60 seconds uses that default.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from typing import Any, TextIO
 from favlo.persona import INSTRUCTIONS, intros_path, opening, rotate_opening, save_intros
 
 Turn = Callable[[str], str]
-HEARTBEAT_SECONDS = 30 * 60
+HEARTBEAT_SECONDS = 5 * 60
 HEARTBEAT_QUIET = "HEARTBEAT_QUIET"
 _HEARTBEAT_LINE = (
     "This machine can hold Qwen3.8-27B. I started the download. "
@@ -201,9 +201,15 @@ def _run(
     def ask(after_output: bool = False) -> None:
         _prompt(after_output, prompt)
 
+    def quiet_seconds() -> float:
+        from favlo.logs import favlo_home, heartbeat_seconds, load_settings
+
+        root = home if home is not None else favlo_home()
+        return float(heartbeat_seconds(load_settings(root)))
+
     beat_thread = threading.Thread(
         target=heartbeat_loop,
-        args=(idle, HEARTBEAT_SECONDS, ended, beat, write, None, ask),
+        args=(idle, quiet_seconds, ended, beat, write, None, ask),
         name="favlo-heartbeat",
         daemon=True,
     )
@@ -255,7 +261,7 @@ def _run(
 
 def heartbeat_loop(
     idle: Idle,
-    interval: float,
+    interval: float | Callable[[], float],
     stop: threading.Event,
     run: Callable[[], str],
     write: Callable[[str], None],
@@ -265,12 +271,13 @@ def heartbeat_loop(
     """Run ``run`` once this terminal has been quiet for ``interval``. Missed ticks coalesce."""
     pause = stop.wait if wait is None else wait
     while not stop.is_set():
-        remaining = idle.remaining(interval)
+        seconds = _interval_seconds(interval)
+        remaining = idle.remaining(seconds)
         if remaining > 0:
             if pause(min(remaining, 1.0)):
                 return
             continue
-        if not idle.quiet(interval):
+        if not idle.quiet(seconds):
             if pause(1.0):
                 return
             continue
@@ -287,6 +294,17 @@ def heartbeat_loop(
                 ask(True)
             else:
                 _prompt(True)
+
+
+def _interval_seconds(interval: float | Callable[[], float]) -> float:
+    raw = interval() if callable(interval) else interval
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        return float(HEARTBEAT_SECONDS)
+    if seconds <= 0:
+        return float(HEARTBEAT_SECONDS)
+    return seconds
 
 
 def _heartbeat(base: str, home: Path | None) -> str:
