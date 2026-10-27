@@ -708,6 +708,29 @@ def test_stream_text_emits_reasoning_then_reply() -> None:
     ]
 
 
+def test_a_numeric_parameter_is_a_number() -> None:
+    text = (
+        "<tool_call>\n<function=read_file>\n"
+        "<parameter=file_path>\nnotes.txt\n</parameter>\n"
+        "<parameter=offset>\n12\n</parameter>\n"
+        "<parameter=timeout_seconds>\n1.5\n</parameter>\n"
+        "<parameter=scale>\n1e2\n</parameter>\n"
+        "<parameter=label>\n01\n</parameter>\n"
+        "<parameter=literal>\ntrue\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    _content, calls = parse_tool_calls(text)
+    arguments = json.loads(calls[0]["function"]["arguments"])
+    assert arguments["file_path"] == "notes.txt"
+    assert arguments["offset"] == 12
+    assert isinstance(arguments["offset"], int)
+    assert arguments["timeout_seconds"] == 1.5
+    assert isinstance(arguments["timeout_seconds"], float)
+    assert arguments["scale"] == 100.0
+    assert arguments["label"] == "01"
+    assert arguments["literal"] == "true"
+
+
 def test_a_json_array_parameter_is_a_list() -> None:
     text = (
         "<tool_call>\n<function=save_intro>\n<parameter=lines>\n"

@@ -11,6 +11,7 @@ _CALL = re.compile(
     re.DOTALL,
 )
 _PARAM = re.compile(r"<parameter=([^\n>]+)>\n?(.*?)</parameter>", re.DOTALL)
+_JSON_NUMBER = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\Z")
 _UNICODE = re.compile(r"\\u([0-9a-fA-F]{4})")
 _UNICODE_TAIL = re.compile(r"(?:\\u[0-9a-fA-F]{0,3}|\\)$")
 _HIGH_SURROGATE = re.compile(r"\\u[Dd][89ABab][0-9A-Fa-f]{2}$")
@@ -82,12 +83,25 @@ def parse_tool_calls(text: str) -> tuple[str | None, list[dict[str, Any]]]:
 
 
 def _parameter_value(value: str) -> Any:
-    """The parameter body. A JSON array or object is that value. Other text stays a string."""
+    """A JSON array, object, or number is that value. Other text stays a string."""
     text = value.strip("\n")
-    parsed = _json_container(text.strip())
+    stripped = text.strip()
+    parsed = _json_container(stripped)
     if parsed is not None:
         return parsed
+    number = _json_number(stripped)
+    if number is not None:
+        return number
     return decode_unicode_escapes(text)
+
+
+def _json_number(text: str) -> int | float | None:
+    if _JSON_NUMBER.fullmatch(text) is None:
+        return None
+    parsed = json.loads(text)
+    if isinstance(parsed, bool) or not isinstance(parsed, (int, float)):
+        return None
+    return parsed
 
 
 def _json_container(text: str) -> Any | None:
