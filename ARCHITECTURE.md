@@ -67,6 +67,7 @@ pipelines/failed/       pipelines that are not discovered and are not served
 custom-pipelines/       gitignored; one entry and package per custom model
 src/favlo/              process entry; the listener loads the pipeline a request names
   cli.py                discovers entry files; a new runtime does not edit this
+  web_host.py           starts the web API and the Expo app; it does not start the listener. It does not start when the registry has no language model. The first run stores that registry model as the application default
   registry.py           folders, aliases, pipelines, and sampling variants
   listener.py           process, model load, and the request lock; a terminal starts it and keeps the CLI
   http_app.py           ASGI routes for chat and MCP
@@ -92,6 +93,8 @@ src/favlo/              process entry; the listener loads the pipeline a request
   images.py             stored RGB and the PNG encoded from it; image_ttl_seconds drops an older pair
   music.py              stored WAV and the MP3 or FLAC encoded from it; music_ttl_seconds drops an older clip
   voice.py              stored spoken WAV and the MP3 or FLAC encoded from it; voice_ttl_seconds drops an older clip
+web-api/                FastAPI process for favlo web, package web_api
+web-spa/                Expo web app
 harness/                file agent, coding agent, worktree agent, and the three benchmarks
 docs/                   as-built notes; see docs/README.md
 ```
@@ -104,6 +107,7 @@ Probe, matmul, kernels, bf16, complete, and quantize stay on that pipeline's fla
 uv sync --extra dev
 uv run pytest
 uv run favlo serve
+uv run favlo web
 uv run favlo --qwen38-flash-next probe
 uv run favlo --qwen38-flash-next matmul
 uv run favlo --qwen38-flash-next kernels

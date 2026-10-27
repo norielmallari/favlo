@@ -5,6 +5,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | Path | Contents |
 |---|---|
 | [serve.md](serve.md) | Listener, daemon, and the serve log |
+| [web.md](web.md) | Web API, Expo app, and `favlo web` |
 | [console.md](console.md) | Shared status row |
 | [prefix.md](prefix.md) | SSD prefix store |
 | [harness.md](harness.md) | File agent, coding agent, and worktree agent |

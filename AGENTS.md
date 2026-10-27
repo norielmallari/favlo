@@ -26,6 +26,7 @@ The files in [`.cursor/rules`](.cursor/rules) are repo rules. Cursor loads them 
 | [media-pipeline.mdc](.cursor/rules/media-pipeline.mdc) | When editing a served media pipeline or `MediaPipeline`. Inherit the listener contract, and run the one preemption harness after that contract changes. |
 | [language-pipeline.mdc](.cursor/rules/language-pipeline.mdc) | When editing a served language model or `LanguagePipeline`. Keep the completion in the pipeline, and run the language harness after the disconnect shell changes. |
 | [embeddings-pipeline.mdc](.cursor/rules/embeddings-pipeline.mdc) | When editing a served embedding model or `EmbeddingsPipeline`. Return the vector and the token count, and let the class write the list object. |
+| [favlo-web.mdc](.cursor/rules/favlo-web.mdc) | When editing `web-spa/`. Unit tests use Jest and `jest-expo`. A feature is complete only after its headless Playwright script passes against a live `favlo serve`. |
 
 ## Changes
 

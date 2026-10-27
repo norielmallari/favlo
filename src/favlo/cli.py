@@ -88,11 +88,13 @@ def _pipeline_stem(path: Path) -> str | None:
 
 def _help(names: Sequence[str]) -> str:
     lines = ["usage: favlo serve [--non-interactive]"]
+    lines.append("       favlo web")
     lines.extend(f"       favlo --{name} [args]" for name in names)
     lines.append("")
     lines.append("  serve                  chat on a terminal; the server is a daemon")
     lines.append("  serve --non-interactive")
     lines.append("                         start the server daemon and exit")
+    lines.append("  web                    start the API and the Expo app")
     width = max((len(name) for name in names), default=0)
     for name in names:
         lines.append(f"  --{name.ljust(width)}    {name}")
@@ -197,6 +199,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from favlo.listener import serve_main
 
         return int(serve_main(args[1:]))
+    if args[0] == "web":
+        from favlo.web_host import main as web_main
+
+        return int(web_main(args[1:]))
     flag = args[0]
     if not flag.startswith("--") or flag == "--":
         sys.stderr.write(_help(names))

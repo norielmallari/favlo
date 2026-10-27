@@ -1,0 +1,20 @@
+{
+  "expo": {
+    "name": "Favlo",
+    "slug": "favlo",
+    "scheme": "favlo",
+    "orientation": "default",
+    "userInterfaceStyle": "automatic",
+    "plugins": [
+      "expo-router",
+      "expo-status-bar"
+    ],
+    "experiments": {
+      "typedRoutes": false
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single"
+    }
+  }
+}

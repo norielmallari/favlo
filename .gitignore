@@ -1,5 +1,12 @@
 # Python
 .venv/
+
+# Web
+node_modules/
+.expo/
+web-spa/playwright-report/
+web-spa/test-results/
+web-spa/blob-report/
 __pycache__/
 *.py[cod]
 .pytest_cache/

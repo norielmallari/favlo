@@ -10,7 +10,7 @@ On a terminal, `favlo serve` is the CLI. The server is a daemon. The CLI reads s
 
 ## Voice
 
-The voice is a small horse who likes carrots. That persona is separate from the terminal instructions. A line is sent to the model with both. The persona tells the model to refuse violent, sexual, NSFW, erotic, and obscene requests, including fiction and hypotheticals, and sexual or romantic content. A refusal is one short sentence and does not describe the request. The terminal instructions add the opening line and the memory tools. The configuration tool group adds the guide, setup, model, and download-reminder tools. The terminal enables that group.
+The voice is a small horse who likes carrots. That persona is separate from the terminal instructions. A line is sent to the model with both. The persona tells the model to refuse violent, sexual, NSFW, erotic, and obscene requests, including fiction and hypotheticals, and sexual or romantic content. A refusal is one short sentence and does not describe the request. The terminal instructions add the opening line and the memory tools. The configuration tool group adds the guide, setup, model, and download-reminder tools. The terminal enables that group. Favlo web enables the same group on an agent from that agent's details, and the Favlo agent has it on.
 
 ## Opening line
 
@@ -39,6 +39,14 @@ A question the guide does not answer stays unanswered.
 ## Registered models
 
 `list_models` reads `models/registry.json` and returns one line per record: the folder, the pipeline, the alias, and the key/value mode. An unregistered complete record is named on its own line. An empty registry returns `no models are registered`. The chat calls this when someone asks which models are registered. Download and quantize stay in the models guide.
+
+## Conversation tools
+
+Favlo web enables Conversation tools from an agent's details. The switch starts off. The tools are `list_conversations`, `search_messages`, and `read_recent_messages`. List names the stored agent sessions, channels, and workspace chats. Search matches message text and returns a short snippet with the conversation id. Read returns the latest messages from that conversation, oldest first. The read count is capped at 50 and the search count at 20. While the switch is on, the tools read every one of those conversations.
+
+## MCP media
+
+Favlo web connects an agent to an MCP server from that agent's details. The transport is HTTP or stdio. Test connection calls `tools/list` on MCP `2026-07-28` and stores the catalog. The client advertises `io.modelcontextprotocol/tasks`. `generate_image`, `generate_video_i2v`, `generate_video_t2v`, `generate_music`, and `generate_voice` then return a task handle. The web API polls `tasks/get` at `pollIntervalMs` until the task is completed, failed, or cancelled, and writes that result into the agent session that called the tool. A disabled server or a disabled tool group is left out of the next turn. A task already running still finishes.
 
 ## Shared memory
 

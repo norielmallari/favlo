@@ -1,0 +1,35 @@
+---
+description: Favlo web UI changes need a Jest unit test and a headless Playwright script against live favlo serve.
+globs: web-spa/**
+alwaysApply: false
+---
+
+# Favlo web completion
+
+A change under `web-spa/` that alters what a person can see or do needs both of the checks below, in the same change. A change that does not alter the screen adds neither.
+
+## Unit tests
+
+Use Jest with the `jest-expo` preset and `@testing-library/react-native`. Router tests use `expo-router/testing-library` and live outside `app/`. These tests do not start `favlo serve` or a browser.
+
+```bash
+cd web-spa && npx jest <test>
+```
+
+## End-to-end
+
+Playwright simulates the person in headless Chromium. The script is a fixed sequence of clicks, typing, and keys. `favlo web` is running, and it calls a live `favlo serve`. Do not stub the model or a media tool.
+
+```bash
+cd web-spa && npx playwright test e2e/<feature>.spec.ts --project=chromium
+```
+
+The script is `web-spa/e2e/<feature>.spec.ts`. `web-spa/playwright.config.ts` sets `screenshot` to `on`.
+
+- Do not use `waitForTimeout` or a retry that ignores the failure. Wait for a selector, a response, or an event.
+- The prompt and the clicks are fixed. Assert the outcome on screen. Assert exact wording only when that wording is not model output.
+- Cover wide at 1280×800. When the feature has a narrow layout, cover 390×844 in the same script.
+- Open `http://127.0.0.1:8081`. Leave the browser on `127.0.0.1`.
+- Playwright writes a screenshot for every script, including a script that passes. The file is under `web-spa/test-results/`. Read that screenshot before treating the run as finished. Leave the screenshot uncommitted.
+
+A phase is finished only when every feature script in that phase passes, its unit tests pass, and the passing screenshot shows the outcome on screen.
