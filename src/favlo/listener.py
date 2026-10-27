@@ -2,7 +2,10 @@
 
 This module does not import a pipeline. ``open_runtime`` and ``handle_chat``
 come from the entry file the registry row names. After the request closes,
-a pipeline that defines ``idle_heartbeat`` runs that function here.
+a pipeline that defines ``idle_heartbeat`` runs that function here. A chat
+or a media request replaces the resident runtime when the folder or the
+pipeline differs. An embeddings request opens its own process beside that
+runtime and closes it when the request returns.
 """
 
 from __future__ import annotations
@@ -323,6 +326,69 @@ def _bind_request(body: dict[str, Any], state: dict[str, Any], args: Any) -> Any
     if runtime is not None:
         runtime._request_id = state["requests"]
     return selection
+
+
+def _embed_selection(body: dict[str, Any], state: dict[str, Any]) -> Any:
+    """The embeddings row named by this request. A model that does not embed is refused."""
+    model = body.get("model")
+    if not isinstance(model, str) or not model:
+        message = "model is required"
+        raise LookupError(message)
+    selection = resolve(model, resident=state.get("record"))
+    module = _pipeline_module(selection)
+    if not callable(getattr(module, "handle_embed", None)):
+        message = f"{selection.pipeline} does not embed"
+        raise LookupError(message)
+    return selection
+
+
+def _restore_console(ui: Any, saved: Any) -> None:
+    if ui is None or saved is None:
+        return
+    ui.pipeline, ui.load_detail = saved
+
+
+def _open_embed(state: dict[str, Any], args: Any, selection: Any) -> Any:
+    """Open an embeddings process beside the resident model. That model stays."""
+    from favlo.memory import memory
+    from favlo.schedule import ensure
+
+    ui = getattr(args, "console_ui", None)
+    saved = None
+    if ui is not None:
+        saved = (ui.pipeline, ui.load_detail)
+        ui.pipeline = selection.pipeline
+        ui.load_detail = selection.alias or selection.folder
+    schedule = ensure(state)
+    before = memory.owners()
+    try:
+        child = _start_pipeline(selection, args, schedule)
+    except Exception:
+        _sweep_new(before)
+        _restore_console(ui, saved)
+        raise
+    child._embed_console = saved
+    memory.report(getattr(child, "counts", {}) or {})
+    pipelines.add(child, tuple(getattr(child, "counts", {}) or ()))
+    if ui is not None and ui.keeps_lines:
+        label = selection.alias or selection.folder
+        _log(f"loaded {label} {selection.folder}")
+    return child
+
+
+def _close_embed(child: Any, args: Any) -> None:
+    """Close the embeddings process opened for one request."""
+    if child is None:
+        return
+    folder = getattr(getattr(child, "selection", None), "folder", None)
+    ui = getattr(args, "console_ui", None)
+    saved = getattr(child, "_embed_console", None)
+    try:
+        pipelines.retire(child, tuple(getattr(child, "counts", {}) or ()))
+    finally:
+        _restore_console(ui, saved)
+    if isinstance(folder, str) and folder:
+        _log(f"released {folder}")
 
 
 def serve(args: Any) -> int:

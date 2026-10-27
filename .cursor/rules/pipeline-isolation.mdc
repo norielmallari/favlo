@@ -18,7 +18,7 @@ A pipeline's kernels, records, and cache are described in that pipeline's `docs/
 
 ## Model switch
 
-One pipeline is resident. A request that names a different folder or a different pipeline closes that runtime before the next one opens. The same folder and the same pipeline stay resident.
+One chat or media pipeline is resident. A chat or media request that names a different folder or a different pipeline closes that runtime before the next one opens. The same folder and the same pipeline stay resident. An embeddings request does not close the resident runtime. It opens its own process for that request and closes it when the request returns.
 
 `close` returns only after that pipeline's device memory is released. That includes its key/value cache, prefill workspace, decode path, command queue, and open record. A prefix flush may finish first. After `close` returns, the previous runtime holds no Metal buffer, and the next runtime is the one that allocates.
 
@@ -34,7 +34,7 @@ The listener records every owner that gained a span during `open_runtime`, and `
 
 ## Media preemption
 
-An image, video, or music pipeline assumes a chat can set `state["preempt"]` while that pipeline holds the GPU. Read the event at each stage boundary, after the Metal command already submitted has finished. On preempt, save the finished stage in a host checkpoint, leave the job `in_progress` with the same id, and return. `close` then releases the device so the chat's model can allocate. The listener calls the same handler again after those chats. The handler loads that checkpoint and continues the unfinished work. Cancel drops the checkpoint and does not resume.
+An image, video, or music pipeline assumes a chat can set `state["preempt"]` while that pipeline holds the GPU. An embeddings request does not set `preempt` and does not close that device. Read the event at each stage boundary, after the Metal command already submitted has finished. On preempt, save the finished stage in a host checkpoint, leave the job `in_progress` with the same id, and return. `close` then releases the device so the chat's model can allocate. The listener calls the same handler again after those chats. The handler loads that checkpoint and continues the unfinished work. Cancel drops the checkpoint and does not resume.
 
 Device buffers do not survive `close`. A value the next stage needs is in the host checkpoint. Each pipeline keeps that checkpoint in its own package.
 

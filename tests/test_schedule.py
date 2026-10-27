@@ -30,16 +30,19 @@ def _wait_until(ready) -> None:
     assert ready()
 
 
-def test_an_embedding_preempts_media_and_runs_before_the_chat() -> None:
+def test_an_embedding_does_not_preempt_media_and_runs_before_the_chat() -> None:
     schedule = Scheduler()
     order: list[str] = []
     media = schedule.acquire("media")
     embed = threading.Thread(target=_run, args=(schedule, "embed", order))
     chat = threading.Thread(target=_run, args=(schedule, "chat", order))
     embed.start()
-    assert schedule.preempt.wait(2)
+    _wait_until(lambda: schedule.waiting("embed") == 1)
+    assert schedule.preempt.is_set() is False
+    assert schedule.foreground() is True
     chat.start()
-    _wait_until(lambda: schedule.waiting("embed") == 1 and schedule.waiting("chat") == 1)
+    _wait_until(lambda: schedule.waiting("chat") == 1)
+    assert schedule.preempt.is_set() is True
     schedule.release(media)
     embed.join(2)
     chat.join(2)
@@ -184,7 +187,7 @@ def test_media_waits_behind_a_chat_without_preempt() -> None:
     assert schedule.running() is None
 
 
-def test_preempt_stays_set_until_every_foreground_waiter_is_gone() -> None:
+def test_preempt_clears_when_the_chat_leaves_and_an_embedding_is_still_waiting() -> None:
     schedule = Scheduler()
     media_in = threading.Event()
     media_go = threading.Event()
@@ -211,7 +214,7 @@ def test_preempt_stays_set_until_every_foreground_waiter_is_gone() -> None:
     cancel.set()
     assert closed.wait(2)
     chat.join(2)
-    assert schedule.preempt.is_set() is True
+    assert schedule.preempt.is_set() is False
     assert schedule.waiting("embed") == 1
     media_go.set()
     assert embed_in.wait(2)

@@ -4,9 +4,11 @@ Uvicorn serves it. A pipeline receives a :class:`favlo.reply.LiveReply` and
 never a socket. ``GET /v1/models`` does not take the request lock. The daemon
 admits the GPU through :class:`favlo.schedule.Scheduler`: embeddings, then
 chats, then media. An embedding waits until the open chat returns. A chat
-that has not started waits while an embedding is queued or running. Either
-one preempts media and leaves ``preempt`` set until that foreground queue
-is empty. Image, video, music, and voice run on the MCP queue.
+that has not started waits while an embedding is queued or running. A chat
+preempts media and leaves ``preempt`` set until the chat queue is empty.
+An embedding does not set ``preempt``. It opens beside the resident model
+and closes when the request returns. Image, video, music, and voice run
+on the MCP queue.
 """
 
 from __future__ import annotations
@@ -490,7 +492,11 @@ def _run_once(
 ) -> None:
     from favlo.listener import (
         _bind_request,
+        _close_embed,
+        _drop_runtime,
+        _embed_selection,
         _log,
+        _open_embed,
         _report_failure,
         _schedule_pipeline_heartbeat,
         _smoke_held,
@@ -511,6 +517,8 @@ def _run_once(
         return
     opened = False
     selection = None
+    embed_child = None
+    drop_embed = False
     try:
         schedule: Scheduler = state["schedule"]
         if kind in _MEDIA_KINDS and schedule.foreground():
@@ -539,14 +547,33 @@ def _run_once(
             reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
             return
         try:
-            selection = _bind_request(body, state, args)
+            if kind == "embed" and getattr(args, "lazy", False):
+                selection = _embed_selection(body, state)
+                same = (
+                    state.get("runtime") is not None
+                    and state.get("record") == selection.folder
+                    and state.get("pipeline") == selection.pipeline
+                )
+                if same:
+                    drop_embed = True
+                    runtime = state.get("runtime")
+                    module = state.get("module")
+                else:
+                    embed_child = _open_embed(state, args, selection)
+                    runtime = embed_child
+                    module = embed_child.proxy
+                state["requests"] = int(state.get("requests") or 0) + 1
+                if runtime is not None:
+                    runtime._request_id = state["requests"]
+            else:
+                selection = _bind_request(body, state, args)
+                runtime = state.get("runtime")
+                module = state.get("module")
         except LookupError as exc:
             reply.json(404, {"error": {"message": str(exc), "type": "not_found"}})
             return
         if selection is not None:
             reply.model_id = selection.requested_id
-        runtime = state.get("runtime")
-        module = state.get("module")
         if runtime is None or module is None:
             reply.json(404, {"error": {"message": "no model is loaded", "type": "not_found"}})
             return
@@ -585,21 +612,30 @@ def _run_once(
         except Exception as exc:
             from favlo.pipeline_worker import ChildExited
 
-            if isinstance(exc, ChildExited):
+            if isinstance(exc, ChildExited) and embed_child is None:
                 _abandon_child(state, args)
             else:
-                _report_failure(getattr(state.get("runtime"), "console", None))
+                console = getattr(embed_child, "console", None) if embed_child is not None else None
+                if console is None:
+                    console = getattr(state.get("runtime"), "console", None)
+                _report_failure(console)
             if not reply.started:
                 reply.json(500, {"error": {"message": str(exc), "type": type(exc).__name__}})
     finally:
-        if opened:
-            _log("request closed")
-        module = state.get("module")
-        runtime = state.get("runtime")
-        _touch_job(state, reply)
-        if holds:
-            lock.release()
-        if opened:
+        try:
+            if embed_child is not None:
+                _close_embed(embed_child, args)
+            elif drop_embed:
+                _drop_runtime(state, args)
+            if opened:
+                _log("request closed")
+            module = state.get("module")
+            runtime = state.get("runtime")
+            _touch_job(state, reply)
+        finally:
+            if holds:
+                lock.release()
+        if opened and kind != "embed":
             _schedule_pipeline_heartbeat(module, runtime, selection)
         if not reply.started and not state.get("media_yield"):
             reply.json(

@@ -633,6 +633,216 @@ def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
     assert state["pipeline"] == "qwen38-27b"
 
 
+def _embed_reply() -> SimpleNamespace:
+    reply = SimpleNamespace(started=False, payload=None, model_id=None, status=0)
+
+    def json(status: int, payload: dict) -> None:
+        reply.started = True
+        reply.status = status
+        reply.payload = payload
+
+    reply.json = json
+    return reply
+
+
+def _embed_state(resident: _Runtime) -> dict:
+    from favlo.schedule import ensure
+
+    state: dict = {
+        "runtime": resident,
+        "record": "qwen",
+        "pipeline": "qwen36-35b-a3b",
+        "module": resident,
+        "lock": threading.Lock(),
+    }
+    ensure(state)
+    return state
+
+
+def test_an_embedding_request_leaves_the_resident_runtime(monkeypatch) -> None:
+    from favlo.http_app import _run_once
+
+    resident = _Runtime()
+    resident.counts = {}
+    state = _embed_state(resident)
+    opened: list[_Runtime] = []
+
+    def handle_embed(reply, runtime, body, selection, args, request_state) -> None:
+        del body, selection, args, request_state
+        assert runtime is opened[0]
+        assert resident.closed is False
+        reply.json(200, {"object": "list", "data": []})
+
+    def start(selection, args, schedule=None):
+        del args, schedule
+        child = _Runtime()
+        child.counts = {}
+        child.selection = selection
+        child.proxy = SimpleNamespace(handle_embed=handle_embed)
+        opened.append(child)
+        return child
+
+    monkeypatch.setattr(listener, "_start_pipeline", start)
+    monkeypatch.setattr(
+        listener,
+        "resolve",
+        lambda model, resident=None: _selection("bge-m3-int8", "bge-m3"),
+    )
+    monkeypatch.setattr(
+        listener,
+        "_pipeline_module",
+        lambda selection: SimpleNamespace(handle_embed=handle_embed),
+    )
+    args = _args()
+    args.lazy = True
+    reply = _embed_reply()
+    _run_once(
+        args,
+        state,
+        "embed",
+        "application/json",
+        b'{"model": "bge-m3-int8", "input": "bridge"}',
+        reply,
+    )
+    assert reply.status == 200
+    assert resident.closed is False
+    assert state["runtime"] is resident
+    assert state["record"] == "qwen"
+    assert state["pipeline"] == "qwen36-35b-a3b"
+    assert opened[0].closed is True
+
+
+def test_an_embedding_child_exit_keeps_the_resident_runtime(monkeypatch) -> None:
+    from favlo.http_app import _run_once
+    from favlo.pipeline_worker import ChildExited
+
+    resident = _Runtime()
+    resident.counts = {}
+    state = _embed_state(resident)
+    opened: list[_Runtime] = []
+
+    def handle_embed(reply, runtime, body, selection, args, request_state) -> None:
+        del reply, runtime, body, selection, args, request_state
+        raise ChildExited("embeddings process exited")
+
+    def start(selection, args, schedule=None):
+        del args, schedule
+        child = _Runtime()
+        child.counts = {}
+        child.selection = selection
+        child.proxy = SimpleNamespace(handle_embed=handle_embed)
+        opened.append(child)
+        return child
+
+    monkeypatch.setattr(listener, "_start_pipeline", start)
+    monkeypatch.setattr(
+        listener,
+        "resolve",
+        lambda model, resident=None: _selection("bge-m3-int8", "bge-m3"),
+    )
+    monkeypatch.setattr(
+        listener,
+        "_pipeline_module",
+        lambda selection: SimpleNamespace(handle_embed=handle_embed),
+    )
+    args = _args()
+    args.lazy = True
+    reply = _embed_reply()
+    _run_once(
+        args,
+        state,
+        "embed",
+        "application/json",
+        b'{"model": "bge-m3-int8", "input": "bridge"}',
+        reply,
+    )
+    assert reply.status == 500
+    assert resident.closed is False
+    assert state["runtime"] is resident
+    assert opened[0].closed is True
+
+
+def test_the_resident_embeddings_model_closes_when_the_request_returns(monkeypatch) -> None:
+    from favlo.http_app import _run_once
+
+    resident = _Runtime()
+    resident.counts = {}
+
+    def handle_embed(reply, runtime, body, selection, args, request_state) -> None:
+        del runtime, body, selection, args, request_state
+        reply.json(200, {"object": "list", "data": []})
+
+    resident.handle_embed = handle_embed
+    state = _embed_state(resident)
+    state["record"] = "bge-m3-int8"
+    state["pipeline"] = "bge-m3"
+    state["module"] = resident
+
+    def start(selection, args, schedule=None):
+        del selection, args, schedule
+        raise AssertionError("a second embeddings process opened")
+
+    monkeypatch.setattr(listener, "_start_pipeline", start)
+    monkeypatch.setattr(
+        listener,
+        "resolve",
+        lambda model, resident=None: _selection("bge-m3-int8", "bge-m3"),
+    )
+    monkeypatch.setattr(
+        listener,
+        "_pipeline_module",
+        lambda selection: SimpleNamespace(handle_embed=handle_embed),
+    )
+    args = _args()
+    args.lazy = True
+    reply = _embed_reply()
+    _run_once(
+        args,
+        state,
+        "embed",
+        "application/json",
+        b'{"model": "bge-m3-int8", "input": "bridge"}',
+        reply,
+    )
+    assert reply.status == 200
+    assert resident.closed is True
+    assert state["runtime"] is None
+    assert state["record"] is None
+
+
+def test_an_embedding_request_refuses_a_model_that_does_not_embed(monkeypatch) -> None:
+    from favlo.http_app import _run_once
+
+    resident = _Runtime()
+    state = _embed_state(resident)
+
+    def start(selection, args, schedule=None):
+        del selection, args, schedule
+        raise AssertionError("a model that does not embed was opened")
+
+    monkeypatch.setattr(listener, "_start_pipeline", start)
+    monkeypatch.setattr(
+        listener,
+        "resolve",
+        lambda model, resident=None: _selection("qwen", "qwen36-35b-a3b"),
+    )
+    monkeypatch.setattr(listener, "_pipeline_module", lambda selection: SimpleNamespace())
+    args = _args()
+    args.lazy = True
+    reply = _embed_reply()
+    _run_once(
+        args,
+        state,
+        "embed",
+        "application/json",
+        b'{"model": "qwen", "input": "bridge"}',
+        reply,
+    )
+    assert reply.status == 404
+    assert resident.closed is False
+    assert state["runtime"] is resident
+
+
 def _selection(folder: str, pipeline: str) -> SimpleNamespace:
     return SimpleNamespace(
         folder=folder,
@@ -643,6 +853,7 @@ def _selection(folder: str, pipeline: str) -> SimpleNamespace:
         resident_percent=None,
         kv_cache="e4m3",
         path=folder,
+        requested_id=folder,
     )
 
 

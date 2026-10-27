@@ -8,7 +8,7 @@ The server does not check an API key. A client that requires one can send any pl
 
 `GET /v1/models` lists registered models. Each object includes `context_length`. The default is 131072. A completion's `usage` object includes `prompt_tokens`, `completion_tokens`, `total_tokens`, `context_length`, and `prompt_tokens_details.cached_tokens`. `POST /v1/chat/completions` runs one chat. The `model` field is a registry id: the folder name, the alias, or either of those with `:thinking` or `:instruct`. A bare id uses that pipeline's default variant. `enable_thinking` set to false selects the instruct card when the id has no variant suffix.
 
-One request runs at a time. A connection that arrives while a request is open waits. The first request that names a model loads it. Naming a different model unloads the one that is resident.
+One request runs at a time. A connection that arrives while a request is open waits. The first request that names a model loads it. Naming a different chat or media model unloads the one that is resident. An embeddings request leaves that model loaded and closes its own process when the request returns.
 
 ```bash
 curl http://127.0.0.1:8129/v1/chat/completions \

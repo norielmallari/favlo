@@ -16,7 +16,11 @@ _HOLDS = ("image_hold", "video_hold", "music_hold", "voice_hold")
 
 
 class Pipelines:
-    """Runtimes opened in this process. One resident model stays the listener's rule."""
+    """Runtimes opened in this process.
+
+    One chat or media model stays resident. An embeddings process can sit
+    beside it until that request returns.
+    """
 
     def __init__(self) -> None:
         self._items: list[Any] = []

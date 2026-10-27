@@ -85,7 +85,7 @@ The daemon records the one pipeline process. That process loads the registry row
 
 ## Queueing
 
-`src/favlo/schedule.py` admits one request to the device. An embeddings request waits until a chat already on the device returns, and a chat that has not started waits while an embeddings request is queued or running. Image, video, music, and voice run when that foreground queue is empty. A foreground arrival pauses the media job at its next safe point and closes the device. The same job resumes after the foreground queue has drained. One media job runs at a time. A chat whose client has gone leaves the queue. The listener is [docs/serve.md](docs/serve.md).
+`src/favlo/schedule.py` admits one request to the device. An embeddings request waits until a chat already on the device returns, and a chat that has not started waits while an embeddings request is queued or running. Image, video, music, and voice run when that foreground queue is empty. A chat pauses the media job at its next safe point and closes the device. The same job resumes after the chat queue has drained. An embeddings request leaves the resident model loaded and closes its own process when the request returns. One media job runs at a time. A chat whose client has gone leaves the queue. The listener is [docs/serve.md](docs/serve.md).
 
 ## Prefix cache
 

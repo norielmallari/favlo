@@ -2,10 +2,10 @@
 
 Two queues. The foreground queue is embeddings, then chats that have not
 started. The media queue runs only when the foreground queue is empty.
-A foreground arrival preempts media at its next safe point and leaves
-``preempt`` set until that queue has drained. An embedding does not preempt
-a chat that already holds the GPU. ``flush`` drops every waiter. The request
-that holds admission stays until it releases.
+A chat preempts media at its next safe point and leaves ``preempt`` set
+until the chat queue has drained. An embedding does not set ``preempt``
+and does not preempt a chat that already holds the GPU. ``flush`` drops
+every waiter. The request that holds admission stays until it releases.
 """
 
 from __future__ import annotations
@@ -175,7 +175,7 @@ class Scheduler:
 
     def _sync_preempt(self) -> None:
         media = self._running is not None and self._running.kind == "media"
-        if media and (self._embeds or self._chats):
+        if media and self._chats:
             self.preempt.set()
             return
         self.preempt.clear()
