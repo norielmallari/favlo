@@ -45,22 +45,26 @@ uv run favlo --<pipeline> matmul
 uv run favlo --<pipeline> kernels
 ```
 
-3. After those pass, the smoke-testing skill: pipeline smoke, then the file agent, then the coding agent.
+3. After those pass, the smoke-testing skill's pipeline smoke, then the coding agent. Do not run the file agent.
+
+```text
+uv run python -m harness.coding --model <pipeline>
+```
 
 ## 4. Commit
 
-Once the agent smokes pass, commit the related code on the current branch, including `main`.
+Once the coding agent passes, commit the related code on the current branch, including `main`.
 
 Related code is this iteration's write set: the pipeline entry, package, `docs/<pipeline>/`, and tests that import only this package. When a printed series for the phase being optimized is at least 90% of the kernel ceiling, record that rate in the pipeline note before the commit.
 
 Leave models, artifacts, the machine lock, and other pipelines out of the commit. Use a Conventional Commit. Do not push.
 
-A failed pipeline smoke or a failed agent smoke is not a commit.
+A failed pipeline smoke or a failed coding agent is not a commit.
 
 ## 5. Compare
 
-A phase is done when its printed rate on the series for that phase is at least 90% of the kernel ceiling. The file-agent series and the coding-agent series stay separate.
+A phase is done when the coding agent's printed rate for that phase is at least 90% of the kernel ceiling. That series is the only one. Do not run the file agent, and do not compare a file-agent rate.
 
-If it is short, modify again and run section 3. Reuse the saved ceiling unless a designed kernel changed. Each agent smoke is a new run. Commit again when that run passes.
+If it is short, modify again and run section 3. Reuse the saved ceiling unless a designed kernel changed. Each coding-agent run is a new run. Commit again when that run passes.
 
 When 90% is met, report the ceiling and the printed rate. Do not write that rate into another pipeline's note.
