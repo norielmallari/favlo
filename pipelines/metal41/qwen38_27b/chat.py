@@ -158,24 +158,44 @@ def _rng(body: dict[str, Any]) -> np.random.Generator:
     return np.random.default_rng(int(seed))
 
 
-def _mtp_flag(body: dict[str, Any]) -> bool:
-    """Draft verify. Absent means on. Sampling settings do not change the flag."""
-    flag = body.get("mtp", True)
-    if isinstance(flag, bool):
-        return flag
-    message = "mtp must be true or false"
-    raise RuntimeError(message)
+def _mtp_flag(body: dict[str, Any], selection: Any = None) -> bool:
+    """Draft verify. A request field wins. Otherwise the registry row is used.
 
-
-def _mtp_depth(body: dict[str, Any]) -> int:
-    """Draft length. Absent means three. Sampling settings do not change it."""
-    from qwen38_27b.speculate import DEPTH
-
-    raw = body.get("mtp_depth", DEPTH)
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
-        message = "mtp_depth must be a positive integer"
+    A row that omits ``mtp`` is off. Sampling settings do not change the flag.
+    """
+    if "mtp" in body:
+        flag = body["mtp"]
+        if isinstance(flag, bool):
+            return flag
+        message = "mtp must be true or false"
         raise RuntimeError(message)
-    return raw
+    folder = getattr(selection, "folder", None)
+    if not isinstance(folder, str) or not folder:
+        return False
+    from favlo.registry import model_mtp
+
+    enabled, _depth = model_mtp(folder)
+    return enabled
+
+
+def _mtp_depth(body: dict[str, Any], selection: Any = None) -> int:
+    """Draft length. A request field wins. Otherwise the registry row is used.
+
+    A row that omits ``mtp_depth`` is three. Sampling settings do not change it.
+    """
+    if "mtp_depth" in body:
+        raw = body["mtp_depth"]
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+            message = "mtp_depth must be a positive integer"
+            raise RuntimeError(message)
+        return raw
+    folder = getattr(selection, "folder", None)
+    if not isinstance(folder, str) or not folder:
+        return 3
+    from favlo.registry import model_mtp
+
+    _enabled, depth = model_mtp(folder)
+    return depth
 
 
 def _limit(body: dict[str, Any]) -> int | None:
@@ -281,8 +301,8 @@ def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any)
             logit_bias=bias,
             rng=draw,
             emit_tools=emit_tools,
-            mtp=_mtp_flag(body),
-            mtp_depth=_mtp_depth(body),
+            mtp=_mtp_flag(body, selection),
+            mtp_depth=_mtp_depth(body, selection),
         )
         return
     tokens = runtime.generate(
@@ -298,8 +318,8 @@ def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any)
         frequency=frequency,
         logit_bias=bias,
         rng=draw,
-        mtp=_mtp_flag(body),
-        mtp_depth=_mtp_depth(body),
+        mtp=_mtp_flag(body, selection),
+        mtp_depth=_mtp_depth(body, selection),
     )
     text = decode_text(runtime.root, tokens)
     reasoning, visible = split_thinking(text, thinking)
@@ -404,7 +424,7 @@ def _stream(
     frequency: float = 0.0,
     logit_bias: dict[int, float] | None = None,
     rng: np.random.Generator | None = None,
-    mtp: bool = True,
+    mtp: bool = False,
     mtp_depth: int | None = None,
 ) -> None:
     decode = getattr(runtime, "decode", None)

@@ -17,6 +17,7 @@ from favlo.registry import (
     resolve,
     save_registry,
     set_alias,
+    set_model_mtp,
 )
 
 PIPELINE = "qwen38-flash-next"
@@ -332,6 +333,24 @@ def test_reregister_refreshes_the_card_from_the_pipeline(tmp_path) -> None:
     assert selection.path == packed
     assert entry["default_variant"] == "thinking"
     assert entry["variants"]["thinking"]["presence_penalty"] == 0.0
+
+
+def test_model_mtp_is_stored_on_the_row(tmp_path) -> None:
+    _record(tmp_path, "packed")
+    add_model("packed", alias="short", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
+    assert resolve("packed", root=tmp_path).mtp is False
+    assert resolve("packed", root=tmp_path).mtp_depth == 3
+    assert "mtp off depth 3" in format_listing(tmp_path)
+    text = set_model_mtp("short", enabled=True, depth=4, root=tmp_path)
+    assert text == "packed mtp on depth 4"
+    selected = resolve("packed", root=tmp_path)
+    assert selected.mtp is True
+    assert selected.mtp_depth == 4
+    row = model_objects(tmp_path)[0]
+    assert row["mtp"] is True
+    assert row["mtp_depth"] == 4
+    kept = set_model_mtp("packed", enabled=False, root=tmp_path)
+    assert kept == "packed mtp off depth 4"
 
 
 def test_a_media_row_fills_an_empty_registry_default(monkeypatch) -> None:

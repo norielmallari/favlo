@@ -26,7 +26,7 @@ The official checkpoint is `Qwen/Qwen3.8-27B`. The steps are [qwen38-27b/SETUP.m
 
 `favlo --qwen38-27b download` fetches that checkpoint into `models/Qwen3.8-27B-bf16` with plain HTTP. `--check` reports whether the volume has room and does not write the files. A short file is continued on the next run.
 
-`favlo --qwen38-27b quantize` does not download. With no `--src`, it reads the Hugging Face cache snapshot for that repository. A missing cache is an error. `--src` names a local BF16 checkout, including `models/Qwen3.8-27B-bf16`. A uniform pack is `models/Qwen3.8-27B-fp4`. `--ffn-fp8 100` writes `models/Qwen3.8-27B-fp8`. Any other percentage writes `models/Qwen3.8-27B-fp8-fp4`. The record is registered under the alias `qwen38-27b`. `delete <folder-or-alias>` removes that row, the packed directory, and a checkout still under `models/`.
+`favlo --qwen38-27b quantize` does not download. With no `--src`, it reads the Hugging Face cache snapshot for that repository. A missing cache is an error. `--src` names a local BF16 checkout, including `models/Qwen3.8-27B-bf16`. A uniform pack is `models/Qwen3.8-27B-fp4`. `--ffn-fp8 100` writes `models/Qwen3.8-27B-fp8`. Any other percentage writes `models/Qwen3.8-27B-fp8-e<P>`, where `<P>` is that percentage. `20` writes `models/Qwen3.8-27B-fp8-e20`. The record is registered under the alias `qwen38-27b`. `delete <folder-or-alias>` removes that row, the packed directory, and a checkout still under `models/`.
 
 `download_suggestions` stores whether download reminders are enabled. Packing the record stays `quantize`.
 
@@ -62,7 +62,7 @@ The same file may set `"media"` to folder ids for `image`, `i2v`, `t2v`, `music`
 
 ## Register a finished record
 
-`models` lists the registry. `models add` registers a directory under `models/` whose manifest is already complete. `models alias` renames the alias of a folder. The same subcommands exist for each pipeline flag:
+`models` lists the registry. Each line names the folder, the pipeline, the alias, the key/value mode, and whether MTP is on with its draft depth. A row that omits `mtp` is off. A row that omits `mtp_depth` uses 3. `set_model_mtp` on the configuration tools stores those two fields. A chat request that sets `mtp` or `mtp_depth` overrides the row. `models add` registers a directory under `models/` whose manifest is already complete. `models alias` renames the alias of a folder. The same subcommands exist for each pipeline flag:
 
 ```bash
 favlo --qwen36-35b-a3b models

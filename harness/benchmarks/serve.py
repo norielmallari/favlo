@@ -25,6 +25,8 @@ class Request:
     enable_thinking: bool = False
     reasoning_effort: str | None = None
     max_tokens: dict[str, int] | None = None
+    mtp: bool | None = None
+    mtp_depth: int | None = None
 
     def limit(self, suite: str) -> int:
         limits = self.max_tokens or {}
@@ -61,6 +63,8 @@ def apply_sampling(request: Request, sampling: dict[str, object]) -> Request:
         enable_thinking=request.enable_thinking,
         reasoning_effort=request.reasoning_effort,
         max_tokens=request.max_tokens,
+        mtp=request.mtp,
+        mtp_depth=request.mtp_depth,
     )
 
 
@@ -131,6 +135,10 @@ def completion_body(
         body["presence_penalty"] = request.presence_penalty
     if request.reasoning_effort:
         body["reasoning_effort"] = request.reasoning_effort
+    if request.mtp is not None:
+        body["mtp"] = request.mtp
+    if request.mtp_depth is not None:
+        body["mtp_depth"] = request.mtp_depth
     return body
 
 

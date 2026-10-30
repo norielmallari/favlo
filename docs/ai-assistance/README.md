@@ -30,7 +30,7 @@ A question the guide does not answer stays unanswered.
 
 ## Registered models
 
-`list_models` reads `models/registry.json` and returns one line per record: the folder, the pipeline, the alias, and the key/value mode. An unregistered complete record is named on its own line. An empty registry returns `no models are registered`. The chat calls this when someone asks which models are registered. Download and quantize stay in the models guide.
+`list_models` reads `models/registry.json` and returns one line per record: the folder, the pipeline, the alias, the key/value mode, and whether MTP is on with its draft depth. An unregistered complete record is named on its own line. An empty registry returns `no models are registered`. The chat calls this when someone asks which models are registered. `set_model_mtp` stores `mtp` and `mtp_depth` on that row. The next completion uses the row when the request omits those fields. A request field still wins. A row that omits `mtp` does not draft. A row that omits `mtp_depth` uses 3. Download and quantize stay in the models guide.
 
 ## Session tools
 

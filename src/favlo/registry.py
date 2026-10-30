@@ -40,6 +40,8 @@ class Selection:
     resident_percent: float | None
     max_prompt_tokens: int | None
     context_length: int = DEFAULT_CONTEXT_LENGTH
+    mtp: bool = False
+    mtp_depth: int = 3
     variants: dict[str, dict[str, float | int]] | None = None
     default_variant: str | None = None
     runtime: str = ""
@@ -117,7 +119,8 @@ def format_listing(root: Path | None = None) -> str:
         alias = entry.get("alias") or ""
         kv = entry.get("kv_cache") or "e4m3"
         alias_text = f"alias {alias}" if alias else "alias"
-        lines.append(f"{folder} pipeline {pipeline} {alias_text} kv {kv}")
+        enabled, depth = mtp_pair(entry)
+        lines.append(f"{folder} pipeline {pipeline} {alias_text} kv {kv} mtp {'on' if enabled else 'off'} depth {depth}")
     for folder in list_unregistered(root):
         lines.append(f"unregistered {folder}")
     return "\n".join(lines)
@@ -155,6 +158,59 @@ def add_model(
     _ensure_media_defaults(data, folder, pipeline, runtime, custom)
     save_registry(data, root)
     return data
+
+
+def mtp_pair(entry: Mapping[str, Any]) -> tuple[bool, int]:
+    """The row's draft flag and depth. A missing flag is off. A missing depth is 3."""
+    enabled = entry.get("mtp", False)
+    if not isinstance(enabled, bool):
+        message = "mtp must be true or false"
+        raise ValueError(message)
+    depth = entry.get("mtp_depth", 3)
+    if isinstance(depth, bool) or not isinstance(depth, int) or depth < 1:
+        message = "mtp_depth must be a positive integer"
+        raise ValueError(message)
+    return enabled, depth
+
+
+def model_mtp(folder: str, root: Path | None = None) -> tuple[bool, int]:
+    """Draft flag and depth for one registered folder. An unknown folder is off at depth 3."""
+    entry = load_registry(root)["models"].get(folder)
+    if not isinstance(entry, dict):
+        return False, 3
+    return mtp_pair(entry)
+
+
+def set_model_mtp(
+    model: str,
+    *,
+    enabled: bool,
+    depth: int | None = None,
+    root: Path | None = None,
+) -> str:
+    """Store the draft flag and depth on the row named by a folder, alias, or pipeline."""
+    if not isinstance(enabled, bool):
+        message = "mtp must be true or false"
+        raise ValueError(message)
+    if depth is not None and (isinstance(depth, bool) or not isinstance(depth, int) or depth < 1):
+        message = "mtp_depth must be a positive integer"
+        raise ValueError(message)
+    data = load_registry(root)
+    base, _separator, _variant = model.partition(":")
+    folder = _folder_for(data, base)
+    if folder is None:
+        _unknown(model, data)
+    entry = data["models"][folder]
+    entry["mtp"] = enabled
+    if depth is None:
+        _enabled, stored = mtp_pair(entry)
+        del _enabled
+        entry["mtp_depth"] = stored
+    else:
+        entry["mtp_depth"] = depth
+    save_registry(data, root)
+    state = "on" if enabled else "off"
+    return f"{folder} mtp {state} depth {entry['mtp_depth']}"
 
 
 def set_alias(folder: str, alias: str | None, root: Path | None = None) -> dict[str, Any]:
@@ -697,6 +753,8 @@ def _selection(
         resident_percent=None if percent is None else float(percent),
         max_prompt_tokens=_max_prompt_tokens(entry),
         context_length=_context_length(entry),
+        mtp=mtp_pair(entry)[0],
+        mtp_depth=mtp_pair(entry)[1],
         variants=stored,
         default_variant=_default_variant(entry),
         runtime=_require_runtime(entry, folder),
@@ -731,6 +789,9 @@ def _object(
     if cap is not None:
         row["max_prompt_tokens"] = cap
     row["context_length"] = _context_length(entry)
+    enabled, depth = mtp_pair(entry)
+    row["mtp"] = enabled
+    row["mtp_depth"] = depth
     if variant is not None:
         row["parent"] = parent if ":" not in model_id else model_id.split(":", 1)[0]
         row["variant"] = variant

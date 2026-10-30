@@ -29,6 +29,8 @@ INSTRUCTIONS = (
     "run_setup only runs inside this install. Do not run a command the guide does not contain. "
     "When someone asks which models are registered, or which model id to send, "
     "call list_models before you answer. Report only the lines it returns. "
+    "When someone wants MTP on or off for a model, or a different draft depth, "
+    "call set_model_mtp. A row that omits MTP stays off. "
     "When someone asks where your name came from, or who Amanda and Celestia are, "
     "call read_guide with history and tell that story. Do not add events it does not contain. "
     "Answer from that guide. If the guide does not say it, say you do not know."
@@ -40,6 +42,7 @@ def tools(base: str, home: Path | None) -> list[object]:
     return [
         _guide_tool(),
         _models_tool(),
+        _mtp_tool(),
         _suggestions_tool(home),
         _setup_guide_tool(),
         _setup_run_tool(base),
@@ -191,10 +194,41 @@ def _models_tool() -> object:
     def list_models() -> str:
         """List the registered models.
 
-        Each line is one record: folder, pipeline, alias, and key/value mode.
+        Each line is one record: folder, pipeline, alias, key/value mode,
+        and whether MTP is on with its draft depth.
         An unregistered complete record is named too. This is the live registry,
         not the download guide.
         """
         return registered_models()
 
     return list_models
+
+
+def _mtp_tool() -> object:
+    from typing import Annotated
+
+    from agent_framework import tool
+    from pydantic import Field
+
+    from favlo.registry import set_model_mtp as store_model_mtp
+
+    @tool(approval_mode="never_require")
+    def set_model_mtp(
+        model: Annotated[str, Field(description="Folder, alias, or pipeline id.")],
+        enabled: Annotated[bool, Field(description="True drafts. False stays on one token.")],
+        depth: Annotated[
+            int | None,
+            Field(description="Draft length. Omit it to keep the depth already stored."),
+        ] = None,
+    ) -> str:
+        """Store MTP and its draft depth on one registry row.
+
+        The next completion for that model uses the row when the request omits
+        ``mtp`` or ``mtp_depth``. A request field still wins.
+        """
+        try:
+            return store_model_mtp(model, enabled=enabled, depth=depth)
+        except (LookupError, ValueError) as exc:
+            return str(exc)
+
+    return set_model_mtp

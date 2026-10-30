@@ -20,6 +20,15 @@ def test_completion_body_omits_unset_sampling_fields() -> None:
     assert "presence_penalty" not in body
     assert "reasoning_effort" not in body
     assert "top_p" not in body
+    assert "mtp" not in body
+    drafted = completion_body(
+        "example-model",
+        [{"role": "user", "content": "2+2"}],
+        32,
+        Request(temperature=0.0, mtp=False),
+    )
+    assert drafted["mtp"] is False
+    assert "mtp_depth" not in drafted
 
 
 def test_completion_text_is_the_server_content() -> None:

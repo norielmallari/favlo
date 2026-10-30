@@ -38,7 +38,7 @@ Each GEMV time is one command buffer, then a wait, the median of five dispatches
 
 Later finds are appended here. The sections above stay as committed.
 
-23 October 2026. A 2048-token prefill of `Qwen3.8-27B-fp8-fp4` is tabulated in [../ceilings.md](../ceilings.md). The projection bandwidth ceiling is 1020 tok/s, and 994 tok/s once the 2048-key score and value reads are added. The timed kernel set sums to 5594.6 ms, 366 tok/s. The decode rows above are unchanged.
+23 October 2026. A 2048-token prefill of `Qwen3.8-27B-fp8-e20` is tabulated in [../ceilings.md](../ceilings.md). The projection bandwidth ceiling is 1020 tok/s, and 994 tok/s once the 2048-key score and value reads are added. The timed kernel set sums to 5594.6 ms, 366 tok/s. The decode rows above are unchanged.
 
 23 October 2026. The down projection now uses `prefill_fp4_m32` and `prefill_fp8_m32`. That chunk's projection bandwidth ceiling is 834 tok/s, and 816 tok/s with the 2048-key score and value reads. The timed set sums to 5321.3 ms, 385 tok/s.
 

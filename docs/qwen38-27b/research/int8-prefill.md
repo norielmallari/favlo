@@ -4,7 +4,7 @@ Measurement note for the `qwen38-27b` pipeline. The serving contract is [../READ
 
 ## Remainder
 
-On `Qwen3.8-27B-fp8-fp4`, on an M5 Pro with 20 shader cores and 48 GB, a warm run recorded 512.61 tok/s on a 2048-token prefill and 15.66 tok/s on 64 argmax tokens. A search on 25 October 2026 did not find that pair.
+On `Qwen3.8-27B-fp8-e20`, on an M5 Pro with 20 shader cores and 48 GB, a warm run recorded 512.61 tok/s on a 2048-token prefill and 15.66 tok/s on 64 argmax tokens. A search on 25 October 2026 did not find that pair.
 
 ## Predecessors
 
@@ -29,7 +29,7 @@ The lines are the ones printed in [../README.md](../README.md). No committed com
 
 ## Search
 
-25 October 2026. Queries: "Qwen3.8-27B prefill tok/s int8 Apple M5 Pro 512", "NVFP4 dequantize to int8 matmul prefill W8A8 runtime requantize E2M1", "MXFP4 group scale collapse per-channel int8 GEMM decode keeps FP4", "int8_prefill Qwen3.8-27B 512.61 tok/s fp8-fp4 M5 Pro 2048", "Cider W8A8 Qwen3.8-27B M5 Pro 48GB 2048 prefill 15.66 decode", and "oMLX int8 activation prefill Qwen3.8-27B 518.5 tok/s pp4096 group_size 64". The predecessors in this note are the overlaps those queries returned. The 518.5 tok/s figure is an affine Q4 checkpoint on an M5 Pro with 15 or 16 shader cores. The 1044 tok/s figure is an M5 Max with 128 GB. The search did not find the 512.61 tok/s prefill or the 15.66 tok/s decode on `Qwen3.8-27B-fp8-fp4`.
+25 October 2026. Queries: "Qwen3.8-27B prefill tok/s int8 Apple M5 Pro 512", "NVFP4 dequantize to int8 matmul prefill W8A8 runtime requantize E2M1", "MXFP4 group scale collapse per-channel int8 GEMM decode keeps FP4", "int8_prefill Qwen3.8-27B 512.61 tok/s fp8-fp4 M5 Pro 2048", "Cider W8A8 Qwen3.8-27B M5 Pro 48GB 2048 prefill 15.66 decode", and "oMLX int8 activation prefill Qwen3.8-27B 518.5 tok/s pp4096 group_size 64". The predecessors in this note are the overlaps those queries returned. The 518.5 tok/s figure is an affine Q4 checkpoint on an M5 Pro with 15 or 16 shader cores. The 1044 tok/s figure is an M5 Max with 128 GB. The search did not find the 512.61 tok/s prefill or the 15.66 tok/s decode on `Qwen3.8-27B-fp8-e20`.
 
 ## Corrections
 

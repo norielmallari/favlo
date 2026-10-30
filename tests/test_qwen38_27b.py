@@ -208,8 +208,9 @@ def test_ffn_percentage_selects_whole_layers() -> None:
     assert ffn_promote_count(20, 64) == 12
     assert ffn_promote_count(100, 64) == 64
     assert record_name(0, 64) == "Qwen3.8-27B-fp4"
-    assert record_name(12, 64) == "Qwen3.8-27B-fp8-fp4"
-    assert record_name(64, 64) == "Qwen3.8-27B-fp8"
+    assert record_name(20, 64) == "Qwen3.8-27B-fp8-e20"
+    assert record_name(10, 64) == "Qwen3.8-27B-fp8-e10"
+    assert record_name(100, 64) == "Qwen3.8-27B-fp8"
     scores = {0: 0.2, 1: 0.2, 2: 0.9}
     assert promoted_layer_ids(scores, 2) == [0, 2]
     row = np.zeros((1, 32), dtype=np.float32)
@@ -1444,7 +1445,7 @@ def test_delete_removes_the_record_the_checkout_and_the_prefix(
     packed = tmp_path / "models" / "Qwen3.8-27B-fp4"
     packed.mkdir(parents=True)
     (packed / "manifest.json").write_text(json.dumps({"complete": True}) + "\n")
-    mixed = tmp_path / "models" / "Qwen3.8-27B-fp8-fp4"
+    mixed = tmp_path / "models" / "Qwen3.8-27B-fp8-e20"
     mixed.mkdir()
     (mixed / "manifest.json").write_text(json.dumps({"complete": True, "mixed": True}) + "\n")
     checkout = tmp_path / "models" / "Qwen3.8-27B-bf16"
@@ -1467,7 +1468,7 @@ def test_delete_removes_the_record_the_checkout_and_the_prefix(
         runtime="metal41",
     )
     register_quantized(
-        "Qwen3.8-27B-fp8-fp4",
+        "Qwen3.8-27B-fp8-e20",
         source=checkout,
         alias=None,
         directory=mixed,
@@ -1501,14 +1502,14 @@ def test_delete_removes_the_record_the_checkout_and_the_prefix(
     assert checkout.is_dir()
     assert not partition.exists()
     assert mixed.is_dir()
-    assert main(["delete", "Qwen3.8-27B-fp8-fp4"]) == 0
+    assert main(["delete", "Qwen3.8-27B-fp8-e20"]) == 0
     assert not mixed.exists()
     assert not checkout.exists()
     assert outside.is_dir()
     assert kept.is_dir()
     registry = json.loads((tmp_path / "models" / "registry.json").read_text())
     assert "Qwen3.8-27B-fp4" not in registry["models"]
-    assert "Qwen3.8-27B-fp8-fp4" not in registry["models"]
+    assert "Qwen3.8-27B-fp8-e20" not in registry["models"]
     assert "kept-model" in registry["models"]
     assert "other-model" in registry["models"]
     assert main(["delete", "kept-model"]) == 0
@@ -1534,12 +1535,20 @@ def test_draft_window_stops_before_feeding_a_stop_token() -> None:
     assert expected == []
 
 
-def test_mtp_flag_defaults_on() -> None:
+def test_mtp_flag_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
     from qwen38_27b.chat import _mtp_depth, _mtp_flag
 
-    assert _mtp_flag({}) is True
+    assert _mtp_flag({}) is False
     assert _mtp_flag({"mtp": False}) is False
     assert _mtp_flag({"mtp": True}) is True
+    monkeypatch.setattr("favlo.registry.model_mtp", lambda folder, root=None: (True, 4))
+    row = SimpleNamespace(folder="example-model")
+    assert _mtp_flag({}, row) is True
+    assert _mtp_depth({}, row) == 4
+    assert _mtp_flag({"mtp": False}, row) is False
+    assert _mtp_depth({"mtp_depth": 2}, row) == 2
     with pytest.raises(RuntimeError):
         _mtp_flag({"mtp": "yes"})
     assert _mtp_depth({}) == 3

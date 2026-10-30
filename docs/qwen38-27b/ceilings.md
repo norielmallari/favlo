@@ -63,7 +63,7 @@ The gate dispatch reads the 91,914,240-byte image and the 20,480-byte activation
 
 ## Prefill, 2048 tokens
 
-The mixed record `Qwen3.8-27B-fp8-fp4`. Twelve language feed-forward layers are fp8 and the other fifty-two are fp4. MTP, the embedding, `lm_head`, the vision tower, and the float16 vectors are not in the projection image. The data plane plus the scale plane of the language projections is 14,544,732,160 bytes.
+The mixed record `Qwen3.8-27B-fp8-e20`. Twelve language feed-forward layers are fp8 and the other fifty-two are fp4. MTP, the embedding, `lm_head`, the vision tower, and the float16 vectors are not in the projection image. The data plane plus the scale plane of the language projections is 14,544,732,160 bytes.
 
 Gate, up, and the attention projections use a 64-row tile, so those 10,979,573,760 bytes are read 32 times in a 2048-token chunk. The down projection uses a 32-row tile, so its 3,565,158,400 bytes are read 64 times. Weight traffic is 579,516,497,920 bytes. The chunk also reads 13,891,534,848 bytes of half activations and writes 31,994,150,912 bytes of float outputs. That is 625,402,183,680 bytes. Divided by 254.6 GB/s the projection bandwidth ceiling is 2.456 s, 834 tok/s.
 

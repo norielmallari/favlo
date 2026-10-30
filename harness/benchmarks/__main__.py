@@ -46,6 +46,30 @@ not run
 not run
 <!-- /smoke-humaneval -->
 
+<!-- smoke-mtp-on-ifeval -->
+not run
+<!-- /smoke-mtp-on-ifeval -->
+
+<!-- smoke-mtp-on-gsm8k -->
+not run
+<!-- /smoke-mtp-on-gsm8k -->
+
+<!-- smoke-mtp-on-humaneval -->
+not run
+<!-- /smoke-mtp-on-humaneval -->
+
+<!-- smoke-mtp-off-ifeval -->
+not run
+<!-- /smoke-mtp-off-ifeval -->
+
+<!-- smoke-mtp-off-gsm8k -->
+not run
+<!-- /smoke-mtp-off-gsm8k -->
+
+<!-- smoke-mtp-off-humaneval -->
+not run
+<!-- /smoke-mtp-off-humaneval -->
+
 ## Sample of 100
 
 The sample is the first 100 rows of each set, in file order.
@@ -267,15 +291,31 @@ def _note_path(model: str) -> Path | None:
     return directory / "benchmarks.md"
 
 
+def _parent_heading(name: str) -> str:
+    if name.startswith("smoke"):
+        return "## Intelligence smoke"
+    if name.startswith("sample"):
+        return "## Sample of 100"
+    return "## Full"
+
+
 def _replace(text: str, name: str, body: str) -> str:
     start = f"<!-- {name} -->"
     end = f"<!-- /{name} -->"
-    if start not in text or end not in text:
-        message = f"benchmarks note is missing {start}"
-        raise RuntimeError(message)
-    before, _, rest = text.partition(start)
-    _, _, after = rest.partition(end)
-    return f"{before}{start}\n{body}\n{end}{after}"
+    block = f"{start}\n{body}\n{end}"
+    if start in text and end in text:
+        before, _, rest = text.partition(start)
+        _, _, after = rest.partition(end)
+        return f"{before}{block}{after}"
+    parent = _parent_heading(name)
+    inserted = f"\n{block}\n"
+    if parent in text:
+        head, _, tail = text.partition(parent)
+        nxt = tail.find("\n## ")
+        if nxt == -1:
+            return text.rstrip() + inserted
+        return head + parent + tail[:nxt] + inserted + tail[nxt:]
+    return text.rstrip() + inserted
 
 
 def _write_block(model: str, request: Request, section: str, body: str) -> None:
@@ -342,7 +382,7 @@ def _suite(
 ) -> dict[str, Any]:
     chosen = items if limit is None else items[:limit]
     rows = _run_rows(
-        name, server, chosen, out / f"{name}.jsonl", score_row, request, model=model
+        name, server, chosen, _rows_path(out, name, request), score_row, request, model=model
     )
     summary = summarize(rows)
     print(f"{name} {_fmt(summary)}", flush=True)
@@ -355,6 +395,32 @@ def _catalog() -> tuple[tuple[str, list[dict[str, Any]], Any, Any], ...]:
         ("gsm8k", _gsm_items(), _score_gsm, lambda rows: _rate(rows, "correct")),
         ("humaneval", _he_items(), _score_he, lambda rows: _rate(rows, "correct")),
     )
+
+
+def _mtp_token(request: Request) -> str | None:
+    if request.mtp is None:
+        return None
+    return "on" if request.mtp else "off"
+
+
+def _rows_path(out: Path, name: str, request: Request) -> Path:
+    token = _mtp_token(request)
+    if token is None:
+        return out / f"{name}.jsonl"
+    return out / f"{name}.mtp-{token}.jsonl"
+
+
+def _section(kind: str, name: str, request: Request) -> str:
+    token = _mtp_token(request)
+    if token is None:
+        return f"{kind}-{name}"
+    return f"{kind}-mtp-{token}-{name}"
+
+
+def _score_line(name: str, summary: dict[str, Any], request: Request) -> str:
+    token = _mtp_token(request)
+    label = name if token is None else f"{name}, mtp {token}"
+    return f"- {label}: {_fmt(summary)}"
 
 
 def run(
@@ -380,14 +446,14 @@ def run(
                     name, server, items, output, score_row, summarize, limit, request, model
                 )
                 if section is not None:
-                    _write_block(model, request, f"{section}-{name}", f"- {name}: {_fmt(summary)}")
+                    _write_block(model, request, _section(section, name, request), _score_line(name, summary, request))
             print("sample recorded", flush=True)
             return 0
         for name, items, score_row, summarize in suites:
             summary = _suite(
                 name, server, items, output, score_row, summarize, _SMOKE, request, model
             )
-            _write_block(model, request, f"smoke-{name}", f"- {name}: {_fmt(summary)}")
+            _write_block(model, request, _section("smoke", name, request), _score_line(name, summary, request))
         print("smoke recorded", flush=True)
         if sample_only:
             return 0
@@ -395,7 +461,7 @@ def run(
             summary = _suite(
                 name, server, items, output, score_row, summarize, None, request, model
             )
-            _write_block(model, request, f"full-{name}", f"- {name}: {_fmt(summary)}")
+            _write_block(model, request, _section("full", name, request), _score_line(name, summary, request))
         print("full recorded", flush=True)
     except Exception as exc:
         print(exc, flush=True)
@@ -419,6 +485,8 @@ def _request_from_args(args: argparse.Namespace) -> Request:
         enable_thinking=args.thinking,
         reasoning_effort=args.reasoning_effort,
         max_tokens=limits,
+        mtp=None if args.mtp is None else args.mtp == "on",
+        mtp_depth=args.mtp_depth,
     )
 
 
@@ -444,6 +512,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--presence", type=float, default=None)
     parser.add_argument("--thinking", action="store_true")
     parser.add_argument("--reasoning-effort", default=None)
+    parser.add_argument("--mtp", choices=("on", "off"), default=None)
+    parser.add_argument("--mtp-depth", type=int, default=None)
     parser.add_argument(
         "--max-tokens",
         type=int,
@@ -451,6 +521,8 @@ def main(argv: list[str] | None = None) -> int:
         help="one completion cap for every suite",
     )
     args = parser.parse_args(argv)
+    if args.mtp_depth is not None and args.mtp_depth < 1:
+        parser.error("--mtp-depth must be a positive integer")
     output = args.output or (_ROOT / "artifacts" / "benchmarks" / args.model.split(":", 1)[0])
     only = set(args.only) if args.only else None
     return run(

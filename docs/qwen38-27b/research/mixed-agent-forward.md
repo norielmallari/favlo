@@ -4,7 +4,7 @@ Measurement note for the `qwen38-27b` pipeline. The serving contract is [../READ
 
 ## Remainder
 
-On `Qwen3.8-27B-fp8-fp4`, on an M5 Pro with 20 shader cores and 48 GB, the file agent recorded 179.56 tok/s prefill over 91802 tokens and 11.80 tok/s decode over 142 tokens, after the live length grew from 2048 to 92160. A search on 22 October 2026 did not find that run on that machine.
+On `Qwen3.8-27B-fp8-e20`, on an M5 Pro with 20 shader cores and 48 GB, the file agent recorded 179.56 tok/s prefill over 91802 tokens and 11.80 tok/s decode over 142 tokens, after the live length grew from 2048 to 92160. A search on 22 October 2026 did not find that run on that machine.
 
 ## Predecessors
 

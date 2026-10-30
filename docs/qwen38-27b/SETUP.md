@@ -64,7 +64,7 @@ With no `--src`, `quantize` reads the Hugging Face cache snapshot for [Qwen/Qwen
 
 - No `--ffn-fp8` writes `models/Qwen3.8-27B-fp4`. This is the default.
 - `100` stores all 64 language feed-forward layers as fp8 and writes `models/Qwen3.8-27B-fp8`.
-- Any other percentage stores that share of the language feed-forward layers as fp8 and writes `models/Qwen3.8-27B-fp8-fp4`. The count is the largest whole number that does not exceed that percentage, so `20` is 12 layers. Those layers are the highest BF16-to-fp4 relative errors. Gate, up, and down move together.
+- Any other percentage stores that share of the language feed-forward layers as fp8 and writes `models/Qwen3.8-27B-fp8-e<P>`, where `<P>` is that percentage. `20` writes `models/Qwen3.8-27B-fp8-e20`. The count is the largest whole number that does not exceed that percentage, so `20` is 12 layers. Those layers are the highest BF16-to-fp4 relative errors. Gate, up, and down move together.
 
 The embedding, the projections, `lm_head`, the MTP block, and the vision tower stay fp4. The MTP feed-forward stays fp4. One-dimensional parameters stay float16.
 

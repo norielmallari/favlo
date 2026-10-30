@@ -83,13 +83,17 @@ def _f16_entry(array: np.ndarray) -> tuple[bytes, dict]:
     return flat.tobytes(), body
 
 
-def record_name(count: int, layers: int) -> str:
-    """Uniform fp4, uniform fp8, or a mixed record whose name ends in ``fp8-fp4``."""
-    if count <= 0:
+def record_name(percent: float | None, layers: int) -> str:
+    """``<model>-fp4``, ``<model>-fp8``, or ``<model>-fp8-e<P>`` for a partial promotion.
+
+    ``<P>`` is the ``--ffn-fp8`` percentage. ``20`` is ``Qwen3.8-27B-fp8-e20``.
+    """
+    if percent is None or float(percent) <= 0:
         return RECORD_NAME
-    if count >= layers:
+    if ffn_promote_count(float(percent), layers) >= layers:
         return "Qwen3.8-27B-fp8"
-    return "Qwen3.8-27B-fp8-fp4"
+    token = str(int(percent)) if float(percent) == int(percent) else f"{float(percent):g}"
+    return f"Qwen3.8-27B-fp8-e{token}"
 
 
 def _language_ffn(name: str) -> tuple[int, str] | None:
@@ -275,7 +279,7 @@ def quantize(src: Path, output: Path | None = None, *, ffn_fp8: float | None = N
     layers = int(text["num_hidden_layers"])
     count = 0 if ffn_fp8 is None else ffn_promote_count(ffn_fp8, layers)
     if output is None:
-        output = Path("models") / record_name(count, layers)
+        output = Path("models") / record_name(ffn_fp8, layers)
     output = output.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
     manifest_path = output / "manifest.json"
