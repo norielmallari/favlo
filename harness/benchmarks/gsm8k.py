@@ -1,4 +1,4 @@
-"""GSM8K test split. The number match is the published `####` extractor."""
+"""GSM8K test split. Five training shots, then the published ``####`` number."""
 
 from __future__ import annotations
 
@@ -7,13 +7,61 @@ import re
 from pathlib import Path
 
 _DATA = Path(__file__).resolve().parent / "data" / "gsm8k" / "test.jsonl"
-_NUMBER = re.compile(r"-?[0-9][0-9,]*(?:\.[0-9]+)?")
+_SHOTS = Path(__file__).resolve().parent / "data" / "gsm8k" / "train_shots.jsonl"
+_ANSWER = re.compile(r"#### (\-?[0-9\.\,]+)")
 _INVALID = "[invalid]"
+_SHOT_COUNT = 5
 
 
 def load() -> list[dict[str, str]]:
+    return _read(_DATA)
+
+
+def messages(row: dict[str, str]) -> list[dict[str, str]]:
+    """Five train examples, then ``Question`` / ``Answer`` for this row.
+
+    The shots are the first five lines of the published training split.
+    The reply is the text after ``Answer:``.
+    """
+    parts = [
+        f"Question: {shot['question']}\nAnswer: {shot['answer']}" for shot in _shots()
+    ]
+    parts.append(f"Question: {row['question']}\nAnswer:")
+    return [{"role": "user", "content": "\n\n".join(parts)}]
+
+
+def extract_answer(completion: str) -> str:
+    """The first number on a ``####`` line, commas removed.
+
+    Words between the marker and the number do not match. A reply with no
+    such number is invalid. Text from the next ``Question:`` on is ignored.
+    """
+    text = _until_question(completion)
+    match = _ANSWER.search(text)
+    if match is None:
+        return _INVALID
+    return match.group(1).replace(",", "")
+
+
+def correct(response: str, row: dict[str, str]) -> bool:
+    gold = extract_answer(row["answer"])
+    if gold == _INVALID:
+        message = "the published answer has no final number"
+        raise RuntimeError(message)
+    return extract_answer(response) == gold
+
+
+def _shots() -> list[dict[str, str]]:
+    rows = _read(_SHOTS)
+    if len(rows) != _SHOT_COUNT:
+        message = "GSM8K shots are not the five training examples"
+        raise RuntimeError(message)
+    return rows
+
+
+def _read(path: Path) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
-    with _DATA.open() as handle:
+    with path.open() as handle:
         for index, line in enumerate(handle):
             if not line.strip():
                 continue
@@ -28,37 +76,10 @@ def load() -> list[dict[str, str]]:
     return rows
 
 
-def messages(row: dict[str, str]) -> list[dict[str, str]]:
-    text = (
-        f"{row['question']}\n\n"
-        "Solve the problem. End with a line that starts with #### and the final number."
-    )
-    return [{"role": "user", "content": text}]
-
-
-def extract_answer(completion: str) -> str:
-    """The final number, commas removed.
-
-    The first number on the ``####`` line wins. Words and a currency sign may
-    sit between the marker and that number. A reply with no such number uses
-    the last number in the text.
-    """
-    for line in completion.splitlines():
-        if "####" not in line:
-            continue
-        found = _NUMBER.findall(line.split("####", 1)[1])
-        if found:
-            return found[0].replace(",", "")
-        break
-    found = _NUMBER.findall(completion)
-    if not found:
-        return _INVALID
-    return found[-1].replace(",", "")
-
-
-def correct(response: str, row: dict[str, str]) -> bool:
-    gold = extract_answer(row["answer"])
-    if gold == _INVALID:
-        message = "the published answer has no final number"
-        raise RuntimeError(message)
-    return extract_answer(response) == gold
+def _until_question(completion: str) -> str:
+    if completion.startswith("Question:"):
+        return ""
+    at = completion.find("\nQuestion:")
+    if at >= 0:
+        return completion[:at]
+    return completion

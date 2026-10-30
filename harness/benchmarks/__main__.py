@@ -9,14 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from harness.benchmarks import gsm8k, humaneval, ifeval
-from harness.benchmarks.serve import (
-    Request,
-    Server,
-    apply_sampling,
-    card_model_id,
-    complete,
-    fetch_sampling,
-)
+from harness.benchmarks.serve import Request, Server, complete
 
 _ROOT = Path(__file__).resolve().parents[2]
 _SMOKE = 30
@@ -256,7 +249,14 @@ def _request_line(request: Request) -> str:
     caps = ", ".join(f"{name} {limits[name]}" for name in _SUITES if name in limits)
     if caps:
         parts.append(f"max tokens {caps}")
-    return "- " + ", ".join(parts)
+    return "\n".join(
+        (
+            "- " + ", ".join(parts),
+            "- ifeval: the dataset prompt, scored by the published strict and loose checkers",
+            "- gsm8k: five training shots, then Question / Answer; the first #### number must match",
+            "- humaneval: the instruct prompt; the continuation after the published signature is tested",
+        )
+    )
 
 
 def _note_path(model: str) -> Path | None:
@@ -369,12 +369,6 @@ def run(
     server = Server()
     server.start()
     try:
-        request = apply_sampling(
-            request,
-            fetch_sampling(
-                server.port, card_model_id(model, thinking=request.enable_thinking)
-            ),
-        )
         _smoke(server.port, model, request)
         suites = _catalog()
         if only:
@@ -418,10 +412,10 @@ def _request_from_args(args: argparse.Namespace) -> Request:
         for name in limits:
             limits[name] = args.max_tokens
     return Request(
-        temperature=args.temperature,
+        temperature=0.0 if args.temperature is None else args.temperature,
         top_p=args.top_p,
         top_k=args.top_k,
-        presence_penalty=args.presence,
+        presence_penalty=0.0 if args.presence is None else args.presence,
         enable_thinking=args.thinking,
         reasoning_effort=args.reasoning_effort,
         max_tokens=limits,

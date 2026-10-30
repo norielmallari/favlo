@@ -1,4 +1,4 @@
-"""HumanEval pass@1. One greedy sample, then the published test subprocess."""
+"""HumanEval pass@1. One argmax continuation, then the published tests."""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ from pathlib import Path
 
 _DATA = Path(__file__).resolve().parent / "data" / "humaneval" / "HumanEval.jsonl.gz"
 _VENDOR = Path(__file__).resolve().parent / "vendor"
-_FENCE = re.compile(r"```python\n(.*?)```", re.DOTALL)
+_FENCE = re.compile(r"```(?:python)?[^\n]*\n(.*?)(?:```|$)", re.DOTALL)
+_STOPS = ("\nclass", "\ndef", "\n#", "\nif", "\nprint")
 _INSTRUCTION = (
-    "Read the following function signature and docstring, and fully implement "
-    "the function described. Your response should only contain the code for "
-    "this function.\n"
+    "Write a solution to the following problem and make sure that it passes the tests:\n"
+    "```python\n{prompt}\n```\n"
 )
 
 
@@ -39,29 +39,35 @@ def load() -> list[dict[str, str]]:
 
 
 def messages(row: dict[str, str]) -> list[dict[str, str]]:
-    return [{"role": "user", "content": _INSTRUCTION + row["prompt"]}]
+    return [{"role": "user", "content": _INSTRUCTION.format(prompt=row["prompt"])}]
 
 
-def function_body(completion: str, entry_point: str) -> str:
-    """Keep one function. A python fence is unwrapped first.
+def function_body(completion: str, prompt: str, entry_point: str) -> str:
+    """The text that follows the published signature.
 
-    A reply that includes ``def {entry_point}`` is kept from that line. The
-    published prompt is still prepended, and this definition replaces it, so
-    a renamed parameter stays bound. A reply that is already the body is left
-    indented.
+    A python fence is unwrapped first. A copy of the published prompt is
+    dropped, and so is a rewritten ``def`` line, so the tests keep the
+    dataset signature. Generation ends at a new top-level statement, the
+    same stops as the published completion task.
     """
-    fenced = _FENCE.findall(completion)
-    text = fenced[0] if fenced else completion
-    needle = f"def {entry_point}"
-    if needle in text:
-        text = text[text.find(needle) :]
-    for stop in ("\ndef ", "\nclass ", "\nif __name__", "\n```"):
-        at = text.find(stop)
-        if needle in text and at >= 0 and text.startswith(needle):
-            # The stop must not cut the definition that starts this text.
-            at = text.find(stop, len(needle))
+    fenced = _FENCE.search(completion)
+    text = fenced.group(1) if fenced is not None else completion
+    published = prompt.strip()
+    if published and published in text:
+        text = text[text.find(published) + len(published) :]
+    else:
+        needle = f"def {entry_point}"
+        at = text.find(needle)
         if at >= 0:
-            text = text[:at]
+            rest = text[at:]
+            newline = rest.find("\n")
+            text = "" if newline < 0 else rest[newline + 1 :]
+    cut = len(text)
+    for stop in _STOPS:
+        at = text.find(stop)
+        if 0 <= at < cut:
+            cut = at
+    text = text[:cut]
     if text and not text.endswith("\n"):
         text += "\n"
     return text
@@ -80,6 +86,6 @@ def passed(row: dict[str, str], completion: str, *, timeout: float = 3.0) -> boo
         "entry_point": row["entry_point"],
         "test": row["test"],
     }
-    body = function_body(completion, row["entry_point"])
+    body = function_body(completion, row["prompt"], row["entry_point"])
     result = check_correctness(problem, body, timeout)
     return bool(result["passed"])
