@@ -2,12 +2,15 @@
 
 FastMCP serves MCP 2026-07-28 at ``/mcp``. ``generate_image``,
 ``generate_video_i2v``, ``generate_video_t2v``, ``generate_music``, and
-``generate_voice`` are optional Tasks. A client that
+``generate_voice`` are optional Tasks. Each uses the ``media`` default in
+``models/registry.json`` unless ``session`` names a ``set_*`` result. A client that
 advertises ``io.modelcontextprotocol/tasks`` gets a ``CreateTaskResult`` and
 the in-memory worker runs one task at a time. A client that does not gets the
 tool result on that call. ``list_image_models``, ``list_video_models_i2v``,
 ``list_video_models_t2v``, ``list_music_models``, ``list_voice_models``,
-``media_status``, and ``media_cancel`` run in the request. A generate
+``set_image_model``, ``set_video_i2v_model``, ``set_video_t2v_model``,
+``set_music_model``, ``set_voice_model``, ``media_status``, and
+``media_cancel`` run in the request. A generate
 tool calls the pipeline handler through the same lock as ``POST /v1``.
 Chat completion is not a tool.
 """
@@ -33,6 +36,8 @@ from fastmcp_tasks.models import CreateTaskResult, GetTaskParams, GetTaskResult
 from mcp.shared.exceptions import MCPError
 
 from favlo import __version__
+from favlo.images import load_image
+from favlo.media_session import assign, choose
 from favlo.memory_mcp import (
     FORGET_DESCRIPTION,
     RECALL_DESCRIPTION,
@@ -42,7 +47,6 @@ from favlo.memory_mcp import (
     recall_text,
     remember_text,
 )
-from favlo.images import load_image
 from favlo.music import load_music, music_dir
 from favlo.videos import load_video
 from favlo.voice import load_voice, voice_dir
@@ -136,23 +140,83 @@ def build_mcp(
     def forget(id: str) -> str:  # noqa: A002
         return forget_text(store, id)
 
+    def _set_model(kind: str, model: str, session: str) -> str:
+        if model not in _catalog(dispatch, kind):
+            message = f"unknown {kind} model"
+            raise ToolError(message)
+        try:
+            return assign(tasks.state, kind, model, session)
+        except LookupError as exc:
+            raise ToolError(str(exc)) from exc
+
+    @mcp.tool(task=False)
+    def set_image_model(model: str, session: str = "") -> str:
+        """Use this image model for one session. The reply is the session id.
+
+        Args:
+            model: Id from list_image_models.
+            session: Omit to start a session. Pass an id to change that session.
+        """
+        return _set_model("image", model, session)
+
+    @mcp.tool(task=False)
+    def set_video_i2v_model(model: str, session: str = "") -> str:
+        """Use this image-to-video model for one session. The reply is the session id.
+
+        Args:
+            model: Id from list_video_models_i2v.
+            session: Omit to start a session. Pass an id to change that session.
+        """
+        return _set_model("i2v", model, session)
+
+    @mcp.tool(task=False)
+    def set_video_t2v_model(model: str, session: str = "") -> str:
+        """Use this text-to-video model for one session. The reply is the session id.
+
+        Args:
+            model: Id from list_video_models_t2v.
+            session: Omit to start a session. Pass an id to change that session.
+        """
+        return _set_model("t2v", model, session)
+
+    @mcp.tool(task=False)
+    def set_music_model(model: str, session: str = "") -> str:
+        """Use this music model for one session. The reply is the session id.
+
+        Args:
+            model: Id from list_music_models.
+            session: Omit to start a session. Pass an id to change that session.
+        """
+        return _set_model("music", model, session)
+
+    @mcp.tool(task=False)
+    def set_voice_model(model: str, session: str = "") -> str:
+        """Use this voice model for one session. The reply is the session id.
+
+        Args:
+            model: Id from list_voice_models.
+            session: Omit to start a session. Pass an id to change that session.
+        """
+        return _set_model("voice", model, session)
+
     @mcp.tool(task=_TASK, annotations=_ANNOTATIONS)
     async def generate_image(
         prompt: str,
-        model: str,
         size: str = "1280x720",
         n: int = 1,
         quality: str = "high",
         seed: int = 0,
         include_image: bool = False,
+        session: str = "",
     ) -> ToolResult:
         """Generate one or more PNGs. ``n`` is 1 to 10 and is one task.
 
         ``size`` defaults to ``1280x720``. ``auto`` is that same 16:9 frame.
+        ``session`` is a set_* id. Omitted uses the registry default.
         """
         body = {
             "prompt": prompt,
-            "model": model,
+            "model": _model(tasks.state, "image", session),
             "size": size,
             "n": n,
             "quality": quality,
@@ -163,7 +227,7 @@ def build_mcp(
 
     async def _generate_video(
         prompt: str,
-        model: str,
+        kind: str,
         size: str,
         image: str | dict[str, Any] | None,
         duration: float | None,
@@ -172,10 +236,11 @@ def build_mcp(
         negative_prompt: str,
         guidance_scale: float | list[float] | None,
         steps: int,
+        session: str,
     ) -> ToolResult:
         body: dict[str, Any] = {
             "prompt": prompt,
-            "model": model,
+            "model": _model(tasks.state, kind, session),
             "size": size,
             "seed": seed,
             "quality": quality,
@@ -196,7 +261,6 @@ def build_mcp(
     @mcp.tool(task=_TASK, annotations=_ANNOTATIONS)
     async def generate_video_i2v(
         prompt: str,
-        model: str,
         size: str,
         image: str | dict[str, Any],
         duration: float | None = None,
@@ -205,12 +269,12 @@ def build_mcp(
         negative_prompt: str = "",
         guidance_scale: float | list[float] | None = None,
         steps: int = 0,
+        session: str = "",
     ) -> ToolResult:
         """Generate one MP4 from a still. Read favlo://videos/{id}.mp4.
 
         Args:
             prompt: Motion prompt. The still is the first frame.
-            model: Model id from list_video_models_i2v.
             size: Required WIDTHxHEIGHT from list_video_models_i2v.
             image: Id starting with image_, or a PNG block.
             duration: Clip length in seconds. Omitted uses the model default.
@@ -219,10 +283,11 @@ def build_mcp(
             negative_prompt: Empty uses Wan's sample negative.
             guidance_scale: One number or [low, high]. Default 1.
             steps: Euler steps from 1 to 40. 0 uses 4.
+            session: Session id from a set_* call. Omitted uses the registry default.
         """
         return await _generate_video(
             prompt,
-            model,
+            "i2v",
             size,
             image,
             duration,
@@ -231,12 +296,12 @@ def build_mcp(
             negative_prompt,
             guidance_scale,
             steps,
+            session,
         )
 
     @mcp.tool(task=_TASK, annotations=_ANNOTATIONS)
     async def generate_video_t2v(
         prompt: str,
-        model: str,
         size: str,
         duration: float | None = None,
         seed: int = 0,
@@ -244,12 +309,12 @@ def build_mcp(
         negative_prompt: str = "",
         guidance_scale: float | list[float] | None = None,
         steps: int = 0,
+        session: str = "",
     ) -> ToolResult:
         """Generate one MP4 from text. Read favlo://videos/{id}.mp4.
 
         Args:
             prompt: Motion prompt.
-            model: Model id from list_video_models_t2v.
             size: Required WIDTHxHEIGHT from list_video_models_t2v.
             duration: Clip length in seconds. Omitted uses the model default.
             seed: Integer seed. The default is 0.
@@ -257,10 +322,11 @@ def build_mcp(
             negative_prompt: Empty uses Wan's sample negative.
             guidance_scale: One number or [low, high]. Default 1.
             steps: Euler steps from 1 to 40. 0 uses 4.
+            session: Session id from a set_* call. Omitted uses the registry default.
         """
         return await _generate_video(
             prompt,
-            model,
+            "t2v",
             size,
             None,
             duration,
@@ -269,12 +335,12 @@ def build_mcp(
             negative_prompt,
             guidance_scale,
             steps,
+            session,
         )
 
     @mcp.tool(task=_TASK, annotations=_ANNOTATIONS)
     async def generate_music(
         prompt: str,
-        model: str,
         response_format: str = "mp3",
         lyrics: str = "",
         seconds: float | None = None,
@@ -284,11 +350,15 @@ def build_mcp(
         keyscale: str = "",
         timesignature: str = "",
         include_audio: bool = False,
+        session: str = "",
     ) -> ToolResult:
-        """Generate one clip. ``response_format`` is mp3, wav, or flac."""
+        """Generate one clip. ``response_format`` is mp3, wav, or flac.
+
+        ``session`` is a set_* id. Omitted uses the registry default.
+        """
         body: dict[str, Any] = {
             "prompt": prompt,
-            "model": model,
+            "model": _model(tasks.state, "music", session),
             "response_format": response_format,
         }
         if lyrics:
@@ -311,21 +381,22 @@ def build_mcp(
     @mcp.tool(task=_TASK, annotations=_ANNOTATIONS)
     async def generate_voice(
         input: str,
-        model: str,
         voice: str = "",
         instructions: str = "",
         response_format: str = "mp3",
         include_audio: bool = False,
+        session: str = "",
     ) -> ToolResult:
         """Speak one line.
 
         ``voice`` is a speaker id from ``list_voice_models``.
         A square-bracket tag in ``input`` is an emotion id from that row.
         ``response_format`` is mp3, wav, or flac.
+        ``session`` is a set_* id. Omitted uses the registry default.
         """
         body: dict[str, Any] = {
             "input": input,
-            "model": model,
+            "model": _model(tasks.state, "voice", session),
             "response_format": response_format,
         }
         if voice:
@@ -441,6 +512,24 @@ def _home(state: dict[str, Any], key: str) -> Path | None:
     if isinstance(home, Path):
         return home
     return None
+
+
+def _model(state: dict[str, Any], kind: str, session: str) -> str:
+    try:
+        return choose(state, kind, session)
+    except LookupError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+def _catalog(dispatch: Any, kind: str) -> set[str]:
+    media = "video" if kind in {"i2v", "t2v"} else kind
+    body: dict[str, Any] = {"media": media}
+    if media == "video":
+        body["mode"] = kind
+    rows = dispatch("list", body)
+    if not isinstance(rows, list):
+        return set()
+    return {row["id"] for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)}
 
 
 async def _run_task(dispatch: Any, kind: str, body: dict[str, Any]) -> dict[str, Any]:

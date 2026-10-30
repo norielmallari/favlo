@@ -12,11 +12,20 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import qwen38_flash_next.commands as commands
-from qwen38_flash_next.runtime import RequestClosed
+import pytest
 
+import qwen38_flash_next.commands as commands
 from favlo import listener
 from favlo.pipelines import drop_runtime, install_runtime, open_runtime
+from qwen38_flash_next.runtime import RequestClosed
+
+
+@pytest.fixture(autouse=True)
+def _registry_media_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "favlo.media_session.default_model",
+        lambda kind, root=None: "example-model",
+    )
 
 
 class _Encoded:
@@ -1412,7 +1421,7 @@ def test_mcp_initialize_lists_tools_and_rejects_a_batch(tmp_path) -> None:
         inline_status, inline = _tool(
             port,
             "generate_image",
-            {"prompt": "pair", "model": "example-model"},
+            {"prompt": "pair"},
             tasks=False,
         )
         batch_status, batch = _mcp_raw(
@@ -1438,6 +1447,11 @@ def test_mcp_initialize_lists_tools_and_rejects_a_batch(tmp_path) -> None:
         "remember",
         "recall",
         "forget",
+        "set_image_model",
+        "set_video_i2v_model",
+        "set_video_t2v_model",
+        "set_music_model",
+        "set_voice_model",
         "generate_image",
         "generate_video_i2v",
         "generate_video_t2v",
@@ -1536,10 +1550,10 @@ def test_mcp_queue_runs_the_first_image_and_cancel_skips_the_second(tmp_path) ->
     port = int(state["server"].server_address[1])
     try:
         _status, first = _tool(
-            port, "generate_image", {"prompt": "hold", "model": "example-model"}
+            port, "generate_image", {"prompt": "hold"}
         )
         _status, second = _tool(
-            port, "generate_image", {"prompt": "later", "model": "example-model"}
+            port, "generate_image", {"prompt": "later"}
         )
         assert media.entered.wait(5)
         assert media.order == ["start"]
@@ -1578,7 +1592,7 @@ def test_mcp_cancel_during_a_batch_discards_the_file(tmp_path) -> None:
         _status, created = _tool(
             port,
             "generate_image",
-            {"prompt": "batch", "model": "example-model", "n": 2},
+            {"prompt": "batch", "n": 2},
         )
         assert media.first_file.wait(5)
         task_id = created["result"]["taskId"]
@@ -1603,13 +1617,13 @@ def test_mcp_image_results_are_links_and_resources_read_the_file(tmp_path) -> No
         _status, pair = _tool(
             port,
             "generate_image",
-            {"prompt": "pair", "model": "example-model", "n": 2},
+            {"prompt": "pair", "n": 2},
         )
         pair_done = _wait_task(port, pair["result"]["taskId"])
         _status, big = _tool(
             port,
             "generate_image",
-            {"prompt": "big", "model": "example-model", "include_image": True},
+            {"prompt": "big", "include_image": True},
         )
         big_done = _wait_task(port, big["result"]["taskId"])
         _status, read = _mcp(
@@ -1665,6 +1679,12 @@ def test_generate_video_schema_names_the_still_and_the_frame_default() -> None:
     assert "sample negative" in properties["negative_prompt"]["description"]
     assert "[low, high]" in properties["guidance_scale"]["description"]
     assert "40" in properties["steps"]["description"]
+    assert "model" not in properties
+    assert "session" in properties
+    assert "session" not in i2v.parameters["required"]
+    image = next(tool for tool in tools if tool.name == "generate_image")
+    assert "model" not in image.parameters["properties"]
+    assert "session" in image.parameters["properties"]
 
 
 def test_mcp_video_rejects_a_filesystem_path(tmp_path) -> None:
@@ -1679,7 +1699,6 @@ def test_mcp_video_rejects_a_filesystem_path(tmp_path) -> None:
             "generate_video_i2v",
             {
                 "prompt": "gallop",
-                "model": "example-model",
                 "size": "576x320",
                 "image": "/tmp/still.png",
             },
@@ -1706,7 +1725,7 @@ def test_mcp_chat_preempts_media_and_the_same_task_resumes(tmp_path) -> None:
 
     try:
         _status, created = _tool(
-            port, "generate_image", {"prompt": "preempt", "model": "example-model"}
+            port, "generate_image", {"prompt": "preempt"}
         )
         assert media.saw_a.wait(5)
         worker = threading.Thread(target=post_chat)
@@ -1859,7 +1878,7 @@ def test_mcp_voice_writes_a_wav_and_the_link_reads_it(tmp_path) -> None:
         status, called = _tool(
             port,
             "generate_voice",
-            {"input": "The small brown fox spoke one short line.", "model": "example-model", "response_format": "wav"},
+            {"input": "The small brown fox spoke one short line.", "response_format": "wav"},
             tasks=False,
         )
         _read_status, read = _mcp(
@@ -2055,7 +2074,7 @@ def test_the_foreground_queue_drains_before_media_resumes() -> None:
         image["result"] = _tool(
             port,
             "generate_image",
-            {"prompt": "queue", "model": "example-model"},
+            {"prompt": "queue"},
             tasks=False,
         )
 
@@ -2127,7 +2146,7 @@ def test_a_later_chat_preempts_the_next_media_slice() -> None:
         _tool(
             port,
             "generate_image",
-            {"prompt": "queue", "model": "example-model"},
+            {"prompt": "queue"},
             tasks=False,
         )
 

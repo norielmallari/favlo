@@ -32,7 +32,7 @@ That starts the daemon and returns. A later `favlo serve` attaches to it. `quit`
 
 ## Tools
 
-`list_image_models`, `list_video_models_i2v`, `list_video_models_t2v`, `list_music_models`, `list_voice_models`, `media_status`, and `media_cancel` run immediately. A video row includes `resolutions`. A pipeline that names both modes appears on both video lists.
+`list_image_models`, `list_video_models_i2v`, `list_video_models_t2v`, `list_music_models`, `list_voice_models`, `set_image_model`, `set_video_i2v_model`, `set_video_t2v_model`, `set_music_model`, `set_voice_model`, `media_status`, and `media_cancel` run immediately. A video row includes `resolutions`. A pipeline that names both modes appears on both video lists. A generate call with no `session` uses the `media` folder id in `models/registry.json` for that kind. `set_*` returns a session id. Pass that id as `session` on a later generate call to use the session. `harness.mcp_media` turns a harness `model` argument into that `set_*` call.
 
 `generate_image`, `generate_video_i2v`, `generate_video_t2v`, and `generate_music` return a task when the client advertises `io.modelcontextprotocol/tasks`. The GPU starts when the one worker reaches that task. Poll `media_status` with the `taskId` every 2 seconds until `completed`, `failed`, or `cancelled`. Then `resources/read` the `favlo://` link in the result. A client that does not advertise the extension receives the finished tool result on that same call. Image and music bytes are inlined only when the caller asked and the file is at most 1 MiB. Video is always a `favlo://videos/{id}.mp4` link.
 

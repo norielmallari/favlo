@@ -58,6 +58,8 @@ The official checkpoint is `ACE-Step/acestep-v15-xl-turbo`. `setup` downloads th
 
 `models/registry.json` may set top-level `"default"` to a variant id such as `qwen36-35b-a3b:instruct`. The first registered language model writes that field to its instruct variant when it is still unset. Agent harnesses and Favlo web read it when no model is chosen.
 
+The same file may set `"media"` to folder ids for `image`, `i2v`, `t2v`, `music`, and `voice`. The first registered row for a kind fills an empty key. A later read fills a key that is still empty and saves it. A generate call with no session uses that folder.
+
 ## Register a finished record
 
 `models` lists the registry. `models add` registers a directory under `models/` whose manifest is already complete. `models alias` renames the alias of a folder. The same subcommands exist for each pipeline flag:

@@ -243,4 +243,4 @@ Measures the speech fundamental of a WAV and optional gap to a reference clip. U
 
 ### MCP media client
 
-Import `harness.mcp_media` (no `python -m` entry). Shared MCP client helpers (`start_task`, `task_view`, `read_link`, and related) used by media agent harnesses.
+Import `harness.mcp_media` (no `python -m` entry). Shared MCP client helpers (`start_task`, `task_view`, `read_link`, and related) used by media agent harnesses. A `model` argument on `generate` or `start_task` calls the matching `set_*` tool and sends the returned session id. The server schema has no `model` parameter.

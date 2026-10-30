@@ -8,7 +8,7 @@ from typing import Any
 
 from web_api.bus import Bus
 from web_api.mcp_client import McpError, render_result, rpc
-from web_api.mcp_groups import LIST_BEFORE
+from web_api.mcp_groups import GENERATE
 from web_api.store import Store
 
 _FAILURES = 30
@@ -85,11 +85,13 @@ def settle(tool: str, status: str, body: str, *, error: bool = False) -> tuple[s
 
 
 def correction_cue(tool: str, text: str) -> str:
-    listed = LIST_BEFORE.get(tool)
-    if listed:
+    pair = GENERATE.get(tool)
+    if pair:
+        listed, setter = pair
         return (
             f"{text}\n"
-            f"Call {listed}, then call {tool} again with a model id that {listed} returned."
+            f"Call {listed}, then {setter}. Repeat the returned session id in your reply, "
+            f"then call {tool} again with that session."
         )
     return f"{text}\nCorrect the failed call."
 

@@ -6,24 +6,27 @@ import asyncio
 from typing import Any
 
 from web_api.mcp_client import McpError, render_result, rpc, task_handle
-from web_api.mcp_groups import LIST_BEFORE, ORDER, group_for
+from web_api.mcp_groups import GENERATE, ORDER, group_for
 from web_api.mcp_tasks import spawn, watch
 
 INSTRUCTIONS = (
     "Enabled MCP tools are available on every turn. "
-    "Before generate_image, call list_image_models and pass a model id that list returned. "
-    "Before generate_video_i2v, call list_video_models_i2v and pass a model id that list returned. "
-    "Before generate_video_t2v, call list_video_models_t2v and pass a model id that list returned. "
-    "Before generate_music, call list_music_models and pass a model id that list returned. "
-    "Before generate_voice, call list_voice_models and pass a model id that list returned. "
-    "Do not invent a model id, and do not reuse a model id from an earlier message. "
-    "When you call a generate tool, tell the user you are generating that image, video, music, or voice. "
+    "generate_image, generate_video_i2v, generate_video_t2v, generate_music, and generate_voice "
+    "use the registry default for that media type. "
+    "To change a model, call the matching list tool, then set_image_model, set_video_i2v_model, "
+    "set_video_t2v_model, set_music_model, or set_voice_model. "
+    "Repeat the returned session id in your reply. "
+    "Pass that same id as session on later set and generate calls. "
+    "Omit session to use the registry defaults. "
+    "When you call a generate tool, tell the user you are generating "
+    "that image, video, music, or voice. "
     "Do not write a favlo:// link or an image id, and do not say the file is already ready. "
     "A media tool may return a task id instead of the file. "
     "The finished result arrives in this session. "
     "Do not call that tool again for the same request while the task is working. "
     "When a task result says the tool failed or names an unknown model, "
-    "call the matching list tool and call the generate tool again with an id from that list."
+    "call the matching list and set tools, repeat the session id, "
+    "and call the generate tool again with that session."
 )
 
 
@@ -133,10 +136,15 @@ def _tool(
 
 def _description(row: dict[str, Any]) -> str:
     text = str(row.get("description") or row["name"])
-    listed = LIST_BEFORE.get(str(row.get("name") or ""))
-    if listed is None:
+    pair = GENERATE.get(str(row.get("name") or ""))
+    if pair is None:
         return text
-    note = f"Call {listed} first and pass a model id that {listed} returned."
+    listed, setter = pair
+    note = (
+        f"The registry default is already selected. "
+        f"To use another model, call {listed}, then {setter}, "
+        f"repeat the returned session id in your reply, and pass it as session."
+    )
     if note in text:
         return text
     return f"{text} {note}"

@@ -332,3 +332,76 @@ def test_reregister_refreshes_the_card_from_the_pipeline(tmp_path) -> None:
     assert selection.path == packed
     assert entry["default_variant"] == "thinking"
     assert entry["variants"]["thinking"]["presence_penalty"] == 0.0
+
+
+def test_a_media_row_fills_an_empty_registry_default(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from favlo import registry
+
+    module = SimpleNamespace(
+        handle_image=lambda *args: None,
+        handle_video=lambda *args: None,
+        video_modes=lambda: ("t2v",),
+    )
+    monkeypatch.setattr("favlo.cli.load_pipeline", lambda *args, **kwargs: module)
+    data: dict = {"models": {}}
+    registry._ensure_media_defaults(data, "folder-a", "pipe", "metal41", False)
+    assert data["media"] == {"image": "folder-a", "t2v": "folder-a"}
+    registry._ensure_media_defaults(data, "folder-b", "pipe", "metal41", False)
+    assert data["media"]["image"] == "folder-a"
+    assert data["media"]["t2v"] == "folder-a"
+
+
+def test_an_empty_media_key_is_filled_from_a_registered_row(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from favlo import registry
+
+    module = SimpleNamespace(handle_music=lambda *args: None)
+    monkeypatch.setattr("favlo.cli.load_pipeline", lambda *args, **kwargs: module)
+    root = tmp_path
+    (root / "models").mkdir()
+    registry.save_registry(
+        {
+            "version": 1,
+            "models": {
+                "clip-a": {"pipeline": "pipe", "runtime": "metal41", "directory": "models/clip-a"},
+            },
+        },
+        root,
+    )
+    assert registry.media_default("music", root) == "clip-a"
+    assert registry.load_registry(root)["media"]["music"] == "clip-a"
+    assert registry.media_default("image", root) == ""
+
+
+def test_a_language_row_does_not_add_media_defaults(monkeypatch) -> None:
+    from favlo import registry
+
+    def _missing(*_args: object, **_kwargs: object) -> None:
+        raise FileNotFoundError("missing")
+
+    monkeypatch.setattr("favlo.cli.load_pipeline", _missing)
+    data: dict = {"models": {}}
+    registry._ensure_media_defaults(data, "packed", PIPELINE, "metal41", False)
+    assert "media" not in data
+
+
+def test_one_media_session_covers_every_kind(monkeypatch) -> None:
+    from favlo.media_session import assign, choose
+
+    monkeypatch.setattr(
+        "favlo.media_session.default_model",
+        lambda kind, root=None: f"default-{kind}",
+    )
+    state: dict = {}
+    token = assign(state, "image", "other-image", "")
+    assert token.startswith("media_")
+    assert choose(state, "image", token) == "other-image"
+    assert choose(state, "music", token) == "default-music"
+    assert assign(state, "music", "other-music", token) == token
+    assert choose(state, "music", token) == "other-music"
+    assert choose(state, "image", "") == "default-image"
+    with pytest.raises(LookupError, match="unknown media session"):
+        choose(state, "image", "media_missing")

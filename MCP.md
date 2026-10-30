@@ -74,6 +74,39 @@ Returns registry rows whose pipeline generates music.
 
 Returns registry rows whose pipeline speaks. A row includes `voices` when the pipeline defines `list_voices`, and `emotions` when it defines `list_emotions`.
 
+### Defaults and sessions
+
+`models/registry.json` stores a `media` object. Its keys are `image`, `i2v`, `t2v`, `music`, and `voice`. Each value is a registry folder id. The first registered row for a kind fills an empty key. A later read fills a key that is still empty and saves it.
+
+A generate call with no `session` uses that folder. `set_image_model`, `set_video_i2v_model`, `set_video_t2v_model`, `set_music_model`, and `set_voice_model` copy those defaults into one in-memory session, replace the kind named by the tool, and return the session id. A later `set_*` or generate call passes that same id. An omitted `session` on `set_*` starts a new id. An unknown id is an error. The session is not kept across a listener restart.
+
+The caller repeats the returned id in its reply so a later turn can pass it.
+
+#### `set_image_model`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `model` | string | required | Id from `list_image_models` |
+| `session` | string | `""` | Omit to start a session. Pass an id to change that session |
+
+**Result:** The session id, a token starting with `media_`.
+
+#### `set_video_i2v_model`
+
+Same parameters. `model` is an id from `list_video_models_i2v`.
+
+#### `set_video_t2v_model`
+
+Same parameters. `model` is an id from `list_video_models_t2v`.
+
+#### `set_music_model`
+
+Same parameters. `model` is an id from `list_music_models`.
+
+#### `set_voice_model`
+
+Same parameters. `model` is an id from `list_voice_models`.
+
 ### Task control
 
 #### `media_status`
@@ -128,12 +161,12 @@ Optional task.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `prompt` | string | required | Image prompt |
-| `model` | string | required | Model id from `list_image_models` |
 | `size` | string | `1280x720` | `WIDTHxHEIGHT`; `auto` is the same 16:9 frame |
 | `n` | integer | `1` | Images to generate, 1–10 (one task) |
 | `quality` | string | `high` | Quality preset for the pipeline |
 | `seed` | integer | `0` | Seed |
 | `include_image` | boolean | `false` | Inline PNG in the result when decoded size ≤ 1 MiB |
+| `session` | string | `""` | Session id from a `set_*` call. Omitted uses the registry default |
 
 **Result:** Text content with each `image_*` id, a `resource_link` `favlo://images/{id}.png`, and optionally an inline `image` block.
 
@@ -144,8 +177,7 @@ Optional task. Produces one MP4.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `prompt` | string | required | Motion prompt; the still is the first frame |
-| `model` | string | required | Id from `list_video_models_i2v` |
-| `size` | string | required | `WIDTHxHEIGHT` from that list |
+| `size` | string | required | `WIDTHxHEIGHT` from `list_video_models_i2v` |
 | `image` | string or object | required | `image_*` id from `generate_image`, or `{"type":"image","data":"<base64 png>"}` |
 | `duration` | number | omitted | Clip length in seconds; omitted uses the model default |
 | `seed` | integer | `0` | Seed |
@@ -153,6 +185,7 @@ Optional task. Produces one MP4.
 | `negative_prompt` | string | `""` | Empty uses Wan’s published sample negative where applicable |
 | `guidance_scale` | number or array | omitted | One number or `[low, high]`; default effective scale is 1 |
 | `steps` | integer | `0` | Euler steps 1–40; `0` uses 4 |
+| `session` | string | `""` | Session id from a `set_*` call. Omitted uses the registry default |
 
 `image` refuses a filesystem path and a `favlo://` URI.
 
@@ -160,7 +193,7 @@ Optional task. Produces one MP4.
 
 ### `generate_video_t2v`
 
-Optional task. Same parameters and result shape as I2V except there is no `image`; `model` and `size` come from `list_video_models_t2v`.
+Optional task. Same parameters and result shape as I2V except there is no `image`. `size` comes from `list_video_models_t2v`.
 
 ### `generate_music`
 
@@ -169,7 +202,6 @@ Optional task.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `prompt` | string | required | Caption / style prompt |
-| `model` | string | required | Id from `list_music_models` |
 | `response_format` | string | `mp3` | `mp3`, `wav`, or `flac` |
 | `lyrics` | string | `""` | Lyrics when the pipeline uses them |
 | `seconds` | number | omitted | Target duration when supported |
@@ -179,6 +211,7 @@ Optional task.
 | `keyscale` | string | `""` | Key when supported |
 | `timesignature` | string | `""` | Meter when supported |
 | `include_audio` | boolean | `false` | Inline audio when decoded size ≤ 1 MiB |
+| `session` | string | `""` | Session id from a `set_*` call. Omitted uses the registry default |
 
 **Result:** `music_*` id, `resource_link` `favlo://music/{id}.{ext}`, optional inline `audio`.
 
@@ -189,11 +222,11 @@ Optional task.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `input` | string | required | Text to speak; `[emotion]` tags use ids from `list_voice_models` when defined |
-| `model` | string | required | Id from `list_voice_models` |
 | `voice` | string | `""` | Speaker id from that row; empty uses the zero speaker |
 | `instructions` | string | `""` | Extra instructions when the pipeline supports them |
 | `response_format` | string | `mp3` | `mp3`, `wav`, or `flac` |
 | `include_audio` | boolean | `false` | Inline audio when decoded size ≤ 1 MiB |
+| `session` | string | `""` | Session id from a `set_*` call. Omitted uses the registry default |
 
 **Result:** `voice_*` id, `resource_link` `favlo://voice/{id}.{ext}`, optional inline `audio`.
 

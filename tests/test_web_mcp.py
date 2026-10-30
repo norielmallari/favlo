@@ -164,11 +164,12 @@ def test_save_keeps_a_disabled_group_and_lists_its_tools(tmp_path: Path) -> None
         [
             {"name": "generate_image", "description": "Generate.", "schema": {"type": "object"}},
             {"name": "list_image_models", "description": "List.", "schema": {"type": "object"}},
+            {"name": "set_image_model", "description": "Set.", "schema": {"type": "object"}},
             {"name": "echo", "description": "Echo.", "schema": {"type": "object"}},
         ]
     )
     groups = groups_from(catalog)
-    assert groups[0]["tools"] == ["generate_image", "list_image_models"]
+    assert groups[0]["tools"] == ["generate_image", "list_image_models", "set_image_model"]
     store = Store(tmp_path / "app.db")
     try:
         _status, created, _events = store.create_mcp_server(
@@ -186,26 +187,26 @@ def test_save_keeps_a_disabled_group_and_lists_its_tools(tmp_path: Path) -> None
         )
         image = next(group for group in created["groups"] if group["id"] == "image")
         assert image["enabled"] is False
-        assert image["tools"] == ["generate_image", "list_image_models"]
+        assert image["tools"] == ["generate_image", "list_image_models", "set_image_model"]
         assert [row["name"] for row in store.enabled_mcp_tools("agent_favlo")] == ["echo"]
     finally:
         store.close()
 
 
 def test_media_instructions_require_a_listed_model_id() -> None:
-    assert "list_image_models" in INSTRUCTIONS
-    assert "list_video_models_i2v" in INSTRUCTIONS
-    assert "list_video_models_t2v" in INSTRUCTIONS
-    assert "list_music_models" in INSTRUCTIONS
-    assert "list_voice_models" in INSTRUCTIONS
-    assert "Do not invent a model id" in INSTRUCTIONS
+    assert "set_image_model" in INSTRUCTIONS
+    assert "set_video_i2v_model" in INSTRUCTIONS
+    assert "set_video_t2v_model" in INSTRUCTIONS
+    assert "set_music_model" in INSTRUCTIONS
+    assert "set_voice_model" in INSTRUCTIONS
+    assert "Repeat the returned session id" in INSTRUCTIONS
     assert "Do not write a favlo:// link" in INSTRUCTIONS
     assert "tell the user you are generating" in INSTRUCTIONS
-    assert "do not reuse a model id from an earlier message" in INSTRUCTIONS
     described = _description(
         {"name": "generate_image", "description": "Generate one or more PNGs."}
     )
-    assert "Call list_image_models first" in described
+    assert "set_image_model" in described
+    assert "session" in described
 
 
 def test_a_finished_image_stays_finished() -> None:
