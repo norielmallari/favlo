@@ -395,6 +395,67 @@ def test_an_empty_media_key_is_filled_from_a_registered_row(tmp_path, monkeypatc
     assert registry.media_default("image", root) == ""
 
 
+def test_an_embeddings_row_fills_an_empty_registry_default(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from favlo import registry
+
+    module = SimpleNamespace(handle_embed=lambda *args: None)
+    monkeypatch.setattr("favlo.cli.load_pipeline", lambda *args, **kwargs: module)
+    data: dict = {"models": {}}
+    registry._ensure_embeddings_default(data, "folder-a", "pipe", "metal41", False)
+    assert data["embeddings"] == "folder-a"
+    registry._ensure_embeddings_default(data, "folder-b", "pipe", "metal41", False)
+    assert data["embeddings"] == "folder-a"
+
+
+def test_an_empty_embeddings_key_is_filled_from_a_registered_row(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from favlo import registry
+
+    module = SimpleNamespace(handle_embed=lambda *args: None)
+    monkeypatch.setattr("favlo.cli.load_pipeline", lambda *args, **kwargs: module)
+    root = tmp_path
+    (root / "models").mkdir()
+    registry.save_registry(
+        {
+            "version": 1,
+            "models": {
+                "vec-a": {"pipeline": "pipe", "runtime": "metal41", "directory": "models/vec-a"},
+                "vec-b": {"pipeline": "pipe", "runtime": "metal41", "directory": "models/vec-b"},
+            },
+        },
+        root,
+    )
+    assert registry.embeddings_default(root) == "vec-a"
+    assert registry.load_registry(root)["embeddings"] == "vec-a"
+    assert registry.embeddings_default(root) == "vec-a"
+
+
+def test_a_stored_embeddings_default_is_kept(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from favlo import registry
+
+    module = SimpleNamespace(handle_embed=lambda *args: None)
+    monkeypatch.setattr("favlo.cli.load_pipeline", lambda *args, **kwargs: module)
+    root = tmp_path
+    (root / "models").mkdir()
+    registry.save_registry(
+        {
+            "version": 1,
+            "embeddings": "vec-b",
+            "models": {
+                "vec-a": {"pipeline": "pipe", "runtime": "metal41"},
+                "vec-b": {"pipeline": "pipe", "runtime": "metal41"},
+            },
+        },
+        root,
+    )
+    assert registry.embeddings_default(root) == "vec-b"
+
+
 def test_a_language_row_does_not_add_media_defaults(monkeypatch) -> None:
     from favlo import registry
 

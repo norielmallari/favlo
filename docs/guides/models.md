@@ -60,6 +60,8 @@ The official checkpoint is `ACE-Step/acestep-v15-xl-turbo`. `setup` downloads th
 
 The same file may set `"media"` to folder ids for `image`, `i2v`, `t2v`, `music`, and `voice`. The first registered row for a kind fills an empty key. A later read fills a key that is still empty and saves it. A generate call with no session uses that folder.
 
+The same file may set `"embeddings"` to one embeddings folder id. The first registered row whose pipeline defines `handle_embed` fills an empty key. A later read fills a key that is still empty and saves it. `POST /v1/embeddings` uses that folder when the body omits `model`.
+
 ## Register a finished record
 
 `models` lists the registry. Each line names the folder, the pipeline, the alias, the key/value mode, and whether MTP is on with its draft depth. A row that omits `mtp` is off. A row that omits `mtp_depth` uses 3. `set_model_mtp` on the configuration tools stores those two fields. A chat request that sets `mtp` or `mtp_depth` overrides the row. `models add` registers a directory under `models/` whose manifest is already complete. `models alias` renames the alias of a folder. The same subcommands exist for each pipeline flag:

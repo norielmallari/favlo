@@ -62,6 +62,9 @@ def load_registry(root: Path | None = None) -> dict[str, Any]:
     default = data.get("default")
     if default is not None and not isinstance(default, str):
         data.pop("default", None)
+    embeddings = data.get("embeddings")
+    if embeddings is not None and not isinstance(embeddings, str):
+        data.pop("embeddings", None)
     if not isinstance(data["models"], dict):
         message = "registry models is not an object"
         raise ValueError(message)
@@ -156,6 +159,7 @@ def add_model(
     data["models"][folder] = entry
     _ensure_default_llm(data, folder, alias, entry)
     _ensure_media_defaults(data, folder, pipeline, runtime, custom)
+    _ensure_embeddings_default(data, folder, pipeline, runtime, custom)
     save_registry(data, root)
     return data
 
@@ -270,6 +274,7 @@ def register_quantized(
                 current.setdefault("context_length", DEFAULT_CONTEXT_LENGTH)
             _ensure_default_llm(data, folder, alias, current)
             _ensure_media_defaults(data, folder, pipeline, runtime, custom)
+            _ensure_embeddings_default(data, folder, pipeline, runtime, custom)
             save_registry(data, root)
             return
         message = f"{folder} is already registered for a different source"
@@ -287,6 +292,7 @@ def register_quantized(
     data["models"][folder] = entry
     _ensure_default_llm(data, folder, alias, entry)
     _ensure_media_defaults(data, folder, pipeline, runtime, custom)
+    _ensure_embeddings_default(data, folder, pipeline, runtime, custom)
     save_registry(data, root)
 
 
@@ -599,6 +605,75 @@ def _media_kinds(pipeline: str, runtime: str, custom: bool) -> tuple[str, ...]:
     if callable(getattr(module, "handle_voice", None)):
         found.append("voice")
     return tuple(found)
+
+
+_embeddings_misses: set[str] = set()
+
+
+def embeddings_default(root: Path | None = None) -> str:
+    """The folder id for ``POST /v1/embeddings`` when the request omits ``model``.
+
+    An empty ``embeddings`` key is filled from the first registered row whose
+    pipeline defines ``handle_embed``, then saved.
+    """
+    data = load_registry(root)
+    stored = _embeddings_value(data)
+    if stored:
+        return stored
+    token = str(registry_path(root))
+    if token in _embeddings_misses:
+        return ""
+    for folder, entry in data["models"].items():
+        if not isinstance(entry, dict):
+            continue
+        pipeline = entry.get("pipeline")
+        runtime = entry.get("runtime")
+        if not isinstance(pipeline, str) or not isinstance(runtime, str):
+            continue
+        _ensure_embeddings_default(
+            data,
+            folder,
+            pipeline,
+            runtime,
+            bool(entry.get("custom")),
+        )
+        if _embeddings_value(data):
+            break
+    if _embeddings_value(data):
+        save_registry(data, root)
+    else:
+        _embeddings_misses.add(token)
+    return _embeddings_value(data)
+
+
+def _embeddings_value(data: dict[str, Any]) -> str:
+    raw = data.get("embeddings")
+    if not isinstance(raw, str):
+        return ""
+    return raw.strip()
+
+
+def _ensure_embeddings_default(
+    data: dict[str, Any],
+    folder: str,
+    pipeline: str,
+    runtime: str,
+    custom: bool,
+) -> None:
+    """Fill an empty ``embeddings`` key when this pipeline serves embeddings."""
+    if _embeddings_value(data) or not _serves_embed(pipeline, runtime, custom):
+        return
+    data["embeddings"] = folder
+
+
+def _serves_embed(pipeline: str, runtime: str, custom: bool) -> bool:
+    from favlo.cli import load_pipeline
+
+    try:
+        module = load_pipeline(pipeline, runtime=runtime, custom=custom)
+    except (FileNotFoundError, ImportError, OSError):
+        return False
+    return callable(getattr(module, "handle_embed", None))
 
 
 def _entry(

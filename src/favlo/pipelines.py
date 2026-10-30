@@ -465,9 +465,14 @@ def close_embed(child: Any, args: Any) -> None:
 
 def _open_embed_for(body: dict[str, Any], state: dict[str, Any], args: Any) -> Opened:
     model = body.get("model")
-    if not isinstance(model, str) or not model:
-        message = "model is required"
-        raise LookupError(message)
+    if not isinstance(model, str) or not model.strip():
+        from favlo.registry import embeddings_default
+
+        model = embeddings_default()
+        if not model:
+            message = "no default embeddings model is registered"
+            raise LookupError(message)
+        body["model"] = model
     from favlo.registry import resolve
 
     selection = resolve(model, resident=state.get("record"))

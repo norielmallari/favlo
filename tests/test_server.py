@@ -814,6 +814,65 @@ def test_the_resident_embeddings_model_closes_when_the_request_returns(monkeypat
     assert state["record"] is None
 
 
+def test_an_embedding_request_uses_the_registry_default_when_model_is_omitted(monkeypatch) -> None:
+    from favlo.http_app import _run_once
+
+    resident = _Runtime()
+    state = _embed_state(resident)
+    seen: list[str] = []
+
+    def handle_embed(reply, runtime, body, selection, args, request_state) -> None:
+        del runtime, body, selection, args, request_state
+        reply.json(200, {"object": "list", "data": []})
+
+    def start(selection, args, schedule=None):
+        del args, schedule
+        child = _Runtime()
+        child.selection = selection
+        child.proxy = SimpleNamespace(handle_embed=handle_embed)
+        return child
+
+    def resolve(model, resident=None):
+        del resident
+        seen.append(model)
+        return _selection(model, "bge-m3")
+
+    monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
+    monkeypatch.setattr("favlo.registry.resolve", resolve)
+    monkeypatch.setattr("favlo.registry.embeddings_default", lambda root=None: "bge-m3-int8")
+    monkeypatch.setattr(
+        "favlo.pipelines.pipeline_module",
+        lambda selection: SimpleNamespace(handle_embed=handle_embed),
+    )
+    args = _args()
+    args.lazy = True
+    reply = _embed_reply()
+    _run_once(args, state, "embed", "application/json", b'{"input": "bridge"}', reply)
+    assert reply.status == 200
+    assert seen == ["bge-m3-int8"]
+    assert resident.closed is False
+
+
+def test_an_embedding_request_without_a_default_is_not_found(monkeypatch) -> None:
+    from favlo.http_app import _run_once
+
+    resident = _Runtime()
+    state = _embed_state(resident)
+
+    def start(selection, args, schedule=None):
+        del selection, args, schedule
+        raise AssertionError("an embeddings process opened without a model")
+
+    monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
+    monkeypatch.setattr("favlo.registry.embeddings_default", lambda root=None: "")
+    args = _args()
+    args.lazy = True
+    reply = _embed_reply()
+    _run_once(args, state, "embed", "application/json", b'{"input": "bridge"}', reply)
+    assert reply.status == 404
+    assert resident.closed is False
+
+
 def test_an_embedding_request_refuses_a_model_that_does_not_embed(monkeypatch) -> None:
     from favlo.http_app import _run_once
 
