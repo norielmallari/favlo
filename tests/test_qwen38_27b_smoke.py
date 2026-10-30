@@ -108,6 +108,39 @@ def _expect_six(text: str, *, thinking: bool) -> None:
         raise AssertionError(message)
 
 
+def test_mtp_off_and_on_match(carrot_runtime: Qwen38Runtime) -> None:
+    root = carrot_runtime.root
+    manifest = json.loads((root / "manifest.json").read_text())
+    if manifest.get("mtp_weight") != "fp8":
+        pytest.skip("mtp matrices are not fp8")
+    prompt = encode_chat(
+        root,
+        [{"role": "user", "content": CARROT_PROMPT}],
+        None,
+        False,
+        None,
+    )
+    carrot_runtime.reset()
+    off = carrot_runtime.generate(prompt, 12, STOP, temperature=0.0, mtp=False)
+    assert carrot_runtime._mtp_tries == 0
+    carrot_runtime.reset()
+    on = carrot_runtime.generate(
+        prompt, 12, STOP, temperature=0.0, mtp=True, rng=np.random.default_rng(0)
+    )
+    assert on == off
+    if carrot_runtime.drafts:
+        assert carrot_runtime._mtp_tries > 0
+    print(f"mtp {carrot_runtime._mtp_accepts}/{carrot_runtime._mtp_tries}")
+    carrot_runtime.reset()
+    carrot_runtime.generate(prompt, 64, STOP, temperature=0.0, mtp=True, rng=np.random.default_rng(0))
+    tries = int(carrot_runtime._mtp_tries)
+    accepts = int(carrot_runtime._mtp_accepts)
+    rate = 0.0 if tries == 0 else accepts / tries
+    print(f"mtp rate {accepts}/{tries} {rate:.3f}")
+    assert tries > 0
+    assert rate >= 0.5
+
+
 def test_carrot_instruct_greedy(carrot_runtime: Qwen38Runtime) -> None:
     text = _complete(carrot_runtime, thinking=False, effort=None)
     print(f"instruct greedy: {text[:160]}")

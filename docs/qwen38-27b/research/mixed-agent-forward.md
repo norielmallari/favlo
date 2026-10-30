@@ -71,3 +71,14 @@ Later finds are appended here. The sections above stay as committed.
 |---|---|---|---|
 | 1, cache miss | 437 | 319.39 tok/s (437 tok in 1.37 s) | 14.80 tok/s (396 tok in 26.75 s) |
 | 2, prefix load 437, cache hit 437 | 853 | 340.67 tok/s (416 tok in 1.22 s) | 14.70 tok/s (83 tok in 5.65 s) |
+
+30 October 2026. `uv run python -m harness.coding --model qwen38-27b --mtp on`. Thinking stayed on. Six requests, context 3435. Prefill 336.09 tok/s over 2719 tokens (8.09 s). Decode 13.65 tok/s over 1038 tokens (76.03 s). A search the same day did not find that pair. Queries: "Qwen3.8-27B coding agent 13.65 tok/s MTP M5 Pro 48GB thinking" and "Qwen3.8-27B 13.65 OR 336.09 tok/s coding MTP thinking M5 Pro". [oMLX](https://omlx.ai/benchmarks/performance/ev8uxazm) reports 33.6 tok/s at 16k with thinking and MTP on an M5 Pro with 20 GPU cores and 48 GB. [MTPLX](https://mtplx.com/models/qwen3.8-27b/) reports 65.2 tok/s on a coding task on an M5 Max. Neither run is this harness table.
+
+| Coding-agent request, MTP on | Prompt | Prefill | Decode |
+|---|---|---|---|
+| 1, cache miss | 2036 | 465.57 tok/s (2036 tok in 4.37 s) | 13.52 tok/s (457 tok in 33.80 s) |
+| 2, cache hit 2493 | 2686 | 243.01 tok/s (193 tok in 0.79 s) | 13.41 tok/s (110 tok in 8.20 s) |
+| 3, prefix load 2686, cache hit 2686 | 2880 | 228.58 tok/s (194 tok in 0.85 s) | 14.96 tok/s (102 tok in 6.82 s) |
+| 4, cache hit 2982 | 3181 | 232.43 tok/s (199 tok in 0.86 s) | 13.77 tok/s (102 tok in 7.41 s) |
+| 5, cache hit 3283 | 3321 | 62.26 tok/s (38 tok in 0.61 s) | 14.98 tok/s (55 tok in 3.67 s) |
+| 6, cache hit 3376 | 3435 | 97.20 tok/s (59 tok in 0.61 s) | 13.14 tok/s (212 tok in 16.13 s) |

@@ -26,7 +26,7 @@ from favlo.registry import (
 )
 from qwen38_27b.chat import STOP, decode_text, encode_chat
 from qwen38_27b.checks import format_report, run_checks
-from qwen38_27b.convert import quantize
+from qwen38_27b.convert import quantize, repack_mtp_fp8
 from qwen38_27b.fetch import (
     CHECKOUT,
     REPO,
@@ -66,6 +66,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     complete.add_argument("--kv-cache", choices=("e4m3",), default="e4m3")
     complete.add_argument("--max-memory", default=None, help="maximum bytes, such as 32GiB")
     sub.add_parser("kernels", help="compile the shader library and run the dispatch checks")
+    mtp_fp8 = sub.add_parser("mtp-fp8", help="repack MTP matrices as fp8 from the BF16 cache")
+    mtp_fp8.add_argument("--src", type=Path, default=None)
+    mtp_fp8.add_argument("--record", type=Path, default=None)
     delete = sub.add_parser("delete", help="remove a packed model and its registry row")
     delete.add_argument("model", help="folder name or alias")
     models = sub.add_parser("models", help="list or edit the flavor registry")
@@ -87,6 +90,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _kernels()
     if args.command == "quantize":
         return _quantize(args)
+    if args.command == "mtp-fp8":
+        return _mtp_fp8(args)
     if args.command == "download":
         return _download(args)
     if args.command == "delete":
@@ -95,6 +100,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _complete(args)
     sys.stderr.write("qwen38-27b bf16 layer check is not this command\n")
     return 1
+
+
+def _mtp_fp8(args: argparse.Namespace) -> int:
+    """Repack the installed record's MTP matrices. The BF16 checkout stays where it is."""
+    try:
+        src = args.src or snapshot_dir(_BF16_REPO)
+        record = args.record or installed_record()
+    except (OSError, FileNotFoundError) as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
+    if record is None:
+        sys.stderr.write("quantized record is not installed\n")
+        return 1
+    try:
+        repack_mtp_fp8(Path(record), Path(src))
+    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
+    return 0
 
 
 def _download(args: argparse.Namespace) -> int:

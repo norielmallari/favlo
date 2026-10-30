@@ -766,27 +766,39 @@ class Qwen38Runtime:
     ) -> None:
         from qwen38_27b.attn import attend_plane
 
-        q_w, q_s = self._pair(self._w(layer, "self_attn.q_proj.weight"))
-        k_w, k_s = self._pair(self._w(layer, "self_attn.k_proj.weight"))
-        v_w, v_s = self._pair(self._w(layer, "self_attn.v_proj.weight"))
-        self.session.encode(
-            "attn_qkv",
-            [
-                (self.normed, 0),
-                q_w,
-                q_s,
-                k_w,
-                k_s,
-                v_w,
-                v_s,
-                (self.wide, 0),
-                (self.kv, 0),
-                (self.vv, 0),
-            ],
-            [],
-            (Q_PROJ + KV_PROJ + KV_PROJ, 1, 1),
-            (32, 1, 1),
-        )
+        q_name = self._w(layer, "self_attn.q_proj.weight")
+        k_name = self._w(layer, "self_attn.k_proj.weight")
+        v_name = self._w(layer, "self_attn.v_proj.weight")
+        kinds = {self._dtype(name) for name in (q_name, k_name, v_name)}
+        if kinds == {"fp8"}:
+            self._gemv(self.normed, q_name, self.wide)
+            self._gemv(self.normed, k_name, self.kv)
+            self._gemv(self.normed, v_name, self.vv)
+        elif kinds == {"fp4"}:
+            q_w, q_s = self._pair(q_name)
+            k_w, k_s = self._pair(k_name)
+            v_w, v_s = self._pair(v_name)
+            self.session.encode(
+                "attn_qkv",
+                [
+                    (self.normed, 0),
+                    q_w,
+                    q_s,
+                    k_w,
+                    k_s,
+                    v_w,
+                    v_s,
+                    (self.wide, 0),
+                    (self.kv, 0),
+                    (self.vv, 0),
+                ],
+                [],
+                (Q_PROJ + KV_PROJ + KV_PROJ, 1, 1),
+                (32, 1, 1),
+            )
+        else:
+            message = f"{q_name} dtype {sorted(kinds)} is not a decode projection"
+            raise RuntimeError(message)
         self.session.encode(
             "split_q_gate_rows",
             [(self.wide, 0), (self.query, 0), (self.gate, 0)],
@@ -882,6 +894,20 @@ class Qwen38Runtime:
             return f"mtp.layers.0.{rest}"
         return self.weight(layer, rest)
 
+    def _dtype(self, name: str) -> str:
+        _buf, _offset, entry = self.locate(name)
+        return str(entry.get("dtype", "fp4"))
+
+    def _copy_normed(self) -> None:
+        """Copy the post-norm vector in ``normed`` back onto ``hidden``."""
+        self.session.encode(
+            "copy_f32",
+            [(self.normed, 0), (self.hidden, 0)],
+            [_u32(HIDDEN)],
+            (HIDDEN // 256, 1, 1),
+            (256, 1, 1),
+        )
+
     def _pair(self, name: str) -> tuple[tuple[Any, int], tuple[Any, int]]:
         buf, offset, entry = self.locate(name)
         return (buf, offset), (buf, self.scale_offset(entry, offset))
@@ -945,8 +971,48 @@ class Qwen38Runtime:
             return None
         return _best(self)
 
+    def _argmax_hidden(self) -> int:
+        """Argmax of the residual already stored in ``hidden``."""
+        self.session.begin()
+        try:
+            final = self._resolve(
+                "model.language_model.norm.weight",
+                "model.norm.weight",
+            )
+            self._rms(self.hidden, final, self.normed)
+            head = self._resolve("lm_head.weight", "model.language_model.lm_head.weight")
+            self._gemv(self.normed, head, self.logits)
+            self.session.encode(
+                "argmax_partial",
+                [(self.logits, 0), (self.best_v, 0), (self.best_i, 0)],
+                [_u32(VOCAB)],
+                (_ARGMAX_GROUPS, 1, 1),
+                (256, 1, 1),
+            )
+            self.session.end()
+        except Exception:
+            self.session.finish()
+            raise
+        return _best(self)
+
+    def _fill_logits(self) -> None:
+        """Write the final-norm logits for the residual already stored in ``hidden``."""
+        self.session.begin()
+        try:
+            final = self._resolve(
+                "model.language_model.norm.weight",
+                "model.norm.weight",
+            )
+            self._rms(self.hidden, final, self.normed)
+            head = self._resolve("lm_head.weight", "model.language_model.lm_head.weight")
+            self._gemv(self.normed, head, self.logits)
+            self.session.end()
+        except Exception:
+            self.session.finish()
+            raise
+
     def _mtp_body(self, token: int, pos: int) -> None:
-        """MTP layer at ``pos``. ``hidden`` is the backbone residual. Embeds ``token``."""
+        """MTP layer at ``pos``. ``hidden`` is already the post-norm state. Embeds ``token``."""
         self._rms(self.hidden, "mtp.pre_fc_norm_hidden.weight", self.hold)
         self._embed(token)
         self._rms(self.hidden, "mtp.pre_fc_norm_embedding.weight", self.normed)
@@ -963,10 +1029,23 @@ class Qwen38Runtime:
         self._rms(self.hidden, self._w(None, "post_attention_layernorm.weight"), self.normed)
         self._ffn(None)
 
-    def _draft(self, token: int, pos: int) -> int:
+    def _draft(self, token: int, pos: int, *, backbone: bool) -> int:
+        """Draft the token after ``token``. ``backbone`` norms the language residual first.
+
+        A later draft in the same chain leaves ``hidden`` as this step's ``mtp.norm``
+        output, which is the input the next draft reads.
+        """
         self.session.begin()
+        if backbone:
+            final = self._resolve(
+                "model.language_model.norm.weight",
+                "model.norm.weight",
+            )
+            self._rms(self.hidden, final, self.normed)
+            self._copy_normed()
         self._mtp_body(token, pos)
         self._rms(self.hidden, "mtp.norm.weight", self.normed)
+        self._copy_normed()
         head_name = self._resolve("lm_head.weight", "model.language_model.lm_head.weight")
         self._gemv(self.normed, head_name, self.logits)
         self.session.encode(
@@ -996,6 +1075,7 @@ class Qwen38Runtime:
         frequency: float = 0.0,
         logit_bias: dict[int, float] | None = None,
         rng: np.random.Generator | None = None,
+        mtp: bool = False,
     ) -> list[int]:
         self._hit_limit = False
         self._temperature = float(temperature)
@@ -1084,6 +1164,7 @@ class Qwen38Runtime:
             last_sample: float | None = None
             self._mtp_accepts = 0
             self._mtp_tries = 0
+            use_mtp = bool(mtp) and bool(getattr(self, "drafts", False))
             emitted = 0
             rope_cursor = getattr(self, "_rope_next", None)
 
@@ -1098,9 +1179,11 @@ class Qwen38Runtime:
                 self._hit_limit = True
             while emitted < decode_total:
                 self._check_stop()
+                forced_token = False
                 if pending:
                     chosen = int(pending.pop(0))
                     finished_forced = close_after and not pending
+                    forced_token = True
                 else:
                     finished_forced = False
                 if chosen in stop or repeated_tail(out):
@@ -1134,6 +1217,81 @@ class Qwen38Runtime:
                 if repeated_tail(out):
                     step_new(chosen, pos, logits=False)
                     break
+                speculated = False
+                if use_mtp and not forced_token and pos > 0:
+                    from qwen38_27b.speculate import DEPTH, draft_window, propose, verify
+
+                    room = decode_total - emitted
+                    need = pos + min(DEPTH, room)
+                    if room > 0 and self.ensure(need) and self.drafts:
+                        drafts = propose(self, chosen, pos - 1, min(DEPTH, room))
+                        feeds, expected = draft_window(chosen, drafts, stop, room)
+                        if expected:
+                            produced = list(out)
+                            sample_counts = dict(counts)
+
+                            def draw() -> int:
+                                self._fill_logits()
+                                picked = sample_token(
+                                    self._logits(),
+                                    self._temperature,
+                                    self._top_p,
+                                    self._top_k,
+                                    self._presence,
+                                    self._frequency,
+                                    sample_counts,
+                                    self._logit_bias,
+                                    self._rng,
+                                )
+                                return self._stable_draw(produced, picked, sample_counts)
+
+                            def commit(token: int) -> None:
+                                produced.append(int(token))
+                                sample_counts[int(token)] = sample_counts.get(int(token), 0) + 1
+
+                            accepted, nxt, keep = verify(
+                                self,
+                                pos,
+                                feeds,
+                                expected,
+                                draw=draw if self._sample_host else None,
+                                commit=commit if self._sample_host else None,
+                            )
+                            self._mtp_tries += len(expected)
+                            self._mtp_accepts += accepted
+                            if rope_cursor is not None:
+                                rope_cursor += keep
+                            emit = expected[: accepted - 1] if accepted == len(expected) else expected[:accepted]
+                            halted = False
+                            for token in emit:
+                                if token in stop or repeated_tail(out):
+                                    chosen = int(token)
+                                    halted = True
+                                    break
+                                if emitted >= decode_total:
+                                    halted = True
+                                    break
+                                out.append(int(token))
+                                counts[int(token)] = counts.get(int(token), 0) + 1
+                                emitted += 1
+                                self._output_ids = list(out)
+                                if decode_row is not None:
+                                    decode_row.done = len(out)
+                                if on_token is not None:
+                                    on_token(int(token))
+                            if not halted:
+                                if self._sample_host:
+                                    chosen = int(nxt)
+                                else:
+                                    chosen = self._stable_draw(out, self._pick(nxt, counts), counts)
+                            last_sample = time.perf_counter()
+                            speculated = True
+                            if halted or emitted >= decode_total:
+                                if emitted >= decode_total:
+                                    self._hit_limit = True
+                                break
+                if speculated:
+                    continue
                 nxt_id = step_new(chosen, pos, logits=True)
                 assert nxt_id is not None
                 chosen = self._stable_draw(out, self._pick(nxt_id, counts), counts)

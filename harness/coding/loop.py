@@ -16,8 +16,14 @@ from harness.coding.workspace import PROMPT, TOOLS, arguments_of, dispatch, prep
 SESSION_ROUNDS = 16
 
 
-def chat_body(model: str, messages: list[dict[str, Any]], request: Request) -> dict[str, object]:
-    """Bare model id and ``enable_thinking``. The listener fills the thinking card."""
+def chat_body(
+    model: str,
+    messages: list[dict[str, Any]],
+    request: Request,
+    *,
+    mtp: bool,
+) -> dict[str, object]:
+    """Bare model id, ``enable_thinking``, and the MTP flag. The listener fills the thinking card."""
     del request
     body = completion_body(
         model.partition(":")[0],
@@ -26,6 +32,7 @@ def chat_body(model: str, messages: list[dict[str, Any]], request: Request) -> d
         Request(enable_thinking=True),
     )
     body["tools"] = TOOLS
+    body["mtp"] = bool(mtp)
     return body
 
 
@@ -34,6 +41,8 @@ def run_session(
     model: str,
     request: Request,
     workspace: Path,
+    *,
+    mtp: bool,
 ) -> list[str]:
     """Let the model use the tools, then return the ones that succeeded."""
     prepare_workspace(workspace)
@@ -41,7 +50,7 @@ def run_session(
     messages: list[dict[str, Any]] = [{"role": "user", "content": PROMPT}]
     try:
         for _ in range(SESSION_ROUNDS):
-            payload = _post(port, chat_body(model, messages, request))
+            payload = _post(port, chat_body(model, messages, request, mtp=mtp))
             message = _assistant(payload)
             messages.append(message)
             calls = message.get("tool_calls")

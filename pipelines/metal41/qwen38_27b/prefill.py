@@ -134,6 +134,26 @@ def prefill_ids(
             note(cursor - pos0)
 
 
+def backbone_ids(runtime: Any, ids: list[int], pos0: int) -> _Workspace:
+    """Run the language stack over ``ids`` and leave each residual in the workspace.
+
+    The MTP layer stays out of this pass. The caller reads ``hidden`` rows and
+    decides which prefix of the state to keep.
+    """
+    if not ids:
+        message = "backbone pass is empty"
+        raise RuntimeError(message)
+    if pos0 + len(ids) > runtime.max_pos:
+        message = f"position {pos0 + len(ids)} is past {runtime.max_pos}"
+        raise RuntimeError(message)
+    workspace = getattr(runtime, "_prefill", None)
+    if workspace is None:
+        workspace = _Workspace(runtime.session, drafts=bool(getattr(runtime, "drafts", False)))
+        runtime._prefill = workspace
+    _chunk(runtime, workspace, ids, pos0, None, False)
+    return workspace
+
+
 def _chunk(
     runtime: Any,
     work: _Workspace,
@@ -193,12 +213,17 @@ def _mtp_rows(
         return
     _write(work.tokens, _pack_u32(shifted))
     _zero(runtime, work.mix, rows * MIX)
+    final = runtime._resolve(
+        "model.language_model.norm.weight",
+        "model.norm.weight",
+    )
+    _rms(runtime, work.hidden, final, work.normed, count)
+    _rms(runtime, work.normed, "mtp.pre_fc_norm_hidden.weight", work.big2, count)
     _embed(runtime, work, count, work.big0)
-    _rms(runtime, work.hidden, "mtp.pre_fc_norm_hidden.weight", work.normed, count)
     _rms(runtime, work.big0, "mtp.pre_fc_norm_embedding.weight", work.big1, count)
     runtime.session.encode(
         "concat_pair",
-        [(work.big1, 0), (work.normed, 0), (work.mix, 0)],
+        [(work.big1, 0), (work.big2, 0), (work.mix, 0)],
         [_u32(HIDDEN), _u32(count)],
         (count, 1, 1),
         (256, 1, 1),

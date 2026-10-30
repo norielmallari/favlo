@@ -158,6 +158,15 @@ def _rng(body: dict[str, Any]) -> np.random.Generator:
     return np.random.default_rng(int(seed))
 
 
+def _mtp_flag(body: dict[str, Any]) -> bool:
+    """Draft verify. Absent means on. Sampling settings do not change the flag."""
+    flag = body.get("mtp", True)
+    if isinstance(flag, bool):
+        return flag
+    message = "mtp must be true or false"
+    raise RuntimeError(message)
+
+
 def _limit(body: dict[str, Any]) -> int | None:
     """Request or settings cap. None means decode until a stop or the context ends."""
     from favlo.logs import output_token_limit
@@ -261,6 +270,7 @@ def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any)
             logit_bias=bias,
             rng=draw,
             emit_tools=emit_tools,
+            mtp=_mtp_flag(body),
         )
         return
     tokens = runtime.generate(
@@ -276,6 +286,7 @@ def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any)
         frequency=frequency,
         logit_bias=bias,
         rng=draw,
+        mtp=_mtp_flag(body),
     )
     text = decode_text(runtime.root, tokens)
     reasoning, visible = split_thinking(text, thinking)
@@ -380,6 +391,7 @@ def _stream(
     frequency: float = 0.0,
     logit_bias: dict[int, float] | None = None,
     rng: np.random.Generator | None = None,
+    mtp: bool = True,
 ) -> None:
     decode = getattr(runtime, "decode", None)
     if not callable(decode):
@@ -451,6 +463,7 @@ def _stream(
             frequency=frequency,
             logit_bias=logit_bias,
             rng=rng,
+            mtp=mtp,
         )
         decoded = decode(produced) if produced else ""
         piece, previous = _stream_delta(decoded, previous, final=True)

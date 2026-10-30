@@ -1515,3 +1515,92 @@ def test_delete_removes_the_record_the_checkout_and_the_prefix(
     assert not kept.exists()
     assert outside.is_dir()
     assert other.is_dir()
+
+
+def test_draft_window_stops_before_feeding_a_stop_token() -> None:
+    from qwen38_27b.speculate import draft_window
+
+    feeds, expected = draft_window(9, [5, 6, 7], set(), 3)
+    assert feeds == [9, 5, 6]
+    assert expected == [5, 6, 7]
+    feeds, expected = draft_window(9, [5, 99, 7], {99}, 3)
+    assert feeds == [9, 5]
+    assert expected == [5, 99]
+    feeds, expected = draft_window(9, [5, 6, 7], set(), 1)
+    assert feeds == [9]
+    assert expected == [5]
+    feeds, expected = draft_window(9, [], set(), 3)
+    assert feeds == [9]
+    assert expected == []
+
+
+def test_mtp_flag_defaults_on() -> None:
+    from qwen38_27b.chat import _mtp_flag
+
+    assert _mtp_flag({}) is True
+    assert _mtp_flag({"mtp": False}) is False
+    assert _mtp_flag({"mtp": True}) is True
+    with pytest.raises(RuntimeError):
+        _mtp_flag({"mtp": "yes"})
+
+
+def test_repack_mtp_replaces_fp4_bytes(tmp_path: Path) -> None:
+    import json
+
+    from qwen38_27b.budget import tensor_span
+    from qwen38_27b.convert import _fp4_entry, repack_mtp_fp8
+
+    weight = np.linspace(-1.0, 1.0, 64 * 256, dtype=np.float32).reshape(64, 256)
+    blob, body = _fp4_entry(weight)
+    neighbor = np.arange(8, dtype=np.float16).tobytes()
+    record = tmp_path / "record"
+    source = tmp_path / "bf16"
+    record.mkdir()
+    source.mkdir()
+    resident = record / "resident.bin"
+    with resident.open("wb") as handle:
+        handle.write(neighbor)
+        pad = (128 - (len(neighbor) % 128)) % 128
+        handle.write(b"\x00" * pad)
+        offset = handle.tell()
+        handle.write(blob)
+    manifest = {
+        "complete": True,
+        "tensors": {
+            "model.norm.weight": {
+                "dtype": "f16",
+                "shape": [8],
+                "stored_shape": [8],
+                "file": "resident.bin",
+                "offset": 0,
+            },
+            "mtp.fc.weight": {**body, "file": "resident.bin", "offset": offset},
+        },
+    }
+    (record / "manifest.json").write_text(json.dumps(manifest))
+    raw = (np.ascontiguousarray(weight).view(np.uint32) >> np.uint32(16)).astype(np.uint16).tobytes()
+    header = {
+        "mtp.fc.weight": {"dtype": "BF16", "shape": [64, 256], "data_offsets": [0, len(raw)]}
+    }
+    encoded = json.dumps(header).encode()
+    with (source / "model.safetensors").open("wb") as handle:
+        handle.write(len(encoded).to_bytes(8, "little"))
+        handle.write(encoded)
+        handle.write(raw)
+    (source / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"mtp.fc.weight": "model.safetensors"}})
+    )
+    repack_mtp_fp8(record, source)
+    packed = json.loads((record / "manifest.json").read_text())
+    assert packed["mtp_weight"] == "fp8"
+    assert packed["tensors"]["mtp.fc.weight"]["dtype"] == "fp8"
+    assert packed["tensors"]["model.norm.weight"]["dtype"] == "f16"
+    rewritten = (record / "resident.bin").read_bytes()
+    norm = packed["tensors"]["model.norm.weight"]
+    start = int(norm["offset"])
+    assert rewritten[start : start + tensor_span(norm)] == neighbor
+    assert blob not in rewritten
+    assert not (record / "resident.bin.bak").exists()
+    repack_mtp_fp8(record, source)
+    again = json.loads((record / "manifest.json").read_text())
+    assert again["tensors"]["mtp.fc.weight"]["offset"] == packed["tensors"]["mtp.fc.weight"]["offset"]

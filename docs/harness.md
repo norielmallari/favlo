@@ -77,10 +77,10 @@ Starts `serve` on a free port (or `--port`), runs two thinking-mode turns agains
 ### Coding ledger
 
 ```bash
-python -m harness.coding --model <id>
+python -m harness.coding --model <id> [--mtp on|off]
 ```
 
-Starts `serve` and sets `enable_thinking` true on the bare model id. The workspace begins with `notes/brief.txt`. The model uses `glob`, `grep_search`, `read_file`, `write_file`, `edit`, and `run_shell_command` to write `ledger.py`. A pytest file outside the workspace is the result. Exit 0 means that suite passed and each of those tools returned successfully. Prints each request's prefill and decode line. Takes the machine lock. Not part of `pytest`. `tests/test_coding_harness.py` and `tests/test_coding_tools.py` check the request and the tools without a listener. The tool contract is [coding-primitives.md](coding-primitives.md).
+Starts `serve` and sets `enable_thinking` true on the bare model id. `--mtp on` is the default and sends `mtp` true. `--mtp off` sends `mtp` false. Thinking and the sampling card stay as they are either way. The workspace begins with `notes/brief.txt`. The model uses `glob`, `grep_search`, `read_file`, `write_file`, `edit`, and `run_shell_command` to write `ledger.py`. A pytest file outside the workspace is the result. Exit 0 means that suite passed and each of those tools returned successfully. Prints each request's prefill and decode line. Takes the machine lock. Not part of `pytest`. `tests/test_coding_harness.py` and `tests/test_coding_tools.py` check the request and the tools without a listener. The tool contract is [coding-primitives.md](coding-primitives.md).
 
 ### Worktree summarization
 
@@ -96,7 +96,7 @@ Starts `serve`, checks out a detached worktree of `main` under `artifacts/`, and
 python -m harness.benchmarks --model <id> [--limit 30|100]
 ```
 
-Scores IFEval, GSM8K, and HumanEval against `serve`. The `model` field is that id. Thinking stays off. Omitted sampling fields are filled from `GET /v1/models` row `<id>:instruct`. A CLI flag overrides that field. The checker reads `message.content`. `--limit 30` scores the first 30 rows and writes the smoke section. `--limit 100` writes the sample of 100. A run with no limit scores the smoke, then the full sets. Not part of `pytest`. Each finished suite is written into `docs/<pipeline>/benchmarks.md`.
+Scores IFEval, GSM8K, and HumanEval against `serve`. The `model` field is that id. Thinking stays off. Temperature is 0 and the presence penalty is 0, so the draw is an argmax and the instruct card is not applied. A CLI flag overrides a sampling field. IFEval sends the dataset prompt and scores it with the published strict and loose checkers. GSM8K sends five shots from the training split, in file order, as `Question` / `Answer`, and counts a reply only when its first `####` number matches. HumanEval sends the instruct prompt and tests the continuation after the published signature. A new top-level `class`, `def`, `#`, `if`, or `print` ends that continuation. The checker reads `message.content`. `--limit 30` scores the first 30 rows and writes the smoke section. `--limit 100` writes the sample of 100. A run with no limit scores the smoke, then the full sets. Not part of `pytest`. Each finished suite is written into `docs/<pipeline>/benchmarks.md`.
 
 ### Language pipeline agent
 

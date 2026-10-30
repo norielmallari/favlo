@@ -27,6 +27,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen38-27b/research/ffn-fp8-budget.md](qwen38-27b/research/ffn-fp8-budget.md) | Qwen3.8-27B feed-forward fp8 budget measurement |
 | [qwen38-27b/research/span-draft.md](qwen38-27b/research/span-draft.md) | Qwen3.8-27B two-token draft measurement |
 | [qwen38-27b/research/kernel-ceilings.md](qwen38-27b/research/kernel-ceilings.md) | Qwen3.8-27B isolated projection sum |
+| [qwen38-27b/research/mtp-window.md](qwen38-27b/research/mtp-window.md) | Qwen3.8-27B MTP verify window |
 | [qwen38-27b/research/recorded-forward.md](qwen38-27b/research/recorded-forward.md) | Qwen3.8-27B recorded prefill and decode sums |
 | [qwen38-27b/research/mixed-agent-forward.md](qwen38-27b/research/mixed-agent-forward.md) | Qwen3.8-27B mixed-record agent forward |
 | [qwen38-27b/research/int8-prefill.md](qwen38-27b/research/int8-prefill.md) | Qwen3.8-27B int8 prefill recorded rates |

@@ -1,6 +1,6 @@
 # Two-token draft
 
-Measurement note for the `qwen38-27b` pipeline. The serving contract is [../README.md](../README.md). Decode draws one token at a time and does not substitute the draft. This file records the paired run that fixed that choice.
+Measurement note for the `qwen38-27b` pipeline. The serving contract is [../README.md](../README.md). This file records the paired run that rejected a kept two-token state. A greedy request with `mtp` true verifies drafts from the parent DeltaNet state instead.
 
 ## Remainder
 
@@ -15,7 +15,7 @@ On one prompt, a two-token projection matched the serial argmax for each of the 
 
 ## Rule
 
-Prefill still fills the MTP plane. Decode does not keep the two-token state and does not emit the draft token. The span kernels remain in the shader library. `kernels` checks a synthetic two-row fp4 dot. That check is not the completion comparison.
+Prefill still fills the MTP plane. Decode does not keep the two-token state. A greedy request with `mtp` true emits the accepted prefix after restoring the parent state. `mtp` false stays the serial argmax. The span kernels remain in the shader library. `kernels` checks a synthetic two-row fp4 dot. That check is not the completion comparison.
 
 ## Command
 
@@ -39,3 +39,5 @@ The completion rows below are the recorded paired run in the pipeline note and i
 ## Corrections
 
 Later finds are appended here. The sections above stay as committed.
+
+30 October 2026. Decode verify now runs the span kernels for the first two feeds. A full accept keeps that state. A rejected tail still restores the snapshot and replays the accepted prefix. The tenth-token change in the rule above was a rejected token left in the DeltaNet state.

@@ -1,11 +1,13 @@
 """Build one Python module through ``serve`` and grade it.
 
 The model id is the pipeline name. The request sets ``enable_thinking`` true
-and leaves every other sampling field unset. The task uses every coding tool.
+and leaves every other sampling field unset. ``--mtp`` sends the draft flag
+on its own. The task uses every coding tool.
 Exit 0 means the hidden suite passed and each tool returned successfully.
 Each request's server prefill and decode lines are the thinking series.
 
-    uv run python -m harness.coding --model qwen38-27b
+    uv run python -m harness.coding --model qwen38-27b --mtp on
+    uv run python -m harness.coding --model qwen38-27b --mtp off
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Grade a Python file written through serve.")
     parser.add_argument("--model", required=True)
+    parser.add_argument("--mtp", choices=("on", "off"), default="on")
     parser.add_argument("--max-memory", default=None, help="serve memory cap, such as 16GiB")
     args = parser.parse_args(argv)
     stem = args.model.partition(":")[0]
@@ -46,7 +49,14 @@ def main(argv: list[str] | None = None) -> int:
     server = Server(args.max_memory)
     try:
         server.start()
-        calls = run_session(server.port, stem, Request(enable_thinking=True), workspace)
+        print(f"mtp {args.mtp}", flush=True)
+        calls = run_session(
+            server.port,
+            stem,
+            Request(enable_thinking=True),
+            workspace,
+            mtp=args.mtp == "on",
+        )
         _print_rates(server.log)
         result = grade(workspace)
         absent = missing_tools(calls)

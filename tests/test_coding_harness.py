@@ -24,9 +24,15 @@ def test_thinking_body_omits_sampling_fields() -> None:
         Request(enable_thinking=True),
         {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "presence_penalty": 0.0},
     )
-    body = chat_body("qwen38-27b:thinking", [{"role": "user", "content": "write it"}], request)
+    body = chat_body(
+        "qwen38-27b:thinking",
+        [{"role": "user", "content": "write it"}],
+        request,
+        mtp=True,
+    )
     assert body["model"] == "qwen38-27b"
     assert body["enable_thinking"] is True
+    assert body["mtp"] is True
     assert "temperature" not in body
     assert "top_p" not in body
     assert "top_k" not in body
@@ -35,6 +41,14 @@ def test_thinking_body_omits_sampling_fields() -> None:
     assert body["tools"]
     names = [item["function"]["name"] for item in body["tools"]]
     assert names == list(REQUIRED_TOOLS)
+    off = chat_body(
+        "qwen38-27b:thinking",
+        [{"role": "user", "content": "write it"}],
+        request,
+        mtp=False,
+    )
+    assert off["mtp"] is False
+    assert off["enable_thinking"] is True
 
 
 def test_path_stays_inside_the_workspace(tmp_path: Path) -> None:

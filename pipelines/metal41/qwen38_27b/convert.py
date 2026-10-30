@@ -3,7 +3,7 @@
 Every matrix is fp4 E2M1 with an E8M0 scale every 32 along K, except language
 feed-forward layers selected by ``--ffn-fp8``. Those three matrices are fp8
 E4M3. One-dimensional parameters and the depthwise convolution stay float16.
-The MTP feed-forward stays fp4.
+The MTP feed-forward stays fp4 until ``repack_mtp_fp8`` rewrites those matrices.
 """
 
 from __future__ import annotations
@@ -359,6 +359,109 @@ def quantize(src: Path, output: Path | None = None, *, ffn_fp8: float | None = N
         src_file = src / extra
         if src_file.is_file():
             target = output / extra
-            if not target.exists():
-                shutil.copyfile(src_file, target)
+        if not target.exists():
+            shutil.copyfile(src_file, target)
     return output
+
+
+def repack_mtp_fp8(record: Path, source: Path) -> Path:
+    """Replace fp4 MTP matrices in ``record`` with fp8 packed from the BF16 checkout.
+
+    Only ``mtp.*`` matrices are read from ``source``. The rewritten resident file
+    drops the fp4 bytes. Each new span is what the loader copies into memory.
+    A record whose MTP matrices are already fp8 is left in place.
+    """
+    from qwen38_27b.budget import tensor_span
+
+    record = record.expanduser().resolve()
+    source = source.expanduser().resolve()
+    manifest_path = record / "manifest.json"
+    resident = record / "resident.bin"
+    if not manifest_path.is_file() or not resident.is_file():
+        message = f"{record.name} has no packed record"
+        raise FileNotFoundError(message)
+    manifest = json.loads(manifest_path.read_text())
+    tensors: dict[str, dict] = manifest["tensors"]
+    pending = [
+        name
+        for name, entry in tensors.items()
+        if name.startswith("mtp.") and str(entry.get("dtype")) == "fp4"
+    ]
+    if not pending:
+        print("mtp fp8", flush=True)
+        return record
+    weight_map = _weight_map(source)
+    missing = [name for name in pending if name not in weight_map]
+    if missing:
+        message = f"{missing[0]} is not in the BF16 checkout"
+        raise RuntimeError(message)
+    by_shard: dict[str, list[str]] = {}
+    for name in pending:
+        by_shard.setdefault(weight_map[name], []).append(name)
+    packed: dict[str, tuple[bytes, dict]] = {}
+    for shard, names in sorted(by_shard.items()):
+        path = source / shard
+        header, base = _header(path)
+        print(f"shard {shard}", flush=True)
+        for name in names:
+            array = _load(path, header, base, name)
+            print(f"  {name}", flush=True)
+            packed[name] = _fp8_entry(array)
+            del array
+    free = shutil.disk_usage(record).free
+    old_mtp = sum(tensor_span(tensors[name]) for name in pending)
+    new_mtp = sum(len(blob) for blob, _body in packed.values())
+    need = resident.stat().st_size - old_mtp + new_mtp + 4096
+    if free < need:
+        message = f"need {need} free bytes to rewrite the resident file"
+        raise RuntimeError(message)
+    ordered = sorted(tensors, key=lambda name: int(tensors[name]["offset"]))
+    fresh = record / "resident.bin.new"
+    updated: dict[str, dict] = {}
+    cursor = 0
+    with resident.open("rb") as src, fresh.open("wb") as dst:
+        for name in ordered:
+            pad = _align(cursor) - cursor
+            if pad:
+                dst.write(b"\x00" * pad)
+                cursor += pad
+            if name in packed:
+                blob, body = packed[name]
+                updated[name] = {**body, "file": "resident.bin", "offset": cursor}
+                dst.write(blob)
+                cursor += len(blob)
+                continue
+            entry = tensors[name]
+            span = tensor_span(entry)
+            src.seek(int(entry["offset"]))
+            remaining = span
+            while remaining:
+                chunk = src.read(min(8 << 20, remaining))
+                if len(chunk) != min(8 << 20, remaining):
+                    message = f"{name} ended early"
+                    raise RuntimeError(message)
+                dst.write(chunk)
+                remaining -= len(chunk)
+            updated[name] = {**entry, "offset": cursor}
+            cursor += span
+        dst.flush()
+        os.fsync(dst.fileno())
+    if fresh.stat().st_size != cursor:
+        message = "resident rewrite length does not match"
+        raise RuntimeError(message)
+    backup = record / "resident.bin.bak"
+    os.replace(resident, backup)
+    try:
+        os.replace(fresh, resident)
+        manifest["tensors"] = updated
+        manifest["mtp_weight"] = "fp8"
+        temporary = manifest_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(manifest))
+        os.replace(temporary, manifest_path)
+    except Exception:
+        if backup.exists():
+            os.replace(backup, resident)
+        raise
+    backup.unlink()
+    print(f"mtp fp8 {len(pending)}", flush=True)
+    return record

@@ -43,3 +43,5 @@ Later finds are appended here. The sections above stay as committed.
 23 October 2026. The down projection now uses `prefill_fp4_m32` and `prefill_fp8_m32`. That chunk's projection bandwidth ceiling is 834 tok/s, and 816 tok/s with the 2048-key score and value reads. The timed set sums to 5321.3 ms, 385 tok/s.
 
 23 October 2026. A full chunk no longer clears the norm buffer or the half tile, and it submits every 4 layers. The timed set sums to 5245.3 ms, 390 tok/s.
+
+30 October 2026. A full-accept MTP window on an M5 Pro with 48 GB sums to 146.7 ms, 20.45 tok/s. The bandwidth ceiling of that window is 135.3 ms, 22.2 tok/s, at the 254.6 GB/s copy in [../ceilings.md](../ceilings.md). The table is in that note. The isolated fp4 sum above is not this window.

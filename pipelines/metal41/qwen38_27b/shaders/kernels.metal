@@ -1509,22 +1509,71 @@ kernel void ffn_gate_up_span2(
     uint lane [[thread_index_in_simdgroup]],
     uint job [[threadgroup_position_in_grid]])
 {
-    float s0, s1;
-    if (job < rows) {
-        fp4_span2_row(act0, act1, gate_w, gate_s, job, inner, lane, s0, s1);
-        if (lane == 0u) {
-            gate[job] = s0;
-            gate[rows + job] = s1;
-        }
+    // Four rows per group, one load of each weight word, two activations.
+    // The second token is `rows` floats above the first.
+    uint groups = rows >> 2;
+    if (job >= groups * 2u) {
         return;
     }
-    uint row = job - rows;
-    if (row < rows) {
-        fp4_span2_row(act0, act1, up_w, up_s, row, inner, lane, s0, s1);
-        if (lane == 0u) {
-            up[row] = s0;
-            up[rows + row] = s1;
+    uint up_matrix = job >= groups ? 1u : 0u;
+    uint row0 = (job - up_matrix * groups) << 2;
+    device const uchar* weights = up_matrix ? up_w : gate_w;
+    device const uchar* scales = up_matrix ? up_s : gate_s;
+    device float* dest = up_matrix ? up : gate;
+    uint words = inner >> 3;
+    uint stride = inner >> 1;
+    uint blocks = inner >> 5;
+    device const uint* p0 = (device const uint*)(weights + row0 * stride);
+    device const uint* p1 = (device const uint*)(weights + (row0 + 1u) * stride);
+    device const uint* p2 = (device const uint*)(weights + (row0 + 2u) * stride);
+    device const uint* p3 = (device const uint*)(weights + (row0 + 3u) * stride);
+    device const uchar* s0 = scales + row0 * blocks;
+    device const uchar* s1 = scales + (row0 + 1u) * blocks;
+    device const uchar* s2 = scales + (row0 + 2u) * blocks;
+    device const uchar* s3 = scales + (row0 + 3u) * blocks;
+    float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+    float b0 = 0.0f, b1 = 0.0f, b2 = 0.0f, b3 = 0.0f;
+    for (uint i = lane; i < words; i += 32u) {
+        uint w0 = p0[i];
+        uint w1 = p1[i];
+        uint w2 = p2[i];
+        uint w3 = p3[i];
+        float f0 = e8m0_code(s0[i >> 2]);
+        float f1 = e8m0_code(s1[i >> 2]);
+        float f2 = e8m0_code(s2[i >> 2]);
+        float f3 = e8m0_code(s3[i >> 2]);
+        uint base = i << 3;
+        for (uint n = 0u; n < 8u; ++n) {
+            float x0 = act0[base + n];
+            float x1 = act1[base + n];
+            uint shift = n * 4u;
+            a0 += fp4_e2m1((w0 >> shift) & 0xFu) * f0 * x0;
+            a1 += fp4_e2m1((w1 >> shift) & 0xFu) * f1 * x0;
+            a2 += fp4_e2m1((w2 >> shift) & 0xFu) * f2 * x0;
+            a3 += fp4_e2m1((w3 >> shift) & 0xFu) * f3 * x0;
+            b0 += fp4_e2m1((w0 >> shift) & 0xFu) * f0 * x1;
+            b1 += fp4_e2m1((w1 >> shift) & 0xFu) * f1 * x1;
+            b2 += fp4_e2m1((w2 >> shift) & 0xFu) * f2 * x1;
+            b3 += fp4_e2m1((w3 >> shift) & 0xFu) * f3 * x1;
         }
+    }
+    float o0 = simd_sum(a0);
+    float o1 = simd_sum(a1);
+    float o2 = simd_sum(a2);
+    float o3 = simd_sum(a3);
+    float p0s = simd_sum(b0);
+    float p1s = simd_sum(b1);
+    float p2s = simd_sum(b2);
+    float p3s = simd_sum(b3);
+    if (lane == 0u) {
+        dest[row0] = o0;
+        dest[row0 + 1u] = o1;
+        dest[row0 + 2u] = o2;
+        dest[row0 + 3u] = o3;
+        dest[rows + row0] = p0s;
+        dest[rows + row0 + 1u] = p1s;
+        dest[rows + row0 + 2u] = p2s;
+        dest[rows + row0 + 3u] = p3s;
     }
 }
 
