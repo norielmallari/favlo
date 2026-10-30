@@ -1,8 +1,8 @@
-"""Two-token language step. Each fp4 weight row is read once.
+"""Language step for two or three tokens. Each fp4 weight row is read once.
 
-The second residual is already known at the start of a layer, so the projections
+Every residual is already known at the start of a layer, so the projections
 share one read. The Gated DeltaNet recurrence and the attention mix still run
-in token order. A third draft token stays on the serial step.
+in token order. A feed past the third stays on the serial step.
 """
 
 from __future__ import annotations
@@ -29,45 +29,61 @@ from qwen38_27b.layout import (
 class _Span:
     def __init__(self, session: Any) -> None:
         zeros = session.zeros
-        self.hidden = zeros(2 * HIDDEN * 4)
-        self.normed = zeros(2 * HIDDEN * 4)
-        self.qkv = zeros(2 * MIX * 4)
-        self.z = zeros(2 * max(Z_WIDTH, INTERMEDIATE) * 4)
-        self.a = zeros(2 * AB * 4)
-        self.b = zeros(2 * AB * 4)
-        self.y = zeros(2 * max(Z_WIDTH, ATTN_OUT, INTERMEDIATE) * 4)
-        self.query = zeros(2 * Q_PROJ * 4)
-        self.q = zeros(2 * ATTN_OUT * 4)
-        self.kv = zeros(2 * KV_PROJ * 4)
-        self.vv = zeros(2 * KV_PROJ * 4)
-        self.gate = zeros(2 * ATTN_OUT * 4)
-        self.out = zeros(2 * HIDDEN * 4)
+        wide = 3
+        self.hidden = zeros(wide * HIDDEN * 4)
+        self.normed = zeros(wide * HIDDEN * 4)
+        self.qkv = zeros(wide * MIX * 4)
+        self.z = zeros(wide * max(Z_WIDTH, INTERMEDIATE) * 4)
+        self.a = zeros(wide * AB * 4)
+        self.b = zeros(wide * AB * 4)
+        self.y = zeros(wide * max(Z_WIDTH, ATTN_OUT, INTERMEDIATE) * 4)
+        self.query = zeros(wide * Q_PROJ * 4)
+        self.q = zeros(wide * ATTN_OUT * 4)
+        self.kv = zeros(wide * KV_PROJ * 4)
+        self.vv = zeros(wide * KV_PROJ * 4)
+        self.gate = zeros(wide * ATTN_OUT * 4)
+        self.out = zeros(wide * HIDDEN * 4)
 
 
 def span_pair(runtime: Any, token0: int, token1: int, pos: int) -> None:
     """Advance two tokens from ``pos``. Both residuals stay in ``runtime._span``."""
+    _advance(runtime, [int(token0), int(token1)], pos)
+
+
+def span_triple(runtime: Any, token0: int, token1: int, token2: int, pos: int) -> None:
+    """Advance three tokens from ``pos``. The residuals stay in ``runtime._span``."""
+    _advance(runtime, [int(token0), int(token1), int(token2)], pos)
+
+
+def _advance(runtime: Any, tokens: list[int], pos: int) -> None:
     span = _buffers(runtime)
+    count = len(tokens)
     runtime.session.begin()
     try:
-        runtime._embed(int(token0))
-        _copy(runtime, runtime.hidden, 0, span.hidden, 0, HIDDEN)
-        runtime._embed(int(token1))
-        _copy(runtime, runtime.hidden, 0, span.hidden, HIDDEN * 4, HIDDEN)
+        for index, token in enumerate(tokens):
+            runtime._embed(int(token))
+            _copy(runtime, runtime.hidden, 0, span.hidden, index * HIDDEN * 4, HIDDEN)
         for layer, kind in enumerate(runtime.layer_types):
             if layer > 0 and layer % 4 == 0:
                 runtime.session.submit()
-            _rms(runtime, span.hidden, runtime.weight(layer, "input_layernorm.weight"), span.normed)
+            _rms(runtime, span.hidden, runtime.weight(layer, "input_layernorm.weight"), span.normed, count)
             if kind == "full_attention":
-                _attend(runtime, span, layer, pos)
+                _attend(runtime, span, layer, pos, count)
             else:
-                _gdn(runtime, span, layer)
-            _rms(runtime, span.hidden, runtime.weight(layer, "post_attention_layernorm.weight"), span.normed)
-            _ffn(runtime, span, layer)
+                _gdn(runtime, span, layer, count)
+            _rms(
+                runtime,
+                span.hidden,
+                runtime.weight(layer, "post_attention_layernorm.weight"),
+                span.normed,
+                count,
+            )
+            _ffn(runtime, span, layer, count)
         runtime.session.end()
     except Exception:
         runtime.session.finish()
         raise
-    runtime.filled = int(pos) + 2
+    runtime.filled = int(pos) + count
 
 
 def load_row(runtime: Any, index: int) -> None:
@@ -90,16 +106,15 @@ def _buffers(runtime: Any) -> _Span:
     return span
 
 
-def _gdn(runtime: Any, span: _Span, layer: int) -> None:
+def _gdn(runtime: Any, span: _Span, layer: int, count: int) -> None:
     qkv_w, qkv_s = runtime._pair(runtime.weight(layer, "linear_attn.in_proj_qkv.weight"))
     z_w, z_s = runtime._pair(runtime.weight(layer, "linear_attn.in_proj_z.weight"))
     a_w, a_s = runtime._pair(runtime.weight(layer, "linear_attn.in_proj_a.weight"))
     b_w, b_s = runtime._pair(runtime.weight(layer, "linear_attn.in_proj_b.weight"))
     runtime.session.encode(
-        "gdn_in_proj_span2",
+        "gdn_in_proj_span3" if count == 3 else "gdn_in_proj_span2",
         [
-            (span.normed, 0),
-            (span.normed, HIDDEN * 4),
+            *_acts(span, count),
             qkv_w,
             qkv_s,
             z_w,
@@ -122,7 +137,7 @@ def _gdn(runtime: Any, span: _Span, layer: int) -> None:
     runtime.session.encode(
         "gdn_conv_rows",
         [(runtime.history, slot * 3 * MIX * 2), (span.qkv, 0), (weight, woff), (span.qkv, 0)],
-        [_u32(2), _u32(MIX)],
+        [_u32(count), _u32(MIX)],
         (MIX // 256, 1, 1),
         (256, 1, 1),
     )
@@ -142,15 +157,15 @@ def _gdn(runtime: Any, span: _Span, layer: int) -> None:
             (norm, noff),
             (span.y, 0),
         ],
-        [_f32(EPS), _u32(2)],
+        [_f32(EPS), _u32(count)],
         (LINEAR_V, 1, 1),
         (128, 1, 1),
     )
-    _project(runtime, span.y, Z_WIDTH, runtime.weight(layer, "linear_attn.out_proj.weight"), span.out)
-    _residual(runtime, span)
+    _project(runtime, span.y, Z_WIDTH, runtime.weight(layer, "linear_attn.out_proj.weight"), span.out, count)
+    _residual(runtime, span, count)
 
 
-def _attend(runtime: Any, span: _Span, layer: int, pos: int) -> None:
+def _attend(runtime: Any, span: _Span, layer: int, pos: int, count: int) -> None:
     from qwen38_27b.attn import attend_plane
 
     q_name = runtime.weight(layer, "self_attn.q_proj.weight")
@@ -161,10 +176,9 @@ def _attend(runtime: Any, span: _Span, layer: int, pos: int) -> None:
         k_w, k_s = runtime._pair(k_name)
         v_w, v_s = runtime._pair(v_name)
         runtime.session.encode(
-            "attn_qkv_span2",
+            "attn_qkv_span3" if count == 3 else "attn_qkv_span2",
             [
-                (span.normed, 0),
-                (span.normed, HIDDEN * 4),
+                *_acts(span, count),
                 q_w,
                 q_s,
                 k_w,
@@ -180,21 +194,21 @@ def _attend(runtime: Any, span: _Span, layer: int, pos: int) -> None:
             (32, 1, 1),
         )
     else:
-        _gemv_rows(runtime, span.normed, HIDDEN, q_name, span.query, Q_PROJ)
-        _gemv_rows(runtime, span.normed, HIDDEN, k_name, span.kv, KV_PROJ)
-        _gemv_rows(runtime, span.normed, HIDDEN, v_name, span.vv, KV_PROJ)
+        _gemv_rows(runtime, span.normed, HIDDEN, q_name, span.query, Q_PROJ, count)
+        _gemv_rows(runtime, span.normed, HIDDEN, k_name, span.kv, KV_PROJ, count)
+        _gemv_rows(runtime, span.normed, HIDDEN, v_name, span.vv, KV_PROJ, count)
     runtime.session.encode(
         "split_q_gate_rows",
         [(span.query, 0), (span.q, 0), (span.gate, 0)],
-        [_u32(2)],
-        (2 * Q_HEADS, 1, 1),
+        [_u32(count)],
+        (count * Q_HEADS, 1, 1),
         (256, 1, 1),
     )
     q_buf, q_off, _entry = runtime.locate(runtime.weight(layer, "self_attn.q_norm.weight"))
     k_buf, k_off, _entry = runtime.locate(runtime.weight(layer, "self_attn.k_norm.weight"))
     rope = getattr(runtime, "_rope_ids", None)
     slot = runtime.full_slot[layer]
-    for token in (0, 1):
+    for token in range(count):
         if rope is None:
             angles = (pos + token, pos + token, pos + token)
         else:
@@ -223,27 +237,28 @@ def _attend(runtime: Any, span: _Span, layer: int, pos: int) -> None:
         count=1,
         slot=slot,
     )
-    _copy(runtime, span.q, ATTN_OUT * 4, span.q, 0, ATTN_OUT)
-    _copy(runtime, span.kv, KV_PROJ * 4, span.kv, 0, KV_PROJ)
-    _copy(runtime, span.vv, KV_PROJ * 4, span.vv, 0, KV_PROJ)
-    _copy(runtime, span.gate, ATTN_OUT * 4, span.gate, 0, ATTN_OUT)
-    attend_plane(
-        runtime,
-        query=span.q,
-        key=span.kv,
-        value=span.vv,
-        gate=span.gate,
-        dest=span.out,
-        pos0=pos + 1,
-        count=1,
-        slot=slot,
-    )
-    _copy(runtime, span.out, 0, span.y, ATTN_OUT * 4, ATTN_OUT)
-    _project(runtime, span.y, ATTN_OUT, runtime.weight(layer, "self_attn.o_proj.weight"), span.out)
-    _residual(runtime, span)
+    for token in range(1, count):
+        _copy(runtime, span.q, token * ATTN_OUT * 4, span.q, 0, ATTN_OUT)
+        _copy(runtime, span.kv, token * KV_PROJ * 4, span.kv, 0, KV_PROJ)
+        _copy(runtime, span.vv, token * KV_PROJ * 4, span.vv, 0, KV_PROJ)
+        _copy(runtime, span.gate, token * ATTN_OUT * 4, span.gate, 0, ATTN_OUT)
+        attend_plane(
+            runtime,
+            query=span.q,
+            key=span.kv,
+            value=span.vv,
+            gate=span.gate,
+            dest=span.out,
+            pos0=pos + token,
+            count=1,
+            slot=slot,
+        )
+        _copy(runtime, span.out, 0, span.y, token * ATTN_OUT * 4, ATTN_OUT)
+    _project(runtime, span.y, ATTN_OUT, runtime.weight(layer, "self_attn.o_proj.weight"), span.out, count)
+    _residual(runtime, span, count)
 
 
-def _ffn(runtime: Any, span: _Span, layer: int) -> None:
+def _ffn(runtime: Any, span: _Span, layer: int, count: int) -> None:
     runtime.prepare_ffn(layer)
     gate = runtime.weight(layer, "mlp.gate_proj.weight")
     up = runtime.weight(layer, "mlp.up_proj.weight")
@@ -267,10 +282,26 @@ def _ffn(runtime: Any, span: _Span, layer: int) -> None:
             (INTERMEDIATE // 4 * 2, 1, 1),
             (32, 1, 1),
         )
+        if count == 3:
+            runtime.session.encode(
+                "ffn_gate_up",
+                [
+                    (span.normed, 2 * HIDDEN * 4),
+                    gate_w,
+                    gate_s,
+                    up_w,
+                    up_s,
+                    (span.y, 2 * INTERMEDIATE * 4),
+                    (span.z, 2 * INTERMEDIATE * 4),
+                ],
+                [_u32(INTERMEDIATE), _u32(HIDDEN)],
+                (INTERMEDIATE * 2, 1, 1),
+                (32, 1, 1),
+            )
     else:
-        _gemv_rows(runtime, span.normed, HIDDEN, gate, span.y, INTERMEDIATE)
-        _gemv_rows(runtime, span.normed, HIDDEN, up, span.z, INTERMEDIATE)
-    for token in (0, 1):
+        _gemv_rows(runtime, span.normed, HIDDEN, gate, span.y, INTERMEDIATE, count)
+        _gemv_rows(runtime, span.normed, HIDDEN, up, span.z, INTERMEDIATE, count)
+    for token in range(count):
         runtime.session.encode(
             "swiglu_f32",
             [
@@ -282,8 +313,8 @@ def _ffn(runtime: Any, span: _Span, layer: int) -> None:
             (INTERMEDIATE // 256, 1, 1),
             (256, 1, 1),
         )
-    _project(runtime, span.y, INTERMEDIATE, down, span.out)
-    for token in (0, 1):
+    _project(runtime, span.y, INTERMEDIATE, down, span.out, count)
+    for token in range(count):
         runtime.session.encode(
             "residual_rows",
             [
@@ -297,16 +328,34 @@ def _ffn(runtime: Any, span: _Span, layer: int) -> None:
         )
 
 
-def _project(runtime: Any, src: Any, width: int, name: str, dest: Any) -> None:
+def _project(runtime: Any, src: Any, width: int, name: str, dest: Any, count: int) -> None:
     buf, offset, entry = runtime.locate(name)
     rows, inner = (int(value) for value in entry["stored_shape"])
     if int(width) != int(inner):
         message = f"{name} span width {width} is not inner {inner}"
         raise RuntimeError(message)
     if runtime._dtype(name) != "fp4":
-        _gemv_rows(runtime, src, inner, name, dest, rows)
+        _gemv_rows(runtime, src, inner, name, dest, rows, count)
         return
     scale = runtime.scale_offset(entry, offset)
+    if count == 3:
+        runtime.session.encode(
+            "gemv_fp4_span3",
+            [
+                (src, 0),
+                (src, inner * 4),
+                (src, 2 * inner * 4),
+                (buf, offset),
+                (buf, scale),
+                (dest, 0),
+                (dest, rows * 4),
+                (dest, 2 * rows * 4),
+            ],
+            [_u32(rows), _u32(inner)],
+            (rows // 4, 1, 1),
+            (32, 1, 1),
+        )
+        return
     runtime.session.encode(
         "gemv_fp4_span2",
         [
@@ -324,9 +373,9 @@ def _project(runtime: Any, src: Any, width: int, name: str, dest: Any) -> None:
 
 
 def _gemv_rows(
-    runtime: Any, src: Any, src_width: int, name: str, dest: Any, dest_width: int
+    runtime: Any, src: Any, src_width: int, name: str, dest: Any, dest_width: int, count: int
 ) -> None:
-    for token in (0, 1):
+    for token in range(count):
         _gemv_at(
             runtime,
             src,
@@ -362,8 +411,8 @@ def _gemv_at(runtime: Any, act: Any, act_off: int, name: str, dest: Any, dest_of
     )
 
 
-def _residual(runtime: Any, span: _Span) -> None:
-    for token in (0, 1):
+def _residual(runtime: Any, span: _Span, count: int) -> None:
+    for token in range(count):
         runtime.session.encode(
             "residual_rows",
             [
@@ -377,15 +426,19 @@ def _residual(runtime: Any, span: _Span) -> None:
         )
 
 
-def _rms(runtime: Any, src: Any, name: str, dest: Any) -> None:
+def _rms(runtime: Any, src: Any, name: str, dest: Any, count: int) -> None:
     buf, offset, _entry = runtime.locate(name)
     runtime.session.encode(
         "rmsnorm_rows",
         [(src, 0), (buf, offset), (dest, 0)],
-        [_u32(HIDDEN), _f32(EPS), _u32(2)],
-        (2, 1, 1),
+        [_u32(HIDDEN), _f32(EPS), _u32(count)],
+        (count, 1, 1),
         (256, 1, 1),
     )
+
+
+def _acts(span: _Span, count: int) -> list[tuple[Any, int]]:
+    return [(span.normed, token * HIDDEN * 4) for token in range(count)]
 
 
 def _copy(runtime: Any, src: Any, src_off: int, dest: Any, dest_off: int, count: int) -> None:

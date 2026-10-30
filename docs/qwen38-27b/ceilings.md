@@ -112,24 +112,18 @@ The sum is 5245.3 ms, 390 tok/s. That is the kernel ceiling for this set. A full
 
 ## MTP verify
 
-One full-accept window on the mixed record. The draft depth is 3, so the window feeds three tokens and emits three output tokens in steady state. The first two feeds share one read of each fp4 language weight. The third feed is one serial step. Twelve language feed-forward layers are fp8 and read those weights twice, once per token. Three draft passes read the MTP block, and the window reads `lm_head` six times: three drafts and three scores. Mixers, norms, and the attention window are outside this sum. Each time is one command buffer, then a wait, the median of five dispatches after one discarded sample, on an M5 Pro with 48 GB. The streaming bandwidth above is 254.6 GB/s.
+One full-accept window on the mixed record. The draft depth is 3, so the window feeds three tokens and emits three output tokens in steady state. Down, out, the Gated DeltaNet input, and attention q/k/v are `gemv_fp4_span3`, `gdn_in_proj_span3`, and `attn_qkv_span3`: one weight read for the three tokens. Gate and up of the first two tokens are `ffn_gate_up_span2`. The third token's gate and up are `ffn_gate_up`, a second read of those matrices. A three-activation gate/up kernel measured 1512.0 µs and is not the launch. Twelve language feed-forward layers are fp8 and read those weights once per token. Three draft passes read the MTP block, and the window reads `lm_head` six times. Mixers, norms, and the attention window are outside this sum. Each time is one command buffer, then a wait, the median of five dispatches after one discarded sample, on an M5 Pro with 48 GB. The streaming bandwidth above is 254.6 GB/s. The span3 rows below are from this window. The span2 and fp8 rows are the earlier measurements of those same kernels.
 
 | Kernel | Shape | Count | µs | ms |
 |---|---|---:|---:|---:|
 | `ffn_gate_up_span2` | 17408×5120, two tokens | 52 | 352.2 | 18.314 |
-| `gemv_fp4_span2` down | 5120×17408 | 52 | 224.7 | 11.684 |
-| `gdn_in_proj_span2` | fused | 48 | 222.0 | 10.656 |
-| `attn_qkv_span2` | fused | 16 | 193.6 | 3.098 |
-| `gemv_fp4_span2` out or o | 5120×6144 | 64 | 57.6 | 3.686 |
-| `gemv_fp8_x4` gate or up | 17408×5120 | 48 | 347.6 | 16.685 |
-| `gemv_fp8_x4` down | 5120×17408 | 24 | 333.1 | 7.994 |
-| `gdn_in_proj` | fused | 48 | 170.0 | 8.160 |
-| `gemv_fp4_x4` out or o | 5120×6144 | 64 | 49.1 | 3.142 |
-| `attn_qkv` | fused | 16 | 145.4 | 2.326 |
-| `ffn_gate_up` | 17408×5120 | 52 | 349.1 | 18.153 |
-| `gemv_fp4_x4` down | 5120×17408 | 52 | 209.1 | 10.873 |
-| `gemv_fp8_x4` gate or up, third token | 17408×5120 | 24 | 347.6 | 8.342 |
-| `gemv_fp8_x4` down, third token | 5120×17408 | 12 | 333.1 | 3.997 |
+| `ffn_gate_up` | 17408×5120, third token | 52 | 349.1 | 18.153 |
+| `gemv_fp4_span3` down | 5120×17408 | 52 | 285.1 | 14.825 |
+| `gdn_in_proj_span3` | fused | 48 | 378.0 | 18.144 |
+| `attn_qkv_span3` | fused | 16 | 241.0 | 3.856 |
+| `gemv_fp4_span3` out or o | 5120×6144 | 64 | 103.3 | 6.611 |
+| `gemv_fp8_x4` gate or up | 17408×5120 | 72 | 347.6 | 25.027 |
+| `gemv_fp8_x4` down | 5120×17408 | 36 | 333.1 | 11.992 |
 | `gemv_fp8_x4` fc | 5120×10240 | 3 | 214.9 | 0.645 |
 | `gemv_fp8_x4` q | 12288×5120 | 3 | 247.5 | 0.743 |
 | `gemv_fp8_x4` k or v | 1024×5120 | 6 | 27.1 | 0.163 |
@@ -138,6 +132,6 @@ One full-accept window on the mixed record. The draft depth is 3, so the window 
 | `gemv_fp8_x4` down, draft | 5120×17408 | 3 | 333.1 | 0.999 |
 | `gemv_fp4_x4` head | 248320×5120 | 6 | 2421.8 | 14.531 |
 
-The sum is 146.7 ms, 20.45 tok/s. That is the kernel ceiling for this window. `ffn_gate_up_span2` reads gate and up once for both tokens. The replaced one-row body of that kernel measured 2238.3 µs. Value uses the key measurement, the same shape.
+The sum is 136.5 ms, 21.98 tok/s. That is the kernel ceiling for this window.
 
-The language projections are 14,544,732,160 bytes, the MTP projections are 437,944,320 bytes, and `lm_head` is 675,430,400 bytes. The window reads the language image twice, the MTP image three times, and the head six times: 34,455,879,680 bytes. Divided by 254.6 GB/s that is 135.3 ms, 22.2 tok/s. That is the bandwidth ceiling. One language attention pass at context C moves 31232 C bytes, from the attention section above. Three passes at 4096 tokens add 383,778,816 bytes, 136.8 ms, 21.9 tok/s.
+One fp4 feed-forward image is 47,349,760 bytes. The 104 gate and up matrices are read twice: 9,848,750,080 bytes. The 52 down matrices are read once: 2,462,187,520 bytes. One fp8 feed-forward image is 91,914,240 bytes. Thirty-six of them, read three times, are 9,926,737,920 bytes. The language projections are 14,544,732,160 bytes, so the projections that are neither feed-forward are 3,849,256,960 bytes and are read once. The MTP projections are 437,944,320 bytes, read three times. `lm_head` is 675,430,400 bytes, read six times. The sum is 31,453,347,840 bytes. Divided by 254.6 GB/s that is 123.5 ms, 24.3 tok/s. That is the bandwidth ceiling. One language attention pass at context C moves 31232 C bytes, from the attention section above. Three passes at 4096 tokens add 383,778,816 bytes, 125.0 ms, 24.0 tok/s.

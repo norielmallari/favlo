@@ -38,3 +38,5 @@ The window feeds three tokens and emits three output tokens in a full accept. Ea
 ## Corrections
 
 Later finds are appended here. The sections above stay as committed.
+
+30 October 2026. The verify window now reads down, out, the Gated DeltaNet input, and attention q/k/v once for three tokens. Gate and up of the third token are a second read. The sum of that window is 136.5 ms, 21.98 tok/s, and its bandwidth ceiling is 123.5 ms, 24.3 tok/s. The table is in ../ceilings.md. A three-activation gate/up kernel measured 1512.0 µs and is not the launch.

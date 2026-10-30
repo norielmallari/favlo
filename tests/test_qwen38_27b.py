@@ -1535,13 +1535,19 @@ def test_draft_window_stops_before_feeding_a_stop_token() -> None:
 
 
 def test_mtp_flag_defaults_on() -> None:
-    from qwen38_27b.chat import _mtp_flag
+    from qwen38_27b.chat import _mtp_depth, _mtp_flag
 
     assert _mtp_flag({}) is True
     assert _mtp_flag({"mtp": False}) is False
     assert _mtp_flag({"mtp": True}) is True
     with pytest.raises(RuntimeError):
         _mtp_flag({"mtp": "yes"})
+    assert _mtp_depth({}) == 3
+    assert _mtp_depth({"mtp_depth": 4}) == 4
+    with pytest.raises(RuntimeError):
+        _mtp_depth({"mtp_depth": 0})
+    with pytest.raises(RuntimeError):
+        _mtp_depth({"mtp_depth": True})
 
 
 def test_repack_mtp_replaces_fp4_bytes(tmp_path: Path) -> None:

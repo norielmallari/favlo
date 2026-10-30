@@ -1,7 +1,8 @@
 """Greedy MTP verify for this pipeline.
 
-The head drafts three tokens from the current residual. The first two feeds
-share one fp4 weight read. A third feed is a serial step. The DeltaNet state
+The head drafts ``mtp_depth`` tokens from the current residual. Absent, that
+depth is three. The first three feeds share one fp4 weight read when three
+are present. Two feeds share one read. Each later feed is a serial step. The DeltaNet state
 and the convolution history are copied first. A rejected tail restores that copy
 and replays the accepted prefix, so
 the kept state is the serial state. Temperature 0 keeps a draft that matches
@@ -78,16 +79,18 @@ def verify(
     _extend_rope(runtime, pos, len(feeds))
     snap = _capture(runtime)
     from qwen38_27b.prefill import backbone_ids
-    from qwen38_27b.span import load_row, span_pair
+    from qwen38_27b.span import load_row, span_pair, span_triple
 
     try:
-        spanned = len(feeds) >= 2
+        span_n = 3 if len(feeds) >= 3 else (2 if len(feeds) >= 2 else 0)
         workspace = None
-        if spanned:
+        if span_n == 3:
+            span_triple(runtime, int(feeds[0]), int(feeds[1]), int(feeds[2]), pos)
+        elif span_n == 2:
             span_pair(runtime, int(feeds[0]), int(feeds[1]), pos)
         else:
             workspace = backbone_ids(runtime, feeds, pos)
-        nxt = _score(runtime, workspace, 0, draw, feeds, pos, spanned)
+        nxt = _score(runtime, workspace, 0, draw, feeds, pos, span_n)
         accepted = 0
         while accepted < len(expected) and int(nxt) == int(expected[accepted]):
             accepted += 1
@@ -95,12 +98,12 @@ def verify(
                 break
             if commit is not None:
                 commit(int(expected[accepted - 1]))
-            nxt = _score(runtime, workspace, accepted, draw, feeds, pos, spanned)
+            nxt = _score(runtime, workspace, accepted, draw, feeds, pos, span_n)
     except Exception:
         _restore(runtime, snap)
         raise
     keep = len(feeds) if accepted == len(feeds) else accepted + 1
-    if keep < len(feeds):
+    if keep < span_n or (span_n == 0 and keep < len(feeds)):
         _restore(runtime, snap)
         for offset, token in enumerate(feeds[:keep]):
             runtime.step(int(token), pos + offset, logits=False, rope=_rope_at(runtime, pos + offset))
@@ -108,7 +111,7 @@ def verify(
         runtime.filled = pos + keep
         if workspace is not None:
             _copy_hidden(runtime, workspace, keep - 1)
-        elif keep <= 2:
+        elif span_n and keep <= span_n:
             load_row(runtime, keep - 1)
     cursor = getattr(runtime, "_rope_next", None)
     if cursor is not None:
@@ -123,13 +126,13 @@ def _score(
     draw: Any,
     feeds: list[int],
     pos: int,
-    spanned: bool,
+    span_n: int,
 ) -> int:
-    if spanned and index < 2:
+    if span_n and index < span_n:
         from qwen38_27b.span import load_row
 
         load_row(runtime, index)
-    elif spanned:
+    elif span_n:
         runtime.step(
             int(feeds[index]),
             pos + index,

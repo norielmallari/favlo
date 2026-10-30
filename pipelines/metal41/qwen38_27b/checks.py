@@ -116,6 +116,35 @@ def check_fp4_span2(session: Session) -> None:
     _close("fp4 span2 b", session.download_f32(dest1, cols), (matrix @ act1).astype(np.float32), atol=1e-4)
 
 
+def check_fp4_span3(session: Session) -> None:
+    rng = np.random.default_rng(3)
+    cols, inner = 8, 256
+    acts = [rng.normal(scale=0.05, size=inner).astype(np.float32) for _ in range(3)]
+    weight = rng.normal(scale=0.05, size=(cols, inner)).astype(np.float32)
+    data, scales = quantize_fp4(weight)
+    dests = [session.zeros(cols * 4) for _ in range(3)]
+    session.dispatch(
+        "gemv_fp4_span3",
+        [
+            *[session.upload(act) for act in acts],
+            session.upload(data),
+            session.upload(scales),
+            *dests,
+        ],
+        [np.uint32(cols).tobytes(), np.uint32(inner).tobytes()],
+        (cols // 4, 1, 1),
+        (32, 1, 1),
+    )
+    matrix = dequant_fp4(data, scales, cols, inner)
+    for index, act in enumerate(acts):
+        _close(
+            f"fp4 span3 {index}",
+            session.download_f32(dests[index], cols),
+            (matrix @ act).astype(np.float32),
+            atol=1e-4,
+        )
+
+
 def _fp8_case(cols: int, inner: int, seed: int) -> tuple[np.ndarray, bytes, bytes, np.ndarray]:
     rng = np.random.default_rng(seed)
     activation = rng.normal(scale=0.05, size=inner).astype(np.float32)
@@ -607,6 +636,7 @@ CHECKS = (
     ("fp4 gemv", check_fp4_gemv),
     ("fp4 x4", check_fp4_x4),
     ("fp4 span2", check_fp4_span2),
+    ("fp4 span3", check_fp4_span3),
     ("fp8 prefill", check_fp8_prefill),
     ("fp8 x4", check_fp8_x4),
     ("fp8 gate up", check_fp8_gate_up),

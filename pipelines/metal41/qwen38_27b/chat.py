@@ -167,6 +167,17 @@ def _mtp_flag(body: dict[str, Any]) -> bool:
     raise RuntimeError(message)
 
 
+def _mtp_depth(body: dict[str, Any]) -> int:
+    """Draft length. Absent means three. Sampling settings do not change it."""
+    from qwen38_27b.speculate import DEPTH
+
+    raw = body.get("mtp_depth", DEPTH)
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        message = "mtp_depth must be a positive integer"
+        raise RuntimeError(message)
+    return raw
+
+
 def _limit(body: dict[str, Any]) -> int | None:
     """Request or settings cap. None means decode until a stop or the context ends."""
     from favlo.logs import output_token_limit
@@ -271,6 +282,7 @@ def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any)
             rng=draw,
             emit_tools=emit_tools,
             mtp=_mtp_flag(body),
+            mtp_depth=_mtp_depth(body),
         )
         return
     tokens = runtime.generate(
@@ -287,6 +299,7 @@ def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any)
         logit_bias=bias,
         rng=draw,
         mtp=_mtp_flag(body),
+        mtp_depth=_mtp_depth(body),
     )
     text = decode_text(runtime.root, tokens)
     reasoning, visible = split_thinking(text, thinking)
@@ -392,6 +405,7 @@ def _stream(
     logit_bias: dict[int, float] | None = None,
     rng: np.random.Generator | None = None,
     mtp: bool = True,
+    mtp_depth: int | None = None,
 ) -> None:
     decode = getattr(runtime, "decode", None)
     if not callable(decode):
@@ -464,6 +478,7 @@ def _stream(
             logit_bias=logit_bias,
             rng=rng,
             mtp=mtp,
+            mtp_depth=mtp_depth,
         )
         decoded = decode(produced) if produced else ""
         piece, previous = _stream_delta(decoded, previous, final=True)

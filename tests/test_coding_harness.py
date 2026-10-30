@@ -33,6 +33,7 @@ def test_thinking_body_omits_sampling_fields() -> None:
     assert body["model"] == "qwen38-27b"
     assert body["enable_thinking"] is True
     assert body["mtp"] is True
+    assert body["mtp_depth"] == 3
     assert "temperature" not in body
     assert "top_p" not in body
     assert "top_k" not in body
@@ -49,6 +50,16 @@ def test_thinking_body_omits_sampling_fields() -> None:
     )
     assert off["mtp"] is False
     assert off["enable_thinking"] is True
+    four = chat_body(
+        "qwen38-27b:thinking",
+        [{"role": "user", "content": "write it"}],
+        request,
+        mtp=True,
+        mtp_depth=4,
+    )
+    assert four["mtp"] is True
+    assert four["mtp_depth"] == 4
+    assert four["enable_thinking"] is True
 
 
 def test_path_stays_inside_the_workspace(tmp_path: Path) -> None:

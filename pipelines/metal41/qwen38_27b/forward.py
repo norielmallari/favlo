@@ -1076,6 +1076,7 @@ class Qwen38Runtime:
         logit_bias: dict[int, float] | None = None,
         rng: np.random.Generator | None = None,
         mtp: bool = False,
+        mtp_depth: int | None = None,
     ) -> list[int]:
         self._hit_limit = False
         self._temperature = float(temperature)
@@ -1165,6 +1166,14 @@ class Qwen38Runtime:
             self._mtp_accepts = 0
             self._mtp_tries = 0
             use_mtp = bool(mtp) and bool(getattr(self, "drafts", False))
+            from qwen38_27b.speculate import DEPTH
+
+            depth = DEPTH if mtp_depth is None else mtp_depth
+            if use_mtp and (isinstance(depth, bool) or not isinstance(depth, int) or depth < 1):
+                message = "mtp_depth must be a positive integer"
+                raise RuntimeError(message)
+            if use_mtp:
+                self._status(f"mtp depth {depth}")
             emitted = 0
             rope_cursor = getattr(self, "_rope_next", None)
 
@@ -1219,12 +1228,13 @@ class Qwen38Runtime:
                     break
                 speculated = False
                 if use_mtp and not forced_token and pos > 0:
-                    from qwen38_27b.speculate import DEPTH, draft_window, propose, verify
+                    from qwen38_27b.speculate import draft_window, propose, verify
 
                     room = decode_total - emitted
-                    need = pos + min(DEPTH, room)
+                    span = min(depth, room)
+                    need = pos + span
                     if room > 0 and self.ensure(need) and self.drafts:
-                        drafts = propose(self, chosen, pos - 1, min(DEPTH, room))
+                        drafts = propose(self, chosen, pos - 1, span)
                         feeds, expected = draft_window(chosen, drafts, stop, room)
                         if expected:
                             produced = list(out)

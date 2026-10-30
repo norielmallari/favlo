@@ -22,6 +22,7 @@ def chat_body(
     request: Request,
     *,
     mtp: bool,
+    mtp_depth: int = 3,
 ) -> dict[str, object]:
     """Bare model id, ``enable_thinking``, and the MTP flag. The listener fills the thinking card."""
     del request
@@ -33,6 +34,7 @@ def chat_body(
     )
     body["tools"] = TOOLS
     body["mtp"] = bool(mtp)
+    body["mtp_depth"] = int(mtp_depth)
     return body
 
 
@@ -43,6 +45,7 @@ def run_session(
     workspace: Path,
     *,
     mtp: bool,
+    mtp_depth: int = 3,
 ) -> list[str]:
     """Let the model use the tools, then return the ones that succeeded."""
     prepare_workspace(workspace)
@@ -50,7 +53,10 @@ def run_session(
     messages: list[dict[str, Any]] = [{"role": "user", "content": PROMPT}]
     try:
         for _ in range(SESSION_ROUNDS):
-            payload = _post(port, chat_body(model, messages, request, mtp=mtp))
+            payload = _post(
+                port,
+                chat_body(model, messages, request, mtp=mtp, mtp_depth=mtp_depth),
+            )
             message = _assistant(payload)
             messages.append(message)
             calls = message.get("tool_calls")

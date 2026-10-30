@@ -77,10 +77,10 @@ Starts `serve` on a free port (or `--port`), runs two thinking-mode turns agains
 ### Coding ledger
 
 ```bash
-python -m harness.coding --model <id> [--mtp on|off]
+python -m harness.coding --model <id> [--mtp on|off] [--mtp-depth <n>]
 ```
 
-Starts `serve` and sets `enable_thinking` true on the bare model id. `--mtp on` is the default and sends `mtp` true. `--mtp off` sends `mtp` false. Thinking and the sampling card stay as they are either way. The workspace begins with `notes/brief.txt`. The model uses `glob`, `grep_search`, `read_file`, `write_file`, `edit`, and `run_shell_command` to write `ledger.py`. A pytest file outside the workspace is the result. Exit 0 means that suite passed and each of those tools returned successfully. Prints each request's prefill and decode line. Takes the machine lock. Not part of `pytest`. `tests/test_coding_harness.py` and `tests/test_coding_tools.py` check the request and the tools without a listener. The tool contract is [coding-primitives.md](coding-primitives.md).
+Starts `serve` and sets `enable_thinking` true on the bare model id. `--mtp on` is the default and sends `mtp` true. `--mtp off` sends `mtp` false. `--mtp-depth` sends `mtp_depth`. Omitted, that length is 3. Thinking and the sampling card stay as they are either way. The workspace begins with `notes/brief.txt`. The model uses `glob`, `grep_search`, `read_file`, `write_file`, `edit`, and `run_shell_command` to write `ledger.py`. A pytest file outside the workspace is the result. Exit 0 means that suite passed and each of those tools returned successfully. Prints each request's prefill and decode line. Takes the machine lock. Not part of `pytest`. `tests/test_coding_harness.py` and `tests/test_coding_tools.py` check the request and the tools without a listener. The tool contract is [coding-primitives.md](coding-primitives.md).
 
 ### Worktree summarization
 
