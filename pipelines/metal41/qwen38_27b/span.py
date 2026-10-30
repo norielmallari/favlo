@@ -2,7 +2,9 @@
 
 Every residual is already known at the start of a layer, so the projections
 share one read. The Gated DeltaNet recurrence and the attention mix still run
-in token order. A feed past the third stays on the serial step.
+in token order. Each linear layer records its pre-convolution rows so a
+partial keep can replay the recurrence without reading the language weights
+again. A feed past the third stays on the serial step.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from qwen38_27b.layout import (
     HIDDEN,
     INTERMEDIATE,
     KV_PROJ,
+    LINEAR_LAYERS,
     LINEAR_V,
     MIX,
     Q_HEADS,
@@ -24,6 +27,9 @@ from qwen38_27b.layout import (
     THETA,
     Z_WIDTH,
 )
+
+_TAPE_TOKENS = 3
+_LAYER_FLOATS = _TAPE_TOKENS * (MIX + Z_WIDTH + AB + AB)
 
 
 class _Span:
@@ -43,6 +49,7 @@ class _Span:
         self.vv = zeros(wide * KV_PROJ * 4)
         self.gate = zeros(wide * ATTN_OUT * 4)
         self.out = zeros(wide * HIDDEN * 4)
+        self.tape = zeros(LINEAR_LAYERS * _LAYER_FLOATS * 4)
 
 
 def span_pair(runtime: Any, token0: int, token1: int, pos: int) -> None:
@@ -84,6 +91,79 @@ def _advance(runtime: Any, tokens: list[int], pos: int) -> None:
         runtime.session.finish()
         raise
     runtime.filled = int(pos) + count
+
+
+def replay_kept(runtime: Any, keep: int) -> None:
+    """Advance the DeltaNet state and the convolution by ``keep`` recorded rows.
+
+    The span already stored each linear layer's pre-convolution qkv, z, a, and b.
+    The caller has restored the pre-window state. This reads those rows and does
+    not read the language weights again.
+    """
+    span = _buffers(runtime)
+    count = int(keep)
+    runtime.session.begin()
+    try:
+        for layer, kind in enumerate(runtime.layer_types):
+            if kind != "linear_attention":
+                continue
+            slot = int(runtime.linear_slot[layer])
+            qkv, z, a, b = _tape_offsets(slot)
+            weight, woff, _entry = runtime.locate_weight(layer, "linear_attn.conv1d.weight")
+            runtime.session.encode(
+                "gdn_conv_rows",
+                [
+                    (runtime.history, slot * 3 * MIX * 2),
+                    (span.tape, qkv),
+                    (weight, woff),
+                    (span.tape, qkv),
+                ],
+                [_u32(count), _u32(MIX)],
+                (MIX // 256, 1, 1),
+                (256, 1, 1),
+            )
+            along, aoff, _entry = runtime.locate_weight(layer, "linear_attn.A_log")
+            bias, boff, _entry = runtime.locate_weight(layer, "linear_attn.dt_bias")
+            norm, noff, _entry = runtime.locate_weight(layer, "linear_attn.norm.weight")
+            runtime.session.encode(
+                "gdn_state_rows",
+                [
+                    (runtime.state, slot * LINEAR_V * 128 * 128 * 4),
+                    (span.tape, qkv),
+                    (span.tape, a),
+                    (span.tape, b),
+                    (span.tape, z),
+                    (along, aoff),
+                    (bias, boff),
+                    (norm, noff),
+                    (span.y, 0),
+                ],
+                [_f32(EPS), _u32(count)],
+                (LINEAR_V, 1, 1),
+                (128, 1, 1),
+            )
+        runtime.session.end()
+    except Exception:
+        runtime.session.finish()
+        raise
+
+
+def _record(runtime: Any, span: _Span, layer: int, count: int) -> None:
+    slot = int(runtime.linear_slot[layer])
+    qkv, z, a, b = _tape_offsets(slot)
+    _copy(runtime, span.qkv, 0, span.tape, qkv, count * MIX)
+    _copy(runtime, span.z, 0, span.tape, z, count * Z_WIDTH)
+    _copy(runtime, span.a, 0, span.tape, a, count * AB)
+    _copy(runtime, span.b, 0, span.tape, b, count * AB)
+
+
+def _tape_offsets(slot: int) -> tuple[int, int, int, int]:
+    base = int(slot) * _LAYER_FLOATS
+    qkv = base
+    z = qkv + _TAPE_TOKENS * MIX
+    a = z + _TAPE_TOKENS * Z_WIDTH
+    b = a + _TAPE_TOKENS * AB
+    return qkv * 4, z * 4, a * 4, b * 4
 
 
 def load_row(runtime: Any, index: int) -> None:
@@ -132,6 +212,7 @@ def _gdn(runtime: Any, span: _Span, layer: int, count: int) -> None:
         (MIX + Z_WIDTH + AB + AB, 1, 1),
         (32, 1, 1),
     )
+    _record(runtime, span, layer, count)
     slot = runtime.linear_slot[layer]
     weight, woff, _entry = runtime.locate_weight(layer, "linear_attn.conv1d.weight")
     runtime.session.encode(

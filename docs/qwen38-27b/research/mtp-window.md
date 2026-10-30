@@ -40,3 +40,5 @@ The window feeds three tokens and emits three output tokens in a full accept. Ea
 Later finds are appended here. The sections above stay as committed.
 
 30 October 2026. The verify window now reads down, out, the Gated DeltaNet input, and attention q/k/v once for three tokens. Gate and up of the third token are a second read. The sum of that window is 136.5 ms, 21.98 tok/s, and its bandwidth ceiling is 123.5 ms, 24.3 tok/s. The table is in ../ceilings.md. A three-activation gate/up kernel measured 1512.0 µs and is not the launch.
+
+30 October 2026. A partial keep restores the pre-window state and replays the recorded convolution and recurrence rows. The language weights are not read again. Recording those rows adds 1.4 ms, so a full accept sums to 137.9 ms, 21.75 tok/s. The tape reads and writes 9,510,912 bytes, and the bandwidth ceiling is 123.6 ms, 24.3 tok/s. One kept token of recurrence is 5.28 ms. Two kept tokens are 6.70 ms. A search on this date for "Qwen3.8-27B 137.9 ms 21.75 tok/s MTP gdn_conv_rows replay M5 Pro" did not find that pair. The overlaps are served tok/s on other engines.

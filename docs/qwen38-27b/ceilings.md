@@ -131,7 +131,12 @@ One full-accept window on the mixed record. The draft depth is 3, so the window 
 | `gemv_fp8_x4` gate or up, draft | 17408×5120 | 6 | 347.6 | 2.086 |
 | `gemv_fp8_x4` down, draft | 5120×17408 | 3 | 333.1 | 0.999 |
 | `gemv_fp4_x4` head | 248320×5120 | 6 | 2421.8 | 14.531 |
+| `copy_f32` qkv tape | 3×10240 | 48 | 8.0 | 0.384 |
+| `copy_f32` z tape | 3×6144 | 48 | 7.7 | 0.370 |
+| `copy_f32` a or b tape | 3×64 | 96 | 7.1 | 0.682 |
 
-The sum is 136.5 ms, 21.98 tok/s. That is the kernel ceiling for this window.
+The sum is 137.9 ms, 21.75 tok/s. That is the kernel ceiling for this window. The three tape rows record the pre-convolution qkv, z, a, and b of each linear layer. A full accept does not replay them.
 
-One fp4 feed-forward image is 47,349,760 bytes. The 104 gate and up matrices are read twice: 9,848,750,080 bytes. The 52 down matrices are read once: 2,462,187,520 bytes. One fp8 feed-forward image is 91,914,240 bytes. Thirty-six of them, read three times, are 9,926,737,920 bytes. The language projections are 14,544,732,160 bytes, so the projections that are neither feed-forward are 3,849,256,960 bytes and are read once. The MTP projections are 437,944,320 bytes, read three times. `lm_head` is 675,430,400 bytes, read six times. The sum is 31,453,347,840 bytes. Divided by 254.6 GB/s that is 123.5 ms, 24.3 tok/s. That is the bandwidth ceiling. One language attention pass at context C moves 31232 C bytes, from the attention section above. Three passes at 4096 tokens add 383,778,816 bytes, 125.0 ms, 24.0 tok/s.
+A rejected tail restores the pre-window state and runs `gdn_conv_rows` and `gdn_state_rows` on the kept rows. One token is 9.1 µs plus 100.9 µs, 48 times, 5.28 ms. Two tokens are 10.4 µs plus 129.2 µs, 48 times, 6.70 ms. Those dispatches are not in the sum above. The language weights are not read again.
+
+One fp4 feed-forward image is 47,349,760 bytes. The 104 gate and up matrices are read twice: 9,848,750,080 bytes. The 52 down matrices are read once: 2,462,187,520 bytes. One fp8 feed-forward image is 91,914,240 bytes. Thirty-six of them, read three times, are 9,926,737,920 bytes. The language projections are 14,544,732,160 bytes, so the projections that are neither feed-forward are 3,849,256,960 bytes and are read once. The MTP projections are 437,944,320 bytes, read three times. `lm_head` is 675,430,400 bytes, read six times. The sum is 31,453,347,840 bytes. The tape reads and writes another 9,510,912 bytes, 19,021,824 bytes of traffic. Divided by 254.6 GB/s that is 123.6 ms, 24.3 tok/s. That is the bandwidth ceiling. One language attention pass at context C moves 31232 C bytes, from the attention section above. Three passes at 4096 tokens add 383,778,816 bytes, 125.0 ms, 24.0 tok/s.

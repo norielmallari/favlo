@@ -4,8 +4,8 @@ The head drafts ``mtp_depth`` tokens from the current residual. Absent, that
 depth is three. The first three feeds share one fp4 weight read when three
 are present. Two feeds share one read. Each later feed is a serial step. The DeltaNet state
 and the convolution history are copied first. A rejected tail restores that copy
-and replays the accepted prefix, so
-the kept state is the serial state. Temperature 0 keeps a draft that matches
+and replays the recorded convolution and recurrence rows for the kept tokens.
+The language weights are not read again. Temperature 0 keeps a draft that matches
 the target argmax. A host sampler keeps a draft that matches its draw. The
 request flag ``mtp`` turns the verify off.
 """
@@ -79,7 +79,7 @@ def verify(
     _extend_rope(runtime, pos, len(feeds))
     snap = _capture(runtime)
     from qwen38_27b.prefill import backbone_ids
-    from qwen38_27b.span import load_row, span_pair, span_triple
+    from qwen38_27b.span import load_row, replay_kept, span_pair, span_triple
 
     try:
         span_n = 3 if len(feeds) >= 3 else (2 if len(feeds) >= 2 else 0)
@@ -103,7 +103,12 @@ def verify(
         _restore(runtime, snap)
         raise
     keep = len(feeds) if accepted == len(feeds) else accepted + 1
-    if keep < span_n or (span_n == 0 and keep < len(feeds)):
+    if span_n and keep < span_n:
+        _restore(runtime, snap)
+        replay_kept(runtime, keep)
+        runtime.filled = pos + keep
+        load_row(runtime, keep - 1)
+    elif span_n == 0 and keep < len(feeds):
         _restore(runtime, snap)
         for offset, token in enumerate(feeds[:keep]):
             runtime.step(int(token), pos + offset, logits=False, rope=_rope_at(runtime, pos + offset))

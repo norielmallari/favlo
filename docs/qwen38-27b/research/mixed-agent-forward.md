@@ -82,3 +82,16 @@ Later finds are appended here. The sections above stay as committed.
 | 4, cache hit 2982 | 3181 | 232.43 tok/s (199 tok in 0.86 s) | 13.77 tok/s (102 tok in 7.41 s) |
 | 5, cache hit 3283 | 3321 | 62.26 tok/s (38 tok in 0.61 s) | 14.98 tok/s (55 tok in 3.67 s) |
 | 6, cache hit 3376 | 3435 | 97.20 tok/s (59 tok in 0.61 s) | 13.14 tok/s (212 tok in 16.13 s) |
+
+30 October 2026. `uv run python -m harness.coding --model qwen38-27b`. MTP stayed on at depth 3. Thinking stayed on. Eight requests, context 3265. Prefill 308.17 tok/s over 2752 tokens (8.93 s). Decode 15.39 tok/s over 823 tokens (53.46 s). A search the same day did not find that pair. Queries: "Qwen3.8-27B 15.39 tok/s 308.17 coding agent MTP thinking M5 Pro 48GB" and "Qwen3.8-27B 15.39 OR 308.17 tok/s harness coding MTP depth 3". [oMLX](https://omlx.ai/benchmarks/performance/e78ir7ct) reports 17.7 tok/s at 64k with thinking and MTP on an M5 Pro with 20 GPU cores and 48 GB. [A code-generation log](https://elitetestengineering.substack.com/p/qwen3-8-27b-performance-on-m5pro-ebd) reports 15.8 tok/s end to end without MTP and 29.0 tok/s with MTP on an M5 Pro with 48 GB. [llmcheck](https://llmcheck.net/models/qwen38-27b-on-m5-pro/) reports 16.5 tok/s for llama.cpp 4-bit on an M5 Pro with 48 GB. [AgentLens](https://agentlenshq.com/blogs/186900a3-8949-4f80-8e35-2bf876e6e339) reports 5.7 to 17.4 tok/s across nine coding harnesses on an M4 with a 3-bit GGUF. None of those runs is this harness table.
+
+| Coding-agent request, MTP on, depth 3 | Prompt | Prefill | Decode |
+|---|---|---|---|
+| 1, cache miss | 2036 | 482.92 tok/s (2036 tok in 4.22 s) | 14.53 tok/s (66 tok in 4.54 s) |
+| 2, cache hit 2102 | 2133 | 52.93 tok/s (31 tok in 0.59 s) | 17.74 tok/s (82 tok in 4.62 s) |
+| 3, cache hit 2215 | 2278 | 107.33 tok/s (63 tok in 0.59 s) | 15.80 tok/s (65 tok in 4.11 s) |
+| 4, cache hit 2343 | 2464 | 182.97 tok/s (121 tok in 0.66 s) | 16.49 tok/s (121 tok in 7.34 s) |
+| 5, prefix load 2464, cache hit 2464 | 2669 | 245.03 tok/s (205 tok in 0.84 s) | 15.21 tok/s (152 tok in 10.00 s) |
+| 6, cache hit 2821 | 3020 | 237.27 tok/s (199 tok in 0.84 s) | 16.40 tok/s (93 tok in 5.67 s) |
+| 7, cache hit 3113 | 3151 | 64.03 tok/s (38 tok in 0.59 s) | 15.03 tok/s (55 tok in 3.66 s) |
+| 8, cache hit 3206 | 3265 | 97.76 tok/s (59 tok in 0.60 s) | 13.98 tok/s (189 tok in 13.52 s) |
