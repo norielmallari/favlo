@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "web-api"))
@@ -126,17 +129,16 @@ async def _finished_task(tmp_path: Path) -> None:
                 "enabled": True,
             },
         )
-        catalog = [
-            {
-                "name": "generate_image",
-                "description": "Generate one or more PNGs.",
-                "schema": {"type": "object", "properties": {}},
-            }
-        ]
-        stored = store.store_mcp_catalog(created["id"], prepare_catalog(catalog))
-        assert stored["groups"][0]["id"] == "image"
-        assert stored["groups"][0]["tools"] == ["generate_image"]
-        row = store.enabled_mcp_tools("agent_favlo")[0]
+        row = {
+            "server_id": created["id"],
+            "server_name": created["name"],
+            "transport": created["transport"],
+            "command": created["command"],
+            "url": created["url"],
+            "name": "generate_image",
+            "description": "Generate one or more PNGs.",
+            "schema": {"type": "object", "properties": {}},
+        }
         pending: set[asyncio.Task[object]] = set()
         text = await call_tool(
             store,
@@ -159,7 +161,9 @@ async def _finished_task(tmp_path: Path) -> None:
         store.close()
 
 
-def test_save_keeps_a_disabled_group_and_lists_its_tools(tmp_path: Path) -> None:
+def test_save_keeps_a_disabled_group_and_lists_its_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     catalog = prepare_catalog(
         [
             {"name": "generate_image", "description": "Generate.", "schema": {"type": "object"}},
@@ -187,8 +191,22 @@ def test_save_keeps_a_disabled_group_and_lists_its_tools(tmp_path: Path) -> None
         )
         image = next(group for group in created["groups"] if group["id"] == "image")
         assert image["enabled"] is False
-        assert image["tools"] == ["generate_image", "list_image_models", "set_image_model"]
-        assert [row["name"] for row in store.enabled_mcp_tools("agent_favlo")] == ["echo"]
+        assert image["tools"] == []
+        from web_api.mcp_tools import bundle
+
+        async def listed(_server: object, *, refresh: bool = False) -> list[dict[str, object]]:
+            return [
+                {
+                    "name": "generate_image",
+                    "description": "Generate.",
+                    "schema": {"type": "object"},
+                },
+                {"name": "echo", "description": "Echo.", "schema": {"type": "object"}},
+            ]
+
+        monkeypatch.setattr("web_api.mcp_cache.catalog.get", listed)
+        _text, enabled = asyncio.run(bundle(store, "agent_favlo", "session_favlo", None, set()))
+        assert [item.name for item in enabled] == ["favlo_media_echo"]
     finally:
         store.close()
 
@@ -259,3 +277,213 @@ def test_an_unknown_model_result_starts_a_correction_turn(tmp_path: Path) -> Non
         assert waiting is True
     finally:
         store.close()
+
+
+def test_mcp_tools_from_two_servers_keep_unique_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from web_api.mcp_tools import bundle
+    from web_api.store import Store
+
+    async def listed(_server: object, *, refresh: bool = False) -> list[dict[str, object]]:
+        return [
+            {
+                "name": "generate_image",
+                "description": "Generate.",
+                "schema": {"type": "object", "properties": {"prompt": {"type": "string"}}},
+            }
+        ]
+
+    monkeypatch.setattr("web_api.mcp_cache.catalog.get", listed)
+    store = Store(tmp_path / "app.db")
+    try:
+        store.create_mcp_server(
+            "mcp-a",
+            {
+                "agent_id": "agent_favlo",
+                "name": "Favlo media",
+                "transport": "http",
+                "command": "",
+                "url": "http://127.0.0.1:8129/mcp",
+                "enabled": True,
+            },
+        )
+        store.create_mcp_server(
+            "mcp-b",
+            {
+                "agent_id": "agent_favlo",
+                "name": "Favlo media",
+                "transport": "http",
+                "command": "",
+                "url": "http://127.0.0.1:9000/mcp",
+                "enabled": True,
+            },
+        )
+        text, tools = asyncio.run(bundle(store, "agent_favlo", "session_favlo", None, set()))
+        names = [item.name for item in tools]
+        assert names == ["favlo_media_generate_image", "favlo_media_2_generate_image"]
+        assert "favlo_media_generate_image" in text
+        described = _description(
+            {"name": "generate_image", "description": "Generate."},
+            "favlo_media_generate_image",
+        )
+        assert "favlo_media_list_image_models" in described
+        assert "favlo_media_set_image_model" in described
+        stored = sqlite3.connect(tmp_path / "app.db")
+        try:
+            tables = stored.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            found = {row[0] for row in tables}
+            assert "mcp_tool" not in found
+            assert "mcp_tool_group" not in found
+        finally:
+            stored.close()
+    finally:
+        store.close()
+
+
+def test_an_old_catalog_table_becomes_group_switches(tmp_path: Path) -> None:
+    path = tmp_path / "app.db"
+    raw = sqlite3.connect(path)
+    raw.execute(
+        """
+        CREATE TABLE mcp_server (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            transport TEXT NOT NULL,
+            command TEXT NOT NULL,
+            url TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            status_message TEXT NOT NULL,
+            revision INTEGER NOT NULL
+        )
+        """
+    )
+    raw.execute(
+        """
+        CREATE TABLE mcp_tool (
+            server_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            group_id TEXT NOT NULL,
+            description TEXT NOT NULL,
+            schema TEXT NOT NULL
+        )
+        """
+    )
+    raw.execute(
+        """
+        CREATE TABLE mcp_tool_group (
+            server_id TEXT NOT NULL,
+            group_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            enabled INTEGER NOT NULL
+        )
+        """
+    )
+    raw.execute(
+        """
+        INSERT INTO mcp_server (
+            id, agent_id, name, transport, command, url, enabled,
+            status, status_message, revision
+        ) VALUES (
+            'mcp_old', 'agent_favlo', 'Favlo media', 'http', '',
+            'http://127.0.0.1:8129/mcp', 1, 'connected', '', 1
+        )
+        """
+    )
+    raw.execute(
+        """
+        INSERT INTO mcp_tool (server_id, name, group_id, description, schema)
+        VALUES (
+            'mcp_old', 'generate_image', 'image', 'Generate.',
+            '{"type":"object","required":["model"]}'
+        )
+        """
+    )
+    raw.execute(
+        """
+        INSERT INTO mcp_tool_group (server_id, group_id, name, enabled)
+        VALUES ('mcp_old', 'image', 'Image', 0)
+        """
+    )
+    raw.commit()
+    raw.close()
+    store = Store(path)
+    try:
+        server = store.mcp_server("mcp_old")
+        assert server is not None
+        assert server["groups"] == [
+            {"id": "image", "name": "Image", "enabled": False, "tools": []}
+        ]
+        kept = store.enabled_mcp_servers("agent_favlo")
+        assert kept[0]["switches"] == {"image": False}
+    finally:
+        store.close()
+    check = sqlite3.connect(path)
+    try:
+        listed = check.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        tables = {row[0] for row in listed}
+        assert "mcp_tool" not in tables
+        assert "mcp_tool_group" not in tables
+    finally:
+        check.close()
+
+
+def test_the_catalog_cache_reuses_a_fresh_list_and_refetches_when_it_expires() -> None:
+    from web_api.mcp_cache import CatalogCache
+
+    now = [0.0]
+    calls = {"n": 0}
+
+    async def fetch(_server: dict[str, object]) -> list[dict[str, object]]:
+        calls["n"] += 1
+        return [{"name": "echo", "description": "", "schema": {"type": "object"}}]
+
+    cache = CatalogCache(ttl=10, fetch=fetch, clock=lambda: now[0])
+    server = {"transport": "http", "url": "http://127.0.0.1:8129/mcp", "command": ""}
+
+    async def run() -> None:
+        first = await cache.get(server)
+        second = await cache.get(server)
+        assert calls["n"] == 1
+        assert first == second
+        assert first is not second
+        first[0]["name"] = "changed"
+        third = await cache.get(server)
+        assert third[0]["name"] == "echo"
+        now[0] = 11
+        await cache.get(server)
+        assert calls["n"] == 2
+        await cache.get(server, refresh=True)
+        assert calls["n"] == 3
+
+    asyncio.run(run())
+
+
+def test_one_catalog_fetch_serves_concurrent_readers() -> None:
+    from web_api.mcp_cache import CatalogCache
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = {"n": 0}
+
+    async def fetch(_server: dict[str, object]) -> list[dict[str, object]]:
+        calls["n"] += 1
+        started.set()
+        await release.wait()
+        return [{"name": "echo", "description": "", "schema": {"type": "object"}}]
+
+    cache = CatalogCache(fetch=fetch)
+    server = {"transport": "http", "url": "http://127.0.0.1:8129/mcp", "command": ""}
+
+    async def run() -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        first = asyncio.create_task(cache.get(server))
+        second = asyncio.create_task(cache.get(server))
+        await started.wait()
+        release.set()
+        return await first, await second
+
+    left, right = asyncio.run(run())
+    assert calls["n"] == 1
+    assert left == right == [{"name": "echo", "description": "", "schema": {"type": "object"}}]

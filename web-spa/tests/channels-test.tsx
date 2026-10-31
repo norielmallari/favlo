@@ -24,6 +24,9 @@ test('the channels column has no width control', async () => {
     if (path === '/sessions/session_favlo') {
       return json({ messages: [], runs: [], cursor: 0 });
     }
+    if (path.startsWith('/workspaces')) {
+      return json({ workspaces: [] });
+    }
     return json({});
   }) as typeof fetch;
   const view = await render(

@@ -46,6 +46,9 @@ describe('heartbeats configuration', () => {
       if (path === '/mcp-servers') {
         return json({ servers: [] });
       }
+      if (path === '/agent-skills') {
+        return json({ skills: [] });
+      }
       return json({ message: 'The request failed.' }, 404);
     }) as typeof fetch;
   });

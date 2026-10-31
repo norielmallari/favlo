@@ -68,6 +68,7 @@ async def perform(
             session_id=context["run"]["session_id"],
             bus=bus,
             pending=pending,
+            cancel=cancel,
         ):
             if cancel.is_set():
                 await _publish(bus, store.finish_run(run_id, "cancelled", None))

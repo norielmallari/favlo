@@ -1,7 +1,10 @@
 import { expect, test } from '@playwright/test';
 
+import { deleteAgentsNamed } from './cleanup';
+
 test('working sweeps a light band across the word during a reply', async ({ page }) => {
   const name = `Wren ${Date.now()}`;
+  try {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto('http://localhost:8081/');
   await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8081\/?$/);
@@ -21,4 +24,7 @@ test('working sweeps a light band across the word during a reply', async ({ page
   await expect(working).toHaveText('Working');
   await expect(working).toHaveCSS('animation-name', 'favlo-working-shimmer');
   await expect(working).toHaveCSS('-webkit-background-clip', 'text');
+  } finally {
+    await deleteAgentsNamed(name);
+  }
 });

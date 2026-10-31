@@ -50,15 +50,8 @@ class MessageCreate(BaseModel):
 
 class McpGroupUpdate(BaseModel):
     id: str
+    name: str = ""
     enabled: bool
-
-
-class McpToolInput(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    name: str = Field(min_length=1, max_length=200)
-    description: str = ""
-    input_schema: dict[str, Any] = Field(default_factory=dict, alias="schema")
 
 
 class McpCreate(BaseModel):
@@ -69,7 +62,6 @@ class McpCreate(BaseModel):
     url: str = ""
     enabled: bool = True
     groups: list[McpGroupUpdate] | None = None
-    tools: list[McpToolInput] | None = None
 
 
 class McpUpdate(BaseModel):
@@ -80,7 +72,6 @@ class McpUpdate(BaseModel):
     url: str = ""
     enabled: bool = True
     groups: list[McpGroupUpdate] | None = None
-    tools: list[McpToolInput] | None = None
 
 
 class McpTest(BaseModel):
@@ -103,3 +94,57 @@ class HeartbeatUpdate(BaseModel):
     timezone: str = Field(min_length=1, max_length=80)
     instructions: str = Field(default="", max_length=8000)
     enabled: bool = True
+
+
+class WorkspaceCreate(BaseModel):
+    channel_id: str
+    name: str = Field(min_length=1, max_length=80)
+    type: str = "gallery"
+
+
+class FolderRoot(BaseModel):
+    name: str = Field(default="", max_length=80)
+    kind: str
+    provider: str | None = None
+    location: str | None = None
+
+
+class SkillCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=8000)
+
+
+class AgentSkillCreate(BaseModel):
+    agent_id: str
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=8000)
+
+
+class SkillUpdate(BaseModel):
+    expected_revision: int = Field(ge=1)
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=8000)
+
+
+class ImageWrite(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    path: str = Field(min_length=1)
+    data: str | None = Field(default=None, alias="bytes")
+    source: str | None = None
+    note: dict[str, Any] | None = None
+    expected_revision: str | None = None
+
+
+class FolderCreate(BaseModel):
+    path: str = Field(min_length=1)
+
+
+class FolderPatch(BaseModel):
+    path: str = Field(min_length=1)
+    name: str | None = None
+    to: str | None = None
+
+
+class FolderDelete(BaseModel):
+    path: str = Field(min_length=1)

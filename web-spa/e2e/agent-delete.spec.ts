@@ -1,8 +1,11 @@
 import { expect, test } from '@playwright/test';
 
+import { deleteAgentsNamed } from './cleanup';
+
 test('deleting an agent removes it from configuration and from chat', async ({ page }) => {
   test.setTimeout(90000);
   const name = `Reed ${Date.now()}`;
+  try {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto('http://localhost:8081/');
   await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8081\/?$/);
@@ -30,4 +33,7 @@ test('deleting an agent removes it from configuration and from chat', async ({ p
   await expect(page.getByRole('heading', { name: 'Channels' })).toBeVisible();
   await expect(page.getByRole('button', { name, exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Favlo', exact: true })).toBeVisible();
+  } finally {
+    await deleteAgentsNamed(name);
+  }
 });

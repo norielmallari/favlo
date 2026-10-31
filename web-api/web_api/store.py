@@ -18,8 +18,7 @@ from web_api.db import FAVLO_AGENT_ID, LOCAL_PROVIDER_ID, connect, migrate
 from web_api.events import envelope, now
 from web_api.heartbeat_tools import GROUP_ID as HEARTBEAT_GROUP_ID
 from web_api.ids import mint
-from web_api.mcp_groups import ORDER as MCP_GROUP_ORDER
-from web_api.mcp_groups import group_for
+from web_api.mcp_groups import GROUP_NAMES, ORDER
 from web_api.session_tools import GROUP_ID as SESSION_GROUP_ID
 
 
@@ -117,24 +116,22 @@ def _command_present(command: str) -> bool:
     return bool(shlex.split(command)) if command.strip() else False
 
 
-def _mcp_server(conn: sqlite3.Connection, row: Any) -> dict[str, Any]:
-    tools = conn.execute(
-        """
-        SELECT name, group_id FROM mcp_tool
-        WHERE server_id = ?
-        ORDER BY name
-        """,
-        (row["id"],),
-    ).fetchall()
-    grouped: dict[str, list[str]] = {}
-    for tool in tools:
-        grouped.setdefault(tool["group_id"], []).append(tool["name"])
-    groups = conn.execute(
-        "SELECT * FROM mcp_tool_group WHERE server_id = ?",
-        (row["id"],),
-    ).fetchall()
-    rank = {group_id: index for index, group_id in enumerate(MCP_GROUP_ORDER)}
-    ordered = sorted(groups, key=lambda item: rank.get(item["group_id"], len(rank)))
+def _group_switches(raw: Any) -> dict[str, bool]:
+    if not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(key): bool(value) for key, value in parsed.items()}
+
+
+def _mcp_server(row: Any) -> dict[str, Any]:
+    switches = _group_switches(row["group_switches"])
+    rank = {group_id: index for index, group_id in enumerate(ORDER)}
+    ordered = sorted(switches, key=lambda group_id: rank.get(group_id, len(rank)))
     return {
         "id": row["id"],
         "agent_id": row["agent_id"],
@@ -148,78 +145,31 @@ def _mcp_server(conn: sqlite3.Connection, row: Any) -> dict[str, Any]:
         "revision": row["revision"],
         "groups": [
             {
-                "id": item["group_id"],
-                "name": item["name"],
-                "enabled": bool(item["enabled"]),
-                "tools": grouped.get(item["group_id"], []),
+                "id": group_id,
+                "name": GROUP_NAMES.get(group_id, group_id),
+                "enabled": switches[group_id],
+                "tools": [],
             }
-            for item in ordered
+            for group_id in ordered
         ],
     }
 
 
-def _enabled_map(groups: Any) -> dict[str, bool]:
-    found: dict[str, bool] = {}
-    if not isinstance(groups, list):
-        return found
+def _save_switches(conn: sqlite3.Connection, server_id: str, groups: list[Any]) -> None:
+    """Store which groups are on. Names and schemas stay in the catalog cache."""
+    row = conn.execute(
+        "SELECT group_switches FROM mcp_server WHERE id = ?",
+        (server_id,),
+    ).fetchone()
+    switches = _group_switches(row["group_switches"] if row is not None else "")
     for item in groups:
-        if isinstance(item, dict) and isinstance(item.get("id"), str):
-            found[item["id"]] = bool(item.get("enabled"))
-    return found
-
-
-def _replace_catalog(
-    conn: sqlite3.Connection,
-    server_id: str,
-    tools: list[Any],
-    enabled: dict[str, bool],
-) -> None:
-    conn.execute("DELETE FROM mcp_tool WHERE server_id = ?", (server_id,))
-    conn.execute("DELETE FROM mcp_tool_group WHERE server_id = ?", (server_id,))
-    seen: dict[str, str] = {}
-    for tool in tools:
-        if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]:
             continue
-        group_id, group_name = group_for(tool["name"])
-        seen[group_id] = group_name
-        schema = tool.get("schema", tool.get("input_schema"))
-        if not isinstance(schema, dict):
-            schema = {}
-        description = tool.get("description")
-        conn.execute(
-            """
-            INSERT INTO mcp_tool (server_id, name, group_id, description, schema)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                server_id,
-                tool["name"],
-                group_id,
-                description if isinstance(description, str) else "",
-                json.dumps(schema),
-            ),
-        )
-    for group_id, group_name in seen.items():
-        conn.execute(
-            """
-            INSERT INTO mcp_tool_group (server_id, group_id, name, enabled)
-            VALUES (?, ?, ?, ?)
-            """,
-            (server_id, group_id, group_name, int(enabled.get(group_id, True))),
-        )
-
-
-def _set_mcp_groups(conn: sqlite3.Connection, server_id: str, groups: list[Any]) -> None:
-    for item in groups:
-        if not isinstance(item, dict):
-            continue
-        conn.execute(
-            """
-            UPDATE mcp_tool_group SET enabled = ?
-            WHERE server_id = ? AND group_id = ?
-            """,
-            (int(bool(item.get("enabled"))), server_id, item.get("id")),
-        )
+        switches[item["id"]] = bool(item.get("enabled"))
+    conn.execute(
+        "UPDATE mcp_server SET group_switches = ? WHERE id = ?",
+        (json.dumps(switches), server_id),
+    )
 
 
 def _schedule(expression: str, timezone: str) -> tuple[str, str]:
@@ -281,6 +231,103 @@ def _rows(conn: sqlite3.Connection, statement: str, ids: list[str]) -> list[sqli
         return []
     marks = ", ".join("?" for _ in ids)
     return list(conn.execute(f"{statement} ({marks})", ids))
+
+
+def _folder_payload(row: Any) -> dict[str, Any]:
+    kind = row["kind"]
+    return {
+        "id": row["id"],
+        "workspace_id": row["workspace_id"],
+        "name": row["name"],
+        "role": row["role"],
+        "kind": kind,
+        "provider": row["provider"] or None,
+        "location": row["location"] if kind == "local" else None,
+        "machine_id": row["machine_id"] or "",
+        "remote_id": row["remote_id"],
+        "revision": row["revision"],
+    }
+
+
+def _skill_fields(body: dict[str, Any]) -> tuple[str, str]:
+    name = " ".join(str(body.get("name") or "").split())
+    description = str(body.get("description") or "").strip()
+    if not name:
+        raise Rejected("A name is required.")
+    return name, description
+
+
+def _skill_payload(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "workspace_id": row["workspace_id"],
+        "name": row["name"],
+        "description": row["description"],
+        "revision": row["revision"],
+    }
+
+
+def _agent_skill_payload(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "agent_id": row["agent_id"],
+        "name": row["name"],
+        "description": row["description"],
+        "revision": row["revision"],
+    }
+
+
+def _agent_skills_for(conn: sqlite3.Connection, agent_id: str | None = None) -> list[dict[str, Any]]:
+    if agent_id:
+        rows = conn.execute(
+            """
+            SELECT * FROM agent_skill
+            WHERE agent_id = ?
+            ORDER BY name COLLATE NOCASE, id
+            """,
+            (agent_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM agent_skill ORDER BY name COLLATE NOCASE, id"
+        ).fetchall()
+    return [_agent_skill_payload(row) for row in rows]
+
+
+def _skills_for(conn: sqlite3.Connection, workspace_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT * FROM skill
+        WHERE workspace_id = ?
+        ORDER BY name COLLATE NOCASE, id
+        """,
+        (workspace_id,),
+    ).fetchall()
+    return [_skill_payload(row) for row in rows]
+
+
+def _workspace_payload(conn: sqlite3.Connection, row: Any) -> dict[str, Any]:
+    folder = conn.execute(
+        "SELECT * FROM folder WHERE workspace_id = ?",
+        (row["id"],),
+    ).fetchone()
+    return {
+        "id": row["id"],
+        "channel_id": row["channel_id"],
+        "session_id": row["session_id"],
+        "name": row["name"],
+        "type": row["type"],
+        "revision": row["revision"],
+        "root": _folder_payload(folder) if folder is not None else None,
+        "skills": _skills_for(conn, row["id"]),
+    }
+
+
+def _require_workspace(conn: sqlite3.Connection, workspace_id: str) -> dict[str, Any]:
+    row = conn.execute("SELECT * FROM workspace WHERE id = ?", (workspace_id,)).fetchone()
+    if row is None:
+        raise NotFound("That workspace does not exist.")
+    return _workspace_payload(conn, row)
 
 
 def _execute_in(conn: sqlite3.Connection, statement: str, ids: list[str]) -> None:
@@ -843,18 +890,10 @@ class Store:
             for item in active:
                 if item["id"] not in running:
                     running.append(item["id"])
-            servers = [
-                item["id"]
-                for item in conn.execute(
-                    "SELECT id FROM mcp_server WHERE agent_id = ?",
-                    (agent_id,),
-                )
-            ]
             conn.execute("DELETE FROM mcp_task WHERE agent_id = ?", (agent_id,))
-            _execute_in(conn, "DELETE FROM mcp_tool WHERE server_id IN", servers)
-            _execute_in(conn, "DELETE FROM mcp_tool_group WHERE server_id IN", servers)
             conn.execute("DELETE FROM mcp_server WHERE agent_id = ?", (agent_id,))
             conn.execute("DELETE FROM heartbeat WHERE agent_id = ?", (agent_id,))
+            conn.execute("DELETE FROM agent_skill WHERE agent_id = ?", (agent_id,))
             _execute_in(conn, "DELETE FROM message WHERE session_id IN", sessions)
             conn.execute(
                 "DELETE FROM message WHERE actor_kind = 'agent' AND actor_id = ?",
@@ -868,6 +907,20 @@ class Store:
                 [f"session:{session_id}" for session_id in sessions],
             )
             _execute_in(conn, "DELETE FROM session WHERE id IN", sessions)
+            workspaces = [
+                item["id"]
+                for item in conn.execute(
+                    """
+                    SELECT w.id FROM workspace w
+                    JOIN channel_member m ON m.channel_id = w.channel_id
+                    WHERE m.agent_id = ?
+                    """,
+                    (agent_id,),
+                )
+            ]
+            _execute_in(conn, "DELETE FROM skill WHERE workspace_id IN", workspaces)
+            _execute_in(conn, "DELETE FROM folder WHERE workspace_id IN", workspaces)
+            _execute_in(conn, "DELETE FROM workspace WHERE id IN", workspaces)
             channels = [
                 item["channel_id"]
                 for item in conn.execute(
@@ -1293,7 +1346,7 @@ class Store:
             rows = conn.execute(
                 "SELECT * FROM mcp_server ORDER BY name, id"
             ).fetchall()
-            return [_mcp_server(conn, row) for row in rows]
+            return [_mcp_server(row) for row in rows]
 
         return self._read(read)
 
@@ -1323,9 +1376,9 @@ class Store:
                 """
                 INSERT INTO mcp_server (
                     id, agent_id, name, transport, command, url, enabled,
-                    status, status_message, revision
+                    status, status_message, revision, group_switches
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'unchecked', '', 1)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'unchecked', '', 1, '{}')
                 """,
                 (
                     server_id,
@@ -1337,19 +1390,10 @@ class Store:
                     int(bool(body.get("enabled", True))),
                 ),
             )
-            tools = body.get("tools")
-            if isinstance(tools, list):
-                _replace_catalog(conn, server_id, tools, _enabled_map(body.get("groups")))
-                conn.execute(
-                    """
-                    UPDATE mcp_server
-                    SET status = 'connected', status_message = 'Connection succeeded'
-                    WHERE id = ?
-                    """,
-                    (server_id,),
-                )
+            groups = body.get("groups")
+            if isinstance(groups, list):
+                _save_switches(conn, server_id, groups)
             result = _mcp_server(
-                conn,
                 conn.execute("SELECT * FROM mcp_server WHERE id = ?", (server_id,)).fetchone(),
             )
             self._remember(conn, key or "", body, 201, result)
@@ -1389,28 +1433,18 @@ class Store:
                     server_id,
                 ),
             )
-            tools = body.get("tools")
-            if isinstance(tools, list):
-                _replace_catalog(conn, server_id, tools, _enabled_map(body.get("groups")))
-                conn.execute(
-                    """
-                    UPDATE mcp_server
-                    SET status = 'connected', status_message = 'Connection succeeded'
-                    WHERE id = ?
-                    """,
-                    (server_id,),
-                )
-            elif isinstance(body.get("groups"), list):
-                _set_mcp_groups(conn, server_id, body["groups"])
+            groups = body.get("groups")
+            if isinstance(groups, list):
+                _save_switches(conn, server_id, groups)
             updated = conn.execute(
                 "SELECT * FROM mcp_server WHERE id = ?",
                 (server_id,),
             ).fetchone()
-            return _mcp_server(conn, updated)
+            return _mcp_server(updated)
 
         return self._write(write)
 
-    def store_mcp_catalog(self, server_id: str, tools: list[dict[str, Any]]) -> dict[str, Any]:
+    def mark_mcp_connected(self, server_id: str) -> dict[str, Any]:
         def write(conn: sqlite3.Connection) -> dict[str, Any]:
             row = conn.execute(
                 "SELECT * FROM mcp_server WHERE id = ?",
@@ -1418,40 +1452,6 @@ class Store:
             ).fetchone()
             if row is None:
                 raise NotFound("That MCP server does not exist.")
-            prior = {
-                item["group_id"]: bool(item["enabled"])
-                for item in conn.execute(
-                    "SELECT group_id, enabled FROM mcp_tool_group WHERE server_id = ?",
-                    (server_id,),
-                )
-            }
-            conn.execute("DELETE FROM mcp_tool WHERE server_id = ?", (server_id,))
-            conn.execute("DELETE FROM mcp_tool_group WHERE server_id = ?", (server_id,))
-            seen: dict[str, str] = {}
-            for tool in tools:
-                group_id, group_name = tool["group_id"], tool["group_name"]
-                seen[group_id] = group_name
-                conn.execute(
-                    """
-                    INSERT INTO mcp_tool (server_id, name, group_id, description, schema)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        server_id,
-                        tool["name"],
-                        group_id,
-                        tool["description"],
-                        json.dumps(tool["schema"]),
-                    ),
-                )
-            for group_id, group_name in seen.items():
-                conn.execute(
-                    """
-                    INSERT INTO mcp_tool_group (server_id, group_id, name, enabled)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (server_id, group_id, group_name, int(prior.get(group_id, True))),
-                )
             conn.execute(
                 """
                 UPDATE mcp_server
@@ -1465,7 +1465,7 @@ class Store:
                 "SELECT * FROM mcp_server WHERE id = ?",
                 (server_id,),
             ).fetchone()
-            return _mcp_server(conn, updated)
+            return _mcp_server(updated)
 
         return self._write(write)
 
@@ -1490,40 +1490,33 @@ class Store:
                 "SELECT * FROM mcp_server WHERE id = ?",
                 (server_id,),
             ).fetchone()
-            return _mcp_server(conn, updated)
+            return _mcp_server(updated)
 
         return self._write(write)
 
-    def enabled_mcp_tools(self, agent_id: str) -> list[dict[str, Any]]:
+    def enabled_mcp_servers(self, agent_id: str) -> list[dict[str, Any]]:
+        """Enabled servers and the group switches. Tool definitions are not here."""
+
         def read(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             rows = conn.execute(
                 """
-                SELECT s.id AS server_id, s.name AS server_name, s.transport, s.command, s.url,
-                       t.name, t.description, t.schema, g.group_id
-                FROM mcp_server s
-                JOIN mcp_tool t ON t.server_id = s.id
-                JOIN mcp_tool_group g ON g.server_id = s.id AND g.group_id = t.group_id
-                WHERE s.agent_id = ? AND s.enabled = 1 AND g.enabled = 1
-                ORDER BY s.name, t.name
+                SELECT * FROM mcp_server
+                WHERE agent_id = ? AND enabled = 1
+                ORDER BY name, id
                 """,
                 (agent_id,),
             ).fetchall()
-            found = []
-            for row in rows:
-                found.append(
-                    {
-                        "server_id": row["server_id"],
-                        "server_name": row["server_name"],
-                        "transport": row["transport"],
-                        "command": row["command"],
-                        "url": row["url"],
-                        "name": row["name"],
-                        "description": row["description"],
-                        "schema": json.loads(row["schema"]),
-                        "group_id": row["group_id"],
-                    }
-                )
-            return found
+            return [
+                {
+                    "server_id": row["id"],
+                    "server_name": row["name"],
+                    "transport": row["transport"],
+                    "command": row["command"],
+                    "url": row["url"],
+                    "switches": _group_switches(row["group_switches"]),
+                }
+                for row in rows
+            ]
 
         return self._read(read)
 
@@ -1708,6 +1701,530 @@ class Store:
             return [dict(row) for row in rows]
 
         return self._read(read)
+
+    def list_workspaces(self, channel_id: str) -> list[dict[str, Any]]:
+        def read(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            channel = conn.execute("SELECT id FROM channel WHERE id = ?", (channel_id,)).fetchone()
+            if channel is None:
+                raise NotFound("That channel does not exist.")
+            rows = conn.execute(
+                """
+                SELECT * FROM workspace
+                WHERE channel_id = ?
+                ORDER BY created_at, id
+                """,
+                (channel_id,),
+            ).fetchall()
+            return [_workspace_payload(conn, row) for row in rows]
+
+        return self._read(read)
+
+    def workspace(self, workspace_id: str) -> dict[str, Any]:
+        def read(conn: sqlite3.Connection) -> dict[str, Any]:
+            return _require_workspace(conn, workspace_id)
+
+        return self._read(read)
+
+    def create_workspace(
+        self, key: str | None, body: dict[str, Any]
+    ) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
+        def write(conn: sqlite3.Connection) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
+            prior = self._claim(conn, key, body)
+            if prior is not None:
+                return prior[0], prior[1], []
+            channel_id = str(body.get("channel_id") or "")
+            name = str(body.get("name") or "").strip()
+            kind = str(body.get("type") or "gallery")
+            if not name:
+                raise Rejected("A name is required.")
+            if kind != "gallery":
+                raise Rejected("type is gallery.")
+            channel = conn.execute("SELECT id FROM channel WHERE id = ?", (channel_id,)).fetchone()
+            if channel is None:
+                raise NotFound("That channel does not exist.")
+            member = conn.execute(
+                "SELECT agent_id FROM channel_member WHERE channel_id = ?",
+                (channel_id,),
+            ).fetchone()
+            if member is None:
+                raise Rejected("That channel has no agent.")
+            workspace_id = mint("workspace")
+            session_id = mint("session")
+            created = now()
+            conn.execute(
+                """
+                INSERT INTO session (
+                    id, kind, channel_id, participant_id, workspace_id, created_at
+                )
+                VALUES (?, 'workspace_chat', ?, ?, ?, ?)
+                """,
+                (session_id, channel_id, member["agent_id"], workspace_id, created),
+            )
+            conn.execute(
+                """
+                INSERT INTO workspace (
+                    id, channel_id, session_id, name, type, revision, created_at
+                )
+                VALUES (?, ?, ?, ?, 'gallery', 1, ?)
+                """,
+                (workspace_id, channel_id, session_id, name, created),
+            )
+            result = _require_workspace(conn, workspace_id)
+            events = [
+                self._event(
+                    conn,
+                    stream_id="app",
+                    event_type="workspace.created",
+                    payload=result,
+                    channel_id=channel_id,
+                    session_id=session_id,
+                    actor={"kind": "user", "id": "local"},
+                )
+            ]
+            self._remember(conn, key or "", body, 201, result)
+            return 201, result, events
+
+        return self._write(write)
+
+    def delete_workspace(
+        self, workspace_id: str
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
+        def write(
+            conn: sqlite3.Connection,
+        ) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
+            row = conn.execute("SELECT * FROM workspace WHERE id = ?", (workspace_id,)).fetchone()
+            if row is None:
+                raise NotFound("That workspace does not exist.")
+            session_id = row["session_id"]
+            running = [
+                item["id"]
+                for item in conn.execute(
+                    "SELECT id FROM run WHERE session_id = ? AND status = 'running'",
+                    (session_id,),
+                )
+            ]
+            conn.execute("DELETE FROM message WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM run WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM event WHERE stream_id = ?", (f"session:{session_id}",))
+            conn.execute("DELETE FROM folder WHERE workspace_id = ?", (workspace_id,))
+            conn.execute("DELETE FROM skill WHERE workspace_id = ?", (workspace_id,))
+            conn.execute("DELETE FROM session WHERE id = ?", (session_id,))
+            conn.execute("DELETE FROM workspace WHERE id = ?", (workspace_id,))
+            result = {"id": workspace_id, "name": row["name"]}
+            events = [
+                self._event(
+                    conn,
+                    stream_id="app",
+                    event_type="workspace.deleted",
+                    payload=result,
+                    channel_id=row["channel_id"],
+                    actor={"kind": "user", "id": "local"},
+                )
+            ]
+            return result, events, running
+
+        return self._write(write)
+
+    def root(self, workspace_id: str) -> dict[str, Any] | None:
+        def read(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            _require_workspace(conn, workspace_id)
+            folder = conn.execute(
+                "SELECT * FROM folder WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchone()
+            return _folder_payload(folder) if folder is not None else None
+
+        return self._read(read)
+
+    def set_root(
+        self, key: str | None, workspace_id: str, body: dict[str, Any]
+    ) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
+        def write(conn: sqlite3.Connection) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
+            prior = self._claim(conn, key, body)
+            if prior is not None:
+                return prior[0], prior[1], []
+            workspace = _require_workspace(conn, workspace_id)
+            if workspace["type"] != "gallery":
+                raise Rejected("That workspace is not a gallery.")
+            kind = str(body.get("kind") or "")
+            provider = str(body.get("provider") or "").strip() or None
+            name = str(body.get("name") or "").strip() or workspace["name"]
+            location = str(body.get("location") or "").strip()
+            if kind == "cloud":
+                raise Rejected(f"{provider or 'cloud'} is not enabled.")
+            if kind != "local":
+                raise Rejected("kind is local or cloud.")
+            if provider:
+                raise Rejected("A local folder has no provider.")
+            if not location:
+                raise Rejected("A local folder needs a location.")
+            from pathlib import Path
+
+            path = Path(location).expanduser()
+            if not path.exists() or not path.is_dir():
+                raise Rejected("The gallery root must be an existing directory.")
+            resolved = str(path.resolve())
+            existing = conn.execute(
+                "SELECT * FROM folder WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchone()
+            created = now()
+            if existing is None:
+                folder_id = mint("folder")
+                conn.execute(
+                    """
+                    INSERT INTO folder (
+                        id, workspace_id, name, role, kind, provider, location,
+                        machine_id, remote_id, revision, created_at
+                    )
+                    VALUES (?, ?, ?, 'root', 'local', NULL, ?, '', NULL, 1, ?)
+                    """,
+                    (folder_id, workspace_id, name, resolved, created),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE folder
+                    SET name = ?, kind = 'local', provider = NULL, location = ?,
+                        remote_id = NULL, revision = revision + 1
+                    WHERE workspace_id = ?
+                    """,
+                    (name, resolved, workspace_id),
+                )
+            result = _folder_payload(
+                conn.execute(
+                    "SELECT * FROM folder WHERE workspace_id = ?",
+                    (workspace_id,),
+                ).fetchone()
+            )
+            events = [
+                self._event(
+                    conn,
+                    stream_id="app",
+                    event_type="workspace.root_set",
+                    payload={"workspace_id": workspace_id, "root": result},
+                    channel_id=workspace["channel_id"],
+                    session_id=workspace["session_id"],
+                    actor={"kind": "user", "id": "local"},
+                )
+            ]
+            self._remember(conn, key or "", body, 200, result)
+            return 200, result, events
+
+        return self._write(write)
+
+    def list_agent_skills(self, agent_id: str | None = None) -> list[dict[str, Any]]:
+        def read(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            if agent_id:
+                agent = conn.execute("SELECT id FROM agent WHERE id = ?", (agent_id,)).fetchone()
+                if agent is None:
+                    raise NotFound("That agent does not exist.")
+            return _agent_skills_for(conn, agent_id)
+
+        return self._read(read)
+
+    def create_agent_skill(
+        self, key: str | None, body: dict[str, Any]
+    ) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
+        def write(conn: sqlite3.Connection) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
+            prior = self._claim(conn, key, body)
+            if prior is not None:
+                return prior[0], prior[1], []
+            agent_id = str(body.get("agent_id") or "")
+            agent = conn.execute("SELECT id FROM agent WHERE id = ?", (agent_id,)).fetchone()
+            if agent is None:
+                raise NotFound("That agent does not exist.")
+            name, description = _skill_fields(body)
+            taken = conn.execute(
+                "SELECT id FROM agent_skill WHERE agent_id = ? AND name = ?",
+                (agent_id, name),
+            ).fetchone()
+            if taken is not None:
+                raise Rejected("That skill name is already on this agent.")
+            skill_id = mint("skill")
+            created = now()
+            conn.execute(
+                """
+                INSERT INTO agent_skill (
+                    id, agent_id, name, description, revision, created_at
+                )
+                VALUES (?, ?, ?, ?, 1, ?)
+                """,
+                (skill_id, agent_id, name, description, created),
+            )
+            result = _agent_skill_payload(
+                conn.execute("SELECT * FROM agent_skill WHERE id = ?", (skill_id,)).fetchone()
+            )
+            events = [
+                self._event(
+                    conn,
+                    stream_id="app",
+                    event_type="agent_skill.created",
+                    payload=result,
+                    actor={"kind": "user", "id": "local"},
+                )
+            ]
+            self._remember(conn, key or "", body, 201, result)
+            return 201, result, events
+
+        return self._write(write)
+
+    def update_agent_skill(
+        self, skill_id: str, body: dict[str, Any]
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        def write(conn: sqlite3.Connection) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            row = conn.execute("SELECT * FROM agent_skill WHERE id = ?", (skill_id,)).fetchone()
+            if row is None:
+                raise NotFound("That skill does not exist.")
+            expected = int(body["expected_revision"])
+            if int(row["revision"]) != expected:
+                raise Conflict("The skill was updated. Reload and try again.")
+            name, description = _skill_fields(body)
+            taken = conn.execute(
+                """
+                SELECT id FROM agent_skill
+                WHERE agent_id = ? AND name = ? AND id != ?
+                """,
+                (row["agent_id"], name, skill_id),
+            ).fetchone()
+            if taken is not None:
+                raise Rejected("That skill name is already on this agent.")
+            revision = expected + 1
+            conn.execute(
+                """
+                UPDATE agent_skill
+                SET name = ?, description = ?, revision = ?
+                WHERE id = ?
+                """,
+                (name, description, revision, skill_id),
+            )
+            result = _agent_skill_payload(
+                conn.execute("SELECT * FROM agent_skill WHERE id = ?", (skill_id,)).fetchone()
+            )
+            events = [
+                self._event(
+                    conn,
+                    stream_id="app",
+                    event_type="agent_skill.updated",
+                    payload=result,
+                    actor={"kind": "user", "id": "local"},
+                )
+            ]
+            return result, events
+
+        return self._write(write)
+
+    def delete_agent_skill(self, skill_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        def write(conn: sqlite3.Connection) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            row = conn.execute("SELECT * FROM agent_skill WHERE id = ?", (skill_id,)).fetchone()
+            if row is None:
+                raise NotFound("That skill does not exist.")
+            conn.execute("DELETE FROM agent_skill WHERE id = ?", (skill_id,))
+            result = {"id": skill_id, "agent_id": row["agent_id"]}
+            events = [
+                self._event(
+                    conn,
+                    stream_id="app",
+                    event_type="agent_skill.deleted",
+                    payload=result,
+                    actor={"kind": "user", "id": "local"},
+                )
+            ]
+            return result, events
+
+        return self._write(write)
+
+    def list_skills(self, workspace_id: str) -> list[dict[str, Any]]:
+        def read(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            _require_workspace(conn, workspace_id)
+            return _skills_for(conn, workspace_id)
+
+        return self._read(read)
+
+    def create_skill(
+        self, key: str | None, workspace_id: str, body: dict[str, Any]
+    ) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
+        def write(conn: sqlite3.Connection) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
+            prior = self._claim(conn, key, body)
+            if prior is not None:
+                return prior[0], prior[1], []
+            workspace = _require_workspace(conn, workspace_id)
+            name, description = _skill_fields(body)
+            taken = conn.execute(
+                "SELECT id FROM skill WHERE workspace_id = ? AND name = ?",
+                (workspace_id, name),
+            ).fetchone()
+            if taken is not None:
+                raise Rejected("That skill name is already on this workspace.")
+            skill_id = mint("skill")
+            created = now()
+            conn.execute(
+                """
+                INSERT INTO skill (
+                    id, workspace_id, name, description, revision, created_at
+                )
+                VALUES (?, ?, ?, ?, 1, ?)
+                """,
+                (skill_id, workspace_id, name, description, created),
+            )
+            result = _skill_payload(
+                conn.execute("SELECT * FROM skill WHERE id = ?", (skill_id,)).fetchone()
+            )
+            events = [
+                self._event(
+                    conn,
+                    stream_id="app",
+                    event_type="skill.created",
+                    payload={"workspace_id": workspace_id, "skill": result},
+                    channel_id=workspace["channel_id"],
+                    session_id=workspace["session_id"],
+                    actor={"kind": "user", "id": "local"},
+                )
+            ]
+            self._remember(conn, key or "", body, 201, result)
+            return 201, result, events
+
+        return self._write(write)
+
+    def update_skill(
+        self, workspace_id: str, skill_id: str, body: dict[str, Any]
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        def write(conn: sqlite3.Connection) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            workspace = _require_workspace(conn, workspace_id)
+            row = conn.execute(
+                "SELECT * FROM skill WHERE id = ? AND workspace_id = ?",
+                (skill_id, workspace_id),
+            ).fetchone()
+            if row is None:
+                raise NotFound("That skill does not exist.")
+            expected = int(body["expected_revision"])
+            if int(row["revision"]) != expected:
+                raise Conflict("The skill was updated. Reload and try again.")
+            name, description = _skill_fields(body)
+            taken = conn.execute(
+                """
+                SELECT id FROM skill
+                WHERE workspace_id = ? AND name = ? AND id != ?
+                """,
+                (workspace_id, name, skill_id),
+            ).fetchone()
+            if taken is not None:
+                raise Rejected("That skill name is already on this workspace.")
+            revision = expected + 1
+            conn.execute(
+                """
+                UPDATE skill
+                SET name = ?, description = ?, revision = ?
+                WHERE id = ?
+                """,
+                (name, description, revision, skill_id),
+            )
+            result = _skill_payload(
+                conn.execute("SELECT * FROM skill WHERE id = ?", (skill_id,)).fetchone()
+            )
+            events = [
+                self._event(
+                    conn,
+                    stream_id="app",
+                    event_type="skill.updated",
+                    payload={"workspace_id": workspace_id, "skill": result},
+                    channel_id=workspace["channel_id"],
+                    session_id=workspace["session_id"],
+                    actor={"kind": "user", "id": "local"},
+                )
+            ]
+            return result, events
+
+        return self._write(write)
+
+    def delete_skill(
+        self, workspace_id: str, skill_id: str
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        def write(conn: sqlite3.Connection) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            workspace = _require_workspace(conn, workspace_id)
+            row = conn.execute(
+                "SELECT * FROM skill WHERE id = ? AND workspace_id = ?",
+                (skill_id, workspace_id),
+            ).fetchone()
+            if row is None:
+                raise NotFound("That skill does not exist.")
+            conn.execute("DELETE FROM skill WHERE id = ?", (skill_id,))
+            result = {"id": skill_id, "workspace_id": workspace_id}
+            events = [
+                self._event(
+                    conn,
+                    stream_id="app",
+                    event_type="skill.deleted",
+                    payload=result,
+                    channel_id=workspace["channel_id"],
+                    session_id=workspace["session_id"],
+                    actor={"kind": "user", "id": "local"},
+                )
+            ]
+            return result, events
+
+        return self._write(write)
+
+    def workspace_for_session(self, session_id: str) -> dict[str, str] | None:
+        def read(conn: sqlite3.Connection) -> dict[str, str] | None:
+            session = conn.execute("SELECT * FROM session WHERE id = ?", (session_id,)).fetchone()
+            if session is None or session["kind"] != "workspace_chat":
+                return None
+            workspace_id = session["workspace_id"]
+            if not workspace_id:
+                return None
+            workspace = conn.execute(
+                "SELECT id, type FROM workspace WHERE id = ?",
+                (workspace_id,),
+            ).fetchone()
+            if workspace is None:
+                return None
+            return {"id": str(workspace["id"]), "type": str(workspace["type"])}
+
+        return self._read(read)
+
+    def gallery_for_session(self, session_id: str) -> str | None:
+        def read(conn: sqlite3.Connection) -> str | None:
+            session = conn.execute("SELECT * FROM session WHERE id = ?", (session_id,)).fetchone()
+            if session is None or session["kind"] != "workspace_chat":
+                return None
+            workspace_id = session["workspace_id"]
+            if not workspace_id:
+                return None
+            workspace = conn.execute(
+                "SELECT type FROM workspace WHERE id = ?",
+                (workspace_id,),
+            ).fetchone()
+            if workspace is None or workspace["type"] != "gallery":
+                return None
+            folder = conn.execute(
+                "SELECT 1 FROM folder WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchone()
+            if folder is None:
+                return None
+            return str(workspace_id)
+
+        return self._read(read)
+
+    def note_gallery(self, workspace_id: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        def write(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            row = conn.execute("SELECT * FROM workspace WHERE id = ?", (workspace_id,)).fetchone()
+            if row is None:
+                raise NotFound("That workspace does not exist.")
+            return [
+                self._event(
+                    conn,
+                    stream_id=f"session:{row['session_id']}",
+                    event_type="gallery.updated",
+                    payload=payload,
+                    channel_id=row["channel_id"],
+                    session_id=row["session_id"],
+                    actor={"kind": "user", "id": "local"},
+                )
+            ]
+
+        return self._write(write)
 
     def session_snapshot(self, session_id: str) -> dict[str, Any]:
         def read(conn: sqlite3.Connection) -> dict[str, Any]:

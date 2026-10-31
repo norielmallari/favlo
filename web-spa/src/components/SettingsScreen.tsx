@@ -65,13 +65,21 @@ type McpServer = {
   revision: number;
   groups: McpGroup[];
 };
-type Section = 'providers' | 'agents' | 'heartbeats' | 'mcp' | 'orchestration';
+type Section = 'providers' | 'agents' | 'heartbeats' | 'skills' | 'mcp' | 'orchestration';
+type AgentSkill = {
+  id: string;
+  agent_id: string;
+  name: string;
+  description: string;
+  revision: number;
+};
 type DrillPane = 'agents' | 'list' | 'detail';
 
 const SECTIONS: { id: Section; label: string; catalog: boolean }[] = [
   { id: 'providers', label: 'Providers', catalog: true },
   { id: 'agents', label: 'Agents', catalog: true },
   { id: 'heartbeats', label: 'Heartbeats', catalog: false },
+  { id: 'skills', label: 'Skills', catalog: false },
   { id: 'mcp', label: 'MCP', catalog: false },
   { id: 'orchestration', label: 'Orchestration', catalog: false },
 ];
@@ -107,15 +115,22 @@ export function SettingsScreen() {
   const [creatingMcp, setCreatingMcp] = useState(false);
   const [mcpToken, setMcpToken] = useState(0);
   const [mcpPane, setMcpPane] = useState<DrillPane>('agents');
+  const [agentSkills, setAgentSkills] = useState<AgentSkill[]>([]);
+  const [skillId, setSkillId] = useState<string | null>(null);
+  const [creatingSkill, setCreatingSkill] = useState(false);
+  const [skillToken, setSkillToken] = useState(0);
+  const [skillPane, setSkillPane] = useState<DrillPane>('agents');
 
-  async function reload(keepHeartbeat?: string, keepMcp?: string) {
-    const [listedProviders, nextSettings, nextAgents, listedGroups, listedHeartbeats, listedMcp] = await Promise.all([
+  async function reload(keepHeartbeat?: string, keepMcp?: string, keepSkill?: string) {
+    const [listedProviders, nextSettings, nextAgents, listedGroups, listedHeartbeats, listedMcp, listedSkills] =
+      await Promise.all([
       api<{ providers: Provider[] }>('/providers'),
       api<Settings>('/settings'),
       api<{ agents: Agent[] }>('/agents'),
       api<{ groups: ToolGroup[] }>('/tool-groups'),
       api<{ heartbeats: Heartbeat[] }>('/heartbeats'),
       api<{ servers: McpServer[] }>('/mcp-servers'),
+      api<{ skills: AgentSkill[] }>('/agent-skills'),
     ]);
     const providerRows = listedProviders.providers;
     const agentRows = nextAgents.agents;
@@ -129,7 +144,13 @@ export function SettingsScreen() {
     setAgents(agentRows);
     setGroups(listedGroups.groups);
     setHeartbeats(listedHeartbeats.heartbeats);
+    setAgentSkills(listedSkills.skills);
     setMcpServers(listedMcp.servers);
+    setSkillId((current) => {
+      const chosen = keepSkill ?? current;
+      const row = listedSkills.skills.find((item) => item.id === chosen);
+      return row == null ? null : row.id;
+    });
     setMcpId((current) => {
       const chosen = keepMcp ?? current;
       const row = listedMcp.servers.find((item) => item.id === chosen);
@@ -165,8 +186,10 @@ export function SettingsScreen() {
         setCreating(false);
         setCreatingHeartbeat(false);
         setCreatingMcp(false);
+        setCreatingSkill(false);
         setHeartbeatPane('agents');
         setMcpPane('agents');
+        setSkillPane('agents');
       }
     };
     document.addEventListener('keydown', onKey);
@@ -180,7 +203,7 @@ export function SettingsScreen() {
   const current = SECTIONS.find((item) => item.id === section) ?? SECTIONS[0];
   const catalog = current.catalog;
   const showSections = wide || drawer === 'sections';
-  const special = section === 'heartbeats' || section === 'mcp';
+  const special = section === 'heartbeats' || section === 'mcp' || section === 'skills';
   const showList = !special && catalog && (wide || !showDetail);
   const showDetails = !special && (!catalog || wide || showDetail);
   const heartbeatAgents = section === 'heartbeats' && (wide || heartbeatPane === 'agents');
@@ -193,15 +216,30 @@ export function SettingsScreen() {
   const mcpDetail = section === 'mcp' && (wide || mcpPane === 'detail');
   const agentServers = mcpServers.filter((row) => row.agent_id === agentId);
   const mcpServer = agentServers.find((row) => row.id === mcpId) ?? null;
+  const skillAgents = section === 'skills' && (wide || skillPane === 'agents');
+  const skillList = section === 'skills' && (wide || skillPane === 'list');
+  const skillDetail = section === 'skills' && (wide || skillPane === 'detail');
+  const skillsForAgent = agentSkills.filter((row) => row.agent_id === agentId);
+  const agentSkill = skillsForAgent.find((row) => row.id === skillId) ?? null;
 
   function chooseSection(next: Section) {
     setSection(next);
     setCreating(false);
     setCreatingHeartbeat(false);
     setCreatingMcp(false);
+    setCreatingSkill(false);
     setShowDetail(false);
     setHeartbeatPane('agents');
     setMcpPane('agents');
+    setSkillPane('agents');
+    setDrawer(null);
+  }
+
+  function startSkill() {
+    setCreatingSkill(true);
+    setSkillId(null);
+    setSkillToken((current) => current + 1);
+    setSkillPane('detail');
     setDrawer(null);
   }
 
@@ -574,6 +612,102 @@ export function SettingsScreen() {
               {error ? <Text accessibilityRole="alert" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text> : null}
             </ScrollView>
           ) : null}
+          {skillAgents ? (
+            <View accessibilityLabel="Agents list" style={columnStyle(palette.border, palette.surface, wide, wide ? 200 : undefined)}>
+              {!wide ? null : <Text style={label(palette.textPrimary)}>Agents</Text>}
+              <ScrollView contentContainerStyle={menuRows}>
+                {agents.map((item) => (
+                  <MenuRow
+                    key={item.id}
+                    label={item.name}
+                    selected={item.id === agentId}
+                    onPress={() => {
+                      setAgentId(item.id);
+                      setSkillId(null);
+                      setCreatingSkill(false);
+                      setSkillPane('list');
+                      setDrawer(null);
+                    }}
+                  />
+                ))}
+              </ScrollView>
+            </View>
+          ) : null}
+          {skillList ? (
+            <View accessibilityLabel="Skills list" style={columnStyle(palette.border, palette.surface, wide, wide ? 220 : undefined)}>
+              {!wide ? (
+                <Pressable accessibilityRole="button" accessibilityLabel="Back to agents" onPress={() => setSkillPane('agents')} style={{ minHeight: 44, justifyContent: 'center' }}>
+                  <Text style={{ color: palette.accent, fontSize: 14 }}>Back</Text>
+                </Pressable>
+              ) : (
+                <Text style={label(palette.textPrimary)}>Skills</Text>
+              )}
+              <ScrollView contentContainerStyle={menuRows}>
+                {skillsForAgent.map((row) => (
+                  <MenuRow
+                    key={row.id}
+                    label={row.name}
+                    selected={row.id === skillId}
+                    onPress={() => {
+                      setSkillId(row.id);
+                      setCreatingSkill(false);
+                      setSkillPane('detail');
+                      setDrawer(null);
+                    }}
+                  />
+                ))}
+                {skillsForAgent.length === 0 ? <Text style={{ color: palette.textSecondary, fontSize: 14 }}>No skills</Text> : null}
+              </ScrollView>
+              {!wide && agent != null ? (
+                <Pressable accessibilityRole="button" accessibilityLabel="New skill" onPress={startSkill} style={button(palette.accent)}>
+                  <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>New skill</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          ) : null}
+          {skillDetail ? (
+            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 16, maxWidth: 720 }}>
+              {!wide ? (
+                <Pressable accessibilityRole="button" accessibilityLabel="Back to skills" onPress={() => setSkillPane('list')} style={{ minHeight: 44, justifyContent: 'center' }}>
+                  <Text style={{ color: palette.accent, fontSize: 14 }}>Back</Text>
+                </Pressable>
+              ) : null}
+              {agent == null ? (
+                <Text style={{ color: palette.textPrimary, fontSize: 16 }}>Choose an agent.</Text>
+              ) : (
+                <View style={{ gap: 12 }}>
+                  {wide ? (
+                    <Pressable accessibilityRole="button" accessibilityLabel="New skill" onPress={startSkill} style={button(palette.accent)}>
+                      <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>New skill</Text>
+                    </Pressable>
+                  ) : null}
+                  {creatingSkill ? (
+                    <SkillForm
+                      key={`new-${skillToken}`}
+                      agent={agent}
+                      skill={null}
+                      onSuccess={setSaved}
+                      onSaved={(row) => {
+                        setCreatingSkill(false);
+                        void reload(undefined, undefined, row.id);
+                      }}
+                    />
+                  ) : agentSkill != null ? (
+                    <SkillForm
+                      key={`${agentSkill.id}:${agentSkill.revision}`}
+                      agent={agent}
+                      skill={agentSkill}
+                      onSuccess={setSaved}
+                      onSaved={() => void reload()}
+                    />
+                  ) : (
+                    <Text style={{ color: palette.textPrimary, fontSize: 16 }}>Choose a skill.</Text>
+                  )}
+                </View>
+              )}
+              {error ? <Text accessibilityRole="alert" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text> : null}
+            </ScrollView>
+          ) : null}
           {mcpAgents ? (
             <View accessibilityLabel="Agents list" style={columnStyle(palette.border, palette.surface, wide, wide ? 200 : undefined)}>
               {wide ? <Text style={label(palette.textPrimary)}>Agents</Text> : null}
@@ -694,7 +828,6 @@ function McpForm({
   const [command, setCommand] = useState(server?.command ?? '');
   const [enabled, setEnabled] = useState(server?.enabled ?? true);
   const [groups, setGroups] = useState(server?.groups ?? []);
-  const [catalog, setCatalog] = useState<McpTool[] | null>(null);
   const [notice, setNotice] = useState<string | null>(server?.status_message || null);
   const [error, setError] = useState<string | null>(null);
   const enabledBox = `Enabled for ${server?.name ?? 'MCP'}`;
@@ -706,8 +839,7 @@ function McpForm({
       command,
       url,
       enabled,
-      groups: groups.map((group) => ({ id: group.id, enabled: group.enabled })),
-      ...(catalog == null ? {} : { tools: catalog }),
+      groups: groups.map((group) => ({ id: group.id, name: group.name, enabled: group.enabled })),
     };
     try {
       const saved =
@@ -743,7 +875,6 @@ function McpForm({
         const prior = new Map(current.map((group) => [group.id, group.enabled]));
         return tested.groups.map((group) => ({ ...group, enabled: prior.get(group.id) ?? group.enabled }));
       });
-      setCatalog(tested.tools);
       if (tested.url) {
         setUrl(tested.url);
       }
@@ -1092,6 +1223,91 @@ function HeartbeatForm({
         </Pressable>
       ) : null}
       {notice ? <Text accessibilityLiveRegion="polite" style={{ color: palette.textPrimary, fontSize: 14 }}>{notice}</Text> : null}
+      {error ? <Text accessibilityRole="alert" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text> : null}
+    </View>
+  );
+}
+
+function SkillForm({
+  agent,
+  skill,
+  onSuccess,
+  onSaved,
+}: {
+  agent: Agent;
+  skill: AgentSkill | null;
+  onSuccess: (message: string) => void;
+  onSaved: (row: AgentSkill) => void;
+}) {
+  const { palette } = useTheme();
+  const [name, setName] = useState(skill?.name ?? '');
+  const [description, setDescription] = useState(skill?.description ?? '');
+  const [error, setError] = useState<string | null>(null);
+
+  async function save() {
+    const body = { name: name.trim(), description: description.trim() };
+    try {
+      const saved = skill == null
+        ? await api<AgentSkill>('/agent-skills', {
+            method: 'POST',
+            headers: { 'Idempotency-Key': idempotencyKey() },
+            body: JSON.stringify({ ...body, agent_id: agent.id }),
+          })
+        : await api<AgentSkill>(`/agent-skills/${skill.id}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ ...body, expected_revision: skill.revision }),
+          });
+      onSuccess(skill == null ? 'The skill was created.' : 'The skill was saved.');
+      onSaved(saved);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'The skill was not saved.');
+    }
+  }
+
+  async function remove() {
+    if (skill == null) {
+      return;
+    }
+    try {
+      await api(`/agent-skills/${skill.id}`, { method: 'DELETE' });
+      onSuccess('The skill was deleted.');
+      onSaved({ ...skill, id: '' });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'The skill was not deleted.');
+    }
+  }
+
+  return (
+    <View style={{ gap: 8 }}>
+      <Text accessibilityRole="header" aria-level={2} style={heading(palette.textPrimary)}>
+        {skill?.name ?? 'New skill'}
+      </Text>
+      <Text style={label(palette.textPrimary)}>Skill name</Text>
+      <TextInput accessibilityLabel="Skill name" value={name} onChangeText={setName} style={fieldStyle(palette)} />
+      <Text style={label(palette.textPrimary)}>Skill description</Text>
+      <TextInput
+        accessibilityLabel="Skill description"
+        multiline
+        value={description}
+        onChangeText={setDescription}
+        style={[fieldStyle(palette), { minHeight: 88 }]}
+      />
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={skill == null ? 'Create skill' : 'Save skill'}
+        disabled={name.trim().length === 0}
+        onPress={() => void save()}
+        style={button(palette.accent)}
+      >
+        <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>
+          {skill == null ? 'Create skill' : 'Save skill'}
+        </Text>
+      </Pressable>
+      {skill != null ? (
+        <Pressable accessibilityRole="button" accessibilityLabel="Delete skill" onPress={() => void remove()} style={button(palette.surface, palette.borderStrong)}>
+          <Text style={{ color: palette.textPrimary, fontSize: 14, fontWeight: '600' }}>Delete skill</Text>
+        </Pressable>
+      ) : null}
       {error ? <Text accessibilityRole="alert" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text> : null}
     </View>
   );

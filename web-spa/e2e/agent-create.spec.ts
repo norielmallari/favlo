@@ -1,7 +1,10 @@
 import { expect, test } from '@playwright/test';
 
+import { deleteAgentsNamed } from './cleanup';
+
 test('a new agent shows the same options as edit', async ({ page }) => {
   const name = `Reed ${Date.now()}`;
+  try {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto('http://localhost:8081/');
   await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8081\/?$/);
@@ -49,4 +52,7 @@ test('a new agent shows the same options as edit', async ({ page }) => {
   await expect(page.getByRole('combobox', { name: 'Provider', exact: true })).toBeVisible();
   await expect(heartbeat).toBeVisible();
   await expect(page.getByRole('button', { name: 'Create agent' })).toBeVisible();
+  } finally {
+    await deleteAgentsNamed(name);
+  }
 });

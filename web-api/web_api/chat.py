@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -89,6 +91,8 @@ def turn_setup(
     session_id: str | None = None,
     bus: Any | None = None,
     pending: set[Any] | None = None,
+    mcp_text: str = "",
+    mcp_tools: list[object] | None = None,
 ) -> tuple[str, list[object]]:
     """Instructions and tools for one turn. Each enabled group adds its own text."""
     from favlo.config_tools import GROUP_ID
@@ -122,15 +126,36 @@ def turn_setup(
         if SESSION_INSTRUCTIONS not in instructions:
             instructions = f"{instructions}\n\n{SESSION_INSTRUCTIONS}"
         tool_list.extend(session_tools(store, session_id, bus))
-    if store is not None and agent_id and session_id and bus is not None and pending is not None:
+    if mcp_tools:
         from web_api.mcp_tools import INSTRUCTIONS as MCP_INSTRUCTIONS
-        from web_api.mcp_tools import bundle
 
-        mcp_text, mcp_tools = bundle(store, agent_id, session_id, bus, pending)
-        if mcp_tools:
-            if MCP_INSTRUCTIONS not in instructions:
-                instructions = f"{instructions}\n\n{mcp_text}"
-            tool_list.extend(mcp_tools)
+        if MCP_INSTRUCTIONS not in instructions:
+            instructions = f"{instructions}\n\n{mcp_text}"
+        tool_list.extend(mcp_tools)
+    if store is not None and session_id:
+        from web_api.gallery_tools import INSTRUCTIONS as GALLERY_INSTRUCTIONS
+        from web_api.gallery_tools import tools as gallery_tools
+        from web_api.workspace import skills_text
+        from web_api.workspace import text_for as workspace_text
+
+        workspace = store.workspace_for_session(session_id)
+        if workspace is not None:
+            extra = workspace_text(workspace["type"])
+            if extra and extra not in instructions:
+                instructions = f"{instructions}\n\n{extra}"
+        skill_rows: list[dict[str, Any]] = []
+        if agent_id:
+            skill_rows.extend(store.list_agent_skills(agent_id))
+        if workspace is not None:
+            skill_rows.extend(store.list_skills(workspace["id"]))
+        skill_block = skills_text(skill_rows)
+        if skill_block and skill_block not in instructions:
+            instructions = f"{instructions}\n\n{skill_block}"
+        workspace_id = store.gallery_for_session(session_id)
+        if workspace_id:
+            if GALLERY_INSTRUCTIONS not in instructions:
+                instructions = f"{instructions}\n\n{GALLERY_INSTRUCTIONS}"
+            tool_list.extend(gallery_tools(store, workspace_id, bus))
     return instructions, tool_list
 
 
@@ -148,12 +173,19 @@ async def stream_reply(
     session_id: str | None = None,
     bus: Any | None = None,
     pending: set[Any] | None = None,
+    cancel: asyncio.Event | None = None,
 ) -> AsyncIterator[ReplyPiece]:
     from agent_framework import Agent, InMemoryHistoryProvider
     from openai import AsyncOpenAI
 
     http = AsyncOpenAI(api_key="favlo", base_url=base_url, timeout=3600.0)
     client = open_chat_client(model, base_url, async_client=http)
+    mcp_text = ""
+    mcp_tools: list[object] = []
+    if store is not None and agent_id and session_id and bus is not None and pending is not None:
+        from web_api.mcp_tools import bundle
+
+        mcp_text, mcp_tools = await bundle(store, agent_id, session_id, bus, pending)
     instructions, tool_list = turn_setup(
         persona,
         agent_name,
@@ -164,6 +196,8 @@ async def stream_reply(
         session_id,
         bus,
         pending,
+        mcp_text=mcp_text,
+        mcp_tools=mcp_tools,
     )
     if tool_list:
         client.function_invocation_configuration["max_iterations"] = 6
@@ -186,27 +220,54 @@ async def stream_reply(
     saw_reasoning = False
     spoken = ""
     buffered: list[str] = []
+    abort: asyncio.Task[None] | None = None
+    if cancel is not None:
+
+        async def _abort() -> None:
+            await cancel.wait()
+            closer = getattr(stream, "close", None)
+            if closer is not None:
+                with contextlib.suppress(Exception):
+                    await closer()
+            with contextlib.suppress(Exception):
+                await http.close()
+
+        abort = asyncio.create_task(_abort())
+    stopped = False
     try:
-        async for update in stream:
-            reason = reasoning_piece(update)
-            if reason:
-                saw_reasoning = True
-                yield ReplyPiece("reasoning", reason)
-            piece = assistant_piece(update)
-            if not piece:
-                continue
-            if tool_list:
-                buffered.append(piece)
-                visible = spoken_text("".join(buffered))
-                extra = visible[len(spoken) :] if visible.startswith(spoken) else visible
-                spoken = visible
-                if not extra:
+        try:
+            async for update in stream:
+                if cancel is not None and cancel.is_set():
+                    stopped = True
+                    break
+                reason = reasoning_piece(update)
+                if reason:
+                    saw_reasoning = True
+                    yield ReplyPiece("reasoning", reason)
+                piece = assistant_piece(update)
+                if not piece:
+                    continue
+                if tool_list:
+                    buffered.append(piece)
+                    visible = spoken_text("".join(buffered))
+                    extra = visible[len(spoken) :] if visible.startswith(spoken) else visible
+                    spoken = visible
+                    if not extra:
+                        continue
+                    content_yielded = True
+                    yield ReplyPiece("content", extra)
                     continue
                 content_yielded = True
-                yield ReplyPiece("content", extra)
-                continue
-            content_yielded = True
-            yield ReplyPiece("content", piece)
+                yield ReplyPiece("content", piece)
+        except Exception:
+            if cancel is not None and cancel.is_set():
+                stopped = True
+            else:
+                raise
+        if cancel is not None and cancel.is_set():
+            stopped = True
+        if stopped:
+            return
         if not content_yielded:
             final = await stream.get_final_response()
             if not saw_reasoning:
@@ -221,9 +282,14 @@ async def stream_reply(
                 if text:
                     yield ReplyPiece("content", text)
     finally:
+        if abort is not None:
+            abort.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await abort
         closer = getattr(client, "close", None)
         if closer is not None:
             closed = closer()
             if hasattr(closed, "__await__"):
                 await closed
-        await http.close()
+        with contextlib.suppress(Exception):
+            await http.close()

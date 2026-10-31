@@ -27,6 +27,7 @@ from web_api.routes import (
     providers,
     sessions,
     settings,
+    workspaces,
 )
 from web_api.runs import perform
 from web_api.store import Conflict, NotFound, Rejected, Store
@@ -108,6 +109,7 @@ def create_app(home: Path | None = None, reply: Callable[..., Any] | None = None
     app.include_router(heartbeats.router)
     app.include_router(mcp.router)
     app.include_router(media.router)
+    app.include_router(workspaces.router)
     app.include_router(events.router)
 
     @app.get("/health")

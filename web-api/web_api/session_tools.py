@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from web_api.tool_names import qualified
+
 GROUP_ID = "session"
 GROUP_NAME = "Session tools"
+SOURCE = "session"
 
 INSTRUCTIONS = (
-    "When someone asks to clear, reset, or forget this conversation, call clear_session. "
+    "When someone asks to clear, reset, or forget this conversation, call "
+    f"{qualified(SOURCE, 'clear_session')}. "
     "That drops the stored turns and clears the in-memory session. "
     "Do not repeat anything from before that call."
 )
@@ -53,7 +57,7 @@ async def clear_current_session(store: Any, session_id: str, bus: Any, session: 
 def _clear_tool(store: Any, session_id: str, bus: Any) -> object:
     from agent_framework import FunctionInvocationContext, tool
 
-    @tool(approval_mode="never_require", name="clear_session")
+    @tool(approval_mode="never_require", name=qualified(SOURCE, "clear_session"))
     async def clear_session_tool(ctx: FunctionInvocationContext) -> str:
         """Clear this conversation.
 

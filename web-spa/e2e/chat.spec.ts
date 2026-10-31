@@ -1,10 +1,14 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
 
+import { deleteAgentsNamed } from './cleanup';
+
 test('two agent channels keep separate conversations', async ({ page }) => {
   const models = await liveModels();
   test.skip(models.length === 0, 'favlo serve has no language model');
   const modelId = models[0];
+  const created: string[] = [];
+  try {
 
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto('http://localhost:8081/');
@@ -81,6 +85,7 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await page.getByRole('tab', { name: 'Agents' }).click();
 
   const brook = `Brook ${Date.now()}`;
+  created.push(brook);
   await page.getByRole('button', { name: 'New agent' }).filter({ visible: true }).click();
   await page.getByRole('textbox', { name: 'Agent name', exact: true }).fill(brook);
   await page.getByRole('textbox', { name: 'Persona', exact: true }).fill('A short persona.');
@@ -182,9 +187,11 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await page.getByRole('button', { name: 'Chat' }).click();
   await listed;
   await expect(page.getByLabel('Conversation').getByRole('heading', { name: 'Favlo' })).toBeVisible();
+  created.push('River', 'Cedar');
   await createAgent(page, 'River', 'Reply in one short sentence.');
   await createAgent(page, 'Cedar', 'Reply in one short sentence.');
   const emptyName = `Glen ${Date.now()}`;
+  created.push(emptyName);
   await createAgent(page, emptyName, 'Reply in one short sentence.');
   await page.getByRole('button', { name: emptyName, exact: true }).click();
   await expect(page.getByRole('heading', { name: emptyName })).toBeVisible();
@@ -209,6 +216,9 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Cedar' })).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('button', { name: 'Close channels' })).toHaveCount(0);
+  } finally {
+    await deleteAgentsNamed(...created);
+  }
 });
 
 async function expectHeartbeatColumns(page: Page) {

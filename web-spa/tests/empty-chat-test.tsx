@@ -10,7 +10,7 @@ jest.mock('expo-router', () => ({
   useFocusEffect: () => undefined,
 }));
 
-test('an empty conversation offers starters and hides workspaces', async () => {
+test('an empty conversation offers starters and shows workspaces', async () => {
   jest.spyOn(Dimensions, 'get').mockReturnValue({ width: 1280, height: 800, scale: 1, fontScale: 1 });
   mockChat();
   const user = userEvent.setup();
@@ -22,7 +22,8 @@ test('an empty conversation offers starters and hides workspaces', async () => {
   expect(await view.findByRole('button', { name: 'New agent' })).toBeTruthy();
   expect(await view.findByText('Chat, images, music, and voice on this machine.')).toBeTruthy();
   expect(view.getByRole('button', { name: 'Generate an image' })).toBeTruthy();
-  expect(view.queryByLabelText('Workspaces')).toBeNull();
+  expect(view.getByLabelText('Workspaces')).toBeTruthy();
+  expect(view.getByRole('button', { name: 'New workspace' })).toBeTruthy();
   expect(view.getByTestId('selected-mark')).toBeTruthy();
   expect(within(view.getByTestId('reading-column')).getByLabelText('Message')).toBeTruthy();
   await user.press(view.getByRole('button', { name: 'Generate an image' }));
@@ -39,6 +40,7 @@ test('a compact empty conversation uses a channels drawer', async () => {
     </ThemeProvider>,
   );
   expect(await view.findByRole('button', { name: 'Channels' })).toBeTruthy();
+  expect(view.getByRole('button', { name: 'Workspaces' })).toBeTruthy();
   expect(view.queryByRole('button', { name: 'New agent' })).toBeNull();
   expect(view.getByRole('button', { name: 'Generate an image' })).toBeTruthy();
   expect(pressedStyle(view, 'Generate an image')).toEqual(expect.objectContaining({ alignSelf: 'stretch' }));
@@ -75,6 +77,9 @@ function mockChat() {
     }
     if (path === '/sessions/session_favlo') {
       return json({ messages: [], runs: [], cursor: 0 });
+    }
+    if (path.startsWith('/workspaces')) {
+      return json({ workspaces: [] });
     }
     return json({});
   }) as typeof fetch;

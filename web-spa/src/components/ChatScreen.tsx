@@ -4,6 +4,7 @@ import {
   Platform,
   ScrollView,
   Text,
+  TextInput,
   useWindowDimensions,
   View,
   type NativeScrollEvent,
@@ -11,49 +12,44 @@ import {
 } from 'react-native';
 
 import { api, idempotencyKey, socketUrl } from '@/api/client';
+import {
+  chatMessage,
+  clearedTranscript,
+  keepLatest,
+  LATEST_SLACK,
+  readDraft,
+  showsMessage,
+  TranscriptTurn,
+  writeDraft,
+  type ChatMessage,
+} from '@/components/chat-transcript';
 import { Composer } from '@/components/Composer';
 import { Confirmation } from '@/components/Confirmation';
 import { EmptyState } from '@/components/EmptyState';
 import { Frame } from '@/components/Frame';
+import { GalleryWorkspace } from '@/components/GalleryWorkspace';
 import { MarkdownText } from '@/components/MarkdownText';
-import { humanText, MessageBody } from '@/components/MessageBody';
+import { humanText } from '@/components/MessageBody';
 import { MenuRow } from '@/components/MenuRow';
 import { Modal } from '@/components/Modal';
 import { focusRingInset, Pressable } from '@/components/Pressable';
 import { AgentForm, type Provider, type Settings, type ToolGroup } from '@/components/SettingsScreen';
 import { Thinking } from '@/components/Thinking';
 import { transcriptScrollbar } from '@/components/scrollbar';
+import { Workspaces, type Workspace } from '@/components/Workspaces';
 import { workingShimmer } from '@/components/working';
 import { useTheme } from '@/theme/Theme';
 import { radius, space, z } from '@/theme/tokens';
 import { measureStyle, textStyle } from '@/theme/type';
 
+export { clearedTranscript, keepLatest, showsMessage };
+
 type Channel = { id: string; name: string; agent_id: string; session_id: string };
-type ChatMessage = { id: string; role: string; body: string; reasoning?: string };
 type Snapshot = {
   messages: { id: string; role: string; body: string; reasoning?: string | null }[];
   runs: { id: string; status: string; error: string | null }[];
   cursor: number;
 };
-const LATEST_SLACK = 64;
-
-export function showsMessage(text?: string, reasoning?: string | null): boolean {
-  return Boolean(text) || Boolean(reasoning && reasoning.trim());
-}
-
-export function clearedTranscript(
-  event: { type: string; stream_id?: string },
-  sessionId: string | undefined,
-): boolean {
-  return sessionId != null && event.type === 'session.cleared' && event.stream_id === `session:${sessionId}`;
-}
-
-export function keepLatest(following: boolean, placed: boolean, fromBottom: number): boolean {
-  if (!placed) {
-    return following;
-  }
-  return fromBottom <= LATEST_SLACK;
-}
 
 type AgentEvent = {
   event_id: string;
@@ -94,14 +90,19 @@ export function ChatScreen() {
   const [notice, setNotice] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
-  const [drawer, setDrawer] = useState<'channels' | null>(null);
+  const [drawer, setDrawer] = useState<'channels' | 'workspaces' | null>(null);
   const [creating, setCreating] = useState(false);
   const [createToken, setCreateToken] = useState(0);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [groups, setGroups] = useState<ToolGroup[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [selectedWorkspace, setSelectedWorkspace] = useState<string | null>(null);
+  const [creatingWorkspace, setCreatingWorkspace] = useState(false);
+  const [workspaceName, setWorkspaceName] = useState('');
 
   const channel = channels.find((item) => item.id === selected) ?? null;
+  const workspace = workspaces.find((item) => item.id === selectedWorkspace) ?? null;
 
   const loadChannels = useCallback(async () => {
     const body = await api<{ channels: Channel[] }>('/channels');
@@ -113,6 +114,16 @@ export function ChatScreen() {
       const favlo = body.channels.find((item) => item.agent_id === 'agent_favlo');
       return favlo?.id ?? body.channels[0]?.id ?? null;
     });
+  }, []);
+
+  const loadWorkspaces = useCallback(async (channelId: string) => {
+    const body = await api<{ workspaces: Workspace[] }>(
+      `/workspaces?channel_id=${encodeURIComponent(channelId)}`,
+    );
+    setWorkspaces(body.workspaces ?? []);
+    setSelectedWorkspace((current) =>
+      current != null && (body.workspaces ?? []).some((item) => item.id === current) ? current : null,
+    );
   }, []);
 
   useEffect(() => {
@@ -148,6 +159,15 @@ export function ChatScreen() {
       };
     }, [loadChannels]),
   );
+
+  useEffect(() => {
+    if (channel == null) {
+      setWorkspaces([]);
+      setSelectedWorkspace(null);
+      return;
+    }
+    void loadWorkspaces(channel.id).catch((caught: Error) => setNotice(caught.message));
+  }, [channel?.id, loadWorkspaces]);
 
   useEffect(() => {
     if (channel == null) {
@@ -236,6 +256,7 @@ export function ChatScreen() {
       if (event.key === 'Escape') {
         setDrawer(null);
         setCreating(false);
+        setCreatingWorkspace(false);
       }
     };
     document.addEventListener('keydown', onKey);
@@ -249,6 +270,18 @@ export function ChatScreen() {
     seen.current.add(event.event_id);
     if (event.type === 'agent.created' || event.type === 'agent.deleted') {
       void loadChannels();
+      return;
+    }
+    if (event.type === 'workspace.created' || event.type === 'workspace.deleted' || event.type === 'workspace.root_set') {
+      if (channel != null) {
+        void loadWorkspaces(channel.id);
+      }
+      if (event.type === 'workspace.deleted' && event.payload && 'id' in (event.payload as object)) {
+        const deleted = (event.payload as { id?: string }).id;
+        if (deleted != null && deleted === selectedWorkspace) {
+          setSelectedWorkspace(null);
+        }
+      }
       return;
     }
     if (event.stream_id !== `session:${channel?.session_id}`) {
@@ -339,6 +372,25 @@ export function ChatScreen() {
     }
   }
 
+  async function createWorkspace() {
+    if (channel == null || workspaceName.trim() === '') {
+      return;
+    }
+    try {
+      const created = await api<Workspace>('/workspaces', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': idempotencyKey() },
+        body: JSON.stringify({ channel_id: channel.id, name: workspaceName.trim(), type: 'gallery' }),
+      });
+      setCreatingWorkspace(false);
+      setWorkspaceName('');
+      setWorkspaces((current) => [...current, created]);
+      setSelectedWorkspace(created.id);
+    } catch (caught) {
+      setNotice(caught instanceof Error ? caught.message : 'The workspace was not created.');
+    }
+  }
+
   async function stop() {
     if (runId == null) {
       return;
@@ -388,10 +440,13 @@ export function ChatScreen() {
             <Pressable accessibilityRole="button" accessibilityLabel="Channels" onPress={() => setDrawer('channels')} style={barButton(palette.surface, palette.borderStrong)}>
               <Text style={textStyle('small', palette.textPrimary)}>Channels</Text>
             </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Workspaces" onPress={() => setDrawer('workspaces')} style={barButton(palette.surface, palette.borderStrong)}>
+              <Text style={textStyle('small', palette.textPrimary)}>Workspaces</Text>
+            </Pressable>
           </View>
         ) : null}
         <View style={{ flex: 1, flexDirection: 'row', minWidth: 0, maxWidth: '100%' }}>
-          {!wide && drawer === 'channels' ? (
+          {!wide && drawer != null ? (
             <Pressable
               accessible={false}
               onPress={() => setDrawer(null)}
@@ -420,6 +475,7 @@ export function ChatScreen() {
                   selected={item.id === selected}
                   onPress={() => {
                     setSelected(item.id);
+                    setSelectedWorkspace(null);
                     setDrawer(null);
                   }}
                 />
@@ -435,6 +491,15 @@ export function ChatScreen() {
               ) : null}
             </View>
           )}
+          {workspace != null ? (
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <GalleryWorkspace
+                workspaceId={workspace.id}
+                agentName={channel?.name ?? 'Agent'}
+                onBack={() => setSelectedWorkspace(null)}
+              />
+            </View>
+          ) : (
           <View accessibilityLabel="Conversation" style={{ flex: 1, minWidth: 0, maxWidth: '100%', padding: space[4], overflow: 'hidden' }}>
             <View testID="reading-column" style={[{ flex: 1, minWidth: 0, width: '100%', gap: space[3] }, measureStyle]}>
             {channel == null ? (
@@ -518,7 +583,70 @@ export function ChatScreen() {
             {hasReply ? null : <View style={{ flex: 1 }} />}
             </View>
           </View>
+          )}
+          {(wide || drawer === 'workspaces') && (
+            <View
+              style={{
+                width: wide ? 280 : drawerWidth,
+                borderLeftWidth: 1,
+                borderLeftColor: palette.border,
+                backgroundColor: palette.surface,
+                ...(wide ? {} : { position: 'absolute', top: 0, bottom: 0, right: 0, zIndex: z.drawer }),
+              }}
+            >
+              <Workspaces
+                workspaces={workspaces}
+                selectedId={selectedWorkspace}
+                onSelect={(id) => {
+                  setSelectedWorkspace(id);
+                  setDrawer(null);
+                }}
+                onCreate={() => {
+                  setWorkspaceName('');
+                  setCreatingWorkspace(true);
+                  setDrawer(null);
+                }}
+              />
+              {!wide ? (
+                <Pressable accessibilityRole="button" accessibilityLabel="Close workspaces" onPress={() => setDrawer(null)} style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: space[4] }}>
+                  <Text style={textStyle('small', palette.accent)}>Close</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          )}
         </View>
+        {creatingWorkspace ? (
+          <Modal label="New workspace" closeLabel="Close new workspace" onClose={() => setCreatingWorkspace(false)}>
+            <View style={{ gap: space[3] }}>
+              <TextInput
+                accessibilityLabel="Workspace name"
+                value={workspaceName}
+                onChangeText={setWorkspaceName}
+                style={{
+                  ...textStyle('body', palette.textPrimary),
+                  minHeight: 44,
+                  borderWidth: 1,
+                  borderColor: palette.borderStrong,
+                  borderRadius: radius.control,
+                  paddingHorizontal: 12,
+                  backgroundColor: palette.surface,
+                }}
+              />
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Create workspace"
+                accessibilityState={{ disabled: workspaceName.trim() === '' }}
+                disabled={workspaceName.trim() === ''}
+                onPress={() => void createWorkspace()}
+                style={barButton(workspaceName.trim() === '' ? palette.disabledSurface : palette.accent, palette.accent)}
+              >
+                <Text style={textStyle('small', workspaceName.trim() === '' ? palette.disabledText : palette.onAccent, '600')}>
+                  Create workspace
+                </Text>
+              </Pressable>
+            </View>
+          </Modal>
+        ) : null}
         {creating ? (
           <Modal label="New agent" closeLabel="Close new agent" onClose={() => setCreating(false)}>
             <AgentForm
@@ -539,82 +667,6 @@ export function ChatScreen() {
       </View>
     </Frame>
   );
-}
-
-function TranscriptTurn({
-  name,
-  role,
-  body,
-  reasoning,
-}: {
-  name: string;
-  role: string;
-  body: string;
-  reasoning?: string;
-}) {
-  const { palette } = useTheme();
-  const [empty, setEmpty] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const reportEmpty = useCallback(() => setEmpty(true), []);
-  const mine = role === 'user';
-  if (empty) {
-    return null;
-  }
-  return (
-    <View
-      accessibilityLabel={`${name} said: ${humanText(body)}`}
-      style={{ alignItems: mine ? 'flex-end' : 'flex-start', maxWidth: '100%' }}
-    >
-      <View
-        style={{
-          maxWidth: mine ? '85%' : '100%',
-          gap: space[1],
-          padding: mine ? space[3] : 0,
-          borderRadius: radius.card,
-          backgroundColor: mine ? palette.accentSubtle : 'transparent',
-        }}
-      >
-        <Text style={textStyle('label', palette.textPrimary, '600')}>{name}</Text>
-        {reasoning ? <Thinking text={reasoning} settled /> : null}
-        <MessageBody body={body} onEmpty={reportEmpty} />
-        {!mine && humanText(body) ? (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Copy"
-            onPress={() => {
-              if (Platform.OS === 'web') {
-                void navigator.clipboard.writeText(humanText(body)).then(() => setCopied(true));
-              }
-            }}
-            style={{ minHeight: 44, justifyContent: 'center', alignSelf: 'flex-start' }}
-          >
-            <Text style={textStyle('caption', palette.textSecondary, '600')}>{copied ? 'Copied' : 'Copy'}</Text>
-          </Pressable>
-        ) : null}
-      </View>
-    </View>
-  );
-}
-
-function chatMessage(item: { id: string; role: string; body: string; reasoning?: string | null }): ChatMessage {
-  const reasoning = item.reasoning?.trim() ?? '';
-  return reasoning
-    ? { id: item.id, role: item.role, body: item.body, reasoning }
-    : { id: item.id, role: item.role, body: item.body };
-}
-
-function readDraft(sessionId: string): string {
-  if (Platform.OS !== 'web' || typeof localStorage === 'undefined') {
-    return '';
-  }
-  return localStorage.getItem(`favlo.draft.${sessionId}`) ?? '';
-}
-
-function writeDraft(sessionId: string, value: string) {
-  if (Platform.OS !== 'web' || typeof localStorage === 'undefined') {
-    return;
-  }
-  localStorage.setItem(`favlo.draft.${sessionId}`, value);
 }
 
 const menuRows = { gap: focusRingInset * 2, padding: focusRingInset };

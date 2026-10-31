@@ -1,7 +1,10 @@
 import { expect, test, type Page } from '@playwright/test';
 
-test('an empty conversation shows starters and hides workspaces', async ({ page }) => {
+import { deleteAgentsNamed } from './cleanup';
+
+test('an empty conversation shows starters and an empty workspaces column', async ({ page }) => {
   const name = `Grove ${Date.now()}`;
+  try {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto('http://localhost:8081/');
   await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8081\/?$/);
@@ -14,7 +17,9 @@ test('an empty conversation shows starters and hides workspaces', async ({ page 
   await expect(page.getByLabel('Conversation').getByRole('heading', { name })).toBeVisible();
   await expect(page.getByText('Chat, images, music, and voice on this machine.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Generate an image' })).toBeVisible();
-  await expect(page.getByLabel('Workspaces')).toHaveCount(0);
+  await expect(page.getByLabel('Workspaces')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'New workspace' })).toBeVisible();
+  await expect(page.getByText('No workspaces')).toBeVisible();
   await page.getByRole('button', { name: 'List registered models' }).click();
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('Which models are registered?');
   await expect(page.getByRole('link', { name: 'Skip to message' })).not.toBeInViewport();
@@ -28,6 +33,7 @@ test('an empty conversation shows starters and hides workspaces', async ({ page 
   await page.setViewportSize({ width: 390, height: 844 });
   await expectFits(page);
   await expect(page.getByRole('button', { name: 'Channels' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Workspaces' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'New agent' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Generate an image' })).toBeInViewport();
   await expect(page.getByRole('button', { name: 'Set up a model' })).toBeInViewport();
@@ -41,6 +47,9 @@ test('an empty conversation shows starters and hides workspaces', async ({ page 
   await page.keyboard.press('Escape');
   await expect(page.getByRole('button', { name: 'Close channels' })).toHaveCount(0);
   await expectFits(page);
+  } finally {
+    await deleteAgentsNamed(name);
+  }
 });
 
 async function expectComposerInColumn(page: Page) {

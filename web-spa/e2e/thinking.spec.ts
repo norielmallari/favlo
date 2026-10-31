@@ -1,7 +1,10 @@
 import { expect, test } from '@playwright/test';
 
+import { deleteAgentsNamed } from './cleanup';
+
 test('thinking opens during a reply and closes when the message is stored', async ({ page }) => {
   const name = `Wren ${Date.now()}`;
+  try {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto('http://localhost:8081/');
   await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8081\/?$/);
@@ -26,4 +29,7 @@ test('thinking opens during a reply and closes when the message is stored', asyn
   await thinking.click();
   await expect(thinking).toHaveAttribute('aria-expanded', 'true');
   await expect(page.getByTestId('thinking-text')).toBeVisible();
+  } finally {
+    await deleteAgentsNamed(name);
+  }
 });

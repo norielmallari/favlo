@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from web_api.tool_names import qualified
+
 GROUP_ID = "conversation"
 GROUP_NAME = "Conversation tools"
+SOURCE = "conversation"
 LIST_MAX = 20
 SEARCH_MAX = 20
 READ_MAX = 50
@@ -15,9 +18,9 @@ _BODY = 2000
 INSTRUCTIONS = (
     "When a question depends on an earlier message in any agent session, channel, "
     "or workspace chat, use the conversation tools before you answer. "
-    "Call list_conversations to see which conversations exist. "
-    "Call search_messages with the words you are looking for. "
-    "Call read_recent_messages with the conversation id and how many of the latest "
+    f"Call {qualified(SOURCE, 'list_conversations')} to see which conversations exist. "
+    f"Call {qualified(SOURCE, 'search_messages')} with the words you are looking for. "
+    f"Call {qualified(SOURCE, 'read_recent_messages')} with the conversation id and how many of the latest "
     "messages you need. Ask for only as many as the question needs. "
     "A read returns those messages from oldest to newest. "
     "These tools cover every stored agent session, channel, and workspace chat."
@@ -80,7 +83,7 @@ def _list_tool(store: Any) -> object:
     from agent_framework import tool
     from pydantic import Field
 
-    @tool(approval_mode="never_require", name="list_conversations")
+    @tool(approval_mode="never_require", name=qualified(SOURCE, "list_conversations"))
     def list_conversations_tool(
         kind: Annotated[
             str,
@@ -106,7 +109,7 @@ def _search_tool(store: Any) -> object:
     from agent_framework import tool
     from pydantic import Field
 
-    @tool(approval_mode="never_require", name="search_messages")
+    @tool(approval_mode="never_require", name=qualified(SOURCE, "search_messages"))
     def search_messages_tool(
         query: Annotated[str, Field(description="Text to find in a message.")],
         kind: Annotated[
@@ -130,7 +133,7 @@ def _read_tool(store: Any) -> object:
     from agent_framework import tool
     from pydantic import Field
 
-    @tool(approval_mode="never_require", name="read_recent_messages")
+    @tool(approval_mode="never_require", name=qualified(SOURCE, "read_recent_messages"))
     def read_recent_messages_tool(
         conversation: Annotated[str, Field(description="A conversation id or its exact name.")],
         limit: Annotated[

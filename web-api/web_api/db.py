@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -108,22 +109,8 @@ CREATE TABLE IF NOT EXISTS mcp_server (
     enabled INTEGER NOT NULL,
     status TEXT NOT NULL,
     status_message TEXT NOT NULL,
-    revision INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS mcp_tool (
-    server_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    group_id TEXT NOT NULL,
-    description TEXT NOT NULL,
-    schema TEXT NOT NULL,
-    PRIMARY KEY (server_id, name)
-);
-CREATE TABLE IF NOT EXISTS mcp_tool_group (
-    server_id TEXT NOT NULL,
-    group_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    enabled INTEGER NOT NULL,
-    PRIMARY KEY (server_id, group_id)
+    revision INTEGER NOT NULL,
+    group_switches TEXT NOT NULL DEFAULT '{}'
 );
 CREATE TABLE IF NOT EXISTS mcp_task (
     id TEXT PRIMARY KEY,
@@ -151,6 +138,46 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS workspace (
+    id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    type TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS folder (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    role TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    provider TEXT,
+    location TEXT NOT NULL,
+    machine_id TEXT NOT NULL,
+    remote_id TEXT,
+    revision INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS skill (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (workspace_id, name)
+);
+CREATE TABLE IF NOT EXISTS agent_skill (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (agent_id, name)
+);
 """
 
 LOCAL_PROVIDER_ID = "provider_local"
@@ -170,8 +197,50 @@ def connect(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _drop_mcp_definitions(conn: sqlite3.Connection) -> None:
+    """Drop catalog tables. Group on/off switches stay on the server row."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(mcp_server)")}
+    if "group_switches" not in columns:
+        conn.execute(
+            "ALTER TABLE mcp_server ADD COLUMN group_switches TEXT NOT NULL DEFAULT '{}'"
+        )
+    present = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mcp_tool_group'"
+    ).fetchone()
+    if present is not None:
+        grouped: dict[str, dict[str, bool]] = {}
+        query = "SELECT server_id, group_id, enabled FROM mcp_tool_group"
+        for row in conn.execute(query):
+            server_id = str(row["server_id"])
+            grouped.setdefault(server_id, {})[str(row["group_id"])] = bool(row["enabled"])
+        for server_id, switches in grouped.items():
+            current = conn.execute(
+                "SELECT group_switches FROM mcp_server WHERE id = ?",
+                (server_id,),
+            ).fetchone()
+            if current is None:
+                continue
+            merged: dict[str, bool] = {}
+            raw = current["group_switches"]
+            if isinstance(raw, str) and raw:
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    parsed = {}
+                if isinstance(parsed, dict):
+                    merged = {str(key): bool(value) for key, value in parsed.items()}
+            merged.update(switches)
+            conn.execute(
+                "UPDATE mcp_server SET group_switches = ? WHERE id = ?",
+                (json.dumps(merged), server_id),
+            )
+        conn.execute("DROP TABLE mcp_tool_group")
+    conn.execute("DROP TABLE IF EXISTS mcp_tool")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    _drop_mcp_definitions(conn)
     columns = {row[1] for row in conn.execute("PRAGMA table_info(heartbeat)")}
     if "session_id" not in columns:
         conn.execute("ALTER TABLE heartbeat ADD COLUMN session_id TEXT")
@@ -183,6 +252,9 @@ def migrate(conn: sqlite3.Connection) -> None:
     run_columns = {row[1] for row in conn.execute("PRAGMA table_info(run)")}
     if "cue" not in run_columns:
         conn.execute("ALTER TABLE run ADD COLUMN cue TEXT")
+    session_columns = {row[1] for row in conn.execute("PRAGMA table_info(session)")}
+    if "workspace_id" not in session_columns:
+        conn.execute("ALTER TABLE session ADD COLUMN workspace_id TEXT")
     row = conn.execute("SELECT id FROM settings WHERE id = 1").fetchone()
     if row is None:
         conn.execute(

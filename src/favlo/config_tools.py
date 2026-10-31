@@ -12,27 +12,27 @@ GROUP_NAME = "Configuration tools"
 INSTRUCTIONS = (
     "When someone asks how to connect a client, which address or model id to use, "
     "how to download or quantize a supported model, or how to register one, "
-    "call read_guide before you answer. "
-    "Use clients for the server address, the model field, reload, "
-    "and stopping the server with quit. "
+    "call config_read_guide before you answer. "
+    "Use clients for the server address, the model field, and reload. "
+    "Ctrl+C stops a terminal favlo serve. "
     "Use models for which checkpoints can be downloaded and how registration works. "
-    "When someone wants to set up Qwen3.6-35B-A3B, call read_setup with qwen36-35b-a3b "
-    "before you answer. When someone wants to set up Qwen3.8-27B, call read_setup with "
+    "When someone wants to set up Qwen3.6-35B-A3B, call config_read_setup with qwen36-35b-a3b "
+    "before you answer. When someone wants to set up Qwen3.8-27B, call config_read_setup with "
     "qwen38-27b before you answer. When someone wants to set up Z-Image-Turbo, call "
-    "read_setup with z-image-turbo before you answer. When someone wants to set up "
-    "Wan 2.2 I2V, call read_setup with wan22-i2v before you answer. When someone wants to "
-    "set up ACE-Step, call read_setup with ace-step-15-turbo before you answer. For any other "
+    "config_read_setup with z-image-turbo before you answer. When someone wants to set up "
+    "Wan 2.2 I2V, call config_read_setup with wan22-i2v before you answer. When someone wants to "
+    "set up ACE-Step, call config_read_setup with ace-step-15-turbo before you answer. For any other "
     "pipeline "
-    "they want to set up, download, quantize, or delete, call read_setup with that pipeline id. "
+    "they want to set up, download, quantize, or delete, call config_read_setup with that pipeline id. "
     "Answer from that guide. "
-    "When they want you to run a step from it, call run_setup with that command. "
-    "run_setup only runs inside this install. Do not run a command the guide does not contain. "
+    "When they want you to run a step from it, call config_run_setup with that command. "
+    "config_run_setup only runs inside this install. Do not run a command the guide does not contain. "
     "When someone asks which models are registered, or which model id to send, "
-    "call list_models before you answer. Report only the lines it returns. "
+    "call config_list_models before you answer. Report only the lines it returns. "
     "When someone wants MTP on or off for a model, or a different draft depth, "
-    "call set_model_mtp. A row that omits MTP stays off. "
+    "call config_set_model_mtp. A row that omits MTP stays off. "
     "When someone asks where your name came from, or who Amanda and Celestia are, "
-    "call read_guide with history and tell that story. Do not add events it does not contain. "
+    "call config_read_guide with history and tell that story. Do not add events it does not contain. "
     "Answer from that guide. If the guide does not say it, say you do not know."
 )
 
@@ -67,14 +67,14 @@ def _guide_tool() -> object:
 
     from favlo.guides import read_guide as load_guide
 
-    @tool(approval_mode="never_require")
+    @tool(approval_mode="never_require", name="config_read_guide")
     def read_guide(
         name: Annotated[str, Field(description="clients, models, or history.")],
     ) -> str:
         """Read one guide.
 
-        clients points a program at this server, covers ``reload``,
-        and ``quit`` stops the server. models covers
+        clients points a program at this server and covers ``reload``.
+        Ctrl+C stops a terminal ``favlo serve``. models covers
         download, quantize, and registration. history is where the name Favlo came from.
         """
         return load_guide(name)
@@ -90,7 +90,7 @@ def _suggestions_tool(home: Path | None) -> object:
 
     from favlo.machine import set_suggestions
 
-    @tool(approval_mode="never_require")
+    @tool(approval_mode="never_require", name="config_download_suggestions")
     def download_suggestions(
         enabled: Annotated[
             bool,
@@ -114,7 +114,7 @@ def _setup_guide_tool() -> object:
 
     from favlo.guides import read_setup as load_setup
 
-    @tool(approval_mode="never_require")
+    @tool(approval_mode="never_require", name="config_read_setup")
     def read_setup(
         pipeline: Annotated[
             str,
@@ -143,7 +143,7 @@ def _setup_run_tool(base: str) -> object:
 
     from favlo.setup_run import accepted_argv, frees_model, run_setup_command
 
-    @tool(approval_mode="never_require")
+    @tool(approval_mode="never_require", name="config_run_setup")
     def run_setup(
         command: Annotated[
             str,
@@ -190,7 +190,7 @@ def _close_resident(base: str) -> str | None:
 def _models_tool() -> object:
     from agent_framework import tool
 
-    @tool(approval_mode="never_require")
+    @tool(approval_mode="never_require", name="config_list_models")
     def list_models() -> str:
         """List the registered models.
 
@@ -212,7 +212,7 @@ def _mtp_tool() -> object:
 
     from favlo.registry import set_model_mtp as store_model_mtp
 
-    @tool(approval_mode="never_require")
+    @tool(approval_mode="never_require", name="config_set_model_mtp")
     def set_model_mtp(
         model: Annotated[str, Field(description="Folder, alias, or pipeline id.")],
         enabled: Annotated[bool, Field(description="True drafts. False stays on one token.")],

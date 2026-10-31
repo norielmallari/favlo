@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -116,7 +118,7 @@ def test_clear_session_drops_the_stored_turns_and_the_memory(tmp_path: Path) -> 
             Bus(),
         )
         assert "clear_session" in instructions
-        assert [item.name for item in enabled] == ["clear_session"]
+        assert [item.name for item in enabled] == ["session_clear_session"]
     finally:
         store.close()
 
@@ -135,7 +137,14 @@ def test_the_configuration_group_adds_its_instructions() -> None:
     )
     assert "read_setup" in text
     assert "You live in this terminal" not in text
-    assert len(enabled) == 5
+    assert [item.name for item in enabled] == [
+        "config_read_guide",
+        "config_list_models",
+        "config_set_model_mtp",
+        "config_download_suggestions",
+        "config_read_setup",
+        "config_run_setup",
+    ]
 
 
 def test_conversation_tools_read_every_transcript(tmp_path: Path) -> None:
@@ -196,9 +205,9 @@ def test_conversation_tools_read_every_transcript(tmp_path: Path) -> None:
     assert "search_messages" in text
     assert "read_recent_messages" in text
     assert [item.name for item in enabled] == [
-        "list_conversations",
-        "search_messages",
-        "read_recent_messages",
+        "conversation_list_conversations",
+        "conversation_search_messages",
+        "conversation_read_recent_messages",
     ]
     bare, idle = turn_setup(
         "You are River.",
@@ -602,6 +611,211 @@ def test_reasoning_content_stays_out_of_the_reply() -> None:
     assert read_reasoning(object(), parsed) == parsed
 
 
+def test_stop_ends_a_run_that_is_still_waiting(tmp_path: Path) -> None:
+    started = threading.Event()
+    released = threading.Event()
+
+    async def hanging(**kwargs: object):
+        started.set()
+        cancel = kwargs["cancel"]
+        assert isinstance(cancel, asyncio.Event)
+        await cancel.wait()
+        released.set()
+        return
+        yield "nope"
+
+    app = create_app(tmp_path, reply=hanging)
+    with TestClient(app) as client:
+        model = client.post(
+            "/provider-models",
+            headers={"Idempotency-Key": "model-stop"},
+            json={
+                "provider_id": "provider_local",
+                "model_id": "example-model",
+                "display_name": "Example",
+            },
+        )
+        assert model.status_code == 201
+        settings = client.get("/settings").json()
+        saved = client.patch(
+            "/settings",
+            json={
+                "expected_revision": settings["revision"],
+                "default_model_id": model.json()["id"],
+                "exchange_budget": 10,
+            },
+        )
+        assert saved.status_code == 200
+        sent = client.post(
+            "/sessions/session_favlo/messages",
+            headers={"Idempotency-Key": "stop-1"},
+            json={"text": "Hello"},
+        )
+        assert sent.status_code == 202
+        assert started.wait(2)
+        stopped = client.post(f"/runs/{sent.json()['run_id']}/cancel")
+        assert stopped.status_code == 202
+        assert released.wait(2)
+        snapshot = _wait(client, "session_favlo")
+    assert snapshot["runs"][-1]["status"] == "cancelled"
+
+
+def test_stop_closes_the_agent_framework_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    from web_api.chat import stream_reply
+
+    closed = {"stream": False, "http": False}
+
+    class Stream:
+        def __init__(self) -> None:
+            self._wait = asyncio.Event()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await self._wait.wait()
+            raise StopAsyncIteration
+
+        async def close(self) -> None:
+            closed["stream"] = True
+            self._wait.set()
+
+    class Session:
+        def __init__(self) -> None:
+            self.state: dict[str, object] = {}
+
+    class Agent:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def create_session(self) -> Session:
+            return Session()
+
+        def run(self, *_args: object, **_kwargs: object) -> Stream:
+            return Stream()
+
+    class HTTP:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def close(self) -> None:
+            closed["http"] = True
+
+    class Client:
+        function_invocation_configuration: dict[str, object] = {}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("agent_framework.Agent", Agent)
+    monkeypatch.setattr("openai.AsyncOpenAI", HTTP)
+    monkeypatch.setattr("web_api.chat.open_chat_client", lambda *_args, **_kwargs: Client())
+
+    async def once() -> None:
+        cancel = asyncio.Event()
+        task = asyncio.create_task(_collect_reply(cancel))
+        await asyncio.sleep(0.05)
+        cancel.set()
+        pieces = await asyncio.wait_for(task, 1)
+        assert pieces == []
+        assert closed["stream"]
+        assert closed["http"]
+
+    async def _collect_reply(cancel: asyncio.Event) -> list[object]:
+        pieces = []
+        async for piece in stream_reply(
+            base_url="http://127.0.0.1:8129/v1",
+            model="example-model",
+            persona="A short persona.",
+            agent_name="Favlo",
+            history=[],
+            user_text="Hello",
+            cancel=cancel,
+        ):
+            pieces.append(piece)
+        return pieces
+
+    asyncio.run(once())
+
+
+def test_a_cancel_event_still_streams_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from web_api.chat import stream_reply
+
+    class Update:
+        role = "assistant"
+        contents: list[object] = []
+        raw_representation = None
+
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    async def pieces():
+        yield Update("Hel")
+        yield Update("lo")
+
+    class Stream:
+        def __init__(self) -> None:
+            self._it = pieces()
+
+        def __aiter__(self):
+            return self._it
+
+        async def close(self) -> None:
+            return None
+
+        async def get_final_response(self) -> SimpleNamespace:
+            return SimpleNamespace(text="Hello", messages=[])
+
+    class Session:
+        def __init__(self) -> None:
+            self.state: dict[str, object] = {}
+
+    class Agent:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def create_session(self) -> Session:
+            return Session()
+
+        def run(self, *_args: object, **_kwargs: object) -> Stream:
+            return Stream()
+
+    class HTTP:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def close(self) -> None:
+            return None
+
+    class Client:
+        function_invocation_configuration: dict[str, object] = {}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("agent_framework.Agent", Agent)
+    monkeypatch.setattr("openai.AsyncOpenAI", HTTP)
+    monkeypatch.setattr("web_api.chat.open_chat_client", lambda *_args, **_kwargs: Client())
+
+    async def once() -> None:
+        collected = []
+        async for piece in stream_reply(
+            base_url="http://127.0.0.1:8129/v1",
+            model="example-model",
+            persona="A short persona.",
+            agent_name="Favlo",
+            history=[],
+            user_text="Hello",
+            cancel=asyncio.Event(),
+        ):
+            collected.append(piece.text)
+        assert collected == ["Hel", "lo"]
+
+    asyncio.run(once())
+
+
 def test_tool_markup_stays_out_of_the_reply() -> None:
     from web_api.chat import spoken_text
 
@@ -923,6 +1137,16 @@ def test_deleting_an_agent_removes_its_downstream_rows(client: TestClient, tmp_p
         },
     )
     assert beat.status_code == 201
+    skill = client.post(
+        "/agent-skills",
+        headers={"Idempotency-Key": "delete-skill"},
+        json={
+            "agent_id": agent_id,
+            "name": "Photo captions",
+            "description": "Write a one-line caption.",
+        },
+    )
+    assert skill.status_code == 201
     started = client.post(
         f"/heartbeats/{beat.json()['id']}/run",
         headers={"Idempotency-Key": "delete-run"},
@@ -997,9 +1221,8 @@ def test_deleting_an_agent_removes_its_downstream_rows(client: TestClient, tmp_p
         ("message", "session_id", heartbeat_session),
         ("run", "agent_id", agent_id),
         ("heartbeat", "agent_id", agent_id),
+        ("agent_skill", "agent_id", agent_id),
         ("mcp_server", "agent_id", agent_id),
-        ("mcp_tool", "server_id", server.json()["id"]),
-        ("mcp_tool_group", "server_id", server.json()["id"]),
         ("mcp_task", "agent_id", agent_id),
         ("event", "stream_id", f"session:{session_id}"),
         ("event", "stream_id", f"session:{heartbeat_session}"),

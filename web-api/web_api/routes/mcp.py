@@ -7,8 +7,9 @@ import asyncio
 from fastapi import APIRouter, Request
 
 from web_api.http import json_body, key
-from web_api.mcp_client import McpError, list_tools
-from web_api.mcp_tools import groups_from, prepare_catalog
+from web_api.mcp_cache import catalog
+from web_api.mcp_client import McpError
+from web_api.mcp_tools import groups_from, prepare_catalog, with_catalog
 from web_api.schemas import McpCreate, McpTest, McpUpdate
 from web_api.store import NotFound, Rejected, _mcp_fields
 
@@ -18,7 +19,8 @@ router = APIRouter()
 @router.get("/mcp-servers")
 async def list_servers(request: Request):
     rows = await asyncio.to_thread(request.app.state.store.mcp_servers)
-    return json_body(200, {"servers": rows})
+    servers = await asyncio.gather(*(with_catalog(row) for row in rows))
+    return json_body(200, {"servers": servers})
 
 
 @router.post("/mcp-servers")
@@ -53,7 +55,7 @@ async def test_connection(body: McpTest):
         return json_body(200, failed)
     server = {"id": "preview", "transport": transport, "command": command, "url": url}
     try:
-        tools = await list_tools(server)
+        tools = await catalog.get(server, refresh=True)
     except McpError:
         return json_body(200, failed)
     prepared = prepare_catalog(tools)
@@ -75,13 +77,10 @@ async def test_server(server_id: str, request: Request):
     if server is None:
         raise NotFound("That MCP server does not exist.")
     try:
-        tools = await list_tools(server)
+        fresh = await with_catalog(server, refresh=True)
     except McpError:
         failed = await asyncio.to_thread(request.app.state.store.mark_mcp_failed, server_id)
         return json_body(200, {"ok": False, "message": "Connection failed", "server": failed})
-    stored = await asyncio.to_thread(
-        request.app.state.store.store_mcp_catalog,
-        server_id,
-        prepare_catalog(tools),
-    )
-    return json_body(200, {"ok": True, "message": "Connection succeeded", "server": stored})
+    marked = await asyncio.to_thread(request.app.state.store.mark_mcp_connected, server_id)
+    marked["groups"] = fresh["groups"]
+    return json_body(200, {"ok": True, "message": "Connection succeeded", "server": marked})

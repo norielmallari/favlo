@@ -5,15 +5,18 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from web_api.tool_names import qualified
+
 GROUP_ID = "heartbeats"
 GROUP_NAME = "Heartbeat tools"
+SOURCE = "heartbeat"
 
 INSTRUCTIONS = (
     "When you should check something on a schedule, use the heartbeat tools. "
-    "Call list_heartbeats to see the schedules already stored for you. "
-    "Call add_heartbeat with a five-field cron expression, a timezone, and the "
-    "instructions for that run. Call update_heartbeat to change one of yours. "
-    "Call delete_heartbeat to remove one of yours. The schedule runs when that minute arrives."
+    f"Call {qualified(SOURCE, 'list_heartbeats')} to see the schedules already stored for you. "
+    f"Call {qualified(SOURCE, 'add_heartbeat')} with a five-field cron expression, a timezone, and the "
+    f"instructions for that run. Call {qualified(SOURCE, 'update_heartbeat')} to change one of yours. "
+    f"Call {qualified(SOURCE, 'delete_heartbeat')} to remove one of yours. The schedule runs when that minute arrives."
 )
 
 
@@ -135,7 +138,7 @@ def _owned(store: Any, agent_id: str, heartbeat_id: str) -> dict[str, Any] | Non
 def _list_tool(store: Any, agent_id: str) -> object:
     from agent_framework import tool
 
-    @tool(approval_mode="never_require", name="list_heartbeats")
+    @tool(approval_mode="never_require", name=qualified(SOURCE, "list_heartbeats"))
     def list_heartbeats_tool() -> str:
         """List the heartbeats stored for you."""
         return list_heartbeats(store, agent_id)
@@ -149,7 +152,7 @@ def _add_tool(store: Any, agent_id: str) -> object:
     from agent_framework import tool
     from pydantic import Field
 
-    @tool(approval_mode="never_require", name="add_heartbeat")
+    @tool(approval_mode="never_require", name=qualified(SOURCE, "add_heartbeat"))
     def add_heartbeat_tool(
         cron_expression: Annotated[
             str,
@@ -176,7 +179,7 @@ def _update_tool(store: Any, agent_id: str) -> object:
     from agent_framework import tool
     from pydantic import Field
 
-    @tool(approval_mode="never_require", name="update_heartbeat")
+    @tool(approval_mode="never_require", name=qualified(SOURCE, "update_heartbeat"))
     def update_heartbeat_tool(
         heartbeat_id: Annotated[str, Field(description="The heartbeat id from list_heartbeats.")],
         cron_expression: Annotated[
@@ -219,7 +222,7 @@ def _delete_tool(store: Any, agent_id: str) -> object:
     from agent_framework import tool
     from pydantic import Field
 
-    @tool(approval_mode="never_require", name="delete_heartbeat")
+    @tool(approval_mode="never_require", name=qualified(SOURCE, "delete_heartbeat"))
     def delete_heartbeat_tool(
         heartbeat_id: Annotated[str, Field(description="The heartbeat id from list_heartbeats.")],
     ) -> str:

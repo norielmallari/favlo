@@ -78,6 +78,9 @@ test('a new agent shows the same options as edit', async () => {
     if (path === '/mcp-servers') {
       return json({ servers: [] });
     }
+    if (path === '/agent-skills') {
+      return json({ skills: [] });
+    }
     return json({ message: 'The request failed.' }, 404);
   }) as typeof fetch;
   Object.defineProperty(globalThis, 'crypto', { value: { randomUUID: () => 'key' }, configurable: true });

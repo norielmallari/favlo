@@ -27,6 +27,8 @@ _GROUPS: dict[str, tuple[str, str]] = {
 }
 
 ORDER = ("image", "video", "music", "voice", "media", "memory", "tools")
+GROUP_NAMES = {group_id: name for group_id, name in _GROUPS.values()}
+GROUP_NAMES["tools"] = "Tools"
 
 GENERATE = {
     "generate_image": ("list_image_models", "set_image_model"),
