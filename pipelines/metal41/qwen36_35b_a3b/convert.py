@@ -229,6 +229,8 @@ def _score_planes(
         path = src / shard
         header, base = _header(path)
         for name in names:
+            if name.startswith("mtp."):
+                continue
             found = _routed_plane(name)
             if found is None:
                 continue
@@ -274,8 +276,8 @@ def _promoted_sets(
     percent: float,
 ) -> tuple[set[tuple[int, int]], set[int]]:
     language_count = promote_count(percent, LANGUAGE_EXPERTS)
-    mtp_count = promote_count(percent, MTP_EXPERTS)
-    if language_count == 0 and mtp_count == 0:
+    # MTP stays unpacked. mtp-fp8 is the command that stores those weights.
+    if language_count == 0:
         return set(), set()
     path = output / "expert_error.json"
     progress = output / "quantize_progress.json"
@@ -284,15 +286,13 @@ def _promoted_sets(
         if float(body.get("percent", -1)) != float(percent):
             message = "expert_error.json does not match --expert-fp8"
             raise RuntimeError(message)
-        return _sets_from(body, language_count, mtp_count)
+        return _language_set(body, language_count), set()
     if progress.is_file():
         message = "expert_error.json is missing from an unfinished record"
         raise RuntimeError(message)
-    language_parts, mtp_parts = _score_planes(src, weight_map)
+    language_parts, _mtp_parts = _score_planes(src, weight_map)
     language_scores = _flat_scores(language_parts, LANGUAGE_EXPERTS, language=True)
-    mtp_scores = _flat_scores(mtp_parts, MTP_EXPERTS, language=False)
     language_ids = promoted_indices(language_scores, language_count)
-    mtp_ids = promoted_indices(mtp_scores, mtp_count)
     body = {
         "percent": percent,
         "language": {
@@ -308,45 +308,26 @@ def _promoted_sets(
                 for index in range(LANGUAGE_EXPERTS)
             },
         },
-        "mtp": {
-            "pool": MTP_EXPERTS,
-            "count": mtp_count,
-            "promoted": mtp_ids,
-            "scores": {
-                str(index): {
-                    "gate_up": mtp_parts[index]["gate_up"],
-                    "down": mtp_parts[index]["down"],
-                    "expert": mtp_scores[index],
-                }
-                for index in range(MTP_EXPERTS)
-            },
-        },
+        "mtp": {"pool": MTP_EXPERTS, "count": 0, "promoted": [], "scores": {}},
     }
     _replace_json(path, body)
-    return _sets_from(body, language_count, mtp_count)
+    return _language_set(body, language_count), set()
 
 
-def _sets_from(
-    body: dict, language_count: int, mtp_count: int
-) -> tuple[set[tuple[int, int]], set[int]]:
+def _language_set(body: dict, language_count: int) -> set[tuple[int, int]]:
     language = body["language"]
-    mtp = body["mtp"]
-    if int(language["count"]) != language_count or int(mtp["count"]) != mtp_count:
+    if int(language["count"]) != language_count:
         message = "expert_error.json promote count does not match"
         raise RuntimeError(message)
     chosen = {(int(layer), int(expert)) for layer, expert in language["promoted"]}
-    mtp_ids = {int(expert) for expert in mtp["promoted"]}
-    if len(chosen) != language_count or len(mtp_ids) != mtp_count:
+    if len(chosen) != language_count:
         message = "expert_error.json promote list does not match"
         raise RuntimeError(message)
     for layer, expert in chosen:
         if layer < 0 or layer >= LANGUAGE_LAYERS or expert < 0 or expert >= 256:
             message = f"promoted expert {layer}.{expert} is outside the language pool"
             raise RuntimeError(message)
-    if any(expert < 0 or expert >= MTP_EXPERTS for expert in mtp_ids):
-        message = "a promoted MTP expert is outside the pool"
-        raise RuntimeError(message)
-    return chosen, mtp_ids
+    return chosen
 
 
 def _expert_width(
@@ -435,9 +416,7 @@ def _stage_expert(
     }
 
 
-def _write_widths(
-    output: Path, language: set[tuple[int, int]], mtp: set[int]
-) -> None:
+def _write_widths(output: Path, language: set[tuple[int, int]]) -> None:
     widths = np.full((LANGUAGE_LAYERS, 256), 4, dtype=np.uint8)
     for layer, expert in language:
         widths[layer, expert] = 8
@@ -446,12 +425,6 @@ def _write_widths(
     folder.mkdir(parents=True, exist_ok=True)
     _replace_bytes(folder / "widths.bin", widths.tobytes())
     _replace_bytes(folder / "offsets.bin", np.ascontiguousarray(offsets, dtype="<u8").tobytes())
-    mtp_widths = np.full((1, MTP_EXPERTS), 4, dtype=np.uint8)
-    for expert in mtp:
-        mtp_widths[0, expert] = 8
-    mtp_offsets = expert_offsets(mtp_widths)
-    _replace_bytes(folder / "mtp.widths", mtp_widths.tobytes())
-    _replace_bytes(folder / "mtp.offsets", np.ascontiguousarray(mtp_offsets, dtype="<u8").tobytes())
     for layer in range(LANGUAGE_LAYERS):
         path = folder / f"{layer}.bin"
         expect = int(offsets[layer, -1]) + expert_bytes(int(widths[layer, -1]))
@@ -459,11 +432,6 @@ def _write_widths(
         if got != expect:
             message = f"{path.name} is {got} bytes"
             raise RuntimeError(message)
-    mtp_path = folder / "mtp.bin"
-    expect = int(mtp_offsets[0, -1]) + expert_bytes(int(mtp_widths[0, -1]))
-    if mtp_path.stat().st_size != expect:
-        message = f"mtp.bin is {mtp_path.stat().st_size} bytes"
-        raise RuntimeError(message)
 
 
 def _replace_bytes(path: Path, blob: bytes) -> None:
@@ -492,7 +460,6 @@ def quantize(
 
     percent = float(expert_fp8)
     language_count = promote_count(percent, LANGUAGE_EXPERTS)
-    mtp_count = promote_count(percent, MTP_EXPERTS)
     src = src.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
     manifest_path = output / "manifest.json"
@@ -523,7 +490,7 @@ def quantize(
         if on_bytes is None:
             print(f"shard {shard}", flush=True)
         for name in shards[shard]:
-            if name in done:
+            if name in done or name.startswith("mtp."):
                 continue
             array = _load(path, header, base, name)
             expert = _expert_file(output, name)
@@ -583,7 +550,7 @@ def quantize(
         message = f"routed expert pair is incomplete: {sorted(path.name for path in staged)}"
         raise RuntimeError(message)
     if language or mtp:
-        _write_widths(output, language, mtp)
+        _write_widths(output, language)
     manifest = {
         "complete": True,
         "pipeline": "qwen36-35b-a3b",
@@ -599,11 +566,9 @@ def quantize(
         "vocab": int((config.get("text_config") or config)["vocab_size"]),
         "hidden": 2048,
     }
-    if language or mtp:
+    if language:
         manifest["expert_fp8"] = language_count
         manifest["expert_fp4"] = LANGUAGE_EXPERTS - language_count
-        manifest["mtp_expert_fp8"] = mtp_count
-        manifest["mtp_expert_fp4"] = MTP_EXPERTS - mtp_count
         manifest["expert_widths"] = "experts/widths.bin"
         manifest["expert_offsets"] = "experts/offsets.bin"
     tmp = manifest_path.with_suffix(".json.tmp")

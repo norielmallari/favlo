@@ -115,6 +115,17 @@ def test_fp4_tie_picks_the_even_code() -> None:
     assert restored[0, 1] == np.float32(1.0)
 
 
+def test_default_pack_leaves_out_mtp_experts() -> None:
+    from qwen36_35b_a3b.convert import LANGUAGE_EXPERTS
+    from qwen36_35b_a3b.fetch import record_bytes
+    from qwen36_35b_a3b.formats import EXPERT_FP8, EXPERT_IMAGE, promote_count
+
+    language = promote_count(20, LANGUAGE_EXPERTS)
+    experts = language * EXPERT_FP8 + (LANGUAGE_EXPERTS - language) * EXPERT_IMAGE
+    assert record_bytes(20) == experts + 3_082_002_816
+    assert record_bytes(0) == LANGUAGE_EXPERTS * EXPERT_IMAGE + 3_082_002_816
+
+
 def test_expert_budget_keeps_the_lower_index() -> None:
     assert promote_count(20, 10240) == 2048
     assert promote_count(20, 256) == 51
@@ -1374,6 +1385,32 @@ def test_mtp_draft_window_stops_at_a_stop_id() -> None:
     feeds, expected = draft_window(7, [], set(), 3)
     assert feeds == [7]
     assert expected == []
+
+
+def test_resident_mtp_base_is_the_dense_suffix() -> None:
+    from qwen36_35b_a3b.forward import Qwen36Runtime, _resident_mtp_base
+
+    tensors = {
+        "lm_head.weight": {"file": "resident.bin", "offset": 0},
+        "mtp.fc.weight": {"file": "resident.bin", "offset": 1000, "data_nbytes": 8, "scale_pad": 0},
+        "mtp.layers.0.mlp.experts.down_proj": {"file": "experts/mtp.bin"},
+    }
+    assert _resident_mtp_base(tensors) == 1000
+    assert _resident_mtp_base({"lm_head.weight": {"file": "resident.bin", "offset": 0}}) is None
+    runtime = Qwen36Runtime.__new__(Qwen36Runtime)
+    runtime.tensors = tensors
+    runtime._mtp_resident_base = 1000
+    runtime.mtp_resident = None
+    runtime.resident = "language"
+    with pytest.raises(RuntimeError, match="not loaded"):
+        runtime._loc("mtp.fc.weight")
+    runtime.mtp_resident = "suffix"
+    buf, offset, _entry = runtime._loc("mtp.fc.weight")
+    assert buf == "suffix"
+    assert offset == 0
+    buf, offset, _entry = runtime._loc("lm_head.weight")
+    assert buf == "language"
+    assert offset == 0
 
 
 def test_mtp_flag_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:

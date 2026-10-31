@@ -76,6 +76,9 @@ _SPAN_BYTES = (
 )
 _MTP_HELD = (
     "mtp_experts",
+    "mtp_resident",
+    "mtp_widths",
+    "mtp_offsets",
     "_mtp_state",
     "_mtp_history",
     "span_h",
@@ -206,8 +209,24 @@ def _f32(value: float) -> bytes:
     return struct.pack("<f", value)
 
 
-def _file_buffer(session: Session, path: Path) -> Any:
-    size = path.stat().st_size
+def _resident_mtp_base(tensors: dict) -> int | None:
+    """File offset where the dense MTP matrices begin, when they are a suffix."""
+    offsets = [
+        int(entry["offset"])
+        for name, entry in tensors.items()
+        if name.startswith("mtp.") and entry.get("file") == "resident.bin" and "offset" in entry
+    ]
+    if not offsets:
+        return None
+    return min(offsets)
+
+
+def _file_buffer(session: Session, path: Path, *, start: int = 0, nbytes: int | None = None) -> Any:
+    file_size = path.stat().st_size
+    size = file_size - start if nbytes is None else nbytes
+    if start < 0 or size < 0 or start + size > file_size:
+        message = f"{path.name} slice {start}:{start + size} is outside {file_size}"
+        raise RuntimeError(message)
     buffer = session.allocate(max(size, 16))
     if buffer is None:
         message = f"device refused a {size} byte file"
@@ -215,11 +234,13 @@ def _file_buffer(session: Session, path: Path) -> Any:
     view = memoryview(buffer.contents().as_buffer(size))
     note = session._load_note
     with path.open("rb") as handle:
+        handle.seek(start)
         offset = 0
         while offset < size:
-            chunk = handle.read(8 << 20)
+            chunk = handle.read(min(8 << 20, size - offset))
             if not chunk:
-                break
+                message = f"{path.name} stopped at {start + offset} of {start + size}"
+                raise OSError(message)
             view[offset : offset + len(chunk)] = chunk
             offset += len(chunk)
             if note is not None:
@@ -319,16 +340,18 @@ class Qwen36Runtime:
         if not self.manifest.get("complete"):
             message = f"{self.root.name} is not a finished record"
             raise RuntimeError(message)
-        self._mtp_ready = "mtp.fc.weight" in self.manifest.get("tensors", {})
+        self.tensors: dict[str, dict] = self.manifest["tensors"]
+        self._mtp_ready = "mtp.fc.weight" in self.tensors
         self._mtp_extra = 0
         self._mtp_snapped = False
-        if self._mtp_ready:
-            mtp_file = (self.root / "experts" / "mtp.bin").stat().st_size
-            snap = _STATE_WORDS * 4 + _HISTORY_WORDS * 4
-            self._mtp_extra = (
-                mtp_file + snap + _SPAN_BYTES + _ARGMAX_GROUPS * 8 + _DRAFT_CAP * 4
-            )
-        resident_bytes = (self.root / "resident.bin").stat().st_size
+        self._mtp_resident_base = None
+        resident_file = (self.root / "resident.bin").stat().st_size
+        base = _resident_mtp_base(self.tensors)
+        if self._mtp_ready and base is not None and 0 < base < resident_file:
+            self._mtp_resident_base = base
+        resident_bytes = (
+            self._mtp_resident_base if self._mtp_resident_base is not None else resident_file
+        )
         cap = parse_memory(max_memory)
         from favlo.memory import memory
 
@@ -383,7 +406,10 @@ class Qwen36Runtime:
         try:
             self.session = Session(self._owner)
             self.session._load_note = self._note_load
-            self.resident = _file_buffer(self.session, self.root / "resident.bin")
+            self.resident = _file_buffer(
+                self.session, self.root / "resident.bin", nbytes=resident_bytes
+            )
+            self.mtp_resident = None
             self.atlas = ExpertAtlas(
                 self.session,
                 self.root,
@@ -395,7 +421,6 @@ class Qwen36Runtime:
                 self.expert_widths = self.session.upload(self.expert_layout.widths)
                 self.expert_offsets = self.session.upload(self.expert_layout.offsets)
                 self.token_offsets = self.session.zeros(EXPERTS * 8)
-            self.tensors: dict[str, dict] = self.manifest["tensors"]
             self.hidden = self.session.zeros(HIDDEN * 4)
             self.normed = self.session.zeros(HIDDEN * 4)
             self.half = self.session.zeros(8192 * 2)
@@ -436,8 +461,6 @@ class Qwen36Runtime:
             self.mtp_experts = None
             self.mtp_widths = None
             self.mtp_offsets = None
-            if self._mtp_ready:
-                self._open_mtp()
             if plane:
                 bind_plane(self)
             self.filled = 0
@@ -622,7 +645,17 @@ class Qwen36Runtime:
 
     def _loc(self, name: str) -> tuple[Any, int, dict]:
         entry = self.tensors[name]
-        return self.resident, int(entry["offset"]), entry
+        offset = int(entry["offset"])
+        if (
+            name.startswith("mtp.")
+            and entry.get("file") == "resident.bin"
+            and self._mtp_resident_base is not None
+        ):
+            if self.mtp_resident is None:
+                message = "MTP weights are not loaded"
+                raise RuntimeError(message)
+            return self.mtp_resident, offset - self._mtp_resident_base, entry
+        return self.resident, offset, entry
 
     def _scale(self, entry: dict, offset: int) -> int:
         return offset + int(entry["data_nbytes"]) + int(entry["scale_pad"])
@@ -1277,8 +1310,78 @@ class Qwen36Runtime:
             if buf is not None:
                 self._held.append(buf)
 
+    def _mtp_device_bytes(self) -> int:
+        """Routed MTP file, the dense suffix, and the draft scratch."""
+        mtp_file = (self.root / "experts" / "mtp.bin").stat().st_size
+        suffix = 0
+        if self._mtp_resident_base is not None:
+            suffix = (self.root / "resident.bin").stat().st_size - self._mtp_resident_base
+        snap = _STATE_WORDS * 4 + _HISTORY_WORDS * 4
+        tables = EXPERTS + EXPERTS * 8
+        return mtp_file + suffix + tables + snap + _SPAN_BYTES + _ARGMAX_GROUPS * 8 + _DRAFT_CAP * 4
+
+    def _atlas_reserved(self) -> int:
+        plane = 0 if self.kv_cache == "f32" else self._plane_at(self.max_pos)
+        return _reserved_bytes(self._resident_bytes, self.kv_bytes, plane, self._mtp_extra)
+
+    def _refit_atlas(self) -> None:
+        """Size the atlas around the bytes this opening is holding."""
+        self._drop_pending()
+        self.session.wait_inflight()
+        self.atlas.retune(self.session, self._atlas_reserved())
+        self._remember()
+
+    def _free_device(self, buffers: list[Any]) -> None:
+        from favlo.memory import memory
+
+        drop = {id(buf) for buf in buffers if buf is not None}
+        for buf in buffers:
+            if buf is not None:
+                memory.release(buf)
+        owned = getattr(self.session, "_owned", None)
+        if owned is not None:
+            self.session._owned = [item for item in owned if id(item) not in drop]
+        self._release_held([buf for buf in buffers if buf is not None])
+
+    def _ensure_mtp(self) -> None:
+        """Read the MTP weights. An off request leaves them unread."""
+        if self.mtp_experts is not None:
+            return
+        if not self._mtp_ready:
+            message = "this record has no MTP weights"
+            raise RuntimeError(message)
+        self._mtp_extra = self._mtp_device_bytes()
+        try:
+            self._refit_atlas()
+            self._open_mtp()
+        except Exception:
+            self._release_mtp()
+            raise
+        self._remember()
+
+    def _release_mtp(self) -> None:
+        """Drop the MTP weights and return their bytes to the atlas."""
+        if self.mtp_experts is None and self.mtp_resident is None and self._mtp_extra == 0:
+            return
+        self._drop_pending()
+        self.session.wait_inflight()
+        names = list(_MTP_HELD)
+        buffers = [getattr(self, name, None) for name in names]
+        for name in names:
+            if getattr(self, name, None) is not None:
+                setattr(self, name, None)
+        self._free_device(buffers)
+        self._mtp_extra = 0
+        self._mtp_snapped = False
+        self._refit_atlas()
+
     def _open_mtp(self) -> None:
-        """Keep the fp8 MTP expert file on device. Language experts stay in the atlas."""
+        """Read the MTP expert file and, when it is a suffix, the dense MTP matrices."""
+        if self._mtp_resident_base is not None:
+            resident = self.root / "resident.bin"
+            self.mtp_resident = _file_buffer(
+                self.session, resident, start=self._mtp_resident_base
+            )
         widths_path = self.root / "experts" / "mtp.widths"
         offsets_path = self.root / "experts" / "mtp.offsets"
         file_path = self.root / "experts" / "mtp.bin"
@@ -1824,7 +1927,14 @@ class Qwen36Runtime:
         self._status(f"cache hit {hit}" if hit else "cache miss")
         self._cached_tokens = hit
         suffix = prompt[hit:]
-        self._mtp_fill = bool(mtp) and bool(getattr(self, "_mtp_ready", False))
+        if mtp and not self._mtp_ready:
+            message = "this record has no MTP weights"
+            raise RuntimeError(message)
+        self._mtp_fill = bool(mtp) and bool(self._mtp_ready)
+        if self._mtp_fill:
+            self._ensure_mtp()
+        else:
+            self._release_mtp()
         prefill_row = None
         decode_row = None
         boundary = False

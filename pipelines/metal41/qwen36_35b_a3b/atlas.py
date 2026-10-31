@@ -371,32 +371,49 @@ class ExpertAtlas:
 
     def retune(self, session: Any, reserved: int) -> None:
         """Fit the atlas to the bytes left after ``reserved``. A full atlas stays put."""
-        if self.layout.mixed:
-            room = self.max_memory - reserved
-            images = atlas_slots(
-                self.max_memory, EXPERT_FP8, reserved, layers=LAYERS * EXPERTS
-            )
-            full = room >= self.layout.total_bytes
-            if self.complete and full:
-                return
-            if not self.complete and not full and images == self.slots:
-                return
-        else:
-            images = atlas_slots(
-                self.max_memory,
-                EXPERT_IMAGE,
-                reserved,
-                layers=LAYERS * EXPERTS,
-            )
-            if self.complete and images >= LAYERS * EXPERTS:
-                return
-            if not self.complete and images == self.slots:
-                return
+        if not self._rebuilds(reserved):
+            return
+        self._release_buffers(session)
         root = self.root
         memory = self.max_memory
         layout = self.layout
         self.close()
         self.__init__(session, root, max_memory=memory, reserved=reserved, layout=layout)
+
+    def _rebuilds(self, reserved: int) -> bool:
+        if self.layout.mixed:
+            room = self.max_memory - reserved
+            images = atlas_slots(self.max_memory, EXPERT_FP8, reserved, layers=LAYERS * EXPERTS)
+            full = room >= self.layout.total_bytes
+            if self.complete and full:
+                return False
+            if not self.complete and not full and images == self.slots:
+                return False
+            return True
+        images = atlas_slots(
+            self.max_memory,
+            EXPERT_IMAGE,
+            reserved,
+            layers=LAYERS * EXPERTS,
+        )
+        if self.complete and images >= LAYERS * EXPERTS:
+            return False
+        if not self.complete and images == self.slots:
+            return False
+        return True
+
+    def _release_buffers(self, session: Any) -> None:
+        from favlo.memory import memory
+
+        drop = {id(buf) for buf in self.buffers}
+        for buf in self.buffers:
+            memory.release(buf)
+        owned = getattr(session, "_owned", None)
+        if owned is not None:
+            session._owned = [item for item in owned if id(item) not in drop]
+        self.buffers.clear()
+        self.layers.clear()
+        self.buffer = None
 
     def _open_uniform(self, session: Any, reserved: int) -> None:
         first = self.root / "experts" / "0.bin"

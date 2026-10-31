@@ -14,7 +14,7 @@ The official checkpoint is [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qw
 - A network path to `huggingface.co`
 - Free disk for the BF16 checkout and the packed record at the same time
 
-The default pack is `fp8-e20`. `setup` reserves 22.3 GiB for that record (the routed expert images and the resident weights). Another `--expert-fp8` value reserves the size of that pack instead. The checkout is whatever the repository publishes. `setup` adds those two sizes and stops when the volume does not have that much free. After the record is registered, the checkout is removed.
+The default pack is `fp8-e20`. `setup` reserves 21.8 GiB for that record (the language expert images and the resident weights). MTP weights are not in the pack. Another `--expert-fp8` value reserves the size of that pack instead. The checkout is whatever the repository publishes. `setup` adds those two sizes and stops when the volume does not have that much free. After the record is registered, the checkout is removed.
 
 8 GB is not enough to run a model capable of real-world agentic workflows. On 16 GB the runtime keeps a smaller set of expert images in memory and reads the rest from the record.
 
@@ -37,7 +37,7 @@ uv run favlo --qwen36-35b-a3b setup
 That command does four things:
 
 1. Downloads [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) into `models/Qwen3.6-35B-A3B-bf16` with plain HTTP. A public checkout does not need a token. A short file continues on the next run.
-2. Packs `models/Qwen3.6-35B-A3B-fp8-e20`. Twenty percent of the routed experts are fp8. The rest of those experts are fp4. The language projections, the token embedding, `lm_head`, the vision tower, and the shared expert are fp8.
+2. Packs `models/Qwen3.6-35B-A3B-fp8-e20`. Twenty percent of the language routed experts are fp8. The rest of those experts are fp4. The language projections, the token embedding, `lm_head`, the vision tower, and the shared expert are fp8. MTP weights are left unpacked.
 3. Registers the folder under the alias `qwen36-35b-a3b` in `models/registry.json`. The row stores `models/Qwen3.6-35B-A3B-fp8-e20`.
 4. Removes `models/Qwen3.6-35B-A3B-bf16`. `--keep-bf16` leaves that checkout on disk.
 
@@ -76,7 +76,7 @@ Run the same command again. Files already written stay on disk, and the next run
 `--expert-fp8` is a percentage from 0 to 100. The default is 20, which is the `fp8-e20` pack. When `--name` is omitted, the packed folder is the repository's model name plus that format.
 
 - `0` stores every quantized matrix as fp4. The folder ends in `-fp4`.
-- `20` stores 20 percent of the routed experts as fp8 and the rest as fp4. The language projections, the token embedding, `lm_head`, the vision tower, and the shared expert are fp8. The folder ends in `-fp8-e20`.
+- `20` stores 20 percent of the language routed experts as fp8 and the rest as fp4. The language projections, the token embedding, `lm_head`, the vision tower, and the shared expert are fp8. The folder ends in `-fp8-e20`. MTP weights are not packed.
 - `100` stores every routed expert as fp8. The folder ends in `-fp8-e100`.
 - Any other percentage stores that share of the routed experts as fp8. The folder ends in `-fp8-e<P>`, where `<P>` is the percentage. The count is the largest whole number that does not exceed that percentage.
 
@@ -87,7 +87,7 @@ uv run favlo --qwen36-35b-a3b setup --repo example-org/example-model --expert-fp
 
 The first command packs `models/Qwen3.6-35B-A3B-fp4`. The second packs `models/example-model-fp8-e100`. `quantize` accepts the same `--expert-fp8` and does not download. With no `--src`, it reads `models/Qwen3.6-35B-A3B-bf16`. `--src` names another checkout. After a successful quantize, a checkout under `models/` is removed. `--keep-bf16` leaves it. A `--src` outside `models/` is left in place.
 
-`mtp-fp8` rewrites the MTP block of a finished record from a local checkout. Every MTP routed expert and the dense MTP matrices are stored as fp8. Language experts stay as packed. The checkout is left in place.
+`setup` does not pack MTP. `mtp-fp8` adds it to a finished record from a local checkout. Every MTP routed expert and the dense MTP matrices are stored as fp8. Language experts stay as packed. The checkout is left in place. A record that already has those weights can keep them.
 
 ```bash
 uv run favlo --qwen36-35b-a3b mtp-fp8 --src /path/to/checkout --record models/Qwen3.6-35B-A3B-fp8-e20
