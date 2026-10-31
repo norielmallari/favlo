@@ -36,6 +36,8 @@ Work on `main`. Do not create a branch unless the user asks for one.
 
 Changes stay in this repository. Edit another repository only when the user asks for that repository.
 
+The closed source implementation is the sibling directory `favlo-cloud`, when that checkout is present. It holds the hosted account service. Read it only when the task is the hosted product. When the sibling checkout is absent, ignore the closed source implementation and continue in this repository.
+
 Edit one runtime. Leave every other runtime's files untouched. The write set and the runtime table are in [ARCHITECTURE.md](ARCHITECTURE.md). Do not edit `src/favlo/cli.py` to register a runtime. Do not edit another pipeline's package, shaders, tests, or docs. A served media pipeline inherits `MediaPipeline`. A language-model pipeline does not. Do not add a kernel that branches on the pipeline. A new abstract method on `MediaPipeline` updates every subclass in that same change.
 
 Adding a model adds an entry file under `pipelines/metal41/`, a package beside it, a `docs/<pipeline>/` note, and one row in the runtime table. Load [bootstrap-new-model](.cursor/skills/bootstrap-new-model/SKILL.md) before creating one. Load [prefix-caching](.cursor/skills/prefix-caching/SKILL.md) before wiring a pipeline to the shared prefix store.
