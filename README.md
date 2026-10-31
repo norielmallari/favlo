@@ -30,7 +30,7 @@ From a checkout of this repository:
 uv sync --extra dev
 ```
 
-This installs the `favlo` package and the `dev` extra, including pytest. The package is not published to PyPI.
+This installs the `favlo` package and the `dev` extra, including pytest. Release 0.3.0 is also on PyPI as [`favlo`](https://pypi.org/project/favlo/). That upload is the runtime under `src/favlo`. The pipelines, the shaders, and the web app stay in this checkout, so a working install is the checkout above.
 
 ## Usage
 
