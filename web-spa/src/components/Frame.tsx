@@ -1,31 +1,59 @@
-import { createElement, type ReactNode } from 'react';
+import { createElement, useEffect, useState, type ReactNode } from 'react';
 import { Platform, Text, useWindowDimensions, View } from 'react-native';
 
 import { Pressable } from '@/components/Pressable';
 import { useTheme, type Preference } from '@/theme/Theme';
+import { radius, space, z } from '@/theme/tokens';
+import { textStyle } from '@/theme/type';
 
 const ORDER: Preference[] = ['system', 'light', 'dark'];
 const APPEARANCE: Record<Preference, string> = { system: 'System', light: 'Light', dark: 'Dark' };
-
-export function nextAppearance(current: Preference): Preference {
-  const index = ORDER.indexOf(current);
-  return ORDER[(index + 1) % ORDER.length];
-}
 
 export function Frame({
   children,
   onSkip,
   link,
+  title = 'Favlo',
 }: {
   children: ReactNode;
   onSkip?: () => void;
   link: { label: string; onPress: () => void };
+  title?: string;
 }) {
   const { palette, preference, setPreference } = useTheme();
   const { width } = useWindowDimensions();
   const narrow = width < 1024;
+  const [menu, setMenu] = useState(false);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof document === 'undefined') {
+      return;
+    }
+    document.title = title;
+  }, [title]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web' || !menu) {
+      return;
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMenu(false);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [menu]);
+
   return (
     <View style={{ flex: 1, width: '100%', maxWidth: '100%', backgroundColor: palette.background }}>
+      {Platform.OS === 'web' && onSkip
+        ? createElement(
+            'style',
+            null,
+            '[data-testid="skip-to-message"]:not(:focus-within){position:absolute;left:-10000px;width:1px;height:1px;overflow:hidden}',
+          )
+        : null}
       <View
         testID="app-banner"
         {...(Platform.OS === 'web' ? { role: 'banner' as const } : {})}
@@ -33,47 +61,100 @@ export function Frame({
           minHeight: 48,
           width: '100%',
           maxWidth: '100%',
-          paddingHorizontal: 12,
+          paddingHorizontal: space[3],
           paddingVertical: 4,
           flexDirection: 'row',
           flexWrap: 'wrap',
           alignItems: 'center',
-          gap: narrow ? 8 : 12,
+          gap: narrow ? space[2] : space[3],
           borderBottomWidth: 1,
           borderBottomColor: palette.border,
           backgroundColor: palette.surface,
+          zIndex: z.banner,
         }}
       >
         {onSkip ? (
-          <Pressable accessibilityRole="link" accessibilityLabel="Skip to message" onPress={onSkip} style={target}>
-            <Text style={{ color: palette.accent, fontSize: 14 }}>Skip to message</Text>
+          <Pressable
+            testID="skip-to-message"
+            accessibilityRole="link"
+            accessibilityLabel="Skip to message"
+            onPress={onSkip}
+            style={target}
+          >
+            <Text style={textStyle('small', palette.accent)}>Skip to message</Text>
           </Pressable>
         ) : null}
-        <Text accessibilityRole="header" style={{ color: palette.textPrimary, fontSize: 18, lineHeight: 24, fontWeight: '600' }}>
+        <Text accessibilityRole="header" style={textStyle('title', palette.textPrimary)}>
           Favlo
         </Text>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Appearance, ${APPEARANCE[preference]}`}
-          onPress={() => setPreference(nextAppearance(preference))}
-          style={[
-            target,
-            {
-              marginLeft: narrow ? 0 : 'auto',
-              minWidth: 44,
-              alignItems: 'center',
-              borderRadius: 6,
-              borderWidth: 1,
-              borderColor: palette.borderStrong,
-              backgroundColor: palette.surface,
-              paddingHorizontal: 8,
-            },
-          ]}
-        >
-          <AppearanceMark preference={preference} color={palette.textPrimary} />
-        </Pressable>
+        <View style={{ marginLeft: narrow ? 0 : 'auto', position: 'relative' }}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Appearance, ${APPEARANCE[preference]}`}
+            accessibilityState={{ expanded: menu }}
+            onPress={() => setMenu((open) => !open)}
+            style={[
+              target,
+              {
+                minWidth: 44,
+                alignItems: 'center',
+                borderRadius: radius.control,
+                borderWidth: 1,
+                borderColor: palette.borderStrong,
+                backgroundColor: palette.surface,
+                paddingHorizontal: space[2],
+              },
+            ]}
+          >
+            <AppearanceMark preference={preference} color={palette.textPrimary} />
+          </Pressable>
+          {menu ? (
+            <View
+              accessibilityRole="menu"
+              accessibilityLabel="Appearance"
+              style={{
+                position: 'absolute',
+                top: 48,
+                ...(narrow ? { left: 0 } : { right: 0 }),
+                zIndex: z.modal,
+                minWidth: 140,
+                maxWidth: 240,
+                padding: space[1],
+                borderRadius: radius.control,
+                borderWidth: 1,
+                borderColor: palette.borderStrong,
+                backgroundColor: palette.surfaceRaised,
+              }}
+            >
+              {ORDER.map((item) => {
+                const selected = item === preference;
+                return (
+                  <Pressable
+                    key={item}
+                    accessibilityRole="menuitem"
+                    accessibilityLabel={APPEARANCE[item]}
+                    accessibilityState={{ selected }}
+                    onPress={() => {
+                      setPreference(item);
+                      setMenu(false);
+                    }}
+                    style={{
+                      minHeight: 44,
+                      justifyContent: 'center',
+                      paddingHorizontal: space[3],
+                      borderRadius: radius.control,
+                      backgroundColor: selected ? palette.accentSubtle : palette.surfaceRaised,
+                    }}
+                  >
+                    <Text style={textStyle('label', palette.textPrimary, selected ? '600' : '400')}>{APPEARANCE[item]}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          ) : null}
+        </View>
         <Pressable accessibilityRole="button" accessibilityLabel={link.label} onPress={link.onPress} style={target}>
-          <Text style={{ color: palette.accent, fontSize: 14, fontWeight: '600' }}>{link.label}</Text>
+          <Text style={textStyle('small', palette.accent, '600')}>{link.label}</Text>
         </Pressable>
       </View>
       {children}
@@ -125,6 +206,6 @@ function moon(color: string): ReactNode {
 function contrast(color: string): ReactNode {
   return [
     createElement('circle', { key: 'ring', cx: 12, cy: 12, r: 8, stroke: color }),
-    createElement('path', { key: 'half', d: 'M12 4a8 8 0 0 0 0 16z', fill: color, stroke: 'none' }),
+    createElement('path', { key: 'half', d: 'M12 4a8 8 0 1 0 0 16z', fill: color, stroke: 'none' }),
   ];
 }

@@ -19,6 +19,13 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const [preference, setPreference] = useState<Preference>('system');
 
   useEffect(() => {
+    if (Platform.OS !== 'web' || typeof document === 'undefined') {
+      return;
+    }
+    document.documentElement.lang = 'en';
+  }, []);
+
+  useEffect(() => {
     if (Platform.OS !== 'web' || typeof localStorage === 'undefined') {
       return;
     }

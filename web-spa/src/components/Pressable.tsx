@@ -9,7 +9,7 @@ import {
 } from 'react-native';
 
 import { useTheme } from '@/theme/Theme';
-import { dark } from '@/theme/tokens';
+import { dark, radius } from '@/theme/tokens';
 
 type PressState = PressableStateCallbackType & { hovered?: boolean; focused?: boolean };
 
@@ -42,7 +42,7 @@ export function Pressable({ children, style, ...props }: PressableProps) {
                 testID="press-feedback"
                 style={[
                   StyleSheet.absoluteFill,
-                  { borderRadius: 6, backgroundColor: current.pressed ? pressedTint : hoverTint },
+                  { borderRadius: radius.control, backgroundColor: current.pressed ? pressedTint : hoverTint },
                 ]}
               />
             ) : null}

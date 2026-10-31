@@ -48,6 +48,7 @@ test('the Favlo chat shows a generated image', async ({ page }) => {
   await expectLatest(page);
   await expectFits(page);
   await page.getByRole('button', { name: 'Appearance, System' }).click();
+  await page.getByRole('menuitem', { name: 'Light' }).click();
   await expect(page.getByRole('button', { name: 'Appearance, Light' })).toBeInViewport();
   const css = await page.getByTestId('transcript-scrollbar').evaluate((node) => node.textContent ?? '');
   expect(css).toContain('#718096');

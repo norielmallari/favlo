@@ -395,7 +395,7 @@ function actionButton(background: string, color: string, border: string): CSSPro
   return {
     minHeight: 44,
     padding: '0 16px',
-    borderRadius: 8,
+    borderRadius: 12,
     border: `1px solid ${border}`,
     background,
     color,

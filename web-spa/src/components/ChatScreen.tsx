@@ -13,22 +13,26 @@ import {
 import { api, idempotencyKey, socketUrl } from '@/api/client';
 import { Composer } from '@/components/Composer';
 import { Confirmation } from '@/components/Confirmation';
+import { EmptyState } from '@/components/EmptyState';
 import { Frame } from '@/components/Frame';
 import { MarkdownText } from '@/components/MarkdownText';
 import { humanText, MessageBody } from '@/components/MessageBody';
+import { MenuRow } from '@/components/MenuRow';
+import { Modal } from '@/components/Modal';
 import { focusRingInset, Pressable } from '@/components/Pressable';
 import { AgentForm, type Provider, type Settings, type ToolGroup } from '@/components/SettingsScreen';
 import { Thinking } from '@/components/Thinking';
 import { transcriptScrollbar } from '@/components/scrollbar';
 import { workingShimmer } from '@/components/working';
-import { Workspaces } from '@/components/Workspaces';
 import { useTheme } from '@/theme/Theme';
+import { radius, space, z } from '@/theme/tokens';
+import { measureStyle, textStyle } from '@/theme/type';
 
 type Channel = { id: string; name: string; agent_id: string; session_id: string };
 type ChatMessage = { id: string; role: string; body: string; reasoning?: string };
 type Snapshot = {
   messages: { id: string; role: string; body: string; reasoning?: string | null }[];
-  runs: { status: string; error: string | null }[];
+  runs: { id: string; status: string; error: string | null }[];
   cursor: number;
 };
 const LATEST_SLACK = 64;
@@ -54,6 +58,7 @@ export function keepLatest(following: boolean, placed: boolean, fromBottom: numb
 type AgentEvent = {
   event_id: string;
   stream_id?: string;
+  run_id?: string;
   type: string;
   payload?: {
     message_id?: string;
@@ -84,10 +89,12 @@ export function ChatScreen() {
   const [live, setLive] = useState('');
   const [thinking, setThinking] = useState('');
   const [working, setWorking] = useState(false);
+  const [runId, setRunId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
-  const [drawer, setDrawer] = useState<'channels' | 'workspaces' | null>(null);
+  const [drawer, setDrawer] = useState<'channels' | null>(null);
   const [creating, setCreating] = useState(false);
   const [createToken, setCreateToken] = useState(0);
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -153,6 +160,7 @@ export function ChatScreen() {
       setMessages(snapshot.messages.map(chatMessage));
       const latest = snapshot.runs.at(-1);
       setWorking(latest?.status === 'running');
+      setRunId(latest?.status === 'running' ? latest.id : null);
       setError(latest?.status === 'failed' ? latest.error : null);
       setLive('');
       setThinking('');
@@ -263,6 +271,8 @@ export function ChatScreen() {
         setLive('');
         setThinking('');
         setWorking(false);
+        setRunId(null);
+        setStatus('Reply ready');
       }
     }
     if (clearedTranscript(event, channel?.session_id)) {
@@ -270,11 +280,14 @@ export function ChatScreen() {
       setLive('');
       setThinking('');
       setError(null);
+      setStatus(null);
     }
     if (event.type === 'run.started') {
       setWorking(true);
       setError(null);
       setThinking('');
+      setStatus(null);
+      setRunId(event.run_id ?? null);
     }
     if (event.type === 'run.delta' && event.payload?.agui?.type === 'TEXT_MESSAGE_CONTENT') {
       setLive((current) => current + (event.payload?.agui?.delta ?? ''));
@@ -286,7 +299,9 @@ export function ChatScreen() {
       setWorking(false);
       setLive('');
       setThinking('');
+      setRunId(null);
       setError(event.type === 'run.failed' ? (event.payload?.message ?? 'The reply failed.') : null);
+      setStatus(event.type === 'run.cancelled' ? 'The reply stopped.' : null);
     }
   }
 
@@ -304,7 +319,7 @@ export function ChatScreen() {
     const text = draft;
     updateDraft('');
     try {
-      const result = await api<{ message_id: string; text: string }>(`/sessions/${channel.session_id}/messages`, {
+      const result = await api<{ message_id: string; text: string; run_id?: string }>(`/sessions/${channel.session_id}/messages`, {
         method: 'POST',
         headers: { 'Idempotency-Key': idempotencyKey() },
         body: JSON.stringify({ text }),
@@ -315,10 +330,23 @@ export function ChatScreen() {
           : [...current, { id: result.message_id, role: 'user', body: result.text }],
       );
       setWorking(true);
+      setRunId(result.run_id ?? null);
       setError(null);
+      setStatus(null);
     } catch (caught) {
       updateDraft(text);
       setNotice(caught instanceof Error ? caught.message : 'The message was not sent.');
+    }
+  }
+
+  async function stop() {
+    if (runId == null) {
+      return;
+    }
+    try {
+      await api(`/runs/${runId}/cancel`, { method: 'POST' });
+    } catch (caught) {
+      setNotice(caught instanceof Error ? caught.message : 'The reply did not stop.');
     }
   }
 
@@ -331,14 +359,14 @@ export function ChatScreen() {
         <TranscriptTurn
           key={item.id}
           name={item.role === 'user' ? 'You' : channel?.name ?? 'Agent'}
+          role={item.role}
           body={item.body}
           reasoning={item.reasoning}
-          color={palette.textPrimary}
         />
       ))}
       {liveThinking !== '' ? <Thinking text={liveThinking} settled={false} /> : null}
       {shown !== '' ? (
-        <View accessibilityLabel={`${channel?.name ?? 'Agent'} said: ${shown}`}>
+        <View accessibilityLabel={`${channel?.name ?? 'Agent'} said: ${shown}`} style={measureStyle}>
           <MarkdownText text={shown} color={palette.textPrimary} />
         </View>
       ) : null}
@@ -356,16 +384,20 @@ export function ChatScreen() {
     >
       <View style={{ flex: 1, minWidth: 0, maxWidth: '100%' }}>
         {!wide ? (
-          <View style={{ flexDirection: 'row', gap: 8, padding: 8 }}>
+          <View style={{ flexDirection: 'row', gap: space[2], padding: space[2] }}>
             <Pressable accessibilityRole="button" accessibilityLabel="Channels" onPress={() => setDrawer('channels')} style={barButton(palette.surface, palette.borderStrong)}>
-              <Text style={{ color: palette.textPrimary, fontSize: 14 }}>Channels</Text>
-            </Pressable>
-            <Pressable accessibilityRole="button" accessibilityLabel="Workspaces" onPress={() => setDrawer('workspaces')} style={barButton(palette.surface, palette.borderStrong)}>
-              <Text style={{ color: palette.textPrimary, fontSize: 14 }}>Workspaces</Text>
+              <Text style={textStyle('small', palette.textPrimary)}>Channels</Text>
             </Pressable>
           </View>
         ) : null}
         <View style={{ flex: 1, flexDirection: 'row', minWidth: 0, maxWidth: '100%' }}>
+          {!wide && drawer === 'channels' ? (
+            <Pressable
+              accessible={false}
+              onPress={() => setDrawer(null)}
+              style={{ position: 'absolute', inset: 0, zIndex: z.drawer - 1, backgroundColor: palette.overlay }}
+            />
+          ) : null}
           {(wide || drawer === 'channels') && (
             <View
               accessibilityLabel="Channels"
@@ -374,45 +406,42 @@ export function ChatScreen() {
                 borderRightWidth: 1,
                 borderRightColor: palette.border,
                 backgroundColor: palette.surface,
-                padding: 12,
-                gap: 8,
-                ...(wide ? {} : { position: 'absolute', top: 0, bottom: 0, left: 0, zIndex: 2 }),
+                padding: space[3],
+                gap: space[2],
+                ...(wide ? {} : { position: 'absolute', top: 0, bottom: 0, left: 0, zIndex: z.drawer }),
               }}
             >
-              <Text accessibilityRole="header" aria-level={2} style={heading(palette.textPrimary)}>Channels</Text>
+              <Text accessibilityRole="header" aria-level={2} style={textStyle('title', palette.textPrimary)}>Channels</Text>
               <View style={menuRows}>
               {channels.map((item) => (
-                <Pressable
+                <MenuRow
                   key={item.id}
-                  accessibilityRole="button"
-                  accessibilityLabel={item.name}
-                  accessibilityState={{ selected: item.id === selected }}
+                  label={item.name}
+                  selected={item.id === selected}
                   onPress={() => {
                     setSelected(item.id);
                     setDrawer(null);
                   }}
-                  style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 8, borderRadius: 6, backgroundColor: item.id === selected ? palette.accentSubtle : palette.surface }}
-                >
-                  <Text style={{ color: palette.textPrimary, fontSize: 16 }}>{item.name}</Text>
-                </Pressable>
+                />
               ))}
               </View>
               <Pressable accessibilityRole="button" accessibilityLabel="New agent" onPress={() => { setCreateToken((value) => value + 1); setCreating(true); }} style={barButton(palette.accent, palette.accent)}>
-                <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>New agent</Text>
+                <Text style={textStyle('small', palette.onAccent, '600')}>New agent</Text>
               </Pressable>
               {!wide ? (
                 <Pressable accessibilityRole="button" accessibilityLabel="Close channels" onPress={() => setDrawer(null)} style={{ minHeight: 44, justifyContent: 'center' }}>
-                  <Text style={{ color: palette.accent, fontSize: 14 }}>Close</Text>
+                  <Text style={textStyle('small', palette.accent)}>Close</Text>
                 </Pressable>
               ) : null}
             </View>
           )}
-          <View accessibilityLabel="Conversation" style={{ flex: 1, minWidth: 0, maxWidth: '100%', padding: 16, gap: 12 }}>
+          <View accessibilityLabel="Conversation" style={{ flex: 1, minWidth: 0, maxWidth: '100%', padding: space[4], overflow: 'hidden' }}>
+            <View testID="reading-column" style={[{ flex: 1, minWidth: 0, width: '100%', gap: space[3] }, measureStyle]}>
             {channel == null ? (
-              <Text style={{ color: palette.textPrimary, fontSize: 16, lineHeight: 24 }}>Create an agent to start a conversation.</Text>
-            ) : (
-              <Text accessibilityRole="header" aria-level={2} style={heading(palette.textPrimary)}>{channel.name}</Text>
-            )}
+              <Text style={textStyle('body', palette.textPrimary)}>Create an agent to start a conversation.</Text>
+            ) : hasReply ? (
+              <Text accessibilityRole="header" aria-level={2} style={textStyle('title', palette.textPrimary)}>{channel.name}</Text>
+            ) : null}
             {hasReply && Platform.OS === 'web'
               ? createElement('style', { 'data-testid': 'transcript-scrollbar' }, transcriptScrollbar(palette.borderStrong, palette.background, palette.textSecondary))
               : null}
@@ -421,7 +450,7 @@ export function ChatScreen() {
                 ref={transcriptRef}
                 testID="transcript"
                 style={{ flex: 1, minWidth: 0, maxWidth: '100%' }}
-                contentContainerStyle={{ gap: 16, maxWidth: '100%' }}
+                contentContainerStyle={{ gap: space[4], maxWidth: '100%' }}
                 onContentSizeChange={showLatest}
                 onScroll={noteScroll}
                 scrollEventThrottle={16}
@@ -429,7 +458,21 @@ export function ChatScreen() {
                 {transcript}
               </ScrollView>
             ) : (
-              <View style={{ flex: 1, justifyContent: 'flex-end', gap: 16 }}>{transcript}</View>
+              <View style={{ flex: 1, justifyContent: 'flex-end', gap: space[4], maxWidth: '100%' }}>
+                {channel != null ? (
+                  <EmptyState
+                    name={channel.name}
+                    compact={width < 600}
+                    onFill={(text) => {
+                      updateDraft(text);
+                      if (Platform.OS === 'web') {
+                        document.querySelector<HTMLElement>('[aria-label="Message"]')?.focus();
+                      }
+                    }}
+                  />
+                ) : null}
+                {transcript}
+              </View>
             )}
             {working ? (
               <>
@@ -439,62 +482,58 @@ export function ChatScreen() {
                 <Text
                   testID="working"
                   accessibilityLiveRegion="polite"
-                  style={{ color: palette.textSecondary, fontSize: 14 }}
+                  style={textStyle('small', palette.textSecondary)}
                 >
                   Working
                 </Text>
               </>
             ) : null}
+            {status ? (
+              <Text
+                accessibilityLiveRegion="polite"
+                {...(Platform.OS === 'web' ? { role: 'status' as const } : {})}
+                style={
+                  Platform.OS === 'web'
+                    ? { position: 'absolute', width: 1, height: 1, overflow: 'hidden' }
+                    : textStyle('small', palette.textSecondary)
+                }
+              >
+                {status}
+              </Text>
+            ) : null}
             {error ? (
-              <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text>
+              <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={textStyle('small', palette.danger)}>{error}</Text>
             ) : null}
             {notice ? (
-              <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ color: palette.danger, fontSize: 14 }}>{notice}</Text>
+              <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={textStyle('small', palette.danger)}>{notice}</Text>
             ) : null}
-            <Composer value={draft} working={working} onChange={updateDraft} onSend={() => void send()} />
+            <Composer
+              value={draft}
+              working={working}
+              agentName={channel?.name}
+              onChange={updateDraft}
+              onSend={() => void send()}
+              onStop={() => void stop()}
+            />
             {hasReply ? null : <View style={{ flex: 1 }} />}
-          </View>
-          {(wide || drawer === 'workspaces') && (
-            <View
-              style={{
-                width: wide ? 280 : drawerWidth,
-                borderLeftWidth: 1,
-                borderLeftColor: palette.border,
-                backgroundColor: palette.surface,
-                ...(wide ? {} : { position: 'absolute', top: 0, bottom: 0, right: 0, zIndex: 2 }),
-              }}
-            >
-              <Workspaces />
-              {!wide ? (
-                <Pressable accessibilityRole="button" accessibilityLabel="Close workspaces" onPress={() => setDrawer(null)} style={{ minHeight: 44, paddingHorizontal: 16, justifyContent: 'center' }}>
-                  <Text style={{ color: palette.accent, fontSize: 14 }}>Close</Text>
-                </Pressable>
-              ) : null}
             </View>
-          )}
+          </View>
         </View>
         {creating ? (
-          <View accessibilityViewIsModal style={{ position: 'absolute', inset: 0, backgroundColor: palette.overlay, justifyContent: 'center', padding: 16 }}>
-            <View style={{ backgroundColor: palette.surface, borderRadius: 8, maxWidth: 480, alignSelf: 'center', width: '100%', maxHeight: height - 32, overflow: 'hidden' }}>
-              <ScrollView contentContainerStyle={{ padding: 16, gap: 12 }}>
-                <AgentForm
-                  key={createToken}
-                  agent={null}
-                  groups={groups}
-                  providers={providers}
-                  settings={settings}
-                  onSuccess={setSaved}
-                  onSaved={() => {
-                    setCreating(false);
-                    void loadChannels();
-                  }}
-                />
-                <Pressable accessibilityRole="button" accessibilityLabel="Close new agent" onPress={() => setCreating(false)} style={{ minHeight: 44, justifyContent: 'center' }}>
-                  <Text style={{ color: palette.accent, fontSize: 14 }}>Close</Text>
-                </Pressable>
-              </ScrollView>
-            </View>
-          </View>
+          <Modal label="New agent" closeLabel="Close new agent" onClose={() => setCreating(false)}>
+            <AgentForm
+              key={createToken}
+              agent={null}
+              groups={groups}
+              providers={providers}
+              settings={settings}
+              onSuccess={setSaved}
+              onSaved={() => {
+                setCreating(false);
+                void loadChannels();
+              }}
+            />
+          </Modal>
         ) : null}
         {saved ? <Confirmation message={saved} onDismiss={() => setSaved(null)} /> : null}
       </View>
@@ -504,25 +543,55 @@ export function ChatScreen() {
 
 function TranscriptTurn({
   name,
+  role,
   body,
   reasoning,
-  color,
 }: {
   name: string;
+  role: string;
   body: string;
   reasoning?: string;
-  color: string;
 }) {
+  const { palette } = useTheme();
   const [empty, setEmpty] = useState(false);
+  const [copied, setCopied] = useState(false);
   const reportEmpty = useCallback(() => setEmpty(true), []);
+  const mine = role === 'user';
   if (empty) {
     return null;
   }
   return (
-    <View accessibilityLabel={`${name} said: ${humanText(body)}`}>
-      <Text style={{ color, fontSize: 16, lineHeight: 24, fontWeight: '600' }}>{name}</Text>
-      {reasoning ? <Thinking text={reasoning} settled /> : null}
-      <MessageBody body={body} onEmpty={reportEmpty} />
+    <View
+      accessibilityLabel={`${name} said: ${humanText(body)}`}
+      style={{ alignItems: mine ? 'flex-end' : 'flex-start', maxWidth: '100%' }}
+    >
+      <View
+        style={{
+          maxWidth: mine ? '85%' : '100%',
+          gap: space[1],
+          padding: mine ? space[3] : 0,
+          borderRadius: radius.card,
+          backgroundColor: mine ? palette.accentSubtle : 'transparent',
+        }}
+      >
+        <Text style={textStyle('label', palette.textPrimary, '600')}>{name}</Text>
+        {reasoning ? <Thinking text={reasoning} settled /> : null}
+        <MessageBody body={body} onEmpty={reportEmpty} />
+        {!mine && humanText(body) ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Copy"
+            onPress={() => {
+              if (Platform.OS === 'web') {
+                void navigator.clipboard.writeText(humanText(body)).then(() => setCopied(true));
+              }
+            }}
+            style={{ minHeight: 44, justifyContent: 'center', alignSelf: 'flex-start' }}
+          >
+            <Text style={textStyle('caption', palette.textSecondary, '600')}>{copied ? 'Copied' : 'Copy'}</Text>
+          </Pressable>
+        ) : null}
+      </View>
     </View>
   );
 }
@@ -550,19 +619,15 @@ function writeDraft(sessionId: string, value: string) {
 
 const menuRows = { gap: focusRingInset * 2, padding: focusRingInset };
 
-function heading(color: string) {
-  return { color, fontSize: 18, lineHeight: 24, fontWeight: '600' as const };
-}
-
 function barButton(background: string, border: string) {
   return {
     minHeight: 44,
     minWidth: 44,
-    borderRadius: 6,
+    borderRadius: radius.control,
     borderWidth: 1,
     borderColor: border,
     backgroundColor: background,
-    paddingHorizontal: 12,
+    paddingHorizontal: space[3],
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
   };

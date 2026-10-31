@@ -24,4 +24,14 @@ describe('theme contrast', () => {
     expect(contrast(light.borderStrong, light.surface)).toBeGreaterThanOrEqual(3);
     expect(contrast(dark.borderStrong, dark.surface)).toBeGreaterThanOrEqual(3);
   });
+
+  test('the selected-row accent mark meets the UI contrast minimum', () => {
+    expect(contrast(light.accent, light.surface)).toBeGreaterThanOrEqual(3);
+    expect(contrast(dark.accent, dark.surface)).toBeGreaterThanOrEqual(3);
+  });
+
+  test('the switch thumb meets the UI contrast minimum', () => {
+    expect(contrast(light.onAccent, light.accent)).toBeGreaterThanOrEqual(3);
+    expect(contrast(dark.onAccent, dark.accent)).toBeGreaterThanOrEqual(3);
+  });
 });

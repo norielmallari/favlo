@@ -4,6 +4,8 @@ import { Text, View } from 'react-native';
 import { MarkdownText } from '@/components/MarkdownText';
 import { Pressable } from '@/components/Pressable';
 import { useTheme } from '@/theme/Theme';
+import { space } from '@/theme/tokens';
+import { textStyle } from '@/theme/type';
 
 export function Thinking({ text, settled }: { text: string; settled: boolean }) {
   const { palette } = useTheme();
@@ -15,7 +17,7 @@ export function Thinking({ text, settled }: { text: string; settled: boolean }) 
   }
 
   return (
-    <View style={{ gap: 4, maxWidth: '100%', minWidth: 0 }}>
+    <View style={{ gap: space[1], maxWidth: '100%', minWidth: 0 }}>
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="Thinking"
@@ -27,24 +29,24 @@ export function Thinking({ text, settled }: { text: string; settled: boolean }) 
           flexDirection: 'row',
           alignItems: 'center',
           alignSelf: 'flex-start',
-          gap: 8,
+          gap: space[2],
         }}
       >
-        <Text style={{ color: palette.textSecondary, fontSize: 14, lineHeight: 20, fontWeight: '600' }}>Thinking</Text>
-        <Text style={{ color: palette.textSecondary, fontSize: 14, lineHeight: 20 }}>{open ? '▾' : '▸'}</Text>
+        <Text style={textStyle('small', palette.textSecondary, '600')}>Thinking</Text>
+        <Text style={textStyle('small', palette.textSecondary)}>{open ? '▾' : '▸'}</Text>
       </Pressable>
       {open ? (
         <View
           testID="thinking-text"
           style={{
-            paddingLeft: 12,
+            paddingLeft: space[3],
             borderLeftWidth: 2,
-            borderLeftColor: palette.border,
+            borderLeftColor: palette.borderStrong,
             maxWidth: '100%',
             minWidth: 0,
           }}
         >
-          <MarkdownText text={text} color={palette.textSecondary} fontSize={14} lineHeight={20} />
+          <MarkdownText text={text} color={palette.textSecondary} fontSize={14} lineHeight={22} />
         </View>
       ) : null}
     </View>

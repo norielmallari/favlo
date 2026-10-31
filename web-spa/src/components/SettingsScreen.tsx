@@ -6,8 +6,11 @@ import { Platform, ScrollView, Switch, Text, TextInput, useWindowDimensions, Vie
 import { api, idempotencyKey } from '@/api/client';
 import { Confirmation } from '@/components/Confirmation';
 import { Frame } from '@/components/Frame';
+import { MenuRow } from '@/components/MenuRow';
 import { focusRingInset, Pressable } from '@/components/Pressable';
 import { useTheme } from '@/theme/Theme';
+import { radius } from '@/theme/tokens';
+import { textStyle } from '@/theme/type';
 
 export type Model = {
   id: string;
@@ -301,22 +304,21 @@ export function SettingsScreen() {
   }
 
   const field = {
+    ...textStyle('body', palette.textPrimary),
     minHeight: 44,
     borderWidth: 1,
     borderColor: palette.borderStrong,
-    borderRadius: 6,
+    borderRadius: radius.control,
     paddingHorizontal: 12,
-    color: palette.textPrimary,
     backgroundColor: palette.surface,
-    fontSize: 16,
   };
 
   return (
-    <Frame link={{ label: 'Chat', onPress: () => router.push('/') }}>
+    <Frame title="Configuration · Favlo" link={{ label: 'Chat', onPress: () => router.push('/') }}>
       <View style={{ flex: 1, minWidth: 0, maxWidth: '100%' }}>
         {!wide ? (
           <View style={{ flexDirection: 'row', gap: 8, padding: 8 }}>
-            <Pressable accessibilityRole="button" accessibilityLabel="Sections" onPress={() => setDrawer('sections')} style={button(palette.surface)}>
+            <Pressable accessibilityRole="button" accessibilityLabel="Sections" onPress={() => setDrawer('sections')} style={button(palette.surface, palette.borderStrong)}>
               <Text style={{ color: palette.textPrimary, fontSize: 14, fontWeight: '600' }}>Sections</Text>
             </Pressable>
           </View>
@@ -337,21 +339,15 @@ export function SettingsScreen() {
             >
               <Text accessibilityRole="header" aria-level={2} style={heading(palette.textPrimary)}>Configuration</Text>
               <View accessibilityRole="tablist" accessibilityLabel="Configuration" style={menuRows}>
-                {SECTIONS.map((item) => {
-                  const selected = item.id === section;
-                  return (
-                    <Pressable
-                      key={item.id}
-                      accessibilityRole="tab"
-                      accessibilityLabel={item.label}
-                      accessibilityState={{ selected }}
-                      onPress={() => chooseSection(item.id)}
-                      style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 8, borderRadius: 6, backgroundColor: selected ? palette.accentSubtle : palette.surface }}
-                    >
-                      <Text style={{ color: palette.textPrimary, fontSize: 16 }}>{item.label}</Text>
-                    </Pressable>
-                  );
-                })}
+                {SECTIONS.map((item) => (
+                  <MenuRow
+                    key={item.id}
+                    role="tab"
+                    label={item.label}
+                    selected={item.id === section}
+                    onPress={() => chooseSection(item.id)}
+                  />
+                ))}
               </View>
               {!wide ? (
                 <Pressable accessibilityRole="button" accessibilityLabel="Close sections" onPress={() => setDrawer(null)} style={{ minHeight: 44, justifyContent: 'center' }}>
@@ -377,10 +373,10 @@ export function SettingsScreen() {
                 {(section === 'providers' ? providers : agents).map((item) => {
                   const selected = section === 'providers' ? item.id === providerId : item.id === agentId;
                   return (
-                    <Pressable
+                    <MenuRow
                       key={item.id}
-                      accessibilityRole="button"
-                      accessibilityLabel={item.name}
+                      label={item.name}
+                      selected={selected}
                       onPress={() => {
                         if (section === 'providers') {
                           setProviderId(item.id);
@@ -391,10 +387,7 @@ export function SettingsScreen() {
                         setShowDetail(true);
                         setDrawer(null);
                       }}
-                      style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 8, borderRadius: 6, backgroundColor: selected ? palette.accentSubtle : palette.surface }}
-                    >
-                      <Text style={{ color: palette.textPrimary, fontSize: 16 }}>{item.name}</Text>
-                    </Pressable>
+                    />
                   );
                 })}
               </ScrollView>
@@ -415,7 +408,7 @@ export function SettingsScreen() {
                   <Pressable accessibilityRole="button" accessibilityLabel="Test connection" onPress={() => void testConnection()} style={button(palette.accent)}>
                     <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>Test connection</Text>
                   </Pressable>
-                  <Pressable accessibilityRole="button" accessibilityLabel="Refresh models" onPress={() => void refreshModels()} style={button(palette.surface)}>
+                  <Pressable accessibilityRole="button" accessibilityLabel="Refresh models" onPress={() => void refreshModels()} style={button(palette.surface, palette.borderStrong)}>
                     <Text style={{ color: palette.textPrimary, fontSize: 14, fontWeight: '600' }}>Refresh models</Text>
                   </Pressable>
                   {status ? <Text accessibilityLiveRegion="polite" style={{ color: palette.textPrimary, fontSize: 14 }}>{status}</Text> : null}
@@ -477,7 +470,7 @@ export function SettingsScreen() {
                     <Text style={label(palette.textPrimary)}>Maximum turns</Text>
                     <TextInput accessibilityLabel="Maximum turns" value={budget} onChangeText={setBudget} keyboardType="number-pad" style={field} />
                   </View>
-                  <Pressable accessibilityRole="button" accessibilityLabel="Save maximum turns" onPress={() => void saveBudget()} style={button(palette.surface)}>
+                  <Pressable accessibilityRole="button" accessibilityLabel="Save maximum turns" onPress={() => void saveBudget()} style={button(palette.surface, palette.borderStrong)}>
                     <Text style={{ color: palette.textPrimary, fontSize: 14, fontWeight: '600' }}>Save maximum turns</Text>
                   </Pressable>
                 </View>
@@ -489,26 +482,20 @@ export function SettingsScreen() {
             <View accessibilityLabel="Agents list" style={columnStyle(palette.border, palette.surface, wide, wide ? 200 : undefined)}>
               {!wide ? null : <Text style={label(palette.textPrimary)}>Agents</Text>}
               <ScrollView contentContainerStyle={menuRows}>
-                {agents.map((item) => {
-                  const selected = item.id === agentId;
-                  return (
-                    <Pressable
-                      key={item.id}
-                      accessibilityRole="button"
-                      accessibilityLabel={item.name}
-                      onPress={() => {
-                        setAgentId(item.id);
-                        setHeartbeatId(null);
-                        setCreatingHeartbeat(false);
-                        setHeartbeatPane('list');
-                        setDrawer(null);
-                      }}
-                      style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 8, borderRadius: 6, backgroundColor: selected ? palette.accentSubtle : palette.surface }}
-                    >
-                      <Text style={{ color: palette.textPrimary, fontSize: 16 }}>{item.name}</Text>
-                    </Pressable>
-                  );
-                })}
+                {agents.map((item) => (
+                  <MenuRow
+                    key={item.id}
+                    label={item.name}
+                    selected={item.id === agentId}
+                    onPress={() => {
+                      setAgentId(item.id);
+                      setHeartbeatId(null);
+                      setCreatingHeartbeat(false);
+                      setHeartbeatPane('list');
+                      setDrawer(null);
+                    }}
+                  />
+                ))}
               </ScrollView>
             </View>
           ) : null}
@@ -522,25 +509,19 @@ export function SettingsScreen() {
                 <Text style={label(palette.textPrimary)}>Heartbeats</Text>
               )}
               <ScrollView contentContainerStyle={menuRows}>
-                {agentHeartbeats.map((row) => {
-                  const selected = row.id === heartbeatId;
-                  return (
-                    <Pressable
-                      key={row.id}
-                      accessibilityRole="button"
-                      accessibilityLabel={row.cron_expression}
-                      onPress={() => {
-                        setHeartbeatId(row.id);
-                        setCreatingHeartbeat(false);
-                        setHeartbeatPane('detail');
-                        setDrawer(null);
-                      }}
-                      style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 8, borderRadius: 6, backgroundColor: selected ? palette.accentSubtle : palette.surface }}
-                    >
-                      <Text style={{ color: palette.textPrimary, fontSize: 16 }}>{row.cron_expression}</Text>
-                    </Pressable>
-                  );
-                })}
+                {agentHeartbeats.map((row) => (
+                  <MenuRow
+                    key={row.id}
+                    label={row.cron_expression}
+                    selected={row.id === heartbeatId}
+                    onPress={() => {
+                      setHeartbeatId(row.id);
+                      setCreatingHeartbeat(false);
+                      setHeartbeatPane('detail');
+                      setDrawer(null);
+                    }}
+                  />
+                ))}
                 {agentHeartbeats.length === 0 ? <Text style={{ color: palette.textSecondary, fontSize: 14 }}>No heartbeats</Text> : null}
               </ScrollView>
               {!wide && agent != null ? (
@@ -597,26 +578,20 @@ export function SettingsScreen() {
             <View accessibilityLabel="Agents list" style={columnStyle(palette.border, palette.surface, wide, wide ? 200 : undefined)}>
               {wide ? <Text style={label(palette.textPrimary)}>Agents</Text> : null}
               <ScrollView contentContainerStyle={menuRows}>
-                {agents.map((item) => {
-                  const selected = item.id === agentId;
-                  return (
-                    <Pressable
-                      key={item.id}
-                      accessibilityRole="button"
-                      accessibilityLabel={item.name}
-                      onPress={() => {
-                        setAgentId(item.id);
-                        setMcpId(null);
-                        setCreatingMcp(false);
-                        setMcpPane('list');
-                        setDrawer(null);
-                      }}
-                      style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 8, borderRadius: 6, backgroundColor: selected ? palette.accentSubtle : palette.surface }}
-                    >
-                      <Text style={{ color: palette.textPrimary, fontSize: 16 }}>{item.name}</Text>
-                    </Pressable>
-                  );
-                })}
+                {agents.map((item) => (
+                  <MenuRow
+                    key={item.id}
+                    label={item.name}
+                    selected={item.id === agentId}
+                    onPress={() => {
+                      setAgentId(item.id);
+                      setMcpId(null);
+                      setCreatingMcp(false);
+                      setMcpPane('list');
+                      setDrawer(null);
+                    }}
+                  />
+                ))}
               </ScrollView>
             </View>
           ) : null}
@@ -630,25 +605,19 @@ export function SettingsScreen() {
                 <Text style={label(palette.textPrimary)}>MCP</Text>
               )}
               <ScrollView contentContainerStyle={menuRows}>
-                {agentServers.map((row) => {
-                  const selected = row.id === mcpId;
-                  return (
-                    <Pressable
-                      key={row.id}
-                      accessibilityRole="button"
-                      accessibilityLabel={row.name}
-                      onPress={() => {
-                        setMcpId(row.id);
-                        setCreatingMcp(false);
-                        setMcpPane('detail');
-                        setDrawer(null);
-                      }}
-                      style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 8, borderRadius: 6, backgroundColor: selected ? palette.accentSubtle : palette.surface }}
-                    >
-                      <Text style={{ color: palette.textPrimary, fontSize: 16 }}>{row.name}</Text>
-                    </Pressable>
-                  );
-                })}
+                {agentServers.map((row) => (
+                  <MenuRow
+                    key={row.id}
+                    label={row.name}
+                    selected={row.id === mcpId}
+                    onPress={() => {
+                      setMcpId(row.id);
+                      setCreatingMcp(false);
+                      setMcpPane('detail');
+                      setDrawer(null);
+                    }}
+                  />
+                ))}
                 {agentServers.length === 0 ? <Text style={{ color: palette.textSecondary, fontSize: 14 }}>No MCP servers</Text> : null}
               </ScrollView>
               {!wide && agent != null ? (
@@ -803,7 +772,7 @@ function McpForm({
               accessibilityState={{ selected: on }}
               aria-checked={on}
               onPress={() => setTransport(choice)}
-              style={button(on ? palette.accentSubtle : palette.surface)}
+              style={button(on ? palette.accentSubtle : palette.surface, palette.borderStrong)}
             >
               <Text style={{ color: palette.textPrimary, fontSize: 14, fontWeight: '600' }}>{box}</Text>
             </Pressable>
@@ -822,7 +791,7 @@ function McpForm({
         </>
       )}
       <SettingSwitch label={enabledBox} value={enabled} onValueChange={setEnabled} />
-      <Pressable accessibilityRole="button" accessibilityLabel="Test connection" onPress={() => void test()} style={button(palette.surface)}>
+      <Pressable accessibilityRole="button" accessibilityLabel="Test connection" onPress={() => void test()} style={button(palette.surface, palette.borderStrong)}>
         <Text style={{ color: palette.textPrimary, fontSize: 14, fontWeight: '600' }}>Test connection</Text>
       </Pressable>
       {notice ? <Text accessibilityLiveRegion="polite" style={{ color: palette.textPrimary, fontSize: 14 }}>{notice}</Text> : null}
@@ -1006,7 +975,7 @@ export function AgentForm({
         accessibilityRole="button"
         accessibilityLabel={creating ? 'Create agent' : `Save ${agent.name}`}
         onPress={() => void save()}
-        style={button(creating ? palette.accent : palette.surface)}
+        style={button(creating ? palette.accent : palette.surface, creating ? palette.accent : palette.borderStrong)}
       >
         <Text style={{ color: creating ? palette.onAccent : palette.textPrimary, fontSize: 14, fontWeight: '600' }}>
           {creating ? 'Create agent' : `Save ${agent.name}`}
@@ -1118,7 +1087,7 @@ function HeartbeatForm({
         </Text>
       </Pressable>
       {heartbeat != null ? (
-        <Pressable accessibilityRole="button" accessibilityLabel="Run heartbeat" onPress={() => void runNow()} style={button(palette.surface)}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Run heartbeat" onPress={() => void runNow()} style={button(palette.surface, palette.borderStrong)}>
           <Text style={{ color: palette.textPrimary, fontSize: 14, fontWeight: '600' }}>Run heartbeat</Text>
         </Pressable>
       ) : null}
@@ -1149,7 +1118,7 @@ function SettingSwitch({
         value={value}
         onValueChange={onValueChange}
         trackColor={{ false: palette.borderStrong, true: palette.accent }}
-        thumbColor="#FFFFFF"
+        thumbColor={palette.onAccent}
         ios_backgroundColor={palette.borderStrong}
       />
     </View>
@@ -1184,7 +1153,7 @@ function pickerStyle(
     minHeight: 44,
     borderWidth: 1,
     borderColor: palette.borderStrong,
-    borderRadius: 6,
+    borderRadius: radius.control,
     paddingHorizontal: 12,
     color: palette.textPrimary,
     backgroundColor: palette.surface,
@@ -1197,35 +1166,36 @@ function pickerStyle(
 }
 
 function label(color: string) {
-  return { color, fontSize: 16, lineHeight: 24 };
+  return textStyle('label', color);
 }
 
 const menuRows = { gap: focusRingInset * 2, padding: focusRingInset };
 
 function heading(color: string) {
-  return { color, fontSize: 18, lineHeight: 24, fontWeight: '600' as const };
+  return textStyle('title', color);
 }
 
-function button(background: string) {
+function button(background: string, border?: string) {
   return {
     minHeight: 44,
     alignSelf: 'flex-start' as const,
-    borderRadius: 6,
+    borderRadius: radius.control,
     paddingHorizontal: 16,
     justifyContent: 'center' as const,
     backgroundColor: background,
+    borderWidth: 1,
+    borderColor: border ?? background,
   };
 }
 
 function fieldStyle(palette: { textPrimary: string; surface: string; borderStrong: string }) {
   return {
+    ...textStyle('body', palette.textPrimary),
     minHeight: 44,
     borderWidth: 1,
     borderColor: palette.borderStrong,
-    borderRadius: 6,
+    borderRadius: radius.control,
     paddingHorizontal: 12,
-    color: palette.textPrimary,
     backgroundColor: palette.surface,
-    fontSize: 16,
   };
 }

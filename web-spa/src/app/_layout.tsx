@@ -2,6 +2,7 @@ import { Stack } from 'expo-router';
 import { Platform, View } from 'react-native';
 
 import { ThemeProvider } from '@/theme/Theme';
+import { type as typeScale } from '@/theme/tokens';
 
 function replaceLocalhost(): boolean {
   if (Platform.OS !== 'web' || typeof window === 'undefined') {
@@ -22,7 +23,15 @@ export default function RootLayout() {
   }
   return (
     <ThemeProvider>
-      <View style={{ flex: 1, width: '100%', maxWidth: '100%', overflow: 'hidden' }}>
+      <View
+        style={{
+          flex: 1,
+          width: '100%',
+          maxWidth: '100%',
+          overflow: 'hidden',
+          ...(Platform.OS === 'web' ? { fontFamily: typeScale.family.ui } : null),
+        }}
+      >
         <Stack screenOptions={{ headerShown: false }} />
       </View>
     </ThemeProvider>

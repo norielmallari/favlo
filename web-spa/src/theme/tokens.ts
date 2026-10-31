@@ -76,6 +76,67 @@ export const dark: Palette = {
   overlay: 'rgba(0, 0, 0, 0.64)',
 };
 
+export const type = {
+  family: {
+    ui: '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif',
+    mono: 'ui-monospace, "SF Mono", Menlo, "Cascadia Mono", monospace',
+  },
+  size: {
+    caption: 12,
+    small: 14,
+    body: 16,
+    label: 16,
+    title: 20,
+    display: 28,
+    mono: 13,
+  },
+  line: {
+    caption: 16,
+    small: 22,
+    body: 26,
+    label: 22,
+    title: 28,
+    display: 36,
+    mono: 22,
+  },
+  weight: {
+    regular: '400' as const,
+    medium: '500' as const,
+    semibold: '600' as const,
+    bold: '700' as const,
+  },
+  measure: 72,
+};
+
+export const space = {
+  1: 4,
+  2: 8,
+  3: 12,
+  4: 16,
+  5: 24,
+  6: 32,
+  7: 48,
+};
+
+export const radius = {
+  control: 8,
+  card: 12,
+  dialog: 16,
+  pill: 999,
+};
+
+export const duration = {
+  fast: 120,
+  med: 200,
+};
+
+export const z = {
+  banner: 10,
+  drawer: 20,
+  modal: 30,
+  toast: 40,
+};
+
 export function contrast(foreground: string, background: string): number {
   const ratio = (left: number, right: number) => {
     const lighter = Math.max(left, right);

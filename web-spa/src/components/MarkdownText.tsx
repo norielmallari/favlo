@@ -4,13 +4,15 @@ import Markdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import { useTheme } from '@/theme/Theme';
+import { type as typeScale } from '@/theme/tokens';
+import { monoStyle, textStyle } from '@/theme/type';
 
 type Props = { text: string; color: string; fontSize?: number; lineHeight?: number };
 
 export function MarkdownText({ text, color, fontSize = 16, lineHeight = 24 }: Props) {
   const { palette } = useTheme();
   const block = bodyStyle(color, fontSize, lineHeight);
-  const cell = cellStyle(palette.border);
+  const cell = cellStyle(palette.borderStrong);
   const components: Components = {
     p: ({ children }) => <Text style={block}>{children}</Text>,
     strong: ({ children }) => <Text style={strong}>{children}</Text>,
@@ -18,12 +20,12 @@ export function MarkdownText({ text, color, fontSize = 16, lineHeight = 24 }: Pr
     del: ({ children }) => <Text style={strike}>{children}</Text>,
     a: ({ href, children }) => <Link href={href} color={palette.accent}>{children}</Link>,
     img: ({ alt }) => (alt ? <Text style={block}>{alt}</Text> : null),
-    h1: ({ children }) => <Text style={headingStyle(block, 20)}>{children}</Text>,
-    h2: ({ children }) => <Text style={headingStyle(block, 18)}>{children}</Text>,
-    h3: ({ children }) => <Text style={headingStyle(block, 18)}>{children}</Text>,
-    h4: ({ children }) => <Text style={headingStyle(block, 18)}>{children}</Text>,
-    h5: ({ children }) => <Text style={headingStyle(block, 18)}>{children}</Text>,
-    h6: ({ children }) => <Text style={headingStyle(block, 18)}>{children}</Text>,
+    h1: ({ children }) => <Text style={headingStyle(block, typeScale.size.title)}>{children}</Text>,
+    h2: ({ children }) => <Text style={headingStyle(block, typeScale.size.label)}>{children}</Text>,
+    h3: ({ children }) => <Text style={headingStyle(block, typeScale.size.label)}>{children}</Text>,
+    h4: ({ children }) => <Text style={headingStyle(block, typeScale.size.body)}>{children}</Text>,
+    h5: ({ children }) => <Text style={headingStyle(block, typeScale.size.body)}>{children}</Text>,
+    h6: ({ children }) => <Text style={headingStyle(block, typeScale.size.body)}>{children}</Text>,
     ul: ({ children }) => <View style={list}>{children}</View>,
     ol: ({ children }) => <View style={list}>{children}</View>,
     li: ({ children }) => (
@@ -33,7 +35,7 @@ export function MarkdownText({ text, color, fontSize = 16, lineHeight = 24 }: Pr
       </View>
     ),
     blockquote: ({ children }) => (
-      <View style={{ paddingLeft: 12, borderLeftWidth: 2, borderLeftColor: palette.border }}>{children}</View>
+      <View style={{ paddingLeft: 12, borderLeftWidth: 2, borderLeftColor: palette.borderStrong }}>{children}</View>
     ),
     pre: ({ children }) => (
       <View style={{ padding: 12, borderRadius: 8, backgroundColor: palette.surfaceHover, maxWidth: '100%' }}>{children}</View>
@@ -90,7 +92,7 @@ function Link({ href, color, children }: { href?: string; color: string; childre
 }
 
 function bodyStyle(color: string, fontSize: number, lineHeight: number): TextStyle {
-  return { color, fontSize, lineHeight, maxWidth: '100%' };
+  return { ...textStyle('body', color), fontSize, lineHeight, maxWidth: '100%' };
 }
 
 function headingStyle(block: TextStyle, fontSize: number): TextStyle {
@@ -98,7 +100,7 @@ function headingStyle(block: TextStyle, fontSize: number): TextStyle {
 }
 
 function codeStyle(block: TextStyle): TextStyle {
-  return { ...block, fontFamily: 'monospace' };
+  return { ...block, ...monoStyle() };
 }
 
 function cellStyle(border: string): ViewStyle {

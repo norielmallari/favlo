@@ -1,15 +1,17 @@
 import { Text, View } from 'react-native';
 
 import { useTheme } from '@/theme/Theme';
+import { space } from '@/theme/tokens';
+import { textStyle } from '@/theme/type';
 
 export function Workspaces() {
   const { palette } = useTheme();
   return (
-    <View accessibilityLabel="Workspaces" style={{ flex: 1, padding: 16, gap: 8 }}>
-      <Text accessibilityRole="header" aria-level={2} style={{ color: palette.textPrimary, fontSize: 18, lineHeight: 24, fontWeight: '600' }}>
+    <View accessibilityLabel="Workspaces" style={{ flex: 1, padding: space[4], gap: space[2] }}>
+      <Text accessibilityRole="header" aria-level={2} style={textStyle('title', palette.textPrimary)}>
         Workspaces
       </Text>
-      <Text style={{ color: palette.textSecondary, fontSize: 14, lineHeight: 20 }}>No workspaces</Text>
+      <Text style={textStyle('small', palette.textSecondary)}>No workspaces</Text>
     </View>
   );
 }
