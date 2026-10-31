@@ -132,23 +132,25 @@ Stored in the profile memory database (`~/.favlo` by default). Embedding uses th
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `text` | string | required | One durable sentence: fact or preference |
-| `client` | string | `""` | Optional client label |
+| `client` | string | `""` | Owner. A web agent turn sets this to that agent. |
 
-Returns a confirmation string or an id usable with `forget`.
+Returns a confirmation string or an id usable with `forget`. The same sentence can be stored once for each owner.
 
 #### `recall`
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `query` | string | Natural-language search over stored sentences |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `query` | string | required | Natural-language search over stored sentences |
+| `client` | string | `""` | Owner. When set, only that owner's sentences are returned. |
 
 Returns matching rows (id and text) or an error string.
 
 #### `forget`
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `id` | string | Id from `remember` or `recall` |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `id` | string | required | Id from `remember` or `recall` |
+| `client` | string | `""` | Owner. When set, another owner's sentence is left in place. |
 
 Removes one stored sentence.
 

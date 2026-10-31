@@ -17,7 +17,10 @@ REMEMBER_DESCRIPTION = (
     "transcript, or a secret."
 )
 
-RECALL_DESCRIPTION = "Find stored sentences from an earlier session by meaning."
+RECALL_DESCRIPTION = (
+    "Find stored sentences from an earlier session by meaning. "
+    "A client returns only that owner's sentences."
+)
 
 FORGET_DESCRIPTION = (
     "Drop one stored sentence when the person asks. The id comes from recall or remember."
@@ -43,6 +46,7 @@ def recall_text(
     store: MemoryStore,
     embed: Callable[[str], list[float] | str],
     query: str,
+    client: str | None = None,
 ) -> str | list[dict[str, Any]]:
     vector = embed(query)
     if isinstance(vector, str):
@@ -56,15 +60,15 @@ def recall_text(
         return again
 
     try:
-        rows = store.recall(query, vector, reembed=reembed)
+        rows = store.recall(query, vector, reembed=reembed, client=client)
     except (ValueError, RuntimeError) as exc:
         return str(exc)
     return rows
 
 
-def forget_text(store: MemoryStore, mem_id: str) -> str:
+def forget_text(store: MemoryStore, mem_id: str, client: str | None = None) -> str:
     try:
-        store.forget(mem_id)
+        store.forget(mem_id, client=client)
     except KeyError as exc:
         return str(exc)
     return f"forgot {mem_id}"

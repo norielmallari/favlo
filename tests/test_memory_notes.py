@@ -137,6 +137,18 @@ def test_concurrent_remember(store: MemoryStore) -> None:
     assert count == 8
 
 
+def test_recall_and_forget_stay_with_one_client(store: MemoryStore) -> None:
+    own = store.remember("Likes tea.", _unit(0), client="agent_a")
+    other = store.remember("Likes tea.", _unit(0), client="agent_b")
+    assert own != other
+    rows = store.recall("tea", _unit(0), client="agent_a")
+    assert [row["id"] for row in rows] == [own]
+    with pytest.raises(KeyError):
+        store.forget(other, client="agent_a")
+    still = store.recall("tea", _unit(0), client="agent_b")
+    assert [row["id"] for row in still] == [other]
+
+
 def test_mcp_lists_memory_tools() -> None:
     import asyncio
 

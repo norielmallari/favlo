@@ -151,12 +151,14 @@ def build_mcp(
         return remember_text(store, embed, text, client=who)
 
     @mcp.tool(task=False, description=RECALL_DESCRIPTION)
-    def recall(query: str) -> Any:
-        return recall_text(store, embed, query)
+    def recall(query: str, client: str = "") -> Any:
+        who = client.strip() or None
+        return recall_text(store, embed, query, client=who)
 
     @mcp.tool(task=False, description=FORGET_DESCRIPTION)
-    def forget(id: str) -> str:  # noqa: A002
-        return forget_text(store, id)
+    def forget(id: str, client: str = "") -> str:  # noqa: A002
+        who = client.strip() or None
+        return forget_text(store, id, client=who)
 
     def _set_model(kind: str, model: str, session: str) -> str:
         if model not in _catalog(dispatch, kind):

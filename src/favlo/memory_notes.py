@@ -42,8 +42,8 @@ create virtual table if not exists observation_fts using fts5(
   content='observation',
   content_rowid='rowid'
 );
-create unique index if not exists observation_text_live
-  on observation(text) where deleted is null;
+create unique index if not exists observation_text_client_live
+  on observation(text, ifnull(client, '')) where deleted is null;
 """
 
 _FTS_TRIGGERS = """
@@ -104,6 +104,7 @@ class MemoryStore:
             db = self._connect()
             try:
                 db.executescript(_SCHEMA)
+                db.execute("drop index if exists observation_text_live")
                 db.executescript(_FTS_TRIGGERS)
                 row = db.execute("select value from meta where key = 'model'").fetchone()
                 if row is None:
@@ -128,8 +129,9 @@ class MemoryStore:
             db = self._connect()
             try:
                 existing = db.execute(
-                    "select id from observation where text = ? and deleted is null",
-                    (cleaned,),
+                    "select id from observation where text = ? and deleted is null "
+                    "and ifnull(client, '') = ifnull(?, '')",
+                    (cleaned, client),
                 ).fetchone()
                 if existing is not None:
                     return str(existing[0])
@@ -159,8 +161,12 @@ class MemoryStore:
         vector: list[float],
         *,
         reembed: Callable[[str], list[float]] | None = None,
+        client: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Return up to eight live rows ranked by vector similarity and FTS."""
+        """Return up to eight live rows ranked by vector similarity and FTS.
+
+        A client limits the rows to that owner.
+        """
         if len(vector) != DIM:
             message = f"embedding length is not {DIM}"
             raise ValueError(message)
@@ -168,9 +174,9 @@ class MemoryStore:
             db = self._connect()
             try:
                 self._sync_model(db, reembed)
-                knn = self._knn(db, vector)
+                knn = self._knn(db, vector, client)
                 by_id = {row["id"]: row for row in knn}
-                fts = self._fts_hits(db, query, exclude=set(by_id))
+                fts = self._fts_hits(db, query, exclude=set(by_id), client=client)
                 merged = knn + fts
                 if len(merged) > _VEC_MAX:
                     merged = merged[:_VEC_MAX]
@@ -178,19 +184,25 @@ class MemoryStore:
             finally:
                 db.close()
 
-    def forget(self, mem_id: str) -> None:
-        """Mark one observation deleted and drop its vector."""
+    def forget(self, mem_id: str, client: str | None = None) -> None:
+        """Mark one observation deleted and drop its vector.
+
+        A client can delete only a row stored for that owner.
+        """
         with self._lock:
             db = self._connect()
             try:
                 row = db.execute(
-                    "select rowid, deleted from observation where id = ?",
+                    "select rowid, deleted, client from observation where id = ?",
                     (mem_id,),
                 ).fetchone()
                 if row is None:
                     message = f"unknown memory id {mem_id}"
                     raise KeyError(message)
-                rowid, deleted = row
+                rowid, deleted, owner = row
+                if client is not None and owner != client:
+                    message = f"unknown memory id {mem_id}"
+                    raise KeyError(message)
                 if deleted is not None:
                     return
                 stamp = _now()
@@ -233,7 +245,12 @@ class MemoryStore:
             )
         db.commit()
 
-    def _knn(self, db: sqlite3.Connection, vector: list[float]) -> list[dict[str, Any]]:
+    def _knn(
+        self,
+        db: sqlite3.Connection,
+        vector: list[float],
+        client: str | None,
+    ) -> list[dict[str, Any]]:
         blob = serialize_float32(vector)
         rows = db.execute(
             """
@@ -243,8 +260,9 @@ class MemoryStore:
             where v.embedding match ?
               and k = ?
               and o.deleted is null
+              and (? is null or o.client = ?)
             """,
-            (blob, _VEC_KNN),
+            (blob, _VEC_KNN, client, client),
         ).fetchall()
         out: list[dict[str, Any]] = []
         for mem_id, text, created, client, distance in rows:
@@ -266,6 +284,7 @@ class MemoryStore:
         query: str,
         *,
         exclude: set[str],
+        client: str | None,
     ) -> list[dict[str, Any]]:
         match = _fts_query(query)
         if match is None:
@@ -278,9 +297,10 @@ class MemoryStore:
                 join observation o on o.rowid = f.rowid
                 where observation_fts match ?
                   and o.deleted is null
+                  and (? is null or o.client = ?)
                 limit ?
                 """,
-                (match, _VEC_MAX),
+                (match, client, client, _VEC_MAX),
             ).fetchall()
         except sqlite3.OperationalError:
             return []
