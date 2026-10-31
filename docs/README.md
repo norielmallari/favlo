@@ -37,6 +37,12 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen36-35b-a3b/research/kernel-ceilings.md](qwen36-35b-a3b/research/kernel-ceilings.md) | Qwen3.6-35B-A3B isolated dispatch sum |
 | [qwen36-35b-a3b/research/recorded-forward.md](qwen36-35b-a3b/research/recorded-forward.md) | Qwen3.6-35B-A3B recorded prefill and decode sums |
 | [qwen36-35b-a3b/performance.md](qwen36-35b-a3b/performance.md) | Qwen3.6-35B-A3B recorded prefill and decode rates |
+| [gemma4-26b-a4b/README.md](gemma4-26b-a4b/README.md) | Gemma 4 26B-A4B pipeline contract |
+| [gemma4-26b-a4b/ceilings.md](gemma4-26b-a4b/ceilings.md) | Gemma 4 26B-A4B bandwidth ceilings |
+| [gemma4-26b-a4b/references.md](gemma4-26b-a4b/references.md) | Papers and specifications for the Gemma 4 pipeline |
+| [gemma4-26b-a4b/research/kernel-ceilings.md](gemma4-26b-a4b/research/kernel-ceilings.md) | Gemma 4 26B-A4B isolated decode sum |
+| [gemma4-26b-a4b/research/recorded-forward.md](gemma4-26b-a4b/research/recorded-forward.md) | Gemma 4 26B-A4B recorded prefill and decode runs |
+| [gemma4-26b-a4b/benchmarks.md](gemma4-26b-a4b/benchmarks.md) | Gemma 4 26B-A4B harness scores against `serve` |
 | [qwen38-flash-next/record.md](qwen38-flash-next/record.md) | Metal record layout and tier rules |
 | [qwen38-flash-next/ngram.md](qwen38-flash-next/ngram.md) | n-gram hash and injection |
 | [qwen38-flash-next/schedule.md](qwen38-flash-next/schedule.md) | Prefill, decode, and quantize schedule |

@@ -1,0 +1,33 @@
+"""Open the packed record for ``favlo serve``."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from gemma4_26b_a4b.chat import handle_chat
+from gemma4_26b_a4b.forward import Gemma4Runtime
+
+
+def open_runtime(
+    path: Path,
+    *,
+    kv_cache: str = "e4m3",
+    console: Any = None,
+    resident_percent: float | None = None,
+    owner: str | None = None,
+    max_memory: str | int | None = None,
+    mtp: bool = False,
+) -> Gemma4Runtime:
+    """Load the resident matrices. Routed experts stay in the layer files."""
+    del resident_percent, mtp
+    return Gemma4Runtime(
+        path,
+        kv_cache=kv_cache,
+        console=console,
+        max_memory=max_memory,
+        owner=owner or "gemma4-26b-a4b",
+    )
+
+
+__all__ = ["handle_chat", "open_runtime"]

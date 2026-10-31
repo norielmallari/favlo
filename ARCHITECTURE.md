@@ -34,6 +34,7 @@ Each runtime is a separate write set. An agent developing one runtime edits that
 | `qwen38-flash-next` | `pipelines/metal41/qwen38-flash-next.py` | `pipelines/metal41/qwen38_flash_next/` | [docs/qwen38-flash-next/architecture.md](docs/qwen38-flash-next/architecture.md) |
 | `qwen38-27b` | `pipelines/metal41/qwen38-27b.py` | `pipelines/metal41/qwen38_27b/` | [docs/qwen38-27b/README.md](docs/qwen38-27b/README.md) |
 | `qwen36-35b-a3b` | `pipelines/metal41/qwen36-35b-a3b.py` | `pipelines/metal41/qwen36_35b_a3b/` | [docs/qwen36-35b-a3b/README.md](docs/qwen36-35b-a3b/README.md) |
+| `gemma4-26b-a4b` | `pipelines/metal41/gemma4-26b-a4b.py` | `pipelines/metal41/gemma4_26b_a4b/` | [docs/gemma4-26b-a4b/README.md](docs/gemma4-26b-a4b/README.md) |
 | `z-image-turbo` | `pipelines/metal41/z-image-turbo.py` | `pipelines/metal41/z_image_turbo/` | [docs/z-image-turbo/README.md](docs/z-image-turbo/README.md) |
 | `wan22-i2v` | `pipelines/metal41/wan22-i2v.py` | `pipelines/metal41/wan22_i2v/` | [docs/wan22-i2v/README.md](docs/wan22-i2v/README.md) |
 | `wan22-ti2v-5b` | `pipelines/metal41/wan22-ti2v-5b.py` | `pipelines/metal41/wan22_ti2v_5b/` | [docs/wan22-ti2v-5b/README.md](docs/wan22-ti2v-5b/README.md) |
