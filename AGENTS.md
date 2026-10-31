@@ -44,7 +44,7 @@ The listener runs one request. A language-model pipeline does not fuse a whole l
 
 ## Memory
 
-Every pipeline has a degraded mode. It runs under memory pressure and on a machine with 16 GB of memory. The design is [pipeline-memory-strategies.md](artifacts/implementation-plan/docs/unified-memory-management/pipeline-memory-strategies.md). The listener already records an opening's owners and sweeps them after `close`. The per-pipeline work is [pipeline-handoff.md](artifacts/implementation-plan/docs/unified-memory-management/pipeline-handoff.md).
+Every pipeline has a degraded mode. It runs under memory pressure and on a machine with 16 GB of memory. The listener records an opening's owners and sweeps them after `close`.
 
 A pipeline reads `memory.budget()` when it opens and shrinks the one knob it owns until its minimum working set fits. It refuses to open when that minimum does not fit. A media request keeps the resolution, the frame count, and the duration it named. The next read of the ledger is at `complete`. `open_runtime` accepts `owner` and uses it for every allocate in that opening. When the argument is absent, the pipeline keeps minting its own owner string.
 
@@ -74,7 +74,7 @@ Do not invent routing hits, calibration energies, or hidden-state errors. A meas
 
 A pipeline change updates that pipeline's `docs/<pipeline>/` note in the same change. A process change (listener, registry, console, or the write set) updates [ARCHITECTURE.md](ARCHITECTURE.md). An AI-assisted feature change updates [docs/ai-assistance](docs/ai-assistance/README.md) in the same change. Add a page under that folder when the feature needs its own note, and list the page from that folder's README. Do not edit another pipeline's note to describe this one.
 
-`docs/` is as-built only, plus a measured research remainder at `docs/<pipeline>/research/<slug>.md`. That file does not change the serving note until the behavior ships. Implementation plans live under `artifacts/implementation-plan/` (gitignored). Do not commit plan or option-comparison notes under `docs/`. Load [research-claims](.cursor/skills/research-claims/SKILL.md) before documenting a research claim.
+`docs/` is as-built only, plus a measured research remainder at `docs/<pipeline>/research/<slug>.md`. That file does not change the serving note until the behavior ships. Do not commit plan or option-comparison notes under `docs/`. Load [research-claims](.cursor/skills/research-claims/SKILL.md) before documenting a research claim.
 
 ## Commits
 

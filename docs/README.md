@@ -71,4 +71,4 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [z-image-turbo/research/generation-ceiling.md](z-image-turbo/research/generation-ceiling.md) | Z-Image-Turbo 1280 generation sum |
 | [bge-m3/research/recorded-encode.md](bge-m3/research/recorded-encode.md) | BGE-M3 warm encode times |
 
-Implementation plans, option comparisons, and design sketches are **not** committed here. They belong under `artifacts/implementation-plan/` (gitignored). A measured research remainder lives at `docs/<pipeline>/research/<slug>.md` and does not change the serving note until that behavior ships.
+Do not commit plan or option-comparison notes here. A measured research remainder lives at `docs/<pipeline>/research/<slug>.md` and does not change the serving note until that behavior ships.

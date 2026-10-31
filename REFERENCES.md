@@ -93,8 +93,6 @@ Apple. WWDC22 session 10104, *Load resources faster with Metal 3.* An IO command
 
 Apple. WWDC22 session 10066, *Discover Metal 3.* Many small loads are the case that fast resource loading adds. A long sequential file is the bulk transfer.
 
-The plan that uses these is a local note under `artifacts/implementation-plan/docs/prefill-decode-split/` (gitignored). It is not an as-built forward.
-
 ## Benchmarks
 
 Jeffrey Zhou et al. *Instruction-Following Evaluation for Large Language Models.* [arXiv:2311.07911](https://arxiv.org/abs/2311.07911), 2023. IFEval. Prompt-level and instruction-level accuracy, strict and loose.

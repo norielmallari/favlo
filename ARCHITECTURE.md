@@ -2,7 +2,7 @@
 
 One model is one pipeline. `favlo serve` listens with nothing loaded. The `model` field on `POST /v1/chat/completions` loads one registry row. A chat record and a media record are not resident together. An embeddings record opens beside the resident model for that request and closes when the request returns. A pipeline does not import another pipeline, and it does not share that pipeline's forward, records, or kernels. Quantize and the other non-serve commands require `favlo --<pipeline>`.
 
-This file is the map and the write set. It wins for the listener, the registry, the console, and which files an agent may edit. A pipeline note wins for that pipeline's records, cache, and kernels. Implementation plans stay under `artifacts/implementation-plan/` (gitignored). A measured research remainder stays at `docs/<pipeline>/research/<slug>.md` and is indexed from [RESEARCH.md](RESEARCH.md).
+This file is the map and the write set. It wins for the listener, the registry, the console, and which files an agent may edit. A pipeline note wins for that pipeline's records, cache, and kernels. A measured research remainder stays at `docs/<pipeline>/research/<slug>.md` and is indexed from [RESEARCH.md](RESEARCH.md).
 
 ## Map
 

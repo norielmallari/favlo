@@ -27,7 +27,7 @@ build/
 *.log
 artifacts/
 
-# Implementation plans (keep under artifacts/implementation-plan/, not docs/)
+# Legacy plan paths (do not commit under docs/)
 docs/console-improvements/
 docs/decode-options/
 docs/dynamic-quantization/

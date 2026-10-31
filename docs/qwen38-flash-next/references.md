@@ -77,13 +77,13 @@ Mike Lasby et al. *REAP the Experts: Why Pruning Prevails for One-Shot MoE Compr
 
 Mohamed Amine Bergach. *When Quantization Is Free: An int4 KV Cache That Outruns fp16 on Apple Silicon.* [arXiv:2605.05699](https://arxiv.org/abs/2605.05699), May 2026. A fused int4 key/value cache can transfer less per decode step than fp16 on unified memory. The measured models are not this checkpoint.
 
-Options 1, 2, and 3 in the local `artifacts/implementation-plan/docs/decode-options/` note (gitignored) are the as-built decode. Option 4 in that note is still a plan. Option 5 is the as-built MTP decode. The int4 cache in the paper above is not one of those options.
+The as-built decode paths are in [schedule.md](schedule.md), including MTP. The int4 cache in the paper above is not one of those paths.
 
 Yaniv Leviathan, Matan Kalman, and Yossi Matias. *Fast Inference from Transformers via Speculative Decoding.* ICML 2023. [arXiv:2211.17192](https://arxiv.org/abs/2211.17192). One target call scores the drafted span. A drafted token \(x\) is kept with probability \(\min(1, p(x)/q(x))\). A rejection draws from \(\mathrm{norm}(\max(0, p-q))\). The output distribution is the target's, at every temperature. Temperature 0 is that rule when \(p\) is a point mass on the argmax.
 
 Charlie Chen, Sebastian Borgeaud, Geoffrey Irving, Jean-Baptiste Lespiau, Laurent Sifre, and John Jumper. *Accelerating Large Language Model Decoding with Speculative Sampling.* [arXiv:2302.01318](https://arxiv.org/abs/2302.01318), 2023. Temperature, nucleus, and top-k are applied to both distributions before the same test. Scoring a short continuation costs about one sample when the call is bound by reading the weights.
 
-The decode that uses these is [schedule.md](schedule.md). The local `artifacts/implementation-plan/docs/mtp/` note is gitignored.
+The decode that uses these is [schedule.md](schedule.md).
 
 The key/value cache defaults to E4M3 for completed blocks of four. The unfinished tail stays BF16. `--kv-cache bf16` stores every K and V token as BF16. The indexer key stays BF16.
 

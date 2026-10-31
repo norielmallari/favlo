@@ -21,7 +21,7 @@ A release that changes the version updates `CITATION.cff` in that same change. D
 
 ## Where a note lives
 
-An idea with no measurement stays at `artifacts/implementation-plan/docs/<pipeline>/<slug>.md`. That tree is gitignored.
+An idea with no measurement is not committed in this repository.
 
 A measured remainder is one Markdown file, `docs/<pipeline>/research/<slug>.md`. A format bound is a measurement of the code points. A per-matrix table is a measurement of the checkout. A dispatch table, a bandwidth ceiling, or a recorded rate is a measurement of this implementation. The file says which one it holds. The pipeline README links it as a measurement. The serving note changes only when that behavior ships.
 
