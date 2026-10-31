@@ -48,14 +48,46 @@ _EMPTY_THINK = """{%- if reasoning_content %}
             {%- endif %}"""
 
 
+def preserve_thinking(body: dict[str, Any]) -> bool:
+    """Whether historical reasoning stays in the prompt.
+
+    Omitted is on, which is this checkpoint's default. A top-level
+    ``preserve_thinking`` wins over ``chat_template_kwargs``. False keeps a
+    think block only on assistant turns after the latest user message.
+    """
+    flag = _preserve_flag(body.get("preserve_thinking")) if "preserve_thinking" in body else None
+    if flag is None:
+        kwargs = body.get("chat_template_kwargs")
+        if isinstance(kwargs, dict) and "preserve_thinking" in kwargs:
+            flag = _preserve_flag(kwargs.get("preserve_thinking"))
+    if flag is None:
+        return True
+    return flag
+
+
+def _preserve_flag(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    message = "preserve_thinking must be true or false"
+    raise RuntimeError(message)
+
+
 def encode_chat(
     root: Path,
     messages: list[dict[str, Any]],
     tools: Any,
     enable_thinking: bool,
     reasoning_effort: str | None = None,
+    *,
+    preserve_thinking: bool = True,
 ) -> list[int]:
-    """Render the checkpoint template and encode it."""
+    """Render the checkpoint template and encode it.
+
+    ``preserve_thinking`` false drops reasoning on assistant turns before the
+    latest user message. True, the default, keeps every assistant think block.
+    """
     template = (root / "chat_template.jinja").read_text()
     if _CHECKOUT_EMPTY_THINK not in template:
         message = "chat template has no empty think block to align"
@@ -69,7 +101,7 @@ def encode_chat(
         "add_generation_prompt": True,
         "enable_thinking": enable_thinking,
         "add_vision_id": False,
-        "preserve_thinking": True,
+        "preserve_thinking": preserve_thinking,
     }
     if reasoning_effort:
         rendered_args["reasoning_effort"] = reasoning_effort
@@ -268,7 +300,12 @@ def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any)
 
     images = collect_images(messages, note=_vision_note)
     prompt = encode_chat(
-        runtime.root, messages, body.get("tools"), thinking, _reasoning_effort(body)
+        runtime.root,
+        messages,
+        body.get("tools"),
+        thinking,
+        _reasoning_effort(body),
+        preserve_thinking=preserve_thinking(body),
     )
     prepared = [
         prepare_image(blob, min_pixels=low, max_pixels=high) for blob, low, high in images

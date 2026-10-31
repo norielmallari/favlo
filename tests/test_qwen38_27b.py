@@ -315,6 +315,52 @@ def test_the_draw_tokenizer_is_not_the_lookup_method(monkeypatch: pytest.MonkeyP
     assert runtime._tokenizer().decode([1]) == "ok"
 
 
+def test_preserve_thinking_defaults_on_and_either_field_overrides() -> None:
+    from qwen38_27b.chat import preserve_thinking
+
+    assert preserve_thinking({}) is True
+    assert preserve_thinking({"preserve_thinking": False}) is False
+    assert preserve_thinking({"chat_template_kwargs": {"preserve_thinking": False}}) is False
+    assert (
+        preserve_thinking(
+            {
+                "preserve_thinking": False,
+                "chat_template_kwargs": {"preserve_thinking": True},
+            }
+        )
+        is False
+    )
+    assert preserve_thinking({"preserve_thinking": None, "chat_template_kwargs": {"preserve_thinking": False}}) is False
+    with pytest.raises(RuntimeError):
+        preserve_thinking({"preserve_thinking": "false"})
+
+
+def test_false_preserve_thinking_drops_reasoning_before_the_latest_user() -> None:
+    root = installed_record()
+    if root is None or not (root / "chat_template.jinja").is_file():
+        pytest.skip("quantized record is not installed")
+    history = [
+        {"role": "user", "content": "Read notes.txt"},
+        {"role": "assistant", "content": "First.", "reasoning_content": "old thought"},
+        {"role": "user", "content": "Read it again"},
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "new thought",
+            "tool_calls": [
+                {"function": {"name": "read_file", "arguments": {"path": "notes.txt"}}}
+            ],
+        },
+        {"role": "tool", "content": "ok"},
+    ]
+    kept = decode_text(root, encode_chat(root, history, None, True, preserve_thinking=True))
+    dropped = decode_text(root, encode_chat(root, history, None, True, preserve_thinking=False))
+    assert "old thought" in kept
+    assert "new thought" in kept
+    assert "old thought" not in dropped
+    assert "new thought" in dropped
+
+
 def test_empty_think_turn_stays_a_prefix_of_the_next_prompt() -> None:
     root = installed_record()
     if root is None or not (root / "chat_template.jinja").is_file():
