@@ -189,9 +189,17 @@ def test_an_omitted_completion_cap_is_the_context_room() -> None:
     assert decode_steps(262144, 36864, 35000) == 1864
 
 
+def _chat_root() -> Path | None:
+    for name in ("Qwen3.6-35B-A3B-fp8-e20", "Qwen3.6-35B-A3B-fp4"):
+        root = Path("models") / name
+        if (root / "chat_template.jinja").is_file() and (root / "tokenizer.json").is_file():
+            return root
+    return None
+
+
 def test_a_closed_think_tool_call_is_a_prefix_of_the_next_prompt() -> None:
-    root = Path("models/Qwen3.6-35B-A3B-fp4")
-    if not (root / "chat_template.jinja").is_file():
+    root = _chat_root()
+    if root is None:
         pytest.skip("chat template is not installed")
     from qwen36_35b_a3b.chat import encode_chat, encode_text
 
@@ -288,8 +296,8 @@ def test_close_drops_device_buffers_before_another_pipeline() -> None:
 
 
 def test_an_omitted_assistant_turn_stays_a_prefix_of_the_next_prompt() -> None:
-    root = Path("models/Qwen3.6-35B-A3B-fp4")
-    if not (root / "chat_template.jinja").is_file():
+    root = _chat_root()
+    if root is None:
         pytest.skip("chat template is not installed")
     from qwen36_35b_a3b.chat import encode_chat
 
@@ -318,13 +326,14 @@ def test_an_omitted_assistant_turn_stays_a_prefix_of_the_next_prompt() -> None:
         {"role": "tool", "content": "print(1)\n"},
         {"role": "user", "content": "Call read_file with path b.metal."},
     ]
-    previous = encode_chat(root, asked, tools, False, None)
+    previous = encode_chat(root, asked, tools, False, None, preserve_thinking=True)
     follow = encode_chat(
         root,
         [*asked, {"role": "user", "content": "Call read_file with path c.py."}],
         tools,
         False,
         None,
+        preserve_thinking=True,
     )
     assert follow[: len(previous)] == previous
 
@@ -1283,6 +1292,64 @@ def test_kv_widths_and_atlas_budget() -> None:
     root = Path("models/Qwen3.6-35B-A3B-fp4")
     if (root / "config.json").is_file():
         assert max_position(root) == 262144
+
+
+def test_preserve_thinking_defaults_off_and_chat_kwargs_win() -> None:
+    from qwen36_35b_a3b.chat import preserve_thinking
+
+    assert preserve_thinking({}, {}) is False
+    assert preserve_thinking({}, {"preserve_thinking": True}) is True
+    assert preserve_thinking({}, {"preserve_thinking": False}) is False
+    assert (
+        preserve_thinking(
+            {"chat_template_kwargs": {"preserve_thinking": False}},
+            {"preserve_thinking": True},
+        )
+        is False
+    )
+    assert (
+        preserve_thinking(
+            {"chat_template_kwargs": {"preserve_thinking": True}},
+            {},
+        )
+        is True
+    )
+    assert preserve_thinking({"chat_template_kwargs": {}}, {"preserve_thinking": True}) is True
+    assert preserve_thinking({"preserve_thinking": True}, {}) is False
+
+
+def test_historical_reasoning_follows_the_preserve_setting() -> None:
+    root = _chat_root()
+    if root is None:
+        pytest.skip("chat template is not installed")
+    from qwen36_35b_a3b.chat import decode_text, encode_chat
+
+    history = [
+        {"role": "user", "content": "First question"},
+        {
+            "role": "assistant",
+            "reasoning_content": "older-trace",
+            "content": "visible-answer",
+        },
+        {"role": "user", "content": "Second question"},
+    ]
+    dropped = decode_text(root, encode_chat(root, history, None, True))
+    kept = decode_text(
+        root, encode_chat(root, history, None, True, preserve_thinking=True)
+    )
+    assert "visible-answer" in dropped
+    assert "older-trace" not in dropped
+    assert "older-trace" in kept
+    assert "visible-answer" in kept
+
+    current = [
+        {"role": "user", "content": "Use the tool"},
+        {"role": "assistant", "reasoning_content": "live-trace", "content": "ok"},
+        {"role": "user", "content": "<tool_response>\ndone\n</tool_response>"},
+    ]
+    live = decode_text(root, encode_chat(root, current, None, True))
+    assert "live-trace" in live
+    assert "ok" in live
 
 
 def test_omitted_sampling_uses_the_pipeline_card() -> None:

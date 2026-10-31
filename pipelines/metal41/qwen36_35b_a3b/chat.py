@@ -137,11 +137,42 @@ def load_tokenizer(root: Path) -> Tokenizer:
     return Tokenizer.from_file(str(root / "tokenizer.json"))
 
 
+def _chat_preserve(body: dict[str, Any]) -> bool | None:
+    """``chat_template_kwargs.preserve_thinking``, or None when that key is absent."""
+    kwargs = body.get("chat_template_kwargs")
+    if not isinstance(kwargs, dict) or "preserve_thinking" not in kwargs:
+        return None
+    value = kwargs.get("preserve_thinking")
+    if value is None:
+        return None
+    return bool(value)
+
+
+def preserve_thinking(body: dict[str, Any], settings: dict[str, Any] | None = None) -> bool:
+    """Whether historical reasoning stays in the prompt.
+
+    Chat kwargs override ``settings.json``. An omitted key is false. False keeps
+    a think block only on assistant turns after the latest user message. True
+    keeps one on every assistant turn.
+    """
+    requested = _chat_preserve(body)
+    if requested is not None:
+        return requested
+    if settings is None:
+        from favlo.logs import favlo_home, load_settings
+
+        settings = load_settings(favlo_home())
+    value = settings.get("preserve_thinking")
+    if value is None:
+        return False
+    return bool(value)
+
+
 def _bridge_omitted_assistant(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Put an empty assistant turn where the previous prompt already closed thinking.
 
-    A follow-up that omits that turn renders the next user in its place, so the
-    stored tokens are no longer a prefix. The empty turn is the closed think.
+    Used when historical thinking is kept. That empty turn renders the closed
+    think, so a follow-up that omitted it stays a prefix of the stored tokens.
     """
     bridged: list[dict[str, Any]] = []
     previous: str | None = None
@@ -160,23 +191,30 @@ def encode_chat(
     tools: Any,
     enable_thinking: bool,
     reasoning_effort: str | None = None,
+    *,
+    preserve_thinking: bool = False,
 ) -> list[int]:
     """Render the checkpoint template and encode it.
 
     A passed reasoning effort is ignored. This checkpoint opens or closes
-    thinking only through ``enable_thinking``.
+    thinking only through ``enable_thinking``. ``preserve_thinking`` is the
+    template flag: false keeps reasoning on assistant turns after the latest
+    user message, and true keeps it on every assistant turn.
     """
     del reasoning_effort
+    prepared = normalize_messages(messages)
+    if preserve_thinking:
+        prepared = _bridge_omitted_assistant(prepared)
     template = (root / "chat_template.jinja").read_text()
     env = Environment()
     env.globals["raise_exception"] = _raise
     rendered_args: dict[str, Any] = {
-        "messages": _bridge_omitted_assistant(normalize_messages(messages)),
+        "messages": prepared,
         "tools": tools or None,
         "add_generation_prompt": True,
         "enable_thinking": enable_thinking,
         "add_vision_id": False,
-        "preserve_thinking": True,
+        "preserve_thinking": preserve_thinking,
     }
     rendered = env.from_string(template).render(**rendered_args)
     return list(load_tokenizer(root).encode(rendered).ids)
@@ -279,7 +317,13 @@ def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any)
     temperature, top_p, top_k = _sampling(body, thinking, card)
     presence = _presence(body, thinking, card)
     frequency = _frequency(body)
-    prompt = encode_chat(runtime.root, messages, body.get("tools"), thinking)
+    prompt = encode_chat(
+        runtime.root,
+        messages,
+        body.get("tools"),
+        thinking,
+        preserve_thinking=preserve_thinking(body),
+    )
     prompt = prepare_prompt(runtime, messages, prompt)
     forced, stop_after_forced = _forced_call(runtime.root, body.get("tools"), required)
     close, end = think_close_ids(runtime.root) if thinking else ([], None)
