@@ -114,7 +114,7 @@ Favlo is licensed under the Apache License, Version 2.0. The terms are in [LICEN
 | Checkpoint | License | Note |
 |---|---|---|
 | Qwen3.6-35B-A3B | Apache License, Version 2.0 | [note](docs/qwen36-35b-a3b/README.md) |
-| Gemma 4 26B-A4B | Apache License, Version 2.0 | [note](docs/gemma4-26b-a4b/README.md) |
+| Gemma 4 26B-A4B | [Apache License, Version 2.0](https://ai.google.dev/gemma/docs/gemma_4_license) | [note](docs/gemma4-26b-a4b/README.md) |
 | Qwen3.8-27B | Apache License, Version 2.0 | [note](docs/qwen38-27b/README.md) |
 | Z-Image-Turbo | Apache License, Version 2.0 | [note](docs/z-image-turbo/README.md) |
 | Wan 2.2 I2V | Apache License, Version 2.0 | [note](docs/wan22-i2v/SETUP.md) |

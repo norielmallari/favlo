@@ -4,7 +4,7 @@ Gemma Team. *Gemma 4 Technical Report.* 2026. [arXiv:2607.02770](https://arxiv.o
 
 mlx-lm. `gemma4_text.py`. The text layer adds the attention residual and both feed-forward residuals at scale one, then multiplies by `layer_scalar`. The dense MLP uses `pre_feedforward_layernorm` and `post_feedforward_layernorm_1`. Routed experts use `pre_feedforward_layernorm_2` and `post_feedforward_layernorm_2`. The router normalizes with `router.scale` times `hidden**-0.5`. The token embedding is multiplied by `sqrt(hidden)`. Logits use the tied embedding with no extra scale. Attention uses scale 1. Values use RMSNorm with no scale: a global value is that norm of the key projection and is not rotated.
 
-Google. *google/gemma-4-26B-A4B-it.* Model card. [Hugging Face](https://huggingface.co/google/gemma-4-26B-A4B-it). The QAT card's Hub metadata tags the weights Apache License, Version 2.0. This pipeline packs a local bfloat16 checkout of those shapes. It does not download.
+Google. *google/gemma-4-26B-A4B-it.* Model card. [Hugging Face](https://huggingface.co/google/gemma-4-26B-A4B-it). Those weights are under the [Apache License, Version 2.0](https://ai.google.dev/gemma/docs/gemma_4_license). This pipeline packs a local bfloat16 checkout of those shapes. It does not download.
 
 Barbero, Vitvitskyi, Perivolaropoulos, Pascanu, and Veličković. *Round and Round We Go! What Makes Rotary Positional Encodings Useful?* 2024. [arXiv:2410.06205](https://arxiv.org/abs/2410.06205). Proportional rotary embeddings rotate the first fraction of pairs and leave the rest as the identity. The rotation pairs the first half of the head with the second half.
 
