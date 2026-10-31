@@ -9,8 +9,8 @@ the in-memory worker runs one task at a time. A client that does not gets the
 tool result on that call. ``list_image_models``, ``list_video_models_i2v``,
 ``list_video_models_t2v``, ``list_music_models``, ``list_voice_models``,
 ``set_image_model``, ``set_video_i2v_model``, ``set_video_t2v_model``,
-``set_music_model``, ``set_voice_model``, ``media_status``, and
-``media_cancel`` run in the request. A generate
+``set_music_model``, ``set_voice_model``, ``media_status``,
+``media_cancel``, and ``read_media`` run in the request. A generate
 tool calls the pipeline handler through the same lock as ``POST /v1``.
 Chat completion is not a tool.
 """
@@ -18,6 +18,7 @@ Chat completion is not a tool.
 from __future__ import annotations
 
 import base64
+import json
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -125,6 +126,23 @@ def build_mcp(
         """Cancel one task. A second call returns the same status."""
         return await tasks.cancel(taskId)
 
+    @mcp.tool(task=False)
+    def read_media(name: str) -> str:
+        """The parameters stored with one generated file.
+
+        Args:
+            name: Id starting with image_, video_, music_, or voice_.
+        """
+        from favlo.media_meta import kind_of, load_media
+
+        kind = kind_of(name)
+        if kind is None:
+            raise ToolError("unknown media")
+        record = load_media(name, home=_home(tasks.state, f"{kind}_home"))
+        if record is None:
+            raise ToolError("unknown media")
+        return json.dumps(record)
+
     store = open_store(state.get("memory_home"))
 
     @mcp.tool(task=False, description=REMEMBER_DESCRIPTION)
@@ -202,26 +220,34 @@ def build_mcp(
     @mcp.tool(task=_TASK, annotations=_ANNOTATIONS)
     async def generate_image(
         prompt: str,
-        size: str = "1280x720",
-        n: int = 1,
+        size: str = "720x1280",
         quality: str = "high",
-        seed: int = 0,
+        seed: int | None = None,
         include_image: bool = False,
         session: str = "",
     ) -> ToolResult:
-        """Generate one or more PNGs. ``n`` is 1 to 10 and is one task.
+        """Generate one PNG.
 
-        ``size`` defaults to ``1280x720``. ``auto`` is that same 16:9 frame.
+        ``size`` defaults to ``720x1280``. ``auto`` is that same 9:16 frame.
         ``session`` is a set_* id. Omitted uses the registry default.
+        An omitted seed is a random integer. The result includes those parameters.
+
+        Args:
+            prompt: Image prompt.
+            size: WIDTHxHEIGHT. auto is the same 9:16 frame.
+            quality: Quality preset.
+            seed: Omitted draws a random seed.
+            include_image: Inline the PNG when it is at most 1 MiB.
+            session: Session id from a set_* call. Omitted uses the registry default.
         """
-        body = {
+        body: dict[str, Any] = {
             "prompt": prompt,
             "model": _model(tasks.state, "image", session),
             "size": size,
-            "n": n,
             "quality": quality,
-            "seed": seed,
         }
+        if seed is not None:
+            body["seed"] = seed
         payload = await _run_task(dispatch, "image", body)
         return _image_result(payload, include_image, tasks.state)
 
@@ -231,7 +257,7 @@ def build_mcp(
         size: str,
         image: str | dict[str, Any] | None,
         duration: float | None,
-        seed: int,
+        seed: int | None,
         quality: str,
         negative_prompt: str,
         guidance_scale: float | list[float] | None,
@@ -242,9 +268,10 @@ def build_mcp(
             "prompt": prompt,
             "model": _model(tasks.state, kind, session),
             "size": size,
-            "seed": seed,
             "quality": quality,
         }
+        if seed is not None:
+            body["seed"] = seed
         if image is not None:
             body["image"] = _still(image, tasks.state)
         if duration is not None:
@@ -256,7 +283,7 @@ def build_mcp(
         if steps:
             body["steps"] = steps
         payload = await _run_task(dispatch, "video", body)
-        return _video_result(payload)
+        return _video_result(payload, tasks.state)
 
     @mcp.tool(task=_TASK, annotations=_ANNOTATIONS)
     async def generate_video_i2v(
@@ -264,7 +291,7 @@ def build_mcp(
         size: str,
         image: str | dict[str, Any],
         duration: float | None = None,
-        seed: int = 0,
+        seed: int | None = None,
         quality: str = "high",
         negative_prompt: str = "",
         guidance_scale: float | list[float] | None = None,
@@ -278,7 +305,7 @@ def build_mcp(
             size: Required WIDTHxHEIGHT from list_video_models_i2v.
             image: Id starting with image_, or a PNG block.
             duration: Clip length in seconds. Omitted uses the model default.
-            seed: Integer seed. The default is 0.
+            seed: Omitted draws a random seed.
             quality: auto, low, medium, high, xhigh, max, standard, or hd.
             negative_prompt: Empty uses Wan's sample negative.
             guidance_scale: One number or [low, high]. Default 1.
@@ -304,7 +331,7 @@ def build_mcp(
         prompt: str,
         size: str,
         duration: float | None = None,
-        seed: int = 0,
+        seed: int | None = None,
         quality: str = "high",
         negative_prompt: str = "",
         guidance_scale: float | list[float] | None = None,
@@ -317,7 +344,7 @@ def build_mcp(
             prompt: Motion prompt.
             size: Required WIDTHxHEIGHT from list_video_models_t2v.
             duration: Clip length in seconds. Omitted uses the model default.
-            seed: Integer seed. The default is 0.
+            seed: Omitted draws a random seed.
             quality: auto, low, medium, high, xhigh, max, standard, or hd.
             negative_prompt: Empty uses Wan's sample negative.
             guidance_scale: One number or [low, high]. Default 1.
@@ -355,6 +382,7 @@ def build_mcp(
         """Generate one clip. ``response_format`` is mp3, wav, or flac.
 
         ``session`` is a set_* id. Omitted uses the registry default.
+        An omitted seed is a random integer. The result includes those parameters.
         """
         body: dict[str, Any] = {
             "prompt": prompt,
@@ -393,6 +421,7 @@ def build_mcp(
         A square-bracket tag in ``input`` is an emotion id from that row.
         ``response_format`` is mp3, wav, or flac.
         ``session`` is a set_* id. Omitted uses the registry default.
+        The result includes the parameters stored for the clip.
         """
         body: dict[str, Any] = {
             "input": input,
@@ -596,6 +625,9 @@ def _image_result(
             continue
         image_id = item["id"]
         blocks.append(mcp_types.TextContent(type="text", text=image_id))
+        meta = _metadata_text(image_id, state)
+        if meta is not None:
+            blocks.append(meta)
         blocks.append(_media_link("images", image_id, "png", "image/png"))
         if not include_image:
             continue
@@ -629,7 +661,7 @@ def _image_bytes(item: dict[str, Any], state: dict[str, Any]) -> bytes | None:
         return None
 
 
-def _video_result(payload: dict[str, Any]) -> ToolResult:
+def _video_result(payload: dict[str, Any], state: dict[str, Any]) -> ToolResult:
     if payload.get("status") == "cancelled":
         return ToolResult([mcp_types.TextContent(type="text", text="cancelled")])
     video_id = payload.get("id")
@@ -639,12 +671,12 @@ def _video_result(payload: dict[str, Any]) -> ToolResult:
     size = payload.get("size") if isinstance(payload.get("size"), str) else ""
     seconds = payload.get("seconds") if isinstance(payload.get("seconds"), str) else ""
     text = " ".join(part for part in (video_id, size, seconds) if part)
-    return ToolResult(
-        [
-            mcp_types.TextContent(type="text", text=text),
-            _media_link("videos", video_id, "mp4", "video/mp4"),
-        ]
-    )
+    blocks: list[mcp_types.ContentBlock] = [mcp_types.TextContent(type="text", text=text)]
+    meta = _metadata_text(video_id, state)
+    if meta is not None:
+        blocks.append(meta)
+    blocks.append(_media_link("videos", video_id, "mp4", "video/mp4"))
+    return ToolResult(blocks)
 
 
 def _music_result(
@@ -662,8 +694,11 @@ def _music_result(
     mime = _AUDIO[fmt]
     blocks: list[mcp_types.ContentBlock] = [
         mcp_types.TextContent(type="text", text=music_id),
-        _media_link("music", music_id, fmt, mime),
     ]
+    meta = _metadata_text(music_id, state)
+    if meta is not None:
+        blocks.append(meta)
+    blocks.append(_media_link("music", music_id, fmt, mime))
     if include_audio:
         loaded = load_music(music_id, fmt, home=_home(state, "music_home"))
         if loaded is not None and len(loaded[0]) <= _INLINE:
@@ -692,8 +727,11 @@ def _voice_result(
     mime = _AUDIO[fmt]
     blocks: list[mcp_types.ContentBlock] = [
         mcp_types.TextContent(type="text", text=voice_id),
-        _media_link("voice", voice_id, fmt, mime),
     ]
+    meta = _metadata_text(voice_id, state)
+    if meta is not None:
+        blocks.append(meta)
+    blocks.append(_media_link("voice", voice_id, fmt, mime))
     if include_audio:
         loaded = load_voice(voice_id, fmt, home=_home(state, "voice_home"))
         if loaded is not None and len(loaded[0]) <= _INLINE:
@@ -705,6 +743,19 @@ def _voice_result(
                 )
             )
     return ToolResult(blocks)
+
+
+def _metadata_text(name: str, state: dict[str, Any]) -> mcp_types.TextContent | None:
+    """The stored parameters for one id, when the JSON record is on disk."""
+    from favlo.media_meta import kind_of, load_media
+
+    kind = kind_of(name)
+    if kind is None:
+        return None
+    record = load_media(name, home=_home(state, f"{kind}_home"))
+    if record is None:
+        return None
+    return mcp_types.TextContent(type="text", text=json.dumps(record))
 
 
 def _media_link(kind: str, item_id: str, ext: str, mime: str) -> mcp_types.ResourceLink:

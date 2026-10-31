@@ -1344,17 +1344,16 @@ class _QueueMedia:
             reply.json(200, {"data": [{"id": "image_later", "b64_json": "bGF0ZXI="}]})
             return
         if prompt == "batch":
-            wrote = []
-            for index in range(int(body.get("n") or 1)):
-                if state["cancel"].is_set():
-                    reply.json(200, {"status": "in_progress", "data": wrote})
-                    return
-                image_id = f"image_{index}"
-                _store_png(self.home, image_id, b"batch")
-                wrote.append({"id": image_id, "b64_json": "YmF0Y2g="})
-                if index == 0:
-                    self.first_file.set()
-                    self.hold_release.wait(5)
+            if state["cancel"].is_set():
+                reply.json(200, {"status": "in_progress", "data": []})
+                return
+            _store_png(self.home, "image_0", b"batch")
+            wrote = [{"id": "image_0", "b64_json": "YmF0Y2g="}]
+            self.first_file.set()
+            self.hold_release.wait(5)
+            if state["cancel"].is_set():
+                reply.json(200, {"status": "in_progress", "data": wrote})
+                return
             reply.json(200, {"data": wrote})
             return
         if prompt == "pair":
@@ -1503,6 +1502,7 @@ def test_mcp_initialize_lists_tools_and_rejects_a_batch(tmp_path) -> None:
         "list_voice_models",
         "media_status",
         "media_cancel",
+        "read_media",
         "remember",
         "recall",
         "forget",
@@ -1651,7 +1651,7 @@ def test_mcp_cancel_during_a_batch_discards_the_file(tmp_path) -> None:
         _status, created = _tool(
             port,
             "generate_image",
-            {"prompt": "batch", "n": 2},
+            {"prompt": "batch"},
         )
         assert media.first_file.wait(5)
         task_id = created["result"]["taskId"]
@@ -1663,7 +1663,6 @@ def test_mcp_cancel_during_a_batch_discards_the_file(tmp_path) -> None:
         _stop_background(state, thread)
     assert finished["status"] == "cancelled"
     assert not (tmp_path / "images" / "image_0.png").exists()
-    assert not (tmp_path / "images" / "image_1.png").exists()
 
 
 def test_mcp_image_results_are_links_and_resources_read_the_file(tmp_path) -> None:
@@ -1676,7 +1675,7 @@ def test_mcp_image_results_are_links_and_resources_read_the_file(tmp_path) -> No
         _status, pair = _tool(
             port,
             "generate_image",
-            {"prompt": "pair", "n": 2},
+            {"prompt": "pair"},
         )
         pair_done = _wait_task(port, pair["result"]["taskId"])
         _status, big = _tool(
@@ -1743,7 +1742,11 @@ def test_generate_video_schema_names_the_still_and_the_frame_default() -> None:
     assert "session" not in i2v.parameters["required"]
     image = next(tool for tool in tools if tool.name == "generate_image")
     assert "model" not in image.parameters["properties"]
+    assert "n" not in image.parameters["properties"]
     assert "session" in image.parameters["properties"]
+    assert "seed" not in image.parameters["required"]
+    seed = image.parameters["properties"]["seed"]["description"]
+    assert "random" in seed
 
 
 def test_mcp_video_rejects_a_filesystem_path(tmp_path) -> None:

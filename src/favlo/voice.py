@@ -122,6 +122,9 @@ def sweep_voice(
                 sibling.unlink()
             except OSError:
                 continue
+        from favlo.media_meta import drop_media
+
+        drop_media(root, "voice", stem)
         if isinstance(voice, dict):
             voice.pop(stem, None)
 

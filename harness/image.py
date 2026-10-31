@@ -32,7 +32,6 @@ def main() -> int:
         "model": args.model,
         "prompt": stored["prompt"],
         "size": f"{stored['width']}x{stored['height']}",
-        "n": 1,
         "seed": stored["seed"],
     }
     listener = None
@@ -45,7 +44,6 @@ def main() -> int:
                 "model": body["model"],
                 "prompt": body["prompt"],
                 "size": body["size"],
-                "n": 1,
                 "seed": body["seed"],
             },
         )

@@ -92,6 +92,9 @@ def sweep_images(
                 path.unlink()
             except OSError:
                 continue
+        from favlo.media_meta import drop_media
+
+        drop_media(root, "image", stem)
         if isinstance(images, dict):
             images.pop(stem, None)
 

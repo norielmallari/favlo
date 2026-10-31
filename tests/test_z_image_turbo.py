@@ -218,11 +218,11 @@ def test_lower_quality_uses_a_higher_zlib_level(tmp_path) -> None:
 def test_image_request_default_size() -> None:
     fields = _fields({"prompt": "a cat"})
     assert fields.prompt == "a cat"
-    assert (fields.width, fields.height, fields.seed, fields.count) == (1280, 720, 0, 1)
+    assert (fields.width, fields.height, fields.seed) == (720, 1280, 0)
     assert fields.quality == "high"
     assert fields.background == "opaque"
     assert fields.output_format == "png"
-    assert fields.size == "1280x720"
+    assert fields.size == "720x1280"
     assert fields.safety_identifier is None
 
 
@@ -230,7 +230,6 @@ def test_image_request_accepts_a_standard_body() -> None:
     fields = _fields(
         {
             "prompt": "a cat",
-            "n": 2,
             "size": "auto",
             "quality": "auto",
             "background": "opaque",
@@ -247,17 +246,17 @@ def test_image_request_accepts_a_standard_body() -> None:
             "user": "reader",
         }
     )
-    assert fields.count == 2
     assert fields.seed == 4
-    assert fields.size == "1280x720"
+    assert fields.size == "720x1280"
     assert fields.quality == "high"
     assert fields.safety_identifier == "reader"
 
 
-def test_image_request_rejects_counts_past_ten() -> None:
-    with pytest.raises(ImageRequestError, match="n must be from 1 to 10") as raised:
-        _fields({"prompt": "a cat", "n": 11})
-    assert raised.value.param == "n"
+def test_image_request_ignores_a_count() -> None:
+    plain = _fields({"prompt": "a cat"})
+    counted = _fields({"prompt": "a cat", "n": 4})
+    assert counted == plain
+    assert "count" not in plain._fields
 
 
 def test_image_request_rejects_sizes_this_model_cannot_draw() -> None:
@@ -282,7 +281,7 @@ def test_image_request_rejects_unsupported_image_options() -> None:
         assert raised.value.param == key
 
 
-def test_image_response_returns_one_png_per_count(tmp_path) -> None:
+def test_image_response_returns_one_png(tmp_path) -> None:
     class _Runtime:
         def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **_extra):
             del prompt, width, height, steps
@@ -293,31 +292,103 @@ def test_image_response_returns_one_png_per_count(tmp_path) -> None:
 
     reply = MemoryReply()
     state = {"image_home": tmp_path}
-    handle_image(reply, _Runtime(), {"prompt": "a cat", "n": 2, "seed": 7}, None, None, state)
+    handle_image(reply, _Runtime(), {"prompt": "a cat", "seed": 7}, None, None, state)
     assert reply.status == 200
     data = reply.body["data"]
     assert isinstance(data, list)
-    assert len(data) == 2
+    assert len(data) == 1
     first = np.zeros((8, 8, 3), dtype=np.uint8)
     first[..., 0] = 7
-    second = np.zeros((8, 8, 3), dtype=np.uint8)
-    second[..., 0] = 8
     assert base64.b64decode(data[0]["b64_json"]) == encode_png(first, "high")
-    assert base64.b64decode(data[1]["b64_json"]) == encode_png(second, "high")
     rgb = tmp_path / "images" / f"{data[0]['id']}.rgb"
     assert np.array_equal(unpack_rgb(rgb.read_bytes()), first)
     assert (tmp_path / "images" / f"{data[0]['id']}.png").read_bytes() == encode_png(first, "high")
-    timings = reply.body["generation_seconds"]
-    assert isinstance(timings, list)
-    assert len(timings) == 2
+    assert isinstance(reply.body["generation_seconds"], dict)
     assert reply.body["output_format"] == "png"
     assert reply.body["background"] == "opaque"
-    assert reply.body["size"] == "1280x720"
+    assert reply.body["size"] == "720x1280"
     assert "usage" not in reply.body
     assert "status" not in reply.body
     assert "revised_prompt" not in data[0]
-    handle_image(reply, _Runtime(), {"prompt": "a cat"}, None, None, state)
-    assert isinstance(reply.body["generation_seconds"], dict)
+
+
+def test_an_omitted_seed_is_stored_with_the_prompt(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("favlo.media_pipeline.secrets.randbits", lambda _bits: 17)
+    seen: list[int] = []
+
+    class _Runtime:
+        def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **_extra):
+            del prompt, width, height, steps
+            seen.append(seed)
+            timing = {"total": 1.0, "caption": 0.1, "vae": 0.2, "steps": [0.1]}
+            return _picture(seed), "digest", timing
+
+    reply = MemoryReply()
+    handle_image(reply, _Runtime(), {"prompt": "a red cube"}, None, None, {"image_home": tmp_path})
+    image_id = reply.body["data"][0]["id"]
+    record = json.loads((tmp_path / "images" / f"{image_id}.json").read_text())
+    assert seen == [17]
+    assert record["name"] == image_id
+    assert record["kind"] == "image"
+    assert record["seed"] == 17
+    assert record["prompt"] == "a red cube"
+    assert record["size"] == "720x1280"
+    assert "b64_json" not in record
+
+
+def test_an_explicit_zero_seed_stays(tmp_path) -> None:
+    seen: list[int] = []
+
+    class _Runtime:
+        def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **_extra):
+            del prompt, width, height, steps
+            seen.append(seed)
+            timing = {"total": 1.0, "caption": 0.1, "vae": 0.2, "steps": [0.1]}
+            return _picture(1), "digest", timing
+
+    reply = MemoryReply()
+    state = {"image_home": tmp_path}
+    handle_image(reply, _Runtime(), {"prompt": "a cat", "seed": 0}, None, None, state)
+    image_id = reply.body["data"][0]["id"]
+    record = json.loads((tmp_path / "images" / f"{image_id}.json").read_text())
+    assert seen == [0]
+    assert record["seed"] == 0
+
+
+def test_a_resumed_image_keeps_the_drawn_seed(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("favlo.media_pipeline.secrets.randbits", lambda _bits: 17)
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.seeds: list[int] = []
+
+        def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **extra):
+            del prompt, width, height, steps
+            self.seeds.append(seed)
+            if not extra.get("done_steps"):
+                raise ImagePaused(
+                    "preempt",
+                    ImageHold(
+                        stage="step",
+                        step=4,
+                        latent=np.arange(4, dtype=np.float32),
+                        times=[0.2, 0.2, 0.2, 0.2],
+                    ),
+                )
+            timing = {"total": 1.0, "caption": 0.1, "vae": 0.2, "steps": [0.1]}
+            return _picture(seed), "digest", timing
+
+    runtime = _Runtime()
+    reply = MemoryReply()
+    state = {"image_home": tmp_path, "preempt": threading.Event(), "cancel": threading.Event()}
+    handle_image(reply, runtime, {"prompt": "a cat"}, None, None, state)
+    assert state["image_hold"]["seed"] == 17
+    handle_image(reply, runtime, {"prompt": "a cat"}, None, None, state)
+    assert runtime.seeds == [17, 17]
+    image_id = reply.body["data"][0]["id"]
+    record = json.loads((tmp_path / "images" / f"{image_id}.json").read_text())
+    assert record["seed"] == 17
+    assert record["prompt"] == "a cat"
 
 
 def _picture(seed: int) -> np.ndarray:
@@ -349,7 +420,7 @@ def test_the_image_request_releases_the_runtime(tmp_path) -> None:
     assert runtime.closed == 2
 
 
-def test_preempt_keeps_a_stored_image_and_the_same_id(tmp_path) -> None:
+def test_preempt_after_decode_keeps_the_pixels_and_the_same_id(tmp_path) -> None:
     preempt = threading.Event()
 
     class _Runtime:
@@ -359,25 +430,24 @@ def test_preempt_keeps_a_stored_image_and_the_same_id(tmp_path) -> None:
         def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **_extra):
             del prompt, width, height, steps
             self.seeds.append(seed)
-            if len(self.seeds) > 1:
-                preempt.set()
+            preempt.set()
             timing = {"total": 1.0, "caption": 0.1, "vae": 0.2, "steps": [0.1]}
             return _picture(seed), "digest", timing
 
     runtime = _Runtime()
     reply = MemoryReply()
     state = {"image_home": tmp_path, "preempt": preempt, "cancel": threading.Event()}
-    handle_image(reply, runtime, {"prompt": "a cat", "n": 2, "seed": 7}, None, None, state)
+    handle_image(reply, runtime, {"prompt": "a cat", "seed": 7}, None, None, state)
     assert reply.body["status"] == "in_progress"
     assert reply.body["stage"] == "decode"
-    assert len(reply.body["data"]) == 1
+    assert reply.body["data"] == []
     assert state["image_hold"]["hold"].id == reply.body["id"]
-    assert runtime.seeds == [7, 8]
+    assert runtime.seeds == [7]
     preempt.clear()
-    handle_image(reply, runtime, {"prompt": "a cat", "n": 2, "seed": 7}, None, None, state)
+    handle_image(reply, runtime, {"prompt": "a cat", "seed": 7}, None, None, state)
     assert "status" not in reply.body
-    assert len(reply.body["data"]) == 2
-    assert runtime.seeds == [7, 8]
+    assert len(reply.body["data"]) == 1
+    assert runtime.seeds == [7]
     assert state.get("image_hold") is None
 
 
@@ -462,7 +532,7 @@ def test_cancel_before_the_draw_skips_the_runtime(tmp_path) -> None:
     assert state.get("image_hold") is None
 
 
-def test_cancel_drops_the_checkpoint_and_skips_the_remaining_image(tmp_path) -> None:
+def test_cancel_during_the_draw_drops_the_checkpoint(tmp_path) -> None:
     class _Runtime:
         def __init__(self) -> None:
             self.seeds: list[int] = []
@@ -470,7 +540,7 @@ def test_cancel_drops_the_checkpoint_and_skips_the_remaining_image(tmp_path) -> 
         def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **_extra):
             del prompt, width, height, steps
             self.seeds.append(seed)
-            if seed == 8:
+            if len(self.seeds) == 1:
                 raise ImagePaused("cancel", ImageHold(stage="step", step=1, latent=_picture(1)))
             timing = {"total": 1.0, "caption": 0.1, "vae": 0.2, "steps": [0.1]}
             return _picture(seed), "digest", timing
@@ -478,13 +548,14 @@ def test_cancel_drops_the_checkpoint_and_skips_the_remaining_image(tmp_path) -> 
     runtime = _Runtime()
     reply = MemoryReply()
     state = {"image_home": tmp_path, "preempt": threading.Event(), "cancel": threading.Event()}
-    handle_image(reply, runtime, {"prompt": "a cat", "n": 2, "seed": 7}, None, None, state)
+    handle_image(reply, runtime, {"prompt": "a cat", "seed": 7}, None, None, state)
     assert reply.body["status"] == "in_progress"
-    assert len(reply.body["data"]) == 1
+    assert reply.body["data"] == []
     assert state.get("image_hold") is None
-    assert (tmp_path / "images" / f"{reply.body['data'][0]['id']}.png").is_file()
-    handle_image(reply, runtime, {"prompt": "a cat", "n": 2, "seed": 7}, None, None, state)
-    assert runtime.seeds == [7, 8, 7, 8]
+    handle_image(reply, runtime, {"prompt": "a cat", "seed": 7}, None, None, state)
+    assert runtime.seeds == [7, 7]
+    assert "status" not in reply.body
+    assert len(reply.body["data"]) == 1
 
 
 def test_a_different_prompt_drops_the_paused_image(tmp_path) -> None:

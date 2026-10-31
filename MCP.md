@@ -46,8 +46,6 @@ While `status` is `working`, `tasks/get` and `media_status` may include:
 | `progress` | Percent while the clip is generating |
 | `eta` | Estimated seconds remaining |
 
-Image `n` from 1 to 10 is still one task.
-
 ## Tools
 
 ### Registry lists
@@ -161,14 +159,13 @@ Optional task.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `prompt` | string | required | Image prompt |
-| `size` | string | `1280x720` | `WIDTHxHEIGHT`; `auto` is the same 16:9 frame |
-| `n` | integer | `1` | Images to generate, 1–10 (one task) |
+| `size` | string | `720x1280` | `WIDTHxHEIGHT`; `auto` is the same 9:16 frame |
 | `quality` | string | `high` | Quality preset for the pipeline |
-| `seed` | integer | `0` | Seed |
+| `seed` | integer | omitted | Omitted draws a random seed |
 | `include_image` | boolean | `false` | Inline PNG in the result when decoded size ≤ 1 MiB |
 | `session` | string | `""` | Session id from a `set_*` call. Omitted uses the registry default |
 
-**Result:** Text content with each `image_*` id, a `resource_link` `favlo://images/{id}.png`, and optionally an inline `image` block.
+**Result:** Text content with the `image_*` id, a second text block with the stored parameters (the seed, the prompt, and the other fields used), a `resource_link` `favlo://images/{id}.png`, and optionally an inline `image` block. The same JSON is `<id>.json` beside the PNG.
 
 ### `generate_video_i2v`
 
@@ -180,7 +177,7 @@ Optional task. Produces one MP4.
 | `size` | string | required | `WIDTHxHEIGHT` from `list_video_models_i2v` |
 | `image` | string or object | required | `image_*` id from `generate_image`, or `{"type":"image","data":"<base64 png>"}` |
 | `duration` | number | omitted | Clip length in seconds; omitted uses the model default |
-| `seed` | integer | `0` | Seed |
+| `seed` | integer | omitted | Omitted draws a random seed |
 | `quality` | string | `high` | `auto`, `low`, `medium`, `high`, `xhigh`, `max`, `standard`, or `hd` |
 | `negative_prompt` | string | `""` | Empty uses Wan’s published sample negative where applicable |
 | `guidance_scale` | number or array | omitted | One number or `[low, high]`; default effective scale is 1 |
@@ -189,7 +186,7 @@ Optional task. Produces one MP4.
 
 `image` refuses a filesystem path and a `favlo://` URI.
 
-**Result:** Text with `video_*` id (and optional `size` / `seconds` fields), plus `resource_link` `favlo://videos/{id}.mp4`. Video is never inlined.
+**Result:** Text with `video_*` id (and optional `size` / `seconds` fields), a text block with the stored parameters, plus `resource_link` `favlo://videos/{id}.mp4`. Video is never inlined. The same JSON is `<id>.json` beside the MP4. The still is not stored in that file.
 
 ### `generate_video_t2v`
 
@@ -205,7 +202,7 @@ Optional task.
 | `response_format` | string | `mp3` | `mp3`, `wav`, or `flac` |
 | `lyrics` | string | `""` | Lyrics when the pipeline uses them |
 | `seconds` | number | omitted | Target duration when supported |
-| `seed` | integer | omitted | Seed when supported |
+| `seed` | integer | omitted | Omitted draws a random seed |
 | `vocal_language` | string | `""` | Vocal language when supported |
 | `bpm` | integer | omitted | Tempo when supported |
 | `keyscale` | string | `""` | Key when supported |
@@ -213,7 +210,7 @@ Optional task.
 | `include_audio` | boolean | `false` | Inline audio when decoded size ≤ 1 MiB |
 | `session` | string | `""` | Session id from a `set_*` call. Omitted uses the registry default |
 
-**Result:** `music_*` id, `resource_link` `favlo://music/{id}.{ext}`, optional inline `audio`.
+**Result:** `music_*` id, a text block with the stored parameters (including the prompt, lyrics, and seed), `resource_link` `favlo://music/{id}.{ext}`, optional inline `audio`. The same JSON is `<id>.json` beside the clip.
 
 ### `generate_voice`
 
@@ -228,7 +225,17 @@ Optional task.
 | `include_audio` | boolean | `false` | Inline audio when decoded size ≤ 1 MiB |
 | `session` | string | `""` | Session id from a `set_*` call. Omitted uses the registry default |
 
-**Result:** `voice_*` id, `resource_link` `favlo://voice/{id}.{ext}`, optional inline `audio`.
+**Result:** `voice_*` id, a text block with the stored parameters (the spoken line and the other fields used), `resource_link` `favlo://voice/{id}.{ext}`, optional inline `audio`. The same JSON is `<id>.json` beside the clip. Voice has no seed.
+
+### `read_media`
+
+Immediate. Returns the JSON stored for one generated file.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `name` | string | Id starting with `image_`, `video_`, `music_`, or `voice_` |
+
+An unknown id is an error. The record is `name`, `kind`, `model` when the job named one, `seed` when the pipeline uses one, and the other resolved parameters, including the prompts.
 
 ## Resources
 

@@ -678,10 +678,11 @@ def _discard_output(state: dict[str, Any], payload: Any) -> None:
     from pathlib import Path
 
     from favlo.images import image_path, source_path
+    from favlo.media_meta import drop_media
     from favlo.music import music_dir
-    from favlo.voice import voice_dir
     from favlo.videos import source_path as video_source
     from favlo.videos import video_path
+    from favlo.voice import voice_dir
 
     data = payload.get("data")
     if isinstance(data, list):
@@ -696,6 +697,7 @@ def _discard_output(state: dict[str, Any], payload: Any) -> None:
                         path_of(root, item["id"]).unlink(missing_ok=True)
                     except (OSError, ValueError):
                         continue
+                drop_media(root, "image", item["id"])
     item_id = payload.get("id")
     if not isinstance(item_id, str):
         return
@@ -709,6 +711,7 @@ def _discard_output(state: dict[str, Any], payload: Any) -> None:
             video_path(root, item_id).unlink(missing_ok=True)
         except (OSError, ValueError):
             return
+        drop_media(root, "video", item_id)
     if item_id.startswith("music_"):
         home = state.get("music_home")
         root = home if isinstance(home, Path) else None
@@ -720,6 +723,7 @@ def _discard_output(state: dict[str, Any], payload: Any) -> None:
                 (folder / f"{item_id}.{suffix}").unlink(missing_ok=True)
             except OSError:
                 continue
+        drop_media(root, "music", item_id)
     if item_id.startswith("voice_"):
         home = state.get("voice_home")
         root = home if isinstance(home, Path) else None
@@ -731,6 +735,7 @@ def _discard_output(state: dict[str, Any], payload: Any) -> None:
                 (folder / f"{item_id}.{suffix}").unlink(missing_ok=True)
             except OSError:
                 continue
+        drop_media(root, "voice", item_id)
 
 
 def _mcp_dispatch(

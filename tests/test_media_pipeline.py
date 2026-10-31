@@ -147,9 +147,10 @@ def test_a_bad_body_is_a_400_and_stores_no_hold() -> None:
     assert state.get("video_hold") is None
 
 
-def test_a_mismatch_mints_a_new_id() -> None:
+def test_a_mismatch_mints_a_new_id(tmp_path) -> None:
     pipe = _Pipe()
     state = _state()
+    state["video_home"] = tmp_path
     state["preempt"].set()
     first = _Reply()
     pipe(first, _Runtime(), {"prompt": "move"}, None, None, state)
@@ -164,23 +165,29 @@ def test_a_mismatch_mints_a_new_id() -> None:
     assert state["video_hold"] is None
 
 
-def test_pack_can_replace_the_payload() -> None:
+def test_pack_can_replace_the_payload(tmp_path) -> None:
     pipe = _Pipe()
     state = _state()
+    state["video_home"] = tmp_path
     reply = _Reply()
     pipe(reply, _Runtime(result={"replace": True}), {"prompt": "move"}, None, None, state)
     assert reply.payload == {"id": "custom", "status": "completed"}
     assert state["video_hold"] is None
 
 
-def test_on_finish_runs_after_success_pause_and_failure() -> None:
+def test_on_finish_runs_after_success_pause_and_failure(tmp_path) -> None:
     pipe = _Pipe()
     ok = _Runtime()
-    pipe(_Reply(), ok, {"prompt": "move"}, None, None, _state())
+    done = _state()
+    done["video_home"] = tmp_path
+    pipe(_Reply(), ok, {"prompt": "move"}, None, None, done)
     paused = _Runtime()
     state = _state()
+    state["video_home"] = tmp_path
     state["preempt"].set()
     pipe(_Reply(), paused, {"prompt": "move"}, None, None, state)
     failed = _Runtime(error=RuntimeError("device"))
-    pipe(_Reply(), failed, {"prompt": "move"}, None, None, _state())
+    broken = _state()
+    broken["video_home"] = tmp_path
+    pipe(_Reply(), failed, {"prompt": "move"}, None, None, broken)
     assert (ok.finished, paused.finished, failed.finished) == (1, 1, 1)

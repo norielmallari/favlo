@@ -46,7 +46,6 @@ def smoke_body(root: Path) -> dict[str, Any]:
         "model": IMAGE_MODEL,
         "prompt": stored["prompt"],
         "size": f"{stored['width']}x{stored['height']}",
-        "n": 1,
         "seed": stored["seed"],
     }
 

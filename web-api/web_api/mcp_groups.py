@@ -20,6 +20,7 @@ _GROUPS: dict[str, tuple[str, str]] = {
     "generate_voice": ("voice", "Voice"),
     "media_status": ("media", "Media tasks"),
     "media_cancel": ("media", "Media tasks"),
+    "read_media": ("media", "Media tasks"),
     "remember": ("memory", "Memory"),
     "recall": ("memory", "Memory"),
     "forget": ("memory", "Memory"),

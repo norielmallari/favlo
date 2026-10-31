@@ -160,7 +160,6 @@ def probes(root: Path, still: Path) -> list[Probe]:
                 "model": IMAGE_MODEL,
                 "prompt": image["prompt"],
                 "size": f"{image['width']}x{image['height']}",
-                "n": 1,
                 "quality": "low",
                 "seed": image["seed"],
             },

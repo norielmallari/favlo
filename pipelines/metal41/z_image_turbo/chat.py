@@ -33,7 +33,6 @@ class ImageFields(NamedTuple):
     width: int
     height: int
     seed: int
-    count: int
     quality: str
     background: str
     output_format: str
@@ -73,7 +72,6 @@ class Pipeline(MediaPipeline):
             request.seed,
             request.width,
             request.height,
-            request.count,
             request.quality,
         )
 
@@ -98,12 +96,12 @@ class Pipeline(MediaPipeline):
             seed=request.seed,
             width=request.width,
             height=request.height,
-            count=request.count,
+            count=1,
             quality=request.quality,
         )
         call.image = image
         try:
-            while image.index < request.count:
+            while image.index < 1:
                 reason = stop()
                 if reason == "cancel":
                     raise MediaPaused("cancel", image)
@@ -222,7 +220,7 @@ def _finished(job: ImageJob, fields: ImageFields) -> dict[str, Any]:
         "output_format": fields.output_format,
         "quality": fields.quality,
         "size": fields.size,
-        "generation_seconds": job.timings[0] if fields.count == 1 else job.timings,
+        "generation_seconds": job.timings[0],
     }
     if fields.safety_identifier:
         payload["safety_identifier"] = fields.safety_identifier
@@ -335,7 +333,6 @@ def _fields(body: dict[str, Any]) -> ImageFields:
         width=width,
         height=height,
         seed=_optional_int(body, "seed", 0, "seed must be an integer"),
-        count=_bounded_int(body, "n", 1, 1, 10, "n must be from 1 to 10"),
         quality=REPORTED_QUALITY[quality or "auto"],
         background="opaque",
         output_format=output_format or "png",
@@ -391,7 +388,7 @@ def _safety_identifier(body: dict[str, Any]) -> str | None:
 
 def _size(value: Any) -> tuple[int, int, str]:
     if value is None or value == "auto":
-        return 1280, 720, "1280x720"
+        return 720, 1280, "720x1280"
     if not isinstance(value, str) or "x" not in value:
         raise ImageRequestError("size must be auto or WIDTHxHEIGHT", "size")
     left, _, right = value.partition("x")

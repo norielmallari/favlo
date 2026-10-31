@@ -122,6 +122,9 @@ def sweep_music(
                 sibling.unlink()
             except OSError:
                 continue
+        from favlo.media_meta import drop_media
+
+        drop_media(root, "music", stem)
         if isinstance(music, dict):
             music.pop(stem, None)
 

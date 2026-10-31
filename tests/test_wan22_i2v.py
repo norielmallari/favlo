@@ -819,6 +819,10 @@ def test_preempt_pauses_and_the_same_job_resumes(tmp_path) -> None:
     assert state.get("video_hold") is None
     stored = load_video(job["id"], home=tmp_path)
     assert stored is not None and stored[4:8] == b"ftyp"
+    record = json.loads((tmp_path / "videos" / f"{job['id']}.json").read_text())
+    assert record["prompt"] == "move"
+    assert record["seed"] == body["seed"]
+    assert "image" not in record
 
 
 def test_expert_load_checkpoints_the_unfinished_step(monkeypatch) -> None:

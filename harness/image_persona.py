@@ -84,7 +84,6 @@ def image_tools(port: int, png: list[bytes]) -> list[object]:
                 "model": IMAGE_MODEL,
                 "prompt": IMAGE_PROMPT,
                 "size": f"{MAX_EDGE}x{MAX_EDGE}",
-                "n": 1,
                 "seed": 0,
             },
         )

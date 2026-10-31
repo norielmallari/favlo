@@ -170,6 +170,9 @@ def sweep_videos(
                 path.unlink()
             except OSError:
                 continue
+        from favlo.media_meta import drop_media
+
+        drop_media(root, "video", stem)
         if isinstance(videos, dict):
             videos.pop(stem, None)
 

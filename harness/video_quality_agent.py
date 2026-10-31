@@ -37,7 +37,6 @@ def main(argv: list[str] | None = None) -> int:
         "model": "Z-Image-Turbo-fp4",
         "prompt": video_note["prompt"],
         "size": f"{WIDTH}x{HEIGHT}",
-        "n": 1,
         "seed": video_note["seed"],
     }
     video_body = {

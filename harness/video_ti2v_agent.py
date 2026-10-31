@@ -190,7 +190,6 @@ def main(argv: list[str] | None = None) -> int:
         "model": "Z-Image-Turbo-fp4",
         "prompt": card["prompt"],
         "size": still_size,
-        "n": 1,
         "seed": card["seed"],
     }
     video_body = {

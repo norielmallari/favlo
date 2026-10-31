@@ -192,6 +192,7 @@ class Pipeline(MediaPipeline):
     """VoxCPM2's listener contract. Speech stays in the runtime."""
 
     kind = "voice"
+    seeds = False
     id_prefix = "voice_"
     object_name = "audio.voice"
     table_name = "voice"
