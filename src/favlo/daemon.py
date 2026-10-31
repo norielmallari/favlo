@@ -390,19 +390,16 @@ def _spawn(
         command.extend(["--transcript", str(transcript)])
     path = telemetry_path(port, home)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o644)
-    try:
-        return subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=fd,
-            stderr=subprocess.STDOUT,
-            env=env,
-            cwd=str(root),
-            start_new_session=True,
-        )
-    finally:
-        os.close(fd)
+    env["FAVLO_LOG_FILE"] = str(path)
+    return subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+        cwd=str(root),
+        start_new_session=True,
+    )
 
 
 def _tail(port: int, home: Path | None) -> str:

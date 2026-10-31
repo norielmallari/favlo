@@ -1,16 +1,23 @@
-"""Rolling server log. The process entry owns this module.
+"""Rolling text logs. The process entry owns this module.
 
-The file is ``~/.favlo/logs/favlo.log``. ``~/.favlo/settings.json``
-key ``log_max_bytes`` is the most bytes that file may hold. The default is
-1 MiB. A line that would pass the cap leaves the newest bytes that still fit.
+``~/.favlo/logs/favlo.log`` records durable lines. The daemon writes
+``~/.favlo/logs/serve-<port>.log``. A background download writes
+``~/.favlo/logs/qwen38-27b-download.log``. ``~/.favlo/settings.json``
+key ``log_max_bytes`` is the most bytes each of those files may hold.
+The default is 1 MiB. An append that would pass the cap leaves the newest
+bytes that still fit. SQLite files are not these logs.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import sys
 import threading
 from pathlib import Path
 from typing import Any
+
+_LOG_ENV = "FAVLO_LOG_FILE"
 
 DEFAULT_LOG_MAX_BYTES = 1024 * 1024
 DEFAULT_VIDEO_TTL_SECONDS = 24 * 60 * 60
@@ -224,6 +231,56 @@ def _tail(blob: bytes, max_bytes: int) -> bytes:
     if newline != -1 and newline < len(kept) - 1:
         return kept[newline + 1 :]
     return kept
+
+
+class RollingText:
+    """A text stream. Each finished line is appended through ``RollingLog``."""
+
+    def __init__(self, rolling: RollingLog) -> None:
+        self._rolling = rolling
+        self._pending = ""
+        self._lock = threading.Lock()
+        self.encoding = "utf-8"
+        self._favlo_rolling = True
+
+    def write(self, text: str) -> int:
+        if not text:
+            return 0
+        with self._lock:
+            self._pending += text
+            self._drain(final=False)
+        return len(text)
+
+    def flush(self) -> None:
+        with self._lock:
+            self._drain(final=True)
+
+    def isatty(self) -> bool:
+        return False
+
+    def _drain(self, *, final: bool) -> None:
+        while "\n" in self._pending:
+            line, self._pending = self._pending.split("\n", 1)
+            self._rolling.write(line + "\n")
+        if final and self._pending:
+            self._rolling.write(self._pending)
+            self._pending = ""
+
+
+def install_rolling_stdio() -> None:
+    """Send this process's stdout and stderr through the rolling file in the env."""
+    raw = os.environ.get(_LOG_ENV)
+    if not raw or getattr(sys.stdout, "_favlo_rolling", False):
+        return
+    path = Path(raw)
+    home = path.parent.parent if path.parent.name == "logs" else favlo_home()
+    try:
+        settings = ensure_settings(home)
+        stream = RollingText(RollingLog(path, log_max_bytes(settings)))
+    except (OSError, ValueError):
+        return
+    sys.stdout = stream
+    sys.stderr = stream
 
 
 def attach_process_log(console: Any, home: Path | None = None) -> None:

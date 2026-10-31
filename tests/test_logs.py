@@ -2,6 +2,7 @@
 
 import io
 import json
+import sys
 
 import pytest
 
@@ -12,6 +13,7 @@ from favlo.logs import (
     configured_thinking_budget,
     ensure_settings,
     heartbeat_seconds,
+    install_rolling_stdio,
     load_settings,
     log_max_bytes,
     log_path,
@@ -59,6 +61,31 @@ def test_the_log_keeps_only_the_newest_bytes(tmp_path) -> None:
     assert text.startswith("line-")
     assert "line-19" in text
     assert "line-00" not in text
+
+
+def test_stdio_stays_under_the_configured_cap(tmp_path, monkeypatch) -> None:
+    stored = ensure_settings(tmp_path)
+    stored["log_max_bytes"] = 64
+    settings_path(tmp_path).write_text(json.dumps(stored), encoding="utf-8")
+    path = tmp_path / "logs" / "serve-9.log"
+    path.parent.mkdir()
+    monkeypatch.setenv("FAVLO_LOG_FILE", str(path))
+    original = sys.stdout, sys.stderr
+    try:
+        install_rolling_stdio()
+        for index in range(20):
+            sys.stdout.write(f"line-{index:02d} pad\n")
+        sys.stdout.flush()
+        blob = path.read_bytes()
+        assert len(blob) <= 64
+        assert b"line-19" in blob
+        assert b"line-00" not in blob
+        again = sys.stdout
+        install_rolling_stdio()
+        assert sys.stdout is again
+        assert sys.stderr is again
+    finally:
+        sys.stdout, sys.stderr = original
 
 
 def test_console_lines_land_in_the_rolling_log(tmp_path) -> None:

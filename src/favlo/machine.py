@@ -224,17 +224,14 @@ def _spawn(root: Path | None, home: Path | None) -> int:
     if root is not None:
         env["FAVLO_ROOT"] = str(root)
     env["FAVLO_SKIP_PLATE"] = "1"
-    handle = log_path.open("ab")
-    try:
-        proc = subprocess.Popen(
-            command,
-            cwd=root,
-            env=env,
-            stdout=handle,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-    finally:
-        handle.close()
+    env["FAVLO_LOG_FILE"] = str(log_path)
+    proc = subprocess.Popen(
+        command,
+        cwd=root,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
     pid_path(base).write_text(f"{proc.pid}\n", encoding="utf-8")
     return proc.pid

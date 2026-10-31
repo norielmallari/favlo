@@ -183,6 +183,9 @@ def pipeline_main(module: ModuleType) -> Callable[[Sequence[str]], int]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    from favlo.logs import install_rolling_stdio
+
+    install_rolling_stdio()
     args = list(sys.argv[1:] if argv is None else argv)
     try:
         names = pipeline_names()

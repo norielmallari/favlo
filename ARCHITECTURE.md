@@ -90,7 +90,7 @@ src/favlo/              process entry; the pipeline manager loads the pipeline a
   memory_notes.py       ~/.favlo/memory.db for MCP remember, recall, and forget
   pipelines.py          the request in service, the runtime that serves it, and that runtime's owners
   setup.py              empty-registry download
-  logs.py               rolling server log; size is settings.json log_max_bytes
+  logs.py               rolling text logs; each file stays within settings.json log_max_bytes
   videos.py             stored AVI and the MP4 encoded from it; video_ttl_seconds drops an older clip
   images.py             stored RGB and the PNG encoded from it; image_ttl_seconds drops an older pair
   music.py              stored WAV and the MP3 or FLAC encoded from it; music_ttl_seconds drops an older clip
