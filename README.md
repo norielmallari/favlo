@@ -36,16 +36,17 @@ This installs the `favlo` package and the `dev` extra, including pytest. The pac
 
 ```bash
 uv run favlo serve
-uv run favlo serve --non-interactive
 ```
 
-`favlo serve` on a terminal is the daemon. It listens on `127.0.0.1:8129` and paints progress on stderr. `favlo serve --non-interactive` starts a detached daemon and exits. Chat and embeddings are HTTP routes on that daemon. Image, video, music, and voice are MCP.
+On a terminal with an empty registry, this downloads the first model and packs it before the daemon listens. Wait until that finishes, and leave this process running.
 
-`uv run favlo web` starts the workspace beside that listener. The API is [web-api/README.md](web-api/README.md). The app is [web-spa/README.md](web-spa/README.md).
+In another terminal:
 
-## Startup
+```bash
+uv run favlo web
+```
 
-On a terminal, an empty registry downloads [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B), packs `models/Qwen3.6-35B-A3B-fp8-e20`, and then the daemon listens. The steps are [docs/qwen36-35b-a3b/SETUP.md](docs/qwen36-35b-a3b/SETUP.md). Quantize and the other non-serve commands use that model's flag, as in `favlo --qwen38-flash-next quantize`. The listener is [docs/serve.md](docs/serve.md). The image request is [docs/z-image-turbo/README.md](docs/z-image-turbo/README.md). Clients are [docs/guides/clients.md](docs/guides/clients.md). Assisted features are [docs/ai-assistance](docs/ai-assistance/README.md).
+When the app is ready, open the printed link in a browser. That address is `http://127.0.0.1:8012`.
 
 ## Supported Models
 

@@ -16,7 +16,7 @@ from favlo.daemon import port_open
 API_HOST = "127.0.0.1"
 API_PORT = 8130
 WEB_HOST = "127.0.0.1"
-WEB_PORT = 8081
+WEB_PORT = 8012
 _READY_SECONDS = 120.0
 
 

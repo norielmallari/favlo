@@ -6,8 +6,8 @@ test('configuration stores a global skill and copies it to an agent', async ({ p
   const name = `Captions ${Date.now()}`;
   try {
     await page.setViewportSize({ width: 1280, height: 800 });
-    await page.goto('http://localhost:8081/');
-    await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8081\/?$/);
+    await page.goto('http://localhost:8012/');
+    await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8012\/?$/);
     await page.getByRole('button', { name: 'Configuration' }).click();
     await page.getByRole('tab', { name: 'Skills' }).click();
     await expect(page.getByLabel('Skills list')).toBeVisible();

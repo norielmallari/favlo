@@ -11,8 +11,8 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   try {
 
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto('http://localhost:8081/');
-  await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8081\/?$/);
+  await page.goto('http://localhost:8012/');
+  await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8012\/?$/);
   await expect(page.getByRole('heading', { name: 'Channels' })).toBeVisible();
   await assertShell(page);
 

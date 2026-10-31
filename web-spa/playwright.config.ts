@@ -2,6 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: 'e2e',
+  testIgnore: '**/web-new-user-e2e-setup/**',
   fullyParallel: false,
   workers: 1,
   retries: 0,
@@ -9,7 +10,7 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   use: {
     ...devices['Desktop Chrome'],
-    baseURL: 'http://127.0.0.1:8081',
+    baseURL: 'http://127.0.0.1:8012',
     headless: true,
     trace: 'on-first-retry',
     screenshot: 'on',

@@ -6,8 +6,8 @@ test('a gallery workspace stores a skill for its agents', async ({ page }) => {
   const name = `Captions ${Date.now()}`;
   try {
     await page.setViewportSize({ width: 1280, height: 800 });
-    await page.goto('http://localhost:8081/');
-    await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8081\/?$/);
+    await page.goto('http://localhost:8012/');
+    await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8012\/?$/);
     await page.getByRole('button', { name: 'New workspace' }).click();
     await page.getByRole('textbox', { name: 'Workspace name' }).fill(name);
     await page.getByRole('button', { name: 'Create workspace' }).click();

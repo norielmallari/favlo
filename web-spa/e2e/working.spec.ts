@@ -6,8 +6,8 @@ test('working sweeps a light band across the word during a reply', async ({ page
   const name = `Wren ${Date.now()}`;
   try {
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto('http://localhost:8081/');
-  await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8081\/?$/);
+  await page.goto('http://localhost:8012/');
+  await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8012\/?$/);
   await page.getByRole('button', { name: 'New agent' }).click();
   await page.getByRole('textbox', { name: 'Agent name', exact: true }).fill(name);
   await page.getByRole('textbox', { name: 'Persona', exact: true }).fill('A short persona.');

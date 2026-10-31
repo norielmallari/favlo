@@ -9,7 +9,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 router = APIRouter()
 
-BROWSER_ORIGIN = "http://127.0.0.1:8081"
+BROWSER_ORIGIN = "http://127.0.0.1:8012"
 
 
 @router.websocket("/events")

@@ -14,7 +14,7 @@ uv run favlo serve --non-interactive
 uv run favlo web
 ```
 
-The API listens on `127.0.0.1:8130`. The app listens on `127.0.0.1:8081`. Stopping `favlo web` stops both children. A port that is already taken ends the command and names that port. The first run stores the registry's language model as the application default.
+The API listens on `127.0.0.1:8130`. The app listens on `127.0.0.1:8012`. Stopping `favlo web` stops both children. A port that is already taken ends the command and names that port. The first run stores the registry's language model as the application default.
 
 ## Configuration
 
@@ -23,7 +23,7 @@ The API listens on `127.0.0.1:8130`. The app listens on `127.0.0.1:8081`. Stoppi
 | Database | `~/.favlo/web/app.db` |
 | Home override | `FAVLO_WEB_HOME` replaces `~/.favlo/web` |
 | Listener | `http://127.0.0.1:8129/v1` |
-| Browser origin | `http://127.0.0.1:8081` |
+| Browser origin | `http://127.0.0.1:8012` |
 
 The listener is a provider by default. Refresh models reads that provider's models endpoint again. That list is the listener's language models. Media models stay on the media MCP tools. Chat completions go to the listener. When a completion includes reasoning, that text is stored beside the reply. The next turn sends that reasoning as `reasoning_content` with the reply. The browser shows the reasoning as Thinking. A completion that stops inside thinking stores that reasoning and reports that the reply was empty.
 

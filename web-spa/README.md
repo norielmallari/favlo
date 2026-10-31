@@ -1,6 +1,6 @@
 # Web app
 
-Expo app for the Favlo web workspace. A browser at `http://127.0.0.1:8081` talks to the Web API. This directory is part of the Favlo repository.
+Expo app for the Favlo web workspace. A browser at `http://127.0.0.1:8012` talks to the Web API. This directory is part of the Favlo repository.
 
 The API is [../web-api/README.md](../web-api/README.md). The process map is [../ARCHITECTURE.md](../ARCHITECTURE.md).
 
@@ -14,7 +14,7 @@ uv run favlo serve --non-interactive
 uv run favlo web
 ```
 
-Open `http://127.0.0.1:8081`. A page opened at `http://localhost:8081` moves to that address before it calls the API. The API listens on `127.0.0.1:8130`. Stopping `favlo web` stops both children.
+Open `http://127.0.0.1:8012`. A page opened at `http://localhost:8012` moves to that address before it calls the API. The API listens on `127.0.0.1:8130`. Stopping `favlo web` stops both children.
 
 ## Chat
 
@@ -53,6 +53,12 @@ End-to-end tests use headless Playwright against a live `favlo web` and `favlo s
 
 ```bash
 cd web-spa && npx playwright test --project=chromium
+```
+
+`web-new-user-e2e-setup` starts its own `favlo web` on an empty home, so ports 8130 and 8012 must be free. That run creates the database, seeds Favlo, and sends the first chat. It does not use `~/.favlo/web`.
+
+```bash
+cd web-spa && npx playwright test --config e2e/web-new-user-e2e-setup/playwright.config.ts --project=chromium
 ```
 
 ## Problems

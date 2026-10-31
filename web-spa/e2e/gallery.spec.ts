@@ -11,8 +11,8 @@ test('a gallery opens as a grid and a new folder is a tile', async ({ page }) =>
   const name = `Stills ${Date.now()}`;
   try {
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto('http://localhost:8081/');
-  await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8081\/?$/);
+  await page.goto('http://localhost:8012/');
+  await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8012\/?$/);
   await expect(page.getByRole('button', { name: 'New workspace' })).toBeVisible();
 
   await page.getByRole('button', { name: 'New workspace' }).click();

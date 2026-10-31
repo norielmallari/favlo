@@ -32,7 +32,7 @@ from web_api.routes import (
 from web_api.runs import perform
 from web_api.store import Conflict, NotFound, Rejected, Store
 
-BROWSER_ORIGIN = "http://127.0.0.1:8081"
+BROWSER_ORIGIN = "http://127.0.0.1:8012"
 
 
 def web_home() -> Path:

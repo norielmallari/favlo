@@ -446,8 +446,8 @@ def test_a_stale_agent_revision_is_a_conflict(client: TestClient) -> None:
 
 
 def test_the_browser_origin_is_the_only_cors_origin(client: TestClient) -> None:
-    allowed = client.get("/health", headers={"Origin": "http://127.0.0.1:8081"})
-    assert allowed.headers["access-control-allow-origin"] == "http://127.0.0.1:8081"
+    allowed = client.get("/health", headers={"Origin": "http://127.0.0.1:8012"})
+    assert allowed.headers["access-control-allow-origin"] == "http://127.0.0.1:8012"
     blocked = client.get("/health", headers={"Origin": "http://127.0.0.1:9999"})
     assert "access-control-allow-origin" not in blocked.headers
 

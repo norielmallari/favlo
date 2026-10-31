@@ -6,6 +6,7 @@ node_modules/
 .expo/
 web-spa/playwright-report/
 web-spa/test-results/
+web-spa/e2e/web-new-user-e2e-setup/.home
 web-spa/blob-report/
 __pycache__/
 *.py[cod]

@@ -4,8 +4,8 @@ const message = ['See **bold** and *italic*.', '', '| Name | Note |', '| --- | -
 
 test('a chat message renders bold, italics, and a table', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto('http://localhost:8081/');
-  await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8081\/?$/);
+  await page.goto('http://localhost:8012/');
+  await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8012\/?$/);
   await page.getByRole('textbox', { name: 'Message' }).fill(message);
   await page.getByRole('button', { name: 'Send' }).click();
 

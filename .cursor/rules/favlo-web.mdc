@@ -29,7 +29,7 @@ The script is `web-spa/e2e/<feature>.spec.ts`. `web-spa/playwright.config.ts` se
 - Do not use `waitForTimeout` or a retry that ignores the failure. Wait for a selector, a response, or an event.
 - The prompt and the clicks are fixed. Assert the outcome on screen. Assert exact wording only when that wording is not model output.
 - Cover wide at 1280×800. When the feature has a narrow layout, cover 390×844 in the same script.
-- Open `http://127.0.0.1:8081`. Leave the browser on `127.0.0.1`.
+- Open `http://127.0.0.1:8012`. Leave the browser on `127.0.0.1`.
 - Playwright writes a screenshot for every script, including a script that passes. The file is under `web-spa/test-results/`. Read that screenshot before treating the run as finished. Leave the screenshot uncommitted.
 
 A phase is finished only when every feature script in that phase passes, its unit tests pass, and the passing screenshot shows the outcome on screen.

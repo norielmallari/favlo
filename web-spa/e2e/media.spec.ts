@@ -15,10 +15,10 @@ test('the Favlo chat shows a generated image', async ({ page }) => {
   test.skip(link == null, 'the Favlo chat has no generated image');
 
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto('http://localhost:8081/');
-  await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8081\/?$/);
+  await page.goto('http://localhost:8012/');
+  await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8012\/?$/);
   await page.reload();
-  await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8081\/?$/);
+  await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8012\/?$/);
   await expect(page.getByLabel('Conversation').getByRole('heading', { name: 'Favlo' })).toBeVisible();
   await expect(page.getByLabel('Channels width')).toHaveCount(0);
   const image = page.getByRole('img', { name: 'Generated image' }).last();
