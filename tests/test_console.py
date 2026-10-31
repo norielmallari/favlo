@@ -6,7 +6,15 @@ import time
 
 import pytest
 
-from favlo.console import PHASES, UNITS, VERSION, Console, Progress
+from favlo.console import (
+    PHASES,
+    UNITS,
+    VERSION,
+    Console,
+    Progress,
+    format_note,
+    format_rate,
+)
 
 
 class Clock:
@@ -58,6 +66,187 @@ def test_plain_lines_match_the_harness_text() -> None:
     assert stream.getvalue() == (
         "listening on http://127.0.0.1:8129\nprefill 98.03 tok/s (1187 tok in 12.11s)\n"
     )
+
+
+def test_pretty_omits_turn_diagnostics() -> None:
+    ui, stream, _clock = _ui("pretty", color=0)
+    for line in (
+        "prompt tokens 10",
+        "cache miss",
+        "cache hit 8",
+        "prefix load 8 tokens",
+        "mtp depth 3",
+        "mtp 2/3",
+        "context 2048 atlas 10 images",
+        "incoming tokens 10",
+        "output tokens 2",
+    ):
+        ui.log(line)
+    ui.apply_event({"type": "begin", "phase": "prefill", "total": 10, "unit": "tok"})
+    ui.apply_event(
+        {"type": "end", "phase": "prefill", "summary": "prefill 1.00 tok/s (10 tok in 10.00s)"}
+    )
+    ui.apply_event({"type": "log", "line": "prefix store 10 tokens"})
+    ui.apply_event({"type": "begin", "phase": "decode", "total": 0, "unit": "tok"})
+    ui.apply_event({"type": "log", "line": "mtp 2/3"})
+    ui.apply_event(
+        {"type": "end", "phase": "decode", "summary": "decode 1.00 tok/s (2 tok in 2.00s)"}
+    )
+    ui.apply_event({"type": "log", "line": "prefix store 12 tokens"})
+    ui.log("waiting for the open request")
+    ui.log("prefix store failed disk full")
+    text = stream.getvalue()
+    assert "prompt tokens" not in text
+    assert "cache miss" not in text
+    assert "cache hit" not in text
+    assert "prefix load" not in text
+    assert "mtp" not in text
+    assert "context 2048" not in text
+    assert "incoming tokens" not in text
+    assert "output tokens" not in text
+    assert "prefill 1.00 tok/s (10 tok in 10.00s)" in text
+    assert "decode 1.00 tok/s (2 tok in 2.00s)" in text
+    assert "prefix store 10 tokens" in text
+    assert "prefix store 12 tokens" in text
+    assert "waiting for the open request" in text
+    assert "prefix store failed disk full" in text
+
+
+def test_pretty_hides_a_shutdown_traceback() -> None:
+    ui, stream, _clock = _ui("pretty", color=0)
+    for line in (
+        "Cancel 1 running task(s), timeout graceful shutdown exceeded",
+        "Exception in ASGI application",
+        "Traceback (most recent call last):",
+        '  File "src/favlo/http_app.py", line 388, in _locked',
+        "    await asyncio.to_thread(reply.ready.wait)",
+        "    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^",
+        "asyncio.exceptions.CancelledError: Task cancelled, timeout graceful shutdown exceeded",
+        "client closed",
+        "listening on http://127.0.0.1:8129",
+    ):
+        ui.log(line)
+    text = stream.getvalue()
+    assert "CancelledError" not in text
+    assert "Traceback" not in text
+    assert "File " not in text
+    assert "await asyncio.to_thread" not in text
+    assert "client closed" in text
+    assert "listening on http://127.0.0.1:8129" in text
+
+
+def test_plain_keeps_turn_diagnostics() -> None:
+    ui, stream, _clock = _ui("plain")
+    ui.log("prompt tokens 10")
+    ui.log("cache miss")
+    assert stream.getvalue() == "prompt tokens 10\ncache miss\n"
+
+
+def test_format_rate_matches_the_harness_line() -> None:
+    assert format_rate("prefill", 0, 1.0) == "prefill 0 tok/s"
+    assert format_rate("decode", 4, 0.0) == "decode 0 tok/s"
+    assert format_rate("prefill", 58, 12.5) == "prefill 4.64 tok/s (58 tok in 12.50s)"
+    assert format_rate("sample", 8, 2.0, unit="layers") == (
+        "sample 4.00 layers/s (8 layers in 2.00s)"
+    )
+
+
+def test_format_note_is_canonical() -> None:
+    assert format_note("prompt", tokens=10) == "prompt tokens 10"
+    assert format_note("cache", hit=0) == "cache miss"
+    assert format_note("cache", hit=8) == "cache hit 8"
+    assert format_note("prefix_load", tokens=8) == "prefix load 8 tokens"
+    assert format_note("prefix_store", tokens=12) == "prefix store 12 tokens"
+    assert format_note("mtp_depth", depth=3) == "mtp depth 3"
+    assert format_note("mtp", accepts=2, tries=3) == "mtp 2/3"
+    assert format_note("incoming", tokens=10) == "incoming tokens 10"
+    assert format_note("output", tokens=2) == "output tokens 2"
+    assert format_note("context", tokens=2048, atlas=10) == "context 2048 atlas 10 images"
+    with pytest.raises(ValueError, match="note"):
+        format_note("warmup")
+
+
+def test_pretty_folds_a_request_into_one_line() -> None:
+    ui, stream, clock = _ui("pretty", color=0)
+    ui.fold_turns = True
+    ui.apply_event({"type": "log", "line": "request open"})
+    ui.note("prompt", tokens=10)
+    ui.note("cache", hit=0)
+    ui.apply_event({"type": "begin", "phase": "prefill", "total": 10, "unit": "tok"})
+    ui.apply_event(
+        {"type": "end", "phase": "prefill", "summary": "prefill 1.00 tok/s (10 tok in 10.00s)"}
+    )
+    ui.note("prefix_store", tokens=10)
+    ui.apply_event({"type": "begin", "phase": "decode", "total": 0, "unit": "tok"})
+    ui.apply_event(
+        {"type": "end", "phase": "decode", "summary": "decode 1.00 tok/s (2 tok in 2.00s)"}
+    )
+    ui.note("prefix_store", tokens=12)
+    ui.apply_event({"type": "log", "line": "request closed"})
+    ui.apply_event({"type": "log", "line": "request open"})
+    ui.apply_event({"type": "begin", "phase": "prefill", "total": 2, "unit": "tok"})
+    ui.apply_event(
+        {"type": "end", "phase": "prefill", "summary": "prefill 2.00 tok/s (2 tok in 1.00s)"}
+    )
+    ui.apply_event({"type": "begin", "phase": "decode", "total": 0, "unit": "tok"})
+    ui.apply_event(
+        {"type": "end", "phase": "decode", "summary": "decode 2.00 tok/s (4 tok in 2.00s)"}
+    )
+    ui.note("prefix_store", tokens=16)
+    ui.apply_event({"type": "log", "line": "request closed"})
+    clock.now += 1
+    ui.sample()
+    text = stream.getvalue()
+    assert "prompt tokens" not in text
+    assert "cache miss" not in text
+    assert "prefill 1.00" not in text
+    assert "decode 1.00" not in text
+    assert "prefix store 10 tokens" not in text
+    assert "prefix store 12 tokens" not in text
+    line = [row for row in text.splitlines() if "prefill 2.00" in row][-1]
+    assert "decode 2.00 tok/s (4 tok in 2.00s)" in line
+    assert "prefix store 16 tokens" in line
+    assert text.count("prefill 2.00") == 1
+
+
+def test_pretty_prints_a_summary_when_no_request_is_open() -> None:
+    ui, stream, _clock = _ui("pretty", color=0)
+    ui.fold_turns = True
+    progress = ui.begin("prefill", total=10, unit="tok")
+    ui.end(progress, "prefill 1.00 tok/s (10 tok in 10.00s)")
+    ui.note("prefix_store", tokens=10)
+    text = stream.getvalue()
+    assert "prefill 1.00 tok/s (10 tok in 10.00s)" in text
+    assert "prefix store 10 tokens" in text
+
+
+def test_a_held_folded_turn_prints_one_line_before_the_reply() -> None:
+    ui, stream, clock = _ui("pretty", color=0)
+    ui.fold_turns = True
+    ui.hold(True)
+    ui.apply_event({"type": "log", "line": "request open"})
+    ui.note("prompt", tokens=10)
+    ui.apply_event({"type": "begin", "phase": "prefill", "total": 10, "unit": "tok"})
+    ui.apply_event(
+        {"type": "end", "phase": "prefill", "summary": "prefill 2.00 tok/s (2 tok in 1.00s)"}
+    )
+    ui.apply_event({"type": "begin", "phase": "decode", "total": 0, "unit": "tok"})
+    ui.apply_event(
+        {"type": "end", "phase": "decode", "summary": "decode 2.00 tok/s (4 tok in 2.00s)"}
+    )
+    ui.note("prefix_store", tokens=16)
+    ui.apply_event({"type": "log", "line": "request closed"})
+    clock.now += 1
+    ui.sample()
+    ui.say("favlo: Hello")
+    assert "favlo: Hello" not in stream.getvalue()
+    ui.hold(False)
+    text = stream.getvalue()
+    line = [row for row in text.splitlines() if "prefill 2.00" in row][-1]
+    assert "decode 2.00 tok/s (4 tok in 2.00s)" in line
+    assert "prefix store 16 tokens" in line
+    assert text.index("prefill 2.00") < text.index("favlo: Hello")
+    assert "prompt tokens" not in text
 
 
 def test_pretty_bar_spinner_gauge_and_erase() -> None:
@@ -292,6 +481,7 @@ def test_from_env_is_pretty_on_a_color_tty(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("TERM", "xterm-256color")
     ui = Console.from_env("auto", pipeline="qwen38-flash-next", stream=_tty_stream())
     assert ui.mode == "pretty"
+    assert ui.fold_turns is True
 
 
 @pytest.mark.parametrize("mode", ["plain", "pretty", "json"])

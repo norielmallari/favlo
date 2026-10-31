@@ -63,6 +63,52 @@ def test_follow_events_keeps_ticks(tmp_path: Path) -> None:
     assert seen[0]["done"] == 3
 
 
+def test_a_shutdown_cancel_starts_a_response() -> None:
+    import asyncio
+
+    from favlo.http_app import _QuietCancel
+
+    sent: list[dict[str, object]] = []
+
+    async def app(_scope: object, _receive: object, _send: object) -> None:
+        raise asyncio.CancelledError
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    asyncio.run(_QuietCancel(app)({"type": "http"}, None, send))
+    assert sent[0]["status"] == 503
+    assert sent[1]["type"] == "http.response.body"
+
+
+def test_follow_events_skips_a_shutdown_traceback(tmp_path: Path) -> None:
+    path = tmp_path / "serve.log"
+    path.write_text(
+        "\n".join(
+            [
+                "Cancel 1 running task(s), timeout graceful shutdown exceeded",
+                "Exception in ASGI application",
+                "Traceback (most recent call last):",
+                '  File "src/favlo/http_app.py", line 388, in _locked',
+                "    await asyncio.to_thread(reply.ready.wait)",
+                "    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^",
+                "asyncio.exceptions.CancelledError: Task cancelled, timeout graceful shutdown exceeded",
+                '{"type":"log","line":"client closed"}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    seen: list[dict[str, object]] = []
+    stop = threading.Event()
+    follow_events(path, seen.append, stop, offset=0)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and not seen:
+        time.sleep(0.05)
+    stop.set()
+    assert [event.get("line") for event in seen] == ["client closed"]
+
+
 def test_a_foreign_listener_is_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("favlo.daemon.port_open", lambda *_args, **_kwargs: True)
     with pytest.raises(DaemonError, match="already in use"):
@@ -151,52 +197,38 @@ def test_non_interactive_starts_the_daemon_and_exits(
     assert captured.err == ""
 
 
-def test_interactive_prints_the_listening_line(
+def test_a_terminal_is_the_listener(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     stream = io.StringIO()
+    seen: list[str] = []
     monkeypatch.setattr(sys, "stderr", stream)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
-    monkeypatch.setattr("favlo.setup.prepare", lambda *_a, **_k: 0)
-    monkeypatch.setattr("favlo.daemon.ensure", lambda *_a, **_k: (7, False))
-    monkeypatch.setattr("favlo.daemon.follow_events", lambda *_a, **_k: None)
-    monkeypatch.setattr("favlo.daemon.stop_pid", lambda _pid: None)
-    started: list[str] = []
+    monkeypatch.setattr(listener, "attach_process_log", lambda _ui: None)
+    monkeypatch.setattr("favlo.daemon.occupy", lambda *_a, **_k: None)
+    monkeypatch.setattr("favlo.daemon.release_pid", lambda *_a, **_k: None)
 
-    def start(*_args, **_kwargs) -> threading.Thread:
-        started.append("talk")
-        thread = threading.Thread(target=lambda: None)
-        thread.start()
-        return thread
+    def serve(args: object) -> int:
+        seen.append(getattr(args, "console_ui").mode)
+        return 0
 
-    monkeypatch.setattr("favlo.talk.start", start)
-    assert listener.serve_main(["--port", "8129"]) == 0
-    assert started == ["talk"]
-    assert "listening on http://127.0.0.1:8129\n" in stream.getvalue()
+    monkeypatch.setattr(listener, "serve", serve)
+    assert listener.serve_main(["--port", "8129", "--console", "plain"]) == 0
+    assert seen == ["plain"]
+    assert "favlo 0.2.0\n" in stream.getvalue()
 
 
-def test_ctrl_c_closes_pipelines_and_leaves_the_daemon(
-    monkeypatch: pytest.MonkeyPatch,
+def test_a_taken_address_does_not_start(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    stopped: list[int] = []
-    closed: list[str] = []
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
-    monkeypatch.setattr("favlo.daemon.ensure", lambda *_a, **_k: (7, True))
-    monkeypatch.setattr("favlo.daemon.follow_events", lambda *_a, **_k: None)
-    monkeypatch.setattr("favlo.daemon.stop_pid", lambda pid: stopped.append(pid))
-    monkeypatch.setattr(
-        "favlo.talk.pipeline_command",
-        lambda _host, _port, action: closed.append(action),
-    )
 
-    class _Join:
-        def join(self) -> None:
-            raise KeyboardInterrupt
+    def taken(*_args: object, **_kwargs: object) -> None:
+        raise DaemonError("http://127.0.0.1:8129 is already in use")
 
-    monkeypatch.setattr("favlo.talk.start", lambda *_a, **_k: _Join())
-    assert listener.serve_main(["--port", "8129"]) == 0
-    assert stopped == []
-    assert closed == ["close"]
+    monkeypatch.setattr("favlo.daemon.occupy", taken)
+    assert listener.serve_main(["--port", "8129"]) == 1
+    assert "already in use" in capsys.readouterr().err
 
 
 def test_daemon_process_does_not_spawn_another(

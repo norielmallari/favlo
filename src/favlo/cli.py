@@ -91,7 +91,7 @@ def _help(names: Sequence[str]) -> str:
     lines.append("       favlo web")
     lines.extend(f"       favlo --{name} [args]" for name in names)
     lines.append("")
-    lines.append("  serve                  chat on a terminal; the server is a daemon")
+    lines.append("  serve                  listen on this terminal")
     lines.append("  serve --non-interactive")
     lines.append("                         start the server daemon and exit")
     lines.append("  web                    start the API and the Expo app")

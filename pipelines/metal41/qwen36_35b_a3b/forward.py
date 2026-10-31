@@ -11,6 +11,7 @@ from typing import Any
 
 import numpy as np
 
+from favlo.console import format_note, format_rate
 from favlo.pipeline import ClientClosed
 
 from qwen36_35b_a3b.atlas import (
@@ -197,12 +198,6 @@ def _reserved_bytes(resident: int, kv_one: int, plane: int, extra: int = 0) -> i
 
 def _u32(value: int) -> bytes:
     return struct.pack("<I", value)
-
-
-def _clock_line(phase: str, count: int, elapsed: float) -> str:
-    """Phase tok/s. A zero duration writes a zero rate."""
-    rate = 0.0 if elapsed <= 0.0 else count / elapsed
-    return f"{phase} {rate:.2f} tok/s ({count} tok in {elapsed:.2f}s)"
 
 
 def _f32(value: float) -> bytes:
@@ -1266,7 +1261,7 @@ class Qwen36Runtime:
         if plane:
             resize_plane(self)
         self._remember()
-        self._status(f"context {target} atlas {self.atlas.slots} images")
+        self._note("context", tokens=target, atlas=self.atlas.slots)
         return True
 
     def _plane_bytes(self, buf: Any, positions: int) -> np.ndarray:
@@ -1913,7 +1908,7 @@ class Qwen36Runtime:
             self._cached_tokens = 0
             return []
         prompt = [int(token) for token in prompt]
-        self._status(f"prompt tokens {len(prompt)}")
+        self._note("prompt", tokens=len(prompt))
         if not self._grow(len(prompt)):
             message = f"prompt length {len(prompt)} does not fit the memory budget"
             raise RuntimeError(message)
@@ -1923,8 +1918,8 @@ class Qwen36Runtime:
         max_tokens = decode_steps(max_tokens, self._context_limit, len(prompt))
         hit = self.prefix.align(prompt)
         if self.prefix.loaded:
-            self._status(f"prefix load {hit} tokens")
-        self._status(f"cache hit {hit}" if hit else "cache miss")
+            self._note("prefix_load", tokens=hit)
+        self._note("cache", hit=hit)
         self._cached_tokens = hit
         suffix = prompt[hit:]
         if mtp and not self._mtp_ready:
@@ -1979,7 +1974,7 @@ class Qwen36Runtime:
             self._mtp_tries = 0
             carry: int | None = None
             if use_mtp:
-                self._status(f"mtp depth {depth}")
+                self._note("mtp_depth", depth=depth)
             for _count in range(max_tokens):
                 self._check_stop()
                 if len(out) >= max_tokens:
@@ -2053,10 +2048,10 @@ class Qwen36Runtime:
                     elapsed = last_sample - started
                     self._prefill_seconds = elapsed
                     self._prefill_progress = None
-                    self._end_phase(prefill_row, _clock_line("prefill", len(suffix), elapsed))
+                    self._end_phase(prefill_row, format_rate("prefill", len(suffix), elapsed))
                     prefill_row = None
                     boundary = True
-                    self._store_prefix()
+                    self._store_prefix(note=False)
                     decode_started = last_sample
                     decode_row = self._begin_phase("decode", max_tokens, live=True)
                     prefill_open = False
@@ -2233,20 +2228,20 @@ class Qwen36Runtime:
                 self._take_routes(prefill=False)
                 assert logits is not None
             if self._mtp_tries:
-                self._status(f"mtp {self._mtp_accepts}/{self._mtp_tries}")
+                self._note("mtp", accepts=self._mtp_accepts, tries=self._mtp_tries)
             if prefill_open:
                 elapsed = time.perf_counter() - started
                 self._prefill_seconds = elapsed
                 self._prefill_progress = None
-                self._end_phase(prefill_row, _clock_line("prefill", len(suffix), elapsed))
+                self._end_phase(prefill_row, format_rate("prefill", len(suffix), elapsed))
                 prefill_row = None
                 boundary = True
-                self._store_prefix()
+                self._store_prefix(note=False)
                 self._decode_seconds = 0.0
             else:
                 decode_elapsed = last_sample - decode_started
                 self._decode_seconds = decode_elapsed if decode_elapsed > 0.0 else 0.0
-                self._end_phase(decode_row, _clock_line("decode", len(out), self._decode_seconds))
+                self._end_phase(decode_row, format_rate("decode", len(out), self._decode_seconds))
                 decode_row = None
             self._output_ids = list(out)
             self.prefix.note((prompt + out)[: self.filled])
@@ -2271,14 +2266,14 @@ class Qwen36Runtime:
             self._end_phase(decode_row, "")
         return out
 
-    def _store_prefix(self) -> None:
+    def _store_prefix(self, *, note: bool = True) -> None:
         try:
             path = self.prefix.flush()
         except OSError as exc:
-            self._status(f"prefix store failed {exc}")
+            self._note("prefix_store_failed", error=exc)
             return
-        if path is not None:
-            self._status(f"prefix store {len(self.prefix.tokens)} tokens")
+        if path is not None and note:
+            self._note("prefix_store", tokens=len(self.prefix.tokens))
 
     def _begin_load(self, total: int) -> Any:
         console = self.console
@@ -2299,6 +2294,14 @@ class Qwen36Runtime:
             print(line, flush=True)
             return
         console.log(line)
+
+    def _note(self, topic: str, **fields: Any) -> None:
+        console = self.console
+        note = getattr(console, "note", None)
+        if callable(note):
+            note(topic, **fields)
+            return
+        self._status(format_note(topic, **fields))
 
     def _begin_phase(self, phase: str, total: int, *, live: bool = False) -> Any:
         console = self.console

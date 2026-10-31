@@ -483,10 +483,10 @@ def test_completion_usage_uses_the_phase_clocks() -> None:
 
 
 def test_a_zero_clock_prints_a_zero_rate() -> None:
-    from qwen36_35b_a3b.forward import _clock_line
+    from favlo.console import format_rate
 
-    assert _clock_line("decode", 1, 0.0) == "decode 0.00 tok/s (1 tok in 0.00s)"
-    assert _clock_line("prefill", 4, 2.0) == "prefill 2.00 tok/s (4 tok in 2.00s)"
+    assert format_rate("decode", 1, 0.0) == "decode 0 tok/s"
+    assert format_rate("prefill", 4, 2.0) == "prefill 2.00 tok/s (4 tok in 2.00s)"
 
 
 def test_stream_chunks_carry_reasoning_then_the_reply() -> None:

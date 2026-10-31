@@ -1,8 +1,8 @@
-"""The serve daemon. The terminal does not run this process.
+"""The serve daemon.
 
-``favlo serve --non-interactive`` starts the daemon and returns. A terminal
-``favlo serve`` starts it when the address is free, then talks to it over
-HTTP. The daemon writes JSON telemetry and does not read stdin.
+A terminal ``favlo serve`` is this process and paints progress on stderr.
+``favlo serve --non-interactive`` starts a detached daemon and returns. The
+detached daemon writes JSON telemetry and does not read stdin.
 """
 
 from __future__ import annotations
@@ -110,6 +110,68 @@ def plain_text(blob: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+class TracebackSkip:
+    """A shutdown traceback stays in the log file and off the pretty console."""
+
+    def __init__(self) -> None:
+        self.open = False
+
+    def drop(self, raw: str) -> bool:
+        text = raw.strip()
+        if not text:
+            return self.open
+        if text.startswith("{"):
+            self.open = False
+            return False
+        if _traceback_header(text) or _traceback_marker(text) or (self.open and _exception_line(text)):
+            self.open = True
+            return True
+        if self.open and _traceback_continuation(raw):
+            return True
+        self.open = False
+        return False
+
+
+def _traceback_header(text: str) -> bool:
+    if text in {"Exception in ASGI application", "Traceback (most recent call last):"}:
+        return True
+    if text.startswith("During handling of the above exception"):
+        return True
+    if text.startswith("The above exception was the direct cause"):
+        return True
+    if text.startswith("Cancel ") and "running task" in text:
+        return True
+    if text == "ASGI callable returned without starting response.":
+        return True
+    return text.endswith("graceful shutdown exceeded")
+
+
+def _traceback_marker(text: str) -> bool:
+    if text.startswith("During handling of the above exception"):
+        return True
+    if text.startswith("The above exception was the direct cause"):
+        return True
+    if text.startswith('File "') or text.startswith("File '"):
+        return True
+    if set(text) <= {"^"}:
+        return True
+    return "CancelledError" in text
+
+
+def _exception_line(text: str) -> bool:
+    head = text.split(":", 1)[0]
+    return head.endswith("Error") or head.endswith("Exception")
+
+
+def _traceback_continuation(raw: str) -> bool:
+    text = raw.strip()
+    if not text or raw[:1].isspace():
+        return True
+    if text.startswith(("return ", "raise ", "yield ", "except ", "finally:", "else:", "try:")):
+        return True
+    return "await " in text or text == ")" or text.startswith(")")
+
+
 def telemetry_event(raw: str) -> dict[str, Any] | None:
     """One telemetry object. A plain line is a log event. Ticks stay in the object."""
     text = raw.strip()
@@ -202,7 +264,11 @@ def follow_events(
 ) -> threading.Thread:
     """Call ``on_event`` with each telemetry object, including ticks."""
 
+    skip = TracebackSkip()
+
     def take(raw: str) -> None:
+        if skip.drop(raw):
+            return
         event = telemetry_event(raw)
         if event is not None:
             on_event(event)
@@ -236,6 +302,21 @@ def release_pid(port: int, pid: int, home: Path | None = None) -> None:
         path.unlink()
     except OSError:
         return
+
+
+def occupy(host: str, port: int, *, home: Path | None = None) -> None:
+    """Claim this process as the listener. Raise when that address is taken."""
+    existing = read_pid(port, home)
+    if existing is not None and alive(existing) and existing != os.getpid():
+        raise DaemonError(f"http://{host}:{port} is already in use")
+    if port_open(host, port):
+        raise DaemonError(f"http://{host}:{port} is already in use")
+    if _starting(port, home):
+        raise DaemonError(f"http://{host}:{port} is already in use")
+    _clear_pid(port, home)
+    if not _claim(port, home):
+        raise DaemonError(f"http://{host}:{port} is already in use")
+    pid_path(port, home).write_text(f"{os.getpid()}\n", encoding="utf-8")
 
 
 def ensure(

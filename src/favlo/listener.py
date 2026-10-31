@@ -3,8 +3,8 @@
 The pipeline manager chooses the runtime, admits the request, and sweeps
 that runtime's owners after close and after a crash. This module does not
 import a pipeline and does not open one. After the request closes, a pipeline
-that defines ``idle_heartbeat`` runs that function here. The operator console
-reads ``quit`` and ``reload``.
+that defines ``idle_heartbeat`` runs that function here. A terminal runs this
+process. ``--non-interactive`` starts a detached daemon and returns.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from favlo.console import VERSION, Console
+from favlo.console import Console
 from favlo.daemon import DAEMON_ENV, alive
 from favlo.images import sweep_images
 from favlo.logs import attach_process_log
@@ -251,7 +251,7 @@ def _serve_loop(args: Any, state: dict[str, Any]) -> int:
 
 
 def serve_main(argv: Sequence[str] | None = None) -> int:
-    """``favlo serve``. The daemon listens. A terminal runs the CLI."""
+    """``favlo serve``. A terminal is the daemon. ``--non-interactive`` detaches it."""
     parser = argparse.ArgumentParser(prog="favlo serve")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8129)
@@ -275,12 +275,11 @@ def serve_main(argv: Sequence[str] | None = None) -> int:
         return _daemon_main(args)
     if args.non_interactive:
         return _start_daemon(args)
-    return _interactive(args)
+    return _foreground(args)
 
 
-def _daemon_main(args: Any) -> int:
-    """The listener process. Telemetry is JSON on stdout. Stdin is closed."""
-    ui = Console("json", pipeline="", stream=sys.stdout)
+def _listen(args: Any, ui: Console) -> int:
+    """Run the listener on this process. Progress uses ``ui``."""
     attach_process_log(ui)
     bind_log(ui.log)
     ui.live_decode = True
@@ -297,6 +296,31 @@ def _daemon_main(args: Any) -> int:
         from favlo.daemon import release_pid
 
         release_pid(args.port, os.getpid())
+
+
+def _daemon_main(args: Any) -> int:
+    """Detached listener. Telemetry is JSON on stdout. Stdin is closed."""
+    ui = Console("json", pipeline="", stream=sys.stdout)
+    return _listen(args, ui)
+
+
+def _foreground(args: Any) -> int:
+    """This process is the listener. A terminal paints progress on stderr."""
+    from favlo.cli import repo_root
+    from favlo.daemon import DaemonError, occupy
+    from favlo.setup import prepare
+
+    if sys.stdin.isatty():
+        code = prepare(repo_root(), stdin_tty=True, console=args.console)
+        if code != 0:
+            return code
+    try:
+        occupy(args.host, args.port)
+    except DaemonError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
+    ui = Console.from_env(args.console, pipeline="")
+    return _listen(args, ui)
 
 
 def _start_daemon(args: Any) -> int:
@@ -316,70 +340,3 @@ def _start_daemon(args: Any) -> int:
     sys.stdout.write(f"listening on http://{args.host}:{args.port}\n")
     sys.stdout.flush()
     return 0
-
-
-def _interactive(args: Any) -> int:
-    """First-run setup on a terminal, then the operator console."""
-    from favlo.cli import repo_root
-    from favlo.daemon import DaemonError, ensure, follow_events, stop_pid, telemetry_path
-    from favlo.setup import prepare
-    from favlo.talk import start
-
-    if sys.stdin.isatty():
-        code = prepare(repo_root(), stdin_tty=True, console=args.console)
-        if code != 0:
-            return code
-    ui = Console.from_env(args.console, pipeline="")
-    ui.plate()
-    try:
-        try:
-            pid, _created = ensure(
-                args.host,
-                args.port,
-                max_memory=args.max_memory,
-                transcript=args.transcript,
-            )
-        except DaemonError as exc:
-            ui.log(str(exc))
-            return 1
-        path = telemetry_path(args.port)
-        offset = 0 if _created or not path.is_file() else path.stat().st_size
-        listening = f"listening on http://{args.host}:{args.port}"
-        ui.log(listening)
-        stopped = threading.Event()
-
-        def on_event(event: dict[str, Any]) -> None:
-            line = event.get("line")
-            if event.get("type") == "log" and line in {f"favlo {VERSION}", listening}:
-                return
-            ui.apply_event(event)
-
-        follow_events(path, on_event, stopped, offset=offset, on_idle=ui.note_caught_up)
-
-        def stop() -> None:
-            stopped.set()
-            stop_pid(pid)
-
-        thread = start(
-            args.host,
-            args.port,
-            sys.stdin,
-            ui.say,
-            stop,
-            prompt=ui.prompt,
-        )
-        try:
-            thread.join()
-        except KeyboardInterrupt:
-            from favlo.talk import pipeline_command
-
-            try:
-                pipeline_command(args.host, args.port, "close")
-            except (OSError, RuntimeError, ValueError):
-                pass
-            return 0
-        finally:
-            stopped.set()
-        return 0
-    finally:
-        ui.close()

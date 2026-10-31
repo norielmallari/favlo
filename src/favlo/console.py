@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
 
+from favlo.daemon import TracebackSkip
 from favlo.logs import RollingLog
 
 PHASES = ("load", "download", "quantize", "prefill", "decode", "sample")
@@ -34,11 +35,51 @@ _PLATE_MID = "▕██     F A V L O     ██▏"
 _PLATE_BOT = "▕███████████████████████▏"
 _TICK = 0.1
 _FRAME_WAIT = 2.0
+_TURN_IDLE = 0.4
+_TURN_ORDER = ("prefill", "decode", "sample", "prefix")
+_STASH_PHASES = frozenset({"prefill", "decode", "sample"})
 _CSI_FINAL = set(
     "@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
 )
 _WINDOW_MIN = 0.5
 _SMOOTH = 1.5
+
+
+def format_rate(phase: str, count: int, seconds: float, *, unit: str = "tok") -> str:
+    """Durable close line for a counted phase. The harness parses this form."""
+    if count <= 0 or seconds <= 0:
+        return f"{phase} 0 {unit}/s"
+    return f"{phase} {count / seconds:.2f} {unit}/s ({count} {unit} in {seconds:.2f}s)"
+
+
+def format_note(topic: str, **fields: Any) -> str:
+    """Canonical diagnostic line. Pretty folds these. Plain and json keep them."""
+    if topic == "prompt":
+        return f"prompt tokens {int(fields['tokens'])}"
+    if topic == "cache":
+        hit = int(fields.get("hit") or 0)
+        return "cache miss" if hit <= 0 else f"cache hit {hit}"
+    if topic == "prefix_load":
+        return f"prefix load {int(fields['tokens'])} tokens"
+    if topic == "prefix_store":
+        return f"prefix store {int(fields['tokens'])} tokens"
+    if topic == "prefix_store_failed":
+        return f"prefix store failed {fields['error']}"
+    if topic == "mtp_depth":
+        return f"mtp depth {int(fields['depth'])}"
+    if topic == "mtp":
+        return f"mtp {int(fields['accepts'])}/{int(fields['tries'])}"
+    if topic == "incoming":
+        return f"incoming tokens {int(fields['tokens'])}"
+    if topic == "output":
+        return f"output tokens {int(fields['tokens'])}"
+    if topic == "context":
+        atlas = fields.get("atlas")
+        if atlas is None:
+            return f"context {int(fields['tokens'])}"
+        return f"context {int(fields['tokens'])} atlas {int(atlas)} images"
+    message = f"unknown console note {topic}"
+    raise ValueError(message)
 
 
 @dataclass
@@ -109,6 +150,10 @@ class Console:
         self._caught_at = 0.0
         self._at_prompt = False
         self._restore_prompt = False
+        self._traceback = TracebackSkip()
+        self._turn_depth = 0
+        self._turn_parts: list[str] = []
+        self._turn_due: float | None = None
 
     @classmethod
     def from_env(
@@ -129,7 +174,9 @@ class Console:
             dumb = os.environ.get("TERM") == "dumb" or os.environ.get("NO_COLOR") is not None
             tty = _is_tty(target)
             mode = "plain" if dumb or not tty else "pretty"
-        return cls(mode, pipeline=pipeline, stream=target)
+        ui = cls(mode, pipeline=pipeline, stream=target)
+        ui.fold_turns = mode == "pretty"
+        return ui
 
     def attach_log(self, path: Path, max_bytes: int) -> None:
         """Copy durable lines into a rolling file. The row itself is not copied."""
@@ -172,10 +219,21 @@ class Console:
             return
         if self.mode == "pretty" and self._handles:
             return
+        if self.mode == "pretty" and (_folded_log(line) or self._traceback.drop(line)):
+            return
+        if self.mode == "pretty" and self.fold_turns and _turn_key(line) is not None:
+            with self._lock:
+                if self._turn_depth > 0:
+                    self._stash_turn(line)
+                    return
         self._note_prompt_displaced()
         self._erase()
         self._write(line + "\n")
         self._redraw()
+
+    def note(self, topic: str, **fields: Any) -> None:
+        """A structured diagnostic. Pretty folds it. Plain and json keep the line."""
+        self.log(format_note(topic, **fields))
 
     def draft(self, text: str) -> None:
         """Show a reply that is still arriving. The terminal wraps it.
@@ -288,6 +346,8 @@ class Console:
                     break
             self._sleep(0.02)
         if reply:
+            with self._lock:
+                self._flush_turn(force=True)
             self.say(reply)
 
     def apply_event(self, event: dict[str, Any]) -> None:
@@ -296,10 +356,15 @@ class Console:
         with self._lock:
             line = _log_line(event)
             if line == "request open":
+                self._turn_depth += 1
+                self._turn_due = None
                 if self._holding:
                     self._opens += 1
                 return
             if line == "request closed":
+                self._turn_depth = max(0, self._turn_depth - 1)
+                if self.fold_turns and self._turn_depth == 0:
+                    self._turn_due = self._clock() + _TURN_IDLE
                 if self._holding:
                     self._closes += 1
                 elif self._restore_prompt and not self._handles:
@@ -354,6 +419,7 @@ class Console:
         )
         with self._lock:
             self._handles.append(progress)
+            self._turn_due = None
         if self.mode != "plain":
             self._note_prompt_displaced()
         if self.mode == "json":
@@ -378,14 +444,28 @@ class Console:
             remaining = len(self._handles)
             if self.mode == "pretty" and self._draft is not None:
                 if summary:
-                    self._pending_summaries.append(summary)
+                    if (
+                        self.fold_turns
+                        and progress.phase in _STASH_PHASES
+                        and self._turn_depth > 0
+                    ):
+                        self._stash_turn(summary)
+                    else:
+                        self._pending_summaries.append(summary)
                 self._paint_status_below(self._status_rows())
                 return
             if self.mode == "pretty":
                 self._note_prompt_displaced()
                 self._erase()
                 if summary:
-                    self._write(self._dim(summary) + "\n")
+                    if (
+                        self.fold_turns
+                        and progress.phase in _STASH_PHASES
+                        and self._turn_depth > 0
+                    ):
+                        self._stash_turn(summary)
+                    else:
+                        self._write(self._dim(summary) + "\n")
                 if remaining == 0:
                     self._show_cursor()
                 else:
@@ -446,6 +526,11 @@ class Console:
                 self._draft = None
                 self._erase()
                 self._show_cursor()
+                parts = self._turn_parts
+                self._turn_parts = []
+                self._turn_due = None
+                if parts:
+                    self._write(self._dim("  ".join(parts)) + "\n")
             if text:
                 self._write(text if text.endswith("\n") else text + "\n")
 
@@ -453,6 +538,7 @@ class Console:
         """One renderer tick. Tests call this with the thread left off."""
         now = self._clock()
         with self._lock:
+            self._flush_turn()
             handles = list(self._handles)
             if self.mode == "pretty" and self._draft is not None:
                 self._paint_status_below(self._status_rows())
@@ -479,6 +565,8 @@ class Console:
             handles = list(self._handles)
         for progress in handles:
             self.end(progress, progress.summary)
+        with self._lock:
+            self._flush_turn(force=True)
         self._show_cursor()
 
     def _ensure_thread(self) -> None:
@@ -827,6 +915,39 @@ class Console:
         for summary in pending:
             self._write(self._dim(summary) + "\n")
 
+    def _stash_turn(self, line: str) -> None:
+        key = _turn_key(line)
+        if key is None:
+            return
+        self._turn_parts = [item for item in self._turn_parts if _turn_key(item) != key]
+        self._turn_parts.append(line)
+        self._turn_parts.sort(
+            key=lambda item: _TURN_ORDER.index(_turn_key(item) or "prefix")
+        )
+
+    def _flush_turn(self, *, force: bool = False) -> None:
+        if not self.fold_turns or self.mode != "pretty":
+            return
+        if self._holding and not force:
+            return
+        if not force and (self._turn_due is None or self._clock() < self._turn_due):
+            return
+        if self._handles or self._turn_depth > 0:
+            return
+        parts = self._turn_parts
+        self._turn_parts = []
+        self._turn_due = None
+        if not parts:
+            return
+        line = "  ".join(parts)
+        self._note_prompt_displaced()
+        self._erase()
+        self._write(self._dim(line) + "\n")
+        if self._handles:
+            self._redraw()
+        else:
+            self._show_cursor()
+
     def _erase(self) -> None:
         if self.mode != "pretty":
             return
@@ -926,6 +1047,33 @@ def _log_line(event: dict[str, Any]) -> str | None:
     line = event.get("line")
     if isinstance(line, str) and line:
         return line
+    return None
+
+
+def _folded_log(line: str) -> bool:
+    """True when pretty should keep the line in the log and off the terminal."""
+    if line == "cache miss":
+        return True
+    return line.startswith(
+        (
+            "prompt tokens ",
+            "cache hit ",
+            "prefix load ",
+            "mtp ",
+            "incoming tokens ",
+            "output tokens ",
+            "context ",
+        )
+    )
+
+
+def _turn_key(line: str) -> str | None:
+    """Kind used to collapse one request's durable lines."""
+    if line.startswith("prefix store ") and "failed" not in line:
+        return "prefix"
+    first = line.split(" ", 1)[0]
+    if first in _STASH_PHASES:
+        return first
     return None
 
 

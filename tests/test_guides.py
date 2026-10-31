@@ -12,10 +12,9 @@ def test_clients_guide_names_this_server() -> None:
     assert "http://127.0.0.1:8129/v1" in text
     assert "qwen36-35b-a3b" in text
     assert "API key" in text
-    assert "quit" in text
-    assert "reload" in text
-    assert "operator console" in text
+    assert "POST /v1/pipelines/reload" in text
     assert "does not call a model" in text
+    assert "Ctrl+C" in text
     assert "Qwen3.6-35B-A3B" in text
 
 

@@ -224,7 +224,37 @@ def embed_input(
     return [float(value) for value in vector]
 
 
-def build_app(args: Any, state: dict[str, Any]) -> Starlette:
+class _QuietCancel:
+    """A shutdown cancel ends the request. It does not print a traceback."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        started = False
+
+        async def send_quiet(message: Any) -> None:
+            nonlocal started
+            if message.get("type") == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_quiet)
+        except asyncio.CancelledError:
+            if started:
+                return
+            try:
+                await send({"type": "http.response.start", "status": 503, "headers": []})
+                await send({"type": "http.response.body", "body": b""})
+            except (OSError, RuntimeError, asyncio.CancelledError):
+                return
+
+
+def build_app(args: Any, state: dict[str, Any]) -> Any:
     _prepare_listener(state)
 
     def dispatch(kind: str, body: dict[str, Any], task_id: str = "") -> Any:
@@ -271,7 +301,7 @@ def build_app(args: Any, state: dict[str, Any]) -> Starlette:
         Route("/v1/embeddings", embeddings, methods=["POST"]),
         *mcp_app.routes,
     ]
-    return Starlette(routes=routes, lifespan=mcp_app.lifespan)
+    return _QuietCancel(Starlette(routes=routes, lifespan=mcp_app.lifespan))
 
 
 def _language_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
