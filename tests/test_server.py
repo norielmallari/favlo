@@ -1023,6 +1023,24 @@ def test_open_runtime_passes_owner_when_accepted(monkeypatch) -> None:
     assert runtime._owner == seen["owner"]
 
 
+def test_open_runtime_passes_mtp_when_accepted(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def opener(path, *, kv_cache, console, resident_percent, mtp):
+        del path, kv_cache, console, resident_percent
+        seen["mtp"] = mtp
+        return SimpleNamespace()
+
+    module = SimpleNamespace(open_runtime=opener)
+    monkeypatch.setattr("favlo.pipelines.pipeline_module", lambda _selection: module)
+    selection = _selection("record", "qwen38-27b")
+    open_runtime(selection, None, None)
+    assert seen["mtp"] is False
+    selection.mtp = True
+    open_runtime(selection, None, None)
+    assert seen["mtp"] is True
+
+
 def test_open_runtime_omits_owner_when_absent(monkeypatch) -> None:
     def opener(path, *, kv_cache, console, resident_percent):
         del kv_cache, console, resident_percent

@@ -247,6 +247,8 @@ def open_runtime(selection: Any, console: Any, max_memory: str | None) -> Any:
         kwargs["max_memory"] = max_memory
     if _accepts(opener, "owner"):
         kwargs["owner"] = mint_owner(selection.pipeline)
+    if _accepts(opener, "mtp"):
+        kwargs["mtp"] = bool(getattr(selection, "mtp", False))
     if _accepts(opener, "parts"):
         kwargs["parts"] = selection.parts or {}
     return opener(selection.path, **kwargs)

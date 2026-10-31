@@ -1,8 +1,9 @@
 """Text forward. Weights are fp4, with promoted feed-forward layers at fp8. The key/value cache is fp8.
 
 A feed-forward layer that does not fit stays in the record and is copied into one
-stage before that layer runs. The MTP head leaves the device when the prompt
-needs its bytes. Decode does not run that block.
+stage before that layer runs. MTP weights stay in the record when MTP is off.
+The head leaves the device when the prompt needs its bytes. Decode does not run
+that block.
 
 Temperature 0 is an argmax. A positive temperature samples with top-k and
 top-p. Presence, frequency, and logit bias follow the OpenAI logit update.
@@ -168,6 +169,7 @@ class Qwen38Runtime:
         resident_percent: float | None = None,
         max_memory: str | int | None = None,
         owner: str | None = None,
+        mtp: bool = False,
     ) -> None:
         del resident_percent
         self._owner = owner or f"qwen38-27b:{id(self)}"
@@ -188,6 +190,7 @@ class Qwen38Runtime:
             raise RuntimeError(message)
         self.tensors: dict[str, dict] = self.manifest["tensors"]
         self._record_mtp = "mtp.fc.weight" in self.tensors
+        self._mtp_wanted = bool(mtp) and self._record_mtp
         self._group = group_tensors(self.tensors)
         self.layer_types = tuple(self.manifest.get("layer_types") or _default_layers())
         self.linear_slot = _slots(self.layer_types, "linear_attention")
@@ -220,7 +223,7 @@ class Qwen38Runtime:
             2048,
             self._group,
             self._limit,
-            mtp_available=self._record_mtp,
+            mtp_available=self._mtp_wanted,
         )
         summary = ""
         self._load_progress = self._begin_load(
@@ -338,6 +341,54 @@ class Qwen38Runtime:
             return
         memory.sweep(owner)
 
+    def _install_mtp(self, wanted: bool, needed: int) -> None:
+        """Copy the MTP head when ``wanted`` is true. Leave it in the file when false."""
+        available = bool(wanted) and self._record_mtp
+        self._mtp_wanted = available
+        current = self.wire
+        if current is not None and bool(current.mtp) == available:
+            return
+        if self.session is None or self._record is None:
+            return
+        target = max(needed, int(self.max_pos) or 2048)
+        try:
+            plan = choose_wire(
+                self._growth_budget(),
+                target,
+                self._group,
+                self._limit,
+                mtp_available=available,
+            )
+        except RuntimeError as exc:
+            if "does not fit" not in str(exc):
+                raise
+            return
+        if plan.positions < needed:
+            return
+        if current is not None and (
+            plan.mtp == current.mtp
+            and plan.wired == current.wired
+            and plan.positions == current.positions
+        ):
+            return
+        count, saved = self._capture_planes()
+        try:
+            if same_weight_image(current, plan):
+                self._extend_cache(plan, count, saved)
+            else:
+                self._apply(plan, count, saved)
+        except RuntimeError as exc:
+            if "device refused" not in str(exc):
+                raise
+            if current is not None:
+                try:
+                    self._apply(current, count, saved)
+                except RuntimeError as restore_exc:
+                    if "device refused" not in str(restore_exc):
+                        raise
+            return
+        self._note_growth(current, plan)
+
     def ensure(self, needed: int) -> bool:
         """Grow the cache so ``needed`` positions fit. Leave the device alone when it cannot."""
         if needed <= self.max_pos:
@@ -358,7 +409,7 @@ class Qwen38Runtime:
                     self._group,
                     self._limit,
                     extra_unwire=extra,
-                    mtp_available=self._record_mtp,
+                    mtp_available=self._mtp_wanted,
                 )
             except RuntimeError as exc:
                 if "does not fit" not in str(exc):
@@ -1103,13 +1154,14 @@ class Qwen38Runtime:
         if prompt[-1] < 0:
             message = f"prompt length {len(prompt)} is past {self.max_pos}"
             raise RuntimeError(message)
+        self._install_mtp(bool(mtp), len(prompt))
         if not self.ensure(len(prompt)):
             reached = choose_wire(
                 self._budget(),
                 len(prompt),
                 self._group,
                 self._limit,
-                mtp_available=self._record_mtp,
+                mtp_available=self._mtp_wanted,
             ).positions
             message = f"prompt length {len(prompt)} is past {max(self.max_pos, reached)}"
             raise RuntimeError(message)

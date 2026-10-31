@@ -1,9 +1,10 @@
 """What stays on the device when the prompt and the next token need room.
 
 The prefill workspace, the decode buffers, the DeltaNet state, and the key/value
-cache are claimed first. Vision tensors stay in the record. The MTP head is
-dropped as a whole before any language feed-forward layer. Unwired language
-layers are read into one stage, from the last index downward.
+cache are claimed first. Vision tensors stay in the record. MTP weights stay in
+the record when the opening turns MTP off. When it is on, the head is dropped
+as a whole before any language feed-forward layer. Unwired language layers are
+read into one stage, from the last index downward.
 """
 
 from __future__ import annotations

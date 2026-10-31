@@ -9,6 +9,7 @@ import pytest
 from qwen38_27b.budget import (
     choose_wire,
     group_tensors,
+    layout_copies,
     growth_budget,
     same_weight_image,
     startup_bytes,
@@ -70,6 +71,40 @@ def _config() -> dict:
     }
 
 
+def test_mtp_matrices_pack_as_fp8() -> None:
+    from qwen38_27b.convert import _keep_f16, _mtp_fp4
+
+    assert _keep_f16("mtp.norm.weight", np.ones(8, dtype=np.float32)) is True
+    assert _mtp_fp4({"mtp.fc.weight": {"dtype": "fp4"}, "lm_head.weight": {"dtype": "fp4"}}) is True
+    assert _mtp_fp4({"mtp.fc.weight": {"dtype": "fp8"}}) is False
+
+
+def test_a_new_27b_row_defaults_mtp_on(tmp_path: Path) -> None:
+    from favlo.registry import load_registry, register_quantized, save_registry
+    from qwen38_27b.commands import _ensure_mtp_on
+
+    source = tmp_path / "bf16"
+    source.mkdir()
+    register_quantized(
+        "example-model",
+        source=source,
+        alias="qwen38-27b",
+        directory=tmp_path / "example-model",
+        root=tmp_path,
+        pipeline="qwen38-27b",
+        runtime="metal41",
+    )
+    _ensure_mtp_on("example-model", tmp_path)
+    entry = load_registry(tmp_path)["models"]["example-model"]
+    assert entry["mtp"] is True
+    assert entry["mtp_depth"] == 3
+    data = load_registry(tmp_path)
+    data["models"]["example-model"]["mtp"] = False
+    save_registry(data, tmp_path)
+    _ensure_mtp_on("example-model", tmp_path)
+    assert load_registry(tmp_path)["models"]["example-model"]["mtp"] is False
+
+
 def test_open_runtime_forwards_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     from qwen38_27b.runtime import open_runtime
 
@@ -84,6 +119,9 @@ def test_open_runtime_forwards_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     assert open_runtime(Path("record"), owner="qwen38-27b:7") == "runtime"
     assert captured["owner"] == "qwen38-27b:7"
     assert captured["max_memory"] is None
+    assert captured["mtp"] is False
+    assert open_runtime(Path("record"), mtp=True) == "runtime"
+    assert captured["mtp"] is True
 
 
 def test_a_missing_record_keeps_the_passed_owner(tmp_path: Path) -> None:
@@ -1036,6 +1074,23 @@ def _sample_group(*, layer_span: int = 3000, mtp_span: int = 5000, vision: int =
 
 def test_float16_tensor_span_is_two_bytes_per_element() -> None:
     assert tensor_span({"dtype": "f16", "stored_shape": [5120], "offset": 0}) == 10240
+
+
+def test_fit_omits_mtp_weights_when_the_flag_is_off() -> None:
+    group = _sample_group()
+    full = choose_wire(10**18, 4096, group, 131072)
+    off = choose_wire(10**18, 4096, group, 131072, mtp_available=False)
+    copies, _stage, total = layout_copies(group, mtp=False, wired=off.wired)
+    assert full.mtp is True
+    assert off.mtp is False
+    assert off.slots == full.slots - 1
+    assert off.wired == tuple(range(64))
+    assert off.weights == total
+    assert full.weights - off.weights == 5000
+    assert all(not name.startswith("mtp.") for name, _file, _device, _span in copies)
+    assert startup_bytes(off.weights, 4096, slots=off.slots, drafts=False) < startup_bytes(
+        full.weights, 4096, slots=full.slots, drafts=True
+    )
 
 
 def test_fit_drops_the_mtp_head_before_a_language_layer() -> None:

@@ -3,7 +3,7 @@
 Every matrix is fp4 E2M1 with an E8M0 scale every 32 along K, except language
 feed-forward layers selected by ``--ffn-fp8``. Those three matrices are fp8
 E4M3. One-dimensional parameters and the depthwise convolution stay float16.
-The MTP feed-forward stays fp4 until ``repack_mtp_fp8`` rewrites those matrices.
+MTP matrices are fp8 E4M3. ``repack_mtp_fp8`` rewrites a record that still stores them as fp4.
 """
 
 from __future__ import annotations
@@ -152,6 +152,15 @@ def _fp4_entry(array: np.ndarray) -> tuple[bytes, dict]:
     return blob, body
 
 
+def _mtp_fp4(tensors: dict[str, dict]) -> bool:
+    """True when an MTP matrix is still packed as fp4."""
+    return any(
+        str(name).startswith("mtp.") and str(entry.get("dtype")) == "fp4"
+        for name, entry in tensors.items()
+        if isinstance(entry, dict)
+    )
+
+
 def _keep_f16(name: str, array: np.ndarray) -> bool:
     if name.endswith("conv1d.weight") or name.endswith("A_log") or name.endswith("dt_bias"):
         return True
@@ -287,6 +296,9 @@ def quantize(src: Path, output: Path | None = None, *, ffn_fp8: float | None = N
         body = json.loads(manifest_path.read_text())
         if body.get("complete"):
             _budget(body, ffn_fp8, count)
+            tensors = body.get("tensors")
+            if isinstance(tensors, dict) and _mtp_fp4(tensors):
+                return repack_mtp_fp8(output, src)
             return output
     weight_map = _weight_map(src)
     promoted = _promoted(src, weight_map, output, ffn_fp8, layers)
@@ -320,6 +332,8 @@ def quantize(src: Path, output: Path | None = None, *, ffn_fp8: float | None = N
                 blob, body = _f16_entry(flat)
             elif found is not None and found[0] in chosen:
                 blob, body = _fp8_entry(array)
+            elif name.startswith("mtp."):
+                blob, body = _fp8_entry(array)
             else:
                 blob, body = _fp4_entry(array)
             offset = _append(resident, blob)
@@ -350,6 +364,8 @@ def quantize(src: Path, output: Path | None = None, *, ffn_fp8: float | None = N
     if count:
         manifest["ffn_fp8_percent"] = ffn_fp8
         manifest["ffn_fp8_layers"] = promoted
+    if any(str(name).startswith("mtp.") and str(body.get("dtype")) == "fp8" for name, body in done.items()):
+        manifest["mtp_weight"] = "fp8"
     temporary = manifest_path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(manifest))
     os.replace(temporary, manifest_path)
@@ -365,6 +381,8 @@ def quantize(src: Path, output: Path | None = None, *, ffn_fp8: float | None = N
             target = output / extra
         if not target.exists():
             shutil.copyfile(src_file, target)
+    if _mtp_fp4(done):
+        return repack_mtp_fp8(output, src)
     return output
 
 

@@ -54,7 +54,7 @@ The default pack stores every quantized matrix as fp4 and writes `models/Qwen3.8
 uv run favlo --qwen38-27b quantize --src models/Qwen3.8-27B-bf16
 ```
 
-That command registers the folder under the alias `qwen38-27b` in `models/registry.json`. The row stores the directory that was written. The BF16 checkout stays. A finished directory has `manifest.json` with `complete: true`. Running `quantize` again on that directory returns it when the feed-forward percentage matches. An unfinished directory resumes from `quantize_progress.json`.
+That command registers the folder under the alias `qwen38-27b` in `models/registry.json`. The row stores the directory that was written, and it sets `mtp` true and `mtp_depth` 3 when the row does not already store `mtp`. `models add` does the same. The BF16 checkout stays. A finished directory has `manifest.json` with `complete: true`. Running `quantize` again on that directory returns it when the feed-forward percentage matches. An unfinished directory resumes from `quantize_progress.json`.
 
 With no `--src`, `quantize` reads the Hugging Face cache snapshot for [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B). A missing cache is an error. `--src` names a local BF16 checkout, including `models/Qwen3.8-27B-bf16`. `--output` names the packed directory. The alias stays `qwen38-27b`.
 
@@ -66,7 +66,7 @@ With no `--src`, `quantize` reads the Hugging Face cache snapshot for [Qwen/Qwen
 - `100` stores all 64 language feed-forward layers as fp8 and writes `models/Qwen3.8-27B-fp8`.
 - Any other percentage stores that share of the language feed-forward layers as fp8 and writes `models/Qwen3.8-27B-fp8-e<P>`, where `<P>` is that percentage. `20` writes `models/Qwen3.8-27B-fp8-e20`. The count is the largest whole number that does not exceed that percentage, so `20` is 12 layers. Those layers are the highest BF16-to-fp4 relative errors. Gate, up, and down move together.
 
-The embedding, the projections, `lm_head`, the MTP block, and the vision tower stay fp4. The MTP feed-forward stays fp4. One-dimensional parameters stay float16.
+The embedding, the projections, `lm_head`, and the vision tower stay fp4. MTP matrices are fp8 E4M3. One-dimensional parameters, including MTP norms, stay float16. `mtp-fp8` rewrites a finished record whose MTP matrices are still fp4.
 
 ```bash
 uv run favlo --qwen38-27b quantize --src models/Qwen3.8-27B-bf16 --ffn-fp8 100

@@ -17,8 +17,12 @@ def open_runtime(
     resident_percent: float | None = None,
     max_memory: str | int | None = None,
     owner: str | None = None,
+    mtp: bool = False,
 ) -> Qwen38Runtime:
-    """Load the resident fp4 record and the fp8 key/value cache."""
+    """Load the resident fp4 record and the fp8 key/value cache.
+
+    ``mtp`` false leaves the MTP block in the record file.
+    """
     del resident_percent
     return Qwen38Runtime(
         path,
@@ -26,6 +30,7 @@ def open_runtime(
         console=console,
         max_memory=max_memory,
         owner=owner,
+        mtp=mtp,
     )
 
 

@@ -26,7 +26,7 @@ The official checkpoint is `Qwen/Qwen3.8-27B`. The steps are [qwen38-27b/SETUP.m
 
 `favlo --qwen38-27b download` fetches that checkpoint into `models/Qwen3.8-27B-bf16` with plain HTTP. `--check` reports whether the volume has room and does not write the files. A short file is continued on the next run.
 
-`favlo --qwen38-27b quantize` does not download. With no `--src`, it reads the Hugging Face cache snapshot for that repository. A missing cache is an error. `--src` names a local BF16 checkout, including `models/Qwen3.8-27B-bf16`. A uniform pack is `models/Qwen3.8-27B-fp4`. `--ffn-fp8 100` writes `models/Qwen3.8-27B-fp8`. Any other percentage writes `models/Qwen3.8-27B-fp8-e<P>`, where `<P>` is that percentage. `20` writes `models/Qwen3.8-27B-fp8-e20`. The record is registered under the alias `qwen38-27b`. `delete <folder-or-alias>` removes that row, the packed directory, and a checkout still under `models/`.
+`favlo --qwen38-27b quantize` does not download. With no `--src`, it reads the Hugging Face cache snapshot for that repository. A missing cache is an error. `--src` names a local BF16 checkout, including `models/Qwen3.8-27B-bf16`. A uniform pack is `models/Qwen3.8-27B-fp4`. `--ffn-fp8 100` writes `models/Qwen3.8-27B-fp8`. Any other percentage writes `models/Qwen3.8-27B-fp8-e<P>`, where `<P>` is that percentage. `20` writes `models/Qwen3.8-27B-fp8-e20`. MTP matrices in that pack are fp8. The record is registered under the alias `qwen38-27b`, with `mtp` true and draft depth 3 when the row does not already store `mtp`. `delete <folder-or-alias>` removes that row, the packed directory, and a checkout still under `models/`.
 
 `download_suggestions` stores whether download reminders are enabled. Packing the record stays `quantize`.
 

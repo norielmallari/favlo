@@ -171,6 +171,17 @@ def _move(progress: Any, done: int, total: int) -> None:
     progress.total = total
 
 
+def _ensure_mtp_on(folder: str, root: Path | None = None) -> None:
+    """Store MTP on for a 27B row that does not already say. A stored flag stays."""
+    data = load_registry(root)
+    entry = data["models"].get(folder)
+    if not isinstance(entry, dict) or "mtp" in entry:
+        return
+    entry["mtp"] = True
+    entry["mtp_depth"] = 3
+    save_registry(data, root)
+
+
 def installed_record() -> Path | None:
     """The one registered record for this pipeline. None when the registry has no row."""
     try:
@@ -204,6 +215,7 @@ def _quantize(args: argparse.Namespace) -> int:
             pipeline=PIPELINE,
             runtime="metal41",
         )
+        _ensure_mtp_on(output.name)
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError, KeyError) as exc:
         sys.stderr.write(f"{exc}\n")
         return 1
@@ -352,6 +364,7 @@ def _models(args: argparse.Namespace) -> int:
                 pipeline=PIPELINE,
                 runtime="metal41",
             )
+            _ensure_mtp_on(args.folder)
         elif command == "alias":
             set_alias(args.folder, args.alias)
         listing = format_listing()
