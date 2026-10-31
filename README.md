@@ -1,28 +1,16 @@
 # Favlo
 
-Favlo AI Runtime: Your Local AI Workhorse
+Favlo: Your AI, the Whole Stable.
 
 <p align="center">
-  <img src="docs/images/favlo.png" alt="Favlo AI Runtime" width="480">
+  <img src="docs/images/favlo-stable.jpg" alt="Favlo" width="480">
 </p>
 
->This app is directly inspired by [oMLX](https://github.com/jundot/omlx). It's an amazing app - I recommend trying that first for general purpose inference before using my more specialized runtime.
+>This app is directly inspired by [oMLX](https://github.com/jundot/omlx) and [ComfyUI](https://github.com/Comfy-Org/ComfyUI). These are amazing apps - I recommend trying them first before using my more specialized, opinionated runtime.
 
-Favlo is a local runtime for Apple Silicon. One machine serves language-model inference, embeddings, and content generation: image, video, music, and voice. One model is one pipeline. Each pipeline owns its forward, its weight records, and its Metal kernels. `favlo serve` is the entry point. A client selects a registered language model with the OpenAI `model` field. A language row answers `POST /v1/chat/completions`. An embeddings row answers `POST /v1/embeddings`. Agents reach the content-generation models through MCP at `POST /mcp`. The tool catalog is [MCP.md](MCP.md).
+Favlo runs locally or in the cloud. One process serves language models, embeddings, and media: image, video, music, and voice. One model is one pipeline. When the pipelines share a machine, chat and embeddings take the device. A media job yields at its next safe point, checkpoints, and resumes when that queue has drained. Each pipeline owns its forward, its weight records, and its Metal kernels. `favlo serve` is the entry point. A client selects a registered language model with the OpenAI `model` field. A language row answers `POST /v1/chat/completions`. An embeddings row answers `POST /v1/embeddings`. Agents reach the content-generation models through MCP at `POST /mcp`. The tool catalog is [MCP.md](MCP.md).
 
 The process contract is [ARCHITECTURE.md](ARCHITECTURE.md). The papers are [REFERENCES.md](REFERENCES.md). Measured research claims are [RESEARCH.md](RESEARCH.md). Cite this software from [CITATION.cff](CITATION.cff). Agents start at [AGENTS.md](AGENTS.md). AI-assisted features are [docs/ai-assistance](docs/ai-assistance/README.md).
-
-| Pipeline | Note |
-|---|---|
-| `qwen36-35b-a3b` | [Qwen3.6-35B-A3B](docs/qwen36-35b-a3b/README.md) |
-| `qwen38-27b` | [Qwen3.8-27B](docs/qwen38-27b/README.md) |
-| `qwen38-flash-next` | [Qwen3.8-Flash-Next](docs/qwen38-flash-next/architecture.md) |
-| `z-image-turbo` | [Z-Image-Turbo](docs/z-image-turbo/README.md) |
-| `wan22-i2v` | [Wan 2.2 I2V](docs/wan22-i2v/README.md) |
-| `wan22-ti2v-5b` | [Wan2.2 TI2V-5B](docs/wan22-ti2v-5b/README.md) |
-| `ace-step-15-turbo` | [ACE-Step 1.5 XL Turbo](docs/ace-step-15-turbo/README.md) |
-| `bge-m3` | [BGE-M3](docs/bge-m3/README.md) |
-| `voxcpm2` | [VoxCPM2](docs/voxcpm2/README.md) |
 
 ## Requirements
 
@@ -58,6 +46,20 @@ uv run favlo serve --non-interactive
 ## Startup
 
 On a terminal, an empty registry downloads [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B), packs `models/Qwen3.6-35B-A3B-fp8-e20`, and then the daemon listens. The steps are [docs/qwen36-35b-a3b/SETUP.md](docs/qwen36-35b-a3b/SETUP.md). Quantize and the other non-serve commands use that model's flag, as in `favlo --qwen38-flash-next quantize`. The listener is [docs/serve.md](docs/serve.md). The image request is [docs/z-image-turbo/README.md](docs/z-image-turbo/README.md). The operator console is [docs/guides/clients.md](docs/guides/clients.md). Assisted features are [docs/ai-assistance](docs/ai-assistance/README.md).
+
+## Supported Models
+
+| Pipeline | Note |
+|---|---|
+| `qwen36-35b-a3b` | [Qwen3.6-35B-A3B](docs/qwen36-35b-a3b/README.md) |
+| `qwen38-27b` | [Qwen3.8-27B](docs/qwen38-27b/README.md) |
+| `qwen38-flash-next` | [Qwen3.8-Flash-Next](docs/qwen38-flash-next/architecture.md) |
+| `z-image-turbo` | [Z-Image-Turbo](docs/z-image-turbo/README.md) |
+| `wan22-i2v` | [Wan 2.2 I2V](docs/wan22-i2v/README.md) |
+| `wan22-ti2v-5b` | [Wan2.2 TI2V-5B](docs/wan22-ti2v-5b/README.md) |
+| `ace-step-15-turbo` | [ACE-Step 1.5 XL Turbo](docs/ace-step-15-turbo/README.md) |
+| `bge-m3` | [BGE-M3](docs/bge-m3/README.md) |
+| `voxcpm2` | [VoxCPM2](docs/voxcpm2/README.md) |
 
 ## Methodology
 
