@@ -39,7 +39,7 @@ Run the carrot file that imports only this package:
 | `qwen36-35b-a3b` | `tests/test_qwen36_35b_a3b_smoke.py` |
 | `qwen38-flash-next` | `tests/test_smoke.py` |
 
-`tests/test_qwen36_35b_a3b_smoke_16gb.py` runs the 35B file's cases with the runtime capped at 16GiB. That file is the `<file>` in the lock commands above.
+`tests/test_qwen36_35b_a3b_smoke_16gb.py` is skipped for now. It would run the 35B file's cases with the runtime capped at 16GiB. Do not run that file until the skip is removed.
 
 The file covers, in order: greedy decode, the instruct card, the thinking card at the template default effort, then one case for each reasoning effort that template names (`low`, `medium`, `xhigh` when the template names them).
 

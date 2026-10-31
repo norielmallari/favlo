@@ -150,6 +150,17 @@ KERNELS = (
     "vision_attend72",
     "dequant_fp4_rows",
     "dequant_fp8_rows",
+    "argmax_span",
+    "argmax_index",
+    "gemv_fp8_pair",
+    "gemv_fp8_pair_acc",
+    "gemv_fp8_pair_scale",
+    "gdn_in_proj_fp8_pair",
+    "attn_qkv_fp8_pair",
+    "shared_gate_silu_pair",
+    "moe_down_routed_w",
+    "logit_adjust",
+    "topk_partial",
 )
 
 _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"

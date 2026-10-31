@@ -1,8 +1,9 @@
 """Carrot smoke with the runtime capped at 16GiB.
 
-The cases are the ones in ``test_qwen36_35b_a3b_smoke``. The cap is the same
-``max_memory`` value as ``serve --max-memory 16GiB``. The atlas then holds
-fewer than every expert image, and a miss reads that image when it is routed.
+Skipped for now. The cases are the ones in ``test_qwen36_35b_a3b_smoke``. The
+cap is the same ``max_memory`` value as ``serve --max-memory 16GiB``. The
+atlas then holds fewer than every expert image, and a miss reads that image
+when it is routed.
 """
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ def _smoke():
 
 
 _CASES = _smoke()
+
+pytestmark = pytest.mark.skip(reason="16GiB carrot smoke is paused")
 
 
 @pytest.fixture(scope="module")

@@ -69,6 +69,7 @@ def _complete(
     presence: float,
     seed: int = 0,
     check: bool = True,
+    mtp: bool = False,
 ) -> str:
     np.random.seed(seed)
     runtime.reset()
@@ -96,6 +97,7 @@ def _complete(
         think_end=end,
         thinking_budget=_THINK_BUDGET if thinking else 0,
         forbid=forbid,
+        mtp=mtp,
     )
     text = decode_text(runtime.root, tokens).rstrip()
     if check:
@@ -121,6 +123,19 @@ def test_carrot_instruct_greedy(carrot_runtime: Qwen36Runtime) -> None:
         presence=0.0,
     )
     print(f"instruct greedy: {text[:160]}")
+
+
+def test_carrot_instruct_greedy_mtp(carrot_runtime: Qwen36Runtime) -> None:
+    text = _complete(
+        carrot_runtime,
+        thinking=False,
+        temperature=0.0,
+        top_p=1.0,
+        top_k=0,
+        presence=0.0,
+        mtp=True,
+    )
+    print(f"instruct greedy mtp: {text[:160]}")
 
 
 def test_carrot_instruct_recommended(carrot_runtime: Qwen36Runtime) -> None:

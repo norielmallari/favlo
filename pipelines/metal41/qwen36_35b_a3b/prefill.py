@@ -185,8 +185,14 @@ def _gdn_scratch_bytes() -> int:
     return 32 * _GDN_CHUNK * (_GDN_CHUNK + 128 * 3) * 4 + 32 * _GDN_CHUNK * 4
 
 
-def prefill_ids(runtime: Any, ids: list[int], pos0: int = 0) -> None:
-    """Advance state and the KV cache through ``ids``. The last prompt token is separate."""
+def prefill_ids(
+    runtime: Any, ids: list[int], pos0: int = 0, *, follow: int | None = None
+) -> None:
+    """Advance state and the KV cache through ``ids``. The last prompt token is separate.
+
+    ``follow`` is the token after the last id. The MTP layer at each position
+    reads that position's residual and the embedding of the next token.
+    """
     if not ids:
         return
     if pos0 + len(ids) >= runtime.max_pos:
@@ -200,10 +206,15 @@ def prefill_ids(runtime: Any, ids: list[int], pos0: int = 0) -> None:
     remaining = ids
     while remaining:
         take = min(CHUNK, len(remaining))
+        chunk = remaining[:take]
+        rest = remaining[take:]
+        nxt = rest[0] if rest else follow
         runtime._prefill_base = cursor - pos0
-        _chunk(runtime, workspace, remaining[:take], cursor)
+        _chunk(runtime, workspace, chunk, cursor)
+        if getattr(runtime, "_mtp_fill", False):
+            runtime._store_mtp_rows(workspace, chunk, cursor, nxt)
         cursor += take
-        remaining = remaining[take:]
+        remaining = rest
         note = getattr(runtime, "_note_prefill", None)
         if note is not None:
             note(cursor - pos0)

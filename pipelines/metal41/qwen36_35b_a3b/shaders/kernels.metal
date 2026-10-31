@@ -229,6 +229,54 @@ static float fp8_vec_dot(
     return simd_sum(acc);
 }
 
+// One weight row, two activations. Each scale block is decoded with the same
+// apply as the single-row dot, then the second activation reuses those
+// registers. Both rows are not live together.
+static float2 fp8_vec_dot_pair(
+    device const float* act0,
+    device const float* act1,
+    device const uchar* weights,
+    device const uchar* scales,
+    uint row,
+    uint inner,
+    uint lane)
+{
+    uint blocks = inner >> 5u;
+    device const uchar* row_w = weights + (ulong)row * inner;
+    device const uchar* row_scale = scales + (ulong)row * blocks;
+    float x = 0.0f;
+    float y = 0.0f;
+    if (blocks == 64u) {
+        uint b0 = lane;
+        uint b1 = lane + 32u;
+        device const uint4* w0 = (device const uint4*)(row_w + (b0 << 5u));
+        device const uint4* w1 = (device const uint4*)(row_w + (b1 << 5u));
+        float f0 = exp2(float(row_scale[b0]) - 127.0f);
+        float f1 = exp2(float(row_scale[b1]) - 127.0f);
+        uint4 p0 = w0[0];
+        uint4 p1 = w0[1];
+        x = fp8_apply(p0, p1, act0, b0, f0);
+        y = fp8_apply(p0, p1, act1, b0, f0);
+        uint4 q0 = w1[0];
+        uint4 q1 = w1[1];
+        x += fp8_apply(q0, q1, act0, b1, f1);
+        y += fp8_apply(q0, q1, act1, b1, f1);
+    } else {
+        for (uint block = lane; block < blocks; block += 32u) {
+            device const uint4* words = (device const uint4*)(row_w + (block << 5u));
+            uint4 p0 = words[0];
+            uint4 p1 = words[1];
+            float factor = exp2(float(row_scale[block]) - 127.0f);
+            x += fp8_apply(p0, p1, act0, block, factor);
+            y += fp8_apply(p0, p1, act1, block, factor);
+        }
+    }
+    float2 out;
+    out.x = simd_sum(x);
+    out.y = simd_sum(y);
+    return out;
+}
+
 // Pair i keeps the temporal frequency unless the interleaved sections overwrite it.
 // Height owns 1, 4, ..., 31. Width owns 2, 5, ..., 29. The rest stay temporal.
 static uint mrope_axis(uint pair) {
@@ -2333,6 +2381,35 @@ kernel void moe_down_mix_w(
     }
     float shared = fp8_vec_dot(shared_gated, shared_w, shared_s, row, 512u, lane);
     acc += coeff[0] * shared;
+    if (lane == 0u) {
+        hidden[row] += acc;
+    }
+}
+
+// fp4 routed down mix. The shared expert is a separate pair dispatch.
+kernel void moe_down_routed_w(
+    device const float* gated [[buffer(0)]],
+    device const uchar* file [[buffer(1)]],
+    device const uint* ids [[buffer(2)]],
+    device const float* mix [[buffer(3)]],
+    device float* hidden [[buffer(4)]],
+    device const ulong* offsets [[buffer(5)]],
+    device const uchar* widths [[buffer(6)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= 2048u) {
+        return;
+    }
+    float acc = 0.0f;
+    for (uint slot = 0u; slot < 8u; ++slot) {
+        if (widths[ids[slot]] != 4u) {
+            continue;
+        }
+        device const uchar* down = file + offsets[ids[slot]] + 1114112ul;
+        float dot = fp4_vec_dot(gated + slot * 512u, down, down + 524288u, row, 512u, lane);
+        acc += mix[slot] * dot;
+    }
     if (lane == 0u) {
         hidden[row] += acc;
     }
@@ -4752,5 +4829,349 @@ kernel void dequant_fp8_rows(
         float factor = exp2(float(row_scale[block]) - 127.0f);
         uint element = (block << 5) + lane;
         dest[element] = e4m3_fn(packed[element]) * factor;
+    }
+}
+
+// One threadgroup owns 256 logits. Padded lanes past `n` lose to a real index.
+kernel void argmax_span(
+    device const float* logits [[buffer(0)]],
+    device float* best_value [[buffer(1)]],
+    device uint* best_index [[buffer(2)]],
+    constant uint& n [[buffer(3)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint group [[threadgroup_position_in_grid]])
+{
+    uint index = group * 256u + tid;
+    float value = index < n ? logits[index] : -INFINITY;
+    uint id = index;
+    for (uint offset = 1u; offset < 32u; offset <<= 1u) {
+        float other = simd_shuffle_xor(value, offset);
+        uint other_id = simd_shuffle_xor(id, offset);
+        if (other > value || (other == value && other_id < id)) {
+            value = other;
+            id = other_id;
+        }
+    }
+    threadgroup float vals[8];
+    threadgroup uint ids[8];
+    if (lane == 0u) {
+        vals[simd] = value;
+        ids[simd] = id;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0u) {
+        float best = vals[0];
+        uint best_id = ids[0];
+        for (uint i = 1u; i < 8u; ++i) {
+            if (vals[i] > best || (vals[i] == best && ids[i] < best_id)) {
+                best = vals[i];
+                best_id = ids[i];
+            }
+        }
+        best_value[group] = best;
+        best_index[group] = best_id;
+    }
+}
+
+// Reduce the span winners into one index at `chosen`.
+kernel void argmax_index(
+    device const float* best_value [[buffer(0)]],
+    device const uint* best_index [[buffer(1)]],
+    device uint* chosen [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]])
+{
+    float value = -INFINITY;
+    uint id = 0xffffffffu;
+    for (uint i = tid; i < count; i += 256u) {
+        float other = best_value[i];
+        uint other_id = best_index[i];
+        if (other > value || (other == value && other_id < id)) {
+            value = other;
+            id = other_id;
+        }
+    }
+    for (uint offset = 1u; offset < 32u; offset <<= 1u) {
+        float other = simd_shuffle_xor(value, offset);
+        uint other_id = simd_shuffle_xor(id, offset);
+        if (other > value || (other == value && other_id < id)) {
+            value = other;
+            id = other_id;
+        }
+    }
+    threadgroup float vals[8];
+    threadgroup uint ids[8];
+    if (lane == 0u) {
+        vals[simd] = value;
+        ids[simd] = id;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0u) {
+        float best = vals[0];
+        uint best_id = ids[0];
+        for (uint i = 1u; i < 8u; ++i) {
+            if (vals[i] > best || (vals[i] == best && ids[i] < best_id)) {
+                best = vals[i];
+                best_id = ids[i];
+            }
+        }
+        chosen[0] = best_id;
+    }
+}
+
+// Two activation rows, one weight read. Each threadgroup owns one output row.
+kernel void gemv_fp8_pair(
+    device const float* act0 [[buffer(0)]],
+    device const float* act1 [[buffer(1)]],
+    device const uchar* weights [[buffer(2)]],
+    device const uchar* scales [[buffer(3)]],
+    device float* dest0 [[buffer(4)]],
+    device float* dest1 [[buffer(5)]],
+    constant uint& cols [[buffer(6)]],
+    constant uint& inner [[buffer(7)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= cols) {
+        return;
+    }
+    float2 sum = fp8_vec_dot_pair(act0, act1, weights, scales, row, inner, lane);
+    if (lane == 0u) {
+        dest0[row] = sum.x;
+        dest1[row] = sum.y;
+    }
+}
+
+kernel void gemv_fp8_pair_acc(
+    device const float* act0 [[buffer(0)]],
+    device const float* act1 [[buffer(1)]],
+    device const uchar* weights [[buffer(2)]],
+    device const uchar* scales [[buffer(3)]],
+    device float* dest0 [[buffer(4)]],
+    device float* dest1 [[buffer(5)]],
+    constant uint& cols [[buffer(6)]],
+    constant uint& inner [[buffer(7)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= cols) {
+        return;
+    }
+    float2 sum = fp8_vec_dot_pair(act0, act1, weights, scales, row, inner, lane);
+    if (lane == 0u) {
+        dest0[row] += sum.x;
+        dest1[row] += sum.y;
+    }
+}
+
+// Shared-expert down. Each row is scaled by that token's coefficient.
+kernel void gemv_fp8_pair_scale(
+    device const float* act0 [[buffer(0)]],
+    device const float* act1 [[buffer(1)]],
+    device const uchar* weights [[buffer(2)]],
+    device const uchar* scales [[buffer(3)]],
+    device float* dest0 [[buffer(4)]],
+    device float* dest1 [[buffer(5)]],
+    device const float* coeff0 [[buffer(6)]],
+    device const float* coeff1 [[buffer(7)]],
+    constant uint& cols [[buffer(8)]],
+    constant uint& inner [[buffer(9)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= cols) {
+        return;
+    }
+    float2 sum = fp8_vec_dot_pair(act0, act1, weights, scales, row, inner, lane);
+    if (lane == 0u) {
+        dest0[row] += sum.x * coeff0[0];
+        dest1[row] += sum.y * coeff1[0];
+    }
+}
+
+kernel void gdn_in_proj_fp8_pair(
+    device const float* act0 [[buffer(0)]],
+    device const float* act1 [[buffer(1)]],
+    device const uchar* qkv_w [[buffer(2)]],
+    device const uchar* qkv_s [[buffer(3)]],
+    device const uchar* z_w [[buffer(4)]],
+    device const uchar* z_s [[buffer(5)]],
+    device const uchar* a_w [[buffer(6)]],
+    device const uchar* a_s [[buffer(7)]],
+    device const uchar* b_w [[buffer(8)]],
+    device const uchar* b_s [[buffer(9)]],
+    device float* qkv [[buffer(10)]],
+    device float* z [[buffer(11)]],
+    device float* a [[buffer(12)]],
+    device float* b [[buffer(13)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint job [[threadgroup_position_in_grid]])
+{
+    if (job < 8192u) {
+        float2 sum = fp8_vec_dot_pair(act0, act1, qkv_w, qkv_s, job, 2048u, lane);
+        if (lane == 0u) {
+            qkv[job] = sum.x;
+            qkv[8192u + job] = sum.y;
+        }
+        return;
+    }
+    if (job < 12288u) {
+        uint row = job - 8192u;
+        float2 sum = fp8_vec_dot_pair(act0, act1, z_w, z_s, row, 2048u, lane);
+        if (lane == 0u) {
+            z[row] = sum.x;
+            z[4096u + row] = sum.y;
+        }
+        return;
+    }
+    if (job < 12320u) {
+        uint row = job - 12288u;
+        float2 sum = fp8_vec_dot_pair(act0, act1, a_w, a_s, row, 2048u, lane);
+        if (lane == 0u) {
+            a[row] = sum.x;
+            a[32u + row] = sum.y;
+        }
+        return;
+    }
+    if (job < 12352u) {
+        uint row = job - 12320u;
+        float2 sum = fp8_vec_dot_pair(act0, act1, b_w, b_s, row, 2048u, lane);
+        if (lane == 0u) {
+            b[row] = sum.x;
+            b[32u + row] = sum.y;
+        }
+    }
+}
+
+kernel void attn_qkv_fp8_pair(
+    device const float* act0 [[buffer(0)]],
+    device const float* act1 [[buffer(1)]],
+    device const uchar* q_w [[buffer(2)]],
+    device const uchar* q_s [[buffer(3)]],
+    device const uchar* k_w [[buffer(4)]],
+    device const uchar* k_s [[buffer(5)]],
+    device const uchar* v_w [[buffer(6)]],
+    device const uchar* v_s [[buffer(7)]],
+    device float* query [[buffer(8)]],
+    device float* key [[buffer(9)]],
+    device float* value [[buffer(10)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint job [[threadgroup_position_in_grid]])
+{
+    if (job < 8192u) {
+        float2 sum = fp8_vec_dot_pair(act0, act1, q_w, q_s, job, 2048u, lane);
+        if (lane == 0u) {
+            query[job] = sum.x;
+            query[8192u + job] = sum.y;
+        }
+        return;
+    }
+    if (job < 8704u) {
+        uint row = job - 8192u;
+        float2 sum = fp8_vec_dot_pair(act0, act1, k_w, k_s, row, 2048u, lane);
+        if (lane == 0u) {
+            key[row] = sum.x;
+            key[512u + row] = sum.y;
+        }
+        return;
+    }
+    if (job < 9216u) {
+        uint row = job - 8704u;
+        float2 sum = fp8_vec_dot_pair(act0, act1, v_w, v_s, row, 2048u, lane);
+        if (lane == 0u) {
+            value[row] = sum.x;
+            value[512u + row] = sum.y;
+        }
+    }
+}
+
+// Shared expert gate and up, one weight read for both tokens.
+kernel void shared_gate_silu_pair(
+    device const float* act0 [[buffer(0)]],
+    device const float* act1 [[buffer(1)]],
+    device const uchar* weights [[buffer(2)]],
+    device const uchar* scales [[buffer(3)]],
+    device float* dest0 [[buffer(4)]],
+    device float* dest1 [[buffer(5)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= 512u) {
+        return;
+    }
+    float2 gate = fp8_vec_dot_pair(act0, act1, weights, scales, row, 2048u, lane);
+    float2 up = fp8_vec_dot_pair(act0, act1, weights, scales, row + 512u, 2048u, lane);
+    if (lane == 0u) {
+        dest0[row] = silu_f(gate.x) * up.x;
+        dest1[row] = silu_f(gate.y) * up.y;
+    }
+}
+
+// Add a per-id delta. A ban passes -inf. One thread owns one id.
+kernel void logit_adjust(
+    device float* scores [[buffer(0)]],
+    device const uint* ids [[buffer(1)]],
+    device const float* delta [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= count) {
+        return;
+    }
+    scores[ids[tid]] += delta[tid];
+}
+
+// Each thread keeps its own top ``k`` (k <= 32). The global top k is the top k
+// of those lists: an id in the global top k is in the top k of its thread.
+kernel void topk_partial(
+    device const float* scores [[buffer(0)]],
+    device float* values [[buffer(1)]],
+    device uint* ids [[buffer(2)]],
+    constant uint& n [[buffer(3)]],
+    constant uint& k [[buffer(4)]],
+    uint tid [[thread_position_in_threadgroup]])
+{
+    float best_v[32];
+    uint best_i[32];
+    uint kept = 0u;
+    uint limit = k < 32u ? k : 32u;
+    for (uint i = tid; i < n; i += 256u) {
+        float value = scores[i];
+        if (kept < limit) {
+            best_v[kept] = value;
+            best_i[kept] = i;
+            kept += 1u;
+            continue;
+        }
+        uint worst = 0u;
+        float worst_v = best_v[0];
+        uint worst_i = best_i[0];
+        for (uint j = 1u; j < limit; ++j) {
+            float other = best_v[j];
+            uint other_i = best_i[j];
+            if (other < worst_v || (other == worst_v && other_i > worst_i)) {
+                worst = j;
+                worst_v = other;
+                worst_i = other_i;
+            }
+        }
+        if (value > worst_v || (value == worst_v && i < worst_i)) {
+            best_v[worst] = value;
+            best_i[worst] = i;
+        }
+    }
+    for (uint j = 0u; j < limit; ++j) {
+        uint slot = tid * limit + j;
+        if (j < kept) {
+            values[slot] = best_v[j];
+            ids[slot] = best_i[j];
+        } else {
+            values[slot] = -INFINITY;
+            ids[slot] = 0u;
+        }
     }
 }

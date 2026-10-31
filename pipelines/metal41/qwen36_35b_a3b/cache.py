@@ -29,7 +29,9 @@ MODES = ("e4m3", "e2m1", "f32")
 _ALIASES = {"fp8": "e4m3", "fp4": "e2m1", "float32": "f32"}
 _CONTEXT_STEP = 2048
 CONTEXT_STEP = _CONTEXT_STEP
-_KV_BUFFERS = 20
+# Ten language full-attention layers, plus the MTP layer.
+FULL_ATTENTION = 11
+KV_BUFFERS = FULL_ATTENTION * 2
 
 
 def kv_mode(name: str | None) -> str:
@@ -58,8 +60,8 @@ def kv_buffer_bytes(mode: str, positions: int) -> int:
 
 
 def cache_bytes(mode: str, positions: int) -> int:
-    """Key and value buffers for the 10 full-attention layers."""
-    return _KV_BUFFERS * kv_buffer_bytes(mode, positions)
+    """Key and value buffers for the language full-attention layers and the MTP layer."""
+    return KV_BUFFERS * kv_buffer_bytes(mode, positions)
 
 
 def fit_positions(

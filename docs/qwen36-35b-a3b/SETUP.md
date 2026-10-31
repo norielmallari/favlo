@@ -87,6 +87,12 @@ uv run favlo --qwen36-35b-a3b setup --repo example-org/example-model --expert-fp
 
 The first command packs `models/Qwen3.6-35B-A3B-fp4`. The second packs `models/example-model-fp8-e100`. `quantize` accepts the same `--expert-fp8` and does not download. With no `--src`, it reads `models/Qwen3.6-35B-A3B-bf16`. `--src` names another checkout. After a successful quantize, a checkout under `models/` is removed. `--keep-bf16` leaves it. A `--src` outside `models/` is left in place.
 
+`mtp-fp8` rewrites the MTP block of a finished record from a local checkout. Every MTP routed expert and the dense MTP matrices are stored as fp8. Language experts stay as packed. The checkout is left in place.
+
+```bash
+uv run favlo --qwen36-35b-a3b mtp-fp8 --src /path/to/checkout --record models/Qwen3.6-35B-A3B-fp8-e20
+```
+
 ## Another checkpoint
 
 `setup` can download a different Hugging Face repository that uses the same tensor names as [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B). With no `--name`, the folder and the registry id are the model name plus the quant format. The default is `fp8-e20`.

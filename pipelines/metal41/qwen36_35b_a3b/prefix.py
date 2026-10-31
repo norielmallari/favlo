@@ -22,9 +22,9 @@ from favlo.prefix import (
     default_prefix_dir,
     read_regions,
 )
-from qwen36_35b_a3b.cache import kv_buffer_bytes
+from qwen36_35b_a3b.cache import FULL_ATTENTION, kv_buffer_bytes
 
-_SLOTS = 10
+_SLOTS = FULL_ATTENTION
 _KV = 2
 _HEAD = 256
 _HISTORY_BYTES = 30 * 3 * 8192 * 2
@@ -37,7 +37,7 @@ def open_session(runtime: Any) -> PrefixSession:
             default_prefix_dir(),
             model="qwen36-35b-a3b",
             digest=checkpoint_digest(runtime.root),
-            tag=f"{runtime.kv_cache}-mrope",
+            tag=f"{runtime.kv_cache}-mrope-mtp",
             budget=DEFAULT_BUDGET,
         ),
         CacheAdapter(runtime),

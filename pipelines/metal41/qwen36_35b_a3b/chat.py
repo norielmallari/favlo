@@ -85,6 +85,46 @@ def thinking_token_budget(thinking: bool) -> int | None:
     return configured_thinking_budget()
 
 
+def _mtp_flag(body: dict[str, Any], selection: Any = None) -> bool:
+    """Draft verify. A request field wins. Otherwise the registry row is used.
+
+    A row that omits ``mtp`` is off. Sampling settings do not change the flag.
+    """
+    if "mtp" in body:
+        flag = body["mtp"]
+        if isinstance(flag, bool):
+            return flag
+        message = "mtp must be true or false"
+        raise RuntimeError(message)
+    folder = getattr(selection, "folder", None)
+    if not isinstance(folder, str) or not folder:
+        return False
+    from favlo.registry import model_mtp
+
+    enabled, _depth = model_mtp(folder)
+    return enabled
+
+
+def _mtp_depth(body: dict[str, Any], selection: Any = None) -> int:
+    """Draft length. A request field wins. Otherwise the registry row is used.
+
+    A row that omits ``mtp_depth`` is three. Sampling settings do not change it.
+    """
+    if "mtp_depth" in body:
+        raw = body["mtp_depth"]
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+            message = "mtp_depth must be a positive integer"
+            raise RuntimeError(message)
+        return raw
+    folder = getattr(selection, "folder", None)
+    if not isinstance(folder, str) or not folder:
+        return 3
+    from favlo.registry import model_mtp
+
+    _enabled, depth = model_mtp(folder)
+    return depth
+
+
 def completion_limit(max_position: int, prompt_tokens: int, requested: int | None) -> int:
     """Tokens still available in the checkpoint context, cut by a request cap."""
     room = max(0, int(max_position) - int(prompt_tokens))
@@ -246,6 +286,8 @@ def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any)
     forbid = None if thinking else instruct_forbid(runtime.root)
     emit_tools = body.get("tool_choice") != "none"
     stream = bool(body.get("stream", False))
+    mtp = _mtp_flag(body, selection)
+    mtp_depth = _mtp_depth(body, selection)
     # Grow happens inside generate. A cap taken from the previous cache is 0
     # once the prompt is longer than that cache, and decode never samples.
     requested = requested_limit(body)
@@ -268,6 +310,8 @@ def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any)
             emit_tools,
             forbid,
             frequency=frequency,
+            mtp=mtp,
+            mtp_depth=mtp_depth,
         )
         return
     tokens = runtime.generate(
@@ -285,6 +329,8 @@ def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any)
         thinking_budget=thinking_token_budget(thinking),
         forbid=forbid,
         frequency=frequency,
+        mtp=mtp,
+        mtp_depth=mtp_depth,
     )
     text = decode_text(runtime.root, tokens)
     reasoning, visible = split_thinking(text, thinking)
@@ -390,6 +436,9 @@ def _stream(
     emit_tools: bool = True,
     forbid: set[int] | None = None,
     frequency: float = 0.0,
+    *,
+    mtp: bool = False,
+    mtp_depth: int | None = None,
 ) -> None:
     decode = getattr(runtime, "decode", None)
     if not callable(decode):
@@ -465,6 +514,8 @@ def _stream(
             thinking_budget=thinking_token_budget(thinking),
             forbid=forbid,
             frequency=frequency,
+            mtp=mtp,
+            mtp_depth=mtp_depth,
         )
     finally:
         pending.put(None)

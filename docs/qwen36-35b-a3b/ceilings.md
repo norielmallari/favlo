@@ -45,9 +45,57 @@ That sum is 10.28 ms, 97.25 tok/s. A context of 65536 tokens uses the same proje
 | `kv_pv_split8` | 128 blocks of 512 keys | 20 | 166.3 |
 | `kv_restore_sum` | 128 blocks, 8×256 | 20 | 102.1 |
 
-That token is 17.17 ms, 58.23 tok/s. Those times are the fp4-weight measurement. The byte count is the resident projections, eight expert images per layer, the float16 routers and coefficients, the head, the GDN state read and write, K and V across the visible tokens, the float32 score and probability writes, the float16 probability scratch, and one float scale per row per block. On this record the projections, the shared expert, and the head are fp8 images. Context 2048 is 2,805,787,136 bytes, 9.27 ms, 107.90 tok/s. Context 65536 is 3,577,880,576 bytes, 11.82 ms, 84.61 tok/s. The 90% test for decode uses a kernel ceiling measured on the kernels the forward launches. The rows above are not that measurement. The fp8 decode dot loads both scale blocks of a 2048-wide row before the table lookup. One simdgroup owns one row.
+That token is 17.17 ms, 58.23 tok/s. Those times are the fp4-weight measurement. The byte count is the resident projections, eight expert images per layer, the float16 routers and coefficients, the head, the GDN state read and write, K and V across the visible tokens, the float32 score and probability writes, the float16 probability scratch, and one float scale per row per block. On this record the projections, the shared expert, and the head are fp8 images. Context 2048 is 2,805,787,136 bytes, 9.27 ms, 107.90 tok/s. Context 65536 is 3,577,880,576 bytes, 11.82 ms, 84.61 tok/s. The fp8 decode dot loads both scale blocks of a 2048-wide row before the table lookup. One simdgroup owns one row.
 
-The embed, the query/gate split, RoPE, the top-8 pick, and the key/value store are not in this total.
+The embed, the query/gate split, RoPE, the top-8 pick, and the key/value store are not in the fp4 total above.
+
+## Decode kernels the forward launches
+
+Measured on 30 October 2026. Each kernel is one command buffer, then a wait. The first sample is discarded. The figure is the median of the next four. The sum is every dispatch in the token, including the embed, the query/gate split, RoPE, the top-8 pick, and the key/value store. MTP off is one language token. MTP on is that token plus one draft. A full accept at depth 3 emits three tokens from three language steps and three drafts, and the state copy is once per three tokens, so the MTP-on figure adds one third of the snapshot.
+
+Context 2048, MTP off, is 12.58 ms, 79.50 tok/s.
+
+| Kernel | Count | µs |
+|---|---:|---:|
+| `gather_fp8_row` | 1 | 12.6 |
+| `rmsnorm_f32` | 81 | 5.3 |
+| `gdn_in_proj_fp8` | 30 | 86.1 |
+| `gdn_conv_shift` | 30 | 2.3 |
+| `gdn_state` | 30 | 11.1 |
+| `gemv_fp8_vec_acc` | 40 | 28.2 |
+| `router_coeff` | 40 | 5.4 |
+| `router8` | 40 | 7.1 |
+| `copy_u32` route id | 40 | 2.0 |
+| `moe_gate_silu_w` | 40 | 37.3 |
+| `moe_gate_silu_fp8` | 40 | 10.8 |
+| `moe_down_mix_w` | 40 | 27.6 |
+| `moe_down_mix_fp8` | 40 | 9.9 |
+| `attn_qkv_fp8` | 10 | 68.0 |
+| `split_q_gate` | 10 | 2.5 |
+| `qk_norm_rope` | 10 | 2.9 |
+| `kv_plane_k` | 10 | 2.9 |
+| `kv_tail_store` | 10 | 2.0 |
+| `kv_plane_v` | 10 | 3.3 |
+| `zero_f32` | 20 | 1.7 |
+| `kv_row_init` | 20 | 1.9 |
+| `kv_cast_q` | 20 | 2.0 |
+| `prefill_fp8_m8` | 20 | 28.5 |
+| `kv_softmax_max` | 20 | 3.6 |
+| `kv_softmax_prob` | 20 | 4.0 |
+| `kv_softmax_close` | 20 | 4.0 |
+| `kv_cast_blocks` | 20 | 5.4 |
+| `kv_pv_split8` | 20 | 7.6 |
+| `kv_restore_sum` | 20 | 3.2 |
+| `kv_attend_write` | 20 | 2.1 |
+| `gemv_fp8_vec` head | 1 | 1927.4 |
+
+Context 65536, MTP off, uses the same projections and replaces the attention rows. `prefill_fp8_m8` is 112.0 µs, `kv_softmax_max` 7.4 µs, `kv_softmax_prob` 9.4 µs, `kv_softmax_close` 5.2 µs, `kv_cast_blocks` 8.5 µs, `kv_pv_split8` 48.0 µs, and `kv_restore_sum` 26.0 µs, each 20 calls. That token is 15.89 ms, 62.94 tok/s.
+
+The 90% test for decode uses these kernel ceilings. A draft reads the resident MTP file, the dense MTP matrices, `lm_head` again, and the MTP key/value plane, and it copies the DeltaNet state and the convolution history. Those extra bytes are 637,570,048 at context 2048 and 704,613,376 at context 65536. Added to the language byte count, context 2048 is 3,443,357,184 bytes, 11.37 ms, 87.92 tok/s, and context 65536 is 4,282,493,952 bytes, 14.15 ms, 70.69 tok/s.
+
+One draft at context 2048, without the snapshot, is 2.35 ms. The snapshot is 481.9 µs. MTP on at context 2048 is 15.09 ms, 66.25 tok/s. MTP on at context 65536 is 18.74 ms, 53.36 tok/s. The draft's head is `gemv_fp8_vec` at 1895.6 µs, and `argmax_span` plus `argmax_index` are 9.8 µs.
+
+Those MTP-on figures are the serial verify: one language token plus one draft. The paired verify is a different forward. `gemv_fp8_pair`, `gdn_in_proj_fp8_pair`, `attn_qkv_fp8_pair`, and `shared_gate_silu_pair` read each dense fp8 weight once for two activation rows. Gated DeltaNet, attention, and the routed experts still run once per token. On 31 October 2026 an M5 Pro with 48 GB timed `gemv_fp8_pair` against `gemv_fp8_vec`, one command buffer then a wait, the first sample discarded, the median of the next four. At 8192 rows the pair took 264.9 µs and the single row 194.1 µs. At 248320 rows the pair took 1861.6 µs and the single row 2252.2 µs. The pair step has not been timed as its own kernel sum.
 
 ## Prefill
 

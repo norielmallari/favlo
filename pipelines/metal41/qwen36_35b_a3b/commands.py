@@ -27,7 +27,7 @@ from favlo.registry import (
 )
 from qwen36_35b_a3b.chat import STOP, decode_text, encode_chat, instruct_forbid
 from qwen36_35b_a3b.checks import format_report, run_checks
-from qwen36_35b_a3b.convert import quantize, record_name
+from qwen36_35b_a3b.convert import quantize, record_name, requant_mtp
 from qwen36_35b_a3b.fetch import (
     REPO,
     download,
@@ -179,6 +179,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="leave the BF16 checkout under models/ after a successful quantize",
     )
     setup.add_argument("--console", choices=("auto", "pretty", "plain", "json"), default="auto")
+    mtp = sub.add_parser("mtp-fp8", help="store every MTP matrix as fp8 from a local checkout")
+    mtp.add_argument("--src", type=Path, required=True, help="local BF16 checkout")
+    mtp.add_argument("--record", type=Path, required=True, help="finished packed record")
     delete = sub.add_parser("delete", help="remove a packed model and its registry row")
     delete.add_argument("model", help="folder name or alias")
     models = sub.add_parser("models", help="list or edit the flavor registry")
@@ -200,6 +203,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _kernels()
     if args.command == "quantize":
         return _quantize(args)
+    if args.command == "mtp-fp8":
+        return _mtp_fp8(args)
     if args.command == "setup":
         return _setup(args)
     if args.command == "delete":
@@ -208,6 +213,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _complete(args)
     sys.stderr.write("qwen36-35b-a3b bf16 layer check is not this command\n")
     return 1
+
+
+def _mtp_fp8(args: argparse.Namespace) -> int:
+    """Rewrite the MTP block of a finished record. Language experts stay."""
+    requant_mtp(args.src, args.record)
+    return 0
 
 
 def _setup(args: argparse.Namespace) -> int:

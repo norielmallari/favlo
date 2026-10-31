@@ -83,6 +83,44 @@ On 25 October 2026 the same command ran after the resident projections restored 
 
 The summary is prefill 676.53 tok/s (663 tok in 0.98 s) and decode 63.48 tok/s (405 tok in 6.38 s).
 
+On 31 October 2026 the same command ran on an M5 Pro with 48 GB, on `Qwen3.6-35B-A3B-fp8-e20`, with MTP on. The harness printed `mtp on depth 3`. The language forward verifies one draft. The hidden suite passed. It reached 3436 prompt tokens over six requests.
+
+| Request | Prompt tokens | Cache | Prefill | Decode |
+|---|---:|---|---|---|
+| 1 | 1998 | miss | 698.12 tok/s (1998 tok in 2.86 s) | 44.88 tok/s (341 tok in 7.60 s) |
+| 2 | 2532 | prefix load 1998, hit 1998 | 564.90 tok/s (534 tok in 0.95 s) | 44.17 tok/s (157 tok in 3.55 s) |
+| 3 | 2773 | prefix load 2532, hit 2532 | 410.13 tok/s (241 tok in 0.59 s) | 45.02 tok/s (119 tok in 2.64 s) |
+| 4 | 3091 | hit 2892 | 322.50 tok/s (199 tok in 0.62 s) | 43.13 tok/s (159 tok in 3.69 s) |
+| 5 | 3288 | hit 3250 | 175.79 tok/s (38 tok in 0.22 s) | 41.30 tok/s (89 tok in 2.16 s) |
+| 6 | 3436 | hit 3377 | 214.87 tok/s (59 tok in 0.27 s) | 40.66 tok/s (339 tok in 8.34 s) |
+
+The summary is prefill 556.99 tok/s (3069 tok in 5.51 s) and decode 43.03 tok/s (1204 tok in 27.98 s).
+
+Later the same day the same command ran again on that machine and record, with MTP on. The harness printed `mtp on depth 3`. The language forward verifies one draft. The hidden suite passed. It reached 3512 prompt tokens over seven requests.
+
+| Request | Prompt tokens | Cache | Prefill | Decode |
+|---|---:|---|---|---|
+| 1 | 1998 | miss | 705.67 tok/s (1998 tok in 2.83 s) | 46.46 tok/s (401 tok in 8.63 s) |
+| 2 | 2592 | prefix load 1998, hit 1998 | 585.40 tok/s (594 tok in 1.01 s) | 44.21 tok/s (101 tok in 2.28 s) |
+| 3 | 2777 | prefix load 2592, hit 2592 | 374.21 tok/s (185 tok in 0.49 s) | 45.49 tok/s (110 tok in 2.42 s) |
+| 4 | 3086 | hit 2887 | 386.56 tok/s (199 tok in 0.51 s) | 40.35 tok/s (119 tok in 2.95 s) |
+| 5 | 3243 | hit 3205 | 175.93 tok/s (38 tok in 0.22 s) | 39.93 tok/s (108 tok in 2.70 s) |
+| 6 | 3382 | hit 3351 | 154.98 tok/s (31 tok in 0.20 s) | 34.14 tok/s (71 tok in 2.08 s) |
+| 7 | 3512 | hit 3453 | 220.53 tok/s (59 tok in 0.27 s) | 39.79 tok/s (188 tok in 4.72 s) |
+
+The summary is prefill 561.30 tok/s (3104 tok in 5.53 s) and decode 42.59 tok/s (1098 tok in 25.78 s).
+
+## Greedy smoke
+
+`tests/test_qwen36_35b_a3b_smoke.py` on 31 October 2026, on an M5 Pro with 48 GB, on `Qwen3.6-35B-A3B-fp8-e20`. The greedy carrot ran twice. The second run set `mtp` and printed `mtp depth 3`. It kept 67 of 82 drafts. The instruct card and the thinking card omit `mtp`.
+
+| Case | Prefill | Decode |
+|---|---|---|
+| Greedy, MTP off | 176.29 tok/s (51 tok in 0.29 s) | 68.94 tok/s (108 tok in 1.57 s) |
+| Greedy, MTP on | 212.43 tok/s (51 tok in 0.24 s) | 57.54 tok/s (149 tok in 2.59 s) |
+| Instruct card | 245.73 tok/s (51 tok in 0.21 s) | 63.63 tok/s (154 tok in 2.42 s) |
+| Thinking card, seed 0 | 237.91 tok/s (49 tok in 0.21 s) | 64.59 tok/s (549 tok in 8.50 s) |
+
 ## File agent, 16GiB
 
 Same instruct card as the file agent above, on the earlier fp4 record. The command passes a memory cap, so the atlas holds fewer than every expert image:

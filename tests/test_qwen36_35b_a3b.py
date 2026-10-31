@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 from qwen36_35b_a3b.atlas import atlas_slots
 from qwen36_35b_a3b.cache import (
+    cache_bytes,
     fit_positions,
     kv_buffer_bytes,
     kv_mode,
@@ -1204,11 +1205,11 @@ def test_context_shrinks_to_the_bytes_the_cache_can_hold() -> None:
     fixed = 1000
     def nothing(_positions: int) -> int:
         return 0
-    full = fixed + 20 * kv_buffer_bytes(mode, 8192)
+    full = fixed + cache_bytes(mode, 8192)
     assert fit_positions(full, fixed, mode, limit, nothing, keep=0) == 8192
-    one = 20 * kv_buffer_bytes(mode, 2048)
+    one = cache_bytes(mode, 2048)
     assert fit_positions(full, fixed, mode, limit, nothing, keep=one) == 6144
-    short = fixed + 20 * kv_buffer_bytes(mode, 4096) - 1
+    short = fixed + cache_bytes(mode, 4096) - 1
     assert fit_positions(short, fixed, mode, limit, nothing, keep=0) == 2048
     assert fit_positions(fixed, fixed, mode, limit, nothing, keep=0) is None
     wider = fit_positions(full, fixed, "f32", limit, nothing, keep=0)
@@ -1226,7 +1227,7 @@ def test_a_tight_budget_keeps_context_by_shrinking_the_atlas() -> None:
     image = 1_671_168
     eight = 8 * image
     layer = 256 * image
-    budget = fixed + 20 * kv_buffer_bytes(mode, limit) + eight
+    budget = fixed + cache_bytes(mode, limit) + eight
     assert fit_positions(budget, fixed, mode, limit, nothing, keep=eight) == limit
     assert fit_positions(budget, fixed, mode, limit, nothing, keep=layer) is None
 
@@ -1297,3 +1298,102 @@ def test_kernels_match_the_host_formulas() -> None:
     report = run_checks()
     failed = [name for name, ok, _detail in report["rows"] if not ok]
     assert report["ok"], failed
+
+
+def test_mtp_partial_top_matches_the_full_distribution() -> None:
+    import numpy as np
+
+    from qwen36_35b_a3b.speculate import candidate_probs, merge_top
+
+    scores = np.arange(5000, dtype=np.float32)
+    scores[10] = 10000
+    threads = 256
+    k = 20
+    values = np.full(threads * k, -np.inf, dtype=np.float32)
+    ids = np.zeros(threads * k, dtype=np.uint32)
+    for tid in range(threads):
+        kept: list[tuple[float, int]] = []
+        for index in range(tid, scores.size, threads):
+            value = float(scores[index])
+            if len(kept) < k:
+                kept.append((value, index))
+                continue
+            worst = min(range(k), key=lambda slot: (kept[slot][0], -kept[slot][1]))
+            if value > kept[worst][0] or (value == kept[worst][0] and index < kept[worst][1]):
+                kept[worst] = (value, index)
+        for slot, (value, index) in enumerate(kept):
+            values[tid * k + slot] = value
+            ids[tid * k + slot] = index
+    got_i, got_p = merge_top(values, ids, k, 1.0, 0.95)
+    exp_i, exp_p = candidate_probs(scores, 1.0, 0.95, k)
+    assert np.array_equal(np.sort(got_i), np.sort(exp_i))
+    order = np.argsort(got_i)
+    exp_order = np.argsort(exp_i)
+    assert np.allclose(got_p[order], exp_p[exp_order])
+
+
+def test_mtp_temperature_zero_is_the_argmax() -> None:
+    import numpy as np
+
+    from qwen36_35b_a3b.speculate import candidate_probs, keep_draft
+
+    scores = np.asarray([0.2, 3.0, 1.0], dtype=np.float32)
+    idx, probs = candidate_probs(scores, 0.0, 0.95, 20)
+    assert int(idx[0]) == 1
+    assert float(probs[0]) == 1.0
+    same = np.asarray([1], dtype=np.int64)
+    one = np.asarray([1.0], dtype=np.float64)
+    other = np.asarray([0], dtype=np.int64)
+    kept, token = keep_draft(1, same, one, same, one)
+    assert kept and token == 1
+    kept, token = keep_draft(1, other, one, same, one)
+    assert not kept
+    assert token == 0
+
+
+def test_mtp_equal_distributions_keep_the_draft() -> None:
+    import numpy as np
+
+    from qwen36_35b_a3b.speculate import keep_draft
+
+    idx = np.asarray([4, 9], dtype=np.int64)
+    probs = np.asarray([0.25, 0.75], dtype=np.float64)
+    kept, token = keep_draft(9, idx, probs, idx, probs)
+    assert kept and token == 9
+
+
+def test_mtp_draft_window_stops_at_a_stop_id() -> None:
+    from qwen36_35b_a3b.speculate import draft_window
+
+    feeds, expected = draft_window(7, [8, 9, 10], {9}, 3)
+    assert feeds == [7, 8]
+    assert expected == [8, 9]
+    feeds, expected = draft_window(7, [8, 9], set(), 1)
+    assert feeds == [7]
+    assert expected == [8]
+    feeds, expected = draft_window(7, [], set(), 3)
+    assert feeds == [7]
+    assert expected == []
+
+
+def test_mtp_flag_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from qwen36_35b_a3b.chat import _mtp_depth, _mtp_flag
+
+    body = {"temperature": 0.7, "presence_penalty": 1.5, "enable_thinking": False}
+    assert _mtp_flag(body) is False
+    assert _mtp_flag({**body, "mtp": False}) is False
+    assert _mtp_flag({**body, "mtp": True}) is True
+    monkeypatch.setattr("favlo.registry.model_mtp", lambda folder, root=None: (True, 4))
+    row = SimpleNamespace(folder="example-model")
+    assert _mtp_flag(body, row) is True
+    assert _mtp_depth(body, row) == 4
+    assert _mtp_flag({**body, "mtp": False}, row) is False
+    assert _mtp_depth({**body, "mtp_depth": 2}, row) == 2
+    with pytest.raises(RuntimeError, match="true or false"):
+        _mtp_flag({"mtp": 1})
+    assert _mtp_depth({}) == 3
+    assert _mtp_depth({"mtp_depth": 4}) == 4
+    with pytest.raises(RuntimeError, match="positive integer"):
+        _mtp_depth({"mtp_depth": True})

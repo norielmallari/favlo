@@ -622,3 +622,114 @@ def quantize(
             if not target.exists():
                 target.write_bytes(src_file.read_bytes())
     return output
+
+
+def requant_mtp(src: Path, output: Path) -> Path:
+    """Store every MTP routed expert and the dense MTP matrices as fp8.
+
+    Language experts stay as they are. ``src`` is a local BF16 checkout with
+    the same tensor names. A finished record is updated in place.
+    """
+    src = src.expanduser().resolve()
+    output = output.expanduser().resolve()
+    manifest_path = output / "manifest.json"
+    if not manifest_path.is_file():
+        message = f"{output.name} has no manifest.json"
+        raise RuntimeError(message)
+    manifest = json.loads(manifest_path.read_text())
+    if not manifest.get("complete"):
+        message = f"{output.name} is not a finished record"
+        raise RuntimeError(message)
+    index = json.loads((src / "model.safetensors.index.json").read_text())
+    weight_map: dict[str, str] = index["weight_map"]
+    names = [name for name in weight_map if name.startswith("mtp.")]
+    if not names:
+        message = "checkout has no MTP tensors"
+        raise RuntimeError(message)
+    shards: dict[str, list[str]] = {}
+    for name in names:
+        shards.setdefault(weight_map[name], []).append(name)
+    resident = output / "resident.bin"
+    done = dict(manifest["tensors"])
+    pending: dict[str, dict[str, np.ndarray]] = {}
+    staged: dict[Path, dict[str, tuple[str, list[tuple[bytes, bytes]]]]] = {}
+    mtp_all = set(range(MTP_EXPERTS))
+    language: set[tuple[int, int]] = set()
+    for shard in sorted(shards):
+        path = src / shard
+        header, base = _header(path)
+        print(f"mtp shard {shard}", flush=True)
+        for name in shards[shard]:
+            array = _load(path, header, base, name)
+            expert = _expert_file(output, name)
+            if expert is not None:
+                kind = "gate_up" if name.endswith("gate_up_proj") else "down"
+                print(f"  {name}", flush=True)
+                committed = _stage_expert(
+                    staged, expert[0], name, array, kind, output, language, mtp_all
+                )
+                del array
+                if committed is not None:
+                    done.update(committed)
+                continue
+            if name.endswith("shared_expert.gate_proj.weight") or name.endswith(
+                "shared_expert.up_proj.weight"
+            ):
+                key = name.rsplit(".", 2)[0]
+                slot = pending.setdefault(key, {})
+                slot["gate" if name.endswith("gate_proj.weight") else "up"] = array
+                if "gate" not in slot or "up" not in slot:
+                    continue
+                fused = np.concatenate([slot.pop("gate"), slot.pop("up")], axis=0)
+                pending.pop(key, None)
+                blob, body = _fp8_entry(fused)
+                offset = _append(resident, blob)
+                done[key + ".gate_up"] = {**body, "file": "resident.bin", "offset": offset}
+                print(f"  {key}.gate_up", flush=True)
+                del array
+                del fused
+                continue
+            if _keep_f16(name):
+                blob, body = _f16_entry(array)
+                offset = _append(resident, blob)
+                done[name] = {**body, "file": "resident.bin", "offset": offset}
+            else:
+                matrix = array
+                if matrix.ndim > 2:
+                    matrix = matrix.reshape(matrix.shape[0], -1)
+                blob, body = _fp8_entry(matrix)
+                offset = _append(resident, blob)
+                done[name] = {
+                    **body,
+                    "file": "resident.bin",
+                    "offset": offset,
+                    "logical_shape": list(array.shape),
+                }
+            print(f"  {name}", flush=True)
+            del array
+    if pending:
+        message = f"shared expert pair is incomplete: {sorted(pending)}"
+        raise RuntimeError(message)
+    if staged:
+        message = f"routed expert pair is incomplete: {sorted(path.name for path in staged)}"
+        raise RuntimeError(message)
+    mtp_widths = np.full((1, MTP_EXPERTS), 8, dtype=np.uint8)
+    mtp_offsets = expert_offsets(mtp_widths)
+    folder = output / "experts"
+    _replace_bytes(folder / "mtp.widths", mtp_widths.tobytes())
+    _replace_bytes(folder / "mtp.offsets", np.ascontiguousarray(mtp_offsets, dtype="<u8").tobytes())
+    mtp_path = folder / "mtp.bin"
+    expect = int(mtp_offsets[0, -1]) + expert_bytes(8)
+    got = mtp_path.stat().st_size
+    if got != expect:
+        message = f"mtp.bin is {got} bytes"
+        raise RuntimeError(message)
+    manifest["tensors"] = done
+    manifest["mtp_expert_fp8"] = MTP_EXPERTS
+    manifest["mtp_expert_fp4"] = 0
+    manifest["mtp_quant"] = "fp8"
+    tmp = manifest_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(manifest))
+    os.replace(tmp, manifest_path)
+    print(f"mtp fp8 {MTP_EXPERTS} experts", flush=True)
+    return output
