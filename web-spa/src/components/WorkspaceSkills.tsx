@@ -1,9 +1,12 @@
 import { useState } from 'react';
-import { Text, TextInput, View } from 'react-native';
+import { Text, View } from 'react-native';
 
 import { api, idempotencyKey } from '@/api/client';
 import { Modal } from '@/components/Modal';
+import { FeatherIcon } from '@/components/FeatherIcon';
+import { buttonRow, IconButton } from '@/components/IconButton';
 import { Pressable } from '@/components/Pressable';
+import { SkillForm } from '@/components/SkillForm';
 import { useTheme } from '@/theme/Theme';
 import { radius, space } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
@@ -13,6 +16,7 @@ export type WorkspaceSkill = {
   workspace_id: string;
   name: string;
   description: string;
+  definition?: string;
   revision: number;
 };
 
@@ -28,38 +32,53 @@ export function WorkspaceSkills({
   onClose: () => void;
 }) {
   const { palette } = useTheme();
-  const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const canAdd = name.trim() !== '';
+  const [pane, setPane] = useState<'list' | 'form'>('list');
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [token, setToken] = useState(0);
+  const selected = skills.find((item) => item.id === selectedId) ?? null;
 
-  async function addSkill() {
-    if (!canAdd) {
-      return;
-    }
-    try {
+  function openNew() {
+    setCreating(true);
+    setSelectedId(null);
+    setToken((current) => current + 1);
+    setPane('form');
+  }
+
+  function openSkill(skill: WorkspaceSkill) {
+    setCreating(false);
+    setSelectedId(skill.id);
+    setPane('form');
+  }
+
+  async function save(fields: { name: string; description: string }) {
+    if (creating || selected == null) {
       const created = await api<WorkspaceSkill>(`/workspaces/${workspaceId}/skills`, {
         method: 'POST',
         headers: { 'Idempotency-Key': idempotencyKey() },
-        body: JSON.stringify({ name: name.trim(), description: description.trim() }),
+        body: JSON.stringify(fields),
       });
       onChange([...skills.filter((item) => item.id !== created.id), created]);
-      setName('');
-      setDescription('');
-      setError(null);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'The skill was not added.');
+      setCreating(false);
+      setSelectedId(created.id);
+      return;
     }
+    const saved = await api<WorkspaceSkill>(`/workspaces/${workspaceId}/skills/${selected.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ ...fields, expected_revision: selected.revision }),
+    });
+    onChange(skills.map((item) => (item.id === saved.id ? saved : item)));
   }
 
-  async function removeSkill(skill: WorkspaceSkill) {
-    try {
-      await api(`/workspaces/${workspaceId}/skills/${skill.id}`, { method: 'DELETE' });
-      onChange(skills.filter((item) => item.id !== skill.id));
-      setError(null);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'The skill was not deleted.');
+  async function remove() {
+    if (selected == null) {
+      return;
     }
+    await api(`/workspaces/${workspaceId}/skills/${selected.id}`, { method: 'DELETE' });
+    onChange(skills.filter((item) => item.id !== selected.id));
+    setSelectedId(null);
+    setCreating(false);
+    setPane('list');
   }
 
   return (
@@ -70,70 +89,39 @@ export function WorkspaceSkills({
       <Text style={textStyle('small', palette.textSecondary)}>
         Any agent in this workspace uses these skills.
       </Text>
-      {skills.length === 0 ? (
-        <Text style={textStyle('small', palette.textSecondary)}>No skills</Text>
-      ) : (
-        <View accessibilityLabel="Skill list" style={{ gap: space[3] }}>
-          {skills.map((item) => (
-            <View key={item.id} style={{ gap: space[1] }}>
-              <Text style={textStyle('body', palette.textPrimary, '600')}>{item.name}</Text>
-              {item.description ? (
-                <Text style={textStyle('small', palette.textSecondary)}>{item.description}</Text>
-              ) : null}
+      {pane === 'list' ? (
+        <View accessibilityLabel="Workspace skills" style={{ gap: space[3] }}>
+          {skills.length === 0 ? (
+            <Text style={textStyle('small', palette.textSecondary)}>No skills</Text>
+          ) : (
+            skills.map((item) => (
               <Pressable
+                key={item.id}
                 accessibilityRole="button"
-                accessibilityLabel={`Delete ${item.name}`}
-                onPress={() => void removeSkill(item)}
-                style={barButton(palette.surface, palette.borderStrong)}
+                accessibilityLabel={item.name}
+                onPress={() => openSkill(item)}
+                style={[barButton(palette.surface, palette.borderStrong), { flexDirection: 'row', gap: space[2], alignSelf: 'flex-start' }]}
               >
-                <Text style={textStyle('small', palette.textPrimary)}>Delete</Text>
+                <FeatherIcon name="book-open" size={18} color={palette.textPrimary} />
+                <Text style={textStyle('body', palette.textPrimary, '600')}>{item.name}</Text>
               </Pressable>
-            </View>
-          ))}
+            ))
+          )}
+          <IconButton icon="plus" label="New skill" onPress={openNew} background={palette.accent} color={palette.onAccent} />
+        </View>
+      ) : (
+        <View style={{ gap: space[3] }}>
+          <IconButton icon="arrow-left" label="Back" accessibilityLabel="Back to skills" onPress={() => setPane('list')} background="transparent" border="transparent" color={palette.accent} />
+          <SkillForm
+            key={creating ? `new-${token}` : `${selected?.id}:${selected?.revision}`}
+            skill={creating ? null : selected}
+            onSave={save}
+            onDelete={selected == null ? undefined : remove}
+          />
         </View>
       )}
-      <TextInput
-        accessibilityLabel="Skill name"
-        value={name}
-        onChangeText={setName}
-        style={fieldStyle(palette)}
-      />
-      <TextInput
-        accessibilityLabel="Skill description"
-        value={description}
-        onChangeText={setDescription}
-        multiline
-        style={[fieldStyle(palette), { minHeight: 88, paddingVertical: 12 }]}
-      />
-      {error ? (
-        <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={textStyle('small', palette.danger)}>
-          {error}
-        </Text>
-      ) : null}
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="Add skill"
-        accessibilityState={{ disabled: !canAdd }}
-        disabled={!canAdd}
-        onPress={() => void addSkill()}
-        style={barButton(canAdd ? palette.accent : palette.disabledSurface, palette.accent)}
-      >
-        <Text style={textStyle('small', canAdd ? palette.onAccent : palette.disabledText, '600')}>Add skill</Text>
-      </Pressable>
     </Modal>
   );
-}
-
-function fieldStyle(palette: { textPrimary: string; surface: string; borderStrong: string }) {
-  return {
-    ...textStyle('body', palette.textPrimary),
-    minHeight: 44,
-    borderWidth: 1,
-    borderColor: palette.borderStrong,
-    borderRadius: radius.control,
-    paddingHorizontal: 12,
-    backgroundColor: palette.surface,
-  };
 }
 
 function barButton(background: string, border: string) {

@@ -12,7 +12,14 @@ from web_api.conversation import GROUP_NAME as CONVERSATION_NAME
 from web_api.heartbeat_tools import GROUP_ID as HEARTBEAT_ID
 from web_api.heartbeat_tools import GROUP_NAME as HEARTBEAT_NAME
 from web_api.http import json_body, key
-from web_api.schemas import AgentCreate, AgentSkillCreate, AgentUpdate, SkillUpdate
+from web_api.schemas import (
+    AgentCreate,
+    AgentSkillCreate,
+    AgentUpdate,
+    GlobalSkillCreate,
+    SkillCopy,
+    SkillUpdate,
+)
 from web_api.session_tools import GROUP_ID as SESSION_ID
 from web_api.session_tools import GROUP_NAME as SESSION_NAME
 
@@ -107,6 +114,60 @@ async def delete_agent_skill(skill_id: str, request: Request):
     for event in events:
         await request.app.state.bus.publish(event)
     return json_body(200, result)
+
+
+@router.get("/global-skills")
+async def list_global_skills(request: Request):
+    rows = await asyncio.to_thread(request.app.state.store.list_global_skills)
+    return json_body(200, {"skills": rows})
+
+
+@router.post("/global-skills")
+async def create_global_skill(body: GlobalSkillCreate, request: Request):
+    status, result, events = await asyncio.to_thread(
+        request.app.state.store.create_global_skill,
+        key(request),
+        body.model_dump(),
+    )
+    for event in events:
+        await request.app.state.bus.publish(event)
+    return json_body(status, result)
+
+
+@router.patch("/global-skills/{skill_id}")
+async def update_global_skill(skill_id: str, body: SkillUpdate, request: Request):
+    updated, events = await asyncio.to_thread(
+        request.app.state.store.update_global_skill,
+        skill_id,
+        body.model_dump(),
+    )
+    for event in events:
+        await request.app.state.bus.publish(event)
+    return json_body(200, updated)
+
+
+@router.delete("/global-skills/{skill_id}")
+async def delete_global_skill(skill_id: str, request: Request):
+    result, events = await asyncio.to_thread(
+        request.app.state.store.delete_global_skill,
+        skill_id,
+    )
+    for event in events:
+        await request.app.state.bus.publish(event)
+    return json_body(200, result)
+
+
+@router.post("/global-skills/{skill_id}/copy")
+async def copy_global_skill(skill_id: str, body: SkillCopy, request: Request):
+    status, result, events = await asyncio.to_thread(
+        request.app.state.store.copy_global_skill,
+        key(request),
+        skill_id,
+        body.model_dump(),
+    )
+    for event in events:
+        await request.app.state.bus.publish(event)
+    return json_body(status, result)
 
 
 @router.delete("/agents/{agent_id}")

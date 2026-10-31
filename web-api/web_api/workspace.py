@@ -30,10 +30,13 @@ def skills_text(skills: list[dict[str, Any]]) -> str | None:
         if not name:
             continue
         description = str(skill.get("description") or "").strip()
-        block = f"## {name}"
+        definition = str(skill.get("definition") or "").strip()
+        parts = [f"## {name}"]
         if description:
-            block = f"{block}\n\n{description}"
-        blocks.append(block)
+            parts.append(description)
+        if definition:
+            parts.append(definition)
+        blocks.append("\n\n".join(parts))
     if len(blocks) == 1:
         return None
     return "\n\n".join(blocks)

@@ -1,6 +1,9 @@
+import { useRouter } from 'expo-router';
 import { createElement, useEffect, useState, type ReactNode } from 'react';
 import { Platform, Text, useWindowDimensions, View } from 'react-native';
 
+import { FeatherIcon } from '@/components/FeatherIcon';
+import { IconButton } from '@/components/IconButton';
 import { Pressable } from '@/components/Pressable';
 import { useTheme, type Preference } from '@/theme/Theme';
 import { radius, space, z } from '@/theme/tokens';
@@ -20,6 +23,7 @@ export function Frame({
   link: { label: string; onPress: () => void };
   title?: string;
 }) {
+  const router = useRouter();
   const { palette, preference, setPreference } = useTheme();
   const { width } = useWindowDimensions();
   const narrow = width < 1024;
@@ -74,20 +78,29 @@ export function Frame({
         }}
       >
         {onSkip ? (
-          <Pressable
+          <IconButton
             testID="skip-to-message"
-            accessibilityRole="link"
-            accessibilityLabel="Skip to message"
+            role="link"
+            icon="corner-right-down"
+            label="Skip to message"
             onPress={onSkip}
-            style={target}
-          >
-            <Text style={textStyle('small', palette.accent)}>Skip to message</Text>
-          </Pressable>
+            background="transparent"
+            border="transparent"
+            color={palette.accent}
+          />
         ) : null}
-        <Text accessibilityRole="header" style={textStyle('title', palette.textPrimary)}>
-          Favlo
-        </Text>
-        <View style={{ marginLeft: narrow ? 0 : 'auto', position: 'relative' }}>
+        <Pressable accessibilityRole="link" accessibilityLabel="Favlo" onPress={() => router.push('/')} style={target}>
+          <Text accessibilityRole="header" style={textStyle('title', palette.textPrimary)}>
+            Favlo
+          </Text>
+        </Pressable>
+        <View
+          testID="banner-slot"
+          style={{ flexDirection: 'row', alignItems: 'center', gap: space[2], flexShrink: 1, minWidth: 0 }}
+        />
+        <View style={{ marginLeft: narrow ? 0 : 'auto', flexDirection: 'row', alignItems: 'center' }}>
+          <View testID="banner-actions" style={{ flexDirection: 'row', alignItems: 'center' }} />
+          <View style={{ position: 'relative' }}>
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={`Appearance, ${APPEARANCE[preference]}`}
@@ -140,26 +153,56 @@ export function Frame({
                     }}
                     style={{
                       minHeight: 44,
-                      justifyContent: 'center',
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: space[2],
                       paddingHorizontal: space[3],
                       borderRadius: radius.control,
                       backgroundColor: selected ? palette.accentSubtle : palette.surfaceRaised,
                     }}
                   >
+                    <FeatherIcon name={item === 'light' ? 'sun' : item === 'dark' ? 'moon' : 'monitor'} size={18} color={palette.textPrimary} />
                     <Text style={textStyle('label', palette.textPrimary, selected ? '600' : '400')}>{APPEARANCE[item]}</Text>
                   </Pressable>
                 );
               })}
             </View>
           ) : null}
+          </View>
         </View>
-        <Pressable accessibilityRole="button" accessibilityLabel={link.label} onPress={link.onPress} style={target}>
-          <Text style={textStyle('small', palette.accent, '600')}>{link.label}</Text>
-        </Pressable>
+        {link.label === 'Configuration' ? (
+          <Pressable accessibilityRole="button" accessibilityLabel={link.label} onPress={link.onPress} style={target}>
+            <FeatherIcon name="settings" size={22} color={palette.textPrimary} />
+          </Pressable>
+        ) : (
+          <IconButton
+            icon="message-square"
+            label={link.label}
+            onPress={link.onPress}
+            background="transparent"
+            border="transparent"
+            color={palette.accent}
+          />
+        )}
       </View>
       {children}
     </View>
   );
+}
+
+export function BannerPortal({ hostId = 'banner-slot', children }: { hostId?: string; children: ReactNode }) {
+  const [host, setHost] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof document === 'undefined') {
+      return;
+    }
+    setHost(document.querySelector<HTMLElement>(`[data-testid="${hostId}"]`));
+  }, [hostId]);
+  if (host == null || Platform.OS !== 'web') {
+    return null;
+  }
+  const { createPortal } = require('react-dom') as typeof import('react-dom');
+  return createPortal(children, host);
 }
 
 const target = { minHeight: 44, justifyContent: 'center' as const };

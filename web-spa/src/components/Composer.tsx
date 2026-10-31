@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { StyleSheet, Text, TextInput, View, type ViewStyle } from 'react-native';
 
 import { composerCommand } from '@/components/composer-keys';
-import { Pressable } from '@/components/Pressable';
+import { IconButton } from '@/components/IconButton';
 import { useTheme } from '@/theme/Theme';
 import { radius, space } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
@@ -59,29 +59,14 @@ export function Composer({ value, working, onChange, onSend, onStop, agentName }
             },
           ]}
         />
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={stop ? 'Stop' : 'Send'}
-          accessibilityState={{ disabled: !stop && idle }}
+        <IconButton
+          icon={stop ? 'square' : 'send'}
+          label={stop ? 'Stop' : 'Send'}
           disabled={!stop && idle}
-          onPress={stop ? onStop : onSend}
-          style={[
-            styles.send,
-            {
-              backgroundColor: !stop && idle ? palette.disabledSurface : stop ? palette.danger : palette.accent,
-            },
-          ]}
-        >
-          <Text
-            style={textStyle(
-              'small',
-              !stop && idle ? palette.disabledText : stop ? palette.onDanger : palette.onAccent,
-              '600',
-            )}
-          >
-            {stop ? 'Stop' : 'Send'}
-          </Text>
-        </Pressable>
+          onPress={stop ? (onStop ?? onSend) : onSend}
+          background={!stop && idle ? palette.disabledSurface : stop ? palette.danger : palette.accent}
+          color={!stop && idle ? palette.disabledText : stop ? palette.onDanger : palette.onAccent}
+        />
       </View>
       <Text style={textStyle('caption', palette.textSecondary)}>Return to send · Shift+Return for a line</Text>
     </View>

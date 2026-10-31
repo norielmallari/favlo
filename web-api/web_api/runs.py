@@ -55,6 +55,16 @@ async def perform(
                 {"type": "TEXT_MESSAGE_START", "messageId": message_id, "role": "assistant"},
             )
         )
+        gallery_note = ""
+        user_image = None
+        folder = context.get("gallery_folder")
+        image = context.get("gallery_image")
+        if folder is not None or image:
+            from web_api.gallery_tools import preview_file, turn_note
+
+            gallery_note = turn_note(folder or "", image)
+            if image:
+                user_image = preview_file(store, context["run"]["session_id"], image)
         async for piece in reply(
             base_url=context["base_url"],
             model=context["model"],
@@ -69,6 +79,8 @@ async def perform(
             bus=bus,
             pending=pending,
             cancel=cancel,
+            gallery_note=gallery_note,
+            user_image=user_image,
         ):
             if cancel.is_set():
                 await _publish(bus, store.finish_run(run_id, "cancelled", None))

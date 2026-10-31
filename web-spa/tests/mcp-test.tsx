@@ -48,6 +48,12 @@ describe('MCP configuration', () => {
       if (path === '/agent-skills') {
         return json({ skills: [] });
       }
+      if (path === '/global-skills') {
+        return json({ skills: [] });
+      }
+      if (path === '/workspaces') {
+        return json({ workspaces: [] });
+      }
       return json({ message: 'The request failed.' }, 404);
     }) as typeof fetch;
   });

@@ -84,6 +84,18 @@ def settle(tool: str, status: str, body: str, *, error: bool = False) -> tuple[s
     return "failed", f"{tool} failed.\n{body}"
 
 
+def follow_cue(tool: str, status: str, text: str) -> str:
+    """The prompt for the turn that answers a finished task. Not a chat message."""
+    if status == "failed":
+        return correction_cue(tool, text)
+    return (
+        f"{text}\n"
+        "Reply to the user about this finished task. "
+        "Include each favlo:// link so the file appears. "
+        "Do not paste the JSON, the tool name, or a file id."
+    )
+
+
 def correction_cue(tool: str, text: str) -> str:
     pair = GENERATE.get(tool)
     if pair:
@@ -123,17 +135,14 @@ async def _finish(
 ) -> None:
     tool = str(task["tool_name"])
     status, text = settle(tool, status, body, error=error)
-    events = store.deliver_mcp_result(task["id"], status, text)
-    for event in events:
-        await bus.publish(event)
-    if not events or status != "failed":
+    if not store.deliver_mcp_result(task["id"], status):
         return
     await _open_correction(
         store,
         bus,
         str(task["session_id"]),
         str(task["agent_id"]),
-        correction_cue(tool, text),
+        follow_cue(tool, status, text),
     )
 
 

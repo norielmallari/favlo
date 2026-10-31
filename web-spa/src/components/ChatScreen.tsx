@@ -19,6 +19,7 @@ import {
   LATEST_SLACK,
   readDraft,
   showsMessage,
+  transcriptFrame,
   TranscriptTurn,
   writeDraft,
   type ChatMessage,
@@ -27,6 +28,7 @@ import { Composer } from '@/components/Composer';
 import { Confirmation } from '@/components/Confirmation';
 import { EmptyState } from '@/components/EmptyState';
 import { Frame } from '@/components/Frame';
+import { buttonRow, IconButton } from '@/components/IconButton';
 import { GalleryWorkspace } from '@/components/GalleryWorkspace';
 import { MarkdownText } from '@/components/MarkdownText';
 import { humanText } from '@/components/MessageBody';
@@ -78,6 +80,7 @@ export function ChatScreen() {
   const transcriptRef = useRef<ComponentRef<typeof ScrollView>>(null);
   const followLatest = useRef(true);
   const placedLatest = useRef(false);
+  const expandedSeed = useRef(false);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -90,14 +93,17 @@ export function ChatScreen() {
   const [notice, setNotice] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
-  const [drawer, setDrawer] = useState<'channels' | 'workspaces' | null>(null);
+  const [drawer, setDrawer] = useState<'channels' | null>(null);
+  const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [welcomeAgentId, setWelcomeAgentId] = useState<string | null>(null);
   const [createToken, setCreateToken] = useState(0);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [groups, setGroups] = useState<ToolGroup[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWorkspace, setSelectedWorkspace] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [workspaceName, setWorkspaceName] = useState('');
 
@@ -161,13 +167,20 @@ export function ChatScreen() {
   );
 
   useEffect(() => {
-    if (channel == null) {
-      setWorkspaces([]);
-      setSelectedWorkspace(null);
+    if (expandedSeed.current || selected == null) {
       return;
     }
-    void loadWorkspaces(channel.id).catch((caught: Error) => setNotice(caught.message));
-  }, [channel?.id, loadWorkspaces]);
+    expandedSeed.current = true;
+    setExpanded(selected);
+  }, [selected]);
+
+  useEffect(() => {
+    if (expanded == null) {
+      setWorkspaces([]);
+      return;
+    }
+    void loadWorkspaces(expanded).catch((caught: Error) => setNotice(caught.message));
+  }, [expanded, loadWorkspaces]);
 
   useEffect(() => {
     if (channel == null) {
@@ -314,6 +327,8 @@ export function ChatScreen() {
       setThinking('');
       setError(null);
       setStatus(null);
+      setCreating(false);
+      setWelcomeAgentId(null);
     }
     if (event.type === 'run.started') {
       setWorking(true);
@@ -386,6 +401,7 @@ export function ChatScreen() {
       setWorkspaceName('');
       setWorkspaces((current) => [...current, created]);
       setSelectedWorkspace(created.id);
+      setWorkspaceOpen(true);
     } catch (caught) {
       setNotice(caught instanceof Error ? caught.message : 'The workspace was not created.');
     }
@@ -405,6 +421,8 @@ export function ChatScreen() {
   const shown = humanText(live);
   const liveThinking = thinking.trim();
   const hasReply = messages.some((item) => item.role === 'assistant') || shown !== '' || liveThinking !== '';
+  const conversation = hasReply || working;
+  const greeting = !conversation && channel != null && channel.agent_id === welcomeAgentId;
   const transcript = (
     <>
       {messages.map((item) => (
@@ -435,14 +453,9 @@ export function ChatScreen() {
       link={{ label: 'Configuration', onPress: () => router.push('/settings') }}
     >
       <View style={{ flex: 1, minWidth: 0, maxWidth: '100%' }}>
-        {!wide ? (
-          <View style={{ flexDirection: 'row', gap: space[2], padding: space[2] }}>
-            <Pressable accessibilityRole="button" accessibilityLabel="Channels" onPress={() => setDrawer('channels')} style={barButton(palette.surface, palette.borderStrong)}>
-              <Text style={textStyle('small', palette.textPrimary)}>Channels</Text>
-            </Pressable>
-            <Pressable accessibilityRole="button" accessibilityLabel="Workspaces" onPress={() => setDrawer('workspaces')} style={barButton(palette.surface, palette.borderStrong)}>
-              <Text style={textStyle('small', palette.textPrimary)}>Workspaces</Text>
-            </Pressable>
+        {!wide && !workspaceOpen ? (
+          <View style={[buttonRow, { padding: space[2] }]}>
+            <IconButton icon="menu" label="Channels" onPress={() => setDrawer('channels')} background={palette.surface} border={palette.borderStrong} color={palette.textPrimary} />
           </View>
         ) : null}
         <View style={{ flex: 1, flexDirection: 'row', minWidth: 0, maxWidth: '100%' }}>
@@ -453,7 +466,7 @@ export function ChatScreen() {
               style={{ position: 'absolute', inset: 0, zIndex: z.drawer - 1, backgroundColor: palette.overlay }}
             />
           ) : null}
-          {(wide || drawer === 'channels') && (
+          {!workspaceOpen && (wide || drawer === 'channels') && (
             <View
               accessibilityLabel="Channels"
               style={{
@@ -467,36 +480,59 @@ export function ChatScreen() {
               }}
             >
               <Text accessibilityRole="header" aria-level={2} style={textStyle('title', palette.textPrimary)}>Channels</Text>
-              <View style={menuRows}>
+              <ScrollView style={{ flex: 1 }} contentContainerStyle={menuRows}>
               {channels.map((item) => (
-                <MenuRow
-                  key={item.id}
-                  label={item.name}
-                  selected={item.id === selected}
-                  onPress={() => {
-                    setSelected(item.id);
-                    setSelectedWorkspace(null);
-                    setDrawer(null);
-                  }}
-                />
+                <View key={item.id} style={{ gap: space[2] }}>
+                  <MenuRow
+                    label={item.name}
+                    icon={item.id === expanded ? 'chevron-down' : 'chevron-right'}
+                    expanded={item.id === expanded}
+                    selected={false}
+                    selectedTestId=""
+                    onPress={() => setExpanded((current) => (current === item.id ? null : item.id))}
+                  />
+                  {item.id === expanded ? (
+                    <Workspaces
+                      workspaces={workspaces}
+                      selectedId={workspaceOpen ? selectedWorkspace : null}
+                      homeSelected={item.id === selected && !workspaceOpen}
+                      onHome={() => {
+                        setSelected(item.id);
+                        setSelectedWorkspace(null);
+                        setWorkspaceOpen(false);
+                        setDrawer(null);
+                      }}
+                      onSelect={(id) => {
+                        setSelected(item.id);
+                        setSelectedWorkspace(id);
+                        setWorkspaceOpen(true);
+                        setDrawer(null);
+                      }}
+                      onCreate={() => {
+                        setWorkspaceName('');
+                        setCreatingWorkspace(true);
+                        setDrawer(null);
+                      }}
+                    />
+                  ) : null}
+                </View>
               ))}
-              </View>
-              <Pressable accessibilityRole="button" accessibilityLabel="New agent" onPress={() => { setCreateToken((value) => value + 1); setCreating(true); }} style={barButton(palette.accent, palette.accent)}>
-                <Text style={textStyle('small', palette.onAccent, '600')}>New agent</Text>
-              </Pressable>
+              </ScrollView>
+              <IconButton icon="user-plus" label="New agent" onPress={() => { setCreateToken((value) => value + 1); setCreating(true); }} background={palette.accent} color={palette.onAccent} />
               {!wide ? (
-                <Pressable accessibilityRole="button" accessibilityLabel="Close channels" onPress={() => setDrawer(null)} style={{ minHeight: 44, justifyContent: 'center' }}>
-                  <Text style={textStyle('small', palette.accent)}>Close</Text>
-                </Pressable>
+                <IconButton icon="x" label="Close" accessibilityLabel="Close channels" onPress={() => setDrawer(null)} background="transparent" border="transparent" color={palette.accent} />
               ) : null}
             </View>
           )}
-          {workspace != null ? (
+          {workspaceOpen && workspace != null ? (
             <View style={{ flex: 1, minWidth: 0 }}>
               <GalleryWorkspace
                 workspaceId={workspace.id}
                 agentName={channel?.name ?? 'Agent'}
-                onBack={() => setSelectedWorkspace(null)}
+                onBack={() => {
+                  setWorkspaceOpen(false);
+                  setSelectedWorkspace(null);
+                }}
               />
             </View>
           ) : (
@@ -504,18 +540,18 @@ export function ChatScreen() {
             <View testID="reading-column" style={[{ flex: 1, minWidth: 0, width: '100%', gap: space[3] }, measureStyle]}>
             {channel == null ? (
               <Text style={textStyle('body', palette.textPrimary)}>Create an agent to start a conversation.</Text>
-            ) : hasReply ? (
+            ) : greeting ? null : (
               <Text accessibilityRole="header" aria-level={2} style={textStyle('title', palette.textPrimary)}>{channel.name}</Text>
-            ) : null}
-            {hasReply && Platform.OS === 'web'
+            )}
+            {!greeting && channel != null && Platform.OS === 'web'
               ? createElement('style', { 'data-testid': 'transcript-scrollbar' }, transcriptScrollbar(palette.borderStrong, palette.background, palette.textSecondary))
               : null}
-            {hasReply ? (
+            {!greeting && channel != null ? (
               <ScrollView
                 ref={transcriptRef}
                 testID="transcript"
                 style={{ flex: 1, minWidth: 0, maxWidth: '100%' }}
-                contentContainerStyle={{ gap: space[4], maxWidth: '100%' }}
+                contentContainerStyle={transcriptFrame(space[4])}
                 onContentSizeChange={showLatest}
                 onScroll={noteScroll}
                 scrollEventThrottle={16}
@@ -580,39 +616,9 @@ export function ChatScreen() {
               onSend={() => void send()}
               onStop={() => void stop()}
             />
-            {hasReply ? null : <View style={{ flex: 1 }} />}
+            {greeting ? <View style={{ flex: 1 }} /> : null}
             </View>
           </View>
-          )}
-          {(wide || drawer === 'workspaces') && (
-            <View
-              style={{
-                width: wide ? 280 : drawerWidth,
-                borderLeftWidth: 1,
-                borderLeftColor: palette.border,
-                backgroundColor: palette.surface,
-                ...(wide ? {} : { position: 'absolute', top: 0, bottom: 0, right: 0, zIndex: z.drawer }),
-              }}
-            >
-              <Workspaces
-                workspaces={workspaces}
-                selectedId={selectedWorkspace}
-                onSelect={(id) => {
-                  setSelectedWorkspace(id);
-                  setDrawer(null);
-                }}
-                onCreate={() => {
-                  setWorkspaceName('');
-                  setCreatingWorkspace(true);
-                  setDrawer(null);
-                }}
-              />
-              {!wide ? (
-                <Pressable accessibilityRole="button" accessibilityLabel="Close workspaces" onPress={() => setDrawer(null)} style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: space[4] }}>
-                  <Text style={textStyle('small', palette.accent)}>Close</Text>
-                </Pressable>
-              ) : null}
-            </View>
           )}
         </View>
         {creatingWorkspace ? (
@@ -632,18 +638,14 @@ export function ChatScreen() {
                   backgroundColor: palette.surface,
                 }}
               />
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Create workspace"
-                accessibilityState={{ disabled: workspaceName.trim() === '' }}
+              <IconButton
+                icon="plus"
+                label="Create workspace"
                 disabled={workspaceName.trim() === ''}
                 onPress={() => void createWorkspace()}
-                style={barButton(workspaceName.trim() === '' ? palette.disabledSurface : palette.accent, palette.accent)}
-              >
-                <Text style={textStyle('small', workspaceName.trim() === '' ? palette.disabledText : palette.onAccent, '600')}>
-                  Create workspace
-                </Text>
-              </Pressable>
+                background={workspaceName.trim() === '' ? palette.disabledSurface : palette.accent}
+                color={workspaceName.trim() === '' ? palette.disabledText : palette.onAccent}
+              />
             </View>
           </Modal>
         ) : null}
@@ -656,8 +658,9 @@ export function ChatScreen() {
               providers={providers}
               settings={settings}
               onSuccess={setSaved}
-              onSaved={() => {
+              onSaved={(agent) => {
                 setCreating(false);
+                setWelcomeAgentId(agent.id);
                 void loadChannels();
               }}
             />

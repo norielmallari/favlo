@@ -1,5 +1,6 @@
 import { Text, View } from 'react-native';
 
+import { FeatherIcon } from '@/components/FeatherIcon';
 import { Pressable } from '@/components/Pressable';
 import { useTheme } from '@/theme/Theme';
 import { radius, space } from '@/theme/tokens';
@@ -10,18 +11,24 @@ export function MenuRow({
   selected,
   onPress,
   role = 'button',
+  icon,
+  expanded,
+  selectedTestId = 'selected-mark',
 }: {
   label: string;
   selected: boolean;
   onPress: () => void;
   role?: 'button' | 'tab';
+  icon?: string;
+  expanded?: boolean;
+  selectedTestId?: string;
 }) {
   const { palette } = useTheme();
   return (
     <Pressable
       accessibilityRole={role}
       accessibilityLabel={label}
-      accessibilityState={{ selected }}
+      accessibilityState={{ selected, ...(expanded == null ? {} : { expanded }) }}
       onPress={onPress}
       style={{
         minHeight: 44,
@@ -34,7 +41,7 @@ export function MenuRow({
       }}
     >
       <View
-        testID={selected ? 'selected-mark' : undefined}
+        testID={selected && selectedTestId !== '' ? selectedTestId : undefined}
         style={{
           width: 3,
           height: 20,
@@ -42,6 +49,7 @@ export function MenuRow({
           backgroundColor: selected ? palette.accent : 'transparent',
         }}
       />
+      {icon ? <FeatherIcon name={icon} size={18} color={palette.textPrimary} /> : null}
       <Text style={textStyle('label', palette.textPrimary, selected ? '600' : '400')}>{label}</Text>
     </Pressable>
   );

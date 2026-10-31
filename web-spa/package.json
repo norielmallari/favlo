@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@react-native-picker/picker": "2.11.4",
+    "@react-native-vector-icons/feather": "^14.0.0",
     "expo": "58.0.19",
     "expo-constants": "~58.0.13",
     "expo-linking": "~58.0.14",
@@ -44,7 +45,7 @@
       "<rootDir>/tests/setup.js"
     ],
     "transformIgnorePatterns": [
-      "/node_modules/(?!(.pnpm|react-native|@react-native|@react-native-community|expo|@expo|@expo-google-fonts|react-navigation|@react-navigation|@sentry/react-native|native-base|standard-navigation|react-markdown|remark-|unified|bail|devlop|trough|vfile|unist-|mdast-|micromark|decode-named-character-reference|character-entities|is-plain-obj|hast-|property-information|space-separated-tokens|comma-separated-tokens|html-url-attributes|ccount|escape-string-regexp|markdown-table|longest-streak|zwitch|parse-entities|stringify-entities|trim-lines|style-to-js|style-to-object|inline-style-parser|estree-util-|@types/estree|devlop))",
+      "/node_modules/(?!(.pnpm|react-native|@react-native|@react-native-community|@react-native-vector-icons|expo|@expo|@expo-google-fonts|react-navigation|@react-navigation|@sentry/react-native|native-base|standard-navigation|react-markdown|remark-|unified|bail|devlop|trough|vfile|unist-|mdast-|micromark|decode-named-character-reference|character-entities|is-plain-obj|hast-|property-information|space-separated-tokens|comma-separated-tokens|html-url-attributes|ccount|escape-string-regexp|markdown-table|longest-streak|zwitch|parse-entities|stringify-entities|trim-lines|style-to-js|style-to-object|inline-style-parser|estree-util-|@types/estree|devlop))",
       "/node_modules/react-native-reanimated/plugin/",
       "/node_modules/@react-native/babel-preset/"
     ]

@@ -17,6 +17,14 @@ def document() -> dict[str, Any]:
     return {"profile": PROFILE, "folder_kinds": list(FOLDER_KINDS)}
 
 
+def known_cloud(provider: str | None) -> bool:
+    if not provider:
+        return False
+    return any(
+        item.get("kind") == "cloud" and item.get("provider") == provider for item in FOLDER_KINDS
+    )
+
+
 def cloud_enabled(provider: str | None) -> bool:
     if not provider:
         return False

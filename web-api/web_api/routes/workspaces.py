@@ -1,4 +1,4 @@
-"""Gallery workspaces, the root folder, and the workspace session."""
+"""Gallery workspaces, folder rows, and the workspace session."""
 
 from __future__ import annotations
 
@@ -14,10 +14,14 @@ from web_api.http import json_body, key
 from web_api.profile import document
 from web_api.runs import perform
 from web_api.schemas import (
+    FocusUpdate,
     FolderCreate,
     FolderDelete,
     FolderPatch,
-    FolderRoot,
+    FolderRecord,
+    FolderRecordUpdate,
+    ImageDelete,
+    ImageMove,
     ImageWrite,
     MessageCreate,
     SkillCreate,
@@ -35,7 +39,7 @@ async def profile():
 
 
 @router.get("/workspaces")
-async def list_workspaces(request: Request, channel_id: str):
+async def list_workspaces(request: Request, channel_id: str | None = None):
     rows = await asyncio.to_thread(request.app.state.store.list_workspaces, channel_id)
     return json_body(200, {"workspaces": rows})
 
@@ -119,27 +123,20 @@ async def delete_skill(workspace_id: str, skill_id: str, request: Request):
     return json_body(200, result)
 
 
-@router.get("/workspaces/{workspace_id}/root")
-async def read_root(workspace_id: str, request: Request):
-    row = await asyncio.to_thread(request.app.state.store.root, workspace_id)
-    if row is None:
-        raise Rejected("Set the gallery root first.")
-    return json_body(200, row)
+@router.get("/workspaces/{workspace_id}/folders")
+async def list_folder_rows(workspace_id: str, request: Request, parent_id: str | None = None):
+    rows = await asyncio.to_thread(
+        request.app.state.store.list_folders,
+        workspace_id,
+        parent_id,
+    )
+    return json_body(200, {"folders": rows})
 
 
-@router.post("/workspaces/{workspace_id}/root/pick")
-async def pick_root(workspace_id: str, request: Request):
-    await asyncio.to_thread(request.app.state.store.workspace, workspace_id)
-    location = await asyncio.to_thread(choose_directory)
-    if location is None:
-        return json_body(200, {"cancelled": True})
-    return json_body(200, {"cancelled": False, "location": location})
-
-
-@router.put("/workspaces/{workspace_id}/root")
-async def put_root(workspace_id: str, body: FolderRoot, request: Request):
+@router.post("/workspaces/{workspace_id}/folders")
+async def create_folder_row(workspace_id: str, body: FolderRecord, request: Request):
     status, result, events = await asyncio.to_thread(
-        request.app.state.store.set_root,
+        request.app.state.store.add_folder,
         key(request),
         workspace_id,
         body.model_dump(),
@@ -149,23 +146,72 @@ async def put_root(workspace_id: str, body: FolderRoot, request: Request):
     return json_body(status, result)
 
 
-@router.get("/workspaces/{workspace_id}/images")
-async def list_images(workspace_id: str, request: Request, path: str = ""):
-    listing = await asyncio.to_thread(folder_for(request.app.state.store, workspace_id).list, path)
+@router.post("/workspaces/{workspace_id}/folders/pick")
+async def pick_folder(workspace_id: str, request: Request):
+    await asyncio.to_thread(request.app.state.store.workspace, workspace_id)
+    location = await asyncio.to_thread(choose_directory)
+    if location is None:
+        return json_body(200, {"cancelled": True})
+    return json_body(200, {"cancelled": False, "location": location})
+
+
+@router.put("/workspaces/{workspace_id}/focus")
+async def put_focus(workspace_id: str, body: FocusUpdate, request: Request):
+    result = await asyncio.to_thread(
+        request.app.state.store.set_focus,
+        workspace_id,
+        body.folder_id,
+    )
+    return json_body(200, result)
+
+
+@router.patch("/workspaces/{workspace_id}/folders/{folder_id}")
+async def patch_folder_row(
+    workspace_id: str, folder_id: str, body: FolderRecordUpdate, request: Request
+):
+    result, events = await asyncio.to_thread(
+        request.app.state.store.update_folder,
+        workspace_id,
+        folder_id,
+        body.model_dump(),
+    )
+    for event in events:
+        await request.app.state.bus.publish(event)
+    return json_body(200, result)
+
+
+@router.delete("/workspaces/{workspace_id}/folders/{folder_id}")
+async def delete_folder_row(workspace_id: str, folder_id: str, request: Request):
+    result, events = await asyncio.to_thread(
+        request.app.state.store.delete_folder_row,
+        workspace_id,
+        folder_id,
+    )
+    for event in events:
+        await request.app.state.bus.publish(event)
+    return json_body(200, result)
+
+
+@router.get("/workspaces/{workspace_id}/folders/{folder_id}/images")
+async def list_images(workspace_id: str, folder_id: str, request: Request, path: str = ""):
+    listing = await asyncio.to_thread(
+        folder_for(request.app.state.store, workspace_id, folder_id).list,
+        path,
+    )
     return json_body(200, listing)
 
 
-@router.get("/workspaces/{workspace_id}/file")
-async def read_file(workspace_id: str, request: Request, path: str):
-    folder = folder_for(request.app.state.store, workspace_id)
+@router.get("/workspaces/{workspace_id}/folders/{folder_id}/file")
+async def read_file(workspace_id: str, folder_id: str, request: Request, path: str):
+    folder = folder_for(request.app.state.store, workspace_id, folder_id)
     payload = await asyncio.to_thread(folder.read, path)
     stat = await asyncio.to_thread(folder.stat, path)
     return Response(content=payload, media_type=stat["media_type"])
 
 
-@router.post("/workspaces/{workspace_id}/images")
-async def write_image(workspace_id: str, body: ImageWrite, request: Request):
-    folder = folder_for(request.app.state.store, workspace_id)
+@router.post("/workspaces/{workspace_id}/folders/{folder_id}/images")
+async def write_image(workspace_id: str, folder_id: str, body: ImageWrite, request: Request):
+    folder = folder_for(request.app.state.store, workspace_id, folder_id)
     payload = image_bytes(source=body.source, data=body.data)
     written = await asyncio.to_thread(
         folder.write,
@@ -180,10 +226,30 @@ async def write_image(workspace_id: str, body: ImageWrite, request: Request):
     return json_body(200, written)
 
 
-@router.post("/workspaces/{workspace_id}/folders")
-async def create_folder(workspace_id: str, body: FolderCreate, request: Request):
+@router.post("/workspaces/{workspace_id}/folders/{folder_id}/images/move")
+async def move_image(workspace_id: str, folder_id: str, body: ImageMove, request: Request):
+    folder = folder_for(request.app.state.store, workspace_id, folder_id)
+    moved = await asyncio.to_thread(folder.move, body.path, body.to)
+    events = await asyncio.to_thread(request.app.state.store.note_gallery, workspace_id, moved)
+    for event in events:
+        await request.app.state.bus.publish(event)
+    return json_body(200, moved)
+
+
+@router.delete("/workspaces/{workspace_id}/folders/{folder_id}/images")
+async def delete_image(workspace_id: str, folder_id: str, body: ImageDelete, request: Request):
+    folder = folder_for(request.app.state.store, workspace_id, folder_id)
+    deleted = await asyncio.to_thread(folder.delete_image, body.path)
+    events = await asyncio.to_thread(request.app.state.store.note_gallery, workspace_id, deleted)
+    for event in events:
+        await request.app.state.bus.publish(event)
+    return json_body(200, deleted)
+
+
+@router.post("/workspaces/{workspace_id}/folders/{folder_id}/directories")
+async def create_directory(workspace_id: str, folder_id: str, body: FolderCreate, request: Request):
     created = await asyncio.to_thread(
-        folder_for(request.app.state.store, workspace_id).create_folder,
+        folder_for(request.app.state.store, workspace_id, folder_id).create_folder,
         body.path,
     )
     events = await asyncio.to_thread(request.app.state.store.note_gallery, workspace_id, created)
@@ -192,9 +258,9 @@ async def create_folder(workspace_id: str, body: FolderCreate, request: Request)
     return json_body(201, created)
 
 
-@router.patch("/workspaces/{workspace_id}/folders")
-async def patch_folder(workspace_id: str, body: FolderPatch, request: Request):
-    folder = folder_for(request.app.state.store, workspace_id)
+@router.patch("/workspaces/{workspace_id}/folders/{folder_id}/directories")
+async def patch_directory(workspace_id: str, folder_id: str, body: FolderPatch, request: Request):
+    folder = folder_for(request.app.state.store, workspace_id, folder_id)
     if body.to:
         changed = await asyncio.to_thread(folder.move_folder, body.path, body.to)
     elif body.name:
@@ -207,10 +273,10 @@ async def patch_folder(workspace_id: str, body: FolderPatch, request: Request):
     return json_body(200, changed)
 
 
-@router.delete("/workspaces/{workspace_id}/folders")
-async def delete_folder(workspace_id: str, body: FolderDelete, request: Request):
+@router.delete("/workspaces/{workspace_id}/folders/{folder_id}/directories")
+async def delete_directory(workspace_id: str, folder_id: str, body: FolderDelete, request: Request):
     deleted = await asyncio.to_thread(
-        folder_for(request.app.state.store, workspace_id).delete_folder,
+        folder_for(request.app.state.store, workspace_id, folder_id).delete_folder,
         body.path,
     )
     events = await asyncio.to_thread(request.app.state.store.note_gallery, workspace_id, deleted)
@@ -234,13 +300,26 @@ async def workspace_session(workspace_id: str, request: Request):
 @router.post("/workspaces/{workspace_id}/session/messages")
 async def send(workspace_id: str, body: MessageCreate, request: Request):
     row = await asyncio.to_thread(request.app.state.store.workspace, workspace_id)
-    if row["root"] is None:
-        raise Rejected("Set the gallery root first.")
+    ready = await asyncio.to_thread(request.app.state.store.has_local_folder, workspace_id)
+    if not ready:
+        raise Rejected("Save a local folder first.")
+    folder = body.folder
+    image = body.image.strip() if body.image else None
+    if folder is not None or image:
+        port = folder_for(request.app.state.store, workspace_id)
+        if folder is not None:
+            await asyncio.to_thread(port.resolve, folder, directory=True)
+        if image:
+            await asyncio.to_thread(port.resolve, image, file=True)
+            if folder and not image.startswith(f"{folder}/"):
+                raise Rejected("That image is not in the open folder.")
     status, result, events = await asyncio.to_thread(
         request.app.state.store.begin_message,
         key(request),
         row["session_id"],
         body.text,
+        folder,
+        image,
     )
     bus = request.app.state.bus
     for event in events:

@@ -11,8 +11,11 @@ from web_api.mcp_groups import GENERATE, ORDER, group_for
 from web_api.mcp_tasks import spawn, watch
 from web_api.tool_names import unique
 
+_MEMORY = {"remember", "recall", "forget"}
+
 INSTRUCTIONS = (
     "Enabled MCP tools are available on every turn. "
+    "remember, recall, and forget use only this agent's memories. "
     "Each MCP tool name starts with the server name, then the tool. "
     "generate_image, generate_video_i2v, generate_video_t2v, generate_music, and generate_voice "
     "use the registry default for that media type. "
@@ -26,9 +29,13 @@ INSTRUCTIONS = (
     "read_media(name) returns that record. "
     "When you call a generate tool, tell the user you are generating "
     "that image, video, music, or voice. "
-    "Do not write a favlo:// link or an image id, and do not say the file is already ready. "
+    "While the task is working, do not write a favlo:// link or an image id, "
+    "and do not say the file is already ready. "
     "A media tool may return a task id instead of the file. "
-    "The finished result arrives in this session. "
+    "When the task finishes you are called again with its result. "
+    "That result is not shown in the chat. "
+    "Tell the user it is ready and include each favlo:// link from the result. "
+    "Do not paste the JSON, the tool name, or a file id. "
     "Do not call that tool again for the same request while the task is working. "
     "When a task result says the tool failed or names an unknown model, "
     "call the matching list and set tools, repeat the session id, "
@@ -144,6 +151,9 @@ async def call_tool(
         "command": row["command"],
         "url": row["url"],
     }
+    if row["name"] in _MEMORY:
+        arguments = {key: value for key, value in arguments.items() if key != "client"}
+        arguments["client"] = agent_id
     try:
         result = await rpc(
             server,

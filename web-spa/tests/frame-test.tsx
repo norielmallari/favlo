@@ -4,6 +4,10 @@ import { Dimensions } from 'react-native';
 import { Frame } from '@/components/Frame';
 import { ThemeProvider } from '@/theme/Theme';
 
+jest.mock('expo-router', () => ({
+  useRouter: () => ({ push: jest.fn() }),
+}));
+
 test('the header wraps instead of growing past the screen', async () => {
   const view = await render(
     <ThemeProvider>
@@ -15,6 +19,7 @@ test('the header wraps instead of growing past the screen', async () => {
   expect(style.flexWrap).toBe('wrap');
   expect(style.maxWidth).toBe('100%');
   expect(view.getByRole('button', { name: 'Configuration' })).toBeTruthy();
+  expect(view.getByRole('link', { name: 'Favlo' })).toBeTruthy();
 });
 
 test('appearance is a menu of system, light, and dark', async () => {

@@ -46,6 +46,8 @@ class SettingsUpdate(BaseModel):
 
 class MessageCreate(BaseModel):
     text: str = Field(min_length=1)
+    folder: str | None = None
+    image: str | None = None
 
 
 class McpGroupUpdate(BaseModel):
@@ -102,28 +104,66 @@ class WorkspaceCreate(BaseModel):
     type: str = "gallery"
 
 
-class FolderRoot(BaseModel):
-    name: str = Field(default="", max_length=80)
+class FolderRecord(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
     kind: str
     provider: str | None = None
     location: str | None = None
+    remote_id: str | None = None
+    parent_id: str | None = None
+
+
+class FolderRecordUpdate(BaseModel):
+    expected_revision: int = Field(ge=1)
+    name: str | None = Field(default=None, max_length=80)
+    parent_id: str | None = None
+    move: bool = False
+
+
+class FocusUpdate(BaseModel):
+    folder_id: str | None = None
+
+
+class ImageMove(BaseModel):
+    path: str = Field(min_length=1)
+    to: str = Field(min_length=1)
+
+
+class ImageDelete(BaseModel):
+    path: str = Field(min_length=1)
 
 
 class SkillCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     description: str = Field(default="", max_length=8000)
+    definition: str = Field(default="", max_length=32000)
 
 
 class AgentSkillCreate(BaseModel):
     agent_id: str
     name: str = Field(min_length=1, max_length=80)
     description: str = Field(default="", max_length=8000)
+    definition: str = Field(default="", max_length=32000)
+
+
+class GlobalSkillCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=8000)
+    definition: str = Field(default="", max_length=32000)
+    add_by_default: bool = False
+
+
+class SkillCopy(BaseModel):
+    agent_id: str | None = None
+    workspace_id: str | None = None
 
 
 class SkillUpdate(BaseModel):
     expected_revision: int = Field(ge=1)
     name: str = Field(min_length=1, max_length=80)
     description: str = Field(default="", max_length=8000)
+    definition: str = Field(default="", max_length=32000)
+    add_by_default: bool | None = None
 
 
 class ImageWrite(BaseModel):

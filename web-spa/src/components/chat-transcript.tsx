@@ -2,7 +2,7 @@ import { useCallback, useState } from 'react';
 import { Platform, Text, View } from 'react-native';
 
 import { humanText, MessageBody } from '@/components/MessageBody';
-import { Pressable } from '@/components/Pressable';
+import { IconButton } from '@/components/IconButton';
 import { Thinking } from '@/components/Thinking';
 import { useTheme } from '@/theme/Theme';
 import { radius, space } from '@/theme/tokens';
@@ -27,6 +27,15 @@ export function keepLatest(following: boolean, placed: boolean, fromBottom: numb
     return following;
   }
   return fromBottom <= LATEST_SLACK;
+}
+
+export function transcriptFrame(gap: number) {
+  return {
+    flexGrow: 1,
+    justifyContent: 'flex-end' as const,
+    gap,
+    maxWidth: '100%' as const,
+  };
 }
 
 export function chatMessage(item: { id: string; role: string; body: string; reasoning?: string | null }): ChatMessage {
@@ -87,18 +96,19 @@ export function TranscriptTurn({
         {reasoning ? <Thinking text={reasoning} settled /> : null}
         <MessageBody body={body} onEmpty={reportEmpty} />
         {!mine && humanText(body) ? (
-          <Pressable
-            accessibilityRole="button"
+          <IconButton
+            icon={copied ? 'check' : 'copy'}
+            label={copied ? 'Copied' : 'Copy'}
             accessibilityLabel="Copy"
             onPress={() => {
               if (Platform.OS === 'web') {
                 void navigator.clipboard.writeText(humanText(body)).then(() => setCopied(true));
               }
             }}
-            style={{ minHeight: 44, justifyContent: 'center', alignSelf: 'flex-start' }}
-          >
-            <Text style={textStyle('caption', palette.textSecondary, '600')}>{copied ? 'Copied' : 'Copy'}</Text>
-          </Pressable>
+            background="transparent"
+            border="transparent"
+            color={palette.textSecondary}
+          />
         ) : null}
       </View>
     </View>

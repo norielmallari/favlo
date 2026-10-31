@@ -15,15 +15,48 @@ from web_api.tool_names import qualified
 SOURCE = "gallery"
 
 INSTRUCTIONS = (
-    "Image files live under the gallery root the user set. Paths are relative "
-    "to that root. Do not use a host path or another workspace id. After an "
-    "image generate tool finishes, call "
+    "Image files live in the local folder this session is using. Paths are relative "
+    "to that folder. Do not use a host path or another workspace id. The turn names "
+    "the open folder. This folder means that path. This image means the selected "
+    "image on the turn, when one is named. After an image generate tool finishes, "
+    "call "
     f"{qualified(SOURCE, 'write_image')} with the favlo:// URI as source and a path "
-    "under the root. Use "
-    f"{qualified(SOURCE, 'create_folder')}, {qualified(SOURCE, 'rename_folder')}, "
-    f"{qualified(SOURCE, 'move_folder')}, and {qualified(SOURCE, 'delete_folder')} "
-    "for directories inside the root. Those tools cannot change the root itself."
+    "inside the open folder, unless the message names a different folder. Use "
+    f"{qualified(SOURCE, 'list_folder')}, {qualified(SOURCE, 'create_folder')}, "
+    f"{qualified(SOURCE, 'rename_folder')}, {qualified(SOURCE, 'move_folder')}, "
+    f"{qualified(SOURCE, 'move_image')}, {qualified(SOURCE, 'delete_image')}, and "
+    f"{qualified(SOURCE, 'delete_folder')} "
+    "for files and directories inside that folder. Those tools cannot add or delete a folder row."
 )
+
+
+def turn_note(folder: str, image: str | None) -> str:
+    """The open folder and selected image for one turn."""
+    place = "the local folder" if folder == "" else folder
+    lines = [
+        f"The open folder on this turn is {place}.",
+        "This folder means that path.",
+        "Save a generated image into that folder unless the message names another folder.",
+    ]
+    if image:
+        lines.append(f"The selected image on this turn is {image}. This image means that path.")
+    else:
+        lines.append("No image is selected on this turn.")
+    return "\n".join(lines)
+
+
+def preview_file(store: Any, session_id: str, path: str) -> tuple[bytes, str] | None:
+    """Bytes and media type for the image selected when the turn was sent."""
+    workspace_id = store.gallery_for_session(session_id)
+    if not workspace_id:
+        return None
+    try:
+        folder = folder_for(store, workspace_id)
+        payload = folder.read(path)
+        media = str(folder.stat(path)["media_type"])
+    except Rejected:
+        return None
+    return payload, media
 
 _IMAGE_URI = re.compile(r"^favlo://images/([A-Za-z0-9_-]+)\.png$")
 
@@ -35,6 +68,8 @@ def tools(store: Any, workspace_id: str, bus: Any | None = None) -> list[object]
         _create_tool(store, workspace_id, bus),
         _rename_tool(store, workspace_id, bus),
         _move_tool(store, workspace_id, bus),
+        _move_image_tool(store, workspace_id, bus),
+        _delete_image_tool(store, workspace_id, bus),
         _delete_tool(store, workspace_id, bus),
     ]
 
@@ -44,7 +79,7 @@ def _list_tool(store: Any, workspace_id: str) -> object:
 
     @tool(approval_mode="never_require", name=qualified(SOURCE, "list_folder"))
     def list_folder(path: str = "") -> str:
-        """List images and subfolders under a path relative to the gallery root."""
+        """List images and subfolders under a path relative to the local folder."""
         try:
             listing = folder_for(store, workspace_id).list(path)
         except Rejected as exc:
@@ -64,10 +99,10 @@ def _write_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
         data: str = "",
         expected_revision: str = "",
     ) -> str:
-        """Write an image under the gallery root.
+        """Write an image under the local folder.
 
         Pass source as a favlo://images/{id}.png URI from generate_image, or data
-        as base64. path is relative to the gallery root.
+        as base64. path is relative to the local folder.
         """
         try:
             payload = image_bytes(source=source or None, data=data or None)
@@ -89,7 +124,7 @@ def _create_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
 
     @tool(approval_mode="never_require", name=qualified(SOURCE, "create_folder"))
     async def create_folder(path: str) -> str:
-        """Create a directory inside the gallery root."""
+        """Create a directory inside the local folder."""
         try:
             created = folder_for(store, workspace_id).create_folder(path)
         except Rejected as exc:
@@ -105,7 +140,7 @@ def _rename_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
 
     @tool(approval_mode="never_require", name=qualified(SOURCE, "rename_folder"))
     async def rename_folder(path: str, name: str) -> str:
-        """Rename a directory inside the gallery root."""
+        """Rename a directory inside the local folder."""
         try:
             renamed = folder_for(store, workspace_id).rename_folder(path, name)
         except Rejected as exc:
@@ -121,7 +156,7 @@ def _move_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
 
     @tool(approval_mode="never_require", name=qualified(SOURCE, "move_folder"))
     async def move_folder(path: str, destination: str) -> str:
-        """Move a directory to another path inside the gallery root."""
+        """Move a directory to another path inside the local folder."""
         try:
             moved = folder_for(store, workspace_id).move_folder(path, destination)
         except Rejected as exc:
@@ -132,12 +167,44 @@ def _move_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
     return move_folder
 
 
+def _move_image_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
+    from agent_framework import tool
+
+    @tool(approval_mode="never_require", name=qualified(SOURCE, "move_image"))
+    async def move_image(path: str, destination: str) -> str:
+        """Move an image to another path inside the local folder."""
+        try:
+            moved = folder_for(store, workspace_id).move(path, destination)
+        except Rejected as exc:
+            return str(exc)
+        await _notify(store, workspace_id, bus, moved)
+        return _dump(moved)
+
+    return move_image
+
+
+def _delete_image_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
+    from agent_framework import tool
+
+    @tool(approval_mode="never_require", name=qualified(SOURCE, "delete_image"))
+    async def delete_image(path: str) -> str:
+        """Delete an image inside the local folder. path is relative to that folder."""
+        try:
+            deleted = folder_for(store, workspace_id).delete_image(path)
+        except Rejected as exc:
+            return str(exc)
+        await _notify(store, workspace_id, bus, deleted)
+        return _dump(deleted)
+
+    return delete_image
+
+
 def _delete_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
     from agent_framework import tool
 
     @tool(approval_mode="never_require", name=qualified(SOURCE, "delete_folder"))
     async def delete_folder(path: str) -> str:
-        """Delete a directory inside the gallery root. The root itself cannot be deleted."""
+        """Delete an empty directory inside the local folder. The local folder itself cannot be deleted."""
         try:
             deleted = folder_for(store, workspace_id).delete_folder(path)
         except Rejected as exc:

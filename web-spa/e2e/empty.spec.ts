@@ -14,6 +14,8 @@ test('an empty conversation shows starters and an empty workspaces column', asyn
   await page.getByRole('button', { name: 'Create agent' }).click();
   await expect(page.getByRole('button', { name, exact: true })).toBeVisible();
   await page.getByRole('button', { name, exact: true }).click();
+  await expect(page.getByRole('heading', { name, exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Home', exact: true }).click();
   await expect(page.getByLabel('Conversation').getByRole('heading', { name })).toBeVisible();
   await expect(page.getByText('Chat, images, music, and voice on this machine.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Generate an image' })).toBeVisible();
@@ -33,7 +35,7 @@ test('an empty conversation shows starters and an empty workspaces column', asyn
   await page.setViewportSize({ width: 390, height: 844 });
   await expectFits(page);
   await expect(page.getByRole('button', { name: 'Channels' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Workspaces' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Workspaces' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'New agent' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Generate an image' })).toBeInViewport();
   await expect(page.getByRole('button', { name: 'Set up a model' })).toBeInViewport();

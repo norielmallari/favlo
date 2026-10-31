@@ -39,6 +39,20 @@ export async function deleteWorkspacesNamed(...names: string[]): Promise<void> {
   }
 }
 
+export async function deleteGlobalSkillsNamed(...names: string[]): Promise<void> {
+  if (names.length === 0) {
+    return;
+  }
+  const wanted = new Set(names);
+  const body = await read<{ skills: AgentSkill[] }>('/global-skills');
+  for (const skill of body.skills) {
+    if (!wanted.has(skill.name)) {
+      continue;
+    }
+    await send('DELETE', `/global-skills/${skill.id}`);
+  }
+}
+
 export async function deleteAgentSkillsNamed(...names: string[]): Promise<void> {
   if (names.length === 0) {
     return;

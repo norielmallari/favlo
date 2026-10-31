@@ -235,11 +235,12 @@ def _rows(conn: sqlite3.Connection, statement: str, ids: list[str]) -> list[sqli
 
 def _folder_payload(row: Any) -> dict[str, Any]:
     kind = row["kind"]
+    parent = row["parent_id"]
     return {
         "id": row["id"],
         "workspace_id": row["workspace_id"],
+        "parent_id": parent or None,
         "name": row["name"],
-        "role": row["role"],
         "kind": kind,
         "provider": row["provider"] or None,
         "location": row["location"] if kind == "local" else None,
@@ -249,12 +250,173 @@ def _folder_payload(row: Any) -> dict[str, Any]:
     }
 
 
-def _skill_fields(body: dict[str, Any]) -> tuple[str, str]:
+def _folder_name(value: object) -> str:
+    name = " ".join(str(value or "").split())
+    if not name or "/" in name or "\\" in name or name in {".", ".."}:
+        raise Rejected("A name is required.")
+    return name
+
+
+def _folder_in(conn: sqlite3.Connection, workspace_id: str, folder_id: str) -> Any:
+    row = conn.execute(
+        "SELECT * FROM folder WHERE id = ? AND workspace_id = ?",
+        (folder_id, workspace_id),
+    ).fetchone()
+    if row is None:
+        raise NotFound("That folder does not exist.")
+    return row
+
+
+def _reject_sibling(
+    conn: sqlite3.Connection,
+    workspace_id: str,
+    parent_id: str | None,
+    name: str,
+    folder_id: str | None,
+) -> None:
+    if parent_id:
+        rows = conn.execute(
+            """
+            SELECT id FROM folder
+            WHERE workspace_id = ? AND parent_id = ? AND name = ? COLLATE NOCASE
+            """,
+            (workspace_id, parent_id, name),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT id FROM folder
+            WHERE workspace_id = ? AND parent_id IS NULL AND name = ? COLLATE NOCASE
+            """,
+            (workspace_id, name),
+        ).fetchall()
+    if any(row["id"] != folder_id for row in rows):
+        raise Rejected("That folder name is already here.")
+
+
+def _folder_fields(
+    conn: sqlite3.Connection, workspace_id: str, body: dict[str, Any]
+) -> dict[str, Any]:
+    from web_api.profile import known_cloud
+
+    kind = str(body.get("kind") or "")
+    name = _folder_name(body.get("name"))
+    provider = str(body.get("provider") or "").strip() or None
+    parent_id = str(body.get("parent_id") or "").strip() or None
+    remote_id = str(body.get("remote_id") or "").strip() or None
+    if kind == "local":
+        if provider:
+            raise Rejected("A local folder has no provider.")
+        if parent_id:
+            raise Rejected("A local folder stays at the workspace root.")
+        location = str(body.get("location") or "").strip()
+        if not location:
+            raise Rejected("A local folder needs a location.")
+        from pathlib import Path
+
+        path = Path(location).expanduser()
+        if not path.exists() or not path.is_dir():
+            raise Rejected("That directory does not exist.")
+        return {
+            "name": name,
+            "kind": "local",
+            "provider": None,
+            "location": str(path.resolve()),
+            "remote_id": None,
+            "parent_id": None,
+        }
+    if kind != "cloud":
+        raise Rejected("kind is local or cloud.")
+    if not known_cloud(provider):
+        raise Rejected("That provider is not in the catalog.")
+    if parent_id:
+        parent = _folder_in(conn, workspace_id, parent_id)
+        if parent["kind"] != "cloud":
+            raise Rejected("That would download.")
+    return {
+        "name": name,
+        "kind": "cloud",
+        "provider": provider,
+        "location": None,
+        "remote_id": remote_id,
+        "parent_id": parent_id,
+    }
+
+
+def _move_parent(conn: sqlite3.Connection, workspace_id: str, row: Any, parent: object) -> str | None:
+    parent_id = str(parent or "").strip() or None
+    if row["kind"] == "local":
+        if parent_id:
+            raise Rejected("That would upload.")
+        return None
+    if parent_id == row["id"]:
+        raise Rejected("A folder cannot be moved into itself.")
+    if parent_id:
+        parent_row = _folder_in(conn, workspace_id, parent_id)
+        if parent_row["kind"] != "cloud":
+            raise Rejected("That would download.")
+        seen = {str(row["id"])}
+        current: str | None = parent_id
+        while current:
+            if current in seen:
+                raise Rejected("A folder cannot be moved into itself.")
+            seen.add(current)
+            nxt = conn.execute(
+                "SELECT parent_id FROM folder WHERE id = ? AND workspace_id = ?",
+                (current, workspace_id),
+            ).fetchone()
+            if nxt is None:
+                raise Rejected("That folder is not in this workspace.")
+            current = nxt["parent_id"] or None
+    return parent_id
+
+
+def _seed_gallery_skills(conn: sqlite3.Connection, workspace_id: str, created: str) -> None:
+    from web_api.workspace_skill_catalog import skills_for
+
+    for name, description, definition in skills_for("gallery"):
+        conn.execute(
+            """
+            INSERT INTO skill (
+                id, workspace_id, name, description, definition, revision, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, 1, ?)
+            """,
+            (mint("skill"), workspace_id, name, description, definition, created),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO meta (key, value) VALUES (?, '1')",
+            (f"workspace_skill_seed:{workspace_id}:{name}",),
+        )
+
+
+def _copy_default_skills(conn: sqlite3.Connection, agent_id: str, created: str) -> None:
+    rows = conn.execute(
+        """
+        SELECT name, description, definition FROM global_skill
+        WHERE add_by_default = 1
+        ORDER BY name COLLATE NOCASE, id
+        """
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            """
+            INSERT INTO agent_skill (
+                id, agent_id, name, description, definition, revision, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, 1, ?)
+            """,
+            (mint("skill"), agent_id, row["name"], row["description"], row["definition"], created),
+        )
+
+
+def _skill_fields(body: dict[str, Any]) -> tuple[str, str, str]:
     name = " ".join(str(body.get("name") or "").split())
     description = str(body.get("description") or "").strip()
+    definition = str(body.get("definition") or "").strip()
     if not name:
         raise Rejected("A name is required.")
-    return name, description
+    return name, description, definition
 
 
 def _skill_payload(row: Any) -> dict[str, Any]:
@@ -263,6 +425,7 @@ def _skill_payload(row: Any) -> dict[str, Any]:
         "workspace_id": row["workspace_id"],
         "name": row["name"],
         "description": row["description"],
+        "definition": row["definition"] or "",
         "revision": row["revision"],
     }
 
@@ -273,6 +436,18 @@ def _agent_skill_payload(row: Any) -> dict[str, Any]:
         "agent_id": row["agent_id"],
         "name": row["name"],
         "description": row["description"],
+        "definition": row["definition"] or "",
+        "revision": row["revision"],
+    }
+
+
+def _global_skill_payload(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "description": row["description"],
+        "definition": row["definition"] or "",
+        "add_by_default": bool(row["add_by_default"]),
         "revision": row["revision"],
     }
 
@@ -307,10 +482,6 @@ def _skills_for(conn: sqlite3.Connection, workspace_id: str) -> list[dict[str, A
 
 
 def _workspace_payload(conn: sqlite3.Connection, row: Any) -> dict[str, Any]:
-    folder = conn.execute(
-        "SELECT * FROM folder WHERE workspace_id = ?",
-        (row["id"],),
-    ).fetchone()
     return {
         "id": row["id"],
         "channel_id": row["channel_id"],
@@ -318,7 +489,6 @@ def _workspace_payload(conn: sqlite3.Connection, row: Any) -> dict[str, Any]:
         "name": row["name"],
         "type": row["type"],
         "revision": row["revision"],
-        "root": _folder_payload(folder) if folder is not None else None,
         "skills": _skills_for(conn, row["id"]),
     }
 
@@ -762,6 +932,7 @@ class Store:
                 """,
                 (session_id, channel_id, agent_id, created),
             )
+            _copy_default_skills(conn, agent_id, created)
             groups = body.get("tool_groups")
             if groups is not None:
                 _replace_groups(conn, agent_id, groups)
@@ -1565,43 +1736,18 @@ class Store:
 
         return self._read(read)
 
-    def deliver_mcp_result(
-        self, task_pk: str, status: str, text: str
-    ) -> list[dict[str, Any]]:
-        def write(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    def deliver_mcp_result(self, task_pk: str, status: str) -> bool:
+        """Mark a working task finished. The result is not a chat message."""
+
+        def write(conn: sqlite3.Connection) -> bool:
             row = conn.execute("SELECT * FROM mcp_task WHERE id = ?", (task_pk,)).fetchone()
             if row is None or row["status"] != "working":
-                return []
+                return False
             conn.execute(
                 "UPDATE mcp_task SET status = ? WHERE id = ?",
                 (status, task_pk),
             )
-            session = conn.execute(
-                "SELECT * FROM session WHERE id = ?",
-                (row["session_id"],),
-            ).fetchone()
-            if session is None:
-                return []
-            message_id = mint("message")
-            created = now()
-            conn.execute(
-                """
-                INSERT INTO message (id, session_id, role, body, actor_kind, actor_id, created_at)
-                VALUES (?, ?, 'assistant', ?, 'agent', ?, ?)
-                """,
-                (message_id, row["session_id"], text, row["agent_id"], created),
-            )
-            return [
-                self._event(
-                    conn,
-                    stream_id=f"session:{row['session_id']}",
-                    event_type="message.created",
-                    payload={"message_id": message_id, "role": "assistant", "text": text},
-                    channel_id=session["channel_id"],
-                    session_id=row["session_id"],
-                    actor={"kind": "agent", "id": row["agent_id"]},
-                )
-            ]
+            return True
 
         return self._write(write)
 
@@ -1634,7 +1780,7 @@ class Store:
     def begin_task_correction(
         self, session_id: str, agent_id: str, cue: str
     ) -> tuple[str | None, list[dict[str, Any]], bool]:
-        """Start a turn that answers a failed task.
+        """Start a turn that answers a finished task.
 
         The cue is the model prompt. It is not a chat message. A running reply
         returns waiting so the caller can try again after that reply ends.
@@ -1702,19 +1848,30 @@ class Store:
 
         return self._read(read)
 
-    def list_workspaces(self, channel_id: str) -> list[dict[str, Any]]:
+    def list_workspaces(self, channel_id: str | None = None) -> list[dict[str, Any]]:
         def read(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-            channel = conn.execute("SELECT id FROM channel WHERE id = ?", (channel_id,)).fetchone()
-            if channel is None:
-                raise NotFound("That channel does not exist.")
-            rows = conn.execute(
-                """
-                SELECT * FROM workspace
-                WHERE channel_id = ?
-                ORDER BY created_at, id
-                """,
-                (channel_id,),
-            ).fetchall()
+            if channel_id:
+                channel = conn.execute(
+                    "SELECT id FROM channel WHERE id = ?",
+                    (channel_id,),
+                ).fetchone()
+                if channel is None:
+                    raise NotFound("That channel does not exist.")
+                rows = conn.execute(
+                    """
+                    SELECT * FROM workspace
+                    WHERE channel_id = ?
+                    ORDER BY created_at, id
+                    """,
+                    (channel_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM workspace
+                    ORDER BY name COLLATE NOCASE, id
+                    """
+                ).fetchall()
             return [_workspace_payload(conn, row) for row in rows]
 
         return self._read(read)
@@ -1769,6 +1926,7 @@ class Store:
                 """,
                 (workspace_id, channel_id, session_id, name, created),
             )
+            _seed_gallery_skills(conn, workspace_id, created)
             result = _require_workspace(conn, workspace_id)
             events = [
                 self._event(
@@ -1825,18 +1983,32 @@ class Store:
 
         return self._write(write)
 
-    def root(self, workspace_id: str) -> dict[str, Any] | None:
-        def read(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    def list_folders(self, workspace_id: str, parent_id: str | None = None) -> list[dict[str, Any]]:
+        def read(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             _require_workspace(conn, workspace_id)
-            folder = conn.execute(
-                "SELECT * FROM folder WHERE workspace_id = ?",
-                (workspace_id,),
-            ).fetchone()
-            return _folder_payload(folder) if folder is not None else None
+            if parent_id:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM folder
+                    WHERE workspace_id = ? AND parent_id = ?
+                    ORDER BY name COLLATE NOCASE, id
+                    """,
+                    (workspace_id, parent_id),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM folder
+                    WHERE workspace_id = ? AND parent_id IS NULL
+                    ORDER BY name COLLATE NOCASE, id
+                    """,
+                    (workspace_id,),
+                ).fetchall()
+            return [_folder_payload(row) for row in rows]
 
         return self._read(read)
 
-    def set_root(
+    def add_folder(
         self, key: str | None, workspace_id: str, body: dict[str, Any]
     ) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
         def write(conn: sqlite3.Connection) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
@@ -1846,72 +2018,188 @@ class Store:
             workspace = _require_workspace(conn, workspace_id)
             if workspace["type"] != "gallery":
                 raise Rejected("That workspace is not a gallery.")
-            kind = str(body.get("kind") or "")
-            provider = str(body.get("provider") or "").strip() or None
-            name = str(body.get("name") or "").strip() or workspace["name"]
-            location = str(body.get("location") or "").strip()
-            if kind == "cloud":
-                raise Rejected(f"{provider or 'cloud'} is not enabled.")
-            if kind != "local":
-                raise Rejected("kind is local or cloud.")
-            if provider:
-                raise Rejected("A local folder has no provider.")
-            if not location:
-                raise Rejected("A local folder needs a location.")
-            from pathlib import Path
-
-            path = Path(location).expanduser()
-            if not path.exists() or not path.is_dir():
-                raise Rejected("The gallery root must be an existing directory.")
-            resolved = str(path.resolve())
-            existing = conn.execute(
-                "SELECT * FROM folder WHERE workspace_id = ?",
-                (workspace_id,),
-            ).fetchone()
+            fields = _folder_fields(conn, workspace_id, body)
+            _reject_sibling(conn, workspace_id, fields["parent_id"], fields["name"], None)
+            folder_id = mint("folder")
             created = now()
-            if existing is None:
-                folder_id = mint("folder")
-                conn.execute(
-                    """
-                    INSERT INTO folder (
-                        id, workspace_id, name, role, kind, provider, location,
-                        machine_id, remote_id, revision, created_at
-                    )
-                    VALUES (?, ?, ?, 'root', 'local', NULL, ?, '', NULL, 1, ?)
-                    """,
-                    (folder_id, workspace_id, name, resolved, created),
+            conn.execute(
+                """
+                INSERT INTO folder (
+                    id, workspace_id, parent_id, name, kind, provider, location,
+                    machine_id, remote_id, revision, created_at
                 )
-            else:
-                conn.execute(
-                    """
-                    UPDATE folder
-                    SET name = ?, kind = 'local', provider = NULL, location = ?,
-                        remote_id = NULL, revision = revision + 1
-                    WHERE workspace_id = ?
-                    """,
-                    (name, resolved, workspace_id),
-                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, 1, ?)
+                """,
+                (
+                    folder_id,
+                    workspace_id,
+                    fields["parent_id"],
+                    fields["name"],
+                    fields["kind"],
+                    fields["provider"],
+                    fields["location"],
+                    fields["remote_id"],
+                    created,
+                ),
+            )
             result = _folder_payload(
-                conn.execute(
-                    "SELECT * FROM folder WHERE workspace_id = ?",
-                    (workspace_id,),
-                ).fetchone()
+                conn.execute("SELECT * FROM folder WHERE id = ?", (folder_id,)).fetchone()
             )
             events = [
                 self._event(
                     conn,
                     stream_id="app",
-                    event_type="workspace.root_set",
-                    payload={"workspace_id": workspace_id, "root": result},
+                    event_type="folder.created",
+                    payload=result,
                     channel_id=workspace["channel_id"],
                     session_id=workspace["session_id"],
                     actor={"kind": "user", "id": "local"},
                 )
             ]
-            self._remember(conn, key or "", body, 200, result)
-            return 200, result, events
+            self._remember(conn, key or "", body, 201, result)
+            return 201, result, events
 
         return self._write(write)
+
+    def update_folder(
+        self, workspace_id: str, folder_id: str, body: dict[str, Any]
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        def write(conn: sqlite3.Connection) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            workspace = _require_workspace(conn, workspace_id)
+            row = _folder_in(conn, workspace_id, folder_id)
+            expected = int(body["expected_revision"])
+            if int(row["revision"]) != expected:
+                raise Conflict("That folder was updated. Reload and try again.")
+            name = " ".join(str(body.get("name") or row["name"]).split())
+            if not name:
+                raise Rejected("A name is required.")
+            parent_id = row["parent_id"]
+            if body.get("move"):
+                parent_id = _move_parent(conn, workspace_id, row, body.get("parent_id"))
+            _reject_sibling(conn, workspace_id, parent_id, name, folder_id)
+            conn.execute(
+                """
+                UPDATE folder
+                SET name = ?, parent_id = ?, revision = revision + 1
+                WHERE id = ?
+                """,
+                (name, parent_id, folder_id),
+            )
+            result = _folder_payload(
+                conn.execute("SELECT * FROM folder WHERE id = ?", (folder_id,)).fetchone()
+            )
+            events = [
+                self._event(
+                    conn,
+                    stream_id="app",
+                    event_type="folder.updated",
+                    payload=result,
+                    channel_id=workspace["channel_id"],
+                    session_id=workspace["session_id"],
+                    actor={"kind": "user", "id": "local"},
+                )
+            ]
+            return result, events
+
+        return self._write(write)
+
+    def delete_folder_row(
+        self, workspace_id: str, folder_id: str
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        def write(conn: sqlite3.Connection) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            workspace = _require_workspace(conn, workspace_id)
+            row = _folder_in(conn, workspace_id, folder_id)
+            child = conn.execute(
+                "SELECT 1 FROM folder WHERE parent_id = ?",
+                (folder_id,),
+            ).fetchone()
+            if child is not None:
+                raise Rejected("Move the folders inside it first.")
+            conn.execute("DELETE FROM folder WHERE id = ?", (folder_id,))
+            conn.execute(
+                """
+                UPDATE workspace SET focus_folder_id = NULL
+                WHERE id = ? AND focus_folder_id = ?
+                """,
+                (workspace_id, folder_id),
+            )
+            result = {"id": folder_id, "name": row["name"]}
+            events = [
+                self._event(
+                    conn,
+                    stream_id="app",
+                    event_type="folder.deleted",
+                    payload=result,
+                    channel_id=workspace["channel_id"],
+                    session_id=workspace["session_id"],
+                    actor={"kind": "user", "id": "local"},
+                )
+            ]
+            return result, events
+
+        return self._write(write)
+
+    def set_focus(self, workspace_id: str, folder_id: str | None) -> dict[str, Any]:
+        def write(conn: sqlite3.Connection) -> dict[str, Any]:
+            _require_workspace(conn, workspace_id)
+            if folder_id:
+                row = _folder_in(conn, workspace_id, folder_id)
+                if row["kind"] != "local":
+                    raise Rejected("Open a local folder.")
+            conn.execute(
+                "UPDATE workspace SET focus_folder_id = ? WHERE id = ?",
+                (folder_id, workspace_id),
+            )
+            return {"folder_id": folder_id}
+
+        return self._write(write)
+
+    def has_local_folder(self, workspace_id: str) -> bool:
+        def read(conn: sqlite3.Connection) -> bool:
+            _require_workspace(conn, workspace_id)
+            row = conn.execute(
+                "SELECT 1 FROM folder WHERE workspace_id = ? AND kind = 'local'",
+                (workspace_id,),
+            ).fetchone()
+            return row is not None
+
+        return self._read(read)
+
+    def local_location(self, workspace_id: str, folder_id: str | None = None) -> str:
+        def read(conn: sqlite3.Connection) -> str:
+            _require_workspace(conn, workspace_id)
+            if folder_id:
+                row = _folder_in(conn, workspace_id, folder_id)
+                if row["kind"] != "local" or not row["location"]:
+                    raise Rejected("That folder is not on this machine.")
+                return str(row["location"])
+            workspace = conn.execute(
+                "SELECT focus_folder_id FROM workspace WHERE id = ?",
+                (workspace_id,),
+            ).fetchone()
+            focus = workspace["focus_folder_id"] if workspace is not None else None
+            if focus:
+                focused = conn.execute(
+                    "SELECT * FROM folder WHERE id = ? AND workspace_id = ?",
+                    (focus, workspace_id),
+                ).fetchone()
+                if focused is not None and focused["kind"] == "local" and focused["location"]:
+                    return str(focused["location"])
+            rows = conn.execute(
+                """
+                SELECT * FROM folder
+                WHERE workspace_id = ? AND kind = 'local'
+                ORDER BY created_at, id
+                """,
+                (workspace_id,),
+            ).fetchall()
+            if len(rows) == 1 and rows[0]["location"]:
+                return str(rows[0]["location"])
+            if not rows:
+                raise Rejected("Save a local folder first.")
+            raise Rejected("Open a local folder.")
+
+        return self._read(read)
 
     def list_agent_skills(self, agent_id: str | None = None) -> list[dict[str, Any]]:
         def read(conn: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -1934,7 +2222,7 @@ class Store:
             agent = conn.execute("SELECT id FROM agent WHERE id = ?", (agent_id,)).fetchone()
             if agent is None:
                 raise NotFound("That agent does not exist.")
-            name, description = _skill_fields(body)
+            name, description, definition = _skill_fields(body)
             taken = conn.execute(
                 "SELECT id FROM agent_skill WHERE agent_id = ? AND name = ?",
                 (agent_id, name),
@@ -1946,11 +2234,11 @@ class Store:
             conn.execute(
                 """
                 INSERT INTO agent_skill (
-                    id, agent_id, name, description, revision, created_at
+                    id, agent_id, name, description, definition, revision, created_at
                 )
-                VALUES (?, ?, ?, ?, 1, ?)
+                VALUES (?, ?, ?, ?, ?, 1, ?)
                 """,
-                (skill_id, agent_id, name, description, created),
+                (skill_id, agent_id, name, description, definition, created),
             )
             result = _agent_skill_payload(
                 conn.execute("SELECT * FROM agent_skill WHERE id = ?", (skill_id,)).fetchone()
@@ -1979,7 +2267,7 @@ class Store:
             expected = int(body["expected_revision"])
             if int(row["revision"]) != expected:
                 raise Conflict("The skill was updated. Reload and try again.")
-            name, description = _skill_fields(body)
+            name, description, definition = _skill_fields(body)
             taken = conn.execute(
                 """
                 SELECT id FROM agent_skill
@@ -1993,10 +2281,10 @@ class Store:
             conn.execute(
                 """
                 UPDATE agent_skill
-                SET name = ?, description = ?, revision = ?
+                SET name = ?, description = ?, definition = ?, revision = ?
                 WHERE id = ?
                 """,
-                (name, description, revision, skill_id),
+                (name, description, definition, revision, skill_id),
             )
             result = _agent_skill_payload(
                 conn.execute("SELECT * FROM agent_skill WHERE id = ?", (skill_id,)).fetchone()
@@ -2034,6 +2322,211 @@ class Store:
 
         return self._write(write)
 
+    def list_global_skills(self) -> list[dict[str, Any]]:
+        def read(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            rows = conn.execute(
+                """
+                SELECT * FROM global_skill
+                ORDER BY name COLLATE NOCASE, id
+                """
+            ).fetchall()
+            return [_global_skill_payload(row) for row in rows]
+
+        return self._read(read)
+
+    def create_global_skill(
+        self, key: str | None, body: dict[str, Any]
+    ) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
+        def write(conn: sqlite3.Connection) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
+            prior = self._claim(conn, key, body)
+            if prior is not None:
+                return prior[0], prior[1], []
+            name, description, definition = _skill_fields(body)
+            taken = conn.execute(
+                "SELECT id FROM global_skill WHERE name = ?",
+                (name,),
+            ).fetchone()
+            if taken is not None:
+                raise Rejected("That skill name is already in the catalog.")
+            skill_id = mint("skill")
+            created = now()
+            conn.execute(
+                """
+                INSERT INTO global_skill (
+                    id, name, description, definition, add_by_default, revision, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, 1, ?)
+                """,
+                (skill_id, name, description, definition, int(bool(body.get("add_by_default"))), created),
+            )
+            result = _global_skill_payload(
+                conn.execute("SELECT * FROM global_skill WHERE id = ?", (skill_id,)).fetchone()
+            )
+            events = [
+                self._event(
+                    conn,
+                    stream_id="app",
+                    event_type="global_skill.created",
+                    payload=result,
+                    actor={"kind": "user", "id": "local"},
+                )
+            ]
+            self._remember(conn, key or "", body, 201, result)
+            return 201, result, events
+
+        return self._write(write)
+
+    def update_global_skill(
+        self, skill_id: str, body: dict[str, Any]
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        def write(conn: sqlite3.Connection) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            row = conn.execute("SELECT * FROM global_skill WHERE id = ?", (skill_id,)).fetchone()
+            if row is None:
+                raise NotFound("That skill does not exist.")
+            expected = int(body["expected_revision"])
+            if int(row["revision"]) != expected:
+                raise Conflict("The skill was updated. Reload and try again.")
+            name, description, definition = _skill_fields(body)
+            taken = conn.execute(
+                "SELECT id FROM global_skill WHERE name = ? AND id != ?",
+                (name, skill_id),
+            ).fetchone()
+            if taken is not None:
+                raise Rejected("That skill name is already in the catalog.")
+            revision = expected + 1
+            add_by_default = row["add_by_default"]
+            if "add_by_default" in body and body["add_by_default"] is not None:
+                add_by_default = int(bool(body["add_by_default"]))
+            conn.execute(
+                """
+                UPDATE global_skill
+                SET name = ?, description = ?, definition = ?, add_by_default = ?, revision = ?
+                WHERE id = ?
+                """,
+                (name, description, definition, add_by_default, revision, skill_id),
+            )
+            result = _global_skill_payload(
+                conn.execute("SELECT * FROM global_skill WHERE id = ?", (skill_id,)).fetchone()
+            )
+            events = [
+                self._event(
+                    conn,
+                    stream_id="app",
+                    event_type="global_skill.updated",
+                    payload=result,
+                    actor={"kind": "user", "id": "local"},
+                )
+            ]
+            return result, events
+
+        return self._write(write)
+
+    def delete_global_skill(self, skill_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        def write(conn: sqlite3.Connection) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            row = conn.execute("SELECT * FROM global_skill WHERE id = ?", (skill_id,)).fetchone()
+            if row is None:
+                raise NotFound("That skill does not exist.")
+            conn.execute("DELETE FROM global_skill WHERE id = ?", (skill_id,))
+            result = {"id": skill_id}
+            events = [
+                self._event(
+                    conn,
+                    stream_id="app",
+                    event_type="global_skill.deleted",
+                    payload=result,
+                    actor={"kind": "user", "id": "local"},
+                )
+            ]
+            return result, events
+
+        return self._write(write)
+
+    def copy_global_skill(
+        self, key: str | None, skill_id: str, body: dict[str, Any]
+    ) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
+        def write(conn: sqlite3.Connection) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
+            prior = self._claim(conn, key, body)
+            if prior is not None:
+                return prior[0], prior[1], []
+            row = conn.execute("SELECT * FROM global_skill WHERE id = ?", (skill_id,)).fetchone()
+            if row is None:
+                raise NotFound("That skill does not exist.")
+            agent_id = str(body.get("agent_id") or "").strip()
+            workspace_id = str(body.get("workspace_id") or "").strip()
+            if bool(agent_id) == bool(workspace_id):
+                raise Rejected("Choose an agent or a workspace.")
+            name = str(row["name"])
+            description = str(row["description"])
+            definition = str(row["definition"] or "")
+            created = now()
+            copy_id = mint("skill")
+            if agent_id:
+                agent = conn.execute("SELECT id FROM agent WHERE id = ?", (agent_id,)).fetchone()
+                if agent is None:
+                    raise NotFound("That agent does not exist.")
+                taken = conn.execute(
+                    "SELECT id FROM agent_skill WHERE agent_id = ? AND name = ?",
+                    (agent_id, name),
+                ).fetchone()
+                if taken is not None:
+                    raise Rejected("That skill name is already on this agent.")
+                conn.execute(
+                    """
+                    INSERT INTO agent_skill (
+                        id, agent_id, name, description, definition, revision, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, 1, ?)
+                    """,
+                    (copy_id, agent_id, name, description, definition, created),
+                )
+                result = _agent_skill_payload(
+                    conn.execute("SELECT * FROM agent_skill WHERE id = ?", (copy_id,)).fetchone()
+                )
+                events = [
+                    self._event(
+                        conn,
+                        stream_id="app",
+                        event_type="agent_skill.created",
+                        payload=result,
+                        actor={"kind": "user", "id": "local"},
+                    )
+                ]
+            else:
+                workspace = _require_workspace(conn, workspace_id)
+                taken = conn.execute(
+                    "SELECT id FROM skill WHERE workspace_id = ? AND name = ?",
+                    (workspace_id, name),
+                ).fetchone()
+                if taken is not None:
+                    raise Rejected("That skill name is already on this workspace.")
+                conn.execute(
+                    """
+                    INSERT INTO skill (
+                        id, workspace_id, name, description, definition, revision, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, 1, ?)
+                    """,
+                    (copy_id, workspace_id, name, description, definition, created),
+                )
+                result = _skill_payload(
+                    conn.execute("SELECT * FROM skill WHERE id = ?", (copy_id,)).fetchone()
+                )
+                events = [
+                    self._event(
+                        conn,
+                        stream_id="app",
+                        event_type="skill.created",
+                        payload={"workspace_id": workspace_id, "skill": result},
+                        channel_id=workspace["channel_id"],
+                        session_id=workspace["session_id"],
+                        actor={"kind": "user", "id": "local"},
+                    )
+                ]
+            self._remember(conn, key or "", body, 201, result)
+            return 201, result, events
+
+        return self._write(write)
+
     def list_skills(self, workspace_id: str) -> list[dict[str, Any]]:
         def read(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             _require_workspace(conn, workspace_id)
@@ -2049,7 +2542,7 @@ class Store:
             if prior is not None:
                 return prior[0], prior[1], []
             workspace = _require_workspace(conn, workspace_id)
-            name, description = _skill_fields(body)
+            name, description, definition = _skill_fields(body)
             taken = conn.execute(
                 "SELECT id FROM skill WHERE workspace_id = ? AND name = ?",
                 (workspace_id, name),
@@ -2061,11 +2554,11 @@ class Store:
             conn.execute(
                 """
                 INSERT INTO skill (
-                    id, workspace_id, name, description, revision, created_at
+                    id, workspace_id, name, description, definition, revision, created_at
                 )
-                VALUES (?, ?, ?, ?, 1, ?)
+                VALUES (?, ?, ?, ?, ?, 1, ?)
                 """,
-                (skill_id, workspace_id, name, description, created),
+                (skill_id, workspace_id, name, description, definition, created),
             )
             result = _skill_payload(
                 conn.execute("SELECT * FROM skill WHERE id = ?", (skill_id,)).fetchone()
@@ -2100,7 +2593,7 @@ class Store:
             expected = int(body["expected_revision"])
             if int(row["revision"]) != expected:
                 raise Conflict("The skill was updated. Reload and try again.")
-            name, description = _skill_fields(body)
+            name, description, definition = _skill_fields(body)
             taken = conn.execute(
                 """
                 SELECT id FROM skill
@@ -2114,10 +2607,10 @@ class Store:
             conn.execute(
                 """
                 UPDATE skill
-                SET name = ?, description = ?, revision = ?
+                SET name = ?, description = ?, definition = ?, revision = ?
                 WHERE id = ?
                 """,
-                (name, description, revision, skill_id),
+                (name, description, definition, revision, skill_id),
             )
             result = _skill_payload(
                 conn.execute("SELECT * FROM skill WHERE id = ?", (skill_id,)).fetchone()
@@ -2198,7 +2691,7 @@ class Store:
             if workspace is None or workspace["type"] != "gallery":
                 return None
             folder = conn.execute(
-                "SELECT 1 FROM folder WHERE workspace_id = ?",
+                "SELECT 1 FROM folder WHERE workspace_id = ? AND kind = 'local'",
                 (workspace_id,),
             ).fetchone()
             if folder is None:
@@ -2270,9 +2763,14 @@ class Store:
         return self._read(read)
 
     def begin_message(
-        self, key: str | None, session_id: str, text: str
+        self,
+        key: str | None,
+        session_id: str,
+        text: str,
+        folder: str | None = None,
+        image: str | None = None,
     ) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
-        body = {"session_id": session_id, "text": text}
+        body = {"session_id": session_id, "text": text, "folder": folder, "image": image}
 
         def write(conn: sqlite3.Connection) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
             prior = self._claim(conn, key, body)
@@ -2306,10 +2804,13 @@ class Store:
             )
             conn.execute(
                 """
-                INSERT INTO run (id, session_id, agent_id, status, error, started_at, finished_at)
-                VALUES (?, ?, ?, 'running', NULL, ?, NULL)
+                INSERT INTO run (
+                    id, session_id, agent_id, status, error, started_at, finished_at,
+                    gallery_folder, gallery_image
+                )
+                VALUES (?, ?, ?, 'running', NULL, ?, NULL, ?, ?)
                 """,
-                (run_id, session_id, session["participant_id"], created),
+                (run_id, session_id, session["participant_id"], created, folder, image),
             )
             stream_id = f"session:{session_id}"
             channel_id = session["channel_id"]
@@ -2403,6 +2904,8 @@ class Store:
             else:
                 user_text = history[-1]["text"] if history else ""
                 prior = history[:-1]
+            folder = run["gallery_folder"]
+            image = run["gallery_image"]
             return {
                 "run": dict(run),
                 "session": dict(session),
@@ -2411,6 +2914,8 @@ class Store:
                 "base_url": base_url,
                 "prior": prior,
                 "user_text": user_text,
+                "gallery_folder": None if folder is None else str(folder),
+                "gallery_image": None if image is None else str(image),
             }
 
         return self._read(read)

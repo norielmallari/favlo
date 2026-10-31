@@ -1,7 +1,7 @@
 import { useEffect, useRef, type ReactNode } from 'react';
 import { Platform, ScrollView, Text, useWindowDimensions, View } from 'react-native';
 
-import { Pressable } from '@/components/Pressable';
+import { IconButton } from '@/components/IconButton';
 import { useTheme } from '@/theme/Theme';
 import { radius, space, z } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
@@ -101,9 +101,7 @@ export function Modal({
       >
         <ScrollView contentContainerStyle={{ padding: space[4], gap: space[3] }}>
           {children}
-          <Pressable accessibilityRole="button" accessibilityLabel={closeLabel} onPress={onClose} style={{ minHeight: 44, justifyContent: 'center' }}>
-            <Text style={textStyle('small', palette.accent, '600')}>Close</Text>
-          </Pressable>
+          <IconButton icon="x" label="Close" accessibilityLabel={closeLabel} onPress={onClose} background="transparent" border="transparent" color={palette.accent} />
         </ScrollView>
       </View>
     </View>

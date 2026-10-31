@@ -69,7 +69,7 @@ def test_a_stdio_server_lists_its_tools(tmp_path: Path) -> None:
     assert [tool["name"] for tool in tools] == ["echo"]
 
 
-def test_a_finished_task_is_written_to_the_calling_session(tmp_path: Path) -> None:
+def test_a_finished_task_starts_a_turn_and_stays_out_of_the_chat(tmp_path: Path) -> None:
     asyncio.run(_finished_task(tmp_path))
 
 
@@ -154,7 +154,12 @@ async def _finished_task(tmp_path: Path) -> None:
         await asyncio.wait_for(next(iter(pending)), timeout=2)
         snapshot = store.session_snapshot("session_favlo")
         bodies = [message["body"] for message in snapshot["messages"]]
-        assert any("favlo://images/image_abc.png" in body for body in bodies)
+        assert not any("favlo://images/image_abc.png" in body for body in bodies)
+        assert not any(body.strip().startswith("{") for body in bodies)
+        running = [row for row in snapshot["runs"] if row["status"] == "running"]
+        assert len(running) == 1
+        assert "favlo://images/image_abc.png" in running[0]["cue"]
+        assert "Do not paste the JSON" in running[0]["cue"]
         assert seen["gets"] >= 1
     finally:
         server.shutdown()
@@ -218,7 +223,8 @@ def test_media_instructions_require_a_listed_model_id() -> None:
     assert "set_music_model" in INSTRUCTIONS
     assert "set_voice_model" in INSTRUCTIONS
     assert "Repeat the returned session id" in INSTRUCTIONS
-    assert "Do not write a favlo:// link" in INSTRUCTIONS
+    assert "do not write a favlo:// link" in INSTRUCTIONS
+    assert "Do not paste the JSON" in INSTRUCTIONS
     assert "tell the user you are generating" in INSTRUCTIONS
     described = _description(
         {"name": "generate_image", "description": "Generate one or more PNGs."}
@@ -260,16 +266,14 @@ def test_an_unknown_model_result_starts_a_correction_turn(tmp_path: Path) -> Non
         )
         snapshot = store.session_snapshot(FAVLO_SESSION_ID)
         bodies = [message["body"] for message in snapshot["messages"]]
-        assert any(
-            body.startswith("generate_image failed.") and "unknown model" in body for body in bodies
-        )
+        assert not any("unknown model" in body for body in bodies)
         running = [row for row in snapshot["runs"] if row["status"] == "running"]
         assert len(running) == 1
         context = store.run_context(running[0]["id"])
         assert "list_image_models" in context["user_text"]
         assert "generate_image again" in context["user_text"]
-        assert context["prior"][-1]["role"] == "assistant"
-        assert "unknown model" in context["prior"][-1]["text"]
+        assert "unknown model" in context["user_text"]
+        assert not any("unknown model" in row["text"] for row in context["prior"])
         again, _events, waiting = store.begin_task_correction(
             FAVLO_SESSION_ID, FAVLO_AGENT_ID, "again"
         )
@@ -487,3 +491,36 @@ def test_one_catalog_fetch_serves_concurrent_readers() -> None:
     left, right = asyncio.run(run())
     assert calls["n"] == 1
     assert left == right == [{"name": "echo", "description": "", "schema": {"type": "object"}}]
+
+
+def test_a_memory_call_keeps_the_agents_own_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    async def fake_rpc(_server: dict[str, object], _method: str, params: dict[str, object], **_kwargs: object) -> dict[str, object]:
+        seen["arguments"] = params["arguments"]
+        return {"content": [{"type": "text", "text": "[]"}]}
+
+    monkeypatch.setattr("web_api.mcp_tools.rpc", fake_rpc)
+
+    async def run() -> None:
+        await call_tool(
+            None,
+            {
+                "server_id": "server",
+                "server_name": "Favlo",
+                "transport": "http",
+                "command": "",
+                "url": "http://127.0.0.1:9/mcp",
+                "name": "recall",
+                "description": "Recall.",
+                "schema": {},
+            },
+            {"query": "tea", "client": "agent_other"},
+            "session_favlo",
+            "agent_favlo",
+            None,
+            set(),
+        )
+
+    asyncio.run(run())
+    assert seen["arguments"] == {"query": "tea", "client": "agent_favlo"}

@@ -49,22 +49,33 @@ describe('skills configuration', () => {
       if (path === '/agent-skills' && method === 'GET') {
         return json({ skills: [] });
       }
+      if (path === '/global-skills') {
+        return json({ skills: [] });
+      }
+      if (path === '/workspaces') {
+        return json({ workspaces: [] });
+      }
       return json({ message: 'The request failed.' }, 404);
     }) as typeof fetch;
   });
 
-  test('shows agents, then skills, then the skill detail', async () => {
+  test('shows global skills, and agent skills under the agent', async () => {
     const view = await render(
       <ThemeProvider>
         <SettingsScreen />
       </ThemeProvider>,
     );
     const user = userEvent.setup();
-    await user.press(await view.findByRole('tab', { name: 'Skills' }));
-    expect(view.getByLabelText('Agents list')).toBeTruthy();
+    expect(await view.findByLabelText('Agent skills')).toBeTruthy();
+    expect(view.getByText('No skills')).toBeTruthy();
+    await user.press(view.getByRole('tab', { name: 'Skills' }));
     expect(view.getByLabelText('Skills list')).toBeTruthy();
+    expect(view.queryByLabelText('Agents list')).toBeNull();
+    expect(view.queryByLabelText('Agent skills')).toBeNull();
     expect(view.getByRole('button', { name: 'New skill' })).toBeTruthy();
     expect(view.getByText('Choose a skill.')).toBeTruthy();
+    await user.press(view.getByRole('button', { name: 'New skill' }));
+    expect(view.getByRole('switch', { name: 'Add to new agents' })).toBeTruthy();
   });
 });
 

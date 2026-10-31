@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { Text, View } from 'react-native';
 
+import { IconButton } from '@/components/IconButton';
 import { MarkdownText } from '@/components/MarkdownText';
-import { Pressable } from '@/components/Pressable';
 import { useTheme } from '@/theme/Theme';
 import { space } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
@@ -18,23 +18,15 @@ export function Thinking({ text, settled }: { text: string; settled: boolean }) 
 
   return (
     <View style={{ gap: space[1], maxWidth: '100%', minWidth: 0 }}>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="Thinking"
-        accessibilityState={{ expanded: open }}
-        aria-expanded={open}
+      <IconButton
+        icon={open ? 'chevron-down' : 'chevron-right'}
+        label="Thinking"
         onPress={() => setOpen((value) => !value)}
-        style={{
-          minHeight: 44,
-          flexDirection: 'row',
-          alignItems: 'center',
-          alignSelf: 'flex-start',
-          gap: space[2],
-        }}
-      >
-        <Text style={textStyle('small', palette.textSecondary, '600')}>Thinking</Text>
-        <Text style={textStyle('small', palette.textSecondary)}>{open ? '▾' : '▸'}</Text>
-      </Pressable>
+        background="transparent"
+        border="transparent"
+        color={palette.textSecondary}
+        accessibilityState={{ expanded: open }}
+      />
       {open ? (
         <View
           testID="thinking-text"

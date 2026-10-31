@@ -5,9 +5,12 @@ import { Platform, ScrollView, Switch, Text, TextInput, useWindowDimensions, Vie
 
 import { api, idempotencyKey } from '@/api/client';
 import { Confirmation } from '@/components/Confirmation';
+import { FeatherIcon } from '@/components/FeatherIcon';
 import { Frame } from '@/components/Frame';
 import { MenuRow } from '@/components/MenuRow';
+import { buttonRow, IconButton } from '@/components/IconButton';
 import { focusRingInset, Pressable } from '@/components/Pressable';
+import { SkillForm, type SkillFields } from '@/components/SkillForm';
 import { useTheme } from '@/theme/Theme';
 import { radius } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
@@ -71,8 +74,18 @@ type AgentSkill = {
   agent_id: string;
   name: string;
   description: string;
+  definition: string;
   revision: number;
 };
+type GlobalSkill = {
+  id: string;
+  name: string;
+  description: string;
+  definition: string;
+  add_by_default: boolean;
+  revision: number;
+};
+type WorkspaceOption = { id: string; name: string };
 type DrillPane = 'agents' | 'list' | 'detail';
 
 const SECTIONS: { id: Section; label: string; catalog: boolean }[] = [
@@ -116,14 +129,33 @@ export function SettingsScreen() {
   const [mcpToken, setMcpToken] = useState(0);
   const [mcpPane, setMcpPane] = useState<DrillPane>('agents');
   const [agentSkills, setAgentSkills] = useState<AgentSkill[]>([]);
-  const [skillId, setSkillId] = useState<string | null>(null);
-  const [creatingSkill, setCreatingSkill] = useState(false);
-  const [skillToken, setSkillToken] = useState(0);
-  const [skillPane, setSkillPane] = useState<DrillPane>('agents');
+  const [globalSkills, setGlobalSkills] = useState<GlobalSkill[]>([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceOption[]>([]);
+  const [globalSkillId, setGlobalSkillId] = useState<string | null>(null);
+  const [creatingGlobal, setCreatingGlobal] = useState(false);
+  const [globalToken, setGlobalToken] = useState(0);
+  const [globalPane, setGlobalPane] = useState<'list' | 'detail'>('list');
+  const [agentSkillId, setAgentSkillId] = useState<string | null>(null);
+  const [creatingAgentSkill, setCreatingAgentSkill] = useState(false);
+  const [agentSkillToken, setAgentSkillToken] = useState(0);
 
-  async function reload(keepHeartbeat?: string, keepMcp?: string, keepSkill?: string) {
-    const [listedProviders, nextSettings, nextAgents, listedGroups, listedHeartbeats, listedMcp, listedSkills] =
-      await Promise.all([
+  async function reload(
+    keepHeartbeat?: string,
+    keepMcp?: string,
+    keepAgentSkill?: string,
+    keepGlobal?: string,
+  ) {
+    const [
+      listedProviders,
+      nextSettings,
+      nextAgents,
+      listedGroups,
+      listedHeartbeats,
+      listedMcp,
+      listedSkills,
+      listedGlobal,
+      listedWorkspaces,
+    ] = await Promise.all([
       api<{ providers: Provider[] }>('/providers'),
       api<Settings>('/settings'),
       api<{ agents: Agent[] }>('/agents'),
@@ -131,6 +163,8 @@ export function SettingsScreen() {
       api<{ heartbeats: Heartbeat[] }>('/heartbeats'),
       api<{ servers: McpServer[] }>('/mcp-servers'),
       api<{ skills: AgentSkill[] }>('/agent-skills'),
+      api<{ skills: GlobalSkill[] }>('/global-skills'),
+      api<{ workspaces: WorkspaceOption[] }>('/workspaces'),
     ]);
     const providerRows = listedProviders.providers;
     const agentRows = nextAgents.agents;
@@ -145,10 +179,17 @@ export function SettingsScreen() {
     setGroups(listedGroups.groups);
     setHeartbeats(listedHeartbeats.heartbeats);
     setAgentSkills(listedSkills.skills);
+    setGlobalSkills(listedGlobal.skills);
+    setWorkspaces(listedWorkspaces.workspaces);
     setMcpServers(listedMcp.servers);
-    setSkillId((current) => {
-      const chosen = keepSkill ?? current;
+    setAgentSkillId((current) => {
+      const chosen = keepAgentSkill ?? current;
       const row = listedSkills.skills.find((item) => item.id === chosen);
+      return row == null ? null : row.id;
+    });
+    setGlobalSkillId((current) => {
+      const chosen = keepGlobal ?? current;
+      const row = listedGlobal.skills.find((item) => item.id === chosen);
       return row == null ? null : row.id;
     });
     setMcpId((current) => {
@@ -186,10 +227,11 @@ export function SettingsScreen() {
         setCreating(false);
         setCreatingHeartbeat(false);
         setCreatingMcp(false);
-        setCreatingSkill(false);
+        setCreatingGlobal(false);
+        setCreatingAgentSkill(false);
         setHeartbeatPane('agents');
         setMcpPane('agents');
-        setSkillPane('agents');
+        setGlobalPane('list');
       }
     };
     document.addEventListener('keydown', onKey);
@@ -216,31 +258,107 @@ export function SettingsScreen() {
   const mcpDetail = section === 'mcp' && (wide || mcpPane === 'detail');
   const agentServers = mcpServers.filter((row) => row.agent_id === agentId);
   const mcpServer = agentServers.find((row) => row.id === mcpId) ?? null;
-  const skillAgents = section === 'skills' && (wide || skillPane === 'agents');
-  const skillList = section === 'skills' && (wide || skillPane === 'list');
-  const skillDetail = section === 'skills' && (wide || skillPane === 'detail');
+  const skillList = section === 'skills' && (wide || globalPane === 'list');
+  const skillDetail = section === 'skills' && (wide || globalPane === 'detail');
   const skillsForAgent = agentSkills.filter((row) => row.agent_id === agentId);
-  const agentSkill = skillsForAgent.find((row) => row.id === skillId) ?? null;
+  const agentSkill = skillsForAgent.find((row) => row.id === agentSkillId) ?? null;
+  const globalSkill = globalSkills.find((row) => row.id === globalSkillId) ?? null;
 
   function chooseSection(next: Section) {
     setSection(next);
     setCreating(false);
     setCreatingHeartbeat(false);
     setCreatingMcp(false);
-    setCreatingSkill(false);
+    setCreatingGlobal(false);
+    setCreatingAgentSkill(false);
     setShowDetail(false);
     setHeartbeatPane('agents');
     setMcpPane('agents');
-    setSkillPane('agents');
+    setGlobalPane('list');
     setDrawer(null);
   }
 
-  function startSkill() {
-    setCreatingSkill(true);
-    setSkillId(null);
-    setSkillToken((current) => current + 1);
-    setSkillPane('detail');
+  function startGlobalSkill() {
+    setCreatingGlobal(true);
+    setGlobalSkillId(null);
+    setGlobalToken((current) => current + 1);
+    setGlobalPane('detail');
     setDrawer(null);
+  }
+
+  function startAgentSkill() {
+    setCreatingAgentSkill(true);
+    setAgentSkillId(null);
+    setAgentSkillToken((current) => current + 1);
+  }
+
+  async function saveAgentSkill(fields: SkillFields) {
+    if (agent == null) {
+      return;
+    }
+    if (creatingAgentSkill || agentSkill == null) {
+      const saved = await api<AgentSkill>('/agent-skills', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': idempotencyKey() },
+        body: JSON.stringify({ ...fields, agent_id: agent.id }),
+      });
+      setCreatingAgentSkill(false);
+      setAgentSkillId(saved.id);
+      setSaved('The skill was created.');
+      await reload(undefined, undefined, saved.id);
+      return;
+    }
+    await api(`/agent-skills/${agentSkill.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ ...fields, expected_revision: agentSkill.revision }),
+    });
+    setSaved('The skill was saved.');
+    await reload(undefined, undefined, agentSkill.id);
+  }
+
+  async function deleteAgentSkill() {
+    if (agentSkill == null) {
+      return;
+    }
+    await api(`/agent-skills/${agentSkill.id}`, { method: 'DELETE' });
+    setCreatingAgentSkill(false);
+    setAgentSkillId(null);
+    setSaved('The skill was deleted.');
+    await reload();
+  }
+
+  async function saveGlobalSkill(fields: SkillFields) {
+    if (creatingGlobal || globalSkill == null) {
+      const saved = await api<GlobalSkill>('/global-skills', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': idempotencyKey() },
+        body: JSON.stringify(fields),
+      });
+      setCreatingGlobal(false);
+      setGlobalSkillId(saved.id);
+      setGlobalPane('detail');
+      setSaved('The skill was created.');
+      await reload(undefined, undefined, undefined, saved.id);
+      return;
+    }
+    await api(`/global-skills/${globalSkill.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ ...fields, expected_revision: globalSkill.revision }),
+    });
+    setSaved('The skill was saved.');
+    await reload(undefined, undefined, undefined, globalSkill.id);
+  }
+
+  async function deleteGlobalSkill() {
+    if (globalSkill == null) {
+      return;
+    }
+    await api(`/global-skills/${globalSkill.id}`, { method: 'DELETE' });
+    setCreatingGlobal(false);
+    setGlobalSkillId(null);
+    setGlobalPane('list');
+    setSaved('The skill was deleted.');
+    await reload();
   }
 
   function startMcp() {
@@ -355,10 +473,8 @@ export function SettingsScreen() {
     <Frame title="Configuration · Favlo" link={{ label: 'Chat', onPress: () => router.push('/') }}>
       <View style={{ flex: 1, minWidth: 0, maxWidth: '100%' }}>
         {!wide ? (
-          <View style={{ flexDirection: 'row', gap: 8, padding: 8 }}>
-            <Pressable accessibilityRole="button" accessibilityLabel="Sections" onPress={() => setDrawer('sections')} style={button(palette.surface, palette.borderStrong)}>
-              <Text style={{ color: palette.textPrimary, fontSize: 14, fontWeight: '600' }}>Sections</Text>
-            </Pressable>
+          <View style={[buttonRow, { padding: 8 }]}>
+            <IconButton icon="layout" label="Sections" onPress={() => setDrawer('sections')} background={palette.surface} border={palette.borderStrong} color={palette.textPrimary} />
           </View>
         ) : null}
         <View style={{ flex: 1, flexDirection: 'row', minWidth: 0, maxWidth: '100%' }}>
@@ -388,9 +504,7 @@ export function SettingsScreen() {
                 ))}
               </View>
               {!wide ? (
-                <Pressable accessibilityRole="button" accessibilityLabel="Close sections" onPress={() => setDrawer(null)} style={{ minHeight: 44, justifyContent: 'center' }}>
-                  <Text style={{ color: palette.accent, fontSize: 14 }}>Close</Text>
-                </Pressable>
+                <IconButton icon="x" label="Close" accessibilityLabel="Close sections" onPress={() => setDrawer(null)} background="transparent" border="transparent" color={palette.accent} />
               ) : null}
             </View>
           ) : null}
@@ -408,8 +522,17 @@ export function SettingsScreen() {
               }}
             >
               <ScrollView contentContainerStyle={menuRows}>
+                {section === 'agents' ? (
+                  <MenuRow icon="user-plus" label="New agent" selected={creating} onPress={() => {
+                    setCreating(true);
+                    setAgentSkillId(null);
+                    setCreatingAgentSkill(false);
+                    setShowDetail(true);
+                    setDrawer(null);
+                  }} />
+                ) : null}
                 {(section === 'providers' ? providers : agents).map((item) => {
-                  const selected = section === 'providers' ? item.id === providerId : item.id === agentId;
+                  const selected = section === 'providers' ? item.id === providerId : item.id === agentId && !creating;
                   return (
                     <MenuRow
                       key={item.id}
@@ -421,6 +544,8 @@ export function SettingsScreen() {
                         } else {
                           setAgentId(item.id);
                           setCreating(false);
+                          setAgentSkillId(null);
+                          setCreatingAgentSkill(false);
                         }
                         setShowDetail(true);
                         setDrawer(null);
@@ -434,21 +559,17 @@ export function SettingsScreen() {
           {showDetails ? (
             <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 16, maxWidth: 720 }}>
               {!wide && catalog ? (
-                <Pressable accessibilityRole="button" accessibilityLabel="Back to list" onPress={() => setShowDetail(false)} style={{ minHeight: 44, justifyContent: 'center' }}>
-                  <Text style={{ color: palette.accent, fontSize: 14 }}>Back</Text>
-                </Pressable>
+                <IconButton icon="arrow-left" label="Back" accessibilityLabel="Back to list" onPress={() => setShowDetail(false)} background="transparent" border="transparent" color={palette.accent} />
               ) : null}
               {section === 'providers' && provider != null ? (
                 <View style={{ gap: 12 }}>
                   <Text accessibilityRole="header" aria-level={2} style={heading(palette.textPrimary)}>{provider.name}</Text>
                   <Text style={label(palette.textPrimary)}>Address</Text>
                   <Text style={{ color: palette.textSecondary, fontSize: 14 }}>{provider.base_url}</Text>
-                  <Pressable accessibilityRole="button" accessibilityLabel="Test connection" onPress={() => void testConnection()} style={button(palette.accent)}>
-                    <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>Test connection</Text>
-                  </Pressable>
-                  <Pressable accessibilityRole="button" accessibilityLabel="Refresh models" onPress={() => void refreshModels()} style={button(palette.surface, palette.borderStrong)}>
-                    <Text style={{ color: palette.textPrimary, fontSize: 14, fontWeight: '600' }}>Refresh models</Text>
-                  </Pressable>
+                  <View style={buttonRow}>
+                    <IconButton icon="zap" label="Test connection" onPress={() => void testConnection()} background={palette.accent} color={palette.onAccent} />
+                    <IconButton icon="refresh-cw" label="Refresh models" onPress={() => void refreshModels()} background={palette.surface} border={palette.borderStrong} color={palette.textPrimary} />
+                  </View>
                   {status ? <Text accessibilityLiveRegion="polite" style={{ color: palette.textPrimary, fontSize: 14 }}>{status}</Text> : null}
                   <Text style={label(palette.textPrimary)}>Default model</Text>
                   <Picker
@@ -468,14 +589,6 @@ export function SettingsScreen() {
               ) : null}
               {section === 'agents' ? (
                 <View style={{ gap: 12 }}>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel="New agent"
-                    onPress={() => setCreating(true)}
-                    style={button(palette.accent)}
-                  >
-                    <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>New agent</Text>
-                  </Pressable>
                   {creating ? (
                     <AgentForm
                       agent={null}
@@ -499,6 +612,34 @@ export function SettingsScreen() {
                   ) : (
                     <Text style={{ color: palette.textPrimary, fontSize: 16 }}>Choose an agent.</Text>
                   )}
+                  {!creating && agent != null ? (
+                    <View accessibilityLabel="Agent skills" style={{ gap: 8 }}>
+                      <Text style={label(palette.textPrimary)}>Skills</Text>
+                      <MenuRow icon="plus" label="New skill" selected={creatingAgentSkill} onPress={startAgentSkill} />
+                      {skillsForAgent.map((row) => (
+                        <MenuRow
+                          key={row.id}
+                          label={row.name}
+                          selected={row.id === agentSkillId && !creatingAgentSkill}
+                          onPress={() => {
+                            setAgentSkillId(row.id);
+                            setCreatingAgentSkill(false);
+                          }}
+                        />
+                      ))}
+                      {skillsForAgent.length === 0 ? (
+                        <Text style={{ color: palette.textSecondary, fontSize: 14 }}>No skills</Text>
+                      ) : null}
+                      {creatingAgentSkill || agentSkill != null ? (
+                        <SkillForm
+                          key={creatingAgentSkill ? `new-${agentSkillToken}` : `${agentSkill?.id}:${agentSkill?.revision}`}
+                          skill={creatingAgentSkill ? null : agentSkill}
+                          onSave={saveAgentSkill}
+                          onDelete={creatingAgentSkill ? undefined : deleteAgentSkill}
+                        />
+                      ) : null}
+                    </View>
+                  ) : null}
                 </View>
               ) : null}
               {section === 'orchestration' ? (
@@ -508,9 +649,7 @@ export function SettingsScreen() {
                     <Text style={label(palette.textPrimary)}>Maximum turns</Text>
                     <TextInput accessibilityLabel="Maximum turns" value={budget} onChangeText={setBudget} keyboardType="number-pad" style={field} />
                   </View>
-                  <Pressable accessibilityRole="button" accessibilityLabel="Save maximum turns" onPress={() => void saveBudget()} style={button(palette.surface, palette.borderStrong)}>
-                    <Text style={{ color: palette.textPrimary, fontSize: 14, fontWeight: '600' }}>Save maximum turns</Text>
-                  </Pressable>
+                  <IconButton icon="check" label="Save maximum turns" onPress={() => void saveBudget()} background={palette.surface} border={palette.borderStrong} color={palette.textPrimary} />
                 </View>
               ) : null}
               {error ? <Text accessibilityRole="alert" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text> : null}
@@ -540,18 +679,19 @@ export function SettingsScreen() {
           {heartbeatList ? (
             <View accessibilityLabel="Heartbeats list" style={columnStyle(palette.border, palette.surface, wide, wide ? 220 : undefined)}>
               {!wide ? (
-                <Pressable accessibilityRole="button" accessibilityLabel="Back to agents" onPress={() => setHeartbeatPane('agents')} style={{ minHeight: 44, justifyContent: 'center' }}>
-                  <Text style={{ color: palette.accent, fontSize: 14 }}>Back</Text>
-                </Pressable>
+                <IconButton icon="arrow-left" label="Back" accessibilityLabel="Back to agents" onPress={() => setHeartbeatPane('agents')} background="transparent" border="transparent" color={palette.accent} />
               ) : (
                 <Text style={label(palette.textPrimary)}>Heartbeats</Text>
               )}
               <ScrollView contentContainerStyle={menuRows}>
+                {agent != null ? (
+                  <MenuRow icon="plus" label="New heartbeat" selected={creatingHeartbeat} onPress={startHeartbeat} />
+                ) : null}
                 {agentHeartbeats.map((row) => (
                   <MenuRow
                     key={row.id}
                     label={row.cron_expression}
-                    selected={row.id === heartbeatId}
+                    selected={row.id === heartbeatId && !creatingHeartbeat}
                     onPress={() => {
                       setHeartbeatId(row.id);
                       setCreatingHeartbeat(false);
@@ -562,29 +702,17 @@ export function SettingsScreen() {
                 ))}
                 {agentHeartbeats.length === 0 ? <Text style={{ color: palette.textSecondary, fontSize: 14 }}>No heartbeats</Text> : null}
               </ScrollView>
-              {!wide && agent != null ? (
-                <Pressable accessibilityRole="button" accessibilityLabel="New heartbeat" onPress={startHeartbeat} style={button(palette.accent)}>
-                  <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>New heartbeat</Text>
-                </Pressable>
-              ) : null}
             </View>
           ) : null}
           {heartbeatDetail ? (
             <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 16, maxWidth: 720 }}>
               {!wide ? (
-                <Pressable accessibilityRole="button" accessibilityLabel="Back to heartbeats" onPress={() => setHeartbeatPane('list')} style={{ minHeight: 44, justifyContent: 'center' }}>
-                  <Text style={{ color: palette.accent, fontSize: 14 }}>Back</Text>
-                </Pressable>
+                <IconButton icon="arrow-left" label="Back" accessibilityLabel="Back to heartbeats" onPress={() => setHeartbeatPane('list')} background="transparent" border="transparent" color={palette.accent} />
               ) : null}
               {agent == null ? (
                 <Text style={{ color: palette.textPrimary, fontSize: 16 }}>Choose an agent.</Text>
               ) : (
                 <View style={{ gap: 12 }}>
-                  {wide ? (
-                    <Pressable accessibilityRole="button" accessibilityLabel="New heartbeat" onPress={startHeartbeat} style={button(palette.accent)}>
-                      <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>New heartbeat</Text>
-                    </Pressable>
-                  ) : null}
                   {creatingHeartbeat ? (
                     <HeartbeatForm
                       key={`new-${createToken}`}
@@ -612,99 +740,58 @@ export function SettingsScreen() {
               {error ? <Text accessibilityRole="alert" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text> : null}
             </ScrollView>
           ) : null}
-          {skillAgents ? (
-            <View accessibilityLabel="Agents list" style={columnStyle(palette.border, palette.surface, wide, wide ? 200 : undefined)}>
-              {!wide ? null : <Text style={label(palette.textPrimary)}>Agents</Text>}
-              <ScrollView contentContainerStyle={menuRows}>
-                {agents.map((item) => (
-                  <MenuRow
-                    key={item.id}
-                    label={item.name}
-                    selected={item.id === agentId}
-                    onPress={() => {
-                      setAgentId(item.id);
-                      setSkillId(null);
-                      setCreatingSkill(false);
-                      setSkillPane('list');
-                      setDrawer(null);
-                    }}
-                  />
-                ))}
-              </ScrollView>
-            </View>
-          ) : null}
           {skillList ? (
             <View accessibilityLabel="Skills list" style={columnStyle(palette.border, palette.surface, wide, wide ? 220 : undefined)}>
-              {!wide ? (
-                <Pressable accessibilityRole="button" accessibilityLabel="Back to agents" onPress={() => setSkillPane('agents')} style={{ minHeight: 44, justifyContent: 'center' }}>
-                  <Text style={{ color: palette.accent, fontSize: 14 }}>Back</Text>
-                </Pressable>
-              ) : (
-                <Text style={label(palette.textPrimary)}>Skills</Text>
-              )}
+              <Text style={label(palette.textPrimary)}>Skills</Text>
               <ScrollView contentContainerStyle={menuRows}>
-                {skillsForAgent.map((row) => (
+                <MenuRow icon="plus" label="New skill" selected={creatingGlobal} onPress={startGlobalSkill} />
+                {globalSkills.map((row) => (
                   <MenuRow
                     key={row.id}
                     label={row.name}
-                    selected={row.id === skillId}
+                    selected={row.id === globalSkillId && !creatingGlobal}
                     onPress={() => {
-                      setSkillId(row.id);
-                      setCreatingSkill(false);
-                      setSkillPane('detail');
+                      setGlobalSkillId(row.id);
+                      setCreatingGlobal(false);
+                      setGlobalPane('detail');
                       setDrawer(null);
                     }}
                   />
                 ))}
-                {skillsForAgent.length === 0 ? <Text style={{ color: palette.textSecondary, fontSize: 14 }}>No skills</Text> : null}
+                {globalSkills.length === 0 ? <Text style={{ color: palette.textSecondary, fontSize: 14 }}>No skills</Text> : null}
               </ScrollView>
-              {!wide && agent != null ? (
-                <Pressable accessibilityRole="button" accessibilityLabel="New skill" onPress={startSkill} style={button(palette.accent)}>
-                  <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>New skill</Text>
-                </Pressable>
-              ) : null}
             </View>
           ) : null}
           {skillDetail ? (
             <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 16, maxWidth: 720 }}>
               {!wide ? (
-                <Pressable accessibilityRole="button" accessibilityLabel="Back to skills" onPress={() => setSkillPane('list')} style={{ minHeight: 44, justifyContent: 'center' }}>
-                  <Text style={{ color: palette.accent, fontSize: 14 }}>Back</Text>
-                </Pressable>
+                <IconButton icon="arrow-left" label="Back" accessibilityLabel="Back to skills" onPress={() => setGlobalPane('list')} background="transparent" border="transparent" color={palette.accent} />
               ) : null}
-              {agent == null ? (
-                <Text style={{ color: palette.textPrimary, fontSize: 16 }}>Choose an agent.</Text>
-              ) : (
-                <View style={{ gap: 12 }}>
-                  {wide ? (
-                    <Pressable accessibilityRole="button" accessibilityLabel="New skill" onPress={startSkill} style={button(palette.accent)}>
-                      <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>New skill</Text>
-                    </Pressable>
-                  ) : null}
-                  {creatingSkill ? (
-                    <SkillForm
-                      key={`new-${skillToken}`}
-                      agent={agent}
-                      skill={null}
-                      onSuccess={setSaved}
-                      onSaved={(row) => {
-                        setCreatingSkill(false);
-                        void reload(undefined, undefined, row.id);
-                      }}
-                    />
-                  ) : agentSkill != null ? (
-                    <SkillForm
-                      key={`${agentSkill.id}:${agentSkill.revision}`}
-                      agent={agent}
-                      skill={agentSkill}
-                      onSuccess={setSaved}
-                      onSaved={() => void reload()}
-                    />
-                  ) : (
-                    <Text style={{ color: palette.textPrimary, fontSize: 16 }}>Choose a skill.</Text>
-                  )}
-                </View>
-              )}
+              <View style={{ gap: 12 }}>
+                {creatingGlobal || globalSkill != null ? (
+                  <SkillForm
+                    key={creatingGlobal ? `new-${globalToken}` : `${globalSkill?.id}:${globalSkill?.revision}`}
+                    skill={creatingGlobal ? null : globalSkill}
+                    showDefault
+                    onSave={saveGlobalSkill}
+                    onDelete={creatingGlobal ? undefined : deleteGlobalSkill}
+                  />
+                ) : (
+                  <Text style={{ color: palette.textPrimary, fontSize: 16 }}>Choose a skill.</Text>
+                )}
+                {!creatingGlobal && globalSkill != null ? (
+                  <GlobalCopy
+                    key={globalSkill.id}
+                    skillId={globalSkill.id}
+                    agents={agents}
+                    workspaces={workspaces}
+                    onCopied={(message) => {
+                      setSaved(message);
+                      void reload(undefined, undefined, undefined, globalSkill.id);
+                    }}
+                  />
+                ) : null}
+              </View>
               {error ? <Text accessibilityRole="alert" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text> : null}
             </ScrollView>
           ) : null}
@@ -732,18 +819,19 @@ export function SettingsScreen() {
           {mcpList ? (
             <View accessibilityLabel="MCP list" style={columnStyle(palette.border, palette.surface, wide, wide ? 220 : undefined)}>
               {!wide ? (
-                <Pressable accessibilityRole="button" accessibilityLabel="Back to agents" onPress={() => setMcpPane('agents')} style={{ minHeight: 44, justifyContent: 'center' }}>
-                  <Text style={{ color: palette.accent, fontSize: 14 }}>Back</Text>
-                </Pressable>
+                <IconButton icon="arrow-left" label="Back" accessibilityLabel="Back to agents" onPress={() => setMcpPane('agents')} background="transparent" border="transparent" color={palette.accent} />
               ) : (
                 <Text style={label(palette.textPrimary)}>MCP</Text>
               )}
               <ScrollView contentContainerStyle={menuRows}>
+                {agent != null ? (
+                  <MenuRow icon="plus" label="New MCP" selected={creatingMcp} onPress={startMcp} />
+                ) : null}
                 {agentServers.map((row) => (
                   <MenuRow
                     key={row.id}
                     label={row.name}
-                    selected={row.id === mcpId}
+                    selected={row.id === mcpId && !creatingMcp}
                     onPress={() => {
                       setMcpId(row.id);
                       setCreatingMcp(false);
@@ -754,29 +842,17 @@ export function SettingsScreen() {
                 ))}
                 {agentServers.length === 0 ? <Text style={{ color: palette.textSecondary, fontSize: 14 }}>No MCP servers</Text> : null}
               </ScrollView>
-              {!wide && agent != null ? (
-                <Pressable accessibilityRole="button" accessibilityLabel="New MCP" onPress={startMcp} style={button(palette.accent)}>
-                  <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>New MCP</Text>
-                </Pressable>
-              ) : null}
             </View>
           ) : null}
           {mcpDetail ? (
             <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 16, maxWidth: 720 }}>
               {!wide ? (
-                <Pressable accessibilityRole="button" accessibilityLabel="Back to MCP" onPress={() => setMcpPane('list')} style={{ minHeight: 44, justifyContent: 'center' }}>
-                  <Text style={{ color: palette.accent, fontSize: 14 }}>Back</Text>
-                </Pressable>
+                <IconButton icon="arrow-left" label="Back" accessibilityLabel="Back to MCP" onPress={() => setMcpPane('list')} background="transparent" border="transparent" color={palette.accent} />
               ) : null}
               {agent == null ? (
                 <Text style={{ color: palette.textPrimary, fontSize: 16 }}>Choose an agent.</Text>
               ) : (
                 <View style={{ gap: 12 }}>
-                  {wide ? (
-                    <Pressable accessibilityRole="button" accessibilityLabel="New MCP" onPress={startMcp} style={button(palette.accent)}>
-                      <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>New MCP</Text>
-                    </Pressable>
-                  ) : null}
                   {creatingMcp ? (
                     <McpForm
                       key={`new-mcp-${mcpToken}`}
@@ -903,8 +979,9 @@ function McpForm({
               accessibilityState={{ selected: on }}
               aria-checked={on}
               onPress={() => setTransport(choice)}
-              style={button(on ? palette.accentSubtle : palette.surface, palette.borderStrong)}
+              style={[button(on ? palette.accentSubtle : palette.surface, palette.borderStrong), { flexDirection: 'row', alignItems: 'center', gap: 8 }]}
             >
+              <FeatherIcon name={choice === 'http' ? 'globe' : 'terminal'} size={18} color={palette.textPrimary} />
               <Text style={{ color: palette.textPrimary, fontSize: 14, fontWeight: '600' }}>{box}</Text>
             </Pressable>
           );
@@ -922,9 +999,7 @@ function McpForm({
         </>
       )}
       <SettingSwitch label={enabledBox} value={enabled} onValueChange={setEnabled} />
-      <Pressable accessibilityRole="button" accessibilityLabel="Test connection" onPress={() => void test()} style={button(palette.surface, palette.borderStrong)}>
-        <Text style={{ color: palette.textPrimary, fontSize: 14, fontWeight: '600' }}>Test connection</Text>
-      </Pressable>
+      <IconButton icon="zap" label="Test connection" onPress={() => void test()} background={palette.surface} border={palette.borderStrong} color={palette.textPrimary} />
       {notice ? <Text accessibilityLiveRegion="polite" style={{ color: palette.textPrimary, fontSize: 14 }}>{notice}</Text> : null}
       {groups.length > 0 ? <Text style={label(palette.textPrimary)}>Tools</Text> : null}
       {groups.map((group) => {
@@ -944,9 +1019,13 @@ function McpForm({
           </View>
         );
       })}
-      <Pressable accessibilityRole="button" accessibilityLabel={server == null ? 'Create MCP' : `Save ${server.name}`} onPress={() => void save()} style={button(palette.accent)}>
-        <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>{server == null ? 'Create MCP' : `Save ${server.name}`}</Text>
-      </Pressable>
+      <IconButton
+        icon={server == null ? 'plus' : 'check'}
+        label={server == null ? 'Create MCP' : `Save ${server.name}`}
+        onPress={() => void save()}
+        background={palette.accent}
+        color={palette.onAccent}
+      />
       {error ? <Text accessibilityRole="alert" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text> : null}
     </View>
   );
@@ -1102,26 +1181,25 @@ export function AgentForm({
           />
         );
       })}
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={creating ? 'Create agent' : `Save ${agent.name}`}
-        onPress={() => void save()}
-        style={button(creating ? palette.accent : palette.surface, creating ? palette.accent : palette.borderStrong)}
-      >
-        <Text style={{ color: creating ? palette.onAccent : palette.textPrimary, fontSize: 14, fontWeight: '600' }}>
-          {creating ? 'Create agent' : `Save ${agent.name}`}
-        </Text>
-      </Pressable>
-      {!creating && agent.id !== 'agent_favlo' ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Delete ${agent.name}`}
-          onPress={() => void remove()}
-          style={button(palette.danger)}
-        >
-          <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>{`Delete ${agent.name}`}</Text>
-        </Pressable>
-      ) : null}
+      <View style={buttonRow}>
+        <IconButton
+          icon={creating ? 'plus' : 'check'}
+          label={creating ? 'Create agent' : `Save ${agent.name}`}
+          onPress={() => void save()}
+          background={creating ? palette.accent : palette.surface}
+          border={creating ? palette.accent : palette.borderStrong}
+          color={creating ? palette.onAccent : palette.textPrimary}
+        />
+        {!creating && agent.id !== 'agent_favlo' ? (
+          <IconButton
+            icon="trash-2"
+            label={`Delete ${agent.name}`}
+            onPress={() => void remove()}
+            background={palette.danger}
+            color={palette.onAccent}
+          />
+        ) : null}
+      </View>
       {error ? <Text accessibilityRole="alert" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text> : null}
     </View>
   );
@@ -1207,107 +1285,109 @@ function HeartbeatForm({
         style={[fieldStyle(palette), { minHeight: 88 }]}
       />
       <SettingSwitch label={box} value={enabled} onValueChange={setEnabled} />
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={heartbeat == null ? 'Create heartbeat' : 'Save heartbeat'}
-        onPress={() => void save()}
-        style={button(palette.accent)}
-      >
-        <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>
-          {heartbeat == null ? 'Create heartbeat' : 'Save heartbeat'}
-        </Text>
-      </Pressable>
-      {heartbeat != null ? (
-        <Pressable accessibilityRole="button" accessibilityLabel="Run heartbeat" onPress={() => void runNow()} style={button(palette.surface, palette.borderStrong)}>
-          <Text style={{ color: palette.textPrimary, fontSize: 14, fontWeight: '600' }}>Run heartbeat</Text>
-        </Pressable>
-      ) : null}
+      <View style={buttonRow}>
+        <IconButton
+          icon={heartbeat == null ? 'plus' : 'check'}
+          label={heartbeat == null ? 'Create heartbeat' : 'Save heartbeat'}
+          onPress={() => void save()}
+          background={palette.accent}
+          color={palette.onAccent}
+        />
+        {heartbeat != null ? (
+          <IconButton icon="play" label="Run heartbeat" onPress={() => void runNow()} background={palette.surface} border={palette.borderStrong} color={palette.textPrimary} />
+        ) : null}
+      </View>
       {notice ? <Text accessibilityLiveRegion="polite" style={{ color: palette.textPrimary, fontSize: 14 }}>{notice}</Text> : null}
       {error ? <Text accessibilityRole="alert" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text> : null}
     </View>
   );
 }
 
-function SkillForm({
-  agent,
-  skill,
-  onSuccess,
-  onSaved,
+function GlobalCopy({
+  skillId,
+  agents,
+  workspaces,
+  onCopied,
 }: {
-  agent: Agent;
-  skill: AgentSkill | null;
-  onSuccess: (message: string) => void;
-  onSaved: (row: AgentSkill) => void;
+  skillId: string;
+  agents: Agent[];
+  workspaces: WorkspaceOption[];
+  onCopied: (message: string) => void;
 }) {
   const { palette } = useTheme();
-  const [name, setName] = useState(skill?.name ?? '');
-  const [description, setDescription] = useState(skill?.description ?? '');
+  const [agentId, setAgentId] = useState(
+    agents.find((item) => item.id === 'agent_favlo')?.id ?? agents[0]?.id ?? '',
+  );
+  const [workspaceId, setWorkspaceId] = useState(workspaces[0]?.id ?? '');
+  const [agentFocused, setAgentFocused] = useState(false);
+  const [workspaceFocused, setWorkspaceFocused] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const agent = agents.find((item) => item.id === agentId) ?? null;
+  const workspace = workspaces.find((item) => item.id === workspaceId) ?? null;
 
-  async function save() {
-    const body = { name: name.trim(), description: description.trim() };
+  async function copyTo(body: { agent_id?: string; workspace_id?: string }, target: string) {
     try {
-      const saved = skill == null
-        ? await api<AgentSkill>('/agent-skills', {
-            method: 'POST',
-            headers: { 'Idempotency-Key': idempotencyKey() },
-            body: JSON.stringify({ ...body, agent_id: agent.id }),
-          })
-        : await api<AgentSkill>(`/agent-skills/${skill.id}`, {
-            method: 'PATCH',
-            body: JSON.stringify({ ...body, expected_revision: skill.revision }),
-          });
-      onSuccess(skill == null ? 'The skill was created.' : 'The skill was saved.');
-      onSaved(saved);
+      await api(`/global-skills/${skillId}/copy`, {
+        method: 'POST',
+        headers: { 'Idempotency-Key': idempotencyKey() },
+        body: JSON.stringify(body),
+      });
+      setError(null);
+      onCopied(`Copied to ${target}.`);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'The skill was not saved.');
-    }
-  }
-
-  async function remove() {
-    if (skill == null) {
-      return;
-    }
-    try {
-      await api(`/agent-skills/${skill.id}`, { method: 'DELETE' });
-      onSuccess('The skill was deleted.');
-      onSaved({ ...skill, id: '' });
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'The skill was not deleted.');
+      setError(caught instanceof Error ? caught.message : 'The skill was not copied.');
     }
   }
 
   return (
     <View style={{ gap: 8 }}>
-      <Text accessibilityRole="header" aria-level={2} style={heading(palette.textPrimary)}>
-        {skill?.name ?? 'New skill'}
-      </Text>
-      <Text style={label(palette.textPrimary)}>Skill name</Text>
-      <TextInput accessibilityLabel="Skill name" value={name} onChangeText={setName} style={fieldStyle(palette)} />
-      <Text style={label(palette.textPrimary)}>Skill description</Text>
-      <TextInput
-        accessibilityLabel="Skill description"
-        multiline
-        value={description}
-        onChangeText={setDescription}
-        style={[fieldStyle(palette), { minHeight: 88 }]}
-      />
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={skill == null ? 'Create skill' : 'Save skill'}
-        disabled={name.trim().length === 0}
-        onPress={() => void save()}
-        style={button(palette.accent)}
+      <Text style={label(palette.textPrimary)}>Copy to an agent</Text>
+      <Picker
+        accessibilityLabel="Agent for copy"
+        selectedValue={agentId}
+        onValueChange={(value) => setAgentId(String(value))}
+        onFocus={() => setAgentFocused(true)}
+        onBlur={() => setAgentFocused(false)}
+        style={pickerStyle(palette, agentFocused)}
       >
-        <Text style={{ color: palette.onAccent, fontSize: 14, fontWeight: '600' }}>
-          {skill == null ? 'Create skill' : 'Save skill'}
-        </Text>
-      </Pressable>
-      {skill != null ? (
-        <Pressable accessibilityRole="button" accessibilityLabel="Delete skill" onPress={() => void remove()} style={button(palette.surface, palette.borderStrong)}>
-          <Text style={{ color: palette.textPrimary, fontSize: 14, fontWeight: '600' }}>Delete skill</Text>
-        </Pressable>
-      ) : null}
+        {agents.map((item) => (
+          <Picker.Item key={item.id} label={item.name} value={item.id} color={palette.textPrimary} />
+        ))}
+      </Picker>
+      <IconButton
+        icon="copy"
+        label="Copy to agent"
+        disabled={agent == null}
+        onPress={() => void copyTo({ agent_id: agentId }, agent?.name ?? 'the agent')}
+        background={agent == null ? palette.disabledSurface : palette.accent}
+        color={agent == null ? palette.disabledText : palette.onAccent}
+      />
+      <Text style={label(palette.textPrimary)}>Copy to a workspace</Text>
+      {workspaces.length === 0 ? (
+        <Text style={{ color: palette.textSecondary, fontSize: 14 }}>No workspaces</Text>
+      ) : (
+        <Picker
+          accessibilityLabel="Workspace for copy"
+          selectedValue={workspaceId}
+          onValueChange={(value) => setWorkspaceId(String(value))}
+          onFocus={() => setWorkspaceFocused(true)}
+          onBlur={() => setWorkspaceFocused(false)}
+          style={pickerStyle(palette, workspaceFocused)}
+        >
+          {workspaces.map((item) => (
+            <Picker.Item key={item.id} label={item.name} value={item.id} color={palette.textPrimary} />
+          ))}
+        </Picker>
+      )}
+      <IconButton
+        icon="copy"
+        label="Copy to workspace"
+        disabled={workspace == null}
+        onPress={() => void copyTo({ workspace_id: workspaceId }, workspace?.name ?? 'the workspace')}
+        background={workspace == null ? palette.disabledSurface : palette.surface}
+        border={palette.borderStrong}
+        color={workspace == null ? palette.disabledText : palette.textPrimary}
+      />
       {error ? <Text accessibilityRole="alert" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text> : null}
     </View>
   );

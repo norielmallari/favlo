@@ -1,6 +1,6 @@
 import { Platform, StyleSheet, Text, View } from 'react-native';
 
-import { Pressable } from '@/components/Pressable';
+import { IconButton } from '@/components/IconButton';
 import { useTheme } from '@/theme/Theme';
 import { radius, space, z } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
@@ -40,14 +40,15 @@ export function Confirmation({ message, onDismiss }: { message: string; onDismis
           }}
         >
           <Text style={[textStyle('body', palette.success), { flex: 1 }]}>{message}</Text>
-          <Pressable
-            accessibilityRole="button"
+          <IconButton
+            icon="x"
+            label="Dismiss"
             accessibilityLabel="Dismiss confirmation"
             onPress={onDismiss}
-            style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: space[2] }}
-          >
-            <Text style={textStyle('small', palette.success, '600')}>Dismiss</Text>
-          </Pressable>
+            background="transparent"
+            border="transparent"
+            color={palette.success}
+          />
         </View>
       </View>
     </View>

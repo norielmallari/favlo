@@ -174,6 +174,8 @@ async def stream_reply(
     bus: Any | None = None,
     pending: set[Any] | None = None,
     cancel: asyncio.Event | None = None,
+    gallery_note: str = "",
+    user_image: tuple[bytes, str] | None = None,
 ) -> AsyncIterator[ReplyPiece]:
     from agent_framework import Agent, InMemoryHistoryProvider
     from openai import AsyncOpenAI
@@ -199,6 +201,8 @@ async def stream_reply(
         mcp_text=mcp_text,
         mcp_tools=mcp_tools,
     )
+    if gallery_note:
+        instructions = f"{instructions}\n\n{gallery_note}"
     if tool_list:
         client.function_invocation_configuration["max_iterations"] = 6
     agent = Agent(
@@ -215,7 +219,13 @@ async def stream_reply(
         history_message(item["role"], item["text"], item.get("reasoning") or "")
         for item in history
     )
-    stream = agent.run(user_text, session=session, stream=True)
+    prompt: Any = user_text
+    if user_image is not None:
+        from agent_framework import Content, Message
+
+        data, media_type = user_image
+        prompt = Message("user", [user_text, Content.from_data(data=data, media_type=media_type)])
+    stream = agent.run(prompt, session=session, stream=True)
     content_yielded = False
     saw_reasoning = False
     spoken = ""

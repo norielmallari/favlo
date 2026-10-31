@@ -193,10 +193,10 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   const emptyName = `Glen ${Date.now()}`;
   created.push(emptyName);
   await createAgent(page, emptyName, 'Reply in one short sentence.');
-  await page.getByRole('button', { name: emptyName, exact: true }).click();
+  await openChannel(page, emptyName);
   await expect(page.getByRole('heading', { name: emptyName })).toBeVisible();
   await expectComposerCentered(page, emptyName);
-  await page.getByRole('button', { name: 'River', exact: true }).click();
+  await openChannel(page, 'River');
   const prompt = `Say hello. ${Date.now()}`;
   const replies = page.getByLabel(/^River said: .+/);
   const before = await replies.count();
@@ -205,7 +205,7 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await expect.poll(async () => replies.count(), { timeout: 360_000 }).toBeGreaterThan(before);
   await expectComposerDocked(page, 'River');
 
-  await page.getByRole('button', { name: 'Cedar', exact: true }).click();
+  await openChannel(page, 'Cedar');
   const cedar = page.getByLabel('Conversation').filter({ has: page.getByRole('heading', { name: 'Cedar' }) });
   await expect(cedar).toBeVisible();
   await expect(cedar.getByLabel(`You said: ${prompt}`)).toHaveCount(0);
@@ -225,7 +225,8 @@ async function expectHeartbeatColumns(page: Page) {
   const sections = await page.getByLabel('Configuration sections').boundingBox();
   const agents = await page.getByLabel('Agents list').boundingBox();
   const beats = await page.getByLabel('Heartbeats list').boundingBox();
-  const detail = await page.getByRole('button', { name: 'New heartbeat' }).boundingBox();
+  const detail = await page.getByText('Choose a heartbeat.').boundingBox();
+  await expect(page.getByLabel('Heartbeats list').getByRole('button', { name: 'New heartbeat' })).toBeVisible();
   expect(sections).not.toBeNull();
   expect(agents).not.toBeNull();
   expect(beats).not.toBeNull();
@@ -269,6 +270,11 @@ async function composerPlace(page: Page, name: string) {
     composer: box!.y + box!.height / 2,
     bottom: box!.y + box!.height,
   };
+}
+
+async function openChannel(page: Page, name: string) {
+  await page.getByRole('button', { name, exact: true }).click();
+  await page.getByRole('button', { name: 'Home', exact: true }).click();
 }
 
 async function createAgent(page: Page, name: string, persona: string) {
