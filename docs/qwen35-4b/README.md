@@ -42,7 +42,9 @@ Coding agent printed `prompt tokens` / `cache miss` per request:
 
 | Card | Prefill | Decode |
 |---|---|---|
-| thinking | 909.40 tok/s (25736 tok in 28.30s) | 38.04 tok/s (2321 tok in 61.01s) |
-| instruct | 968.42 tok/s (23058 tok in 23.81s) | 39.43 tok/s (1920 tok in 48.69s) |
+| thinking | 992.90 tok/s (25736 tok in 25.92s) | 38.55 tok/s (2104 tok in 54.58s) |
+| instruct | 1050.21 tok/s (23052 tok in 21.95s) | 39.78 tok/s (1980 tok in 49.78s) |
+
+Thinking prefill is 98.5% of the 1007.60 tok/s kernel ceiling ([ceilings.md](ceilings.md)).
 
 Progress uses `favlo.console` begin / end / note on the console thread (`prompt`, `cache`, load / prefill / decode). Decode streaming uses a separate queue thread. NumPy stays off the hot path.

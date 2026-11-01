@@ -970,7 +970,24 @@ kernel void attend_prefill(
     float total = block_sum(local_sum, shared, lane, simd, simds);
     threadgroup_barrier(mem_flags::mem_device);
     float acc = 0.0f;
-    for (uint p = 0u; p < length; ++p) {
+    uint p = 0u;
+    // Unrolled value mix; each thread owns one output dim and walks the keys.
+    for (; p + 3u < length; p += 4u) {
+        ulong slot0 = ulong(p) * kv_heads + kvh;
+        ulong slot1 = slot0 + kv_heads;
+        ulong slot2 = slot1 + kv_heads;
+        ulong slot3 = slot2 + kv_heads;
+        uint scale_i = tid >> 5;
+        float v0 = e4m3_code(value_data[slot0 * D + tid]) * e8m0_code(value_scale[slot0 * (D >> 5) + scale_i]);
+        float v1 = e4m3_code(value_data[slot1 * D + tid]) * e8m0_code(value_scale[slot1 * (D >> 5) + scale_i]);
+        float v2 = e4m3_code(value_data[slot2 * D + tid]) * e8m0_code(value_scale[slot2 * (D >> 5) + scale_i]);
+        float v3 = e4m3_code(value_data[slot3 * D + tid]) * e8m0_code(value_scale[slot3 * (D >> 5) + scale_i]);
+        acc = fma(srow[p], v0, acc);
+        acc = fma(srow[p + 1u], v1, acc);
+        acc = fma(srow[p + 2u], v2, acc);
+        acc = fma(srow[p + 3u], v3, acc);
+    }
+    for (; p < length; ++p) {
         ulong slot = ulong(p) * kv_heads + kvh;
         float vs = e8m0_code(value_scale[slot * (D >> 5) + (tid >> 5)]);
         acc = fma(srow[p], e4m3_code(value_data[slot * D + tid]) * vs, acc);

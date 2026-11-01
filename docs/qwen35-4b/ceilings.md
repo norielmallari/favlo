@@ -30,7 +30,7 @@ One chunk of 256 tokens (the matmul row multiple used for the isolated times bel
 | `head_rmsnorm_rows` | q/k | 16 | 179.7 |
 | `rope_heads_rows` | q/k | 16 | 137.4 |
 | `store_kv_rows` | k/v | 16 | 156.8 |
-| `attend_prefill` | 16×256×2048 | 8 | 1917.9 |
+| `attend_prefill` | 16×256×2048 | 8 | 2446.1 |
 | `cast_f32_f16` attn | 256×4096 | 8 | 133.6 |
 | `matmul_fp8` o | 2560×4096 | 8 | 368.5 |
 | `matmul_fp8` gate | 9216×2560 | 32 | 643.6 |
@@ -41,7 +41,7 @@ One chunk of 256 tokens (the matmul row multiple used for the isolated times bel
 | `residual_add_rows` | 256×2560 | 64 | 167.6 |
 | `gemv_fp8` head | 248320×2560 | 1 | 2411.1 |
 
-One GDN layer is 7692.6 µs. One full-attention layer (2048-key window) is 7809.1 µs. One 256-token chunk is 249844.5 µs, 1024.64 tok/s. That is the kernel ceiling for prefill.
+One GDN layer is 7692.6 µs. One full-attention layer (2048-key window) is 8337.3 µs after the value-mix unroll in `attend_prefill` (remeasured 2 November 2026). One 256-token chunk is 254070.0 µs, 1007.60 tok/s. That is the kernel ceiling for prefill.
 
 The byte count for that first chunk is the dense projections, the tied embed and head, Gated DeltaNet state read and write, key/value store and attend traffic for 2048 keys on eight layers, and the float32 score scratch. That is 5,195,177,984 bytes, 21.66 ms at 239.82 GB/s, 11817.62 tok/s. The 90% test for prefill uses the kernel ceiling.
 
