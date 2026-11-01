@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from harness.benchmarks import gsm8k, humaneval, ifeval
-from harness.benchmarks.serve import Request, Server, complete
+from harness.benchmarks.serve import Request, Server, complete, probe_limit
 
 _ROOT = Path(__file__).resolve().parents[2]
 _SMOKE = 30
@@ -127,9 +127,10 @@ def _append(path: Path, row: dict[str, Any]) -> None:
 def _smoke(port: int, model: str, request: Request) -> None:
     """Two short completions on the same request the suites use.
 
-    The instruct card samples, so the digits are not a gate. An empty reply
-    means the server did not return content.
+    The digits are not a gate. An empty reply means the server did not return
+    content. A thinking request uses the suite cap so the trace can close.
     """
+    limit = probe_limit(request)
     prompts = (
         "What is 2+2? Answer with one number.",
         "What is 3+3? Answer with one number.",
@@ -138,7 +139,7 @@ def _smoke(port: int, model: str, request: Request) -> None:
         text, reason, tokens = complete(
             port,
             [{"role": "user", "content": prompt}],
-            32,
+            limit,
             request,
             model=model,
         )
@@ -277,8 +278,8 @@ def _request_line(request: Request) -> str:
         (
             "- " + ", ".join(parts),
             "- ifeval: the dataset prompt, scored by the published strict and loose checkers",
-            "- gsm8k: five training shots, then Question / Answer; the first #### number must match",
-            "- humaneval: the instruct prompt; the continuation after the published signature is tested",
+            "- gsm8k: five training shots, then Question / Answer; the first #### number matches",
+            "- humaneval: the instruct prompt; the continuation after the signature is tested",
         )
     )
 
@@ -446,14 +447,24 @@ def run(
                     name, server, items, output, score_row, summarize, limit, request, model
                 )
                 if section is not None:
-                    _write_block(model, request, _section(section, name, request), _score_line(name, summary, request))
+                    _write_block(
+                        model,
+                        request,
+                        _section(section, name, request),
+                        _score_line(name, summary, request),
+                    )
             print("sample recorded", flush=True)
             return 0
         for name, items, score_row, summarize in suites:
             summary = _suite(
                 name, server, items, output, score_row, summarize, _SMOKE, request, model
             )
-            _write_block(model, request, _section("smoke", name, request), _score_line(name, summary, request))
+            _write_block(
+                model,
+                request,
+                _section("smoke", name, request),
+                _score_line(name, summary, request),
+            )
         print("smoke recorded", flush=True)
         if sample_only:
             return 0
@@ -461,7 +472,12 @@ def run(
             summary = _suite(
                 name, server, items, output, score_row, summarize, None, request, model
             )
-            _write_block(model, request, _section("full", name, request), _score_line(name, summary, request))
+            _write_block(
+                model,
+                request,
+                _section("full", name, request),
+                _score_line(name, summary, request),
+            )
         print("full recorded", flush=True)
     except Exception as exc:
         print(exc, flush=True)

@@ -1,16 +1,28 @@
 # Download and register a model
 
-Three pipelines are supported. A packed record is registered in `models/registry.json`. `favlo serve` lists those rows. It does not scan `models/` for a directory that was never registered.
+A packed record is registered in `models/registry.json`. `favlo serve` lists those rows. It does not scan `models/` for a directory that was never registered.
 
 16 GB of memory is required. 8 GB is not enough to run a model capable of real-world agentic workflows.
+
+## Spark-X2.6-1.7B
+
+The official checkpoint is `XHToken/Spark-X2.6-1.7B`. The steps are [spark-x26-1-7b/SETUP.md](../spark-x26-1-7b/SETUP.md).
+
+On a terminal, `favlo serve` with an empty registry downloads that checkpoint, packs `models/Spark-X2.6-1.7B-fp8`, registers the alias `spark-x26-1-7b`, and removes the BF16 checkout. The next `serve` continues from the files already written.
+
+The same download and pack, without opening the socket:
+
+```bash
+favlo --spark-x26-1-7b setup
+```
+
+`--keep-bf16` leaves the checkout.
 
 ## Qwen3.6-35B-A3B
 
 The official checkpoint is `Qwen/Qwen3.6-35B-A3B`. The steps are [qwen36-35b-a3b/SETUP.md](../qwen36-35b-a3b/SETUP.md).
 
-On a terminal, `favlo serve` with an empty registry downloads that checkpoint, packs `models/Qwen3.6-35B-A3B-fp8-e20`, registers the alias `qwen36-35b-a3b`, and removes the BF16 checkout. The next `serve` continues from the files already written.
-
-The same download and pack, without opening the socket:
+`favlo --qwen36-35b-a3b setup` downloads that checkpoint and packs it, without opening the socket:
 
 ```bash
 favlo --qwen36-35b-a3b setup

@@ -8,8 +8,7 @@ import struct
 import numpy as np
 
 from favlo.memory import memory
-
-from spark_x26_1_7b.formats import dequant_fp4, quantize_fp4
+from spark_x26_1_7b.formats import dequant_fp8, quantize_fp8
 from spark_x26_1_7b.sample import Sampler
 from spark_x26_1_7b.session import Session, f32, u32
 
@@ -20,8 +19,10 @@ def run() -> None:
     session = Session(_OWNER)
     try:
         _gemv(session)
-        _matmul(session, 64, 64, 256, "matmul_fp4_64", 64, 64)
-        _matmul(session, 32, 128, 256, "matmul_fp4_32", 32, 128)
+        _gemv_vec_rms(session)
+        _gemv_vec_add_cached(session)
+        _matmul(session, 64, 64, 256, "matmul_fp8_64", 64, 64)
+        _matmul(session, 32, 128, 256, "matmul_fp8_32", 32, 128)
         _rmsnorm(session)
         _rope(session)
         _geglu(session)
@@ -35,14 +36,14 @@ def run() -> None:
 
 def _gemv(session: Session) -> None:
     weight = _exact((4, 256))
-    packed, scales = quantize_fp4(weight)
+    packed, scales = quantize_fp8(weight)
     activation = np.linspace(-1.0, 1.0, 256, dtype=np.float32)
     data = session.upload(packed)
     scale = session.upload(scales)
     act = session.upload(activation.tobytes())
     dest = session.allocate(16)
     session.launch(
-        "gemv_fp4",
+        "gemv_fp8",
         [act, data, scale, dest],
         [u32(256)],
         (1, 1, 1),
@@ -51,6 +52,53 @@ def _gemv(session: Session) -> None:
     got = _f32(dest, 4)
     expect = weight @ activation
     _close("gemv", got, expect)
+
+
+def _gemv_vec_rms(session: Session) -> None:
+    rows, inner = 32, 256
+    weight = _exact((rows, inner))
+    packed, scales = quantize_fp8(weight)
+    activation = np.linspace(-1.0, 1.0, inner, dtype=np.float32)
+    gain = np.ones(inner, dtype=np.float16)
+    data = session.upload(packed)
+    scale = session.upload(scales)
+    act = session.upload(activation.tobytes())
+    norm_w = session.upload(gain.tobytes())
+    dest = session.allocate(rows * 4)
+    normed = session.allocate(inner * 4)
+    session.launch(
+        "gemv_fp8_vec_rms",
+        [act, norm_w, data, scale, dest, normed],
+        [u32(inner), f32(1e-6)],
+        (1, 1, 1),
+        (256, 1, 1),
+    )
+    inv = 1.0 / np.sqrt(np.mean(activation * activation) + 1e-6)
+    restored = dequant_fp8(packed, scales, rows, inner)
+    expect = restored @ (activation * inv)
+    _close("gemv_fp8_vec_rms", _f32(dest, rows), expect, atol=2e-2)
+
+
+def _gemv_vec_add_cached(session: Session) -> None:
+    rows, inner = 32, 256
+    weight = _exact((rows, inner))
+    packed, scales = quantize_fp8(weight)
+    activation = np.linspace(-0.5, 0.5, inner, dtype=np.float32)
+    hidden = np.ones(rows, dtype=np.float32)
+    data = session.upload(packed)
+    scale = session.upload(scales)
+    act = session.upload(activation.tobytes())
+    dest = session.upload(hidden.tobytes())
+    session.launch(
+        "gemv_fp8_vec_add_cached",
+        [act, data, scale, dest],
+        [u32(inner)],
+        (1, 1, 1),
+        (256, 1, 1),
+    )
+    restored = dequant_fp8(packed, scales, rows, inner)
+    expect = hidden + restored @ activation
+    _close("gemv_fp8_vec_add_cached", _f32(dest, rows), expect, atol=2e-2)
 
 
 def _matmul(
@@ -63,7 +111,7 @@ def _matmul(
     tile_n: int,
 ) -> None:
     weight = _exact((cols, inner))
-    packed, scales = quantize_fp4(weight)
+    packed, scales = quantize_fp8(weight)
     left = np.ones((rows, inner), dtype=np.float32) * 0.5
     half = np.ascontiguousarray(left, dtype=np.float16)
     act = session.upload(half.tobytes())
@@ -78,7 +126,7 @@ def _matmul(
         (128, 1, 1),
     )
     got = _f32(dest, rows * cols).reshape(rows, cols)
-    restored = dequant_fp4(packed, scales, cols, inner)
+    restored = dequant_fp8(packed, scales, cols, inner)
     expect = left @ restored.T
     _close(name, got, expect, atol=2e-2)
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 STEM = "spark-x26-1-7b"
-FOLDER = "Spark-X2.6-1.7B-fp4"
+FOLDER = "Spark-X2.6-1.7B-fp8"
 REPO = "XHToken/Spark-X2.6-1.7B"
 
 HIDDEN = 2048
@@ -25,7 +25,9 @@ ROPE_SLIDE = 256
 THETA_FULL = 5_000_000.0
 THETA_SLIDE = 10_000.0
 ATTN_SCALE = 0.0625
+BOS = 0
 EOS = 1
+PAD = 2
 
 FULL = (3, 7, 11, 15, 19, 23, 27)
 FULL_SET = frozenset(FULL)
@@ -42,9 +44,9 @@ def kind_ordinal(layer: int) -> int:
     return layer - sum(1 for item in FULL if item < layer)
 
 
-def fp4_bytes(rows: int, inner: int) -> int:
-    """Packed nibbles plus one E8M0 byte per 32 elements along K."""
-    return rows * inner // 2 + rows * (inner // BLOCK)
+def fp8_bytes(rows: int, inner: int) -> int:
+    """One E4M3 byte per element, plus one E8M0 byte per 32 elements along K."""
+    return rows * inner + rows * (inner // BLOCK)
 
 
 def f16_bytes(count: int) -> int:
@@ -52,12 +54,12 @@ def f16_bytes(count: int) -> int:
 
 
 def record_bytes() -> int:
-    """The fp4 record, with ``g_proj`` and the RMSNorm gains left in float16."""
-    embed = fp4_bytes(VOCAB, HIDDEN)
-    qkv = fp4_bytes(Q_DIM + 2 * KV_DIM, HIDDEN)
-    out = fp4_bytes(HIDDEN, HIDDEN)
-    gate = fp4_bytes(INTERMEDIATE, HIDDEN)
-    down = fp4_bytes(HIDDEN, INTERMEDIATE)
+    """The fp8 record, with ``g_proj`` and the RMSNorm gains left in float16."""
+    embed = fp8_bytes(VOCAB, HIDDEN)
+    qkv = fp8_bytes(Q_DIM + 2 * KV_DIM, HIDDEN)
+    out = fp8_bytes(HIDDEN, HIDDEN)
+    gate = fp8_bytes(INTERMEDIATE, HIDDEN)
+    down = fp8_bytes(HIDDEN, INTERMEDIATE)
     layers = LAYERS * (qkv + out + 2 * gate + down)
     gates = LAYERS * f16_bytes(HEADS * HIDDEN)
     norms = f16_bytes((LAYERS * 2 + 1) * HIDDEN)

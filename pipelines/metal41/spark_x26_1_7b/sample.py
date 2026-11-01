@@ -7,7 +7,6 @@ import struct
 from typing import Any
 
 from favlo.memory import memory
-
 from spark_x26_1_7b.layout import VOCAB
 from spark_x26_1_7b.session import Session, f32, u32
 
@@ -43,6 +42,17 @@ class Sampler:
             [u32(VOCAB)],
             (VOCAB // _THREADS, 1, 1),
             (_THREADS, 1, 1),
+        )
+
+    def observe(self, token: int) -> None:
+        """Count one forced id. The draw writes the sampled id itself."""
+        memory.store(self.token, 0, struct.pack("<I", int(token) & 0xFFFFFFFF))
+        self.session.launch(
+            "bump_count",
+            [self.counts, self.token],
+            [],
+            (1, 1, 1),
+            (1, 1, 1),
         )
 
     def draw(

@@ -10,7 +10,7 @@ import re
 
 import pytest
 
-from spark_x26_1_7b.chat import decode_text, encode_chat, split_thinking
+from spark_x26_1_7b.chat import STOP, decode_text, encode_chat, split_thinking
 from spark_x26_1_7b.commands import CARROT_PROMPT, installed_record
 from spark_x26_1_7b.forward import SparkRuntime
 
@@ -34,7 +34,9 @@ def carrot_runtime():
         runtime.close()
 
 
-def _complete(runtime: SparkRuntime, *, thinking: bool, effort: str | None, temperature: float) -> str:
+def _complete(
+    runtime: SparkRuntime, *, thinking: bool, effort: str | None, temperature: float
+) -> str:
     runtime.reset()
     prompt = encode_chat(
         runtime.root,
@@ -47,7 +49,7 @@ def _complete(runtime: SparkRuntime, *, thinking: bool, effort: str | None, temp
     tokens = runtime.generate(
         prompt,
         limit,
-        {1},
+        STOP,
         temperature=temperature,
         top_p=1.0 if temperature == 0.0 else 0.95,
         top_k=0,

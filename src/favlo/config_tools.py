@@ -16,8 +16,10 @@ INSTRUCTIONS = (
     "Use clients for the server address, the model field, and reload. "
     "Ctrl+C stops a terminal favlo serve. "
     "Use models for which checkpoints can be downloaded and how registration works. "
-    "When someone wants to set up Qwen3.6-35B-A3B, call config_read_setup with qwen36-35b-a3b "
-    "before you answer. When someone wants to set up Qwen3.8-27B, call config_read_setup with "
+    "When someone wants to set up Spark-X2.6-1.7B, call config_read_setup with spark-x26-1-7b "
+    "before you answer. When someone wants to set up Qwen3.6-35B-A3B, call config_read_setup "
+    "with qwen36-35b-a3b before you answer. When someone wants to set up Qwen3.8-27B, call "
+    "config_read_setup with "
     "qwen38-27b before you answer. When someone wants to set up Z-Image-Turbo, call "
     "config_read_setup with z-image-turbo before you answer. When someone wants to set up "
     "Wan 2.2 I2V, call config_read_setup with wan22-i2v before you answer. When someone wants to "
@@ -124,7 +126,8 @@ def _setup_guide_tool() -> object:
         """Read one pipeline's setup guide.
 
         Call this when someone wants to set up, download, quantize, or delete a model.
-        qwen36-35b-a3b is Qwen3.6-35B-A3B. qwen38-27b is Qwen3.8-27B.
+        spark-x26-1-7b is Spark-X2.6-1.7B. qwen36-35b-a3b is Qwen3.6-35B-A3B.
+        qwen38-27b is Qwen3.8-27B.
         z-image-turbo is Z-Image-Turbo. wan22-i2v is Wan 2.2 I2V.
         ace-step-15-turbo is ACE-Step.
         The result is that pipeline's setup page.

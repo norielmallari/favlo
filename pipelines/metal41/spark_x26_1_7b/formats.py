@@ -1,4 +1,4 @@
-"""Pack BF16 rows as fp4 E2M1 with an E8M0 scale. Checkpoint packing only."""
+"""Pack BF16 rows as fp8 E4M3 with an E8M0 scale. Checkpoint packing only."""
 
 from __future__ import annotations
 
@@ -6,9 +6,7 @@ import numpy as np
 
 from spark_x26_1_7b.layout import BLOCK
 
-FP4_QMAX = 6.0
-FP4_MAGNITUDE = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
-_FP4_EDGE = np.array([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0], dtype=np.float32)
+FP8_QMAX = 448.0
 
 
 def bf16_to_f32(raw: np.ndarray) -> np.ndarray:
@@ -34,34 +32,77 @@ def biased_e8m0(amax: np.ndarray, qmax: float) -> tuple[np.ndarray, np.ndarray]:
     return biased, scale
 
 
-def quantize_fp4(weight: np.ndarray) -> tuple[bytes, bytes]:
-    """Pack ``[rows, inner]`` float32. ``inner`` is a multiple of 32. Low nibble is element 0."""
+def enc_e4m3(values: np.ndarray) -> np.ndarray:
+    """OCP E4M3FN codes. ``0x7E`` is 448 and ``0x7F`` is NaN."""
+    original = np.ascontiguousarray(values, dtype=np.float32)
+    bits = np.frombuffer(original.tobytes(), dtype=np.uint32).reshape(original.shape)
+    sign = ((bits >> np.uint32(24)) & np.uint32(0x80)).astype(np.uint8)
+    exp = ((bits >> np.uint32(23)) & np.uint32(0xFF)).astype(np.int32)
+    mant = bits & np.uint32(0x7FFFFF)
+    mag = np.abs(original)
+    sub = np.minimum(np.rint(mag * np.float32(512.0)).astype(np.int32), 7).astype(np.uint8)
+    out = sign.copy()
+    out = np.where(mag >= np.float32(FP8_QMAX), sign | np.uint8(0x7E), out)
+    tiny = (mag > np.float32(0.0)) & (mag < np.float32(FP8_QMAX)) & (
+        (exp == 0) | (mag < np.float32(0.015625))
+    )
+    out = np.where(tiny, sign | sub, out)
+    normal = (
+        (mag >= np.float32(0.015625))
+        & (mag < np.float32(FP8_QMAX))
+        & (exp != 0)
+        & (exp != 255)
+    )
+    top = (mant >> np.uint32(20)).astype(np.int32)
+    rem = mant & np.uint32(0xFFFFF)
+    round_up = (rem > np.uint32(0x80000)) | ((rem == np.uint32(0x80000)) & ((top & 1) != 0))
+    top = top + round_up.astype(np.int32)
+    biased = exp - 127 + 7
+    carry = top >= 8
+    top = np.where(carry, 0, top)
+    biased = np.where(carry, biased + 1, biased)
+    code = (sign.astype(np.int32) | ((biased & 15) << 3) | (top & 7)).astype(np.uint8)
+    code = np.where(biased > 15, sign | np.uint8(0x7E), code)
+    code = np.where((biased == 15) & (top > 6), sign | np.uint8(0x7E), code)
+    code = np.where(biased <= 0, sign | sub, code)
+    return np.where(normal, code, out).astype(np.uint8)
+
+
+def dec_e4m3(codes: np.ndarray) -> np.ndarray:
+    raw = np.asarray(codes, dtype=np.uint8)
+    sign = np.where(raw & np.uint8(0x80), np.float32(-1.0), np.float32(1.0))
+    exp = ((raw >> np.uint8(3)) & np.uint8(0xF)).astype(np.int32)
+    mant = (raw & np.uint8(0x7)).astype(np.float32)
+    normal = (np.float32(1.0) + mant / np.float32(8.0)) * np.ldexp(
+        np.ones(raw.shape, dtype=np.float32), exp - 7
+    )
+    sub = mant * np.float32(2.0**-9)
+    value = np.where(exp == 0, sub, normal).astype(np.float32)
+    value = np.where((exp == 15) & (mant == np.float32(7.0)), np.float32(np.nan), value)
+    return sign * value
+
+
+def quantize_fp8(weight: np.ndarray) -> tuple[bytes, bytes]:
+    """Pack ``[rows, inner]`` float32. ``inner`` is a multiple of 128."""
     matrix = np.ascontiguousarray(weight, dtype=np.float32)
     rows, inner = matrix.shape
-    if inner % BLOCK:
-        message = f"inner dimension {inner} is not a multiple of {BLOCK}"
+    if inner % 128:
+        message = f"inner dimension {inner} is not a multiple of 128"
         raise ValueError(message)
     values = matrix.reshape(rows, inner // BLOCK, BLOCK)
     amax = np.max(np.abs(values), axis=-1)
-    biased, scale = biased_e8m0(amax, FP4_QMAX)
-    scaled = values / scale[..., None]
-    choice = np.searchsorted(_FP4_EDGE, np.abs(scaled), side="left").astype(np.uint8)
-    sign = np.signbit(scaled).astype(np.uint8) << np.uint8(3)
-    nibbles = choice | sign
-    packed = nibbles[..., 0::2] | (nibbles[..., 1::2] << np.uint8(4))
-    return np.ascontiguousarray(packed).tobytes(), np.ascontiguousarray(biased).tobytes()
+    biased, scale = biased_e8m0(amax, FP8_QMAX)
+    scaled = (values / scale[..., None]).reshape(rows, inner)
+    return np.ascontiguousarray(enc_e4m3(scaled)).tobytes(), np.ascontiguousarray(biased).tobytes()
 
 
-def dequant_fp4(packed: bytes, scales: bytes, rows: int, inner: int) -> np.ndarray:
-    raw = np.frombuffer(packed, dtype=np.uint8).reshape(rows, inner // 2)
-    codes = np.empty((rows, inner), dtype=np.uint8)
-    codes[:, 0::2] = raw & np.uint8(0xF)
-    codes[:, 1::2] = raw >> np.uint8(4)
-    sign = np.where(codes & np.uint8(0x8), np.float32(-1.0), np.float32(1.0))
-    magnitude = FP4_MAGNITUDE[codes & np.uint8(0x7)]
+def dequant_fp8(packed: bytes, scales: bytes, rows: int, inner: int) -> np.ndarray:
+    codes = np.frombuffer(packed, dtype=np.uint8).reshape(rows, inner)
     factors = np.frombuffer(scales, dtype=np.uint8).astype(np.int32).reshape(rows, inner // BLOCK)
-    restored = (sign * magnitude).reshape(rows, inner // BLOCK, BLOCK)
-    restored = restored * np.ldexp(np.ones(factors.shape, dtype=np.float32), factors - 127)[..., None]
+    restored = dec_e4m3(codes).reshape(rows, inner // BLOCK, BLOCK)
+    restored = restored * np.ldexp(
+        np.ones(factors.shape, dtype=np.float32), factors - 127
+    )[..., None]
     return restored.reshape(rows, inner)
 
 

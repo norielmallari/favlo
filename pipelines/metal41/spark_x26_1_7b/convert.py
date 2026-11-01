@@ -1,21 +1,24 @@
-"""Download the BF16 checkout and pack the fp4 record. Serving does not import this module."""
+"""Download the BF16 checkout and pack the fp8 record. Serving does not import this module."""
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import struct
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import numpy as np
 
-from spark_x26_1_7b.formats import bf16_to_f32, f16_bytes, quantize_fp4
+from spark_x26_1_7b.formats import bf16_to_f32, f16_bytes, quantize_fp8
 from spark_x26_1_7b.layout import (
+    BLOCK,
     FOLDER,
     HEADS,
     HIDDEN,
@@ -40,6 +43,7 @@ _SIDECARS = (
     "special_tokens_map.json",
 )
 _QKV = Q_DIM + 2 * KV_DIM
+_PACK_WORKERS = 8
 
 Progress = Callable[[int, int, str], None]
 
@@ -139,13 +143,34 @@ def quantize(src: Path, dest: Path) -> Path:
         raise RuntimeError(message)
     manifest_path.write_text(
         json.dumps(
-            {"complete": True, "weight": "fp4", "kv": "e4m3", "source": REPO, "tensors": tensors},
+            {"complete": True, "weight": "fp8", "kv": "e4m3", "source": REPO, "tensors": tensors},
             indent=2,
         )
         + "\n",
         encoding="utf-8",
     )
     return dest
+
+
+def _placements() -> list[tuple[str, str, str, int, int, int, int, int]]:
+    """File order and the byte offset of each plane. The offsets do not overlap."""
+    placed: list[tuple[str, str, str, int, int, int, int, int]] = []
+    cursor = 0
+    for raw, logical, kind, rows, inner in _order():
+        if kind == "fp8":
+            data_bytes = rows * inner
+            scale_bytes = rows * (inner // BLOCK)
+        else:
+            data_bytes = rows * inner * 2
+            scale_bytes = 0
+        placed.append((raw, logical, kind, rows, inner, cursor, data_bytes, scale_bytes))
+        cursor += data_bytes + scale_bytes
+    return placed
+
+
+def _workers() -> int:
+    count = os.process_cpu_count() or os.cpu_count() or 1
+    return max(1, min(_PACK_WORKERS, count))
 
 
 def _pack(path: Path, src: Path, weight_map: dict[str, Any]) -> tuple[dict[str, Any], int]:
@@ -158,44 +183,60 @@ def _pack(path: Path, src: Path, weight_map: dict[str, Any]) -> tuple[dict[str, 
     if missing:
         message = f"missing tensors: {', '.join(missing)}"
         raise RuntimeError(message)
-    tensors: dict[str, Any] = {}
-    cursor = 0
-    shards: dict[str, tuple[dict[str, Any], int]] = {}
-    with path.open("wb") as out:
-        for raw, logical, kind, rows, inner in _order():
-            array = _load(src, weight_map, shards, raw)
-            if array.shape != (rows, inner) and not (kind == "f16" and array.shape == (inner,)):
-                message = f"{raw} has shape {array.shape}"
-                raise RuntimeError(message)
-            if kind == "fp4":
-                data, scale = quantize_fp4(array.reshape(rows, inner))
-                spec = {
-                    "kind": "fp4",
-                    "rows": rows,
-                    "inner": inner,
-                    "data": cursor,
-                    "data_bytes": len(data),
-                    "scale": cursor + len(data),
-                    "scale_bytes": len(scale),
-                }
-                out.write(data)
-                out.write(scale)
-                cursor += len(data) + len(scale)
-            else:
-                data = f16_bytes(array.reshape(rows, inner))
-                spec = {
-                    "kind": "f16",
-                    "rows": rows,
-                    "inner": inner,
-                    "data": cursor,
-                    "data_bytes": len(data),
-                    "scale": 0,
-                    "scale_bytes": 0,
-                }
-                out.write(data)
-                cursor += len(data)
-            tensors[logical] = spec
-    return tensors, cursor
+    placed = _placements()
+    total = placed[-1][5] + placed[-1][6] + placed[-1][7]
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
+    try:
+        os.ftruncate(fd, total)
+        tasks = [
+            (fd, src, weight_map, raw, logical, kind, rows, inner, cursor, data_bytes, scale_bytes)
+            for raw, logical, kind, rows, inner, cursor, data_bytes, scale_bytes in placed
+        ]
+        with ThreadPoolExecutor(max_workers=_workers()) as pool:
+            packed = list(pool.map(_pack_tensor, tasks))
+    finally:
+        os.close(fd)
+    return dict(packed), total
+
+
+def _pack_tensor(task: tuple[Any, ...]) -> tuple[str, dict[str, Any]]:
+    fd, src, weight_map, raw, logical, kind, rows, inner, cursor, data_bytes, scale_bytes = task
+    array = _load(src, weight_map, {}, raw)
+    if array.shape != (rows, inner) and not (kind == "f16" and array.shape == (inner,)):
+        message = f"{raw} has shape {array.shape}"
+        raise RuntimeError(message)
+    if kind == "fp8":
+        data, scale = quantize_fp8(array.reshape(rows, inner))
+        if len(data) != data_bytes or len(scale) != scale_bytes:
+            message = f"{raw} packed {len(data)} + {len(scale)} bytes"
+            raise RuntimeError(message)
+        os.pwrite(fd, data, cursor)
+        os.pwrite(fd, scale, cursor + data_bytes)
+        spec = {
+            "kind": "fp8",
+            "rows": rows,
+            "inner": inner,
+            "data": cursor,
+            "data_bytes": data_bytes,
+            "scale": cursor + data_bytes,
+            "scale_bytes": scale_bytes,
+        }
+    else:
+        data = f16_bytes(array.reshape(rows, inner))
+        if len(data) != data_bytes:
+            message = f"{raw} packed {len(data)} bytes"
+            raise RuntimeError(message)
+        os.pwrite(fd, data, cursor)
+        spec = {
+            "kind": "f16",
+            "rows": rows,
+            "inner": inner,
+            "data": cursor,
+            "data_bytes": data_bytes,
+            "scale": 0,
+            "scale_bytes": 0,
+        }
+    return logical, spec
 
 
 def _expected_names() -> set[str]:
@@ -204,20 +245,26 @@ def _expected_names() -> set[str]:
 
 def _order() -> list[tuple[str, str, str, int, int]]:
     rows: list[tuple[str, str, str, int, int]] = [
-        ("model.embedding.weight", "embedding", "fp4", VOCAB, HIDDEN),
+        ("model.embedding.weight", "embedding", "fp8", VOCAB, HIDDEN),
     ]
     for index in range(LAYERS):
         stem = f"model.layers.{index}."
         rows.extend(
             (
-                (stem + "self_attn.q_k_v_proj.weight", f"layer.{index}.qkv", "fp4", _QKV, HIDDEN),
-                (stem + "self_attn.out_proj.weight", f"layer.{index}.out", "fp4", HIDDEN, HIDDEN),
-                (stem + "mlp.gate_proj.weight", f"layer.{index}.gate", "fp4", INTERMEDIATE, HIDDEN),
-                (stem + "mlp.up_proj.weight", f"layer.{index}.up", "fp4", INTERMEDIATE, HIDDEN),
-                (stem + "mlp.down_proj.weight", f"layer.{index}.down", "fp4", HIDDEN, INTERMEDIATE),
+                (stem + "self_attn.q_k_v_proj.weight", f"layer.{index}.qkv", "fp8", _QKV, HIDDEN),
+                (stem + "self_attn.out_proj.weight", f"layer.{index}.out", "fp8", HIDDEN, HIDDEN),
+                (stem + "mlp.gate_proj.weight", f"layer.{index}.gate", "fp8", INTERMEDIATE, HIDDEN),
+                (stem + "mlp.up_proj.weight", f"layer.{index}.up", "fp8", INTERMEDIATE, HIDDEN),
+                (stem + "mlp.down_proj.weight", f"layer.{index}.down", "fp8", HIDDEN, INTERMEDIATE),
                 (stem + "self_attn.g_proj.weight", f"layer.{index}.g", "f16", HEADS, HIDDEN),
                 (stem + "input_layernorm.weight", f"layer.{index}.in_norm", "f16", 1, HIDDEN),
-                (stem + "post_attention_layernorm.weight", f"layer.{index}.post_norm", "f16", 1, HIDDEN),
+                (
+                    stem + "post_attention_layernorm.weight",
+                    f"layer.{index}.post_norm",
+                    "f16",
+                    1,
+                    HIDDEN,
+                ),
             )
         )
     rows.append(("model.norm.weight", "final_norm", "f16", 1, HIDDEN))

@@ -1,4 +1,4 @@
-"""Record sizes, fp4 packing, chat markup, and prefix slices. No GPU."""
+"""Record sizes, fp8 packing, chat markup, and prefix slices. No GPU."""
 
 from __future__ import annotations
 
@@ -19,26 +19,46 @@ from spark_x26_1_7b.chat import (
     parse_tool_calls,
     split_thinking,
 )
-from spark_x26_1_7b.formats import dequant_fp4, quantize_fp4
+from spark_x26_1_7b.formats import dequant_fp8, enc_e4m3, quantize_fp8
 from spark_x26_1_7b.layout import cache_bytes, full_token_bytes, record_bytes
 from spark_x26_1_7b.prefix import scatter_channel_major, scatter_token_major
 
 
 def test_record_and_cache_bytes() -> None:
-    assert record_bytes() == 908_038_144
+    assert record_bytes() == 1_761_579_008
     assert full_token_bytes() == 7392
     assert cache_bytes(2048) == 15_138_816
     assert cache_bytes(131072) == 968_884_224
     assert cache_bytes(1_048_576) == 7_751_073_792
 
 
-def test_fp4_roundtrip_uses_the_magnitude_table() -> None:
+def test_pack_offsets_cover_the_record() -> None:
+    from spark_x26_1_7b.convert import _placements
+
+    placed = _placements()
+    cursor = 0
+    for _raw, _logical, _kind, _rows, _inner, offset, data_bytes, scale_bytes in placed:
+        assert offset == cursor
+        assert data_bytes > 0
+        cursor += data_bytes + scale_bytes
+    assert cursor == record_bytes()
+
+
+def test_fp8_roundtrip_keeps_exact_e4m3_values() -> None:
+    codes = enc_e4m3(np.array([0.0, 1.0, -1.0, 384.0, 448.0], dtype=np.float32))
+    assert [int(code) for code in codes] == [0x00, 0x38, 0xB8, 0x7C, 0x7E]
     table = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
     weight = np.resize(table, (64, 256)).copy()
     weight[::2] *= -1.0
-    packed, scales = quantize_fp4(weight)
-    restored = dequant_fp4(packed, scales, 64, 256)
+    packed, scales = quantize_fp8(weight)
+    restored = dequant_fp8(packed, scales, 64, 256)
     assert np.allclose(restored, weight)
+
+
+def test_turn_markers_stop_the_completion() -> None:
+    from spark_x26_1_7b.chat import STOP
+
+    assert STOP == {0, 1, 2}
 
 
 def test_think_and_tool_markup() -> None:

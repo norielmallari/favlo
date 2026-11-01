@@ -34,6 +34,8 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [spark-x26-1-7b/README.md](spark-x26-1-7b/README.md) | Spark-X2.6-1.7B pipeline contract |
 | [spark-x26-1-7b/references.md](spark-x26-1-7b/references.md) | Papers and specifications for the Spark pipeline |
 | [spark-x26-1-7b/ceilings.md](spark-x26-1-7b/ceilings.md) | Spark-X2.6-1.7B kernel ceilings |
+| [spark-x26-1-7b/research/kernel-ceilings.md](spark-x26-1-7b/research/kernel-ceilings.md) | Spark-X2.6-1.7B isolated dispatch sum |
+| [spark-x26-1-7b/research/recorded-forward.md](spark-x26-1-7b/research/recorded-forward.md) | Spark-X2.6-1.7B recorded prefill and decode runs |
 | [gemma4-26b-a4b/ceilings.md](gemma4-26b-a4b/ceilings.md) | Gemma 4 26B-A4B bandwidth ceilings |
 | [gemma4-26b-a4b/references.md](gemma4-26b-a4b/references.md) | Papers and specifications for the Gemma 4 pipeline |
 | [gemma4-26b-a4b/research/kernel-ceilings.md](gemma4-26b-a4b/research/kernel-ceilings.md) | Gemma 4 26B-A4B isolated decode sum |

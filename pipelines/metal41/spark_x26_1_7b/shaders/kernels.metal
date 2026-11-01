@@ -9,9 +9,42 @@ using scales_plane = tensor_blockwise<tensor_plane_scales,
                                       device metal_fp8_ue8m0_format,
                                       32, 1>;
 
-constant float FP4_MAG[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
 constant float INV_SQRT2 = 0.7071067811865476f;
 constant float ATTN_SCALE = 0.0625f;
+constant float E4M3[256] = {
+    0.00000000e+00f, 1.95312500e-03f, 3.90625000e-03f, 5.85937500e-03f, 7.81250000e-03f, 9.76562500e-03f, 1.17187500e-02f, 1.36718750e-02f,
+    1.56250000e-02f, 1.75781250e-02f, 1.95312500e-02f, 2.14843750e-02f, 2.34375000e-02f, 2.53906250e-02f, 2.73437500e-02f, 2.92968750e-02f,
+    3.12500000e-02f, 3.51562500e-02f, 3.90625000e-02f, 4.29687500e-02f, 4.68750000e-02f, 5.07812500e-02f, 5.46875000e-02f, 5.85937500e-02f,
+    6.25000000e-02f, 7.03125000e-02f, 7.81250000e-02f, 8.59375000e-02f, 9.37500000e-02f, 1.01562500e-01f, 1.09375000e-01f, 1.17187500e-01f,
+    1.25000000e-01f, 1.40625000e-01f, 1.56250000e-01f, 1.71875000e-01f, 1.87500000e-01f, 2.03125000e-01f, 2.18750000e-01f, 2.34375000e-01f,
+    2.50000000e-01f, 2.81250000e-01f, 3.12500000e-01f, 3.43750000e-01f, 3.75000000e-01f, 4.06250000e-01f, 4.37500000e-01f, 4.68750000e-01f,
+    5.00000000e-01f, 5.62500000e-01f, 6.25000000e-01f, 6.87500000e-01f, 7.50000000e-01f, 8.12500000e-01f, 8.75000000e-01f, 9.37500000e-01f,
+    1.00000000e+00f, 1.12500000e+00f, 1.25000000e+00f, 1.37500000e+00f, 1.50000000e+00f, 1.62500000e+00f, 1.75000000e+00f, 1.87500000e+00f,
+    2.00000000e+00f, 2.25000000e+00f, 2.50000000e+00f, 2.75000000e+00f, 3.00000000e+00f, 3.25000000e+00f, 3.50000000e+00f, 3.75000000e+00f,
+    4.00000000e+00f, 4.50000000e+00f, 5.00000000e+00f, 5.50000000e+00f, 6.00000000e+00f, 6.50000000e+00f, 7.00000000e+00f, 7.50000000e+00f,
+    8.00000000e+00f, 9.00000000e+00f, 1.00000000e+01f, 1.10000000e+01f, 1.20000000e+01f, 1.30000000e+01f, 1.40000000e+01f, 1.50000000e+01f,
+    1.60000000e+01f, 1.80000000e+01f, 2.00000000e+01f, 2.20000000e+01f, 2.40000000e+01f, 2.60000000e+01f, 2.80000000e+01f, 3.00000000e+01f,
+    3.20000000e+01f, 3.60000000e+01f, 4.00000000e+01f, 4.40000000e+01f, 4.80000000e+01f, 5.20000000e+01f, 5.60000000e+01f, 6.00000000e+01f,
+    6.40000000e+01f, 7.20000000e+01f, 8.00000000e+01f, 8.80000000e+01f, 9.60000000e+01f, 1.04000000e+02f, 1.12000000e+02f, 1.20000000e+02f,
+    1.28000000e+02f, 1.44000000e+02f, 1.60000000e+02f, 1.76000000e+02f, 1.92000000e+02f, 2.08000000e+02f, 2.24000000e+02f, 2.40000000e+02f,
+    2.56000000e+02f, 2.88000000e+02f, 3.20000000e+02f, 3.52000000e+02f, 3.84000000e+02f, 4.16000000e+02f, 4.48000000e+02f, NAN,
+    -0.00000000e+00f, -1.95312500e-03f, -3.90625000e-03f, -5.85937500e-03f, -7.81250000e-03f, -9.76562500e-03f, -1.17187500e-02f, -1.36718750e-02f,
+    -1.56250000e-02f, -1.75781250e-02f, -1.95312500e-02f, -2.14843750e-02f, -2.34375000e-02f, -2.53906250e-02f, -2.73437500e-02f, -2.92968750e-02f,
+    -3.12500000e-02f, -3.51562500e-02f, -3.90625000e-02f, -4.29687500e-02f, -4.68750000e-02f, -5.07812500e-02f, -5.46875000e-02f, -5.85937500e-02f,
+    -6.25000000e-02f, -7.03125000e-02f, -7.81250000e-02f, -8.59375000e-02f, -9.37500000e-02f, -1.01562500e-01f, -1.09375000e-01f, -1.17187500e-01f,
+    -1.25000000e-01f, -1.40625000e-01f, -1.56250000e-01f, -1.71875000e-01f, -1.87500000e-01f, -2.03125000e-01f, -2.18750000e-01f, -2.34375000e-01f,
+    -2.50000000e-01f, -2.81250000e-01f, -3.12500000e-01f, -3.43750000e-01f, -3.75000000e-01f, -4.06250000e-01f, -4.37500000e-01f, -4.68750000e-01f,
+    -5.00000000e-01f, -5.62500000e-01f, -6.25000000e-01f, -6.87500000e-01f, -7.50000000e-01f, -8.12500000e-01f, -8.75000000e-01f, -9.37500000e-01f,
+    -1.00000000e+00f, -1.12500000e+00f, -1.25000000e+00f, -1.37500000e+00f, -1.50000000e+00f, -1.62500000e+00f, -1.75000000e+00f, -1.87500000e+00f,
+    -2.00000000e+00f, -2.25000000e+00f, -2.50000000e+00f, -2.75000000e+00f, -3.00000000e+00f, -3.25000000e+00f, -3.50000000e+00f, -3.75000000e+00f,
+    -4.00000000e+00f, -4.50000000e+00f, -5.00000000e+00f, -5.50000000e+00f, -6.00000000e+00f, -6.50000000e+00f, -7.00000000e+00f, -7.50000000e+00f,
+    -8.00000000e+00f, -9.00000000e+00f, -1.00000000e+01f, -1.10000000e+01f, -1.20000000e+01f, -1.30000000e+01f, -1.40000000e+01f, -1.50000000e+01f,
+    -1.60000000e+01f, -1.80000000e+01f, -2.00000000e+01f, -2.20000000e+01f, -2.40000000e+01f, -2.60000000e+01f, -2.80000000e+01f, -3.00000000e+01f,
+    -3.20000000e+01f, -3.60000000e+01f, -4.00000000e+01f, -4.40000000e+01f, -4.80000000e+01f, -5.20000000e+01f, -5.60000000e+01f, -6.00000000e+01f,
+    -6.40000000e+01f, -7.20000000e+01f, -8.00000000e+01f, -8.80000000e+01f, -9.60000000e+01f, -1.04000000e+02f, -1.12000000e+02f, -1.20000000e+02f,
+    -1.28000000e+02f, -1.44000000e+02f, -1.60000000e+02f, -1.76000000e+02f, -1.92000000e+02f, -2.08000000e+02f, -2.24000000e+02f, -2.40000000e+02f,
+    -2.56000000e+02f, -2.88000000e+02f, -3.20000000e+02f, -3.52000000e+02f, -3.84000000e+02f, -4.16000000e+02f, -4.48000000e+02f, NAN,
+};
 constant uint REDUCE_GROUPS = 256u;
 
 struct Pair {
@@ -95,18 +128,10 @@ static float gelu_erf(float value) {
     return sign * (1.0f - poly * exp(-ax * ax));
 }
 
-static float dequant_fp4(device uchar* data, device uchar* scales, uint row, uint k, uint inner) {
-    uint packed = data[row * (inner >> 1) + (k >> 1)];
-    uint nibble = (k & 1u) ? (packed >> 4) : (packed & 0xFu);
-    float mag = FP4_MAG[nibble & 7u];
-    float sign = (nibble & 8u) ? -1.0f : 1.0f;
+static float dequant_fp8(device uchar* data, device uchar* scales, uint row, uint k, uint inner) {
+    uint code = data[row * inner + k];
     uint scale = scales[row * (inner >> 5) + (k >> 5)];
-    return sign * mag * exp2(float(scale) - 127.0f);
-}
-
-static float fp4_signed(uint nibble) {
-    float mag = FP4_MAG[nibble & 7u];
-    return (nibble & 8u) ? -mag : mag;
+    return E4M3[code] * exp2(float(scale) - 127.0f);
 }
 
 template <bool NORM, bool ACCUM>
@@ -159,7 +184,7 @@ static void gemv_group_body(
         }
     }
     uint row0 = tgid * 32u + simd * 4u;
-    uint bytes = inner >> 1;
+    uint bytes = inner;
     uint scale_stride = inner >> 5;
     float acc0 = 0.0f;
     float acc1 = 0.0f;
@@ -169,20 +194,23 @@ static void gemv_group_body(
         uint k = base + lane * 2u;
         float a0 = act[k];
         float a1 = act[k + 1u];
-        uint byte_index = k >> 1;
         uint scale_index = k >> 5;
-        uchar p0 = weights[row0 * bytes + byte_index];
-        uchar p1 = weights[(row0 + 1u) * bytes + byte_index];
-        uchar p2 = weights[(row0 + 2u) * bytes + byte_index];
-        uchar p3 = weights[(row0 + 3u) * bytes + byte_index];
+        uchar p0 = weights[row0 * bytes + k];
+        uchar n0 = weights[row0 * bytes + k + 1u];
+        uchar p1 = weights[(row0 + 1u) * bytes + k];
+        uchar n1 = weights[(row0 + 1u) * bytes + k + 1u];
+        uchar p2 = weights[(row0 + 2u) * bytes + k];
+        uchar n2 = weights[(row0 + 2u) * bytes + k + 1u];
+        uchar p3 = weights[(row0 + 3u) * bytes + k];
+        uchar n3 = weights[(row0 + 3u) * bytes + k + 1u];
         float s0 = exp2(float(scales[row0 * scale_stride + scale_index]) - 127.0f);
         float s1 = exp2(float(scales[(row0 + 1u) * scale_stride + scale_index]) - 127.0f);
         float s2 = exp2(float(scales[(row0 + 2u) * scale_stride + scale_index]) - 127.0f);
         float s3 = exp2(float(scales[(row0 + 3u) * scale_stride + scale_index]) - 127.0f);
-        acc0 += (a0 * fp4_signed(p0 & 0xFu) + a1 * fp4_signed(p0 >> 4)) * s0;
-        acc1 += (a0 * fp4_signed(p1 & 0xFu) + a1 * fp4_signed(p1 >> 4)) * s1;
-        acc2 += (a0 * fp4_signed(p2 & 0xFu) + a1 * fp4_signed(p2 >> 4)) * s2;
-        acc3 += (a0 * fp4_signed(p3 & 0xFu) + a1 * fp4_signed(p3 >> 4)) * s3;
+        acc0 += (a0 * E4M3[p0] + a1 * E4M3[n0]) * s0;
+        acc1 += (a0 * E4M3[p1] + a1 * E4M3[n1]) * s1;
+        acc2 += (a0 * E4M3[p2] + a1 * E4M3[n2]) * s2;
+        acc3 += (a0 * E4M3[p3] + a1 * E4M3[n3]) * s3;
     }
     acc0 = simd_sum(acc0);
     acc1 = simd_sum(acc1);
@@ -215,26 +243,29 @@ static void dot_rows(
     thread float& acc2,
     thread float& acc3)
 {
-    uint bytes = inner >> 1;
+    uint bytes = inner;
     uint scale_stride = inner >> 5;
     for (uint base = 0u; base < inner; base += 64u) {
         uint k = base + lane * 2u;
         float a0 = activation[k];
         float a1 = activation[k + 1u];
-        uint byte_index = k >> 1;
         uint scale_index = k >> 5;
-        uchar p0 = weights[row0 * bytes + byte_index];
-        uchar p1 = weights[(row0 + 1u) * bytes + byte_index];
-        uchar p2 = weights[(row0 + 2u) * bytes + byte_index];
-        uchar p3 = weights[(row0 + 3u) * bytes + byte_index];
+        uchar p0 = weights[row0 * bytes + k];
+        uchar n0 = weights[row0 * bytes + k + 1u];
+        uchar p1 = weights[(row0 + 1u) * bytes + k];
+        uchar n1 = weights[(row0 + 1u) * bytes + k + 1u];
+        uchar p2 = weights[(row0 + 2u) * bytes + k];
+        uchar n2 = weights[(row0 + 2u) * bytes + k + 1u];
+        uchar p3 = weights[(row0 + 3u) * bytes + k];
+        uchar n3 = weights[(row0 + 3u) * bytes + k + 1u];
         float s0 = exp2(float(scales[row0 * scale_stride + scale_index]) - 127.0f);
         float s1 = exp2(float(scales[(row0 + 1u) * scale_stride + scale_index]) - 127.0f);
         float s2 = exp2(float(scales[(row0 + 2u) * scale_stride + scale_index]) - 127.0f);
         float s3 = exp2(float(scales[(row0 + 3u) * scale_stride + scale_index]) - 127.0f);
-        acc0 += (a0 * fp4_signed(p0 & 0xFu) + a1 * fp4_signed(p0 >> 4)) * s0;
-        acc1 += (a0 * fp4_signed(p1 & 0xFu) + a1 * fp4_signed(p1 >> 4)) * s1;
-        acc2 += (a0 * fp4_signed(p2 & 0xFu) + a1 * fp4_signed(p2 >> 4)) * s2;
-        acc3 += (a0 * fp4_signed(p3 & 0xFu) + a1 * fp4_signed(p3 >> 4)) * s3;
+        acc0 += (a0 * E4M3[p0] + a1 * E4M3[n0]) * s0;
+        acc1 += (a0 * E4M3[p1] + a1 * E4M3[n1]) * s1;
+        acc2 += (a0 * E4M3[p2] + a1 * E4M3[n2]) * s2;
+        acc3 += (a0 * E4M3[p3] + a1 * E4M3[n3]) * s3;
     }
 }
 
@@ -251,7 +282,7 @@ static float value_at(device uchar* data, device uchar* scale, uint kv, uint slo
     return dec_e4m3(code) * exp2(float(sc) - 127.0f);
 }
 
-kernel void gemv_fp4(
+kernel void gemv_fp8(
     device float* activation [[buffer(0)]],
     device uchar* weights [[buffer(1)]],
     device uchar* scales [[buffer(2)]],
@@ -278,18 +309,74 @@ kernel void gemv_fp4(
     }
 }
 
-static float dot8(float a0, float a1, float a2, float a3, float a4, float a5, float a6, float a7, uint packed) {
-    return a0 * fp4_signed(packed & 0xFu)
-        + a1 * fp4_signed((packed >> 4) & 0xFu)
-        + a2 * fp4_signed((packed >> 8) & 0xFu)
-        + a3 * fp4_signed((packed >> 12) & 0xFu)
-        + a4 * fp4_signed((packed >> 16) & 0xFu)
-        + a5 * fp4_signed((packed >> 20) & 0xFu)
-        + a6 * fp4_signed((packed >> 24) & 0xFu)
-        + a7 * fp4_signed(packed >> 28);
+static float dot8(float a0, float a1, float a2, float a3, float a4, float a5, float a6, float a7, uint2 packed) {
+    return a0 * E4M3[packed.x & 0xFFu]
+        + a1 * E4M3[(packed.x >> 8) & 0xFFu]
+        + a2 * E4M3[(packed.x >> 16) & 0xFFu]
+        + a3 * E4M3[packed.x >> 24]
+        + a4 * E4M3[packed.y & 0xFFu]
+        + a5 * E4M3[(packed.y >> 8) & 0xFFu]
+        + a6 * E4M3[(packed.y >> 16) & 0xFFu]
+        + a7 * E4M3[packed.y >> 24];
 }
 
-kernel void gemv_fp4_vec(
+kernel void gemv_fp8_row(
+    device float* activation [[buffer(0)]],
+    device uchar* weights [[buffer(1)]],
+    device uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]])
+{
+    uint bytes = inner;
+    device uchar* weight = weights + row * bytes;
+    device uchar* scale_row = scales + row * (inner >> 5);
+    float acc = 0.0f;
+    for (uint base = 0u; base < inner; base += 256u) {
+        uint k = base + lane * 8u;
+        float scale = exp2(float(scale_row[k >> 5]) - 127.0f);
+        uint2 packed = *reinterpret_cast<device uint2*>(weight + k);
+        acc += scale * dot8(
+            activation[k], activation[k + 1u], activation[k + 2u], activation[k + 3u],
+            activation[k + 4u], activation[k + 5u], activation[k + 6u], activation[k + 7u],
+            packed);
+    }
+    acc = simd_sum(acc);
+    if (lane == 0u) {
+        destination[row] = acc;
+    }
+}
+
+kernel void gemv_fp8_row_add(
+    device float* activation [[buffer(0)]],
+    device uchar* weights [[buffer(1)]],
+    device uchar* scales [[buffer(2)]],
+    device float* hidden [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]])
+{
+    uint bytes = inner;
+    device uchar* weight = weights + row * bytes;
+    device uchar* scale_row = scales + row * (inner >> 5);
+    float acc = 0.0f;
+    for (uint base = 0u; base < inner; base += 256u) {
+        uint k = base + lane * 8u;
+        float scale = exp2(float(scale_row[k >> 5]) - 127.0f);
+        uint2 packed = *reinterpret_cast<device uint2*>(weight + k);
+        acc += scale * dot8(
+            activation[k], activation[k + 1u], activation[k + 2u], activation[k + 3u],
+            activation[k + 4u], activation[k + 5u], activation[k + 6u], activation[k + 7u],
+            packed);
+    }
+    acc = simd_sum(acc);
+    if (lane == 0u) {
+        hidden[row] += acc;
+    }
+}
+
+kernel void gemv_fp8_vec(
     device float* activation [[buffer(0)]],
     device uchar* weights [[buffer(1)]],
     device uchar* scales [[buffer(2)]],
@@ -299,7 +386,7 @@ kernel void gemv_fp4_vec(
     uint lane [[thread_index_in_threadgroup]])
 {
     uint row0 = tgid * 4u;
-    uint bytes = inner >> 1;
+    uint bytes = inner;
     uint scale_stride = inner >> 5;
     device uchar* w0 = weights + row0 * bytes;
     device uchar* w1 = w0 + bytes;
@@ -328,11 +415,10 @@ kernel void gemv_fp4_vec(
         float a5 = activation[k + 5u];
         float a6 = activation[k + 6u];
         float a7 = activation[k + 7u];
-        uint byte_index = k >> 1;
-        uint p0 = *reinterpret_cast<device uint*>(w0 + byte_index);
-        uint p1 = *reinterpret_cast<device uint*>(w1 + byte_index);
-        uint p2 = *reinterpret_cast<device uint*>(w2 + byte_index);
-        uint p3 = *reinterpret_cast<device uint*>(w3 + byte_index);
+        uint2 p0 = *reinterpret_cast<device uint2*>(w0 + k);
+        uint2 p1 = *reinterpret_cast<device uint2*>(w1 + k);
+        uint2 p2 = *reinterpret_cast<device uint2*>(w2 + k);
+        uint2 p3 = *reinterpret_cast<device uint2*>(w3 + k);
         acc0 += s0 * dot8(a0, a1, a2, a3, a4, a5, a6, a7, p0);
         acc1 += s1 * dot8(a0, a1, a2, a3, a4, a5, a6, a7, p1);
         acc2 += s2 * dot8(a0, a1, a2, a3, a4, a5, a6, a7, p2);
@@ -350,7 +436,112 @@ kernel void gemv_fp4_vec(
     }
 }
 
-kernel void gemv_fp4_vec_rms(
+template <bool NORM, bool ACCUM>
+static void gemv_cached(
+    threadgroup float* act,
+    threadgroup float* red,
+    device float* activation,
+    device half* norm_w,
+    device uchar* weights,
+    device uchar* scales,
+    device float* destination,
+    device float* normed,
+    uint inner,
+    float eps,
+    uint tgid,
+    uint tid)
+{
+    uint simd = tid >> 5;
+    uint lane = tid & 31u;
+    float local = 0.0f;
+    for (uint k = tid; k < inner; k += 256u) {
+        float value = activation[k];
+        act[k] = value;
+        if (NORM) {
+            local += value * value;
+        }
+    }
+    if (NORM) {
+        local = simd_sum(local);
+        if (lane == 0u) {
+            red[simd] = local;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (NORM) {
+        if (tid == 0u) {
+            float sum = red[0] + red[1] + red[2] + red[3] + red[4] + red[5] + red[6] + red[7];
+            red[0] = rsqrt(sum / float(inner) + eps);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float inv = red[0];
+        for (uint k = tid; k < inner; k += 256u) {
+            act[k] = act[k] * float(norm_w[k]) * inv;
+            if (tgid == 0u) {
+                normed[k] = act[k];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    uint row0 = tgid * 32u + simd * 4u;
+    uint bytes = inner;
+    uint scale_stride = inner >> 5;
+    device uchar* w0 = weights + row0 * bytes;
+    device uchar* w1 = w0 + bytes;
+    device uchar* w2 = w1 + bytes;
+    device uchar* w3 = w2 + bytes;
+    device uchar* c0 = scales + row0 * scale_stride;
+    device uchar* c1 = c0 + scale_stride;
+    device uchar* c2 = c1 + scale_stride;
+    device uchar* c3 = c2 + scale_stride;
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+    for (uint base = 0u; base < inner; base += 256u) {
+        uint k = base + lane * 8u;
+        uint scale_index = k >> 5;
+        float s0 = exp2(float(c0[scale_index]) - 127.0f);
+        float s1 = exp2(float(c1[scale_index]) - 127.0f);
+        float s2 = exp2(float(c2[scale_index]) - 127.0f);
+        float s3 = exp2(float(c3[scale_index]) - 127.0f);
+        float a0 = act[k];
+        float a1 = act[k + 1u];
+        float a2 = act[k + 2u];
+        float a3 = act[k + 3u];
+        float a4 = act[k + 4u];
+        float a5 = act[k + 5u];
+        float a6 = act[k + 6u];
+        float a7 = act[k + 7u];
+        uint2 p0 = *reinterpret_cast<device uint2*>(w0 + k);
+        uint2 p1 = *reinterpret_cast<device uint2*>(w1 + k);
+        uint2 p2 = *reinterpret_cast<device uint2*>(w2 + k);
+        uint2 p3 = *reinterpret_cast<device uint2*>(w3 + k);
+        acc0 += s0 * dot8(a0, a1, a2, a3, a4, a5, a6, a7, p0);
+        acc1 += s1 * dot8(a0, a1, a2, a3, a4, a5, a6, a7, p1);
+        acc2 += s2 * dot8(a0, a1, a2, a3, a4, a5, a6, a7, p2);
+        acc3 += s3 * dot8(a0, a1, a2, a3, a4, a5, a6, a7, p3);
+    }
+    acc0 = simd_sum(acc0);
+    acc1 = simd_sum(acc1);
+    acc2 = simd_sum(acc2);
+    acc3 = simd_sum(acc3);
+    if (lane == 0u) {
+        if (ACCUM) {
+            destination[row0] += acc0;
+            destination[row0 + 1u] += acc1;
+            destination[row0 + 2u] += acc2;
+            destination[row0 + 3u] += acc3;
+        } else {
+            destination[row0] = acc0;
+            destination[row0 + 1u] = acc1;
+            destination[row0 + 2u] = acc2;
+            destination[row0 + 3u] = acc3;
+        }
+    }
+}
+
+kernel void gemv_fp8_vec_rms(
     device float* activation [[buffer(0)]],
     device half* norm_w [[buffer(1)]],
     device uchar* weights [[buffer(2)]],
@@ -360,73 +551,15 @@ kernel void gemv_fp4_vec_rms(
     constant uint& inner [[buffer(6)]],
     constant float& eps [[buffer(7)]],
     uint tgid [[threadgroup_position_in_grid]],
-    uint lane [[thread_index_in_threadgroup]])
+    uint tid [[thread_index_in_threadgroup]])
 {
-    float sumsq = 0.0f;
-    for (uint k = lane; k < inner; k += 32u) {
-        float value = activation[k];
-        sumsq += value * value;
-    }
-    sumsq = simd_sum(sumsq);
-    float inv = rsqrt(sumsq / float(inner) + eps);
-    if (tgid == 0u) {
-        for (uint k = lane; k < inner; k += 32u) {
-            normed[k] = activation[k] * float(norm_w[k]) * inv;
-        }
-    }
-    uint row0 = tgid * 4u;
-    uint bytes = inner >> 1;
-    uint scale_stride = inner >> 5;
-    device uchar* w0 = weights + row0 * bytes;
-    device uchar* w1 = w0 + bytes;
-    device uchar* w2 = w1 + bytes;
-    device uchar* w3 = w2 + bytes;
-    device uchar* c0 = scales + row0 * scale_stride;
-    device uchar* c1 = c0 + scale_stride;
-    device uchar* c2 = c1 + scale_stride;
-    device uchar* c3 = c2 + scale_stride;
-    float acc0 = 0.0f;
-    float acc1 = 0.0f;
-    float acc2 = 0.0f;
-    float acc3 = 0.0f;
-    for (uint base = 0u; base < inner; base += 256u) {
-        uint k = base + lane * 8u;
-        uint scale_index = k >> 5;
-        float s0 = exp2(float(c0[scale_index]) - 127.0f);
-        float s1 = exp2(float(c1[scale_index]) - 127.0f);
-        float s2 = exp2(float(c2[scale_index]) - 127.0f);
-        float s3 = exp2(float(c3[scale_index]) - 127.0f);
-        float a0 = activation[k] * float(norm_w[k]) * inv;
-        float a1 = activation[k + 1u] * float(norm_w[k + 1u]) * inv;
-        float a2 = activation[k + 2u] * float(norm_w[k + 2u]) * inv;
-        float a3 = activation[k + 3u] * float(norm_w[k + 3u]) * inv;
-        float a4 = activation[k + 4u] * float(norm_w[k + 4u]) * inv;
-        float a5 = activation[k + 5u] * float(norm_w[k + 5u]) * inv;
-        float a6 = activation[k + 6u] * float(norm_w[k + 6u]) * inv;
-        float a7 = activation[k + 7u] * float(norm_w[k + 7u]) * inv;
-        uint byte_index = k >> 1;
-        uint p0 = *reinterpret_cast<device uint*>(w0 + byte_index);
-        uint p1 = *reinterpret_cast<device uint*>(w1 + byte_index);
-        uint p2 = *reinterpret_cast<device uint*>(w2 + byte_index);
-        uint p3 = *reinterpret_cast<device uint*>(w3 + byte_index);
-        acc0 += s0 * dot8(a0, a1, a2, a3, a4, a5, a6, a7, p0);
-        acc1 += s1 * dot8(a0, a1, a2, a3, a4, a5, a6, a7, p1);
-        acc2 += s2 * dot8(a0, a1, a2, a3, a4, a5, a6, a7, p2);
-        acc3 += s3 * dot8(a0, a1, a2, a3, a4, a5, a6, a7, p3);
-    }
-    acc0 = simd_sum(acc0);
-    acc1 = simd_sum(acc1);
-    acc2 = simd_sum(acc2);
-    acc3 = simd_sum(acc3);
-    if (lane == 0u) {
-        destination[row0] = acc0;
-        destination[row0 + 1u] = acc1;
-        destination[row0 + 2u] = acc2;
-        destination[row0 + 3u] = acc3;
-    }
+    threadgroup float act[2048];
+    threadgroup float red[8];
+    gemv_cached<true, false>(
+        act, red, activation, norm_w, weights, scales, destination, normed, inner, eps, tgid, tid);
 }
 
-kernel void gemv_fp4_vec_add(
+kernel void gemv_fp8_vec_add(
     device float* activation [[buffer(0)]],
     device uchar* weights [[buffer(1)]],
     device uchar* scales [[buffer(2)]],
@@ -436,7 +569,7 @@ kernel void gemv_fp4_vec_add(
     uint lane [[thread_index_in_threadgroup]])
 {
     uint row0 = tgid * 4u;
-    uint bytes = inner >> 1;
+    uint bytes = inner;
     uint scale_stride = inner >> 5;
     device uchar* w0 = weights + row0 * bytes;
     device uchar* w1 = w0 + bytes;
@@ -465,11 +598,10 @@ kernel void gemv_fp4_vec_add(
         float a5 = activation[k + 5u];
         float a6 = activation[k + 6u];
         float a7 = activation[k + 7u];
-        uint byte_index = k >> 1;
-        uint p0 = *reinterpret_cast<device uint*>(w0 + byte_index);
-        uint p1 = *reinterpret_cast<device uint*>(w1 + byte_index);
-        uint p2 = *reinterpret_cast<device uint*>(w2 + byte_index);
-        uint p3 = *reinterpret_cast<device uint*>(w3 + byte_index);
+        uint2 p0 = *reinterpret_cast<device uint2*>(w0 + k);
+        uint2 p1 = *reinterpret_cast<device uint2*>(w1 + k);
+        uint2 p2 = *reinterpret_cast<device uint2*>(w2 + k);
+        uint2 p3 = *reinterpret_cast<device uint2*>(w3 + k);
         acc0 += s0 * dot8(a0, a1, a2, a3, a4, a5, a6, a7, p0);
         acc1 += s1 * dot8(a0, a1, a2, a3, a4, a5, a6, a7, p1);
         acc2 += s2 * dot8(a0, a1, a2, a3, a4, a5, a6, a7, p2);
@@ -485,6 +617,36 @@ kernel void gemv_fp4_vec_add(
         hidden[row0 + 2u] += acc2;
         hidden[row0 + 3u] += acc3;
     }
+}
+
+kernel void gemv_fp8_vec_add_cached(
+    device float* activation [[buffer(0)]],
+    device uchar* weights [[buffer(1)]],
+    device uchar* scales [[buffer(2)]],
+    device float* hidden [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    threadgroup float act[2048];
+    threadgroup float red[8];
+    gemv_cached<false, true>(
+        act, red, activation, nullptr, weights, scales, hidden, nullptr, inner, 0.0f, tgid, tid);
+}
+
+kernel void gemv_fp8_vec_add_wide(
+    device float* activation [[buffer(0)]],
+    device uchar* weights [[buffer(1)]],
+    device uchar* scales [[buffer(2)]],
+    device float* hidden [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    threadgroup float act[6656];
+    threadgroup float red[8];
+    gemv_cached<false, true>(
+        act, red, activation, nullptr, weights, scales, hidden, nullptr, inner, 0.0f, tgid, tid);
 }
 
 kernel void gemv_group(
@@ -579,7 +741,7 @@ kernel void embed_row(
     uint lane [[thread_index_in_threadgroup]])
 {
     for (uint k = lane; k < inner; k += 32u) {
-        destination[k] = dequant_fp4(weights, scales, 0u, k, inner);
+        destination[k] = dequant_fp8(weights, scales, 0u, k, inner);
     }
 }
 
@@ -987,23 +1149,28 @@ kernel void store_full_span(
     device uchar* value_scale [[buffer(4)]],
     device float* scratch [[buffer(5)]],
     constant SpanStore& cfg [[buffer(6)]],
-    uint lane [[thread_index_in_threadgroup]])
+    uint tid [[thread_position_in_grid]])
 {
-    if (cfg.count == 1u) {
+    uint lane = tid & 31u;
+    uint simd = tid >> 5;
+    if (cfg.count == 1u && simd < 16u) {
+        uint key_head = simd >> 3;
+        uint group = simd & 7u;
         device float* key = rows + 2048u;
-        for (uint head = 0u; head < 2u; ++head) {
-            for (uint group = 0u; group < 8u; ++group) {
-                float amax = simd_max(fabs(key[head * 256u + group * 32u + lane]));
-                uint sc = e8m0_byte(amax, 448.0f);
-                float scale = exp2(float(sc) - 127.0f);
-                float raw = key[head * 256u + group * 32u + lane];
-                float q = scale > 0.0f ? raw / scale : 0.0f;
-                key_data[(head * cfg.capacity + cfg.pos) * 256u + group * 32u + lane] = uchar(enc_e4m3(q));
-                if (lane == 0u) {
-                    key_scale[(head * cfg.capacity + cfg.pos) * 8u + group] = uchar(sc);
-                }
-            }
+        float amax = simd_max(fabs(key[key_head * 256u + group * 32u + lane]));
+        uint sc = e8m0_byte(amax, 448.0f);
+        float scale = exp2(float(sc) - 127.0f);
+        float raw = key[key_head * 256u + group * 32u + lane];
+        float q = scale > 0.0f ? raw / scale : 0.0f;
+        key_data[(key_head * cfg.capacity + cfg.pos) * 256u + group * 32u + lane] = uchar(enc_e4m3(q));
+        if (lane == 0u) {
+            key_scale[(key_head * cfg.capacity + cfg.pos) * 8u + group] = uchar(sc);
         }
+    }
+    uint head = tid >> 8;
+    uint channel = tid & 255u;
+    if (head >= 2u) {
+        return;
     }
     uint span_end = cfg.pos + cfg.count;
     uint first = cfg.pos >> 5;
@@ -1016,28 +1183,20 @@ kernel void store_full_span(
             device float* row = rows + (pos - cfg.pos) * 3072u;
             uint slot = pos & 31u;
             device float* value = row + 2560u;
-            for (uint head = 0u; head < 2u; ++head) {
-                for (uint channel = lane; channel < 256u; channel += 32u) {
-                    scratch[(head * 256u + channel) * 32u + slot] = value[head * 256u + channel];
-                }
-            }
+            scratch[(head * 256u + channel) * 32u + slot] = value[head * 256u + channel];
         }
         uint slot_limit = block_end - base;
-        for (uint head = 0u; head < 2u; ++head) {
-            for (uint channel = lane; channel < 256u; channel += 32u) {
-                float amax = 0.0f;
-                for (uint s = 0u; s < slot_limit; ++s) {
-                    amax = max(amax, fabs(scratch[(head * 256u + channel) * 32u + s]));
-                }
-                uint sc = e8m0_byte(amax, 448.0f);
-                value_scale[(head * 256u + channel) * blocks + block] = uchar(sc);
-                float scale = exp2(float(sc) - 127.0f);
-                for (uint s = 0u; s < slot_limit; ++s) {
-                    float raw = scratch[(head * 256u + channel) * 32u + s];
-                    float q = scale > 0.0f ? raw / scale : 0.0f;
-                    value_data[(head * 256u + channel) * cfg.capacity + base + s] = uchar(enc_e4m3(q));
-                }
-            }
+        float amax = 0.0f;
+        for (uint s = 0u; s < slot_limit; ++s) {
+            amax = max(amax, fabs(scratch[(head * 256u + channel) * 32u + s]));
+        }
+        uint sc = e8m0_byte(amax, 448.0f);
+        value_scale[(head * 256u + channel) * blocks + block] = uchar(sc);
+        float scale = exp2(float(sc) - 127.0f);
+        for (uint s = 0u; s < slot_limit; ++s) {
+            float raw = scratch[(head * 256u + channel) * 32u + s];
+            float q = scale > 0.0f ? raw / scale : 0.0f;
+            value_data[(head * 256u + channel) * cfg.capacity + base + s] = uchar(enc_e4m3(q));
         }
     }
 }
@@ -1050,24 +1209,29 @@ kernel void store_slide_span(
     device uchar* value_scale [[buffer(4)]],
     device float* scratch [[buffer(5)]],
     constant SpanStore& cfg [[buffer(6)]],
-    uint lane [[thread_index_in_threadgroup]])
+    uint tid [[thread_position_in_grid]])
 {
-    if (cfg.count == 1u) {
+    uint lane = tid & 31u;
+    uint simd = tid >> 5;
+    if (cfg.count == 1u && simd < 16u) {
         uint slot0 = cfg.pos % 512u;
+        uint key_head = simd >> 3;
+        uint group = simd & 7u;
         device float* key = rows + 2048u;
-        for (uint head = 0u; head < 2u; ++head) {
-            for (uint group = 0u; group < 8u; ++group) {
-                float amax = simd_max(fabs(key[head * 256u + group * 32u + lane]));
-                uint sc = e8m0_byte(amax, 448.0f);
-                float scale = exp2(float(sc) - 127.0f);
-                float raw = key[head * 256u + group * 32u + lane];
-                float q = scale > 0.0f ? raw / scale : 0.0f;
-                key_data[(head * 512u + slot0) * 256u + group * 32u + lane] = uchar(enc_e4m3(q));
-                if (lane == 0u) {
-                    key_scale[(head * 512u + slot0) * 8u + group] = uchar(sc);
-                }
-            }
+        float amax = simd_max(fabs(key[key_head * 256u + group * 32u + lane]));
+        uint sc = e8m0_byte(amax, 448.0f);
+        float scale = exp2(float(sc) - 127.0f);
+        float raw = key[key_head * 256u + group * 32u + lane];
+        float q = scale > 0.0f ? raw / scale : 0.0f;
+        key_data[(key_head * 512u + slot0) * 256u + group * 32u + lane] = uchar(enc_e4m3(q));
+        if (lane == 0u) {
+            key_scale[(key_head * 512u + slot0) * 8u + group] = uchar(sc);
         }
+    }
+    uint head = tid >> 8;
+    uint channel = tid & 255u;
+    if (head >= 2u) {
+        return;
     }
     uint span_end = cfg.pos + cfg.count;
     uint latest = span_end - 1u;
@@ -1076,11 +1240,7 @@ kernel void store_slide_span(
         uint slot = pos % 512u;
         device float* row = rows + token * 3072u;
         device float* value = row + 2560u;
-        for (uint head = 0u; head < 2u; ++head) {
-            for (uint channel = lane; channel < 256u; channel += 32u) {
-                scratch[(head * 256u + channel) * 512u + slot] = value[head * 256u + channel];
-            }
-        }
+        scratch[(head * 256u + channel) * 512u + slot] = value[head * 256u + channel];
     }
     for (uint block = 0u; block < 16u; ++block) {
         bool touched = false;
@@ -1093,31 +1253,27 @@ kernel void store_slide_span(
         if (!touched) {
             continue;
         }
-        for (uint head = 0u; head < 2u; ++head) {
-            for (uint channel = lane; channel < 256u; channel += 32u) {
-                float amax = 0.0f;
-                for (uint s = 0u; s < 32u; ++s) {
-                    uint ring = block * 32u + s;
-                    bool occupied = latest >= 511u || ring <= latest;
-                    if (!occupied) {
-                        continue;
-                    }
-                    amax = max(amax, fabs(scratch[(head * 256u + channel) * 512u + ring]));
-                }
-                uint sc = e8m0_byte(amax, 448.0f);
-                value_scale[(head * 256u + channel) * 16u + block] = uchar(sc);
-                float scale = exp2(float(sc) - 127.0f);
-                for (uint s = 0u; s < 32u; ++s) {
-                    uint ring = block * 32u + s;
-                    bool occupied = latest >= 511u || ring <= latest;
-                    if (!occupied) {
-                        continue;
-                    }
-                    float raw = scratch[(head * 256u + channel) * 512u + ring];
-                    float q = scale > 0.0f ? raw / scale : 0.0f;
-                    value_data[(head * 256u + channel) * 512u + ring] = uchar(enc_e4m3(q));
-                }
+        float amax = 0.0f;
+        for (uint s = 0u; s < 32u; ++s) {
+            uint ring = block * 32u + s;
+            bool occupied = latest >= 511u || ring <= latest;
+            if (!occupied) {
+                continue;
             }
+            amax = max(amax, fabs(scratch[(head * 256u + channel) * 512u + ring]));
+        }
+        uint sc = e8m0_byte(amax, 448.0f);
+        value_scale[(head * 256u + channel) * 16u + block] = uchar(sc);
+        float scale = exp2(float(sc) - 127.0f);
+        for (uint s = 0u; s < 32u; ++s) {
+            uint ring = block * 32u + s;
+            bool occupied = latest >= 511u || ring <= latest;
+            if (!occupied) {
+                continue;
+            }
+            float raw = scratch[(head * 256u + channel) * 512u + ring];
+            float q = scale > 0.0f ? raw / scale : 0.0f;
+            value_data[(head * 256u + channel) * 512u + ring] = uchar(enc_e4m3(q));
         }
     }
 }
@@ -1147,24 +1303,34 @@ static void attend_range(
     thread float& sum,
     thread float acc[8])
 {
+    uint blocks = capacity >> 5;
+    uint base = lane * 8u;
     for (uint i = begin; i < end; ++i) {
         uint slot = window == 0u ? (start + i) : ((start + i) % window);
-        float partial = 0.0f;
-        for (uint group = 0u; group < 8u; ++group) {
-            uint channel = group * 32u + lane;
-            uint sc = key_scale[(kv * capacity + slot) * 8u + group];
-            float scale = exp2(float(sc) - 127.0f);
-            uint code = key_data[(kv * capacity + slot) * 256u + channel];
-            partial += query[channel] * dec_e4m3(code) * scale;
-        }
-        float score = simd_sum(partial) * ATTN_SCALE;
+        device uchar* key_row = key_data + (kv * capacity + slot) * 256u;
+        uint2 packed = *reinterpret_cast<device uint2*>(key_row + base);
+        uint sc = key_scale[(kv * capacity + slot) * 8u + (base >> 5)];
+        float scale = exp2(float(sc) - 127.0f);
+        float partial = query[base] * E4M3[packed.x & 0xFFu]
+            + query[base + 1u] * E4M3[(packed.x >> 8) & 0xFFu]
+            + query[base + 2u] * E4M3[(packed.x >> 16) & 0xFFu]
+            + query[base + 3u] * E4M3[packed.x >> 24]
+            + query[base + 4u] * E4M3[packed.y & 0xFFu]
+            + query[base + 5u] * E4M3[(packed.y >> 8) & 0xFFu]
+            + query[base + 6u] * E4M3[(packed.y >> 16) & 0xFFu]
+            + query[base + 7u] * E4M3[packed.y >> 24];
+        float score = simd_sum(partial * scale) * ATTN_SCALE;
         float next = max(peak, score);
         float decay = exp(peak - next);
         float weight = exp(score - next);
         sum = sum * decay + weight;
+        uint block = slot >> 5;
         for (uint j = 0u; j < 8u; ++j) {
-            uint channel = lane + j * 32u;
-            acc[j] = acc[j] * decay + weight * value_at(value_data, value_scale, kv, slot, channel, capacity);
+            uint channel = base + j;
+            uint code = value_data[(kv * 256u + channel) * capacity + slot];
+            uint vc = value_scale[(kv * 256u + channel) * blocks + block];
+            float value = E4M3[code] * exp2(float(vc) - 127.0f);
+            acc[j] = acc[j] * decay + weight * value;
         }
         peak = next;
     }
@@ -1208,8 +1374,107 @@ kernel void attend_span(
     float inv = sum > 0.0f ? 1.0f / sum : 0.0f;
     float gate = 1.0f / (1.0f + exp(-gates[token * 8u + qh]));
     for (uint j = 0u; j < 8u; ++j) {
-        uint channel = lane + j * 32u;
+        uint channel = lane * 8u + j;
         mixed[(token * 8u + qh) * 256u + channel] = acc[j] * inv * gate;
+    }
+}
+
+kernel void attend_part(
+    device float* queries [[buffer(0)]],
+    device uchar* key_data [[buffer(1)]],
+    device uchar* key_scale [[buffer(2)]],
+    device uchar* value_data [[buffer(3)]],
+    device uchar* value_scale [[buffer(4)]],
+    device float* partial [[buffer(5)]],
+    device float* state [[buffer(6)]],
+    constant AttendSpan& cfg [[buffer(7)]],
+    constant uint& tile_stride [[buffer(8)]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]])
+{
+    uint qh = tgid.x;
+    uint token = tgid.y;
+    uint part = tgid.z;
+    if (token >= cfg.count) {
+        return;
+    }
+    uint kv = qh >> 2;
+    uint pos = cfg.pos + token;
+    uint start = 0u;
+    uint count = pos + 1u;
+    if (cfg.window != 0u && count > cfg.window) {
+        start = count - cfg.window;
+        count = cfg.window;
+    }
+    uint begin = part * 64u;
+    uint slot_index = (token * 8u + qh) * tile_stride + part;
+    device float* row = partial + slot_index * 256u;
+    if (begin >= count) {
+        for (uint j = 0u; j < 8u; ++j) {
+            row[lane * 8u + j] = 0.0f;
+        }
+        if (lane == 0u) {
+            state[slot_index * 2u] = -1.0e30f;
+            state[slot_index * 2u + 1u] = 0.0f;
+        }
+        return;
+    }
+    float acc[8];
+    for (uint j = 0u; j < 8u; ++j) {
+        acc[j] = 0.0f;
+    }
+    float peak = -1.0e30f;
+    float sum = 0.0f;
+    uint end = min(begin + 64u, count);
+    attend_range(
+        queries + token * 3072u + qh * 256u,
+        key_data, key_scale, value_data, value_scale,
+        kv, start, begin, end, cfg.window, cfg.capacity, lane, peak, sum, acc);
+    for (uint j = 0u; j < 8u; ++j) {
+        row[lane * 8u + j] = acc[j];
+    }
+    if (lane == 0u) {
+        state[slot_index * 2u] = peak;
+        state[slot_index * 2u + 1u] = sum;
+    }
+}
+
+kernel void attend_chunk_merge(
+    device float* partial [[buffer(0)]],
+    device float* state [[buffer(1)]],
+    device float* gates [[buffer(2)]],
+    device float* mixed [[buffer(3)]],
+    constant uint& tile_stride [[buffer(4)]],
+    constant uint& parts [[buffer(5)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]])
+{
+    uint qh = tgid.x;
+    uint token = tgid.y;
+    uint base = (token * 8u + qh) * tile_stride;
+    float peak = -1.0e30f;
+    for (uint part = 0u; part < parts; ++part) {
+        peak = max(peak, state[(base + part) * 2u]);
+    }
+    float acc[8];
+    for (uint j = 0u; j < 8u; ++j) {
+        acc[j] = 0.0f;
+    }
+    float sum = 0.0f;
+    for (uint part = 0u; part < parts; ++part) {
+        float tile_peak = state[(base + part) * 2u];
+        float tile_sum = state[(base + part) * 2u + 1u];
+        float scale = exp(tile_peak - peak);
+        sum += tile_sum * scale;
+        device float* row = partial + (base + part) * 256u;
+        for (uint j = 0u; j < 8u; ++j) {
+            acc[j] += row[lane * 8u + j] * scale;
+        }
+    }
+    float inv = sum > 0.0f ? 1.0f / sum : 0.0f;
+    float gate = 1.0f / (1.0f + exp(-gates[token * 8u + qh]));
+    for (uint j = 0u; j < 8u; ++j) {
+        mixed[(token * 8u + qh) * 256u + lane * 8u + j] = acc[j] * inv * gate;
     }
 }
 
@@ -1239,7 +1504,7 @@ kernel void attend_tile(
     device float* row = partial + (qh * tile_stride + tile) * 256u;
     if (begin >= count) {
         for (uint j = 0u; j < 8u; ++j) {
-            row[lane + j * 32u] = 0.0f;
+            row[lane * 8u + j] = 0.0f;
         }
         if (lane == 0u) {
             state[(qh * tile_stride + tile) * 2u] = -1.0e30f;
@@ -1259,7 +1524,7 @@ kernel void attend_tile(
         key_data, key_scale, value_data, value_scale,
         kv, start, begin, end, cfg.window, cfg.capacity, lane, peak, sum, acc);
     for (uint j = 0u; j < 8u; ++j) {
-        row[lane + j * 32u] = acc[j];
+        row[lane * 8u + j] = acc[j];
     }
     if (lane == 0u) {
         state[(qh * tile_stride + tile) * 2u] = peak;
@@ -1293,17 +1558,17 @@ kernel void attend_merge(
         sum += tile_sum * scale;
         device float* row = partial + (qh * tile_stride + tile) * 256u;
         for (uint j = 0u; j < 8u; ++j) {
-            acc[j] += row[lane + j * 32u] * scale;
+            acc[j] += row[lane * 8u + j] * scale;
         }
     }
     float inv = sum > 0.0f ? 1.0f / sum : 0.0f;
     float gate = 1.0f / (1.0f + exp(-gates[qh]));
     for (uint j = 0u; j < 8u; ++j) {
-        mixed[qh * 256u + lane + j * 32u] = acc[j] * inv * gate;
+        mixed[qh * 256u + lane * 8u + j] = acc[j] * inv * gate;
     }
 }
 
-kernel void gemv_fp4_rms(
+kernel void gemv_fp8_rms(
     device float* activation [[buffer(0)]],
     device half* norm_w [[buffer(1)]],
     device uchar* weights [[buffer(2)]],
@@ -1332,26 +1597,29 @@ kernel void gemv_fp4_rms(
     float acc1 = 0.0f;
     float acc2 = 0.0f;
     float acc3 = 0.0f;
-    uint bytes = inner >> 1;
+    uint bytes = inner;
     uint scale_stride = inner >> 5;
     for (uint base = 0u; base < inner; base += 64u) {
         uint k = base + lane * 2u;
         float a0 = activation[k] * float(norm_w[k]) * inv;
         float a1 = activation[k + 1u] * float(norm_w[k + 1u]) * inv;
-        uint byte_index = k >> 1;
         uint scale_index = k >> 5;
-        uchar p0 = weights[row0 * bytes + byte_index];
-        uchar p1 = weights[(row0 + 1u) * bytes + byte_index];
-        uchar p2 = weights[(row0 + 2u) * bytes + byte_index];
-        uchar p3 = weights[(row0 + 3u) * bytes + byte_index];
+        uchar p0 = weights[row0 * bytes + k];
+        uchar n0 = weights[row0 * bytes + k + 1u];
+        uchar p1 = weights[(row0 + 1u) * bytes + k];
+        uchar n1 = weights[(row0 + 1u) * bytes + k + 1u];
+        uchar p2 = weights[(row0 + 2u) * bytes + k];
+        uchar n2 = weights[(row0 + 2u) * bytes + k + 1u];
+        uchar p3 = weights[(row0 + 3u) * bytes + k];
+        uchar n3 = weights[(row0 + 3u) * bytes + k + 1u];
         float s0 = exp2(float(scales[row0 * scale_stride + scale_index]) - 127.0f);
         float s1 = exp2(float(scales[(row0 + 1u) * scale_stride + scale_index]) - 127.0f);
         float s2 = exp2(float(scales[(row0 + 2u) * scale_stride + scale_index]) - 127.0f);
         float s3 = exp2(float(scales[(row0 + 3u) * scale_stride + scale_index]) - 127.0f);
-        acc0 += (a0 * fp4_signed(p0 & 0xFu) + a1 * fp4_signed(p0 >> 4)) * s0;
-        acc1 += (a0 * fp4_signed(p1 & 0xFu) + a1 * fp4_signed(p1 >> 4)) * s1;
-        acc2 += (a0 * fp4_signed(p2 & 0xFu) + a1 * fp4_signed(p2 >> 4)) * s2;
-        acc3 += (a0 * fp4_signed(p3 & 0xFu) + a1 * fp4_signed(p3 >> 4)) * s3;
+        acc0 += (a0 * E4M3[p0] + a1 * E4M3[n0]) * s0;
+        acc1 += (a0 * E4M3[p1] + a1 * E4M3[n1]) * s1;
+        acc2 += (a0 * E4M3[p2] + a1 * E4M3[n2]) * s2;
+        acc3 += (a0 * E4M3[p3] + a1 * E4M3[n3]) * s3;
     }
     acc0 = simd_sum(acc0);
     acc1 = simd_sum(acc1);
@@ -1365,7 +1633,7 @@ kernel void gemv_fp4_rms(
     }
 }
 
-kernel void gemv_fp4_add(
+kernel void gemv_fp8_add(
     device float* activation [[buffer(0)]],
     device uchar* weights [[buffer(1)]],
     device uchar* scales [[buffer(2)]],
@@ -1407,7 +1675,7 @@ kernel void gate_rows(
     }
 }
 
-kernel void matmul_fp4_64(
+kernel void matmul_fp8_64(
     device half* activation [[buffer(0)]],
     device uchar* weights [[buffer(1)]],
     device uchar* scales [[buffer(2)]],
@@ -1419,7 +1687,7 @@ kernel void matmul_fp4_64(
 {
     tensor<device half, dextents<int, 2>, tensor_inline> left(
         activation, dextents<int, 2>(int(inner), int(rows)), array<int, 2>{1, int(inner)});
-    tensor<device metal_fp4_e2m1_format, dextents<int, 2>, tensor_inline, scales_plane> right(
+    tensor<device metal_fp8_e4m3_format, dextents<int, 2>, tensor_inline, scales_plane> right(
         weights, dextents<int, 2>(int(inner), int(cols)), array<int, 2>{1, int(inner)}, scales_plane(scales));
     tensor<device float, dextents<int, 2>, tensor_inline> out(
         destination, dextents<int, 2>(int(cols), int(rows)), array<int, 2>{1, int(cols)});
@@ -1431,7 +1699,7 @@ kernel void matmul_fp4_64(
     op.run(tile_left, tile_right, tile_out);
 }
 
-kernel void matmul_fp4_32(
+kernel void matmul_fp8_32(
     device half* activation [[buffer(0)]],
     device uchar* weights [[buffer(1)]],
     device uchar* scales [[buffer(2)]],
@@ -1443,7 +1711,7 @@ kernel void matmul_fp4_32(
 {
     tensor<device half, dextents<int, 2>, tensor_inline> left(
         activation, dextents<int, 2>(int(inner), int(rows)), array<int, 2>{1, int(inner)});
-    tensor<device metal_fp4_e2m1_format, dextents<int, 2>, tensor_inline, scales_plane> right(
+    tensor<device metal_fp8_e4m3_format, dextents<int, 2>, tensor_inline, scales_plane> right(
         weights, dextents<int, 2>(int(inner), int(cols)), array<int, 2>{1, int(inner)}, scales_plane(scales));
     tensor<device float, dextents<int, 2>, tensor_inline> out(
         destination, dextents<int, 2>(int(cols), int(rows)), array<int, 2>{1, int(cols)});
@@ -1452,6 +1720,157 @@ kernel void matmul_fp4_32(
     auto tile_left = left.slice(0, int(tgid.y) * 32);
     auto tile_right = right.slice(0, int(tgid.x) * 128);
     auto tile_out = out.slice(int(tgid.x) * 128, int(tgid.y) * 32);
+    op.run(tile_left, tile_right, tile_out);
+}
+
+kernel void gemv_fp8_split(
+    device float* activation [[buffer(0)]],
+    device uchar* weights [[buffer(1)]],
+    device uchar* scales [[buffer(2)]],
+    device float* partial [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    constant uint& rows [[buffer(5)]],
+    constant uint& splits [[buffer(6)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]])
+{
+    uint span = inner / splits;
+    uint row0 = tgid.x * 4u;
+    uint k0 = tgid.y * span;
+    uint bytes = inner;
+    uint scale_stride = inner >> 5;
+    device uchar* w0 = weights + row0 * bytes;
+    device uchar* w1 = w0 + bytes;
+    device uchar* w2 = w1 + bytes;
+    device uchar* w3 = w2 + bytes;
+    device uchar* c0 = scales + row0 * scale_stride;
+    device uchar* c1 = c0 + scale_stride;
+    device uchar* c2 = c1 + scale_stride;
+    device uchar* c3 = c2 + scale_stride;
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+    for (uint base = k0; base < k0 + span; base += 256u) {
+        uint k = base + lane * 8u;
+        uint scale_index = k >> 5;
+        float s0 = exp2(float(c0[scale_index]) - 127.0f);
+        float s1 = exp2(float(c1[scale_index]) - 127.0f);
+        float s2 = exp2(float(c2[scale_index]) - 127.0f);
+        float s3 = exp2(float(c3[scale_index]) - 127.0f);
+        float a0 = activation[k];
+        float a1 = activation[k + 1u];
+        float a2 = activation[k + 2u];
+        float a3 = activation[k + 3u];
+        float a4 = activation[k + 4u];
+        float a5 = activation[k + 5u];
+        float a6 = activation[k + 6u];
+        float a7 = activation[k + 7u];
+        uint2 p0 = *reinterpret_cast<device uint2*>(w0 + k);
+        uint2 p1 = *reinterpret_cast<device uint2*>(w1 + k);
+        uint2 p2 = *reinterpret_cast<device uint2*>(w2 + k);
+        uint2 p3 = *reinterpret_cast<device uint2*>(w3 + k);
+        acc0 += s0 * dot8(a0, a1, a2, a3, a4, a5, a6, a7, p0);
+        acc1 += s1 * dot8(a0, a1, a2, a3, a4, a5, a6, a7, p1);
+        acc2 += s2 * dot8(a0, a1, a2, a3, a4, a5, a6, a7, p2);
+        acc3 += s3 * dot8(a0, a1, a2, a3, a4, a5, a6, a7, p3);
+    }
+    acc0 = simd_sum(acc0);
+    acc1 = simd_sum(acc1);
+    acc2 = simd_sum(acc2);
+    acc3 = simd_sum(acc3);
+    if (lane == 0u) {
+        device float* dest = partial + tgid.y * rows + row0;
+        dest[0] = acc0;
+        dest[1] = acc1;
+        dest[2] = acc2;
+        dest[3] = acc3;
+    }
+}
+
+kernel void gemv_split_sum(
+    device float* partial [[buffer(0)]],
+    device float* destination [[buffer(1)]],
+    constant uint& rows [[buffer(2)]],
+    constant uint& splits [[buffer(3)]],
+    uint row [[thread_position_in_grid]])
+{
+    if (row >= rows) {
+        return;
+    }
+    float sum = 0.0f;
+    for (uint part = 0u; part < splits; part++) {
+        sum += partial[part * rows + row];
+    }
+    destination[row] = sum;
+}
+
+kernel void mm_m8_n128(
+    device half* activation [[buffer(0)]],
+    device uchar* weights [[buffer(1)]],
+    device uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint tgid [[threadgroup_position_in_grid]])
+{
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        activation, dextents<int, 2>(int(inner), 8), array<int, 2>{1, int(inner)});
+    tensor<device metal_fp8_e4m3_format, dextents<int, 2>, tensor_inline, scales_plane> right(
+        weights, dextents<int, 2>(int(inner), int(cols)), array<int, 2>{1, int(inner)}, scales_plane(scales));
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        destination, dextents<int, 2>(int(cols), 8), array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(8, 128, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, 0);
+    auto tile_right = right.slice(0, int(tgid) * 128);
+    auto tile_out = out.slice(int(tgid) * 128, 0);
+    op.run(tile_left, tile_right, tile_out);
+}
+
+kernel void mm_m8_n32(
+    device half* activation [[buffer(0)]],
+    device uchar* weights [[buffer(1)]],
+    device uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint tgid [[threadgroup_position_in_grid]])
+{
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        activation, dextents<int, 2>(int(inner), 8), array<int, 2>{1, int(inner)});
+    tensor<device metal_fp8_e4m3_format, dextents<int, 2>, tensor_inline, scales_plane> right(
+        weights, dextents<int, 2>(int(inner), int(cols)), array<int, 2>{1, int(inner)}, scales_plane(scales));
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        destination, dextents<int, 2>(int(cols), 8), array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(8, 32, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<1>> op;
+    auto tile_left = left.slice(0, 0);
+    auto tile_right = right.slice(0, int(tgid) * 32);
+    auto tile_out = out.slice(int(tgid) * 32, 0);
+    op.run(tile_left, tile_right, tile_out);
+}
+
+kernel void mm_m16_n128(
+    device half* activation [[buffer(0)]],
+    device uchar* weights [[buffer(1)]],
+    device uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint tgid [[threadgroup_position_in_grid]])
+{
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        activation, dextents<int, 2>(int(inner), 16), array<int, 2>{1, int(inner)});
+    tensor<device metal_fp8_e4m3_format, dextents<int, 2>, tensor_inline, scales_plane> right(
+        weights, dextents<int, 2>(int(inner), int(cols)), array<int, 2>{1, int(inner)}, scales_plane(scales));
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        destination, dextents<int, 2>(int(cols), 16), array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(16, 128, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, 0);
+    auto tile_right = right.slice(0, int(tgid) * 128);
+    auto tile_out = out.slice(int(tgid) * 128, 0);
     op.run(tile_left, tile_right, tile_out);
 }
 
@@ -1795,8 +2214,10 @@ kernel void pick_nucleus(
     constant PickCfg& cfg [[buffer(3)]])
 {
     float total = cumulative[cfg.n - 1u];
+    // An empty or non-finite distribution is the end-of-sentence id.
+    // Token 0 is the start-of-sentence marker, so it must not be the fallback.
     if (!(total > 0.0f)) {
-        out[0] = 0u;
+        out[0] = 1u;
         return;
     }
     float mass = total;

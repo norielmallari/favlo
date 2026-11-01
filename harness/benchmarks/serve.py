@@ -36,6 +36,32 @@ class Request:
         return int(limits[suite])
 
 
+def will_think(request: Request) -> bool:
+    """Whether the completion opens a trace.
+
+    A named effort wins. ``none`` leaves thinking off. An omitted effort
+    follows ``enable_thinking``.
+    """
+    effort = request.reasoning_effort
+    if isinstance(effort, str) and effort:
+        return effort != "none"
+    return request.enable_thinking
+
+
+def probe_limit(request: Request) -> int:
+    """Tokens for the two completions that run before the suites.
+
+    A trace needs the smallest suite cap so it can close and the reply can
+    appear. A request that does not think uses 32.
+    """
+    if not will_think(request):
+        return 32
+    caps = [int(value) for value in (request.max_tokens or {}).values()]
+    if not caps:
+        return 1024
+    return min(caps)
+
+
 def card_model_id(model: str, *, thinking: bool) -> str:
     """The registry row whose ``sampling`` object fills omitted request fields."""
     stem, separator, named = model.partition(":")

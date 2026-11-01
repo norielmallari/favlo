@@ -3,6 +3,22 @@
 from __future__ import annotations
 
 from harness.benchmarks import gsm8k, humaneval, ifeval
+from harness.benchmarks.serve import Request, probe_limit
+
+
+def test_a_thinking_probe_uses_the_smallest_suite_cap() -> None:
+    greedy = Request(enable_thinking=False, max_tokens={"ifeval": 2048, "gsm8k": 1024})
+    assert probe_limit(greedy) == 32
+    thinking = Request(enable_thinking=True, max_tokens={"ifeval": 2048, "gsm8k": 1024})
+    assert probe_limit(thinking) == 1024
+    named = Request(
+        enable_thinking=False,
+        reasoning_effort="high",
+        max_tokens={"gsm8k": 1024, "humaneval": 2048},
+    )
+    assert probe_limit(named) == 1024
+    quiet = Request(enable_thinking=True, reasoning_effort="none", max_tokens={"gsm8k": 1024})
+    assert probe_limit(quiet) == 32
 
 
 def test_gsm8k_matches_the_published_number() -> None:

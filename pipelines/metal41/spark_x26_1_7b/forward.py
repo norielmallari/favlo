@@ -1,4 +1,4 @@
-"""One resident fp4 record and the fp8 cache. Prefill and decode stay on Metal."""
+"""One resident fp8 record and the fp8 cache. Prefill and decode stay on Metal."""
 
 from __future__ import annotations
 
@@ -18,7 +18,6 @@ from favlo.prefix import (
     checkpoint_digest,
     default_prefix_dir,
 )
-
 from spark_x26_1_7b.cache import Kv, _slot_bytes
 from spark_x26_1_7b.closed import RequestClosed
 from spark_x26_1_7b.layout import (
@@ -26,6 +25,7 @@ from spark_x26_1_7b.layout import (
     CONTEXT,
     EOS,
     FULL,
+    HEAD_DIM,
     HEADS,
     HIDDEN,
     INTERMEDIATE,
@@ -56,6 +56,8 @@ class Plane:
     rows: int
     inner: int
     kind: str
+    data_offset: int
+    scale_offset: int
 
 
 @dataclass
@@ -70,6 +72,22 @@ class Layer:
     post_norm: Plane
     full: bool
     index: int
+
+
+def _load_record(session: Session, path: Path) -> Any:
+    """Copy ``weights.bin`` into one buffer in 8 MiB pieces."""
+    size = path.stat().st_size
+    handle = session.allocate(size)
+    with path.open("rb") as src:
+        offset = 0
+        while offset < size:
+            block = src.read(min(8 << 20, size - offset))
+            if not block:
+                message = f"{path.name} stopped at {offset} of {size}"
+                raise OSError(message)
+            memory.map(handle, offset, len(block))[:] = block
+            offset += len(block)
+    return handle
 
 
 def parse_memory(text: str | int | None) -> int | None:
@@ -203,6 +221,8 @@ class SparkRuntime:
         self.attn = self.session.allocate(rows * HIDDEN * 4)
         self.proj = self.session.allocate(rows * HIDDEN * 4)
         self.gates = self.session.allocate(rows * HEADS * 4)
+        self.chunk_partial = self.session.allocate(HEADS * CHUNK * 64 * HEAD_DIM * 4)
+        self.chunk_state = self.session.allocate(HEADS * CHUNK * 64 * 2 * 4)
         self.logits = self.session.allocate(VOCAB * 4)
         self.kv = Kv(self.session, 2048)
         self.scores = self.session.allocate(HEADS * self.kv.capacity * 4, zero=True)
@@ -211,42 +231,49 @@ class SparkRuntime:
         self.attn_state = None
         self._tile_cap = 0
         self._bind_tiles()
-        blob = weight_path.read_bytes()
+        self.weights = _load_record(self.session, weight_path)
         tensors = manifest["tensors"]
-        self.embedding = self._plane(blob, tensors["embedding"])
-        self.final_norm = self._plane(blob, tensors["final_norm"])
-        self.layers = [self._layer(blob, tensors, index) for index in range(LAYERS)]
+        self.embedding = self._plane(tensors["embedding"])
+        self.final_norm = self._plane(tensors["final_norm"])
+        self.layers = [self._layer(tensors, index) for index in range(LAYERS)]
         store = PrefixStore(
             default_prefix_dir(),
             model="spark-x26-1-7b",
             digest=checkpoint_digest(self.root),
-            tag="fp4-e4m3b",
+            tag="fp8-e4m3",
             budget=DEFAULT_BUDGET,
         )
         self.prefix = PrefixSession(store, CacheAdapter(self))
         self.sampler = Sampler(self.session)
 
-    def _plane(self, blob: bytes, spec: dict[str, Any]) -> Plane:
-        data = blob[spec["data"] : spec["data"] + spec["data_bytes"]]
-        kind = spec["kind"]
-        if kind == "fp4":
-            scale = blob[spec["scale"] : spec["scale"] + spec["scale_bytes"]]
-            data_h, scale_h = memory.upload_group([data, scale], owner=self.owner)
-            return Plane(data_h, scale_h, int(spec["rows"]), int(spec["inner"]), kind)
-        handle = self.session.upload(data)
-        return Plane(handle, None, int(spec["rows"]), int(spec["inner"]), kind)
+    def _plane(self, spec: dict[str, Any]) -> Plane:
+        kind = str(spec["kind"])
+        data_offset = int(spec["data"])
+        scale_offset = int(spec["scale"])
+        if data_offset % 128 or (kind == "fp8" and scale_offset % 128):
+            message = f"a {kind} plane at {data_offset} is not 128-byte aligned"
+            raise RuntimeError(message)
+        return Plane(
+            self.weights,
+            self.weights,
+            int(spec["rows"]),
+            int(spec["inner"]),
+            kind,
+            data_offset,
+            scale_offset,
+        )
 
-    def _layer(self, blob: bytes, tensors: dict[str, Any], index: int) -> Layer:
+    def _layer(self, tensors: dict[str, Any], index: int) -> Layer:
         prefix = f"layer.{index}."
         return Layer(
-            qkv=self._plane(blob, tensors[prefix + "qkv"]),
-            out=self._plane(blob, tensors[prefix + "out"]),
-            gate=self._plane(blob, tensors[prefix + "gate"]),
-            up=self._plane(blob, tensors[prefix + "up"]),
-            down=self._plane(blob, tensors[prefix + "down"]),
-            g=self._plane(blob, tensors[prefix + "g"]),
-            in_norm=self._plane(blob, tensors[prefix + "in_norm"]),
-            post_norm=self._plane(blob, tensors[prefix + "post_norm"]),
+            qkv=self._plane(tensors[prefix + "qkv"]),
+            out=self._plane(tensors[prefix + "out"]),
+            gate=self._plane(tensors[prefix + "gate"]),
+            up=self._plane(tensors[prefix + "up"]),
+            down=self._plane(tensors[prefix + "down"]),
+            g=self._plane(tensors[prefix + "g"]),
+            in_norm=self._plane(tensors[prefix + "in_norm"]),
+            post_norm=self._plane(tensors[prefix + "post_norm"]),
             full=is_full(index),
             index=index,
         )
@@ -364,8 +391,11 @@ class SparkRuntime:
                 at_cap = emitted == decode_total
                 if finished_forced or at_cap or chosen in stop:
                     self._forward([chosen], pos, False)
-                    if at_cap:
-                        self._hit_limit = True
+                if at_cap:
+                    self._hit_limit = True
+                    break
+                if not self._ensure(pos):
+                    self._hit_limit = True
                     break
                 self.session.begin()
                 self._encode([chosen], pos, True)
@@ -393,7 +423,9 @@ class SparkRuntime:
                 self.session.end()
         return out
 
-    def _draw(self, temperature: float, top_p: float, top_k: int, presence: float, frequency: float) -> int:
+    def _draw(
+        self, temperature: float, top_p: float, top_k: int, presence: float, frequency: float
+    ) -> int:
         return self.sampler.draw(
             self.logits,
             temperature=temperature,
@@ -453,19 +485,17 @@ class SparkRuntime:
                 [u32(HIDDEN)],
                 (1, 1, 1),
                 (32, 1, 1),
-                offsets=[int(token) * (HIDDEN // 2), int(token) * (HIDDEN // 32), row * HIDDEN * 4],
+                offsets=[
+                    self.embedding.data_offset + int(token) * HIDDEN,
+                    self.embedding.scale_offset + int(token) * (HIDDEN // 32),
+                    row * HIDDEN * 4,
+                ],
             )
         for layer in self.layers:
             self._layer_step(layer, count, physical, pos)
         if logits:
             if count == 1:
-                self.session.launch(
-                    "gemv_group_rms",
-                    [self.hidden, self.final_norm.data, self.embedding.data, self.embedding.scale, self.logits, self.normed],
-                    [u32(HIDDEN), f32(RMS_EPS)],
-                    (VOCAB // 32, 1, 1),
-                    (256, 1, 1),
-                )
+                self._gemv_rms(self.hidden, self.final_norm, self.embedding, self.logits)
             else:
                 self.session.launch(
                     "rmsnorm",
@@ -473,7 +503,7 @@ class SparkRuntime:
                     [u32(HIDDEN), f32(RMS_EPS)],
                     (1, 1, 1),
                     (32, 1, 1),
-                    offsets=[(count - 1) * HIDDEN * 4, 0, 0],
+                    offsets=[(count - 1) * HIDDEN * 4, self.final_norm.data_offset, 0],
                 )
                 self.session.launch(
                     "gemv_group",
@@ -481,6 +511,7 @@ class SparkRuntime:
                     [u32(HIDDEN)],
                     (VOCAB // 32, 1, 1),
                     (256, 1, 1),
+                    offsets=[0, self.embedding.data_offset, self.embedding.scale_offset, 0],
                 )
         self.kv.length = pos + count
 
@@ -533,39 +564,44 @@ class SparkRuntime:
 
     def _gemv_rms(self, source: Any, norm: Plane, plane: Plane, dest: Any) -> None:
         self.session.launch(
-            "gemv_fp4_vec_rms",
+            "gemv_fp8_vec_rms",
             [source, norm.data, plane.data, plane.scale, dest, self.normed],
             [u32(plane.inner), f32(RMS_EPS)],
-            (plane.rows // 4, 1, 1),
-            (32, 1, 1),
+            (plane.rows // 32, 1, 1),
+            (256, 1, 1),
+            offsets=[0, norm.data_offset, plane.data_offset, plane.scale_offset, 0, 0],
         )
 
     def _gemv_add(self, source: Any, plane: Plane, hidden: Any) -> None:
+        name = "gemv_fp8_vec_add_wide" if plane.inner > HIDDEN else "gemv_fp8_vec_add_cached"
         self.session.launch(
-            "gemv_fp4_vec_add",
+            name,
             [source, plane.data, plane.scale, hidden],
             [u32(plane.inner)],
-            (plane.rows // 4, 1, 1),
-            (32, 1, 1),
+            (plane.rows // 32, 1, 1),
+            (256, 1, 1),
+            offsets=[0, plane.data_offset, plane.scale_offset, 0],
         )
 
     def _linear(self, source: Any, count: int, plane: Plane, dest: Any) -> None:
         if count == CHUNK:
             self._cast(source, count * plane.inner)
             self.session.launch(
-                "matmul_fp4_32",
+                "matmul_fp8_32",
                 [self.half, plane.data, plane.scale, dest],
                 [u32(count), u32(plane.rows), u32(plane.inner)],
                 (plane.rows // 128, count // 32, 1),
                 (128, 1, 1),
+                offsets=[0, plane.data_offset, plane.scale_offset, 0],
             )
             return
         self.session.launch(
-            "gemv_fp4",
+            "gemv_fp8",
             [source, plane.data, plane.scale, dest],
             [u32(plane.inner)],
             (plane.rows // 4, 1, 1),
             (32, 1, 1),
+            offsets=[0, plane.data_offset, plane.scale_offset, 0],
         )
 
     def _cast(self, source: Any, count: int) -> None:
@@ -585,6 +621,7 @@ class SparkRuntime:
             [u32(HIDDEN), f32(RMS_EPS)],
             (count, 1, 1),
             (32, 1, 1),
+            offsets=[0, plane.data_offset, 0],
         )
 
     def _residual(self, hidden: Any, update: Any, count: int) -> None:
@@ -625,7 +662,7 @@ class SparkRuntime:
             values,
             [self.qkv, slot.key, slot.key_scale, slot.value, slot.value_scale, slot.scratch],
             [packed],
-            (1, 1, 1),
+            (16, 1, 1),
             (32, 1, 1),
         )
 
@@ -637,11 +674,44 @@ class SparkRuntime:
         nkeys = pos + count
         if window != 0:
             nkeys = min(nkeys, window)
+        if count > 1 and nkeys > 128:
+            parts = min(64, (nkeys + 63) // 64)
+            self.session.launch(
+                "attend_part",
+                [
+                    self.qkv,
+                    slot.key,
+                    slot.key_scale,
+                    slot.value,
+                    slot.value_scale,
+                    self.chunk_partial,
+                    self.chunk_state,
+                ],
+                [cfg, u32(64)],
+                (HEADS, count, parts),
+                (32, 1, 1),
+            )
+            self.session.launch(
+                "attend_chunk_merge",
+                [self.chunk_partial, self.chunk_state, self.gates, self.attn],
+                [u32(64), u32(parts)],
+                (HEADS, count, 1),
+                (32, 1, 1),
+            )
+            return
         if count == 1 and nkeys > 64:
             used = (nkeys + 63) // 64
             self.session.launch(
                 "attend_tile",
-                [self.qkv, slot.key, slot.key_scale, slot.value, slot.value_scale, self.attn_partial, self.attn_state],
+                [
+                    self.qkv,
+                    slot.key,
+                    slot.key_scale,
+                    slot.value,
+                    slot.value_scale,
+                    self.attn_partial,
+                    self.attn_state,
+                ],
                 [cfg, u32(self._tile_cap)],
                 (HEADS, used, 1),
                 (32, 1, 1),
@@ -656,7 +726,15 @@ class SparkRuntime:
             return
         self.session.launch(
             "attend_span",
-            [self.qkv, slot.key, slot.key_scale, slot.value, slot.value_scale, self.gates, self.attn],
+            [
+                self.qkv,
+                slot.key,
+                slot.key_scale,
+                slot.value,
+                slot.value_scale,
+                self.gates,
+                self.attn,
+            ],
             [cfg],
             (HEADS, count, 1),
             (32, 1, 1),
@@ -669,6 +747,7 @@ class SparkRuntime:
             [u32(HIDDEN), u32(HEADS)],
             (HEADS, count, 1),
             (32, 1, 1),
+            offsets=[0, layer.g.data_offset, 0],
         )
 
     def _ensure(self, pos: int) -> bool:

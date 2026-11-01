@@ -85,6 +85,7 @@ async def _run(
     client.function_invocation_configuration["max_iterations"] = SESSION_ROUNDS
     client.function_invocation_configuration["max_consecutive_errors_per_request"] = SESSION_ROUNDS
     client.function_invocation_configuration["allow_concurrent_invocation"] = False
+    client.function_invocation_configuration["include_detailed_errors"] = True
     options = agent_options(request, mtp=mtp, mtp_depth=mtp_depth)
     agent = Agent(
         client=client,

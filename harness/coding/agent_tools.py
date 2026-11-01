@@ -2,11 +2,16 @@
 
 The schemas stay the ones in ``tools/schemas.py``. The framework calls each
 function and sends the JSON result back to the model. A boolean, integer, or
-number that arrives as text is coerced before the schema type check.
+number that arrives as text is coerced before the schema type check. A write,
+an edit, or a shell start or input that omits ``idempotency_key`` still runs.
+The key is the SHA-256 of the tool name and the other arguments, so the same
+call returns the recorded outcome. A call that sends a key keeps that key.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import uuid
 from typing import Any
@@ -56,7 +61,7 @@ class _TextScalars(FunctionTool):
     def _prepare_arguments(self, arguments: Any) -> dict[str, Any]:
         mapped = self._arguments_as_mapping(arguments)
         if isinstance(mapped, dict):
-            arguments = _coerce_text(mapped, self.parameters())
+            arguments = _supply_key(self.name, _coerce_text(mapped, self.parameters()))
         return super()._prepare_arguments(arguments)
 
 
@@ -92,3 +97,34 @@ def _coerce_text(arguments: dict[str, Any], schema: dict[str, Any]) -> dict[str,
 def _integer_text(value: str) -> bool:
     text = value[1:] if value.startswith("-") else value
     return text.isdigit() and text != ""
+
+
+def _supply_key(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    if not _needs_key(name, arguments):
+        return arguments
+    current = arguments.get("idempotency_key")
+    if isinstance(current, str) and current != "":
+        return arguments
+    filled = dict(arguments)
+    filled["idempotency_key"] = _derived_key(name, arguments)
+    return filled
+
+
+def _needs_key(name: str, arguments: dict[str, Any]) -> bool:
+    if name in {"write_file", "edit"}:
+        return True
+    if name != "run_shell_command":
+        return False
+    action = arguments.get("action")
+    return action in {None, "start", "input"}
+
+
+def _derived_key(name: str, arguments: dict[str, Any]) -> str:
+    body = {key: value for key, value in arguments.items() if key != "idempotency_key"}
+    raw = json.dumps(
+        {"arguments": body, "tool": name},
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(raw.encode()).hexdigest()

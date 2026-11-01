@@ -1,5 +1,5 @@
 ---
-description: How a served language model implements LanguagePipeline. Chat follows the OpenAI Chat Completions object, not another pipeline. NumPy stays off the hot serving path.
+description: How a served language model implements LanguagePipeline. Chat follows the OpenAI Chat Completions object, not another pipeline. NumPy stays off the hot serving path. Weights load from SSD into one device buffer.
 globs: src/favlo/pipeline.py,src/favlo/language_pipeline.py,harness/language_pipeline.py,tests/test_language_pipeline.py,pipelines/metal41/qwen36_35b_a3b/**,pipelines/metal41/qwen38_27b/**,pipelines/parked/qwen38_flash_next/**,pipelines/metal41/gemma4_26b_a4b/**,pipelines/metal41/spark_x26_1_7b/**,pipelines/metal41/spark-x26-1-7b.py,docs/qwen36-35b-a3b/**,docs/qwen38-27b/**,docs/qwen38-flash-next/**,docs/gemma4-26b-a4b/**,docs/spark-x26-1-7b/**
 alwaysApply: false
 ---
@@ -31,6 +31,18 @@ NumPy stays off the hot serving path. Prefill, decode, routing, expert grouping,
 Wrong: a prefill span that downloads expert ids into a NumPy array and rebuilds the slot tables on the host.
 
 Right: the route result stays on device, and a Metal kernel writes the slot tables the gather and scatter already read.
+
+Quantize from BF16 is CPU-bound and parallel. The pool size is `os.process_cpu_count()`, or `os.cpu_count()` when that count is missing. That count is the worker count. Each worker sets `VECLIB_MAXIMUM_THREADS`, `OMP_NUM_THREADS`, and `OPENBLAS_NUM_THREADS` to 1, so the pool fills the cores and a matrix product inside one worker does not start another team.
+
+Wrong: packing one matrix at a time, a pool capped below the CPU count, or each worker launching a full BLAS team.
+
+Right: one worker per CPU, one BLAS thread inside that worker, packing the BF16 checkout in parallel.
+
+The packed weight file is read from SSD into one resident Metal buffer. Each read is a sequential piece of at least 8 MiB, written into that buffer. Each matrix stays at its byte offset, and a launch binds the buffer there. A layer file that stays on SSD is read the same way into the slot that runs it. The device holds one copy of the bytes it will run.
+
+Wrong: `read_bytes()` of the weight file, a Python slice per matrix, and `upload_group` into a new heap for each plane.
+
+Right: one buffer, an 8 MiB read into that buffer, and `setBuffer:offset:` at the plane.
 
 MAF and other clients pass those fields through. They do not scan for markup, close a trace, or copy reasoning into the reply. The chat client in `src/favlo/chat_client.py` is that pass-through. A harness does not add its own parser for markup.
 

@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from favlo.registry import load_registry, models_dir, register_quantized, set_alias
-
-from spark_x26_1_7b.layout import FOLDER, REPO, STEM
+from spark_x26_1_7b.layout import FOLDER, STEM
 
 PIPELINE = STEM
 CARROT_PROMPT = (
@@ -24,9 +26,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command")
     fetch = sub.add_parser("download", help="download the official BF16 checkout")
     fetch.add_argument("--check", action="store_true")
-    quant = sub.add_parser("quantize", help="write the fp4 record")
+    quant = sub.add_parser("quantize", help="write the fp8 record")
     quant.add_argument("--src", type=Path, default=None)
     quant.add_argument("--output", type=Path, default=None)
+    setup = sub.add_parser("setup", help="download the official checkpoint and pack fp8")
+    setup.add_argument(
+        "--keep-bf16",
+        action="store_true",
+        help="leave the BF16 checkout under models/ after a successful quantize",
+    )
+    setup.add_argument("--console", choices=("auto", "pretty", "plain", "json"), default="auto")
     sub.add_parser("kernels", help="compile the shader library and run the dispatch checks")
     complete = sub.add_parser("complete", help="argmax completion from the packed record")
     complete.add_argument("--prompt", default=CARROT_PROMPT)
@@ -50,6 +59,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _download(args)
     if args.command == "quantize":
         return _quantize(args)
+    if args.command == "setup":
+        return _setup(args)
     if args.command == "kernels":
         return _kernels()
     if args.command == "complete":
@@ -90,7 +101,11 @@ def _download(args: argparse.Namespace) -> int:
         sys.stdout.write(f"{dest}\n")
         return 0
     try:
-        download(dest, files, lambda done, total, name: sys.stdout.write(f"{name} {done}/{total}\n"))
+        download(
+            dest,
+            files,
+            lambda done, total, name: sys.stdout.write(f"{name} {done}/{total}\n"),
+        )
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         sys.stderr.write(f"{exc}\n")
         return 1
@@ -105,19 +120,105 @@ def _quantize(args: argparse.Namespace) -> int:
     dest = Path(args.output) if args.output is not None else record_dir(models_dir())
     try:
         output = quantize(src, dest)
-        register_quantized(
-            output.name,
-            source=src,
-            alias=PIPELINE,
-            directory=output,
-            pipeline=PIPELINE,
-            runtime="metal41",
-        )
+        _register_record(src, output)
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError, KeyError) as exc:
         sys.stderr.write(f"{exc}\n")
         return 1
     sys.stdout.write(f"{output}\n")
     return 0
+
+
+def _setup(args: argparse.Namespace) -> int:
+    """Download the official checkpoint, pack it, and remove the checkout."""
+    from favlo.console import Console
+    from spark_x26_1_7b.convert import checkout_dir, download, list_files, quantize, record_dir
+
+    ui = Console.from_env(getattr(args, "console", None), pipeline=PIPELINE)
+    if os.environ.get("FAVLO_SKIP_PLATE") != "1":
+        ui.plate()
+    src = checkout_dir(models_dir())
+    output = record_dir(models_dir())
+    download_bar = None
+    try:
+        if installed_record() is not None:
+            _register_record(src, output)
+            if not args.keep_bf16:
+                _remove_checkout(src, spare=output)
+            ui.log(f"record complete: {output}")
+            return 0
+        files = list_files()
+        total = sum(size for _name, size in files)
+        download_bar = ui.begin(
+            "download",
+            total=max(total, 1),
+            unit="bytes",
+            detail="XHToken/Spark-X2.6-1.7B",
+        )
+        download(src, files, lambda done, whole, name: _advance(download_bar, done, whole, name))
+        ui.end(download_bar, "downloaded XHToken/Spark-X2.6-1.7B")
+        download_bar = None
+        quantize(src, output)
+        _register_record(src, output)
+        if not args.keep_bf16:
+            _remove_checkout(src, spare=output)
+        ui.log(f"record complete: {output}")
+        return 0
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError, KeyError) as exc:
+        ui.report(f"{exc}\n")
+        ui.log("the next serve continues from the files already written")
+        return 1
+    finally:
+        if download_bar is not None and not download_bar.closed:
+            ui.end(download_bar, "")
+        ui.close()
+
+
+def _advance(progress: Any, done: int, total: int, detail: str) -> None:
+    progress.done = done
+    progress.total = total
+    progress.detail = detail
+
+
+def _register_record(src: Path, output: Path) -> None:
+    _free_pipeline_alias()
+    register_quantized(
+        output.name,
+        source=src,
+        alias=PIPELINE,
+        directory=output,
+        pipeline=PIPELINE,
+        runtime="metal41",
+    )
+
+
+def _remove_checkout(path: Path, *, spare: Path | None = None) -> None:
+    """Remove a BF16 checkout that lives under ``models/``."""
+    root = models_dir().resolve()
+    try:
+        target = path.expanduser().resolve()
+        spared = None if spare is None else spare.expanduser().resolve()
+    except OSError:
+        return
+    if target == root or root not in target.parents:
+        return
+    if spared is not None and (target == spared or target in spared.parents):
+        return
+    if path.is_symlink() or not target.is_dir():
+        return
+    shutil.rmtree(target)
+
+
+def _free_pipeline_alias() -> None:
+    """Drop this pipeline's alias from an older record so the new folder can take it."""
+    data = load_registry()
+    for name, entry in data["models"].items():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("alias") != PIPELINE or entry.get("pipeline") != PIPELINE:
+            continue
+        if name == FOLDER:
+            continue
+        set_alias(name, None)
 
 
 def _kernels() -> int:

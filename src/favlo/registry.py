@@ -469,11 +469,14 @@ def _custom(entry: dict[str, Any]) -> bool:
     return bool(entry.get("custom"))
 
 
+_LANGUAGE_VARIANTS = frozenset({"instruct", "thinking", "high", "low", "none"})
+
+
 def _is_language_model_entry(entry: dict[str, Any]) -> bool:
     variants = entry.get("variants")
     if not isinstance(variants, dict):
         return False
-    return "instruct" in variants or "thinking" in variants
+    return any(name in variants for name in _LANGUAGE_VARIANTS)
 
 
 def _language_variant(entry: dict[str, Any]) -> str:
@@ -485,7 +488,13 @@ def _language_variant(entry: dict[str, Any]) -> str:
         return "instruct"
     if "thinking" in variants:
         return "thinking"
-    message = "language model row has no instruct or thinking variant"
+    default = entry.get("default_variant")
+    if isinstance(default, str) and default in variants and default in _LANGUAGE_VARIANTS:
+        return default
+    for name in ("high", "low", "none"):
+        if name in variants:
+            return name
+    message = "language model row has no chat variant"
     raise LookupError(message)
 
 

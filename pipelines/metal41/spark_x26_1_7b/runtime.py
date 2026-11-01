@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from spark_x26_1_7b.chat import handle_chat
+from spark_x26_1_7b.chat import handle_chat, handle_responses
 from spark_x26_1_7b.forward import SparkRuntime
 
 
@@ -19,7 +19,7 @@ def open_runtime(
     owner: str | None = None,
     mtp: bool = False,
 ) -> SparkRuntime:
-    """Load the resident fp4 record and the fp8 key/value cache."""
+    """Load the resident fp8 record and the fp8 key/value cache."""
     del resident_percent, mtp
     return SparkRuntime(
         path,
@@ -30,4 +30,4 @@ def open_runtime(
     )
 
 
-__all__ = ["handle_chat", "open_runtime"]
+__all__ = ["handle_chat", "handle_responses", "open_runtime"]

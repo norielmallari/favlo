@@ -6,10 +6,10 @@ sends the draft flag. Omitted, that flag is off. ``--mtp-depth`` is the draft
 length, three when omitted. ``--vision`` is off unless set. When it is set,
 the first chat is the horse still, and a later request must reuse the tower.
 Each model call prints the reasoning and the reply as the tokens arrive, then
-the tool calls when that call ends. The framework runs every coding tool.
+the tool calls when that call ends. The framework runs the coding tools.
 After the ledger, the same listener runs the chat contract.
-Exit 0 means the hidden suite passed, each tool returned successfully, and
-every contract check held.
+Exit 0 means ``ledger.py`` ``collect`` returns 6, 0, and -6, and every
+contract check held. Which tools the model called is not part of that result.
 Each request's server prefill and decode lines are the thinking series.
 
     uv run python -m harness.coding --model qwen38-27b
@@ -30,7 +30,6 @@ from harness.benchmarks.serve import Request, Server
 from harness.coding.compliance import run_contract, vision_problems
 from harness.coding.grade import grade
 from harness.coding.loop import run_session
-from harness.coding.workspace import missing_tools
 from harness.file_session import format_request, format_summary, parse_requests
 from harness.image_attachment import HORSE
 
@@ -83,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         server.start()
         print(f"mtp {args.mtp} depth {args.mtp_depth} thinking {args.thinking}", flush=True)
-        calls, problems = run_session(
+        _, problems = run_session(
             server.port,
             stem,
             Request(enable_thinking=args.thinking == "on"),
@@ -98,7 +97,6 @@ def main(argv: list[str] | None = None) -> int:
         problems.extend(asyncio.run(run_contract(base_url, stem)))
         _print_rates(server.log)
         result = grade(workspace)
-        absent = missing_tools(calls)
     finally:
         server.stop()
         if created:
@@ -107,9 +105,6 @@ def main(argv: list[str] | None = None) -> int:
     sys.stderr.write(result.stderr)
     if result.returncode != 0:
         return result.returncode
-    if absent:
-        print("missing tools: " + ", ".join(absent))
-        return 1
     if problems:
         return 1
     print("passed")

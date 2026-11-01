@@ -172,6 +172,75 @@ def test_prompt_does_not_name_a_tool() -> None:
     assert 'python3 -c "import ledger; print(ledger.collect(15, 21))"' in PROMPT
 
 
+def test_an_omitted_idempotency_key_still_writes(tmp_path: Path) -> None:
+    prepare_workspace(tmp_path)
+    session = session_for(tmp_path)
+    arguments = {"file_path": "ledger.py", "content": _MODULE}
+    try:
+        write = next(tool for tool in coding_tools(session) if tool.name == "write_file")
+        first = json.loads(asyncio.run(write.invoke(arguments=arguments, skip_parsing=True)))
+        second = json.loads(asyncio.run(write.invoke(arguments=dict(arguments), skip_parsing=True)))
+        shell = next(tool for tool in coding_tools(session) if tool.name == "run_shell_command")
+        started = json.loads(
+            asyncio.run(
+                shell.invoke(
+                    arguments={"command": "true"},
+                    skip_parsing=True,
+                )
+            )
+        )
+    finally:
+        session.close()
+    assert first["file_path"] == "ledger.py"
+    assert second == first
+    assert (tmp_path / "ledger.py").read_text(encoding="utf-8") == _MODULE
+    assert started["status"] == "queued"
+    assert started["job_id"]
+
+
+def test_a_supplied_idempotency_key_is_kept(tmp_path: Path) -> None:
+    prepare_workspace(tmp_path)
+    session = session_for(tmp_path)
+    try:
+        write = next(tool for tool in coding_tools(session) if tool.name == "write_file")
+        asyncio.run(
+            write.invoke(
+                arguments={
+                    "file_path": "ledger.py",
+                    "content": _MODULE,
+                    "idempotency_key": "create-ledger",
+                },
+                skip_parsing=True,
+            )
+        )
+        again = json.loads(
+            asyncio.run(
+                write.invoke(
+                    arguments={
+                        "file_path": "ledger.py",
+                        "content": _MODULE,
+                        "idempotency_key": "other-attempt",
+                    },
+                    skip_parsing=True,
+                )
+            )
+        )
+    finally:
+        session.close()
+    assert again["error"] == "conflict"
+
+
+def test_a_missing_required_field_names_that_field(tmp_path: Path) -> None:
+    prepare_workspace(tmp_path)
+    session = session_for(tmp_path)
+    try:
+        write = next(tool for tool in coding_tools(session) if tool.name == "write_file")
+        with pytest.raises(TypeError, match="file_path"):
+            asyncio.run(write.invoke(arguments={"content": "x"}, skip_parsing=True))
+    finally:
+        session.close()
+
+
 def test_hidden_suite_passes_a_correct_module(tmp_path: Path) -> None:
     body = json.loads(
         dispatch(
