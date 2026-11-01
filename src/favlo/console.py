@@ -23,7 +23,7 @@ from favlo.logs import RollingLog
 
 PHASES = ("load", "download", "quantize", "prefill", "decode", "sample")
 UNITS = ("tok", "layers", "bytes", "shards", "experts", "stages", "files", "blocks")
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 SCHEMA = 1
 
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"

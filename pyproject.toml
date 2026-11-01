@@ -1,6 +1,6 @@
 [project]
 name = "favlo"
-version = "0.3.0"
+version = "0.4.0"
 description = "Favlo AI Runtime: Your Local AI Workhorse"
 readme = "README.md"
 license = "Apache-2.0"
