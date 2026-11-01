@@ -119,6 +119,9 @@ def prefill_ids(
     cursor = pos0
     remaining = ids
     while remaining:
+        refresh = getattr(runtime, "refresh_budget", None)
+        if callable(refresh):
+            refresh()
         check = getattr(runtime, "_check_stop", None)
         if check is not None:
             check()

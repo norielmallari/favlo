@@ -35,7 +35,7 @@ from qwen38_27b.fetch import (
     remaining_download,
     shortfall,
 )
-from qwen38_27b.forward import Qwen38Runtime
+from qwen38_27b.runtime import open_runtime
 
 PIPELINE = "qwen38-27b"
 CARROT_PROMPT = (
@@ -226,7 +226,7 @@ def _quantize(args: argparse.Namespace) -> int:
 def _complete(args: argparse.Namespace) -> int:
     try:
         path, _selection = choose_complete(model=None, record=None, pipeline=PIPELINE)
-        runtime = Qwen38Runtime(path, kv_cache=args.kv_cache, max_memory=args.max_memory)
+        runtime = open_runtime(path, kv_cache=args.kv_cache, max_memory=args.max_memory)
         try:
             messages = [{"role": "user", "content": CARROT_PROMPT}]
             prompt = encode_chat(runtime.root, messages, None, False)

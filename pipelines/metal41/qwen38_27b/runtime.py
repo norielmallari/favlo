@@ -21,14 +21,16 @@ def open_runtime(
 ) -> Qwen38Runtime:
     """Load the resident fp4 record and the fp8 key/value cache.
 
-    ``mtp`` false leaves the MTP block in the record file.
+    ``max_memory`` is the serve ledger's ceiling. ``mtp`` false leaves the MTP block in the record file.
     """
     del resident_percent
+    from favlo.memory import memory
+
+    memory.set_max_memory(max_memory)
     return Qwen38Runtime(
         path,
         kv_cache=kv_cache,
         console=console,
-        max_memory=max_memory,
         owner=owner,
         mtp=mtp,
     )

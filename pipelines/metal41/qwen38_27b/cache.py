@@ -9,9 +9,7 @@ stops at ``DEFAULT_CONTEXT_LENGTH``.
 
 from __future__ import annotations
 
-import ctypes
 import json
-import os
 from pathlib import Path
 
 from qwen38_27b.layout import CONTEXT, FULL_LAYERS, HEAD, KV_HEADS
@@ -66,85 +64,6 @@ def fit_positions(budget: int, resident: int, scratch: int, slots: int = FULL_LA
         message = "the key/value cache does not fit a 2048-token chunk"
         raise RuntimeError(message)
     return positions
-
-
-def parse_memory(text: str | int | None) -> int | None:
-    """``32GiB``, ``512MiB``, or a byte count. Empty means the caller picks the cap."""
-    if text is None or text == "":
-        return None
-    if isinstance(text, int):
-        if text < 1:
-            message = f"maximum memory {text} is not positive"
-            raise ValueError(message)
-        return text
-    raw = str(text).strip().replace("_", "")
-    suffix = ""
-    digits = raw
-    for ending, name in (
-        ("gib", "GiB"),
-        ("mib", "MiB"),
-        ("gb", "GiB"),
-        ("mb", "MiB"),
-        ("g", "GiB"),
-        ("m", "MiB"),
-    ):
-        if raw.lower().endswith(ending):
-            suffix = name
-            digits = raw[: -len(ending)]
-            break
-    try:
-        number = int(digits)
-    except ValueError as exc:
-        message = f"maximum memory {text} is not a byte count"
-        raise ValueError(message) from exc
-    if number < 1:
-        message = f"maximum memory {text} is not positive"
-        raise ValueError(message)
-    if suffix == "GiB":
-        return number << 30
-    if suffix == "MiB":
-        return number << 20
-    return number
-
-
-def available_bytes() -> int:
-    """Reclaimable pages: free, inactive, and speculative."""
-    libc = ctypes.CDLL("/usr/lib/libSystem.dylib", use_errno=True)
-
-    class Stats(ctypes.Structure):
-        _fields_ = [
-            ("free_count", ctypes.c_uint),
-            ("active_count", ctypes.c_uint),
-            ("inactive_count", ctypes.c_uint),
-            ("wire_count", ctypes.c_uint),
-            ("zero_fill_count", ctypes.c_uint64),
-            ("reactivations", ctypes.c_uint64),
-            ("pageins", ctypes.c_uint64),
-            ("pageouts", ctypes.c_uint64),
-            ("faults", ctypes.c_uint64),
-            ("cow_faults", ctypes.c_uint64),
-            ("lookups", ctypes.c_uint64),
-            ("hits", ctypes.c_uint64),
-            ("purges", ctypes.c_uint64),
-            ("purgeable_count", ctypes.c_uint),
-            ("speculative_count", ctypes.c_uint),
-        ]
-
-    count = ctypes.c_uint(ctypes.sizeof(Stats) // 4)
-    stats = Stats()
-    kern = libc.host_statistics64(
-        libc.mach_host_self(),
-        ctypes.c_int(4),
-        ctypes.byref(stats),
-        ctypes.byref(count),
-    )
-    if kern != 0:
-        page = os.sysconf("SC_PAGE_SIZE")
-        pages = os.sysconf("SC_PHYS_PAGES")
-        return int(page) * int(pages)
-    page = int(os.sysconf("SC_PAGE_SIZE"))
-    reclaimable = stats.free_count + stats.inactive_count + stats.speculative_count
-    return int(reclaimable) * page
 
 
 def max_position(root: Path) -> int:

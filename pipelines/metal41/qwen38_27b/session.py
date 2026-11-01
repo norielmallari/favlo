@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from favlo.memory import memory
+from favlo.memory import device_buffer, memory
 
 # Darwin <sys/mman.h>. The kernel may reuse these pages instead of keeping them.
 _MADV_FREE_REUSABLE = 7
@@ -278,11 +278,11 @@ class Session:
             raw = bytes(blob)
         if raw:
             return memory.upload(raw, owner=self._owner)
-        return memory.allocate(16, owner=self._owner, zero=True)
+        return device_buffer(self._owner, 16, zero=True)
 
     def allocate(self, nbytes: int) -> Any | None:
         """A shared buffer, or None when the device refuses the length."""
-        return memory.allocate(max(int(nbytes), 16), owner=self._owner)
+        return device_buffer(self._owner, nbytes)
 
     def zeros(self, nbytes: int) -> Any:
         buffer = self.allocate(nbytes)

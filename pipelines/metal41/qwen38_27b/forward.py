@@ -26,6 +26,7 @@ from typing import Any
 import numpy as np
 import objc
 
+from favlo.console import format_note, format_rate
 from favlo.memory import memory
 from favlo.pipeline import ClientClosed
 from qwen38_27b.attn import bind_plane, value_block_bytes
@@ -41,7 +42,6 @@ from qwen38_27b.cache import (
     kv_mode,
     layer_cache_bytes,
     max_position,
-    parse_memory,
     plane_bytes,
     sequence_cache_bytes,
 )
@@ -174,7 +174,6 @@ class Qwen38Runtime:
         kv_cache: str = "e4m3",
         console: Any = None,
         resident_percent: float | None = None,
-        max_memory: str | int | None = None,
         owner: str | None = None,
         mtp: bool = False,
     ) -> None:
@@ -204,7 +203,7 @@ class Qwen38Runtime:
         self.full_slot = _slots(self.layer_types, "full_attention")
         card_limit = max_position(self.root) if (self.root / "config.json").is_file() else 262144
         self._limit = min(card_limit, DEFAULT_CONTEXT_LENGTH)
-        self._memory_cap = parse_memory(max_memory)
+        self._fit_ceiling = 0
         self.filled = 0
         self.drafts = False
         self.kv_slots = FULL_LAYERS
@@ -214,6 +213,7 @@ class Qwen38Runtime:
         self._record = None
         self._prefill = None
         self._prefill_progress = None
+        self._decode_progress = None
         self._load_progress = None
         self._on_prefill = None
         self._prefill_noted = 0
@@ -225,8 +225,9 @@ class Qwen38Runtime:
         self.resident = None
         self.k_cache = []
         self.v_cache = []
+        self.refresh_budget()
         plan = choose_wire(
-            memory.budget() if self._memory_cap is None else self._memory_cap,
+            self._fit_ceiling,
             2048,
             self._group,
             self._limit,
@@ -472,18 +473,26 @@ class Qwen38Runtime:
             self.session.resume()
         weights.stage_busy = True
 
+    def refresh_budget(self) -> None:
+        """Ask the serve ledger again. A larger answer raises the fit ceiling.
+
+        A later dip leaves the live cache and the wired layers where they are.
+        The next growth uses the larger answer.
+        """
+        ceiling = memory.budget()
+        if ceiling > self._fit_ceiling:
+            self._fit_ceiling = ceiling
+
     def _budget(self) -> int:
-        if self._memory_cap is not None:
-            return self._memory_cap
-        return memory.budget()
+        self.refresh_budget()
+        return self._fit_ceiling
 
     def _growth_budget(self) -> int:
         """Bytes the next image may use while the host copy of the live cache stays."""
-        if self._memory_cap is not None:
-            return self._memory_cap
+        self.refresh_budget()
         count = min(int(self.filled), int(self.max_pos))
         packed = sequence_cache_bytes(count, self.kv_slots) if count > 0 and self.k_cache else 0
-        return max(0, memory.budget() - packed)
+        return max(0, self._fit_ceiling - packed)
 
     def _held_bytes(self) -> int:
         if self.weights is None or not self.max_pos:
@@ -632,11 +641,11 @@ class Qwen38Runtime:
             or previous.mtp != plan.mtp
             or previous.wired != plan.wired
         ):
-            self._status(f"context {plan.positions}{self._fit_suffix()}")
+            self._note("context", tokens=plan.positions)
 
     def _end_open_progress(self) -> None:
         console = getattr(self, "console", None)
-        for name in ("_load_progress", "_prefill_progress"):
+        for name in ("_load_progress", "_prefill_progress", "_decode_progress"):
             progress = getattr(self, name, None)
             setattr(self, name, None)
             if progress is None or console is None or getattr(progress, "closed", True):
@@ -1164,11 +1173,11 @@ class Qwen38Runtime:
             message = f"prompt length {len(prompt)} is past {max(self.max_pos, reached)}"
             raise RuntimeError(message)
         self.ensure(len(prompt) + 1)
-        self._status(f"prompt tokens {len(prompt)}")
+        self._note("prompt", tokens=len(prompt))
         hit = self.prefix.align(prompt)
         if self.prefix.loaded:
-            self._status(f"prefix load {hit} tokens")
-        self._status(f"cache hit {hit}" if hit else "cache miss")
+            self._note("prefix_load", tokens=hit)
+        self._note("cache", hit=hit)
         self._cached_tokens = hit
         suffix = prompt[hit:]
         prefill_row = None
@@ -1194,24 +1203,19 @@ class Qwen38Runtime:
             sampled_at = time.perf_counter()
             prefill_elapsed = max(sampled_at - started, 0.0)
             self._prefill_seconds = prefill_elapsed
-            prefill_rate = 0.0 if prefill_elapsed <= 0 else len(suffix) / prefill_elapsed
-            summary = (
-                f"prefill {prefill_rate:.2f} tok/s "
-                f"({len(suffix)} tok in {prefill_elapsed:.2f}s)"
-            )
+            self._note_prefill(len(suffix))
             self._prefill_progress = None
-            self._end_phase(prefill_row, summary)
-            print(summary, flush=True)
+            self._end_phase(prefill_row, format_rate("prefill", len(suffix), prefill_elapsed))
             prefill_row = None
             self.prefix.note(prompt)
             self._store_prefix()
             boundary = True
-            self._note_prefill(len(suffix))
             pending = list(forced or [])
             close_after = bool(stop_after_forced) and bool(pending)
             room = max(0, self._limit - len(prompt))
             decode_total = room if max_tokens is None else max(0, min(max_tokens, room))
             decode_row = self._begin_phase("decode", decode_total, live=True)
+            self._decode_progress = decode_row
             decode_started = sampled_at
             last_sample: float | None = None
             self._mtp_accepts = 0
@@ -1224,7 +1228,7 @@ class Qwen38Runtime:
                 message = "mtp_depth must be a positive integer"
                 raise RuntimeError(message)
             if use_mtp:
-                self._status(f"mtp depth {depth}")
+                self._note("mtp_depth", depth=depth)
             emitted = 0
             rope_cursor = getattr(self, "_rope_next", None)
 
@@ -1349,15 +1353,11 @@ class Qwen38Runtime:
                 chosen = self._stable_draw(out, self._pick(nxt_id, counts), counts)
                 last_sample = time.perf_counter()
             if self._mtp_tries:
-                self._status(f"mtp {self._mtp_accepts}/{self._mtp_tries}")
+                self._note("mtp", accepts=self._mtp_accepts, tries=self._mtp_tries)
             decode_elapsed = 0.0 if last_sample is None else max(last_sample - decode_started, 0.0)
             self._decode_seconds = decode_elapsed
-            decode_rate = 0.0 if decode_elapsed <= 0 else len(out) / decode_elapsed
-            decode_summary = (
-                f"decode {decode_rate:.2f} tok/s ({len(out)} tok in {decode_elapsed:.2f}s)"
-            )
-            self._end_phase(decode_row, decode_summary)
-            print(decode_summary, flush=True)
+            self._decode_progress = None
+            self._end_phase(decode_row, format_rate("decode", len(out), decode_elapsed))
             decode_row = None
             self.prefix.note((prompt + out)[: self.filled])
             self._store_prefix()
@@ -1375,6 +1375,7 @@ class Qwen38Runtime:
             self._vision_prepared = None
             self._on_prefill = None
             self._prefill_progress = None
+            self._decode_progress = None
             self._end_phase(prefill_row, "")
             self._end_phase(decode_row, "")
         return out
@@ -1541,10 +1542,10 @@ class Qwen38Runtime:
         try:
             path = self.prefix.flush()
         except OSError as exc:
-            self._status(f"prefix store failed {exc}")
+            self._note("prefix_store_failed", error=exc)
             return
         if path is not None:
-            self._status(f"prefix store {len(self.prefix.tokens)} tokens")
+            self._note("prefix_store", tokens=len(self.prefix.tokens))
 
     def _status(self, line: str) -> None:
         console = self.console
@@ -1552,6 +1553,14 @@ class Qwen38Runtime:
             print(line, flush=True)
             return
         console.log(line)
+
+    def _note(self, topic: str, **fields: Any) -> None:
+        console = self.console
+        note = getattr(console, "note", None)
+        if callable(note):
+            note(topic, **fields)
+            return
+        self._status(format_note(topic, **fields))
 
     def _begin_load(self, total: int) -> Any:
         console = self.console
@@ -1588,10 +1597,17 @@ class Qwen38Runtime:
 
     def _end_phase(self, progress: Any, summary: str) -> None:
         if progress is None:
+            if summary:
+                self._status(summary)
+            return
+        if getattr(progress, "closed", False):
             return
         console = self.console
-        if console is not None:
-            console.end(progress, summary)
+        if console is None:
+            if summary:
+                print(summary, flush=True)
+            return
+        console.end(progress, summary)
 
     def _note_prefill(self, done: int) -> None:
         progress = self._prefill_progress

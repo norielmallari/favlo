@@ -109,6 +109,7 @@ def test_open_runtime_forwards_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     from qwen38_27b.runtime import open_runtime
 
     captured: dict[str, object] = {}
+    caps: list[object] = []
 
     def fake(path: Path, **kwargs: object) -> str:
         captured["path"] = path
@@ -116,12 +117,30 @@ def test_open_runtime_forwards_owner(monkeypatch: pytest.MonkeyPatch) -> None:
         return "runtime"
 
     monkeypatch.setattr("qwen38_27b.runtime.Qwen38Runtime", fake)
+    monkeypatch.setattr("favlo.memory.memory.set_max_memory", caps.append)
     assert open_runtime(Path("record"), owner="qwen38-27b:7") == "runtime"
     assert captured["owner"] == "qwen38-27b:7"
-    assert captured["max_memory"] is None
+    assert "max_memory" not in captured
     assert captured["mtp"] is False
-    assert open_runtime(Path("record"), mtp=True) == "runtime"
+    assert caps == [None]
+    assert open_runtime(Path("record"), mtp=True, max_memory="16GiB") == "runtime"
     assert captured["mtp"] is True
+    assert caps == [None, "16GiB"]
+
+
+def test_fit_ceiling_keeps_the_larger_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = Qwen38Runtime.__new__(Qwen38Runtime)
+    runtime._fit_ceiling = 0
+    runtime.filled = 0
+    runtime.max_pos = 0
+    runtime.kv_slots = 16
+    runtime.k_cache = []
+    answers = iter((1000, 400, 2500))
+    monkeypatch.setattr("favlo.memory.memory.budget", lambda: next(answers))
+    runtime.refresh_budget()
+    assert runtime._fit_ceiling == 1000
+    assert runtime._budget() == 1000
+    assert runtime._growth_budget() == 2500
 
 
 def test_a_missing_record_keeps_the_passed_owner(tmp_path: Path) -> None:
@@ -878,6 +897,62 @@ def test_startup_bytes_cover_the_record_and_the_cache() -> None:
     total = startup_bytes(resident, 4096)
     assert total > resident + cache_bytes(4096)
     assert total > resident + plane_bytes(4096) * FULL_LAYERS * 2
+
+
+def test_phase_close_uses_format_rate_and_notes() -> None:
+    from favlo.console import format_note, format_rate
+
+    notes: list[str] = []
+    ended: list[str] = []
+    logged: list[str] = []
+
+    class _Console:
+        shows_bars = True
+        live_decode = False
+
+        def note(self, topic: str, **fields: object) -> None:
+            notes.append(format_note(topic, **fields))
+
+        def begin(self, phase: str, **kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                phase=phase,
+                total=kwargs["total"],
+                done=0,
+                closed=False,
+                unit=kwargs["unit"],
+            )
+
+        def end(self, progress: SimpleNamespace, summary: str) -> None:
+            progress.closed = True
+            ended.append(summary)
+
+        def log(self, line: str) -> None:
+            logged.append(line)
+
+    runtime = Qwen38Runtime.__new__(Qwen38Runtime)
+    runtime.console = _Console()
+    runtime._request_id = 0
+    runtime._note("prompt", tokens=12)
+    runtime._note("cache", hit=0)
+    runtime._note("prefix_store", tokens=4)
+    runtime._note("mtp_depth", depth=3)
+    runtime._note("mtp", accepts=2, tries=5)
+    runtime._note("context", tokens=4096)
+    row = runtime._begin_phase("prefill", 8)
+    runtime._end_phase(row, format_rate("prefill", 8, 2.0))
+    runtime._end_phase(row, "prefill again")
+    runtime._end_phase(None, format_rate("decode", 0, 0.0))
+    assert notes == [
+        "prompt tokens 12",
+        "cache miss",
+        "prefix store 4 tokens",
+        "mtp depth 3",
+        "mtp 2/5",
+        "context 4096",
+    ]
+    assert ended == ["prefill 4.00 tok/s (8 tok in 2.00s)"]
+    assert logged == ["decode 0 tok/s"]
+    assert runtime._begin_phase("decode", 32, live=True) is None
 
 
 def test_load_row_counts_bytes_and_decode_has_no_bar() -> None:
