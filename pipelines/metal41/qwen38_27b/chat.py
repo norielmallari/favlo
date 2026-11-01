@@ -291,7 +291,13 @@ class Pipeline(_Hooks):
         del args
         try:
             translated = chat_to_responses(body)
+            # Official Qwen3.8-27B: omitted is on; false keeps think blocks only
+            # after the latest user message. Top-level wins over kwargs.
+            translated["preserve_thinking"] = preserve_thinking(body)
         except RequestError as exc:
+            reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+            return
+        except RuntimeError as exc:
             reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
             return
         _respond(ChatWire(reply), runtime, translated, selection, state)
@@ -354,8 +360,15 @@ def _respond(
         tools = []
     effort = _template_effort(prepared) if thinking else None
     try:
-        prompt = _render(runtime, messages, tools, thinking, effort)
-        prompt = _fit_prompt(runtime, prepared, messages, tools, thinking, effort, prompt)
+        keep_thinking = preserve_thinking(prepared)
+    except RuntimeError as exc:
+        reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+        return
+    try:
+        prompt = _render(runtime, messages, tools, thinking, effort, keep_thinking)
+        prompt = _fit_prompt(
+            runtime, prepared, messages, tools, thinking, effort, keep_thinking, prompt
+        )
     except RequestError as exc:
         reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
         return
@@ -444,6 +457,7 @@ def _render(
     tools: list[dict[str, Any]],
     thinking: bool,
     effort: str | None,
+    keep_thinking: bool,
 ) -> list[int]:
     from qwen38_27b.vision import collect_images, expand_image_tokens, log_prepared, merged_grid, prepare_image
 
@@ -460,7 +474,7 @@ def _render(
         tools,
         thinking,
         effort,
-        preserve_thinking=True,
+        preserve_thinking=keep_thinking,
     )
     pixels = [prepare_image(blob, min_pixels=low, max_pixels=high) for blob, low, high in images]
     log_prepared(runtime, pixels)
@@ -491,6 +505,7 @@ def _fit_prompt(
     tools: list[dict[str, Any]],
     thinking: bool,
     effort: str | None,
+    keep_thinking: bool,
     prompt: list[int],
 ) -> list[int]:
     ceiling = getattr(runtime, "_limit", None)
@@ -506,7 +521,7 @@ def _fit_prompt(
         if drop >= len(kept):
             break
         del kept[drop]
-        prompt = _render(runtime, kept, tools, thinking, effort)
+        prompt = _render(runtime, kept, tools, thinking, effort, keep_thinking)
     if len(prompt) > ceiling:
         raise RequestError("input does not fit")
     messages[:] = kept

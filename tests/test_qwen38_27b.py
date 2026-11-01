@@ -393,7 +393,7 @@ def test_auto_truncation_drops_the_oldest_turn(monkeypatch: pytest.MonkeyPatch) 
     from favlo.responses import RequestError
     from qwen38_27b.chat import _fit_prompt
 
-    def render(_runtime, messages, _tools, _thinking, _effort):
+    def render(_runtime, messages, _tools, _thinking, _effort, _keep):
         return [0] * (len(messages) * 10)
 
     monkeypatch.setattr("qwen38_27b.chat._render", render)
@@ -413,6 +413,7 @@ def test_auto_truncation_drops_the_oldest_turn(monkeypatch: pytest.MonkeyPatch) 
         [],
         False,
         None,
+        True,
         [0] * 30,
     )
     assert prompt == [0] * 20
@@ -424,7 +425,7 @@ def test_auto_truncation_drops_the_oldest_turn(monkeypatch: pytest.MonkeyPatch) 
         {"role": "user", "content": "new"},
     ]
     with pytest.raises(RequestError, match="input does not fit"):
-        _fit_prompt(Runtime(), {}, blocked, [], False, None, [0] * 30)
+        _fit_prompt(Runtime(), {}, blocked, [], False, None, True, [0] * 30)
 
 
 def test_ffn_percentage_selects_whole_layers() -> None:
@@ -520,6 +521,76 @@ def test_preserve_thinking_defaults_on_and_either_field_overrides() -> None:
     assert preserve_thinking({"preserve_thinking": None, "chat_template_kwargs": {"preserve_thinking": False}}) is False
     with pytest.raises(RuntimeError):
         preserve_thinking({"preserve_thinking": "false"})
+
+
+def test_chat_preserve_thinking_false_reaches_the_template(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pathlib import Path
+
+    from favlo.reply import MemoryReply
+    from qwen38_27b.chat import handle_chat
+
+    seen: dict[str, object] = {}
+
+    def encode(*_args, **kwargs):
+        seen["preserve"] = kwargs.get("preserve_thinking")
+        return [1, 2]
+
+    monkeypatch.setattr("qwen38_27b.chat.encode_chat", encode)
+    monkeypatch.setattr("qwen38_27b.chat.decode_text", lambda _root, _ids: "apple")
+    monkeypatch.setattr("qwen38_27b.vision.collect_images", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("qwen38_27b.chat._forced_call", lambda *_args, **_kwargs: ([], False))
+
+    class Runtime:
+        root = Path(".")
+        _hit_limit = False
+        _limit = 131072
+        _cached_tokens = 0
+        _prefill_seconds = 0.0
+        _decode_seconds = 0.0
+        _output_ids: list[int] = []
+
+        def generate(self, prompt, limit, stop, **kwargs):
+            del prompt, limit, stop, kwargs
+            self._output_ids = [7]
+            return [7]
+
+    reply = MemoryReply("qwen38-27b")
+    handle_chat.complete(
+        reply,
+        Runtime(),
+        {
+            "model": "qwen38-27b",
+            "messages": [
+                {"role": "user", "content": "one"},
+                {"role": "assistant", "content": "a", "reasoning_content": "old"},
+                {"role": "user", "content": "two"},
+            ],
+            "enable_thinking": False,
+            "preserve_thinking": False,
+        },
+        None,
+        None,
+        {},
+    )
+    assert reply.status == 200
+    assert seen["preserve"] is False
+
+    kept = MemoryReply("qwen38-27b")
+    handle_chat.complete(
+        kept,
+        Runtime(),
+        {
+            "model": "qwen38-27b",
+            "messages": [{"role": "user", "content": "two"}],
+            "enable_thinking": False,
+            "chat_template_kwargs": {"preserve_thinking": True},
+        },
+        None,
+        None,
+        {},
+    )
+    assert kept.status == 200
+    assert seen["preserve"] is True
 
 
 def test_false_preserve_thinking_drops_reasoning_before_the_latest_user() -> None:
