@@ -36,15 +36,15 @@ Pipeline smoke under the smoke lock (`tests/test_qwen35_4b_smoke.py`), fp8 recor
 | decode (instruct card) | 44.95 tok/s | 105 | 2.34 |
 | decode (thinking card) | 43.34 tok/s | 558 | 12.88 |
 
-A 2012-token prompt prefills at 1027.68 tok/s (1.96 s). The prefill kernel ceiling for a 256-token chunk is 1024.64 tok/s ([ceilings.md](ceilings.md)).
+A 2012-token prompt prefills at 1060.88 tok/s (1.90 s). The prefill kernel ceiling for a 256-token chunk is 1007.60 tok/s ([ceilings.md](ceilings.md)).
 
-Coding agent printed `prompt tokens` / `cache miss` per request:
+Coding agent printed `prompt tokens` / `cache miss` per request (2 November 2026):
 
 | Card | Prefill | Decode |
 |---|---|---|
-| thinking | 992.90 tok/s (25736 tok in 25.92s) | 38.55 tok/s (2104 tok in 54.58s) |
-| instruct | 1050.21 tok/s (23052 tok in 21.95s) | 39.78 tok/s (1980 tok in 49.78s) |
+| thinking | 993.10 tok/s (25781 tok in 25.96s) | 37.64 tok/s (2384 tok in 63.34s) |
+| instruct | 1049.04 tok/s (23058 tok in 21.98s) | 40.21 tok/s (1863 tok in 46.33s) |
 
-Thinking prefill is 98.5% of the 1007.60 tok/s kernel ceiling ([ceilings.md](ceilings.md)).
+Thinking prefill is 98.6% of the 1007.60 tok/s kernel ceiling ([ceilings.md](ceilings.md)).
 
 Progress uses `favlo.console` begin / end / note on the console thread (`prompt`, `cache`, load / prefill / decode). Decode streaming uses a separate queue thread. NumPy stays off the hot path.

@@ -18,6 +18,18 @@ favlo --spark-x26-1-7b setup
 
 `--keep-bf16` leaves the checkout.
 
+## Qwen3.5-4B
+
+The official checkpoint is `Qwen/Qwen3.5-4B`. The steps are [qwen35-4b/SETUP.md](../qwen35-4b/SETUP.md).
+
+`favlo --qwen35-4b setup` packs a same-tensor BF16 checkout already under `models/` into `models/Qwen3.5-4B-fp8` and registers the alias `qwen35-4b`:
+
+```bash
+favlo --qwen35-4b setup --keep-bf16
+```
+
+`quantize --src` packs without the setup wrapper. `--keep-bf16` leaves the BF16 checkout.
+
 ## Qwen3.6-35B-A3B
 
 The official checkpoint is `Qwen/Qwen3.6-35B-A3B`. The steps are [qwen36-35b-a3b/SETUP.md](../qwen36-35b-a3b/SETUP.md).
