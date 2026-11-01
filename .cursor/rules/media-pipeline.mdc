@@ -1,5 +1,5 @@
 ---
-description: How a served media pipeline implements MediaPipeline, and when to extend and run the preemption harness.
+description: How a served media pipeline implements MediaPipeline, and when to extend and run the preemption harness. Scratch sizes from the serve ledger, with no private cap. The request keeps its resolution, frame count, and duration. The preemption harness waits and does not take the lock. A GPU test uses smoke_lock run.
 globs: src/favlo/media_pipeline.py,src/favlo/pipeline_worker.py,src/favlo/pipelines.py,harness/media_pipeline.py,tests/test_media_pipeline.py,tests/test_media_pipeline_harness.py,pipelines/metal41/z_image_turbo/**,pipelines/metal41/wan22_i2v/**,pipelines/metal41/wan22_ti2v_5b/**,pipelines/metal41/ace_step_15_turbo/**,pipelines/metal41/voxcpm2/**,docs/z-image-turbo/**,docs/wan22-i2v/**,docs/wan22-ti2v-5b/**,docs/ace-step-15-turbo/**,docs/voxcpm2/**,docs/harness.md
 alwaysApply: false
 ---
@@ -16,6 +16,30 @@ Clear a hold with `state[key] = None`. Do not `pop` the key. The exported keys a
 
 `parse` or `generate` raises `MediaRequestError` for a bad body. That is a 400. Any other exception fails the job with `error` `{"message", "type"}`. `describe` copies the job keys MCP already reads (`size`, `seconds`, `response_format`). `reply.json` runs once with the job before `generate`. Call it again only when `pack` or `working` returns a different dict. A new abstract method updates every subclass in that same change. One pipeline note records that pipeline's checkpoint. Do not describe another pipeline there.
 
+## Memory
+
+`src/favlo/memory.py` is the only allocator. `memory` is the process singleton. Device, residency set, and command queues stay process-owned. Heaps are per owner, kind (`resident`, `scratch`, `private`), and storage (`shared` or `private`). Do not call `newBufferWithLength` or keep a second allocator.
+
+`open_runtime` accepts `owner`. The listener calls `memory.set_max_memory` before that open. Stamp `_owner` before the first allocate:
+
+```python
+self._owner = owner or f"{stem}:{id(self)}"
+```
+
+`stem` is the flag stem (`z-image-turbo`). Every `allocate` and `upload` in that opening uses that string. `sweep` matches the whole string. `close` sweeps it in `finally`, including when `open` fails after a span exists. A missing record raises `FileNotFoundError` before `Gpu()`. The listener passes `mint_owner(stem)` when the signature includes `owner`, records `runtime._owner`, and sweeps that opening after `close`.
+
+The serve process keeps the ledger. This process allocates its own Metal buffers. `allocate`, `zeros`, `release`, and `sweep` report the owner and the byte counts on the worker pipe. Do not open that pipe. `budget()` asks the serve process and waits. The answer is reclaimable pages plus this daemon's live, pending, and returning bytes, including every child. `memory.set_max_memory` caps that answer. `room()` is `max(0, budget() - live - pending)`. Read those two. Do not parse `--max-memory`, and do not keep `_memory_cap` or a private `parse_memory`. An in-process command calls `memory.set_max_memory` before the first `budget()`.
+
+The request keeps its resolution, its frame count, and its duration. The one knob is the scratch this pipeline already sizes for that request. Weights plus that scratch must fit in `room()` before the first commit. Read the budget at open and again when a later stage can use a larger reservation. A larger answer may raise the knob. Do not shrink it while a request is in flight. At open, shrink the knob down to the minimum that still runs the named request. When that minimum does not fit, raise `RuntimeError` and name the request. Do not drop layers, stand in a host GEMV, or change the packed quant. 16 GB is the product floor. It is not free memory and it is not `budget()`.
+
+Spans go through `device_buffer(owner, nbytes)`. `release` returns a span the caller has dropped. Leave a buffer a later command or a live local still names. `sweep` waits out tracked command buffers, then frees that owner's spans and idle heaps. Device buffers do not go in a preemption hold.
+
+`close` sweeps the owner. The release is done when that owner has no live span and no command still holds a freed span. `memory.wait_released` returns on that check. The sweep runs in this process before the handler returns. Pending and returning bytes stay in the budget until the kernel reports them. They do not keep the process alive, and they do not keep the next call queued. The daemon does not admit the next call while an allocation or a release is still open. A short reclaim calls `note_returning` for the bytes still held, then drops the child. `confirm_released` and `reclaimable_bytes` stay on raw Mach counts.
+
+Wrong: a private `_memory_cap`, a `16GiB` string left unread, or a shorter clip because `room()` dipped.
+
+Right: `memory.room()` sizes the scratch, and the request keeps its resolution, frame count, and duration.
+
 ## Preemption harness
 
 One agent covers every served media pipeline: `python -m harness.media_pipeline`. The order is `image`, `i2v`, `t2v`, `music`, `voice`. Names after the command run that subset in the same order, as in `python -m harness.media_pipeline i2v`. An omitted list runs every name. Do not add a second preemption agent.
@@ -29,7 +53,9 @@ uv run pytest tests/test_media_pipeline.py tests/test_media_pipeline_harness.py
 uv run python -m harness.media_pipeline
 ```
 
-The pytest does not open a listener and does not take the machine lock. The harness uses one `favlo serve` on `127.0.0.1:8129` and does not take the lock. If `artifacts/pipeline-test.lock` is held by a live pid, wait. Exit 0 means every selected probe paused with `task is ongoing` and that same task finished. A kernel, shader, or quantize edit that leaves the request, the checkpoint, and the job dict alone does not run the harness.
+The pytest does not open a listener and does not take the machine lock. The harness uses one `favlo serve` on `127.0.0.1:8129` and does not take the lock. `harness.server` waits until no live pid holds `artifacts/pipeline-test.lock` before it talks to that listener. Exit 0 means every selected probe paused with `task is ongoing` and that same task finished. A kernel, shader, or quantize edit that leaves the request, the checkpoint, and the job dict alone does not run the harness.
+
+A command that compiles shaders, loads a checkpoint, or starts its own serve uses `python -m favlo.smoke_lock run`. It releases on failure and on SIGINT. Do not kill serve to free the GPU. Close during a live hold is 409.
 
 Wrong: a host matmul standing in for a missing kernel, a popped hold, or one preemption agent per pipeline.
 

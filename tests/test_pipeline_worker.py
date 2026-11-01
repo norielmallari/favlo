@@ -58,6 +58,12 @@ def test_a_clean_exit_waits_for_the_pages_taken_while_resident(monkeypatch) -> N
         def forget(self, owners: object) -> None:
             seen["owners"] = owners
 
+        def drop_child(self, key: int) -> None:
+            seen["dropped"] = key
+
+        def note_returning(self, nbytes: int) -> None:
+            seen["returning"] = nbytes
+
     monkeypatch.setattr("favlo.memory.memory", _Ledger())
     child = PipelineChild(SimpleNamespace(), None)
     child._proc = SimpleNamespace(returncode=0)
@@ -71,6 +77,8 @@ def test_a_clean_exit_waits_for_the_pages_taken_while_resident(monkeypatch) -> N
     assert seen["nbytes"] == 24_000_000_000
     assert seen["timeout"] is None
     assert seen["owners"] == ("chat",)
+    assert seen["dropped"] == id(child)
+    assert "returning" not in seen
 
 
 def test_a_short_reclaim_still_drops_the_owners(monkeypatch) -> None:
@@ -85,6 +93,12 @@ def test_a_short_reclaim_still_drops_the_owners(monkeypatch) -> None:
         def forget(self, owners: object) -> None:
             seen["owners"] = owners
 
+        def drop_child(self, key: int) -> None:
+            seen["dropped"] = key
+
+        def note_returning(self, nbytes: int) -> None:
+            seen["returning"] = nbytes
+
     monkeypatch.setattr("favlo.memory.memory", _Ledger())
     monkeypatch.setattr("favlo.pipeline_worker._log_line", lines.append)
     child = PipelineChild(SimpleNamespace(), None)
@@ -96,6 +110,8 @@ def test_a_short_reclaim_still_drops_the_owners(monkeypatch) -> None:
     child.counts = {"chat": 30_000_000_000}
     child._forget()
     assert seen["owners"] == ("chat",)
+    assert seen["returning"] == 24_000_000_000
+    assert seen["dropped"] == id(child)
     assert lines == ["reclaimable pages stopped short"]
 
 

@@ -582,10 +582,11 @@ def _fit_prompt(
     saw_reasoning: bool,
     prompt: list[int],
 ) -> list[int]:
-    ceiling = getattr(runtime, "max_pos", None)
+    """The opening cache is not the prompt limit. The served window is."""
+    ceiling = getattr(runtime, "_context_limit", None)
     if not isinstance(ceiling, int) or ceiling < 1:
-        ceiling = getattr(runtime, "_context_limit", None)
-    if not isinstance(ceiling, int) or ceiling < 1 or len(prompt) <= ceiling:
+        ceiling = DEFAULT_CONTEXT_LENGTH
+    if len(prompt) <= ceiling:
         return prompt
     if prepared.get("truncation") != "auto":
         raise RequestError("input does not fit")

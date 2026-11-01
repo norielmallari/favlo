@@ -65,6 +65,57 @@ def reclaimable_bytes() -> int:
     return int(reclaimable) * page
 
 
+def parse_memory(text: str | int | None) -> int | None:
+    """``32GiB``, ``512MiB``, or a byte count. Empty means uncapped."""
+    if text is None or text == "":
+        return None
+    if isinstance(text, bool) or not isinstance(text, int | str):
+        message = f"maximum memory {text} is not a byte count"
+        raise ValueError(message)
+    if isinstance(text, int):
+        if text < 1:
+            message = f"maximum memory {text} is not positive"
+            raise ValueError(message)
+        return text
+    raw = str(text).strip().replace("_", "")
+    suffix = ""
+    digits = raw
+    for ending, name in (
+        ("gib", "GiB"),
+        ("mib", "MiB"),
+        ("gb", "GiB"),
+        ("mb", "MiB"),
+        ("g", "GiB"),
+        ("m", "MiB"),
+    ):
+        if raw.lower().endswith(ending):
+            suffix = name
+            digits = raw[: -len(ending)]
+            break
+    try:
+        number = int(digits)
+    except ValueError as exc:
+        message = f"maximum memory {text} is not a byte count"
+        raise ValueError(message) from exc
+    if number < 1:
+        message = f"maximum memory {text} is not positive"
+        raise ValueError(message)
+    if suffix == "GiB":
+        return number << 30
+    if suffix == "MiB":
+        return number << 20
+    return number
+
+
+@dataclass
+class _ChildUse:
+    """One pipeline process, as the serve process last heard it."""
+
+    owners: dict[str, int]
+    pending: int
+    returning: int
+
+
 class Handle:
     """Integer span. The heap buffer stays in the manager."""
 
@@ -152,6 +203,11 @@ class Memory:
         self._pending = 0
         self._returning = 0
         self._reported: dict[str, int] = {}
+        self._children: dict[int, _ChildUse] = {}
+        self._ceiling: int | None = None
+        self._account_hook: Any = None
+        self._budget_query: Any = None
+        self._account_dirty = False
         self._reclaim_mark = 0
         self._fence: Any = None
         self._wait_fence = False
@@ -176,12 +232,110 @@ class Memory:
             self._retire_pending()
             return self._pending
 
+    def set_max_memory(self, text: str | int | None) -> None:
+        """Cap ``budget()``. Empty clears the cap. Reclaim waits stay uncapped."""
+        ceiling = parse_memory(text)
+        with self._lock:
+            self._ceiling = ceiling
+
+    def set_account_hook(self, hook: Any) -> None:
+        """Child process: report span totals to the serve process. ``None`` stops."""
+        with self._lock:
+            self._account_hook = hook
+
+    def set_budget_query(self, query: Any) -> None:
+        """Child process: ``budget()`` asks the serve process. ``None`` uses this process."""
+        with self._lock:
+            self._budget_query = query
+
+    def account_child(
+        self,
+        key: int,
+        owners: dict[str, int],
+        pending: int,
+        returning: int,
+    ) -> None:
+        """Replace one child's totals. A repeat does not add a second copy."""
+        kept: dict[str, int] = {}
+        for owner, nbytes in owners.items():
+            if not isinstance(owner, str) or not owner:
+                continue
+            if isinstance(nbytes, bool) or not isinstance(nbytes, int):
+                continue
+            kept[owner] = max(nbytes, 0)
+        with self._lock:
+            self._children[int(key)] = _ChildUse(kept, max(int(pending), 0), max(int(returning), 0))
+
+    def drop_child(self, key: int) -> None:
+        """Drop one child's totals after it has exited."""
+        with self._lock:
+            self._children.pop(int(key), None)
+
+    def note_returning(self, nbytes: int) -> None:
+        """Pages this daemon released that the kernel has not reported reclaimable yet."""
+        count = max(int(nbytes), 0)
+        if count < 1:
+            return
+        with self._lock:
+            self._returning += count
+
     def budget(self) -> int:
-        """Reclaimable pages, live spans, reported child bytes, and heaps not yet returned."""
+        """The serve process answers. A child with a query waits for that answer.
+
+        The local total is reclaimable pages plus live, pending, and returning
+        bytes, including every child of this daemon. A cap keeps the smaller
+        number. ``reclaimable_bytes`` itself stays uncapped.
+        """
+        with self._lock:
+            query = self._budget_query
+        if query is not None:
+            answer = query()
+            if isinstance(answer, bool) or not isinstance(answer, int) or answer < 0:
+                message = "the serve process returned no budget"
+                raise RuntimeError(message)
+            return answer
         with self._lock:
             self._retire_pending()
-            reported = sum(self._reported.values())
-            return reclaimable_bytes() + self._live + self._pending + self._returning + reported
+            total = self._raw_locked()
+            cap = self._ceiling
+            if cap is not None:
+                total = min(total, cap)
+        self._flush_account()
+        return total
+
+    def room(self) -> int:
+        """Bytes a new span may take after this process's own live and pending counts."""
+        return max(0, self.budget() - self.live - self.pending)
+
+    def _raw_locked(self) -> int:
+        reported = sum(self._reported.values())
+        for child in self._children.values():
+            reported += sum(child.owners.values()) + child.pending + child.returning
+        return reclaimable_bytes() + self._live + self._pending + self._returning + reported
+
+    def _owner_map_locked(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for span in self._spans.values():
+            if span.released or not span.owner:
+                continue
+            counts[span.owner] = counts.get(span.owner, 0) + span.requested
+        return counts
+
+    def _flush_account(self) -> None:
+        with self._lock:
+            hook = self._account_hook
+            if hook is None or not self._account_dirty:
+                return
+            self._account_dirty = False
+            payload = {
+                "owners": self._owner_map_locked(),
+                "pending": self._pending,
+                "returning": self._returning,
+            }
+        try:
+            hook(payload)
+        except Exception:
+            return
 
     def report(self, counts: dict[str, int]) -> None:
         """Remember bytes a pipeline process reported. This does not create a device."""
@@ -305,8 +459,10 @@ class Memory:
             self._next += 1
             self._spans[span_id] = span
             self._live += span.requested
+            self._account_dirty = True
         if zero:
             self.zero(handle, 0, span.requested)
+        self._flush_account()
         return handle
 
     def upload_group(self, parts: list[bytes | Any], *, owner: str) -> list[Handle]:
@@ -329,7 +485,9 @@ class Memory:
                 self._next += 1
                 self._spans[span_id] = span
                 self._live += span.requested
+                self._account_dirty = True
                 handles.append(handle)
+        self._flush_account()
         for handle, raw in zip(handles, raws, strict=True):
             if raw:
                 self.store(handle, 0, raw)
@@ -410,6 +568,8 @@ class Memory:
         self._advise(handle, int(offset), int(nbytes), 7)
         with self._lock:
             self._pending += int(nbytes)
+            self._account_dirty = True
+        self._flush_account()
 
     def commit_span(self, handle: Handle, offset: int, nbytes: int) -> None:
         self._advise(handle, int(offset), int(nbytes), 8)
@@ -429,6 +589,8 @@ class Memory:
                 return
             self._pending += aligned
             span.advised = True
+            self._account_dirty = True
+        self._flush_account()
 
     def purge(self, handle: Handle, state: int) -> int:
         if self._lookup(handle) is None:
@@ -486,6 +648,7 @@ class Memory:
         with self._lock:
             self._free_span(span)
             self._drop_idle_segments()
+        self._flush_account()
 
     def owners(self) -> frozenset[str]:
         """Owner strings that still have a live span."""
@@ -503,6 +666,7 @@ class Memory:
                 self._free_span(span)
             self._drop_idle_segments()
             self._retire_pending()
+        self._flush_account()
 
     def sweep_new(self, kept: Any) -> None:
         """Sweep owners that were not in ``kept``. Owners in ``kept`` stay."""
@@ -521,6 +685,7 @@ class Memory:
         with self._lock:
             self._retire_commands()
             self._rewind_scratch()
+        self._flush_account()
 
     def command_buffer(self, queue: Any) -> Any:
         """A retained command buffer whose extra retain is drained in ``retire``."""
@@ -738,6 +903,7 @@ class Memory:
             return
         span.released = True
         self._live -= span.requested
+        self._account_dirty = True
         key = self._id_of(span)
         if key is not None:
             self._spans.pop(key, None)
@@ -745,6 +911,7 @@ class Memory:
             self._deferred.append((span.segment, span.token, set(self._commands)))
             if not span.advised:
                 self._pending += span.requested
+                self._account_dirty = True
                 span.advised = True
             return
         span.segment.mapping.free(span.token)
@@ -780,8 +947,10 @@ class Memory:
             self._release_once(segment.heap)
             segment.buffer = None
             segment.heap = None
-            self._returning += segment.departed
-            segment.departed = 0
+            if segment.departed:
+                self._returning += segment.departed
+                self._account_dirty = True
+                segment.departed = 0
         if changed and self._set is not None:
             self._set.commit()
             if not any(segment.queued for segment in self._segments):
@@ -814,6 +983,7 @@ class Memory:
             span = self._spans.pop(key)
             if not span.released:
                 self._live -= span.requested
+                self._account_dirty = True
             span.released = True
 
     def _retire_commands(self) -> None:
@@ -851,10 +1021,13 @@ class Memory:
         delta = now - self._reclaim_mark
         if delta > 0:
             take = min(self._returning, delta)
-            self._returning -= take
+            if take:
+                self._returning -= take
+                self._account_dirty = True
             rest = delta - take
             if rest > 0 and self._pending:
                 self._pending = max(0, self._pending - rest)
+                self._account_dirty = True
         if now > self._reclaim_mark:
             self._reclaim_mark = now
 
@@ -964,6 +1137,11 @@ def _as_bytes(data: bytes | Any) -> bytes:
     if isinstance(data, np.ndarray):
         return np.ascontiguousarray(data).tobytes()
     return bytes(data)
+
+
+def device_buffer(owner: str, nbytes: int, *, zero: bool = False) -> Handle:
+    """One shared span. Pipelines ask for a size. This module reports it."""
+    return memory.allocate(max(int(nbytes), 16), owner=owner, zero=zero)
 
 
 memory = Memory()

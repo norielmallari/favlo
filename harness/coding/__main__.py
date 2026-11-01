@@ -98,9 +98,9 @@ def main(argv: list[str] | None = None) -> int:
         _print_rates(server.log)
         result = grade(workspace)
     finally:
-        server.stop()
         if created:
             release(root=root)
+        server.stop()
     sys.stdout.write(result.stdout)
     sys.stderr.write(result.stderr)
     if result.returncode != 0:

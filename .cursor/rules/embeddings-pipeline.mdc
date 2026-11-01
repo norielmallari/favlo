@@ -1,5 +1,5 @@
 ---
-description: How a served embedding model implements EmbeddingsPipeline.
+description: How a served embedding model implements EmbeddingsPipeline. Passage length sizes from the serve ledger, with no private cap. The embeddings harness waits and does not take the lock. A GPU test uses smoke_lock run.
 globs: src/favlo/embeddings_pipeline.py,src/favlo/pipeline.py,pipelines/metal41/bge_m3/**,docs/bge-m3/**,harness/language_pipeline.py,harness/embeddings_agent.py
 alwaysApply: false
 ---
@@ -12,8 +12,34 @@ Bind `handle_embed = Pipeline()`. `embed` returns the vector and the token count
 
 A new abstract method on `EmbeddingsPipeline` updates every served embedding subclass in that same change.
 
-The language harness posts this route. After a change to `embed` or the list object, run `uv run python -m harness.language_pipeline`. That command is in [language-pipeline.mdc](language-pipeline.mdc). `python -m harness.embeddings_agent` remains the direct check of the same six sentences.
-
 Wrong: copying the list object into the pipeline package, or catching `ValueError` around the reply builder.
 
 Right: `embed` returns `(vector, tokens)` and the class writes `usage.prompt_tokens`.
+
+## Memory
+
+`src/favlo/memory.py` is the only allocator. `memory` is the process singleton. Device, residency set, and command queues stay process-owned. Heaps are per owner, kind (`resident`, `scratch`, `private`), and storage (`shared` or `private`). Do not call `newBufferWithLength` or keep a second allocator.
+
+`open_runtime` accepts `owner`. The listener calls `memory.set_max_memory` before that open. Stamp `_owner` before the first allocate:
+
+```python
+self._owner = owner or f"{stem}:{id(self)}"
+```
+
+`stem` is the flag stem (`bge-m3`). Every `allocate` and `upload` in that opening uses that string. `sweep` matches the whole string. `close` sweeps it in `finally`, including when `open` fails after a span exists. A missing record raises `FileNotFoundError` before `Gpu()`. The listener passes `mint_owner(stem)` when the signature includes `owner`, records `runtime._owner`, and sweeps that opening after `close`.
+
+The serve process keeps the ledger. This process allocates its own Metal buffers. `allocate`, `zeros`, `release`, and `sweep` report the owner and the byte counts on the worker pipe. Do not open that pipe. `budget()` asks the serve process and waits. The answer is reclaimable pages plus this daemon's live, pending, and returning bytes, including every child. `memory.set_max_memory` caps that answer. `room()` is `max(0, budget() - live - pending)`. Read those two. Do not parse `--max-memory`, and do not keep a private cap. An in-process command calls `memory.set_max_memory` before the first `budget()`.
+
+The one knob is the passage length. Weights plus one passage at the length the call named must fit in `room()` before the first commit. Read the budget at open and again before a later call that can use a longer passage. A larger answer may raise the limit. Do not shrink it while a request is in flight. When one passage at the named length does not fit, raise `RuntimeError` and name that length. Do not truncate the input, drop layers, or change the packed quant. 16 GB is the product floor. It is not free memory and it is not `budget()`.
+
+Spans go through `device_buffer(owner, nbytes)`. `release` returns a span the caller has dropped. Leave a buffer a later command or a live local still names. `sweep` waits out tracked command buffers, then frees that owner's spans and idle heaps.
+
+`close` sweeps the owner. The release is done when that owner has no live span and no command still holds a freed span. `memory.wait_released` returns on that check. Pending and returning bytes stay in the budget until the kernel reports them. They do not keep the process alive, and they do not keep the next call queued. The daemon does not admit the next call while an allocation or a release is still open. A short reclaim calls `note_returning` for the bytes still held, then drops the child. `confirm_released` and `reclaimable_bytes` stay on raw Mach counts.
+
+Wrong: `fit_length` from a raw `max_memory` integer, or a passage cut short so it fits.
+
+Right: `memory.budget()` sizes the limit, and an input past that limit is refused.
+
+The language harness posts this route. After a change to `embed` or the list object, run `uv run python -m harness.language_pipeline`. That command is in [language-pipeline.mdc](language-pipeline.mdc). `python -m harness.embeddings_agent` remains the direct check of the same six sentences. Both use one `favlo serve` on `127.0.0.1:8129` and do not take the machine lock. `harness.server` waits until no live pid holds `artifacts/pipeline-test.lock` before it talks to that listener.
+
+A command that compiles shaders, loads a checkpoint, or starts its own serve uses `python -m favlo.smoke_lock run`. It releases on failure and on SIGINT. Do not kill serve to free the GPU. Close during a live hold is 409.

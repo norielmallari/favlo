@@ -35,7 +35,6 @@ from qwen36_35b_a3b.cache import (
     kv_mode,
     kv_record_bytes,
     max_position,
-    parse_memory,
     repack_plane,
 )
 from qwen36_35b_a3b.convert import LANGUAGE_LAYERS, SLOT_MAP_BYTES
@@ -363,7 +362,6 @@ class Qwen36Runtime:
         kv_cache: str = "e4m3",
         console: Any = None,
         resident_percent: float | None = None,
-        max_memory: str | int | None = None,
         owner: str | None = None,
     ) -> None:
         del resident_percent
@@ -397,10 +395,9 @@ class Qwen36Runtime:
         resident_bytes = (
             self._mtp_resident_base if self._mtp_resident_base is not None else resident_file
         )
-        cap = parse_memory(max_memory)
         from favlo.memory import memory
 
-        self.max_memory = memory.budget() if cap is None else cap
+        self.max_memory = memory.budget()
         self._resident_bytes = resident_bytes
         card = max_position(self.root)
         fixed = _reserved_bytes(resident_bytes, 0, 0, self._mtp_extra)
@@ -1345,8 +1342,43 @@ class Qwen36Runtime:
                 threads,
             )
 
+    def refresh_budget(self) -> None:
+        """Ask the serve process again. A larger answer grows the atlas."""
+        from favlo.memory import memory
+
+        ceiling = memory.budget()
+        if ceiling <= self.max_memory:
+            return
+        self.max_memory = ceiling
+        fixed = _reserved_bytes(self._resident_bytes, 0, 0, self._mtp_extra)
+        longer = fit_positions(
+            ceiling,
+            fixed,
+            self.kv_cache,
+            max_position(self.root),
+            self._plane_at,
+            keep=MIN_IMAGES * (EXPERT_FP8 if self.expert_layout.mixed else EXPERT_IMAGE),
+        )
+        if longer is not None:
+            self._context_limit = min(max(self._context_limit, longer), DEFAULT_CONTEXT_LENGTH)
+        atlas = getattr(self, "atlas", None)
+        session = getattr(self, "session", None)
+        if atlas is None or session is None:
+            return
+        atlas.max_memory = ceiling
+        reserved = _reserved_bytes(
+            self._resident_bytes,
+            self.kv_bytes,
+            self._plane_at(self.max_pos),
+            self._mtp_extra,
+        )
+        self._drop_pending()
+        session.wait_inflight()
+        atlas.retune(session, reserved)
+
     def _grow(self, length: int) -> bool:
         """Widen the cache to cover ``length`` tokens and shrink the atlas to match."""
+        self.refresh_budget()
         if length <= self.max_pos:
             return True
         target = ((length + CONTEXT_STEP - 1) // CONTEXT_STEP) * CONTEXT_STEP

@@ -173,3 +173,38 @@ def test_mint_owner_is_the_stem_and_a_counter() -> None:
     second = mint_owner("z-image-turbo")
     assert first.startswith("z-image-turbo:")
     assert first != second
+
+
+def test_a_child_total_stays_in_the_budget_until_it_is_replaced(monkeypatch: Any) -> None:
+    _freeze_reclaimable(monkeypatch, 8 << 30)
+    before = memory.budget()
+    memory.account_child(41, {"model": 1_000_000}, 0, 0)
+    try:
+        assert memory.budget() == before + 1_000_000
+        memory.account_child(41, {"model": 1_000_000}, 0, 0)
+        assert memory.budget() == before + 1_000_000
+        memory.account_child(41, {"model": 250_000}, 0, 0)
+        assert memory.budget() == before + 250_000
+    finally:
+        memory.drop_child(41)
+
+
+def test_a_later_budget_ask_sees_pages_that_became_free() -> None:
+    answers = {"n": 10}
+    memory.set_budget_query(lambda: answers["n"])
+    try:
+        assert memory.budget() == 10
+        answers["n"] = 25
+        assert memory.budget() == 25
+    finally:
+        memory.set_budget_query(None)
+
+
+def test_a_global_cap_keeps_the_smaller_budget(monkeypatch: Any) -> None:
+    _freeze_reclaimable(monkeypatch, 8 << 30)
+    uncapped = memory.budget()
+    memory.set_max_memory("1GiB")
+    try:
+        assert memory.budget() == min(uncapped, 1 << 30)
+    finally:
+        memory.set_max_memory(None)

@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from favlo.memory import memory
+from favlo.memory import device_buffer, memory
 
 KERNELS = (
     "prefill_fp4_e8m0",
@@ -255,12 +255,12 @@ class Session:
         if raw:
             buffer = memory.upload(raw, owner=self._owner)
         else:
-            buffer = memory.allocate(16, owner=self._owner, zero=True)
+            buffer = device_buffer(self._owner, 16, zero=True)
         return self._keep(buffer)
 
     def allocate(self, nbytes: int) -> Any | None:
         """A shared buffer, or None when the device refuses the length."""
-        return self._keep(memory.allocate(max(int(nbytes), 16), owner=self._owner))
+        return self._keep(device_buffer(self._owner, nbytes))
 
     def close(self) -> None:
         """Wait for the queue and drop every buffer this session allocated."""

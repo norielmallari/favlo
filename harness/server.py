@@ -34,7 +34,9 @@ def open_listener(host: str = HOST, port: int = PORT) -> Listener:
     """Reuse a listener on ``host:port``, or start one and own it."""
     from favlo.cli import repo_root
     from favlo.daemon import ensure, port_open
+    from favlo.smoke_lock import wait_clear
 
+    wait_clear(root=repo_root())
     if port_open(host, port):
         print(f"reuse {host}:{port}", flush=True)
         return Listener(host=host, port=port, owned=False)

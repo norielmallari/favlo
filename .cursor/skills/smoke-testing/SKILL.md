@@ -7,13 +7,14 @@ description: Run Favlo language-model pipeline smoke and agent smoke. Pipeline s
 
 One pipeline. Read this skill when another skill says to smoke. Do not copy these commands into that skill.
 
-Take the GPU with the smoke lock before a command that loads a checkpoint. Run acquire, the smoke, and release in the same shell. Acquire closes the resident model when `favlo serve` is up and no request is open, then writes `artifacts/pipeline-test.lock`. The daemon stays up. Do not kill it. Exit 2 means a request is open: wait and run acquire again. Exit 3 means another live pid holds the lock: wait. Release on failure too.
+Take the GPU with one `run`. It waits for the lock, closes the resident model when `favlo serve` is up and no request is open, runs the smoke, and releases on every exit, including failure and SIGINT. The daemon stays up. Do not kill it.
 
 ```text
-uv run python -m favlo.smoke_lock acquire --pipeline <stem> --command smoke
-uv run python -m pytest tests/<file> -s
-uv run python -m favlo.smoke_lock release
+uv run python -m favlo.smoke_lock run --pipeline <stem> --command smoke -- \
+  uv run python -m pytest tests/<file> -s
 ```
+
+A stretch of several commands in one shell uses `acquire --wait` and one `release` at the end. `acquire` without `--wait` is for tests of exit 2 and 3.
 
 The file-agent and coding-agent commands start their own serve. They still need port 8129 free. Do not point them at a listener already on that port, and do not stop a daemon the user left running.
 

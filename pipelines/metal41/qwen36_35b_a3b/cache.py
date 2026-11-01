@@ -147,45 +147,6 @@ def repack_plane(
     return dst
 
 
-def parse_memory(text: str | int | None) -> int | None:
-    """``32GiB``, ``512MiB``, or a byte count. Empty means the caller picks the cap."""
-    if text is None or text == "":
-        return None
-    if isinstance(text, int):
-        if text < 1:
-            message = f"maximum memory {text} is not positive"
-            raise ValueError(message)
-        return text
-    raw = str(text).strip().replace("_", "")
-    suffix = ""
-    digits = raw
-    for ending, name in (
-        ("gib", "GiB"),
-        ("mib", "MiB"),
-        ("gb", "GiB"),
-        ("mb", "MiB"),
-        ("g", "GiB"),
-        ("m", "MiB"),
-    ):
-        if raw.lower().endswith(ending):
-            suffix = name
-            digits = raw[: -len(ending)]
-            break
-    try:
-        number = int(digits)
-    except ValueError as exc:
-        message = f"maximum memory {text} is not a byte count"
-        raise ValueError(message) from exc
-    if number < 1:
-        message = f"maximum memory {text} is not positive"
-        raise ValueError(message)
-    if suffix == "GiB":
-        return number << 30
-    if suffix == "MiB":
-        return number << 20
-    return number
-
-
 def max_position(root: Path) -> int:
     """The text config's ``max_position_embeddings``."""
     config = json.loads((root / "config.json").read_text())

@@ -232,8 +232,9 @@ def _accepts(opener: Any, name: str) -> bool:
 
 def open_runtime(selection: Any, console: Any, max_memory: str | None) -> Any:
     """Open the pipeline named on the registry row. The previous runtime is already closed."""
-    from favlo.memory import mint_owner
+    from favlo.memory import memory, mint_owner
 
+    memory.set_max_memory(max_memory)
     module = pipeline_module(selection)
     opener = getattr(module, "open_runtime", None)
     if not callable(opener):
@@ -349,7 +350,6 @@ def install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
             drop_runtime(state, args)
 
     child.on_crash = _crashed
-    memory.report(getattr(child, "counts", {}) or {})
     state["runtime"] = child
     state["memory_owners"] = tuple(child.counts)
     pipelines.add(child, state["memory_owners"])
@@ -441,7 +441,6 @@ def open_embed(state: dict[str, Any], args: Any, selection: Any) -> Any:
         _restore_console(ui, saved)
         raise
     child._embed_console = saved
-    memory.report(getattr(child, "counts", {}) or {})
     pipelines.add(child, tuple(getattr(child, "counts", {}) or ()))
     if ui is not None and ui.keeps_lines:
         label = selection.alias or selection.folder

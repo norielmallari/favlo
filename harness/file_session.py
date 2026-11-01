@@ -632,10 +632,10 @@ def main(argv: list[str] | None = None) -> int:
         print(log.text()[-3000:])
         return 1
     finally:
-        if server is not None:
-            _stop_server(server)
         if created:
             release(root=root)
+        if server is not None:
+            _stop_server(server)
     print(format_summary(result.requests, args.tokens))
     if result.note:
         print(result.note)

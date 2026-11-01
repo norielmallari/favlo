@@ -2,11 +2,15 @@
 
 import json
 import os
+import signal
+import subprocess
+import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from favlo.smoke_lock import acquire, clear_hold, hold, owner_pid, release
+from favlo.smoke_lock import acquire, clear_hold, hold, main, owner_pid, release, run
 
 
 class _Scripted(BaseHTTPRequestHandler):
@@ -160,6 +164,119 @@ def test_hold_leaves_a_lock_this_shell_already_owns(tmp_path: Path, monkeypatch)
     )
     assert created is False
     assert json.loads(path.read_text())["command"] == "smoke"
+
+
+def test_release_when_serve_is_down(tmp_path: Path, capsys) -> None:
+    path = tmp_path / "artifacts" / "pipeline-test.lock"
+    path.parent.mkdir()
+    body = {"pipeline": "qwen36-35b-a3b", "pid": os.getpid(), "command": "smoke"}
+    path.write_text(json.dumps(body))
+    code = release(root=tmp_path, port=1, pid=os.getpid())
+    text = capsys.readouterr().out
+    assert code == 0
+    assert "serve is not listening" in text
+    assert not path.exists()
+
+
+def test_release_refuses_a_live_holder(tmp_path: Path) -> None:
+    path = tmp_path / "artifacts" / "pipeline-test.lock"
+    path.parent.mkdir()
+    body = {"pipeline": "qwen36-35b-a3b", "pid": os.getppid(), "command": "smoke"}
+    path.write_text(json.dumps(body))
+    code = release(root=tmp_path, port=1, pid=os.getpid())
+    assert code == 3
+    assert path.is_file()
+
+
+def test_release_stale_removes_a_dead_pid(tmp_path: Path, capsys) -> None:
+    path = tmp_path / "artifacts" / "pipeline-test.lock"
+    path.parent.mkdir()
+    body = {"pipeline": "qwen36-35b-a3b", "pid": 2**30, "command": "smoke"}
+    path.write_text(json.dumps(body))
+    code = release(root=tmp_path, port=1, pid=os.getpid(), stale=True)
+    text = capsys.readouterr().out
+    assert code == 0
+    assert "stale lock released" in text
+    assert not path.exists()
+
+
+def test_run_releases_after_the_child_exits(tmp_path: Path) -> None:
+    code = run(
+        root=tmp_path,
+        pipeline="qwen36-35b-a3b",
+        command="smoke",
+        argv=[sys.executable, "-c", "raise SystemExit(0)"],
+        port=1,
+        wait=0.01,
+    )
+    assert code == 0
+    assert not (tmp_path / "artifacts" / "pipeline-test.lock").exists()
+
+
+def test_run_releases_after_the_child_fails(tmp_path: Path) -> None:
+    code = run(
+        root=tmp_path,
+        pipeline="qwen36-35b-a3b",
+        command="smoke",
+        argv=[sys.executable, "-c", "raise SystemExit(7)"],
+        port=1,
+        wait=0.01,
+    )
+    assert code == 7
+    assert not (tmp_path / "artifacts" / "pipeline-test.lock").exists()
+
+
+def test_run_releases_after_sigint(tmp_path: Path) -> None:
+    script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from favlo.smoke_lock import run\n"
+        "raise SystemExit(run(\n"
+        "    root=Path(sys.argv[1]),\n"
+        '    pipeline="qwen36-35b-a3b",\n'
+        '    command="smoke",\n'
+        '    argv=["sleep", "30"],\n'
+        "    port=1,\n"
+        "    wait=0.01,\n"
+        "))\n"
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = "src" + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script, str(tmp_path)],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+    )
+    lock = tmp_path / "artifacts" / "pipeline-test.lock"
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not lock.exists():
+        time.sleep(0.05)
+    assert lock.is_file()
+    proc.send_signal(signal.SIGINT)
+    assert proc.wait(timeout=10) == 130
+    assert not lock.exists()
+
+
+def test_acquire_wait_zero_stays_nonblocking(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "artifacts" / "pipeline-test.lock"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"pipeline": "qwen38-27b", "pid": os.getppid(), "command": "smoke"}))
+    monkeypatch.setattr("favlo.smoke_lock.repo_root", lambda: tmp_path)
+    code = main(
+        [
+            "--port",
+            "1",
+            "acquire",
+            "--wait",
+            "0",
+            "--pipeline",
+            "qwen36-35b-a3b",
+            "--command",
+            "smoke",
+        ]
+    )
+    assert code == 3
+    assert json.loads(path.read_text())["pid"] == os.getppid()
 
 
 def test_acquire_does_not_steal_a_live_lock(tmp_path: Path) -> None:

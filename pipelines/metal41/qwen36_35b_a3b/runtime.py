@@ -18,13 +18,15 @@ def open_runtime(
     max_memory: str | int | None = None,
     owner: str | None = None,
 ) -> Qwen36Runtime:
-    """Load the resident matrices and the expert atlas under ``max_memory``."""
+    """Load the resident matrices and the expert atlas under the serve ledger."""
     del resident_percent
+    from favlo.memory import memory
+
+    memory.set_max_memory(max_memory)
     return Qwen36Runtime(
         path,
         kv_cache=kv_cache,
         console=console,
-        max_memory=max_memory,
         owner=owner,
     )
 

@@ -1503,6 +1503,24 @@ class _QueueMedia:
         )
 
 
+def test_close_during_a_smoke_hold_is_refused() -> None:
+    from favlo.pipelines import pipelines
+
+    runtime = _Runtime()
+    state, thread = _serve_background(runtime)
+    state["record"] = "example-model"
+    state["smoke_hold"] = os.getpid()
+    pipelines.add(runtime, ())
+    port = int(state["server"].server_address[1])
+    try:
+        closed = _post_json(port, "/v1/pipelines/close", {})
+    finally:
+        state["smoke_hold"] = None
+        _stop_background(state, thread)
+    assert closed.startswith(b"HTTP/1.1 409")
+    assert runtime.closed is False
+
+
 def test_mcp_answers_after_the_pipeline_is_closed() -> None:
     from favlo.pipelines import pipelines
 

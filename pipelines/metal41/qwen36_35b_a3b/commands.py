@@ -37,7 +37,6 @@ from qwen36_35b_a3b.fetch import (
     shortfall,
 )
 from qwen36_35b_a3b.formats import promote_count
-from qwen36_35b_a3b.forward import Qwen36Runtime
 
 PIPELINE = "qwen36-35b-a3b"
 CARROT_PROMPT = (
@@ -374,7 +373,9 @@ def _quantize(args: argparse.Namespace) -> int:
 def _complete(args: argparse.Namespace) -> int:
     try:
         path, _selection = choose_complete(model=None, record=None, pipeline=PIPELINE)
-        runtime = Qwen36Runtime(
+        from qwen36_35b_a3b.runtime import open_runtime
+
+        runtime = open_runtime(
             path,
             kv_cache=args.kv_cache,
             max_memory=args.max_memory,

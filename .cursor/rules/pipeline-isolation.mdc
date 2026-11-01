@@ -42,21 +42,22 @@ Device buffers do not survive `close`. A value the next stage needs is in the ho
 
 Wait until the machine is free before a test command. That includes `pytest`, `kernels`, `quantize`, `complete`, `bf16`, `probe`, `matmul`, `python -m harness`, and `python -m harness.coding`: any command that compiles shaders, dispatches Metal, loads a checkpoint, quantizes, or starts `favlo serve`. Editing the write set does not wait. Reading another pipeline does not.
 
-The machine is busy when `artifacts/pipeline-test.lock` exists and the `pid` in it is still running. A running `favlo serve` is not itself a reason to wait. Take the lock with the smoke script. When the daemon is up and no request is open, the script closes the resident model and holds chat until release. The daemon stays up. Do not kill the server, and do not kill the process that holds the lock.
+The machine is busy when `artifacts/pipeline-test.lock` exists and the `pid` in it is still running. A running `favlo serve` is not itself a reason to wait. `python -m favlo.smoke_lock run` is the only take-and-release path. It waits until this shell owns the lock, runs the command, and releases on every exit, including a failed command and SIGINT. When the daemon is up and no request is open, the script closes the resident model and holds chat until that release. The daemon stays up. Do not kill the server, and do not kill the process that holds the lock. Do not sleep and retry acquire outside the script.
 
 ```text
-uv run python -m favlo.smoke_lock acquire --pipeline <stem> --command <name>
+uv run python -m favlo.smoke_lock run --pipeline <stem> --command <name> -- <command...>
 ```
 
-Exit 0 means this shell holds the lock and the GPU is free. Exit 2 means a request is open: the lock was not taken. Wait and run acquire again. Exit 3 means another live pid holds the lock. Wait. A lock whose `pid` is gone is stale. The next acquire removes it. The `favlo serve` a test starts itself is that test's process. The wait is before the test starts.
-
-Do not create the lock file by hand. Release it when the testing stretch ends, including when the command fails:
+A stretch of several commands in one shell uses one blocking acquire and one release:
 
 ```text
+uv run python -m favlo.smoke_lock acquire --wait --pipeline <stem> --command <name>
 uv run python -m favlo.smoke_lock release
 ```
 
-Release removes the file only when its `pid` is this shell. A chat during the hold receives 503. After release, the next chat loads a model again. The lock is one JSON object and nothing else:
+`acquire` without `--wait` is for tests of exit 2 and 3. Agents do not use it. A lock whose `pid` is gone is stale. `release --stale` removes it and resumes chat. Do not delete the lock file by hand. Do not use `kill`, `stop_pid`, or `POST /v1/pipelines/close` to end a hold. Close during a live hold is 409.
+
+A chat during the hold receives 503. After release, the next chat loads a model again. The lock is one JSON object and nothing else:
 
 ```json
 {"pipeline": "qwen38-27b", "pid": 12345, "command": "kernels"}
@@ -64,4 +65,4 @@ Release removes the file only when its `pid` is this shell. A chat during the ho
 
 `pipeline` is the flag stem. `pid` is the shell that owns the test. `uv` and `python` are skipped when the script records that pid, so `uv run` names the shell that stays up for the stretch. A nested command from that shell leaves the file in place. `command` is the short name of that test. Do not write a name, home directory, hostname, or device path.
 
-The file lives under `artifacts/`, which is gitignored. Do not commit it. `pid` is the shell that ran acquire, not the short-lived Python process. Run acquire, the test, and release in that same shell.
+The file lives under `artifacts/`, which is gitignored. Do not commit it. `pid` is the shell that ran `run` or `acquire --wait`, not the short-lived Python process. A multi-command stretch ends with one `release` in that same shell.

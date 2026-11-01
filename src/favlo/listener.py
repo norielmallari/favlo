@@ -282,6 +282,9 @@ def serve_main(argv: Sequence[str] | None = None) -> int:
 
 def _listen(args: Any, ui: Console) -> int:
     """Run the listener on this process. Progress uses ``ui``."""
+    from favlo.memory import memory
+
+    memory.set_max_memory(getattr(args, "max_memory", None))
     attach_process_log(ui)
     bind_log(ui.log)
     ui.live_decode = True

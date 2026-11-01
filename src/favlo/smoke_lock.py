@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -154,15 +155,21 @@ def release(
     host: str = _HOST,
     port: int = _PORT,
     pid: int | None = None,
+    stale: bool = False,
 ) -> int:
-    """Clear the smoke hold and remove this shell's lock."""
+    """Clear the smoke hold and remove this shell's lock.
+
+    A dead recorded pid is the same path. ``stale`` names that recovery.
+    A live pid that is not this shell is left in place.
+    """
     owner = owner_pid() if pid is None else pid
     path = lock_path(root)
     holder = _read_pid(path)
     if holder is not None and holder != owner and alive(holder):
         print(f"lock held by {holder}")
         return 3
-    code, _body = _post(host, port, "/v1/resume", {"pid": owner})
+    resume_pid = holder if holder is not None and not alive(holder) else owner
+    code, _body = _post(host, port, "/v1/resume", {"pid": resume_pid})
     if code not in {0, 200}:
         if code == 409:
             print("a request is open")
@@ -171,8 +178,85 @@ def release(
         return 1
     if holder is None or holder == owner or not alive(holder):
         _drop_claim(root, owner if holder == owner else holder or owner)
-    print("lock released")
+    if code == 0:
+        print("serve is not listening")
+    recovered = stale and holder is not None and not alive(holder)
+    print("stale lock released" if recovered else "lock released")
     return 0
+
+
+def wait_clear(
+    *,
+    root: Path,
+    wait: float = 5.0,
+) -> None:
+    """Block until no live pid holds the machine lock. This call does not take it."""
+    while True:
+        holder = _read_pid(lock_path(root))
+        if holder is None or not alive(holder):
+            return
+        print(f"lock held by {holder}", flush=True)
+        time.sleep(wait)
+
+
+def run(
+    *,
+    root: Path,
+    pipeline: str,
+    command: str,
+    argv: list[str],
+    host: str = _HOST,
+    port: int = _PORT,
+    wait: float = 5.0,
+) -> int:
+    """Hold the lock, run ``argv``, and release when this call created the claim."""
+    if not argv:
+        print("a command is required")
+        return 2
+    created = hold(
+        root=root,
+        pipeline=pipeline,
+        command=command,
+        host=host,
+        port=port,
+        wait=wait,
+    )
+    child: subprocess.Popen[bytes] | None = None
+    previous = {
+        signal.SIGINT: signal.getsignal(signal.SIGINT),
+        signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+    }
+
+    def _on_signal(signum: int, _frame: object) -> None:
+        if child is not None and child.poll() is None:
+            child.send_signal(signum)
+        raise KeyboardInterrupt
+
+    code = 1
+    try:
+        signal.signal(signal.SIGINT, _on_signal)
+        signal.signal(signal.SIGTERM, _on_signal)
+        child = subprocess.Popen(argv)
+        code = int(child.wait())
+    except KeyboardInterrupt:
+        if child is not None and child.poll() is None:
+            child.send_signal(signal.SIGINT)
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+        code = 130
+    finally:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            if created:
+                release(root=root, host=host, port=port)
+        finally:
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
+    return code
 
 
 def _parent(pid: int) -> int:
@@ -287,10 +371,27 @@ def main(argv: list[str] | None = None) -> int:
     take = sub.add_parser("acquire")
     take.add_argument("--pipeline", required=True)
     take.add_argument("--command", required=True)
-    sub.add_parser("release")
+    take.add_argument("--wait", nargs="?", const=5.0, default=None, type=float)
+    unlock = sub.add_parser("release")
+    unlock.add_argument("--stale", action="store_true")
+    wrapped = sub.add_parser("run")
+    wrapped.add_argument("--pipeline", required=True)
+    wrapped.add_argument("--command", required=True)
+    wrapped.add_argument("--wait", type=float, default=5.0)
+    wrapped.add_argument("argv", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     root = repo_root()
     if args.action == "acquire":
+        if args.wait is not None and args.wait > 0:
+            hold(
+                root=root,
+                pipeline=args.pipeline,
+                command=args.command,
+                host=args.host,
+                port=args.port,
+                wait=args.wait,
+            )
+            return 0
         return acquire(
             root=root,
             pipeline=args.pipeline,
@@ -298,7 +399,20 @@ def main(argv: list[str] | None = None) -> int:
             host=args.host,
             port=args.port,
         )
-    return release(root=root, host=args.host, port=args.port)
+    if args.action == "run":
+        command = list(args.argv)
+        if command[:1] == ["--"]:
+            command = command[1:]
+        return run(
+            root=root,
+            pipeline=args.pipeline,
+            command=args.command,
+            argv=command,
+            host=args.host,
+            port=args.port,
+            wait=args.wait,
+        )
+    return release(root=root, host=args.host, port=args.port, stale=args.stale)
 
 
 if __name__ == "__main__":

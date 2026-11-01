@@ -18,7 +18,6 @@ from qwen36_35b_a3b.cache import (
     kv_buffer_bytes,
     kv_mode,
     max_position,
-    parse_memory,
     repack_plane,
 )
 from qwen36_35b_a3b.checks import run_checks
@@ -64,7 +63,7 @@ def test_open_runtime_forwards_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("qwen36_35b_a3b.runtime.Qwen36Runtime", fake)
     assert open_runtime(Path("record"), owner="qwen36-35b-a3b:7") == "runtime"
     assert captured["owner"] == "qwen36-35b-a3b:7"
-    assert captured["max_memory"] is None
+    assert "max_memory" not in captured
 
 
 def test_a_missing_record_keeps_the_passed_owner(tmp_path: Path) -> None:
@@ -1268,6 +1267,8 @@ def test_kv_widths_and_atlas_budget() -> None:
     images = 40 * 256
     assert atlas_slots((16 << 30), image, 6 << 30, layers=images) < images
     assert atlas_slots((32 << 30), image, 1 << 30, layers=images) == images
+    from favlo.memory import parse_memory
+
     assert parse_memory("32GiB") == 32 << 30
     assert parse_memory("512MiB") == 512 << 20
     try:
@@ -1482,6 +1483,19 @@ def test_resident_mtp_base_is_the_dense_suffix() -> None:
     buf, offset, _entry = runtime._loc("lm_head.weight")
     assert buf == "language"
     assert offset == 0
+
+
+def test_a_prompt_past_the_opening_cache_fits_the_served_window() -> None:
+    from favlo.responses import RequestError
+    from qwen36_35b_a3b.cache import DEFAULT_CONTEXT_LENGTH
+    from qwen36_35b_a3b.chat import _fit_prompt
+
+    runtime = SimpleNamespace(max_pos=2048, _context_limit=DEFAULT_CONTEXT_LENGTH)
+    prompt = [1] * 3000
+    messages = [{"role": "user", "content": "hello"}]
+    assert _fit_prompt(runtime, {}, messages, [], False, False, prompt) == prompt
+    with pytest.raises(RequestError, match="input does not fit"):
+        _fit_prompt(runtime, {}, messages, [], False, False, [1] * (DEFAULT_CONTEXT_LENGTH + 1))
 
 
 def test_mtp_flag_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:

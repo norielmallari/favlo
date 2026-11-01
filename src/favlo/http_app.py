@@ -395,9 +395,12 @@ async def _resume(request: Request, state: dict[str, Any]) -> Response:
 
 
 async def _pipelines_close(args: Any, state: dict[str, Any]) -> Response:
-    """Close every runtime and leave ``POST /mcp`` up. This does not set the smoke hold."""
+    """Close every runtime and leave ``POST /mcp`` up. A live smoke hold is refused."""
+    from favlo.listener import _smoke_held
     from favlo.pipelines import pipelines
 
+    if _smoke_held(state):
+        return _error(409, "a smoke hold is active", "busy")
     _prepare_listener(state)
     try:
         closed = await asyncio.to_thread(pipelines.close, state, args)

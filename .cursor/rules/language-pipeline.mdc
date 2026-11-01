@@ -1,6 +1,6 @@
 ---
-description: How a served language model implements LanguagePipeline. Chat follows the OpenAI Chat Completions object, not another pipeline. NumPy stays off the hot serving path. Weights load from SSD into one device buffer.
-globs: src/favlo/pipeline.py,src/favlo/language_pipeline.py,harness/language_pipeline.py,tests/test_language_pipeline.py,pipelines/metal41/qwen36_35b_a3b/**,pipelines/metal41/qwen38_27b/**,pipelines/parked/qwen38_flash_next/**,pipelines/metal41/gemma4_26b_a4b/**,pipelines/metal41/spark_x26_1_7b/**,pipelines/metal41/spark-x26-1-7b.py,docs/qwen36-35b-a3b/**,docs/qwen38-27b/**,docs/qwen38-flash-next/**,docs/gemma4-26b-a4b/**,docs/spark-x26-1-7b/**
+description: How a served language model implements LanguagePipeline. Chat follows the OpenAI Chat Completions object, not another pipeline. NumPy stays off the hot serving path. A prompt up to the configured maximum is accepted. The context working set sizes from the serve ledger, with no private cap. Streaming is a queue off the GPU thread. Progress uses favlo.console begin/end/note, and those writes stay off the hot path. Weights load from SSD into one device buffer. A GPU test uses smoke_lock run. The language-pipeline harness waits and does not take the lock.
+globs: src/favlo/pipeline.py,src/favlo/language_pipeline.py,harness/language_pipeline.py,tests/test_language_pipeline.py,pipelines/metal41/qwen36_35b_a3b/**,pipelines/metal41/qwen38_27b/**,pipelines/parked/qwen38_flash_next/**,pipelines/metal41/gemma4_26b_a4b/**,pipelines/metal41/spark_x26_1_7b/**,pipelines/metal41/spark-x26-1-7b.py,pipelines/metal41/qwen35_4b/**,pipelines/metal41/qwen35-4b.py,docs/qwen36-35b-a3b/**,docs/qwen38-27b/**,docs/qwen38-flash-next/**,docs/gemma4-26b-a4b/**,docs/spark-x26-1-7b/**,docs/qwen35-4b/**
 alwaysApply: false
 ---
 
@@ -20,11 +20,53 @@ A new abstract method on `LanguagePipeline` updates every served language subcla
 
 The pipeline converts its own markup into those fields before the object is written. Markers stay out of `content`. A call becomes `tool_calls`. An open trace stays `reasoning_content` and does not become the reply. A call that starts before the trace closes ends the trace. The marker strings belong to that model. They are not taken from a sibling pipeline.
 
+A prompt of any length up to the pipeline's configured maximum is accepted. That maximum is the served context window. The cache length allocated at open is not a reason to reject the prompt. A prompt past that maximum is rejected. `truncation` `auto` may drop the oldest non-system messages until the prompt fits the maximum. An omitted `truncation` does not drop them.
+
+When the prompt fits the maximum and does not fit the current working set, grow that working set from the ledger and then run prefill. The grow stays in that pipeline. It is not a shared policy on `LanguagePipeline`.
+
+## Memory
+
+`src/favlo/memory.py` is the only allocator. `memory` is the process singleton. Device, residency set, and command queues stay process-owned. Heaps are per owner, kind (`resident`, `scratch`, `private`), and storage (`shared` or `private`). Do not call `newBufferWithLength` or keep a second allocator.
+
+`open_runtime` accepts `owner`. The listener calls `memory.set_max_memory` before that open. Stamp `_owner` before the first allocate:
+
+```python
+self._owner = owner or f"{stem}:{id(self)}"
+```
+
+`stem` is the flag stem (`qwen36-35b-a3b`). Every `allocate` and `upload` in that opening uses that string. `sweep` matches the whole string. `close` sweeps it in `finally`, including when `open` fails after a span exists. A missing record raises `FileNotFoundError` before `Gpu()`. The listener passes `mint_owner(stem)` when the signature includes `owner`, records `runtime._owner`, and sweeps that opening after `close`.
+
+The serve process keeps the ledger. This process allocates its own Metal buffers. `allocate`, `zeros`, `release`, and `sweep` report the owner and the byte counts on the worker pipe. Do not open that pipe. `budget()` asks the serve process and waits. The answer is reclaimable pages plus this daemon's live, pending, and returning bytes, including every child. `memory.set_max_memory` caps that answer. `room()` is `max(0, budget() - live - pending)`. Read those two. Do not parse `--max-memory`, and do not keep `_memory_cap` or a private `parse_memory`. An in-process `complete` calls `memory.set_max_memory` before the first `budget()`.
+
+The one knob is the context working set. Weights plus that working set must fit in `room()` before the first commit. The prompt keeps its length. Read the budget at open and again before growing the cache, including before a prefill chunk. A larger answer may raise the working set. Do not shrink it while a request is in flight. At open, shrink the working set down to the minimum that still runs the prompt. When that minimum does not fit, raise `RuntimeError` and name the prompt length. Do not drop layers, stand in a host GEMV, or change the packed quant. 16 GB is the product floor. It is not free memory and it is not `budget()`.
+
+Spans go through `device_buffer(owner, nbytes)`. `release` returns a span the caller has dropped. Leave a buffer a later command or a live local still names. `sweep` waits out tracked command buffers, then frees that owner's spans and idle heaps.
+
+`close` sweeps the owner. The release is done when that owner has no live span and no command still holds a freed span. `memory.wait_released` returns on that check. Pending and returning bytes stay in the budget until the kernel reports them. They do not keep the process alive, and they do not keep the next call queued. The daemon does not admit the next call while an allocation or a release is still open. A short reclaim calls `note_returning` for the bytes still held, then drops the child. `confirm_released` and `reclaimable_bytes` stay on raw Mach counts.
+
+Wrong: `self.max_memory = cap or budget()` stored once at open, a second `min` with a private cap, or a prompt rejected because the cache is still at its opening length.
+
+Right: `memory.budget()` on each sizing decision, and a longer cache when that answer grew.
+
 Decode streaming always uses a separate thread and a queue. The decode loop enqueues the token id and returns. It does not decode text, format an event, or write the socket. The stream thread reads that queue, turns ids into text, and writes the events. The enqueue does not wait for that write, so a slow client does not stall the next GPU step. The decode thread joins the stream thread after generation returns. A dead client stops the decode loop on the next enqueue.
 
 Wrong: the decode loop writes the event before the next GPU step.
 
 Right: the decode loop puts the token id on a queue, and a stream thread writes the event.
+
+Progress uses `favlo.console` only. The pipeline does not print its own status rows. Phases are `load`, `prefill`, and `decode` on the serve path (`download` and `quantize` on setup). Diagnostics go through `console.note` (or `format_note` when the console is absent). Canonical note topics are `prompt`, `cache`, `prefix_load`, `prefix_store`, `prefix_store_failed`, `mtp_depth`, `mtp`, `incoming`, `output`, and `context`. Pretty folds those into the daemon log. While a listener request is open, prefill and decode summaries wait and print as one durable line when the request closes.
+
+No progress write blocks the hot path. Prefill and decode store `progress.done` and return. Opening a phase, closing a phase, and a diagnostic note are enqueued. The console thread formats the line and writes it. The enqueue returns without waiting for that write. A slow pipe or a slow terminal does not stall the next GPU step. The decode thread does not join the console thread between kernels.
+
+Load: `begin("load", total=bytes, unit="bytes")` while the resident record (and any atlas) is read into device buffers. Advance `done` by each sequential read. End with a short loaded summary naming the record and the live context.
+
+Prefill: `begin("prefill", total=uncached_tok, unit="tok")` after prefix align. Advance `done` as each chunk (and each layer of a chunk, when that pipeline reports per layer) finishes. The prefill clock starts at the uncached forward and ends when the first output token is sampled. The forward that produced that token's logits stays inside prefill. The prompt prefix write stays outside. End with `format_rate("prefill", uncached_tok, seconds)`.
+
+Decode: after that first sample, `begin("decode", total=0, unit="tok")` when `console.live_decode` is true (pretty). An open-ended row uses a spinner. Set `progress.done` to the completion length after each kept token. The decode clock starts at that first sample and ends at the last. A send between samples stays inside decode. The last send and the finished-sequence prefix write stay outside. End with `format_rate("decode", completion_tok, seconds)`. On cancel or disconnect, end an open row with an empty summary.
+
+Wrong: `print` a tok/s line from the forward, skip `begin`/`end`, advance the bar from the stream thread, or wait on a phase write before the next GPU step.
+
+Right: the hot path stores `progress.done` and enqueues the phase open, the phase close, and the note. The console thread writes them. `format_rate` is the close string the harness parses.
 
 NumPy stays off the hot serving path. Prefill, decode, routing, expert grouping, and sampling do not import it, build an array with it, or read a device buffer back through it. The sampled token id may come back as bytes. Checkpoint packing, prefix packing, and the kernel self-checks are not that path.
 
@@ -57,7 +99,9 @@ uv run pytest tests/test_language_pipeline.py
 uv run python -m harness.language_pipeline
 ```
 
-The harness is the one agent for the registry default chat model and `bge-m3-int8`. It does not take the machine lock. It uses one `favlo serve` on `127.0.0.1:8129`. Exit 0 means `check_embeddings` ran and every paraphrase cosine beat every cross-topic cosine. A kernel or quantize edit that leaves `complete`, the disconnect shell, and the reply alone does not run the harness.
+The harness is the one agent for the registry default chat model and `bge-m3-int8`. It does not take the machine lock. `harness.server` waits until no live pid holds `artifacts/pipeline-test.lock`, then uses one `favlo serve` on `127.0.0.1:8129`. Exit 0 means `check_embeddings` ran and every paraphrase cosine beat every cross-topic cosine. A kernel or quantize edit that leaves `complete`, the disconnect shell, and the reply alone does not run the harness.
+
+A command that compiles shaders, loads a checkpoint, or starts its own serve uses `python -m favlo.smoke_lock run`. `python -m harness`, `python -m harness.coding`, and `python -m harness.worktree` take that lock and release it before they stop the private serve they started. They need port 8129 free. They do not attach to a listener someone else left running. Do not kill serve to free the GPU. Close during a live hold is 409.
 
 Wrong: a shared sampler in `LanguagePipeline`, or a second harness per language model.
 

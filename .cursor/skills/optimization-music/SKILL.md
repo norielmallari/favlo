@@ -28,7 +28,7 @@ The ceiling used for the 90% test is the kernel ceiling. The bandwidth ceiling i
 
 Change this pipeline's kernels or the forward that launches them. Update `docs/<pipeline>/` in the same change when the kernels, records, or cache change.
 
-Take the GPU with `uv run python -m favlo.smoke_lock acquire --pipeline <stem> --command <name>` before any command that compiles shaders, dispatches Metal, loads a checkpoint, quantizes, or starts `favlo serve`. Run acquire, the command, and `uv run python -m favlo.smoke_lock release` in the same shell. Exit 2 or 3 means wait and run acquire again. Do not kill a serve the user left running.
+Take the GPU with `uv run python -m favlo.smoke_lock run --pipeline <stem> --command <name> -- <command>` before any command that compiles shaders, dispatches Metal, loads a checkpoint, quantizes, or starts `favlo serve`. `run` releases when the command exits, including failure and SIGINT. A stretch of several commands uses `acquire --wait` and one `release`. Do not kill a serve the user left running.
 
 ## 3. Smoke
 

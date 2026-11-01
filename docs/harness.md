@@ -21,7 +21,7 @@ python -m harness.coding --model <id>
 python -m harness.worktree --model <id>
 ```
 
-These take the machine lock with `python -m favlo.smoke_lock`. The recorded pid is the shell that invoked it. A lock that shell already holds stays in place. They restart the process they started so a later turn reloads a prefix. They require port 8129 to be free. They do not attach to a listener someone else left running.
+These take the machine lock through `python -m favlo.smoke_lock`, the same module as `run`. The recorded pid is the shell that invoked it. A lock that shell already holds stays in place. They release that claim before they stop the private serve they started. They restart the process they started so a later turn reloads a prefix. They require port 8129 to be free. They do not attach to a listener someone else left running. Media harnesses do not take the lock. `harness.server` waits until no live pid holds it, then reuses `127.0.0.1:8129`.
 
 A media harness does not take that lock. It calls the listener on `127.0.0.1:8129` (directly or through `harness.server`).
 

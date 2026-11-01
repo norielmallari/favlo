@@ -12,6 +12,8 @@ import importlib.util
 from pathlib import Path
 
 import pytest
+
+from favlo.memory import memory
 from qwen36_35b_a3b.forward import Qwen36Runtime
 
 _CAP = "16GiB"
@@ -38,17 +40,21 @@ pytestmark = pytest.mark.skip(reason="16GiB carrot smoke is paused")
 def carrot_runtime():
     if not (_CASES._ROOT / "manifest.json").is_file():
         pytest.skip("quantized record is not installed")
-    runtime = Qwen36Runtime(_CASES._ROOT, max_memory=_CAP)
-    if runtime.max_memory != _BYTES:
-        message = f"memory cap is {runtime.max_memory}, not {_BYTES}"
-        raise AssertionError(message)
-    if runtime.atlas.slots >= 40 * 256:
-        message = f"16GiB atlas held all {runtime.atlas.slots} expert images"
-        raise AssertionError(message)
+    memory.set_max_memory(_CAP)
     try:
-        yield runtime
+        runtime = Qwen36Runtime(_CASES._ROOT)
+        if runtime.max_memory != memory.budget() or runtime.max_memory > _BYTES:
+            message = f"memory cap is {runtime.max_memory}, not at most {_BYTES}"
+            raise AssertionError(message)
+        if runtime.atlas.slots >= 40 * 256:
+            message = f"16GiB atlas held all {runtime.atlas.slots} expert images"
+            raise AssertionError(message)
+        try:
+            yield runtime
+        finally:
+            runtime.close()
     finally:
-        runtime.close()
+        memory.set_max_memory(None)
 
 
 def test_carrot_instruct_greedy(carrot_runtime: Qwen36Runtime) -> None:

@@ -205,6 +205,9 @@ def prefill_ids(
     cursor = pos0
     remaining = ids
     while remaining:
+        refresh = getattr(runtime, "refresh_budget", None)
+        if callable(refresh):
+            refresh()
         take = min(CHUNK, len(remaining))
         chunk = remaining[:take]
         rest = remaining[take:]

@@ -109,6 +109,7 @@ class PipelineChild:
         self.on_crash: Any = None
         self._proc: subprocess.Popen[bytes] | None = None
         self._control: int | None = None
+        self._budget_write: int | None = None
         self._baseline: int | None = None
         self._while_resident: int | None = None
         self._release_from: int | None = None
@@ -256,8 +257,11 @@ class PipelineChild:
         self._baseline = reclaimable_bytes()
         read_fd, write_fd = os.pipe()
         os.set_inheritable(read_fd, True)
+        budget_read, budget_write = os.pipe()
+        os.set_inheritable(budget_read, True)
         env = dict(os.environ)
         env["FAVLO_CONTROL_FD"] = str(read_fd)
+        env["FAVLO_BUDGET_FD"] = str(budget_read)
         if self.stub:
             env["FAVLO_WORKER_STUB"] = "1"
         proc = subprocess.Popen(
@@ -266,13 +270,15 @@ class PipelineChild:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=env,
-            pass_fds=(read_fd,),
+            pass_fds=(read_fd, budget_read),
             start_new_session=True,
         )
         _CHILD_PIDS.add(proc.pid)
         os.close(read_fd)
+        os.close(budget_read)
         self._proc = proc
         self._control = write_fd
+        self._budget_write = budget_write
         threading.Thread(target=self._read_stdout, name="favlo-pipeline-read", daemon=True).start()
         threading.Thread(target=self._reap, name="favlo-pipeline-reap", daemon=True).start()
         if proc.stderr is not None:
@@ -335,9 +341,42 @@ class PipelineChild:
             if isinstance(message, dict) and message.get("op") == "console":
                 self._apply_console(message.get("event"))
                 continue
+            if isinstance(message, dict) and message.get("op") == "account":
+                self._apply_account(message)
+                continue
+            if isinstance(message, dict) and message.get("op") == "budget":
+                self._answer_budget()
+                continue
             if isinstance(message, dict):
                 self._messages.put(message)
         self._messages.put({"op": "gone"})
+
+    def _apply_account(self, message: dict[str, Any]) -> None:
+        owners = message.get("owners")
+        if not isinstance(owners, dict):
+            return
+        pending = message.get("pending")
+        returning = message.get("returning")
+        from favlo.memory import memory
+
+        memory.account_child(
+            id(self),
+            owners,
+            int(pending) if isinstance(pending, int) and not isinstance(pending, bool) else 0,
+            int(returning) if isinstance(returning, int) and not isinstance(returning, bool) else 0,
+        )
+
+    def _answer_budget(self) -> None:
+        fd = self._budget_write
+        if fd is None:
+            return
+        from favlo.memory import memory
+
+        blob = (json.dumps({"bytes": memory.budget()}) + "\n").encode()
+        try:
+            os.write(fd, blob)
+        except OSError:
+            return
 
     def _apply_console(self, event: Any) -> None:
         apply = getattr(self._ui, "apply_event", None)
@@ -410,6 +449,8 @@ class PipelineChild:
             if before is not None and code is not None:
                 if not memory.confirm_released(before, held):
                     _log_line("reclaimable pages stopped short")
+                    memory.note_returning(held)
+            memory.drop_child(id(self))
             memory.forget(owners)
         finally:
             self._release_memory()
@@ -518,6 +559,37 @@ def _drain(stream: Any) -> None:
             _log_line(text)
 
 
+def _install_ledger(proto: Any) -> None:
+    """Report spans to the serve process and ask it for the budget."""
+    raw = os.environ.get("FAVLO_BUDGET_FD")
+    if raw is None or not raw.isdigit():
+        return
+    from favlo.memory import memory
+
+    reply = os.fdopen(int(raw), "rb", buffering=0)
+    gate = threading.Lock()
+
+    def publish(payload: dict[str, Any]) -> None:
+        _emit(proto, {"op": "account", **payload})
+
+    def ask() -> int:
+        with gate:
+            _emit(proto, {"op": "budget"})
+            line = reply.readline()
+        if not line:
+            message = "the serve process closed the budget reply"
+            raise RuntimeError(message)
+        body = json.loads(line.decode("utf-8"))
+        nbytes = body.get("bytes") if isinstance(body, dict) else None
+        if isinstance(nbytes, bool) or not isinstance(nbytes, int) or nbytes < 0:
+            message = "the serve process returned no budget"
+            raise RuntimeError(message)
+        return nbytes
+
+    memory.set_account_hook(publish)
+    memory.set_budget_query(ask)
+
+
 def main() -> None:
     """Read one command stream. Stdout is the protocol. Prints go to stderr."""
     proto_fd = os.dup(1)
@@ -530,6 +602,7 @@ def main() -> None:
     max_memory: str | None = None
     stub = os.environ.get("FAVLO_WORKER_STUB") == "1"
     console = _pipeline_console(proto)
+    _install_ledger(proto)
     try:
         _serve_child(proto, control, runtime, module, selection, max_memory, stub, console)
     finally:
