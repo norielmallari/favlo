@@ -13,6 +13,8 @@ import queue
 import threading
 from typing import Any
 
+from favlo.usage import complete_chat_usage
+
 
 class MemoryReply:
     """Records one reply. Pipeline tests use this instead of a socket."""
@@ -27,6 +29,7 @@ class MemoryReply:
         self.sent: list[bytes] = []
 
     def json(self, status: int, payload: dict[str, Any]) -> None:
+        complete_chat_usage(payload)
         self.started = True
         self.status = status
         self.body = payload
@@ -36,6 +39,7 @@ class MemoryReply:
         self.started = True
 
     def event(self, payload: dict[str, Any]) -> None:
+        complete_chat_usage(payload)
         self.events.append(payload)
 
     def done(self) -> None:
@@ -76,6 +80,7 @@ class LiveReply:
     def json(self, status: int, payload: dict[str, Any]) -> None:
         if self._kind == "stream":
             return
+        complete_chat_usage(payload)
         self.started = True
         self._kind = "json"
         self.status = status
@@ -92,6 +97,7 @@ class LiveReply:
         self._ready.set()
 
     def event(self, payload: dict[str, Any]) -> None:
+        complete_chat_usage(payload)
         self._write(b"data: " + json.dumps(payload).encode() + b"\n\n")
 
     def done(self) -> None:

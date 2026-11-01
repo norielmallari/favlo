@@ -14,7 +14,6 @@ import asyncio
 from pathlib import Path
 
 from agent_framework import Agent, tool
-from openai import AsyncOpenAI
 
 from favlo.chat_client import open_chat_client
 from harness.embeddings_agent import (
@@ -62,8 +61,11 @@ def _agent(base_url: str, tools: list[object], model: str) -> int:
 
 
 async def _run(base_url: str, tools: list[object], model: str) -> None:
-    http = AsyncOpenAI(api_key="favlo", base_url=base_url, timeout=None, max_retries=0)
-    client = open_chat_client(model, base_url, async_client=http)
+    client = open_chat_client(model, base_url)
+    http = getattr(client, "client", None)
+    if http is not None:
+        http.timeout = None
+        http.max_retries = 0
     client.function_invocation_configuration["max_iterations"] = 1
     client.function_invocation_configuration["max_consecutive_errors_per_request"] = 1
     agent = Agent(

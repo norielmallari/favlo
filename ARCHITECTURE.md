@@ -78,10 +78,11 @@ src/favlo/              process entry; the pipeline manager loads the pipeline a
   embeddings_pipeline.py list object a served embedding model inherits
   media_pipeline.py     listener contract a served media pipeline inherits
   mcp_server.py         FastMCP media queue, Tasks, and favlo:// reads
-  reply.py              the object a pipeline writes; the server turns it into HTTP
+  reply.py              the object a pipeline writes; the server turns it into HTTP and fills chat usage
+  usage.py              OpenAI token fields on a chat completion, including max_prompt_tokens
   daemon.py             spawn and stop the listener; no pipeline imports
   console.py            status row; no pipeline imports
-  chat_client.py        Agent Framework chat client; reasoning stays on reasoning_content
+  chat_client.py        Agent Framework chat client; reasoning stays on reasoning_content. It keeps max_prompt_tokens and leaves older messages out at half that cap
   persona.py            horse persona
   config_tools.py       configuration tool group for the web
   prefix.py             SSD prefix store

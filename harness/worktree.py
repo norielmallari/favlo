@@ -30,10 +30,9 @@ from agent_framework import (
     tool,
 )
 from agent_framework.openai import OpenAIChatCompletionClient
-from openai import AsyncOpenAI
 from pydantic import Field
 
-from favlo.chat_client import open_chat_client
+from favlo.chat_client import close_chat_client, open_chat_client
 from harness.coding.workspace import locate
 from harness.file_session import (
     Log,
@@ -324,11 +323,10 @@ def _open_agent(
     model: str,
     tools: list[object],
     gate: SummaryGate,
-    http: AsyncOpenAI,
-) -> tuple[OpenAIChatCompletionClient, Agent]:
-    client = open_chat_client(model, base_url, async_client=http)
+) -> tuple[OpenAIChatCompletionClient, OpenAIChatCompletionClient, Agent]:
+    client = open_chat_client(model, base_url)
     client.function_invocation_configuration["max_iterations"] = 1
-    summary_client = open_chat_client(model, base_url, async_client=http)
+    summary_client = open_chat_client(model, base_url)
     strategy = SummarizationStrategy(
         client=_InstructSummarizer(summary_client),
         target_count=4,
@@ -347,7 +345,7 @@ def _open_agent(
         tools=tools,
         context_providers=[history, compaction],
     )
-    return client, agent
+    return client, summary_client, agent
 
 
 def _options(thinking: bool, tool_name: str | None) -> dict[str, object]:
@@ -392,8 +390,7 @@ async def run_worktree_agent(
     tools = [_write_tool(root), _read_tool(root)]
     gate = SummaryGate(target)
     base_url = f"http://127.0.0.1:{server.port}/v1"
-    http = AsyncOpenAI(api_key="favlo", base_url=base_url, timeout=3600.0)
-    _client, agent = _open_agent(base_url, model, tools, gate, http)
+    client, summary, agent = _open_agent(base_url, model, tools, gate)
     session = agent.create_session()
     requests: list = []
     seen = 0
@@ -445,7 +442,8 @@ async def run_worktree_agent(
             agent, session, _AFTER, log, server, seen, thinking=False, tool_name=None
         )
     finally:
-        await http.close()
+        await close_chat_client(client)
+        await close_chat_client(summary)
         remove_worktree(repo, root)
     if not requests:
         return requests, gate, "no requests"

@@ -26,10 +26,9 @@ from pathlib import Path
 from typing import Annotated
 
 from agent_framework import Agent, tool
-from openai import AsyncOpenAI
 from pydantic import Field
 
-from favlo.chat_client import open_chat_client
+from favlo.chat_client import close_chat_client, open_chat_client
 
 TARGET_TOKENS = 65536
 INSTRUCTIONS = (
@@ -457,9 +456,8 @@ def _completions(log: Log) -> str:
     return "\n---\n".join(blocks[-2:])
 
 
-def _open_agent(base_url: str, model: str, read: object) -> tuple[AsyncOpenAI, Agent]:
-    http = AsyncOpenAI(api_key="favlo", base_url=base_url, timeout=3600.0)
-    client = open_chat_client(model_stem(model), base_url, async_client=http)
+def _open_agent(base_url: str, model: str, read: object) -> tuple[object, Agent]:
+    client = open_chat_client(model_stem(model), base_url)
     # One tool call, then the framework asks for a reply with tools disabled.
     client.function_invocation_configuration["max_iterations"] = 1
     agent = Agent(
@@ -472,7 +470,7 @@ def _open_agent(base_url: str, model: str, read: object) -> tuple[AsyncOpenAI, A
             "extra_body": {"enable_thinking": False},
         },
     )
-    return http, agent
+    return client, agent
 
 
 async def run_file_agent(
@@ -499,7 +497,7 @@ async def run_file_agent(
     task = {"path": ""}
     read = _read_tool(root, allowed, loaded, task)
     base_url = f"http://127.0.0.1:{server.port}/v1"
-    http, agent = _open_agent(base_url, model, read)
+    chat, agent = _open_agent(base_url, model, read)
     session = agent.create_session()
     seen = 0
     turn = 0
@@ -523,13 +521,13 @@ async def run_file_agent(
             turn += 1
             if turn == 1 and index + 1 < len(files):
                 print("restarting server", flush=True)
-                await http.close()
-                http = None
+                await close_chat_client(chat)
+                chat = None
                 _restart(server, log)
-                http, agent = _open_agent(f"http://127.0.0.1:{server.port}/v1", model, read)
+                chat, agent = _open_agent(f"http://127.0.0.1:{server.port}/v1", model, read)
     finally:
-        if http is not None:
-            await http.close()
+        if chat is not None:
+            await close_chat_client(chat)
     context = requests[-1].prompt_tokens if requests else 0
     reached = context >= target
     extended = extensions_hold(requests)
@@ -583,7 +581,7 @@ def _spawn(port: int, log: Log, max_memory: str | None = None) -> Server:
 
 
 def _stop_server(server: Server) -> None:
-    """SIGTERM so the daemon can write the live prefix, then wait for that exit."""
+    """SIGTERM the daemon. It forwards that signal to each pipeline process."""
     from favlo.daemon import stop_pid
 
     if server.follow_stop is not None:

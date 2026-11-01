@@ -31,7 +31,14 @@ def test_file_agent_creates_edits_and_confirms(tmp_path: Path) -> None:
     if not (root / "manifest.json").is_file():
         pytest.skip("quantized record is not installed")
     pytest.importorskip("agent_framework.openai")
-    from favlo.daemon import DaemonError, alive, ensure, plain_text, stop_pid, telemetry_path
+    from favlo.daemon import (
+        DaemonError,
+        alive,
+        ensure,
+        plain_text,
+        stop_pid,
+        telemetry_path,
+    )
 
     port = _free_port()
     try:

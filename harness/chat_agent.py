@@ -18,7 +18,6 @@ from harness.harness_model import judge_model
 from harness.server import close_listener, open_listener
 
 INSTRUCTIONS = "Reply in one short sentence."
-TURN_LIMIT = 1024
 
 
 @dataclass(frozen=True)
@@ -132,16 +131,13 @@ def reply_parts(response: Any) -> tuple[str, str]:
 
 async def run_scenario(base_url: str, model: str, scenario: Scenario) -> list[str]:
     """Run one conversation. Problems are returned; the caller prints them."""
-    from agent_framework import Agent, InMemoryHistoryProvider
-    from openai import AsyncOpenAI
+    from agent_framework import Agent
 
-    from favlo.chat_client import history_message, open_chat_client
+    from favlo.chat_client import close_chat_client, open_chat_client
 
     chat_model = thinking_model(model) if scenario.thinking else model
-    http = AsyncOpenAI(api_key="favlo", base_url=base_url, timeout=3600.0)
-    client = open_chat_client(chat_model, base_url, async_client=http)
+    client = open_chat_client(chat_model, base_url)
     options: dict[str, object] = {
-        "max_tokens": TURN_LIMIT,
         "extra_body": {"enable_thinking": scenario.thinking},
     }
     agent = Agent(
@@ -150,16 +146,10 @@ async def run_scenario(base_url: str, model: str, scenario: Scenario) -> list[st
         instructions=INSTRUCTIONS,
         default_options=options,
     )
-    prior: list[tuple[str, str, str]] = []
     problems: list[str] = []
+    session = agent.create_session()
     try:
         for index, prompt in enumerate(scenario.turns, start=1):
-            session = agent.create_session()
-            bucket = session.state.setdefault(InMemoryHistoryProvider.DEFAULT_SOURCE_ID, {})
-            messages = bucket.setdefault("messages", [])
-            messages.extend(
-                history_message(role, text, reasoning) for role, text, reasoning in prior
-            )
             response = await agent.run(prompt, session=session, options=options)
             reasoning, text = reply_parts(response)
             print(f"{scenario.name} turn {index} reply {text!r}", flush=True)
@@ -167,15 +157,8 @@ async def run_scenario(base_url: str, model: str, scenario: Scenario) -> list[st
                 problems.append(f"turn {index} returned no reasoning")
             if not text:
                 problems.append(f"turn {index} returned no reply")
-            prior.append(("user", prompt, ""))
-            prior.append(("assistant", text, reasoning))
     finally:
-        closer = getattr(client, "close", None)
-        if closer is not None:
-            closed = closer()
-            if hasattr(closed, "__await__"):
-                await closed
-        await http.close()
+        await close_chat_client(client)
     return problems
 
 

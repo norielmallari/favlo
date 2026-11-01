@@ -18,7 +18,7 @@ wheels = [
 
 [[package]]
 name = "agent-framework-core"
-version = "1.21.0"
+version = "1.24.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "msgspec" },
@@ -29,22 +29,22 @@ dependencies = [
     { name = "regex" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/28/4e/ccbbb762eb222881e0fb9b63d3c03ed298d26fea9725ef8beb3d40633523/agent_framework_core-1.21.0.tar.gz", hash = "sha256:3ddd6e46373875cceac857b671480c528b57d387b2d2177f52d32568d842017f", size = 750586, upload-time = "2026-10-08T10:42:40.918Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9a/d6/7b700ed0f1cb26ce540660e70a1eec9479932f752d103054eece4cd24c5f/agent_framework_core-1.24.0.tar.gz", hash = "sha256:04968b955c2d198ea5d7635e0f062d744dbf971d881bb2fe6023a50687c05b4c", size = 791994, upload-time = "2026-10-30T21:38:06.536Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/be/97/e99f86ebd1910d200b5c889d87b8a205e339ac87e372b8ba8cf374f9519a/agent_framework_core-1.21.0-py3-none-any.whl", hash = "sha256:ef333ff8348375b7d0757e690b1bd2ac3a1da67afc5cfacf6ce8db7da93bc423", size = 812842, upload-time = "2026-10-08T10:40:38.176Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/39/35e085321e228fe45e46e5bf6af9a08a5ddc11d5ee175cbe8a5f7ce146d7/agent_framework_core-1.24.0-py3-none-any.whl", hash = "sha256:dd8edd14dabbe6c64d807c2d0dece91a8171d31055443ff5f98cc7f902007bee", size = 853834, upload-time = "2026-10-30T21:39:05.591Z" },
 ]
 
 [[package]]
 name = "agent-framework-openai"
-version = "1.16.0"
+version = "1.18.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-framework-core" },
     { name = "openai" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f6/e0/40400b67cb4eefd6f74b52dffc3805f413fe296a882dfae3980f6b2cadf2/agent_framework_openai-1.16.0.tar.gz", hash = "sha256:f78877ff6e9a7fd207187d667db0d5eb5a22058ff39bad5cc6b6eb24016859b4", size = 74323, upload-time = "2026-10-08T10:43:01.97Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a1/1b/2907c8b399716e71f0a560ef3a62f235f0bb3e0fd765a8cea4332796d343/agent_framework_openai-1.18.0.tar.gz", hash = "sha256:0c65c0b71940c72243870808b26de38d2f87fbdb187a49793514af8a449746e1", size = 78840, upload-time = "2026-10-30T21:38:35.644Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a6/9a/6796e96cf2490cd49111fde36ceb7ef9fd3ce8a329198f33b414273e06f3/agent_framework_openai-1.16.0-py3-none-any.whl", hash = "sha256:93790e61f8ee0104db56d2998bd03924c844600046b16efc26ed5df7fe1bee7f", size = 79126, upload-time = "2026-10-08T10:43:00.276Z" },
+    { url = "https://files.pythonhosted.org/packages/65/7d/458753e38e4cf0b2261c175cf9f64d3c03ca4227085d7d0b669a74820dbf/agent_framework_openai-1.18.0-py3-none-any.whl", hash = "sha256:8ad432801ba7ff55afe104383635919d33bc129bdbe3ac9ffab9d25d3b7ef52d", size = 83660, upload-time = "2026-10-30T21:39:33.758Z" },
 ]
 
 [[package]]
@@ -564,6 +564,7 @@ dependencies = [
     { name = "safetensors" },
     { name = "sqlite-vec" },
     { name = "starlette" },
+    { name = "tenacity" },
     { name = "tokenizers" },
     { name = "uvicorn" },
 ]
@@ -590,9 +591,9 @@ harness = [
 requires-dist = [
     { name = "absl-py", marker = "extra == 'dev'", specifier = ">=2" },
     { name = "absl-py", marker = "extra == 'harness'", specifier = ">=2" },
-    { name = "agent-framework-openai", specifier = ">=1" },
-    { name = "agent-framework-openai", marker = "extra == 'dev'", specifier = ">=1" },
-    { name = "agent-framework-openai", marker = "extra == 'harness'", specifier = ">=1" },
+    { name = "agent-framework-openai", specifier = ">=1.18" },
+    { name = "agent-framework-openai", marker = "extra == 'dev'", specifier = ">=1.18" },
+    { name = "agent-framework-openai", marker = "extra == 'harness'", specifier = ">=1.18" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "fastmcp", extras = ["tasks"], specifier = ">=2.14" },
     { name = "httpx", specifier = ">=0.27" },
@@ -611,6 +612,7 @@ requires-dist = [
     { name = "safetensors", specifier = ">=0.6" },
     { name = "sqlite-vec", specifier = ">=0.1.9" },
     { name = "starlette", specifier = ">=0.41" },
+    { name = "tenacity", specifier = ">=9.1.4,<9.2" },
     { name = "tokenizers", specifier = ">=0.22" },
     { name = "uvicorn", specifier = ">=0.32" },
 ]
@@ -2273,6 +2275,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ad/eb/4e197bf26b023abafc5e9043ec8710d7de0fcb032d0969045236d72aa0b1/starlette-1.9.0.tar.gz", hash = "sha256:3d931de246ed870e35ce605974440816ef895e592f255d1396cfdf191d4c4318", size = 2732466, upload-time = "2026-10-18T15:50:33.189Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f3/93/181df62699d9b5aca1d87e5cfda131dac87e3cdaebf668662f7206ca3470/starlette-1.9.0-py3-none-any.whl", hash = "sha256:fd3f159936e882d06c1108f84688f7cda2cf85fc6a592a50edbd175e882c2ddc", size = 80335, upload-time = "2026-10-18T15:50:31.526Z" },
+]
+
+[[package]]
+name = "tenacity"
+version = "9.1.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/47/c6/ee486fd809e357697ee8a44d3d69222b344920433d3b6666ccd9b374630c/tenacity-9.1.4.tar.gz", hash = "sha256:adb31d4c263f2bd041081ab33b498309a57c77f9acf2db65aadf0898179cf93a", size = 49413, upload-time = "2026-02-07T10:45:33.841Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d7/c1/eb8f9debc45d3b7918a32ab756658a0904732f75e555402972246b0b8e71/tenacity-9.1.4-py3-none-any.whl", hash = "sha256:6095a360c919085f28c6527de529e76a06ad89b23659fa881ae0649b867a9d55", size = 28926, upload-time = "2026-02-07T10:45:32.24Z" },
 ]
 
 [[package]]

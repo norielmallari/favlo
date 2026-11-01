@@ -64,7 +64,7 @@ File tools driven by the chat endpoint. The agent creates a note, replaces its t
 python -m harness.chat_agent [--model <id>] [--scenario <name>]
 ```
 
-Reuses the listener on `127.0.0.1:8129` and does not take the machine lock. Each scenario is a short conversation through the shared chat client. `thinking-follow-up` asks two questions with thinking on. The second request must extend the first request's stored prefix, and both turns must return a reply. `--scenario` runs one named conversation. The default runs every scenario. Exit 0 means every selected scenario held. Not part of `pytest`. `tests/test_chat_agent.py` checks the prefix rule without a listener.
+Reuses the listener on `127.0.0.1:8129` and does not take the machine lock. Each scenario is a short conversation through the shared chat client. The scenario keeps one Agent Framework session, so the next request is the messages that session stored. The request does not send `max_tokens`. `thinking-follow-up` asks two questions with thinking on. The second request must extend the first request's stored prefix, and both turns must return a reply. `--scenario` runs one named conversation. The default runs every scenario. Exit 0 means every selected scenario held. Not part of `pytest`. `tests/test_chat_agent.py` checks the prefix rule without a listener.
 
 ### Thinking persona coherence
 

@@ -58,7 +58,11 @@ A media harness does not take the machine lock. It calls the listener. A media h
 
 `harness.chat_agent` uses that same listener and does not take the machine lock.
 
-A test agent harness uses the shared chat client. It does not add a response parser, a message preparer, or another patch of its own. A field the next turn must send is set where chat messages are built.
+## Agents
+
+Every agent is a Microsoft Agent Framework agent. Chat goes through the shared client in `src/favlo/chat_client.py`.
+
+A unit test and a smoke test may call the OpenAI HTTP API. An agent harness and production code use the framework and that shared client. They keep the client's response parser and message preparer. A field the next turn must send is set where chat messages are built.
 
 ## Chat
 
