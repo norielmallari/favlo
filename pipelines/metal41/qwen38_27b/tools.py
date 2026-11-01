@@ -295,11 +295,18 @@ class StreamText:
 
 
 def split_thinking(text: str, thinking: bool) -> tuple[str, str]:
-    """Reasoning and the reply after a closed think block."""
+    """Reasoning and the reply after a closed think block.
+
+    A ``<tool_call>`` before ``</think>`` ends the trace. The call is the reply.
+    With neither marker the reply is empty.
+    """
     if not thinking:
         return "", text
     marker = "</think>"
     at = text.find(marker)
-    if at < 0:
-        return text, ""
-    return text[:at], text[at + len(marker) :].lstrip("\n")
+    if at >= 0:
+        return text[:at], text[at + len(marker) :].lstrip("\n")
+    tool = text.find("<tool_call>")
+    if tool >= 0:
+        return text[:tool], text[tool:]
+    return text, ""

@@ -7,6 +7,7 @@ use the OpenAI logit update.
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -15,10 +16,25 @@ import numpy as np
 from jinja2 import Environment
 from tokenizers import Tokenizer
 
-from qwen38_27b.cache import DEFAULT_CONTEXT_LENGTH
 from favlo.language_pipeline import LanguagePipeline
+from favlo.responses import (
+    RequestError,
+    chat_to_responses,
+    format_instruction,
+    function_tools,
+    new_id,
+    prepare_request,
+    remember,
+    response_object,
+    response_to_chat,
+    template_messages,
+    thinking_enabled,
+    usage_object,
+    web_search_context,
+)
+from qwen38_27b.cache import DEFAULT_CONTEXT_LENGTH
 from qwen38_27b.forward import RequestClosed
-from qwen38_27b.sampling import VARIANTS, mode_card, requested_thinking
+from qwen38_27b.sampling import VARIANTS, mode_card
 from qwen38_27b.tools import (
     StreamText,
     function_has_parameters,
@@ -246,13 +262,20 @@ def _forced_call(root: Path, tools: Any, required: str | None) -> tuple[list[int
     return encode_text(root, text), True
 
 
-class Pipeline(LanguagePipeline):
-    """One non-streaming or streaming chat completion. The next token is an argmax."""
+class _Hooks(LanguagePipeline):
+    """Disconnect shell shared by the Responses route and the chat adapter."""
 
     def on_open(self, runtime: Any, reply: Any, selection: Any) -> None:
         del selection
         runtime._halted = False
         runtime._stop = reply.stopped
+
+    def client_closed(self, exc: OSError) -> bool:
+        return str(exc) == "client closed"
+
+
+class Pipeline(_Hooks):
+    """Chat Completions translated into one Responses generation."""
 
     def complete(
         self,
@@ -263,34 +286,164 @@ class Pipeline(LanguagePipeline):
         args: Any,
         state: dict[str, Any],
     ) -> None:
-        del args, state
-        _handle_chat(reply, runtime, body, selection)
+        del args
+        try:
+            translated = chat_to_responses(body)
+        except RequestError as exc:
+            reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+            return
+        _respond(ChatWire(reply), runtime, translated, selection, state)
+
+
+class ResponsesPipeline(_Hooks):
+    """One Responses generation."""
+
+    def complete(
+        self,
+        reply: Any,
+        runtime: Any,
+        body: dict[str, Any],
+        selection: Any,
+        args: Any,
+        state: dict[str, Any],
+    ) -> None:
+        del args
+        _respond(ResponseWire(reply), runtime, body, selection, state)
 
 
 handle_chat = Pipeline()
+handle_responses = ResponsesPipeline()
 
 
 def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any) -> None:
-    messages = body["messages"]
-    requested = requested_thinking(body)
-    required = required_function(body.get("tool_choice"))
-    if required and "enable_thinking" not in body and (
-        selection is None or getattr(selection, "variant", None) is None
-    ):
-        requested = False
+    """Compatibility entry. A chat body still reaches generation."""
+    handle_chat.complete(reply, runtime, body, selection, None, {})
+
+
+def _respond(
+    reply: Any,
+    runtime: Any,
+    body: dict[str, Any],
+    selection: Any,
+    state: dict[str, Any] | None,
+) -> None:
+    try:
+        prepared = prepare_request(body, state)
+    except RequestError as exc:
+        reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+        return
+    requested = thinking_enabled(prepared)
+    required = required_function(prepared.get("tool_choice"))
     thinking, card = mode_card(selection, requested)
-    temperature, top_p, top_k = _sampling(body, thinking, card)
-    presence = _presence(body, thinking, card)
-    frequency = _frequency(body)
-    bias = _logit_bias(body)
-    draw = _rng(body)
-    from qwen38_27b.vision import (
-        collect_images,
-        expand_image_tokens,
-        log_prepared,
-        merged_grid,
-        prepare_image,
+    if required:
+        thinking = False
+    temperature, top_p, top_k = _sampling(prepared, thinking, card)
+    presence = _presence(prepared, thinking, card)
+    frequency = _frequency(prepared)
+    messages, _ = template_messages(prepared)
+    extra = format_instruction(prepared)
+    if extra:
+        messages = [{"role": "system", "content": extra}, *messages]
+    search, note = web_search_context(prepared)
+    if note:
+        messages.append({"role": "user", "content": note})
+    tools = function_tools(prepared.get("tools"))
+    if prepared.get("tool_choice") == "none":
+        tools = []
+    effort = _template_effort(prepared) if thinking else None
+    try:
+        prompt = _render(runtime, messages, tools, thinking, effort)
+        prompt = _fit_prompt(runtime, prepared, messages, tools, thinking, effort, prompt)
+    except RequestError as exc:
+        reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+        return
+    forced, stop_after_forced = _forced_call(runtime.root, tools, required)
+    emit_tools = prepared.get("tool_choice") != "none"
+    stream = bool(prepared.get("stream", False))
+    mtp_body = _mtp_body(prepared)
+    mtp = _mtp_flag(mtp_body, selection)
+    mtp_depth = _mtp_depth(mtp_body, selection)
+    limit = _output_limit(prepared)
+    if stream:
+        _stream(
+            reply,
+            runtime,
+            prompt,
+            forced,
+            stop_after_forced,
+            limit,
+            thinking,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            presence=presence,
+            frequency=frequency,
+            emit_tools=emit_tools,
+            mtp=mtp,
+            mtp_depth=mtp_depth,
+            prepared=prepared,
+            state=state,
+            search=search,
+        )
+        return
+    tokens = runtime.generate(
+        prompt,
+        limit,
+        STOP,
+        forced=forced,
+        stop_after_forced=stop_after_forced,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        presence=presence,
+        frequency=frequency,
+        mtp=mtp,
+        mtp_depth=mtp_depth,
     )
+    text = decode_text(runtime.root, tokens)
+    payload = _response_payload(
+        reply,
+        runtime,
+        prepared,
+        search,
+        text,
+        thinking,
+        emit_tools,
+        len(prompt),
+        len(getattr(runtime, "_output_ids", None) or tokens),
+        bool(getattr(runtime, "_hit_limit", False)),
+    )
+    remember(state, prepared, payload)
+    reply.json(200, payload)
+
+
+def _template_effort(prepared: dict[str, Any]) -> str | None:
+    """Effort the checkpoint template names. ``none`` leaves thinking off elsewhere."""
+    reasoning = prepared.get("reasoning")
+    if not isinstance(reasoning, dict):
+        return None
+    effort = reasoning.get("effort")
+    if not isinstance(effort, str) or effort.strip().lower() in {"", "none"}:
+        return None
+    return effort
+
+
+def _output_limit(prepared: dict[str, Any]) -> int | None:
+    """``max_output_tokens`` when the body sets it, otherwise the settings cap."""
+    cap = prepared.get("max_output_tokens")
+    if cap is not None:
+        return int(cap)
+    return _limit({})
+
+
+def _render(
+    runtime: Any,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    thinking: bool,
+    effort: str | None,
+) -> list[int]:
+    from qwen38_27b.vision import collect_images, expand_image_tokens, log_prepared, merged_grid, prepare_image
 
     noted = getattr(runtime, "_status", None)
 
@@ -302,87 +455,299 @@ def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any)
     prompt = encode_chat(
         runtime.root,
         messages,
-        body.get("tools"),
+        tools,
         thinking,
-        _reasoning_effort(body),
-        preserve_thinking=preserve_thinking(body),
+        effort,
+        preserve_thinking=True,
     )
-    prepared = [
-        prepare_image(blob, min_pixels=low, max_pixels=high) for blob, low, high in images
-    ]
-    log_prepared(runtime, prepared)
-    if prepared:
-        counts = []
-        for _patches, grid in prepared:
-            height, width = merged_grid(grid)
-            counts.append(height * width)
-        prompt = expand_image_tokens(prompt, counts)
+    pixels = [prepare_image(blob, min_pixels=low, max_pixels=high) for blob, low, high in images]
+    log_prepared(runtime, pixels)
     runtime._vision_images = images
-    runtime._vision_prepared = prepared
-    emit_tools = body.get("tool_choice") != "none"
-    forced, stop_after_forced = _forced_call(runtime.root, body.get("tools"), required)
-    if bool(body.get("stream", False)):
-        _stream(
-            reply,
-            runtime,
-            prompt,
-            forced,
-            stop_after_forced,
-            _limit(body),
-            thinking,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            presence=presence,
-            frequency=frequency,
-            logit_bias=bias,
-            rng=draw,
-            emit_tools=emit_tools,
-            mtp=_mtp_flag(body, selection),
-            mtp_depth=_mtp_depth(body, selection),
-        )
-        return
-    tokens = runtime.generate(
-        prompt,
-        _limit(body),
-        STOP,
-        forced=forced,
-        stop_after_forced=stop_after_forced,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-        presence=presence,
-        frequency=frequency,
-        logit_bias=bias,
-        rng=draw,
-        mtp=_mtp_flag(body, selection),
-        mtp_depth=_mtp_depth(body, selection),
-    )
-    text = decode_text(runtime.root, tokens)
+    runtime._vision_prepared = pixels
+    if not pixels:
+        return prompt
+    counts = []
+    for _patches, grid in pixels:
+        height, width = merged_grid(grid)
+        counts.append(height * width)
+    return expand_image_tokens(prompt, counts)
+
+
+def _mtp_body(prepared: dict[str, Any]) -> dict[str, Any]:
+    body: dict[str, Any] = {}
+    if "favlo:mtp" in prepared:
+        body["mtp"] = prepared["favlo:mtp"]
+    if "favlo:mtp_depth" in prepared:
+        body["mtp_depth"] = prepared["favlo:mtp_depth"]
+    return body
+
+
+def _fit_prompt(
+    runtime: Any,
+    prepared: dict[str, Any],
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    thinking: bool,
+    effort: str | None,
+    prompt: list[int],
+) -> list[int]:
+    ceiling = getattr(runtime, "_limit", None)
+    if not isinstance(ceiling, int) or ceiling < 1:
+        ceiling = DEFAULT_CONTEXT_LENGTH
+    if len(prompt) <= ceiling:
+        return prompt
+    if prepared.get("truncation") != "auto":
+        raise RequestError("input does not fit")
+    kept = list(messages)
+    while len(prompt) > ceiling and len(kept) > 1:
+        drop = 1 if kept and kept[0].get("role") == "system" else 0
+        if drop >= len(kept):
+            break
+        del kept[drop]
+        prompt = _render(runtime, kept, tools, thinking, effort)
+    if len(prompt) > ceiling:
+        raise RequestError("input does not fit")
+    messages[:] = kept
+    return prompt
+
+
+def _shown_reply(text: str, content: str | None, calls: list[dict[str, Any]]) -> str | None:
+    """Reply text with a tool call removed. Text after the call stays."""
+    if not calls:
+        return content
+    if content:
+        return content
+    end = text.rfind("</tool_call>")
+    trailing = text[end + len("</tool_call>") :].strip() if end >= 0 else ""
+    return trailing or None
+
+
+def _response_payload(
+    reply: Any,
+    runtime: Any,
+    prepared: dict[str, Any],
+    search: dict[str, Any] | None,
+    text: str,
+    thinking: bool,
+    emit_tools: bool,
+    prompt_tokens: int,
+    completion_tokens: int,
+    hit_limit: bool,
+    response_id: str | None = None,
+) -> dict[str, Any]:
     reasoning, visible = split_thinking(text, thinking)
-    content, calls = parse_tool_calls(visible if visible else text)
+    content, calls = parse_tool_calls(visible)
     if not emit_tools:
+        content = _shown_reply(visible if thinking else text, content, calls)
         calls = []
-        content = text if not thinking else (visible if visible else text)
+    elif not thinking:
+        content = _shown_reply(text, content, calls)
+    output: list[dict[str, Any]] = []
+    if search is not None:
+        output.append(search)
+    store = prepared.get("store", True) is not False
+    include = prepared.get("include")
+    encrypt = (not store) or (isinstance(include, list) and "reasoning.encrypted_content" in include)
+    if reasoning:
+        item: dict[str, Any] = {
+            "type": "reasoning",
+            "id": new_id("rs_"),
+            "summary": [],
+            "status": "completed",
+            "content": [{"type": "reasoning_text", "text": reasoning}],
+        }
+        summary = prepared.get("reasoning")
+        if isinstance(summary, dict) and summary.get("summary"):
+            item["summary"] = [{"type": "summary_text", "text": reasoning}]
+        if encrypt:
+            item["encrypted_content"] = reasoning
+        output.append(item)
+    visible_text = content or ""
     if calls:
-        reason = "tool_calls"
+        if visible_text:
+            output.append(_message_item(visible_text))
+        for call in calls:
+            function = call.get("function") if isinstance(call.get("function"), dict) else {}
+            output.append(
+                {
+                    "type": "function_call",
+                    "id": new_id("fc_"),
+                    "call_id": str(call.get("id") or new_id("call_")),
+                    "name": function.get("name") or "",
+                    "arguments": function.get("arguments") or "{}",
+                    "status": "completed",
+                }
+            )
+        status = "completed"
+        incomplete = None
     else:
-        reason = "length" if runtime._hit_limit else "stop"
-        if not thinking:
-            content = text
-    reply.json(
-        200,
-        _completion(
-            content,
-            len(prompt),
-            len(tokens),
-            reason,
-            calls,
-            reasoning if thinking else "",
-            runtime,
-            reply.model_id,
-        ),
+        output.append(_message_item(visible_text))
+        if hit_limit:
+            status = "incomplete"
+            incomplete = "max_output_tokens"
+        else:
+            status = "completed"
+            incomplete = None
+    cached = int(getattr(runtime, "_cached_tokens", 0) or 0)
+    payload = response_object(
+        model=getattr(reply, "model_id", "") or prepared.get("model") or "",
+        output=output,
+        usage=usage_object(prompt_tokens, completion_tokens, cached, 0),
+        body=prepared,
+        status=status,
+        incomplete=incomplete,
+        response_id=response_id or new_id("resp_"),
     )
+    chat_usage = _usage(runtime, prompt_tokens, completion_tokens)
+    payload["_chat_usage"] = chat_usage
+    return payload
+
+
+def _message_item(text: str) -> dict[str, Any]:
+    return {
+        "type": "message",
+        "id": new_id("msg_"),
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
+
+
+class ChatWire:
+    """Writes a Response as Chat Completions chunks."""
+
+    responses_wire = True
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.model_id = getattr(inner, "model_id", "")
+        self._created = int(time.time())
+        self._calls = 0
+
+    def stopped(self) -> bool:
+        return bool(self._inner.stopped())
+
+    def begin_events(self) -> None:
+        self._inner.begin_events()
+
+    def done(self) -> None:
+        self._inner.done()
+
+    def json(self, status: int, payload: dict[str, Any]) -> None:
+        if payload.get("object") != "response":
+            self._inner.json(status, payload)
+            return
+        extra = payload.pop("_chat_usage", None)
+        chat = response_to_chat(payload, None)
+        if isinstance(extra, dict):
+            chat["usage"] = extra
+        self.model_id = payload.get("model") or self.model_id
+        chat["model"] = self.model_id
+        self._inner.json(status, chat)
+
+    def event(self, payload: dict[str, Any]) -> None:
+        kind = payload.get("type")
+        if kind == "response.created":
+            self._inner.event(
+                _frame(
+                    self,
+                    [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+                    self._created,
+                )
+            )
+            return
+        if kind == "response.reasoning_text.delta":
+            self._delta({"reasoning_content": payload.get("delta") or ""})
+            return
+        if kind == "response.output_text.delta":
+            self._delta({"content": payload.get("delta") or ""})
+            return
+        if kind == "response.output_item.done":
+            item = payload.get("item")
+            if isinstance(item, dict) and item.get("type") == "function_call":
+                self._delta(
+                    {
+                        "tool_calls": [
+                            {
+                                "index": self._calls,
+                                "id": item.get("call_id"),
+                                "type": "function",
+                                "function": {
+                                    "name": item.get("name") or "",
+                                    "arguments": item.get("arguments") or "{}",
+                                },
+                            }
+                        ]
+                    }
+                )
+                self._calls += 1
+            return
+        if kind == "response.completed":
+            response = payload.get("response")
+            if not isinstance(response, dict):
+                return
+            extra = response.pop("_chat_usage", None)
+            calls = any(
+                isinstance(item, dict) and item.get("type") == "function_call"
+                for item in response.get("output") or []
+            )
+            reason = "tool_calls" if calls else _chat_reason(response)
+            self._inner.event(
+                _frame(self, [{"index": 0, "delta": {}, "finish_reason": reason}], self._created)
+            )
+            usage = extra if isinstance(extra, dict) else {}
+            self._inner.event(_frame(self, [], self._created, usage))
+
+    def keepalive(self) -> None:
+        self._inner.event(_frame(self, [{"index": 0, "delta": {}, "finish_reason": None}], self._created))
+
+    def _delta(self, delta: dict[str, Any]) -> None:
+        self._inner.event(
+            _frame(self, [{"index": 0, "delta": delta, "finish_reason": None}], self._created)
+        )
+
+
+class ResponseWire:
+    """Writes Response events and omits the Chat Completions done marker."""
+
+    responses_wire = True
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.model_id = getattr(inner, "model_id", "")
+
+    def stopped(self) -> bool:
+        return bool(self._inner.stopped())
+
+    def begin_events(self) -> None:
+        self._inner.begin_events()
+
+    def done(self) -> None:
+        return
+
+    def keepalive(self) -> None:
+        return
+
+    def json(self, status: int, payload: dict[str, Any]) -> None:
+        if isinstance(payload, dict):
+            payload.pop("_chat_usage", None)
+        self._inner.json(status, payload)
+
+    def event(self, payload: dict[str, Any]) -> None:
+        if payload.get("type") == "response.completed":
+            response = payload.get("response")
+            if isinstance(response, dict):
+                response.pop("_chat_usage", None)
+        self._inner.event(payload)
+
+
+def _chat_reason(response: dict[str, Any]) -> str:
+    details = response.get("incomplete_details")
+    if isinstance(details, dict) and details.get("reason") == "max_output_tokens":
+        return "length"
+    if response.get("status") == "incomplete":
+        return "length"
+    return "stop"
 
 
 def _stream_delta(decoded: str, shown: str, *, final: bool) -> tuple[str, str]:
@@ -463,7 +828,11 @@ def _stream(
     rng: np.random.Generator | None = None,
     mtp: bool = False,
     mtp_depth: int | None = None,
+    prepared: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+    search: dict[str, Any] | None = None,
 ) -> None:
+    del logit_bias, rng
     decode = getattr(runtime, "decode", None)
     if not callable(decode):
         tokenizer = load_tokenizer(runtime.root)
@@ -471,117 +840,175 @@ def _stream(
         def decode(ids: list[int]) -> str:
             return tokenizer.decode(ids, skip_special_tokens=False)
 
-    created = int(time.time())
+    sink = reply if getattr(reply, "responses_wire", False) else ChatWire(reply)
+    request = prepared if isinstance(prepared, dict) else {"model": getattr(reply, "model_id", "") or ""}
+    sequence = 0
     try:
-        reply.begin_events()
+        sink.begin_events()
     except OSError:
         raise RequestClosed() from None
 
     def event(payload: dict[str, Any]) -> None:
+        nonlocal sequence
+        payload["sequence_number"] = sequence
+        sequence += 1
         try:
-            reply.event(payload)
+            sink.event(payload)
         except OSError as exc:
             raise RequestClosed() from exc
 
-    saw_tool = False
-
-    def emit_pieces(pieces: list[tuple[str, Any]]) -> None:
-        nonlocal saw_tool
-        for channel, payload in pieces:
-            if channel == "tool_start":
-                saw_tool = True
-                _emit_tool(event, reply, created, payload, started=True)
-            elif channel == "tool_args":
-                saw_tool = True
-                _emit_tool(event, reply, created, payload, started=False)
-            else:
-                _emit(event, reply, channel, payload, created)
-
-    event(
-        _frame(
-            reply,
-            [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
-            created,
-        )
+    response_id = new_id("resp_")
+    reasoning_id = new_id("rs_")
+    message_id = new_id("msg_")
+    shell = response_object(
+        model=getattr(sink, "model_id", "") or request.get("model") or "",
+        output=[],
+        usage=usage_object(0, 0, 0, 0),
+        body=request,
+        status="in_progress",
+        incomplete=None,
+        response_id=response_id,
     )
+    event({"type": "response.created", "response": shell})
+    event({"type": "response.in_progress", "response": shell})
     produced: list[int] = []
     previous = ""
     gate = StreamText(thinking, tools=emit_tools)
+    opened: set[str] = set()
+
+    def emit_piece(channel: str, visible: str) -> None:
+        if not visible or channel in {"tool_start", "tool_args"}:
+            return
+        if channel not in opened:
+            opened.add(channel)
+            _open_item(event, channel, reasoning_id, message_id)
+        _emit_response(event, channel, visible, reasoning_id, message_id)
 
     def on_token(token: int) -> None:
         nonlocal previous
         produced.append(int(token))
         decoded = decode(produced)
         piece, previous = _stream_delta(decoded, previous, final=False)
-        emit_pieces(gate.push(piece))
+        for channel, visible in gate.push(piece):
+            emit_piece(channel, visible)
 
     def on_prefill(_done: int) -> None:
-        event(_frame(reply, [{"index": 0, "delta": {}, "finish_reason": None}], created))
+        keepalive = getattr(sink, "keepalive", None)
+        if callable(keepalive):
+            keepalive()
 
+    runtime.generate(
+        prompt,
+        limit,
+        STOP,
+        forced=forced,
+        stop_after_forced=stop_after_forced,
+        on_token=on_token,
+        on_prefill=on_prefill,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        presence=presence,
+        frequency=frequency,
+        mtp=mtp,
+        mtp_depth=mtp_depth,
+    )
+    decoded = decode(produced) if produced else ""
+    piece, previous = _stream_delta(decoded, previous, final=True)
+    for channel, visible in gate.push(piece):
+        emit_piece(channel, visible)
+    for channel, visible in gate.finish():
+        emit_piece(channel, visible)
+    counted = getattr(runtime, "_output_ids", None)
+    completion_tokens = len(counted) if isinstance(counted, list) else len(produced)
+    text = previous
+    payload = _response_payload(
+        sink,
+        runtime,
+        request,
+        search,
+        text,
+        thinking,
+        emit_tools,
+        len(prompt),
+        completion_tokens,
+        bool(getattr(runtime, "_hit_limit", False)),
+        response_id,
+    )
+    for index, item in enumerate(payload["output"]):
+        kind = item.get("type")
+        if kind == "reasoning":
+            item["id"] = reasoning_id
+            event({"type": "response.output_item.done", "output_index": index, "item": item})
+        elif kind == "function_call":
+            arguments = item.get("arguments") or "{}"
+            if not isinstance(arguments, str):
+                arguments = json.dumps(arguments)
+            opened_item = dict(item)
+            opened_item["arguments"] = ""
+            event({"type": "response.output_item.added", "output_index": index, "item": opened_item})
+            event(
+                {
+                    "type": "response.function_call_arguments.done",
+                    "arguments": arguments,
+                    "item_id": item.get("id") or "",
+                    "output_index": index,
+                }
+            )
+            event({"type": "response.output_item.done", "output_index": index, "item": item})
+    event({"type": "response.completed", "response": payload})
+    remember(state, request, payload)
     try:
-        runtime.generate(
-            prompt,
-            limit,
-            STOP,
-            forced=forced,
-            stop_after_forced=stop_after_forced,
-            on_token=on_token,
-            on_prefill=on_prefill,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            presence=presence,
-            frequency=frequency,
-            logit_bias=logit_bias,
-            rng=rng,
-            mtp=mtp,
-            mtp_depth=mtp_depth,
-        )
-        decoded = decode(produced) if produced else ""
-        piece, previous = _stream_delta(decoded, previous, final=True)
-        emit_pieces(gate.push(piece))
-        emit_pieces(gate.finish())
-        reason = "tool_calls" if saw_tool else ("length" if runtime._hit_limit else "stop")
-        event(_frame(reply, [{"index": 0, "delta": {}, "finish_reason": reason}], created))
-        completion_tokens = len(getattr(runtime, "_output_ids", None) or produced)
-        event(_frame(reply, [], created, _usage(runtime, len(prompt), completion_tokens)))
-        reply.done()
+        sink.done()
     except OSError as exc:
         raise RequestClosed() from exc
 
 
-def _emit(event: Any, reply: Any, channel: str, visible: str, created: int) -> None:
+def _open_item(event: Any, channel: str, reasoning_id: str, message_id: str) -> None:
+    if channel == "reasoning":
+        item: dict[str, Any] = {
+            "type": "reasoning",
+            "id": reasoning_id,
+            "summary": [],
+            "content": [],
+            "status": "in_progress",
+        }
+        index = 0
+    else:
+        item = {
+            "type": "message",
+            "id": message_id,
+            "role": "assistant",
+            "status": "in_progress",
+            "content": [{"type": "output_text", "text": "", "annotations": []}],
+        }
+        index = 1
+    event({"type": "response.output_item.added", "output_index": index, "item": item})
+
+
+def _emit_response(event: Any, channel: str, visible: str, reasoning_id: str, message_id: str) -> None:
     if not visible:
         return
-    field = "reasoning_content" if channel == "reasoning" else "content"
-    event(
-        _frame(
-            reply,
-            [{"index": 0, "delta": {field: visible}, "finish_reason": None}],
-            created,
+    if channel == "reasoning":
+        event(
+            {
+                "type": "response.reasoning_text.delta",
+                "content_index": 0,
+                "delta": visible,
+                "item_id": reasoning_id,
+                "output_index": 0,
+            }
         )
-    )
-
-
-def _emit_tool(event: Any, reply: Any, created: int, payload: dict[str, Any], *, started: bool) -> None:
-    function: dict[str, Any] = {}
-    if started:
-        function["name"] = payload["name"]
-        call: dict[str, Any] = {
-            "index": payload["index"],
-            "id": payload["id"],
-            "type": "function",
-            "function": function,
+        return
+    event(
+        {
+            "type": "response.output_text.delta",
+            "content_index": 0,
+            "delta": visible,
+            "item_id": message_id,
+            "output_index": 1,
+            "logprobs": [],
         }
-    else:
-        function["arguments"] = payload["arguments"]
-        call = {"index": payload["index"], "function": function}
-    event(
-        _frame(
-            reply,
-            [{"index": 0, "delta": {"tool_calls": [call]}, "finish_reason": None}],
-            created,
-        )
     )
 
 

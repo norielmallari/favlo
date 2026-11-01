@@ -240,6 +240,191 @@ def test_reasoning_effort_none_uses_the_template_default() -> None:
     assert _reasoning_effort({"chat_template_kwargs": {"reasoning_effort": "medium"}}) == "medium"
 
 
+def test_responses_body_is_the_generation_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pathlib import Path
+
+    from favlo.reply import MemoryReply
+    from qwen38_27b.chat import handle_chat, handle_responses
+
+    seen: dict[str, object] = {}
+    rendered: list[tuple[object, object]] = []
+
+    def encode(*_args, **_kwargs):
+        thinking = _args[3] if len(_args) > 3 else None
+        effort = _args[4] if len(_args) > 4 else None
+        rendered.append((thinking, effort))
+        seen["effort"] = effort
+        seen["tools"] = _args[2] if len(_args) > 2 else None
+        return [1, 2]
+
+    monkeypatch.setattr("qwen38_27b.chat.encode_chat", encode)
+    monkeypatch.setattr(
+        "qwen38_27b.chat.decode_text",
+        lambda _root, _ids: "<think>\nplan\n</think>\nsix carrots",
+    )
+    monkeypatch.setattr("qwen38_27b.vision.collect_images", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("qwen38_27b.chat._forced_call", lambda *_args, **_kwargs: ([], False))
+
+    class Runtime:
+        root = Path(".")
+        _hit_limit = False
+        _limit = 131072
+        _cached_tokens = 0
+        _prefill_seconds = 0.0
+        _decode_seconds = 0.0
+        _output_ids: list[int] = []
+
+        def generate(self, prompt, limit, stop, **kwargs):
+            del prompt, limit, stop
+            seen["mtp"] = kwargs.get("mtp")
+            seen["depth"] = kwargs.get("mtp_depth")
+            self._output_ids = [7]
+            return [7]
+
+    reply = MemoryReply("qwen38-27b")
+    handle_responses.complete(
+        reply,
+        Runtime(),
+        {
+            "model": "qwen38-27b",
+            "input": "carrots",
+            "reasoning": {"effort": "low"},
+            "favlo:mtp": True,
+            "favlo:mtp_depth": 3,
+        },
+        None,
+        None,
+        {},
+    )
+    assert reply.status == 200
+    assert reply.body["object"] == "response"
+    assert reply.body["status"] == "completed"
+    assert reply.body["output"][-1]["type"] == "message"
+    assert reply.body["output"][-1]["content"][0]["text"] == "six carrots"
+    assert reply.body["output"][0]["type"] == "reasoning"
+    assert "plan" in reply.body["output"][0]["content"][0]["text"]
+    assert seen["effort"] == "low"
+    assert rendered[0] == (True, "low")
+    assert seen["mtp"] is True
+    assert seen["depth"] == 3
+
+    open_think = MemoryReply("qwen38-27b")
+    monkeypatch.setattr("qwen38_27b.chat.decode_text", lambda _root, _ids: "still planning")
+    handle_responses.complete(
+        open_think,
+        Runtime(),
+        {"model": "qwen38-27b", "input": "carrots", "reasoning": {"effort": "low"}},
+        None,
+        None,
+        {},
+    )
+    assert open_think.body["output"][-1]["content"][0]["text"] == ""
+    assert open_think.body["output"][0]["content"][0]["text"] == "still planning"
+
+    forced = MemoryReply("qwen38-27b")
+    handle_responses.complete(
+        forced,
+        Runtime(),
+        {
+            "model": "qwen38-27b",
+            "input": "carrots",
+            "reasoning": {"effort": "low"},
+            "tools": [{"type": "function", "name": "grove", "parameters": {"type": "object"}}],
+            "tool_choice": {"type": "function", "name": "grove"},
+        },
+        None,
+        None,
+        {},
+    )
+    assert rendered[-1][0] is False
+
+    short = MemoryReply("qwen38-27b")
+    handle_responses.complete(
+        short,
+        Runtime(),
+        {"model": "qwen38-27b", "input": "carrots", "max_output_tokens": 8},
+        None,
+        None,
+        {},
+    )
+    assert short.status == 400
+
+    quiet = MemoryReply("qwen38-27b")
+    handle_responses.complete(
+        quiet,
+        Runtime(),
+        {
+            "model": "qwen38-27b",
+            "input": "Name one fruit.",
+            "reasoning": {"effort": "none"},
+            "tools": [{"type": "function", "name": "locker", "parameters": {"type": "object"}}],
+            "tool_choice": "none",
+        },
+        None,
+        None,
+        {},
+    )
+    assert quiet.status == 200
+    assert seen["tools"] == []
+    assert rendered[-1][0] is False
+    assert not any(item.get("type") == "function_call" for item in quiet.body["output"])
+
+    chat = MemoryReply("qwen38-27b")
+    handle_chat.complete(
+        chat,
+        Runtime(),
+        {
+            "model": "qwen38-27b",
+            "messages": [{"role": "user", "content": "hi"}],
+            "enable_thinking": False,
+        },
+        None,
+        None,
+        {},
+    )
+    assert chat.status == 200
+    assert chat.body["object"] == "chat.completion"
+    assert chat.body["choices"][0]["message"]["content"] == "still planning"
+
+
+def test_auto_truncation_drops_the_oldest_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    from favlo.responses import RequestError
+    from qwen38_27b.chat import _fit_prompt
+
+    def render(_runtime, messages, _tools, _thinking, _effort):
+        return [0] * (len(messages) * 10)
+
+    monkeypatch.setattr("qwen38_27b.chat._render", render)
+
+    class Runtime:
+        _limit = 25
+
+    messages = [
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": "old"},
+        {"role": "user", "content": "new"},
+    ]
+    prompt = _fit_prompt(
+        Runtime(),
+        {"truncation": "auto"},
+        messages,
+        [],
+        False,
+        None,
+        [0] * 30,
+    )
+    assert prompt == [0] * 20
+    assert [item["content"] for item in messages] == ["s", "new"]
+
+    blocked = [
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": "old"},
+        {"role": "user", "content": "new"},
+    ]
+    with pytest.raises(RequestError, match="input does not fit"):
+        _fit_prompt(Runtime(), {}, blocked, [], False, None, [0] * 30)
+
+
 def test_ffn_percentage_selects_whole_layers() -> None:
     assert ffn_promote_count(0, 64) == 0
     assert ffn_promote_count(10, 64) == 6
