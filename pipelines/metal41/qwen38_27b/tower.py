@@ -10,8 +10,6 @@ from __future__ import annotations
 import struct
 from typing import Any
 
-import numpy as np
-
 from qwen38_27b.budget import tensor_span
 from qwen38_27b.vision import IMAGE_PAD, prepare_image
 
@@ -93,8 +91,8 @@ def scatter(runtime: Any, hidden: Any, pos0: int, count: int) -> None:
         [
             (rows, 0),
             (hidden, 0),
-            (session.upload(np.asarray(local, dtype=np.uint32)), 0),
-            (session.upload(np.asarray(source, dtype=np.uint32)), 0),
+            (session.upload(_u32s(local)), 0),
+            (session.upload(_u32s(source)), 0),
         ],
         [_u32(len(local)), _u32(_LANG)],
         (len(local), 1, 1),
@@ -102,9 +100,8 @@ def scatter(runtime: Any, hidden: Any, pos0: int, count: int) -> None:
     )
 
 
-def _encode(runtime: Any, prepared: list[tuple[np.ndarray, tuple[int, int]]]) -> Any:
-    patches = np.concatenate([item[0] for item in prepared], axis=0)
-    count = int(patches.shape[0])
+def _encode(runtime: Any, prepared: list[tuple[Any, tuple[int, int]]]) -> Any:
+    patches, count = _patch_blob(prepared)
     if count % 4:
         message = "vision patches are not a whole merge block"
         raise RuntimeError(message)
@@ -125,7 +122,16 @@ def _encode(runtime: Any, prepared: list[tuple[np.ndarray, tuple[int, int]]]) ->
     session.begin()
     try:
         _project(
-            runtime, weights, half, patches, hidden, count, row_pad, 1536, 1536, "model.visual.patch_embed.proj"
+            runtime,
+            weights,
+            half,
+            patches,
+            hidden,
+            count,
+            row_pad,
+            1536,
+            1536,
+            "model.visual.patch_embed.proj",
         )
         _bias(runtime, weights, hidden, count, _HIDDEN, _HIDDEN, "model.visual.patch_embed.proj.bias")
         _positions(runtime, weights, hidden, prepared)
@@ -305,7 +311,7 @@ def _project(
     runtime: Any,
     weights: dict[str, tuple[Any, int, dict]],
     half: Any,
-    host: np.ndarray | None,
+    host: bytes | None,
     dest: Any,
     count: int,
     row_pad: int,
@@ -324,9 +330,8 @@ def _project(
         raise RuntimeError(message)
     session = runtime.session
     if host is not None:
-        padded = np.zeros((row_pad, inner), dtype=np.float32)
-        padded[:count, :logical] = host.reshape(count, logical)
-        src = session.upload(padded.astype(np.float16))
+        src = session.zeros(row_pad * inner * 2)
+        _to_half(runtime, session.upload(host), src, count, row_pad, logical, inner, logical)
         src_stride = inner
     else:
         _to_half(runtime, source, half, count, row_pad, logical, inner, source_stride or logical)
@@ -358,7 +363,7 @@ def _positions(
     runtime: Any,
     weights: dict[str, tuple[Any, int, dict]],
     hidden: Any,
-    prepared: list[tuple[np.ndarray, tuple[int, int]]],
+    prepared: list[tuple[Any, tuple[int, int]]],
 ) -> None:
     buf, offset, entry = weights["model.visual.pos_embed.weight"]
     _rows, inner = (int(value) for value in entry["stored_shape"])
@@ -387,7 +392,7 @@ def _positions(
         cursor += count
 
 
-def _coords(session: Any, prepared: list[tuple[np.ndarray, tuple[int, int]]]) -> Any:
+def _coords(session: Any, prepared: list[tuple[Any, tuple[int, int]]]) -> Any:
     pairs: list[int] = []
     for _patches, (grid_h, grid_w) in prepared:
         blocks_w = grid_w // 2
@@ -398,7 +403,23 @@ def _coords(session: Any, prepared: list[tuple[np.ndarray, tuple[int, int]]]) ->
                 ih = intra // 2
                 iw = intra % 2
                 pairs.extend((bh * 2 + ih, bw * 2 + iw))
-    return session.upload(np.asarray(pairs, dtype=np.uint32))
+    return session.upload(_u32s(pairs))
+
+
+def _patch_blob(prepared: list[tuple[Any, tuple[int, int]]]) -> tuple[bytes, int]:
+    """Packed float32 patches, one row of 1536 per patch."""
+    parts: list[bytes] = []
+    count = 0
+    for patches, _grid in prepared:
+        count += int(patches.shape[0])
+        parts.append(patches.tobytes())
+    return b"".join(parts), count
+
+
+def _u32s(values: list[int]) -> bytes:
+    if not values:
+        return b""
+    return struct.pack(f"<{len(values)}I", *values)
 
 
 def _norm(runtime: Any, weights: dict, src: Any, dest: Any, rows: int, width: int, name: str) -> None:

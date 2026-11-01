@@ -99,6 +99,13 @@ KERNELS = (
     "kv_attend_write",
     "dequant_e4m3",
     "argmax_partial",
+    "argmax_final",
+    "logit_adjust",
+    "logit_fill",
+    "sample_topk_partial",
+    "sample_topk_draw",
+    "sample_scan",
+    "fill_mrope",
 )
 
 _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"

@@ -289,12 +289,20 @@ def _attend(runtime: Any, span: _Span, layer: int, pos: int, count: int) -> None
     k_buf, k_off, _entry = runtime.locate(runtime.weight(layer, "self_attn.k_norm.weight"))
     rope = getattr(runtime, "_rope_ids", None)
     slot = runtime.full_slot[layer]
+    position_at = None
+    if rope:
+        from qwen38_27b.vision import position_at as _position_at
+
+        position_at = _position_at
     for token in range(count):
-        if rope is None:
+        if position_at is None:
             angles = (pos + token, pos + token, pos + token)
         else:
-            row = rope[pos + token]
-            angles = (int(row[0]), int(row[1]), int(row[2]))
+            found = position_at(rope, pos + token)
+            if found is None:
+                message = f"position {pos + token} has no RoPE id"
+                raise RuntimeError(message)
+            angles = found
         runtime.session.encode(
             "qk_norm_rope",
             [

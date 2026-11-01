@@ -2982,3 +2982,537 @@ kernel void argmax_partial(
         best_index[group] = best_id;
     }
 }
+
+static float sane_logit(float value) {
+    return value == value ? value : -INFINITY;
+}
+
+static bool beats_logit(float score, uint id, float other, uint other_id) {
+    return score > other || (score == other && id < other_id);
+}
+
+// One delta per id. The host merges presence, frequency, and logit bias first.
+kernel void logit_adjust(
+    device float* logits [[buffer(0)]],
+    device const uint* ids [[buffer(1)]],
+    device const float* deltas [[buffer(2)]],
+    constant uint& n [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= n) {
+        return;
+    }
+    uint id = ids[tid];
+    logits[id] = sane_logit(logits[id]) + deltas[tid];
+}
+
+kernel void logit_fill(
+    device float* logits [[buffer(0)]],
+    device const uint* ids [[buffer(1)]],
+    constant float& value [[buffer(2)]],
+    constant uint& n [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= n) {
+        return;
+    }
+    logits[ids[tid]] = value;
+}
+
+kernel void argmax_final(
+    device const float* values [[buffer(0)]],
+    device const uint* ids [[buffer(1)]],
+    device float* out_value [[buffer(2)]],
+    device uint* out_id [[buffer(3)]],
+    constant uint& n [[buffer(4)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid != 0u || n == 0u) {
+        return;
+    }
+    float best = sane_logit(values[0]);
+    uint best_id = ids[0];
+    for (uint i = 1u; i < n; ++i) {
+        float value = sane_logit(values[i]);
+        uint id = ids[i];
+        if (beats_logit(value, id, best, best_id)) {
+            best = value;
+            best_id = id;
+        }
+    }
+    out_value[0] = best;
+    out_id[0] = best_id;
+}
+
+// Each group keeps the top scores it sees. A tie keeps the lower id.
+kernel void sample_topk_partial(
+    device const float* logits [[buffer(0)]],
+    device float* top_scores [[buffer(1)]],
+    device uint* top_ids [[buffer(2)]],
+    constant uint& n [[buffer(3)]],
+    constant uint& k [[buffer(4)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint group [[threadgroup_position_in_grid]])
+{
+    threadgroup float vals[256];
+    threadgroup uint ids[256];
+    uint index = group * 256u + tid;
+    vals[tid] = index < n ? sane_logit(logits[index]) : -INFINITY;
+    ids[tid] = index;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid != 0u) {
+        return;
+    }
+    uint keep = k > 32u ? 32u : k;
+    float best_s[32];
+    uint best_i[32];
+    for (uint s = 0u; s < 32u; ++s) {
+        best_s[s] = -INFINITY;
+        best_i[s] = 0xffffffffu;
+    }
+    if (keep > 0u) {
+        for (uint i = 0u; i < 256u; ++i) {
+            float score = vals[i];
+            uint id = ids[i];
+            if (!beats_logit(score, id, best_s[keep - 1u], best_i[keep - 1u])) {
+                continue;
+            }
+            uint pos = keep - 1u;
+            while (pos > 0u && beats_logit(score, id, best_s[pos - 1u], best_i[pos - 1u])) {
+                best_s[pos] = best_s[pos - 1u];
+                best_i[pos] = best_i[pos - 1u];
+                pos -= 1u;
+            }
+            best_s[pos] = score;
+            best_i[pos] = id;
+        }
+    }
+    for (uint s = 0u; s < 32u; ++s) {
+        top_scores[group * 32u + s] = best_s[s];
+        top_ids[group * 32u + s] = best_i[s];
+    }
+}
+
+// Merge the group lists, apply temperature and nucleus, then one uniform draw.
+kernel void sample_topk_draw(
+    device const float* top_scores [[buffer(0)]],
+    device const uint* top_ids [[buffer(1)]],
+    device float* out_value [[buffer(2)]],
+    device uint* out_id [[buffer(3)]],
+    constant uint& grid [[buffer(4)]],
+    constant uint& k [[buffer(5)]],
+    constant float& temperature [[buffer(6)]],
+    constant float& top_p [[buffer(7)]],
+    constant float& uniform [[buffer(8)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid != 0u) {
+        return;
+    }
+    uint keep = k > 32u ? 32u : k;
+    float scores[32];
+    uint ids[32];
+    for (uint s = 0u; s < 32u; ++s) {
+        scores[s] = -INFINITY;
+        ids[s] = 0xffffffffu;
+    }
+    if (keep == 0u) {
+        out_value[0] = -INFINITY;
+        out_id[0] = 0u;
+        return;
+    }
+    for (uint g = 0u; g < grid; ++g) {
+        for (uint s = 0u; s < keep; ++s) {
+            float score = top_scores[g * 32u + s];
+            uint id = top_ids[g * 32u + s];
+            if (!beats_logit(score, id, scores[keep - 1u], ids[keep - 1u])) {
+                continue;
+            }
+            uint pos = keep - 1u;
+            while (pos > 0u && beats_logit(score, id, scores[pos - 1u], ids[pos - 1u])) {
+                scores[pos] = scores[pos - 1u];
+                ids[pos] = ids[pos - 1u];
+                pos -= 1u;
+            }
+            scores[pos] = score;
+            ids[pos] = id;
+        }
+    }
+    float scaled[32];
+    float peak = -INFINITY;
+    for (uint s = 0u; s < keep; ++s) {
+        float value = scores[s] > -INFINITY ? scores[s] / temperature : -INFINITY;
+        scaled[s] = value;
+        peak = max(peak, value);
+    }
+    float probs[32];
+    float sum = 0.0f;
+    for (uint s = 0u; s < keep; ++s) {
+        float prob = scaled[s] > -INFINITY ? exp(scaled[s] - peak) : 0.0f;
+        probs[s] = prob;
+        sum += prob;
+    }
+    if (!(sum > 0.0f)) {
+        out_value[0] = scores[0];
+        out_id[0] = ids[0];
+        return;
+    }
+    uint alive = keep;
+    if (top_p > 0.0f && top_p < 1.0f) {
+        float cursor = 0.0f;
+        for (uint s = 0u; s < keep; ++s) {
+            cursor += probs[s] / sum;
+            if (cursor > top_p) {
+                alive = s + 1u;
+                break;
+            }
+        }
+        sum = 0.0f;
+        for (uint s = 0u; s < keep; ++s) {
+            if (s >= alive) {
+                probs[s] = 0.0f;
+            }
+            sum += probs[s];
+        }
+        if (!(sum > 0.0f)) {
+            out_value[0] = scores[0];
+            out_id[0] = ids[0];
+            return;
+        }
+    }
+    float kept_p[32];
+    uint kept_i[32];
+    float kept_s[32];
+    uint nkeep = 0u;
+    for (uint s = 0u; s < alive; ++s) {
+        if (!(probs[s] > 0.0f)) {
+            continue;
+        }
+        kept_p[nkeep] = probs[s];
+        kept_i[nkeep] = ids[s];
+        kept_s[nkeep] = scores[s];
+        nkeep += 1u;
+    }
+    for (uint a = 1u; a < nkeep; ++a) {
+        float prob = kept_p[a];
+        uint id = kept_i[a];
+        float score = kept_s[a];
+        uint b = a;
+        while (b > 0u && kept_i[b - 1u] > id) {
+            kept_p[b] = kept_p[b - 1u];
+            kept_i[b] = kept_i[b - 1u];
+            kept_s[b] = kept_s[b - 1u];
+            b -= 1u;
+        }
+        kept_p[b] = prob;
+        kept_i[b] = id;
+        kept_s[b] = score;
+    }
+    float cursor = 0.0f;
+    for (uint s = 0u; s < nkeep; ++s) {
+        cursor += kept_p[s] / sum;
+        if (uniform < cursor) {
+            out_value[0] = kept_s[s];
+            out_id[0] = kept_i[s];
+            return;
+        }
+    }
+    out_value[0] = kept_s[nkeep - 1u];
+    out_id[0] = kept_i[nkeep - 1u];
+}
+
+static bool marked_id(device uint* marks, uint id) {
+    return (marks[id >> 5u] & (1u << (id & 31u))) != 0u;
+}
+
+static void mark_id(device uint* marks, uint id) {
+    marks[id >> 5u] |= 1u << (id & 31u);
+}
+
+// Full-vocabulary draw used when top-k is omitted or wider than the group list.
+kernel void sample_scan(
+    device const float* logits [[buffer(0)]],
+    device uint* marks [[buffer(1)]],
+    device float* out_value [[buffer(2)]],
+    device uint* out_id [[buffer(3)]],
+    constant uint& n [[buffer(4)]],
+    constant float& temperature [[buffer(5)]],
+    constant float& top_p [[buffer(6)]],
+    constant uint& top_k [[buffer(7)]],
+    constant float& uniform [[buffer(8)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid != 0u || n == 0u) {
+        return;
+    }
+    bool limited = top_k > 0u && top_k < n;
+    if (limited) {
+        uint words = (n + 31u) / 32u;
+        for (uint word = 0u; word < words; ++word) {
+            marks[word] = 0u;
+        }
+        float lo = INFINITY;
+        float hi = -INFINITY;
+        for (uint i = 0u; i < n; ++i) {
+            float score = sane_logit(logits[i]);
+            lo = min(lo, score);
+            hi = max(hi, score);
+        }
+        float edge = hi;
+        if (lo != hi) {
+            for (uint iter = 0u; iter < 64u; ++iter) {
+                float mid = lo + (hi - lo) * 0.5f;
+                if (mid == lo || mid == hi) {
+                    break;
+                }
+                uint above = 0u;
+                for (uint i = 0u; i < n; ++i) {
+                    if (sane_logit(logits[i]) > mid) {
+                        above += 1u;
+                    }
+                }
+                if (above >= top_k) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            edge = hi;
+            for (uint i = 0u; i < n; ++i) {
+                if (sane_logit(logits[i]) > edge) {
+                    mark_id(marks, i);
+                }
+            }
+        }
+        uint above = 0u;
+        for (uint i = 0u; i < n; ++i) {
+            if (marked_id(marks, i)) {
+                above += 1u;
+            }
+        }
+        uint need = above < top_k ? top_k - above : 0u;
+        for (uint rank = 0u; rank < need; ++rank) {
+            float best = -INFINITY;
+            uint best_id = 0xffffffffu;
+            bool found = false;
+            for (uint i = 0u; i < n; ++i) {
+                if (marked_id(marks, i)) {
+                    continue;
+                }
+                float score = sane_logit(logits[i]);
+                if (!found || beats_logit(score, i, best, best_id)) {
+                    best = score;
+                    best_id = i;
+                    found = true;
+                }
+            }
+            if (!found) {
+                break;
+            }
+            mark_id(marks, best_id);
+        }
+    }
+    float peak = -INFINITY;
+    for (uint i = 0u; i < n; ++i) {
+        if (limited && !marked_id(marks, i)) {
+            continue;
+        }
+        float scaled = sane_logit(logits[i]) / temperature;
+        if (scaled > -INFINITY) {
+            peak = max(peak, scaled);
+        }
+    }
+    float sum = 0.0f;
+    for (uint i = 0u; i < n; ++i) {
+        if (limited && !marked_id(marks, i)) {
+            continue;
+        }
+        float scaled = sane_logit(logits[i]) / temperature;
+        if (scaled > -INFINITY) {
+            sum += exp(scaled - peak);
+        }
+    }
+    if (!(sum > 0.0f)) {
+        float best = sane_logit(logits[0]);
+        uint best_id = 0u;
+        for (uint i = 1u; i < n; ++i) {
+            float score = sane_logit(logits[i]);
+            if (beats_logit(score, i, best, best_id)) {
+                best = score;
+                best_id = i;
+            }
+        }
+        out_value[0] = best;
+        out_id[0] = best_id;
+        return;
+    }
+    bool nucleus = top_p > 0.0f && top_p < 1.0f;
+    float cut = sum;
+    float tier = 0.0f;
+    uint tier_limit = n;
+    if (nucleus) {
+        float target = top_p * sum;
+        float lo = 0.0f;
+        float hi = sum;
+        for (uint iter = 0u; iter < 48u; ++iter) {
+            float mid = (lo + hi) * 0.5f;
+            float mass = 0.0f;
+            for (uint i = 0u; i < n; ++i) {
+                if (limited && !marked_id(marks, i)) {
+                    continue;
+                }
+                float scaled = sane_logit(logits[i]) / temperature;
+                float prob = scaled > -INFINITY ? exp(scaled - peak) : 0.0f;
+                if (prob > mid) {
+                    mass += prob;
+                }
+            }
+            if (mass >= target) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        cut = hi;
+        float mass = 0.0f;
+        tier = 0.0f;
+        for (uint i = 0u; i < n; ++i) {
+            if (limited && !marked_id(marks, i)) {
+                continue;
+            }
+            float scaled = sane_logit(logits[i]) / temperature;
+            float prob = scaled > -INFINITY ? exp(scaled - peak) : 0.0f;
+            if (prob > cut) {
+                mass += prob;
+            } else if (prob > tier) {
+                tier = prob;
+            }
+        }
+        uint m = 0u;
+        if (tier > 0.0f && mass <= target) {
+            m = uint((target - mass) / tier) + 1u;
+            uint equal = 0u;
+            for (uint i = 0u; i < n; ++i) {
+                if (limited && !marked_id(marks, i)) {
+                    continue;
+                }
+                float scaled = sane_logit(logits[i]) / temperature;
+                float prob = scaled > -INFINITY ? exp(scaled - peak) : 0.0f;
+                if (prob == tier) {
+                    equal += 1u;
+                }
+            }
+            if (m > equal) {
+                m = equal;
+            }
+            uint lo_i = 0u;
+            uint hi_i = n - 1u;
+            while (lo_i < hi_i) {
+                uint mid = lo_i + (hi_i - lo_i) / 2u;
+                uint count = 0u;
+                for (uint i = 0u; i <= mid; ++i) {
+                    if (limited && !marked_id(marks, i)) {
+                        continue;
+                    }
+                    float scaled = sane_logit(logits[i]) / temperature;
+                    float prob = scaled > -INFINITY ? exp(scaled - peak) : 0.0f;
+                    if (prob == tier) {
+                        count += 1u;
+                    }
+                }
+                if (count >= m) {
+                    hi_i = mid;
+                } else {
+                    lo_i = mid + 1u;
+                }
+            }
+            tier_limit = lo_i;
+        }
+    }
+    float kept = 0.0f;
+    for (uint i = 0u; i < n; ++i) {
+        if (limited && !marked_id(marks, i)) {
+            continue;
+        }
+        float scaled = sane_logit(logits[i]) / temperature;
+        float prob = scaled > -INFINITY ? exp(scaled - peak) : 0.0f;
+        bool take = !nucleus || prob > cut || (prob == tier && tier > 0.0f && i <= tier_limit);
+        if (take) {
+            kept += prob;
+        }
+    }
+    if (!(kept > 0.0f)) {
+        kept = sum;
+        nucleus = false;
+    }
+    float cursor = 0.0f;
+    uint last = 0u;
+    for (uint i = 0u; i < n; ++i) {
+        if (limited && !marked_id(marks, i)) {
+            continue;
+        }
+        float scaled = sane_logit(logits[i]) / temperature;
+        float prob = scaled > -INFINITY ? exp(scaled - peak) : 0.0f;
+        bool take = !nucleus || prob > cut || (prob == tier && tier > 0.0f && i <= tier_limit);
+        if (!take || !(prob > 0.0f)) {
+            continue;
+        }
+        cursor += prob / kept;
+        last = i;
+        if (uniform < cursor) {
+            out_value[0] = sane_logit(logits[i]);
+            out_id[0] = i;
+            return;
+        }
+    }
+    out_value[0] = sane_logit(logits[last]);
+    out_id[0] = last;
+}
+
+// One segment is (token, length, origin, width). Width 0 is text.
+kernel void fill_mrope(
+    device uint* rope [[buffer(0)]],
+    device const uint* segments [[buffer(1)]],
+    constant uint& pos0 [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    constant uint& nseg [[buffer(4)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= count) {
+        return;
+    }
+    uint index = pos0 + tid;
+    uint origin = 0u;
+    uint width = 0u;
+    uint local = 0u;
+    bool found = false;
+    for (uint seg = 0u; seg < nseg; ++seg) {
+        uint token = segments[seg * 4u];
+        uint length = segments[seg * 4u + 1u];
+        if (index >= token && index < token + length) {
+            origin = segments[seg * 4u + 2u];
+            width = segments[seg * 4u + 3u];
+            local = index - token;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        rope[tid * 3u] = 0u;
+        rope[tid * 3u + 1u] = 0u;
+        rope[tid * 3u + 2u] = 0u;
+        return;
+    }
+    if (width == 0u) {
+        uint pos = origin + local;
+        rope[tid * 3u] = pos;
+        rope[tid * 3u + 1u] = pos;
+        rope[tid * 3u + 2u] = pos;
+        return;
+    }
+    uint row = local / width;
+    uint col = local - row * width;
+    rope[tid * 3u] = origin;
+    rope[tid * 3u + 1u] = origin + row;
+    rope[tid * 3u + 2u] = origin + col;
+}

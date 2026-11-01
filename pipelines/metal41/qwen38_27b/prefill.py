@@ -12,8 +12,6 @@ from __future__ import annotations
 import struct
 from typing import Any
 
-import numpy as np
-
 from qwen38_27b.attn import attend_plane
 from qwen38_27b.layout import (
     AB,
@@ -338,6 +336,20 @@ def _attend(
             (256, 1, 1),
         )
     else:
+        from qwen38_27b.vision import pack_segments
+
+        segments = rope
+        filled = runtime.session.zeros(count * 12)
+        runtime.session.encode(
+            "fill_mrope",
+            [
+                (filled, 0),
+                (runtime.session.upload(pack_segments(segments)), 0),
+            ],
+            [_u32(pos0), _u32(count), _u32(len(segments))],
+            ((count + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
         runtime.session.encode(
             "qk_norm_mrope_rows",
             [
@@ -345,7 +357,7 @@ def _attend(
                 (work.kv, 0),
                 (q_buf, q_off),
                 (k_buf, k_off),
-                (runtime.session.upload(np.ascontiguousarray(rope[pos0 : pos0 + count])), 0),
+                (filled, 0),
             ],
             [_f32(THETA), _f32(EPS)],
             (count, Q_HEADS + 4, 1),

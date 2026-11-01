@@ -31,6 +31,7 @@ from qwen38_27b.layout import (
 from qwen38_27b.prefill import workspace_bytes
 
 _ARGMAX_GROUPS = (VOCAB + 255) // 256
+SAMPLE_KEEP = 32
 _STATE_BYTES = LINEAR_LAYERS * LINEAR_V * 128 * 128 * 4
 _HISTORY_BYTES = LINEAR_LAYERS * 3 * MIX * 2
 _FFN_PARTS = ("mlp.gate_proj.weight", "mlp.up_proj.weight", "mlp.down_proj.weight")
@@ -76,6 +77,8 @@ def startup_bytes(
         + AB * 4
         + VOCAB * 4
         + _ARGMAX_GROUPS * 8
+        + SAMPLE_KEEP * _ARGMAX_GROUPS * 8
+        + 16
     )
     hold = HIDDEN * 4 if drafts else 0
     return (

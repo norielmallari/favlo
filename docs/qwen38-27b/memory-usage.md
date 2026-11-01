@@ -12,11 +12,11 @@ The weight image is 16.339 GB, including the fp8 MTP block. The key/value cache 
 | Attention scratch | 0.288 |
 | DeltaNet state | 0.151 |
 | Convolution history | 0.003 |
-| Decode buffers and the draft hold | 0.001 |
-| Steady total | 22.348 |
+| Decode buffers and the draft hold | 0.002 |
+| Steady total | 22.349 |
 
-A verify window keeps that image and adds the three-token span, 0.011 GB, plus a host copy of the DeltaNet state and the convolution history, 0.154 GB. The high point of a request already at this length is 22.513 GB.
+A verify window keeps that image and adds the three-token span, 0.011 GB, plus a host copy of the DeltaNet state and the convolution history, 0.154 GB. The high point of a request already at this length is 22.514 GB.
 
 The step that grows from 129,024 to 131,072 allocates the new cache before it releases the old planes. The host still holds the packed copy of the live cache. That overlap is 31.615 GB. Once the old planes and the host copy are released, the opening returns to the steady total.
 
-An opening with MTP off keeps the 16 language planes and leaves the MTP block in the record file. The same length is 21.550 GB. The cache is then 33,792 bytes per token. A fit that cannot keep the head drops it the same way, before any language feed-forward layer.
+An opening with MTP off keeps the 16 language planes and leaves the MTP block in the record file. The same length is 21.550 GB. The decode buffers on either opening include the grouped top-k lists, 248,336 bytes. The cache is then 33,792 bytes per token. A fit that cannot keep the head drops it the same way, before any language feed-forward layer.

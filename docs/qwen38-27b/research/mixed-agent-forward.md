@@ -95,3 +95,27 @@ Later finds are appended here. The sections above stay as committed.
 | 6, cache hit 2821 | 3020 | 237.27 tok/s (199 tok in 0.84 s) | 16.40 tok/s (93 tok in 5.67 s) |
 | 7, cache hit 3113 | 3151 | 64.03 tok/s (38 tok in 0.59 s) | 15.03 tok/s (55 tok in 3.66 s) |
 | 8, cache hit 3206 | 3265 | 97.76 tok/s (59 tok in 0.60 s) | 13.98 tok/s (189 tok in 13.52 s) |
+
+1 November 2026. `uv run python -m harness.coding --model qwen38-27b` sent MTP off. Thinking stayed on. Eight requests, context 3359. Prefill 302.30 tok/s over 2763 tokens (9.14 s). Decode 14.36 tok/s over 942 tokens (65.60 s). `uv run python -m harness.coding --model qwen38-27b --mtp on` kept depth 3. Thinking stayed on. Eight requests, context 3432. Prefill 298.38 tok/s over 2766 tokens (9.27 s). Decode 15.34 tok/s over 997 tokens (64.98 s). A search the same day did not find that pair on an M5 Pro with 48 GB. Queries: "Qwen3.8-27B 15.34 tok/s 14.36 coding agent MTP M5 Pro 48GB", "Qwen3.8-27B 298.38 OR 302.30 tok/s prefill coding MTP depth 3 thinking M5 Pro", and "14.36 OR 15.34 Qwen3.8-27B tok/s coding MTP". [oMLX](https://omlx.ai/benchmarks/performance/e78ir7ct) reports 17.7 tok/s at 64k with thinking and MTP on an M5 Pro with 20 GPU cores and 48 GB. [A later oMLX row](https://omlx.ai/benchmarks/performance/kq2sw7rd) reports 23.5 tok/s at 64k with thinking off and MTP on that machine. [Billy Xu](https://billyxu.dev/notes/local-model-lab-3/) reports 32.9 tok/s on a short prompt and 30.0 tok/s at 25k tokens with Lightning MTP on an M5 Pro with 48 GB. [llm-bench](https://llm-bench.io/benchmarks/cmvac9wso009z01obo2won597) reports 21.4 tok/s for a thinking coding task on an M5 Pro with 48 GB. [A Strix Halo Q8 table](https://github.com/MikeVeerman/qwen38-27-Strix-Halo-bench/blob/main/README.md) reports a mean of 7.23 tok/s with MTP off and 15.29 tok/s with MTP on. None of those runs is this harness table.
+
+| Coding-agent request, MTP off | Prompt | Prefill | Decode |
+|---|---|---|---|
+| 1, cache miss | 2050 | 449.34 tok/s (2050 tok in 4.56 s) | 14.11 tok/s (62 tok in 4.39 s) |
+| 2, cache hit 2112 | 2143 | 54.92 tok/s (31 tok in 0.56 s) | 14.17 tok/s (77 tok in 5.44 s) |
+| 3, cache hit 2220 | 2283 | 110.32 tok/s (63 tok in 0.57 s) | 13.85 tok/s (41 tok in 2.96 s) |
+| 4, cache hit 2324 | 2445 | 187.21 tok/s (121 tok in 0.65 s) | 14.40 tok/s (118 tok in 8.19 s) |
+| 5, prefix load 2445, cache hit 2445 | 2647 | 247.65 tok/s (202 tok in 0.82 s) | 14.56 tok/s (195 tok in 13.40 s) |
+| 6, cache hit 2842 | 3041 | 243.85 tok/s (199 tok in 0.82 s) | 14.48 tok/s (156 tok in 10.78 s) |
+| 7, cache hit 3197 | 3235 | 66.01 tok/s (38 tok in 0.58 s) | 14.18 tok/s (65 tok in 4.58 s) |
+| 8, cache hit 3300 | 3359 | 101.35 tok/s (59 tok in 0.58 s) | 14.37 tok/s (228 tok in 15.86 s) |
+
+| Coding-agent request, MTP on, depth 3 | Prompt | Prefill | Decode |
+|---|---|---|---|
+| 1, cache miss | 2050 | 446.54 tok/s (2050 tok in 4.59 s) | 13.55 tok/s (208 tok in 15.36 s) |
+| 2, cache hit 2258 | 2289 | 53.66 tok/s (31 tok in 0.58 s) | 15.81 tok/s (78 tok in 4.93 s) |
+| 3, cache hit 2367 | 2430 | 106.29 tok/s (63 tok in 0.59 s) | 17.26 tok/s (41 tok in 2.38 s) |
+| 4, cache hit 2471 | 2592 | 181.35 tok/s (121 tok in 0.67 s) | 15.42 tok/s (121 tok in 7.85 s) |
+| 5, prefix load 2592, cache hit 2592 | 2797 | 245.40 tok/s (205 tok in 0.84 s) | 15.87 tok/s (127 tok in 8.00 s) |
+| 6, cache hit 2924 | 3123 | 239.08 tok/s (199 tok in 0.83 s) | 16.13 tok/s (156 tok in 9.67 s) |
+| 7, cache hit 3279 | 3317 | 65.10 tok/s (38 tok in 0.58 s) | 14.57 tok/s (56 tok in 3.84 s) |
+| 8, cache hit 3373 | 3432 | 99.58 tok/s (59 tok in 0.59 s) | 16.21 tok/s (210 tok in 12.95 s) |

@@ -6,15 +6,14 @@ are present. Two feeds share one read. Each later feed is a serial step. The Del
 and the convolution history are copied first. A rejected tail restores that copy
 and replays the recorded convolution and recurrence rows for the kept tokens.
 The language weights are not read again. Temperature 0 keeps a draft that matches
-the target argmax. A host sampler keeps a draft that matches its draw. The
+the target argmax. A sampler keeps a draft that matches its draw. The
 request flag ``mtp`` turns the verify off.
 """
 
 from __future__ import annotations
 
+import struct
 from typing import Any
-
-import numpy as np
 
 from qwen38_27b.layout import HIDDEN, LINEAR_LAYERS, LINEAR_V, MIX
 
@@ -152,10 +151,19 @@ def _score(
 
 
 def _copy_hidden(runtime: Any, workspace: Any, index: int) -> None:
-    start = index * HIDDEN
-    row = runtime.session.download_f32(workspace.hidden, (index + 1) * HIDDEN)[start : start + HIDDEN]
-    view = memoryview(runtime.hidden.contents().as_buffer(HIDDEN * 4))
-    view[:] = np.ascontiguousarray(row, dtype=np.float32).tobytes()
+    runtime.session.begin()
+    try:
+        runtime.session.encode(
+            "copy_f32",
+            [(workspace.hidden, index * HIDDEN * 4), (runtime.hidden, 0)],
+            [struct.pack("<I", HIDDEN)],
+            (HIDDEN // 256, 1, 1),
+            (256, 1, 1),
+        )
+        runtime.session.end()
+    except Exception:
+        runtime.session.finish()
+        raise
 
 
 def _capture(runtime: Any) -> tuple[bytes, bytes]:
@@ -177,23 +185,21 @@ def _put(buffer: Any, blob: bytes) -> None:
 def _extend_rope(runtime: Any, pos: int, count: int) -> None:
     rope = getattr(runtime, "_rope_ids", None)
     cursor = getattr(runtime, "_rope_next", None)
-    if rope is None or cursor is None:
+    if not rope or cursor is None:
         return
-    have = int(len(rope))
+    last = rope[-1]
+    have = int(last[0]) + int(last[1])
     need = pos + count
     if have >= need:
         return
-    angle = int(cursor)
-    extra = np.zeros((need - have, 3), dtype=np.uint32)
-    for row in range(need - have):
-        extra[row] = angle
-        angle += 1
-    runtime._rope_ids = np.concatenate((np.asarray(rope), extra))
+    extra = (have, need - have, int(cursor), 0)
+    runtime._rope_ids = (*rope, extra)
 
 
 def _rope_at(runtime: Any, index: int) -> tuple[int, int, int] | None:
     rope = getattr(runtime, "_rope_ids", None)
-    if rope is None or index >= len(rope):
+    if not rope:
         return None
-    row = rope[index]
-    return int(row[0]), int(row[1]), int(row[2])
+    from qwen38_27b.vision import position_at
+
+    return position_at(rope, index)

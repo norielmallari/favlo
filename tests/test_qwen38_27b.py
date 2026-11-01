@@ -1289,18 +1289,36 @@ def test_install_reads_one_prefix_region_at_a_time(monkeypatch) -> None:
 
 
 def test_image_tokens_use_the_merged_grid() -> None:
-    from qwen38_27b.vision import IMAGE_PAD, expand_image_tokens, language_positions
+    from qwen38_27b.vision import IMAGE_PAD, expand_image_tokens, language_positions, position_at
 
     prompt = expand_image_tokens([1, IMAGE_PAD, 2], [4])
     positions, nxt = language_positions(prompt, [(2, 2)])
     assert prompt == [1, IMAGE_PAD, IMAGE_PAD, IMAGE_PAD, IMAGE_PAD, 2]
-    assert positions[0].tolist() == [0, 0, 0]
-    assert positions[1].tolist() == [1, 1, 1]
-    assert positions[2].tolist() == [1, 1, 2]
-    assert positions[3].tolist() == [1, 2, 1]
-    assert positions[4].tolist() == [1, 2, 2]
-    assert positions[5].tolist() == [3, 3, 3]
+    rows = [position_at(positions, index) for index in range(len(prompt))]
+    assert rows == [
+        (0, 0, 0),
+        (1, 1, 1),
+        (1, 1, 2),
+        (1, 2, 1),
+        (1, 2, 2),
+        (3, 3, 3),
+    ]
     assert nxt == 4
+
+
+def test_a_draft_past_the_image_continues_the_text_id() -> None:
+    from qwen38_27b.speculate import _extend_rope
+    from qwen38_27b.vision import position_at
+
+    class Runtime:
+        _rope_ids = ((0, 1, 0, 0), (1, 4, 1, 2), (5, 1, 3, 0))
+        _rope_next = 4
+
+    runtime = Runtime()
+    _extend_rope(runtime, 6, 2)
+    assert position_at(runtime._rope_ids, 6) == (4, 4, 4)
+    assert position_at(runtime._rope_ids, 7) == (5, 5, 5)
+    assert runtime._rope_next == 4
 
 
 def test_an_image_is_logged_before_its_bytes_are_read() -> None:

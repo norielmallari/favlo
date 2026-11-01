@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import math
+import struct
+
 import numpy as np
 
 from qwen38_27b.formats import dequant_e4m3_block, dequant_fp4, dequant_fp8, quantize_fp4, quantize_fp8
@@ -630,6 +633,292 @@ def check_i8_prefill(session: Session) -> None:
         _close(f"{kind} {kernel}", got, expect, rtol=1e-5, atol=1e-4)
 
 
+def _draw_id(logits: list[float], temperature: float, top_p: float, top_k: int, uniform: float) -> int:
+    """Sort reference for the device draw. A tie keeps the lower id."""
+    scores = [float(value) for value in logits]
+    count = len(scores)
+    if 0 < top_k < count:
+        order = sorted(range(count), key=lambda index: (-scores[index], index))
+        keep = set(order[:top_k])
+    else:
+        keep = set(range(count))
+    scaled = [
+        scores[index] / temperature if index in keep and math.isfinite(scores[index]) else -math.inf
+        for index in range(count)
+    ]
+    finite = [value for value in scaled if math.isfinite(value)]
+    if not finite:
+        return max(range(count), key=lambda index: (scores[index], -index))
+    peak = max(finite)
+    probs = [math.exp(value - peak) if math.isfinite(value) else 0.0 for value in scaled]
+    total = sum(probs)
+    if 0.0 < top_p < 1.0 and total > 0.0:
+        order = sorted(range(count), key=lambda index: (-probs[index], index))
+        cursor = 0.0
+        chosen: list[int] = []
+        for index in order:
+            if probs[index] <= 0.0:
+                break
+            cursor += probs[index] / total
+            chosen.append(index)
+            if cursor > top_p:
+                break
+        mask = [0.0] * count
+        for index in chosen:
+            mask[index] = probs[index]
+        probs = mask
+        total = sum(probs)
+    pick = float(np.float32(uniform))
+    cursor = 0.0
+    last = 0
+    for index, prob in enumerate(probs):
+        if prob <= 0.0:
+            continue
+        cursor += prob / total
+        last = index
+        if pick < cursor:
+            return index
+    return last
+
+
+def _picked(session: Session, pick: Any) -> int:
+    _value, index = struct.unpack_from("<fI", session.download(pick, 8))
+    return int(index)
+
+
+def check_sample(session: Session) -> None:
+    count = 256
+    groups = (count + 255) // 256
+    logits = np.full(count, -100.0, dtype=np.float32)
+    logits[4] = np.float32(3.0)
+    logits[9] = np.float32(3.0)
+    buf = session.upload(logits)
+    values = session.zeros(groups * 4)
+    indexes = session.zeros(groups * 4)
+    pick = session.zeros(16)
+    session.begin()
+    session.encode(
+        "argmax_partial",
+        [(buf, 0), (values, 0), (indexes, 0)],
+        [struct.pack("<I", count)],
+        (groups, 1, 1),
+        (256, 1, 1),
+    )
+    session.encode(
+        "argmax_final",
+        [(values, 0), (indexes, 0), (pick, 0), (pick, 4)],
+        [struct.pack("<I", groups)],
+        (1, 1, 1),
+        (1, 1, 1),
+    )
+    session.end()
+    assert _picked(session, pick) == 4
+
+    logits = np.full(count, -100.0, dtype=np.float32)
+    logits[0] = np.float32(1.0)
+    logits[1] = np.float32(1.2)
+    buf = session.upload(logits)
+    ids = struct.pack("<I", 1)
+    deltas = struct.pack("<f", -0.5)
+    session.begin()
+    session.encode(
+        "logit_adjust",
+        [(buf, 0), (session.upload(ids), 0), (session.upload(deltas), 0)],
+        [struct.pack("<I", 1)],
+        (1, 1, 1),
+        (256, 1, 1),
+    )
+    session.encode(
+        "argmax_partial",
+        [(buf, 0), (values, 0), (indexes, 0)],
+        [struct.pack("<I", count)],
+        (groups, 1, 1),
+        (256, 1, 1),
+    )
+    session.encode(
+        "argmax_final",
+        [(values, 0), (indexes, 0), (pick, 0), (pick, 4)],
+        [struct.pack("<I", groups)],
+        (1, 1, 1),
+        (1, 1, 1),
+    )
+    session.end()
+    assert _picked(session, pick) == 0
+
+    logits = np.full(count, -100.0, dtype=np.float32)
+    logits[10] = np.float32(5.0)
+    logits[20] = np.float32(4.0)
+    logits[30] = np.float32(1.0)
+    buf = session.upload(logits)
+    top_s = session.zeros(groups * 32 * 4)
+    top_i = session.zeros(groups * 32 * 4)
+    for uniform, expect in ((0.0, 10), (0.9, 20)):
+        session.begin()
+        session.encode(
+            "sample_topk_partial",
+            [(buf, 0), (top_s, 0), (top_i, 0)],
+            [struct.pack("<I", count), struct.pack("<I", 2)],
+            (groups, 1, 1),
+            (256, 1, 1),
+        )
+        session.encode(
+            "sample_topk_draw",
+            [(top_s, 0), (top_i, 0), (pick, 0), (pick, 4)],
+            [
+                struct.pack("<I", groups),
+                struct.pack("<I", 2),
+                struct.pack("<f", 1.0),
+                struct.pack("<f", 1.0),
+                struct.pack("<f", uniform),
+            ],
+            (1, 1, 1),
+            (1, 1, 1),
+        )
+        session.end()
+        got = _picked(session, pick)
+        assert got == expect, (uniform, got, expect)
+        assert got == _draw_id(logits.tolist(), 1.0, 1.0, 2, uniform)
+
+    session.begin()
+    session.encode(
+        "sample_topk_partial",
+        [(buf, 0), (top_s, 0), (top_i, 0)],
+        [struct.pack("<I", count), struct.pack("<I", 2)],
+        (groups, 1, 1),
+        (256, 1, 1),
+    )
+    session.encode(
+        "sample_topk_draw",
+        [(top_s, 0), (top_i, 0), (pick, 0), (pick, 4)],
+        [
+            struct.pack("<I", groups),
+            struct.pack("<I", 2),
+            struct.pack("<f", 1.0),
+            struct.pack("<f", 0.5),
+            struct.pack("<f", 0.99),
+        ],
+        (1, 1, 1),
+        (1, 1, 1),
+    )
+    session.end()
+    assert _picked(session, pick) == 10
+
+    wide = np.full(count, -100.0, dtype=np.float32)
+    for index in range(50):
+        wide[index] = np.float32(float(50 - index))
+    wide_buf = session.upload(wide)
+    session.begin()
+    session.encode(
+        "sample_scan",
+        [(wide_buf, 0), (top_s, 0), (pick, 0), (pick, 4)],
+        [
+            struct.pack("<I", count),
+            struct.pack("<f", 1.0),
+            struct.pack("<f", 0.8),
+            struct.pack("<I", 0),
+            struct.pack("<f", 0.25),
+        ],
+        (1, 1, 1),
+        (1, 1, 1),
+    )
+    session.end()
+    expect = _draw_id(wide.tolist(), 1.0, 0.8, 0, 0.25)
+    got = _picked(session, pick)
+    assert got == expect, (got, expect)
+
+    session.begin()
+    session.encode(
+        "sample_scan",
+        [(wide_buf, 0), (top_s, 0), (pick, 0), (pick, 4)],
+        [
+            struct.pack("<I", count),
+            struct.pack("<f", 0.7),
+            struct.pack("<f", 0.95),
+            struct.pack("<I", 40),
+            struct.pack("<f", 0.1),
+        ],
+        (1, 1, 1),
+        (1, 1, 1),
+    )
+    session.end()
+    expect = _draw_id(wide.tolist(), 0.7, 0.95, 40, 0.1)
+    got = _picked(session, pick)
+    assert got == expect, (got, expect)
+
+    count2 = 512
+    groups2 = 2
+    span = np.full(count2, -50.0, dtype=np.float32)
+    span[300] = np.float32(9.0)
+    span_buf = session.upload(span)
+    values2 = session.zeros(groups2 * 4)
+    indexes2 = session.zeros(groups2 * 4)
+    session.begin()
+    session.encode(
+        "argmax_partial",
+        [(span_buf, 0), (values2, 0), (indexes2, 0)],
+        [struct.pack("<I", count2)],
+        (groups2, 1, 1),
+        (256, 1, 1),
+    )
+    session.encode(
+        "argmax_final",
+        [(values2, 0), (indexes2, 0), (pick, 0), (pick, 4)],
+        [struct.pack("<I", groups2)],
+        (1, 1, 1),
+        (1, 1, 1),
+    )
+    session.end()
+    assert _picked(session, pick) == 300
+
+
+def check_fill_mrope(session: Session) -> None:
+    from qwen38_27b.vision import pack_segments, position_at
+
+    segments = ((0, 1, 0, 0), (1, 4, 1, 2), (5, 1, 3, 0))
+    blob = session.upload(pack_segments(segments))
+
+    def run(pos0: int, count: int) -> None:
+        dest = session.zeros(count * 12)
+        session.begin()
+        session.encode(
+            "fill_mrope",
+            [(dest, 0), (blob, 0)],
+            [struct.pack("<I", pos0), struct.pack("<I", count), struct.pack("<I", len(segments))],
+            ((count + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+        session.end()
+        raw = struct.unpack(f"<{count * 3}I", session.download(dest, count * 12))
+        for offset in range(count):
+            expect = position_at(segments, pos0 + offset)
+            assert expect is not None
+            got = raw[offset * 3 : offset * 3 + 3]
+            assert got == expect
+
+    run(0, 6)
+    run(2, 2)
+
+
+def check_patch_cast(session: Session) -> None:
+    rows, row_pad, logical, inner, stride = 2, 2, 2, 4, 2
+    src = np.array([1.5, 2.5, 3.5, 4.5], dtype=np.float32)
+    dst = session.zeros(row_pad * inner * 2)
+    session.begin()
+    session.encode(
+        "vision_to_half",
+        [(session.upload(src), 0), (dst, 0)],
+        [struct.pack("<I", value) for value in (rows, row_pad, logical, inner, stride)],
+        ((row_pad * inner + 255) // 256, 1, 1),
+        (256, 1, 1),
+    )
+    session.end()
+    got = np.frombuffer(session.download(dst, row_pad * inner * 2), dtype=np.float16).reshape(row_pad, inner)
+    expect = np.zeros((row_pad, inner), dtype=np.float16)
+    expect[0, :2] = np.array([1.5, 2.5], dtype=np.float16)
+    expect[1, :2] = np.array([3.5, 4.5], dtype=np.float16)
+    assert np.array_equal(got, expect)
+
+
 CHECKS = (
     ("fp4 tile", check_fp4_tile),
     ("int8 prefill", check_i8_prefill),
@@ -650,6 +939,9 @@ CHECKS = (
     ("vision erf gelu", check_vision_gelu_erf),
     ("attention", check_attention),
     ("attention blocks", check_attention_blocks),
+    ("sample", check_sample),
+    ("image rope", check_fill_mrope),
+    ("patch cast", check_patch_cast),
 )
 
 

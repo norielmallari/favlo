@@ -77,23 +77,40 @@ def expand_image_tokens(ids: list[int], counts: list[int]) -> list[int]:
     return expanded
 
 
-def language_positions(ids: list[int], merged: list[tuple[int, int]]) -> tuple[np.ndarray, int]:
-    """Interleaved M-RoPE ids. Text uses one id on every axis.
+def language_positions(
+    ids: list[int], merged: list[tuple[int, int]]
+) -> tuple[tuple[tuple[int, int, int, int], ...], int]:
+    """Interleaved M-RoPE segments. Text uses one id on every axis.
 
-    An image keeps a constant temporal id and writes the merged row and column
-    on the other two axes. The next text id is one past the largest id the
-    image used.
+    Each segment is ``(token, length, origin, width)``. Width 0 is text: the
+    id at a token is ``origin`` plus the offset inside the segment, on every
+    axis. An image keeps ``origin`` as its temporal id and uses ``width`` for
+    the merged column. The next text id is one past the largest id the image
+    used. ``fill_mrope`` writes a chunk of these ids on device.
     """
-    positions = np.zeros((len(ids), 3), dtype=np.uint32)
+    segments: list[tuple[int, int, int, int]] = []
     cursor = 0
     image = 0
     index = 0
+    text_at: int | None = None
+    text_origin = 0
+
+    def close_text(end: int) -> None:
+        nonlocal text_at
+        if text_at is None:
+            return
+        segments.append((text_at, end - text_at, text_origin, 0))
+        text_at = None
+
     while index < len(ids):
         if ids[index] != IMAGE_PAD:
-            positions[index] = cursor
+            if text_at is None:
+                text_at = index
+                text_origin = cursor
             cursor += 1
             index += 1
             continue
+        close_text(index)
         if image >= len(merged):
             message = "image tokens ran past the prepared grids"
             raise RuntimeError(message)
@@ -103,19 +120,41 @@ def language_positions(ids: list[int], merged: list[tuple[int, int]]) -> tuple[n
         if index + count > len(ids) or any(token != IMAGE_PAD for token in ids[index : index + count]):
             message = "image tokens do not match the merged grid"
             raise RuntimeError(message)
-        flat = 0
-        for row in range(height):
-            for col in range(width):
-                positions[index + flat, 0] = cursor
-                positions[index + flat, 1] = cursor + row
-                positions[index + flat, 2] = cursor + col
-                flat += 1
+        segments.append((index, count, cursor, width))
         cursor += max(height, width, 1)
         index += count
+    close_text(index)
     if image != len(merged):
         message = "a prepared image was not in the prompt"
         raise RuntimeError(message)
-    return positions, cursor
+    return tuple(segments), cursor
+
+
+def position_at(
+    segments: tuple[tuple[int, int, int, int], ...], index: int
+) -> tuple[int, int, int] | None:
+    """The three M-RoPE ids at ``index``, or None when no segment covers it."""
+    for token, length, origin, width in segments:
+        if index < token or index >= token + length:
+            continue
+        local = index - token
+        if width <= 0:
+            pos = origin + local
+            return pos, pos, pos
+        row = local // width
+        col = local - row * width
+        return origin, origin + row, origin + col
+    return None
+
+
+def pack_segments(segments: tuple[tuple[int, int, int, int], ...]) -> bytes:
+    """Four uint32s per segment, the layout ``fill_mrope`` reads."""
+    flat: list[int] = []
+    for token, length, origin, width in segments:
+        flat.extend((int(token), int(length), int(origin), int(width)))
+    if not flat:
+        return b""
+    return struct.pack(f"<{len(flat)}I", *flat)
 
 
 def prepare_image(

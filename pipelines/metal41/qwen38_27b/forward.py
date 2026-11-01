@@ -5,8 +5,10 @@ stage before that layer runs. MTP weights stay in the record when MTP is off.
 The head leaves the device when the prompt needs its bytes. Decode does not run
 that block.
 
-Temperature 0 is an argmax. A positive temperature samples with top-k and
-top-p. Presence, frequency, and logit bias follow the OpenAI logit update.
+Temperature 0 is an on-device argmax. A positive temperature, a presence
+penalty, a frequency penalty, or a logit bias is drawn on device. The host
+reads the chosen id. Presence, frequency, and logit bias follow the OpenAI
+logit update.
 A repeated span of 16 or more tokens ends the completion. An image request
 runs the vision tower and writes those tokens into the prompt.
 """
@@ -15,6 +17,7 @@ from __future__ import annotations
 
 import gc
 import json
+import math
 import struct
 import time
 from pathlib import Path
@@ -27,6 +30,7 @@ from favlo.memory import memory
 from favlo.pipeline import ClientClosed
 from qwen38_27b.attn import bind_plane, value_block_bytes
 from qwen38_27b.budget import (
+    SAMPLE_KEEP,
     choose_wire,
     group_tensors,
     same_weight_image,
@@ -103,6 +107,9 @@ _DEVICE_FIELDS = (
     "logits",
     "best_v",
     "best_i",
+    "top_s",
+    "top_i",
+    "pick",
     "plane_q",
     "plane_scores",
     "plane_probs",
@@ -251,6 +258,9 @@ class Qwen38Runtime:
             self.logits = zeros(VOCAB * 4)
             self.best_v = zeros(_ARGMAX_GROUPS * 4)
             self.best_i = zeros(_ARGMAX_GROUPS * 4)
+            self.top_s = zeros(_ARGMAX_GROUPS * SAMPLE_KEEP * 4)
+            self.top_i = zeros(_ARGMAX_GROUPS * SAMPLE_KEEP * 4)
+            self.pick = zeros(16)
             self._apply(plan, 0, [])
             self._prefill = _Workspace(self.session, drafts=plan.mtp)
             self.prefix = open_session(self)
@@ -965,10 +975,15 @@ class Qwen38Runtime:
 
     def _rope_at(self, index: int) -> tuple[int, int, int] | None:
         rope = getattr(self, "_rope_ids", None)
-        if rope is None:
+        if not rope:
             return None
-        row = rope[index]
-        return int(row[0]), int(row[1]), int(row[2])
+        from qwen38_27b.vision import position_at
+
+        found = position_at(rope, index)
+        if found is None:
+            message = f"position {index} has no RoPE id"
+            raise RuntimeError(message)
+        return found
 
     def step(
         self,
@@ -1006,21 +1021,16 @@ class Qwen38Runtime:
             if logits:
                 head = self._resolve("lm_head.weight", "model.language_model.lm_head.weight")
                 self._gemv(self.normed, head, self.logits)
-                self.session.encode(
-                    "argmax_partial",
-                    [(self.logits, 0), (self.best_v, 0), (self.best_i, 0)],
-                    [_u32(VOCAB)],
-                    (_ARGMAX_GROUPS, 1, 1),
-                    (256, 1, 1),
-                )
+                if not getattr(self, "_sample_host", False):
+                    self._encode_argmax()
             self.session.end()
         except Exception:
             self.session.finish()
             raise
         self.filled = pos + 1
-        if not logits:
+        if not logits or getattr(self, "_sample_host", False):
             return None
-        return _best(self)
+        return self._read_pick()
 
     def _argmax_hidden(self) -> int:
         """Argmax of the residual already stored in ``hidden``."""
@@ -1033,18 +1043,12 @@ class Qwen38Runtime:
             self._rms(self.hidden, final, self.normed)
             head = self._resolve("lm_head.weight", "model.language_model.lm_head.weight")
             self._gemv(self.normed, head, self.logits)
-            self.session.encode(
-                "argmax_partial",
-                [(self.logits, 0), (self.best_v, 0), (self.best_i, 0)],
-                [_u32(VOCAB)],
-                (_ARGMAX_GROUPS, 1, 1),
-                (256, 1, 1),
-            )
+            self._encode_argmax()
             self.session.end()
         except Exception:
             self.session.finish()
             raise
-        return _best(self)
+        return self._read_pick()
 
     def _fill_logits(self) -> None:
         """Write the final-norm logits for the residual already stored in ``hidden``."""
@@ -1099,15 +1103,9 @@ class Qwen38Runtime:
         self._copy_normed()
         head_name = self._resolve("lm_head.weight", "model.language_model.lm_head.weight")
         self._gemv(self.normed, head_name, self.logits)
-        self.session.encode(
-            "argmax_partial",
-            [(self.logits, 0), (self.best_v, 0), (self.best_i, 0)],
-            [_u32(VOCAB)],
-            (_ARGMAX_GROUPS, 1, 1),
-            (256, 1, 1),
-        )
+        self._encode_argmax()
         self.session.end()
-        return _best(self)
+        return self._read_pick()
 
     def generate(
         self,
@@ -1189,7 +1187,8 @@ class Qwen38Runtime:
 
                 prefill_ids(self, suffix[:-1], hit, follow=suffix[-1])
             nxt = self.step(suffix[-1], len(prompt) - 1, logits=True, rope=self._rope_at(len(prompt) - 1))
-            assert nxt is not None
+            if not self._sample_host:
+                assert nxt is not None
             counts: dict[int, int] = {}
             chosen = self._stable_draw([], self._pick(nxt, counts), counts)
             sampled_at = time.perf_counter()
@@ -1294,17 +1293,7 @@ class Qwen38Runtime:
 
                             def draw() -> int:
                                 self._fill_logits()
-                                picked = sample_token(
-                                    self._logits(),
-                                    self._temperature,
-                                    self._top_p,
-                                    self._top_k,
-                                    self._presence,
-                                    self._frequency,
-                                    sample_counts,
-                                    self._logit_bias,
-                                    self._rng,
-                                )
+                                picked = self._sample(sample_counts, adjust=True)
                                 return self._stable_draw(produced, picked, sample_counts)
 
                             def commit(token: int) -> None:
@@ -1355,7 +1344,8 @@ class Qwen38Runtime:
                 if speculated:
                     continue
                 nxt_id = step_new(chosen, pos, logits=True)
-                assert nxt_id is not None
+                if not self._sample_host:
+                    assert nxt_id is not None
                 chosen = self._stable_draw(out, self._pick(nxt_id, counts), counts)
                 last_sample = time.perf_counter()
             if self._mtp_tries:
@@ -1389,23 +1379,131 @@ class Qwen38Runtime:
             self._end_phase(decode_row, "")
         return out
 
-    def _logits(self) -> np.ndarray:
-        return self.session.download_f32(self.logits, VOCAB)
-
-    def _pick(self, argmax_id: int, counts: dict[int, int]) -> int:
+    def _pick(self, argmax_id: int | None, counts: dict[int, int]) -> int:
         if not self._sample_host:
             return int(argmax_id)
-        return sample_token(
-            self._logits(),
-            self._temperature,
-            self._top_p,
-            self._top_k,
-            self._presence,
-            self._frequency,
-            counts,
-            self._logit_bias,
-            self._rng,
+        return self._sample(counts, adjust=True)
+
+    def _sample(self, counts: dict[int, int], *, adjust: bool) -> int:
+        self.session.begin()
+        try:
+            if adjust:
+                self._encode_penalties(counts)
+            if self._temperature <= 0.0:
+                self._encode_argmax()
+            elif 0 < self._top_k <= SAMPLE_KEEP:
+                self._encode_topk()
+            else:
+                self._encode_scan()
+            self.session.end()
+        except Exception:
+            self.session.finish()
+            raise
+        return self._read_pick()
+
+    def _encode_argmax(self) -> None:
+        self.session.encode(
+            "argmax_partial",
+            [(self.logits, 0), (self.best_v, 0), (self.best_i, 0)],
+            [_u32(VOCAB)],
+            (_ARGMAX_GROUPS, 1, 1),
+            (256, 1, 1),
         )
+        self.session.encode(
+            "argmax_final",
+            [(self.best_v, 0), (self.best_i, 0), (self.pick, 0), (self.pick, 4)],
+            [_u32(_ARGMAX_GROUPS)],
+            (1, 1, 1),
+            (1, 1, 1),
+        )
+
+    def _encode_topk(self) -> None:
+        keep = int(self._top_k)
+        self.session.encode(
+            "sample_topk_partial",
+            [(self.logits, 0), (self.top_s, 0), (self.top_i, 0)],
+            [_u32(VOCAB), _u32(keep)],
+            (_ARGMAX_GROUPS, 1, 1),
+            (256, 1, 1),
+        )
+        self.session.encode(
+            "sample_topk_draw",
+            [(self.top_s, 0), (self.top_i, 0), (self.pick, 0), (self.pick, 4)],
+            [
+                _u32(_ARGMAX_GROUPS),
+                _u32(keep),
+                _f32(self._temperature),
+                _f32(self._top_p),
+                _f32(float(self._rng.random())),
+            ],
+            (1, 1, 1),
+            (1, 1, 1),
+        )
+
+    def _encode_scan(self) -> None:
+        self.session.encode(
+            "sample_scan",
+            [(self.logits, 0), (self.top_s, 0), (self.pick, 0), (self.pick, 4)],
+            [
+                _u32(VOCAB),
+                _f32(self._temperature),
+                _f32(self._top_p),
+                _u32(max(int(self._top_k), 0)),
+                _f32(float(self._rng.random())),
+            ],
+            (1, 1, 1),
+            (1, 1, 1),
+        )
+
+    def _encode_penalties(self, counts: dict[int, int]) -> None:
+        merged: dict[int, float] = {}
+        for token, bias in self._logit_bias.items():
+            index = int(token)
+            if 0 <= index < VOCAB:
+                merged[index] = merged.get(index, 0.0) + float(bias)
+        if self._presence != 0.0 or self._frequency != 0.0:
+            for token, count in counts.items():
+                if count <= 0:
+                    continue
+                index = int(token)
+                if 0 <= index < VOCAB:
+                    delta = -float(count) * float(self._frequency) - float(self._presence)
+                    merged[index] = merged.get(index, 0.0) + delta
+        if not merged:
+            return
+        ids = struct.pack(f"<{len(merged)}I", *merged)
+        deltas = struct.pack(f"<{len(merged)}f", *merged.values())
+        self.session.encode(
+            "logit_adjust",
+            [(self.logits, 0), (self.session.upload(ids), 0), (self.session.upload(deltas), 0)],
+            [_u32(len(merged))],
+            ((len(merged) + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+
+    def _ban(self, banned: list[int]) -> None:
+        ids = [int(token) for token in banned if 0 <= int(token) < VOCAB]
+        if not ids:
+            return
+        blob = struct.pack(f"<{len(ids)}I", *ids)
+        self.session.begin()
+        try:
+            self.session.encode(
+                "logit_fill",
+                [(self.logits, 0), (self.session.upload(blob), 0)],
+                [_f32(float("-inf")), _u32(len(ids))],
+                ((len(ids) + 255) // 256, 1, 1),
+                (256, 1, 1),
+            )
+            self.session.end()
+        except Exception:
+            self.session.finish()
+            raise
+
+    def _read_pick(self) -> int:
+        value, index = struct.unpack_from("<fI", self.session.download(self.pick, 8))
+        self._pick_finite = math.isfinite(value)
+        return int(index)
 
     def _tokenizer(self) -> Any:
         tokenizer = getattr(self, "_loaded_tokenizer", None)
@@ -1427,27 +1525,13 @@ class Qwen38Runtime:
         tokenizer = self._tokenizer()
         if keeps_token_ids(tokenizer, produced, chosen):
             return int(chosen)
-        raw = self._logits()
         first = int(chosen)
         banned: list[int] = []
         for _ in range(64):
             banned.append(int(chosen))
-            scores = np.array(raw, dtype=np.float64, copy=True)
-            scores[banned] = -np.inf
-            if not np.isfinite(scores).any():
-                return first
-            chosen = sample_token(
-                scores,
-                self._temperature,
-                self._top_p,
-                self._top_k,
-                self._presence,
-                self._frequency,
-                counts,
-                self._logit_bias,
-                self._rng,
-            )
-            if not np.isfinite(scores[int(chosen)]):
+            self._ban(banned)
+            chosen = self._sample(counts, adjust=False)
+            if not self._pick_finite:
                 return first
             if keeps_token_ids(tokenizer, produced, int(chosen)):
                 return int(chosen)
@@ -1599,23 +1683,6 @@ def _nucleus(scores: np.ndarray, temperature: float, top_p: float, rng: np.rando
             return int(np.argmax(scores))
         probs /= total
     return int(rng.choice(probs.size, p=probs))
-
-
-def _best(runtime: Qwen38Runtime) -> int:
-    return _best_from(runtime, runtime.best_v, runtime.best_i)
-
-
-def _best_from(runtime: Qwen38Runtime, values_buf: Any, index_buf: Any) -> int:
-    values = runtime.session.download_f32(values_buf, _ARGMAX_GROUPS)
-    raw = runtime.session.download(index_buf, _ARGMAX_GROUPS * 4)
-    indices = np.frombuffer(raw, dtype=np.uint32).copy()
-    choice = 0
-    for index in range(1, _ARGMAX_GROUPS):
-        better = values[index] > values[choice]
-        tie = values[index] == values[choice] and int(indices[index]) < int(indices[choice])
-        if better or tie:
-            choice = index
-    return int(indices[choice])
 
 
 def _wipe(buffer: Any, nbytes: int) -> None:
