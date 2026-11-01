@@ -31,6 +31,10 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen36-35b-a3b/research/recorded-forward.md](qwen36-35b-a3b/research/recorded-forward.md) | Qwen3.6-35B-A3B recorded prefill and decode sums |
 | [qwen36-35b-a3b/performance.md](qwen36-35b-a3b/performance.md) | Qwen3.6-35B-A3B recorded prefill and decode rates |
 | [gemma4-26b-a4b/README.md](gemma4-26b-a4b/README.md) | Gemma 4 26B-A4B pipeline contract |
+| [qwen35-4b/README.md](qwen35-4b/README.md) | Qwen3.5-4B language pipeline |
+| [qwen35-4b/references.md](qwen35-4b/references.md) | Papers and specifications for the Qwen3.5-4B pipeline |
+| [qwen35-4b/SETUP.md](qwen35-4b/SETUP.md) | Qwen3.5-4B download and pack |
+| [qwen35-4b/ceilings.md](qwen35-4b/ceilings.md) | Qwen3.5-4B kernel ceilings |
 | [spark-x26-1-7b/README.md](spark-x26-1-7b/README.md) | Spark-X2.6-1.7B pipeline contract |
 | [spark-x26-1-7b/references.md](spark-x26-1-7b/references.md) | Papers and specifications for the Spark pipeline |
 | [spark-x26-1-7b/ceilings.md](spark-x26-1-7b/ceilings.md) | Spark-X2.6-1.7B kernel ceilings |
