@@ -8,6 +8,8 @@ use the OpenAI logit update.
 from __future__ import annotations
 
 import json
+import queue
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -871,57 +873,87 @@ def _stream(
     )
     event({"type": "response.created", "response": shell})
     event({"type": "response.in_progress", "response": shell})
-    produced: list[int] = []
-    previous = ""
-    gate = StreamText(thinking, tools=emit_tools)
-    opened: set[str] = set()
+    pending: queue.Queue[int | str | None] = queue.Queue()
+    failed: list[BaseException] = []
+    held: list[tuple[str, int]] = []
 
-    def emit_piece(channel: str, visible: str) -> None:
-        if not visible or channel in {"tool_start", "tool_args"}:
-            return
-        if channel not in opened:
-            opened.add(channel)
-            _open_item(event, channel, reasoning_id, message_id)
-        _emit_response(event, channel, visible, reasoning_id, message_id)
+    def write() -> None:
+        produced: list[int] = []
+        previous = ""
+        gate = StreamText(thinking, tools=emit_tools)
+        opened: set[str] = set()
 
-    def on_token(token: int) -> None:
-        nonlocal previous
-        produced.append(int(token))
-        decoded = decode(produced)
-        piece, previous = _stream_delta(decoded, previous, final=False)
-        for channel, visible in gate.push(piece):
-            emit_piece(channel, visible)
+        def emit_piece(channel: str, visible: str) -> None:
+            if not visible or channel in {"tool_start", "tool_args"}:
+                return
+            if channel not in opened:
+                opened.add(channel)
+                _open_item(event, channel, reasoning_id, message_id)
+            _emit_response(event, channel, visible, reasoning_id, message_id)
+
+        try:
+            while True:
+                item = pending.get()
+                if item == "prefill":
+                    keepalive = getattr(sink, "keepalive", None)
+                    if callable(keepalive):
+                        keepalive()
+                    continue
+                final = item is None
+                if not final:
+                    produced.append(int(item))
+                decoded = decode(produced) if produced else ""
+                piece, previous = _stream_delta(decoded, previous, final=final)
+                for channel, visible in gate.push(piece):
+                    emit_piece(channel, visible)
+                if final:
+                    for channel, visible in gate.finish():
+                        emit_piece(channel, visible)
+                    held.append((previous, len(produced)))
+                    break
+        except OSError:
+            failed.append(RequestClosed())
+        except BaseException as exc:
+            failed.append(exc)
+
+    writer = threading.Thread(target=write, name="favlo-stream", daemon=True)
+    writer.start()
+
+    def enqueue(token: int) -> None:
+        if failed:
+            raise RequestClosed()
+        pending.put(token)
 
     def on_prefill(_done: int) -> None:
-        keepalive = getattr(sink, "keepalive", None)
-        if callable(keepalive):
-            keepalive()
+        if failed:
+            raise RequestClosed()
+        pending.put("prefill")
 
-    runtime.generate(
-        prompt,
-        limit,
-        STOP,
-        forced=forced,
-        stop_after_forced=stop_after_forced,
-        on_token=on_token,
-        on_prefill=on_prefill,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-        presence=presence,
-        frequency=frequency,
-        mtp=mtp,
-        mtp_depth=mtp_depth,
-    )
-    decoded = decode(produced) if produced else ""
-    piece, previous = _stream_delta(decoded, previous, final=True)
-    for channel, visible in gate.push(piece):
-        emit_piece(channel, visible)
-    for channel, visible in gate.finish():
-        emit_piece(channel, visible)
+    try:
+        runtime.generate(
+            prompt,
+            limit,
+            STOP,
+            forced=forced,
+            stop_after_forced=stop_after_forced,
+            on_token=enqueue,
+            on_prefill=on_prefill,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            presence=presence,
+            frequency=frequency,
+            mtp=mtp,
+            mtp_depth=mtp_depth,
+        )
+    finally:
+        pending.put(None)
+        writer.join()
+    if failed:
+        raise failed[0]
+    text, streamed = held[-1] if held else ("", 0)
     counted = getattr(runtime, "_output_ids", None)
-    completion_tokens = len(counted) if isinstance(counted, list) else len(produced)
-    text = previous
+    completion_tokens = len(counted) if isinstance(counted, list) else streamed
     payload = _response_payload(
         sink,
         runtime,

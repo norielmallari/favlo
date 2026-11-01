@@ -929,6 +929,45 @@ def test_stream_text_emits_reasoning_then_reply() -> None:
     ]
 
 
+def test_stream_decodes_off_the_sample_thread() -> None:
+    import threading
+
+    sample = threading.current_thread()
+    decoded_on: list[threading.Thread] = []
+
+    class _Runtime:
+        _hit_limit = False
+        _cached_tokens = 0
+        _prefill_seconds = 0.0
+        _decode_seconds = 0.0
+        _output_ids: list[int] = []
+
+        def decode(self, ids: list[int]) -> str:
+            decoded_on.append(threading.current_thread())
+            return "a" * len(ids)
+
+        def generate(self, prompt, limit, stop, **kwargs):
+            del prompt, limit, stop
+            kwargs["on_token"](1)
+            assert threading.current_thread() is sample
+            self._output_ids = [1]
+            return [1]
+
+    from favlo.reply import MemoryReply
+
+    reply = MemoryReply("qwen38-27b")
+    _stream(reply, _Runtime(), [9], [], False, 8, False)
+    assert decoded_on
+    assert decoded_on[0] is not sample
+    assert decoded_on[0].name == "favlo-stream"
+    assert any(
+        isinstance(payload, dict)
+        and payload.get("choices")
+        and payload["choices"][0]["delta"].get("content") == "a"
+        for payload in reply.events
+    )
+
+
 def test_openai_chunk_streams_one_delta_per_token() -> None:
     openai = pytest.importorskip("openai")
     from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
