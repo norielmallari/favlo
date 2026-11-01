@@ -38,7 +38,7 @@ This installs the `favlo` package and the `dev` extra, including pytest. Release
 uv run favlo serve
 ```
 
-On a terminal with an empty registry, this downloads Spark-X2.6-1.7B and packs it before the daemon listens. Wait until that finishes, and leave this process running.
+On a terminal with an empty registry, this downloads Qwen3.5-4B and packs it before the daemon listens. Wait until that finishes, and leave this process running.
 
 In another terminal:
 
@@ -52,7 +52,6 @@ When the app is ready, open the printed link in a browser. That address is `http
 
 | Pipeline | Note |
 |---|---|
-| `spark-x26-1-7b` | [Spark-X2.6-1.7B](docs/spark-x26-1-7b/README.md) |
 | `qwen35-4b` | [Qwen3.5-4B](docs/qwen35-4b/README.md) |
 | `qwen36-35b-a3b` | [Qwen3.6-35B-A3B](docs/qwen36-35b-a3b/README.md) |
 | `gemma4-26b-a4b` | [Gemma 4 26B-A4B](docs/gemma4-26b-a4b/README.md) |
@@ -114,7 +113,6 @@ Favlo is licensed under the Apache License, Version 2.0. The terms are in [LICEN
 
 | Checkpoint | License | Note |
 |---|---|---|
-| Spark-X2.6-1.7B | Apache License, Version 2.0 | [note](docs/spark-x26-1-7b/README.md) |
 | Qwen3.6-35B-A3B | Apache License, Version 2.0 | [note](docs/qwen36-35b-a3b/README.md) |
 | Gemma 4 26B-A4B | [Apache License, Version 2.0](https://ai.google.dev/gemma/docs/gemma_4_license) | [note](docs/gemma4-26b-a4b/README.md) |
 | Qwen3.8-27B | Apache License, Version 2.0 | [note](docs/qwen38-27b/README.md) |

@@ -1,8 +1,12 @@
 # Spark-X2.6-1.7B
 
-Served language pipeline for [XHToken/Spark-X2.6-1.7B](https://huggingface.co/XHToken/Spark-X2.6-1.7B). Those weights are under the Apache License, Version 2.0. The record directory is `Spark-X2.6-1.7B-fp8`. The flag is `spark-x26-1-7b`. `favlo serve` on a terminal with an empty registry runs `setup` for this checkpoint. The steps are [SETUP.md](SETUP.md).
+Parked pipeline. The command scan does not load it, and `serve` does not serve it. The entry is `pipelines/parked/spark-x26-1-7b.py`. The package is `pipelines/parked/spark_x26_1_7b/`. The process contract is [../../ARCHITECTURE.md](../../ARCHITECTURE.md). Host checks and smokes live under `pipelines/parked/tests/` and are outside the default test run.
 
-`weights.bin` is loaded once into one Metal buffer, in 8 MiB pieces. Each matrix is a byte offset in that buffer. The language matrices are fp8 E4M3 with an E8M0 scale every 32 along K. `g_proj` and the RMSNorm gains stay float16. The live key and value cache is fp8 E4M3. Full attention grows from 2,048 tokens. Sliding attention keeps a ring of 512. The sampling card stores a context of 1,048,576. The opening keeps the longest full-attention length that fits `memory.budget()` and refuses to open when a 2,048-token cache does not fit. NumPy is not on prefill, decode, or sampling. The sampled token id comes back as four bytes.
+Last as-built attempt for [XHToken/Spark-X2.6-1.7B](https://huggingface.co/XHToken/Spark-X2.6-1.7B). Those weights are under the Apache License, Version 2.0. The record directory is `Spark-X2.6-1.7B-fp8`. The flag was `spark-x26-1-7b`. An empty registry downloads Qwen3.5-4B instead. The steps are [SETUP.md](SETUP.md).
+
+`weights.bin` is loaded once into one Metal buffer, in 8 MiB pieces. Each matrix is a byte offset in that buffer. The language matrices are fp8 E4M3 with an E8M0 scale every 32 along K. `g_proj` and the RMSNorm gains stay float16. The live key and value cache is float16 by default. The registry row may set `kv_cache` to `e4m3` for the packed E4M3 planes with an E8M0 scale every 32 elements. Full attention grows from 2,048 tokens. Sliding attention keeps a ring of 512. The sampling card stores a context of 1,048,576. The opening keeps the longest full-attention length that fits `memory.budget()` and refuses to open when a 2,048-token cache does not fit. NumPy is not on prefill, decode, or sampling. The sampled token id comes back as four bytes.
+
+`serve` draws a load row while `weights.bin` is copied into the resident buffer and closes it with the record name and the live context. A request opens a prefill row after the prefix align and advances it as each uncached chunk finishes. That clock starts at the uncached forward and ends when the first output token is sampled. The forward that produced that token's logits stays inside the clock. The prompt prefix write stays outside it. A decode row then counts each kept token. Its clock starts at that first sample and ends at the last. A send between samples stays inside the decode clock. The last send and the finished-sequence prefix write stay outside it. Each row closes with `format_rate`. A cancel closes an open row with an empty summary. Prompt, cache, and prefix notes go through the console.
 
 A chunk of up to 64 tokens is one command buffer. That chunk is projected by the 32×128 fp8 matmul; only the valid rows are rotated, stored, and attended. Keys in that chunk are one threadgroup per token. Values in a 32-token block are quantized once for the block. Attention is one threadgroup per query head per token. A decode step longer than 64 keys splits those keys into tiles of 64. Decode reads eight fp8 weights per thread. Each projection is 32 rows from one 256-thread group, and that group keeps the activation in threadgroup memory. RMSNorm is folded into the QKV, gate, up, and vocabulary projections. The output and down projections add into the residual. Isolated kernel times are in [ceilings.md](ceilings.md). The isolated sums are in [research/kernel-ceilings.md](research/kernel-ceilings.md). The recorded prefill and decode runs are in [research/recorded-forward.md](research/recorded-forward.md).
 
@@ -10,10 +14,6 @@ A chunk of up to 64 tokens is one command buffer. That chunk is projected by the
 
 A prefix file stores the packed planes. A file as long as the prompt is not installed, because the next token still has to be scored.
 
-```text
-uv run favlo --spark-x26-1-7b download
-uv run favlo --spark-x26-1-7b quantize
-uv run favlo --spark-x26-1-7b kernels
-```
+`download`, `quantize`, and `kernels` load `pipelines/parked/spark-x26-1-7b.py`, which loads `spark_x26_1_7b`. The command scan does not offer that flag.
 
 Setup steps are in [SETUP.md](SETUP.md). Papers and the checkpoint fields are in [references.md](references.md).

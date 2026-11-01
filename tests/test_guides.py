@@ -20,9 +20,10 @@ def test_clients_guide_names_this_server() -> None:
 
 def test_models_guide_names_the_official_checkpoints() -> None:
     text = read_guide("models")
-    assert "XHToken/Spark-X2.6-1.7B" in text
-    assert "favlo --spark-x26-1-7b setup" in text
-    assert "packs `models/Spark-X2.6-1.7B-fp8`" in text
+    assert "Qwen/Qwen3.5-4B" in text
+    assert "favlo serve` with an empty registry downloads that checkpoint" in text
+    assert "favlo --qwen35-4b setup" in text
+    assert "packs `models/Qwen3.5-4B-fp8`" in text
     assert "Qwen/Qwen3.6-35B-A3B" in text
     assert "favlo --qwen36-35b-a3b setup" in text
     assert "Qwen/Qwen3.8-27B" in text

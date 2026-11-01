@@ -10,7 +10,7 @@ A dropped connection restarts the server and sends the same request again.
 ## Request
 
 <!-- request -->
-- thinking off, temperature 1, top-p 0.95, top-k 0, presence 0, reasoning effort none, max tokens ifeval 131072, gsm8k 131072, humaneval 131072
+- thinking off, temperature 0, presence 0, reasoning effort none, max tokens ifeval 131072, gsm8k 131072, humaneval 131072
 - ifeval: the dataset prompt, scored by the published strict and loose checkers
 - gsm8k: five training shots, then Question / Answer; the first #### number matches
 - humaneval: the instruct prompt; the continuation after the signature is tested
@@ -21,15 +21,15 @@ A dropped connection restarts the server and sends the same request again.
 The smoke is the first 30 rows of each set, in file order.
 
 <!-- smoke-ifeval -->
-- ifeval: n=30  prompt strict 0.667  prompt loose 0.767  instruction strict 0.756  instruction loose 0.822
+- ifeval: n=30  prompt strict 0.733  prompt loose 0.767  instruction strict 0.822  instruction loose 0.844
 <!-- /smoke-ifeval -->
 
 <!-- smoke-gsm8k -->
-- gsm8k: n=30  9/30  0.300
+- gsm8k: n=30  10/30  0.333
 <!-- /smoke-gsm8k -->
 
 <!-- smoke-humaneval -->
-- humaneval: n=30  22/30  0.733
+not run
 <!-- /smoke-humaneval -->
 
 <!-- smoke-mtp-on-ifeval -->

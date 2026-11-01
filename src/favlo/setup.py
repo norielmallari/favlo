@@ -1,7 +1,7 @@
 """First serve with an empty registry. The pipeline owns the download.
 
 A terminal with no registered rows checks Metal 4.1, then runs
-``favlo --spark-x26-1-7b setup``. A pipe leaves the registry empty.
+``favlo --qwen35-4b setup``. A pipe leaves the registry empty.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from typing import Any
 
 from favlo.registry import load_registry
 
-FIRST_PIPELINE = "spark-x26-1-7b"
+FIRST_PIPELINE = "qwen35-4b"
 _SHADER = """
 #include <metal_stdlib>
 using namespace metal;

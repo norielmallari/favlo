@@ -241,6 +241,7 @@ def register_quantized(
     custom: bool = False,
     max_prompt_tokens: int | None = None,
     parts: Mapping[str, Path] | None = None,
+    kv_cache: str | None = None,
 ) -> None:
     """Write or update the entry for a record this quantize just produced."""
     data = load_registry(root)
@@ -258,6 +259,8 @@ def register_quantized(
             current["variants"] = variants
             current["default_variant"] = default_variant
             current["runtime"] = runtime
+            if kv_cache is not None:
+                current["kv_cache"] = kv_cache
             if custom:
                 current["custom"] = True
             else:
@@ -288,6 +291,7 @@ def register_quantized(
         max_prompt_tokens=max_prompt_tokens,
         directory=directory_text,
         parts=part_text,
+        kv_cache=kv_cache,
     )
     data["models"][folder] = entry
     _ensure_default_llm(data, folder, alias, entry)
@@ -695,6 +699,7 @@ def _entry(
     custom: bool = False,
     max_prompt_tokens: int | None = None,
     parts: dict[str, str] | None = None,
+    kv_cache: str | None = None,
 ) -> dict[str, Any]:
     variants, default_variant = pipeline_sampling(pipeline, runtime=runtime, custom=custom)
     ctx = card_context_length(pipeline, runtime=runtime, custom=custom)
@@ -704,7 +709,7 @@ def _entry(
         "alias": alias,
         "source": source,
         "directory": directory,
-        "kv_cache": "e4m3",
+        "kv_cache": kv_cache or "e4m3",
         "resident_percent": None,
         "variants": variants,
         "default_variant": default_variant,

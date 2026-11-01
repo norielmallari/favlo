@@ -12,14 +12,14 @@ from spark_x26_1_7b.forward import SparkRuntime
 def open_runtime(
     path: Path,
     *,
-    kv_cache: str = "e4m3",
+    kv_cache: str = "f16",
     console: Any = None,
     resident_percent: float | None = None,
     max_memory: str | int | None = None,
     owner: str | None = None,
     mtp: bool = False,
 ) -> SparkRuntime:
-    """Load the resident fp8 record and the fp8 key/value cache."""
+    """Load the resident fp8 record and the key/value cache (``f16`` or ``e4m3``)."""
     del resident_percent, mtp
     return SparkRuntime(
         path,

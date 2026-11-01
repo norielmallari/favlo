@@ -4,31 +4,19 @@ A packed record is registered in `models/registry.json`. `favlo serve` lists tho
 
 16 GB of memory is required. 8 GB is not enough to run a model capable of real-world agentic workflows.
 
-## Spark-X2.6-1.7B
-
-The official checkpoint is `XHToken/Spark-X2.6-1.7B`. The steps are [spark-x26-1-7b/SETUP.md](../spark-x26-1-7b/SETUP.md).
-
-On a terminal, `favlo serve` with an empty registry downloads that checkpoint, packs `models/Spark-X2.6-1.7B-fp8`, registers the alias `spark-x26-1-7b`, and removes the BF16 checkout. The next `serve` continues from the files already written.
-
-The same download and pack, without opening the socket:
-
-```bash
-favlo --spark-x26-1-7b setup
-```
-
-`--keep-bf16` leaves the checkout.
-
 ## Qwen3.5-4B
 
 The official checkpoint is `Qwen/Qwen3.5-4B`. The steps are [qwen35-4b/SETUP.md](../qwen35-4b/SETUP.md).
 
-`favlo --qwen35-4b setup` packs a same-tensor BF16 checkout already under `models/` into `models/Qwen3.5-4B-fp8` and registers the alias `qwen35-4b`:
+On a terminal, `favlo serve` with an empty registry downloads that checkpoint, packs `models/Qwen3.5-4B-fp8`, registers the alias `qwen35-4b`, and removes the BF16 checkout. The next `serve` continues from the files already written.
+
+The same download and pack, without opening the socket:
 
 ```bash
-favlo --qwen35-4b setup --keep-bf16
+favlo --qwen35-4b setup
 ```
 
-`quantize --src` packs without the setup wrapper. `--keep-bf16` leaves the BF16 checkout.
+`--keep-bf16` leaves the checkout. `quantize --src` packs a checkout that is already on disk.
 
 ## Qwen3.6-35B-A3B
 

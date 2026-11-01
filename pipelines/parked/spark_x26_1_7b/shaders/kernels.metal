@@ -1568,6 +1568,373 @@ kernel void attend_merge(
     }
 }
 
+static void attend_range_f16(
+    device float* query,
+    device half* key_data,
+    device half* value_data,
+    uint kv,
+    uint start,
+    uint begin,
+    uint end,
+    uint window,
+    uint capacity,
+    uint lane,
+    thread float& peak,
+    thread float& sum,
+    thread float acc[8])
+{
+    uint base = lane * 8u;
+    for (uint i = begin; i < end; ++i) {
+        uint slot = window == 0u ? (start + i) : ((start + i) % window);
+        device half* key_row = key_data + (kv * capacity + slot) * 256u;
+        float partial = query[base] * float(key_row[base])
+            + query[base + 1u] * float(key_row[base + 1u])
+            + query[base + 2u] * float(key_row[base + 2u])
+            + query[base + 3u] * float(key_row[base + 3u])
+            + query[base + 4u] * float(key_row[base + 4u])
+            + query[base + 5u] * float(key_row[base + 5u])
+            + query[base + 6u] * float(key_row[base + 6u])
+            + query[base + 7u] * float(key_row[base + 7u]);
+        float score = simd_sum(partial) * ATTN_SCALE;
+        float next = max(peak, score);
+        float decay = exp(peak - next);
+        float weight = exp(score - next);
+        sum = sum * decay + weight;
+        for (uint j = 0u; j < 8u; ++j) {
+            uint channel = base + j;
+            float value = float(value_data[(kv * 256u + channel) * capacity + slot]);
+            acc[j] = acc[j] * decay + weight * value;
+        }
+        peak = next;
+    }
+}
+
+kernel void store_full_keys_f16(
+    device float* rows [[buffer(0)]],
+    device half* key_data [[buffer(1)]],
+    constant SpanStore& cfg [[buffer(2)]],
+    uint token [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]])
+{
+    if (token >= cfg.count) {
+        return;
+    }
+    uint pos = cfg.pos + token;
+    device float* key = rows + token * 3072u + 2048u;
+    for (uint head = 0u; head < 2u; ++head) {
+        for (uint group = 0u; group < 8u; ++group) {
+            key_data[(head * cfg.capacity + pos) * 256u + group * 32u + lane] =
+                half(key[head * 256u + group * 32u + lane]);
+        }
+    }
+}
+
+kernel void store_slide_keys_f16(
+    device float* rows [[buffer(0)]],
+    device half* key_data [[buffer(1)]],
+    constant SpanStore& cfg [[buffer(2)]],
+    uint token [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]])
+{
+    if (token >= cfg.count) {
+        return;
+    }
+    uint pos = cfg.pos + token;
+    uint slot = pos % 512u;
+    device float* key = rows + token * 3072u + 2048u;
+    for (uint head = 0u; head < 2u; ++head) {
+        for (uint group = 0u; group < 8u; ++group) {
+            key_data[(head * 512u + slot) * 256u + group * 32u + lane] =
+                half(key[head * 256u + group * 32u + lane]);
+        }
+    }
+}
+
+kernel void store_full_span_f16(
+    device float* rows [[buffer(0)]],
+    device half* key_data [[buffer(1)]],
+    device half* value_data [[buffer(2)]],
+    constant SpanStore& cfg [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint lane = tid & 31u;
+    uint simd = tid >> 5;
+    if (cfg.count == 1u && simd < 16u) {
+        uint key_head = simd >> 3;
+        uint group = simd & 7u;
+        device float* key = rows + 2048u;
+        key_data[(key_head * cfg.capacity + cfg.pos) * 256u + group * 32u + lane] =
+            half(key[key_head * 256u + group * 32u + lane]);
+    }
+    uint head = tid >> 8;
+    uint channel = tid & 255u;
+    if (head >= 2u) {
+        return;
+    }
+    for (uint token = 0u; token < cfg.count; ++token) {
+        uint pos = cfg.pos + token;
+        device float* value = rows + token * 3072u + 2560u;
+        value_data[(head * 256u + channel) * cfg.capacity + pos] = half(value[head * 256u + channel]);
+    }
+}
+
+kernel void store_slide_span_f16(
+    device float* rows [[buffer(0)]],
+    device half* key_data [[buffer(1)]],
+    device half* value_data [[buffer(2)]],
+    constant SpanStore& cfg [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint lane = tid & 31u;
+    uint simd = tid >> 5;
+    if (cfg.count == 1u && simd < 16u) {
+        uint slot0 = cfg.pos % 512u;
+        uint key_head = simd >> 3;
+        uint group = simd & 7u;
+        device float* key = rows + 2048u;
+        key_data[(key_head * 512u + slot0) * 256u + group * 32u + lane] =
+            half(key[key_head * 256u + group * 32u + lane]);
+    }
+    uint head = tid >> 8;
+    uint channel = tid & 255u;
+    if (head >= 2u) {
+        return;
+    }
+    for (uint token = 0u; token < cfg.count; ++token) {
+        uint pos = cfg.pos + token;
+        uint slot = pos % 512u;
+        device float* value = rows + token * 3072u + 2560u;
+        value_data[(head * 256u + channel) * 512u + slot] = half(value[head * 256u + channel]);
+    }
+}
+
+kernel void attend_span_f16(
+    device float* queries [[buffer(0)]],
+    device half* key_data [[buffer(1)]],
+    device half* value_data [[buffer(2)]],
+    device float* gates [[buffer(3)]],
+    device float* mixed [[buffer(4)]],
+    constant AttendSpan& cfg [[buffer(5)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]])
+{
+    uint token = tgid.y;
+    if (token >= cfg.count) {
+        return;
+    }
+    uint qh = tgid.x;
+    uint kv = qh >> 2;
+    uint pos = cfg.pos + token;
+    uint start = 0u;
+    uint count = pos + 1u;
+    if (cfg.window != 0u && count > cfg.window) {
+        start = count - cfg.window;
+        count = cfg.window;
+    }
+    float acc[8];
+    for (uint j = 0u; j < 8u; ++j) {
+        acc[j] = 0.0f;
+    }
+    float peak = -1.0e30f;
+    float sum = 0.0f;
+    attend_range_f16(
+        queries + token * 3072u + qh * 256u,
+        key_data,
+        value_data,
+        kv,
+        start,
+        0u,
+        count,
+        cfg.window,
+        cfg.capacity,
+        lane,
+        peak,
+        sum,
+        acc);
+    float inv = sum > 0.0f ? 1.0f / sum : 0.0f;
+    float gate = 1.0f / (1.0f + exp(-gates[token * 8u + qh]));
+    for (uint j = 0u; j < 8u; ++j) {
+        uint channel = lane * 8u + j;
+        mixed[(token * 8u + qh) * 256u + channel] = acc[j] * inv * gate;
+    }
+}
+
+kernel void attend_part_f16(
+    device float* queries [[buffer(0)]],
+    device half* key_data [[buffer(1)]],
+    device half* value_data [[buffer(2)]],
+    device float* partial [[buffer(3)]],
+    device float* state [[buffer(4)]],
+    constant AttendSpan& cfg [[buffer(5)]],
+    constant uint& tile_stride [[buffer(6)]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]])
+{
+    uint qh = tgid.x;
+    uint token = tgid.y;
+    uint part = tgid.z;
+    if (token >= cfg.count) {
+        return;
+    }
+    uint kv = qh >> 2;
+    uint pos = cfg.pos + token;
+    uint start = 0u;
+    uint count = pos + 1u;
+    if (cfg.window != 0u && count > cfg.window) {
+        start = count - cfg.window;
+        count = cfg.window;
+    }
+    uint begin = part * 64u;
+    uint slot_index = (token * 8u + qh) * tile_stride + part;
+    device float* row = partial + slot_index * 256u;
+    if (begin >= count) {
+        for (uint j = 0u; j < 8u; ++j) {
+            row[lane * 8u + j] = 0.0f;
+        }
+        if (lane == 0u) {
+            state[slot_index * 2u] = -1.0e30f;
+            state[slot_index * 2u + 1u] = 0.0f;
+        }
+        return;
+    }
+    float acc[8];
+    for (uint j = 0u; j < 8u; ++j) {
+        acc[j] = 0.0f;
+    }
+    float peak = -1.0e30f;
+    float sum = 0.0f;
+    uint end = min(begin + 64u, count);
+    attend_range_f16(
+        queries + token * 3072u + qh * 256u,
+        key_data,
+        value_data,
+        kv,
+        start,
+        begin,
+        end,
+        cfg.window,
+        cfg.capacity,
+        lane,
+        peak,
+        sum,
+        acc);
+    for (uint j = 0u; j < 8u; ++j) {
+        row[lane * 8u + j] = acc[j];
+    }
+    if (lane == 0u) {
+        state[slot_index * 2u] = peak;
+        state[slot_index * 2u + 1u] = sum;
+    }
+}
+
+kernel void attend_tile_f16(
+    device float* queries [[buffer(0)]],
+    device half* key_data [[buffer(1)]],
+    device half* value_data [[buffer(2)]],
+    device float* partial [[buffer(3)]],
+    device float* state [[buffer(4)]],
+    constant AttendSpan& cfg [[buffer(5)]],
+    constant uint& tile_stride [[buffer(6)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]])
+{
+    uint qh = tgid.x;
+    uint tile = tgid.y;
+    uint kv = qh >> 2;
+    uint start = 0u;
+    uint count = cfg.pos + 1u;
+    if (cfg.window != 0u && count > cfg.window) {
+        start = count - cfg.window;
+        count = cfg.window;
+    }
+    uint begin = tile * 64u;
+    device float* row = partial + (qh * tile_stride + tile) * 256u;
+    if (begin >= count) {
+        for (uint j = 0u; j < 8u; ++j) {
+            row[lane * 8u + j] = 0.0f;
+        }
+        if (lane == 0u) {
+            state[(qh * tile_stride + tile) * 2u] = -1.0e30f;
+            state[(qh * tile_stride + tile) * 2u + 1u] = 0.0f;
+        }
+        return;
+    }
+    float acc[8];
+    for (uint j = 0u; j < 8u; ++j) {
+        acc[j] = 0.0f;
+    }
+    float peak = -1.0e30f;
+    float sum = 0.0f;
+    uint end = min(begin + 64u, count);
+    attend_range_f16(
+        queries + qh * 256u,
+        key_data,
+        value_data,
+        kv,
+        start,
+        begin,
+        end,
+        cfg.window,
+        cfg.capacity,
+        lane,
+        peak,
+        sum,
+        acc);
+    for (uint j = 0u; j < 8u; ++j) {
+        row[lane * 8u + j] = acc[j];
+    }
+    if (lane == 0u) {
+        state[(qh * tile_stride + tile) * 2u] = peak;
+        state[(qh * tile_stride + tile) * 2u + 1u] = sum;
+    }
+}
+
+kernel void copy_token_major_u16(
+    device ushort* source [[buffer(0)]],
+    device ushort* destination [[buffer(1)]],
+    constant uint& heads [[buffer(2)]],
+    constant uint& channels [[buffer(3)]],
+    constant uint& length [[buffer(4)]],
+    constant uint& old_cap [[buffer(5)]],
+    constant uint& new_cap [[buffer(6)]],
+    uint id [[thread_position_in_grid]])
+{
+    uint total = heads * length;
+    if (id >= total) {
+        return;
+    }
+    uint head = id / length;
+    uint token = id - head * length;
+    uint from = (head * old_cap + token) * channels;
+    uint to = (head * new_cap + token) * channels;
+    for (uint c = 0u; c < channels; ++c) {
+        destination[to + c] = source[from + c];
+    }
+}
+
+kernel void copy_channel_major_u16(
+    device ushort* source [[buffer(0)]],
+    device ushort* destination [[buffer(1)]],
+    constant uint& heads [[buffer(2)]],
+    constant uint& channels [[buffer(3)]],
+    constant uint& length [[buffer(4)]],
+    constant uint& old_cap [[buffer(5)]],
+    constant uint& new_cap [[buffer(6)]],
+    uint id [[thread_position_in_grid]])
+{
+    uint total = heads * channels;
+    if (id >= total) {
+        return;
+    }
+    uint head = id / channels;
+    uint channel = id - head * channels;
+    uint from = (head * channels + channel) * old_cap;
+    uint to = (head * channels + channel) * new_cap;
+    for (uint token = 0u; token < length; ++token) {
+        destination[to + token] = source[from + token];
+    }
+}
+
 kernel void gemv_fp8_rms(
     device float* activation [[buffer(0)]],
     device half* norm_w [[buffer(1)]],

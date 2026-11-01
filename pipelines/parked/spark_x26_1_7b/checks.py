@@ -30,6 +30,7 @@ def run() -> None:
         _argmax(session)
         _nucleus(session)
         _e4m3(session)
+        _f16(session)
     finally:
         session.close()
 
@@ -272,6 +273,42 @@ def _e4m3(session: Session) -> None:
     code = memory.load(key, 0, 1)[0]
     if code != 0x7C:
         message = f"e4m3 stored {code}, expected 124 for the 384 bin"
+        raise RuntimeError(message)
+
+
+def _f16(session: Session) -> None:
+    row = np.zeros(_QKV, dtype=np.float32)
+    row[2048] = 1.5
+    row[2560] = 2.0
+    handle = session.upload(row.tobytes())
+    key = session.allocate(2 * 32 * 256 * 2, zero=True)
+    value = session.allocate(2 * 256 * 32 * 2, zero=True)
+    session.launch(
+        "store_full_span_f16",
+        [handle, key, value],
+        [struct.pack("<III", 0, 32, 1)],
+        (16, 1, 1),
+        (32, 1, 1),
+    )
+    stored = struct.unpack("<e", memory.load(key, 0, 2))[0]
+    if abs(stored - 1.5) > 1e-3:
+        message = f"f16 key stored {stored}, expected 1.5"
+        raise RuntimeError(message)
+    queries = np.zeros(_QKV, dtype=np.float32)
+    queries[0] = 1.0
+    query = session.upload(queries.tobytes())
+    gates = session.upload(np.zeros(8, dtype=np.float32).tobytes())
+    mixed = session.allocate(8 * 256 * 4, zero=True)
+    session.launch(
+        "attend_span_f16",
+        [query, key, value, gates, mixed],
+        [struct.pack("<IIIII", 0, 32, 0, 32, 1)],
+        (8, 1, 1),
+        (32, 1, 1),
+    )
+    got = struct.unpack_from("<f", memory.load(mixed, 0, 4))[0]
+    if not math.isfinite(got):
+        message = "f16 attend was not finite"
         raise RuntimeError(message)
 
 

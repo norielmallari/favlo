@@ -74,20 +74,29 @@ class Layer:
     index: int
 
 
-def _load_record(session: Session, path: Path) -> Any:
+def _load_record(session: Session, path: Path, note: Any = None) -> Any:
     """Copy ``weights.bin`` into one buffer in 8 MiB pieces."""
     size = path.stat().st_size
     handle = session.allocate(size)
+    view = memory.map(handle, 0, size)
     with path.open("rb") as src:
-        offset = 0
-        while offset < size:
-            block = src.read(min(8 << 20, size - offset))
-            if not block:
-                message = f"{path.name} stopped at {offset} of {size}"
-                raise OSError(message)
-            memory.map(handle, offset, len(block))[:] = block
-            offset += len(block)
+        _copy_pieces(src, view, path.name, note)
     return handle
+
+
+def _copy_pieces(src: Any, view: memoryview, name: str, note: Any) -> None:
+    """Read ``src`` into ``view`` in 8 MiB pieces. ``note`` receives each piece."""
+    size = len(view)
+    offset = 0
+    while offset < size:
+        piece = min(8 << 20, size - offset)
+        read = src.readinto(view[offset : offset + piece])
+        if not read:
+            message = f"{name} stopped at {offset} of {size}"
+            raise OSError(message)
+        offset += read
+        if note is not None:
+            note(read)
 
 
 def parse_memory(text: str | int | None) -> int | None:
@@ -146,9 +155,9 @@ def _workspace_bytes(capacity: int) -> int:
     return floats * 4 + rows * INTERMEDIATE * 2
 
 
-def _minimum_cache() -> int:
-    full = sum(_slot_bytes(2048, full=True))
-    slide = sum(_slot_bytes(WINDOW, full=False))
+def _minimum_cache(kind: str) -> int:
+    full = sum(_slot_bytes(2048, full=True, kind=kind))
+    slide = sum(_slot_bytes(WINDOW, full=False, kind=kind))
     return len(FULL) * full + (LAYERS - len(FULL)) * slide
 
 
@@ -159,17 +168,18 @@ class SparkRuntime:
         self,
         path: Path,
         *,
-        kv_cache: str = "e4m3",
+        kv_cache: str = "f16",
         console: Any = None,
         max_memory: str | int | None = None,
         owner: str | None = None,
         mtp: bool = False,
     ) -> None:
         del mtp
-        if kv_cache != "e4m3":
-            message = f"spark-x26-1-7b keeps an e4m3 cache; {kv_cache} is not built"
+        if kv_cache not in ("e4m3", "f16"):
+            message = f"spark-x26-1-7b key/value cache {kv_cache} is not built"
             raise RuntimeError(message)
         self.root = Path(path)
+        self.kv_cache = kv_cache
         self.console = console
         self._memory_cap = parse_memory(max_memory)
         self._stop: Any = None
@@ -179,15 +189,25 @@ class SparkRuntime:
         self._decode_seconds = 0.0
         self._cached_tokens = 0
         self._output_ids: list[int] = []
+        self._request_id = 0
+        self._prefill_progress: Any = None
         self.limit = 2048
         self.owner = owner or f"spark-x26-1-7b:{id(self)}"
-        self.session = Session(self.owner)
+        self._load_progress: Any = None
         self.prefix: PrefixSession | None = None
+        weight_path = self.root / "weights.bin"
+        self._load_progress = self._begin_load(weight_path.stat().st_size)
+        summary = ""
         try:
+            self.session = Session(self.owner)
             self._open()
+            summary = f"loaded {self.root.name} kv {self.kv_cache} context {self.limit}"
         except Exception:
-            self.session.close()
+            if getattr(self, "session", None) is not None:
+                self.session.close()
             raise
+        finally:
+            self._finish_load(summary)
 
     def _open(self) -> None:
         manifest_path = self.root / "manifest.json"
@@ -197,13 +217,13 @@ class SparkRuntime:
             message = f"{self.root} is not a finished Spark record"
             raise RuntimeError(message)
         record = weight_path.stat().st_size
-        need = record + _workspace_bytes(2048) + _minimum_cache()
+        need = record + _workspace_bytes(2048) + _minimum_cache(self.kv_cache)
         room = self._room()
         if need > room:
             message = f"spark-x26-1-7b needs {need} bytes and the budget holds {room}"
             raise RuntimeError(message)
         extra = room - need
-        per = full_token_bytes() + HEADS * 4
+        per = full_token_bytes(self.kv_cache) + HEADS * 4
         span = 2048 + extra // per
         span = min(CONTEXT, span - span % 32)
         if span < 2048:
@@ -224,14 +244,14 @@ class SparkRuntime:
         self.chunk_partial = self.session.allocate(HEADS * CHUNK * 64 * HEAD_DIM * 4)
         self.chunk_state = self.session.allocate(HEADS * CHUNK * 64 * 2 * 4)
         self.logits = self.session.allocate(VOCAB * 4)
-        self.kv = Kv(self.session, 2048)
+        self.kv = Kv(self.session, 2048, self.kv_cache)
         self.scores = self.session.allocate(HEADS * self.kv.capacity * 4, zero=True)
         self._score_cap = self.kv.capacity
         self.attn_partial = None
         self.attn_state = None
         self._tile_cap = 0
         self._bind_tiles()
-        self.weights = _load_record(self.session, weight_path)
+        self.weights = _load_record(self.session, weight_path, self._note_load)
         tensors = manifest["tensors"]
         self.embedding = self._plane(tensors["embedding"])
         self.final_norm = self._plane(tensors["final_norm"])
@@ -240,11 +260,35 @@ class SparkRuntime:
             default_prefix_dir(),
             model="spark-x26-1-7b",
             digest=checkpoint_digest(self.root),
-            tag="fp8-e4m3",
+            tag="f16" if self.kv_cache == "f16" else "fp8-e4m3",
             budget=DEFAULT_BUDGET,
         )
         self.prefix = PrefixSession(store, CacheAdapter(self))
         self.sampler = Sampler(self.session)
+
+    def _begin_load(self, total: int) -> Any:
+        console = self.console
+        if console is None or total <= 0 or not getattr(console, "shows_bars", False):
+            return None
+        detail = getattr(console, "load_detail", "") or self.root.name
+        return console.begin("load", total=total, unit="bytes", detail=detail)
+
+    def _note_load(self, step: int) -> None:
+        progress = self._load_progress
+        if progress is None or step <= 0:
+            return
+        progress.done = min(progress.total, progress.done + step)
+
+    def _finish_load(self, summary: str) -> None:
+        progress = self._load_progress
+        self._load_progress = None
+        if progress is not None and not getattr(progress, "closed", False):
+            console = self.console
+            if console is not None:
+                console.end(progress, summary)
+                return
+        if summary:
+            self._status(summary)
 
     def _plane(self, spec: dict[str, Any]) -> Plane:
         kind = str(spec["kind"])
@@ -329,20 +373,24 @@ class SparkRuntime:
         if len(prompt) > self.limit:
             message = f"prompt length {len(prompt)} is past {self.limit}"
             raise RuntimeError(message)
-        self._status(format_note("prompt", tokens=len(prompt)))
+        self._note("prompt", tokens=len(prompt))
         assert self.prefix is not None
         hit = self.prefix.align(prompt)
         if self.prefix.loaded:
-            self._status(format_note("prefix_load", tokens=hit))
-        self._status(format_note("cache", hit=hit))
+            self._note("prefix_load", tokens=hit)
+        self._note("cache", hit=hit)
         self._cached_tokens = hit
         suffix = prompt[hit:]
         if not suffix:
             message = "the prompt is already applied and has no next token to score"
             raise RuntimeError(message)
+        prefill_row = None
+        decode_row = None
         boundary = False
         out: list[int] = []
         try:
+            prefill_row = self._begin_phase("prefill", len(suffix))
+            self._prefill_progress = prefill_row
             started = time.perf_counter()
             self._prefill(suffix, hit, True)
             self.sampler.clear()
@@ -354,9 +402,13 @@ class SparkRuntime:
                 self.session.end()
             else:
                 chosen = self._draw(temperature, top_p, top_k, presence, frequency)
-            elapsed = max(time.perf_counter() - started, 0.0)
+            sampled_at = time.perf_counter()
+            elapsed = max(sampled_at - started, 0.0)
             self._prefill_seconds = elapsed
-            print(format_rate("prefill", len(suffix), elapsed), flush=True)
+            self._note_prefill(len(suffix))
+            self._prefill_progress = None
+            self._end_phase(prefill_row, format_rate("prefill", len(suffix), elapsed))
+            prefill_row = None
             self.prefix.note(prompt)
             self._store_prefix()
             boundary = True
@@ -364,8 +416,9 @@ class SparkRuntime:
                 on_prefill(len(suffix))
             room = max(0, self.limit - len(prompt))
             decode_total = room if max_tokens is None else max(0, min(int(max_tokens), room))
-            decode_started = time.perf_counter()
-            last_sample: float | None = None
+            decode_started = sampled_at
+            decode_row = self._begin_phase("decode", decode_total, live=True)
+            last_sample = sampled_at
             emitted = 0
             close_after = bool(stop_after_forced) and bool(forced)
             if decode_total == 0:
@@ -385,6 +438,8 @@ class SparkRuntime:
                 out.append(chosen)
                 self._output_ids = list(out)
                 emitted += 1
+                if decode_row is not None:
+                    decode_row.done = len(out)
                 if on_token is not None:
                     on_token(chosen)
                 pos = len(prompt) + emitted - 1
@@ -402,9 +457,10 @@ class SparkRuntime:
                 self.prefix.note(prompt + out)
                 chosen = self._draw(temperature, top_p, top_k, presence, frequency)
                 last_sample = time.perf_counter()
-            decode_elapsed = 0.0 if last_sample is None else max(last_sample - decode_started, 0.0)
+            decode_elapsed = max(last_sample - decode_started, 0.0)
             self._decode_seconds = decode_elapsed
-            print(format_rate("decode", len(out), decode_elapsed), flush=True)
+            self._end_phase(decode_row, format_rate("decode", len(out), decode_elapsed))
+            decode_row = None
             self.prefix.note((prompt + out)[: self.kv.length])
             self._store_prefix()
         except RequestClosed:
@@ -421,6 +477,9 @@ class SparkRuntime:
         finally:
             if self.session.active:
                 self.session.end()
+            self._prefill_progress = None
+            self._end_phase(prefill_row, "")
+            self._end_phase(decode_row, "")
         return out
 
     def _draw(
@@ -449,10 +508,12 @@ class SparkRuntime:
             index += take
             if not last:
                 self.session.end()
+                self._note_prefill(index)
                 self._check_stop()
                 self.session.begin()
         if not logits:
             self.session.end()
+            self._note_prefill(len(tokens))
 
     def _forward(self, tokens: list[int], pos: int, logits: bool) -> None:
         if not self._ensure(pos + len(tokens) - 1):
@@ -648,6 +709,25 @@ class SparkRuntime:
         slot = self.kv.slots[layer.index]
         capacity = slot.capacity if layer.full else WINDOW
         packed = struct.pack("<III", pos, capacity, count)
+        if self.kv_cache == "f16":
+            keys = "store_full_keys_f16" if layer.full else "store_slide_keys_f16"
+            values = "store_full_span_f16" if layer.full else "store_slide_span_f16"
+            if count > 1:
+                self.session.launch(
+                    keys,
+                    [self.qkv, slot.key],
+                    [packed],
+                    (count, 1, 1),
+                    (32, 1, 1),
+                )
+            self.session.launch(
+                values,
+                [self.qkv, slot.key, slot.value],
+                [packed],
+                (16, 1, 1),
+                (32, 1, 1),
+            )
+            return
         keys = "store_full_keys" if layer.full else "store_slide_keys"
         values = "store_full_span" if layer.full else "store_slide_span"
         if count > 1:
@@ -674,6 +754,49 @@ class SparkRuntime:
         nkeys = pos + count
         if window != 0:
             nkeys = min(nkeys, window)
+        if self.kv_cache == "f16":
+            if count > 1 and nkeys > 128:
+                parts = min(64, (nkeys + 63) // 64)
+                self.session.launch(
+                    "attend_part_f16",
+                    [self.qkv, slot.key, slot.value, self.chunk_partial, self.chunk_state],
+                    [cfg, u32(64)],
+                    (HEADS, count, parts),
+                    (32, 1, 1),
+                )
+                self.session.launch(
+                    "attend_chunk_merge",
+                    [self.chunk_partial, self.chunk_state, self.gates, self.attn],
+                    [u32(64), u32(parts)],
+                    (HEADS, count, 1),
+                    (32, 1, 1),
+                )
+                return
+            if count == 1 and nkeys > 64:
+                used = (nkeys + 63) // 64
+                self.session.launch(
+                    "attend_tile_f16",
+                    [self.qkv, slot.key, slot.value, self.attn_partial, self.attn_state],
+                    [cfg, u32(self._tile_cap)],
+                    (HEADS, used, 1),
+                    (32, 1, 1),
+                )
+                self.session.launch(
+                    "attend_merge",
+                    [self.attn_partial, self.attn_state, self.gates, self.attn],
+                    [u32(self._tile_cap), u32(used)],
+                    (HEADS, 1, 1),
+                    (32, 1, 1),
+                )
+                return
+            self.session.launch(
+                "attend_span_f16",
+                [self.qkv, slot.key, slot.value, self.gates, self.attn],
+                [cfg],
+                (HEADS, count, 1),
+                (32, 1, 1),
+            )
+            return
         if count > 1 and nkeys > 128:
             parts = min(64, (nkeys + 63) // 64)
             self.session.launch(
@@ -799,10 +922,59 @@ class SparkRuntime:
         try:
             path = self.prefix.flush()
         except OSError as exc:
-            self._status(format_note("prefix_store_failed", error=exc))
+            self._note("prefix_store_failed", error=exc)
             return
         if path is not None:
-            self._status(format_note("prefix_store", tokens=len(self.prefix.tokens)))
+            self._note("prefix_store", tokens=len(self.prefix.tokens))
+
+    def _note(self, topic: str, **fields: Any) -> None:
+        console = self.console
+        note = getattr(console, "note", None)
+        if callable(note):
+            note(topic, **fields)
+            return
+        self._status(format_note(topic, **fields))
+
+    def _begin_phase(self, phase: str, total: int, *, live: bool = False) -> Any:
+        console = self.console
+        if console is None:
+            return None
+        if live:
+            if not getattr(console, "live_decode", False):
+                return None
+            total = 0
+        elif total <= 0:
+            return None
+        detail = f"req #{self._request_id}" if self._request_id else ""
+        return console.begin(
+            phase,
+            total=total,
+            unit="tok",
+            detail=detail,
+            request=self._request_id or None,
+        )
+
+    def _end_phase(self, progress: Any, summary: str) -> None:
+        if progress is None:
+            if summary:
+                self._status(summary)
+            return
+        if getattr(progress, "closed", False):
+            return
+        console = self.console
+        if console is None:
+            if summary:
+                print(summary, flush=True)
+            return
+        console.end(progress, summary)
+
+    def _note_prefill(self, done: int) -> None:
+        progress = self._prefill_progress
+        if progress is None:
+            return
+        capped = min(progress.total, done)
+        if capped > progress.done:
+            progress.done = capped
 
     def _status(self, line: str) -> None:
         if self.console is None:

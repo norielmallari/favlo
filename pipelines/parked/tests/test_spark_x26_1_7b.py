@@ -26,10 +26,13 @@ from spark_x26_1_7b.prefix import scatter_channel_major, scatter_token_major
 
 def test_record_and_cache_bytes() -> None:
     assert record_bytes() == 1_761_579_008
-    assert full_token_bytes() == 7392
-    assert cache_bytes(2048) == 15_138_816
-    assert cache_bytes(131072) == 968_884_224
-    assert cache_bytes(1_048_576) == 7_751_073_792
+    assert full_token_bytes("e4m3") == 7392
+    assert full_token_bytes("f16") == 14336
+    assert cache_bytes(2048, "e4m3") == 15_138_816
+    assert cache_bytes(2048, "f16") == 29_360_128
+    assert cache_bytes(131072, "e4m3") == 968_884_224
+    assert cache_bytes(1_048_576, "e4m3") == 7_751_073_792
+    assert cache_bytes(1_048_576, "f16") == 15_032_385_536
 
 
 def test_pack_offsets_cover_the_record() -> None:
@@ -223,6 +226,209 @@ def test_responses_route_rejects_what_the_core_does_not_run() -> None:
     inner = MemoryReply("spark-x26-1-7b")
     ResponseWire(inner).done()
     assert inner.sent == []
+
+
+def test_phase_rows_use_the_console() -> None:
+    from favlo.console import format_note, format_rate
+    from spark_x26_1_7b.forward import SparkRuntime
+
+    notes: list[str] = []
+    ended: list[str] = []
+    logged: list[str] = []
+
+    class _Console:
+        shows_bars = True
+        live_decode = False
+
+        def note(self, topic: str, **fields: object) -> None:
+            notes.append(format_note(topic, **fields))
+
+        def begin(self, phase: str, **kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(phase=phase, total=kwargs["total"], done=0, closed=False)
+
+        def end(self, progress: SimpleNamespace, summary: str) -> None:
+            progress.closed = True
+            ended.append(summary)
+
+        def log(self, line: str) -> None:
+            logged.append(line)
+
+    runtime = SparkRuntime.__new__(SparkRuntime)
+    runtime.console = _Console()
+    runtime._request_id = 0
+    runtime._prefill_progress = None
+    runtime._note("prompt", tokens=12)
+    runtime._note("cache", hit=0)
+    runtime._note("prefix_load", tokens=4)
+    runtime._note("prefix_store", tokens=4)
+    row = runtime._begin_phase("prefill", 8)
+    runtime._prefill_progress = row
+    runtime._note_prefill(3)
+    runtime._note_prefill(8)
+    runtime._end_phase(row, format_rate("prefill", 8, 2.0))
+    runtime._end_phase(row, "prefill again")
+    runtime._end_phase(None, format_rate("decode", 0, 0.0))
+    assert notes == [
+        "prompt tokens 12",
+        "cache miss",
+        "prefix load 4 tokens",
+        "prefix store 4 tokens",
+    ]
+    assert row.done == 8
+    assert ended == ["prefill 4.00 tok/s (8 tok in 2.00s)"]
+    assert logged == ["decode 0 tok/s"]
+    assert runtime._begin_phase("decode", 32, live=True) is None
+
+
+def test_a_prefill_chunk_advances_the_row_when_it_finishes() -> None:
+    from spark_x26_1_7b.forward import SparkRuntime
+    from spark_x26_1_7b.layout import CHUNK
+
+    class _Session:
+        def __init__(self) -> None:
+            self.active = False
+            self.ended = 0
+
+        def begin(self) -> None:
+            self.active = True
+
+        def end(self) -> None:
+            self.active = False
+            self.ended += 1
+
+    runtime = SparkRuntime.__new__(SparkRuntime)
+    runtime.limit = 2048
+    runtime.session = _Session()
+    runtime._ensure = lambda _pos: True
+    runtime._encode = lambda _tokens, _pos, _logits: None
+    runtime._check_stop = lambda: None
+    runtime._prefill_progress = SimpleNamespace(total=CHUNK + 3, done=0)
+    runtime._prefill(list(range(CHUNK + 3)), 0, True)
+    assert runtime.session.ended == 1
+    assert runtime._prefill_progress.done == CHUNK
+    runtime._prefill_progress = SimpleNamespace(total=4, done=0)
+    runtime._prefill(list(range(4)), 0, False)
+    assert runtime._prefill_progress.done == 4
+
+
+def test_generate_closes_rows_and_a_cancel_leaves_the_rate_off() -> None:
+    from favlo.console import format_rate
+    from spark_x26_1_7b.closed import RequestClosed
+    from spark_x26_1_7b.forward import SparkRuntime
+
+    begun: list[dict[str, object]] = []
+    ended: list[tuple[str, int, str]] = []
+
+    class _Console:
+        shows_bars = True
+        live_decode = True
+        load_detail = ""
+
+        def note(self, topic: str, **fields: object) -> None:
+            del topic, fields
+
+        def begin(self, phase: str, **kwargs: object) -> SimpleNamespace:
+            begun.append({"phase": phase, **kwargs})
+            return SimpleNamespace(phase=phase, total=kwargs["total"], done=0, closed=False)
+
+        def end(self, progress: SimpleNamespace, summary: str) -> None:
+            progress.closed = True
+            ended.append((progress.phase, progress.done, summary))
+
+        def log(self, line: str) -> None:
+            del line
+
+    class _Session:
+        def __init__(self) -> None:
+            self.active = False
+
+        def begin(self) -> None:
+            self.active = True
+
+        def end(self) -> None:
+            self.active = False
+
+    class _Prefix:
+        def __init__(self) -> None:
+            self.loaded = True
+            self.tokens = [4]
+            self.dirty = False
+
+        def align(self, prompt: list[int]) -> int:
+            del prompt
+            return 1
+
+        def note(self, tokens: list[int]) -> None:
+            self.tokens = list(tokens)
+
+        def flush(self) -> None:
+            return None
+
+    runtime = SparkRuntime.__new__(SparkRuntime)
+    runtime.console = _Console()
+    runtime._request_id = 4
+    runtime._prefill_progress = None
+    runtime._hit_limit = False
+    runtime._prefill_seconds = 0.0
+    runtime._decode_seconds = 0.0
+    runtime._output_ids = []
+    runtime._cached_tokens = 0
+    runtime._stop = None
+    runtime.limit = 128
+    runtime.kv = SimpleNamespace(length=8)
+    runtime.session = _Session()
+    runtime.prefix = _Prefix()
+    runtime.sampler = SimpleNamespace(
+        reseed=lambda _seed: None,
+        clear=lambda: None,
+        observe=lambda _token: None,
+    )
+    runtime._ensure = lambda _pos: True
+    runtime._encode = lambda _tokens, _pos, _logits: None
+    runtime._forward = lambda _tokens, _pos, _logits: None
+
+    def _draw(*_args: object) -> int:
+        runtime.session.end()
+        return 9
+
+    runtime._draw = _draw
+    sent: list[int] = []
+    out = runtime.generate([4, 5, 6], 1, set(), on_token=sent.append)
+    assert out == [9]
+    assert sent == [9]
+    assert [item["phase"] for item in begun] == ["prefill", "decode"]
+    assert begun[0]["total"] == 2
+    assert begun[0]["detail"] == "req #4"
+    assert begun[1]["total"] == 0
+    assert ended[0] == ("prefill", 2, format_rate("prefill", 2, runtime._prefill_seconds))
+    assert ended[1] == ("decode", 1, format_rate("decode", 1, runtime._decode_seconds))
+    assert runtime._decode_seconds == 0.0
+
+    def _stop_during_prefill(*_args: object) -> None:
+        raise RequestClosed()
+
+    runtime._prefill = _stop_during_prefill
+    ended.clear()
+    try:
+        runtime.generate([4, 5, 6], 1, set())
+    except RequestClosed:
+        pass
+    else:
+        raise AssertionError("a closed request leaves generate")
+    assert ended == [("prefill", 0, "")]
+
+
+def test_weight_copy_reports_each_piece() -> None:
+    from io import BytesIO
+
+    from spark_x26_1_7b.forward import _copy_pieces
+
+    payload = bytes(range(256)) * 4
+    view = memoryview(bytearray(len(payload)))
+    notes: list[int] = []
+    _copy_pieces(BytesIO(payload), view, "weights.bin", notes.append)
+    assert bytes(view) == payload
+    assert notes == [len(payload)]
 
 
 def test_prefix_slice_roundtrip() -> None:

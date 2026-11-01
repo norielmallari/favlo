@@ -1,7 +1,7 @@
-"""Spark-X2.6-1.7B pipeline.
+"""Parked Spark-X2.6-1.7B pipeline.
 
-``favlo --spark-x26-1-7b`` loads this file by path. The model lives in the
-``spark_x26_1_7b`` package beside it.
+The command scan does not load this file. The package beside it is
+``spark_x26_1_7b``. The note is ``docs/spark-x26-1-7b``.
 """
 
 from __future__ import annotations

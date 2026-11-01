@@ -1,8 +1,10 @@
 # Setup
 
+Parked pipeline. The command scan does not offer `--spark-x26-1-7b`. The entry is `pipelines/parked/spark-x26-1-7b.py`.
+
 `download` writes the official BF16 checkout under `models/Spark-X2.6-1.7B`. `quantize` packs `models/Spark-X2.6-1.7B-fp8` and registers it for `spark-x26-1-7b`. The matrices are packed on up to eight threads and written at fixed offsets in `weights.bin`. A finished manifest is left in place.
 
-`favlo serve` on a terminal with an empty registry runs the same download and pack before it listens. `--keep-bf16` leaves the checkout.
+`--keep-bf16` leaves the checkout. An empty registry downloads Qwen3.5-4B instead of this checkpoint.
 
 ```text
 uv run favlo --spark-x26-1-7b setup

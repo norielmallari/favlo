@@ -39,6 +39,7 @@ Run the carrot file that imports only this package:
 | `qwen38-27b` | `tests/test_qwen38_27b_smoke.py` |
 | `qwen36-35b-a3b` | `tests/test_qwen36_35b_a3b_smoke.py` |
 | `qwen38-flash-next` (parked) | `pipelines/parked/tests/test_smoke.py` |
+| `spark-x26-1-7b` (parked) | `pipelines/parked/tests/test_spark_smoke.py` |
 | `gemma4-26b-a4b` | `tests/test_gemma4_26b_a4b_smoke.py` |
 
 `tests/test_qwen36_35b_a3b_smoke_16gb.py` is skipped for now. It would run the 35B file's cases with the runtime capped at 16GiB. Do not run that file until the skip is removed.

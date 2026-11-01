@@ -66,11 +66,17 @@ def record_bytes() -> int:
     return embed + layers + gates + norms
 
 
-def full_token_bytes() -> int:
-    """fp8 key and value planes of the seven full-attention layers, one token."""
+def full_token_bytes(kind: str = "e4m3") -> int:
+    """Key and value planes of the seven full-attention layers, one token."""
+    if kind == "f16":
+        per_plane = KV_HEADS * HEAD_DIM * 2
+        return len(FULL) * 2 * per_plane
+    if kind != "e4m3":
+        message = f"spark-x26-1-7b key/value cache {kind} is not built"
+        raise ValueError(message)
     per_plane = KV_HEADS * (HEAD_DIM + HEAD_DIM // BLOCK)
     return len(FULL) * 2 * per_plane
 
 
-def cache_bytes(tokens: int) -> int:
-    return full_token_bytes() * tokens
+def cache_bytes(tokens: int, kind: str = "e4m3") -> int:
+    return full_token_bytes(kind) * tokens

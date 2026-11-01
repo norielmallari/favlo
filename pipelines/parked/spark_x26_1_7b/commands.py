@@ -188,6 +188,7 @@ def _register_record(src: Path, output: Path) -> None:
         directory=output,
         pipeline=PIPELINE,
         runtime="metal41",
+        kv_cache="f16",
     )
 
 
@@ -279,6 +280,7 @@ def _models(args: argparse.Namespace) -> int:
                 directory=models_dir() / folder,
                 pipeline=PIPELINE,
                 runtime="metal41",
+                kv_cache="f16",
             )
         except (OSError, ValueError) as exc:
             sys.stderr.write(f"{exc}\n")

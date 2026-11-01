@@ -1,6 +1,6 @@
 # Ceilings
 
-Kernel and bandwidth ceilings for the kernels `spark-x26-1-7b` launches. Recompute when `gemv_fp8_vec_rms`, `gemv_fp8_vec_add_cached`, `gemv_fp8_vec_add_wide`, `gemv_group`, `gemv_f16`, `matmul_fp8_32`, `rmsnorm`, `cast_f16`, `rope_qk`, `residual`, `geglu`, `store_full_keys`, `store_full_span`, `store_slide_keys`, `store_slide_span`, `attend_span`, or `attend_merge` changes.
+Kernel and bandwidth ceilings for the kernels `spark-x26-1-7b` launches. Recompute when `gemv_fp8_vec_rms`, `gemv_fp8_vec_add_cached`, `gemv_fp8_vec_add_wide`, `gemv_group`, `gemv_f16`, `matmul_fp8_32`, `rmsnorm`, `cast_f16`, `rope_qk`, `residual`, `geglu`, `store_full_keys`, `store_full_span`, `store_slide_keys`, `store_slide_span`, `store_full_keys_f16`, `store_full_span_f16`, `store_slide_keys_f16`, `store_slide_span_f16`, `attend_span`, `attend_span_f16`, or `attend_merge` changes. The table below was measured with the E4M3 cache.
 
 Each time is one command buffer, then a wait. The time is `GPUEndTime` minus `GPUStartTime`. Two launches are discarded. The figure is the median of the next four. Measured on 1 November 2026.
 

@@ -59,6 +59,7 @@ def test_serve_is_a_process_command(capsys) -> None:
     captured = capsys.readouterr()
     assert "--host" in captured.out
     assert "--qwen38-flash-next" not in captured.out
+    assert "--spark-x26-1-7b" not in captured.out
 
 
 def test_pipeline_help_comes_from_the_hyphenated_file(capsys) -> None:
