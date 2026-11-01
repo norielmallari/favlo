@@ -47,7 +47,7 @@ KERNELS = (
     "argmax_final",
 )
 
-PREFILL_TILE = 512
+PREFILL_TILE = 1024
 
 # topk kernels stay in the shader source for a later sampler; greedy + presence is enough now.
 

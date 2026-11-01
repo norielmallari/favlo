@@ -18,7 +18,7 @@ Device spans come from `favlo.memory`. The serve process keeps the ledger. This 
 
 Dense hybrid text backbone: 24 Gated DeltaNet layers and 8 full-attention layers (`[linear × 3, full] × 8`), SwiGLU feed-forward, tied embeddings, optional MTP and vision tower (not packed in the first language record). Hidden size 2560, intermediate 9216, vocab 248320. Full attention uses 16 query heads with a fused output gate, 4 KV heads, head dim 256, partial RoPE (64 of 256), and M-RoPE. Gated DeltaNet uses 16 key heads, 32 value heads, head dim 128, and a depthwise conv of width 4.
 
-Weights are fp8 E4M3 with an E8M0 scale every 32 along K. Norms, `A_log`, `dt_bias`, convolution taps, and Q/K gains stay float16. Layer / Q / K / final RMSNorm apply gain as `1 + w`. The GDN gated norm applies `w` then SiLU of `z`. The eight full-attention layers keep an fp8 key/value cache. Prefill is a 512-token Metal tile: `matmul_fp8` / `matmul_fp8_n32`, `gdn_chunk`, and `attend_prefill`. Only the last chunk runs the head. Decode stays token-by-token. Kernel ceilings are [ceilings.md](ceilings.md).
+Weights are fp8 E4M3 with an E8M0 scale every 32 along K. Norms, `A_log`, `dt_bias`, convolution taps, and Q/K gains stay float16. Layer / Q / K / final RMSNorm apply gain as `1 + w`. The GDN gated norm applies `w` then SiLU of `z`. The eight full-attention layers keep an fp8 key/value cache. Prefill is a 1024-token Metal tile: `matmul_fp8` / `matmul_fp8_n32`, `gdn_chunk`, and `attend_prefill`. Only the last chunk runs the head. Decode stays token-by-token. Kernel ceilings are [ceilings.md](ceilings.md).
 
 The packed record's `chat_template.jinja` is the official Qwen3.5 template (tools and `enable_thinking`). MiniFantasy's short template is not used for serve.
 
@@ -42,7 +42,7 @@ Coding agent printed `prompt tokens` / `cache miss` per request:
 
 | Card | Prefill | Decode |
 |---|---|---|
-| thinking | 904.92 tok/s (25736 tok in 28.44s) | 37.75 tok/s (2452 tok in 64.96s) |
-| instruct | 941.14 tok/s (23058 tok in 24.50s) | 40.28 tok/s (1895 tok in 47.04s) |
+| thinking | 909.40 tok/s (25736 tok in 28.30s) | 38.04 tok/s (2321 tok in 61.01s) |
+| instruct | 968.42 tok/s (23058 tok in 23.81s) | 39.43 tok/s (1920 tok in 48.69s) |
 
 Progress uses `favlo.console` begin / end / note on the console thread (`prompt`, `cache`, load / prefill / decode). Decode streaming uses a separate queue thread. NumPy stays off the hot path.
