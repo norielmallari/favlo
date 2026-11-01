@@ -30,7 +30,7 @@ def _ui(mode: str, *, width: int = 120, color: int = 0) -> tuple[Console, io.Str
     clock = Clock()
     ui = Console(
         mode,
-        pipeline="qwen38-flash-next",
+        pipeline="qwen36-35b-a3b",
         stream=stream,
         clock=clock,
         width=width,
@@ -414,7 +414,7 @@ def test_json_events_are_self_contained() -> None:
     assert "begin" in kinds and "tick" in kinds and "end" in kinds
     for row in rows:
         assert row["v"] == 1
-        assert row["pipeline"] == "qwen38-flash-next"
+        assert row["pipeline"] == "qwen36-35b-a3b"
     tick = [row for row in rows if row["type"] == "tick"][-1]
     assert tick["total"] == 1187
     assert tick["unit"] == "tok"
@@ -465,21 +465,21 @@ def _tty_stream() -> io.StringIO:
 
 def test_from_env_forces_plain_for_no_color(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NO_COLOR", "1")
-    ui = Console.from_env("auto", pipeline="qwen38-flash-next", stream=_tty_stream())
+    ui = Console.from_env("auto", pipeline="qwen36-35b-a3b", stream=_tty_stream())
     assert ui.mode == "plain"
 
 
 def test_from_env_forces_plain_for_a_dumb_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setenv("TERM", "dumb")
-    ui = Console.from_env("auto", pipeline="qwen38-flash-next", stream=_tty_stream())
+    ui = Console.from_env("auto", pipeline="qwen36-35b-a3b", stream=_tty_stream())
     assert ui.mode == "plain"
 
 
 def test_from_env_is_pretty_on_a_color_tty(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setenv("TERM", "xterm-256color")
-    ui = Console.from_env("auto", pipeline="qwen38-flash-next", stream=_tty_stream())
+    ui = Console.from_env("auto", pipeline="qwen36-35b-a3b", stream=_tty_stream())
     assert ui.mode == "pretty"
     assert ui.fold_turns is True
 
@@ -636,22 +636,6 @@ def test_retarget_keeps_a_same_unit_window() -> None:
     ticks = [row for row in rows if row["type"] == "tick"]
     assert ticks[-1]["rate"] == pytest.approx(4.0)
     assert ticks[-1]["detail"] == "mtp"
-
-
-def test_prefill_done_only_moves_forward() -> None:
-    from qwen38_flash_next.runtime import Qwen38Runtime
-
-    runtime = Qwen38Runtime.__new__(Qwen38Runtime)
-    runtime.layers = 4
-    runtime._prefill_progress = Progress(total=100, done=0)
-    Qwen38Runtime._note_prefill(runtime, 0, 50, 100)
-    assert runtime._prefill_progress.done == 12
-    Qwen38Runtime._note_prefill(runtime, 1, 0, 100)
-    assert runtime._prefill_progress.done == 25
-    Qwen38Runtime._note_prefill(runtime, 0, 10, 100)
-    assert runtime._prefill_progress.done == 25
-    Qwen38Runtime._note_prefill(runtime, 3, 100, 100)
-    assert runtime._prefill_progress.done == 100
 
 
 def _wait_until(predicate, timeout: float = 2.0) -> bool:

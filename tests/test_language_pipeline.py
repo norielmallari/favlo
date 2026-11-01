@@ -90,12 +90,6 @@ def test_qwen36_treats_only_the_client_message_as_closed() -> None:
     assert not pipe.client_closed(OSError("disk"))
 
 
-def test_flash_next_treats_any_oserror_as_closed() -> None:
-    from qwen38_flash_next.commands import Pipeline as Chat
-
-    assert Chat().client_closed(OSError("disk"))
-
-
 def test_a_blank_embedding_is_a_400() -> None:
     class Pipe(EmbeddingsPipeline):
         def embed(self, runtime, text):

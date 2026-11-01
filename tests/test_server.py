@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import socket
+import sys
 import threading
 import time
 import urllib.error
@@ -14,10 +15,86 @@ from typing import Any
 
 import pytest
 
-import qwen38_flash_next.commands as commands
 from favlo import listener
+from favlo.pipeline import ClientClosed
 from favlo.pipelines import drop_runtime, install_runtime, open_runtime
-from qwen38_flash_next.runtime import RequestClosed
+
+
+def _user_content(body: dict[str, Any]) -> str:
+    raw = body.get("input", "")
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, list) and raw:
+        item = raw[0]
+        if isinstance(item, dict):
+            content = item.get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "input_text":
+                        return str(part.get("text", ""))
+    return ""
+
+
+def _listener_handle_responses(
+    reply: Any,
+    runtime: Any,
+    body: dict[str, Any],
+    selection: Any,
+    args: Any,
+    state: dict[str, Any],
+) -> None:
+    del selection, args, state
+    text = _user_content(body)
+    messages = [{"role": "user", "content": text}]
+    stream = bool(body.get("stream", False))
+    limit = body.get("max_output_tokens")
+    max_tokens = 8 if limit is None else int(limit)
+    runtime._stop = reply.stopped
+    prompt = runtime.encode_chat(messages, None, False)
+    if stream:
+        try:
+            reply.begin_events()
+        except OSError as exc:
+            raise ClientClosed() from exc
+        try:
+            if runtime.watch_cancel:
+                runtime._wait_for_cancel()
+            else:
+                runtime.generate(prompt, max_tokens, 0.0, 1.0, 0)
+            reply.event({"type": "response.output_text.delta", "delta": "ok"})
+        except ClientClosed:
+            runtime._persist_prefix()
+            raise
+        reply.done()
+        return
+    try:
+        if runtime.watch_cancel:
+            runtime._wait_for_cancel()
+        tokens = runtime.generate(prompt, max_tokens, 0.0, 1.0, 0)
+    except ClientClosed:
+        runtime._persist_prefix()
+        raise
+    content = runtime.decode(tokens)
+    reply.json(
+        200,
+        {
+            "id": "resp_stub",
+            "object": "response",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": content}],
+                }
+            ],
+        },
+    )
+
+
+commands = SimpleNamespace(handle_responses=_listener_handle_responses)
 
 
 @pytest.fixture(autouse=True)
@@ -25,6 +102,15 @@ def _registry_media_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "favlo.media_session.default_model",
         lambda kind, root=None: "example-model",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _stub_language_pipeline_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GET /v1/models must not load every registered pipeline module."""
+    monkeypatch.setattr(
+        "favlo.http_app._language_pipelines",
+        lambda: {"qwen36-35b-a3b"},
     )
 
 
@@ -117,7 +203,7 @@ class _Runtime:
         deadline = time.monotonic() + 5
         while not self.release.is_set() and time.monotonic() < deadline:
             if self.halted:
-                raise RequestClosed()
+                raise ClientClosed()
             time.sleep(0.02)
 
     def _mark(self, kind: str) -> None:
@@ -132,7 +218,7 @@ class _Runtime:
             stop = self._stop
             if stop is not None and stop():
                 self.canceled.set()
-                raise RequestClosed()
+                raise ClientClosed()
             time.sleep(0.02)
         message = "dropped client did not stop the request"
         raise AssertionError(message)
@@ -144,14 +230,13 @@ def _args() -> SimpleNamespace:
 
 def _request(content: str, *, stream: bool) -> bytes:
     payload = {
-        "messages": [{"role": "user", "content": content}],
-        "max_tokens": 8,
-        "enable_thinking": False,
+        "input": content,
+        "max_output_tokens": 8,
         "stream": stream,
     }
     body = json.dumps(payload).encode()
     head = (
-        "POST /v1/chat/completions HTTP/1.1\r\n"
+        "POST /v1/responses HTTP/1.1\r\n"
         "Host: 127.0.0.1\r\n"
         "Content-Type: application/json\r\n"
         f"Content-Length: {len(body)}\r\n"
@@ -344,7 +429,7 @@ def test_requests_wait_until_the_current_one_finishes() -> None:
         assert sorted(_serial(runtime.order)) == ["one", "three", "two"]
         for name in ("one", "two", "three"):
             assert results[name].startswith(b"HTTP/1.1 200")
-            assert b'"content": "ok"' in results[name]
+            assert b'"text": "ok"' in results[name]
     finally:
         runtime.release.set()
         _stop_background(state, thread)
@@ -386,7 +471,7 @@ def test_dropped_client_stops_the_request_and_the_next_one_runs() -> None:
         assert runtime.canceled.wait(3)
         follow = _exchange(port, "next")
         assert follow.startswith(b"HTTP/1.1 200")
-        assert b'"content": "ok"' in follow
+        assert b'"text": "ok"' in follow
         assert runtime.persisted == 1
         with runtime.lock:
             assert runtime.order == [("start", "next"), ("end", "next")]
@@ -407,7 +492,7 @@ def test_closed_post_stops_generation() -> None:
         assert runtime.canceled.wait(3)
         follow = _exchange(port, "after")
         assert follow.startswith(b"HTTP/1.1 200")
-        assert b'"content": "ok"' in follow
+        assert b'"text": "ok"' in follow
         assert runtime.persisted == 1
     finally:
         runtime.release.set()
@@ -506,79 +591,6 @@ def _signal_server(sig: int, *, during_request: bool) -> None:
         assert ("end", "held") not in runtime.order
 
 
-def test_usage_excludes_the_cached_prefix() -> None:
-    runtime = SimpleNamespace(_cached_tokens=900, _prefill_seconds=2.0, _decode_seconds=4.0)
-    usage = commands._usage(runtime, 1187, 480, commands.DEFAULT_MAX_PROMPT_TOKENS)
-    timings = usage["timings"]
-    assert usage["prompt_tokens"] == 1187
-    assert timings["prompt_n"] == 287
-    assert timings["predicted_n"] == 480
-    assert timings["prompt_per_second"] == 143.5
-    assert timings["predicted_per_second"] == 120.0
-    assert usage["max_prompt_tokens"] == commands.DEFAULT_MAX_PROMPT_TOKENS
-    assert usage["context_length"] == commands.DEFAULT_CONTEXT_LENGTH
-    assert usage["prompt_tokens_details"]["cached_tokens"] == 900
-    idle = commands._usage(SimpleNamespace(), 10, 4)
-    assert idle["timings"]["prompt_per_second"] == 0.0
-    assert idle["timings"]["predicted_per_second"] == 0.0
-    assert idle["timings"]["prompt_n"] == 10
-
-
-def test_lazy_stream_uses_the_runtime_loaded_for_the_request(monkeypatch) -> None:
-    runtime = _Runtime()
-    state: dict = {
-        "runtime": None,
-        "server": None,
-        "record": None,
-        "requests": 0,
-        "module": commands,
-    }
-
-    def bind(body, bound_state, bound_args, kind="chat"):
-        del body, bound_args, kind
-        bound_state["runtime"] = runtime
-        bound_state["record"] = "packed"
-        return SimpleNamespace(requested_id="packed", enable_thinking=None, sampling=None)
-
-    monkeypatch.setattr("favlo.pipelines.bind_request", bind)
-    args = _args()
-    args.lazy = True
-    thread = threading.Thread(target=listener._serve_loop, args=(args, state), daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 5
-    while state["server"] is None and time.monotonic() < deadline:
-        time.sleep(0.01)
-    server = state["server"]
-    assert server is not None
-    port = int(server.server_address[1])
-    try:
-        body = _exchange(port, "lazy", stream=True)
-    finally:
-        _stop_background(state, thread)
-    assert body.startswith(b"HTTP/1.1 200")
-    assert b"data: [DONE]" in body
-    assert b"AttributeError" not in body
-
-
-def test_streamed_completion_reports_timings() -> None:
-    runtime = _Runtime()
-    runtime._cached_tokens = 1
-    runtime._prefill_seconds = 2.0
-    runtime._decode_seconds = 4.0
-    runtime._output_ids = [7, 8]
-    state, thread = _serve_background(runtime)
-    port = int(state["server"].server_address[1])
-    try:
-        body = _exchange(port, "timed", stream=True)
-    finally:
-        _stop_background(state, thread)
-    assert body.startswith(b"HTTP/1.1 200")
-    assert b'"prompt_n": 0' in body
-    assert b'"predicted_n": 2' in body
-    assert b'"predicted_per_second": 0.5' in body
-    assert b"data: [DONE]" in body
-
-
 def test_sigint_during_a_request_releases_the_server() -> None:
     import signal
 
@@ -631,14 +643,14 @@ def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
     state: dict = {"runtime": None, "record": None, "pipeline": None}
     args = _args()
     first = SimpleNamespace(
-        folder="flash",
-        pipeline="qwen38-flash-next",
+        folder="small",
+        pipeline="qwen36-35b-a3b",
         runtime="metal41",
         custom=False,
         alias=None,
         resident_percent=None,
         kv_cache="e4m3",
-        path="flash",
+        path="small",
     )
     second = SimpleNamespace(
         folder="dense",
@@ -653,7 +665,7 @@ def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
     install_runtime(state, args, first)
     install_runtime(state, args, first)
     assert len(opened) == 1
-    assert state["pipeline"] == "qwen38-flash-next"
+    assert state["pipeline"] == "qwen36-35b-a3b"
     install_runtime(state, args, second)
     assert opened[0].closed
     assert state["runtime"] is opened[1]
@@ -1363,6 +1375,16 @@ class _QueueMedia:
         self.chat_release.wait(5)
         reply.json(200, {"id": "chat", "choices": []})
 
+    def handle_responses(self, reply, runtime, body, selection, args, state) -> None:
+        self.handle_chat(
+            reply,
+            runtime,
+            {"messages": [{"role": "user", "content": _user_content(body)}]},
+            selection,
+            args,
+            state,
+        )
+
     def handle_image(self, reply, runtime, body, selection, args, state) -> None:
         del runtime, selection, args
         prompt = body.get("prompt")
@@ -1819,7 +1841,7 @@ def test_mcp_chat_preempts_media_and_the_same_task_resumes(tmp_path) -> None:
     chat: dict[str, bytes] = {}
 
     def post_chat() -> None:
-        chat["body"] = _post_json(port, "/v1/chat/completions", {"messages": []})
+        chat["body"] = _post_json(port, "/v1/responses", {"input": "hello"})
 
     try:
         _status, created = _tool(
@@ -1922,59 +1944,6 @@ def test_media_http_routes_are_gone(monkeypatch, tmp_path) -> None:
     assert b'"resumed": true' in resume_raw
 
 
-def test_language_harness_clients_read_chat_completions() -> None:
-    import asyncio
-
-    from agent_framework import Agent
-    from favlo.chat_client import close_chat_client, open_chat_client
-    from harness.benchmarks.serve import Request, complete
-    from harness.coherence import _stream
-    from openai import OpenAI
-
-    state, thread = _serve_background(_Runtime())
-    port = int(state["server"].server_address[1])
-    messages = [{"role": "user", "content": "hello"}]
-    try:
-        text, reason, _tokens = complete(
-            port,
-            messages,
-            8,
-            Request(enable_thinking=False),
-            model="text-model",
-        )
-        async def _coding_turn() -> str:
-            client = open_chat_client("text-model", f"http://127.0.0.1:{port}/v1")
-            agent = Agent(
-                client=client,
-                name="coding",
-                instructions="Answer in one word.",
-                default_options={"store": False, "extra_body": {"enable_thinking": True}},
-            )
-            try:
-                result = await agent.run("hello")
-                return str(result.text or "")
-            finally:
-                await close_chat_client(client)
-
-        posted = asyncio.run(_coding_turn())
-        _reasoning, content, _led = _stream(
-            port, messages, presence=0.0, window=20, model="text-model"
-        )
-        client = OpenAI(api_key="favlo", base_url=f"http://127.0.0.1:{port}/v1", timeout=30.0)
-        completion = client.chat.completions.create(
-            model="text-model",
-            messages=messages,
-            extra_body={"enable_thinking": False},
-        )
-    finally:
-        _stop_background(state, thread)
-    assert text
-    assert reason
-    assert posted
-    assert content or _reasoning
-    assert completion.choices[0].message.content
-
-
 def test_mcp_voice_writes_a_wav_and_the_link_reads_it(tmp_path) -> None:
     runtime = _Runtime()
     state, thread = _serve_background(runtime)
@@ -2026,6 +1995,16 @@ class _EmbedOrder:
         self.order.append(f"chat:{name}")
         reply.json(200, {"id": name, "choices": []})
 
+    def handle_responses(self, reply, runtime, body, selection, args, state) -> None:
+        self.handle_chat(
+            reply,
+            runtime,
+            {"messages": [{"role": "user", "content": _user_content(body)}]},
+            selection,
+            args,
+            state,
+        )
+
     def handle_embed(self, reply, runtime, body, selection, args, state) -> None:
         del runtime, selection, args
         self.embed_saw_preempt = bool(state["preempt"].is_set())
@@ -2066,7 +2045,7 @@ def test_an_embedding_waits_for_the_open_chat_and_runs_before_the_next() -> None
     port = int(state["server"].server_address[1])
     hold = threading.Thread(
         target=_post_json,
-        args=(port, "/v1/chat/completions", {"messages": [{"role": "user", "content": "hold"}]}),
+        args=(port, "/v1/responses", {"input": "hold"}),
     )
     embed = threading.Thread(
         target=_post_json,
@@ -2074,7 +2053,7 @@ def test_an_embedding_waits_for_the_open_chat_and_runs_before_the_next() -> None
     )
     nxt = threading.Thread(
         target=_post_json,
-        args=(port, "/v1/chat/completions", {"messages": [{"role": "user", "content": "next"}]}),
+        args=(port, "/v1/responses", {"input": "next"}),
     )
     try:
         hold.start()
@@ -2104,7 +2083,7 @@ def test_a_chat_waits_while_an_embedding_is_running() -> None:
     )
     chat = threading.Thread(
         target=_post_json,
-        args=(port, "/v1/chat/completions", {"messages": [{"role": "user", "content": "next"}]}),
+        args=(port, "/v1/responses", {"input": "next"}),
     )
     try:
         embed.start()
@@ -2150,6 +2129,16 @@ class _ForegroundMedia:
         self.order.append("chat:" + body["messages"][0]["content"])
         reply.json(200, {"id": "chat", "choices": []})
 
+    def handle_responses(self, reply, runtime, body, selection, args, state) -> None:
+        self.handle_chat(
+            reply,
+            runtime,
+            {"messages": [{"role": "user", "content": _user_content(body)}]},
+            selection,
+            args,
+            state,
+        )
+
     def handle_embed(self, reply, runtime, body, selection, args, state) -> None:
         del runtime, selection, args, state
         self.order.append("embed:" + str(body.get("input")))
@@ -2191,7 +2180,7 @@ def test_the_foreground_queue_drains_before_media_resumes() -> None:
     )
     chat = threading.Thread(
         target=_post_json,
-        args=(port, "/v1/chat/completions", {"messages": [{"role": "user", "content": "later"}]}),
+        args=(port, "/v1/responses", {"input": "later"}),
     )
     worker = threading.Thread(target=post_image)
     try:
@@ -2243,6 +2232,16 @@ class _TwoSlices:
         self.order.append("chat:" + body["messages"][0]["content"])
         reply.json(200, {"id": "chat", "choices": []})
 
+    def handle_responses(self, reply, runtime, body, selection, args, state) -> None:
+        self.handle_chat(
+            reply,
+            runtime,
+            {"messages": [{"role": "user", "content": _user_content(body)}]},
+            selection,
+            args,
+            state,
+        )
+
 
 def test_a_later_chat_preempts_the_next_media_slice() -> None:
     module = _TwoSlices()
@@ -2260,8 +2259,8 @@ def test_a_later_chat_preempts_the_next_media_slice() -> None:
     def post_chat(name: str) -> None:
         _post_json(
             port,
-            "/v1/chat/completions",
-            {"messages": [{"role": "user", "content": name}]},
+            "/v1/responses",
+            {"input": name},
         )
 
     worker = threading.Thread(target=post_image)

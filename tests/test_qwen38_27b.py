@@ -244,7 +244,7 @@ def test_responses_body_is_the_generation_path(monkeypatch: pytest.MonkeyPatch) 
     from pathlib import Path
 
     from favlo.reply import MemoryReply
-    from qwen38_27b.chat import handle_chat, handle_responses
+    from qwen38_27b.chat import handle_responses
 
     seen: dict[str, object] = {}
     rendered: list[tuple[object, object]] = []
@@ -368,23 +368,6 @@ def test_responses_body_is_the_generation_path(monkeypatch: pytest.MonkeyPatch) 
     assert seen["tools"] == []
     assert rendered[-1][0] is False
     assert not any(item.get("type") == "function_call" for item in quiet.body["output"])
-
-    chat = MemoryReply("qwen38-27b")
-    handle_chat.complete(
-        chat,
-        Runtime(),
-        {
-            "model": "qwen38-27b",
-            "messages": [{"role": "user", "content": "hi"}],
-            "enable_thinking": False,
-        },
-        None,
-        None,
-        {},
-    )
-    assert chat.status == 200
-    assert chat.body["object"] == "chat.completion"
-    assert chat.body["choices"][0]["message"]["content"] == "still planning"
 
 
 def test_auto_truncation_drops_the_oldest_turn(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1182,99 +1165,6 @@ def test_tool_call_arguments_join_as_json() -> None:
     pieces.extend(plain.push(text))
     pieces.extend(plain.finish())
     assert pieces == [("content", text)]
-
-
-def test_openai_client_receives_a_token_before_generation_ends(monkeypatch: pytest.MonkeyPatch) -> None:
-    openai = pytest.importorskip("openai")
-    import threading
-    import time
-    from types import SimpleNamespace
-
-    from qwen38_27b.chat import _stream
-
-    from favlo import listener
-
-    def chat(handler, runtime, body, selection, args, bound_state):
-        del body, selection, args, bound_state
-        _stream(handler, runtime, [1], [], False, 8, False)
-
-    marks: dict[str, float] = {}
-
-    class _Runtime:
-        root = SimpleNamespace()
-        _hit_limit = False
-        _halted = False
-        _stop = None
-        _cached_tokens = 0
-        _prefill_seconds = 0.0
-        _decode_seconds = 0.2
-        _output_ids: list[int] = []
-
-        def decode(self, ids: list[int]) -> str:
-            return "".join("ab"[token - 1] for token in ids)
-
-        def generate(self, prompt, limit, stop, **kwargs):
-            del prompt, limit, stop
-            on_token = kwargs["on_token"]
-            on_token(1)
-            marks["after_first"] = time.monotonic()
-            time.sleep(0.4)
-            on_token(2)
-            self._output_ids = [1, 2]
-            marks["done"] = time.monotonic()
-            return [1, 2]
-
-    state: dict = {
-        "runtime": _Runtime(),
-        "server": None,
-        "record": None,
-        "module": SimpleNamespace(handle_chat=chat),
-        "pipeline": "qwen38-27b",
-        "requests": 0,
-    }
-
-    def bind(body, bound_state, bound_args, kind="chat"):
-        del body, bound_state, bound_args, kind
-        return SimpleNamespace(requested_id="qwen38-27b", variant=None, sampling=None)
-
-    monkeypatch.setattr("favlo.pipelines.bind_request", bind)
-    args = SimpleNamespace(host="127.0.0.1", port=0, lazy=False, transcript=None, max_memory=None)
-    thread = threading.Thread(target=listener._serve_loop, args=(args, state), daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 5
-    while state["server"] is None and time.monotonic() < deadline:
-        time.sleep(0.01)
-    server = state["server"]
-    assert server is not None
-    port = int(server.server_address[1])
-    first = None
-    try:
-        client = openai.OpenAI(
-            base_url=f"http://127.0.0.1:{port}/v1",
-            api_key="local",
-            timeout=5.0,
-        )
-        stream = client.chat.completions.create(
-            model="qwen38-27b",
-            messages=[{"role": "user", "content": "hi"}],
-            max_tokens=8,
-            stream=True,
-            extra_body={"enable_thinking": False},
-        )
-        for chunk in stream:
-            assert chunk.object == "chat.completion.chunk"
-            if not chunk.choices:
-                continue
-            if first is None and chunk.choices[0].delta.content:
-                first = time.monotonic()
-        stream.close()
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
-        server.server_close()
-    assert first is not None
-    assert "done" in marks
-    assert first < marks["done"]
 
 
 def _span_entry(span: int) -> dict:

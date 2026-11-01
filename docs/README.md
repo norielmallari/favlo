@@ -14,13 +14,6 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [synthetic-matmul2d.md](synthetic-matmul2d.md) | Synthetic `matmul2d` dtype rates |
 | [synthetic-decode.md](synthetic-decode.md) | Synthetic one-token GEMV and `matmul2d` rates |
 | [ai-assistance/README.md](ai-assistance/README.md) | AI-assisted features on `favlo serve` |
-| [qwen38-flash-next/architecture.md](qwen38-flash-next/architecture.md) | Qwen3.8-Flash-Next pipeline contract |
-| [qwen38-flash-next/research/int2-miss.md](qwen38-flash-next/research/int2-miss.md) | Qwen3.8-Flash-Next int2 reconstruction bound |
-| [qwen38-flash-next/research/kernel-ceilings.md](qwen38-flash-next/research/kernel-ceilings.md) | Qwen3.8-Flash-Next isolated dispatch sum |
-| [qwen38-flash-next/research/expert-planes.md](qwen38-flash-next/research/expert-planes.md) | Qwen3.8-Flash-Next expert-width dispatch times |
-| [qwen38-flash-next/research/recorded-forward.md](qwen38-flash-next/research/recorded-forward.md) | Qwen3.8-Flash-Next recorded prefill and decode sums |
-| [qwen38-flash-next/performance.md](qwen38-flash-next/performance.md) | Qwen3.8-Flash-Next recorded prefill and decode rates |
-| [qwen38-flash-next/references.md](qwen38-flash-next/references.md) | Papers and specifications for that pipeline |
 | [qwen38-27b/README.md](qwen38-27b/README.md) | Qwen3.8-27B pipeline contract |
 | [qwen38-27b/SETUP.md](qwen38-27b/SETUP.md) | Qwen3.8-27B download, pack, and first chat |
 | [ternary-bonsai-2/README.md](ternary-bonsai-2/README.md) | Failed Ternary Bonsai 2 pipeline |
@@ -46,12 +39,6 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [gemma4-26b-a4b/research/kernel-ceilings.md](gemma4-26b-a4b/research/kernel-ceilings.md) | Gemma 4 26B-A4B isolated decode sum |
 | [gemma4-26b-a4b/research/recorded-forward.md](gemma4-26b-a4b/research/recorded-forward.md) | Gemma 4 26B-A4B recorded prefill and decode runs |
 | [gemma4-26b-a4b/benchmarks.md](gemma4-26b-a4b/benchmarks.md) | Gemma 4 26B-A4B harness scores against `serve` |
-| [qwen38-flash-next/record.md](qwen38-flash-next/record.md) | Metal record layout and tier rules |
-| [qwen38-flash-next/ngram.md](qwen38-flash-next/ngram.md) | n-gram hash and injection |
-| [qwen38-flash-next/schedule.md](qwen38-flash-next/schedule.md) | Prefill, decode, and quantize schedule |
-| [qwen38-flash-next/probe.md](qwen38-flash-next/probe.md) | Block-of-32 GPU probe |
-| [qwen38-flash-next/console.md](qwen38-flash-next/console.md) | Status row binding |
-| [qwen38-flash-next/benchmarks.md](qwen38-flash-next/benchmarks.md) | Harness scores against `serve` |
 | [qwen38-27b/benchmarks.md](qwen38-27b/benchmarks.md) | Harness scores against `serve` |
 | [qwen36-35b-a3b/benchmarks.md](qwen36-35b-a3b/benchmarks.md) | Harness scores against `serve` |
 | [z-image-turbo/README.md](z-image-turbo/README.md) | Z-Image-Turbo pipeline contract |

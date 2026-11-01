@@ -1,7 +1,7 @@
-"""Qwen3.8-Flash-Next pipeline.
+"""Parked Qwen3.8-Flash-Next pipeline.
 
-``favlo --qwen38-flash-next`` loads this file by path. The model lives in
-the ``qwen38_flash_next`` package beside it.
+The command scan does not load this file. The package beside it is
+``qwen38_flash_next``. The note is ``docs/qwen38-flash-next``.
 """
 
 from __future__ import annotations

@@ -55,7 +55,6 @@ When the app is ready, open the printed link in a browser. That address is `http
 | `qwen36-35b-a3b` | [Qwen3.6-35B-A3B](docs/qwen36-35b-a3b/README.md) |
 | `gemma4-26b-a4b` | [Gemma 4 26B-A4B](docs/gemma4-26b-a4b/README.md) |
 | `qwen38-27b` | [Qwen3.8-27B](docs/qwen38-27b/README.md) |
-| `qwen38-flash-next` | [Qwen3.8-Flash-Next](docs/qwen38-flash-next/architecture.md) |
 | `z-image-turbo` | [Z-Image-Turbo](docs/z-image-turbo/README.md) |
 | `wan22-i2v` | [Wan 2.2 I2V](docs/wan22-i2v/README.md) |
 | `wan22-ti2v-5b` | [Wan2.2 TI2V-5B](docs/wan22-ti2v-5b/README.md) |
@@ -123,4 +122,3 @@ Favlo is licensed under the Apache License, Version 2.0. The terms are in [LICEN
 | ACE-Step 1.5 XL Turbo | MIT License | [note](docs/ace-step-15-turbo/README.md) |
 | bge-m3 | MIT License | [note](docs/bge-m3/README.md) |
 | VoxCPM2 | Apache License, Version 2.0 | [note](docs/voxcpm2/references.md) |
-| Qwen3.8-Flash-Next | [Qwen Community License 1.0](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE) | [note](docs/qwen38-flash-next/references.md) |

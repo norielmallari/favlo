@@ -20,7 +20,7 @@ from favlo.registry import (
     set_model_mtp,
 )
 
-PIPELINE = "qwen38-flash-next"
+PIPELINE = "qwen36-35b-a3b"
 
 
 def _record(root, name: str) -> None:
@@ -183,26 +183,26 @@ def test_alias_must_be_one_unused_name(tmp_path) -> None:
 
 
 def test_a_second_pipeline_is_listed_without_a_default(tmp_path) -> None:
-    flash = "Qwen-h128-fp8-c384-fp4"
+    small = "Qwen3.6-35B-A3B-fp4"
     dense = "Qwen3.8-27B-fp4"
-    _record(tmp_path, flash)
+    _record(tmp_path, small)
     _record(tmp_path, dense)
-    add_model(flash, alias="qwen38-flash-next", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
+    add_model(small, alias="qwen36-35b-a3b", root=tmp_path, pipeline="qwen36-35b-a3b", runtime="metal41")
     add_model(dense, alias="qwen38-27b", root=tmp_path, pipeline="qwen38-27b", runtime="metal41")
     data = load_registry(tmp_path)
-    assert data["default"] == "qwen38-flash-next:instruct"
-    assert resolve("qwen38-flash-next", root=tmp_path).folder == flash
-    assert resolve("qwen38-flash-next", root=tmp_path).pipeline == "qwen38-flash-next"
+    assert data["default"] == "qwen36-35b-a3b:instruct"
+    assert resolve("qwen36-35b-a3b", root=tmp_path).folder == small
+    assert resolve("qwen36-35b-a3b", root=tmp_path).pipeline == "qwen36-35b-a3b"
     selected = resolve("qwen38-27b", root=tmp_path)
     assert selected.folder == dense
     assert selected.pipeline == "qwen38-27b"
     ids = [row["id"] for row in model_objects(tmp_path)]
-    assert "qwen38-flash-next" in ids
+    assert "qwen36-35b-a3b" in ids
     assert "qwen38-27b" in ids
     assert "qwen38-27b:thinking" in ids
     listing = format_listing(tmp_path)
     assert "pipeline qwen38-27b" in listing
-    assert "pipeline qwen38-flash-next" in listing
+    assert "pipeline qwen36-35b-a3b" in listing
 
 
 def test_unregistered_complete_directory_is_listed(tmp_path) -> None:
@@ -248,14 +248,14 @@ def test_registration_copies_the_pipeline_card(tmp_path) -> None:
     add_model("packed", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
     flash = load_registry(tmp_path)["models"]["packed"]
     assert flash["default_variant"] == "thinking"
-    assert flash["variants"]["thinking"]["presence_penalty"] == 0.0
+    assert flash["variants"]["thinking"]["presence_penalty"] == 1.5
     assert flash["variants"]["instruct"]["presence_penalty"] == 1.5
     bare = resolve("packed", root=tmp_path)
     assert bare.sampling is None
     assert bare.variant is None
     assert bare.default_variant == "thinking"
     assert bare.variants is not None
-    assert bare.variants["thinking"]["presence_penalty"] == 0.0
+    assert bare.variants["thinking"]["presence_penalty"] == 1.5
     assert bare.variants["instruct"]["presence_penalty"] == 1.5
 
 
@@ -332,7 +332,7 @@ def test_reregister_refreshes_the_card_from_the_pipeline(tmp_path) -> None:
     assert selection is not None
     assert selection.path == packed
     assert entry["default_variant"] == "thinking"
-    assert entry["variants"]["thinking"]["presence_penalty"] == 0.0
+    assert entry["variants"]["thinking"]["presence_penalty"] == 1.5
 
 
 def test_model_mtp_is_stored_on_the_row(tmp_path) -> None:

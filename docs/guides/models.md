@@ -30,12 +30,6 @@ The official checkpoint is `Qwen/Qwen3.8-27B`. The steps are [qwen38-27b/SETUP.m
 
 `download_suggestions` stores whether download reminders are enabled. Packing the record stays `quantize`.
 
-## Qwen3.8-Flash-Next
-
-The official checkpoint is `Qwen/Qwen3.8-Flash-Next`.
-
-`favlo --qwen38-flash-next quantize` does not download. `--source` is required, and that directory must contain `config.json`. `--alias` sets the registry alias. `--output` sets the record directory. When `--output` is omitted, the directory name comes from the expert widths in the source.
-
 ## Z-Image-Turbo
 
 The official checkpoint is `Tongyi-MAI/Z-Image-Turbo`. The steps are [z-image-turbo/SETUP.md](../z-image-turbo/SETUP.md).
@@ -71,7 +65,6 @@ favlo --qwen36-35b-a3b models
 favlo --qwen36-35b-a3b models add <folder> --alias <name>
 favlo --qwen36-35b-a3b models alias <folder> <name>
 favlo --qwen38-27b models
-favlo --qwen38-flash-next models
 ```
 
 What the running server can see:

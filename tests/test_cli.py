@@ -17,7 +17,6 @@ def test_a_pipeline_entry_is_the_file_that_names_itself(tmp_path: Path) -> None:
 def test_help_lists_the_model_flag(capsys) -> None:
     assert main(["--help"]) == 0
     captured = capsys.readouterr()
-    assert "--qwen38-flash-next" in captured.out
     assert "--qwen38-27b" in captured.out
     assert "--qwen36-35b-a3b" in captured.out
 
@@ -25,7 +24,7 @@ def test_help_lists_the_model_flag(capsys) -> None:
 def test_missing_flag_is_an_error(capsys) -> None:
     assert main([]) == 2
     captured = capsys.readouterr()
-    assert "--qwen38-flash-next" in captured.err
+    assert "--qwen36-35b-a3b" in captured.err
 
 
 def test_unknown_model_is_an_error(capsys) -> None:
@@ -48,7 +47,7 @@ def test_serve_loads_the_pipeline_file(monkeypatch, capsys) -> None:
         kept.append(entry)
     monkeypatch.setattr(sys, "path", kept)
     for name in list(sys.modules):
-        if name == "qwen38_flash_next" or name.startswith("qwen38_flash_next."):
+        if name == "qwen36_35b_a3b" or name.startswith("qwen36_35b_a3b."):
             monkeypatch.delitem(sys.modules, name, raising=False)
     assert main(["serve", "--help"]) == 0
     captured = capsys.readouterr()
@@ -63,19 +62,14 @@ def test_serve_is_a_process_command(capsys) -> None:
 
 
 def test_pipeline_help_comes_from_the_hyphenated_file(capsys) -> None:
-    assert main(["--qwen38-flash-next", "--help"]) == 0
-    captured = capsys.readouterr()
-    assert "probe" in captured.out
-    assert "quantize" in captured.out
-    assert "complete" in captured.out
-    assert main(["--qwen38-27b", "--help"]) == 0
-    captured = capsys.readouterr()
-    assert "download" in captured.out
-    assert "quantize" in captured.out
-    assert "kernels" in captured.out
     assert main(["--qwen36-35b-a3b", "--help"]) == 0
     captured = capsys.readouterr()
     assert "setup" in captured.out
+    assert "quantize" in captured.out
+    assert "kernels" in captured.out
+    assert main(["--qwen38-27b", "--help"]) == 0
+    captured = capsys.readouterr()
+    assert "download" in captured.out
     assert "quantize" in captured.out
     assert "kernels" in captured.out
 

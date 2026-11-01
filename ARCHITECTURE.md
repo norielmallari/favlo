@@ -31,7 +31,6 @@ Each runtime is a separate write set. An agent developing one runtime edits that
 
 | Pipeline | Entry | Package | As-built note |
 |---|---|---|---|
-| `qwen38-flash-next` | `pipelines/metal41/qwen38-flash-next.py` | `pipelines/metal41/qwen38_flash_next/` | [docs/qwen38-flash-next/architecture.md](docs/qwen38-flash-next/architecture.md) |
 | `qwen38-27b` | `pipelines/metal41/qwen38-27b.py` | `pipelines/metal41/qwen38_27b/` | [docs/qwen38-27b/README.md](docs/qwen38-27b/README.md) |
 | `qwen36-35b-a3b` | `pipelines/metal41/qwen36-35b-a3b.py` | `pipelines/metal41/qwen36_35b_a3b/` | [docs/qwen36-35b-a3b/README.md](docs/qwen36-35b-a3b/README.md) |
 | `gemma4-26b-a4b` | `pipelines/metal41/gemma4-26b-a4b.py` | `pipelines/metal41/gemma4_26b_a4b/` | [docs/gemma4-26b-a4b/README.md](docs/gemma4-26b-a4b/README.md) |
@@ -44,6 +43,14 @@ Each runtime is a separate write set. An agent developing one runtime edits that
 | `voxcpm2` | `pipelines/metal41/voxcpm2.py` | `pipelines/metal41/voxcpm2/` | [docs/voxcpm2/README.md](docs/voxcpm2/README.md) |
 
 The entry filename may contain hyphens. The command loads it by path from `pipelines/<runtime>/`. It is not an importable module name. The package beside it uses underscores. The entry sets `PIPELINE` to that filename stem. A runtime's write set is the entry file, the package, `docs/<pipeline>/`, and tests that import only that package. A new runtime adds a row to the table above and its own doc directory. It does not edit another row's package, shaders, tests, or docs. Shipped rows use `runtime` `metal41`. `pipelines/cuda` is empty until a CUDA pipeline names the toolkit it needs. A custom entry lives under `custom-pipelines/<runtime>/` and its registry row sets `custom` true. A missing or unknown `runtime` is an error.
+
+## Parked
+
+A parked pipeline is not discovered and is not served. Its entry is not under `pipelines/metal41` or `pipelines/cuda`. The command scan does not list its flag. `serve` does not load it. The code stays for a future implementation.
+
+| Pipeline | Entry | Package | Note |
+|---|---|---|---|
+| `qwen38-flash-next` | `pipelines/parked/qwen38-flash-next.py` | `pipelines/parked/qwen38_flash_next/` | [docs/qwen38-flash-next/architecture.md](docs/qwen38-flash-next/architecture.md) |
 
 ## Failed
 
@@ -65,6 +72,7 @@ Tests for the listener, the registry, and the console live in `tests/test_cli.py
 ```text
 pipelines/metal41/      shipped pipelines that require Metal 4.1
 pipelines/cuda/         empty until a CUDA pipeline exists
+pipelines/parked/       pipelines kept for a future implementation; not discovered and not served
 pipelines/failed/       pipelines that are not discovered and are not served
 custom-pipelines/       gitignored; one entry and package per custom model
 src/favlo/              process entry; the pipeline manager loads the pipeline a request names
@@ -102,7 +110,7 @@ harness/                file agent, coding agent, worktree agent, chat agent, an
 docs/                   as-built notes; see docs/README.md
 ```
 
-Probe, matmul, kernels, bf16, complete, and quantize stay on that pipeline's flag: `favlo --qwen38-flash-next quantize`, and the same flag for the other commands. The listener runs one request. A language-model pipeline does not fuse a whole layer into one kernel. An image, video, music, or voice pipeline may place several kernels of one generation in one command buffer and may fuse those kernels. Prefill, decode, and the calibration prefill are Metal shaders. A missing kernel stays missing. The Neural Engine may run a module.
+Probe, matmul, kernels, bf16, complete, and quantize stay on that pipeline's flag: `favlo --qwen38-27b quantize`, and the same flag for the other commands. The listener runs one request. A language-model pipeline does not fuse a whole layer into one kernel. An image, video, music, or voice pipeline may place several kernels of one generation in one command buffer and may fuse those kernels. Prefill, decode, and the calibration prefill are Metal shaders. A missing kernel stays missing. The Neural Engine may run a module.
 
 ## Commands
 
@@ -111,10 +119,6 @@ uv sync --extra dev
 uv run pytest
 uv run favlo serve
 uv run favlo web
-uv run favlo --qwen38-flash-next probe
-uv run favlo --qwen38-flash-next matmul
-uv run favlo --qwen38-flash-next kernels
-uv run favlo --qwen38-flash-next quantize
 uv run favlo --qwen38-27b quantize
 uv run favlo --qwen36-35b-a3b kernels
 uv run favlo --qwen36-35b-a3b quantize

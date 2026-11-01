@@ -80,7 +80,7 @@ A chat debug uses the Favlo horse only. That is the seeded agent named Favlo, on
 
 Write algorithms from public research documents: papers, published specifications, and vendor hardware documentation. Do not open another application's tree and port its implementation. That covers local checkouts of inference runtimes and of corpus builders. Do not launch another application's environment.
 
-A pipeline's calibration strings are data, not an algorithm. The bucket for Flash Next is in its references note.
+A pipeline's calibration strings are data, not an algorithm. Treat `qwen36-35b-a3b` as the default language model; its as-built note is [docs/qwen36-35b-a3b/README.md](docs/qwen36-35b-a3b/README.md).
 
 Do not invent routing hits, calibration energies, or hidden-state errors. A measurement belongs in that pipeline's note.
 
@@ -92,11 +92,11 @@ A pipeline change updates that pipeline's `docs/<pipeline>/` note in the same ch
 
 ## Commits
 
-Use [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): imperative summary` on the subject line. Common types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `chore`, `build`, `ci`. Scope is optional; prefer a short pipeline id such as `qwen38-flash-next` or `shared` when the change is localized.
+Use [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): imperative summary` on the subject line. Common types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `chore`, `build`, `ci`. Scope is optional; prefer a short pipeline id such as `qwen36-35b-a3b` or `shared` when the change is localized.
 
 ```text
-feat(qwen38): stream experts from SSD into the resident atlas
-perf(qwen38): fuse scan prefix into MoE prefill shader
+feat(qwen36-35b-a3b): wire Responses store to the shared prefix session
+perf(qwen36-35b-a3b): fuse MoE scan prefix into prefill shader
 docs: describe parallel quantize worker layout
 ```
 

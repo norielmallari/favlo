@@ -1,8 +1,10 @@
 # Qwen3.8-Flash-Next
 
-As-built contract for the `qwen38-flash-next` pipeline. The process, the listener, and which files an agent may edit are [../../ARCHITECTURE.md](../../ARCHITECTURE.md). That file wins on those points. This file wins for this pipeline's records, cache, prefix, and kernels. Another pipeline does not edit this tree.
+Parked pipeline. The command scan does not load it, and `serve` does not serve it. The entry is `pipelines/parked/qwen38-flash-next.py`. The package is `pipelines/parked/qwen38_flash_next/`. The process contract is [../../ARCHITECTURE.md](../../ARCHITECTURE.md). That file wins on the listener and on which files an agent may edit. This file wins for this pipeline's records, cache, prefix, and kernels. Another pipeline does not edit this tree.
 
-`handle_chat` is a `LanguagePipeline`. The completion, the sampler, and the stream stay in this package. Clients reach this pipeline through `favlo serve`. `GET /v1/models` lists it once a record is registered, and the `model` field on `POST /v1/chat/completions` loads it. Quantize, probe, matmul, kernels, bf16, and complete require `favlo --qwen38-flash-next`. That flag loads `pipelines/metal41/qwen38-flash-next.py`, which loads the `qwen38_flash_next` package. The package does not import another pipeline.
+The sections below describe the last as-built attempt. Host checks and smokes moved with the package to `pipelines/parked/tests/` and are outside the default test run.
+
+`handle_chat` is a `LanguagePipeline`. The completion, the sampler, and the stream stay in this package. Quantize, probe, matmul, kernels, bf16, and complete load `pipelines/parked/qwen38-flash-next.py`, which loads the `qwen38_flash_next` package. The command scan does not offer that flag. The package does not import another pipeline.
 
 Device spans come from the process memory manager. The target machine is an M5 Pro with 48 GB: 20 shader cores, a neural accelerator beside the shader pipelines in each core, 307 GB/s unified DRAM, and an APFS volume whose device block and allocation block are 4096 bytes. Requires macOS 27 and the matching Metal SDK. The 16-core Neural Engine is not used. Sub-byte tensor planes also require 128-byte alignment inside the record. A 4 KB file offset does not by itself satisfy that.
 
@@ -12,7 +14,7 @@ Registration copies `sampling.py` onto the registry row. The default variant is 
 
 ## In scope
 
-- `qwen38_flash_next` runs three stages for this model: a BF16 calibration prefill, a converter from Hugging Face BF16 shards to native records, and the text runtime. `pipelines/metal41/qwen38-flash-next.py` is the entry the command loads.
+- `qwen38_flash_next` runs three stages for this model: a BF16 calibration prefill, a converter from Hugging Face BF16 shards to native records, and the text runtime. `pipelines/parked/qwen38-flash-next.py` is the entry a direct load uses.
 - One sequence at a time. Prefill and decode. Layered kernels.
 - `GET /v1/models` and `POST /v1/chat/completions`, including streaming.
 - The checkpoint chat template. Sampling is temperature, top-p, and top-k.

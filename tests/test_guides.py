@@ -26,8 +26,6 @@ def test_models_guide_names_the_official_checkpoints() -> None:
     assert "favlo --qwen38-27b download" in text
     assert "download_suggestions" in text
     assert "favlo --qwen38-27b quantize` does not download" in text
-    assert "Qwen/Qwen3.8-Flash-Next" in text
-    assert "--source` is required" in text
 
 
 def test_history_is_the_carrot_naming() -> None:
@@ -63,9 +61,6 @@ def test_setup_guides_load_by_pipeline_id() -> None:
     assert "uv run favlo --ace-step-15-turbo delete acestep-v15-xl-turbo-fp8-fp4" in music
     with pytest.raises(ValueError, match="unknown setup guide"):
         read_setup("../qwen36-35b-a3b")
-    with pytest.raises(ValueError, match="unknown setup guide"):
-        read_setup("qwen38-flash-next")
-
 
 def test_an_unknown_guide_is_rejected() -> None:
     with pytest.raises(ValueError, match="unknown guide"):

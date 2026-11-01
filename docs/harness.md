@@ -72,7 +72,7 @@ Reuses the listener on `127.0.0.1:8129` and does not take the machine lock. Each
 python -m harness.coherence [--model <id>] [--port <port>]
 ```
 
-Starts `serve` on a free port (or `--port`), runs two thinking-mode turns against a long persona system prompt (~24k characters), and judges checkable facts, reasoning-before-reply ordering, and server log errors. Sampling follows the Qwen3.8-Flash-Next thinking card when used with that family. Optional `--model` overrides the registry default. Stops the daemon when finished. Not part of `pytest`. `tests/test_coherence.py` checks persona and judge helpers without a listener.
+Starts `serve` on a free port (or `--port`), runs two thinking-mode turns against a long persona system prompt (~24k characters), and judges checkable facts, reasoning-before-reply ordering, and server log errors. Sampling follows the thinking card of the model named by `--model`. Optional `--model` overrides the registry default. Stops the daemon when finished. Not part of `pytest`. `tests/test_coherence.py` checks persona and judge helpers without a listener.
 
 ### Coding ledger
 

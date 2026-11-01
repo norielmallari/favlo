@@ -1,6 +1,6 @@
 # Console
 
-As-built status row for the process. The map is [../ARCHITECTURE.md](../ARCHITECTURE.md). How a pipeline fills a phase is that pipeline's note. Flash Next's binding is [qwen38-flash-next/console.md](qwen38-flash-next/console.md).
+As-built status row for the process. The map is [../ARCHITECTURE.md](../ARCHITECTURE.md). How a shipped pipeline fills a phase is that pipeline's note.
 
 `src/favlo/console.py` imports nothing from a pipeline. The listener does not import a pipeline until a request names one. That row's entry file provides `open_runtime` and `handle_chat`. Pipelines report through `begin`, `end`, `note`, and `format_rate`. They do not print their own status rows.
 
