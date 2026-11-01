@@ -17,6 +17,8 @@ from __future__ import annotations
 import struct
 from typing import Any
 
+from qwen36_35b_a3b.cache import plain_cache
+
 TILE = 256
 SCORE = 4096
 BLOCK = 512
@@ -70,7 +72,7 @@ def bind_plane(runtime: Any) -> None:
 
 def resize_plane(runtime: Any) -> None:
     """Grow the value-mix scratch after the context length changes."""
-    if runtime.kv_cache == "f32":
+    if plain_cache(runtime.kv_cache):
         return
     blocks = max(runtime.max_pos, BLOCK) // BLOCK
     runtime.plane_parts = runtime.session.zeros(blocks * (GROUP * GROUP) * HEAD * 4)

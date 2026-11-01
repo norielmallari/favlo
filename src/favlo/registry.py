@@ -120,7 +120,7 @@ def format_listing(root: Path | None = None) -> str:
     for folder, entry in data["models"].items():
         pipeline = _pipeline_name(entry, folder)
         alias = entry.get("alias") or ""
-        kv = entry.get("kv_cache") or "e4m3"
+        kv = entry.get("kv_cache") or "f16"
         alias_text = f"alias {alias}" if alias else "alias"
         enabled, depth = mtp_pair(entry)
         lines.append(f"{folder} pipeline {pipeline} {alias_text} kv {kv} mtp {'on' if enabled else 'off'} depth {depth}")
@@ -709,7 +709,7 @@ def _entry(
         "alias": alias,
         "source": source,
         "directory": directory,
-        "kv_cache": kv_cache or "e4m3",
+        "kv_cache": kv_cache or "f16",
         "resident_percent": None,
         "variants": variants,
         "default_variant": default_variant,
@@ -838,7 +838,7 @@ def _selection(
         parent=str(parent),
         variant=variant,
         sampling=sampling,
-        kv_cache=str(entry.get("kv_cache") or "e4m3"),
+        kv_cache=str(entry.get("kv_cache") or "f16"),
         resident_percent=None if percent is None else float(percent),
         max_prompt_tokens=_max_prompt_tokens(entry),
         context_length=_context_length(entry),

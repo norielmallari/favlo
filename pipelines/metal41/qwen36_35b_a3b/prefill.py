@@ -22,6 +22,7 @@ from typing import Any
 import array
 
 from qwen36_35b_a3b.attn import attend_plane
+from qwen36_35b_a3b.cache import kv_io, plain_cache
 from qwen36_35b_a3b.convert import GATE_UP_BYTES
 from qwen36_35b_a3b.formats import EXPERT_IMAGE, FP8_DOWN_DATA, FP8_DOWN_SCALE, FP8_GATE_SCALE
 
@@ -503,10 +504,11 @@ def _attend(
     )
     slot = layer // 4
     _zero(runtime, work.attn, rows * 4096)
-    if runtime.kv_cache == "f32":
+    if plain_cache(runtime.kv_cache):
+        store, attend = kv_io(runtime.kv_cache, rows=True)
         stride = runtime.max_pos * HEAD
         runtime.session.encode(
-            "store_kv_rows",
+            store,
             [
                 (runtime.k_cache[slot], 0),
                 (runtime.v_cache[slot], 0),
@@ -518,7 +520,7 @@ def _attend(
             (HEAD, 1, 1),
         )
         runtime.session.encode(
-            "attend_prefill2",
+            attend,
             [
                 (work.query, 0),
                 (runtime.k_cache[slot], 0),

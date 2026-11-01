@@ -161,6 +161,8 @@ def _fits(header: PrefixHeader, count: int, mode: str) -> bool:
 
 
 def _packed_length(count: int, mode: str, kind: str) -> int:
+    if mode == "f16":
+        return _KV * count * _HEAD * 2
     if mode == "f32":
         return _KV * count * _HEAD * 4
     width = 256 if mode == "e4m3" else 128
@@ -175,8 +177,8 @@ def _packed_length(count: int, mode: str, kind: str) -> int:
 def _slices(
     array: np.ndarray, max_pos: int, count: int, mode: str, kind: str
 ) -> tuple[np.ndarray, np.ndarray | None]:
-    if mode == "f32":
-        row = _HEAD * 4
+    if mode in ("f16", "f32"):
+        row = _HEAD * (2 if mode == "f16" else 4)
         return array.reshape(_KV, max_pos, row)[:, :count, :], None
     width = 256 if mode == "e4m3" else 128
     scale_base = _KV * max_pos * width

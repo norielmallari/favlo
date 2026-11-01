@@ -747,7 +747,7 @@ def _open(
         parent=str(raw.get("parent") or ""),
         variant=raw.get("variant") if isinstance(raw.get("variant"), str) else None,
         sampling=raw.get("sampling") if isinstance(raw.get("sampling"), dict) else None,
-        kv_cache=str(raw.get("kv_cache") or "e4m3"),
+        kv_cache=str(raw.get("kv_cache") or "f16"),
         resident_percent=resident if isinstance(resident, int | float) else None,
         max_prompt_tokens=prompt_limit if isinstance(prompt_limit, int) else None,
         context_length=int(raw.get("context_length") or 131072),

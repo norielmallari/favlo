@@ -1252,13 +1252,17 @@ def test_a_prefill_chunk_splits_experts_that_do_not_fit() -> None:
 
 
 def test_kv_widths_and_atlas_budget() -> None:
-    assert kv_mode(None) == "e4m3"
+    assert kv_mode(None) == "f16"
+    assert kv_mode("fp16") == "f16"
     assert kv_mode("fp4") == "e2m1"
     assert kv_mode("f32") == "f32"
     positions = 262144
+    assert kv_buffer_bytes("f16", positions) == 2 * positions * 512
     assert kv_buffer_bytes("e4m3", positions) == 2 * positions * 264
     assert kv_buffer_bytes("e2m1", positions) == 2 * positions * 136
     assert kv_buffer_bytes("f32", positions) == 2 * positions * 1024
+    assert cache_bytes("f16", 131072) == 22 * 2 * 131072 * 512
+    assert cache_bytes("e4m3", 131072) == 22 * 2 * 131072 * 264
     file_bytes = 427_819_008
     reserved = 1 << 30
     assert atlas_slots(reserved + file_bytes * 40, file_bytes, reserved) == 40

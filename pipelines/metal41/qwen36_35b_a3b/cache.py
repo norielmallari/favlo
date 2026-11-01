@@ -4,9 +4,11 @@ The checkpoint cap is ``max_position_embeddings``. The served window stops at
 ``DEFAULT_CONTEXT_LENGTH``. The live cache starts at one 2048-token chunk and
 grows with the prompt and with decode, up to the longest multiple of 2048 that
 still leaves eight expert images and still fits that window. The atlas then keeps
-as many images as the remaining bytes allow. The cache is E4M3 unless the
-caller asks for fp4 or for the float32 values with no quantization. Keys scale
-every 32 channels. Values lie along the token axis and scale every 32 tokens.
+as many images as the remaining bytes allow. The cache is fp16 unless the
+caller asks for fp8, fp4, or the float32 values. fp16 and float32 store raw
+values, ``[head, token, channel]``, with no scale plane. fp8 and fp4 keys
+scale every 32 channels. Their values lie
+along the token axis and scale every 32 tokens.
 """
 
 from __future__ import annotations
@@ -24,9 +26,10 @@ BLOCK = 32
 SCALES = HEAD // BLOCK
 E4M3_RECORD = HEAD + SCALES
 E2M1_RECORD = HEAD // 2 + SCALES
+F16_RECORD = HEAD * 2
 F32_RECORD = HEAD * 4
-MODES = ("e4m3", "e2m1", "f32")
-_ALIASES = {"fp8": "e4m3", "fp4": "e2m1", "float32": "f32"}
+MODES = ("f16", "e4m3", "e2m1", "f32")
+_ALIASES = {"fp16": "f16", "fp8": "e4m3", "fp4": "e2m1", "float32": "f32"}
 _CONTEXT_STEP = 2048
 CONTEXT_STEP = _CONTEXT_STEP
 # Ten language full-attention layers, plus the MTP layer.
@@ -35,13 +38,29 @@ KV_BUFFERS = FULL_ATTENTION * 2
 
 
 def kv_mode(name: str | None) -> str:
-    """``e4m3``, ``e2m1``, or ``f32``. Empty means the fp8 default."""
-    text = "e4m3" if name is None or name == "" else str(name)
+    """``f16``, ``e4m3``, ``e2m1``, or ``f32``. Empty means fp16."""
+    text = "f16" if name is None or name == "" else str(name)
     text = _ALIASES.get(text, text)
     if text not in MODES:
-        message = f"kv cache {name} is not e4m3, e2m1, or f32"
+        message = f"kv cache {name} is not f16, e4m3, e2m1, or f32"
         raise ValueError(message)
     return text
+
+
+def plain_cache(mode: str) -> bool:
+    """Raw fp16 or float32. Those modes skip the quantized score plane."""
+    return kv_mode(mode) in ("f16", "f32")
+
+
+def kv_io(mode: str, *, rows: bool) -> tuple[str, str]:
+    """Store and attend kernel names for a raw cache."""
+    if kv_mode(mode) == "f16":
+        if rows:
+            return "store_kv_rows_f16", "attend_prefill2_f16"
+        return "store_kv_f16", "attend_gqa_heads_f16"
+    if rows:
+        return "store_kv_rows", "attend_prefill2"
+    return "store_kv", "attend_gqa_heads"
 
 
 def kv_record_bytes(mode: str) -> int:
@@ -49,6 +68,8 @@ def kv_record_bytes(mode: str) -> int:
     chosen = kv_mode(mode)
     if chosen == "f32":
         return F32_RECORD
+    if chosen == "f16":
+        return F16_RECORD
     if chosen == "e2m1":
         return E2M1_RECORD
     return E4M3_RECORD
@@ -111,8 +132,8 @@ def repack_plane(
     dst = np.zeros(kv_buffer_bytes(mode, new_pos), dtype=np.uint8)
     if count < 1:
         return dst
-    if mode == "f32":
-        row = F32_RECORD
+    if mode in ("f32", "f16"):
+        row = F32_RECORD if mode == "f32" else F16_RECORD
         dst.reshape(KV_HEADS, new_pos, row)[:, :count, :] = src.reshape(KV_HEADS, old_pos, row)[
             :, :count, :
         ]

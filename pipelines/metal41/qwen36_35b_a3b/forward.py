@@ -32,9 +32,11 @@ from qwen36_35b_a3b.cache import (
     KV_BUFFERS,
     fit_positions,
     kv_buffer_bytes,
+    kv_io,
     kv_mode,
     kv_record_bytes,
     max_position,
+    plain_cache,
     repack_plane,
 )
 from qwen36_35b_a3b.convert import LANGUAGE_LAYERS, SLOT_MAP_BYTES
@@ -359,7 +361,7 @@ class Qwen36Runtime:
         self,
         path: Path,
         *,
-        kv_cache: str = "e4m3",
+        kv_cache: str = "f16",
         console: Any = None,
         resident_percent: float | None = None,
         owner: str | None = None,
@@ -406,7 +408,7 @@ class Qwen36Runtime:
         # Eight images is one token. A larger atlas is what remains after the cache.
 
         def _plane(positions: int) -> int:
-            if self.kv_cache == "f32":
+            if plain_cache(self.kv_cache):
                 return 0
             return plane_bytes(positions)
 
@@ -966,10 +968,11 @@ class Qwen36Runtime:
             (HEAD, 1, 1),
         )
         slot = layer // 4
-        if self.kv_cache == "f32":
+        if plain_cache(self.kv_cache):
+            store, attend = kv_io(self.kv_cache, rows=False)
             stride = self.max_pos * HEAD
             self.session.encode(
-                "store_kv",
+                store,
                 [
                     (self.k_cache[slot], 0),
                     (self.v_cache[slot], 0),
@@ -981,7 +984,7 @@ class Qwen36Runtime:
                 (HEAD, 1, 1),
             )
             self.session.encode(
-                "attend_gqa_heads",
+                attend,
                 [
                     (self.query, 0),
                     (self.k_cache[slot], 0),
@@ -1475,7 +1478,7 @@ class Qwen36Runtime:
         return mtp_file + suffix + tables + snap + _SPAN_BYTES
 
     def _atlas_reserved(self) -> int:
-        plane = 0 if self.kv_cache == "f32" else self._plane_at(self.max_pos)
+        plane = 0 if plain_cache(self.kv_cache) else self._plane_at(self.max_pos)
         return _reserved_bytes(self._resident_bytes, self.kv_bytes, plane, self._mtp_extra)
 
     def _refit_atlas(self) -> None:
@@ -1807,10 +1810,11 @@ class Qwen36Runtime:
             (Q_HEADS + KV, 1, 1),
             (HEAD, 1, 1),
         )
-        if self.kv_cache == "f32":
+        if plain_cache(self.kv_cache):
+            store, attend = kv_io(self.kv_cache, rows=False)
             stride = self.max_pos * HEAD
             self.session.encode(
-                "store_kv",
+                store,
                 [
                     (self.k_cache[MTP_SLOT], 0),
                     (self.v_cache[MTP_SLOT], 0),
@@ -1822,7 +1826,7 @@ class Qwen36Runtime:
                 (HEAD, 1, 1),
             )
             self.session.encode(
-                "attend_gqa_heads",
+                attend,
                 [
                     (self.query, 0),
                     (self.k_cache[MTP_SLOT], 0),
