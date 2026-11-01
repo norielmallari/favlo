@@ -19,7 +19,7 @@ from __future__ import annotations
 import struct
 from typing import Any
 
-import numpy as np
+import array
 
 from qwen36_35b_a3b.attn import attend_plane
 from qwen36_35b_a3b.convert import GATE_UP_BYTES
@@ -117,7 +117,7 @@ class _Workspace:
         self.csr_w = zeros((cap * 8 + 1024) * 4)
         self.csr_lane = zeros((cap * 8 + 1024) * 4)
         self.iota = zeros(cap * 4)
-        _write(self.iota, np.arange(cap, dtype=np.uint32).tobytes())
+        _write(self.iota, array.array("I", range(cap)).tobytes())
         self.gdn_kkt = zeros(32 * _GDN_CHUNK * _GDN_CHUNK * 4)
         self.gdn_w = zeros(32 * _GDN_CHUNK * 128 * 4)
         self.gdn_u = zeros(32 * _GDN_CHUNK * 128 * 4)
@@ -231,7 +231,7 @@ def _note_chunk(runtime: Any, finished: int, count: int) -> None:
 def _chunk(runtime: Any, work: _Workspace, ids: list[int], pos0: int) -> None:
     count = len(ids)
     rows = (count + 63) // 64 * 64
-    _write(work.tokens, np.asarray(ids, dtype=np.uint32).tobytes())
+    _write(work.tokens, array.array("I", (int(token) for token in ids)).tobytes())
     runtime.session.begin()
     _zero(runtime, work.hidden, rows * HIDDEN)
     _embed(runtime, work, count)
@@ -270,28 +270,71 @@ def _chunk(runtime: Any, work: _Workspace, ids: list[int], pos0: int) -> None:
 
 
 def _splice_vision(runtime: Any, work: _Workspace, ids: list[int], pos0: int) -> None:
-    table = getattr(runtime, "_vision_at", None)
-    if not table:
+    rows = getattr(runtime, "_vision_rows", None)
+    index = getattr(runtime, "_vision_index", None)
+    if rows is None or index is None:
         return
     count = len(ids)
-    slots = [index for index in range(count) if pos0 + index in table]
-    if not slots:
+    if count < 1:
         return
-    raw = runtime.session.download(work.hidden, count * HIDDEN * 4)
-    hidden = np.frombuffer(raw, dtype=np.float32).reshape(count, HIDDEN).copy()
-    for index in slots:
-        hidden[index] = table[pos0 + index]
-    _write(work.hidden, np.ascontiguousarray(hidden, dtype=np.float32).tobytes())
+    runtime.session.begin()
+    try:
+        runtime.session.encode(
+            "splice_rows",
+            [(rows, 0), (index, 0), (work.hidden, 0)],
+            [_u32(int(pos0)), _u32(count), _u32(HIDDEN)],
+            ((count + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+        runtime.session.commit()
+        runtime.session.wait_inflight()
+    except Exception:
+        runtime.session.abort()
+        runtime.session.wait_inflight()
+        raise
 
 
 def _write_rope(runtime: Any, work: _Workspace, count: int, pos0: int) -> None:
-    table = getattr(runtime, "_rope_positions", None)
-    if table is None:
-        base = np.arange(pos0, pos0 + count, dtype=np.uint32)
-        packed = np.stack((base, base, base), axis=1)
-    else:
-        packed = np.ascontiguousarray(table[:, pos0 : pos0 + count].T, dtype=np.uint32)
-    _write(work.rope, packed.tobytes())
+    table = getattr(runtime, "_rope_device", None)
+    length = int(getattr(runtime, "_rope_length", 0))
+    if table is not None and length > 0:
+        runtime.session.begin()
+        try:
+            runtime.session.encode(
+                "copy_rope",
+                [(table, 0), (work.rope, 0)],
+                [_u32(int(pos0)), _u32(int(count)), _u32(length)],
+                ((int(count) + 255) // 256, 1, 1),
+                (256, 1, 1),
+            )
+            runtime.session.commit()
+            runtime.session.wait_inflight()
+        except Exception:
+            runtime.session.abort()
+            runtime.session.wait_inflight()
+            raise
+        return
+    if getattr(runtime, "_rope_positions", None) is None:
+        if count < 1:
+            return
+        runtime.session.begin()
+        try:
+            runtime.session.encode(
+                "fill_rope",
+                [(work.rope, 0)],
+                [_u32(int(pos0)), _u32(int(count))],
+                ((int(count) + 255) // 256, 1, 1),
+                (256, 1, 1),
+            )
+            runtime.session.commit()
+            runtime.session.wait_inflight()
+        except Exception:
+            runtime.session.abort()
+            runtime.session.wait_inflight()
+            raise
+        return
+    message = "image positions are not on the device"
+    raise RuntimeError(message)
 
 
 def _embed(runtime: Any, work: _Workspace, count: int) -> None:
@@ -549,10 +592,10 @@ def _route(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) ->
         )
 
 
-_ABSENT = np.uint32(0xFFFFFFFF)
+_ABSENT = 0xFFFFFFFF
 
 
-def masked_expert_passes(ids: np.ndarray, slots: int) -> list[np.ndarray] | None:
+def masked_expert_passes(ids: Any, slots: int) -> list[array.array] | None:
     """One masked id list per atlas-sized group, or None when one pass fits.
 
     An id of 0xFFFFFFFF is absent from that pass. The grouped kernels skip it.
@@ -560,23 +603,24 @@ def masked_expert_passes(ids: np.ndarray, slots: int) -> list[np.ndarray] | None
     if slots < 1:
         message = "expert atlas has no images"
         raise ValueError(message)
+    values = [int(expert) for expert in ids]
     seen: list[int] = []
     have: set[int] = set()
-    for expert in ids.tolist():
-        value = int(expert)
+    for value in values:
         if value in have:
             continue
         have.add(value)
         seen.append(value)
     if len(seen) <= slots:
         return None
-    passes: list[np.ndarray] = []
+    passes: list[array.array] = []
+    absent = int(_ABSENT)
     for start in range(0, len(seen), slots):
         wave = set(seen[start : start + slots])
-        masked = np.array(ids, dtype=np.uint32, copy=True)
-        for index, expert in enumerate(masked.tolist()):
+        masked = array.array("I", values)
+        for index, expert in enumerate(masked):
             if int(expert) not in wave:
-                masked[index] = _ABSENT
+                masked[index] = absent
         passes.append(masked)
     return passes
 
@@ -586,10 +630,7 @@ def _collect_routes(runtime: Any, work: _Workspace, count: int) -> None:
     routes = getattr(runtime, "routes", None)
     if routes is None or count <= 0:
         return
-    raw = runtime.session.download(work.route_ids, 40 * count * 8 * 4)
-    ids = np.frombuffer(raw, dtype=np.uint32).reshape(40, count, 8)
-    for layer in range(40):
-        routes.add_prefill(layer, ids[layer])
+    runtime._count_routes(work.route_ids, count, prefill=True)
 
 
 def _experts(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) -> None:
@@ -610,9 +651,8 @@ def _experts(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) 
         )
         return
     runtime.session.end()
-    raw = np.frombuffer(
-        runtime.session.download(work.ids, count * 8 * 4), dtype=np.uint32
-    ).copy()
+    raw = array.array("I")
+    raw.frombytes(runtime.session.download(work.ids, count * 8 * 4))
     passes = masked_expert_passes(raw, runtime.atlas.slots)
     if passes is None:
         file = runtime.routed_layer(layer, work.ids, count * 8, work.offsets)
@@ -637,25 +677,20 @@ def _experts(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) 
             runtime.session.end()
 
 
-def _stage_present(runtime: Any, layer: int, ids: np.ndarray, offsets: Any) -> Any:
+def _stage_present(runtime: Any, layer: int, ids: Any, offsets: Any) -> Any:
     """Load the experts this pass keeps and write their byte offsets."""
     present = [
         int(value)
-        for value in dict.fromkeys(int(item) for item in ids.tolist())
+        for value in dict.fromkeys(int(item) for item in ids)
         if int(value) < 256
     ]
-    table = np.zeros(_EXPERTS, dtype=np.uint64)
     if runtime.atlas.layout.mixed:
         placed = runtime.atlas.stage_offsets(layer, present)
-        for file_slot, byte_off in zip(present, placed, strict=True):
-            table[file_slot] = np.uint64(byte_off)
     else:
-        placed = runtime.atlas.stage(layer, present)
-        image = np.uint64(EXPERT_IMAGE)
-        for file_slot, atlas_slot in zip(present, placed, strict=True):
-            table[file_slot] = np.uint64(atlas_slot) * image
-    raw = table.tobytes()
-    memoryview(offsets.contents().as_buffer(len(raw)))[:] = raw
+        placed = [
+            int(slot) * EXPERT_IMAGE for slot in runtime.atlas.stage(layer, present)
+        ]
+    runtime._scatter_offsets(present, placed, offsets)
     return runtime.atlas.buffer
 
 

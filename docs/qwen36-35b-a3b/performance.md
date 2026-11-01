@@ -110,6 +110,20 @@ Later the same day the same command ran again on that machine and record, with M
 
 The summary is prefill 561.30 tok/s (3104 tok in 5.53 s) and decode 42.59 tok/s (1098 tok in 25.78 s).
 
+On 1 November 2026 the same command ran on that machine and record, with MTP off. The harness printed `mtp off depth 3`. The language forward verifies one draft. The hidden suite passed. It reached 3488 prompt tokens over seven requests.
+
+| Request | Prompt tokens | Cache | Prefill | Decode |
+|---|---:|---|---|---|
+| 1 | 2012 | miss | 1278.28 tok/s (2012 tok in 1.57 s) | 66.10 tok/s (332 tok in 5.02 s) |
+| 2 | 2610 | prefix load 2012, hit 2012 | 820.39 tok/s (598 tok in 0.73 s) | 64.13 tok/s (148 tok in 2.31 s) |
+| 3 | 2957 | hit 2758 | 421.29 tok/s (199 tok in 0.47 s) | 62.79 tok/s (116 tok in 1.85 s) |
+| 4 | 3111 | hit 3073 | 197.77 tok/s (38 tok in 0.19 s) | 62.74 tok/s (110 tok in 1.75 s) |
+| 5 | 3243 | hit 3221 | 135.65 tok/s (22 tok in 0.16 s) | 61.38 tok/s (93 tok in 1.52 s) |
+| 6 | 3367 | hit 3336 | 113.12 tok/s (31 tok in 0.27 s) | 59.34 tok/s (62 tok in 1.04 s) |
+| 7 | 3488 | hit 3429 | 250.97 tok/s (59 tok in 0.24 s) | 64.75 tok/s (277 tok in 4.28 s) |
+
+The summary is prefill 815.15 tok/s (2959 tok in 3.63 s) and decode 64.04 tok/s (1138 tok in 17.77 s).
+
 ## Greedy smoke
 
 `tests/test_qwen36_35b_a3b_smoke.py` on 31 October 2026, on an M5 Pro with 48 GB, on `Qwen3.6-35B-A3B-fp8-e20`. The greedy carrot ran twice. The second run set `mtp` and printed `mtp depth 3`. It kept 67 of 82 drafts. The instruct card and the thinking card omit `mtp`.
@@ -120,6 +134,15 @@ The summary is prefill 561.30 tok/s (3104 tok in 5.53 s) and decode 42.59 tok/s 
 | Greedy, MTP on | 212.43 tok/s (51 tok in 0.24 s) | 57.54 tok/s (149 tok in 2.59 s) |
 | Instruct card | 245.73 tok/s (51 tok in 0.21 s) | 63.63 tok/s (154 tok in 2.42 s) |
 | Thinking card, seed 0 | 237.91 tok/s (49 tok in 0.21 s) | 64.59 tok/s (549 tok in 8.50 s) |
+
+On 1 November 2026 the same smoke ran on that machine and record. The greedy carrot ran twice. The second run set `mtp` and printed `mtp depth 3`. It kept 67 of 85 drafts. The instruct card and the thinking card omit `mtp`.
+
+| Case | Prefill | Decode |
+|---|---|---|
+| Greedy, MTP off | 157.68 tok/s (51 tok in 0.32 s) | 67.98 tok/s (149 tok in 2.19 s) |
+| Greedy, MTP on | 202.68 tok/s (51 tok in 0.25 s) | 54.57 tok/s (152 tok in 2.79 s) |
+| Instruct card | 238.93 tok/s (51 tok in 0.21 s) | 66.55 tok/s (143 tok in 2.15 s) |
+| Thinking card, seed 0 | 233.53 tok/s (49 tok in 0.21 s) | 67.26 tok/s (291 tok in 4.33 s) |
 
 ## File agent, 16GiB
 

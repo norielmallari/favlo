@@ -223,14 +223,11 @@ def verify(
                 if commit is not None and index + 1 < len(expected):
                     commit(int(expected[index]))
                 continue
-            logits = runtime.step(int(feed), pos + index, logits=True)
+            runtime.step(int(feed), pos + index, logits=True, download=False)
             take = getattr(runtime, "_take_routes", None)
             if take is not None:
                 take(prefill=False)
-            if logits is None:
-                message = "verify step returned no logits"
-                raise RuntimeError(message)
-            pred = int(draw(logits))
+            pred = int(draw(None))
             preds.append(pred)
             if pred != int(expected[index]):
                 break

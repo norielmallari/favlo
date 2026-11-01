@@ -17,13 +17,13 @@ from qwen36_35b_a3b.forward import RequestClosed
 from qwen36_35b_a3b.sampling import VARIANTS, mode_card, requested_thinking
 from qwen36_35b_a3b.tools import (
     StreamText,
+    completion_fields,
     decode_shown_text,
     decode_unicode_escapes,
     function_has_parameters,
     normalize_messages,
     parse_tool_calls,
     required_function,
-    split_thinking,
 )
 from qwen36_35b_a3b.vision import prepare_prompt
 
@@ -137,25 +137,38 @@ def load_tokenizer(root: Path) -> Tokenizer:
     return Tokenizer.from_file(str(root / "tokenizer.json"))
 
 
+def _preserve_flag(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    message = "preserve_thinking must be true or false"
+    raise RuntimeError(message)
+
+
 def _chat_preserve(body: dict[str, Any]) -> bool | None:
     """``chat_template_kwargs.preserve_thinking``, or None when that key is absent."""
     kwargs = body.get("chat_template_kwargs")
     if not isinstance(kwargs, dict) or "preserve_thinking" not in kwargs:
         return None
-    value = kwargs.get("preserve_thinking")
-    if value is None:
-        return None
-    return bool(value)
+    return _preserve_flag(kwargs.get("preserve_thinking"))
 
 
 def preserve_thinking(body: dict[str, Any], settings: dict[str, Any] | None = None) -> bool:
     """Whether historical reasoning stays in the prompt.
 
-    Chat kwargs override ``settings.json``. An omitted key is false. False keeps
-    a think block only on assistant turns after the latest user message. True
-    keeps one on every assistant turn.
+    A top-level ``preserve_thinking`` wins over ``chat_template_kwargs``.
+    Either wins over ``settings.json``. Omitted is on, so a later prompt
+    extends the stored prefix. False keeps a think block only on assistant
+    turns after the latest user message.
     """
-    requested = _chat_preserve(body)
+    requested = (
+        _preserve_flag(body.get("preserve_thinking"))
+        if "preserve_thinking" in body
+        else None
+    )
+    if requested is None:
+        requested = _chat_preserve(body)
     if requested is not None:
         return requested
     if settings is None:
@@ -164,7 +177,7 @@ def preserve_thinking(body: dict[str, Any], settings: dict[str, Any] | None = No
         settings = load_settings(favlo_home())
     value = settings.get("preserve_thinking")
     if value is None:
-        return False
+        return True
     return bool(value)
 
 
@@ -294,6 +307,9 @@ class Pipeline(LanguagePipeline):
     def on_finish(self, runtime: Any, selection: Any, *, complete: bool) -> None:
         from qwen36_35b_a3b.firing import finish_request
 
+        from qwen36_35b_a3b.vision import release_vision
+
+        release_vision(runtime)
         runtime._vision_at = None
         runtime._rope_positions = None
         runtime._rope_delta = 0
@@ -377,11 +393,11 @@ def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any)
         mtp_depth=mtp_depth,
     )
     text = decode_text(runtime.root, tokens)
-    reasoning, visible = split_thinking(text, thinking)
-    content, calls = parse_tool_calls(visible if visible else text)
+    reasoning, visible = completion_fields(text, thinking)
+    content, calls = parse_tool_calls(visible)
     if not emit_tools:
         calls = []
-        content = decode_shown_text(visible if visible else text)
+        content = decode_shown_text(visible if thinking else text)
     if calls:
         reason = "tool_calls"
     else:
@@ -566,8 +582,8 @@ def _stream(
         writer.join()
     if failed:
         raise failed[0]
-    _reasoning, visible = split_thinking(text, thinking)
-    _content, calls = parse_tool_calls(visible if visible else text)
+    _reasoning, visible = completion_fields(text, thinking)
+    _content, calls = parse_tool_calls(visible)
     if emit_tools and calls:
         for index, call in enumerate(calls):
             event(

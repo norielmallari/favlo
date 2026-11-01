@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import array
 import gc
 import json
+import random
 import struct
 import time
 from pathlib import Path
@@ -50,6 +52,12 @@ _STATE_WORDS = 30 * 32 * 128 * 128
 _HISTORY_WORDS = 30 * 3 * 8192 * 2 // 4
 _DRAFT_CAP = 64
 _ARGMAX_GROUPS = (VOCAB + 255) // 256
+_SAMPLE_PEN = 131072
+# Partial top-k uses one list per thread. One group of 256 merges those lists.
+_MERGE_THREADS = 256
+_PARTIAL_GROUPS = 64
+_PARTIAL_THREADS = _MERGE_THREADS * _PARTIAL_GROUPS
+_TOP_CAP = 32
 # Two-row verify scratch: residuals, projections, the second logit row, and the
 # post-confirm copy of the DeltaNet state. Counted before the atlas is sized.
 _SPAN_BYTES = (
@@ -70,10 +78,12 @@ _SPAN_BYTES = (
     + 2 * 512 * 4
     + 16
     + LAYERS * 8 * 4
-    + 256 * 32 * 4
-    + 256 * 32 * 4
-    + 4096 * 4
-    + 4096 * 4
+    + _PARTIAL_THREADS * _TOP_CAP * 4
+    + _PARTIAL_THREADS * _TOP_CAP * 4
+    + _PARTIAL_THREADS * _TOP_CAP * 4
+    + _PARTIAL_THREADS * _TOP_CAP * 4
+    + _SAMPLE_PEN * 4
+    + _SAMPLE_PEN * 4
 )
 _MTP_HELD = (
     "mtp_experts",
@@ -101,6 +111,8 @@ _MTP_HELD = (
     "span_route",
     "span_top_v",
     "span_top_i",
+    "span_q_v",
+    "span_q_i",
     "span_pen_i",
     "span_pen_d",
 )
@@ -188,6 +200,15 @@ def _scratch_bytes() -> int:
         + VOCAB * 4
         + 30 * 3 * 8192 * 2
         + 30 * 32 * 128 * 128 * 4
+        + _ARGMAX_GROUPS * 8
+        + _DRAFT_CAP * 4
+        + _PARTIAL_THREADS * _TOP_CAP * 8
+        + _SAMPLE_PEN * 8
+        + 4
+        + 2 * LAYERS * EXPERTS * 4
+        + 8
+        + EXPERTS * 4
+        + EXPERTS * 8
     )
 
 
@@ -198,6 +219,35 @@ def _reserved_bytes(resident: int, kv_one: int, plane: int, extra: int = 0) -> i
 
 def _u32(value: int) -> bytes:
     return struct.pack("<I", value)
+
+
+def _poke(buf: Any, raw: bytes) -> None:
+    if not raw:
+        return
+    memoryview(buf.contents().as_buffer(len(raw)))[: len(raw)] = raw
+
+
+def penalty_updates(
+    presence: float,
+    seen: set[int],
+    banned: set[int] | None,
+    frequency: float,
+    counts: dict[int, int] | None,
+) -> tuple[list[int], list[float]]:
+    """One delta per token. A ban replaces the penalty with negative infinity."""
+    delta: dict[int, float] = {}
+    counted = counts or {}
+    if presence and seen:
+        for token in seen:
+            delta[int(token)] = delta.get(int(token), 0.0) - float(presence)
+    if frequency and counted:
+        for token, count in counted.items():
+            if count > 0:
+                delta[int(token)] = delta.get(int(token), 0.0) - float(frequency) * float(count)
+    if banned:
+        for token in banned:
+            delta[int(token)] = float("-inf")
+    return list(delta), list(delta.values())
 
 
 def _f32(value: float) -> bytes:
@@ -449,6 +499,18 @@ class Qwen36Runtime:
             self.router = self.session.zeros(256 * 4)
             self.coeff = self.session.zeros(4)
             self.logits = self.session.zeros(VOCAB * 4)
+            self._argmax_v = self.session.zeros(_ARGMAX_GROUPS * 4)
+            self._argmax_i = self.session.zeros(_ARGMAX_GROUPS * 4)
+            self._draft_ids = self.session.zeros(_DRAFT_CAP * 4)
+            self._sample_top_v = self.session.zeros(_PARTIAL_THREADS * _TOP_CAP * 4)
+            self._sample_top_i = self.session.zeros(_PARTIAL_THREADS * _TOP_CAP * 4)
+            self._pen_i = self.session.zeros(_SAMPLE_PEN * 4)
+            self._pen_d = self.session.zeros(_SAMPLE_PEN * 4)
+            self._sample_choice = self.session.zeros(4)
+            self._route_hist = self.session.zeros(2 * LAYERS * EXPERTS * 4)
+            self._route_tokens = self.session.zeros(8)
+            self._scatter_i = self.session.zeros(EXPERTS * 4)
+            self._scatter_o = self.session.zeros(EXPERTS * 8)
             self.history = self.session.zeros(30 * 3 * 8192 * 2)
             self.state = self.session.zeros(30 * 32 * 128 * 128 * 4)
             self.k_cache = [self.session.zeros(self.kv_bytes) for _ in range(FULL_ATTENTION)]
@@ -567,62 +629,127 @@ class Qwen36Runtime:
         memory.sweep(owner)
 
     def _note_routes(self) -> None:
-        """Read the router ids copied before remap. One token, forty layers."""
-        routes = self.routes
-        route_ids = getattr(self, "route_ids", None)
-        if routes is None or route_ids is None or self.session is None:
-            return
-        raw = self.session.download(route_ids, LAYERS * 8 * 4)
-        ids = np.frombuffer(raw, dtype=np.uint32).reshape(LAYERS, 1, 8)
-        routes.note_decode(ids)
+        """Router ids stay on device until the request is counted."""
+        return
 
     def _take_routes(self, *, prefill: bool) -> None:
         routes = self.routes
         if routes is None:
             return
-        if prefill:
-            routes.take_prefill_span()
-        else:
-            routes.take_decode(1)
+        self._count_routes(self.route_ids, 1, prefill=prefill)
+
+    def _count_routes(self, ids: Any, tokens: int, *, prefill: bool) -> None:
+        """Add ``tokens`` of router ids into the device histogram."""
+        hist = getattr(self, "_route_hist", None)
+        if hist is None or self.session is None or tokens < 1 or ids is None:
+            return
+        slot = 0 if prefill else 1
+        self.session.begin()
+        try:
+            self.session.encode(
+                "count_routes",
+                [
+                    (ids, 0),
+                    (hist, slot * LAYERS * EXPERTS * 4),
+                    (self._route_tokens, slot * 4),
+                ],
+                [_u32(LAYERS), _u32(int(tokens)), _u32(8)],
+                ((LAYERS * int(tokens) * 8 + 255) // 256, 1, 1),
+                (256, 1, 1),
+            )
+            self.session.commit()
+            self.session.wait_inflight()
+        except Exception:
+            self.session.abort()
+            self.session.wait_inflight()
+            raise
+
+    def _clear_route_hist(self) -> None:
+        hist = getattr(self, "_route_hist", None)
+        tokens = getattr(self, "_route_tokens", None)
+        if hist is None or tokens is None:
+            return
+        _clear(hist, 2 * LAYERS * EXPERTS * 4)
+        _clear(tokens, 8)
+
+    def _pull_route_hist(self) -> None:
+        """Copy the device histogram into the request scratch once."""
+        routes = self.routes
+        hist = getattr(self, "_route_hist", None)
+        if routes is None or hist is None or self.session is None:
+            return
+        counts = array.array("I")
+        counts.frombytes(self.session.download(hist, 2 * LAYERS * EXPERTS * 4))
+        words = array.array("I")
+        words.frombytes(self.session.download(self._route_tokens, 8))
+        prefill = np.frombuffer(
+            counts[: LAYERS * EXPERTS].tobytes(), dtype=np.uint32
+        ).reshape(LAYERS, EXPERTS)
+        decode = np.frombuffer(
+            counts[LAYERS * EXPERTS :].tobytes(), dtype=np.uint32
+        ).reshape(LAYERS, EXPERTS)
+        routes.prefill = prefill.copy()
+        routes.decode = decode.copy()
+        routes.prefill_tokens = int(words[0])
+        routes.decode_tokens = int(words[1])
 
     def _routed_ids(self, ids: Any, count: int) -> list[int]:
         """Finish the open buffer so the router ids can be read."""
         self.session.end()
-        raw = np.frombuffer(self.session.download(ids, count * 4), dtype=np.uint32)
+        raw = array.array("I")
+        raw.frombytes(self.session.download(ids, count * 4))
         return [int(value) for value in raw]
 
     def routed_layer(self, layer: int, ids: Any, count: int, offsets: Any) -> Any:
         """Load misses and write each file slot's byte offset. ``ids`` stay file slots."""
         file_slots = self._routed_ids(ids, count)
-        table = np.zeros(EXPERTS, dtype=np.uint64)
         if self.atlas.layout.mixed:
             placed = self.atlas.stage_offsets(layer, file_slots)
-            for file_slot, byte_off in zip(file_slots, placed, strict=True):
-                table[file_slot] = np.uint64(byte_off)
         else:
-            placed = self.atlas.stage(layer, file_slots)
-            image = np.uint64(EXPERT_IMAGE)
-            for file_slot, atlas_slot in zip(file_slots, placed, strict=True):
-                table[file_slot] = np.uint64(atlas_slot) * image
-        raw = table.tobytes()
-        memoryview(offsets.contents().as_buffer(len(raw)))[:] = raw
+            placed = [int(slot) * EXPERT_IMAGE for slot in self.atlas.stage(layer, file_slots)]
+        pairs: dict[int, int] = {}
+        for file_slot, byte_off in zip(file_slots, placed, strict=True):
+            pairs[int(file_slot)] = int(byte_off)
+        self._scatter_offsets(list(pairs), list(pairs.values()), offsets)
         self.session.begin()
         return self.atlas.buffer
+
+    def _scatter_offsets(self, ids: list[int], offsets: list[int], dest: Any) -> None:
+        """Write byte offsets for the experts just loaded. The table is 256 slots."""
+        count = len(ids)
+        if count > EXPERTS:
+            message = f"{count} expert offsets do not fit"
+            raise RuntimeError(message)
+        raw_i = array.array("I", (int(item) for item in ids)).tobytes()
+        raw_o = array.array("Q", (int(item) for item in offsets)).tobytes()
+        _poke(self._scatter_i, raw_i)
+        _poke(self._scatter_o, raw_o)
+        self.session.begin()
+        try:
+            self.session.encode(
+                "scatter_offsets",
+                [(self._scatter_i, 0), (self._scatter_o, 0), (dest, 0)],
+                [_u32(count)],
+                (1, 1, 1),
+                (1, 1, 1),
+            )
+            self.session.commit()
+            self.session.wait_inflight()
+        except Exception:
+            self.session.abort()
+            self.session.wait_inflight()
+            raise
 
     def _stage_decode(self, layer: int) -> Any:
         """Point the eight ids at atlas slots and return the atlas buffer."""
         file_slots = self._routed_ids(self.ids, 8)
         if self.atlas.layout.mixed:
             placed = self.atlas.stage_offsets(layer, file_slots)
-            table = np.zeros(EXPERTS, dtype=np.uint64)
-            for file_slot, byte_off in zip(file_slots, placed, strict=True):
-                table[file_slot] = np.uint64(byte_off)
-            raw = table.tobytes()
-            memoryview(self.token_offsets.contents().as_buffer(len(raw)))[:] = raw
+            self._scatter_offsets(file_slots, placed, self.token_offsets)
             self.session.begin()
             return self.atlas.buffer
-        placed = np.asarray(self.atlas.stage(layer, file_slots), dtype=np.uint32)
-        blob = placed.tobytes()
+        placed = self.atlas.stage(layer, file_slots)
+        blob = array.array("I", (int(slot) for slot in placed)).tobytes()
         memoryview(self.ids.contents().as_buffer(len(blob)))[:] = blob
         self.session.begin()
         return self.atlas.buffer
@@ -828,7 +955,7 @@ class Qwen36Runtime:
         q_buf, q_off, _entry = self._loc(base + "q_norm.weight")
         k_buf, k_off, _entry = self._loc(base + "k_norm.weight")
         rope = int(pos) + int(getattr(self, "_rope_delta", 0))
-        positions = np.array([rope, rope, rope], dtype=np.uint32).tobytes()
+        positions = struct.pack("<III", rope, rope, rope)
         self.session.encode(
             "qk_norm_rope",
             [
@@ -1313,7 +1440,7 @@ class Qwen36Runtime:
             suffix = (self.root / "resident.bin").stat().st_size - self._mtp_resident_base
         snap = _STATE_WORDS * 4 + _HISTORY_WORDS * 4
         tables = EXPERTS + EXPERTS * 8
-        return mtp_file + suffix + tables + snap + _SPAN_BYTES + _ARGMAX_GROUPS * 8 + _DRAFT_CAP * 4
+        return mtp_file + suffix + tables + snap + _SPAN_BYTES
 
     def _atlas_reserved(self) -> int:
         plane = 0 if self.kv_cache == "f32" else self._plane_at(self.max_pos)
@@ -1397,9 +1524,6 @@ class Qwen36Runtime:
         self.mtp_offsets = self.session.upload(np.ascontiguousarray(offsets))
         self._mtp_state = self.session.zeros(_STATE_WORDS * 4)
         self._mtp_history = self.session.zeros(_HISTORY_WORDS * 4)
-        self._argmax_v = self.session.zeros(_ARGMAX_GROUPS * 4)
-        self._argmax_i = self.session.zeros(_ARGMAX_GROUPS * 4)
-        self._draft_ids = self.session.zeros(_DRAFT_CAP * 4)
         zeros = self.session.zeros
         self.span_h = zeros(2 * HIDDEN * 4)
         self.span_n = zeros(2 * HIDDEN * 4)
@@ -1418,10 +1542,12 @@ class Qwen36Runtime:
         self.span_shared = zeros(2 * 512 * 4)
         self.span_coeff = zeros(16)
         self.span_route = zeros(LAYERS * 8 * 4)
-        self.span_top_v = zeros(256 * 32 * 4)
-        self.span_top_i = zeros(256 * 32 * 4)
-        self.span_pen_i = zeros(4096 * 4)
-        self.span_pen_d = zeros(4096 * 4)
+        self.span_top_v = zeros(_PARTIAL_THREADS * _TOP_CAP * 4)
+        self.span_top_i = zeros(_PARTIAL_THREADS * _TOP_CAP * 4)
+        self.span_q_v = zeros(_PARTIAL_THREADS * _TOP_CAP * 4)
+        self.span_q_i = zeros(_PARTIAL_THREADS * _TOP_CAP * 4)
+        self.span_pen_i = zeros(_SAMPLE_PEN * 4)
+        self.span_pen_d = zeros(_SAMPLE_PEN * 4)
 
     def _copy_f32(self, src: Any, src_off: int, dest: Any, dest_off: int, count: int) -> None:
         groups = count // 32
@@ -1457,11 +1583,12 @@ class Qwen36Runtime:
             (32, 1, 1),
         )
 
-    def _argmax(self, slot: int) -> None:
+    def _argmax(self, slot: int, scores: Any = None) -> None:
         """Write the logit argmax into ``_draft_ids`` at ``slot``."""
+        row = self.logits if scores is None else scores
         self.session.encode(
             "argmax_span",
-            [(self.logits, 0), (self._argmax_v, 0), (self._argmax_i, 0)],
+            [(row, 0), (self._argmax_v, 0), (self._argmax_i, 0)],
             [_u32(VOCAB)],
             (_ARGMAX_GROUPS, 1, 1),
             (256, 1, 1),
@@ -1547,8 +1674,9 @@ class Qwen36Runtime:
         self._draft_count = 0
         if count < 1:
             return []
-        raw = self.session.download(self._draft_ids, count * 4)
-        return [int(value) for value in np.frombuffer(raw, dtype=np.uint32)]
+        raw = array.array("I")
+        raw.frombytes(self.session.download(self._draft_ids, count * 4))
+        return [int(value) for value in raw]
 
     def _restore_mtp_snap(self) -> None:
         """Copy the device snapshot back over the language state and convolution history."""
@@ -1567,7 +1695,7 @@ class Qwen36Runtime:
         self,
         token: int,
         pos: int,
-        rope: np.ndarray | None = None,
+        rope: bytes | None = None,
         *,
         token_buf: Any = None,
         token_off: int = 0,
@@ -1593,7 +1721,7 @@ class Qwen36Runtime:
         )
         self._moe_mtp()
 
-    def _attend_mtp(self, pos: int, rope: np.ndarray | None = None) -> None:
+    def _attend_mtp(self, pos: int, rope: bytes | None = None) -> None:
         base = "mtp.layers.0.self_attn."
         proj = (
             "attn_qkv_fp8"
@@ -1632,8 +1760,9 @@ class Qwen36Runtime:
         k_buf, k_off, _entry = self._loc(base + "k_norm.weight")
         if rope is None:
             angle = int(pos) + int(getattr(self, "_rope_delta", 0))
-            rope = np.array([angle, angle, angle], dtype=np.uint32)
-        positions = np.ascontiguousarray(rope, dtype=np.uint32).reshape(3).tobytes()
+            positions = struct.pack("<III", angle, angle, angle)
+        else:
+            positions = rope
         self.session.encode(
             "qk_norm_rope",
             [
@@ -1792,15 +1921,21 @@ class Qwen36Runtime:
             shifted.append(int(follow))
         if not shifted:
             return
-        table = getattr(self, "_rope_positions", None)
+        host = getattr(self, "_rope_host", None)
+        length = int(getattr(self, "_rope_length", 0))
         self.session.begin()
         try:
             for index, token in enumerate(shifted):
                 self._copy_f32(work.hidden, index * HIDDEN * 4, self.hidden, 0, HIDDEN)
                 at = pos0 + index
                 rope = None
-                if table is not None and at < table.shape[1]:
-                    rope = table[:, at]
+                if host is not None and at < length:
+                    rope = struct.pack(
+                        "<III",
+                        int(host[at]),
+                        int(host[length + at]),
+                        int(host[2 * length + at]),
+                    )
                 self._rms(self.hidden, 0, "model.language_model.norm.weight", HIDDEN, self.normed)
                 self._copy_f32(self.normed, 0, self.hidden, 0, HIDDEN)
                 self._mtp_body(int(token), at, rope)
@@ -1811,7 +1946,9 @@ class Qwen36Runtime:
             self.session.wait_inflight()
             raise
 
-    def step(self, token: int, pos: int, *, logits: bool) -> np.ndarray | None:
+    def step(
+        self, token: int, pos: int, *, logits: bool, download: bool = True
+    ) -> np.ndarray | None:
         self._check_stop()
         if pos >= self.max_pos and not self._grow(pos + 1):
             raise ContextFull
@@ -1833,9 +1970,94 @@ class Qwen36Runtime:
         self.session.wait_inflight()
         self._note_routes()
         self.filled = pos + 1
-        if not logits:
+        if not logits or not download:
             return None
         return self.session.download_f32(self.logits, VOCAB)
+
+    def _encode_penalties(
+        self,
+        presence: float,
+        seen: set[int],
+        banned: set[int] | None,
+        frequency: float,
+        counts: dict[int, int] | None,
+        scores: Any = None,
+    ) -> None:
+        ids, deltas = penalty_updates(presence, seen, banned, frequency, counts)
+        if not ids:
+            return
+        if len(ids) > _SAMPLE_PEN:
+            message = "penalty list does not fit"
+            raise RuntimeError(message)
+        _poke(self._pen_i, array.array("I", ids).tobytes())
+        _poke(self._pen_d, array.array("f", deltas).tobytes())
+        row = self.logits if scores is None else scores
+        self.session.encode(
+            "logit_adjust",
+            [(row, 0), (self._pen_i, 0), (self._pen_d, 0)],
+            [_u32(len(ids))],
+            ((len(ids) + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+
+    def _sample_device(
+        self,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        presence: float,
+        seen: set[int],
+        banned: set[int] | None,
+        frequency: float,
+        counts: dict[int, int] | None,
+        scores: Any = None,
+    ) -> int:
+        """Draw one token from a logit row that is still on device."""
+        row = self.logits if scores is None else scores
+        self.session.begin()
+        try:
+            self._encode_penalties(presence, seen, banned, frequency, counts, scores=row)
+            if temperature == 0.0:
+                self._argmax(0, row)
+                dest = self._draft_ids
+            else:
+                k = int(top_k)
+                if k <= 0 or k > _TOP_CAP:
+                    k = _TOP_CAP
+                self.session.encode(
+                    "topk_partial",
+                    [(row, 0), (self._sample_top_v, 0), (self._sample_top_i, 0)],
+                    [_u32(VOCAB), _u32(k)],
+                    (_PARTIAL_GROUPS, 1, 1),
+                    (_MERGE_THREADS, 1, 1),
+                )
+                self.session.encode(
+                    "sample_topk",
+                    [
+                        (self._sample_top_v, 0),
+                        (self._sample_top_i, 0),
+                        (self._sample_choice, 0),
+                    ],
+                    [
+                        _u32(_PARTIAL_GROUPS),
+                        _u32(_MERGE_THREADS),
+                        _u32(k),
+                        _f32(float(temperature)),
+                        _f32(float(top_p)),
+                        _u32(random.randrange(1 << 32)),
+                    ],
+                    (1, 1, 1),
+                    (_MERGE_THREADS, 1, 1),
+                )
+                dest = self._sample_choice
+            self.session.commit()
+            self.session.wait_inflight()
+        except Exception:
+            self.session.abort()
+            self.session.wait_inflight()
+            raise
+        raw = self.session.download(dest, 4)
+        return int.from_bytes(raw, "little")
 
     def _layers(self, pos: int, *, head: bool) -> None:
         for layer in range(40):
@@ -1943,9 +2165,8 @@ class Qwen36Runtime:
 
                 self._prefill_base = 0
                 prefill_ids(self, suffix[:-1], hit, follow=suffix[-1])
-            logits = self.step(suffix[-1], len(prompt) - 1, logits=True)
+            self.step(suffix[-1], len(prompt) - 1, logits=True, download=False)
             self._take_routes(prefill=True)
-            assert logits is not None
             self.prefix.note(prompt)
             self._note_prefill(len(suffix))
             # The forward is inside prefill. The first sample closes it.
@@ -1956,6 +2177,7 @@ class Qwen36Runtime:
             counts: dict[int, int] = {}
             follow_id: int | None = None
             device_logits = False
+            host_logits: np.ndarray | None = None
             budget = None
             if think_close and think_end is not None and thinking_budget != 0:
                 budget = ThinkBudget(think_close, think_end, thinking_budget)
@@ -1989,7 +2211,27 @@ class Qwen36Runtime:
                     nxt = follow_id
                     follow_id = None
                     if budget is not None:
-                        nxt = budget.take(nxt)
+                        nxt = budget.take(nxt, stop)
+                    finished_forced = False
+                elif host_logits is not None:
+                    banned = {budget.end} if budget is not None and budget.closed else set()
+                    if forbid:
+                        banned |= forbid
+                    row = host_logits
+                    host_logits = None
+                    nxt = _sample(
+                        row,
+                        temperature,
+                        top_p,
+                        top_k,
+                        presence,
+                        seen,
+                        banned,
+                        frequency,
+                        counts,
+                    )
+                    if budget is not None:
+                        nxt = budget.take(nxt, stop)
                     finished_forced = False
                 elif device_logits:
                     from qwen36_35b_a3b.span import sample_buffer
@@ -2011,13 +2253,13 @@ class Qwen36Runtime:
                     )
                     device_logits = False
                     if budget is not None:
-                        nxt = budget.take(nxt)
+                        nxt = budget.take(nxt, stop)
                     finished_forced = False
                 elif carry is not None:
                     nxt = carry
                     carry = None
                     if budget is not None:
-                        nxt = budget.take(nxt)
+                        nxt = budget.take(nxt, stop)
                     finished_forced = False
                 elif pending:
                     nxt = int(pending.pop(0))
@@ -2029,8 +2271,7 @@ class Qwen36Runtime:
                     banned = {budget.end} if budget is not None and budget.closed else set()
                     if forbid:
                         banned |= forbid
-                    nxt = _sample(
-                        logits,
+                    nxt = self._sample_device(
                         temperature,
                         top_p,
                         top_k,
@@ -2041,7 +2282,7 @@ class Qwen36Runtime:
                         counts,
                     )
                     if budget is not None:
-                        nxt = budget.take(nxt)
+                        nxt = budget.take(nxt, stop)
                     finished_forced = False
                 last_sample = time.perf_counter()
                 if prefill_open:
@@ -2127,7 +2368,7 @@ class Qwen36Runtime:
                             self._mtp_accepts += 1
                             token = int(outcome.extra)
                             if budget is not None:
-                                token = budget.take(token)
+                                token = budget.take(token, stop)
                             if token in stop:
                                 break
                             out.append(token)
@@ -2140,12 +2381,13 @@ class Qwen36Runtime:
                             if outcome.follow is not None:
                                 follow_id = int(outcome.follow)
                                 device_logits = False
+                                host_logits = None
                             elif outcome.device:
                                 device_logits = True
-                                logits = None
+                                host_logits = None
                             else:
                                 device_logits = False
-                                logits = outcome.logits
+                                host_logits = outcome.logits
                             last_sample = time.perf_counter()
                             if len(out) >= max_tokens:
                                 self._hit_limit = True
@@ -2156,9 +2398,8 @@ class Qwen36Runtime:
                     span = min(int(depth), room)
                     if room > 0 and span > 0 and self._grow(pos + span):
                         self._draft_chain(nxt, pos - 1, span, wait=False)
-                        logits = self.step(nxt, pos, logits=True)
+                        self.step(nxt, pos, logits=True, download=False)
                         self._take_routes(prefill=False)
-                        assert logits is not None
                         drafts = self._read_drafts()
                         feeds, expected = draft_window(nxt, drafts, stop, room)
                         if not expected:
@@ -2172,9 +2413,8 @@ class Qwen36Runtime:
                             if forbid:
                                 window_ban |= forbid
 
-                            def draw(rows: np.ndarray) -> int:
-                                return _sample(
-                                    rows,
+                            def draw(_rows: Any = None) -> int:
+                                return self._sample_device(
                                     temperature,
                                     top_p,
                                     top_k,
@@ -2198,7 +2438,7 @@ class Qwen36Runtime:
                                 expected,
                                 draw=draw,
                                 commit=commit,
-                                primed=logits,
+                                primed=True,
                             )
                             self._mtp_tries += len(expected)
                             self._mtp_accepts += accepted
@@ -2210,7 +2450,7 @@ class Qwen36Runtime:
                                 if len(out) >= max_tokens:
                                     break
                                 if budget is not None:
-                                    token = budget.take(int(token))
+                                    token = budget.take(int(token), stop)
                                 out.append(int(token))
                                 seen.add(int(token))
                                 counts[int(token)] = counts.get(int(token), 0) + 1
@@ -2224,9 +2464,8 @@ class Qwen36Runtime:
                                 self._hit_limit = True
                                 break
                             continue
-                logits = self.step(nxt, pos, logits=True)
+                self.step(nxt, pos, logits=True, download=False)
                 self._take_routes(prefill=False)
-                assert logits is not None
             if self._mtp_tries:
                 self._note("mtp", accepts=self._mtp_accepts, tries=self._mtp_tries)
             if prefill_open:
@@ -2347,11 +2586,14 @@ class Qwen36Runtime:
 
 
 class ThinkBudget:
-    """Close an open think block after ``budget`` completion tokens.
+    """Close an open think block, then let a stop id end the turn.
 
     The prompt already opened ``<think>``. Drawn tokens count until
-    ``</think>``. At the budget, the next tokens are ``close``, one id at a
-    time. After that sequence, ``end`` is removed from the logits.
+    ``</think>``. At a configured budget, or when a stop id is drawn while
+    the block is still open, the next tokens are ``close``, one id at a
+    time. That stop id is not emitted. After the close, a stop id ends the
+    turn and ``end`` is removed from the logits. An unset budget does not
+    close on a count.
     """
 
     def __init__(self, close: list[int], end: int, budget: int | None) -> None:
@@ -2367,7 +2609,9 @@ class ThinkBudget:
     def forcing(self) -> bool:
         return self.force_at is not None
 
-    def take(self, sampled: int) -> int:
+    def take(self, sampled: int, stops: set[int] | None = None) -> int:
+        if self.forcing:
+            return self.forced()
         if self.closed:
             return sampled
         if self.budget is not None and self.counted >= self.budget:
@@ -2375,6 +2619,8 @@ class ThinkBudget:
         if sampled == self.end:
             self.closed = True
             return sampled
+        if stops is not None and sampled in stops:
+            return self._start()
         self.counted += 1
         return sampled
 

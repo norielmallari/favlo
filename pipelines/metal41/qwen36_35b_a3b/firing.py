@@ -281,10 +281,17 @@ def _stamp_turn(routes: RouteScratch, runtime: Any) -> None:
     )
 
 
+def _clear_hist(runtime: Any) -> None:
+    clear = getattr(runtime, "_clear_route_hist", None)
+    if callable(clear):
+        clear()
+
+
 def open_request(runtime: Any) -> None:
     routes = getattr(runtime, "routes", None)
     if routes is not None:
         routes.begin()
+    _clear_hist(runtime)
     runtime._firing_open = True
 
 
@@ -297,10 +304,15 @@ def finish_request(runtime: Any, selection: Any, *, complete: bool) -> None:
     if not complete:
         routes.drop_decode()
         routes.begin()
+        _clear_hist(runtime)
         return
+    pull = getattr(runtime, "_pull_route_hist", None)
+    if callable(pull):
+        pull()
     _stamp_turn(routes, runtime)
     snap = routes.snapshot()
     routes.begin()
+    _clear_hist(runtime)
     record = str(getattr(runtime, "root", ""))
     token = id(runtime)
     with _lock:

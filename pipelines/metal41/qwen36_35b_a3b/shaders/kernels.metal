@@ -5125,53 +5125,591 @@ kernel void logit_adjust(
     scores[ids[tid]] += delta[tid];
 }
 
-// Each thread keeps its own top ``k`` (k <= 32). The global top k is the top k
-// of those lists: an id in the global top k is in the top k of its thread.
+// Higher logit wins. An equal logit keeps the lower id.
+bool better_logit(float value, uint id, float other, uint other_id) {
+    return value > other || (value == other && id < other_id);
+}
+
+bool finite_logit(float value) {
+    return value == value && value != -INFINITY;
+}
+
+// Insert one finite logit into a descending top-k list.
+void consider_logit(
+    thread float* best_v,
+    thread uint* best_i,
+    thread uint& kept,
+    uint limit,
+    float value,
+    uint id)
+{
+    if (!finite_logit(value)) {
+        return;
+    }
+    if (kept == limit && !better_logit(value, id, best_v[kept - 1u], best_i[kept - 1u])) {
+        return;
+    }
+    uint at = kept;
+    for (uint probe = 0u; probe < kept; ++probe) {
+        if (better_logit(value, id, best_v[probe], best_i[probe])) {
+            at = probe;
+            break;
+        }
+    }
+    uint last = kept < limit ? kept : limit - 1u;
+    for (uint probe = last; probe > at; --probe) {
+        best_v[probe] = best_v[probe - 1u];
+        best_i[probe] = best_i[probe - 1u];
+    }
+    best_v[at] = value;
+    best_i[at] = id;
+    if (kept < limit) {
+        kept += 1u;
+    }
+}
+
+// Merge one packed descending list into a private descending top-k.
+void merge_logit_list(
+    thread float* best_v,
+    thread uint* best_i,
+    thread uint& kept,
+    uint limit,
+    device const float* values,
+    device const uint* ids,
+    uint base)
+{
+    float out_v[32];
+    uint out_i[32];
+    uint left = 0u;
+    uint right = 0u;
+    uint count = 0u;
+    while (count < limit) {
+        bool have_left = left < kept && finite_logit(best_v[left]);
+        bool have_right = right < limit && finite_logit(values[base + right]);
+        if (!have_left && !have_right) {
+            break;
+        }
+        bool take_left = have_left && (
+            !have_right || !better_logit(values[base + right], ids[base + right], best_v[left], best_i[left])
+        );
+        if (take_left) {
+            out_v[count] = best_v[left];
+            out_i[count] = best_i[left];
+            left += 1u;
+        } else {
+            out_v[count] = values[base + right];
+            out_i[count] = ids[base + right];
+            right += 1u;
+        }
+        count += 1u;
+    }
+    kept = count;
+    for (uint probe = 0u; probe < count; ++probe) {
+        best_v[probe] = out_v[probe];
+        best_i[probe] = out_i[probe];
+    }
+}
+
+void write_logit_list(
+    device float* values,
+    device uint* ids,
+    uint base,
+    uint limit,
+    thread float* best_v,
+    thread uint* best_i,
+    uint kept)
+{
+    for (uint probe = 0u; probe < limit; ++probe) {
+        if (probe < kept) {
+            values[base + probe] = best_v[probe];
+            ids[base + probe] = best_i[probe];
+        } else {
+            values[base + probe] = -INFINITY;
+            ids[base + probe] = 0u;
+        }
+    }
+}
+
+// One group merges lists down to list 0. List ``i`` starts at ``i * stride * limit``.
+// The buffer must hold the packed prefix of one list per thread. Launch one group.
+void reduce_logit_lists(
+    device float* values,
+    device uint* ids,
+    uint lists,
+    uint stride,
+    uint limit,
+    uint tid,
+    uint tcount,
+    thread float* best_v,
+    thread uint* best_i,
+    thread uint& kept)
+{
+    kept = 0u;
+    for (uint list = tid; list < lists; list += tcount) {
+        merge_logit_list(best_v, best_i, kept, limit, values, ids, (list * stride) * limit);
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+    write_logit_list(values, ids, tid * limit, limit, best_v, best_i, kept);
+    threadgroup_barrier(mem_flags::mem_device);
+    for (uint step = 1u; step < tcount; step <<= 1u) {
+        if ((tid & (step * 2u - 1u)) == 0u && tid + step < tcount) {
+            merge_logit_list(best_v, best_i, kept, limit, values, ids, (tid + step) * limit);
+            write_logit_list(values, ids, tid * limit, limit, best_v, best_i, kept);
+        }
+        threadgroup_barrier(mem_flags::mem_device);
+    }
+}
+
+// Each thread keeps a descending top-k of its stride, then the threadgroup
+// reduces those lists. The group winner sits at group * threads * limit.
 kernel void topk_partial(
     device const float* scores [[buffer(0)]],
     device float* values [[buffer(1)]],
     device uint* ids [[buffer(2)]],
     constant uint& n [[buffer(3)]],
     constant uint& k [[buffer(4)]],
-    uint tid [[thread_position_in_threadgroup]])
+    uint gid [[thread_position_in_grid]],
+    uint nthreads [[threads_per_grid]],
+    uint lid [[thread_index_in_threadgroup]],
+    uint tcount [[threads_per_threadgroup]],
+    uint group [[threadgroup_position_in_grid]])
 {
     float best_v[32];
     uint best_i[32];
     uint kept = 0u;
     uint limit = k < 32u ? k : 32u;
-    for (uint i = tid; i < n; i += 256u) {
-        float value = scores[i];
+    for (uint index = gid; index < n; index += nthreads) {
+        consider_logit(best_v, best_i, kept, limit, scores[index], index);
+    }
+    uint home = (group * tcount + lid) * limit;
+    write_logit_list(values, ids, home, limit, best_v, best_i, kept);
+    threadgroup_barrier(mem_flags::mem_device);
+    for (uint step = 1u; step < tcount; step <<= 1u) {
+        if ((lid & (step * 2u - 1u)) == 0u && lid + step < tcount) {
+            uint partner = (group * tcount + lid + step) * limit;
+            merge_logit_list(best_v, best_i, kept, limit, values, ids, partner);
+            write_logit_list(values, ids, home, limit, best_v, best_i, kept);
+        }
+        threadgroup_barrier(mem_flags::mem_device);
+    }
+}
+
+// Text positions: the same index on all three mRoPE axes.
+kernel void fill_rope(
+    device uint* rope [[buffer(0)]],
+    constant uint& pos0 [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) {
+        return;
+    }
+    uint pos = pos0 + gid;
+    rope[gid * 3u] = pos;
+    rope[gid * 3u + 1u] = pos;
+    rope[gid * 3u + 2u] = pos;
+}
+
+// Clear a 256-wide offset table and write the loaded experts. One thread.
+kernel void scatter_offsets(
+    device const uint* ids [[buffer(0)]],
+    device const ulong* values [[buffer(1)]],
+    device ulong* table [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid != 0u) {
+        return;
+    }
+    for (uint slot = 0u; slot < 256u; ++slot) {
+        table[slot] = 0u;
+    }
+    for (uint index = 0u; index < count; ++index) {
+        uint slot = ids[index];
+        if (slot < 256u) {
+            table[slot] = values[index];
+        }
+    }
+}
+
+// Add router ids into one layer histogram. ``ids`` is layers × tokens × 8.
+kernel void count_routes(
+    device const uint* ids [[buffer(0)]],
+    device atomic_uint* hist [[buffer(1)]],
+    device atomic_uint* tokens_out [[buffer(2)]],
+    constant uint& layers [[buffer(3)]],
+    constant uint& tokens [[buffer(4)]],
+    constant uint& width [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid == 0u) {
+        atomic_fetch_add_explicit(tokens_out, tokens, memory_order_relaxed);
+    }
+    uint n = layers * tokens * width;
+    if (gid >= n) {
+        return;
+    }
+    uint expert = ids[gid];
+    if (expert >= 256u) {
+        return;
+    }
+    uint layer = gid / (tokens * width);
+    atomic_fetch_add_explicit(hist + layer * 256u + expert, 1u, memory_order_relaxed);
+}
+
+// Collapse packed top-k lists, apply temperature and top-p, write one id.
+// Launch one group. The value buffer holds at least one list per thread.
+kernel void sample_topk(
+    device float* values [[buffer(0)]],
+    device uint* ids [[buffer(1)]],
+    device uint* chosen [[buffer(2)]],
+    constant uint& lists [[buffer(3)]],
+    constant uint& stride [[buffer(4)]],
+    constant uint& k [[buffer(5)]],
+    constant float& temperature [[buffer(6)]],
+    constant float& top_p [[buffer(7)]],
+    constant uint& draw [[buffer(8)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint tcount [[threads_per_threadgroup]])
+{
+    uint limit = k < 32u ? k : 32u;
+    if (limit == 0u || !(temperature > 0.0f)) {
+        if (tid == 0u) {
+            chosen[0] = 0u;
+        }
+        return;
+    }
+    float best_v[32];
+    uint best_i[32];
+    uint kept = 0u;
+    reduce_logit_lists(
+        values, ids, lists, stride, limit, tid, tcount, best_v, best_i, kept);
+    if (tid != 0u) {
+        return;
+    }
+    if (kept == 0u) {
+        chosen[0] = 0u;
+        return;
+    }
+    float max_v = best_v[0];
+    uint max_id = best_i[0];
+    for (uint probe = 1u; probe < kept; ++probe) {
+        if (best_v[probe] > max_v || (best_v[probe] == max_v && best_i[probe] < max_id)) {
+            max_v = best_v[probe];
+            max_id = best_i[probe];
+        }
+    }
+    float inv_t = 1.0f / temperature;
+    float probs[32];
+    float sum = 0.0f;
+    for (uint probe = 0u; probe < kept; ++probe) {
+        float prob = exp((best_v[probe] - max_v) * inv_t);
+        probs[probe] = prob;
+        sum += prob;
+    }
+    if (!(sum > 0.0f)) {
+        chosen[0] = max_id;
+        return;
+    }
+    uint order[32];
+    for (uint probe = 0u; probe < kept; ++probe) {
+        order[probe] = probe;
+    }
+    for (uint index = 1u; index < kept; ++index) {
+        uint key = order[index];
+        uint cursor = index;
+        while (cursor > 0u) {
+            uint prev = order[cursor - 1u];
+            bool less = probs[prev] < probs[key]
+                || (probs[prev] == probs[key] && best_i[prev] > best_i[key]);
+            if (!less) {
+                break;
+            }
+            order[cursor] = prev;
+            cursor -= 1u;
+        }
+        order[cursor] = key;
+    }
+    uint cut = kept;
+    if (top_p > 0.0f && top_p < 1.0f) {
+        float acc = 0.0f;
+        for (uint probe = 0u; probe < kept; ++probe) {
+            acc += probs[order[probe]] / sum;
+            if (acc >= top_p) {
+                cut = probe + 1u;
+                break;
+            }
+        }
+    }
+    float kept_sum = 0.0f;
+    for (uint probe = 0u; probe < cut; ++probe) {
+        kept_sum += probs[order[probe]];
+    }
+    float target = (float(draw) + 0.5f) * kept_sum / 4294967296.0f;
+    float run = 0.0f;
+    uint pick = order[cut - 1u];
+    for (uint probe = 0u; probe < cut; ++probe) {
+        run += probs[order[probe]];
+        if (run >= target) {
+            pick = order[probe];
+            break;
+        }
+    }
+    chosen[0] = best_i[pick];
+}
+
+// Nucleus distribution of one partial top-k list. Matches ``sample_topk``.
+void nucleus(
+    device const float* values,
+    device const uint* ids,
+    uint slots,
+    uint k,
+    float temperature,
+    float top_p,
+    thread float* probs,
+    thread uint* out_ids,
+    thread uint& count)
+{
+    count = 0u;
+    uint limit = k < 32u ? k : 32u;
+    if (limit == 0u || temperature <= 0.0f) {
+        return;
+    }
+    float best_v[32];
+    uint best_i[32];
+    uint kept = 0u;
+    for (uint index = 0u; index < slots; ++index) {
+        float value = values[index];
+        uint id = ids[index];
         if (kept < limit) {
             best_v[kept] = value;
-            best_i[kept] = i;
+            best_i[kept] = id;
             kept += 1u;
             continue;
         }
         uint worst = 0u;
-        float worst_v = best_v[0];
-        uint worst_i = best_i[0];
-        for (uint j = 1u; j < limit; ++j) {
-            float other = best_v[j];
-            uint other_i = best_i[j];
-            if (other < worst_v || (other == worst_v && other_i > worst_i)) {
-                worst = j;
-                worst_v = other;
-                worst_i = other_i;
+        for (uint probe = 1u; probe < limit; ++probe) {
+            float other = best_v[probe];
+            uint other_id = best_i[probe];
+            if (other < best_v[worst] || (other == best_v[worst] && other_id > best_i[worst])) {
+                worst = probe;
             }
         }
-        if (value > worst_v || (value == worst_v && i < worst_i)) {
+        if (value > best_v[worst] || (value == best_v[worst] && id < best_i[worst])) {
             best_v[worst] = value;
-            best_i[worst] = i;
+            best_i[worst] = id;
         }
     }
-    for (uint j = 0u; j < limit; ++j) {
-        uint slot = tid * limit + j;
-        if (j < kept) {
-            values[slot] = best_v[j];
-            ids[slot] = best_i[j];
-        } else {
-            values[slot] = -INFINITY;
-            ids[slot] = 0u;
+    if (kept == 0u) {
+        return;
+    }
+    float max_v = best_v[0];
+    for (uint probe = 1u; probe < kept; ++probe) {
+        if (best_v[probe] > max_v) {
+            max_v = best_v[probe];
         }
+    }
+    uint max_at = 0u;
+    for (uint probe = 1u; probe < kept; ++probe) {
+        if (best_v[probe] > best_v[max_at]
+            || (best_v[probe] == best_v[max_at] && best_i[probe] < best_i[max_at])) {
+            max_at = probe;
+        }
+    }
+    float inv_t = 1.0f / temperature;
+    float raw[32];
+    float sum = 0.0f;
+    for (uint probe = 0u; probe < kept; ++probe) {
+        float prob = exp((best_v[probe] - max_v) * inv_t);
+        raw[probe] = prob;
+        sum += prob;
+    }
+    if (!(sum > 0.0f)) {
+        probs[0] = 1.0f;
+        out_ids[0] = best_i[max_at];
+        count = 1u;
+        return;
+    }
+    uint order[32];
+    for (uint probe = 0u; probe < kept; ++probe) {
+        order[probe] = probe;
+    }
+    for (uint index = 1u; index < kept; ++index) {
+        uint key = order[index];
+        uint cursor = index;
+        while (cursor > 0u) {
+            uint prev = order[cursor - 1u];
+            bool less = raw[prev] < raw[key]
+                || (raw[prev] == raw[key] && best_i[prev] > best_i[key]);
+            if (!less) {
+                break;
+            }
+            order[cursor] = prev;
+            cursor -= 1u;
+        }
+        order[cursor] = key;
+    }
+    uint cut = kept;
+    if (top_p > 0.0f && top_p < 1.0f) {
+        float acc = 0.0f;
+        for (uint probe = 0u; probe < kept; ++probe) {
+            acc += raw[order[probe]] / sum;
+            if (acc >= top_p) {
+                cut = probe + 1u;
+                break;
+            }
+        }
+    }
+    float kept_sum = 0.0f;
+    for (uint probe = 0u; probe < cut; ++probe) {
+        kept_sum += raw[order[probe]];
+    }
+    if (!(kept_sum > 0.0f)) {
+        probs[0] = 1.0f;
+        out_ids[0] = best_i[max_at];
+        count = 1u;
+        return;
+    }
+    for (uint probe = 0u; probe < cut; ++probe) {
+        uint slot = order[probe];
+        probs[probe] = raw[slot] / kept_sum;
+        out_ids[probe] = best_i[slot];
+    }
+    count = cut;
+}
+
+float listed(thread float* probs, thread uint* ids, uint count, uint token) {
+    for (uint index = 0u; index < count; ++index) {
+        if (ids[index] == token) {
+            return probs[index];
+        }
+    }
+    return 0.0f;
+}
+
+// Keep the draft when a uniform draw falls under p(draft) / q(draft).
+// A miss draws from the positive part of p - q. decision is accepted, then id.
+kernel void speculative_accept(
+    device float* q_values [[buffer(0)]],
+    device uint* q_ids [[buffer(1)]],
+    device float* p_values [[buffer(2)]],
+    device uint* p_ids [[buffer(3)]],
+    device uint* decision [[buffer(4)]],
+    constant uint& lists [[buffer(5)]],
+    constant uint& stride [[buffer(6)]],
+    constant uint& k [[buffer(7)]],
+    constant float& temperature [[buffer(8)]],
+    constant float& top_p [[buffer(9)]],
+    constant uint& draft [[buffer(10)]],
+    constant uint& draw_keep [[buffer(11)]],
+    constant uint& draw_resid [[buffer(12)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint tcount [[threads_per_threadgroup]])
+{
+    uint limit = k < 32u ? k : 32u;
+    if (limit == 0u || !(temperature > 0.0f)) {
+        if (tid == 0u) {
+            decision[0] = 0u;
+            decision[1] = 0u;
+        }
+        return;
+    }
+    float scratch_v[32];
+    uint scratch_i[32];
+    uint scratch_n = 0u;
+    reduce_logit_lists(
+        q_values, q_ids, lists, stride, limit, tid, tcount, scratch_v, scratch_i, scratch_n);
+    reduce_logit_lists(
+        p_values, p_ids, lists, stride, limit, tid, tcount, scratch_v, scratch_i, scratch_n);
+    if (tid != 0u) {
+        return;
+    }
+    float q_pr[32];
+    uint q_i[32];
+    float p_pr[32];
+    uint p_i[32];
+    uint qn = 0u;
+    uint pn = 0u;
+    nucleus(q_values, q_ids, limit, k, temperature, top_p, q_pr, q_i, qn);
+    nucleus(p_values, p_ids, limit, k, temperature, top_p, p_pr, p_i, pn);
+    float chance = listed(p_pr, p_i, pn, draft);
+    float proposal = listed(q_pr, q_i, qn, draft);
+    float unit = (float(draw_keep) + 0.5f) / 4294967296.0f;
+    if (proposal > 0.0f && unit < min(1.0f, chance / proposal)) {
+        decision[0] = 1u;
+        decision[1] = draft;
+        return;
+    }
+    float resid[32];
+    float total = 0.0f;
+    for (uint index = 0u; index < pn; ++index) {
+        float gap = p_pr[index] - listed(q_pr, q_i, qn, p_i[index]);
+        if (gap < 0.0f) {
+            gap = 0.0f;
+        }
+        resid[index] = gap;
+        total += gap;
+    }
+    if (!(total > 0.0f) || pn == 0u) {
+        decision[0] = 0u;
+        decision[1] = pn == 0u ? 0u : p_i[0];
+        return;
+    }
+    float target = (float(draw_resid) + 0.5f) * total / 4294967296.0f;
+    float run = 0.0f;
+    uint pick = pn - 1u;
+    for (uint index = 0u; index < pn; ++index) {
+        run += resid[index];
+        if (run >= target) {
+            pick = index;
+            break;
+        }
+    }
+    decision[0] = 0u;
+    decision[1] = p_i[pick];
+}
+
+// Copy an axis-major mRoPE table into token-major triples.
+kernel void copy_rope(
+    device const uint* table [[buffer(0)]],
+    device uint* rope [[buffer(1)]],
+    constant uint& pos0 [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    constant uint& length [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) {
+        return;
+    }
+    uint src = pos0 + gid;
+    if (src >= length) {
+        return;
+    }
+    rope[gid * 3u] = table[src];
+    rope[gid * 3u + 1u] = table[length + src];
+    rope[gid * 3u + 2u] = table[length * 2u + src];
+}
+
+// Write vision rows into the token slots named by ``index``. 0xFFFFFFFF is text.
+kernel void splice_rows(
+    device const float* rows [[buffer(0)]],
+    device const uint* index [[buffer(1)]],
+    device float* hidden [[buffer(2)]],
+    constant uint& pos0 [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    constant uint& width [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) {
+        return;
+    }
+    uint slot = index[pos0 + gid];
+    if (slot == 0xFFFFFFFFu) {
+        return;
+    }
+    device const float* src = rows + slot * width;
+    device float* dest = hidden + gid * width;
+    for (uint lane = 0u; lane < width; ++lane) {
+        dest[lane] = src[lane];
     }
 }

@@ -161,6 +161,13 @@ KERNELS = (
     "moe_down_routed_w",
     "logit_adjust",
     "topk_partial",
+    "fill_rope",
+    "scatter_offsets",
+    "count_routes",
+    "sample_topk",
+    "speculative_accept",
+    "copy_rope",
+    "splice_rows",
 )
 
 _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"

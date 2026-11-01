@@ -8,19 +8,22 @@ confirm point, which is the state after the first token of the pair.
 
 from __future__ import annotations
 
+import array
+import random
 import struct
 from typing import Any
-
-import numpy as np
 
 HIDDEN = 2048
 VOCAB = 248320
 _STATE_WORDS = 30 * 32 * 128 * 128
 _HISTORY_WORDS = 30 * 3 * 8192 * 2 // 4
 _LAYERS = 40
-_TOP_THREADS = 256
+# Same partial grid as forward.py.
+_MERGE_THREADS = 256
+_PARTIAL_GROUPS = 64
+_PARTIAL_THREADS = _MERGE_THREADS * _PARTIAL_GROUPS
 _TOP_CAP = 32
-_PEN_CAP = 4096
+_PEN_CAP = 131072
 _ARGMAX = (VOCAB + 255) // 256
 
 
@@ -36,7 +39,7 @@ class PairStep:
         accepted: bool,
         extra: int | None,
         carry: int | None,
-        logits: np.ndarray | None,
+        logits: Any,
         follow: int | None = None,
         device: bool = False,
     ) -> None:
@@ -64,42 +67,24 @@ def paired_step(
     stop: set[int],
 ) -> PairStep:
     """Draft one token at ``pos - 1`` and verify ``token`` together with that draft."""
-    from qwen36_35b_a3b.speculate import candidate_probs, keep_draft, penalized
-
     runtime._drop_pending()
     host_draft: int | None = None
-    q_idx = np.asarray([0], dtype=np.int64)
-    q_pr = np.asarray([1.0], dtype=np.float64)
     greedy = temperature == 0.0
+    k = _cap_k(top_k)
     if not greedy:
-        runtime._draft_chain(int(token), int(pos) - 1, 1, snap=False)
-        picked = _candidates(
+        runtime._draft_chain(int(token), int(pos) - 1, 1, snap=False, wait=False)
+        runtime.session.wait_inflight()
+        host_draft = _draw_proposal(
             runtime,
-            runtime.logits,
             temperature,
             top_p,
-            top_k,
+            k,
             presence,
             seen,
             banned,
             frequency,
             counts,
         )
-        if picked is None:
-            drafted = penalized(
-                runtime.session.download_f32(runtime.logits, VOCAB),
-                presence,
-                seen,
-                banned,
-                frequency,
-                counts,
-            )
-            q_idx, q_pr = candidate_probs(drafted, temperature, top_p, top_k)
-        else:
-            q_idx, q_pr = picked
-        pick = 0 if q_idx.size == 1 else int(np.random.choice(q_idx.size, p=q_pr))
-        host_draft = int(q_idx[pick])
-    on_device = (not greedy) and 0 < int(top_k) <= _TOP_CAP
     runtime.session.begin()
     try:
         if host_draft is None:
@@ -116,12 +101,16 @@ def paired_step(
             _argmax_at(runtime, runtime.logits, 1)
             if not _penalized(presence, seen, banned, frequency, counts):
                 _argmax_at(runtime, runtime.span_logits, 2)
-        elif on_device and _stage_adjust(
-            runtime, runtime.logits, presence, seen, banned, frequency, counts
-        ):
-            _stage_top(runtime, runtime.logits, int(top_k))
         else:
-            on_device = False
+            _stage_adjust(runtime, runtime.logits, presence, seen, banned, frequency, counts)
+            _stage_top(runtime, runtime.logits, k, runtime.span_top_v, runtime.span_top_i)
+            _accept(
+                runtime,
+                int(host_draft),
+                k,
+                temperature,
+                top_p,
+            )
         runtime.session.commit()
     except Exception:
         runtime.session.abort()
@@ -130,8 +119,8 @@ def paired_step(
     runtime.session.wait_inflight()
     follow: int | None = None
     if host_draft is None:
-        raw = runtime.session.download(runtime._draft_ids, 12)
-        words = np.frombuffer(raw, dtype=np.uint32)
+        words = array.array("I")
+        words.frombytes(runtime.session.download(runtime._draft_ids, 12))
         draft_id = int(words[0])
         corrected = int(words[1])
         follow = int(words[2]) if _penalized(presence, seen, banned, frequency, counts) is False else None
@@ -139,19 +128,10 @@ def paired_step(
         accepted = corrected == draft_id
     else:
         draft_id = int(host_draft)
-        if on_device:
-            p_idx, p_pr = _read_top(runtime, int(top_k), temperature, top_p)
-        else:
-            target = penalized(
-                runtime.session.download_f32(runtime.logits, VOCAB),
-                presence,
-                seen,
-                banned,
-                frequency,
-                counts,
-            )
-            p_idx, p_pr = candidate_probs(target, temperature, top_p, top_k)
-        accepted, corrected = keep_draft(draft_id, p_idx, p_pr, q_idx, q_pr)
+        words = array.array("I")
+        words.frombytes(runtime.session.download(runtime._draft_ids, 8))
+        accepted = int(words[0]) == 1
+        corrected = int(words[1])
     if accepted and int(draft_id) in stop:
         _restore(runtime)
         _routes(runtime, 1)
@@ -168,13 +148,7 @@ def paired_step(
     runtime._mtp_snapped = False
     if greedy and follow is not None:
         return PairStep(True, int(draft_id), None, None, follow=follow)
-    if greedy:
-        bonus = runtime.session.download_f32(runtime.span_logits, VOCAB)
-        return PairStep(True, int(draft_id), None, bonus)
-    if on_device:
-        return PairStep(True, int(draft_id), None, None, device=True)
-    bonus = runtime.session.download_f32(runtime.span_logits, VOCAB)
-    return PairStep(True, int(draft_id), None, bonus)
+    return PairStep(True, int(draft_id), None, None, device=True)
 
 
 def sample_buffer(
@@ -190,26 +164,17 @@ def sample_buffer(
     counts: dict[int, int] | None,
 ) -> int:
     """Draw the next token from a logit buffer that is still on device."""
-    from qwen36_35b_a3b.speculate import candidate_probs, penalized
-
-    picked = _candidates(
-        runtime, scores, temperature, top_p, top_k, presence, seen, banned, frequency, counts
+    return runtime._sample_device(
+        temperature,
+        top_p,
+        top_k,
+        presence,
+        seen,
+        banned,
+        frequency,
+        counts,
+        scores=scores,
     )
-    if picked is None:
-        rows = penalized(
-            runtime.session.download_f32(scores, VOCAB),
-            presence,
-            seen,
-            banned,
-            frequency,
-            counts,
-        )
-        idx, probs = candidate_probs(rows, temperature, top_p, top_k)
-    else:
-        idx, probs = picked
-    if idx.size == 1:
-        return int(idx[0])
-    return int(idx[int(np.random.choice(idx.size, p=probs))])
 
 
 def _penalized(
@@ -220,31 +185,6 @@ def _penalized(
     counts: dict[int, int] | None,
 ) -> bool:
     return bool((presence and seen) or (frequency and counts) or banned)
-
-
-def _adjustments(
-    presence: float,
-    seen: set[int],
-    banned: set[int] | None,
-    frequency: float,
-    counts: dict[int, int] | None,
-) -> tuple[np.ndarray, np.ndarray]:
-    delta: dict[int, float] = {}
-    if presence and seen:
-        for token in seen:
-            delta[int(token)] = delta.get(int(token), 0.0) - float(presence)
-    if frequency and counts:
-        for token, count in counts.items():
-            if count > 0:
-                delta[int(token)] = delta.get(int(token), 0.0) - float(frequency) * float(count)
-    if banned:
-        for token in banned:
-            delta[int(token)] = float("-inf")
-    if not delta:
-        return np.zeros(0, dtype=np.uint32), np.zeros(0, dtype=np.float32)
-    ids = np.fromiter(delta.keys(), dtype=np.uint32, count=len(delta))
-    values = np.fromiter(delta.values(), dtype=np.float32, count=len(delta))
-    return ids, values
 
 
 def _poke(buf: Any, raw: bytes) -> None:
@@ -260,77 +200,109 @@ def _stage_adjust(
     banned: set[int] | None,
     frequency: float,
     counts: dict[int, int] | None,
-) -> bool:
-    ids, values = _adjustments(presence, seen, banned, frequency, counts)
-    if ids.size == 0:
-        return True
-    if ids.size > _PEN_CAP:
-        return False
-    _poke(runtime.span_pen_i, ids.tobytes())
-    _poke(runtime.span_pen_d, values.tobytes())
+) -> None:
+    from qwen36_35b_a3b.forward import penalty_updates
+
+    ids, values = penalty_updates(presence, seen, banned, frequency, counts)
+    if not ids:
+        return
+    if len(ids) > _PEN_CAP:
+        message = "penalty list does not fit"
+        raise RuntimeError(message)
+    _poke(runtime.span_pen_i, array.array("I", ids).tobytes())
+    _poke(runtime.span_pen_d, array.array("f", values).tobytes())
     runtime.session.encode(
         "logit_adjust",
         [(scores, 0), (runtime.span_pen_i, 0), (runtime.span_pen_d, 0)],
-        [_u32(int(ids.size))],
-        (int(ids.size), 1, 1),
-        (1, 1, 1),
+        [_u32(len(ids))],
+        ((len(ids) + 255) // 256, 1, 1),
+        (256, 1, 1),
     )
-    return True
 
 
-def _stage_top(runtime: Any, scores: Any, k: int) -> None:
+def _stage_top(runtime: Any, scores: Any, k: int, values: Any, ids: Any) -> None:
     runtime.session.encode(
         "topk_partial",
-        [(scores, 0), (runtime.span_top_v, 0), (runtime.span_top_i, 0)],
+        [(scores, 0), (values, 0), (ids, 0)],
         [_u32(VOCAB), _u32(int(k))],
-        (1, 1, 1),
-        (_TOP_THREADS, 1, 1),
+        (_PARTIAL_GROUPS, 1, 1),
+        (_MERGE_THREADS, 1, 1),
     )
 
 
-def _read_top(
-    runtime: Any, k: int, temperature: float, top_p: float
-) -> tuple[np.ndarray, np.ndarray]:
-    from qwen36_35b_a3b.speculate import merge_top
-
-    count = _TOP_THREADS * int(k)
-    values = np.frombuffer(
-        runtime.session.download(runtime.span_top_v, count * 4), dtype=np.float32
-    ).copy()
-    ids = np.frombuffer(
-        runtime.session.download(runtime.span_top_i, count * 4), dtype=np.uint32
-    )
-    return merge_top(values, ids, int(k), temperature, top_p)
+def _cap_k(top_k: int) -> int:
+    k = int(top_k)
+    if k <= 0 or k > _TOP_CAP:
+        return _TOP_CAP
+    return k
 
 
-def _candidates(
+def _draw_proposal(
     runtime: Any,
-    scores: Any,
     temperature: float,
     top_p: float,
-    top_k: int,
+    k: int,
     presence: float,
     seen: set[int],
     banned: set[int] | None,
     frequency: float,
     counts: dict[int, int] | None,
-) -> tuple[np.ndarray, np.ndarray] | None:
-    k = int(top_k)
-    if k <= 0 or k > _TOP_CAP:
-        return None
+) -> int:
+    """Draw the draft from the logit row and keep that top-k list."""
     runtime.session.begin()
     try:
-        if not _stage_adjust(runtime, scores, presence, seen, banned, frequency, counts):
-            runtime.session.abort()
-            return None
-        _stage_top(runtime, scores, k)
+        _stage_adjust(runtime, runtime.logits, presence, seen, banned, frequency, counts)
+        _stage_top(runtime, runtime.logits, k, runtime.span_q_v, runtime.span_q_i)
+        runtime.session.encode(
+            "sample_topk",
+            [
+                (runtime.span_q_v, 0),
+                (runtime.span_q_i, 0),
+                (runtime._sample_choice, 0),
+            ],
+            [
+                _u32(_PARTIAL_GROUPS),
+                _u32(_MERGE_THREADS),
+                _u32(k),
+                _f32(float(temperature)),
+                _f32(float(top_p)),
+                _u32(random.randrange(1 << 32)),
+            ],
+            (1, 1, 1),
+            (_MERGE_THREADS, 1, 1),
+        )
         runtime.session.commit()
     except Exception:
         runtime.session.abort()
         runtime.session.wait_inflight()
         raise
     runtime.session.wait_inflight()
-    return _read_top(runtime, k, temperature, top_p)
+    return int.from_bytes(runtime.session.download(runtime._sample_choice, 4), "little")
+
+
+def _accept(runtime: Any, draft: int, k: int, temperature: float, top_p: float) -> None:
+    runtime.session.encode(
+        "speculative_accept",
+        [
+            (runtime.span_q_v, 0),
+            (runtime.span_q_i, 0),
+            (runtime.span_top_v, 0),
+            (runtime.span_top_i, 0),
+            (runtime._draft_ids, 0),
+        ],
+        [
+            _u32(_PARTIAL_GROUPS),
+            _u32(_MERGE_THREADS),
+            _u32(k),
+            _f32(float(temperature)),
+            _f32(float(top_p)),
+            _u32(int(draft)),
+            _u32(random.randrange(1 << 32)),
+            _u32(random.randrange(1 << 32)),
+        ],
+        (1, 1, 1),
+        (_MERGE_THREADS, 1, 1),
+    )
 
 
 def _argmax_at(runtime: Any, scores: Any, slot: int) -> None:
@@ -581,22 +553,16 @@ def _keep_row(runtime: Any, row: int) -> None:
 
 
 def _routes(runtime: Any, tokens: int) -> None:
-    routes = runtime.routes
-    if routes is None or tokens < 1:
+    if getattr(runtime, "routes", None) is None or tokens < 1:
         return
-    raw0 = np.frombuffer(
-        runtime.session.download(runtime.span_route, _LAYERS * 8 * 4), dtype=np.uint32
-    ).reshape(_LAYERS, 1, 8)
-    if tokens == 1:
-        routes.note_decode(raw0)
-        routes.take_decode(1)
-        return
-    raw1 = np.frombuffer(
-        runtime.session.download(runtime.route_ids, _LAYERS * 8 * 4), dtype=np.uint32
-    ).reshape(_LAYERS, 1, 8)
-    routes.note_decode(np.concatenate((raw0, raw1), axis=1))
-    routes.take_decode(2)
+    runtime._count_routes(runtime.span_route, 1, prefill=False)
+    if tokens > 1:
+        runtime._count_routes(runtime.route_ids, 1, prefill=False)
 
 
 def _u32(value: int) -> bytes:
     return struct.pack("<I", value)
+
+
+def _f32(value: float) -> bytes:
+    return struct.pack("<f", value)

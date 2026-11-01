@@ -44,6 +44,7 @@ from qwen36_35b_a3b.forward import (
 )
 from qwen36_35b_a3b.tools import (
     StreamText,
+    completion_fields,
     function_has_parameters,
     parse_tool_calls,
     required_function,
@@ -103,6 +104,21 @@ def test_a_missing_record_mints_an_owner(tmp_path: Path) -> None:
     minted = held["owner"]
     assert minted.startswith("qwen36-35b-a3b:")
     assert minted != "qwen36-35b-a3b:7"
+
+
+def test_partial_grid_matches_the_span_launch() -> None:
+    from qwen36_35b_a3b.forward import _MERGE_THREADS, _PARTIAL_GROUPS, _PARTIAL_THREADS
+    from qwen36_35b_a3b.span import (
+        _MERGE_THREADS as span_merge,
+        _PARTIAL_GROUPS as span_groups,
+        _PARTIAL_THREADS as span_threads,
+    )
+
+    assert (span_merge, span_groups, span_threads) == (
+        _MERGE_THREADS,
+        _PARTIAL_GROUPS,
+        _PARTIAL_THREADS,
+    )
 
 
 def test_fp4_tie_picks_the_even_code() -> None:
@@ -386,6 +402,20 @@ def test_an_unset_thinking_budget_does_not_close_on_a_count() -> None:
     assert not budget.closed
 
 
+def test_a_stop_while_the_block_is_open_draws_the_close() -> None:
+    stops = {248046, 248044}
+    budget = ThinkBudget([2, 9, 3], 9, None)
+    assert budget.take(7, stops) == 7
+    assert budget.take(248046, stops) == 2
+    assert budget.forcing
+    assert not budget.closed
+    assert budget.take(4, stops) == 9
+    assert budget.take(4, stops) == 3
+    assert budget.closed
+    assert not budget.forcing
+    assert budget.take(248046, stops) == 248046
+
+
 def test_thinking_budget_forces_the_close_then_drops_that_token() -> None:
     budget = ThinkBudget([2, 9, 3], 9, 2)
     assert budget.take(4) == 4
@@ -456,6 +486,27 @@ def test_expert_offsets_place_an_fp8_image_on_a_128_byte_boundary() -> None:
     overlap = np.array([[0, 128]], dtype=np.uint64)
     with pytest.raises(ValueError, match="overlap"):
         expert_file_bytes(np.array([[4, 4]], dtype=np.uint8), overlap)
+
+
+def test_a_repeated_image_reuses_the_vision_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    from qwen36_35b_a3b import vision
+
+    calls: list[bytes] = []
+
+    def embed(runtime: object, blob: bytes, *, min_pixels: int, max_pixels: int) -> tuple:
+        del runtime, min_pixels, max_pixels
+        calls.append(blob)
+        return np.ones((4, 8), dtype=np.float32), 4, 4
+
+    monkeypatch.setattr(vision, "embed_image", embed)
+    vision._ROW_CACHE.clear()
+    runtime = SimpleNamespace(root="example-model")
+    first = vision._vision_row(runtime, b"png", min_pixels=1, max_pixels=2)
+    reloaded = SimpleNamespace(root="example-model")
+    second = vision._vision_row(reloaded, b"png", min_pixels=1, max_pixels=2)
+    assert calls == [b"png"]
+    assert second[0] is first[0]
+    assert second[1:] == (4, 4)
 
 
 def test_stream_delta_holds_a_partial_character() -> None:
@@ -551,6 +602,31 @@ def test_stream_chunks_carry_reasoning_then_the_reply() -> None:
         ("finish", "stop"),
         ("usage", 4),
     ]
+
+
+def test_an_open_think_block_stays_out_of_the_reply() -> None:
+    reasoning, reply = completion_fields("the draft reply", True)
+    assert reasoning == "the draft reply"
+    assert reply == ""
+    content, calls = parse_tool_calls(reply)
+    assert content == ""
+    assert calls == []
+
+
+def test_a_tool_call_before_the_close_ends_the_trace() -> None:
+    call = "<tool_call>\n<function=read_file>\n</function>\n</tool_call>"
+    reasoning, reply = completion_fields("Look\n" + call, True)
+    assert reasoning == "Look\n"
+    content, calls = parse_tool_calls(reply)
+    assert content is None
+    assert calls[0]["function"]["name"] == "read_file"
+    gate = StreamText(True)
+    parts: list[tuple[str, str]] = []
+    parts.extend(gate.push("Look\n"))
+    parts.extend(gate.push(call))
+    parts.extend(gate.finish())
+    assert ("reasoning", "Look\n") in parts
+    assert all("<tool_call>" not in text for _channel, text in parts)
 
 
 def test_a_tool_call_is_not_sent_as_a_chat_message() -> None:
@@ -1252,6 +1328,17 @@ def test_a_tight_budget_keeps_context_by_shrinking_the_atlas() -> None:
     assert fit_positions(budget, fixed, mode, limit, nothing, keep=layer) is None
 
 
+def test_penalty_updates_keep_one_delta_per_token() -> None:
+    from qwen36_35b_a3b.forward import penalty_updates
+
+    ids, deltas = penalty_updates(1.5, {4, 9}, {9}, 0.5, {4: 2})
+    assert ids == [4, 9] or set(ids) == {4, 9}
+    paired = dict(zip(ids, deltas, strict=True))
+    assert paired[4] == -1.5 - 1.0
+    assert paired[9] == float("-inf")
+    assert penalty_updates(0.0, set(), None, 0.0, None) == ([], [])
+
+
 def test_a_prefill_chunk_splits_experts_that_do_not_fit() -> None:
     from qwen36_35b_a3b.prefill import masked_expert_passes
 
@@ -1294,10 +1381,10 @@ def test_kv_widths_and_atlas_budget() -> None:
         assert max_position(root) == 262144
 
 
-def test_preserve_thinking_defaults_off_and_chat_kwargs_win() -> None:
+def test_preserve_thinking_defaults_on_and_the_request_wins() -> None:
     from qwen36_35b_a3b.chat import preserve_thinking
 
-    assert preserve_thinking({}, {}) is False
+    assert preserve_thinking({}, {}) is True
     assert preserve_thinking({}, {"preserve_thinking": True}) is True
     assert preserve_thinking({}, {"preserve_thinking": False}) is False
     assert (
@@ -1315,7 +1402,24 @@ def test_preserve_thinking_defaults_off_and_chat_kwargs_win() -> None:
         is True
     )
     assert preserve_thinking({"chat_template_kwargs": {}}, {"preserve_thinking": True}) is True
-    assert preserve_thinking({"preserve_thinking": True}, {}) is False
+    assert preserve_thinking({"preserve_thinking": True}, {}) is True
+    assert preserve_thinking({"preserve_thinking": False}, {"preserve_thinking": True}) is False
+    assert (
+        preserve_thinking(
+            {
+                "preserve_thinking": True,
+                "chat_template_kwargs": {"preserve_thinking": False},
+            },
+            {},
+        )
+        is True
+    )
+    try:
+        preserve_thinking({"preserve_thinking": "true"}, {})
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("preserve_thinking must be true or false")
 
 
 def test_historical_reasoning_follows_the_preserve_setting() -> None:

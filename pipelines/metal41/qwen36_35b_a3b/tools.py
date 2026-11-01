@@ -281,12 +281,25 @@ class StreamText:
         return [(channel, shown)] if shown else []
 
     def _push_reasoning(self) -> list[tuple[str, str]]:
-        at = self._held.find(_THINK_CLOSE)
-        if at < 0:
-            keep = _held_suffix(self._held, _THINK_CLOSE)
+        end_at = self._held.find(_THINK_CLOSE)
+        tool_at = self._held.find(_TOOL_OPEN)
+        if tool_at >= 0 and (end_at < 0 or tool_at < end_at):
+            reasoning = self._held[:tool_at]
+            rest = self._held[tool_at:]
+            self._held = ""
+            self._reasoning = False
+            out = self._show("reasoning", reasoning, final=True) if reasoning else self._flush_escape()
+            out.extend(self.push(rest))
+            return out
+        if end_at < 0:
+            keep = max(
+                _held_suffix(self._held, _THINK_CLOSE),
+                _held_suffix(self._held, _TOOL_OPEN),
+            )
             emit = self._held[:-keep] if keep else self._held
             self._held = self._held[-keep:] if keep else ""
             return self._show("reasoning", emit) if emit else []
+        at = end_at
         reasoning = self._held[:at]
         rest = self._held[at + len(_THINK_CLOSE) :]
         self._held = ""
@@ -324,3 +337,22 @@ def split_thinking(text: str, thinking: bool) -> tuple[str, str]:
     if at < 0:
         return text, ""
     return text[:at], text[at + len(marker) :].lstrip("\n")
+
+
+def completion_fields(text: str, thinking: bool) -> tuple[str, str]:
+    """Reasoning and the reply span a Chat Completions message is built from.
+
+    Thinking on, the reply starts after ``</think>``. A ``<tool_call>`` before
+    that close ends the trace, and the call is the reply span. With neither
+    marker the reply span is empty. The trace is not copied into the reply.
+    """
+    if not thinking:
+        return "", text
+    marker = "</think>"
+    at = text.find(marker)
+    if at >= 0:
+        return text[:at], text[at + len(marker) :].lstrip("\n")
+    tool = text.find(_TOOL_OPEN)
+    if tool >= 0:
+        return text[:tool], text[tool:]
+    return text, ""

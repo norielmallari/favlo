@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import array
+import struct
+from typing import Any
+
 import numpy as np
 
 from qwen36_35b_a3b.formats import (
@@ -1337,6 +1341,229 @@ def check_i8_prefill(session: Session) -> None:
         _close(f"{kind} int8 tile", got, expect, rtol=1e-5, atol=1e-4)
 
 
+def check_fill_rope(session: Session) -> None:
+    rope = session.zeros(4 * 3 * 4)
+    session.dispatch(
+        "fill_rope",
+        [rope],
+        [struct.pack("<I", 5), struct.pack("<I", 4)],
+        (1, 1, 1),
+        (32, 1, 1),
+    )
+    raw = array.array("I")
+    raw.frombytes(session.download(rope, 4 * 3 * 4))
+    assert list(raw) == [5, 5, 5, 6, 6, 6, 7, 7, 7, 8, 8, 8]
+
+
+def check_sample_topk(session: Session) -> None:
+    """One finite candidate wins. The padded lanes are negative infinity."""
+    k = 1
+    slots = 256 * k
+    values = array.array("f", [-float("inf")] * slots)
+    ids = array.array("I", [0] * slots)
+    values[0] = 4.0
+    ids[0] = 17
+    top_v = session.zeros(slots * 4)
+    top_i = session.zeros(slots * 4)
+    chosen = session.zeros(4)
+    memoryview(top_v.contents().as_buffer(slots * 4))[:] = values.tobytes()
+    memoryview(top_i.contents().as_buffer(slots * 4))[:] = ids.tobytes()
+    session.dispatch(
+        "sample_topk",
+        [top_v, top_i, chosen],
+        [
+            struct.pack("<I", slots),
+            struct.pack("<I", 1),
+            struct.pack("<I", k),
+            struct.pack("<f", 1.0),
+            struct.pack("<f", 0.95),
+            struct.pack("<I", 0),
+        ],
+        (1, 1, 1),
+        (256, 1, 1),
+    )
+    got = int.from_bytes(session.download(chosen, 4), "little")
+    assert got == 17
+
+
+def check_partial_sample(session: Session) -> None:
+    """The partial grid and the merge agree on the winning id."""
+    from qwen36_35b_a3b.forward import _MERGE_THREADS, _PARTIAL_GROUPS, _PARTIAL_THREADS
+
+    def draw(scores: array.array, k: int, pick: int) -> int:
+        logits = session.zeros(len(scores) * 4)
+        values = session.zeros(_PARTIAL_THREADS * k * 4)
+        ids = session.zeros(_PARTIAL_THREADS * k * 4)
+        chosen = session.zeros(4)
+        memoryview(logits.contents().as_buffer(len(scores) * 4))[:] = scores.tobytes()
+        session.dispatch(
+            "topk_partial",
+            [logits, values, ids],
+            [struct.pack("<I", len(scores)), struct.pack("<I", k)],
+            (_PARTIAL_GROUPS, 1, 1),
+            (_MERGE_THREADS, 1, 1),
+        )
+        session.dispatch(
+            "sample_topk",
+            [values, ids, chosen],
+            [
+                struct.pack("<I", _PARTIAL_GROUPS),
+                struct.pack("<I", _MERGE_THREADS),
+                struct.pack("<I", k),
+                struct.pack("<f", 1.0),
+                struct.pack("<f", 1.0),
+                struct.pack("<I", pick),
+            ],
+            (1, 1, 1),
+            (_MERGE_THREADS, 1, 1),
+        )
+        return int.from_bytes(session.download(chosen, 4), "little")
+
+    wide = array.array("f", [-1000.0] * 128)
+    wide[40] = 9.0
+    wide[10] = 1.0
+    assert draw(wide, 4, 0) == 40
+    tied = array.array("f", [-1000.0] * 128)
+    tied[40] = 5.0
+    tied[10] = 5.0
+    assert draw(tied, 1, 0) == 10
+    assert draw(tied, 2, 0xFFFFFFFF) == 40
+
+
+def check_count_routes(session: Session) -> None:
+    ids = array.array("I", [0] * 40 * 8)
+    ids[0] = 3
+    ids[1] = 3
+    buf = session.zeros(40 * 8 * 4)
+    hist = session.zeros(40 * 256 * 4)
+    tokens = session.zeros(4)
+    memoryview(buf.contents().as_buffer(40 * 8 * 4))[:] = ids.tobytes()
+    session.dispatch(
+        "count_routes",
+        [buf, hist, tokens],
+        [struct.pack("<I", 40), struct.pack("<I", 1), struct.pack("<I", 8)],
+        (2, 1, 1),
+        (256, 1, 1),
+    )
+    counted = array.array("I")
+    counted.frombytes(session.download(tokens, 4))
+    hits = array.array("I")
+    hits.frombytes(session.download(hist, 256 * 4))
+    assert int(counted[0]) == 1
+    assert int(hits[3]) == 2
+
+
+def check_speculative_accept(session: Session) -> None:
+    """Identical one-id lists keep the draft. Disjoint lists redraw the target."""
+    slots = 256
+    q_values = array.array("f", [-float("inf")] * slots)
+    q_ids = array.array("I", [0] * slots)
+    p_values = array.array("f", [-float("inf")] * slots)
+    p_ids = array.array("I", [0] * slots)
+    q_values[0] = 3.0
+    q_ids[0] = 7
+    p_values[0] = 3.0
+    p_ids[0] = 7
+    buffers = _top_pair(session, q_values, q_ids, p_values, p_ids)
+    decision = session.zeros(8)
+    _accept(session, buffers, decision, draft=7, draw_keep=0, draw_resid=0)
+    words = array.array("I")
+    words.frombytes(session.download(decision, 8))
+    assert int(words[0]) == 1 and int(words[1]) == 7
+    p_ids[0] = 9
+    buffers = _top_pair(session, q_values, q_ids, p_values, p_ids)
+    _accept(session, buffers, decision, draft=7, draw_keep=0, draw_resid=0)
+    words = array.array("I")
+    words.frombytes(session.download(decision, 8))
+    assert int(words[0]) == 0 and int(words[1]) == 9
+
+
+def _top_pair(
+    session: Session,
+    q_values: array.array,
+    q_ids: array.array,
+    p_values: array.array,
+    p_ids: array.array,
+) -> list[Any]:
+    slots = len(q_values)
+    buffers = [session.zeros(slots * 4) for _ in range(4)]
+    blobs = (q_values, q_ids, p_values, p_ids)
+    for buf, blob in zip(buffers, blobs, strict=True):
+        memoryview(buf.contents().as_buffer(slots * 4))[:] = blob.tobytes()
+    return buffers
+
+
+def _accept(
+    session: Session,
+    buffers: list[Any],
+    decision: Any,
+    *,
+    draft: int,
+    draw_keep: int,
+    draw_resid: int,
+) -> None:
+    slots = 256
+    session.dispatch(
+        "speculative_accept",
+        [*buffers, decision],
+        [
+            struct.pack("<I", slots),
+            struct.pack("<I", 1),
+            struct.pack("<I", 1),
+            struct.pack("<f", 1.0),
+            struct.pack("<f", 0.95),
+            struct.pack("<I", draft),
+            struct.pack("<I", draw_keep),
+            struct.pack("<I", draw_resid),
+        ],
+        (1, 1, 1),
+        (256, 1, 1),
+    )
+
+
+def check_copy_rope(session: Session) -> None:
+    length = 4
+    table = array.array("I", [0] * (3 * length))
+    for axis in range(3):
+        for pos in range(length):
+            table[axis * length + pos] = 10 * axis + pos
+    buf = session.zeros(3 * length * 4)
+    rope = session.zeros(2 * 3 * 4)
+    memoryview(buf.contents().as_buffer(3 * length * 4))[:] = table.tobytes()
+    session.dispatch(
+        "copy_rope",
+        [buf, rope],
+        [struct.pack("<I", 1), struct.pack("<I", 2), struct.pack("<I", length)],
+        (1, 1, 1),
+        (32, 1, 1),
+    )
+    got = array.array("I")
+    got.frombytes(session.download(rope, 2 * 3 * 4))
+    assert list(got) == [1, 11, 21, 2, 12, 22]
+
+
+def check_splice_rows(session: Session) -> None:
+    width = 4
+    rows = array.array("f", [1.0, 2.0, 3.0, 4.0])
+    index = array.array("I", [0xFFFFFFFF, 0])
+    hidden = session.zeros(2 * width * 4)
+    row_buf = session.zeros(width * 4)
+    index_buf = session.zeros(8)
+    memoryview(row_buf.contents().as_buffer(width * 4))[:] = rows.tobytes()
+    memoryview(index_buf.contents().as_buffer(8))[:] = index.tobytes()
+    session.dispatch(
+        "splice_rows",
+        [row_buf, index_buf, hidden],
+        [struct.pack("<I", 0), struct.pack("<I", 2), struct.pack("<I", width)],
+        (1, 1, 1),
+        (32, 1, 1),
+    )
+    got = array.array("f")
+    got.frombytes(session.download(hidden, 2 * width * 4))
+    assert list(got[:width]) == [0.0, 0.0, 0.0, 0.0]
+    assert list(got[width:]) == [1.0, 2.0, 3.0, 4.0]
+
+
 CHECKS = (
     ("fp4 tile", check_fp4_tile),
     ("fp8 tile", check_fp8_tile),
@@ -1366,6 +1593,13 @@ CHECKS = (
     ("moe group", check_moe_group),
     ("grouped expert", check_grouped_expert),
     ("fp8 expert", check_fp8_expert),
+    ("fill rope", check_fill_rope),
+    ("sample topk", check_sample_topk),
+    ("partial sample", check_partial_sample),
+    ("count routes", check_count_routes),
+    ("speculative accept", check_speculative_accept),
+    ("copy rope", check_copy_rope),
+    ("splice rows", check_splice_rows),
 )
 
 

@@ -4,12 +4,16 @@ The patch embed is the flattened Conv3d. Position rows are a bilinear sample of
 the 48 by 48 table, then reordered into 2 by 2 merge blocks. Each block is
 LayerNorm, full attention, and a tanh GELU MLP. The merger LayerNorms each
 patch, concatenates the block, and applies erf GELU. The language prefill
-overwrites the expanded image-pad rows with that output.
+overwrites the expanded image-pad rows with that output. An image this
+process already embedded is reused, so a later turn does not run the tower
+again, including after the language model is loaded again.
 """
 
 from __future__ import annotations
 
+import array
 import base64
+import hashlib
 import ipaddress
 import json
 import socket
@@ -320,10 +324,55 @@ def expand_image_tokens(
     return out, spans
 
 
+def release_vision(runtime: Any) -> None:
+    """Drop the device copy of the last image rows and position table."""
+    rows = getattr(runtime, "_vision_rows", None)
+    index = getattr(runtime, "_vision_index", None)
+    rope = getattr(runtime, "_rope_device", None)
+    runtime._vision_rows = None
+    runtime._vision_index = None
+    runtime._rope_device = None
+    runtime._rope_host = None
+    runtime._rope_length = 0
+    free = getattr(runtime, "_free_device", None)
+    buffers = [buf for buf in (rows, index, rope) if buf is not None]
+    if buffers and callable(free):
+        free(buffers)
+
+
+def _install_vision(
+    runtime: Any,
+    expanded: list[int],
+    spans: list[int],
+    rows: list[np.ndarray],
+    positions: np.ndarray,
+) -> None:
+    """Upload vision rows and the axis-major position table once for this prompt."""
+    release_vision(runtime)
+    blob = bytearray()
+    index = array.array("I", [0xFFFFFFFF] * len(expanded))
+    slot = 0
+    for start, embedded in zip(spans, rows, strict=True):
+        flat = np.ascontiguousarray(embedded, dtype=np.float32)
+        blob += flat.tobytes()
+        for offset in range(int(flat.shape[0])):
+            index[start + offset] = slot
+            slot += 1
+    packed = np.ascontiguousarray(positions, dtype=np.uint32)
+    runtime._vision_rows = runtime.session.upload(bytes(blob))
+    runtime._vision_index = runtime.session.upload(index.tobytes())
+    runtime._rope_device = runtime.session.upload(packed.tobytes())
+    host = array.array("I")
+    host.frombytes(packed.tobytes())
+    runtime._rope_host = host
+    runtime._rope_length = int(packed.shape[1])
+
+
 def prepare_prompt(runtime: Any, messages: list[dict[str, Any]], ids: list[int]) -> list[int]:
     """Run the tower for each image and remember the rows prefill must overwrite."""
     blobs = _image_blobs(messages)
     if not blobs:
+        release_vision(runtime)
         runtime._vision_at = None
         runtime._rope_positions = None
         runtime._rope_delta = 0
@@ -334,7 +383,7 @@ def prepare_prompt(runtime: Any, messages: list[dict[str, Any]], ids: list[int])
     lengths: list[int] = []
     grids: list[tuple[int, int]] = []
     for blob, low, high in blobs:
-        embedded, grid_h, grid_w = embed_image(
+        embedded, grid_h, grid_w = _vision_row(
             runtime, blob, min_pixels=low, max_pixels=high
         )
         merged_h = grid_h // MERGE
@@ -356,11 +405,44 @@ def prepare_prompt(runtime: Any, messages: list[dict[str, Any]], ids: list[int])
     )
     runtime._rope_positions = positions
     runtime._rope_delta = delta
+    _install_vision(runtime, expanded, spans, rows, positions)
     if expanded and (len(expanded) - 1) in table:
         message = "the last prompt token is an image pad"
         raise RuntimeError(message)
     runtime._vision_at = table
     return expanded
+
+
+_ROW_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, int, int]] = {}
+_ROW_LIMIT = 8
+
+
+def _vision_row(
+    runtime: Any,
+    blob: bytes,
+    *,
+    min_pixels: int,
+    max_pixels: int,
+) -> tuple[np.ndarray, int, int]:
+    """The merged rows for these bytes. A repeat reuses the stored rows."""
+    key = (
+        str(getattr(runtime, "root", "")),
+        hashlib.sha256(blob).digest(),
+        int(min_pixels),
+        int(max_pixels),
+    )
+    cached = _ROW_CACHE.get(key)
+    if cached is not None:
+        embedded, grid_h, grid_w = cached
+        _note(runtime, f"vision cache {embedded.shape[0]}")
+        return embedded, grid_h, grid_w
+    embedded, grid_h, grid_w = embed_image(
+        runtime, blob, min_pixels=min_pixels, max_pixels=max_pixels
+    )
+    _ROW_CACHE[key] = (embedded, grid_h, grid_w)
+    while len(_ROW_CACHE) > _ROW_LIMIT:
+        _ROW_CACHE.pop(next(iter(_ROW_CACHE)))
+    return embedded, grid_h, grid_w
 
 
 def embed_image(
