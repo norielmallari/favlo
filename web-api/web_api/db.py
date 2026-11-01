@@ -199,9 +199,11 @@ CREATE TABLE IF NOT EXISTS global_skill (
 
 LOCAL_PROVIDER_ID = "provider_local"
 LOCAL_BASE_URL = "http://127.0.0.1:8129/v1"
+LOCAL_MCP_URL = "http://127.0.0.1:8129/mcp"
 FAVLO_AGENT_ID = "agent_favlo"
 FAVLO_CHANNEL_ID = "channel_favlo"
 FAVLO_SESSION_ID = "session_favlo"
+FAVLO_MCP_ID = "mcp_favlo"
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -350,6 +352,7 @@ def migrate(conn: sqlite3.Connection) -> None:
         )
     _seed_favlo(conn)
     _seed_config_group(conn)
+    _seed_favlo_mcp(conn)
     _drop_session_clear(conn)
     skill_columns = {row[1] for row in conn.execute("PRAGMA table_info(global_skill)")}
     if skill_columns and "add_by_default" not in skill_columns:
@@ -409,6 +412,31 @@ def _seed_config_group(conn: sqlite3.Connection) -> None:
             (FAVLO_AGENT_ID, GROUP_ID),
         )
     conn.execute("INSERT INTO meta (key, value) VALUES ('favlo_config_seed', '1')")
+
+
+def _seed_favlo_mcp(conn: sqlite3.Connection) -> None:
+    """Attach the local listener as Favlo media once. A later choice stays."""
+    marked = conn.execute("SELECT key FROM meta WHERE key = 'favlo_mcp_seed'").fetchone()
+    if marked is not None:
+        return
+    exists = conn.execute("SELECT id FROM agent WHERE id = ?", (FAVLO_AGENT_ID,)).fetchone()
+    if exists is not None:
+        already = conn.execute(
+            "SELECT id FROM mcp_server WHERE agent_id = ? AND name = ?",
+            (FAVLO_AGENT_ID, "Favlo media"),
+        ).fetchone()
+        if already is None:
+            conn.execute(
+                """
+                INSERT INTO mcp_server (
+                    id, agent_id, name, transport, command, url, enabled,
+                    status, status_message, revision, group_switches
+                )
+                VALUES (?, ?, 'Favlo media', 'http', '', ?, 1, 'unchecked', '', 1, '{}')
+                """,
+                (FAVLO_MCP_ID, FAVLO_AGENT_ID, LOCAL_MCP_URL),
+            )
+    conn.execute("INSERT INTO meta (key, value) VALUES ('favlo_mcp_seed', '1')")
 
 
 def _seed_global_skills(conn: sqlite3.Connection) -> None:

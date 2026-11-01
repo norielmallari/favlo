@@ -78,6 +78,27 @@ def test_the_default_agent_is_seeded_once(tmp_path: Path) -> None:
     assert names.count("Favlo") == 1
 
 
+def test_favlo_media_mcp_is_seeded_once(tmp_path: Path) -> None:
+    from web_api.db import FAVLO_AGENT_ID, FAVLO_MCP_ID, LOCAL_MCP_URL
+    from web_api.store import Store
+
+    path = tmp_path / "app.db"
+    first = Store(path)
+    servers = first.mcp_servers()
+    first.close()
+    assert len(servers) == 1
+    assert servers[0]["id"] == FAVLO_MCP_ID
+    assert servers[0]["agent_id"] == FAVLO_AGENT_ID
+    assert servers[0]["name"] == "Favlo media"
+    assert servers[0]["transport"] == "http"
+    assert servers[0]["url"] == LOCAL_MCP_URL
+    assert servers[0]["enabled"] is True
+    second = Store(path)
+    again = second.mcp_servers()
+    second.close()
+    assert [row["id"] for row in again] == [FAVLO_MCP_ID]
+
+
 def test_session_commands_stay_on_the_session_that_sent_them(tmp_path: Path) -> None:
     from web_api.db import FAVLO_SESSION_ID
     from web_api.session_commands import ARCHIVE_CUE

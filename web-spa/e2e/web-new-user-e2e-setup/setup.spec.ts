@@ -39,6 +39,21 @@ test('a new install seeds Favlo and answers the first chat', async ({ page }) =>
   const providers = await read<{ providers: Provider[] }>('/providers');
   const local = providers.providers.find((provider) => provider.id === 'provider_local');
   expect(local?.base_url).toBe('http://127.0.0.1:8129/v1');
+  const chosen = local?.models.find((row) => row.id === settings.default_model_id);
+  if (local?.models.some((row) => row.model_id === 'spark-x26-1-7b:high')) {
+    expect(chosen?.model_id).toBe('spark-x26-1-7b:high');
+  }
+  const mcp = await read<{ servers: McpServer[] }>('/mcp-servers');
+  expect(mcp.servers).toEqual([
+    expect.objectContaining({
+      id: 'mcp_favlo',
+      agent_id: 'agent_favlo',
+      name: 'Favlo media',
+      transport: 'http',
+      url: 'http://127.0.0.1:8129/mcp',
+      enabled: true,
+    }),
+  ]);
 
   const catalog = await read<{ skills: Skill[] }>('/global-skills');
   const names = catalog.skills.map((skill) => skill.name).sort();
@@ -93,5 +108,13 @@ async function liveModels(): Promise<string[]> {
 
 type Agent = { id: string; name: string; persona: string; tool_groups: string[] };
 type Channel = { id: string; name: string; agent_id: string; session_id: string };
-type Provider = { id: string; base_url: string };
+type Provider = { id: string; base_url: string; models: { id: string; model_id: string }[] };
+type McpServer = {
+  id: string;
+  agent_id: string;
+  name: string;
+  transport: string;
+  url: string;
+  enabled: boolean;
+};
 type Skill = { name: string; add_by_default?: boolean; agent_id?: string };

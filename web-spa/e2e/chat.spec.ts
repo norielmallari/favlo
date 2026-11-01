@@ -70,15 +70,9 @@ test('two agent channels keep separate conversations', async ({ page }) => {
 
   await page.getByRole('tab', { name: 'MCP' }).click();
   await expect(page.getByLabel('MCP list')).toBeVisible();
-  await expect(page.getByText('No MCP servers')).toBeVisible();
-  await page.getByRole('button', { name: 'New MCP' }).click();
-  await page.getByRole('textbox', { name: 'MCP name' }).fill('Favlo media');
-  await page.getByRole('radio', { name: 'HTTP' }).click();
-  await page.getByRole('textbox', { name: 'URL' }).fill('http://127.0.0.1:8129/mcp');
-  const createMcp = page.getByRole('button', { name: 'Create MCP' });
-  await onScreen(createMcp);
-  await createMcp.click();
   await expect(page.getByLabel('MCP list').getByRole('button', { name: 'Favlo media' })).toBeVisible();
+  await page.getByLabel('MCP list').getByRole('button', { name: 'Favlo media' }).click();
+  await expect(page.getByRole('textbox', { name: 'URL' })).toHaveValue('http://127.0.0.1:8129/mcp');
   await page.getByRole('button', { name: 'Test connection' }).click();
   await expect(page.getByText('Connection succeeded')).toBeVisible();
   await expect(page.getByText('generate_image', { exact: true })).toBeVisible();

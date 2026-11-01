@@ -39,6 +39,7 @@ The script is `web-spa/e2e/<feature>.spec.ts`. A fresh install uses `e2e/web-new
 | Empty conversation | `e2e/empty.spec.ts` |
 | Working | `e2e/working.spec.ts` |
 | Thinking | `e2e/thinking.spec.ts` |
+| 35B thinking chat through serve | `e2e/thinking-serve.spec.ts` |
 | Tool call | `e2e/tool-call.spec.ts` |
 | Markdown | `e2e/markdown.spec.ts` |
 | Stored media | `e2e/media.spec.ts` |
