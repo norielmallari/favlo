@@ -1001,28 +1001,29 @@ def test_close_confirms_the_bytes_it_sweeps(monkeypatch: pytest.MonkeyPatch) -> 
     assert seen["nbytes"] == 4096
 
 
-def test_open_runtime_forwards_the_listener_owner(monkeypatch) -> None:
+def test_open_runtime_sets_the_ledger_cap(monkeypatch) -> None:
     from wan22_i2v import runtime as runtime_mod
 
     seen: dict[str, object] = {}
+    caps: list[object] = []
 
     def fake(
         path: Path,
         console: object = None,
         *,
         owner: str | None = None,
-        max_memory: object = None,
         parts: object = None,
     ) -> str:
         del path, console, parts
         seen["owner"] = owner
-        seen["cap"] = max_memory
         return "runtime"
 
     monkeypatch.setattr(runtime_mod, "Runtime", fake)
+    monkeypatch.setattr(runtime_mod.memory, "set_max_memory", caps.append)
     opened = runtime_mod.open_runtime(Path("record"), owner="wan22-i2v:4", max_memory="16GiB")
     assert opened == "runtime"
-    assert seen == {"owner": "wan22-i2v:4", "cap": "16GiB"}
+    assert seen == {"owner": "wan22-i2v:4"}
+    assert caps == ["16GiB"]
 
 
 def test_missing_record_raises_before_the_device(tmp_path: Path) -> None:
@@ -1074,22 +1075,21 @@ def test_forward_scratch_grows_with_the_clip() -> None:
     assert separate > 0
 
 
-def test_room_subtracts_live_and_pending(monkeypatch) -> None:
+def test_room_reads_the_ledger(monkeypatch) -> None:
     from wan22_i2v import runtime as runtime_mod
 
     runtime = runtime_mod.Runtime.__new__(runtime_mod.Runtime)
-    runtime._memory_cap = 80
+
+    answers = [40, 90]
 
     class Ledger:
         @staticmethod
-        def budget() -> int:
-            return 100
-
-        live = 30
-        pending = 10
+        def room() -> int:
+            return answers.pop(0)
 
     monkeypatch.setattr(runtime_mod, "memory", Ledger())
     assert runtime._room() == 40
+    assert runtime._room() == 90
 
 
 def test_a_short_ledger_keeps_the_requested_clip(monkeypatch, tmp_path: Path) -> None:
@@ -1099,7 +1099,6 @@ def test_a_short_ledger_keeps_the_requested_clip(monkeypatch, tmp_path: Path) ->
     runtime.path = tmp_path
     runtime.high = tmp_path / "high"
     runtime.low = tmp_path / "low"
-    runtime._memory_cap = 1
     runtime.config = {"dim": 128, "ffn": 256, "text_len": 16, "text_dim": 32, "freq_dim": 16}
     monkeypatch.setattr(runtime, "_room", lambda: 1)
     lat_t, lat_h, lat_w, tokens = geometry(5, 320, 576)

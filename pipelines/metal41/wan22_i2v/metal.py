@@ -12,7 +12,7 @@ import Metal
 import numpy as np
 import objc
 
-from favlo.memory import memory
+from favlo.memory import device_buffer, memory
 from wan22_i2v.formats import INT8_TILE_N, K_ALIGN, TILE_M, TILE_N, LinearPack, pad_to
 
 
@@ -231,7 +231,7 @@ class Gpu:
         return buf
 
     def empty(self, nbytes: int) -> Any:
-        buf = memory.allocate(int(nbytes), owner=self._owner, zero=True)
+        buf = device_buffer(self._owner, int(nbytes), zero=True)
         self._owned.append(buf)
         return buf
 
@@ -644,7 +644,7 @@ class Gpu:
         return result
 
     def _alloc(self, nbytes: int) -> Any:
-        buf = memory.allocate(int(nbytes), owner=self._owner)
+        buf = device_buffer(self._owner, int(nbytes))
         self._owned.append(buf)
         return buf
 

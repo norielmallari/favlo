@@ -60,12 +60,10 @@ class Runtime:
         console: Any = None,
         *,
         owner: str | None = None,
-        max_memory: str | int | None = None,
         parts: Mapping[str, Path] | None = None,
     ) -> None:
         self.console = console
         self._owner = owner or f"wan22-i2v:{id(self)}"
-        self._memory_cap = _parse_memory(max_memory)
         self.path = Path(path)
         found = {name: Path(value) for name, value in (parts or {}).items()}
         self.high = found.get("high", self.path / "high")
@@ -552,7 +550,7 @@ class Runtime:
         need = vae_device_bytes(str(path.resolve())) + decode_peak_bytes(
             frames, height, width, lat_t, lat_h, lat_w, room
         )
-        self._require_room(need, frames, width, height)
+        self._require_room(need, frames, width, height, room=room)
 
     def _ledger_room(self) -> int:
         """Finish device work so ``pending`` does not shrink the decode budget."""
@@ -561,15 +559,22 @@ class Runtime:
             gpu.end()
         return self._room()
 
-    def _require_room(self, need: int, frames: int, width: int, height: int) -> None:
-        if need > self._ledger_room():
+    def _require_room(
+        self,
+        need: int,
+        frames: int,
+        width: int,
+        height: int,
+        *,
+        room: int | None = None,
+    ) -> None:
+        available = self._ledger_room() if room is None else room
+        if need > available:
             raise RuntimeError(f"scratch for {frames} frames at {width}x{height} does not fit")
 
     def _room(self) -> int:
-        ceiling = memory.budget()
-        if self._memory_cap is not None:
-            ceiling = min(ceiling, self._memory_cap)
-        return max(0, ceiling - memory.live - memory.pending)
+        """Bytes a new span may take. The serve ledger applies ``--max-memory``."""
+        return memory.room()
 
     def _sweep_owner(self) -> None:
         owner = getattr(self, "_owner", None)
@@ -676,7 +681,8 @@ def open_runtime(
     parts: Mapping[str, Path] | None = None,
 ) -> Runtime:
     del kv_cache, resident_percent
-    return Runtime(Path(path), console, owner=owner, max_memory=max_memory, parts=parts)
+    memory.set_max_memory(max_memory)
+    return Runtime(Path(path), console, owner=owner, parts=parts)
 
 
 def _umt5_dir(named: Path | None, record: Path) -> Path:
@@ -739,45 +745,6 @@ def resident_latent_frames(room: int, frames: int, height: int, width: int, lat_
 
 def _pixel_bytes(frames: int, height: int, width: int) -> int:
     return 3 * frames * height * width * 4
-
-
-def _parse_memory(text: str | int | None) -> int | None:
-    """``32GiB``, ``512MiB``, or a byte count. Empty leaves the ledger uncapped."""
-    if text is None or text == "":
-        return None
-    if isinstance(text, int):
-        if text < 1:
-            message = f"maximum memory {text} is not positive"
-            raise ValueError(message)
-        return text
-    raw = str(text).strip().replace("_", "")
-    suffix = ""
-    digits = raw
-    for ending, name in (
-        ("gib", "GiB"),
-        ("mib", "MiB"),
-        ("gb", "GiB"),
-        ("mb", "MiB"),
-        ("g", "GiB"),
-        ("m", "MiB"),
-    ):
-        if raw.lower().endswith(ending):
-            suffix = name
-            digits = raw[: -len(ending)]
-            break
-    try:
-        number = int(digits)
-    except ValueError as exc:
-        message = f"maximum memory {text} is not a byte count"
-        raise ValueError(message) from exc
-    if number < 1:
-        message = f"maximum memory {text} is not positive"
-        raise ValueError(message)
-    if suffix == "GiB":
-        return number << 30
-    if suffix == "MiB":
-        return number << 20
-    return number
 
 
 def _volume(gpu: Gpu, buf: Any, shape: tuple[int, ...]) -> np.ndarray:
