@@ -34,6 +34,9 @@ export type Agent = {
   name: string;
   persona: string;
   default_model_id: string | null;
+  enable_thinking?: boolean | null;
+  preserve_thinking?: boolean | null;
+  reasoning_effort?: string | null;
   revision: number;
   tool_groups: string[];
 };
@@ -377,6 +380,10 @@ export function SettingsScreen() {
     setDrawer(null);
   }
 
+  function replaceModels(id: string, models: Model[]) {
+    setProviders((rows) => rows.map((item) => (item.id === id ? { ...item, models } : item)));
+  }
+
   async function refreshModels() {
     if (provider == null) {
       return;
@@ -385,7 +392,7 @@ export function SettingsScreen() {
       const listed = await api<{ models: Model[]; message?: string }>(`/providers/${provider.id}/refresh`, {
         method: 'POST',
       });
-      setProviders((rows) => rows.map((item) => (item.id === provider.id ? { ...item, models: listed.models } : item)));
+      replaceModels(provider.id, listed.models);
       setStatus(listed.message ?? null);
       setError(null);
     } catch (caught) {
@@ -557,7 +564,7 @@ export function SettingsScreen() {
             </View>
           ) : null}
           {showDetails ? (
-            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 16, maxWidth: 720 }}>
+            <ScrollView style={{ flex: 1, width: '100%', minWidth: 0, maxWidth: '100%' }} contentContainerStyle={{ padding: 16, gap: 16, width: '100%', maxWidth: 720 }}>
               {!wide && catalog ? (
                 <IconButton icon="arrow-left" label="Back" accessibilityLabel="Back to list" onPress={() => setShowDetail(false)} background="transparent" border="transparent" color={palette.accent} />
               ) : null}
@@ -597,6 +604,7 @@ export function SettingsScreen() {
                       settings={settings}
                       onSuccess={setSaved}
                       onSaved={rememberAgent}
+                      onModels={replaceModels}
                     />
                   ) : agent != null ? (
                     <AgentForm
@@ -608,6 +616,7 @@ export function SettingsScreen() {
                       onSuccess={setSaved}
                       onSaved={rememberAgent}
                       onDeleted={forgetAgent}
+                      onModels={replaceModels}
                     />
                   ) : (
                     <Text style={{ color: palette.textPrimary, fontSize: 16 }}>Choose an agent.</Text>
@@ -705,7 +714,7 @@ export function SettingsScreen() {
             </View>
           ) : null}
           {heartbeatDetail ? (
-            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 16, maxWidth: 720 }}>
+            <ScrollView style={{ flex: 1, width: '100%', minWidth: 0, maxWidth: '100%' }} contentContainerStyle={{ padding: 16, gap: 16, width: '100%', maxWidth: 720 }}>
               {!wide ? (
                 <IconButton icon="arrow-left" label="Back" accessibilityLabel="Back to heartbeats" onPress={() => setHeartbeatPane('list')} background="transparent" border="transparent" color={palette.accent} />
               ) : null}
@@ -763,7 +772,7 @@ export function SettingsScreen() {
             </View>
           ) : null}
           {skillDetail ? (
-            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 16, maxWidth: 720 }}>
+            <ScrollView style={{ flex: 1, width: '100%', minWidth: 0, maxWidth: '100%' }} contentContainerStyle={{ padding: 16, gap: 16, width: '100%', maxWidth: 720 }}>
               {!wide ? (
                 <IconButton icon="arrow-left" label="Back" accessibilityLabel="Back to skills" onPress={() => setGlobalPane('list')} background="transparent" border="transparent" color={palette.accent} />
               ) : null}
@@ -845,7 +854,7 @@ export function SettingsScreen() {
             </View>
           ) : null}
           {mcpDetail ? (
-            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 16, maxWidth: 720 }}>
+            <ScrollView style={{ flex: 1, width: '100%', minWidth: 0, maxWidth: '100%' }} contentContainerStyle={{ padding: 16, gap: 16, width: '100%', maxWidth: 720 }}>
               {!wide ? (
                 <IconButton icon="arrow-left" label="Back" accessibilityLabel="Back to MCP" onPress={() => setMcpPane('list')} background="transparent" border="transparent" color={palette.accent} />
               ) : null}
@@ -898,6 +907,7 @@ function McpForm({
   onSaved: (row: McpServer) => void;
 }) {
   const { palette } = useTheme();
+  const { height } = useWindowDimensions();
   const [name, setName] = useState(server?.name ?? '');
   const [transport, setTransport] = useState<'http' | 'stdio'>(server?.transport ?? 'http');
   const [url, setUrl] = useState(server?.url || (server == null ? 'http://127.0.0.1:8129/mcp' : ''));
@@ -961,8 +971,11 @@ function McpForm({
     }
   }
 
+  const fieldLimit = Math.max(240, height - 360);
+
   return (
-    <View style={{ gap: 8 }}>
+    <View style={{ width: '100%', maxWidth: '100%', minWidth: 0, gap: 8 }}>
+      <ScrollView style={{ maxHeight: fieldLimit }} contentContainerStyle={{ gap: 8 }}>
       <Text accessibilityRole="header" aria-level={2} style={heading(palette.textPrimary)}>{server?.name ?? 'New MCP'}</Text>
       <Text style={label(palette.textPrimary)}>Name</Text>
       <TextInput accessibilityLabel="MCP name" value={name} onChangeText={setName} style={fieldStyle(palette)} />
@@ -999,7 +1012,6 @@ function McpForm({
         </>
       )}
       <SettingSwitch label={enabledBox} value={enabled} onValueChange={setEnabled} />
-      <IconButton icon="zap" label="Test connection" onPress={() => void test()} background={palette.surface} border={palette.borderStrong} color={palette.textPrimary} />
       {notice ? <Text accessibilityLiveRegion="polite" style={{ color: palette.textPrimary, fontSize: 14 }}>{notice}</Text> : null}
       {groups.length > 0 ? <Text style={label(palette.textPrimary)}>Tools</Text> : null}
       {groups.map((group) => {
@@ -1019,6 +1031,8 @@ function McpForm({
           </View>
         );
       })}
+      </ScrollView>
+      <IconButton icon="zap" label="Test connection" onPress={() => void test()} background={palette.surface} border={palette.borderStrong} color={palette.textPrimary} />
       <IconButton
         icon={server == null ? 'plus' : 'check'}
         label={server == null ? 'Create MCP' : `Save ${server.name}`}
@@ -1029,6 +1043,25 @@ function McpForm({
       {error ? <Text accessibilityRole="alert" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text> : null}
     </View>
   );
+}
+
+const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
+
+function flagValue(value: boolean | null | undefined): string {
+  if (value == null) {
+    return '';
+  }
+  return value ? 'true' : 'false';
+}
+
+function flagBody(value: string): boolean | null {
+  if (value === 'true') {
+    return true;
+  }
+  if (value === 'false') {
+    return false;
+  }
+  return null;
 }
 
 function modelRow(providers: Provider[], rowId: string | null): Model | undefined {
@@ -1046,6 +1079,7 @@ export function AgentForm({
   onSuccess,
   onSaved,
   onDeleted,
+  onModels,
 }: {
   agent: Agent | null;
   groups: ToolGroup[];
@@ -1054,8 +1088,10 @@ export function AgentForm({
   onSuccess: (message: string) => void;
   onSaved: (agent: Agent) => void;
   onDeleted?: (agent: Agent) => void;
+  onModels?: (providerId: string, models: Model[]) => void;
 }) {
   const { palette } = useTheme();
+  const { height } = useWindowDimensions();
   const creating = agent == null;
   const current = modelRow(providers, agent?.default_model_id ?? settings?.default_model_id ?? null);
   const [name, setName] = useState(agent?.name ?? '');
@@ -1063,19 +1099,51 @@ export function AgentForm({
   const [providerId, setProviderId] = useState(
     current?.provider_id ?? providers.find((item) => item.id === 'provider_local')?.id ?? providers[0]?.id ?? '',
   );
-  const hosted = (providers.find((item) => item.id === providerId)?.models ?? []).filter((model) => model.enabled);
+  const [listed, setListed] = useState<Record<string, Model[]>>({});
+  const hosted = (listed[providerId] ?? providers.find((item) => item.id === providerId)?.models ?? []).filter(
+    (model) => model.enabled,
+  );
   const [modelId, setModelId] = useState(
     current != null && current.provider_id === providerId ? current.model_id : hosted[0]?.model_id ?? '',
   );
+  const [thinking, setThinking] = useState(flagValue(agent?.enable_thinking));
+  const [preserve, setPreserve] = useState(flagValue(agent?.preserve_thinking));
+  const [effort, setEffort] = useState(agent?.reasoning_effort ?? '');
   const [enabled, setEnabled] = useState(agent?.tool_groups ?? []);
   const [providerFocused, setProviderFocused] = useState(false);
   const [modelFocused, setModelFocused] = useState(false);
+  const [thinkingFocused, setThinkingFocused] = useState(false);
+  const [preserveFocused, setPreserveFocused] = useState(false);
+  const [effortFocused, setEffortFocused] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   function chooseProvider(next: string) {
     setProviderId(next);
-    const models = (providers.find((item) => item.id === next)?.models ?? []).filter((model) => model.enabled);
+    const models = (listed[next] ?? providers.find((item) => item.id === next)?.models ?? []).filter(
+      (model) => model.enabled,
+    );
     setModelId(models.some((model) => model.model_id === modelId) ? modelId : models[0]?.model_id ?? '');
+  }
+
+  async function refreshModels() {
+    if (providerId === '') {
+      return;
+    }
+    try {
+      const listedModels = await api<{ models: Model[]; message?: string }>(`/providers/${providerId}/refresh`, {
+        method: 'POST',
+      });
+      setListed((current) => ({ ...current, [providerId]: listedModels.models }));
+      onModels?.(providerId, listedModels.models);
+      const enabled = listedModels.models.filter((model) => model.enabled);
+      setModelId(enabled.some((model) => model.model_id === modelId) ? modelId : enabled[0]?.model_id ?? '');
+      setNotice(listedModels.message ?? 'Models refreshed');
+      setError(null);
+    } catch (caught) {
+      setNotice(null);
+      setError(caught instanceof Error ? caught.message : 'The models were not refreshed.');
+    }
   }
 
   async function remove() {
@@ -1104,6 +1172,9 @@ export function AgentForm({
             persona,
             default_model_id: modelRowId,
             tool_groups: enabled,
+            enable_thinking: flagBody(thinking),
+            preserve_thinking: flagBody(preserve),
+            reasoning_effort: effort || null,
           }),
         });
         onSuccess(`${created.agent.name} was created.`);
@@ -1118,6 +1189,9 @@ export function AgentForm({
           persona,
           default_model_id: modelRowId,
           tool_groups: enabled,
+          enable_thinking: flagBody(thinking),
+          preserve_thinking: flagBody(preserve),
+          reasoning_effort: effort || null,
         }),
       });
       onSuccess(`${name.trim() || agent.name} was saved.`);
@@ -1131,9 +1205,14 @@ export function AgentForm({
   const personaLabel = creating ? 'Persona' : `Persona for ${agent.name}`;
   const providerLabel = creating ? 'Provider' : `Provider for ${agent.name}`;
   const modelLabel = creating ? 'Model' : `Model for ${agent.name}`;
+  const thinkingLabel = creating ? 'Thinking' : `Thinking for ${agent.name}`;
+  const preserveLabel = creating ? 'Preserve thinking' : `Preserve thinking for ${agent.name}`;
+  const effortLabel = creating ? 'Reasoning effort' : `Reasoning effort for ${agent.name}`;
+  const fieldLimit = Math.max(240, height - 360);
 
   return (
-    <View style={{ gap: 8 }}>
+    <View style={{ width: '100%', maxWidth: '100%', minWidth: 0, gap: 8 }}>
+      <ScrollView style={{ maxHeight: fieldLimit }} contentContainerStyle={{ gap: 8 }}>
       <Text accessibilityRole="header" aria-level={2} style={heading(palette.textPrimary)}>{creating ? 'New agent' : agent.name}</Text>
       <Text style={label(palette.textPrimary)}>{creating ? 'Name' : nameLabel}</Text>
       <TextInput accessibilityLabel={nameLabel} value={name} onChangeText={setName} style={fieldStyle(palette)} />
@@ -1166,6 +1245,46 @@ export function AgentForm({
           <Picker.Item key={model.id} label={model.display_name} value={model.model_id} color={palette.textPrimary} />
         ))}
       </Picker>
+      <Text style={label(palette.textPrimary)}>{thinkingLabel}</Text>
+      <Picker
+        accessibilityLabel={thinkingLabel}
+        selectedValue={thinking}
+        onValueChange={(value) => setThinking(String(value))}
+        onFocus={() => setThinkingFocused(true)}
+        onBlur={() => setThinkingFocused(false)}
+        style={pickerStyle(palette, thinkingFocused)}
+      >
+        <Picker.Item label="Not set" value="" color={palette.textSecondary} />
+        <Picker.Item label="On" value="true" color={palette.textPrimary} />
+        <Picker.Item label="Off" value="false" color={palette.textPrimary} />
+      </Picker>
+      <Text style={label(palette.textPrimary)}>{preserveLabel}</Text>
+      <Picker
+        accessibilityLabel={preserveLabel}
+        selectedValue={preserve}
+        onValueChange={(value) => setPreserve(String(value))}
+        onFocus={() => setPreserveFocused(true)}
+        onBlur={() => setPreserveFocused(false)}
+        style={pickerStyle(palette, preserveFocused)}
+      >
+        <Picker.Item label="Not set" value="" color={palette.textSecondary} />
+        <Picker.Item label="On" value="true" color={palette.textPrimary} />
+        <Picker.Item label="Off" value="false" color={palette.textPrimary} />
+      </Picker>
+      <Text style={label(palette.textPrimary)}>{effortLabel}</Text>
+      <Picker
+        accessibilityLabel={effortLabel}
+        selectedValue={effort}
+        onValueChange={(value) => setEffort(String(value))}
+        onFocus={() => setEffortFocused(true)}
+        onBlur={() => setEffortFocused(false)}
+        style={pickerStyle(palette, effortFocused)}
+      >
+        <Picker.Item label="Not set" value="" color={palette.textSecondary} />
+        {EFFORTS.map((item) => (
+          <Picker.Item key={item} label={item} value={item} color={palette.textPrimary} />
+        ))}
+      </Picker>
       <Text style={label(palette.textPrimary)}>Tools</Text>
       {groups.map((group) => {
         const on = enabled.includes(group.id);
@@ -1178,10 +1297,19 @@ export function AgentForm({
             onValueChange={(next) =>
               setEnabled((current) => (next ? [...current, group.id] : current.filter((id) => id !== group.id)))
             }
-          />
+            />
         );
       })}
+      </ScrollView>
       <View style={buttonRow}>
+        <IconButton
+          icon="refresh-cw"
+          label="Refresh models"
+          onPress={() => void refreshModels()}
+          background={palette.surface}
+          border={palette.borderStrong}
+          color={palette.textPrimary}
+        />
         <IconButton
           icon={creating ? 'plus' : 'check'}
           label={creating ? 'Create agent' : `Save ${agent.name}`}
@@ -1200,6 +1328,9 @@ export function AgentForm({
           />
         ) : null}
       </View>
+      {notice ? (
+        <Text accessibilityLiveRegion="polite" style={{ color: palette.textPrimary, fontSize: 14 }}>{notice}</Text>
+      ) : null}
       {error ? <Text accessibilityRole="alert" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text> : null}
     </View>
   );
@@ -1404,7 +1535,7 @@ function SettingSwitch({
 }) {
   const { palette } = useTheme();
   return (
-    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, minHeight: 44 }}>
+    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, minHeight: 44, width: '100%', maxWidth: '100%' }}>
       <Text onPress={() => onValueChange(!value)} style={{ color: palette.textPrimary, fontSize: 16, flex: 1 }}>
         {label}
       </Text>
@@ -1446,6 +1577,9 @@ function pickerStyle(
   focused: boolean,
 ) {
   return {
+    width: '100%' as const,
+    maxWidth: '100%' as const,
+    minWidth: 0,
     minHeight: 44,
     borderWidth: 1,
     borderColor: palette.borderStrong,
@@ -1487,6 +1621,9 @@ function button(background: string, border?: string) {
 function fieldStyle(palette: { textPrimary: string; surface: string; borderStrong: string }) {
   return {
     ...textStyle('body', palette.textPrimary),
+    width: '100%' as const,
+    maxWidth: '100%' as const,
+    minWidth: 0,
     minHeight: 44,
     borderWidth: 1,
     borderColor: palette.borderStrong,

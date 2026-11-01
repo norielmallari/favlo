@@ -4,16 +4,226 @@ import { Platform, Text, View } from 'react-native';
 import { humanText, MessageBody } from '@/components/MessageBody';
 import { IconButton } from '@/components/IconButton';
 import { Thinking } from '@/components/Thinking';
+import { ToolCall, type ToolCallRecord } from '@/components/ToolCall';
 import { useTheme } from '@/theme/Theme';
 import { radius, space } from '@/theme/tokens';
-import { textStyle } from '@/theme/type';
+import { measureStyle, textStyle } from '@/theme/type';
 
-export type ChatMessage = { id: string; role: string; body: string; reasoning?: string };
+export type { ToolCallRecord };
+export type ChatMessage = {
+  id: string;
+  role: string;
+  body: string;
+  reasoning?: string;
+  toolCalls?: ToolCallRecord[];
+  trace?: StoredPart[];
+};
 export const LATEST_SLACK = 64;
 
-export function showsMessage(text?: string, reasoning?: string | null): boolean {
-  return Boolean(text) || Boolean(reasoning && reasoning.trim());
+export function readToolCalls(value: unknown): ToolCallRecord[] {
+  if (value == null || value === '') {
+    return [];
+  }
+  let raw = value;
+  if (typeof value === 'string') {
+    try {
+      raw = JSON.parse(value) as unknown;
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw.flatMap((item) => {
+    if (item == null || typeof item !== 'object') {
+      return [];
+    }
+    const row = item as { id?: unknown; name?: unknown; arguments?: unknown; result?: unknown };
+    if (typeof row.id !== 'string' || row.id === '') {
+      return [];
+    }
+    const call: ToolCallRecord = {
+      id: row.id,
+      name: typeof row.name === 'string' ? row.name : '',
+      arguments: typeof row.arguments === 'string' ? row.arguments : '',
+    };
+    if (typeof row.result === 'string' && row.result !== '') {
+      call.result = row.result;
+    }
+    return [call];
+  });
 }
+
+export function mergeToolCall(current: ToolCallRecord[], incoming: ToolCallRecord): ToolCallRecord[] {
+  const index = current.findIndex((item) => item.id === incoming.id);
+  if (index < 0) {
+    return [...current, incoming];
+  }
+  const prior = current[index];
+  const next = current.slice();
+  next[index] = {
+    id: incoming.id,
+    name: incoming.name || prior.name,
+    arguments: incoming.arguments,
+    result: incoming.result ?? prior.result,
+  };
+  return next;
+}
+
+export function toolCallDelta(agui?: {
+  id?: string;
+  name?: string;
+  arguments?: string;
+  result?: string;
+}): ToolCallRecord | null {
+  if (!agui?.id) {
+    return null;
+  }
+  return {
+    id: agui.id,
+    name: agui.name ?? '',
+    arguments: agui.arguments ?? '',
+    result: agui.result || undefined,
+  };
+}
+
+export type StoredPart =
+  | { kind: 'thinking'; text: string }
+  | { kind: 'tool'; call: ToolCallRecord }
+  | { kind: 'reply'; text: string };
+
+export type ReplyStep =
+  | { kind: 'thinking'; text: string; settled: boolean }
+  | { kind: 'tool'; call: ToolCallRecord; settled: boolean }
+  | { kind: 'reply'; text: string };
+
+function settleOpen(steps: ReplyStep[]): ReplyStep[] {
+  return steps.map((step) => (step.kind !== 'reply' && !step.settled ? { ...step, settled: true } : step));
+}
+
+export function noteReasoning(steps: ReplyStep[], delta: string): ReplyStep[] {
+  if (!delta) {
+    return steps;
+  }
+  const last = steps[steps.length - 1];
+  if (last?.kind === 'thinking' && !last.settled) {
+    const next = steps.slice();
+    next[next.length - 1] = { kind: 'thinking', text: last.text + delta, settled: false };
+    return next;
+  }
+  if (!delta.trim()) {
+    return steps;
+  }
+  return [...settleOpen(steps), { kind: 'thinking', text: delta, settled: false }];
+}
+
+export function noteReply(steps: ReplyStep[], delta: string): ReplyStep[] {
+  if (!delta) {
+    return steps;
+  }
+  const last = steps[steps.length - 1];
+  if (last?.kind === 'reply') {
+    const next = steps.slice();
+    next[next.length - 1] = { kind: 'reply', text: last.text + delta };
+    return next;
+  }
+  if (!delta.trim()) {
+    return steps;
+  }
+  return [...settleOpen(steps), { kind: 'reply', text: delta }];
+}
+
+export function noteTool(steps: ReplyStep[], call: ToolCallRecord): ReplyStep[] {
+  const index = steps.findIndex((step) => step.kind === 'tool' && step.call.id === call.id);
+  if (index >= 0) {
+    const prior = steps[index];
+    if (prior.kind !== 'tool') {
+      return steps;
+    }
+    const next = steps.slice();
+    next[index] = {
+      kind: 'tool',
+      settled: prior.settled,
+      call: {
+        id: call.id,
+        name: call.name || prior.call.name,
+        arguments: call.arguments,
+        result: call.result ?? prior.call.result,
+      },
+    };
+    return next;
+  }
+  return [
+    ...steps.map((step) => (step.kind === 'thinking' && !step.settled ? { ...step, settled: true } : step)),
+    { kind: 'tool', call, settled: false },
+  ];
+}
+
+export function replyVisible(steps: ReplyStep[]): boolean {
+  return steps.some((step) => step.kind === 'tool' || step.text.trim() !== '');
+}
+
+export function LiveReply({
+  steps,
+  speaker,
+  measured = false,
+}: {
+  steps: ReplyStep[];
+  speaker?: string;
+  measured?: boolean;
+}) {
+  return steps.map((step, index) => {
+    if (step.kind === 'thinking') {
+      const text = step.text.trim();
+      if (!text) {
+        return null;
+      }
+      return <Thinking key={`thinking-${index}`} text={text} settled={step.settled} />;
+    }
+    if (step.kind === 'tool') {
+      return <ToolCall key={step.call.id} call={step.call} settled={step.settled} />;
+    }
+    const text = step.text.trim();
+    if (!text) {
+      return null;
+    }
+    return (
+      <View
+        key={`reply-${index}`}
+        accessibilityLabel={speaker ? `${speaker} said: ${humanText(step.text)}` : undefined}
+        style={measured ? measureStyle : undefined}
+      >
+        <MessageBody body={step.text} />
+      </View>
+    );
+  });
+}
+
+export function showsMessage(text?: string, reasoning?: string | null, tools?: unknown): boolean {
+  return Boolean(text) || Boolean(reasoning && reasoning.trim()) || readToolCalls(tools).length > 0;
+}
+
+export const SESSION_CLEAR = '/session clear';
+export const SESSION_ARCHIVE = '/session archive';
+
+export function sessionCommand(text: string): 'clear' | 'archive' | null {
+  const trimmed = text.trim();
+  if (trimmed === SESSION_CLEAR) {
+    return 'clear';
+  }
+  if (trimmed === SESSION_ARCHIVE) {
+    return 'archive';
+  }
+  return null;
+}
+
+export type SentMessage = {
+  message_id?: string;
+  text?: string;
+  run_id?: string;
+  cleared?: boolean;
+};
 
 export function clearedTranscript(
   event: { type: string; stream_id?: string },
@@ -38,11 +248,94 @@ export function transcriptFrame(gap: number) {
   };
 }
 
-export function chatMessage(item: { id: string; role: string; body: string; reasoning?: string | null }): ChatMessage {
+export function readTrace(value: unknown): StoredPart[] {
+  if (value == null || value === '') {
+    return [];
+  }
+  let raw = value;
+  if (typeof value === 'string') {
+    try {
+      raw = JSON.parse(value) as unknown;
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw.flatMap((item) => {
+    if (item == null || typeof item !== 'object') {
+      return [];
+    }
+    const row = item as { kind?: unknown; text?: unknown; id?: unknown; name?: unknown; arguments?: unknown; result?: unknown };
+    if (row.kind === 'thinking' && typeof row.text === 'string' && row.text.trim()) {
+      return [{ kind: 'thinking' as const, text: row.text }];
+    }
+    if (row.kind === 'reply' && typeof row.text === 'string' && row.text.trim()) {
+      return [{ kind: 'reply' as const, text: row.text }];
+    }
+    if (row.kind === 'tool' && typeof row.id === 'string' && row.id !== '') {
+      const call: ToolCallRecord = {
+        id: row.id,
+        name: typeof row.name === 'string' ? row.name : '',
+        arguments: typeof row.arguments === 'string' ? row.arguments : '',
+      };
+      if (typeof row.result === 'string' && row.result !== '') {
+        call.result = row.result;
+      }
+      return [{ kind: 'tool' as const, call }];
+    }
+    return [];
+  });
+}
+
+export function chatMessage(item: {
+  id: string;
+  role: string;
+  body: string;
+  reasoning?: string | null;
+  tool_calls?: unknown;
+  trace?: unknown;
+}): ChatMessage {
   const reasoning = item.reasoning?.trim() ?? '';
-  return reasoning
-    ? { id: item.id, role: item.role, body: item.body, reasoning }
-    : { id: item.id, role: item.role, body: item.body };
+  const toolCalls = readToolCalls(item.tool_calls);
+  const trace = readTrace(item.trace);
+  return {
+    id: item.id,
+    role: item.role,
+    body: item.body,
+    ...(reasoning ? { reasoning } : {}),
+    ...(toolCalls.length ? { toolCalls } : {}),
+    ...(trace.length ? { trace } : {}),
+  };
+}
+
+export function storedSteps(message: {
+  body: string;
+  reasoning?: string;
+  toolCalls?: ToolCallRecord[];
+  trace?: StoredPart[];
+}): ReplyStep[] {
+  if (message.trace?.length) {
+    return message.trace.map((part) =>
+      part.kind === 'tool'
+        ? { kind: 'tool', call: part.call, settled: true }
+        : part.kind === 'thinking'
+          ? { kind: 'thinking', text: part.text, settled: true }
+          : { kind: 'reply', text: part.text },
+    );
+  }
+  const steps: ReplyStep[] = [];
+  if (message.reasoning?.trim()) {
+    steps.push({ kind: 'thinking', text: message.reasoning, settled: true });
+  }
+  for (const call of message.toolCalls ?? []) {
+    steps.push({ kind: 'tool', call, settled: true });
+  }
+  if (message.body.trim()) {
+    steps.push({ kind: 'reply', text: message.body });
+  }
+  return steps;
 }
 
 export function readDraft(sessionId: string): string {
@@ -64,17 +357,23 @@ export function TranscriptTurn({
   role,
   body,
   reasoning,
+  toolCalls,
+  trace,
 }: {
   name: string;
   role: string;
   body: string;
   reasoning?: string;
+  toolCalls?: ToolCallRecord[];
+  trace?: StoredPart[];
 }) {
   const { palette } = useTheme();
   const [empty, setEmpty] = useState(false);
   const [copied, setCopied] = useState(false);
   const reportEmpty = useCallback(() => setEmpty(true), []);
   const mine = role === 'user';
+  const steps = storedSteps({ body, reasoning, toolCalls, trace });
+  const replyOnly = steps.length === 1 && steps[0]?.kind === 'reply';
   if (empty) {
     return null;
   }
@@ -93,8 +392,15 @@ export function TranscriptTurn({
         }}
       >
         <Text style={textStyle('label', palette.textPrimary, '600')}>{name}</Text>
-        {reasoning ? <Thinking text={reasoning} settled /> : null}
-        <MessageBody body={body} onEmpty={reportEmpty} />
+        {steps.map((step, index) => {
+          if (step.kind === 'thinking') {
+            return <Thinking key={`thinking-${index}`} text={step.text.trim()} settled />;
+          }
+          if (step.kind === 'tool') {
+            return <ToolCall key={step.call.id} call={step.call} settled />;
+          }
+          return <MessageBody key={`reply-${index}`} body={step.text} onEmpty={replyOnly ? reportEmpty : undefined} />;
+        })}
         {!mine && humanText(body) ? (
           <IconButton
             icon={copied ? 'check' : 'copy'}

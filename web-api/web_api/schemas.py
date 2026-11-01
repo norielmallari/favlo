@@ -12,6 +12,9 @@ class AgentCreate(BaseModel):
     persona: str = ""
     default_model_id: str | None = None
     tool_groups: list[str] | None = None
+    enable_thinking: bool | None = None
+    preserve_thinking: bool | None = None
+    reasoning_effort: str | None = Field(default=None, max_length=32)
 
 
 class AgentUpdate(BaseModel):
@@ -20,6 +23,9 @@ class AgentUpdate(BaseModel):
     persona: str = ""
     default_model_id: str | None = None
     tool_groups: list[str] | None = None
+    enable_thinking: bool | None = None
+    preserve_thinking: bool | None = None
+    reasoning_effort: str | None = Field(default=None, max_length=32)
 
 
 class ModelChoice(BaseModel):
@@ -48,6 +54,7 @@ class MessageCreate(BaseModel):
     text: str = Field(min_length=1)
     folder: str | None = None
     image: str | None = None
+    attachment: str | None = None
 
 
 class McpGroupUpdate(BaseModel):

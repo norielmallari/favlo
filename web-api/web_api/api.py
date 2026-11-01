@@ -54,24 +54,6 @@ def create_app(home: Path | None = None, reply: Callable[..., Any] | None = None
         app.state.reply = reply or stream_reply
         app.state.seeded_providers = set()
 
-        async def follow(run_id: str) -> None:
-            cancel = asyncio.Event()
-            app.state.cancels[run_id] = cancel
-            task = asyncio.create_task(
-                perform(
-                    app.state.store,
-                    app.state.bus,
-                    cancel,
-                    run_id,
-                    app.state.reply,
-                    app.state.tasks,
-                )
-            )
-            app.state.tasks.add(task)
-            task.add_done_callback(app.state.tasks.discard)
-
-        bind_followup(follow)
-        resume(app.state.store, app.state.bus, app.state.tasks)
         for run_id in await asyncio.to_thread(app.state.store.abandoned_runs):
             for event in await asyncio.to_thread(
                 app.state.store.finish_run,
@@ -85,6 +67,25 @@ def create_app(home: Path | None = None, reply: Callable[..., Any] | None = None
         clock = asyncio.create_task(watch(app))
         app.state.tasks.add(clock)
         clock.add_done_callback(app.state.tasks.discard)
+
+        async def follow(run_id: str) -> None:
+            cancel = asyncio.Event()
+            app.state.cancels[run_id] = cancel
+            job = asyncio.create_task(
+                perform(
+                    app.state.store,
+                    app.state.bus,
+                    cancel,
+                    run_id,
+                    app.state.reply,
+                    app.state.tasks,
+                )
+            )
+            app.state.tasks.add(job)
+            job.add_done_callback(app.state.tasks.discard)
+
+        bind_followup(follow)
+        resume(app.state.store, app.state.bus, app.state.tasks)
         try:
             yield
         finally:

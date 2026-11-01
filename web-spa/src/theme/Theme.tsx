@@ -1,6 +1,7 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, createElement, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Appearance, Platform, useColorScheme } from 'react-native';
 
+import { scrollbarStyle } from '@/theme/scrollbar';
 import { dark, light, type Palette } from '@/theme/tokens';
 
 export type Preference = 'system' | 'light' | 'dark';
@@ -52,7 +53,14 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     [preference, palette],
   );
 
-  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
+  return (
+    <ThemeContext.Provider value={value}>
+      {Platform.OS === 'web'
+        ? createElement('style', { 'data-testid': 'scrollbar' }, scrollbarStyle(palette))
+        : null}
+      {children}
+    </ThemeContext.Provider>
+  );
 }
 
 export function useTheme(): ThemeValue {

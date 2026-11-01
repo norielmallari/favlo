@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 
 import { deleteAgentsNamed } from './cleanup';
+import { onScreen } from './on-screen';
 
 const PROMPT = 'Reply with the single word ready.';
 
@@ -15,11 +16,15 @@ test('a short transcript rests on the composer', async ({ page }) => {
     await page.getByRole('button', { name: 'New agent' }).click();
     await page.getByRole('textbox', { name: 'Agent name', exact: true }).fill(name);
     await page.getByRole('textbox', { name: 'Persona', exact: true }).fill('Reply in one short sentence.');
-    await page.getByRole('button', { name: 'Create agent' }).click();
+    const create = page.getByRole('button', { name: 'Create agent' });
+    await onScreen(create);
+    await create.click();
     await page.getByRole('button', { name, exact: true }).click();
     await page.getByRole('button', { name: 'Home', exact: true }).click();
     await page.getByRole('textbox', { name: 'Message', exact: true }).fill(PROMPT);
-    await page.getByRole('button', { name: 'Send' }).click();
+    const send = page.getByRole('button', { name: 'Send' });
+    await onScreen(send);
+    await send.click();
     await expect(page.getByLabel(`You said: ${PROMPT}`)).toBeVisible();
     await expectShortThread(page);
 

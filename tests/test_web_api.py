@@ -40,7 +40,10 @@ def test_the_default_agent_is_the_horse(client: TestClient) -> None:
     assert favlo["name"] == "Favlo"
     assert favlo["persona"] == PERSONA
     assert favlo["default_model_id"] is None
-    assert favlo["tool_groups"] == ["favlo-config", "session"]
+    assert favlo["enable_thinking"] is None
+    assert favlo["preserve_thinking"] is None
+    assert favlo["reasoning_effort"] is None
+    assert favlo["tool_groups"] == ["favlo-config"]
     channels = client.get("/channels").json()["channels"]
     match = next(row for row in channels if row["agent_id"] == "agent_favlo")
     assert match["name"] == "Favlo"
@@ -75,52 +78,88 @@ def test_the_default_agent_is_seeded_once(tmp_path: Path) -> None:
     assert names.count("Favlo") == 1
 
 
-def test_clear_session_drops_the_stored_turns_and_the_memory(tmp_path: Path) -> None:
-    import asyncio
-
-    from agent_framework import AgentSession, InMemoryHistoryProvider
-
-    from web_api.bus import Bus
-    from web_api.chat import turn_setup
+def test_session_commands_stay_on_the_session_that_sent_them(tmp_path: Path) -> None:
     from web_api.db import FAVLO_SESSION_ID
-    from web_api.session_tools import clear_current_session
+    from web_api.session_commands import ARCHIVE_CUE
     from web_api.store import Store
 
     store = Store(tmp_path / "app.db")
     try:
-        _status, started, _events = store.begin_message("hello", FAVLO_SESSION_ID, "Hello")
-        store.complete_run(started["run_id"], "Hi", "thought")
-        session = AgentSession()
-        bucket = session.state.setdefault(InMemoryHistoryProvider.DEFAULT_SOURCE_ID, {})
-        bucket["messages"] = ["kept"]
-        text = asyncio.run(clear_current_session(store, FAVLO_SESSION_ID, Bus(), session))
-        assert text == "This session is clear."
-        assert bucket["messages"] == []
-        snapshot = store.session_snapshot(FAVLO_SESSION_ID)
-        assert snapshot["messages"] == []
-        assert snapshot["runs"] == []
-        missing = asyncio.run(clear_current_session(store, "session_missing", None, None))
-        assert missing == "That session does not exist."
-        _status, running, _events = store.begin_message("stay", FAVLO_SESSION_ID, "Stay")
-        events = store.clear_session_messages(FAVLO_SESSION_ID)
-        assert events[0]["type"] == "session.cleared"
-        kept = store.session_snapshot(FAVLO_SESSION_ID)
-        assert kept["messages"] == []
-        assert [row["id"] for row in kept["runs"]] == [running["run_id"]]
-        instructions, enabled = turn_setup(
-            "You are Favlo.",
-            "Favlo",
-            ["session"],
-            "http://127.0.0.1:8129/v1",
-            store,
-            "agent_favlo",
-            FAVLO_SESSION_ID,
-            Bus(),
+        channel = next(row for row in store.channels() if row["session_id"] == FAVLO_SESSION_ID)
+        _status, workspace, _events = store.create_workspace(
+            "ws",
+            {"channel_id": channel["id"], "name": "Stills", "type": "gallery"},
         )
-        assert "clear_session" in instructions
-        assert [item.name for item in enabled] == ["session_clear_session"]
+        workspace_id = workspace["session_id"]
+        _status, channel_turn, _events = store.begin_message("channel-note", FAVLO_SESSION_ID, "Channel note")
+        store.complete_run(channel_turn["run_id"], "Hi")
+        _status, workspace_turn, _events = store.begin_message("workspace-note", workspace_id, "Workspace note")
+        store.complete_run(workspace_turn["run_id"], "Hi")
+
+        status, cleared, events = store.begin_message("clear-workspace", workspace_id, " /session clear ")
+        assert status == 200
+        assert cleared["cleared"] is True
+        assert "run_id" not in cleared
+        assert events[0]["type"] == "session.cleared"
+        assert events[0]["stream_id"] == f"session:{workspace_id}"
+        assert store.session_snapshot(workspace_id)["messages"] == []
+        assert _bodies(store, FAVLO_SESSION_ID) == ["Channel note", "Hi"]
+
+        _status, again, _events = store.begin_message("workspace-again", workspace_id, "Still here")
+        store.complete_run(again["run_id"], "Hi")
+        status, cleared, events = store.begin_message("clear-channel", FAVLO_SESSION_ID, "/session clear")
+        assert status == 200
+        assert events[0]["stream_id"] == f"session:{FAVLO_SESSION_ID}"
+        assert store.session_snapshot(FAVLO_SESSION_ID)["messages"] == []
+        assert _bodies(store, workspace_id) == ["Still here", "Hi"]
+
+        _status, remembered, _events = store.begin_message("remember", workspace_id, "Remember the red door")
+        store.complete_run(remembered["run_id"], "Noted")
+        status, archived, events = store.begin_message("archive", workspace_id, "/session archive")
+        assert status == 202
+        assert archived["run_id"]
+        assert "message_id" not in archived
+        assert events[0]["type"] == "run.started"
+        context = store.run_context(archived["run_id"])
+        assert context["user_text"] == ARCHIVE_CUE
+        assert [item["text"] for item in context["prior"]] == ["Still here", "Hi", "Remember the red door", "Noted"]
+        done = store.complete_run(archived["run_id"], "Stored.")
+        assert [event["type"] for event in done] == ["run.completed", "session.cleared"]
+        assert done[-1]["stream_id"] == f"session:{workspace_id}"
+        assert store.session_snapshot(workspace_id)["messages"] == []
+        assert store.session_snapshot(FAVLO_SESSION_ID)["messages"] == []
+
+        _status, kept, _events = store.begin_message("keep", workspace_id, "Keep me")
+        store.complete_run(kept["run_id"], "Ok")
+        _status, failed_archive, _events = store.begin_message("archive-fail", workspace_id, "/session archive")
+        failed = store.finish_run(failed_archive["run_id"], "failed", "The listener stopped.")
+        assert "session.cleared" not in [event["type"] for event in failed]
+        assert "Keep me" in _bodies(store, workspace_id)
+
+        _status, empty_archive, _events = store.begin_message("archive-empty", workspace_id, "/session archive")
+        emptied = store.finish_archive(empty_archive["run_id"])
+        assert emptied is not None
+        assert emptied[-1]["type"] == "session.cleared"
+        assert store.session_snapshot(workspace_id)["messages"] == []
+        assert store.finish_archive(failed_archive["run_id"]) is None
+
+        status, ordinary, _events = store.begin_message(
+            "ordinary",
+            FAVLO_SESSION_ID,
+            "please /session clear",
+        )
+        assert status == 202
+        assert ordinary["text"] == "please /session clear"
     finally:
         store.close()
+
+
+def _bodies(store: object, session_id: str) -> list[str]:
+    from web_api.store import Store
+
+    assert isinstance(store, Store)
+    snapshot = store.session_snapshot(session_id)
+    return [row["body"] for row in snapshot["messages"]]
 
 
 def test_the_configuration_group_adds_its_instructions() -> None:
@@ -296,7 +335,6 @@ def test_a_new_agent_leaves_configuration_tools_off(client: TestClient) -> None:
         {"id": "favlo-config", "name": "Configuration tools"},
         {"id": "conversation", "name": "Conversation tools"},
         {"id": "heartbeats", "name": "Heartbeat tools"},
-        {"id": "session", "name": "Session tools"},
     ]
     agents = client.get("/agents").json()["agents"]
     favlo = next(row for row in agents if row["id"] == "agent_favlo")
@@ -376,7 +414,7 @@ def test_favlo_runs_with_the_configuration_group(tmp_path: Path) -> None:
         )
         assert sent.status_code == 202
         _wait(test_client, "session_favlo")
-    assert seen == [["favlo-config", "session"]]
+    assert seen == [["favlo-config"]]
 
 
 def test_two_agents_get_separate_channels(client: TestClient) -> None:
@@ -549,6 +587,10 @@ def test_reasoning_is_stored_beside_the_reply(tmp_path: Path) -> None:
     assistant = snapshot["messages"][-1]
     assert assistant["body"] == "Hello"
     assert assistant["reasoning"] == "Looking"
+    assert assistant["trace"] == [
+        {"kind": "thinking", "text": "Looking"},
+        {"kind": "reply", "text": "Hello"},
+    ]
     stored = sqlite3.connect(tmp_path / "app.db")
     payload = stored.execute(
         "SELECT body FROM event WHERE type = 'message.created' ORDER BY sequence DESC LIMIT 1"
@@ -556,20 +598,158 @@ def test_reasoning_is_stored_beside_the_reply(tmp_path: Path) -> None:
     assert json.loads(payload)["payload"]["reasoning"] == "Looking"
 
 
-def test_an_empty_reply_keeps_its_reasoning(tmp_path: Path) -> None:
+def test_a_streamed_tool_call_joins_on_its_index() -> None:
+    from agent_framework import Content
+
+    from web_api.chat import record_tool, tool_pieces
+
+    class Update:
+        contents = [
+            Content.from_function_call(
+                "call_1",
+                "conversation_list_conversations",
+                arguments='{"kind":',
+                additional_properties={"tool_call_index": 0},
+            )
+        ]
+
+    calls: list[dict[str, object]] = []
+    record_tool(calls, tool_pieces(Update())[0])
+    follow = Content.from_function_call(
+        "",
+        "",
+        arguments=' "all"}',
+        additional_properties={"tool_call_index": 0},
+    )
+    record_tool(calls, tool_pieces(type("Later", (), {"contents": [follow]})())[0])
+    done = Content.from_function_result("call_1", result="No conversations are stored.")
+    record_tool(calls, tool_pieces(type("Result", (), {"contents": [done]})())[0])
+    assert calls[0]["name"] == "conversation_list_conversations"
+    assert calls[0]["arguments"] == '{"kind": "all"}'
+    assert calls[0]["result"] == "No conversations are stored."
+
+
+def test_a_tool_call_is_stored_on_the_message(tmp_path: Path) -> None:
+    from web_api.chat import ReplyPiece
+
+    async def reply(**_kwargs: object):
+        yield ReplyPiece("tool", '{"kind":', "call_1", "conversation_list_conversations", 0)
+        yield ReplyPiece("tool", ' "all"}', "", "", 0)
+        yield ReplyPiece("tool_result", "No conversations are stored.", "call_1")
+        yield ReplyPiece("content", "Done")
+
+    app = create_app(tmp_path, reply=reply)
+    with TestClient(app) as test_client:
+        model = test_client.post(
+            "/provider-models",
+            headers={"Idempotency-Key": "model-tool"},
+            json={
+                "provider_id": "provider_local",
+                "model_id": "example-model",
+                "display_name": "Example",
+            },
+        )
+        assert model.status_code == 201
+        settings = test_client.get("/settings").json()
+        saved = test_client.patch(
+            "/settings",
+            json={
+                "expected_revision": settings["revision"],
+                "default_model_id": model.json()["id"],
+                "exchange_budget": 10,
+            },
+        )
+        assert saved.status_code == 200
+        sent = test_client.post(
+            "/sessions/session_favlo/messages",
+            headers={"Idempotency-Key": "tool-1"},
+            json={"text": "Hello"},
+        )
+        assert sent.status_code == 202
+        snapshot = _wait(test_client, "session_favlo")
+    assistant = snapshot["messages"][-1]
+    assert assistant["body"] == "Done"
+    assert assistant["trace"][0]["kind"] == "tool"
+    assert assistant["trace"][1] == {"kind": "reply", "text": "Done"}
+    assert assistant["tool_calls"] == [
+        {
+            "id": "call_1",
+            "name": "conversation_list_conversations",
+            "arguments": '{"kind": "all"}',
+            "result": "No conversations are stored.",
+        }
+    ]
+
+
+def test_reasoning_without_text_finishes_the_turn(tmp_path: Path) -> None:
     from web_api.store import Store
 
     store = Store(tmp_path / "app.db")
     _status, started, _events = store.begin_message("empty", "session_favlo", "hello")
-    events = store.note_empty_reply(started["run_id"], "User handed over carrots.")
+    events = store.complete_run(started["run_id"], "", "User handed over carrots.")
     prior = store.run_context(started["run_id"])
     store.close()
     created = next(event for event in events if event["type"] == "message.created")
-    failed = next(event for event in events if event["type"] == "run.failed")
+    completed = next(event for event in events if event["type"] == "run.completed")
     assert created["payload"]["reasoning"] == "User handed over carrots."
     assert created["payload"]["text"] == ""
-    assert failed["payload"]["message"] == "The model returned an empty reply."
-    assert prior["run"]["status"] == "failed"
+    assert completed["payload"]["status"] == "completed"
+    assert prior["run"]["status"] == "completed"
+
+
+def test_unset_sampling_stays_off_the_request() -> None:
+    from web_api.chat import sampling_options
+
+    assert sampling_options(None, None, None) is None
+    assert sampling_options(None, None, "") is None
+
+
+def test_a_set_sampling_field_is_the_only_extra() -> None:
+    from web_api.chat import sampling_options
+
+    assert sampling_options(True, None, None) == {"extra_body": {"enable_thinking": True}}
+    assert sampling_options(False, True, "high") == {
+        "extra_body": {
+            "enable_thinking": False,
+            "preserve_thinking": True,
+            "reasoning_effort": "high",
+        }
+    }
+
+
+def test_agent_sampling_fields_round_trip(client: TestClient) -> None:
+    created = client.post(
+        "/agents",
+        headers={"Idempotency-Key": "sample-fields"},
+        json={
+            "name": "Reed",
+            "persona": "",
+            "enable_thinking": True,
+            "preserve_thinking": False,
+            "reasoning_effort": "high",
+        },
+    )
+    assert created.status_code == 201
+    agent = created.json()["agent"]
+    assert agent["enable_thinking"] is True
+    assert agent["preserve_thinking"] is False
+    assert agent["reasoning_effort"] == "high"
+    saved = client.patch(
+        f"/agents/{agent['id']}",
+        json={
+            "expected_revision": agent["revision"],
+            "name": "Reed",
+            "persona": "",
+            "enable_thinking": None,
+            "preserve_thinking": None,
+            "reasoning_effort": None,
+        },
+    )
+    assert saved.status_code == 200
+    body = saved.json()
+    assert body["enable_thinking"] is None
+    assert body["preserve_thinking"] is None
+    assert body["reasoning_effort"] is None
 
 
 def test_the_next_turn_includes_stored_reasoning(tmp_path: Path) -> None:
@@ -702,13 +882,14 @@ def test_stop_closes_the_agent_framework_stream(monkeypatch: pytest.MonkeyPatch)
             closed["http"] = True
 
     class Client:
-        function_invocation_configuration: dict[str, object] = {}
+        def __init__(self) -> None:
+            self.client = HTTP()
+            self.function_invocation_configuration: dict[str, object] = {}
 
         def close(self) -> None:
             return None
 
     monkeypatch.setattr("agent_framework.Agent", Agent)
-    monkeypatch.setattr("openai.AsyncOpenAI", HTTP)
     monkeypatch.setattr("web_api.chat.open_chat_client", lambda *_args, **_kwargs: Client())
 
     async def once() -> None:
@@ -728,7 +909,6 @@ def test_stop_closes_the_agent_framework_stream(monkeypatch: pytest.MonkeyPatch)
             model="example-model",
             persona="A short persona.",
             agent_name="Favlo",
-            history=[],
             user_text="Hello",
             cancel=cancel,
         ):
@@ -790,13 +970,14 @@ def test_a_cancel_event_still_streams_the_reply(monkeypatch: pytest.MonkeyPatch)
             return None
 
     class Client:
-        function_invocation_configuration: dict[str, object] = {}
+        def __init__(self) -> None:
+            self.client = HTTP()
+            self.function_invocation_configuration: dict[str, object] = {}
 
         def close(self) -> None:
             return None
 
     monkeypatch.setattr("agent_framework.Agent", Agent)
-    monkeypatch.setattr("openai.AsyncOpenAI", HTTP)
     monkeypatch.setattr("web_api.chat.open_chat_client", lambda *_args, **_kwargs: Client())
 
     async def once() -> None:
@@ -806,7 +987,6 @@ def test_a_cancel_event_still_streams_the_reply(monkeypatch: pytest.MonkeyPatch)
             model="example-model",
             persona="A short persona.",
             agent_name="Favlo",
-            history=[],
             user_text="Hello",
             cancel=asyncio.Event(),
         ):
@@ -816,14 +996,219 @@ def test_a_cancel_event_still_streams_the_reply(monkeypatch: pytest.MonkeyPatch)
     asyncio.run(once())
 
 
-def test_tool_markup_stays_out_of_the_reply() -> None:
-    from web_api.chat import spoken_text
+def test_a_turn_sends_the_stored_agent_framework_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
 
-    call = '<tool_call>\n{"name": "remember"}\n</tool_call>'
-    assert spoken_text(call) == ""
-    assert spoken_text(f"Looking.\n{call}") == "Looking."
-    assert spoken_text("Here <tool") == "Here"
-    assert spoken_text(f"{call}\nQwen3.6-35B-A3B-fp4") == "Qwen3.6-35B-A3B-fp4"
+    from agent_framework import AgentSession, InMemoryHistoryProvider, Message
+
+    from web_api.chat import stream_reply
+    from web_api.db import FAVLO_SESSION_ID
+    from web_api.gallery_tools import turn_note
+    from web_api.store import Store
+
+    store = Store(tmp_path / "app.db")
+    session = AgentSession(session_id=FAVLO_SESSION_ID)
+    provider = InMemoryHistoryProvider()
+
+    async def seed() -> None:
+        state = session.state.setdefault(provider.source_id, {})
+        await provider.save_messages(
+            session.session_id,
+            [Message("user", ["Hello"]), Message("assistant", ["Hi"])],
+            state=state,
+        )
+
+    asyncio.run(seed())
+    store.save_maf_session(FAVLO_SESSION_ID, session.to_dict())
+    seen: dict[str, object] = {}
+
+    class Stream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+        async def close(self) -> None:
+            return None
+
+        async def get_final_response(self) -> SimpleNamespace:
+            return SimpleNamespace(text="Again", messages=[])
+
+    class Agent:
+        def __init__(self, **kwargs: object) -> None:
+            seen["instructions"] = kwargs.get("instructions")
+            seen["options"] = kwargs.get("default_options")
+            seen["persist"] = kwargs.get("require_per_service_call_history_persistence")
+            seen["providers"] = kwargs.get("context_providers")
+
+        def create_session(self, **_kwargs: object) -> object:
+            raise AssertionError("a stored session is restored")
+
+        def run(self, prompt: object, session: object = None, stream: bool = True) -> Stream:
+            seen["prompt"] = prompt
+            seen["session"] = session
+            return Stream()
+
+    class HTTP:
+        async def close(self) -> None:
+            return None
+
+    class Client:
+        def __init__(self) -> None:
+            self.client = HTTP()
+            self.function_invocation_configuration: dict[str, object] = {}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("agent_framework.Agent", Agent)
+    monkeypatch.setattr("web_api.chat.open_chat_client", lambda *_args, **_kwargs: Client())
+    note = turn_note("photos", None)
+
+    async def once() -> None:
+        collected = []
+        async for piece in stream_reply(
+            base_url="http://127.0.0.1:8129/v1",
+            model="example-model",
+            persona="A short persona.",
+            agent_name="Favlo",
+            user_text="Next",
+            store=store,
+            session_id=FAVLO_SESSION_ID,
+            cancel=asyncio.Event(),
+            gallery_note=note,
+        ):
+            collected.append(piece.text)
+        assert collected == ["Again"]
+
+    try:
+        asyncio.run(once())
+        prompt = str(seen["prompt"])
+        restored = seen["session"]
+        assert isinstance(restored, AgentSession)
+        assert "Next" in prompt
+        assert "photos" in prompt
+        assert "photos" not in str(seen["instructions"])
+        assert seen["options"] == {"store": False}
+        assert seen["persist"] is True
+        providers = seen["providers"]
+        assert isinstance(providers, list)
+        assert type(providers[0]).__name__ == "InMemoryHistoryProvider"
+        assert providers[0].skip_excluded is True
+        assert type(providers[1]).__name__ == "PromptWindow"
+        messages = restored.state[provider.source_id]["messages"]
+        assert [item.text for item in messages] == ["Hello", "Hi"]
+        saved = store.maf_session(FAVLO_SESSION_ID)
+        assert saved is not None
+        assert saved["session_id"] == FAVLO_SESSION_ID
+        assert "maf_state" not in store.session_snapshot(FAVLO_SESSION_ID)["session"]
+    finally:
+        store.close()
+
+
+def test_a_cancelled_turn_leaves_the_stored_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_framework import AgentSession
+
+    from web_api.chat import stream_reply
+    from web_api.db import FAVLO_SESSION_ID
+    from web_api.store import Store
+
+    store = Store(tmp_path / "app.db")
+    store.save_maf_session(
+        FAVLO_SESSION_ID,
+        AgentSession(session_id=FAVLO_SESSION_ID).to_dict(),
+    )
+
+    class Stream:
+        def __init__(self) -> None:
+            self._wait = asyncio.Event()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await self._wait.wait()
+            raise StopAsyncIteration
+
+        async def close(self) -> None:
+            self._wait.set()
+
+    class Agent:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def create_session(self, **_kwargs: object) -> object:
+            raise AssertionError("a stored session is restored")
+
+        def run(self, _prompt: object, session: object = None, stream: bool = True) -> Stream:
+            assert isinstance(session, AgentSession)
+            session.state["marked"] = True
+            return Stream()
+
+    class HTTP:
+        async def close(self) -> None:
+            return None
+
+    class Client:
+        def __init__(self) -> None:
+            self.client = HTTP()
+            self.function_invocation_configuration: dict[str, object] = {}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("agent_framework.Agent", Agent)
+    monkeypatch.setattr("web_api.chat.open_chat_client", lambda *_args, **_kwargs: Client())
+
+    async def once() -> None:
+        cancel = asyncio.Event()
+        task = asyncio.create_task(_collect(cancel))
+        await asyncio.sleep(0.05)
+        cancel.set()
+        await asyncio.wait_for(task, 1)
+
+    async def _collect(cancel: asyncio.Event) -> None:
+        async for _piece in stream_reply(
+            base_url="http://127.0.0.1:8129/v1",
+            model="example-model",
+            persona="A short persona.",
+            agent_name="Favlo",
+            user_text="Hello",
+            store=store,
+            session_id=FAVLO_SESSION_ID,
+            cancel=cancel,
+        ):
+            pass
+
+    try:
+        asyncio.run(once())
+        saved = store.maf_session(FAVLO_SESSION_ID)
+        assert saved is not None
+        assert "marked" not in saved["state"]
+    finally:
+        store.close()
+
+
+def test_clearing_a_session_drops_its_agent_framework_session(tmp_path: Path) -> None:
+    from web_api.db import FAVLO_SESSION_ID
+    from web_api.store import Store
+
+    store = Store(tmp_path / "app.db")
+    try:
+        store.save_maf_session(
+            FAVLO_SESSION_ID,
+            {"type": "session", "session_id": FAVLO_SESSION_ID, "state": {}},
+        )
+        assert store.maf_session(FAVLO_SESSION_ID)["session_id"] == FAVLO_SESSION_ID
+        store.clear_session_messages(FAVLO_SESSION_ID)
+        assert store.maf_session(FAVLO_SESSION_ID) is None
+    finally:
+        store.close()
 
 
 def test_an_older_message_table_gains_reasoning(tmp_path: Path) -> None:
@@ -851,6 +1236,7 @@ def test_an_older_message_table_gains_reasoning(tmp_path: Path) -> None:
     names = {row[1] for row in again.execute("PRAGMA table_info(message)")}
     again.close()
     assert "reasoning" in names
+    assert "trace" in names
 
 
 def test_model_ids_come_from_the_models_payload() -> None:

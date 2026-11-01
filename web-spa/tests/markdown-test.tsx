@@ -45,6 +45,18 @@ test('a message renders bold, italics, and a table', async () => {
   expect(view.getByLabelText('Generated image')).toBeTruthy();
 });
 
+test('a bullet keeps wrapped text beside the marker', async () => {
+  const view = await render(
+    <ThemeProvider>
+      <MarkdownText text={'- Hair:\n  Long, wavy pink, flowing past shoulders.'} color="#182230" />
+    </ThemeProvider>,
+  );
+  const bullet = view.getByText('•');
+  expect(bullet.props.style).not.toMatchObject({ maxWidth: '100%' });
+  expect(bullet.parent?.props.style).toMatchObject({ flexDirection: 'row', alignItems: 'flex-start' });
+  expect(view.getByText(/Hair:/).props.style).toMatchObject({ whiteSpace: 'normal' });
+});
+
 test('raw html and unsafe links stay inert', async () => {
   const view = await render(
     <ThemeProvider>

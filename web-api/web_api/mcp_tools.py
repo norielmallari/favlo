@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import shlex
 from typing import Any
 
+from agent_framework import MCPStdioTool, MCPStreamableHTTPTool
+from agent_framework.exceptions import ToolExecutionException
+
 from web_api.mcp_cache import catalog
-from web_api.mcp_client import McpError, render_result, rpc, task_handle
+from web_api.mcp_client import McpError
 from web_api.mcp_groups import GENERATE, ORDER, group_for
-from web_api.mcp_tasks import spawn, watch
-from web_api.tool_names import unique
+from web_api.mcp_tasks import accept, spawn, started
+from web_api.tool_names import slug
 
 _MEMORY = {"remember", "recall", "forget"}
 
@@ -29,14 +34,10 @@ INSTRUCTIONS = (
     "read_media(name) returns that record. "
     "When you call a generate tool, tell the user you are generating "
     "that image, video, music, or voice. "
-    "While the task is working, do not write a favlo:// link or an image id, "
-    "and do not say the file is already ready. "
-    "A media tool may return a task id instead of the file. "
-    "When the task finishes you are called again with its result. "
-    "That result is not shown in the chat. "
-    "Tell the user it is ready and include each favlo:// link from the result. "
+    "The tool returns when the task is accepted. "
+    "Do not wait for the file in this turn. "
+    "A later turn brings the result. Include each favlo:// link from that result. "
     "Do not paste the JSON, the tool name, or a file id. "
-    "Do not call that tool again for the same request while the task is working. "
     "When a task result says the tool failed or names an unknown model, "
     "call the matching list and set tools, repeat the session id, "
     "and call the generate tool again with that session."
@@ -64,22 +65,25 @@ async def bundle(
             continue
         switches = server.get("switches")
         enabled = switches if isinstance(switches, dict) else {}
-        for tool in prepare_catalog(listed):
-            if not enabled.get(tool["group_id"], True):
-                continue
-            row = {
-                "server_id": server["server_id"],
-                "server_name": server["server_name"],
-                "transport": server["transport"],
-                "command": server["command"],
-                "url": server["url"],
-                "name": tool["name"],
-                "description": tool["description"],
-                "schema": tool["schema"],
-            }
-            exposed = unique(str(row["server_name"] or row["server_id"]), row["name"], taken)
-            tools.append(_tool(store, row, session_id, agent_id, bus, pending, exposed))
-            names.append(exposed)
+        allowed = [
+            str(tool["name"])
+            for tool in prepare_catalog(listed)
+            if enabled.get(tool["group_id"], True)
+        ]
+        if not allowed:
+            continue
+        prefix = _prefix(str(server["server_name"] or server["server_id"]), taken)
+        opened = _server(
+            server,
+            agent_id,
+            prefix,
+            allowed,
+            _Turn(store, bus, pending, str(server["server_id"]), agent_id, session_id),
+        )
+        if opened is None:
+            continue
+        tools.append(opened)
+        names.extend(f"{prefix}_{name}" for name in allowed)
     if not names:
         return "", []
     joined = ", ".join(names)
@@ -136,75 +140,218 @@ def groups_from(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return ordered
 
 
-async def call_tool(
-    store: Any,
-    row: dict[str, Any],
-    arguments: dict[str, Any],
-    session_id: str,
+def _prefix(source: str, taken: set[str]) -> str:
+    stem = slug(source)
+    if stem not in taken:
+        taken.add(stem)
+        return stem
+    extra = 2
+    while f"{stem}_{extra}" in taken:
+        extra += 1
+    chosen = f"{stem}_{extra}"
+    taken.add(chosen)
+    return chosen
+
+
+def _memory_arguments(tool_name: str, arguments: dict[str, Any], agent_id: str) -> dict[str, Any]:
+    if tool_name not in _MEMORY:
+        return arguments
+    kept = {key: value for key, value in arguments.items() if key != "client"}
+    kept["client"] = agent_id
+    return kept
+
+
+def _mcp_client(server: dict[str, Any]) -> Any | None:
+    """A caller-owned client. The tasks extension is not on the framework's own client."""
+    from fastmcp_tasks.client import TasksClientExtension
+    from mcp import Client
+
+    extension = TasksClientExtension()
+    if server.get("transport") == "stdio":
+        from mcp.client.stdio import StdioServerParameters
+
+        argv = shlex.split(str(server.get("command") or ""))
+        if not argv:
+            return None
+        target = StdioServerParameters(command=argv[0], args=argv[1:])
+    else:
+        target = str(server.get("url") or "").strip()
+        if not target:
+            return None
+    return Client(target, extensions=[extension], read_timeout_seconds=3600)
+
+
+async def open_clients(tools: list[object], stack: contextlib.AsyncExitStack) -> None:
+    """Enter each caller-owned client before the framework connects its tool."""
+    for tool in tools:
+        client = getattr(tool, "owned_client", None)
+        if client is not None:
+            await stack.enter_async_context(_Lease(client, tool))
+
+
+class _Turn:
+    def __init__(
+        self,
+        store: Any,
+        bus: Any,
+        jobs: set[asyncio.Task[Any]],
+        server_id: str,
+        agent_id: str,
+        session_id: str,
+    ) -> None:
+        self.store = store
+        self.bus = bus
+        self.jobs = jobs
+        self.server_id = server_id
+        self.agent_id = agent_id
+        self.session_id = session_id
+
+
+class _Lease:
+    """Close the client when the turn ends, unless a task is still running on it."""
+
+    def __init__(self, client: Any, server: Any) -> None:
+        self._client = client
+        self._server = server
+
+    async def __aenter__(self) -> Any:
+        return await self._client.__aenter__()
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        pending = getattr(self._server, "pending", 0)
+        jobs = getattr(self._server, "jobs", None)
+        if pending and jobs is not None:
+            spawn(jobs, self._close())
+            return False
+        await self._client.__aexit__(exc_type, exc, tb)
+        return False
+
+    async def _close(self) -> None:
+        await self._server.idle.wait()
+        with contextlib.suppress(Exception):
+            await self._client.__aexit__(None, None, None)
+
+
+def _server(
+    server: dict[str, Any],
     agent_id: str,
-    bus: Any,
-    pending: set[asyncio.Task[Any]],
-) -> str:
-    server = {
-        "id": row["server_id"],
-        "transport": row["transport"],
-        "command": row["command"],
-        "url": row["url"],
+    prefix: str,
+    allowed: list[str],
+    turn: _Turn | None = None,
+) -> MCPStdioTool | MCPStreamableHTTPTool | None:
+    client = _mcp_client(server)
+    if client is None:
+        return None
+    shared = {
+        "name": str(server["server_name"] or server["server_id"]),
+        "tool_name_prefix": prefix,
+        "approval_mode": "never_require",
+        "allowed_tools": allowed,
+        "load_prompts": False,
     }
-    if row["name"] in _MEMORY:
-        arguments = {key: value for key, value in arguments.items() if key != "client"}
-        arguments["client"] = agent_id
+    kind = _StdioServer if server.get("transport") == "stdio" else _HttpServer
+    return kind(agent_id, client, turn, **shared)
+
+
+def _arm(server: Any, agent_id: str, client: Any, turn: _Turn | None) -> None:
+    server._agent_id = agent_id
+    server.owned_client = client
+    server.turn = turn
+    server.jobs = None if turn is None else turn.jobs
+    server.pending = 0
+    server.idle = asyncio.Event()
+    server.idle.set()
+
+
+def _live_session(client: Any) -> Any | None:
     try:
-        result = await rpc(
-            server,
-            "tools/call",
-            {"name": row["name"], "arguments": arguments},
-            name=row["name"],
-            timeout=60.0,
-        )
-    except McpError as exc:
-        return str(exc)
-    handle = task_handle(result)
-    if handle is None:
-        return render_result(result)
-    remote_id, interval = handle
-    task = store.begin_mcp_task(
-        {
-            "remote_id": remote_id,
-            "server_id": row["server_id"],
-            "agent_id": agent_id,
-            "session_id": session_id,
-            "tool_name": row["name"],
-            "poll_interval_ms": interval,
-        }
+        return client.session
+    except RuntimeError:
+        return None
+
+
+def _result_text(parsed: Any) -> str:
+    if isinstance(parsed, str):
+        return parsed
+    if isinstance(parsed, list):
+        lines = [item.text for item in parsed if getattr(item, "text", None)]
+        if lines:
+            return "\n".join(lines)
+    return "The tool failed."
+
+
+async def _invoke(server: Any, tool_name: str, arguments: dict[str, Any]) -> Any:
+    """One ``tools/call``. A task handle returns immediately."""
+    from fastmcp_tasks.client_models import ClientCreateTaskResult
+
+    filtered, meta = server._prepare_call_kwargs(tool_name, arguments)
+    raw = await server.owned_client.session.call_tool(
+        tool_name,
+        filtered,
+        meta=meta,
+        allow_claimed=True,
+        read_timeout_seconds=server.owned_client.read_timeout_seconds,
     )
-    spawn(pending, watch(store, bus, task))
-    return f"Task {remote_id} is working. The result will arrive in this session."
+    if isinstance(raw, ClientCreateTaskResult):
+        turn = server.turn
+        if turn is not None:
+            accept(
+                turn.store,
+                turn.bus,
+                turn.jobs,
+                server,
+                server_id=turn.server_id,
+                agent_id=turn.agent_id,
+                session_id=turn.session_id,
+                tool_name=tool_name,
+                create_result=raw,
+            )
+        return started(tool_name, raw.task_id)
+    if getattr(raw, "is_error", False):
+        raise ToolExecutionException(_result_text(server._parse_tool_result_from_mcp(raw)))
+    return server._parse_tool_result_from_mcp(raw)
 
 
-def _tool(
-    store: Any,
-    row: dict[str, Any],
-    session_id: str,
-    agent_id: str,
-    bus: Any,
-    pending: set[asyncio.Task[Any]],
-    exposed: str,
-) -> object:
-    from agent_framework import tool
+class _HttpServer(MCPStreamableHTTPTool):
+    """One HTTP MCP server the agent connects for the run."""
 
-    schema = row["schema"] if isinstance(row.get("schema"), dict) else {"type": "object"}
+    def __init__(
+        self,
+        agent_id: str,
+        client: Any,
+        turn: _Turn | None = None,
+        **kwargs: Any,
+    ) -> None:
+        name = str(kwargs.pop("name"))
+        super().__init__(name, mcp_client=client, **kwargs)
+        _arm(self, agent_id, client, turn)
 
-    async def invoke(**arguments: Any) -> str:
-        return await call_tool(store, row, arguments, session_id, agent_id, bus, pending)
+    async def call_tool(self, tool_name: str, **kwargs: Any) -> Any:
+        arguments = _memory_arguments(tool_name, kwargs, self._agent_id)
+        if _live_session(self.owned_client) is None:
+            return await super().call_tool(tool_name, **arguments)
+        return await _invoke(self, tool_name, arguments)
 
-    return tool(
-        invoke,
-        name=exposed,
-        description=_description(row, exposed),
-        schema=schema,
-        approval_mode="never_require",
-    )
+
+class _StdioServer(MCPStdioTool):
+    """One stdio MCP server the agent connects for the run."""
+
+    def __init__(
+        self,
+        agent_id: str,
+        client: Any,
+        turn: _Turn | None = None,
+        **kwargs: Any,
+    ) -> None:
+        name = str(kwargs.pop("name"))
+        super().__init__(name, mcp_client=client, **kwargs)
+        _arm(self, agent_id, client, turn)
+
+    async def call_tool(self, tool_name: str, **kwargs: Any) -> Any:
+        arguments = _memory_arguments(tool_name, kwargs, self._agent_id)
+        if _live_session(self.owned_client) is None:
+            return await super().call_tool(tool_name, **arguments)
+        return await _invoke(self, tool_name, arguments)
 
 
 def _description(row: dict[str, Any], exposed: str | None = None) -> str:

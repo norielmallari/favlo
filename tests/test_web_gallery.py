@@ -253,7 +253,7 @@ def test_gallery_tools_are_only_on_the_workspace_session(tmp_path: Path) -> None
         home_instructions, home_tools = turn_setup(
             "You are Favlo.",
             "Favlo",
-            ["session"],
+            [],
             "http://127.0.0.1:8129/v1",
             store,
             "agent_favlo",
@@ -263,7 +263,7 @@ def test_gallery_tools_are_only_on_the_workspace_session(tmp_path: Path) -> None
         gallery_instructions, gallery_tools = turn_setup(
             "You are Favlo.",
             "Favlo",
-            ["session"],
+            [],
             "http://127.0.0.1:8129/v1",
             store,
             "agent_favlo",
@@ -498,20 +498,20 @@ def test_a_catalog_skill_copies_without_following_later_edits(client: TestClient
     skill = created.json()
     listed = client.get("/global-skills").json()["skills"]
     names = [row["name"] for row in listed]
-    assert names == ["Photo captions", "session-clear", "session-remember"]
+    assert names == ["Photo captions", "session-remember"]
     seeded = {row["name"]: row for row in listed}
-    assert seeded["session-clear"]["add_by_default"] is True
+    assert "session-clear" not in seeded
     assert seeded["session-remember"]["add_by_default"] is True
-    assert "clear, reset, or forget" in seeded["session-clear"]["description"]
-    assert "session_clear_session" in seeded["session-clear"]["definition"]
+    assert "session_clear_session" not in seeded["session-remember"]["definition"]
     assert "`remember`" in seeded["session-remember"]["definition"]
     assert "`recall`" in seeded["session-remember"]["definition"]
     assert "`forget`" in seeded["session-remember"]["definition"]
     favlo_skills = client.get("/agent-skills").json()["skills"]
-    assert {"session-clear", "session-remember"} <= {row["name"] for row in favlo_skills}
+    assert "session-clear" not in {row["name"] for row in favlo_skills}
+    assert "session-remember" in {row["name"] for row in favlo_skills}
     from web_api.workspace import skills_text
 
-    favlo = next(row for row in favlo_skills if row["name"] == "session-clear")
+    favlo = next(row for row in favlo_skills if row["name"] == "session-remember")
     injected = skills_text([favlo])
     assert favlo["description"] in injected
     assert favlo["definition"] in injected
@@ -579,7 +579,7 @@ def test_a_new_agent_receives_default_global_skills(client: TestClient) -> None:
     agent_id = created.json()["agent"]["id"]
     skills = client.get("/agent-skills").json()["skills"]
     names = {row["name"] for row in skills if row["agent_id"] == agent_id}
-    assert names == {"session-clear", "session-remember"}
+    assert names == {"session-remember"}
     catalog = client.get("/global-skills").json()["skills"]
     remembered = next(row for row in catalog if row["name"] == "session-remember")
     turned_off = client.patch(
@@ -602,7 +602,7 @@ def test_a_new_agent_receives_default_global_skills(client: TestClient) -> None:
     later_id = later.json()["agent"]["id"]
     later_skills = client.get("/agent-skills").json()["skills"]
     later_names = {row["name"] for row in later_skills if row["agent_id"] == later_id}
-    assert later_names == {"session-clear"}
+    assert later_names == set()
 
 
 def test_deleting_a_workspace_keeps_the_files(client: TestClient, tmp_path: Path) -> None:
@@ -705,6 +705,74 @@ def test_delete_image_removes_the_file(tmp_path: Path) -> None:
     assert folder.list("")["images"] == []
 
 
+def test_a_named_image_in_the_message_is_read_from_the_gallery_folder(tmp_path: Path) -> None:
+    from web_api.chat import user_turn
+    from web_api.gallery_tools import images_in_message, named_images
+
+    assert named_images("see zebra.png and photos/ok.jpg") == ["zebra.png", "photos/ok.jpg"]
+    assert named_images("favlo://images/abc.png") == []
+    assert named_images("https://example.com/a.png") == []
+
+    root = tmp_path / "root"
+    (root / "a").mkdir(parents=True)
+    (root / "b").mkdir()
+    (root / "photos").mkdir()
+    (root / "a" / "zebra.png").write_bytes(PNG)
+    (root / "b" / "zebra.png").write_bytes(PNG + b"b")
+    (root / "photos" / "my photo.png").write_bytes(b"mine")
+    (root / "photo.png").write_bytes(b"other")
+    (root / "note.txt").write_bytes(b"no")
+    folder = LocalFolder(str(root))
+    assert folder.find_images(["zebra.png", "missing.png", "note.txt"]) == ["a/zebra.png"]
+    assert folder.find_images(["b/zebra.png"]) == ["b/zebra.png"]
+
+    store = Store(tmp_path / "app.db")
+    try:
+        channel = store.channels()[0]
+        _status, workspace, _events = store.create_workspace(
+            "ws-named",
+            {"channel_id": channel["id"], "name": "Named", "type": "gallery"},
+        )
+        store.add_folder(
+            "root-named",
+            workspace["id"],
+            {"kind": "local", "location": str(root), "name": "Named"},
+        )
+        home = images_in_message(store, channel["session_id"], "see zebra.png")
+        found = images_in_message(store, workspace["session_id"], "look at zebra.png")
+        exact = images_in_message(store, workspace["session_id"], "photos/my photo.png")
+        missing = images_in_message(store, workspace["session_id"], "missing.png")
+    finally:
+        store.close()
+
+    assert home == []
+    assert found == [(PNG, "image/png")]
+    assert exact == [(b"mine", "image/png")]
+    assert missing == []
+    prompt = user_turn("look at zebra.png", "", found)
+    assert prompt.contents[0].text == "look at zebra.png"
+    assert prompt.contents[1].media_type == "image/png"
+    assert str(prompt.contents[1].uri).startswith("data:image/png;base64,")
+    assert user_turn("plain", "", None) == "plain"
+
+
+def test_an_image_already_in_the_session_is_not_attached_again() -> None:
+    from agent_framework import AgentSession, Content, Message
+
+    from web_api.chat import unsent_images
+
+    png = b"\x89PNG\r\n"
+    session = AgentSession()
+    session.state["in_memory"] = {
+        "messages": [
+            Message("user", ["see a.png", Content.from_data(data=png, media_type="image/png")]),
+        ]
+    }
+    fresh = unsent_images([(png, "image/png"), (b"jpg", "image/jpeg")], session)
+    assert fresh == [(b"jpg", "image/jpeg")]
+    assert unsent_images([(png, "image/png")], AgentSession()) == [(png, "image/png")]
+
+
 def test_a_sent_turn_records_the_open_folder_and_image(tmp_path: Path) -> None:
     from web_api.store import Store
 
@@ -727,11 +795,24 @@ def test_a_sent_turn_records_the_open_folder_and_image(tmp_path: Path) -> None:
             "ok.png",
         )
         context = store.run_context(started["run_id"])
+        assert context["gallery_attachment"] is None
+        store.complete_run(started["run_id"], "Done")
+        _status, attached, _events = store.begin_message(
+            "draw-file",
+            workspace["session_id"],
+            "look at this",
+            "",
+            "ok.png",
+            "ok.png",
+        )
+        attached_context = store.run_context(attached["run_id"])
     finally:
         store.close()
     assert context["user_text"] == "generate an image"
     assert context["gallery_folder"] == ""
     assert context["gallery_image"] == "ok.png"
+    assert attached_context["gallery_image"] == "ok.png"
+    assert attached_context["gallery_attachment"] == "ok.png"
 
 
 def test_seeded_manage_gallery_is_refreshed_once(tmp_path: Path) -> None:

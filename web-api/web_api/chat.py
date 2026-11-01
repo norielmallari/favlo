@@ -3,20 +3,48 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import hashlib
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
-from favlo.chat_client import history_message, open_chat_client, reasoning_text
+from favlo.chat_client import close_chat_client, open_chat_client, prompt_window, reasoning_text
 
 
 @dataclass(frozen=True)
 class ReplyPiece:
-    """One streamed piece. ``kind`` is ``reasoning`` or ``content``."""
+    """One streamed piece.
+
+    ``kind`` is ``reasoning``, ``content``, ``tool``, or ``tool_result``.
+    A tool piece carries the call id, the function name, and one argument delta.
+    """
 
     kind: str
-    text: str
+    text: str = ""
+    call_id: str = ""
+    name: str = ""
+    index: int | None = None
+
+
+def sampling_options(
+    enable_thinking: bool | None,
+    preserve_thinking: bool | None,
+    reasoning_effort: str | None,
+) -> dict[str, Any] | None:
+    """Request fields the agent set. An unset field stays off the request."""
+    extra: dict[str, Any] = {}
+    if enable_thinking is not None:
+        extra["enable_thinking"] = enable_thinking
+    if preserve_thinking is not None:
+        extra["preserve_thinking"] = preserve_thinking
+    if reasoning_effort:
+        extra["reasoning_effort"] = reasoning_effort
+    if not extra:
+        return None
+    return {"extra_body": extra}
 
 
 def assistant_piece(update: Any) -> str:
@@ -27,34 +55,83 @@ def assistant_piece(update: Any) -> str:
     return text if isinstance(text, str) else ""
 
 
-_TOOL_OPEN = "<tool_call>"
-_TOOL_CLOSE = "</tool_call>"
+def _grow(current: str, incoming: str) -> str:
+    if not incoming or incoming == current:
+        return current
+    if not current or incoming.startswith(current):
+        return incoming
+    if current.endswith(incoming):
+        return current
+    return current + incoming
 
 
-def spoken_text(text: str) -> str:
-    """Reply text with tool-call markup removed. An unfinished call stays hidden."""
-    kept: list[str] = []
-    rest = text
-    while rest:
-        start = rest.find(_TOOL_OPEN)
-        if start < 0:
-            keep = _marker_prefix(rest, _TOOL_OPEN)
-            kept.append(rest[:-keep] if keep else rest)
-            break
-        kept.append(rest[:start])
-        end = rest.find(_TOOL_CLOSE, start)
-        if end < 0:
-            break
-        rest = rest[end + len(_TOOL_CLOSE) :]
-    return "".join(kept).strip()
+def tool_pieces(update: Any) -> list[ReplyPiece]:
+    """Function calls and results on one stream update. Markup is left unread."""
+    pieces: list[ReplyPiece] = []
+    for item in getattr(update, "contents", None) or []:
+        kind = getattr(item, "type", None)
+        if kind not in ("function_call", "function_result"):
+            continue
+        props = getattr(item, "additional_properties", None) or {}
+        raw_index = props.get("tool_call_index") if isinstance(props, dict) else None
+        index = raw_index if isinstance(raw_index, int) else None
+        call_id = getattr(item, "call_id", None) or ""
+        if not isinstance(call_id, str):
+            call_id = str(call_id)
+        name = getattr(item, "name", None) or ""
+        if not isinstance(name, str):
+            name = ""
+        if kind == "function_result":
+            result = getattr(item, "result", None)
+            text = result if isinstance(result, str) else ""
+            pieces.append(ReplyPiece("tool_result", text, call_id, name, index))
+            continue
+        arguments = getattr(item, "arguments", None) or ""
+        if isinstance(arguments, dict):
+            arguments = json.dumps(arguments)
+        elif not isinstance(arguments, str):
+            arguments = str(arguments)
+        pieces.append(ReplyPiece("tool", arguments, call_id, name, index))
+    return pieces
 
 
-def _marker_prefix(text: str, marker: str) -> int:
-    limit = min(len(text), len(marker) - 1)
-    for size in range(limit, 0, -1):
-        if marker.startswith(text[-size:]):
-            return size
-    return 0
+def record_tool(calls: list[dict[str, Any]], piece: ReplyPiece) -> dict[str, Any]:
+    """Merge one streamed function call or result into ``calls``."""
+    found: dict[str, Any] | None = None
+    if piece.call_id:
+        found = next((row for row in calls if row["id"] == piece.call_id), None)
+    if found is None and piece.index is not None:
+        found = next((row for row in calls if row.get("index") == piece.index), None)
+    if found is None:
+        key = piece.call_id or (
+            f"index:{piece.index}" if piece.index is not None else f"call-{len(calls)}"
+        )
+        found = {"id": key, "name": "", "arguments": "", "result": "", "index": piece.index}
+        calls.append(found)
+    if piece.call_id:
+        found["id"] = piece.call_id
+    if piece.index is not None:
+        found["index"] = piece.index
+    if piece.kind == "tool_result":
+        if piece.text:
+            found["result"] += piece.text
+        if piece.name:
+            found["name"] = _grow(str(found["name"]), piece.name)
+        return found
+    if piece.name:
+        found["name"] = _grow(str(found["name"]), piece.name)
+    if piece.text:
+        found["arguments"] = str(found["arguments"]) + piece.text
+    return found
+
+
+def public_call(row: dict[str, Any]) -> dict[str, str]:
+    return {
+        "id": str(row["id"]),
+        "name": str(row["name"]),
+        "arguments": str(row["arguments"]),
+        "result": str(row["result"]),
+    }
 
 
 def reasoning_piece(update: Any) -> str:
@@ -104,9 +181,6 @@ def turn_setup(
     from web_api.heartbeat_tools import GROUP_ID as HEARTBEAT_ID
     from web_api.heartbeat_tools import INSTRUCTIONS as HEARTBEAT_INSTRUCTIONS
     from web_api.heartbeat_tools import tools as heartbeat_tools
-    from web_api.session_tools import GROUP_ID as SESSION_ID
-    from web_api.session_tools import INSTRUCTIONS as SESSION_INSTRUCTIONS
-    from web_api.session_tools import tools as session_tools
 
     instructions = persona.strip() or f"You are {agent_name}."
     tool_list: list[object] = []
@@ -122,10 +196,6 @@ def turn_setup(
         if HEARTBEAT_INSTRUCTIONS not in instructions:
             instructions = f"{instructions}\n\n{HEARTBEAT_INSTRUCTIONS}"
         tool_list.extend(heartbeat_tools(store, agent_id))
-    if SESSION_ID in tool_groups and store is not None and session_id and bus is not None:
-        if SESSION_INSTRUCTIONS not in instructions:
-            instructions = f"{instructions}\n\n{SESSION_INSTRUCTIONS}"
-        tool_list.extend(session_tools(store, session_id, bus))
     if mcp_tools:
         from web_api.mcp_tools import INSTRUCTIONS as MCP_INSTRUCTIONS
 
@@ -159,13 +229,103 @@ def turn_setup(
     return instructions, tool_list
 
 
+def unsent_images(images: list[tuple[bytes, str]] | None, session: Any) -> list[tuple[bytes, str]]:
+    """Drop images whose bytes are already on an earlier turn of this session."""
+    if not images:
+        return []
+    seen = _attached_hashes(session)
+    fresh: list[tuple[bytes, str]] = []
+    for data, media_type in images:
+        digest = hashlib.sha256(data).hexdigest()
+        if digest in seen:
+            continue
+        seen.add(digest)
+        fresh.append((data, media_type))
+    return fresh
+
+
+def _attached_hashes(session: Any) -> set[str]:
+    found: set[str] = set()
+    for message in _session_messages(session):
+        for content in _message_contents(message):
+            payload = _image_bytes(content)
+            if payload is not None:
+                found.add(hashlib.sha256(payload).hexdigest())
+    return found
+
+
+def _session_messages(session: Any) -> list[Any]:
+    state = getattr(session, "state", None)
+    if not isinstance(state, dict):
+        return []
+    memory = state.get("in_memory")
+    if isinstance(memory, dict) and isinstance(memory.get("messages"), list):
+        return list(memory["messages"])
+    messages = state.get("messages")
+    return list(messages) if isinstance(messages, list) else []
+
+
+def _message_contents(message: Any) -> list[Any]:
+    if isinstance(message, dict):
+        contents = message.get("contents")
+    else:
+        contents = getattr(message, "contents", None)
+    return list(contents) if isinstance(contents, list) else []
+
+
+def _image_bytes(content: Any) -> bytes | None:
+    if isinstance(content, dict):
+        media = content.get("media_type")
+        uri = content.get("uri")
+    else:
+        media = getattr(content, "media_type", None)
+        uri = getattr(content, "uri", None)
+    if not isinstance(uri, str) or not uri.startswith("data:image/") or "," not in uri:
+        return None
+    known = media in {"image/png", "image/jpeg"}
+    prefixed = uri.startswith(("data:image/png;", "data:image/jpeg;"))
+    if not known and not prefixed:
+        return None
+    try:
+        return base64.b64decode(uri.split(",", 1)[1])
+    except (ValueError, TypeError):
+        return None
+
+
+def user_turn(text: str, note: str, images: list[tuple[bytes, str]] | None = None) -> Any:
+    """The new user message. A gallery note and any found images stay on this message."""
+    body = f"{text}\n\n{note}" if note else text
+    if not images:
+        return body
+    from agent_framework import Content, Message
+
+    parts: list[Any] = [body]
+    for data, media_type in images:
+        parts.append(Content.from_data(data=data, media_type=media_type))
+    return Message("user", parts)
+
+
+def _open_session(agent: Any, store: Any | None, session_id: str | None) -> Any:
+    """Load the stored Agent Framework session, or open one for this chat."""
+    from agent_framework import AgentSession
+
+    if store is not None and session_id:
+        raw = store.maf_session(session_id)
+        if isinstance(raw, dict):
+            try:
+                return AgentSession.from_dict(raw)
+            except Exception:
+                return agent.create_session(session_id=session_id)
+        return agent.create_session(session_id=session_id)
+    return agent.create_session()
+
+
 async def stream_reply(
     *,
     base_url: str,
     model: str,
     persona: str,
     agent_name: str,
-    history: list[dict[str, str]],
     user_text: str,
     tool_groups: list[str] | None = None,
     store: Any | None = None,
@@ -175,13 +335,14 @@ async def stream_reply(
     pending: set[Any] | None = None,
     cancel: asyncio.Event | None = None,
     gallery_note: str = "",
-    user_image: tuple[bytes, str] | None = None,
+    user_images: list[tuple[bytes, str]] | None = None,
+    enable_thinking: bool | None = None,
+    preserve_thinking: bool | None = None,
+    reasoning_effort: str | None = None,
 ) -> AsyncIterator[ReplyPiece]:
     from agent_framework import Agent, InMemoryHistoryProvider
-    from openai import AsyncOpenAI
 
-    http = AsyncOpenAI(api_key="favlo", base_url=base_url, timeout=3600.0)
-    client = open_chat_client(model, base_url, async_client=http)
+    client = open_chat_client(model, base_url)
     mcp_text = ""
     mcp_tools: list[object] = []
     if store is not None and agent_id and session_id and bus is not None and pending is not None:
@@ -201,35 +362,38 @@ async def stream_reply(
         mcp_text=mcp_text,
         mcp_tools=mcp_tools,
     )
-    if gallery_note:
-        instructions = f"{instructions}\n\n{gallery_note}"
     if tool_list:
         client.function_invocation_configuration["max_iterations"] = 6
-    agent = Agent(
-        client=client,
-        name=agent_name,
-        instructions=instructions,
-        tools=tool_list,
-        default_options={"max_tokens": 1024, "extra_body": {"enable_thinking": False}},
-    )
-    session = agent.create_session()
-    bucket = session.state.setdefault(InMemoryHistoryProvider.DEFAULT_SOURCE_ID, {})
-    messages = bucket.setdefault("messages", [])
-    messages.extend(
-        history_message(item["role"], item["text"], item.get("reasoning") or "")
-        for item in history
-    )
-    prompt: Any = user_text
-    if user_image is not None:
-        from agent_framework import Content, Message
+    options = sampling_options(enable_thinking, preserve_thinking, reasoning_effort) or {}
+    options["store"] = False
+    built: dict[str, Any] = {
+        "client": client,
+        "name": agent_name,
+        "instructions": instructions,
+        "tools": tool_list,
+        "default_options": options,
+        "require_per_service_call_history_persistence": True,
+        "context_providers": [
+            InMemoryHistoryProvider(skip_excluded=True),
+            prompt_window(),
+        ],
+    }
+    agent = Agent(**built)
+    session = _open_session(agent, store, session_id)
+    prompt = user_turn(user_text, gallery_note, unsent_images(user_images, session))
+    clients = contextlib.AsyncExitStack()
+    await clients.__aenter__()
+    try:
+        from web_api.mcp_tools import open_clients
 
-        data, media_type = user_image
-        prompt = Message("user", [user_text, Content.from_data(data=data, media_type=media_type)])
-    stream = agent.run(prompt, session=session, stream=True)
+        await open_clients(mcp_tools, clients)
+        stream = agent.run(prompt, session=session, stream=True)
+    except Exception:
+        await clients.aclose()
+        raise
     content_yielded = False
     saw_reasoning = False
-    spoken = ""
-    buffered: list[str] = []
+    saw_tool = False
     abort: asyncio.Task[None] | None = None
     if cancel is not None:
 
@@ -240,10 +404,11 @@ async def stream_reply(
                 with contextlib.suppress(Exception):
                     await closer()
             with contextlib.suppress(Exception):
-                await http.close()
+                await close_chat_client(client)
 
         abort = asyncio.create_task(_abort())
     stopped = False
+    keep = False
     try:
         try:
             async for update in stream:
@@ -254,18 +419,11 @@ async def stream_reply(
                 if reason:
                     saw_reasoning = True
                     yield ReplyPiece("reasoning", reason)
+                for call in tool_pieces(update):
+                    saw_tool = True
+                    yield call
                 piece = assistant_piece(update)
                 if not piece:
-                    continue
-                if tool_list:
-                    buffered.append(piece)
-                    visible = spoken_text("".join(buffered))
-                    extra = visible[len(spoken) :] if visible.startswith(spoken) else visible
-                    spoken = visible
-                    if not extra:
-                        continue
-                    content_yielded = True
-                    yield ReplyPiece("content", extra)
                     continue
                 content_yielded = True
                 yield ReplyPiece("content", piece)
@@ -285,21 +443,28 @@ async def stream_reply(
                     reason = reasoning_piece(message)
                     if reason:
                         yield ReplyPiece("reasoning", reason)
+            if not saw_tool:
+                for message in getattr(final, "messages", None) or []:
+                    for call in tool_pieces(message):
+                        yield call
             text = getattr(final, "text", None)
             if isinstance(text, str) and text.strip():
-                if tool_list:
-                    text = spoken_text(text)
-                if text:
-                    yield ReplyPiece("content", text)
+                yield ReplyPiece("content", text)
+        keep = True
     finally:
         if abort is not None:
             abort.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await abort
-        closer = getattr(client, "close", None)
-        if closer is not None:
-            closed = closer()
-            if hasattr(closed, "__await__"):
-                await closed
+        if keep and store is not None and session_id and hasattr(session, "to_dict"):
+            store.save_maf_session(session_id, session.to_dict())
         with contextlib.suppress(Exception):
-            await http.close()
+            closer = getattr(agent, "close", None)
+            if closer is not None:
+                closed = closer()
+                if hasattr(closed, "__await__"):
+                    await closed
+        with contextlib.suppress(Exception):
+            await clients.aclose()
+        with contextlib.suppress(Exception):
+            await close_chat_client(client)

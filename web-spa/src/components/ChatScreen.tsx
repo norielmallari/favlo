@@ -12,32 +12,39 @@ import {
 } from 'react-native';
 
 import { api, idempotencyKey, socketUrl } from '@/api/client';
+import { spokenError } from '@/reply-error';
 import {
   chatMessage,
   clearedTranscript,
   keepLatest,
+  sessionCommand,
   LATEST_SLACK,
+  LiveReply,
+  noteReasoning,
+  noteReply,
+  noteTool,
   readDraft,
+  replyVisible,
   showsMessage,
+  toolCallDelta,
   transcriptFrame,
   TranscriptTurn,
   writeDraft,
   type ChatMessage,
+  type ReplyStep,
+  type SentMessage,
 } from '@/components/chat-transcript';
 import { Composer } from '@/components/Composer';
+import { ReplyAlert } from '@/components/ReplyAlert';
 import { Confirmation } from '@/components/Confirmation';
 import { EmptyState } from '@/components/EmptyState';
 import { Frame } from '@/components/Frame';
 import { buttonRow, IconButton } from '@/components/IconButton';
 import { GalleryWorkspace } from '@/components/GalleryWorkspace';
-import { MarkdownText } from '@/components/MarkdownText';
-import { humanText } from '@/components/MessageBody';
 import { MenuRow } from '@/components/MenuRow';
 import { Modal } from '@/components/Modal';
 import { focusRingInset, Pressable } from '@/components/Pressable';
 import { AgentForm, type Provider, type Settings, type ToolGroup } from '@/components/SettingsScreen';
-import { Thinking } from '@/components/Thinking';
-import { transcriptScrollbar } from '@/components/scrollbar';
 import { Workspaces, type Workspace } from '@/components/Workspaces';
 import { workingShimmer } from '@/components/working';
 import { useTheme } from '@/theme/Theme';
@@ -48,7 +55,7 @@ export { clearedTranscript, keepLatest, showsMessage };
 
 type Channel = { id: string; name: string; agent_id: string; session_id: string };
 type Snapshot = {
-  messages: { id: string; role: string; body: string; reasoning?: string | null }[];
+  messages: { id: string; role: string; body: string; reasoning?: string | null; tool_calls?: unknown; trace?: unknown }[];
   runs: { id: string; status: string; error: string | null }[];
   cursor: number;
 };
@@ -63,9 +70,10 @@ type AgentEvent = {
     role?: string;
     text?: string;
     reasoning?: string;
+    tool_calls?: unknown;
     message?: string;
     status?: string;
-    agui?: { type?: string; delta?: string };
+    agui?: { type?: string; delta?: string; id?: string; name?: string; arguments?: string; result?: string };
   };
 };
 
@@ -80,13 +88,13 @@ export function ChatScreen() {
   const transcriptRef = useRef<ComponentRef<typeof ScrollView>>(null);
   const followLatest = useRef(true);
   const placedLatest = useRef(false);
+  const openRun = useRef<string | null>(null);
   const expandedSeed = useRef(false);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState('');
-  const [live, setLive] = useState('');
-  const [thinking, setThinking] = useState('');
+  const [steps, setSteps] = useState<ReplyStep[]>([]);
   const [working, setWorking] = useState(false);
   const [runId, setRunId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -106,6 +114,10 @@ export function ChatScreen() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [workspaceName, setWorkspaceName] = useState('');
+
+  function replaceModels(id: string, models: Provider['models']) {
+    setProviders((rows) => rows.map((item) => (item.id === id ? { ...item, models } : item)));
+  }
 
   const channel = channels.find((item) => item.id === selected) ?? null;
   const workspace = workspaces.find((item) => item.id === selectedWorkspace) ?? null;
@@ -192,11 +204,12 @@ export function ChatScreen() {
       cursorRef.current = snapshot.cursor;
       setMessages(snapshot.messages.map(chatMessage));
       const latest = snapshot.runs.at(-1);
-      setWorking(latest?.status === 'running');
-      setRunId(latest?.status === 'running' ? latest.id : null);
+      const running = latest?.status === 'running' ? latest.id : null;
+      openRun.current = running;
+      setWorking(running != null);
+      setRunId(running);
       setError(latest?.status === 'failed' ? latest.error : null);
-      setLive('');
-      setThinking('');
+      setSteps([]);
     }).catch((caught: Error) => setNotice(caught.message));
   }, [channel]);
 
@@ -209,12 +222,19 @@ export function ChatScreen() {
     if (!followLatest.current) {
       return;
     }
-    transcriptRef.current?.scrollToEnd({ animated: false });
+    const scroll = () => transcriptRef.current?.scrollToEnd({ animated: false });
+    scroll();
+    if (Platform.OS === 'web') {
+      requestAnimationFrame(() => {
+        scroll();
+        requestAnimationFrame(scroll);
+      });
+    }
   }, []);
 
   useEffect(() => {
     showLatest();
-  }, [messages, live, thinking, width, height, showLatest]);
+  }, [messages, steps, width, height, showLatest]);
 
   const noteScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { layoutMeasurement, contentOffset, contentSize } = event.nativeEvent;
@@ -303,7 +323,7 @@ export function ChatScreen() {
     if (
       event.type === 'message.created' &&
       event.payload?.message_id &&
-      showsMessage(event.payload.text, event.payload.reasoning)
+      showsMessage(event.payload.text, event.payload.reasoning, event.payload.tool_calls)
     ) {
       const id = event.payload.message_id;
       const role = event.payload.role ?? 'assistant';
@@ -311,42 +331,76 @@ export function ChatScreen() {
       setMessages((current) =>
         current.some((item) => item.id === id)
           ? current
-          : [...current, chatMessage({ id, role, body, reasoning: event.payload?.reasoning })],
+          : [
+              ...current,
+              chatMessage({
+                id,
+                role,
+                body,
+                reasoning: event.payload?.reasoning,
+                tool_calls: event.payload?.tool_calls,
+                trace: event.payload?.trace,
+              }),
+            ],
       );
       if (role === 'assistant') {
-        setLive('');
-        setThinking('');
+        openRun.current = null;
+        setSteps([]);
         setWorking(false);
         setRunId(null);
         setStatus('Reply ready');
       }
     }
     if (clearedTranscript(event, channel?.session_id)) {
+      openRun.current = null;
       setMessages([]);
-      setLive('');
-      setThinking('');
+      setSteps([]);
+      setWorking(false);
+      setRunId(null);
       setError(null);
       setStatus(null);
       setCreating(false);
       setWelcomeAgentId(null);
     }
     if (event.type === 'run.started') {
+      openRun.current = event.run_id ?? null;
       setWorking(true);
       setError(null);
-      setThinking('');
+      setSteps([]);
       setStatus(null);
       setRunId(event.run_id ?? null);
     }
-    if (event.type === 'run.delta' && event.payload?.agui?.type === 'TEXT_MESSAGE_CONTENT') {
-      setLive((current) => current + (event.payload?.agui?.delta ?? ''));
+    if (
+      event.type === 'run.delta' &&
+      event.run_id != null &&
+      event.run_id === openRun.current &&
+      event.payload?.agui?.type === 'TEXT_MESSAGE_CONTENT'
+    ) {
+      setSteps((current) => noteReply(current, event.payload?.agui?.delta ?? ''));
     }
-    if (event.type === 'run.delta' && event.payload?.agui?.type === 'REASONING_MESSAGE_CONTENT') {
-      setThinking((current) => current + (event.payload?.agui?.delta ?? ''));
+    if (
+      event.type === 'run.delta' &&
+      event.run_id != null &&
+      event.run_id === openRun.current &&
+      event.payload?.agui?.type === 'REASONING_MESSAGE_CONTENT'
+    ) {
+      setSteps((current) => noteReasoning(current, event.payload?.agui?.delta ?? ''));
+    }
+    if (
+      event.type === 'run.delta' &&
+      event.run_id != null &&
+      event.run_id === openRun.current &&
+      event.payload?.agui?.type === 'TOOL_CALL'
+    ) {
+      const call = toolCallDelta(event.payload.agui);
+      if (call) {
+        setSteps((current) => noteTool(current, call));
+      }
     }
     if (event.type === 'run.failed' || event.type === 'run.cancelled') {
+      openRun.current = null;
       setWorking(false);
-      setLive('');
-      setThinking('');
+      setSteps([]);
       setRunId(null);
       setError(event.type === 'run.failed' ? (event.payload?.message ?? 'The reply failed.') : null);
       setStatus(event.type === 'run.cancelled' ? 'The reply stopped.' : null);
@@ -360,29 +414,64 @@ export function ChatScreen() {
     }
   }
 
+  async function postMessage(text: string) {
+    if (channel == null || text.trim() === '') {
+      return;
+    }
+    const result = await api<SentMessage>(`/sessions/${channel.session_id}/messages`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': idempotencyKey() },
+      body: JSON.stringify({ text }),
+    });
+    if (result.cleared) {
+      openRun.current = null;
+      setMessages([]);
+      setSteps([]);
+      setWorking(false);
+      setRunId(null);
+      setError(null);
+      setStatus(null);
+      return;
+    }
+    if (result.message_id) {
+      setMessages((current) =>
+        current.some((item) => item.id === result.message_id)
+          ? current
+          : [...current, { id: result.message_id, role: 'user', body: result.text ?? text }],
+      );
+    }
+    if (result.run_id) {
+      openRun.current = result.run_id;
+      setWorking(true);
+      setRunId(result.run_id);
+      setError(null);
+      setStatus(null);
+    }
+  }
+
   async function send() {
-    if (channel == null || draft.trim() === '' || working) {
+    const command = sessionCommand(draft);
+    if (channel == null || draft.trim() === '' || (working && command !== 'clear')) {
       return;
     }
     const text = draft;
     updateDraft('');
     try {
-      const result = await api<{ message_id: string; text: string; run_id?: string }>(`/sessions/${channel.session_id}/messages`, {
-        method: 'POST',
-        headers: { 'Idempotency-Key': idempotencyKey() },
-        body: JSON.stringify({ text }),
-      });
-      setMessages((current) =>
-        current.some((item) => item.id === result.message_id)
-          ? current
-          : [...current, { id: result.message_id, role: 'user', body: result.text }],
-      );
-      setWorking(true);
-      setRunId(result.run_id ?? null);
-      setError(null);
-      setStatus(null);
+      await postMessage(text);
     } catch (caught) {
       updateDraft(text);
+      setNotice(caught instanceof Error ? caught.message : 'The message was not sent.');
+    }
+  }
+
+  async function resend() {
+    const last = [...messages].reverse().find((item) => item.role === 'user');
+    if (channel == null || working || last == null || last.body.trim() === '') {
+      return;
+    }
+    try {
+      await postMessage(last.body);
+    } catch (caught) {
       setNotice(caught instanceof Error ? caught.message : 'The message was not sent.');
     }
   }
@@ -418,9 +507,7 @@ export function ChatScreen() {
     }
   }
 
-  const shown = humanText(live);
-  const liveThinking = thinking.trim();
-  const hasReply = messages.some((item) => item.role === 'assistant') || shown !== '' || liveThinking !== '';
+  const hasReply = messages.some((item) => item.role === 'assistant') || replyVisible(steps);
   const conversation = hasReply || working;
   const greeting = !conversation && channel != null && channel.agent_id === welcomeAgentId;
   const transcript = (
@@ -432,14 +519,11 @@ export function ChatScreen() {
           role={item.role}
           body={item.body}
           reasoning={item.reasoning}
+          toolCalls={item.toolCalls}
+          trace={item.trace}
         />
       ))}
-      {liveThinking !== '' ? <Thinking text={liveThinking} settled={false} /> : null}
-      {shown !== '' ? (
-        <View accessibilityLabel={`${channel?.name ?? 'Agent'} said: ${shown}`} style={measureStyle}>
-          <MarkdownText text={shown} color={palette.textPrimary} />
-        </View>
-      ) : null}
+      <LiveReply steps={steps} speaker={channel?.name ?? 'Agent'} measured />
     </>
   );
 
@@ -458,7 +542,7 @@ export function ChatScreen() {
             <IconButton icon="menu" label="Channels" onPress={() => setDrawer('channels')} background={palette.surface} border={palette.borderStrong} color={palette.textPrimary} />
           </View>
         ) : null}
-        <View style={{ flex: 1, flexDirection: 'row', minWidth: 0, maxWidth: '100%' }}>
+        <View style={{ flex: 1, flexDirection: 'row', minWidth: 0, minHeight: 0, maxWidth: '100%' }}>
           {!wide && drawer != null ? (
             <Pressable
               accessible={false}
@@ -525,7 +609,7 @@ export function ChatScreen() {
             </View>
           )}
           {workspaceOpen && workspace != null ? (
-            <View style={{ flex: 1, minWidth: 0 }}>
+            <View style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
               <GalleryWorkspace
                 workspaceId={workspace.id}
                 agentName={channel?.name ?? 'Agent'}
@@ -536,21 +620,18 @@ export function ChatScreen() {
               />
             </View>
           ) : (
-          <View accessibilityLabel="Conversation" style={{ flex: 1, minWidth: 0, maxWidth: '100%', padding: space[4], overflow: 'hidden' }}>
-            <View testID="reading-column" style={[{ flex: 1, minWidth: 0, width: '100%', gap: space[3] }, measureStyle]}>
+          <View accessibilityLabel="Conversation" style={{ flex: 1, minWidth: 0, minHeight: 0, maxWidth: '100%', padding: space[4], overflow: 'hidden' }}>
+            <View testID="reading-column" style={[{ flex: 1, minWidth: 0, minHeight: 0, width: '100%', gap: space[3] }, measureStyle]}>
             {channel == null ? (
               <Text style={textStyle('body', palette.textPrimary)}>Create an agent to start a conversation.</Text>
             ) : greeting ? null : (
               <Text accessibilityRole="header" aria-level={2} style={textStyle('title', palette.textPrimary)}>{channel.name}</Text>
             )}
-            {!greeting && channel != null && Platform.OS === 'web'
-              ? createElement('style', { 'data-testid': 'transcript-scrollbar' }, transcriptScrollbar(palette.borderStrong, palette.background, palette.textSecondary))
-              : null}
             {!greeting && channel != null ? (
               <ScrollView
                 ref={transcriptRef}
                 testID="transcript"
-                style={{ flex: 1, minWidth: 0, maxWidth: '100%' }}
+                style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 0, minWidth: 0, maxWidth: '100%' }}
                 contentContainerStyle={transcriptFrame(space[4])}
                 onContentSizeChange={showLatest}
                 onScroll={noteScroll}
@@ -592,7 +673,6 @@ export function ChatScreen() {
             {status ? (
               <Text
                 accessibilityLiveRegion="polite"
-                {...(Platform.OS === 'web' ? { role: 'status' as const } : {})}
                 style={
                   Platform.OS === 'web'
                     ? { position: 'absolute', width: 1, height: 1, overflow: 'hidden' }
@@ -603,7 +683,7 @@ export function ChatScreen() {
               </Text>
             ) : null}
             {error ? (
-              <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={textStyle('small', palette.danger)}>{error}</Text>
+              <ReplyAlert message={spokenError(error)} disabled={working} onResend={() => void resend()} />
             ) : null}
             {notice ? (
               <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={textStyle('small', palette.danger)}>{notice}</Text>
@@ -657,6 +737,7 @@ export function ChatScreen() {
               groups={groups}
               providers={providers}
               settings={settings}
+              onModels={replaceModels}
               onSuccess={setSaved}
               onSaved={(agent) => {
                 setCreating(false);

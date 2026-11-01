@@ -4,6 +4,8 @@ import path from 'node:path';
 
 import { expect, test } from '@playwright/test';
 
+import { onScreen } from '../on-screen';
+
 const API = 'http://127.0.0.1:8130';
 const PROMPT = 'Reply with the single word ready.';
 
@@ -23,7 +25,7 @@ test('a new install seeds Favlo and answers the first chat', async ({ page }) =>
   expect(agents.agents.map((agent) => agent.name)).toEqual(['Favlo']);
   expect(agents.agents[0].id).toBe('agent_favlo');
   expect(agents.agents[0].persona.length).toBeGreaterThan(0);
-  expect(agents.agents[0].tool_groups).toEqual(expect.arrayContaining(['favlo-config', 'session']));
+  expect(agents.agents[0].tool_groups).toEqual(['favlo-config']);
 
   const channels = await read<{ channels: Channel[] }>('/channels');
   expect(channels.channels).toEqual([
@@ -40,10 +42,10 @@ test('a new install seeds Favlo and answers the first chat', async ({ page }) =>
 
   const catalog = await read<{ skills: Skill[] }>('/global-skills');
   const names = catalog.skills.map((skill) => skill.name).sort();
-  expect(names).toEqual(['session-clear', 'session-remember']);
+  expect(names).toEqual(['session-remember']);
   expect(catalog.skills.every((skill) => skill.add_by_default)).toBe(true);
   const copied = await read<{ skills: Skill[] }>('/agent-skills');
-  expect(copied.skills.map((skill) => skill.name).sort()).toEqual(['session-clear', 'session-remember']);
+  expect(copied.skills.map((skill) => skill.name).sort()).toEqual(['session-remember']);
   expect(copied.skills.every((skill) => skill.agent_id === 'agent_favlo')).toBe(true);
 
   await page.setViewportSize({ width: 1280, height: 800 });
@@ -53,7 +55,9 @@ test('a new install seeds Favlo and answers the first chat', async ({ page }) =>
   await expect(page.getByText('Chat, images, music, and voice on this machine.')).toHaveCount(0);
   await expect(page.getByLabel('Conversation').getByRole('heading', { name: 'Favlo', exact: true })).toBeVisible();
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill(PROMPT);
-  await page.getByRole('button', { name: 'Send' }).click();
+  const send = page.getByRole('button', { name: 'Send' });
+  await onScreen(send);
+  await send.click();
   await expect(page.getByLabel(`You said: ${PROMPT}`)).toBeVisible();
   await expect.poll(async () => page.getByLabel(/^Favlo said: /).count(), { timeout: 360_000 }).toBeGreaterThan(0);
 

@@ -20,8 +20,6 @@ from web_api.schemas import (
     SkillCopy,
     SkillUpdate,
 )
-from web_api.session_tools import GROUP_ID as SESSION_ID
-from web_api.session_tools import GROUP_NAME as SESSION_NAME
 
 router = APIRouter()
 
@@ -35,7 +33,6 @@ async def list_tool_groups():
                 {"id": GROUP_ID, "name": GROUP_NAME},
                 {"id": CONVERSATION_ID, "name": CONVERSATION_NAME},
                 {"id": HEARTBEAT_ID, "name": HEARTBEAT_NAME},
-                {"id": SESSION_ID, "name": SESSION_NAME},
             ]
         },
     )
@@ -69,6 +66,9 @@ async def update_agent(agent_id: str, body: AgentUpdate, request: Request):
         body.persona,
         body.default_model_id,
         body.tool_groups,
+        body.enable_thinking,
+        body.preserve_thinking,
+        body.reasoning_effort,
     )
     for event in events:
         await request.app.state.bus.publish(event)

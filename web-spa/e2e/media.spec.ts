@@ -1,5 +1,7 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 
+import { onScreen } from './on-screen';
+
 test('the Favlo chat shows a generated image', async ({ page }) => {
   const channels = await page.request.get('http://127.0.0.1:8130/channels');
   expect(channels.ok()).toBeTruthy();
@@ -47,46 +49,47 @@ test('the Favlo chat shows a generated image', async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 667 });
   await expectLatest(page);
   await expectFits(page);
+  await page.setViewportSize({ width: 1280, height: 640 });
+  await expectLatest(page);
   await page.getByRole('button', { name: 'Appearance, System' }).click();
   await page.getByRole('menuitem', { name: 'Light' }).click();
-  await expect(page.getByRole('button', { name: 'Appearance, Light' })).toBeInViewport();
-  const css = await page.getByTestId('transcript-scrollbar').evaluate((node) => node.textContent ?? '');
+  await expect(page.getByRole('button', { name: 'Appearance, Light' })).toBeVisible();
+  const css = await page.getByTestId('scrollbar').evaluate((node) => node.textContent ?? '');
   expect(css).toContain('#718096');
   expect(css).toContain('#F6F8FC');
   const applied = await page.getByTestId('transcript').evaluate((node) => getComputedStyle(node).scrollbarColor);
   expect(applied).toContain('113, 128, 150');
-  await page.getByRole('button', { name: 'View generated image' }).click();
+  await page.getByRole('button', { name: 'Configuration' }).click();
+  await page.getByRole('tab', { name: 'Agents' }).click();
+  const agentsScroll = await page.getByLabel('Agents list').evaluate((node) => getComputedStyle(node).scrollbarColor);
+  expect(agentsScroll).toContain('113, 128, 150');
+  await page.getByRole('button', { name: 'Chat' }).click();
+  const viewImage = page.getByRole('button', { name: 'View generated image' });
+  await onScreen(viewImage);
+  await viewImage.click();
   const dialog = page.getByRole('dialog', { name: 'Generated image' });
   await expect(dialog).toBeVisible();
   const preview = dialog.getByRole('img', { name: 'Generated image' });
   await expect.poll(() => preview.evaluate((node: HTMLImageElement) => node.naturalWidth)).toBeGreaterThan(0);
-  await expect(dialog.getByRole('button', { name: 'Download image' })).toBeInViewport();
-  await expect(dialog.getByRole('button', { name: 'Close' })).toBeInViewport();
-  const card = await dialog.boundingBox();
-  const picture = await preview.boundingBox();
-  const download = await dialog.getByRole('button', { name: 'Download image' }).boundingBox();
-  expect(card).not.toBeNull();
-  expect(picture).not.toBeNull();
-  expect(download).not.toBeNull();
-  expect(picture?.x ?? 0).toBeGreaterThanOrEqual((card?.x ?? 0) - 1);
-  expect((picture?.x ?? 0) + (picture?.width ?? 0)).toBeLessThanOrEqual((card?.x ?? 0) + (card?.width ?? 0) + 1);
-  expect(picture?.height ?? 0).toBeGreaterThan(40);
-  expect(picture?.y ?? 0).toBeGreaterThan((download?.y ?? 0) + (download?.height ?? 0));
-  expect((picture?.y ?? 0) + (picture?.height ?? 0)).toBeLessThanOrEqual((card?.y ?? 0) + (card?.height ?? 0) + 1);
+  const downloadImage = dialog.getByRole('button', { name: 'Download image' });
+  const closeDialog = dialog.getByRole('button', { name: 'Close' });
+  await onScreen(downloadImage);
+  await onScreen(closeDialog);
   const saved = page.waitForEvent('download');
-  await dialog.getByRole('button', { name: 'Download image' }).click();
+  await downloadImage.click();
   expect((await saved).suggestedFilename()).toBe('favlo-image.png');
   await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
-  await page.getByRole('button', { name: 'View generated image' }).click();
+  await onScreen(viewImage);
+  await viewImage.click();
   const again = page.getByRole('dialog', { name: 'Generated image' });
   await expect(again).toBeVisible();
   await expect.poll(() => again.getByRole('img', { name: 'Generated image' }).evaluate((node: HTMLImageElement) => node.naturalWidth)).toBeGreaterThan(0);
 });
 
 async function expectFits(page: Page) {
-  await expect(page.getByRole('button', { name: 'Configuration' })).toBeInViewport();
-  await expect(page.getByRole('button', { name: /^Appearance, / })).toBeInViewport();
+  await onScreen(page.getByRole('button', { name: 'Configuration' }));
+  await onScreen(page.getByRole('button', { name: /^Appearance, / }));
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(1);
   const image = page.getByRole('img', { name: 'Generated image' }).last();

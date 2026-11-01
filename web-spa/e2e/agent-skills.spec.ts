@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 import { deleteAgentSkillsNamed, deleteGlobalSkillsNamed } from './cleanup';
+import { onScreen } from './on-screen';
 
 test('configuration stores a global skill and copies it to an agent', async ({ page }) => {
   const name = `Captions ${Date.now()}`;
@@ -15,10 +16,28 @@ test('configuration stores a global skill and copies it to an agent', async ({ p
     await page.getByRole('button', { name: 'New skill' }).click();
     await page.getByRole('textbox', { name: 'Skill name' }).fill(name);
     await page.getByRole('textbox', { name: 'Skill description' }).fill('Write a one-line caption.');
-    await page.getByRole('button', { name: 'Create skill' }).click();
+    const create = page.getByRole('button', { name: 'Create skill' });
+    await onScreen(create);
+    await create.click();
+    await expect(page.getByTestId('save-confirmation')).toContainText('The skill was created.');
+    await page.getByRole('button', { name: 'Dismiss confirmation' }).click();
     await expect(page.getByLabel('Skills list').getByRole('button', { name, exact: true })).toBeVisible();
-    await expect(page.getByRole('textbox', { name: 'Skill description' })).toHaveValue('Write a one-line caption.');
-    await page.getByRole('button', { name: 'Copy to agent' }).click();
+    await expect(page.getByRole('textbox', { name: 'Skill description', exact: true })).toHaveValue('Write a one-line caption.');
+
+    await page.setViewportSize({ width: 1280, height: 640 });
+    await page.getByRole('button', { name: 'New skill' }).click();
+    await page.getByRole('textbox', { name: 'Skill name', exact: true }).fill(`${name} short`);
+    await page.getByRole('textbox', { name: 'Skill description', exact: true }).fill('Short window skill.');
+    const shortCreate = page.getByRole('button', { name: 'Create skill', exact: true });
+    await onScreen(shortCreate);
+    await shortCreate.click();
+    await expect(page.getByTestId('save-confirmation')).toContainText('The skill was created.');
+    await page.getByRole('button', { name: 'Dismiss confirmation' }).click();
+    await expect(page.getByLabel('Skills list').getByRole('button', { name: `${name} short`, exact: true })).toBeVisible();
+
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.getByLabel('Skills list').getByRole('button', { name, exact: true }).click();
+    await page.getByRole('button', { name: 'Copy to agent', exact: true }).click();
     await expect(page.getByText('Copied to Favlo.')).toBeVisible();
     await page.getByRole('tab', { name: 'Agents' }).click();
     await expect(page.getByLabel('Agent skills').getByRole('button', { name, exact: true })).toBeVisible();
@@ -28,7 +47,7 @@ test('configuration stores a global skill and copies it to an agent', async ({ p
     await page.getByRole('tab', { name: 'Skills' }).click();
     await expect(page.getByLabel('Skills list').getByRole('button', { name, exact: true })).toBeVisible();
   } finally {
-    await deleteGlobalSkillsNamed(name);
+    await deleteGlobalSkillsNamed(name, `${name} short`);
     await deleteAgentSkillsNamed(name);
   }
 });

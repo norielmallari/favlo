@@ -9,7 +9,6 @@ from pathlib import Path
 from favlo.config_tools import GROUP_ID
 from favlo.persona import PERSONA
 from web_api.events import now
-from web_api.session_tools import GROUP_ID as SESSION_GROUP_ID
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS provider (
@@ -40,6 +39,9 @@ CREATE TABLE IF NOT EXISTS agent (
     name TEXT NOT NULL,
     persona TEXT NOT NULL,
     default_model_id TEXT,
+    enable_thinking INTEGER,
+    preserve_thinking INTEGER,
+    reasoning_effort TEXT,
     revision INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS channel (
@@ -58,7 +60,8 @@ CREATE TABLE IF NOT EXISTS session (
     kind TEXT NOT NULL,
     channel_id TEXT,
     participant_id TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    maf_state TEXT
 );
 CREATE TABLE IF NOT EXISTS message (
     id TEXT PRIMARY KEY,
@@ -68,7 +71,9 @@ CREATE TABLE IF NOT EXISTS message (
     actor_kind TEXT NOT NULL,
     actor_id TEXT,
     created_at TEXT NOT NULL,
-    reasoning TEXT
+    reasoning TEXT,
+    tool_calls TEXT,
+    trace TEXT
 );
 CREATE TABLE IF NOT EXISTS run (
     id TEXT PRIMARY KEY,
@@ -297,6 +302,10 @@ def migrate(conn: sqlite3.Connection) -> None:
     message_columns = {row[1] for row in conn.execute("PRAGMA table_info(message)")}
     if "reasoning" not in message_columns:
         conn.execute("ALTER TABLE message ADD COLUMN reasoning TEXT")
+    if "tool_calls" not in message_columns:
+        conn.execute("ALTER TABLE message ADD COLUMN tool_calls TEXT")
+    if "trace" not in message_columns:
+        conn.execute("ALTER TABLE message ADD COLUMN trace TEXT")
     run_columns = {row[1] for row in conn.execute("PRAGMA table_info(run)")}
     if "cue" not in run_columns:
         conn.execute("ALTER TABLE run ADD COLUMN cue TEXT")
@@ -304,9 +313,20 @@ def migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE run ADD COLUMN gallery_folder TEXT")
     if "gallery_image" not in run_columns:
         conn.execute("ALTER TABLE run ADD COLUMN gallery_image TEXT")
+    if "gallery_attachment" not in run_columns:
+        conn.execute("ALTER TABLE run ADD COLUMN gallery_attachment TEXT")
     session_columns = {row[1] for row in conn.execute("PRAGMA table_info(session)")}
     if "workspace_id" not in session_columns:
         conn.execute("ALTER TABLE session ADD COLUMN workspace_id TEXT")
+    if "maf_state" not in session_columns:
+        conn.execute("ALTER TABLE session ADD COLUMN maf_state TEXT")
+    agent_columns = {row[1] for row in conn.execute("PRAGMA table_info(agent)")}
+    if agent_columns and "enable_thinking" not in agent_columns:
+        conn.execute("ALTER TABLE agent ADD COLUMN enable_thinking INTEGER")
+    if agent_columns and "preserve_thinking" not in agent_columns:
+        conn.execute("ALTER TABLE agent ADD COLUMN preserve_thinking INTEGER")
+    if agent_columns and "reasoning_effort" not in agent_columns:
+        conn.execute("ALTER TABLE agent ADD COLUMN reasoning_effort TEXT")
     _migrate_folders(conn)
     workspace_columns = {row[1] for row in conn.execute("PRAGMA table_info(workspace)")}
     if workspace_columns and "focus_folder_id" not in workspace_columns:
@@ -330,7 +350,7 @@ def migrate(conn: sqlite3.Connection) -> None:
         )
     _seed_favlo(conn)
     _seed_config_group(conn)
-    _seed_session_group(conn)
+    _drop_session_clear(conn)
     skill_columns = {row[1] for row in conn.execute("PRAGMA table_info(global_skill)")}
     if skill_columns and "add_by_default" not in skill_columns:
         conn.execute(
@@ -580,15 +600,29 @@ def _refresh_empty_folder_rule(conn: sqlite3.Connection) -> None:
         conn.execute("INSERT INTO meta (key, value) VALUES (?, '1')", (key,))
 
 
-def _seed_session_group(conn: sqlite3.Connection) -> None:
-    """Enable the session group for Favlo once. A later choice stays."""
-    marked = conn.execute("SELECT key FROM meta WHERE key = 'favlo_session_seed'").fetchone()
-    if marked is not None:
-        return
-    exists = conn.execute("SELECT id FROM agent WHERE id = ?", (FAVLO_AGENT_ID,)).fetchone()
-    if exists is not None:
+_REMEMBER_BEFORE_CLEAR = (
+    "Stores the discussion with Favlo's memory tools remember, recall, and forget. "
+    "Use when someone asks to remember this conversation, or before a session clear that should keep it."
+)
+
+
+def _drop_session_clear(conn: sqlite3.Connection) -> None:
+    """Remove the session clear tool group and any skill that names that tool."""
+    conn.execute("DELETE FROM agent_tool_group WHERE group_id = 'session'")
+    for table in ("global_skill", "agent_skill", "skill"):
         conn.execute(
-            "INSERT OR IGNORE INTO agent_tool_group (agent_id, group_id) VALUES (?, ?)",
-            (FAVLO_AGENT_ID, SESSION_GROUP_ID),
+            f"DELETE FROM {table} WHERE name = 'session-clear' OR definition LIKE '%session_clear_session%'"
         )
-    conn.execute("INSERT INTO meta (key, value) VALUES ('favlo_session_seed', '1')")
+    for table in ("global_skill", "agent_skill", "skill"):
+        conn.execute(
+            f"""
+            UPDATE {table}
+            SET description = ?, revision = revision + 1
+            WHERE name = 'session-remember' AND description = ?
+            """,
+            (
+                "Stores the discussion with Favlo's memory tools remember, recall, and forget. "
+                "Use when someone asks to remember this conversation.",
+                _REMEMBER_BEFORE_CLEAR,
+            ),
+        )

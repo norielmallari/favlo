@@ -1,6 +1,8 @@
 import { expect, test } from '@playwright/test';
 
 import { deleteAgentsNamed } from './cleanup';
+import { onScreen } from './on-screen';
+import { createAgent, openAgentChat } from './open-agent-chat';
 
 test('thinking opens during a reply and closes when the message is stored', async ({ page }) => {
   const name = `Wren ${Date.now()}`;
@@ -12,23 +14,37 @@ test('thinking opens during a reply and closes when the message is stored', asyn
   await page.getByRole('textbox', { name: 'Agent name', exact: true }).fill(name);
   await page.getByRole('textbox', { name: 'Persona', exact: true }).fill('A short persona.');
   await page.getByRole('combobox', { name: 'Model', exact: true }).selectOption('qwen36-35b-a3b:thinking');
-  await page.getByRole('button', { name: 'Create agent' }).click();
-  await expect(page.getByRole('status')).toContainText(`${name} was created.`);
-  await page.getByRole('button', { name: 'Dismiss confirmation' }).click();
-  await page.getByLabel('Channels').getByRole('button', { name, exact: true }).click();
+  await createAgent(page, name);
+  await openAgentChat(page, name);
   await page.getByRole('textbox', { name: 'Message' }).fill('Say hi.');
-  await page.getByRole('button', { name: 'Send' }).click();
+  let send = page.getByRole('button', { name: 'Send' });
+  await onScreen(send);
+  await send.click();
 
-  const thinking = page.getByRole('button', { name: 'Thinking' });
+  await expect(page.getByLabel(new RegExp(`^${name} said:`)).first()).toBeVisible({ timeout: 180_000 });
+  const firstTurn = page.getByLabel(new RegExp(`^${name} said:`)).first();
+  const thinking = firstTurn.getByRole('button', { name: 'Thinking' });
   await expect(thinking).toBeVisible({ timeout: 180_000 });
-  if ((await thinking.getAttribute('aria-expanded')) === 'true') {
-    await expect(thinking).toHaveAttribute('aria-expanded', 'false', { timeout: 180_000 });
-  }
-  await expect(page.getByText('Working')).toHaveCount(0);
-  await expect(thinking).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.getByTestId('working')).toHaveCount(0, { timeout: 240_000 });
+  await expect(thinking).toHaveAttribute('aria-expanded', 'false', { timeout: 180_000 });
   await thinking.click();
   await expect(thinking).toHaveAttribute('aria-expanded', 'true');
-  await expect(page.getByTestId('thinking-text')).toBeVisible();
+  await expect(firstTurn.getByTestId('thinking-text')).toBeVisible();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('textbox', { name: 'Message' }).fill('Say hi again.');
+  send = page.getByRole('button', { name: 'Send' });
+  await onScreen(send);
+  await send.click();
+  const secondTurn = page.getByLabel(new RegExp(`^${name} said:`)).last();
+  await expect(secondTurn).toBeVisible({ timeout: 180_000 });
+  const narrowThinking = secondTurn.getByRole('button', { name: 'Thinking' });
+  await expect(narrowThinking).toBeVisible({ timeout: 180_000 });
+  await expect(page.getByTestId('working')).toHaveCount(0, { timeout: 240_000 });
+  await expect(narrowThinking).toHaveAttribute('aria-expanded', 'false', { timeout: 180_000 });
+  await onScreen(narrowThinking);
+  await narrowThinking.click();
+  await expect(secondTurn.getByTestId('thinking-text')).toBeVisible();
   } finally {
     await deleteAgentsNamed(name);
   }

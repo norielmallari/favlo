@@ -1,4 +1,4 @@
-"""Poll an MCP task and deliver the result to the calling session."""
+"""Accept an MCP task without waiting, then deliver the result on a later turn."""
 
 from __future__ import annotations
 
@@ -68,6 +68,106 @@ async def watch(store: Store, bus: Bus, task: dict[str, Any]) -> None:
 def resume(store: Store, bus: Bus, pending: set[asyncio.Task[Any]]) -> None:
     for task in store.working_mcp_tasks():
         spawn(pending, watch(store, bus, task))
+
+
+def started(tool: str, task_id: str) -> str:
+    """What the model sees when a call is accepted as a task."""
+    return (
+        f"{tool} is working as task {task_id}. "
+        "Tell the user it has started. "
+        "The result arrives in a later turn. Do not wait for the file."
+    )
+
+
+def accept(
+    store: Store,
+    bus: Bus,
+    pending: set[asyncio.Task[Any]],
+    holder: Any,
+    *,
+    server_id: str,
+    agent_id: str,
+    session_id: str,
+    tool_name: str,
+    create_result: Any,
+) -> None:
+    """Record a task and poll it on the same client. The tool call does not wait."""
+    from fastmcp_tasks.client import ToolTask
+
+    interval = getattr(create_result, "poll_interval_ms", None)
+    milliseconds = int(interval) if isinstance(interval, int) and interval > 0 else 2000
+    task = store.begin_mcp_task(
+        {
+            "remote_id": create_result.task_id,
+            "server_id": server_id,
+            "agent_id": agent_id,
+            "session_id": session_id,
+            "tool_name": tool_name,
+            "poll_interval_ms": milliseconds,
+        }
+    )
+    handle = ToolTask(holder.owned_client, tool_name, create_result, raise_on_error=False)
+    holder.pending += 1
+    holder.idle.clear()
+    spawn(pending, _guard(store, bus, holder, task, handle))
+
+
+async def watch_handle(store: Store, bus: Bus, task: dict[str, Any], handle: Any) -> None:
+    """Poll ``tasks/get`` on the client that accepted the task."""
+    failures = 0
+    interval = max(200, int(task["poll_interval_ms"]))
+    while True:
+        await asyncio.sleep(interval / 1000)
+        try:
+            current = await handle.status()
+        except Exception:
+            failures += 1
+            if failures >= _FAILURES:
+                await _finish(store, bus, task, "failed", "The task stopped responding.")
+                return
+            continue
+        failures = 0
+        posted = current.poll_interval_ms
+        if isinstance(posted, int) and posted > 0:
+            interval = posted
+        status = current.status
+        if status == "completed":
+            payload = {"result": current.result} if current.result is not None else {}
+            await _finish(
+                store,
+                bus,
+                task,
+                "completed",
+                render_result(payload),
+                error=_payload_error(payload),
+            )
+            return
+        if status == "failed":
+            payload = {"error": current.error} if current.error else {}
+            body = render_result(payload) if payload else "The tool failed."
+            await _finish(store, bus, task, "failed", body)
+            return
+        if status == "cancelled":
+            await _finish(store, bus, task, "cancelled", "")
+            return
+        if status == "input_required":
+            await _finish(store, bus, task, "failed", "The server asked for more input.")
+            return
+
+
+async def _guard(
+    store: Store,
+    bus: Bus,
+    holder: Any,
+    task: dict[str, Any],
+    handle: Any,
+) -> None:
+    try:
+        await watch_handle(store, bus, task, handle)
+    finally:
+        holder.pending = max(0, holder.pending - 1)
+        if holder.pending == 0:
+            holder.idle.set()
 
 
 def spawn(pending: set[asyncio.Task[Any]], work: Any) -> None:

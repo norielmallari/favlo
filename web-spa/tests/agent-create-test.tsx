@@ -1,4 +1,4 @@
-import { fireEvent, render, userEvent } from '@testing-library/react-native';
+import { act, fireEvent, render, userEvent } from '@testing-library/react-native';
 import { Dimensions } from 'react-native';
 
 import { AgentForm, SettingsScreen } from '@/components/SettingsScreen';
@@ -43,7 +43,16 @@ const groups = [
 
 test('a new agent shows the same options as edit', async () => {
   jest.spyOn(Dimensions, 'get').mockReturnValue({ width: 1280, height: 800, scale: 1, fontScale: 1 });
-  const posted: { body?: { name?: string; default_model_id?: string | null; tool_groups?: string[] } } = {};
+  const posted: {
+    body?: {
+      name?: string;
+      default_model_id?: string | null;
+      tool_groups?: string[];
+      enable_thinking?: boolean | null;
+      preserve_thinking?: boolean | null;
+      reasoning_effort?: string | null;
+    };
+  } = {};
   globalThis.fetch = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input).replace('http://127.0.0.1:8130', '');
     const method = init?.method ?? 'GET';
@@ -106,13 +115,21 @@ test('a new agent shows the same options as edit', async () => {
   expect(view.getByRole('switch', { name: 'Conversation tools' })).toBeTruthy();
   expect(view.getByRole('switch', { name: 'Heartbeat tools' })).toBeTruthy();
   expect(view.queryByLabelText('Provider for Favlo')).toBeNull();
-  fireEvent(view.getByRole('switch', { name: 'Conversation tools' }), 'valueChange', true);
+  await act(() => {
+    fireEvent(view.getByRole('switch', { name: 'Conversation tools' }), 'valueChange', true);
+    fireEvent(view.getByLabelText('Thinking'), 'valueChange', 'true');
+    fireEvent(view.getByLabelText('Preserve thinking'), 'valueChange', 'false');
+    fireEvent(view.getByLabelText('Reasoning effort'), 'valueChange', 'high');
+  });
   await user.type(view.getByLabelText('Agent name'), 'Reed');
   await user.press(view.getByRole('button', { name: 'Create agent' }));
   expect(await view.findByText('Reed was created.')).toBeTruthy();
   expect(posted.body?.name).toBe('Reed');
   expect(posted.body?.default_model_id).toBe('model_local');
   expect(posted.body?.tool_groups).toEqual(['conversation']);
+  expect(posted.body?.enable_thinking).toBe(true);
+  expect(posted.body?.preserve_thinking).toBe(false);
+  expect(posted.body?.reasoning_effort).toBe('high');
 });
 
 test('delete removes that agent', async () => {
@@ -150,6 +167,51 @@ test('delete removes that agent', async () => {
   await user.press(view.getByRole('button', { name: 'Delete Reed' }));
   expect(deleted).toEqual(['http://127.0.0.1:8130/agents/agent_reed']);
   expect(onDeleted).toHaveBeenCalledWith(reed);
+});
+
+test('refresh loads the models the server lists', async () => {
+  const posted: string[] = [];
+  globalThis.fetch = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if ((init?.method ?? 'GET') === 'POST') {
+      posted.push(String(input));
+      return json({
+        message: 'Models refreshed',
+        models: [
+          ...providers[0].models,
+          {
+            id: 'model_gemma',
+            provider_id: 'provider_local',
+            model_id: 'gemma4-26b-a4b:instruct',
+            display_name: 'Gemma 4',
+            enabled: true,
+            revision: 1,
+          },
+        ],
+      });
+    }
+    return json({});
+  }) as typeof fetch;
+  const onModels = jest.fn();
+  const view = await render(
+    <ThemeProvider>
+      <AgentForm
+        agent={null}
+        groups={groups}
+        providers={providers}
+        settings={{ default_model_id: 'model_local', exchange_budget: 10, revision: 1 }}
+        onSuccess={jest.fn()}
+        onSaved={jest.fn()}
+        onModels={onModels}
+      />
+    </ThemeProvider>,
+  );
+  const user = userEvent.setup();
+  await user.press(view.getByRole('button', { name: 'Refresh models' }));
+  expect(posted).toEqual(['http://127.0.0.1:8130/providers/provider_local/refresh']);
+  expect(await view.findByText('Models refreshed')).toBeTruthy();
+  expect(onModels).toHaveBeenCalledWith('provider_local', expect.arrayContaining([
+    expect.objectContaining({ model_id: 'gemma4-26b-a4b:instruct' }),
+  ]));
 });
 
 test('Favlo has no delete button', async () => {

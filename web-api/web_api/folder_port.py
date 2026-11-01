@@ -49,6 +49,62 @@ class LocalFolder:
         path = self.resolve(relative, file=True)
         return path.read_bytes()
 
+    def find_images(self, names: list[str]) -> list[str]:
+        """Relative paths for named png and jpg files, in the order given.
+
+        A path is used when that file exists. A bare filename is the first
+        match in sorted path order. A name that is not in this folder is skipped.
+        """
+        return [path for _name, path in self.locate(names)]
+
+    def locate(self, names: list[str]) -> list[tuple[str, str]]:
+        """Each found name and its relative path, in the order given."""
+        index: dict[str, str] | None = None
+        found: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for name in names:
+            cleaned = _image_name(name)
+            if cleaned is None:
+                continue
+            if "/" in cleaned:
+                relative = self._existing_image(cleaned)
+            else:
+                if index is None:
+                    index = self._image_index()
+                relative = index.get(cleaned.lower())
+            if relative is None or relative in seen:
+                continue
+            seen.add(relative)
+            found.append((name, relative))
+        return found
+
+    def _existing_image(self, relative: str) -> str | None:
+        try:
+            path = self.resolve(relative, file=True)
+        except Rejected:
+            return None
+        if path.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
+            return None
+        return self._relative(path)
+
+    def _image_index(self) -> dict[str, str]:
+        """Lowercase filename to the first relative path in sorted order."""
+        grouped: dict[str, list[str]] = {}
+        for path in self.root.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
+                continue
+            try:
+                resolved = path.resolve()
+            except OSError:
+                continue
+            if resolved != self.root and self.root not in resolved.parents:
+                continue
+            relative = resolved.relative_to(self.root)
+            if any(part.startswith(".") for part in relative.parts):
+                continue
+            grouped.setdefault(relative.name.lower(), []).append(relative.as_posix())
+        return {name: sorted(paths, key=str.lower)[0] for name, paths in grouped.items()}
+
     def write(
         self,
         relative: str,
@@ -209,6 +265,19 @@ class LocalFolder:
 
 def folder_for(store: Any, workspace_id: str, folder_id: str | None = None) -> LocalFolder:
     return LocalFolder(store.local_location(workspace_id, folder_id))
+
+
+def _image_name(name: str) -> str | None:
+    """A relative png or jpg path, or none when the text is not one."""
+    cleaned = name.replace("\\", "/").strip().strip("/")
+    if not cleaned or ":" in cleaned or cleaned.startswith("~") or "\x00" in cleaned:
+        return None
+    parts = Path(cleaned).parts
+    if not parts or any(part in {".", ".."} or part.startswith(".") for part in parts):
+        return None
+    if Path(cleaned).suffix.lower() not in {".png", ".jpg", ".jpeg"}:
+        return None
+    return cleaned
 
 
 def _media_type(suffix: str) -> str:

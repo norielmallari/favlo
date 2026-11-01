@@ -45,8 +45,92 @@ def turn_note(folder: str, image: str | None) -> str:
     return "\n".join(lines)
 
 
+_TOKEN = re.compile(
+    r"(?<![\w./:\\-])((?:[\w.-]+/)*[\w.-]+\.(?:png|jpe?g))(?![\w])",
+    re.IGNORECASE,
+)
+_SPACED_LINE = re.compile(
+    r"(?im)^[ \t]*((?:[^/:\n]+/)*[^/:\n]* [^/:\n]*\.(?:png|jpe?g))[ \t]*$"
+)
+
+
+def named_images(text: str) -> list[str]:
+    """Png and jpg names in the message, in reading order.
+
+    A line that is itself a path may contain spaces. A token inside that line
+    stays in the list until a search shows the path exists.
+    """
+    return [name for _start, name, _spaced in _mentions(text)]
+
+
+def _mentions(text: str) -> list[tuple[int, str, bool]]:
+    """Start offset, name, and whether the name is a whole line that contains a space."""
+    found: list[tuple[int, str, bool]] = []
+    for match in _SPACED_LINE.finditer(text):
+        found.append((match.start(), match.group(1).strip(), True))
+    for match in _TOKEN.finditer(text):
+        found.append((match.start(1), match.group(1), False))
+    found.sort(key=lambda item: (item[0], not item[2]))
+    return found
+
+
+def images_in_message(store: Any, session_id: str, text: str) -> list[tuple[bytes, str]]:
+    """Png and jpg bytes for filenames in the message that the gallery tools can read.
+
+    The search root is the local folder those tools list. A name that is not
+    there is skipped. A session without that folder returns nothing.
+    """
+    workspace_id = store.gallery_for_session(session_id)
+    if not workspace_id:
+        return []
+    try:
+        folder = folder_for(store, workspace_id)
+        relative_paths = folder.find_images(_names_to_open(folder, text))
+    except Rejected:
+        return []
+    found: list[tuple[bytes, str]] = []
+    for relative in relative_paths:
+        try:
+            payload = folder.read(relative)
+            media = str(folder.stat(relative)["media_type"])
+        except Rejected:
+            continue
+        if media not in {"image/png", "image/jpeg"}:
+            continue
+        found.append((payload, media))
+    return found
+
+
+def _names_to_open(folder: Any, text: str) -> list[str]:
+    """Filenames to read. A spaced path that exists hides tokens inside that line."""
+    mentions = _mentions(text)
+    spaced_hits = {
+        name
+        for name, _path in folder.locate([name for _start, name, spaced in mentions if spaced])
+    }
+    hidden: list[tuple[int, int]] = []
+    for start, name, spaced in mentions:
+        if not spaced or name not in spaced_hits:
+            continue
+        line_end = text.find("\n", start)
+        hidden.append((start, len(text) if line_end < 0 else line_end))
+    names: list[str] = []
+    seen: set[str] = set()
+    for start, name, spaced in mentions:
+        if spaced and name not in spaced_hits:
+            continue
+        if not spaced and any(left <= start < right for left, right in hidden):
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        names.append(name)
+    return names
+
+
 def preview_file(store: Any, session_id: str, path: str) -> tuple[bytes, str] | None:
-    """Bytes and media type for the image selected when the turn was sent."""
+    """Bytes and media type for one image path in the local folder."""
     workspace_id = store.gallery_for_session(session_id)
     if not workspace_id:
         return None

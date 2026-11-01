@@ -2,6 +2,7 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
 
 import { deleteAgentsNamed } from './cleanup';
+import { onScreen } from './on-screen';
 
 test('two agent channels keep separate conversations', async ({ page }) => {
   const models = await liveModels();
@@ -60,7 +61,9 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await expect(conversation).not.toBeChecked();
   await expect(page.getByRole('switch', { name: 'Heartbeat tools for Favlo' })).not.toBeChecked();
   await conversation.click();
-  await page.getByRole('button', { name: 'Save Favlo' }).click();
+  const saveFavlo = page.getByRole('button', { name: 'Save Favlo' });
+  await onScreen(saveFavlo);
+  await saveFavlo.click();
   await expect(page.getByRole('status')).toHaveText(/Favlo was saved/);
   await expect(conversation).toBeChecked();
   await expect(page.getByRole('switch', { name: 'Configuration tools for Favlo' })).toBeChecked();
@@ -72,7 +75,9 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await page.getByRole('textbox', { name: 'MCP name' }).fill('Favlo media');
   await page.getByRole('radio', { name: 'HTTP' }).click();
   await page.getByRole('textbox', { name: 'URL' }).fill('http://127.0.0.1:8129/mcp');
-  await page.getByRole('button', { name: 'Create MCP' }).click();
+  const createMcp = page.getByRole('button', { name: 'Create MCP' });
+  await onScreen(createMcp);
+  await createMcp.click();
   await expect(page.getByLabel('MCP list').getByRole('button', { name: 'Favlo media' })).toBeVisible();
   await page.getByRole('button', { name: 'Test connection' }).click();
   await expect(page.getByText('Connection succeeded')).toBeVisible();
@@ -89,7 +94,9 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await page.getByRole('button', { name: 'New agent' }).filter({ visible: true }).click();
   await page.getByRole('textbox', { name: 'Agent name', exact: true }).fill(brook);
   await page.getByRole('textbox', { name: 'Persona', exact: true }).fill('A short persona.');
-  await page.getByRole('button', { name: 'Create agent' }).click();
+  const createBrook = page.getByRole('button', { name: 'Create agent' });
+  await onScreen(createBrook);
+  await createBrook.click();
   await expect(agents.getByRole('button', { name: brook, exact: true })).toBeVisible();
   await expect(page.getByRole('textbox', { name: `Name for ${brook}` })).toHaveValue(brook);
   await expect(page.getByRole('switch', { name: `Configuration tools for ${brook}` })).not.toBeChecked();
@@ -110,7 +117,10 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await expect(page.getByRole('alert')).toContainText('five fields');
   await page.getByRole('textbox', { name: 'Cron for Favlo' }).fill('15 * * * *');
   await page.getByRole('textbox', { name: 'Instructions for Favlo' }).fill('Check the garden.');
-  await page.getByRole('button', { name: 'Create heartbeat' }).click();
+  await page.setViewportSize({ width: 1280, height: 640 });
+  const createHeartbeat = page.getByRole('button', { name: 'Create heartbeat' });
+  await onScreen(createHeartbeat);
+  await createHeartbeat.click();
   const beat = page.getByLabel('Heartbeats list').getByRole('button', { name: '15 * * * *' });
   await expect(beat).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Instructions for Favlo' })).toHaveValue('Check the garden.');
@@ -201,7 +211,9 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   const replies = page.getByLabel(/^River said: .+/);
   const before = await replies.count();
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill(prompt);
-  await page.getByRole('button', { name: 'Send' }).click();
+  const send = page.getByRole('button', { name: 'Send' });
+  await onScreen(send);
+  await send.click();
   await expect.poll(async () => replies.count(), { timeout: 360_000 }).toBeGreaterThan(before);
   await expectComposerDocked(page, 'River');
 
@@ -285,7 +297,9 @@ async function createAgent(page: Page, name: string, persona: string) {
   await page.getByRole('button', { name: 'New agent' }).filter({ visible: true }).click();
   await page.getByRole('textbox', { name: 'Agent name', exact: true }).fill(name);
   await page.getByRole('textbox', { name: 'Persona', exact: true }).fill(persona);
-  await page.getByRole('button', { name: 'Create agent' }).click();
+  const create = page.getByRole('button', { name: 'Create agent' });
+  await onScreen(create);
+  await create.click();
   await expect(page.getByRole('button', { name, exact: true })).toBeVisible();
 }
 

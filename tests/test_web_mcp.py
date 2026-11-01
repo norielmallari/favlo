@@ -1,13 +1,10 @@
-"""MCP servers, the tasks poll, and the session result."""
+"""MCP servers and the Agent Framework session."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import sqlite3
 import sys
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -19,7 +16,7 @@ from web_api.bus import Bus  # noqa: E402
 from web_api.db import FAVLO_AGENT_ID, FAVLO_SESSION_ID  # noqa: E402
 from web_api.mcp_client import list_tools  # noqa: E402
 from web_api.mcp_tasks import _finish, settle  # noqa: E402
-from web_api.mcp_tools import INSTRUCTIONS, _description, call_tool, groups_from, prepare_catalog  # noqa: E402
+from web_api.mcp_tools import INSTRUCTIONS, _description, groups_from, prepare_catalog  # noqa: E402
 from web_api.store import Store, _mcp_fields  # noqa: E402
 
 
@@ -69,101 +66,26 @@ def test_a_stdio_server_lists_its_tools(tmp_path: Path) -> None:
     assert [tool["name"] for tool in tools] == ["echo"]
 
 
-def test_a_finished_task_starts_a_turn_and_stays_out_of_the_chat(tmp_path: Path) -> None:
-    asyncio.run(_finished_task(tmp_path))
+def test_the_framework_session_advertises_tasks() -> None:
+    from fastmcp.utilities.tasks import TASKS_EXTENSION_ID
 
+    from web_api.mcp_tools import _HttpServer, _mcp_client
 
-async def _finished_task(tmp_path: Path) -> None:
-    seen = {"gets": 0}
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_POST(self) -> None:  # noqa: N802
-            length = int(self.headers.get("Content-Length") or 0)
-            body = json.loads(self.rfile.read(length).decode())
-            method = body["method"]
-            if method == "tools/call":
-                result = {
-                    "resultType": "task",
-                    "taskId": "task-1",
-                    "status": "working",
-                    "pollIntervalMs": 20,
-                }
-            else:
-                seen["gets"] += 1
-                result = {
-                    "resultType": "complete",
-                    "taskId": "task-1",
-                    "status": "completed",
-                    "pollIntervalMs": 20,
-                    "result": {
-                        "content": [
-                            {"type": "text", "text": "image_abc"},
-                            {"type": "resource_link", "uri": "favlo://images/image_abc.png"},
-                        ]
-                    },
-                }
-            raw = json.dumps({"jsonrpc": "2.0", "id": body["id"], "result": result}).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(raw)))
-            self.end_headers()
-            self.wfile.write(raw)
-
-        def log_message(self, _format: str, *_args: object) -> None:
-            return
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    port = server.server_address[1]
-    store = Store(tmp_path / "app.db")
-    try:
-        _status, created, _events = store.create_mcp_server(
-            "mcp-key",
-            {
-                "agent_id": "agent_favlo",
-                "name": "Favlo media",
-                "transport": "http",
-                "command": "",
-                "url": f"http://127.0.0.1:{port}/mcp",
-                "enabled": True,
-            },
-        )
-        row = {
-            "server_id": created["id"],
-            "server_name": created["name"],
-            "transport": created["transport"],
-            "command": created["command"],
-            "url": created["url"],
-            "name": "generate_image",
-            "description": "Generate one or more PNGs.",
-            "schema": {"type": "object", "properties": {}},
-        }
-        pending: set[asyncio.Task[object]] = set()
-        text = await call_tool(
-            store,
-            row,
-            {"prompt": "a horse"},
-            "session_favlo",
-            "agent_favlo",
-            Bus(),
-            pending,
-        )
-        assert "task-1" in text
-        assert pending
-        await asyncio.wait_for(next(iter(pending)), timeout=2)
-        snapshot = store.session_snapshot("session_favlo")
-        bodies = [message["body"] for message in snapshot["messages"]]
-        assert not any("favlo://images/image_abc.png" in body for body in bodies)
-        assert not any(body.strip().startswith("{") for body in bodies)
-        running = [row for row in snapshot["runs"] if row["status"] == "running"]
-        assert len(running) == 1
-        assert "favlo://images/image_abc.png" in running[0]["cue"]
-        assert "Do not paste the JSON" in running[0]["cue"]
-        assert seen["gets"] >= 1
-    finally:
-        server.shutdown()
-        store.close()
+    client = _mcp_client({"transport": "http", "url": "http://127.0.0.1:9/mcp"})
+    assert client is not None
+    assert client.read_timeout_seconds == 3600
+    identifiers = [getattr(item, "identifier", None) for item in client.extensions]
+    assert TASKS_EXTENSION_ID in identifiers
+    server = _HttpServer(
+        "agent_favlo",
+        client,
+        name="Favlo",
+        tool_name_prefix="favlo",
+        approval_mode="never_require",
+        allowed_tools=["echo"],
+        load_prompts=False,
+    )
+    assert server.owned_client is client
 
 
 def test_save_keeps_a_disabled_group_and_lists_its_tools(
@@ -211,7 +133,9 @@ def test_save_keeps_a_disabled_group_and_lists_its_tools(
 
         monkeypatch.setattr("web_api.mcp_cache.catalog.get", listed)
         _text, enabled = asyncio.run(bundle(store, "agent_favlo", "session_favlo", None, set()))
-        assert [item.name for item in enabled] == ["favlo_media_echo"]
+        assert len(enabled) == 1
+        assert enabled[0].tool_name_prefix == "favlo_media"
+        assert list(enabled[0].allowed_tools) == ["echo"]
     finally:
         store.close()
 
@@ -223,7 +147,7 @@ def test_media_instructions_require_a_listed_model_id() -> None:
     assert "set_music_model" in INSTRUCTIONS
     assert "set_voice_model" in INSTRUCTIONS
     assert "Repeat the returned session id" in INSTRUCTIONS
-    assert "do not write a favlo:// link" in INSTRUCTIONS
+    assert "returns when the task is accepted" in INSTRUCTIONS
     assert "Do not paste the JSON" in INSTRUCTIONS
     assert "tell the user you are generating" in INSTRUCTIONS
     described = _description(
@@ -324,8 +248,8 @@ def test_mcp_tools_from_two_servers_keep_unique_names(
             },
         )
         text, tools = asyncio.run(bundle(store, "agent_favlo", "session_favlo", None, set()))
-        names = [item.name for item in tools]
-        assert names == ["favlo_media_generate_image", "favlo_media_2_generate_image"]
+        assert [item.tool_name_prefix for item in tools] == ["favlo_media", "favlo_media_2"]
+        assert all(list(item.allowed_tools) == ["generate_image"] for item in tools)
         assert "favlo_media_generate_image" in text
         described = _description(
             {"name": "generate_image", "description": "Generate."},
@@ -493,34 +417,184 @@ def test_one_catalog_fetch_serves_concurrent_readers() -> None:
     assert left == right == [{"name": "echo", "description": "", "schema": {"type": "object"}}]
 
 
-def test_a_memory_call_keeps_the_agents_own_client(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_framework_server_keeps_the_agents_own_client() -> None:
+    from agent_framework import MCPStreamableHTTPTool
+
+    from web_api.mcp_tools import _HttpServer, _mcp_client
+
     seen: dict[str, object] = {}
 
-    async def fake_rpc(_server: dict[str, object], _method: str, params: dict[str, object], **_kwargs: object) -> dict[str, object]:
-        seen["arguments"] = params["arguments"]
-        return {"content": [{"type": "text", "text": "[]"}]}
+    async def fake(self: object, tool_name: str, **kwargs: object) -> str:
+        seen["tool"] = tool_name
+        seen["arguments"] = kwargs
+        return "ok"
 
-    monkeypatch.setattr("web_api.mcp_tools.rpc", fake_rpc)
-
-    async def run() -> None:
-        await call_tool(
-            None,
-            {
-                "server_id": "server",
-                "server_name": "Favlo",
-                "transport": "http",
-                "command": "",
-                "url": "http://127.0.0.1:9/mcp",
-                "name": "recall",
-                "description": "Recall.",
-                "schema": {},
-            },
-            {"query": "tea", "client": "agent_other"},
-            "session_favlo",
+    monkeypatch_base = MCPStreamableHTTPTool.call_tool
+    MCPStreamableHTTPTool.call_tool = fake  # type: ignore[method-assign]
+    try:
+        client = _mcp_client({"transport": "http", "url": "http://127.0.0.1:9/mcp"})
+        assert client is not None
+        server = _HttpServer(
             "agent_favlo",
-            None,
-            set(),
+            client,
+            name="Favlo",
+            tool_name_prefix="favlo",
+            approval_mode="never_require",
+            allowed_tools=["recall"],
+            load_prompts=False,
         )
 
-    asyncio.run(run())
+        async def run() -> None:
+            await server.call_tool("recall", query="tea", client="agent_other")
+
+        asyncio.run(run())
+    finally:
+        MCPStreamableHTTPTool.call_tool = monkeypatch_base  # type: ignore[method-assign]
+    assert seen["tool"] == "recall"
     assert seen["arguments"] == {"query": "tea", "client": "agent_favlo"}
+
+
+def _peer(tmp_path: Path, tasks_get: str) -> str:
+    script = tmp_path / "peer.py"
+    script.write_text(
+        "import json, sys\n"
+        "STAMP = '2026-10-31T00:00:00Z'\n"
+        "def reply(msg, result=None, error=None):\n"
+        "    if 'id' not in msg:\n"
+        "        return\n"
+        "    body = {'jsonrpc': '2.0', 'id': msg['id']}\n"
+        "    key = 'error' if error else 'result'\n"
+        "    body[key] = error or result\n"
+        "    sys.stdout.write(json.dumps(body) + '\\n')\n"
+        "    sys.stdout.flush()\n"
+        "for line in sys.stdin:\n"
+        "    line = line.strip()\n"
+        "    if not line:\n"
+        "        continue\n"
+        "    msg = json.loads(line)\n"
+        "    method = msg.get('method')\n"
+        "    if method == 'server/discover':\n"
+        "        reply(msg, {\n"
+        "            'supportedVersions': ['2026-07-28'],\n"
+        "            'capabilities': {'tools': {}},\n"
+        "            'resultType': 'complete', 'ttlMs': 0,\n"
+        "            'cacheScope': 'private'})\n"
+        "    elif method == 'initialize':\n"
+        "        reply(msg, error={\n"
+        "            'code': -32022,\n"
+        "            'message': 'Unsupported protocol version',\n"
+        "            'data': {'supported': ['2026-07-28'],\n"
+        "                     'requested': '2025-11-25'}})\n"
+        "    elif method == 'tools/list':\n"
+        "        reply(msg, {'tools': [{\n"
+        "            'name': 'echo', 'description': 'Echo.',\n"
+        "            'inputSchema': {'type': 'object',\n"
+        "                'properties': {'text': {'type': 'string'}}}}],\n"
+        "            'resultType': 'complete', 'ttlMs': 0,\n"
+        "            'cacheScope': 'private'})\n"
+        "    elif method == 'tools/call':\n"
+        "        reply(msg, {'resultType': 'task', 'taskId': 'task-1',\n"
+        "            'status': 'working', 'createdAt': STAMP,\n"
+        "            'lastUpdatedAt': STAMP, 'ttlMs': 60000,\n"
+        "            'pollIntervalMs': 20})\n"
+        "    elif method == 'tasks/get':\n"
+        f"        {tasks_get}\n"
+        "    else:\n"
+        "        reply(msg, error={'code': -32601,\n"
+        "            'message': 'Method not found'})\n",
+        encoding="utf-8",
+    )
+    import shlex
+
+    return f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}"
+
+
+def _shown(result: object) -> str:
+    if isinstance(result, str):
+        return result
+    return "\n".join(getattr(item, "text", "") for item in result)  # type: ignore[arg-type]
+
+
+def test_a_modern_server_returns_when_the_task_is_accepted(tmp_path: Path) -> None:
+    from web_api.mcp_tools import _mcp_client, _StdioServer
+
+    command = _peer(
+        tmp_path,
+        "import time; time.sleep(30)\n        reply(msg, {'resultType': 'complete'})",
+    )
+
+    async def run() -> str:
+        client = _mcp_client({"transport": "stdio", "command": command})
+        assert client is not None
+        server = _StdioServer(
+            "agent_favlo",
+            client,
+            name="Peer",
+            tool_name_prefix="peer",
+            approval_mode="never_require",
+            allowed_tools=["echo"],
+            load_prompts=False,
+        )
+        async with client:
+            await server.connect()
+            assert client.protocol_version == "2026-07-28"
+            result = await asyncio.wait_for(server.call_tool("echo", text="hi"), 2)
+            await server.close()
+        return _shown(result)
+
+    text = asyncio.run(run())
+    assert "working" in text
+    assert "task-1" in text
+    assert "ready" not in text
+
+
+def test_a_task_result_arrives_on_a_later_turn(tmp_path: Path) -> None:
+    from web_api.mcp_tools import _mcp_client, _StdioServer, _Turn
+
+    command = _peer(
+        tmp_path,
+        "reply(msg, {'resultType': 'complete', 'taskId': 'task-1',\n"
+        "            'status': 'completed', 'createdAt': STAMP,\n"
+        "            'lastUpdatedAt': STAMP, 'ttlMs': 60000,\n"
+        "            'pollIntervalMs': 20,\n"
+        "            'result': {'content': [\n"
+        "                {'type': 'text', 'text': 'ready'}],\n"
+        "                'isError': False}})",
+    )
+    store = Store(tmp_path / "app.db")
+    jobs: set[asyncio.Task[object]] = set()
+    try:
+
+        async def run() -> str:
+            client = _mcp_client({"transport": "stdio", "command": command})
+            assert client is not None
+            server = _StdioServer(
+                FAVLO_AGENT_ID,
+                client,
+                _Turn(store, Bus(), jobs, "peer", FAVLO_AGENT_ID, FAVLO_SESSION_ID),
+                name="Peer",
+                tool_name_prefix="peer",
+                approval_mode="never_require",
+                allowed_tools=["echo"],
+                load_prompts=False,
+            )
+            async with client:
+                await server.connect()
+                result = await asyncio.wait_for(server.call_tool("echo", text="hi"), 2)
+                shown = _shown(result)
+                for _ in range(40):
+                    snapshot = store.session_snapshot(FAVLO_SESSION_ID)
+                    running = [row for row in snapshot["runs"] if row["status"] == "running"]
+                    if running:
+                        return shown + "\n" + store.run_context(running[0]["id"])["user_text"]
+                    await asyncio.sleep(0.05)
+            raise AssertionError("task did not finish")
+
+        text = asyncio.run(run())
+    finally:
+        store.close()
+    call, cue = text.split("\n", 1)
+    assert "working" in call
+    assert "ready" not in call
+    assert "ready" in cue
+

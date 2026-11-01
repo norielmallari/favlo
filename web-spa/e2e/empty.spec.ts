@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 
 import { deleteAgentsNamed } from './cleanup';
+import { onScreen } from './on-screen';
 
 test('an empty conversation shows starters and an empty workspaces column', async ({ page }) => {
   const name = `Grove ${Date.now()}`;
@@ -11,7 +12,9 @@ test('an empty conversation shows starters and an empty workspaces column', asyn
   await page.getByRole('button', { name: 'New agent' }).click();
   await page.getByRole('textbox', { name: 'Agent name', exact: true }).fill(name);
   await page.getByRole('textbox', { name: 'Persona', exact: true }).fill('A short persona.');
-  await page.getByRole('button', { name: 'Create agent' }).click();
+  const create = page.getByRole('button', { name: 'Create agent' });
+  await onScreen(create);
+  await create.click();
   await expect(page.getByRole('button', { name, exact: true })).toBeVisible();
   await page.getByRole('button', { name, exact: true }).click();
   await expect(page.getByRole('heading', { name, exact: true })).toHaveCount(0);
@@ -37,11 +40,14 @@ test('an empty conversation shows starters and an empty workspaces column', asyn
   await expect(page.getByRole('button', { name: 'Channels' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Workspaces' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'New agent' })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Generate an image' })).toBeInViewport();
-  await expect(page.getByRole('button', { name: 'Set up a model' })).toBeInViewport();
+  await expect(page.getByRole('button', { name: 'Generate an image' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Set up a model' })).toBeVisible();
+  await onScreen(page.getByRole('button', { name: 'Generate an image' }));
+  await onScreen(page.getByRole('button', { name: 'Set up a model' }));
   await expectComposerInColumn(page);
   await page.getByRole('button', { name: /^Appearance, / }).click();
-  await expect(page.getByRole('menuitem', { name: 'Light' })).toBeInViewport();
+  const light = page.getByRole('menuitem', { name: 'Light' });
+  await onScreen(light);
   await page.keyboard.press('Escape');
   await expect(page.getByRole('menuitem', { name: 'Light' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Channels' }).click();
@@ -66,8 +72,8 @@ async function expectComposerInColumn(page: Page) {
 }
 
 async function expectFits(page: Page) {
-  await expect(page.getByRole('button', { name: 'Configuration' })).toBeInViewport();
-  await expect(page.getByRole('button', { name: /^Appearance, / })).toBeInViewport();
+  await onScreen(page.getByRole('button', { name: 'Configuration' }));
+  await onScreen(page.getByRole('button', { name: /^Appearance, / }));
   const overflow = await page.evaluate(
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
   );

@@ -1,6 +1,6 @@
 import { render, userEvent, waitFor } from '@testing-library/react-native';
 
-import { crossedKind, GalleryWorkspace, groupedKinds } from '@/components/GalleryWorkspace';
+import { crossedKind, GalleryWorkspace, groupedKinds, keptSelection } from '@/components/GalleryWorkspace';
 import { ThemeProvider } from '@/theme/Theme';
 
 const KINDS = [
@@ -35,6 +35,25 @@ test('a local item dropped on a cloud folder is refused', () => {
   expect(crossedKind('image', 'cloud')).toBe('That would upload.');
   expect(crossedKind('cloud', 'local')).toBe('That would download.');
   expect(crossedKind('cloud', 'root')).toBeNull();
+});
+
+test('a folder refresh keeps the chosen image', () => {
+  const images = [
+    { path: 'a.png', name: 'a.png', media_type: 'image/png', size: 1, revision: '1', note: null },
+    { path: 'b.png', name: 'b.png', media_type: 'image/png', size: 1, revision: '1', note: null },
+  ];
+  const chosen = {
+    type: 'image' as const,
+    id: 'b.png',
+    name: 'b.png',
+    path: 'b.png',
+    kind: 'image',
+    revision: 0,
+    folderId: 'folder_1',
+  };
+  expect(keptSelection(chosen, images, 'folder_1')?.path).toBe('b.png');
+  expect(keptSelection(null, images, 'folder_1')?.path).toBe('a.png');
+  expect(keptSelection({ ...chosen, path: 'gone.png' }, images, 'folder_1')?.path).toBe('a.png');
 });
 
 test('folder kinds keep cloud subtypes for a later switch', () => {
@@ -305,7 +324,7 @@ test('a folder that still has an image cannot be deleted', async () => {
 });
 
 test('add to chat inserts the relative path', async () => {
-  mockGallery({
+  const fetchMock = mockGallery({
     folders: [localFolder()],
     images: [{ path: 'horse.png', name: 'horse.png', media_type: 'image/png', size: 12, revision: 'abc', note: null }],
   });
@@ -318,12 +337,37 @@ test('add to chat inserts the relative path', async () => {
   expect(await view.findByRole('button', { name: 'horse.png' })).toBeTruthy();
   expect(view.queryByRole('button', { name: 'Camera' })).toBeNull();
   await user.press(view.getByRole('button', { name: 'horse.png' }));
+  await user.press(view.getByRole('button', { name: 'Chat' }));
+  await user.type(view.getByLabelText('Message'), 'Hello');
+  await user.press(view.getByRole('button', { name: 'Send' }));
+  await waitFor(() => {
+    expect(sentBody(fetchMock)).toEqual({ text: 'Hello', folder: '', image: 'horse.png' });
+  });
+  await user.press(view.getByRole('button', { name: 'Back to gallery' }));
   await user.press(view.getByRole('button', { name: 'Add to chat' }));
   await user.press(view.getByRole('button', { name: 'Chat' }));
   await waitFor(() => {
     expect(view.getByLabelText('Message').props.value).toBe('horse.png');
   });
+  await user.press(view.getByRole('button', { name: 'Send' }));
+  await waitFor(() => {
+    expect(sentBody(fetchMock)).toEqual({
+      text: 'horse.png',
+      folder: '',
+      image: 'horse.png',
+      attachment: 'horse.png',
+    });
+  });
 });
+
+function sentBody(fetchMock: jest.Mock): unknown {
+  const calls = fetchMock.mock.calls.filter((call) => {
+    const init = call[1] as { method?: string; body?: string } | undefined;
+    return init?.method === 'POST' && String(call[0]).includes('/session/messages');
+  });
+  const init = calls.at(-1)?.[1] as { body?: string } | undefined;
+  return init?.body ? JSON.parse(init.body) : null;
+}
 
 function localFolder() {
   return {

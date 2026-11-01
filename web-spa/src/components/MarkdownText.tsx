@@ -30,7 +30,7 @@ export function MarkdownText({ text, color, fontSize = 16, lineHeight = 24 }: Pr
     ol: ({ children }) => <View style={list}>{children}</View>,
     li: ({ children }) => (
       <View style={item}>
-        <Text style={block}>•</Text>
+        <Text style={markerStyle(color, fontSize, lineHeight)}>•</Text>
         <View style={itemBody}>{children}</View>
       </View>
     ),
@@ -60,7 +60,7 @@ export function MarkdownText({ text, color, fontSize = 16, lineHeight = 24 }: Pr
       </View>
     ),
     hr: () => <View style={{ height: 1, backgroundColor: palette.border, maxWidth: '100%' }} />,
-    br: () => <Text>{'\n'}</Text>,
+    br: () => <Text style={hardBreak}>{'\n'}</Text>,
     input: () => null,
   };
   return (
@@ -92,7 +92,11 @@ function Link({ href, color, children }: { href?: string; color: string; childre
 }
 
 function bodyStyle(color: string, fontSize: number, lineHeight: number): TextStyle {
-  return { ...textStyle('body', color), fontSize, lineHeight, maxWidth: '100%' };
+  return { ...textStyle('body', color), fontSize, lineHeight, maxWidth: '100%', whiteSpace: 'normal' };
+}
+
+function markerStyle(color: string, fontSize: number, lineHeight: number): TextStyle {
+  return { ...textStyle('body', color), fontSize, lineHeight, flexGrow: 0, flexShrink: 0 };
 }
 
 function headingStyle(block: TextStyle, fontSize: number): TextStyle {
@@ -100,7 +104,7 @@ function headingStyle(block: TextStyle, fontSize: number): TextStyle {
 }
 
 function codeStyle(block: TextStyle): TextStyle {
-  return { ...block, ...monoStyle() };
+  return { ...block, ...monoStyle(), whiteSpace: 'pre-wrap' };
 }
 
 function cellStyle(border: string): ViewStyle {
@@ -187,8 +191,9 @@ const strong: TextStyle = { fontWeight: '700' };
 const emphasis: TextStyle = { fontStyle: 'italic' };
 const strike: TextStyle = { textDecorationLine: 'line-through' };
 const list: ViewStyle = { gap: 4, maxWidth: '100%' };
-const item: ViewStyle = { flexDirection: 'row', gap: 8, maxWidth: '100%' };
-const itemBody: ViewStyle = { flex: 1, minWidth: 0 };
+const item: ViewStyle = { flexDirection: 'row', alignItems: 'flex-start', gap: 8, maxWidth: '100%' };
+const itemBody: ViewStyle = { flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 0 };
+const hardBreak: TextStyle = { whiteSpace: 'pre' };
 const row: ViewStyle = { flexDirection: 'row', alignItems: 'stretch' };
 const table: ViewStyle = { minWidth: '100%' };
 const tableScroll: ViewStyle = { maxWidth: '100%' };

@@ -305,13 +305,16 @@ async def send(workspace_id: str, body: MessageCreate, request: Request):
         raise Rejected("Save a local folder first.")
     folder = body.folder
     image = body.image.strip() if body.image else None
-    if folder is not None or image:
+    attachment = body.attachment.strip() if body.attachment else None
+    if folder is not None or image or attachment:
         port = folder_for(request.app.state.store, workspace_id)
         if folder is not None:
             await asyncio.to_thread(port.resolve, folder, directory=True)
-        if image:
-            await asyncio.to_thread(port.resolve, image, file=True)
-            if folder and not image.startswith(f"{folder}/"):
+        for path in (image, attachment):
+            if not path:
+                continue
+            await asyncio.to_thread(port.resolve, path, file=True)
+            if folder and not path.startswith(f"{folder}/"):
                 raise Rejected("That image is not in the open folder.")
     status, result, events = await asyncio.to_thread(
         request.app.state.store.begin_message,
@@ -320,11 +323,12 @@ async def send(workspace_id: str, body: MessageCreate, request: Request):
         body.text,
         folder,
         image,
+        attachment,
     )
     bus = request.app.state.bus
     for event in events:
         await bus.publish(event)
-    if events:
+    if result.get("run_id"):
         cancel = asyncio.Event()
         request.app.state.cancels[result["run_id"]] = cancel
         task = asyncio.create_task(
@@ -339,6 +343,10 @@ async def send(workspace_id: str, body: MessageCreate, request: Request):
         )
         request.app.state.tasks.add(task)
         task.add_done_callback(request.app.state.tasks.discard)
+    for run_id in result.get("cancelled_run_ids") or []:
+        pending = request.app.state.cancels.pop(run_id, None)
+        if pending is not None:
+            pending.set()
     return json_body(status, result)
 
 

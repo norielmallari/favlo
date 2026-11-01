@@ -7,9 +7,10 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from web_api.bus import Bus
-from web_api.chat import ReplyPiece, stream_reply
+from web_api.chat import ReplyPiece, public_call, record_tool, stream_reply
 from web_api.events import envelope
 from web_api.ids import mint
+from web_api.reply_error import spoken_error
 from web_api.store import Store
 
 Reply = Callable[..., AsyncIterator[str | ReplyPiece]]
@@ -47,6 +48,8 @@ async def perform(
     message_id = mint("message")
     parts: list[str] = []
     reasoning: list[str] = []
+    calls: list[dict[str, Any]] = []
+    trace: list[dict[str, Any]] = []
     try:
         await bus.publish(
             _delta(
@@ -56,21 +59,24 @@ async def perform(
             )
         )
         gallery_note = ""
-        user_image = None
+        agent = context["agent"] or {}
         folder = context.get("gallery_folder")
         image = context.get("gallery_image")
-        if folder is not None or image:
-            from web_api.gallery_tools import preview_file, turn_note
+        attached = context.get("gallery_attachment")
+        from web_api.gallery_tools import images_in_message, turn_note
 
+        if folder is not None or image or attached:
             gallery_note = turn_note(folder or "", image)
-            if image:
-                user_image = preview_file(store, context["run"]["session_id"], image)
+        user_images = images_in_message(
+            store,
+            context["run"]["session_id"],
+            context["user_text"],
+        )
         async for piece in reply(
             base_url=context["base_url"],
             model=context["model"],
             persona=context["agent"]["persona"],
             agent_name=context["agent"]["name"],
-            history=context["prior"],
             user_text=context["user_text"],
             tool_groups=context["agent"]["tool_groups"],
             store=store,
@@ -80,15 +86,19 @@ async def perform(
             pending=pending,
             cancel=cancel,
             gallery_note=gallery_note,
-            user_image=user_image,
+            user_images=user_images,
+            enable_thinking=agent.get("enable_thinking"),
+            preserve_thinking=agent.get("preserve_thinking"),
+            reasoning_effort=agent.get("reasoning_effort"),
         ):
             if cancel.is_set():
                 await _publish(bus, store.finish_run(run_id, "cancelled", None))
                 return
-            kind, incoming = _piece(piece)
-            if kind == "reasoning":
-                if incoming:
-                    reasoning.append(incoming)
+            incoming_piece = _as_piece(piece)
+            if incoming_piece.kind == "reasoning":
+                if incoming_piece.text:
+                    reasoning.append(incoming_piece.text)
+                    _note_text(trace, "thinking", incoming_piece.text)
                     await bus.publish(
                         _delta(
                             context,
@@ -96,16 +106,38 @@ async def perform(
                             {
                                 "type": "REASONING_MESSAGE_CONTENT",
                                 "messageId": message_id,
-                                "delta": incoming,
+                                "delta": incoming_piece.text,
                             },
                         )
                     )
                 continue
+            if incoming_piece.kind in ("tool", "tool_result"):
+                updated = record_tool(calls, incoming_piece)
+                _note_tool(trace, updated)
+                if updated["name"] or updated["arguments"] or updated["result"]:
+                    shown = public_call(updated)
+                    await bus.publish(
+                        _delta(
+                            context,
+                            run_id,
+                            {
+                                "type": "TOOL_CALL",
+                                "messageId": message_id,
+                                "id": shown["id"],
+                                "name": shown["name"],
+                                "arguments": shown["arguments"],
+                                "result": shown["result"],
+                            },
+                        )
+                    )
+                continue
+            incoming = incoming_piece.text
             joined = "".join(parts)
             extra = incoming[len(joined) :] if incoming.startswith(joined) else incoming
             if not extra:
                 continue
             parts.append(extra)
+            _note_text(trace, "reply", extra)
             await bus.publish(
                 _delta(
                     context,
@@ -118,27 +150,76 @@ async def perform(
             return
         text = "".join(parts).strip()
         thought = "".join(reasoning).strip()
+        stored_calls = [public_call(row) for row in calls if row["name"] or row["arguments"]]
+        stored_trace = public_trace(trace)
         if not text:
-            events = (
-                store.note_empty_reply(run_id, thought)
-                if thought
-                else store.finish_run(run_id, "failed", "The model returned an empty reply.")
+            archived = store.finish_archive(run_id)
+            if archived is not None:
+                await _publish(bus, archived)
+                return
+            if thought or stored_calls:
+                await _publish(
+                    bus,
+                    store.complete_run(run_id, "", thought, stored_calls, stored_trace),
+                )
+                return
+            await _publish(
+                bus,
+                store.finish_run(run_id, "failed", "The model returned an empty reply."),
             )
-            await _publish(bus, events)
             return
         await bus.publish(
             _delta(context, run_id, {"type": "TEXT_MESSAGE_END", "messageId": message_id})
         )
-        await _publish(bus, store.complete_run(run_id, text, "".join(reasoning).strip()))
+        await _publish(
+            bus,
+            store.complete_run(run_id, text, thought, stored_calls, stored_trace),
+        )
     except Exception as exc:
-        message = str(exc).strip() or "The listener did not complete the reply."
-        await _publish(bus, store.finish_run(run_id, "failed", message[:400]))
+        await _publish(bus, store.finish_run(run_id, "failed", spoken_error(str(exc))))
 
 
-def _piece(piece: str | ReplyPiece) -> tuple[str, str]:
+def _note_text(trace: list[dict[str, Any]], kind: str, text: str) -> None:
+    """Append one thinking or reply delta. A blank delta does not open a new part."""
+    if not text:
+        return
+    if trace and trace[-1]["kind"] == kind:
+        trace[-1]["text"] += text
+        return
+    if not text.strip():
+        return
+    trace.append({"kind": kind, "text": text})
+
+
+def _note_tool(trace: list[dict[str, Any]], call: dict[str, Any]) -> None:
+    """Keep one tool part for the call record, in the place it started."""
+    if any(part.get("kind") == "tool" and part.get("call") is call for part in trace):
+        return
+    trace.append({"kind": "tool", "call": call})
+
+
+def public_trace(trace: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """The parts a stored turn shows, in the order they arrived."""
+    shown: list[dict[str, str]] = []
+    for part in trace:
+        kind = part["kind"]
+        if kind == "tool":
+            call = public_call(part["call"])
+            if call["name"] or call["arguments"]:
+                shown.append({"kind": "tool", **call})
+            continue
+        text = str(part.get("text") or "")
+        if kind == "thinking":
+            text = text.strip()
+        if text.strip():
+            shown.append({"kind": kind, "text": text})
+    return shown
+
+
+def _as_piece(piece: str | ReplyPiece) -> ReplyPiece:
     if isinstance(piece, ReplyPiece):
-        return piece.kind, piece.text
-    return "content", piece
+        return piece
+    return ReplyPiece("content", piece)
 
 
 async def _publish(bus: Bus, events: list[dict[str, Any]]) -> None:

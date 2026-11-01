@@ -19,7 +19,7 @@ from web_api.events import envelope, now
 from web_api.heartbeat_tools import GROUP_ID as HEARTBEAT_GROUP_ID
 from web_api.ids import mint
 from web_api.mcp_groups import GROUP_NAMES, ORDER
-from web_api.session_tools import GROUP_ID as SESSION_GROUP_ID
+from web_api.session_commands import ARCHIVE_COMMAND, ARCHIVE_CUE, CLEAR_COMMAND
 
 
 class Conflict(Exception):
@@ -34,11 +34,27 @@ class Rejected(Exception):
     pass
 
 
-_KNOWN_GROUPS = {GROUP_ID, CONVERSATION_GROUP_ID, HEARTBEAT_GROUP_ID, SESSION_GROUP_ID}
+_KNOWN_GROUPS = {GROUP_ID, CONVERSATION_GROUP_ID, HEARTBEAT_GROUP_ID}
+
+
+def _stored_flag(value: Any) -> bool | None:
+    if value is None:
+        return None
+    return bool(value)
+
+
+def _stored_effort(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
 
 
 def _agent_record(conn: sqlite3.Connection, row: Any) -> dict[str, Any]:
     agent = dict(row)
+    agent["enable_thinking"] = _stored_flag(agent.get("enable_thinking"))
+    agent["preserve_thinking"] = _stored_flag(agent.get("preserve_thinking"))
+    agent["reasoning_effort"] = _stored_effort(agent.get("reasoning_effort"))
     groups = conn.execute(
         "SELECT group_id FROM agent_tool_group WHERE agent_id = ? ORDER BY group_id",
         (agent["id"],),
@@ -507,6 +523,34 @@ def _execute_in(conn: sqlite3.Connection, statement: str, ids: list[str]) -> Non
     conn.execute(f"{statement} ({marks})", ids)
 
 
+def _session_view(row: Any) -> dict[str, Any]:
+    viewed = dict(row)
+    viewed.pop("maf_state", None)
+    return viewed
+
+
+def _json_list(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, list):
+        return [row for row in raw if isinstance(row, dict)]
+    if not isinstance(raw, str) or not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [row for row in parsed if isinstance(row, dict)]
+
+
+def _tool_calls(raw: Any) -> list[dict[str, Any]]:
+    return _json_list(raw)
+
+
+def _trace(raw: Any) -> list[dict[str, Any]]:
+    return _json_list(raw)
+
+
 def _hash(body: dict[str, Any]) -> str:
     raw = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(raw).hexdigest()
@@ -911,10 +955,21 @@ class Store:
             persona = body.get("persona") or ""
             conn.execute(
                 """
-                INSERT INTO agent (id, name, persona, default_model_id, revision)
-                VALUES (?, ?, ?, ?, 1)
+                INSERT INTO agent (
+                    id, name, persona, default_model_id,
+                    enable_thinking, preserve_thinking, reasoning_effort, revision
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
                 """,
-                (agent_id, name, persona, model_id),
+                (
+                    agent_id,
+                    name,
+                    persona,
+                    model_id,
+                    _stored_flag(body.get("enable_thinking")),
+                    _stored_flag(body.get("preserve_thinking")),
+                    _stored_effort(body.get("reasoning_effort")),
+                ),
             )
             conn.execute(
                 "INSERT INTO channel (id, kind, name, revision) VALUES (?, 'agent', ?, 1)",
@@ -938,13 +993,7 @@ class Store:
                 _replace_groups(conn, agent_id, groups)
             agent = _agent_record(
                 conn,
-                {
-                    "id": agent_id,
-                    "name": name,
-                    "persona": persona,
-                    "default_model_id": model_id,
-                    "revision": 1,
-                },
+                conn.execute("SELECT * FROM agent WHERE id = ?", (agent_id,)).fetchone(),
             )
             result = {
                 "agent": agent,
@@ -981,6 +1030,9 @@ class Store:
         persona: str,
         default_model_id: str | None,
         tool_groups: list[str] | None = None,
+        enable_thinking: bool | None = None,
+        preserve_thinking: bool | None = None,
+        reasoning_effort: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         def write(conn: sqlite3.Connection) -> tuple[dict[str, Any], list[dict[str, Any]]]:
             row = conn.execute("SELECT * FROM agent WHERE id = ?", (agent_id,)).fetchone()
@@ -997,10 +1049,21 @@ class Store:
             conn.execute(
                 """
                 UPDATE agent
-                SET name = ?, persona = ?, default_model_id = ?, revision = ?
+                SET name = ?, persona = ?, default_model_id = ?,
+                    enable_thinking = ?, preserve_thinking = ?, reasoning_effort = ?,
+                    revision = ?
                 WHERE id = ?
                 """,
-                (cleaned, persona, default_model_id, revision, agent_id),
+                (
+                    cleaned,
+                    persona,
+                    default_model_id,
+                    _stored_flag(enable_thinking),
+                    _stored_flag(preserve_thinking),
+                    _stored_effort(reasoning_effort),
+                    revision,
+                    agent_id,
+                ),
             )
             conn.execute(
                 """
@@ -1013,13 +1076,7 @@ class Store:
                 _replace_groups(conn, agent_id, tool_groups)
             updated = _agent_record(
                 conn,
-                {
-                    "id": agent_id,
-                    "name": cleaned,
-                    "persona": persona,
-                    "default_model_id": default_model_id,
-                    "revision": revision,
-                },
+                conn.execute("SELECT * FROM agent WHERE id = ?", (agent_id,)).fetchone(),
             )
             return updated, []
 
@@ -1758,24 +1815,58 @@ class Store:
             session = conn.execute("SELECT * FROM session WHERE id = ?", (session_id,)).fetchone()
             if session is None:
                 raise NotFound("That session does not exist.")
-            conn.execute("DELETE FROM message WHERE session_id = ?", (session_id,))
-            conn.execute(
-                "DELETE FROM run WHERE session_id = ? AND status != 'running'",
-                (session_id,),
-            )
-            return [
-                self._event(
-                    conn,
-                    stream_id=f"session:{session_id}",
-                    event_type="session.cleared",
-                    payload={"session_id": session_id},
-                    channel_id=session["channel_id"],
-                    session_id=session_id,
-                    actor={"kind": "agent", "id": session["participant_id"] or ""},
-                )
-            ]
+            return self._delete_session_turns(conn, session)
 
         return self._write(write)
+
+    def _delete_session_turns(
+        self, conn: sqlite3.Connection, session: sqlite3.Row
+    ) -> list[dict[str, Any]]:
+        session_id = session["id"]
+        conn.execute("DELETE FROM message WHERE session_id = ?", (session_id,))
+        conn.execute("DELETE FROM run WHERE session_id = ?", (session_id,))
+        conn.execute("UPDATE session SET maf_state = NULL WHERE id = ?", (session_id,))
+        return [
+            self._event(
+                conn,
+                stream_id=f"session:{session_id}",
+                event_type="session.cleared",
+                payload={"session_id": session_id},
+                channel_id=session["channel_id"],
+                session_id=session_id,
+                actor={"kind": "agent", "id": session["participant_id"] or ""},
+            )
+        ]
+
+    def maf_session(self, session_id: str) -> dict[str, Any] | None:
+        """The Agent Framework session stored for this chat, if one has finished."""
+
+        def read(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute(
+                "SELECT maf_state FROM session WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None or not row["maf_state"]:
+                return None
+            loaded = json.loads(row["maf_state"])
+            return loaded if isinstance(loaded, dict) else None
+
+        return self._read(read)
+
+    def save_maf_session(self, session_id: str, payload: dict[str, Any]) -> None:
+        """Store the Agent Framework session that this turn actually sent."""
+        encoded = json.dumps(payload)
+
+        def write(conn: sqlite3.Connection) -> None:
+            found = conn.execute("SELECT id FROM session WHERE id = ?", (session_id,)).fetchone()
+            if found is None:
+                return
+            conn.execute(
+                "UPDATE session SET maf_state = ? WHERE id = ?",
+                (encoded, session_id),
+            )
+
+        self._write(write)
 
     def begin_task_correction(
         self, session_id: str, agent_id: str, cue: str
@@ -2724,13 +2815,15 @@ class Store:
             session = conn.execute("SELECT * FROM session WHERE id = ?", (session_id,)).fetchone()
             if session is None:
                 raise NotFound("That session does not exist.")
-            messages = [
-                dict(row)
-                for row in conn.execute(
-                    "SELECT * FROM message WHERE session_id = ? ORDER BY rowid",
-                    (session_id,),
-                )
-            ]
+            messages = []
+            for row in conn.execute(
+                "SELECT * FROM message WHERE session_id = ? ORDER BY rowid",
+                (session_id,),
+            ):
+                item = dict(row)
+                item["tool_calls"] = _tool_calls(item.get("tool_calls"))
+                item["trace"] = _trace(item.get("trace"))
+                messages.append(item)
             runs = [
                 dict(row)
                 for row in conn.execute(
@@ -2744,7 +2837,7 @@ class Store:
                 (stream_id,),
             ).fetchone()
             return {
-                "session": dict(session),
+                "session": _session_view(session),
                 "messages": messages,
                 "runs": runs,
                 "cursor": int(cursor[0]),
@@ -2769,8 +2862,15 @@ class Store:
         text: str,
         folder: str | None = None,
         image: str | None = None,
+        attachment: str | None = None,
     ) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
-        body = {"session_id": session_id, "text": text, "folder": folder, "image": image}
+        body = {
+            "session_id": session_id,
+            "text": text,
+            "folder": folder,
+            "image": image,
+            "attachment": attachment,
+        }
 
         def write(conn: sqlite3.Connection) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
             prior = self._claim(conn, key, body)
@@ -2784,12 +2884,28 @@ class Store:
                 raise Rejected("A message is required.")
             if len(cleaned.encode()) > 8 * 1024 * 1024:
                 raise Rejected("A message is at most 8 MiB.")
+            if cleaned == CLEAR_COMMAND:
+                running = conn.execute(
+                    "SELECT id FROM run WHERE session_id = ? AND status = 'running'",
+                    (session_id,),
+                ).fetchall()
+                events = self._delete_session_turns(conn, session)
+                result = {
+                    "status": "cleared",
+                    "session_id": session_id,
+                    "cleared": True,
+                    "cancelled_run_ids": [row["id"] for row in running],
+                }
+                self._remember(conn, key or "", body, 200, result)
+                return 200, result, events
             active = conn.execute(
                 "SELECT id FROM run WHERE session_id = ? AND status = 'running'",
                 (session_id,),
             ).fetchone()
             if active is not None:
                 raise Conflict("A reply is already in progress.")
+            if cleaned == ARCHIVE_COMMAND:
+                return self._begin_archive(conn, key, body, session)
             message_id = mint("message")
             run_id = mint("run")
             command_id = mint("cmd")
@@ -2806,11 +2922,11 @@ class Store:
                 """
                 INSERT INTO run (
                     id, session_id, agent_id, status, error, started_at, finished_at,
-                    gallery_folder, gallery_image
+                    gallery_folder, gallery_image, gallery_attachment
                 )
-                VALUES (?, ?, ?, 'running', NULL, ?, NULL, ?, ?)
+                VALUES (?, ?, ?, 'running', NULL, ?, NULL, ?, ?, ?)
                 """,
-                (run_id, session_id, session["participant_id"], created, folder, image),
+                (run_id, session_id, session["participant_id"], created, folder, image, attachment),
             )
             stream_id = f"session:{session_id}"
             channel_id = session["channel_id"]
@@ -2849,6 +2965,50 @@ class Store:
             return 202, result, events
 
         return self._write(write)
+
+    def _begin_archive(
+        self,
+        conn: sqlite3.Connection,
+        key: str | None,
+        body: dict[str, Any],
+        session: sqlite3.Row,
+    ) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
+        session_id = session["id"]
+        run_id = mint("run")
+        command_id = mint("cmd")
+        created = now()
+        conn.execute(
+            """
+            INSERT INTO run (
+                id, session_id, agent_id, status, error, started_at, finished_at, cue
+            )
+            VALUES (?, ?, ?, 'running', NULL, ?, NULL, ?)
+            """,
+            (run_id, session_id, session["participant_id"], created, ARCHIVE_CUE),
+        )
+        actor = {"kind": "user", "id": "local"}
+        events = [
+            self._event(
+                conn,
+                stream_id=f"session:{session_id}",
+                event_type="run.started",
+                payload={"status": "running"},
+                channel_id=session["channel_id"],
+                session_id=session_id,
+                run_id=run_id,
+                actor=actor,
+                correlation_id=command_id,
+            )
+        ]
+        result = {
+            "command_id": command_id,
+            "status": "accepted",
+            "session_id": session_id,
+            "run_id": run_id,
+            "cleared": False,
+        }
+        self._remember(conn, key or "", body, 202, result)
+        return 202, result, events
 
     def run_context(self, run_id: str) -> dict[str, Any]:
         def read(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -2906,9 +3066,10 @@ class Store:
                 prior = history[:-1]
             folder = run["gallery_folder"]
             image = run["gallery_image"]
+            attached = run["gallery_attachment"]
             return {
                 "run": dict(run),
-                "session": dict(session),
+                "session": _session_view(session),
                 "agent": agent,
                 "model": model,
                 "base_url": base_url,
@@ -2916,11 +3077,19 @@ class Store:
                 "user_text": user_text,
                 "gallery_folder": None if folder is None else str(folder),
                 "gallery_image": None if image is None else str(image),
+                "gallery_attachment": None if attached is None else str(attached),
             }
 
         return self._read(read)
 
-    def complete_run(self, run_id: str, text: str, reasoning: str = "") -> list[dict[str, Any]]:
+    def complete_run(
+        self,
+        run_id: str,
+        text: str,
+        reasoning: str = "",
+        tool_calls: list[dict[str, Any]] | None = None,
+        trace: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         def write(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             run = conn.execute("SELECT * FROM run WHERE id = ?", (run_id,)).fetchone()
             if run is None or run["status"] != "running":
@@ -2929,17 +3098,31 @@ class Store:
                 "SELECT * FROM session WHERE id = ?",
                 (run["session_id"],),
             ).fetchone()
+            if str(run["cue"] or "") == ARCHIVE_CUE:
+                return self._finish_archive_run(conn, run, session)
             message_id = mint("message")
             created = now()
             stored = reasoning.strip()
+            calls = tool_calls or []
+            parts = trace or []
             conn.execute(
                 """
                 INSERT INTO message (
-                    id, session_id, role, body, actor_kind, actor_id, created_at, reasoning
+                    id, session_id, role, body, actor_kind, actor_id,
+                    created_at, reasoning, tool_calls, trace
                 )
-                VALUES (?, ?, 'assistant', ?, 'agent', ?, ?, ?)
+                VALUES (?, ?, 'assistant', ?, 'agent', ?, ?, ?, ?, ?)
                 """,
-                (message_id, run["session_id"], text, run["agent_id"], created, stored or None),
+                (
+                    message_id,
+                    run["session_id"],
+                    text,
+                    run["agent_id"],
+                    created,
+                    stored or None,
+                    json.dumps(calls) if calls else None,
+                    json.dumps(parts) if parts else None,
+                ),
             )
             conn.execute(
                 "UPDATE run SET status = 'completed', finished_at = ? WHERE id = ?",
@@ -2950,6 +3133,10 @@ class Store:
             payload: dict[str, Any] = {"message_id": message_id, "role": "assistant", "text": text}
             if stored:
                 payload["reasoning"] = stored
+            if calls:
+                payload["tool_calls"] = calls
+            if parts:
+                payload["trace"] = parts
             return [
                 self._event(
                     conn,
@@ -2975,67 +3162,48 @@ class Store:
 
         return self._write(write)
 
-    def note_empty_reply(self, run_id: str, reasoning: str) -> list[dict[str, Any]]:
-        """Store reasoning from a reply that drew no text, then fail the run."""
+    def finish_archive(self, run_id: str) -> list[dict[str, Any]] | None:
+        """Clear an archive turn that stopped without text. Other runs stay."""
 
-        def write(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+        def write(conn: sqlite3.Connection) -> list[dict[str, Any]] | None:
             run = conn.execute("SELECT * FROM run WHERE id = ?", (run_id,)).fetchone()
             if run is None or run["status"] != "running":
-                return []
+                return None
+            if str(run["cue"] or "") != ARCHIVE_CUE:
+                return None
             session = conn.execute(
                 "SELECT * FROM session WHERE id = ?",
                 (run["session_id"],),
             ).fetchone()
-            message_id = mint("message")
-            created = now()
-            stored = reasoning.strip()
-            conn.execute(
-                """
-                INSERT INTO message (
-                    id, session_id, role, body, actor_kind, actor_id, created_at, reasoning
-                )
-                VALUES (?, ?, 'assistant', '', 'agent', ?, ?, ?)
-                """,
-                (message_id, run["session_id"], run["agent_id"], created, stored),
-            )
-            conn.execute(
-                "UPDATE run SET status = 'failed', error = ?, finished_at = ? WHERE id = ?",
-                ("The model returned an empty reply.", created, run_id),
-            )
-            stream_id = f"session:{run['session_id']}"
-            actor = {"kind": "agent", "id": run["agent_id"]}
-            return [
-                self._event(
-                    conn,
-                    stream_id=stream_id,
-                    event_type="message.created",
-                    payload={
-                        "message_id": message_id,
-                        "role": "assistant",
-                        "text": "",
-                        "reasoning": stored,
-                    },
-                    channel_id=session["channel_id"],
-                    session_id=run["session_id"],
-                    run_id=run_id,
-                    actor=actor,
-                ),
-                self._event(
-                    conn,
-                    stream_id=stream_id,
-                    event_type="run.failed",
-                    payload={
-                        "status": "failed",
-                        "message": "The model returned an empty reply.",
-                    },
-                    channel_id=session["channel_id"],
-                    session_id=run["session_id"],
-                    run_id=run_id,
-                    actor=actor,
-                ),
-            ]
+            if session is None:
+                return None
+            return self._finish_archive_run(conn, run, session)
 
         return self._write(write)
+
+    def _finish_archive_run(
+        self, conn: sqlite3.Connection, run: sqlite3.Row, session: sqlite3.Row
+    ) -> list[dict[str, Any]]:
+        created = now()
+        conn.execute(
+            "UPDATE run SET status = 'completed', finished_at = ? WHERE id = ?",
+            (created, run["id"]),
+        )
+        actor = {"kind": "agent", "id": run["agent_id"]}
+        events = [
+            self._event(
+                conn,
+                stream_id=f"session:{run['session_id']}",
+                event_type="run.completed",
+                payload={"status": "completed"},
+                channel_id=session["channel_id"],
+                session_id=run["session_id"],
+                run_id=run["id"],
+                actor=actor,
+            )
+        ]
+        events.extend(self._delete_session_turns(conn, session))
+        return events
 
     def finish_run(self, run_id: str, status: str, error: str | None) -> list[dict[str, Any]]:
         def write(conn: sqlite3.Connection) -> list[dict[str, Any]]:

@@ -13,32 +13,38 @@ import {
 } from 'react-native';
 
 import { API_URL, api, idempotencyKey, socketUrl } from '@/api/client';
+import { spokenError } from '@/reply-error';
 import {
   chatMessage,
   clearedTranscript,
   keepLatest,
+  sessionCommand,
+  LiveReply,
+  noteReasoning,
+  noteReply,
+  noteTool,
   readDraft,
   showsMessage,
+  toolCallDelta,
   transcriptFrame,
   TranscriptTurn,
   writeDraft,
   type ChatMessage,
+  type ReplyStep,
+  type SentMessage,
 } from '@/components/chat-transcript';
 import { BannerPortal } from '@/components/Frame';
 import { Composer } from '@/components/Composer';
+import { ReplyAlert } from '@/components/ReplyAlert';
 import { FeatherIcon } from '@/components/FeatherIcon';
 import { buttonRow, IconButton } from '@/components/IconButton';
-import { MarkdownText } from '@/components/MarkdownText';
-import { humanText } from '@/components/MessageBody';
 import { Modal } from '@/components/Modal';
 import { Pressable } from '@/components/Pressable';
-import { transcriptScrollbar } from '@/components/scrollbar';
-import { Thinking } from '@/components/Thinking';
 import { WorkspaceSkills, type WorkspaceSkill } from '@/components/WorkspaceSkills';
 import { workingShimmer } from '@/components/working';
 import { useTheme } from '@/theme/Theme';
 import { radius, space, type as typeScale } from '@/theme/tokens';
-import { measureStyle, textStyle } from '@/theme/type';
+import { textStyle } from '@/theme/type';
 
 export type FolderKind = {
   kind: string;
@@ -110,7 +116,7 @@ type Dest = {
 };
 
 type Snapshot = {
-  messages: { id: string; role: string; body: string; reasoning?: string | null }[];
+  messages: { id: string; role: string; body: string; reasoning?: string | null; tool_calls?: unknown; trace?: unknown }[];
   runs: { id: string; status: string; error: string | null }[];
   cursor: number;
 };
@@ -119,15 +125,17 @@ type AgentEvent = {
   event_id: string;
   stream_id?: string;
   run_id?: string;
+  sequence?: number;
   type: string;
   payload?: {
     message_id?: string;
     role?: string;
     text?: string;
     reasoning?: string;
+    tool_calls?: unknown;
     message?: string;
     status?: string;
-    agui?: { type?: string; delta?: string };
+    agui?: { type?: string; delta?: string; id?: string; name?: string; arguments?: string; result?: string };
   };
 };
 
@@ -176,8 +184,8 @@ export function GalleryWorkspace({
   const [location, setLocation] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState('');
-  const [live, setLive] = useState('');
-  const [thinking, setThinking] = useState('');
+  const [chatImage, setChatImage] = useState<string | null>(null);
+  const [steps, setSteps] = useState<ReplyStep[]>([]);
   const [working, setWorking] = useState(false);
   const [runId, setRunId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -191,8 +199,11 @@ export function GalleryWorkspace({
   const transcriptRef = useRef<ComponentRef<typeof ScrollView>>(null);
   const followLatest = useRef(true);
   const placedLatest = useRef(false);
+  const openRun = useRef<string | null>(null);
   const placeRef = useRef<Crumb | null>(null);
   const reloadRef = useRef<() => void>(() => undefined);
+  const loadGeneration = useRef(0);
+  const [listen, setListen] = useState(false);
   const moving = useRef(false);
   const deleting = useRef(false);
   const sessionId = detail?.session_id;
@@ -216,9 +227,14 @@ export function GalleryWorkspace({
 
   const loadPlace = useCallback(
     async (place: Crumb) => {
+      const generation = ++loadGeneration.current;
+      const stale = () => generation !== loadGeneration.current;
       if (place.scope === 'rows') {
         const query = place.kind === 'cloud' && place.folderId ? `?parent_id=${encodeURIComponent(place.folderId)}` : '';
         const body = await api<{ folders: FolderRow[] }>(`/workspaces/${workspaceId}/folders${query}`);
+        if (stale()) {
+          return;
+        }
         const root = place.kind === 'root' ? rootLocalFolder(body.folders, place.label) : null;
         if (root) {
           await api(`/workspaces/${workspaceId}/focus`, {
@@ -226,6 +242,9 @@ export function GalleryWorkspace({
             body: JSON.stringify({ folder_id: root.id }),
           });
           const images = await api<Listing>(`/workspaces/${workspaceId}/folders/${root.id}/images?path=`);
+          if (stale()) {
+            return;
+          }
           setRootFolderId(root.id);
           setRows(body.folders.filter((row) => row.id !== root.id));
           setListing(images);
@@ -248,6 +267,9 @@ export function GalleryWorkspace({
       const body = await api<Listing>(
         `/workspaces/${workspaceId}/folders/${place.folderId}/images?path=${encodeURIComponent(place.path)}`,
       );
+      if (stale()) {
+        return;
+      }
       setListing(body);
       setRows([]);
       keepImage(body.images, place.folderId, setSelected);
@@ -271,7 +293,6 @@ export function GalleryWorkspace({
     if (place == null) {
       return;
     }
-    setSelected(null);
     setMoveFor(null);
     void loadPlace(place).catch((caught: Error) => setNotice(caught.message));
   }, [current?.key, loadPlace]);
@@ -280,31 +301,52 @@ export function GalleryWorkspace({
     if (sessionId == null) {
       return;
     }
+    let cancelled = false;
+    setListen(false);
     setDraft(readDraft(sessionId));
     void api<Snapshot>(`/workspaces/${workspaceId}/session`)
       .then((snapshot) => {
+        if (cancelled) {
+          return;
+        }
         cursorRef.current = snapshot.cursor;
+        setListen(true);
         setMessages(snapshot.messages.map(chatMessage));
         const latest = snapshot.runs.at(-1);
-        setWorking(latest?.status === 'running');
-        setRunId(latest?.status === 'running' ? latest.id : null);
+        const running = latest?.status === 'running' ? latest.id : null;
+        openRun.current = running;
+        setWorking(running != null);
+        setRunId(running);
         setError(latest?.status === 'failed' ? latest.error : null);
-        setLive('');
-        setThinking('');
+        setSteps([]);
       })
-      .catch((caught: Error) => setNotice(caught.message));
+      .catch((caught: Error) => {
+        if (!cancelled) {
+          setNotice(caught.message);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [sessionId, workspaceId]);
 
   const showLatest = useCallback(() => {
     if (!followLatest.current) {
       return;
     }
-    transcriptRef.current?.scrollToEnd({ animated: false });
+    const scroll = () => transcriptRef.current?.scrollToEnd({ animated: false });
+    scroll();
+    if (Platform.OS === 'web') {
+      requestAnimationFrame(() => {
+        scroll();
+        requestAnimationFrame(scroll);
+      });
+    }
   }, []);
 
   useEffect(() => {
     showLatest();
-  }, [messages, live, thinking, width, height, showLatest]);
+  }, [messages, steps, width, height, showLatest]);
 
   const noteScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { layoutMeasurement, contentOffset, contentSize } = event.nativeEvent;
@@ -316,7 +358,7 @@ export function GalleryWorkspace({
   }, []);
 
   useEffect(() => {
-    if (Platform.OS !== 'web' || sessionId == null) {
+    if (Platform.OS !== 'web' || sessionId == null || !listen) {
       return;
     }
     let stopped = false;
@@ -346,26 +388,29 @@ export function GalleryWorkspace({
       clearTimeout(timer);
       socket?.close();
     };
-  }, [sessionId]);
+  }, [sessionId, listen]);
 
   function applyEvent(event: AgentEvent) {
     if (seen.current.has(event.event_id)) {
       return;
     }
     seen.current.add(event.event_id);
+    if (event.sequence != null && event.sequence > cursorRef.current) {
+      cursorRef.current = event.sequence;
+    }
+    if (event.stream_id !== `session:${sessionId}`) {
+      return;
+    }
     if (event.type === 'gallery.updated') {
       if (!moving.current && !deleting.current) {
         reloadRef.current();
       }
       return;
     }
-    if (event.stream_id !== `session:${sessionId}`) {
-      return;
-    }
     if (
       event.type === 'message.created' &&
       event.payload?.message_id &&
-      showsMessage(event.payload.text, event.payload.reasoning)
+      showsMessage(event.payload.text, event.payload.reasoning, event.payload.tool_calls)
     ) {
       const id = event.payload.message_id;
       const role = event.payload.role ?? 'assistant';
@@ -373,41 +418,74 @@ export function GalleryWorkspace({
       setMessages((currentMessages) =>
         currentMessages.some((item) => item.id === id)
           ? currentMessages
-          : [...currentMessages, chatMessage({ id, role, body, reasoning: event.payload?.reasoning })],
+          : [
+              ...currentMessages,
+              chatMessage({
+                id,
+                role,
+                body,
+                reasoning: event.payload?.reasoning,
+                tool_calls: event.payload?.tool_calls,
+                trace: event.payload?.trace,
+              }),
+            ],
       );
       if (role === 'assistant') {
-        setLive('');
-        setThinking('');
+        openRun.current = null;
+        setSteps([]);
         setWorking(false);
         setRunId(null);
         setStatus('Reply ready');
-        reloadRef.current();
       }
     }
     if (clearedTranscript(event, sessionId)) {
+      openRun.current = null;
       setMessages([]);
-      setLive('');
-      setThinking('');
+      setSteps([]);
+      setWorking(false);
+      setRunId(null);
       setError(null);
       setStatus(null);
     }
     if (event.type === 'run.started') {
+      openRun.current = event.run_id ?? null;
       setWorking(true);
       setError(null);
-      setThinking('');
+      setSteps([]);
       setStatus(null);
       setRunId(event.run_id ?? null);
     }
-    if (event.type === 'run.delta' && event.payload?.agui?.type === 'TEXT_MESSAGE_CONTENT') {
-      setLive((value) => value + (event.payload?.agui?.delta ?? ''));
+    if (
+      event.type === 'run.delta' &&
+      event.run_id != null &&
+      event.run_id === openRun.current &&
+      event.payload?.agui?.type === 'TEXT_MESSAGE_CONTENT'
+    ) {
+      setSteps((current) => noteReply(current, event.payload?.agui?.delta ?? ''));
     }
-    if (event.type === 'run.delta' && event.payload?.agui?.type === 'REASONING_MESSAGE_CONTENT') {
-      setThinking((value) => value + (event.payload?.agui?.delta ?? ''));
+    if (
+      event.type === 'run.delta' &&
+      event.run_id != null &&
+      event.run_id === openRun.current &&
+      event.payload?.agui?.type === 'REASONING_MESSAGE_CONTENT'
+    ) {
+      setSteps((current) => noteReasoning(current, event.payload?.agui?.delta ?? ''));
+    }
+    if (
+      event.type === 'run.delta' &&
+      event.run_id != null &&
+      event.run_id === openRun.current &&
+      event.payload?.agui?.type === 'TOOL_CALL'
+    ) {
+      const call = toolCallDelta(event.payload.agui);
+      if (call) {
+        setSteps((current) => noteTool(current, call));
+      }
     }
     if (event.type === 'run.failed' || event.type === 'run.cancelled') {
+      openRun.current = null;
       setWorking(false);
-      setLive('');
-      setThinking('');
+      setSteps([]);
       setRunId(null);
       setError(event.type === 'run.failed' ? (event.payload?.message ?? 'The reply failed.') : null);
       setStatus(event.type === 'run.cancelled' ? 'The reply stopped.' : null);
@@ -628,8 +706,54 @@ export function GalleryWorkspace({
     }
   }
 
+  async function postMessage(
+    text: string,
+    folder: string | undefined,
+    image: string | undefined,
+    attachment: string | undefined,
+  ) {
+    const result = await api<SentMessage>(
+      `/workspaces/${workspaceId}/session/messages`,
+      {
+        method: 'POST',
+        headers: { 'Idempotency-Key': idempotencyKey() },
+        body: JSON.stringify({
+          text,
+          ...(folder !== undefined ? { folder } : {}),
+          ...(image ? { image } : {}),
+          ...(attachment ? { attachment } : {}),
+        }),
+      },
+    );
+    if (result.cleared) {
+      openRun.current = null;
+      setMessages([]);
+      setSteps([]);
+      setWorking(false);
+      setRunId(null);
+      setError(null);
+      setStatus(null);
+      return;
+    }
+    if (result.message_id) {
+      setMessages((currentMessages) =>
+        currentMessages.some((item) => item.id === result.message_id)
+          ? currentMessages
+          : [...currentMessages, { id: result.message_id, role: 'user', body: result.text ?? text }],
+      );
+    }
+    if (result.run_id) {
+      openRun.current = result.run_id;
+      setWorking(true);
+      setRunId(result.run_id);
+      setError(null);
+      setStatus(null);
+    }
+  }
+
   async function send() {
-    if (draft.trim() === '' || working) {
+    const command = sessionCommand(draft);
+    if (draft.trim() === '' || (working && command !== 'clear')) {
       return;
     }
     const text = draft;
@@ -638,31 +762,29 @@ export function GalleryWorkspace({
     const onDisk = folderId != null && place?.kind !== 'cloud';
     const folder = onDisk ? (place?.scope === 'disk' ? place.path : '') : undefined;
     const image = onDisk && selected?.type === 'image' ? selected.path : undefined;
+    const attachment = chatImage && text.split('\n').includes(chatImage) ? chatImage : undefined;
     updateDraft('');
+    setChatImage(null);
     try {
-      const result = await api<{ message_id: string; text: string; run_id?: string }>(
-        `/workspaces/${workspaceId}/session/messages`,
-        {
-          method: 'POST',
-          headers: { 'Idempotency-Key': idempotencyKey() },
-          body: JSON.stringify({
-            text,
-            ...(folder !== undefined ? { folder } : {}),
-            ...(image ? { image } : {}),
-          }),
-        },
-      );
-      setMessages((currentMessages) =>
-        currentMessages.some((item) => item.id === result.message_id)
-          ? currentMessages
-          : [...currentMessages, { id: result.message_id, role: 'user', body: result.text }],
-      );
-      setWorking(true);
-      setRunId(result.run_id ?? null);
-      setError(null);
-      setStatus(null);
+      await postMessage(text, folder, image, attachment);
     } catch (caught) {
       updateDraft(text);
+      setNotice(caught instanceof Error ? caught.message : 'The message was not sent.');
+    }
+  }
+
+  async function resend() {
+    const last = [...messages].reverse().find((item) => item.role === 'user');
+    if (working || last == null || last.body.trim() === '') {
+      return;
+    }
+    const place = crumbs.at(-1);
+    const folderId = place?.scope === 'disk' ? place.folderId : rootFolderId;
+    const onDisk = folderId != null && place?.kind !== 'cloud';
+    const folder = onDisk ? (place?.scope === 'disk' ? place.path : '') : undefined;
+    try {
+      await postMessage(last.body, folder, undefined, undefined);
+    } catch (caught) {
       setNotice(caught instanceof Error ? caught.message : 'The message was not sent.');
     }
   }
@@ -678,8 +800,6 @@ export function GalleryWorkspace({
     }
   }
 
-  const shown = humanText(live);
-  const liveThinking = thinking.trim();
   const galleryFolderId = current?.scope === 'disk' ? current.folderId : rootFolderId;
   const selectedImage = selected?.type === 'image' ? selected : null;
   const fileUrl =
@@ -709,6 +829,9 @@ export function GalleryWorkspace({
       }
       const images = listing?.images ?? [];
       const index = images.findIndex((item) => item.path === selected?.path);
+      if (index < 0) {
+        return;
+      }
       const next = event.key === 'ArrowRight' ? index + 1 : index - 1;
       const item = images[next];
       if (!item) {
@@ -787,6 +910,7 @@ export function GalleryWorkspace({
               label="Add to chat"
               onPress={() => {
                 const next = draft.trim() === '' ? selectedImage.path : `${draft.trim()}\n${selectedImage.path}`;
+                setChatImage(selectedImage.path);
                 updateDraft(next);
               }}
               background={palette.surface}
@@ -900,14 +1024,11 @@ export function GalleryWorkspace({
   );
 
   const transcript = (
-    <View accessibilityLabel="Conversation" style={{ flex: 1, minWidth: 0, padding: space[3], gap: space[2] }}>
-      {Platform.OS === 'web'
-        ? createElement('style', { 'data-testid': 'transcript-scrollbar' }, transcriptScrollbar(palette.borderStrong, palette.background, palette.textSecondary))
-        : null}
+    <View accessibilityLabel="Conversation" style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 0, minHeight: 0, overflow: 'hidden', padding: space[3], gap: space[2] }}>
       <ScrollView
         ref={transcriptRef}
         testID="transcript"
-        style={{ flex: 1, minWidth: 0 }}
+        style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 0, minWidth: 0 }}
         contentContainerStyle={transcriptFrame(space[4])}
         onContentSizeChange={showLatest}
         onScroll={noteScroll}
@@ -920,14 +1041,11 @@ export function GalleryWorkspace({
             role={item.role}
             body={item.body}
             reasoning={item.reasoning}
+            toolCalls={item.toolCalls}
+            trace={item.trace}
           />
         ))}
-        {liveThinking !== '' ? <Thinking text={liveThinking} settled={false} /> : null}
-        {shown !== '' ? (
-          <View accessibilityLabel={`${agentName} said: ${shown}`} style={measureStyle}>
-            <MarkdownText text={shown} color={palette.textPrimary} />
-          </View>
-        ) : null}
+        <LiveReply steps={steps} speaker={agentName} measured />
       </ScrollView>
       {working ? (
         <>
@@ -940,14 +1058,12 @@ export function GalleryWorkspace({
         </>
       ) : null}
       {status ? (
-        <Text accessibilityLiveRegion="polite" {...(Platform.OS === 'web' ? { role: 'status' as const } : {})} style={Platform.OS === 'web' ? { position: 'absolute', width: 1, height: 1, overflow: 'hidden' } : textStyle('small', palette.textSecondary)}>
+        <Text accessibilityLiveRegion="polite" style={Platform.OS === 'web' ? { position: 'absolute', width: 1, height: 1, overflow: 'hidden' } : textStyle('small', palette.textSecondary)}>
           {status}
         </Text>
       ) : null}
       {error ? (
-        <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={textStyle('small', palette.danger)}>
-          {error}
-        </Text>
+        <ReplyAlert message={spokenError(error)} disabled={working} onResend={() => void resend()} />
       ) : null}
       <Composer value={draft} working={working} agentName={agentName} onChange={updateDraft} onSend={() => void send()} onStop={() => void stop()} />
     </View>
@@ -977,7 +1093,16 @@ export function GalleryWorkspace({
   );
 
   return (
-    <View accessibilityLabel="Gallery workspace" style={{ flex: 1, minWidth: 0 }}>
+    <View
+      accessibilityLabel="Gallery workspace"
+      style={{
+        flex: 1,
+        minWidth: 0,
+        minHeight: 0,
+        overflow: 'hidden',
+        ...(narrow && Platform.OS === 'web' ? { height: Math.max(320, height - 56), maxHeight: height - 56 } : null),
+      }}
+    >
       {Platform.OS === 'web' ? <BannerPortal hostId="banner-actions">{skillsButton}</BannerPortal> : null}
       {narrow ? (
         <View style={[buttonRow, { padding: space[3], borderBottomWidth: 1, borderBottomColor: palette.border }]}>{workspaceBar}</View>
@@ -1129,13 +1254,15 @@ function keepImage(
   folderId: string,
   setSelected: (value: Source | null | ((current: Source | null) => Source | null)) => void,
 ) {
-  setSelected((current) => {
-    if (current?.type === 'image' && current.folderId === folderId && images.some((item) => item.path === current.path)) {
-      return current;
-    }
-    const first = images[0];
-    return first ? imageSource(first, folderId) : null;
-  });
+  setSelected((current) => keptSelection(current, images, folderId));
+}
+
+export function keptSelection(current: Source | null, images: ImageFile[], folderId: string): Source | null {
+  if (current?.type === 'image' && images.some((item) => item.path === current.path)) {
+    return current.folderId === folderId ? current : { ...current, folderId };
+  }
+  const first = images[0];
+  return first ? imageSource(first, folderId) : null;
 }
 
 function destinationsFor(source: Source, crumbs: Crumb[], rows: FolderRow[], listing: Listing | null): Dest[] {

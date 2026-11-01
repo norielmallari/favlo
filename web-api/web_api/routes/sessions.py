@@ -30,7 +30,7 @@ async def send(session_id: str, body: MessageCreate, request: Request):
     bus = request.app.state.bus
     for event in events:
         await bus.publish(event)
-    if events:
+    if result.get("run_id"):
         cancel = asyncio.Event()
         request.app.state.cancels[result["run_id"]] = cancel
         task = asyncio.create_task(
@@ -45,4 +45,8 @@ async def send(session_id: str, body: MessageCreate, request: Request):
         )
         request.app.state.tasks.add(task)
         task.add_done_callback(request.app.state.tasks.discard)
+    for run_id in result.get("cancelled_run_ids") or []:
+        pending = request.app.state.cancels.pop(run_id, None)
+        if pending is not None:
+            pending.set()
     return json_body(status, result)
