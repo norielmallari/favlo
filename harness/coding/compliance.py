@@ -39,7 +39,7 @@ _INSTRUCTION = "The reply is the single word apple."
 _REPLY = "Name one fruit."
 _LENGTH = "Write a sentence of at least twelve words about a horse."
 _STOP = "Repeat exactly: alpha STOPWORD omega"
-_REASONING = "What vegetable does a horse eat? Name one."
+_REASONING = "What vegetable does a horse eat?"
 _SECRET = "The secret word is apple. Reply with ok."
 _RECALL = "What is the secret word? Reply with that word only."
 _SEARCH = "Search the web for the Qwen3.6-35B-A3B model card and answer in one sentence."
@@ -456,7 +456,6 @@ async def run_reasoning(base_url: str, model: str) -> list[str]:
     agent = Agent(
         client=client,
         name="coding",
-        instructions="Reason in one sentence. Then answer in one sentence.",
         default_options=options,
     )
     session = agent.create_session()
