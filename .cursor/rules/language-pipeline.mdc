@@ -20,6 +20,12 @@ A new abstract method on `LanguagePipeline` updates every served language subcla
 
 The pipeline converts its own markup into those fields before the object is written. Markers stay out of `content`. A call becomes `tool_calls`. An open trace stays `reasoning_content` and does not become the reply. A call that starts before the trace closes ends the trace. The marker strings belong to that model. They are not taken from a sibling pipeline.
 
+Decode streaming always uses a separate thread and a queue. The decode loop enqueues the token id and returns. It does not decode text, format an event, or write the socket. The stream thread reads that queue, turns ids into text, and writes the events. The enqueue does not wait for that write, so a slow client does not stall the next GPU step. The decode thread joins the stream thread after generation returns. A dead client stops the decode loop on the next enqueue.
+
+Wrong: the decode loop writes the event before the next GPU step.
+
+Right: the decode loop puts the token id on a queue, and a stream thread writes the event.
+
 NumPy stays off the hot serving path. Prefill, decode, routing, expert grouping, and sampling do not import it, build an array with it, or read a device buffer back through it. The sampled token id may come back as bytes. Checkpoint packing, prefix packing, and the kernel self-checks are not that path.
 
 Wrong: a prefill span that downloads expert ids into a NumPy array and rebuilds the slot tables on the host.

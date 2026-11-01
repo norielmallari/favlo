@@ -7,13 +7,15 @@ hidden state after the feed-forward residual. The dense MLP uses
 experts use ``pre_feedforward_layernorm_2`` and
 ``post_feedforward_layernorm_2``. The router norm is the full router scale
 times ``1/sqrt(hidden)``. The embedding row is multiplied by ``sqrt(hidden)``.
-Decode reads packed q4_0 one token at a time, including the routed experts.
-Those stay the q4_0 layer file. A full budget keeps every layer resident. A short budget keeps as many as fit and reads a miss into the oldest slot. One threadgroup owns eight output rows.
+Decode reads packed q4_0 for the dense projections. Routed experts are
+fp4 or fp8, one image per expert. A full budget keeps every layer resident.
+A short budget keeps as many as fit and reads a miss into the oldest slot.
+One threadgroup owns eight output rows.
 Prefill attends a chunk of 1024 tokens in one kernel. A device kernel
 groups the routed rows into slots of 64. The matmul grid is an indirect
 dispatch, so the host does not read the expert ids. Every occupied slot
-is multiplied with ``matmul_fp4_64_batch``. The down projection pads K
-from 704 to 768. A chunk submits every ten layers. The prefill count
+is multiplied with ``matmul_fp4_64_at`` or ``matmul_fp8_64_at``.
+The down projection pads K from 704 to 768. A chunk submits every ten layers. The prefill count
 stays short of the prompt until the last of those buffers has finished.
 A dense batch of eight or fewer
 tokens uses that dot. A longer dense batch dequantizes one matrix to
@@ -27,7 +29,6 @@ embedding and the checkpoint soft-cap.
 
 from __future__ import annotations
 
-import array
 import ctypes
 import fcntl
 import os
@@ -56,6 +57,7 @@ from gemma4_26b_a4b.geometry import (
     GLOBAL_DIM,
     GLOBAL_HEADS,
     GLOBAL_LAYERS,
+    EXPERTS,
     HIDDEN,
     IMAGE_TOKEN,
     LAYERS,
@@ -73,7 +75,7 @@ from gemma4_26b_a4b.geometry import (
     local_layers,
 )
 from gemma4_26b_a4b.atlas import ExpertAtlas, kv_bytes, kv_margin, layer_slots
-from gemma4_26b_a4b.planes import Q40, align_k, matrix_nbytes
+from gemma4_26b_a4b.planes import FP4, FP8, Q40, align_k, expert_bytes, expert_planes
 from gemma4_26b_a4b.prefix import RuntimeAdapter
 from gemma4_26b_a4b.session import Session
 
@@ -82,8 +84,20 @@ _ROWS = 8
 
 _CHUNK = 1024
 _SLOT = 64
-_BATCH = 128
 _FP4_DOWN = align_k(EXPERT_WIDTH, "fp4")
+_FP4_PLANES = expert_planes(FP4)
+_FP8_PLANES = expert_planes(FP8)
+
+
+def _plane_off(width: int, kind: str) -> tuple[int, int]:
+    """Data and scale offsets inside one expert image."""
+    gate_data, gate_scale, down_data, _down_scale, _total = (
+        _FP8_PLANES if width == 8 else _FP4_PLANES
+    )
+    if kind == "gate":
+        return 0, gate_data
+    data = gate_data + gate_scale
+    return data, data + down_data
 _SLOTS = 256
 _MAX_K = 8192
 _MAX_N = VOCAB
@@ -251,14 +265,16 @@ class Gemma4Runtime:
         self.atlas = None
         self.prefix = None
         resident_bytes = (path / "resident.bin").stat().st_size
-        layer_bytes = (path / "experts" / "0.bin").stat().st_size
-        self._load_progress = self._begin_load(resident_bytes + LAYERS * layer_bytes)
+        self._layer_sizes = [
+            (path / "experts" / f"{layer}.bin").stat().st_size for layer in range(LAYERS)
+        ]
+        layer_bytes = max(self._layer_sizes)
+        self._load_progress = self._begin_load(resident_bytes + sum(self._layer_sizes))
         try:
             self._load(path)
             self._buffers()
             self._cache()
             self._open_atlas(path, resident_bytes, layer_bytes)
-            self._cache_experts()
             self.prefix = PrefixSession(
                 PrefixStore(
                     default_prefix_dir(),
@@ -320,6 +336,7 @@ class Gemma4Runtime:
             hit = self.prefix.align(prompt)
         if self.prefix.loaded:
             self._note("prefix_load", tokens=hit)
+        self._cached_tokens = hit
         self._note("cache", hit=hit)
         pending = self._visual_tokens(prompt, hit, pictures) if visual else len(prompt) - hit
         prefill_row = self._begin_phase("prefill", max(pending, 0))
@@ -539,9 +556,10 @@ class Gemma4Runtime:
 
     def _run_span(self, count: int, last: bool, *, noted: int) -> None:
         for index, layer in enumerate(self.layers):
-            self._block_span(layer, index, count, noted=noted)
+            self._block_span(layer, index, count)
             if (index + 1) % 10 == 0 and index + 1 != len(self.layers):
-                self.session.flush()
+                done = noted + (count * (index + 1)) // LAYERS
+                self.session.commit(lambda done=done: self._note_prefill_open(done))
         self._copy_at(self.span, (count - 1) * HIDDEN, self.hidden, HIDDEN)
         self.filled += count
         if last:
@@ -564,7 +582,7 @@ class Gemma4Runtime:
                 origins=[0, index * HIDDEN * 4],
             )
 
-    def _block_span(self, layer: Layer, index: int, count: int, *, noted: int) -> None:
+    def _block_span(self, layer: Layer, index: int, count: int) -> None:
         q_dim = GLOBAL_DIM if layer.global_attn else LOCAL_DIM
         kv_heads = GLOBAL_HEADS if layer.global_attn else LOCAL_HEADS
         q_width = Q_HEADS * q_dim
@@ -622,9 +640,9 @@ class Gemma4Runtime:
         self._gemm(self.span_a, layer.o, q_width, count, self.span_m)
         self._norm_rows(self.span_m, layer.post_attn, self.span_n, count)
         self._axpy(self.span, self.span_n, 1.0, count * HIDDEN)
-        self._feed_span(layer, index, count, noted=noted)
+        self._feed_span(layer, index, count)
 
-    def _feed_span(self, layer: Layer, index: int, count: int, *, noted: int) -> None:
+    def _feed_span(self, layer: Layer, index: int, count: int) -> None:
         self._route_span(layer, count)
         self._norm_rows(self.span, layer.pre, self.span_n, count)
         self._gemm(self.span_n, layer.gate, HIDDEN, count, self.span_w)
@@ -639,7 +657,7 @@ class Gemma4Runtime:
         self._norm_rows(self.span_f, layer.post1, self.span_r, count)
         self._norm_rows(self.span, layer.pre2, self.span_n, count)
         self._zero(self.span_m, count * HIDDEN * 4)
-        self._experts_span(index, count, noted=noted)
+        self._experts_span(index, count)
         self._norm_rows(self.span_m, layer.post2, self.span_f, count)
         self._zero(self.span_m, count * HIDDEN * 4)
         self._axpy(self.span_m, self.span_r, 1.0, count * HIDDEN)
@@ -687,18 +705,14 @@ class Gemma4Runtime:
             (128, 1, 1),
         )
 
-    def _experts_span(self, layer: int, count: int, *, noted: int) -> None:
+    def _experts_span(self, layer: int, count: int) -> None:
         """Group the route on device and multiply every occupied slot.
 
         ``which`` selects the expert id inside the full 128-expert pack.
         Each slot is padded to 64 tokens. Gate K is 2816. Down K is 768.
         The grid is indirect, so this span does not read the ids back.
         """
-        start = noted + (count * layer) // LAYERS
-        end = noted + (count * (layer + 1)) // LAYERS
-        self._note_prefill_open(start)
-        if layer >= len(self.fp4_gate_code):
-            self._repack_experts(layer)
+        packed = self.atlas.bind(self.session, layer)
         rows = _SLOTS * _SLOT
         self.session.encode(
             "group_expert_slots",
@@ -730,7 +744,7 @@ class Gemma4Runtime:
             0,
             threads,
         )
-        self._matmul_fp4_indirect(layer, 2 * EXPERT_WIDTH, HIDDEN, gate=True, record=1)
+        self._matmul_experts(packed, layer, 2 * EXPERT_WIDTH, HIDDEN, "gate", record=1)
         self.session.encode_indirect(
             "geglu_rows",
             [self.slot_out, self.slot_mid],
@@ -752,7 +766,7 @@ class Gemma4Runtime:
             48,
             threads,
         )
-        self._matmul_fp4_indirect(layer, HIDDEN, _FP4_DOWN, gate=False, record=4)
+        self._matmul_experts(packed, layer, HIDDEN, _FP4_DOWN, "down", record=4)
         self.session.encode_indirect(
             "scatter_slot_rows",
             [self.span_m, self.slot_out, self.slot_index, self.slot_scale],
@@ -761,70 +775,42 @@ class Gemma4Runtime:
             80,
             threads,
         )
-        self._note_prefill_open(end)
 
-    def _matmul_fp4_indirect(
-        self, layer: int, cols: int, inner: int, *, gate: bool, record: int
-    ) -> None:
-        width = int(self.session.pipes["matmul_fp4_64_batch"].threadExecutionWidth())
-        cached = layer < len(self.fp4_gate_code)
-        if gate:
-            codes = self.fp4_gate_code[layer] if cached else self.gate_code
-            scales = self.fp4_gate_scale[layer] if cached else self.gate_scale
-        else:
-            codes = self.fp4_down_code[layer] if cached else self.down_code
-            scales = self.fp4_down_scale[layer] if cached else self.down_scale
-        self.session.encode_indirect(
-            "matmul_fp4_64_batch",
-            [self.expert_ah, codes, scales, self.slot_out, self.slot_which],
-            [self.session._u32(_SLOT), self.session._u32(cols), self.session._u32(inner)],
-            self.slot_grid,
-            record * 16,
-            (width * 4, 1, 1),
-        )
-
-    def _repack_experts(self, layer: int) -> None:
-        packed = self.atlas.bind(self.session, layer)
-        gate_rows = 2 * EXPERT_WIDTH
-        self._repack(
-            packed, layer, self.gate_code, self.gate_scale, HIDDEN, HIDDEN, gate_rows, 0
-        )
-        self._repack(
-            packed,
-            layer,
-            self.down_code,
-            self.down_scale,
-            EXPERT_WIDTH,
-            _FP4_DOWN,
-            HIDDEN,
-            self._gate_bytes,
-        )
-
-    def _repack(
+    def _matmul_experts(
         self,
         packed: object,
         layer: int,
-        codes: object,
-        scales: object,
-        k_q4: int,
-        k_fp4: int,
-        rows: int,
-        extra: int,
+        cols: int,
+        inner: int,
+        kind: str,
+        *,
+        record: int,
     ) -> None:
-        blocks = rows * (align_k(k_q4, Q40) // 32)
-        self.session.encode(
-            "repack_q4_fp4",
-            [packed, self.expert_offsets, codes, scales],
-            [
-                self.session._u32(align_k(k_q4, Q40)),
-                self.session._u32(k_fp4),
-                self.session._u32(rows),
-                self.session._u32(extra),
-            ],
-            ((blocks + 255) // 256, 128, 1),
-            (256, 1, 1),
-            origins=[0, layer * 128 * 8, 0, 0],
-        )
+        for width, name in ((4, "matmul_fp4_64_at"), (8, "matmul_fp8_64_at")):
+            data_off, scale_off = _plane_off(width, kind)
+            threads = int(self.session.pipes[name].threadExecutionWidth()) * 4
+            self.session.encode_indirect(
+                name,
+                [
+                    self.expert_ah,
+                    packed,
+                    self.slot_out,
+                    self.slot_which,
+                    self.expert_offsets,
+                    self.expert_widths,
+                ],
+                [
+                    self.session._u32(_SLOT),
+                    self.session._u32(cols),
+                    self.session._u32(inner),
+                    self.session._u32(data_off),
+                    self.session._u32(scale_off),
+                ],
+                self.slot_grid,
+                record * 16,
+                (threads, 1, 1),
+                origins=[0, 0, 0, 0, layer * EXPERTS * 8, layer * EXPERTS],
+            )
 
     def _gather(self, at: int, count: int) -> None:
         self.session.encode(
@@ -1105,21 +1091,21 @@ class Gemma4Runtime:
 
     def _experts_device(self, layer: int) -> None:
         gate_rows = 2 * EXPERT_WIDTH
-        self._q4_gemv(layer, self.norm, self.expert_up, gate_rows, HIDDEN, HIDDEN, 0, 0)
+        self._expert_gemv(layer, self.norm, self.expert_up, gate_rows, HIDDEN, HIDDEN, "gate", 0)
         self.session.encode(
             "geglu_rows",
             [self.expert_up, self.expert_hid],
             [self.session._u32(EXPERT_WIDTH), self.session._u32(TOP_K)],
             *self._grid(TOP_K * EXPERT_WIDTH),
         )
-        self._q4_gemv(
+        self._expert_gemv(
             layer,
             self.expert_hid,
             self.expert_down,
             HIDDEN,
+            _FP4_DOWN,
             EXPERT_WIDTH,
-            EXPERT_WIDTH,
-            self._gate_bytes,
+            "down",
             EXPERT_WIDTH,
         )
         self.session.encode(
@@ -1129,7 +1115,7 @@ class Gemma4Runtime:
             *self._grid(HIDDEN),
         )
 
-    def _q4_gemv(
+    def _expert_gemv(
         self,
         layer: int,
         activation: object,
@@ -1137,31 +1123,35 @@ class Gemma4Runtime:
         rows: int,
         k_pad: int,
         active: int,
-        extra: int,
+        kind: str,
         act_stride: int,
     ) -> None:
         groups = (rows + 7) // 8
-        self.session.encode(
-            "gemv_q4_0_routed",
-            [
-                self.atlas.bind(self.session, layer),
-                activation,
-                destination,
-                self.expert_offsets,
-                self.expert_index,
-            ],
-            [
-                self.session._u32(k_pad),
-                self.session._u32(rows),
-                self.session._u32(active),
-                self.session._u32(groups),
-                self.session._u32(extra),
-                self.session._u32(act_stride),
-            ],
-            (groups * TOP_K, 1, 1),
-            (64, 1, 1),
-            origins=[0, 0, 0, layer * 128 * 8, 0],
-        )
+        packed = self.atlas.bind(self.session, layer)
+        for width, name in ((4, "gemv_fp4_at"), (8, "gemv_fp8_at")):
+            data_off, scale_off = _plane_off(width, kind)
+            self.session.encode(
+                name,
+                [
+                    packed,
+                    activation,
+                    destination,
+                    self.expert_index,
+                    self.expert_offsets,
+                    self.expert_widths,
+                ],
+                [
+                    self.session._u32(k_pad),
+                    self.session._u32(rows),
+                    self.session._u32(active),
+                    self.session._u32(act_stride),
+                    self.session._u32(data_off),
+                    self.session._u32(scale_off),
+                ],
+                (groups * TOP_K, 1, 1),
+                (64, 1, 1),
+                origins=[0, 0, 0, 0, layer * EXPERTS * 8, layer * EXPERTS],
+            )
 
     def _grid(self, count: int) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
         return ((count + 255) // 256, 1, 1), (256, 1, 1)
@@ -1294,50 +1284,12 @@ class Gemma4Runtime:
             raise RuntimeError(message)
         progress = self._load_progress
         if progress is not None:
-            progress.total = resident_bytes + slots * layer_bytes
+            progress.total = resident_bytes + sum(self._layer_sizes[:slots])
         self.atlas = ExpertAtlas(self._owner, path, layer_bytes, slots, _read_span)
+        self.atlas.sizes = self._layer_sizes
         summary = self.atlas.load(self._note_load)
         self._finish_load(summary)
         self._note("context", tokens=self.capacity, atlas=self.atlas.slots)
-
-    def _cache_experts(self) -> None:
-        """Repack every layer that still fits after the atlas and the cache."""
-        gate_code_n = 128 * (2 * EXPERT_WIDTH) * (HIDDEN // 2)
-        gate_scale_n = 128 * (2 * EXPERT_WIDTH) * (HIDDEN // 32)
-        down_code_n = 128 * HIDDEN * (_FP4_DOWN // 2)
-        down_scale_n = 128 * HIDDEN * (_FP4_DOWN // 32)
-        per = gate_code_n + gate_scale_n + down_code_n + down_scale_n
-        owner = memory.owner_bytes().get(self._owner, 0)
-        reserve = kv_bytes(8192) + self.atlas.layer_bytes + kv_margin(8192)
-        room = self._budget - owner - reserve
-        count = 0 if per <= 0 or room < per else min(LAYERS, room // per)
-        self.fp4_gate_code = []
-        self.fp4_gate_scale = []
-        self.fp4_down_code = []
-        self.fp4_down_scale = []
-        for layer in range(count):
-            gate_code = self.session.zeros(gate_code_n)
-            gate_scale = self.session.zeros(gate_scale_n)
-            down_code = self.session.zeros(down_code_n)
-            down_scale = self.session.zeros(down_scale_n)
-            packed = self.atlas.bind(self.session, layer)
-            gate_rows = 2 * EXPERT_WIDTH
-            self._repack(packed, layer, gate_code, gate_scale, HIDDEN, HIDDEN, gate_rows, 0)
-            self._repack(
-                packed,
-                layer,
-                down_code,
-                down_scale,
-                EXPERT_WIDTH,
-                _FP4_DOWN,
-                HIDDEN,
-                self._gate_bytes,
-            )
-            self.fp4_gate_code.append(gate_code)
-            self.fp4_gate_scale.append(gate_scale)
-            self.fp4_down_code.append(down_code)
-            self.fp4_down_scale.append(down_scale)
-        self.session.flush()
 
     def _store_prefix(self) -> None:
         try:
@@ -1464,10 +1416,6 @@ class Gemma4Runtime:
         self.half_w = session.zeros(8192 * HIDDEN * 2)
         self.expert_ah = session.zeros(_SLOTS * _SLOT * HIDDEN * 2)
         self.slot_grid = session.zeros(6 * 16)
-        self.gate_code = session.zeros(_BATCH * (2 * EXPERT_WIDTH) * (HIDDEN // 2))
-        self.gate_scale = session.zeros(_BATCH * (2 * EXPERT_WIDTH) * (HIDDEN // 32))
-        self.down_code = session.zeros(_BATCH * HIDDEN * (_FP4_DOWN // 2))
-        self.down_scale = session.zeros(_BATCH * HIDDEN * (_FP4_DOWN // 32))
         self.gather_i = session.zeros(_CHUNK * TOP_K * 4)
         self.gather_s = session.zeros(_CHUNK * TOP_K * 4)
         self.slot_out = session.zeros(_SLOTS * _SLOT * HIDDEN * 4)
@@ -1582,22 +1530,28 @@ class Gemma4Runtime:
                 global_attn=layer in GLOBAL_LAYERS,
             )
             self.layers.append(item)
-        offsets = array.array("Q")
-        offsets.frombytes((path / "experts" / "offsets.bin").read_bytes())
-        if len(offsets) != LAYERS * 128:
-            message = "expert offset table does not match this geometry"
+        widths_path = path / "experts" / "widths.bin"
+        raw = np.fromfile(widths_path, dtype=np.uint8)
+        if raw.size != LAYERS * EXPERTS:
+            message = "expert widths are missing"
             raise RuntimeError(message)
-        gate_bytes = matrix_nbytes(2 * EXPERT_WIDTH, HIDDEN, Q40)
-        stride = gate_bytes + matrix_nbytes(HIDDEN, EXPERT_WIDTH, Q40)
-        self._gate_bytes = gate_bytes
-        self.offsets = offsets
-        self.expert_offsets = self.session.upload(offsets.tobytes())
-        down = array.array("Q", (item + gate_bytes for item in offsets))
-        self.expert_down_offsets = self.session.upload(down.tobytes())
-        sample = path / "experts" / "0.bin"
-        if sample.stat().st_size != 128 * stride:
-            message = "expert layer is not the q4_0 layout"
-            raise RuntimeError(message)
+        widths = raw.reshape(LAYERS, EXPERTS)
+        offsets = np.zeros((LAYERS, EXPERTS), dtype=np.uint64)
+        sizes: list[int] = []
+        for layer in range(LAYERS):
+            cursor = 0
+            for expert in range(EXPERTS):
+                width = int(widths[layer, expert])
+                offsets[layer, expert] = cursor
+                cursor += expert_bytes(width)
+            file_size = (path / "experts" / f"{layer}.bin").stat().st_size
+            if file_size != cursor:
+                message = "expert layer is not the fp8-e20 layout"
+                raise RuntimeError(message)
+            sizes.append(cursor)
+        self._layer_sizes = sizes
+        self.expert_widths = self.session.upload(np.ascontiguousarray(widths))
+        self.expert_offsets = self.session.upload(np.ascontiguousarray(offsets))
 
     def _scale_vector(self, handle: object, factor: float) -> None:
         raw = bytearray(memory.load(handle, 0, HIDDEN * 4))

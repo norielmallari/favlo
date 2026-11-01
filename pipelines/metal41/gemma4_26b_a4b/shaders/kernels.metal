@@ -229,6 +229,81 @@ kernel void matmul_fp4_64_batch(
     op.run(left_tile, right_tile, out_tile);
 }
 
+// One expert image. A threadgroup returns before matmul2d when the width differs.
+kernel void matmul_fp4_64_at(
+    device half* activation [[buffer(0)]],
+    device uchar* file [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    device const uint* which [[buffer(3)]],
+    device const ulong* offsets [[buffer(4)]],
+    device const uchar* widths [[buffer(5)]],
+    constant uint& rows [[buffer(6)]],
+    constant uint& cols [[buffer(7)]],
+    constant uint& inner [[buffer(8)]],
+    constant uint& data_off [[buffer(9)]],
+    constant uint& scale_off [[buffer(10)]],
+    uint3 tgid [[threadgroup_position_in_grid]])
+{
+    uint expert = which[tgid.z];
+    if (widths[expert] != 4u) {
+        return;
+    }
+    device uchar* image = file + offsets[expert];
+    device half* act = activation + (ulong)tgid.z * rows * inner;
+    device float* dest = destination + (ulong)tgid.z * rows * cols;
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        act, dextents<int, 2>(int(inner), int(rows)), array<int, 2>{1, int(inner)});
+    tensor<device metal_fp4_e2m1_format, dextents<int, 2>, tensor_inline, scales_plane> right(
+        image + data_off, dextents<int, 2>(int(inner), int(cols)), array<int, 2>{1, int(inner)},
+        scales_plane(image + scale_off));
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        dest, dextents<int, 2>(int(cols), int(rows)), array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(
+        64, 64, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto left_tile = left.slice(0, int(tgid.y) * 64);
+    auto right_tile = right.slice(0, int(tgid.x) * 64);
+    auto out_tile = out.slice(int(tgid.x) * 64, int(tgid.y) * 64);
+    op.run(left_tile, right_tile, out_tile);
+}
+
+kernel void matmul_fp8_64_at(
+    device half* activation [[buffer(0)]],
+    device uchar* file [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    device const uint* which [[buffer(3)]],
+    device const ulong* offsets [[buffer(4)]],
+    device const uchar* widths [[buffer(5)]],
+    constant uint& rows [[buffer(6)]],
+    constant uint& cols [[buffer(7)]],
+    constant uint& inner [[buffer(8)]],
+    constant uint& data_off [[buffer(9)]],
+    constant uint& scale_off [[buffer(10)]],
+    uint3 tgid [[threadgroup_position_in_grid]])
+{
+    uint expert = which[tgid.z];
+    if (widths[expert] != 8u) {
+        return;
+    }
+    device uchar* image = file + offsets[expert];
+    device half* act = activation + (ulong)tgid.z * rows * inner;
+    device float* dest = destination + (ulong)tgid.z * rows * cols;
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        act, dextents<int, 2>(int(inner), int(rows)), array<int, 2>{1, int(inner)});
+    tensor<device metal_fp8_e4m3_format, dextents<int, 2>, tensor_inline, scales_plane> right(
+        image + data_off, dextents<int, 2>(int(inner), int(cols)), array<int, 2>{1, int(inner)},
+        scales_plane(image + scale_off));
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        dest, dextents<int, 2>(int(cols), int(rows)), array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(
+        64, 64, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto left_tile = left.slice(0, int(tgid.y) * 64);
+    auto right_tile = right.slice(0, int(tgid.x) * 64);
+    auto out_tile = out.slice(int(tgid.x) * 64, int(tgid.y) * 64);
+    op.run(left_tile, right_tile, out_tile);
+}
+
 // 8×32 fp4 product, one expert per grid z. Token counts stay a multiple of 8.
 kernel void matmul_fp4_batch(
     device half* activation [[buffer(0)]],
@@ -1896,6 +1971,19 @@ static float _fp4_pair(uchar packed, float even, float odd) {
     return left * even + right * odd;
 }
 
+static float _fp8_dot16(device const uchar* bytes, thread float act[16], float scale) {
+    float sum = 0.0f;
+    for (uint i = 0u; i < 16u; ++i) {
+        uchar code = bytes[i];
+        float mag = e4m3_mag(code);
+        if (code & 0x80u) {
+            mag = -mag;
+        }
+        sum += mag * act[i];
+    }
+    return sum * scale;
+}
+
 static float _fp4_dot16(device const uchar* bytes, thread float act[16], float scale) {
     uint2 word = *((device const uint2*)bytes);
     uchar packed[8] = {
@@ -2005,6 +2093,230 @@ kernel void gemv_fp4_routed(
         for (uint row = 0u; row < live; ++row) {
             float scale = as_type<float>(uint(scale_row[row][block]) << 23);
             acc[row] += _fp4_dot16(code_row[row] + block * 16u + part * 8u, sample, scale);
+        }
+    }
+    float out0 = simd_sum(acc[0]);
+    float out1 = simd_sum(acc[1]);
+    float out2 = simd_sum(acc[2]);
+    float out3 = simd_sum(acc[3]);
+    if (lane == 0u) {
+        uint dest = which * rows + row0;
+        destination[dest] = out0;
+        if (live > 1u) {
+            destination[dest + 1u] = out1;
+        }
+        if (live > 2u) {
+            destination[dest + 2u] = out2;
+        }
+        if (live > 3u) {
+            destination[dest + 3u] = out3;
+        }
+    }
+}
+
+// One expert image. Width 4 is fp4. A mismatched expert writes nothing.
+kernel void gemv_fp4_at(
+    device const uchar* file [[buffer(0)]],
+    device const float* activation [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    device const uint* expert_ids [[buffer(3)]],
+    device const ulong* offsets [[buffer(4)]],
+    device const uchar* widths [[buffer(5)]],
+    constant uint& k_pad [[buffer(6)]],
+    constant uint& rows [[buffer(7)]],
+    constant uint& active [[buffer(8)]],
+    constant uint& act_stride [[buffer(9)]],
+    constant uint& data_off [[buffer(10)]],
+    constant uint& scale_off [[buffer(11)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint span [[threads_per_threadgroup]],
+    uint group [[threadgroup_position_in_grid]])
+{
+    uint rows_per = (span >> 5) * 4u;
+    uint groups_per = (rows + rows_per - 1u) / rows_per;
+    uint which = group / groups_per;
+    uint expert = expert_ids[which];
+    if (widths[expert] != 4u) {
+        return;
+    }
+    uint local = group - which * groups_per;
+    uint row0 = (local * (span >> 5) + simd) * 4u;
+    if (row0 >= rows) {
+        return;
+    }
+    uint live = min(4u, rows - row0);
+    uint blocks = k_pad >> 5;
+    ulong code_stride = (ulong)(k_pad >> 1);
+    ulong scale_stride = (ulong)blocks;
+    device const uchar* image = file + offsets[expert];
+    device const uchar* code_base = image + data_off;
+    device const uchar* scale_base = image + scale_off;
+    device const float* act = activation;
+    if (act_stride > 0u) {
+        act = activation + (ulong)which * act_stride;
+    }
+    uint step = lane >> 1;
+    uint part = lane & 1u;
+    device const uchar* code_row[4];
+    device const uchar* scale_row[4];
+    for (uint row = 0u; row < 4u; ++row) {
+        uint at = row0 + row;
+        if (at >= rows) {
+            at = row0;
+        }
+        code_row[row] = code_base + (ulong)at * code_stride;
+        scale_row[row] = scale_base + (ulong)at * scale_stride;
+    }
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint block = step; block < blocks; block += 16u) {
+        uint k = (block << 5) + part * 16u;
+        if (k >= active) {
+            continue;
+        }
+        float sample[16];
+        if (k + 16u <= active) {
+            float4 a0 = *((device const float4*)(act + k));
+            float4 a1 = *((device const float4*)(act + k + 4u));
+            float4 a2 = *((device const float4*)(act + k + 8u));
+            float4 a3 = *((device const float4*)(act + k + 12u));
+            sample[0] = a0.x;
+            sample[1] = a0.y;
+            sample[2] = a0.z;
+            sample[3] = a0.w;
+            sample[4] = a1.x;
+            sample[5] = a1.y;
+            sample[6] = a1.z;
+            sample[7] = a1.w;
+            sample[8] = a2.x;
+            sample[9] = a2.y;
+            sample[10] = a2.z;
+            sample[11] = a2.w;
+            sample[12] = a3.x;
+            sample[13] = a3.y;
+            sample[14] = a3.z;
+            sample[15] = a3.w;
+        } else {
+            uint remain = active - k;
+            for (uint i = 0u; i < 16u; ++i) {
+                sample[i] = i < remain ? act[k + i] : 0.0f;
+            }
+        }
+        for (uint row = 0u; row < live; ++row) {
+            float scale = as_type<float>(uint(scale_row[row][block]) << 23);
+            acc[row] += _fp4_dot16(code_row[row] + block * 16u + part * 8u, sample, scale);
+        }
+    }
+    float out0 = simd_sum(acc[0]);
+    float out1 = simd_sum(acc[1]);
+    float out2 = simd_sum(acc[2]);
+    float out3 = simd_sum(acc[3]);
+    if (lane == 0u) {
+        uint dest = which * rows + row0;
+        destination[dest] = out0;
+        if (live > 1u) {
+            destination[dest + 1u] = out1;
+        }
+        if (live > 2u) {
+            destination[dest + 2u] = out2;
+        }
+        if (live > 3u) {
+            destination[dest + 3u] = out3;
+        }
+    }
+}
+
+// Width 8 is fp8 E4M3. The scale plane is the same E8M0 byte per 32 values.
+kernel void gemv_fp8_at(
+    device const uchar* file [[buffer(0)]],
+    device const float* activation [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    device const uint* expert_ids [[buffer(3)]],
+    device const ulong* offsets [[buffer(4)]],
+    device const uchar* widths [[buffer(5)]],
+    constant uint& k_pad [[buffer(6)]],
+    constant uint& rows [[buffer(7)]],
+    constant uint& active [[buffer(8)]],
+    constant uint& act_stride [[buffer(9)]],
+    constant uint& data_off [[buffer(10)]],
+    constant uint& scale_off [[buffer(11)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint span [[threads_per_threadgroup]],
+    uint group [[threadgroup_position_in_grid]])
+{
+    uint rows_per = (span >> 5) * 4u;
+    uint groups_per = (rows + rows_per - 1u) / rows_per;
+    uint which = group / groups_per;
+    uint expert = expert_ids[which];
+    if (widths[expert] != 8u) {
+        return;
+    }
+    uint local = group - which * groups_per;
+    uint row0 = (local * (span >> 5) + simd) * 4u;
+    if (row0 >= rows) {
+        return;
+    }
+    uint live = min(4u, rows - row0);
+    uint blocks = k_pad >> 5;
+    ulong code_stride = (ulong)k_pad;
+    ulong scale_stride = (ulong)blocks;
+    device const uchar* image = file + offsets[expert];
+    device const uchar* code_base = image + data_off;
+    device const uchar* scale_base = image + scale_off;
+    device const float* act = activation;
+    if (act_stride > 0u) {
+        act = activation + (ulong)which * act_stride;
+    }
+    uint step = lane >> 1;
+    uint part = lane & 1u;
+    device const uchar* code_row[4];
+    device const uchar* scale_row[4];
+    for (uint row = 0u; row < 4u; ++row) {
+        uint at = row0 + row;
+        if (at >= rows) {
+            at = row0;
+        }
+        code_row[row] = code_base + (ulong)at * code_stride;
+        scale_row[row] = scale_base + (ulong)at * scale_stride;
+    }
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint block = step; block < blocks; block += 16u) {
+        uint k = (block << 5) + part * 16u;
+        if (k >= active) {
+            continue;
+        }
+        float sample[16];
+        if (k + 16u <= active) {
+            float4 a0 = *((device const float4*)(act + k));
+            float4 a1 = *((device const float4*)(act + k + 4u));
+            float4 a2 = *((device const float4*)(act + k + 8u));
+            float4 a3 = *((device const float4*)(act + k + 12u));
+            sample[0] = a0.x;
+            sample[1] = a0.y;
+            sample[2] = a0.z;
+            sample[3] = a0.w;
+            sample[4] = a1.x;
+            sample[5] = a1.y;
+            sample[6] = a1.z;
+            sample[7] = a1.w;
+            sample[8] = a2.x;
+            sample[9] = a2.y;
+            sample[10] = a2.z;
+            sample[11] = a2.w;
+            sample[12] = a3.x;
+            sample[13] = a3.y;
+            sample[14] = a3.z;
+            sample[15] = a3.w;
+        } else {
+            uint remain = active - k;
+            for (uint i = 0u; i < 16u; ++i) {
+                sample[i] = i < remain ? act[k + i] : 0.0f;
+            }
+        }
+        for (uint row = 0u; row < live; ++row) {
+            float scale = as_type<float>(uint(scale_row[row][block]) << 23);
+            acc[row] += _fp8_dot16(code_row[row] + (ulong)block * 32u + (ulong)part * 16u, sample, scale);
         }
     }
     float out0 = simd_sum(acc[0]);

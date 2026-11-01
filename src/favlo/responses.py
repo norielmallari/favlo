@@ -651,7 +651,7 @@ def _message_item(item: dict[str, Any]) -> dict[str, Any]:
         for part in content:
             if not isinstance(part, dict):
                 continue
-            if part.get("type") == "input_text":
+            if part.get("type") in ("input_text", "output_text"):
                 parts.append({"type": "text", "text": part.get("text") or ""})
             elif part.get("type") == "input_image":
                 url = part.get("image_url") or part.get("url")

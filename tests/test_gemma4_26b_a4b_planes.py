@@ -13,6 +13,8 @@ from gemma4_26b_a4b.checkpoint import load_tensor, tensor_names
 from gemma4_26b_a4b.geometry import GLOBAL_LAYERS, expected, local_layers
 from gemma4_26b_a4b.planes import (
     align_k,
+    expert_bytes,
+    expert_planes,
     pack_matrix,
     relative_rms,
     restore_matrix,
@@ -46,6 +48,21 @@ def test_fp4_midpoint_keeps_the_even_magnitude() -> None:
     weight[0, 0] = 3.5
     restored = restore_matrix(pack_matrix(weight, "fp4"), 1, 32, "fp4")
     assert restored[0, 0] == 4.0
+
+
+def test_fp4_scale_search_beats_the_peak_scale() -> None:
+    weight = np.full((1, 32), 0.35, dtype=np.float32)
+    weight[0, 0] = 6.2
+    packed = pack_matrix(weight, "fp4")
+    restored = restore_matrix(packed, 1, 32, "fp4")
+    peak = float(np.max(np.abs(weight)))
+    coarse = 2.0 ** np.ceil(np.log2(max(peak / 6.0, np.finfo(np.float64).tiny)))
+    unit = weight / coarse
+    edges = np.array([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
+    index = np.clip(np.digitize(np.abs(unit), edges, right=True), 0, 7)
+    magnitude = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])[index]
+    peak_restore = np.sign(weight) * magnitude * coarse
+    assert relative_rms(weight, restored) <= relative_rms(weight, peak_restore)
 
 
 def test_fp4_low_nibble_is_element_zero() -> None:
@@ -97,6 +114,15 @@ def test_k_pad_and_tight_scale_row() -> None:
     assert align_k(4304, "q4_0") == 4320
     assert scale_stride(2816) == 2816 // 32
     assert scale_stride(1024) == 1024 // 32
+
+
+def test_expert_images_start_on_a_128_byte_boundary() -> None:
+    for plane in ("fp4", "fp8"):
+        parts = expert_planes(plane)
+        assert all(part % 128 == 0 for part in parts)
+    assert expert_bytes(4) == expert_planes("fp4")[-1]
+    assert expert_bytes(8) == expert_planes("fp8")[-1]
+    assert expert_bytes(8) > expert_bytes(4)
 
 
 def test_promotion_count_and_tie_break() -> None:

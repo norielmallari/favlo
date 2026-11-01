@@ -99,6 +99,6 @@ A job record under `.favlo/jobs/` is not a live process. When the session opens,
 
 ## Coding session
 
-The session seeds `notes/brief.txt` when that file is absent. The prompt then asks for the six tools in order: find the note, search it, read it, create `ledger.py` with the difference reversed, edit that return to `after - before`, and run `python3 -c` to print `collect(15, 21)`. The shell step polls `status` until the job succeeds. The loop allows 16 rounds.
+The session seeds `notes/brief.txt` when that file is absent. The prompt asks for one step at a time: find the text files under notes, search that note for collect, read it, create `ledger.py` with the difference reversed, replace that return with `after - before`, and run `python3 -c` until the output contains 6. It does not name a tool. The loop allows 16 rounds.
 
 Exit 0 means the hidden suite passed, each tool returned successfully at least once, and the chat contract held. The suite is `harness/coding/checks/test_ledger.py`. It is not copied into the workspace. The contract and `--vision` are [harness.md](harness.md).

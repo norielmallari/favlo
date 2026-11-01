@@ -68,6 +68,8 @@ class ExpertAtlas:
         self._reader = reader
         self._files: dict[int, object] = {}
         self._order: list[int] = []
+        self._alloc: dict[object, int] = {}
+        self.sizes: list[int] | None = None
 
     @property
     def slots(self) -> int:
@@ -75,19 +77,18 @@ class ExpertAtlas:
 
     @property
     def nbytes(self) -> int:
-        return self.slots * self.layer_bytes
+        return sum(self._alloc[handle] for handle in self._files.values())
 
     def load(self, note: Callable[[int], None]) -> str:
         """Read the resident layers. ``note`` receives each layer's byte count."""
         started = time.perf_counter()
         total = 0
         for layer in range(self.limit):
-            handle = memory.allocate(self.layer_bytes, owner=self.owner)
-            self._read(handle, layer)
+            handle, size = self._open_layer(layer)
             self._files[layer] = handle
             self._order.append(layer)
-            total += self.layer_bytes
-            note(self.layer_bytes)
+            total += size
+            note(size)
         elapsed = time.perf_counter() - started
         rate = 0.0 if elapsed <= 0.0 else total / elapsed / 1e9
         return f"experts {total / 1e9:.2f} GB in {elapsed:.2f}s ({rate:.2f} GB/s)"
@@ -99,14 +100,19 @@ class ExpertAtlas:
             self._touch(layer)
             return found
         if len(self._files) < self.limit:
-            handle = memory.allocate(self.layer_bytes, owner=self.owner)
-            self._read(handle, layer)
+            handle, _size = self._open_layer(layer)
             self._files[layer] = handle
             self._order.append(layer)
             return handle
         session.flush()
         old = self._order.pop(0)
         handle = self._files.pop(old)
+        size = self._file_size(layer)
+        if self._alloc.get(handle) != size:
+            memory.release(handle)
+            self._alloc.pop(handle, None)
+            handle = memory.allocate(size, owner=self.owner)
+            self._alloc[handle] = size
         self._read(handle, layer)
         self._files[layer] = handle
         self._order.append(layer)
@@ -118,6 +124,8 @@ class ExpertAtlas:
         if limit < 1:
             message = "the expert atlas does not fit the memory budget"
             raise RuntimeError(message)
+        if self.sizes and room >= max(self.sizes) and room >= sum(self.sizes):
+            limit = min(LAYERS, len(self.sizes))
         if self.complete and limit >= LAYERS:
             return
         if limit >= len(self._order):
@@ -126,16 +134,29 @@ class ExpertAtlas:
         session.flush()
         while len(self._order) > limit:
             layer = self._order.pop(0)
-            memory.release(self._files.pop(layer))
+            handle = self._files.pop(layer)
+            self._alloc.pop(handle, None)
+            memory.release(handle)
         self.limit = limit
         self.complete = False
 
-    def _read(self, handle: object, layer: int) -> None:
+    def _file_size(self, layer: int) -> int:
         path = self.root / "experts" / f"{layer}.bin"
         size = path.stat().st_size
-        if size != self.layer_bytes:
-            message = "expert layer is not the q4_0 layout"
+        if size <= 0 or size > self.layer_bytes:
+            message = "expert layer is larger than the atlas slot"
             raise RuntimeError(message)
+        return size
+
+    def _open_layer(self, layer: int) -> tuple[object, int]:
+        size = self._file_size(layer)
+        handle = memory.allocate(size, owner=self.owner)
+        self._alloc[handle] = size
+        self._read(handle, layer)
+        return handle, size
+
+    def _read(self, handle: object, layer: int) -> None:
+        path = self.root / "experts" / f"{layer}.bin"
         self._reader(handle, path)
 
     def _touch(self, layer: int) -> None:

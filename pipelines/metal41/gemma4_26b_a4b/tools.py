@@ -218,6 +218,12 @@ class StreamText:
             self._call = ""
             self._in_call = False
             return [("content", text)] if text else []
+        if self._reasoning:
+            while True:
+                nested = _nested_thought(self._held)
+                if nested is None:
+                    break
+                self._held = nested
         if not self._held:
             return []
         channel = "reasoning" if self._reasoning else "content"
@@ -238,6 +244,11 @@ class StreamText:
         return self.push(rest)
 
     def _push_reasoning(self) -> list[tuple[str, str]]:
+        while True:
+            nested = _nested_thought(self._held)
+            if nested is None:
+                break
+            self._held = nested
         close_at = self._held.find(_THOUGHT_CLOSE)
         tool_at = self._held.find(_OPEN)
         if tool_at >= 0 and (close_at < 0 or tool_at < close_at):
@@ -251,7 +262,12 @@ class StreamText:
             out.extend(self._close_call())
             return out
         if close_at < 0:
-            return self._emit_held("reasoning", _THOUGHT_CLOSE, _OPEN)
+            # A suffix of `<|channel>thought` may still be a repeated open.
+            # The text before that suffix is dropped if the open completes,
+            # so it stays held. Any other tail streams.
+            if _held_suffix(self._held, _THOUGHT):
+                return []
+            return self._emit_held("reasoning", _THOUGHT_CLOSE, _OPEN, _THOUGHT)
         reasoning = self._held[:close_at]
         rest = self._held[close_at + len(_THOUGHT_CLOSE) :]
         self._held = ""
@@ -294,6 +310,57 @@ class StreamText:
             emit = self._held[:-keep]
             self._held = self._held[-keep:]
         return [(channel, emit)] if emit else []
+
+
+def _nested_thought(text: str) -> str | None:
+    """Body after a repeated ``<|channel>thought`` that appears before a close or a call."""
+    tool_at = text.find(_OPEN)
+    close_at = text.find(_THOUGHT_CLOSE)
+    open_at = text.find(_THOUGHT)
+    if open_at < 0:
+        return None
+    if close_at >= 0 and close_at < open_at:
+        return None
+    if tool_at >= 0 and tool_at < open_at:
+        return None
+    rest = text[open_at + len(_THOUGHT) :]
+    if rest.startswith("\n"):
+        rest = rest[1:]
+    if rest == text:
+        return None
+    return rest
+
+
+def required_function(tool_choice: Any) -> str | None:
+    """The function named by a Responses ``tool_choice`` object."""
+    if not isinstance(tool_choice, dict) or tool_choice.get("type") != "function":
+        return None
+    function = tool_choice.get("function")
+    if isinstance(function, dict):
+        name = function.get("name")
+        if isinstance(name, str) and name:
+            return name
+    name = tool_choice.get("name")
+    if isinstance(name, str) and name:
+        return name
+    return None
+
+
+def function_needs_arguments(tools: list[dict[str, Any]], name: str) -> bool:
+    """True when the named function declares parameters the model must write."""
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+        if not isinstance(function, dict) or function.get("name") != name:
+            continue
+        parameters = function.get("parameters")
+        if not isinstance(parameters, dict):
+            return False
+        properties = parameters.get("properties")
+        required = parameters.get("required")
+        return bool(properties) or bool(required)
+    return True
 
 
 def _skip(text: str, index: int) -> int:

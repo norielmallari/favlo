@@ -101,10 +101,27 @@ def _joined(parts: list[tuple[str, str]], channel: str) -> str:
 
 def test_open_channel_streams_reasoning_before_the_reply() -> None:
     gate = StreamText(channel_open=True)
-    assert _joined(gate.push("look"), "reasoning") == "look"
+    assert gate.push("look") == [("reasoning", "look")]
+    assert gate.push(" here") == [("reasoning", " here")]
     assert _joined(gate.push("\n<channel|>\n"), "reasoning") == ""
     assert _joined(gate.push("done"), "content") == "done"
     assert gate.finish() == []
+
+
+def test_a_repeated_open_is_not_the_trace() -> None:
+    text = (
+        "t)<|channel>thought\nFix the return.\n<channel|>"
+        "<|tool_call>call:edit{}<tool_call|>"
+    )
+    reasoning, answer = reply_text(text, channel_open=True)
+    assert reasoning == "Fix the return."
+    assert "<|channel>" not in reasoning
+    assert answer.startswith("<|tool_call>call:edit")
+    gate = StreamText(channel_open=True)
+    parts = gate.push("t)<|chan")
+    parts.extend(gate.push("nel>thought\nFix the return.\n<channel|>"))
+    assert _joined(parts, "reasoning") == "Fix the return."
+    assert "<|channel>" not in _joined(parts, "reasoning")
 
 
 def test_a_later_thought_streams_after_the_call() -> None:

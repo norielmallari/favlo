@@ -1,7 +1,8 @@
 """Sampling card for Gemma 4 26B-A4B.
 
-Both rows use the generation config on the model card. The template difference
-is ``enable_thinking``. The card has no reasoning-effort ladder.
+Both rows use top-p 0.95 and top-k 64 from the model card, with temperature
+0.95. The template difference is ``enable_thinking``. The card has no
+reasoning-effort ladder.
 """
 
 from typing import Any
@@ -10,7 +11,7 @@ DEFAULT_VARIANT = "thinking"
 CONTEXT_LENGTH = 131072
 
 _CARD = {
-    "temperature": 1.0,
+    "temperature": 0.95,
     "top_p": 0.95,
     "top_k": 64,
     "presence_penalty": 0.0,

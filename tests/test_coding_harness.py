@@ -163,9 +163,13 @@ def test_path_stays_inside_the_workspace(tmp_path: Path) -> None:
         locate(tmp_path, "escape")
 
 
-def test_prompt_names_every_tool() -> None:
+def test_prompt_does_not_name_a_tool() -> None:
     for name in REQUIRED_TOOLS:
-        assert name in PROMPT
+        assert name not in PROMPT
+    assert "notes/brief.txt" in PROMPT
+    assert "def collect(before, after):" in PROMPT
+    assert "return after - before" in PROMPT
+    assert 'python3 -c "import ledger; print(ledger.collect(15, 21))"' in PROMPT
 
 
 def test_hidden_suite_passes_a_correct_module(tmp_path: Path) -> None:

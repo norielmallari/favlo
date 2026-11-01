@@ -89,7 +89,10 @@ async def _run(
     agent = Agent(
         client=client,
         name="coding",
-        instructions="Follow the user request. Call each named tool, then stop.",
+        instructions=(
+            "You are a coding assistant. Carry out the next step, then wait "
+            "for its result. Leave the reply empty."
+        ),
         tools=coding_tools(session),
         default_options=options,
     )

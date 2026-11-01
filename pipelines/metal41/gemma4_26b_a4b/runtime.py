@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from gemma4_26b_a4b.chat import handle_chat
+from gemma4_26b_a4b.chat import handle_chat, handle_responses
 from gemma4_26b_a4b.forward import Gemma4Runtime
 
 
@@ -30,4 +30,4 @@ def open_runtime(
     )
 
 
-__all__ = ["handle_chat", "open_runtime"]
+__all__ = ["handle_chat", "handle_responses", "open_runtime"]

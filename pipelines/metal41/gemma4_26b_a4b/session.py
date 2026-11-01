@@ -18,6 +18,8 @@ _KERNELS = (
     "matmul_f16_64_batch",
     "matmul_fp4_64",
     "matmul_fp4_64_batch",
+    "matmul_fp4_64_at",
+    "matmul_fp8_64_at",
     "matmul_fp4_batch",
     "dequant_q4_0",
     "dequant_q4_0_batch",
@@ -27,6 +29,8 @@ _KERNELS = (
     "scatter_slot_rows",
     "group_expert_slots",
     "gemv_fp4_routed",
+    "gemv_fp4_at",
+    "gemv_fp8_at",
     "write_rows",
     "write_rows_tight",
     "gemv_q4_0",
@@ -206,7 +210,7 @@ class Session:
             self.metal.MTLSizeMake(threads[0], threads[1], threads[2]),
         )
 
-    def commit(self) -> None:
+    def commit(self, when_done: object = None) -> None:
         """Submit the open buffer. The next buffer waits for this one before it touches memory."""
         encoder = self._encoder
         command = self._command
@@ -215,6 +219,8 @@ class Session:
         encoder.updateFence_(self._fence)
         self._fence_armed = True
         encoder.endEncoding()
+        if when_done is not None:
+            command.addCompletedHandler_(lambda _command: when_done())
         command.commit()
         self._inflight.append(command)
         self._encoder = None

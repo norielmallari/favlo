@@ -6,14 +6,19 @@ rounded to bfloat16. A block that is not on that lattice falls back to the
 signed peak divided by −8. Codes are −8..7. The low nibble is element ``i``
 and the high nibble is element ``i + 16``. K is padded to a multiple of 32.
 
-fp4 E2M1 and fp8 E4M3 remain for the prefix file and the kernel checks. Their
-scale rounds the power of two up so the block peak fits. A zero block stores
-exponent 0. The scale row is packed tightly, one byte per 32 K.
+fp4 E2M1 is the routed-expert plane. Each block of 32 tries the E8M0
+exponents around the peak and keeps the one whose nearest E2M1 codes have
+the smallest squared error. fp8 E4M3 remains for the prefix file and the
+kernel checks. Its scale rounds the power of two up so the block peak fits.
+A zero block stores exponent 0. The scale row is packed tightly, one byte
+per 32 K.
 """
 
 from __future__ import annotations
 
 import numpy as np
+
+from gemma4_26b_a4b.geometry import EXPERT_WIDTH, HIDDEN
 
 FP4 = "fp4"
 FP8 = "fp8"
@@ -197,6 +202,82 @@ def _restore_q4_0(blob: bytes, rows: int, k: int) -> np.ndarray:
     return values.reshape(rows, padded)[:, :k].copy()
 
 
+def fp4_parts(rows: int, k: int) -> tuple[int, int]:
+    """Code bytes and scale bytes of one fp4 matrix."""
+    padded = align_k(k, FP4)
+    return rows * (padded // 2), rows * scale_stride(padded)
+
+
+def fp8_parts(rows: int, k: int) -> tuple[int, int]:
+    """Code bytes and scale bytes of one fp8 matrix."""
+    padded = align_k(k, FP8)
+    return rows * padded, rows * scale_stride(padded)
+
+
+def expert_planes(plane: str) -> tuple[int, int, int, int, int]:
+    """Gate data, gate scale, down data, down scale, and the image length.
+
+    The image is one expert: gate-up, then down. Each plane starts on a
+    128-byte boundary. ``plane`` is ``fp4`` or ``fp8``.
+    """
+    parts = fp8_parts if plane == FP8 else fp4_parts
+    if plane not in {FP4, FP8}:
+        message = f"unknown expert plane {plane}"
+        raise ValueError(message)
+    gate_data, gate_scale = parts(2 * EXPERT_WIDTH, HIDDEN)
+    down_data, down_scale = parts(HIDDEN, EXPERT_WIDTH)
+    total = gate_data + gate_scale + down_data + down_scale
+    return gate_data, gate_scale, down_data, down_scale, total
+
+
+def expert_bytes(width: int) -> int:
+    """Byte length of one routed expert. ``4`` is fp4 and ``8`` is fp8."""
+    if width == 4:
+        return expert_planes(FP4)[4]
+    if width == 8:
+        return expert_planes(FP8)[4]
+    message = f"expert width {width} is not 4 or 8"
+    raise ValueError(message)
+
+
+def _pack_fp4(weight: np.ndarray) -> bytes:
+    """Pack fp4. The E8M0 exponent is the one with the smallest squared error."""
+    rows, k = weight.shape
+    padded = align_k(k, FP4)
+    block = np.zeros((rows, padded), dtype=np.float64)
+    block[:, :k] = weight
+    groups = block.reshape(-1, 32)
+    count = groups.shape[0]
+    peak = np.max(np.abs(groups), axis=1)
+    ratio = np.maximum(peak / FP4_QMAX, np.finfo(np.float64).tiny)
+    base = np.where(peak == 0.0, np.int16(0), _ceil_log2(ratio).astype(np.int16))
+    best_error = np.full(count, np.inf)
+    best_offset = np.full(count, np.int16(99))
+    best_unbiased = np.zeros(count, dtype=np.int16)
+    best_nibble = np.zeros((count, 32), dtype=np.uint8)
+    for offset in range(-6, 3):
+        unbiased = np.clip(base + np.int16(offset), -126, 127).astype(np.int16)
+        unbiased = np.where(peak == 0.0, np.int16(0), unbiased)
+        scale = np.exp2(unbiased.astype(np.float64))
+        unit = groups / scale[:, None]
+        index = _fp4_index(unit)
+        sign = np.where(unit < 0.0, np.uint8(8), np.uint8(0))
+        magnitude = _FP4_MAGNITUDE[index]
+        signed = np.where(unit < 0.0, -magnitude, magnitude)
+        error = np.sum((groups - signed * scale[:, None]) ** 2, axis=1)
+        nearer = np.isclose(error, best_error) & (abs(offset) < np.abs(best_offset))
+        better = (error < best_error) | nearer
+        best_error = np.where(better, error, best_error)
+        best_offset = np.where(better, np.int16(offset), best_offset)
+        best_unbiased = np.where(better, unbiased, best_unbiased)
+        nibble = sign | index
+        best_nibble = np.where(better[:, None], nibble, best_nibble)
+    stored = (best_unbiased + np.int16(127)).astype(np.uint8).reshape(rows, padded // 32)
+    nibble = best_nibble.reshape(rows, padded)
+    data = (nibble[:, 0::2] | (nibble[:, 1::2] << 4)).astype(np.uint8)
+    return data.tobytes() + stored.tobytes()
+
+
 def pack_matrix(weight: np.ndarray, plane: str) -> bytes:
     """Pack ``[rows, K]``. Extra K columns are zero codes."""
     if weight.ndim != 2:
@@ -204,21 +285,19 @@ def pack_matrix(weight: np.ndarray, plane: str) -> bytes:
         raise ValueError(message)
     if plane == Q40:
         return _pack_q4_0(weight)
+    if plane == FP4:
+        return _pack_fp4(weight)
+    if plane != FP8:
+        message = f"unknown plane {plane}"
+        raise ValueError(message)
     rows, k = weight.shape
     padded = align_k(k, plane)
     block = np.zeros((rows, padded), dtype=np.float32)
     block[:, :k] = weight
-    qmax = FP4_QMAX if plane == FP4 else FP8_QMAX
-    stored, scale = _block_scale(block, qmax)
+    stored, scale = _block_scale(block, FP8_QMAX)
     expanded = np.repeat(scale.astype(np.float32), 32, axis=1)
     unit = block / expanded
-    if plane == FP4:
-        index = _fp4_index(unit).reshape(rows, padded)
-        sign = (unit < 0.0).astype(np.uint8).reshape(rows, padded)
-        nibble = (sign << 3) | index
-        data = (nibble[:, 0::2] | (nibble[:, 1::2] << 4)).astype(np.uint8)
-    else:
-        data = _fp8_code(unit.reshape(rows, padded))
+    data = _fp8_code(unit.reshape(rows, padded))
     stride = scale_stride(padded)
     scale_plane = np.zeros((rows, stride), dtype=np.uint8)
     scale_plane[:, : stored.shape[1]] = stored
