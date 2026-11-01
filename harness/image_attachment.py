@@ -24,7 +24,7 @@ HORSE = Path("tests/assets") / "favlo-horse.png"
 QUESTION = "Describe the picture. Name the animal and what it is doing."
 _PATCH = 16
 _MERGE = 2
-_MARKS = ("blue", "desk", "blaze", "bandana", "chestnut", "mane", "hoof")
+_MARKS = ("mane", "tail", "hoof", "chestnut", "gallop", "running")
 _REFUSAL = (
     "can't see",
     "cannot see",

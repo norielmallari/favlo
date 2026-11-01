@@ -1,7 +1,7 @@
 """Production readiness for one language pipeline.
 
-The model id is the pipeline name. One Agent Framework agent sets
-``enable_thinking`` true and leaves every sampling field unset. ``--mtp``
+The model id is the pipeline name. ``--thinking on`` is the default and leaves
+every sampling field unset. ``--thinking off`` selects the instruct card. ``--mtp``
 sends the draft flag. Omitted, that flag is off. ``--mtp-depth`` is the draft
 length, three when omitted. ``--vision`` is off unless set. When it is set,
 the first chat is the horse still, and a later request must reuse the tower.
@@ -14,7 +14,8 @@ Each request's server prefill and decode lines are the thinking series.
 
     uv run python -m harness.coding --model qwen38-27b
     uv run python -m harness.coding --model qwen38-27b --mtp on
-    uv run python -m harness.coding --model qwen38-27b --vision
+    uv run python -m harness.coding --model qwen38-27b --vision --thinking on
+    uv run python -m harness.coding --model qwen38-27b --vision --thinking off
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ def argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="send the horse still as the first chat",
     )
+    parser.add_argument("--thinking", choices=("on", "off"), default="on")
     return parser
 
 
@@ -80,11 +82,11 @@ def main(argv: list[str] | None = None) -> int:
     server = Server(args.max_memory)
     try:
         server.start()
-        print(f"mtp {args.mtp} depth {args.mtp_depth}", flush=True)
+        print(f"mtp {args.mtp} depth {args.mtp_depth} thinking {args.thinking}", flush=True)
         calls, problems = run_session(
             server.port,
             stem,
-            Request(enable_thinking=True),
+            Request(enable_thinking=args.thinking == "on"),
             workspace,
             mtp=args.mtp == "on",
             mtp_depth=args.mtp_depth,

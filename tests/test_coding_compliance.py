@@ -19,8 +19,11 @@ from harness.coding.compliance import (
     image_message,
     image_turn_problems,
     length_problems,
+    recall_problems,
     reasoning_problems,
     reply_problems,
+    search_calls,
+    web_search_problems,
     stop_problems,
     stored_reasoning,
     stream_problems,
@@ -64,6 +67,19 @@ def test_the_tool_result_is_bound_to_the_call_id() -> None:
     assert missed[0].result is None
     assert any("call id" in item for item in tool_problems(missed, LABEL))
     assert tool_problems([], "done")
+
+
+def test_web_search_requires_the_server_call() -> None:
+    call = Content.from_search_tool_call(call_id="ws_1", tool_name="web_search", arguments={})
+    response = type("Response", (), {"messages": [Message("assistant", [call, "The card is public."])]})()
+    assert search_calls(response) == ["ws_1"]
+    assert web_search_problems("The card is public.", ["ws_1"]) == []
+    assert any("no web_search" in item for item in web_search_problems("The card is public.", []))
+
+
+def test_a_stored_follow_up_keeps_the_secret_word() -> None:
+    assert recall_problems("apple") == []
+    assert any(WORD in item for item in recall_problems("pear"))
 
 
 def test_tool_choice_none_rejects_a_call() -> None:
@@ -112,9 +128,8 @@ def test_the_image_turn_covers_the_pooled_tokens() -> None:
     assert floor == 256
     assert floor < 1600
     small = image_floor(32, 32)
-    assert image_turn_problems("A chestnut horse on a desk.", small, 32, 32) == []
-    short = image_turn_problems("a horse", 0, 32, 32)
-    assert any("pooled tokens" in item for item in short)
+    assert image_turn_problems("A chestnut horse with a dark mane is galloping.", small, 32, 32) == []
+    assert image_turn_problems("a horse", 0, 32, 32)
     assert any("horse" in item for item in image_turn_problems("a desk", 100, 32, 32))
 
 
@@ -132,12 +147,12 @@ def test_the_image_part_is_an_openai_data_url() -> None:
     assert message.contents[0].text == QUESTION
     client = open_chat_client("example-model", "http://127.0.0.1:8129/v1")
     try:
-        part = client._prepare_content_for_openai(picture)
+        part = client._prepare_content_for_openai("user", picture)
     finally:
         asyncio.run(close_chat_client(client))
-    assert part["type"] == "image_url"
-    assert part["image_url"]["detail"] == "auto"
-    assert part["image_url"]["url"].startswith("data:image/png;base64,")
+    assert part["type"] == "input_image"
+    assert part["detail"] == "auto"
+    assert part["image_url"].startswith("data:image/png;base64,")
 
 
 def test_chat_roles_and_tool_calls_match_the_completions_object() -> None:
@@ -148,15 +163,26 @@ def test_chat_roles_and_tool_calls_match_the_completions_object() -> None:
     client = open_chat_client("example-model", "http://127.0.0.1:8129/v1")
     try:
         developer = client._prepare_message_for_openai(Message("developer", "The reply is apple."))
-        assistant = client._prepare_message_for_openai(Message("assistant", [call]))
-        tool = client._prepare_message_for_openai(Message("tool", [result]))
+        assistant = client._prepare_message_for_openai(
+            Message("assistant", [call]),
+            request_uses_service_side_storage=False,
+        )
+        tool = client._prepare_message_for_openai(
+            Message("tool", [result]),
+            request_uses_service_side_storage=False,
+        )
     finally:
         asyncio.run(close_chat_client(client))
-    assert developer == [{"role": "developer", "content": "The reply is apple."}]
-    assert assistant[0]["role"] == "assistant"
-    assert assistant[0]["tool_calls"] == [{
-        "id": "c1",
-        "type": "function",
-        "function": {"name": "locker", "arguments": json.dumps({"code": CODE})},
-    }]
-    assert tool == [{"role": "tool", "tool_call_id": "c1", "content": LABEL}]
+    assert developer == [
+        {
+            "type": "message",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "The reply is apple."}],
+        }
+    ]
+    assert assistant[0]["type"] == "function_call"
+    assert assistant[0]["name"] == "locker"
+    assert assistant[0]["call_id"] == "c1"
+    assert tool[0]["type"] == "function_call_output"
+    assert tool[0]["call_id"] == "c1"
+    assert LABEL in str(tool[0].get("output"))

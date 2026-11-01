@@ -757,7 +757,7 @@ def test_openai_client_streams_the_completion(monkeypatch: pytest.MonkeyPatch) -
         stream = client.chat.completions.create(
             model="qwen36-35b-a3b",
             messages=[{"role": "user", "content": "2+2"}],
-            max_tokens=8,
+            max_tokens=16,
             stream=True,
             extra_body={"enable_thinking": True},
         )

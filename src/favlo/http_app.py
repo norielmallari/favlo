@@ -287,6 +287,30 @@ def build_app(args: Any, state: dict[str, Any]) -> Any:
     async def chat(request: Request) -> Response:
         return await _locked(request, args, state, "chat")
 
+    async def responses(request: Request) -> Response:
+        return await _locked(request, args, state, "responses")
+
+    async def response_item(request: Request) -> Response:
+        from favlo.responses import stored_response
+
+        found = stored_response(state, request.path_params["response_id"])
+        if found is None:
+            return _error(404, "not found", "not_found")
+        return _json_response(found)
+
+    async def response_delete(request: Request) -> Response:
+        from favlo.responses import drop_response
+
+        identifier = request.path_params["response_id"]
+        if not drop_response(state, identifier):
+            return _error(404, "not found", "not_found")
+        return _json_response({"id": identifier, "object": "response", "deleted": True})
+
+    async def conversations(request: Request) -> Response:
+        from favlo.responses import open_conversation
+
+        return _json_response(open_conversation(state))
+
     async def embeddings(request: Request) -> Response:
         return await _locked(request, args, state, "embed")
 
@@ -298,6 +322,10 @@ def build_app(args: Any, state: dict[str, Any]) -> Any:
         Route("/v1/pipelines/close", pipelines_close, methods=["POST"]),
         Route("/v1/pipelines/reload", pipelines_reload, methods=["POST"]),
         Route("/v1/chat/completions", chat, methods=["POST"]),
+        Route("/v1/responses", responses, methods=["POST"]),
+        Route("/v1/responses/{response_id}", response_item, methods=["GET"]),
+        Route("/v1/responses/{response_id}", response_delete, methods=["DELETE"]),
+        Route("/v1/conversations", conversations, methods=["POST"]),
         Route("/v1/embeddings", embeddings, methods=["POST"]),
         *mcp_app.routes,
     ]
@@ -463,10 +491,10 @@ def _run_locked(
     _prepare_listener(state)
     ticket = None
     cancel = getattr(reply, "disconnected", None)
-    if kind != "chat" or not isinstance(cancel, threading.Event):
+    if kind not in {"chat", "responses"} or not isinstance(cancel, threading.Event):
         cancel = None
     try:
-        if kind in {"embed", "chat"}:
+        if kind in {"embed", "chat", "responses"}:
             ticket = admit(state, kind, cancel=cancel)
             if ticket is None:
                 _leave_cleared(reply)
@@ -593,7 +621,7 @@ def _run_once(
             return
         call = handler_for(kind, module)
         if call is None:
-            if kind == "chat":
+            if kind in {"chat", "responses"}:
                 name = state.get("pipeline") or "pipeline"
                 reply.json(
                     500,

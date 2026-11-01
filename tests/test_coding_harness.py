@@ -32,9 +32,9 @@ def test_thinking_body_omits_sampling_fields() -> None:
     options = agent_options(request, mtp=True, mtp_depth=3)
     extra = options["extra_body"]
     assert isinstance(extra, dict)
-    assert extra["enable_thinking"] is True
-    assert extra["mtp"] is True
-    assert extra["mtp_depth"] == 3
+    assert options["reasoning"] == {"effort": "medium"}
+    assert extra["favlo:mtp"] is True
+    assert extra["favlo:mtp_depth"] == 3
     assert options["store"] is False
     assert "temperature" not in options
     assert "temperature" not in extra
@@ -43,9 +43,9 @@ def test_thinking_body_omits_sampling_fields() -> None:
     assert "presence_penalty" not in extra
     assert "max_tokens" not in extra
     off = agent_options(request, mtp=False, mtp_depth=3)
-    assert off["extra_body"]["mtp"] is False
+    assert off["extra_body"]["favlo:mtp"] is False
     four = agent_options(request, mtp=True, mtp_depth=4)
-    assert four["extra_body"]["mtp_depth"] == 4
+    assert four["extra_body"]["favlo:mtp_depth"] == 4
 
 
 def test_mtp_defaults_off() -> None:
@@ -53,6 +53,9 @@ def test_mtp_defaults_off() -> None:
     assert args.mtp == "off"
     assert args.mtp_depth == 3
     assert args.vision is False
+    assert args.thinking == "on"
+    instruct = argument_parser().parse_args(["--model", "qwen36-35b-a3b", "--thinking", "off"])
+    assert instruct.thinking == "off"
 
 
 def _update(*contents: Content, finish_reason: str | None = None) -> ChatResponseUpdate:

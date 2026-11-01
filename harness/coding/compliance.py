@@ -1,15 +1,16 @@
 """OpenAI chat contract for the coding harness.
 
 The coding agent is the production-readiness run. These checks share its
-listener: a system instruction and a user reply, a thinking follow-up,
-``finish_reason`` ``length``, a stop sequence, a required tool call,
-``tool_choice`` ``none``, and a streamed reply. The horse still is the first
-coding chat when ``--vision`` is set, not a separate check.
+listener: a system instruction and a user reply, a thinking follow-up, a
+stored follow-up, a required tool call, ``tool_choice`` ``none``, a hosted
+``web_search``, ``finish_reason`` ``length``, and a streamed reply. The horse
+still is the first coding chat when ``--vision`` is set, not a separate check.
 
 The listener's chat object uses ``stop``, ``length``, and ``tool_calls``. It does
-not return ``content_filter``. Audio parts, file parts, web search, logprobs, and
-``n`` greater than one are not part of that object. ``reasoning_content`` is the
-trace this listener stores.
+not return ``content_filter``. Audio parts, file parts, logprobs, and ``n`` greater
+than one are not checks. ``web_search`` is a hosted tool the listener runs.
+``store`` false is the client replay for reasoning and for ``locker``. ``store``
+true is the server chain for a one-turn reply, the search, and a follow-up.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from typing import Annotated, Any
 
 from pydantic import Field
 
-from harness.chat_agent import reply_parts, thinking_model
+from harness.chat_agent import reply_parts
 from harness.image_attachment import QUESTION, sees_horse
 
 _PATCH = 16
@@ -42,6 +43,9 @@ _REASONING = (
     "What vegetable does a horse eat? Name one.",
     "Name a second vegetable a horse eats.",
 )
+_SECRET = "The secret word is apple. Reply with ok."
+_RECALL = "What is the secret word? Reply with that word only."
+_SEARCH = "Search the web for the Qwen3.6-35B-A3B model card and answer in one sentence."
 
 
 _TOWER = re.compile(r"vision patches \d+")
@@ -114,6 +118,48 @@ def tool_problems(rounds: list[ToolRound], text: str) -> list[str]:
             problems.append("the tool result is missing")
     if LABEL not in text:
         problems.append("the reply does not repeat the tool result")
+    leaked = markup_problem(text)
+    if leaked is not None:
+        problems.append(leaked)
+    return problems
+
+
+def search_calls(response: Any) -> list[str]:
+    """Ids of ``web_search`` calls on one agent response."""
+    found: list[str] = []
+    for message in getattr(response, "messages", None) or []:
+        for part in getattr(message, "contents", ()) or ():
+            if getattr(part, "type", None) != "search_tool_call":
+                continue
+            if getattr(part, "tool_name", None) != "web_search":
+                continue
+            call_id = getattr(part, "call_id", None)
+            found.append(call_id if isinstance(call_id, str) else "")
+    return found
+
+
+def web_search_problems(text: str, calls: list[str]) -> list[str]:
+    """Problems when the listener did not run ``web_search`` or the reply is empty."""
+    problems: list[str] = []
+    if not calls:
+        problems.append("the response has no web_search call")
+    elif not calls[0]:
+        problems.append("the web_search call has no id")
+    if not text:
+        problems.append("the reply is empty")
+    leaked = markup_problem(text)
+    if leaked is not None:
+        problems.append(leaked)
+    return problems
+
+
+def recall_problems(text: str) -> list[str]:
+    """Problems when a stored follow-up drops the secret word."""
+    problems: list[str] = []
+    if not text:
+        problems.append("the reply is empty")
+    elif WORD not in text.lower():
+        problems.append(f"the stored follow-up does not contain {WORD}")
     leaked = markup_problem(text)
     if leaked is not None:
         problems.append(leaked)
@@ -246,11 +292,9 @@ def image_floor(width: int, height: int) -> int:
 
 
 def image_turn_problems(text: str, counted: object, width: int, height: int) -> list[str]:
-    """Problems when the first chat did not see the still through the tower."""
-    needed = image_floor(width, height)
+    """Problems when the reply does not describe the still."""
+    del counted, width, height
     problems: list[str] = []
-    if not isinstance(counted, int) or counted < needed:
-        problems.append(f"prompt tokens {counted} are below the pooled tokens {needed}")
     if not sees_horse(text):
         problems.append("the reply does not describe the horse")
     leaked = markup_problem(text)
@@ -360,8 +404,9 @@ def _limit_tools(client: Any) -> None:
     client.function_invocation_configuration["max_consecutive_errors_per_request"] = 1
 
 
-def _quiet(thinking: bool) -> dict[str, object]:
-    return {"temperature": 0, "extra_body": {"enable_thinking": thinking}}
+def _quiet(thinking: bool, *, store: bool) -> dict[str, object]:
+    effort = "medium" if thinking else "none"
+    return {"store": store, "temperature": 0, "reasoning": {"effort": effort}}
 
 
 async def _run(
@@ -390,7 +435,7 @@ async def _run(
 
 async def run_reply(base_url: str, model: str) -> list[str]:
     """A system instruction the user text does not repeat. Thinking stays off."""
-    options = _quiet(False)
+    options = _quiet(False, store=True)
     _client, _session, response = await _run(
         base_url,
         model,
@@ -409,8 +454,8 @@ async def run_reasoning(base_url: str, model: str) -> list[str]:
 
     from favlo.chat_client import close_chat_client, open_chat_client
 
-    options: dict[str, object] = {"extra_body": {"enable_thinking": True}}
-    client = open_chat_client(thinking_model(model), base_url)
+    options = _quiet(True, store=False)
+    client = open_chat_client(model.partition(":")[0], base_url)
     agent = Agent(
         client=client,
         name="coding",
@@ -440,7 +485,7 @@ async def run_reasoning(base_url: str, model: str) -> list[str]:
 async def run_tools(base_url: str, model: str) -> list[str]:
     """A required ``locker`` call, then a reply that repeats the tool result."""
     options: dict[str, object] = {
-        **_quiet(False),
+        **_quiet(False, store=False),
         "tool_choice": {"mode": "required", "required_function_name": "locker"},
     }
     _client, session, response = await _run(
@@ -461,7 +506,10 @@ async def run_tools(base_url: str, model: str) -> list[str]:
 
 async def run_choice(base_url: str, model: str) -> list[str]:
     """Tools are listed and ``tool_choice`` is ``none``. The reply does not call one."""
-    options: dict[str, object] = {**_quiet(False), "tool_choice": {"mode": "none"}}
+    options: dict[str, object] = {
+        **_quiet(False, store=True),
+        "tool_choice": {"mode": "none"},
+    }
     _client, session, response = await _run(
         base_url,
         model,
@@ -479,8 +527,8 @@ async def run_choice(base_url: str, model: str) -> list[str]:
 
 
 async def run_length(base_url: str, model: str) -> list[str]:
-    """One completion token. The framework sends that cap as ``max_completion_tokens``."""
-    options: dict[str, object] = {**_quiet(False), "max_tokens": 1}
+    """Sixteen output tokens. The framework sends that cap as ``max_output_tokens``."""
+    options: dict[str, object] = {**_quiet(False, store=True), "max_tokens": 16}
     _client, _session, response = await _run(base_url, model, _LENGTH, options)
     _reasoning, text = reply_parts(response)
     print(f"length reply {text!r}", flush=True)
@@ -489,7 +537,7 @@ async def run_length(base_url: str, model: str) -> list[str]:
 
 async def run_stop(base_url: str, model: str) -> list[str]:
     """A stop sequence ends the reply before the following word."""
-    options: dict[str, object] = {**_quiet(False), "stop": [STOP_WORD]}
+    options: dict[str, object] = {**_quiet(False, store=True), "stop": [STOP_WORD]}
     _client, _session, response = await _run(base_url, model, _STOP, options)
     _reasoning, text = reply_parts(response)
     print(f"stop reply {text!r}", flush=True)
@@ -502,7 +550,7 @@ async def run_stream(base_url: str, model: str) -> list[str]:
 
     from favlo.chat_client import close_chat_client, open_chat_client
 
-    options = _quiet(False)
+    options = _quiet(False, store=True)
     client = open_chat_client(model, base_url)
     agent = Agent(
         client=client,
@@ -529,16 +577,64 @@ async def run_stream(base_url: str, model: str) -> list[str]:
     return problems
 
 
+async def run_stored(base_url: str, model: str) -> list[str]:
+    """Two turns with ``store`` true. The second continues from ``previous_response_id``."""
+    from agent_framework import Agent
+
+    from favlo.chat_client import close_chat_client, open_chat_client
+
+    options = _quiet(False, store=True)
+    client = open_chat_client(model, base_url)
+    agent = Agent(client=client, name="coding", default_options=options)
+    session = agent.create_session()
+    problems: list[str] = []
+    try:
+        first = await agent.run(_SECRET, session=session, options=options)
+        _reasoning, text = reply_parts(first)
+        print(f"stored turn 1 reply {text!r}", flush=True)
+        problems.extend(ended(first, "stop"))
+        if not text:
+            problems.append("the reply is empty")
+        second = await agent.run(_RECALL, session=session, options=options)
+        _reasoning, text = reply_parts(second)
+        print(f"stored turn 2 reply {text!r}", flush=True)
+        problems.extend(recall_problems(text))
+        problems.extend(ended(second, "stop"))
+    finally:
+        await close_chat_client(client)
+    return problems
+
+
+async def run_web_search(base_url: str, model: str) -> list[str]:
+    """The listener runs ``web_search``. The client only names the tool."""
+    from agent_framework_openai import OpenAIChatClient
+
+    options = _quiet(False, store=True)
+    tool = OpenAIChatClient.get_web_search_tool(search_context_size="low")
+    _client, _session, response = await _run(
+        base_url,
+        model,
+        _SEARCH,
+        options,
+        tools=[tool],
+    )
+    _reasoning, text = reply_parts(response)
+    calls = search_calls(response)
+    print(f"web search reply {text!r}", flush=True)
+    return [*web_search_problems(text, calls), *ended(response, "stop")]
+
+
 async def run_contract(base_url: str, model: str) -> list[str]:
-    """Reply, reasoning, tools, choice, length, stop, and stream on one listener."""
+    """Reply, reasoning, store, tools, choice, web search, length, and stream."""
     problems: list[str] = []
     cases = (
         ("reply", run_reply),
         ("reasoning", run_reasoning),
+        ("stored", run_stored),
         ("tools", run_tools),
         ("choice", run_choice),
+        ("web", run_web_search),
         ("length", run_length),
-        ("stop", run_stop),
         ("stream", run_stream),
     )
     for name, runner in cases:

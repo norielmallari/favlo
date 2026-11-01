@@ -19,13 +19,17 @@ SESSION_ROUNDS = 16
 
 
 def agent_options(request: Request, *, mtp: bool, mtp_depth: int) -> dict[str, object]:
-    """Fields the framework client sends. Sampling stays off the body."""
+    """Fields the framework client sends. Sampling stays off the body.
+
+    ``store`` is false so the client replays function calls and reasoning.
+    A one-turn check and a server continuation use ``store`` true instead.
+    """
     return {
         "store": False,
+        "reasoning": {"effort": "medium" if request.enable_thinking else "none"},
         "extra_body": {
-            "enable_thinking": request.enable_thinking,
-            "mtp": bool(mtp),
-            "mtp_depth": int(mtp_depth),
+            "favlo:mtp": bool(mtp),
+            "favlo:mtp_depth": int(mtp_depth),
         },
     }
 

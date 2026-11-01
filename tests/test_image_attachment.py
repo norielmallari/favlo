@@ -28,9 +28,9 @@ def test_a_square_still_counts_merged_tokens() -> None:
 
 
 def test_the_reply_must_name_the_horse_and_two_marks() -> None:
-    assert sees_horse("A chestnut horse with blue eyes sits at a wooden desk.")
+    assert sees_horse("A chestnut horse with a dark mane and tail is galloping.")
     assert not sees_horse("A chestnut horse stands in a field.")
-    assert not sees_horse("I have a problem with analysis and cannot see an image of a horse at a desk.")
+    assert not sees_horse("I have a problem with analysis and cannot see an image of a horse.")
 
 
 def test_an_openai_image_part_is_one_image_pad() -> None:

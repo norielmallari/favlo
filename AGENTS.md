@@ -22,7 +22,6 @@ The files in [`.cursor/rules`](.cursor/rules) are repo rules. Cursor loads them 
 | [research-evidence.mdc](.cursor/rules/research-evidence.mdc) | When writing a measured claim. The note records the remainder a search on that date did not find. The software citation stays in CITATION.cff. |
 | [serving-media.mdc](.cursor/rules/serving-media.mdc) | When an API returns generated media. Save the file, then stream that file. |
 | [mcp-server.mdc](.cursor/rules/mcp-server.mdc) | When editing the media MCP server. Update [MCP.md](MCP.md) in the same change. |
-| [harness.mdc](.cursor/rules/harness.mdc) | When editing harness clients. Update [docs/harness.md](docs/harness.md) in the same change. |
 | [media-pipeline.mdc](.cursor/rules/media-pipeline.mdc) | When editing a served media pipeline or `MediaPipeline`. Inherit the listener contract, and run the one preemption harness after that contract changes. |
 | [language-pipeline.mdc](.cursor/rules/language-pipeline.mdc) | When editing a served language model or `LanguagePipeline`. Keep the completion in the pipeline, and run the language harness after the disconnect shell changes. |
 | [embeddings-pipeline.mdc](.cursor/rules/embeddings-pipeline.mdc) | When editing a served embedding model or `EmbeddingsPipeline`. Return the vector and the token count, and let the class write the list object. |
@@ -57,6 +56,15 @@ A media harness does not take the machine lock. It calls the listener. A media h
 `python -m harness`, `python -m harness.coding`, and `python -m harness.worktree` restart the process they started so a later turn reloads a prefix. They require port 8129 to be free. They do not attach to a listener someone else left running, and they do not bind a second port beside it.
 
 `harness.chat_agent` uses that same listener and does not take the machine lock.
+
+A harness change updates [docs/harness.md](docs/harness.md) in the same change. Each client keeps one subsection there: a short title, the command in a bash block, then what it does.
+
+The coding agent is `uv run python -m harness.coding --model <id>`. Pass `--vision` when that pipeline embeds an image (`embed_image` in its `vision.py`). The still is `tests/assets/favlo-horse.png`. When `sampling.py` lists both `thinking` and `instruct`, run it twice, thinking first. `--thinking on` uses the thinking card. `--thinking off` uses the instruct card. One variant runs once. Exit 0 on each run is the pass.
+
+```text
+uv run python -m harness.coding --model qwen36-35b-a3b --vision --thinking on
+uv run python -m harness.coding --model qwen36-35b-a3b --vision --thinking off
+```
 
 ## Agents
 

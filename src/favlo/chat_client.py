@@ -96,8 +96,6 @@ def open_chat_client(
         "model": model,
         "api_key": "favlo",
         "base_url": base_url,
-        "response_parser": read_reasoning,
-        "message_preparer": prepare_messages,
     }
     if async_client is not None:
         kwargs["async_client"] = async_client
@@ -133,10 +131,10 @@ def prompt_window() -> Any:
 def _chat_client_type() -> type:
     global _CLIENT
     if _CLIENT is None:
-        from agent_framework.openai import OpenAIChatCompletionClient
+        from agent_framework.openai import OpenAIChatClient
 
-        class FavloChatClient(OpenAIChatCompletionClient):
-            """Keeps ``max_prompt_tokens`` from the completion usage."""
+        class FavloChatClient(OpenAIChatClient):
+            """Responses client. Keeps the prompt cap from usage when it is present."""
 
             max_prompt_tokens: int | None = None
             prompt_tokens: int | None = None
@@ -146,7 +144,9 @@ def _chat_client_type() -> type:
                 cap = _usage_cap(usage)
                 if cap is not None:
                     self.max_prompt_tokens = cap
-                prompt = getattr(usage, "prompt_tokens", None)
+                prompt = getattr(usage, "input_tokens", None)
+                if not isinstance(prompt, int) or isinstance(prompt, bool):
+                    prompt = getattr(usage, "prompt_tokens", None)
                 if isinstance(prompt, int) and not isinstance(prompt, bool) and prompt > 0:
                     self.prompt_tokens = prompt
                 return _with_prompt_cap(details, usage)

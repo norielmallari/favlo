@@ -25,6 +25,7 @@ from typing import Any
 _HOLDS = ("image_hold", "video_hold", "music_hold", "voice_hold")
 _KINDS = {
     "chat": "handle_chat",
+    "responses": "handle_responses",
     "embed": "handle_embed",
     "image": "handle_image",
     "video": "handle_video",
@@ -174,6 +175,7 @@ class PipelineChild:
                     "holds": _hold_paths(state),
                     "preempt": _flagged(state, "preempt"),
                     "disconnect": bool(callable(getattr(reply, "stopped", None)) and reply.stopped()),
+                    "stores": _stores(state),
                 }
             )
             while True:
@@ -202,6 +204,7 @@ class PipelineChild:
                 else:
                     _apply_holds(state, message.get("holds"))
                     _apply_tables(state, message.get("tables"))
+                    _apply_stores(state, message.get("stores"))
                     payload = message.get("payload")
                     if not streamed and isinstance(payload, dict):
                         status = message.get("status")
@@ -449,6 +452,24 @@ def _apply_tables(state: dict[str, Any], tables: Any) -> None:
         return
     for key in ("voice", "music", "videos"):
         value = tables.get(key)
+        if isinstance(value, dict):
+            state[key] = value
+
+
+def _stores(state: dict[str, Any]) -> dict[str, Any]:
+    found: dict[str, Any] = {}
+    for key in ("responses", "conversations", "response_inputs"):
+        value = state.get(key)
+        if isinstance(value, dict):
+            found[key] = value
+    return found
+
+
+def _apply_stores(state: dict[str, Any], stores: Any) -> None:
+    if not isinstance(stores, dict):
+        return
+    for key in ("responses", "conversations", "response_inputs"):
+        value = stores.get(key)
         if isinstance(value, dict):
             state[key] = value
 
@@ -734,6 +755,7 @@ def _call(
                 for key in ("voice", "music", "videos")
                 if isinstance(state.get(key), dict)
             },
+            "stores": _stores(state),
         },
     )
 
@@ -749,6 +771,12 @@ def _child_state(message: dict[str, Any], control: dict[str, threading.Event]) -
         for key, value in homes.items():
             if isinstance(key, str) and isinstance(value, str) and value:
                 state[key] = Path(value)
+    stores = message.get("stores")
+    if isinstance(stores, dict):
+        for key in ("responses", "conversations", "response_inputs"):
+            bucket = stores.get(key)
+            if isinstance(bucket, dict):
+                state[key] = bucket
     holds = message.get("holds")
     if isinstance(holds, dict):
         for key, value in holds.items():

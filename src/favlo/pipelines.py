@@ -180,6 +180,7 @@ pipelines = Pipelines()
 
 _HANDLERS = {
     "chat": "handle_chat",
+    "responses": "handle_responses",
     "embed": "handle_embed",
     "image": "handle_image",
     "video": "handle_video",

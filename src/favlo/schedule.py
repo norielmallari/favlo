@@ -13,7 +13,7 @@ from __future__ import annotations
 import threading
 from collections import deque
 
-_FOREGROUND = frozenset({"embed", "chat"})
+_FOREGROUND = frozenset({"embed", "chat", "responses"})
 _KINDS = _FOREGROUND | {"media"}
 
 
@@ -144,7 +144,7 @@ class Scheduler:
     def _queue(self, kind: str) -> deque[_Ticket]:
         if kind == "embed":
             return self._embeds
-        if kind == "chat":
+        if kind in {"chat", "responses"}:
             return self._chats
         if kind == "media":
             return self._media
