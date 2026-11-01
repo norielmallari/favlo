@@ -47,7 +47,7 @@ KERNELS = (
     "argmax_final",
 )
 
-PREFILL_TILE = 256
+PREFILL_TILE = 512
 
 # topk kernels stay in the shader source for a later sampler; greedy + presence is enough now.
 
@@ -111,6 +111,7 @@ class Session:
             self.pipes[name] = pipeline
         self._size = metal.MTLSize
         self._held: list[Any] = []
+        self._inflight: list[tuple[Any, list[Any]]] = []
         self._command: Any = None
         self._encoder: Any = None
         self.gpu_seconds = 0.0
@@ -131,31 +132,45 @@ class Session:
         self._command = memory.command_buffer(self.queue)
         self._encoder = self._command.computeCommandEncoder()
 
-    def end(self) -> None:
+    def end(self, *, wait: bool = True) -> None:
         encoder = self._encoder
         command = self._command
         if encoder is None or command is None:
+            if wait:
+                self.wait()
             return
         self._encoder = None
         self._command = None
         encoder.endEncoding()
         command.commit()
-        command.waitUntilCompleted()
-        started = getattr(command, "GPUStartTime", None)
-        stopped = getattr(command, "GPUEndTime", None)
-        if callable(started) and callable(stopped):
-            span = float(stopped()) - float(started())
-            if span > 0.0:
-                self.gpu_seconds += span
-        status, error = memory.retire(command)
+        held = list(self._held)
         self._held.clear()
-        if status != 4:
-            message = f"metal command failed ({status}): {error}"
-            raise RuntimeError(message)
+        self._inflight.append((command, held))
+        if wait:
+            self.wait()
+
+    def wait(self) -> None:
+        """Drain committed command buffers. Safe before overwriting a bound span."""
+        pending = self._inflight
+        self._inflight = []
+        for command, _held in pending:
+            command.waitUntilCompleted()
+            started = getattr(command, "GPUStartTime", None)
+            stopped = getattr(command, "GPUEndTime", None)
+            if callable(started) and callable(stopped):
+                span = float(stopped()) - float(started())
+                if span > 0.0:
+                    self.gpu_seconds += span
+            status, error = memory.retire(command)
+            if status != 4:
+                message = f"metal command failed ({status}): {error}"
+                raise RuntimeError(message)
 
     def flush(self) -> None:
         if self._encoder is not None:
-            self.end()
+            self.end(wait=True)
+        else:
+            self.wait()
 
     def launch(
         self,
@@ -187,7 +202,6 @@ class Session:
 
     def close(self) -> None:
         try:
-            if self._encoder is not None:
-                self.end()
+            self.flush()
         finally:
             memory.sweep(self.owner)

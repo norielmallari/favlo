@@ -304,9 +304,13 @@ class Qwen35Runtime:
             while done < uncached:
                 self._check()
                 piece = prompt[done : done + _TILE]
-                self._prefill_chunk([int(token) for token in piece])
                 done += len(piece)
+                self._prefill_chunk(
+                    [int(token) for token in piece],
+                    logits=done >= uncached,
+                )
                 progress.note_prefill(self._prefill_progress, done)
+            self.session.wait()
             next_id = self._sample()
         finally:
             self._prefill_seconds = time.perf_counter() - prefill_start
@@ -397,7 +401,7 @@ class Qwen35Runtime:
             offsets=[0, plane.data, plane.scale, 0],
         )
 
-    def _prefill_chunk(self, tokens: list[int]) -> None:
+    def _prefill_chunk(self, tokens: list[int], *, logits: bool) -> None:
         count = len(tokens)
         if count == 0:
             return
@@ -409,8 +413,10 @@ class Qwen35Runtime:
         packed = b"".join(struct.pack("<I", token) for token in tokens)
         if len(tokens) < _TILE:
             packed += b"\x00" * (4 * (_TILE - len(tokens)))
-        memory.store(self.pf_tokens, 0, packed)
         session = self.session
+        # Prior chunk may still be reading pf_tokens / workspace.
+        session.wait()
+        memory.store(self.pf_tokens, 0, packed)
         session.begin()
         if count < row_pad:
             # Clear padded activation rows so matmul tiles stay zero.
@@ -431,18 +437,18 @@ class Qwen35Runtime:
         )
         for layer in range(LAYERS):
             self._prefill_layer(layer, count, row_pad, position0)
-        # Final norm + logits from the last prompt token.
-        last = count - 1
-        session.launch(
-            "copy_row_f32",
-            [self.pf_hidden, self.hidden],
-            [u32(HIDDEN), u32(last)],
-            ((HIDDEN + 255) // 256, 1, 1),
-            (256, 1, 1),
-        )
-        self._rmsnorm(self.hidden, self._planes["final_norm"], self.normed)
-        self._gemv(self.normed, self._planes["embedding"], self.logits, VOCAB, HIDDEN)
-        session.end()
+        if logits:
+            last = count - 1
+            session.launch(
+                "copy_row_f32",
+                [self.pf_hidden, self.hidden],
+                [u32(HIDDEN), u32(last)],
+                ((HIDDEN + 255) // 256, 1, 1),
+                (256, 1, 1),
+            )
+            self._rmsnorm(self.hidden, self._planes["final_norm"], self.normed)
+            self._gemv(self.normed, self._planes["embedding"], self.logits, VOCAB, HIDDEN)
+        session.end(wait=False)
         self.pos = position0 + count
 
     def _prefill_layer(self, layer: int, count: int, row_pad: int, position0: int) -> None:
