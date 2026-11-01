@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import queue
 import sys
 import threading
 import time
@@ -133,7 +134,10 @@ class Console:
         self._cursor_hidden = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._start_thread = start_thread and mode in {"pretty", "json"}
+        # Every mode may enqueue begin/end/note so a slow pipe does not stall
+        # the GPU thread. Tests pass start_thread=False and keep the sync path.
+        self._start_thread = start_thread
+        self._actions: queue.SimpleQueue[tuple[Any, ...]] = queue.SimpleQueue()
         self.fold_turns = False
         self.live_decode = mode == "pretty"
         self._recorder: Callable[[str], None] | None = None
@@ -232,7 +236,15 @@ class Console:
         self._redraw()
 
     def note(self, topic: str, **fields: Any) -> None:
-        """A structured diagnostic. Pretty folds it. Plain and json keep the line."""
+        """A structured diagnostic. Pretty folds it. Plain and json keep the line.
+
+        With the console thread running, the call enqueues and returns. The
+        console thread formats and writes. Prefill and decode do not wait.
+        """
+        if self._start_thread:
+            self._actions.put(("note", topic, dict(fields)))
+            self._ensure_thread()
+            return
         self.log(format_note(topic, **fields))
 
     def draft(self, text: str) -> None:
@@ -401,6 +413,11 @@ class Console:
         gauge: tuple[str, int] | None = None,
         started: float | None = None,
     ) -> Progress:
+        """Open a phase row.
+
+        With the console thread running, the call stores the handle and
+        enqueues the paint. Prefill and decode do not wait for the write.
+        """
         if phase not in PHASES:
             message = f"unknown console phase {phase}"
             raise ValueError(message)
@@ -420,6 +437,30 @@ class Console:
         with self._lock:
             self._handles.append(progress)
             self._turn_due = None
+        if self._start_thread:
+            self._actions.put(("begin", progress))
+            self._ensure_thread()
+            return progress
+        self._emit_begin(progress)
+        return progress
+
+    def end(self, progress: Progress, summary: str) -> None:
+        """Close a phase row.
+
+        With the console thread running, the call marks the row closed and
+        enqueues the summary write. Prefill and decode do not wait for it.
+        """
+        if progress.closed:
+            return
+        progress.summary = summary
+        progress.closed = True
+        if self._start_thread:
+            self._actions.put(("end", progress, summary))
+            self._ensure_thread()
+            return
+        self._emit_end(progress, summary)
+
+    def _emit_begin(self, progress: Progress) -> None:
         if self.mode != "plain":
             self._note_prompt_displaced()
         if self.mode == "json":
@@ -427,16 +468,10 @@ class Console:
         if self.mode == "pretty":
             self._hide_cursor()
             self.sample()
-        self._ensure_thread()
-        return progress
 
-    def end(self, progress: Progress, summary: str) -> None:
-        if progress.closed:
-            return
+    def _emit_end(self, progress: Progress, summary: str) -> None:
         if summary:
             self._record(summary)
-        progress.summary = summary
-        progress.closed = True
         with self._lock:
             if progress in self._handles:
                 self._handles.remove(progress)
@@ -561,13 +596,29 @@ class Console:
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=1)
+        self._drain_actions()
         with self._lock:
             handles = list(self._handles)
         for progress in handles:
-            self.end(progress, progress.summary)
+            if not progress.closed:
+                progress.closed = True
+            self._emit_end(progress, progress.summary)
         with self._lock:
             self._flush_turn(force=True)
         self._show_cursor()
+
+    def flush(self) -> None:
+        """Drain queued begin/end/note work. Tests use this when the thread is off."""
+        if self._start_thread:
+            self._actions.put(("flush",))
+            self._ensure_thread()
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                if self._actions.empty():
+                    return
+                time.sleep(0.01)
+            return
+        self._drain_actions()
 
     def _ensure_thread(self) -> None:
         if not self._start_thread:
@@ -579,8 +630,27 @@ class Console:
         self._thread.start()
 
     def _run(self) -> None:
-        while not self._stop.wait(_TICK):
+        while not self._stop.is_set():
+            self._drain_actions()
             self.sample()
+            self._stop.wait(_TICK)
+        self._drain_actions()
+
+    def _drain_actions(self) -> None:
+        while True:
+            try:
+                action = self._actions.get_nowait()
+            except queue.Empty:
+                return
+            kind = action[0]
+            if kind == "begin":
+                self._emit_begin(action[1])
+            elif kind == "end":
+                self._emit_end(action[1], action[2])
+            elif kind == "note":
+                self.log(format_note(action[1], **action[2]))
+            elif kind == "flush":
+                continue
 
     def _mirror_key(self, event: dict[str, Any]) -> tuple[str, int | None]:
         request = event.get("request")

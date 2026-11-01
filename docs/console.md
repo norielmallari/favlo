@@ -4,6 +4,8 @@ As-built status row for the process. The map is [../ARCHITECTURE.md](../ARCHITEC
 
 `src/favlo/console.py` imports nothing from a pipeline. The listener does not import a pipeline until a request names one. That row's entry file provides `open_runtime` and `handle_chat`. Pipelines report through `begin`, `end`, `note`, and `format_rate`. They do not print their own status rows.
 
+`begin`, `end`, and `note` enqueue onto the `favlo-console` thread and return. That thread formats the line and writes the pipe or the terminal. Prefill and decode store `progress.done` and return; they do not wait for a phase write. A slow reader does not stall the next GPU step. Tests that need the sync path pass `start_thread=False`.
+
 ## Modes
 
 `--console auto` is pretty when stderr is a terminal, and plain when it is a pipe, when `NO_COLOR` is set, or when `TERM` is `dumb`. Progress goes to stderr. [Command Line Interface Guidelines](https://clig.dev/) put the primary result on stdout and messaging on stderr, animate only on a TTY, and hide detail behind a live row while the work runs. Plain prints the lines the harness parses. JSON is one NDJSON object per event, schema version 1.

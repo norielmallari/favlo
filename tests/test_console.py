@@ -654,7 +654,11 @@ def test_each_long_phase_updates_before_it_ends() -> None:
         ui = Console("pretty", pipeline="favlo", stream=stream, color=0, start_thread=True)
         try:
             progress = ui.begin(phase, total=100, unit="tok")
-            assert phase in stream.getvalue()
+
+            def opened(raw: io.StringIO = stream, name: str = phase) -> bool:
+                return name in raw.getvalue()
+
+            assert _wait_until(opened)
             progress.done = 41
 
             def painted(raw: io.StringIO = stream) -> bool:
@@ -664,7 +668,11 @@ def test_each_long_phase_updates_before_it_ends() -> None:
             assert f"{phase} settled" not in stream.getvalue()
             assert not progress.closed
             ui.end(progress, f"{phase} settled")
-            assert f"{phase} settled" in stream.getvalue()
+
+            def settled(raw: io.StringIO = stream, name: str = phase) -> bool:
+                return f"{name} settled" in raw.getvalue()
+
+            assert _wait_until(settled)
         finally:
             ui.close()
 
@@ -692,6 +700,26 @@ def test_json_ticks_while_a_phase_is_still_open() -> None:
             ui.close()
 
 
+def test_begin_end_note_return_before_the_write() -> None:
+    """The GPU thread must not wait on the console pipe."""
+    stream = io.StringIO()
+    ui = Console("plain", pipeline="favlo", stream=stream, start_thread=True)
+    try:
+        progress = ui.begin("prefill", total=10, unit="tok")
+        assert not progress.closed
+        ui.note("prompt", tokens=10)
+        ui.end(progress, "prefill 1.00 tok/s (10 tok in 10.00s)")
+        assert progress.closed
+
+        def written(raw: io.StringIO = stream) -> bool:
+            text = raw.getvalue()
+            return "prompt tokens 10" in text and "prefill 1.00 tok/s" in text
+
+        assert _wait_until(written)
+    finally:
+        ui.close()
+
+
 def test_a_mirrored_tick_shows_before_the_phase_ends() -> None:
     for phase, unit in (
         ("load", "bytes"),
@@ -715,7 +743,11 @@ def test_a_mirrored_tick_shows_before_the_phase_ends() -> None:
             assert _wait_until(painted)
             assert f"{phase} settled" not in stream.getvalue()
             ui.apply_event({"type": "end", "phase": phase, "summary": f"{phase} settled"})
-            assert f"{phase} settled" in stream.getvalue()
+
+            def settled(raw: io.StringIO = stream, name: str = phase) -> bool:
+                return f"{name} settled" in raw.getvalue()
+
+            assert _wait_until(settled)
         finally:
             ui.close()
 
