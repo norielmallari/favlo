@@ -445,6 +445,9 @@ def _check_size(width: int, height: int, steps: int) -> None:
 def _source_of(record: Path) -> Path:
     import json
 
+    packed = record / "tokenizer"
+    if (packed / "tokenizer.json").is_file() and (packed / "tokenizer_config.json").is_file():
+        return record
     body = json.loads((record / "manifest.json").read_text(encoding="utf-8"))
     source = body.get("source")
     if isinstance(source, str) and Path(source).is_dir():

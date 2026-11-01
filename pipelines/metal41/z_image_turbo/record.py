@@ -65,6 +65,8 @@ def quantize(
     if manifest_path.is_file():
         body = json.loads(manifest_path.read_text(encoding="utf-8"))
         if body.get("complete") is True and body.get("format") == fmt:
+            if kind == "int8":
+                _ensure_tokenizer(dest, weights, tokenizer_source)
             return dest
     if dest.exists():
         shutil.rmtree(dest)
@@ -145,6 +147,8 @@ def quantize(
     temporary = manifest_path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(body), encoding="utf-8")
     temporary.replace(manifest_path)
+    if kind == "int8":
+        _install_tokenizer(dest, root)
     return dest
 
 
@@ -222,6 +226,35 @@ def _kind(key: str, shape: tuple[int, ...]) -> str:
         return "fp4"
     message = f"{key} has shape {shape}"
     raise ValueError(message)
+
+
+_TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json")
+
+
+def _tokenizer_ready(dest: Path) -> bool:
+    folder = dest / "tokenizer"
+    return all((folder / name).is_file() for name in _TOKENIZER_FILES)
+
+
+def _ensure_tokenizer(dest: Path, weights: Path, tokenizer_source: Path | None) -> None:
+    """Copy the tokenizer into a finished int8 record that does not have one."""
+    if _tokenizer_ready(dest):
+        return
+    _install_tokenizer(dest, _tokenizer_root(weights, tokenizer_source))
+
+
+def _install_tokenizer(dest: Path, root: Path) -> None:
+    """Copy the caption tokenizer into the packed record."""
+    source = root / "tokenizer"
+    missing = [name for name in _TOKENIZER_FILES if not (source / name).is_file()]
+    if missing:
+        message = f"tokenizer source is missing {', '.join(missing)}"
+        raise FileNotFoundError(message)
+    target = dest / "tokenizer"
+    target.mkdir(parents=True, exist_ok=True)
+    for path in source.iterdir():
+        if path.is_file():
+            shutil.copy2(path, target / path.name)
 
 
 def _tokenizer_root(weights: Path, tokenizer_source: Path | None) -> Path:

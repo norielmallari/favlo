@@ -48,7 +48,7 @@ uv run favlo --z-image-turbo quantize
 
 That command reads `models/Z-Image-Turbo` and registers the folder `Z-Image-Turbo-fp4` in `models/registry.json`. The row stores `models/Z-Image-Turbo-fp4`. The client model field is `Z-Image-Turbo-fp4`. A finished directory has `manifest.json` with `complete: true`. Running `quantize` again on that directory returns it. An unfinished directory is replaced.
 
-`quantize --int8` reads the same checkout. It packs each matrix as symmetric int8 with one float32 scale per output row and writes `models/Z-Image-Turbo-int8`. The fp4 record is not an input. Biases, norms, and the two pad tokens stay float16. The VAE encoder is not packed. The command prints each matrix's relative RMS and the worst matrix.
+`quantize --int8` reads the same checkout. It packs each matrix as symmetric int8 with one float32 scale per output row and writes `models/Z-Image-Turbo-int8`. It also copies `tokenizer/` into that folder. Generation reads that copy. The fp4 record is not an input. Biases, norms, and the two pad tokens stay float16. The VAE encoder is not packed. The command prints each matrix's relative RMS and the worst matrix.
 
 ```bash
 uv run favlo --z-image-turbo quantize --int8
@@ -74,7 +74,7 @@ uv run favlo --z-image-turbo quantize --weights models/example-model.safetensors
 
 That registers `example-model`. The official folder `Z-Image-Turbo-fp4` stays on the official pack.
 
-A weights-only file uses `models/Z-Image-Turbo` for the tokenizer when that checkout contains `tokenizer/tokenizer.json`. Otherwise pass `--tokenizer-source` pointing at a tree that contains `tokenizer/`. `--out` names the packed directory. `--name` and `--out` are not used together. A folder name is one token of letters, digits, dots, underscores, or hyphens. A file name that is not such a token needs `--name`.
+A weights-only file copies the tokenizer from `models/Z-Image-Turbo` when that checkout contains `tokenizer/tokenizer.json`. Otherwise pass `--tokenizer-source` pointing at a tree that contains `tokenizer/`. The copy is written into the packed record. `--out` names the packed directory. `--name` and `--out` are not used together. A folder name is one token of letters, digits, dots, underscores, or hyphens. A file name that is not such a token needs `--name`.
 
 ## Draw a picture
 

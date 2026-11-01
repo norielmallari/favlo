@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import shutil
 import threading
 from pathlib import Path
 
@@ -12,7 +13,14 @@ import pytest
 
 from favlo.reply import MemoryReply
 from z_image_turbo.chat import ImageRequestError, _fields, handle_image
-from z_image_turbo.formats import dequant_fp4, pack_fp4, pack_int8, relative_error, restore_int8, stored_k
+from z_image_turbo.formats import (
+    dequant_fp4,
+    pack_fp4,
+    pack_int8,
+    relative_error,
+    restore_int8,
+    stored_k,
+)
 from z_image_turbo.hold import ImageHold, ImageJob, ImagePaused
 from z_image_turbo.png import ZLIB_LEVEL, encode_png, pack_rgb, unpack_rgb, write_png
 from z_image_turbo.progress import (
@@ -886,10 +894,13 @@ def test_quantize_int8_packs_from_the_float_weights(tmp_path: Path) -> None:
     matrix = np.arange(8 * 32, dtype=np.float32).reshape(8, 32)
     _write_safetensors(weights, {"layers.0.weight": matrix})
     tokenizer = tmp_path / "tokenizer-tree"
-    (tokenizer / "tokenizer").mkdir(parents=True)
+    _write_tokenizer(tokenizer)
     dest = tmp_path / "packed"
     quantize(weights, dest, tokenizer_source=tokenizer, kind="int8")
     body = json.loads((dest / "manifest.json").read_text(encoding="utf-8"))
+    assert (dest / "tokenizer" / "tokenizer.json").read_text() == "tokens"
+    assert (dest / "tokenizer" / "tokenizer_config.json").read_text() == "config"
+    assert (dest / "tokenizer" / "vocab.json").read_text() == "vocab"
     entry = body["tensors"]["layers.0.weight"]
     assert body["format"] == "z-image-turbo-int8"
     assert body["tile_n"] == 128
@@ -898,6 +909,42 @@ def test_quantize_int8_packs_from_the_float_weights(tmp_path: Path) -> None:
     assert entry["stored_k"] == 256
     codes = np.frombuffer((dest / entry["file"]).read_bytes(), dtype=np.int8)
     assert codes.size == 128 * 256
+
+
+def test_a_finished_int8_record_gains_a_tokenizer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    weights = tmp_path / "custom.safetensors"
+    _write_safetensors(weights, {"layers.0.weight": np.ones((8, 32), dtype=np.float32)})
+    tokenizer = tmp_path / "tokenizer-tree"
+    _write_tokenizer(tokenizer)
+    dest = tmp_path / "packed"
+    quantize(weights, dest, tokenizer_source=tokenizer, kind="int8")
+    shutil.rmtree(dest / "tokenizer")
+
+    def _shards(path: Path):
+        del path
+        message = "a finished record was packed again"
+        raise AssertionError(message)
+
+    monkeypatch.setattr("z_image_turbo.record._shards", _shards)
+    quantize(weights, dest, tokenizer_source=tokenizer, kind="int8")
+    assert (dest / "tokenizer" / "tokenizer.json").read_text() == "tokens"
+    assert (dest / "tokenizer" / "vocab.json").read_text() == "vocab"
+
+
+def test_a_packed_tokenizer_is_the_caption_source(tmp_path: Path) -> None:
+    from z_image_turbo.runtime import _source_of
+
+    record = tmp_path / "record"
+    (record / "tokenizer").mkdir(parents=True)
+    (record / "tokenizer" / "tokenizer.json").write_text("{}", encoding="utf-8")
+    (record / "tokenizer" / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    (record / "manifest.json").write_text(
+        json.dumps({"source": str(tmp_path / "missing-checkout")}),
+        encoding="utf-8",
+    )
+    assert _source_of(record) == record
 
 
 def test_quantize_accepts_a_directory_of_safetensors(tmp_path: Path) -> None:
@@ -1029,6 +1076,15 @@ def _write_safetensors(path: Path, arrays: dict[str, np.ndarray]) -> None:
         handle.write(payload)
         for blob in blobs:
             handle.write(blob)
+
+
+def _write_tokenizer(root: Path) -> None:
+    folder = root / "tokenizer"
+    folder.mkdir(parents=True)
+    (folder / "tokenizer.json").write_text("tokens", encoding="utf-8")
+    (folder / "tokenizer_config.json").write_text("config", encoding="utf-8")
+    (folder / "vocab.json").write_text("vocab", encoding="utf-8")
+    (folder / "merges.txt").write_text("merges", encoding="utf-8")
 
 
 class _Row:
