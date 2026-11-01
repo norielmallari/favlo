@@ -8,6 +8,7 @@ token still has to be stepped.
 
 from __future__ import annotations
 
+from favlo.memory import memory
 from favlo.prefix import PrefixHeader, Region, read_regions
 from gemma4_26b_a4b.geometry import (
     GLOBAL_DIM,
@@ -65,6 +66,22 @@ def pack_global(keys: object, values: object, count: int) -> bytes:
     )
 
 
+def pack_token_major(raw: object, heads: int, dim: int, count: int, *, transposed: bool) -> bytes:
+    """Pack one ``[count, heads, dim]`` float16 plane. One head is staged at a time."""
+    if count <= 0 or heads <= 0:
+        return b""
+    import numpy as np
+
+    plane = np.ndarray((count, heads, dim), dtype=np.float16, buffer=raw)
+    parts: list[bytes] = []
+    for head in range(heads):
+        matrix = plane[:, head, :].astype(np.float32)
+        if transposed:
+            matrix = np.ascontiguousarray(matrix.T)
+        parts.append(pack_matrix(matrix, "fp8"))
+    return b"".join(parts)
+
+
 def local_nbytes(count: int) -> int:
     layers = len(local_layers())
     one_key = len(pack_matrix(_zeros((count, LOCAL_DIM)), "fp8"))
@@ -101,12 +118,9 @@ class RuntimeAdapter:
 
     def capture(self) -> list[Region]:
         count = int(self.runtime.filled)
-        keys, values = self.runtime.export_local()
-        ordered = _as_array(values, (len(local_layers()), LOCAL_HEADS, count, LOCAL_DIM))
-        values_kn = ordered.transpose(0, 1, 3, 2)
         return [
-            Region(LOCAL, pack_local(keys, values_kn, count)),
-            Region(GLOBAL, pack_global(*self.runtime.export_global(), count)),
+            Region(LOCAL, _pack_local(self.runtime, count)),
+            Region(GLOBAL, _pack_global(self.runtime, count)),
         ]
 
     def install(self, header: PrefixHeader) -> bool:
@@ -127,6 +141,64 @@ class RuntimeAdapter:
 
     def accept(self, header: PrefixHeader, prompt: list[int]) -> bool:
         return _accept(header, prompt)
+
+
+def _pack_local(runtime: object, count: int) -> bytes:
+    keys: list[bytes] = []
+    values: list[bytes] = []
+    width = count * LOCAL_HEADS * LOCAL_DIM * 2
+    for layer in local_layers():
+        keys.append(
+            pack_token_major(
+                _plane(getattr(runtime, "local_k")[layer], width),
+                LOCAL_HEADS,
+                LOCAL_DIM,
+                count,
+                transposed=False,
+            )
+        )
+        values.append(
+            pack_token_major(
+                _plane(getattr(runtime, "local_v")[layer], width),
+                LOCAL_HEADS,
+                LOCAL_DIM,
+                count,
+                transposed=True,
+            )
+        )
+    return b"".join(keys) + b"".join(values)
+
+
+def _pack_global(runtime: object, count: int) -> bytes:
+    keys: list[bytes] = []
+    values: list[bytes] = []
+    width = count * GLOBAL_HEADS * GLOBAL_DIM * 2
+    for layer in GLOBAL_LAYERS:
+        keys.append(
+            pack_token_major(
+                _plane(getattr(runtime, "global_k")[layer], width),
+                GLOBAL_HEADS,
+                GLOBAL_DIM,
+                count,
+                transposed=False,
+            )
+        )
+        values.append(
+            pack_token_major(
+                _plane(getattr(runtime, "global_v")[layer], width),
+                GLOBAL_HEADS,
+                GLOBAL_DIM,
+                count,
+                transposed=False,
+            )
+        )
+    return b"".join(keys) + b"".join(values)
+
+
+def _plane(handle: object, nbytes: int) -> memoryview:
+    if nbytes < 1:
+        return memoryview(b"")
+    return memory.map(handle, 0, nbytes)
 
 
 def unpack_local(blob: bytes, count: int) -> tuple[object, object]:

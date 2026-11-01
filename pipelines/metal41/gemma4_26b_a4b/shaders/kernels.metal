@@ -1331,6 +1331,122 @@ kernel void attend_span(
     }
 }
 
+// Decode attention. Simdgroups split the key range and merge one online softmax.
+kernel void attend_decode(
+    device const float* queries [[buffer(0)]],
+    device const half* keys [[buffer(1)]],
+    device const half* values [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& query_heads [[buffer(4)]],
+    constant uint& key_heads [[buffer(5)]],
+    constant uint& dim [[buffer(6)]],
+    constant uint& group [[buffer(7)]],
+    constant uint& pos0 [[buffer(8)]],
+    constant uint& count [[buffer(9)]],
+    constant uint& window [[buffer(10)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint simds [[simdgroups_per_threadgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    uint token = tgid.x;
+    uint head = tgid.y;
+    uint width = dim >> 5;
+    uint length = pos0 + token + 1u;
+    uint start = 0u;
+    if (window > 0u && length > window) {
+        start = length - window;
+    }
+    threadgroup float red_max[8];
+    threadgroup float red_mass[8];
+    threadgroup float red_out[8][32][16];
+    if (token >= count || head >= query_heads || simd >= 8u) {
+        return;
+    }
+    uint key_head = head / group;
+    device const float* q = queries + ((ulong)token * query_heads + head) * dim;
+    float qreg[16];
+    for (uint i = 0u; i < 16u; ++i) {
+        qreg[i] = i < width ? q[lane * width + i] : 0.0f;
+    }
+    float running = -INFINITY;
+    float mass = 0.0f;
+    float outv[16];
+    for (uint i = 0u; i < 16u; ++i) {
+        outv[i] = 0.0f;
+    }
+    uint span = length - start;
+    uint chunk = (span + simds - 1u) / simds;
+    uint key0 = start + simd * chunk;
+    uint key1 = key0 + chunk;
+    if (key0 > length) {
+        key0 = length;
+    }
+    if (key1 > length) {
+        key1 = length;
+    }
+    for (uint key = key0; key < key1; ++key) {
+        uint base = (key * key_heads + key_head) * dim + lane * width;
+        float partial = 0.0f;
+        for (uint i = 0u; i < width; i += 4u) {
+            half4 packed = *(device const half4*)(keys + base + i);
+            partial += qreg[i] * float(packed.x);
+            partial += qreg[i + 1u] * float(packed.y);
+            partial += qreg[i + 2u] * float(packed.z);
+            partial += qreg[i + 3u] * float(packed.w);
+        }
+        float score = simd_sum(partial);
+        float next = max(running, score);
+        float fix = exp(running - next);
+        float weight = exp(score - next);
+        running = next;
+        mass = mass * fix + weight;
+        device const half* value = values + base;
+        for (uint i = 0u; i < width; i += 4u) {
+            half4 packed = *(device const half4*)(value + i);
+            outv[i] = outv[i] * fix + weight * float(packed.x);
+            outv[i + 1u] = outv[i + 1u] * fix + weight * float(packed.y);
+            outv[i + 2u] = outv[i + 2u] * fix + weight * float(packed.z);
+            outv[i + 3u] = outv[i + 3u] * fix + weight * float(packed.w);
+        }
+    }
+    if (lane == 0u) {
+        red_max[simd] = running;
+        red_mass[simd] = mass;
+    }
+    for (uint i = 0u; i < 16u; ++i) {
+        red_out[simd][lane][i] = outv[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simd != 0u) {
+        return;
+    }
+    float global = -INFINITY;
+    for (uint part = 0u; part < simds; ++part) {
+        global = max(global, red_max[part]);
+    }
+    float acc[16];
+    for (uint i = 0u; i < 16u; ++i) {
+        acc[i] = 0.0f;
+    }
+    float total = 0.0f;
+    for (uint part = 0u; part < simds; ++part) {
+        if (red_mass[part] == 0.0f) {
+            continue;
+        }
+        float fix = exp(red_max[part] - global);
+        total += red_mass[part] * fix;
+        for (uint i = 0u; i < width; ++i) {
+            acc[i] += red_out[part][lane][i] * fix;
+        }
+    }
+    float inv = total > 0.0f ? 1.0f / total : 0.0f;
+    device float* dest = destination + ((ulong)token * query_heads + head) * dim;
+    for (uint i = 0u; i < width; ++i) {
+        dest[lane * width + i] = acc[i] * inv;
+    }
+}
+
 // Four consecutive queries share each key load. Head dim is 256.
 kernel void attend_span4(
     device const float* queries [[buffer(0)]],
@@ -1621,15 +1737,14 @@ kernel void pad_half_rows(
     destination[(ulong)gid.y * dst_stride + gid.x] = half(value);
 }
 
-// Valid slot rows, scattered with the router scale.
+// Valid slot rows, scattered with the router scale. A sentinel token is padding.
 kernel void scatter_slot_rows(
     device float* destination [[buffer(0)]],
     device const float* source [[buffer(1)]],
-    device const uint* source_row [[buffer(2)]],
-    device const uint* token [[buffer(3)]],
-    device const float* scales [[buffer(4)]],
-    constant uint& width [[buffer(5)]],
-    constant uint& count [[buffer(6)]],
+    device const uint* token [[buffer(2)]],
+    device const float* scales [[buffer(3)]],
+    constant uint& width [[buffer(4)]],
+    constant uint& count [[buffer(5)]],
     uint index [[thread_position_in_grid]])
 {
     if (index >= count * width) {
@@ -1637,8 +1752,135 @@ kernel void scatter_slot_rows(
     }
     uint row = index / width;
     uint col = index - row * width;
-    destination[(ulong)token[row] * width + col] +=
-        scales[row] * source[(ulong)source_row[row] * width + col];
+    uint dest = token[row];
+    if (dest == 0xFFFFFFFFu) {
+        return;
+    }
+    atomic_fetch_add_explicit(
+        (device atomic_float*)(destination + (ulong)dest * width + col),
+        scales[row] * source[(ulong)row * width + col],
+        memory_order_relaxed);
+}
+
+// Group one chunk's route into slots of 64. The grid records are indirect
+// dispatches: gather, gate, geglu, pad, down, scatter. The host does not
+// read the ids.
+kernel void group_expert_slots(
+    device const uint* ids [[buffer(0)]],
+    device const float* weights [[buffer(1)]],
+    device uint* slot_which [[buffer(2)]],
+    device uint* slot_index [[buffer(3)]],
+    device float* slot_scale [[buffer(4)]],
+    device uint* grids [[buffer(5)]],
+    constant uint& count [[buffer(6)]],
+    constant uint& hidden [[buffer(7)]],
+    constant uint& gate_cols [[buffer(8)]],
+    constant uint& expert_width [[buffer(9)]],
+    constant uint& down_k [[buffer(10)]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    threadgroup uint histo[16][128];
+    threadgroup uint slot_of[128];
+    threadgroup uint place[16][128];
+    threadgroup uint nslot;
+    for (uint cell = tid; cell < 16u * 128u; cell += 256u) {
+        histo[cell >> 7u][cell & 127u] = 0u;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint nassign = count * 8u;
+    uint span = (nassign + 15u) >> 4u;
+    if (tid < 16u) {
+        uint begin = tid * span;
+        uint end = begin + span;
+        if (end > nassign) {
+            end = nassign;
+        }
+        for (uint index = begin; index < end; ++index) {
+            uint expert = ids[index];
+            if (expert < 128u) {
+                histo[tid][expert] += 1u;
+            }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0u) {
+        uint cursor = 0u;
+        for (uint expert = 0u; expert < 128u; ++expert) {
+            uint n = 0u;
+            for (uint slice = 0u; slice < 16u; ++slice) {
+                n += histo[slice][expert];
+            }
+            slot_of[expert] = cursor;
+            if (n == 0u) {
+                continue;
+            }
+            uint tiles = (n + 63u) >> 6u;
+            for (uint tile = 0u; tile < tiles; ++tile) {
+                slot_which[cursor + tile] = expert;
+            }
+            cursor += tiles;
+        }
+        uint slots = cursor == 0u ? 1u : cursor;
+        if (cursor == 0u) {
+            slot_which[0] = 0u;
+        }
+        nslot = slots;
+        uint tiled = slots * 64u;
+        device uint* gather = grids;
+        gather[0] = (hidden + 255u) >> 8u;
+        gather[1] = tiled;
+        gather[2] = 1u;
+        device uint* gate = grids + 4u;
+        gate[0] = gate_cols >> 6u;
+        gate[1] = 1u;
+        gate[2] = slots;
+        device uint* geglu = grids + 8u;
+        geglu[0] = (tiled * expert_width + 255u) >> 8u;
+        geglu[1] = 1u;
+        geglu[2] = 1u;
+        device uint* pad = grids + 12u;
+        pad[0] = (down_k + 255u) >> 8u;
+        pad[1] = tiled;
+        pad[2] = 1u;
+        device uint* down = grids + 16u;
+        down[0] = hidden >> 6u;
+        down[1] = 1u;
+        down[2] = slots;
+        device uint* scatter = grids + 20u;
+        scatter[0] = (tiled * hidden + 255u) >> 8u;
+        scatter[1] = 1u;
+        scatter[2] = 1u;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint row = tid; row < 256u * 64u; row += 256u) {
+        slot_index[row] = 0xffffffffu;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < 16u) {
+        for (uint expert = 0u; expert < 128u; ++expert) {
+            uint base = 0u;
+            for (uint slice = 0u; slice < tid; ++slice) {
+                base += histo[slice][expert];
+            }
+            place[tid][expert] = base;
+        }
+        uint begin = tid * span;
+        uint end = begin + span;
+        if (end > nassign) {
+            end = nassign;
+        }
+        for (uint index = begin; index < end; ++index) {
+            uint expert = ids[index];
+            if (expert >= 128u) {
+                continue;
+            }
+            uint local = place[tid][expert];
+            place[tid][expert] = local + 1u;
+            uint row = (slot_of[expert] + (local >> 6u)) * 64u + (local & 63u);
+            slot_index[row] = index >> 3u;
+            slot_scale[row] = weights[index];
+        }
+    }
 }
 
 // Sixteen fp4 values, eight code bytes. The low nibble is the even element.
@@ -2097,4 +2339,247 @@ kernel void sample_topk(
         }
     }
     chosen[0] = pick;
+}
+
+// Float rows of width `count` into half rows of width `stride`. Columns at
+// and after `count`, and rows at and after `valid`, are zero.
+kernel void write_rows_tight(
+    device const float* source [[buffer(0)]],
+    device half* destination [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    constant uint& stride [[buffer(3)]],
+    constant uint& valid [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= stride) {
+        return;
+    }
+    float value = 0.0f;
+    if (gid.y < valid && gid.x < count) {
+        value = source[(ulong)gid.y * count + gid.x];
+    }
+    destination[(ulong)gid.y * stride + gid.x] = half(value);
+}
+
+// Per-token mean and variance, then the learned scale and bias. ε is 10⁻⁶.
+kernel void vision_standardize(
+    device float* rows [[buffer(0)]],
+    device const float* scale [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    constant uint& width [[buffer(3)]],
+    constant float& eps [[buffer(4)]],
+    constant uint& count [[buffer(5)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]],
+    uint span [[threads_per_threadgroup]])
+{
+    if (row >= count) {
+        return;
+    }
+    threadgroup float parts[32];
+    device float* values = rows + (ulong)row * width;
+    float sum = 0.0f;
+    for (uint index = lane; index < width; index += span) {
+        sum += values[index];
+    }
+    float grouped = simd_sum(sum);
+    if ((lane & 31u) == 0u) {
+        parts[lane >> 5] = grouped;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0u) {
+        float total = 0.0f;
+        uint groups = span >> 5;
+        for (uint index = 0u; index < groups; ++index) {
+            total += parts[index];
+        }
+        parts[0] = total / float(width);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float mean = parts[0];
+    float var = 0.0f;
+    for (uint index = lane; index < width; index += span) {
+        float delta = values[index] - mean;
+        var += delta * delta;
+    }
+    grouped = simd_sum(var);
+    if ((lane & 31u) == 0u) {
+        parts[lane >> 5] = grouped;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0u) {
+        float total = 0.0f;
+        uint groups = span >> 5;
+        for (uint index = 0u; index < groups; ++index) {
+            total += parts[index];
+        }
+        parts[0] = rsqrt(total / float(width) + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float inv = parts[0];
+    for (uint index = lane; index < width; index += span) {
+        values[index] = (values[index] - mean) * inv * scale[index] + bias[index];
+    }
+}
+
+// Add axis 0 at the row and axis 1 at the column.
+kernel void vision_positions(
+    device float* tokens [[buffer(0)]],
+    device const float* row_table [[buffer(1)]],
+    device const float* col_table [[buffer(2)]],
+    constant uint& grid_w [[buffer(3)]],
+    constant uint& width [[buffer(4)]],
+    constant uint& count [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= width || gid.y >= count) {
+        return;
+    }
+    uint row = gid.y / grid_w;
+    uint col = gid.y - row * grid_w;
+    tokens[(ulong)gid.y * width + gid.x] +=
+        row_table[(ulong)row * width + gid.x] + col_table[(ulong)col * width + gid.x];
+}
+
+// Axial 2D-RoPE. The first half of the head rotates with the row, the second
+// half with the column. Each half pairs its first 18 values with its second 18.
+kernel void rope_axial(
+    device float* queries [[buffer(0)]],
+    device float* keys [[buffer(1)]],
+    constant uint& heads [[buffer(2)]],
+    constant uint& grid_w [[buffer(3)]],
+    constant float& theta [[buffer(4)]],
+    constant uint& count [[buffer(5)]],
+    uint token [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]],
+    uint span [[threads_per_threadgroup]])
+{
+    if (token >= count) {
+        return;
+    }
+    uint row = token / grid_w;
+    uint col = token - row * grid_w;
+    uint pairs = 18u;
+    uint total = heads * pairs * 2u;
+    for (uint gid = lane; gid < total; gid += span) {
+        uint plane = gid / (heads * pairs);
+        uint local = gid - plane * heads * pairs;
+        uint head = local / pairs;
+        uint pair = local - head * pairs;
+        float fraction = (2.0f * float(pair)) / 36.0f;
+        float angle_scale = pow(theta, fraction);
+        device float* base = queries;
+        if (plane != 0u) {
+            base = keys;
+        }
+        base += ((ulong)token * heads + head) * 72u;
+        float sine_y = sin(float(row) / angle_scale);
+        float cosine_y = cos(float(row) / angle_scale);
+        float left = base[pair];
+        float right = base[18u + pair];
+        base[pair] = left * cosine_y - right * sine_y;
+        base[18u + pair] = right * cosine_y + left * sine_y;
+        float sine_x = sin(float(col) / angle_scale);
+        float cosine_x = cos(float(col) / angle_scale);
+        left = base[36u + pair];
+        right = base[54u + pair];
+        base[36u + pair] = left * cosine_x - right * sine_x;
+        base[54u + pair] = right * cosine_x + left * sine_x;
+    }
+}
+
+// Non-causal attention for head dimension 72. The score is the dot times `scale`.
+kernel void attend_vision(
+    device const float* queries [[buffer(0)]],
+    device const float* keys [[buffer(1)]],
+    device const float* values [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& heads [[buffer(4)]],
+    constant uint& count [[buffer(5)]],
+    constant float& scale [[buffer(6)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    uint token = tgid.x;
+    uint head = tgid.y;
+    if (token >= count || head >= heads) {
+        return;
+    }
+    device const float* q = queries + ((ulong)token * heads + head) * 72u;
+    float q0 = q[lane];
+    float q1 = q[lane + 32u];
+    float q2 = lane + 64u < 72u ? q[lane + 64u] : 0.0f;
+    float running = -INFINITY;
+    float mass = 0.0f;
+    float out0 = 0.0f;
+    float out1 = 0.0f;
+    float out2 = 0.0f;
+    for (uint key = 0u; key < count; ++key) {
+        device const float* packed = keys + ((ulong)key * heads + head) * 72u;
+        float partial = q0 * packed[lane] + q1 * packed[lane + 32u];
+        if (lane + 64u < 72u) {
+            partial += q2 * packed[lane + 64u];
+        }
+        float score = simd_sum(partial) * scale;
+        float next = max(running, score);
+        float fix = exp(running - next);
+        float weight = exp(score - next);
+        running = next;
+        mass = mass * fix + weight;
+        device const float* value = values + ((ulong)key * heads + head) * 72u;
+        out0 = out0 * fix + weight * value[lane];
+        out1 = out1 * fix + weight * value[lane + 32u];
+        if (lane + 64u < 72u) {
+            out2 = out2 * fix + weight * value[lane + 64u];
+        }
+    }
+    float inv = mass > 0.0f ? 1.0f / mass : 0.0f;
+    device float* dest = destination + ((ulong)token * heads + head) * 72u;
+    dest[lane] = out0 * inv;
+    dest[lane + 32u] = out1 * inv;
+    if (lane + 64u < 72u) {
+        dest[lane + 64u] = out2 * inv;
+    }
+}
+
+// Non-overlapping 3×3 average. `grid_w` is the patch columns.
+kernel void pool_patches(
+    device const float* source [[buffer(0)]],
+    device float* destination [[buffer(1)]],
+    constant uint& grid_w [[buffer(2)]],
+    constant uint& width [[buffer(3)]],
+    constant uint& soft [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.y >= soft || gid.x >= width) {
+        return;
+    }
+    uint pooled_w = grid_w / 3u;
+    uint pr = gid.y / pooled_w;
+    uint pc = gid.y - pr * pooled_w;
+    float sum = 0.0f;
+    for (uint dy = 0u; dy < 3u; ++dy) {
+        for (uint dx = 0u; dx < 3u; ++dx) {
+            uint row = pr * 3u + dy;
+            uint col = pc * 3u + dx;
+            sum += source[((ulong)row * grid_w + col) * width + gid.x];
+        }
+    }
+    destination[(ulong)gid.y * width + gid.x] = sum * (1.0f / 9.0f);
+}
+
+// Copy `dst_stride` columns out of a wider matmul row.
+kernel void compact_rows(
+    device const float* source [[buffer(0)]],
+    device float* destination [[buffer(1)]],
+    constant uint& src_stride [[buffer(2)]],
+    constant uint& dst_stride [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.y >= rows || gid.x >= dst_stride) {
+        return;
+    }
+    destination[(ulong)gid.y * dst_stride + gid.x] =
+        source[(ulong)gid.y * src_stride + gid.x];
 }

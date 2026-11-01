@@ -25,8 +25,10 @@ _KERNELS = (
     "gather_half_slots",
     "pad_half_rows",
     "scatter_slot_rows",
+    "group_expert_slots",
     "gemv_fp4_routed",
     "write_rows",
+    "write_rows_tight",
     "gemv_q4_0",
     "gemv_q4_0_routed",
     "mix_experts",
@@ -46,9 +48,12 @@ _KERNELS = (
     "sample_topk",
     "rope_pairs",
     "rope_rows",
+    "rope_axial",
     "attend",
     "attend_span",
+    "attend_decode",
     "attend_span4",
+    "attend_vision",
     "store_kv",
     "store_kv_rows",
     "geglu",
@@ -59,6 +64,10 @@ _KERNELS = (
     "residual_scale",
     "add_scaled",
     "scale_copy",
+    "vision_standardize",
+    "vision_positions",
+    "pool_patches",
+    "compact_rows",
     "softcap",
     "router_norm",
 )
@@ -156,6 +165,44 @@ class Session:
             encoder.setBytes_length_atIndex_(blob, len(blob), base + index)
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(
             self.metal.MTLSizeMake(groups[0], groups[1], groups[2]),
+            self.metal.MTLSizeMake(threads[0], threads[1], threads[2]),
+        )
+
+    def split(self) -> None:
+        """End this encoder so the next one can indirect-dispatch a buffer it wrote."""
+        self._open()
+        encoder = self._encoder
+        encoder.updateFence_(self._fence)
+        self._fence_armed = True
+        encoder.endEncoding()
+        encoder = self._command.computeCommandEncoder()
+        encoder.waitForFence_(self._fence)
+        self._encoder = encoder
+
+    def encode_indirect(
+        self,
+        name: str,
+        handles: list[object],
+        constants: list[bytes],
+        indirect: object,
+        indirect_offset: int,
+        threads: tuple[int, int, int],
+        origins: list[int] | None = None,
+    ) -> None:
+        """Dispatch ``name``. Three uints at ``indirect_offset`` are the grid."""
+        self._open()
+        encoder = self._encoder
+        encoder.setComputePipelineState_(self.pipes[name])
+        for index, handle in enumerate(handles):
+            origin = 0 if origins is None else origins[index]
+            memory.bind(encoder, index, handle, origin)
+        base = len(handles)
+        for index, blob in enumerate(constants):
+            encoder.setBytes_length_atIndex_(blob, len(blob), base + index)
+        memory.bind_indirect(
+            encoder,
+            indirect,
+            indirect_offset,
             self.metal.MTLSizeMake(threads[0], threads[1], threads[2]),
         )
 

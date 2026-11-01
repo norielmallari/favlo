@@ -45,6 +45,14 @@ def test_reasoning_returns_on_its_own_field() -> None:
     ]
 
 
+def test_the_reasoning_field_is_the_trace() -> None:
+    class _Delta:
+        model_extra = {"reasoning": "Look at the notes."}
+
+    parsed = read_reasoning(_Delta(), [])
+    assert parsed[0].text == "Look at the notes."
+
+
 def test_reasoning_delta_is_not_reply_text() -> None:
     class _Delta:
         model_extra = {"reasoning_content": "look"}

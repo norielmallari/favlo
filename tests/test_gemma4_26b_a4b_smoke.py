@@ -122,3 +122,56 @@ def test_carrot_thinking_recommended(carrot_runtime: Gemma4Runtime) -> None:
         print(f"thinking card seed {seed}: {text[:160]}")
         return
     raise AssertionError("carrot reply did not collect 6 carrots\n" + "\n".join(misses))
+
+
+def test_prefill_and_decode_counts_advance(carrot_runtime: Gemma4Runtime) -> None:
+    import json
+
+    from favlo.console import Console
+
+    class _Sink:
+        def __init__(self) -> None:
+            self.parts: list[str] = []
+
+        def write(self, text: str) -> int:
+            self.parts.append(text)
+            return len(text)
+
+        def flush(self) -> None:
+            return None
+
+    sink = _Sink()
+    console = Console("json", pipeline="gemma4-26b-a4b", stream=sink, start_thread=True)
+    console.live_decode = True
+    carrot_runtime.console = console
+    try:
+        prompt = encode_chat(
+            carrot_runtime.root,
+            [{"role": "user", "content": (CARROT_PROMPT + " ") * 12}],
+            False,
+        )
+        tokens, prefill_line, _decode_line = carrot_runtime.generate(
+            prompt, 64, 0.0, 1.0, 1, 0.0, seed=0
+        )
+        print(prefill_line, flush=True)
+        del tokens
+    finally:
+        carrot_runtime.console = None
+        console.close()
+    events = []
+    for line in "".join(sink.parts).splitlines():
+        text = line.strip()
+        if text.startswith("{"):
+            events.append(json.loads(text))
+    prefill = [
+        int(event["done"])
+        for event in events
+        if event.get("type") == "tick" and event.get("phase") == "prefill"
+    ]
+    decode = [
+        int(event["done"])
+        for event in events
+        if event.get("type") == "tick" and event.get("phase") == "decode"
+    ]
+    assert prefill and max(prefill) > min(prefill)
+    assert decode and max(decode) > min(decode)

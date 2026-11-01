@@ -11,21 +11,32 @@ _QUOTE = '<|"|>'
 
 
 def parse_tool_calls(text: str) -> tuple[str | None, list[dict[str, Any]]]:
-    """Leading text, then each complete ``<|tool_call>call:`` block."""
+    """Text outside complete ``<|tool_call>call:`` blocks, then those calls.
+
+    Text before the first call, between calls, and after the last call stays
+    in the reply. An unclosed call stays in the reply too.
+    """
     calls: list[dict[str, Any]] = []
+    pieces: list[str] = []
     cursor = 0
-    prefix_end: int | None = None
     while True:
         start = text.find(_OPEN, cursor)
         if start < 0:
+            tail = text[cursor:].strip()
+            if tail:
+                pieces.append(tail)
             break
+        gap = text[cursor:start].strip()
+        if gap:
+            pieces.append(gap)
         name_at = start + len(_OPEN)
         brace = text.find("{", name_at)
         close = text.find(_CLOSE, name_at)
         if brace < 0 or close < 0 or brace > close:
+            rest = text[start:].strip()
+            if rest:
+                pieces.append(rest)
             break
-        if prefix_end is None:
-            prefix_end = start
         name = text[name_at:brace].strip()
         body_end = close - 1 if text[close - 1] == "}" else close
         arguments = _arguments(text[brace + 1 : body_end])
@@ -40,10 +51,10 @@ def parse_tool_calls(text: str) -> tuple[str | None, list[dict[str, Any]]]:
             }
         )
         cursor = close + len(_CLOSE)
-    if not calls or prefix_end is None:
+    if not calls:
         return text, []
-    prefix = text[:prefix_end].strip()
-    return (prefix or None), calls
+    body = "\n".join(pieces).strip()
+    return (body or None), calls
 
 
 def _arguments(body: str) -> dict[str, Any]:
@@ -160,6 +171,129 @@ def _json_string(text: str, index: int) -> tuple[str, int]:
                 return text[index + 1 : end], end + 1
         end += 1
     return text[index:], len(text)
+
+
+_THOUGHT = "<|channel>thought"
+_THOUGHT_CLOSE = "<channel|>"
+
+
+def _held_suffix(text: str, marker: str) -> int:
+    """How many trailing characters of ``text`` are a proper prefix of ``marker``."""
+    limit = min(len(text), len(marker) - 1)
+    for size in range(limit, 0, -1):
+        if marker.startswith(text[-size:]):
+            return size
+    return 0
+
+
+class StreamText:
+    """Reasoning and reply as tokens arrive.
+
+    An open thought, including one the prompt already started, is reasoning
+    until ``<channel|>`` or ``<|tool_call>``. A finished call is held out of
+    the reply so the caller can send ``tool_calls``. Text after that call is
+    split again. An unclosed call is the reply.
+    """
+
+    def __init__(self, *, channel_open: bool) -> None:
+        self._reasoning = channel_open
+        self._held = ""
+        self._call = ""
+        self._in_call = False
+
+    def push(self, piece: str) -> list[tuple[str, str]]:
+        if piece == "":
+            return []
+        if self._in_call:
+            self._call += piece
+            return self._close_call()
+        self._held += piece
+        if self._reasoning:
+            return self._push_reasoning()
+        return self._push_reply()
+
+    def finish(self) -> list[tuple[str, str]]:
+        if self._in_call:
+            text = self._call
+            self._call = ""
+            self._in_call = False
+            return [("content", text)] if text else []
+        if not self._held:
+            return []
+        channel = "reasoning" if self._reasoning else "content"
+        text = self._held
+        self._held = ""
+        return [(channel, text)] if text else []
+
+    def _close_call(self) -> list[tuple[str, str]]:
+        at = self._call.find(_CLOSE)
+        if at < 0:
+            return []
+        rest = self._call[at + len(_CLOSE) :]
+        self._call = ""
+        self._in_call = False
+        self._reasoning = False
+        if rest.startswith("\n"):
+            rest = rest[1:]
+        return self.push(rest)
+
+    def _push_reasoning(self) -> list[tuple[str, str]]:
+        close_at = self._held.find(_THOUGHT_CLOSE)
+        tool_at = self._held.find(_OPEN)
+        if tool_at >= 0 and (close_at < 0 or tool_at < close_at):
+            reasoning = self._held[:tool_at]
+            rest = self._held[tool_at:]
+            self._held = ""
+            self._reasoning = False
+            self._call = rest
+            self._in_call = True
+            out = [("reasoning", reasoning)] if reasoning else []
+            out.extend(self._close_call())
+            return out
+        if close_at < 0:
+            return self._emit_held("reasoning", _THOUGHT_CLOSE, _OPEN)
+        reasoning = self._held[:close_at]
+        rest = self._held[close_at + len(_THOUGHT_CLOSE) :]
+        self._held = ""
+        self._reasoning = False
+        if rest.startswith("\n"):
+            rest = rest[1:]
+        out = [("reasoning", reasoning)] if reasoning else []
+        out.extend(self.push(rest))
+        return out
+
+    def _push_reply(self) -> list[tuple[str, str]]:
+        tool_at = self._held.find(_OPEN)
+        thought_at = self._held.find(_THOUGHT)
+        if tool_at >= 0 and (thought_at < 0 or tool_at < thought_at):
+            emit = self._held[:tool_at]
+            self._call = self._held[tool_at:]
+            self._held = ""
+            self._in_call = True
+            out = [("content", emit)] if emit else []
+            out.extend(self._close_call())
+            return out
+        if thought_at >= 0:
+            emit = self._held[:thought_at]
+            rest = self._held[thought_at + len(_THOUGHT) :]
+            self._held = ""
+            self._reasoning = True
+            if rest.startswith("\n"):
+                rest = rest[1:]
+            out = [("content", emit)] if emit else []
+            out.extend(self.push(rest))
+            return out
+        return self._emit_held("content", _OPEN, _THOUGHT)
+
+    def _emit_held(self, channel: str, *markers: str) -> list[tuple[str, str]]:
+        keep = max(_held_suffix(self._held, marker) for marker in markers)
+        if keep == 0:
+            emit = self._held
+            self._held = ""
+        else:
+            emit = self._held[:-keep]
+            self._held = self._held[-keep:]
+        return [(channel, emit)] if emit else []
 
 
 def _skip(text: str, index: int) -> int:

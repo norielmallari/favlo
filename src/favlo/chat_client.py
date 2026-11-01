@@ -10,17 +10,23 @@ from typing import Any
 
 
 def reasoning_text(message: Any) -> str:
-    """``reasoning_content`` on a completion message or a stream delta."""
+    """The trace on a completion message or a stream delta.
+
+    ``reasoning`` is the OpenAI field. ``reasoning_content`` is the same trace
+    on clients that still read that name.
+    """
     if message is None:
         return ""
-    value = getattr(message, "reasoning_content", None)
-    if isinstance(value, str) and value:
-        return value
+    for name in ("reasoning", "reasoning_content"):
+        value = getattr(message, name, None)
+        if isinstance(value, str) and value.strip():
+            return value
     extra = getattr(message, "model_extra", None)
     if isinstance(extra, dict):
-        raw = extra.get("reasoning_content")
-        if isinstance(raw, str) and raw:
-            return raw
+        for name in ("reasoning", "reasoning_content"):
+            raw = extra.get(name)
+            if isinstance(raw, str) and raw.strip():
+                return raw
     return ""
 
 

@@ -1,6 +1,6 @@
 ---
-description: How a served language model implements LanguagePipeline, and when to run the language harness.
-globs: src/favlo/pipeline.py,src/favlo/language_pipeline.py,harness/language_pipeline.py,tests/test_language_pipeline.py,pipelines/metal41/qwen36_35b_a3b/**,pipelines/metal41/qwen38_27b/**,pipelines/metal41/qwen38_flash_next/**,docs/qwen36-35b-a3b/**,docs/qwen38-27b/**,docs/qwen38-flash-next/**
+description: How a served language model implements LanguagePipeline. Chat follows the OpenAI Chat Completions object, not another pipeline. NumPy stays off the hot serving path.
+globs: src/favlo/pipeline.py,src/favlo/language_pipeline.py,harness/language_pipeline.py,tests/test_language_pipeline.py,pipelines/metal41/qwen36_35b_a3b/**,pipelines/metal41/qwen38_27b/**,pipelines/metal41/qwen38_flash_next/**,pipelines/metal41/gemma4_26b_a4b/**,docs/qwen36-35b-a3b/**,docs/qwen38-27b/**,docs/qwen38-flash-next/**,docs/gemma4-26b-a4b/**
 alwaysApply: false
 ---
 
@@ -13,6 +13,24 @@ Bind `handle_chat = Pipeline()`. `complete` is the pipeline's own chat, includin
 `on_open` is the work that already sits outside the try. qwen36 and qwen38-27b reset `_halted` and set `runtime._stop` there. Flash Next only calls `open_request` there. `prepare` is inside the outer try and outside the disconnect try. Only Flash Next uses it, for the tool fields and the sampler. `on_finish` keeps that pipeline's current order and always runs after `prepare`. Hooks are called directly. Do not swallow a hook exception.
 
 A new abstract method on `LanguagePipeline` updates every served language subclass in that same change. A new abstract method on `Pipeline` updates every subclass of every seam.
+
+`POST /v1/chat/completions` returns an OpenAI Chat Completions object. That object is the standard for a pipeline's chat. Another pipeline's chat, stream, or markup parser is not a reference. Read the OpenAI fields and this model's own card.
+
+`content` is the reply. It is null when the model only calls a tool. `tool_calls` are the calls, in the OpenAI function shape. `reasoning` is the trace when the model wrote one. `reasoning_content` is that same text. An empty thought is not that field. `finish_reason` is `stop`, `length`, or `tool_calls`. The reply fills `usage` with the OpenAI token fields and `max_prompt_tokens` before the body is encoded. A pipeline may set `cached_tokens`, `context_length`, and `max_prompt_tokens`. Missing standard fields are filled.
+
+The pipeline converts its own markup into those fields before the object is written. Markers stay out of `content`. A call becomes `tool_calls`. An open trace stays `reasoning_content` and does not become the reply. A call that starts before the trace closes ends the trace. The marker strings belong to that model. They are not taken from a sibling pipeline.
+
+NumPy stays off the hot serving path. Prefill, decode, routing, expert grouping, and sampling do not import it, build an array with it, or read a device buffer back through it. The sampled token id may come back as bytes. Checkpoint packing, prefix packing, and the kernel self-checks are not that path.
+
+Wrong: a prefill span that downloads expert ids into a NumPy array and rebuilds the slot tables on the host.
+
+Right: the route result stays on device, and a Metal kernel writes the slot tables the gather and scatter already read.
+
+MAF and other clients pass those fields through. They do not scan for markup, close a trace, or copy reasoning into the reply. The chat client in `src/favlo/chat_client.py` is that pass-through. A harness does not add its own parser for markup.
+
+Wrong: a client that treats `reasoning_content` as `content`, a shared sampler in `LanguagePipeline`, or a chat path copied from another pipeline.
+
+Right: the pipeline writes the Chat Completions object from its own markup, and the client stores `content` and `tool_calls` as returned.
 
 After a change to this shell, run:
 

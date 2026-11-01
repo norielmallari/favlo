@@ -1,6 +1,10 @@
 # References
 
-Gemma Team. *Gemma 4 Technical Report.* 2026. [arXiv:2607.02770](https://arxiv.org/abs/2607.02770). The 26B-A4B decoder, the sliding and global layers, the per-layer scalar, and the final logit soft cap. Section 2.5 names Q4_0 as blockwise quantization of 32 values. This record stores the scale as bfloat16.
+Gemma Team. *Gemma 4 Technical Report.* 2026. [arXiv:2607.02770](https://arxiv.org/abs/2607.02770). The 26B-A4B decoder, the sliding and global layers, the per-layer scalar, and the final logit soft cap. Section 2.5 names Q4_0 as blockwise quantization of 32 values. This record stores the scale as bfloat16. Algorithm 1 and Figure 2 resize an image to a multiple of the pooled patch and pool the encoder 3×3. Table 10 is the 550M width, MLP, heads, and depth. Table 12 evaluates this checkpoint at `N_max` = 280.
+
+Dosovitskiy et al. *An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale.* 2021. [arXiv:2010.11929](https://arxiv.org/abs/2010.11929). The 550M tower is this ViT: patch 16, pre-norm residuals, and scaled dot-product attention.
+
+Heo, Park, Han, and Yun. *Rotary Position Embedding for Vision Transformer.* 2024. [arXiv:2403.13298](https://arxiv.org/abs/2403.13298). Axial 2D-RoPE rotates one half of the head with the row and the other half with the column. This tower uses θ = 100 from the vision config.
 
 mlx-lm. `gemma4_text.py`. The text layer adds the attention residual and both feed-forward residuals at scale one, then multiplies by `layer_scalar`. The dense MLP uses `pre_feedforward_layernorm` and `post_feedforward_layernorm_1`. Routed experts use `pre_feedforward_layernorm_2` and `post_feedforward_layernorm_2`. The router normalizes with `router.scale` times `hidden**-0.5`. The token embedding is multiplied by `sqrt(hidden)`. Logits use the tied embedding with no extra scale. Attention uses scale 1. Values use RMSNorm with no scale: a global value is that norm of the key projection and is not rotated.
 

@@ -25,6 +25,12 @@ GLOBAL_DIM = 512
 VISION_WIDTH = 1152
 VISION_MLP = 4304
 VISION_HEAD = 72
+VISION_HEADS = 16
+PATCH = 16
+POOL = 3
+VISION_SOFT_MAX = 280
+IMAGE_TOKEN = 258880
+VISION_ROPE = 100.0
 RMS_EPS = 1e-6
 SOFTCAP = 30.0
 TOP_K = 8
@@ -39,6 +45,39 @@ RESIDENT = "resident"
 EXPERT_UP = "expert-up"
 EXPERT_DOWN = "expert-down"
 FP16 = "fp16"
+
+
+def pooled_size(height: int, width: int, *, n_max: int = VISION_SOFT_MAX) -> tuple[int, int, int]:
+    """Resized height, width, and soft-token count.
+
+    Algorithm 1 of the Gemma 4 technical report. The pooled patch is ``POOL``
+    times ``PATCH``. Each side rounds down to a multiple of that patch. A side
+    that rounds to zero becomes one pooled patch, and the longer side shrinks
+    until the count is at most ``n_max``.
+    """
+    if height < 1 or width < 1 or n_max < 1:
+        message = f"image {height}x{width} cannot be resized for {n_max} soft tokens"
+        raise ValueError(message)
+    pooled = POOL * PATCH
+    scale = (n_max * pooled * pooled / (height * width)) ** 0.5
+
+    def snap(side: int) -> int:
+        snapped = int((scale * side) // pooled) * pooled
+        if snapped < pooled:
+            return pooled
+        return snapped
+
+    target_h = snap(height)
+    target_w = snap(width)
+    while (target_h // pooled) * (target_w // pooled) > n_max:
+        if target_h >= target_w and target_h > pooled:
+            target_h -= pooled
+        elif target_w > pooled:
+            target_w -= pooled
+        else:
+            break
+    soft = (target_h // pooled) * (target_w // pooled)
+    return target_h, target_w, soft
 
 
 def local_layers() -> tuple[int, ...]:

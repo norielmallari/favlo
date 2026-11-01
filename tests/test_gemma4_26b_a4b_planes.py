@@ -24,6 +24,7 @@ from gemma4_26b_a4b.prefix import (
     local_nbytes,
     pack_global,
     pack_local,
+    pack_token_major,
 )
 from gemma4_26b_a4b.promote import promotion_count, select_promoted
 
@@ -144,6 +145,40 @@ def test_bf16_reader_slices_one_expert(tmp_path: Path) -> None:
     loaded = load_tensor(tmp_path, names["experts"], "experts", 1)
     assert loaded.shape == (2, 2)
     assert abs(float(loaded[0, 0]) - 3.0) < 0.05
+
+
+def test_token_major_pack_matches_the_host_planes() -> None:
+    count = 4
+    rng = np.random.default_rng(0)
+    local_k = rng.standard_normal((25, 8, count, 256)).astype(np.float16)
+    local_v = rng.standard_normal((25, 8, count, 256)).astype(np.float16)
+    global_k = rng.standard_normal((5, 2, count, 512)).astype(np.float16)
+    global_v = rng.standard_normal((5, 2, count, 512)).astype(np.float16)
+    assert _packed_layers(local_k, transposed=False) + _packed_layers(
+        local_v, transposed=True
+    ) == pack_local(
+        local_k.astype(np.float32),
+        np.transpose(local_v.astype(np.float32), (0, 1, 3, 2)),
+        count,
+    )
+    assert _packed_layers(global_k, transposed=False) + _packed_layers(
+        global_v, transposed=False
+    ) == pack_global(
+        global_k.astype(np.float32),
+        global_v.astype(np.float32),
+        count,
+    )
+
+
+def _packed_layers(plane: np.ndarray, *, transposed: bool) -> bytes:
+    layers, heads, _count, dim = plane.shape
+    parts: list[bytes] = []
+    for layer in range(layers):
+        token_major = np.ascontiguousarray(np.transpose(plane[layer], (1, 0, 2)))
+        parts.append(
+            pack_token_major(token_major.tobytes(), heads, dim, plane.shape[2], transposed=transposed)
+        )
+    return b"".join(parts)
 
 
 def test_prefix_pack_length_and_exact_file_refusal() -> None:
