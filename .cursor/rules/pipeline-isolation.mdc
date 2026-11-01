@@ -6,7 +6,7 @@ alwaysApply: false
 
 Edit one runtime. Leave every other runtime's files untouched. Pipeline tests share one machine lock so several agents can edit different pipelines at the same time and only one of them runs on the GPU.
 
-`favlo serve` is the entry point for inference. The client selects one model through the OpenAI endpoints: `GET /v1/models` lists the registry, and the `model` field on `POST /v1/chat/completions` loads that row's pipeline. Quantize and the other non-serve commands require `favlo --<pipeline>`. A new runtime keeps that flag.
+`favlo serve` is the entry point for inference. The client selects one model through the OpenAI endpoints: `GET /v1/models` lists the registry, and the `model` field on `POST /v1/responses` loads that row's pipeline. `POST /v1/chat/completions` translates into that request and translates the Response back. Quantize and the other non-serve commands require `favlo --<pipeline>`. A new runtime keeps that flag.
 
 The write set for a runtime is its entry file (`pipelines/metal41/<pipeline>.py`, which sets `PIPELINE` to that stem), its package beside that file, `docs/<pipeline>/`, and tests that import only that package. Flash Next's note is `docs/qwen38-flash-next/`. 27B's note is `docs/qwen38-27b/`.
 

@@ -10,12 +10,12 @@ from favlo.guides import read_guide, read_setup, setup_pipelines
 def test_clients_guide_names_this_server() -> None:
     text = read_guide("clients")
     assert "http://127.0.0.1:8129/v1" in text
-    assert "qwen36-35b-a3b" in text
+    assert "qwen35-4b" in text
     assert "API key" in text
     assert "POST /v1/pipelines/reload" in text
     assert "does not call a model" in text
     assert "Ctrl+C" in text
-    assert "Qwen3.6-35B-A3B" in text
+    assert "Qwen3.5-4B" in text
 
 
 def test_models_guide_names_the_official_checkpoints() -> None:

@@ -26,7 +26,7 @@ From a checkout of this repository:
 uv sync --extra dev
 ```
 
-The package is not published to PyPI. Later commands use `uv run favlo` from that checkout.
+Release 0.3.0 is on PyPI as the runtime under `src/favlo`. The pipelines stay in this checkout, so later commands use `uv run favlo` from that checkout.
 
 ## Download and pack
 
@@ -43,7 +43,7 @@ That command does four things:
 
 A finished directory has `manifest.json` with `complete: true`. Running `setup` again on that directory registers it, if it is not already registered, and returns.
 
-`uv run favlo serve` on a terminal does the same download when `models/registry.json` has no rows. It first checks that a small shader compiles at Metal 4.1. A machine that cannot compile that version prints `this runtime cannot run here` and exits. `uv run favlo serve --non-interactive` does not download. A pipe does not download.
+An empty registry on a terminal runs `favlo --qwen35-4b setup` before the daemon starts. It first checks that a small shader compiles at Metal 4.1. A machine that cannot compile that version prints `this runtime cannot run here` and exits. `uv run favlo serve --non-interactive` does not download. A pipe does not download.
 
 ## Talk to it
 
@@ -53,14 +53,14 @@ Start the listener:
 uv run favlo serve
 ```
 
-The daemon listens on `http://127.0.0.1:8129`. A terminal `favlo serve` is that process. Ctrl+C stops it. Chat is `POST /v1/chat/completions` or Favlo web.
+The daemon listens on `http://127.0.0.1:8129`. A terminal `favlo serve` is that process. Ctrl+C stops it. Chat is `POST /v1/responses`. `POST /v1/chat/completions` translates into that request and translates the Response back. Favlo web uses the same listener.
 
 From another terminal:
 
 ```bash
-curl http://127.0.0.1:8129/v1/chat/completions \
+curl http://127.0.0.1:8129/v1/responses \
   -H 'Content-Type: application/json' \
-  -d '{"model":"qwen36-35b-a3b:instruct","messages":[{"role":"user","content":"Hello"}]}'
+  -d '{"model":"qwen36-35b-a3b:instruct","input":"Hello"}'
 ```
 
 `GET /v1/models` lists the registered ids. A bare `qwen36-35b-a3b` uses the thinking card (temperature 1.0, top-p 0.95, top-k 20, presence penalty 1.5). `qwen36-35b-a3b:instruct` uses temperature 0.7, top-p 0.8, top-k 20, presence penalty 1.5. `enable_thinking` set to false selects the instruct card when the id has no variant suffix. The server does not check an API key. A client that requires one can send any placeholder, such as `favlo`.

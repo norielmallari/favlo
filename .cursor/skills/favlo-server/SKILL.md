@@ -40,6 +40,6 @@ That starts a detached daemon and returns. A later `favlo serve` stops the liste
 
 `harness.mcp_media` advertises the extension, polls, and reads the link. Do not add an HTTP media route.
 
-Chat is `POST /v1/chat/completions`. It is not an MCP tool. A chat preempts a running media task. An embedding does not. Media does not preempt a chat or an embedding. An embedding does not preempt a chat that already holds the GPU, and it does not unload the resident model. The embeddings process closes when that request returns.
+Chat is `POST /v1/responses`. `POST /v1/chat/completions` translates into that request and translates the Response back. Neither is an MCP tool. A chat preempts a running media task. An embedding does not. Media does not preempt a chat or an embedding. An embedding does not preempt a chat that already holds the GPU, and it does not unload the resident model. The embeddings process closes when that request returns.
 
 Do not start a generate the user did not ask for. One media task runs at a time.

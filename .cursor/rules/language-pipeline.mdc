@@ -1,24 +1,24 @@
 ---
-description: How a served language model implements LanguagePipeline. Chat follows the OpenAI Chat Completions object, not another pipeline. NumPy stays off the hot serving path. A prompt up to the configured maximum is accepted. The context working set sizes from the serve ledger, with no private cap. Streaming is a queue off the GPU thread. Progress uses favlo.console begin/end/note, and those writes stay off the hot path. Weights load from SSD into one device buffer. A GPU test uses smoke_lock run. The language-pipeline harness waits and does not take the lock.
+description: How a served language model implements LanguagePipeline. Generation follows the OpenAI Responses object. Chat Completions is the translation. NumPy stays off the hot serving path. A prompt up to the configured maximum is accepted. The context working set sizes from the serve ledger, with no private cap. Streaming is a queue off the GPU thread. Progress uses favlo.console begin/end/note, and those writes stay off the hot path. Weights load from SSD into one device buffer. A GPU test uses smoke_lock run. The language-pipeline harness waits and does not take the lock.
 globs: src/favlo/pipeline.py,src/favlo/language_pipeline.py,harness/language_pipeline.py,tests/test_language_pipeline.py,pipelines/metal41/qwen36_35b_a3b/**,pipelines/metal41/qwen38_27b/**,pipelines/parked/qwen38_flash_next/**,pipelines/metal41/gemma4_26b_a4b/**,pipelines/parked/spark_x26_1_7b/**,pipelines/parked/spark-x26-1-7b.py,pipelines/metal41/qwen35_4b/**,pipelines/metal41/qwen35-4b.py,docs/qwen36-35b-a3b/**,docs/qwen38-27b/**,docs/qwen38-flash-next/**,docs/gemma4-26b-a4b/**,docs/spark-x26-1-7b/**,docs/qwen35-4b/**
 alwaysApply: false
 ---
 
 # Language pipelines
 
-A served language model inherits `LanguagePipeline` in `src/favlo/language_pipeline.py`. That class extends `Pipeline`. A media pipeline does not inherit it. A failed pipeline does not. The class is the disconnect shell around one chat completion. It does not encode a prompt, sample a token, or parse a tool call.
+A served language model inherits `LanguagePipeline` in `src/favlo/language_pipeline.py`. That class extends `Pipeline`. A media pipeline does not inherit it. A failed pipeline does not. The class is the disconnect shell around one response. It does not encode a prompt, sample a token, or parse a tool call.
 
-Bind `handle_chat = Pipeline()`. `complete` is the pipeline's own chat, including its sampler and its stream. `RequestClosed` subclasses `ClientClosed`.
+Bind `handle_responses = Pipeline()`. `complete` reads a Responses body and writes a Response, including its sampler and its stream. Bind `handle_chat = Pipeline()` to translate a Chat Completions body into that request and translate the Response back. `RequestClosed` subclasses `ClientClosed`.
 
 `on_open` is the work that already sits outside the try. qwen36 and qwen38-27b reset `_halted` and set `runtime._stop` there. Flash Next only calls `open_request` there. `prepare` is inside the outer try and outside the disconnect try. Only Flash Next uses it, for the tool fields and the sampler. `on_finish` keeps that pipeline's current order and always runs after `prepare`. Hooks are called directly. Do not swallow a hook exception.
 
 A new abstract method on `LanguagePipeline` updates every served language subclass in that same change. A new abstract method on `Pipeline` updates every subclass of every seam.
 
-`POST /v1/chat/completions` returns an OpenAI Chat Completions object. That object is the standard for a pipeline's chat. Another pipeline's chat, stream, or markup parser is not a reference. Read the OpenAI fields and this model's own card.
+`POST /v1/responses` is the generation route. The pipeline reads a Responses body and writes a Response. Another pipeline's chat, stream, or markup parser is not a reference. Read the OpenAI Responses fields and this model's own card. `POST /v1/chat/completions` translates into that request and translates the Response back into a Chat Completions object.
 
-`content` is the reply. It is null when the model only calls a tool. `tool_calls` are the calls, in the OpenAI function shape. `reasoning` is the trace when the model wrote one. `reasoning_content` is that same text. An empty thought is not that field. `finish_reason` is `stop`, `length`, or `tool_calls`. The reply fills `usage` with the OpenAI token fields and `max_prompt_tokens` before the body is encoded. A pipeline may set `cached_tokens`, `context_length`, and `max_prompt_tokens`. Missing standard fields are filled.
+The fields below are that translation. `content` is the reply. It is null when the model only calls a tool. `tool_calls` are the calls, in the OpenAI function shape. `reasoning` is the trace when the model wrote one. `reasoning_content` is that same text. An empty thought is not that field. `finish_reason` is `stop`, `length`, or `tool_calls`. The reply fills `usage` with the OpenAI token fields and `max_prompt_tokens` before the body is encoded. A pipeline may set `cached_tokens`, `context_length`, and `max_prompt_tokens`. Missing standard fields are filled.
 
-The pipeline converts its own markup into those fields before the object is written. Markers stay out of `content`. A call becomes `tool_calls`. An open trace stays `reasoning_content` and does not become the reply. A call that starts before the trace closes ends the trace. The marker strings belong to that model. They are not taken from a sibling pipeline.
+The Chat Completions translation converts the pipeline's markup into those fields before that object is written. Markers stay out of `content`. A call becomes `tool_calls`. An open trace stays `reasoning_content` and does not become the reply. A call that starts before the trace closes ends the trace. The marker strings belong to that model. They are not taken from a sibling pipeline.
 
 A prompt of any length up to the pipeline's configured maximum is accepted. That maximum is the served context window. The cache length allocated at open is not a reason to reject the prompt. A prompt past that maximum is rejected. `truncation` `auto` may drop the oldest non-system messages until the prompt fits the maximum. An omitted `truncation` does not drop them.
 
@@ -90,7 +90,7 @@ MAF and other clients pass those fields through. They do not scan for markup, cl
 
 Wrong: a client that treats `reasoning_content` as `content`, a shared sampler in `LanguagePipeline`, or a chat path copied from another pipeline.
 
-Right: the pipeline writes the Chat Completions object from its own markup, and the client stores `content` and `tool_calls` as returned.
+Right: the pipeline writes the Response from its own markup, the Chat Completions translation fills `content` and `tool_calls`, and the client stores those fields as returned.
 
 After a change to this shell, run:
 

@@ -8,7 +8,7 @@ The official checkpoint is [Wan-AI/Wan2.2-I2V-A14B](https://huggingface.co/Wan-A
 
 - Apple Silicon
 - Metal 4.1
-- 16 GB of memory
+- 48 GB of unified memory for the listed resolutions at 81 frames. A machine with 16 GB cannot hold one resident int8 expert. A machine with 24 GB covers short or 320p clips only when the ledger still fits `expert_bytes` plus `forward_bytes`
 - Python 3.12 or newer
 - [uv](https://docs.astral.sh/uv/)
 - A network path to `huggingface.co`
@@ -26,7 +26,7 @@ From a checkout of this repository:
 uv sync --extra dev
 ```
 
-The package is not published to PyPI. Later commands use `uv run favlo` from that checkout.
+Release 0.3.0 is on PyPI as the runtime under `src/favlo`. The pipelines stay in this checkout, so later commands use `uv run favlo` from that checkout.
 
 ## Pack the text encoder
 

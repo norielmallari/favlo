@@ -1,6 +1,6 @@
 # MCP
 
-Favlo serves media generation and session memory on the same process as `favlo serve`. Chat completion stays on `POST /v1/chat/completions` and is not an MCP tool.
+Favlo serves media generation and session memory on the same process as `favlo serve`. Language chat is `POST /v1/responses`. `POST /v1/chat/completions` translates into that request and translates the Response back. Neither is an MCP tool.
 
 Listener behavior, GPU preemption, logging, and client YAML are in [docs/serve.md](docs/serve.md). This file is the tool and resource catalog for `POST /mcp`.
 

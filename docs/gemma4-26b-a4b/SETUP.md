@@ -26,7 +26,7 @@ From a checkout of this repository:
 uv sync --extra dev
 ```
 
-The package is not published to PyPI. Later commands use `uv run favlo` from that checkout.
+Release 0.3.0 is on PyPI as the runtime under `src/favlo`. The pipelines stay in this checkout, so later commands use `uv run favlo` from that checkout.
 
 ## Pack
 
@@ -57,14 +57,14 @@ Start the listener:
 uv run favlo serve
 ```
 
-The daemon listens on `http://127.0.0.1:8129`. A terminal `favlo serve` is that process. Ctrl+C stops it. Chat is `POST /v1/chat/completions` or Favlo web.
+The daemon listens on `http://127.0.0.1:8129`. A terminal `favlo serve` is that process. Ctrl+C stops it. Chat is `POST /v1/responses`. `POST /v1/chat/completions` translates into that request and translates the Response back. Favlo web uses the same listener.
 
 From another terminal:
 
 ```bash
-curl http://127.0.0.1:8129/v1/chat/completions \
+curl http://127.0.0.1:8129/v1/responses \
   -H 'Content-Type: application/json' \
-  -d '{"model":"gemma4-26b-a4b:instruct","messages":[{"role":"user","content":"Hello"}]}'
+  -d '{"model":"gemma4-26b-a4b:instruct","input":"Hello"}'
 ```
 
 `GET /v1/models` lists the registered ids. A bare `gemma4-26b-a4b` uses the thinking row. `gemma4-26b-a4b:instruct` is thinking off. Both rows are temperature 0.95, top-p 0.95, top-k 64, and presence penalty 0. `enable_thinking` set to false selects the instruct row when the id has no variant suffix. The server does not check an API key. A client that requires one can send any placeholder, such as `favlo`.

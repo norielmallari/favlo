@@ -28,7 +28,7 @@ From a checkout of this repository:
 uv sync --extra dev
 ```
 
-The package is not published to PyPI. Later commands use `uv run favlo` from that checkout.
+Release 0.3.0 is on PyPI as the runtime under `src/favlo`. The pipelines stay in this checkout, so later commands use `uv run favlo` from that checkout.
 
 ## Download
 

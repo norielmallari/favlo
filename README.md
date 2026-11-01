@@ -8,7 +8,7 @@ Favlo: Your AI, the Whole Stable.
 
 >This app is directly inspired by [oMLX](https://github.com/jundot/omlx) and [ComfyUI](https://github.com/Comfy-Org/ComfyUI). These are amazing apps - I recommend trying them first before using my more specialized, opinionated runtime.
 
-Favlo runs locally or in the cloud. One process serves language models, embeddings, and media: image, video, music, and voice. One model is one pipeline. When the pipelines share a machine, chat and embeddings take the device. A media job yields at its next safe point, checkpoints, and resumes when that queue has drained. Each pipeline owns its forward, its weight records, and its Metal kernels. `favlo serve` is the entry point. A client selects a registered language model with the OpenAI `model` field. A language row answers `POST /v1/chat/completions`. An embeddings row answers `POST /v1/embeddings`. Agents reach the content-generation models through MCP at `POST /mcp`. The tool catalog is [MCP.md](MCP.md).
+Favlo runs locally or in the cloud. One process serves language models, embeddings, and media: image, video, music, and voice. One model is one pipeline. When the pipelines share a machine, chat and embeddings take the device. A media job yields at its next safe point, checkpoints, and resumes when that queue has drained. Each pipeline owns its forward, its weight records, and its Metal kernels. `favlo serve` is the entry point. A client selects a registered language model with the OpenAI `model` field. A language row answers `POST /v1/responses`. `POST /v1/chat/completions` translates into that request and translates the Response back. That translation is not under active development. An embeddings row answers `POST /v1/embeddings`. Agents reach the content-generation models through MCP at `POST /mcp`. The tool catalog is [MCP.md](MCP.md).
 
 The process contract is [ARCHITECTURE.md](ARCHITECTURE.md). The papers are [REFERENCES.md](REFERENCES.md). Measured research claims are [RESEARCH.md](RESEARCH.md). Cite this software from [CITATION.cff](CITATION.cff). Agents start at [AGENTS.md](AGENTS.md). AI-assisted features are [docs/ai-assistance](docs/ai-assistance/README.md).
 
@@ -39,6 +39,12 @@ uv run favlo serve
 ```
 
 On a terminal with an empty registry, this downloads Qwen3.5-4B and packs it before the daemon listens. Wait until that finishes, and leave this process running.
+
+The web app needs its packages. From the repository root:
+
+```bash
+npm install --prefix web-spa
+```
 
 In another terminal:
 
@@ -75,7 +81,7 @@ Weights follow the Open Compute Project *Microscaling Formats (MX) Specification
 
 ## Memory management
 
-`src/favlo/memory.py` is the allocator for every device span. A pipeline receives a handle, and the heap stays with the owner of that opening. `close` frees that owner's spans. The next request waits until those pages are reclaimable, and stays queued while an allocation or a release is still open. At open, the pipeline reads the budget and shrinks the one knob it owns until the request fits. The request keeps the resolution, the frame count, and the duration it named. When the minimum working set does not fit, the pipeline refuses to open.
+`src/favlo/memory.py` is the allocator for every device span. The serve process keeps the ledger. A pipeline child allocates its own Metal buffers and reports each span. `budget()` is reclaimable pages plus the live, pending, and returning bytes of every child of this daemon. `--max-memory` caps that answer. A pipeline receives a handle, and the heap stays with the owner of that opening. `close` frees that owner's spans. The next request stays queued while an allocation or a release is still open. The reclaim wait ends when those pages are reclaimable, or when the reclaimable count stops rising. Bytes still held stay in the budget as returning. At open, the pipeline reads the budget and shrinks the one knob it owns until the request fits. The request keeps the resolution, the frame count, and the duration it named. When the minimum working set does not fit, the pipeline refuses to open.
 
 ## Pipeline architecture
 
@@ -83,13 +89,13 @@ Weights follow the Open Compute Project *Microscaling Formats (MX) Specification
 
 | Class | Route | What the class owns |
 |---|---|---|
-| `LanguagePipeline` | `POST /v1/chat/completions` | The disconnect shell around one chat completion |
+| `LanguagePipeline` | `POST /v1/responses` | The disconnect shell around one response |
 | `EmbeddingsPipeline` | `POST /v1/embeddings` | The embeddings list object |
 | `MediaPipeline` | `POST /mcp` | The job, the pause, and the host checkpoint |
 
-A served language model inherits `LanguagePipeline` and binds `handle_chat`. A served embedding model inherits `EmbeddingsPipeline` and binds `handle_embed`. A served image, video, music, or voice pipeline inherits `MediaPipeline` and binds `handle_image`, `handle_video`, `handle_music`, or `handle_voice`. A pipeline that is not served inherits none of them. The map is [ARCHITECTURE.md](ARCHITECTURE.md).
+A served language model inherits `LanguagePipeline` and binds `handle_responses`. `handle_chat` translates `POST /v1/chat/completions` into that request and translates the Response back. A served embedding model inherits `EmbeddingsPipeline` and binds `handle_embed`. A served image, video, music, or voice pipeline inherits `MediaPipeline` and binds `handle_image`, `handle_video`, `handle_music`, or `handle_voice`. A pipeline that is not served inherits none of them. The map is [ARCHITECTURE.md](ARCHITECTURE.md).
 
-The daemon records the one pipeline process. That process loads the registry row the request named and creates the device. The row stores the packed record, the pipeline entry, and the sampling card. A different row halts the process and waits until its pages are reclaimable. A crash fails the job that was running. The daemon stays up, drops that process from the ledger, and listens for the next request.
+The daemon records the resident pipeline process. That process loads the registry row the request named and creates the device. The row stores the packed record, the pipeline entry, and the sampling card. One chat or media process stays resident. A different chat or media row halts that process. The next open waits until its pages are reclaimable, or until the reclaimable count stops rising and the bytes stay as returning. An embeddings request opens its own process beside the resident model and closes that process when the request returns. It does not halt the resident model. A crash fails the job that was running. The daemon stays up, drops that process from the ledger, and listens for the next request.
 
 ## Queueing
 
@@ -115,6 +121,7 @@ Favlo is licensed under the Apache License, Version 2.0. The terms are in [LICEN
 
 | Checkpoint | License | Note |
 |---|---|---|
+| Qwen3.5-4B | Apache License, Version 2.0 | [note](docs/qwen35-4b/README.md) |
 | Qwen3.6-35B-A3B | Apache License, Version 2.0 | [note](docs/qwen36-35b-a3b/README.md) |
 | Gemma 4 26B-A4B | [Apache License, Version 2.0](https://ai.google.dev/gemma/docs/gemma_4_license) | [note](docs/gemma4-26b-a4b/README.md) |
 | Qwen3.8-27B | Apache License, Version 2.0 | [note](docs/qwen38-27b/README.md) |
