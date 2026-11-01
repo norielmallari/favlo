@@ -38,49 +38,28 @@ from wan22_i2v.source import (
     dit_dir,
     expert_paths,
     mask_from_prefix,
-    umt5_dir,
     vae_dir,
 )
-from wan22_i2v.text import encoder_path, tokenizer_path
+from wan22_i2v.text import tokenizer_path
+from wan22_i2v.umt5_pack import shared_pack_dir
 from wan22_i2v.vae import vae_path
 from wan22_i2v.video import avi_meta, write_avi, write_mp4
 
 
 def test_setup_writes_each_repo_under_models() -> None:
     assert vae_dir().parts[-2:] == ("Wan-AI", "Wan2.2-I2V-A14B")
-    assert umt5_dir().parts[-2:] == ("google", "umt5-xxl")
     assert dit_dir().parts[-2:] == ("lightx2v", "Wan2.2-Distill-Models")
     assert vae_path().parent == vae_dir()
-    assert encoder_path().parent == tokenizer_path().parent == umt5_dir()
-    other = umt5_dir(repo="example/umt5")
-    assert other.parts[-2:] == ("example", "umt5")
-    assert encoder_path(repo="example/umt5").parent == other
+    assert tokenizer_path().parent == shared_pack_dir()
     assert [item[2] for item in FILES] == [
         "Wan-AI/Wan2.2-I2V-A14B/Wan2.1_VAE.pth",
-        "google/umt5-xxl/models_t5_umt5-xxl-enc-bf16.pth",
         "lightx2v/Wan2.2-Distill-Models/high.safetensors",
         "lightx2v/Wan2.2-Distill-Models/low.safetensors",
-        "google/umt5-xxl/tokenizer.json",
     ]
     high, low = expert_paths()
     assert high.parent == low.parent == dit_dir()
     assert high.name == "high.safetensors"
     assert low.name == "low.safetensors"
-
-
-def test_a_custom_umt5_replaces_the_default_text_files() -> None:
-    from wan22_i2v.source import file_list, repo_id
-
-    rows = file_list("example-org/example-model", sizes=lambda _repo, name: len(name))
-    stored = [row[2] for row in rows]
-    assert stored[0] == "Wan-AI/Wan2.2-I2V-A14B/Wan2.1_VAE.pth"
-    assert "google/umt5-xxl/models_t5_umt5-xxl-enc-bf16.pth" not in stored
-    assert "google/umt5-xxl/tokenizer.json" not in stored
-    assert stored[1] == "example-org/example-model/models_t5_umt5-xxl-enc-bf16.pth"
-    assert stored[-1] == "example-org/example-model/tokenizer.json"
-    link = "https://huggingface.co/example-org/example-model/tree/main"
-    assert repo_id(link) == "example-org/example-model"
-    assert file_list(link, sizes=lambda _repo, name: len(name))[1][0] == "example-org/example-model"
 
 
 def test_name_is_the_packed_model_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -112,15 +91,7 @@ def test_name_is_the_packed_model_id(tmp_path: Path, monkeypatch: pytest.MonkeyP
         dest.mkdir(parents=True)
         return {"high_promoted": [1], "low_promoted": [2]}
 
-    def quantize_umt5(src: Path | None = None, dest: Path | None = None) -> float:
-        seen["src"] = src
-        seen["text"] = dest
-        assert dest is not None
-        dest.mkdir(parents=True)
-        return 0.0
-
     monkeypatch.setattr("wan22_i2v.record.quantize", quantize)
-    monkeypatch.setattr("wan22_i2v.umt5_pack.quantize_umt5", quantize_umt5)
     high = tmp_path / "high.safetensors"
     low = tmp_path / "low.safetensors"
     high.write_bytes(b"h")
@@ -168,26 +139,6 @@ def test_name_is_the_packed_model_id(tmp_path: Path, monkeypatch: pytest.MonkeyP
         ]
     )
     assert refused == 1
-    packed = main(
-        ["quantize-text", "--name", "example-model", "--umt5", "example-org/example-model"]
-    )
-    assert packed == 0
-    assert seen["text"] == tmp_path / "models" / "google" / "umt5-xxl-int8"
-    assert seen["src"] == models_dir() / "example-org" / "example-model" / (
-        "models_t5_umt5-xxl-enc-bf16.pth"
-    )
-    stored = json.loads((tmp_path / "models" / "registry.json").read_text())
-    umt5 = tmp_path / "models" / "google" / "umt5-xxl-int8"
-    assert stored["models"]["example-model"]["parts"]["umt5"] == str(umt5)
-    custom_umt5 = tmp_path / "models" / "example-umt5"
-    moved = main(
-        ["quantize-text", "--name", "example-model", "--out", str(custom_umt5)]
-    )
-    assert moved == 0
-    stored = json.loads((tmp_path / "models" / "registry.json").read_text())
-    row = stored["models"]["example-model"]
-    assert row["parts"]["umt5"] == str(custom_umt5)
-    assert row["directory"] == str(tmp_path / "models" / "example-model")
 
 
 def test_resume_keeps_only_full_ranges() -> None:

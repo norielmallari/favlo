@@ -48,6 +48,7 @@ _QUANTIZE_FLAGS = {
     "--expert-fp8": "percent",
     "--ffn-fp8": "percent",
     "--keep-bf16": "bool",
+    "--keep-source": "bool",
     "--high-dir": "path",
     "--low-dir": "path",
     "--dest": "path",

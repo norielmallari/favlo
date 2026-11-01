@@ -20,7 +20,6 @@ from wan22_i2v.schedule import (
     SHORT_FRAMES,
     STEPS,
 )
-from wan22_i2v.source import repo_id
 
 _FOLDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _RECORD = "Wan2.2-I2V-A14B-fp4"
@@ -30,13 +29,7 @@ _INT8 = "Wan2.2-I2V-A14B-int8"
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="favlo --wan22-i2v")
     sub = parser.add_subparsers(dest="command", required=True)
-    setup = sub.add_parser("setup", help="download the VAE, umT5, and the two experts")
-    setup.add_argument(
-        "--umt5",
-        type=_umt5_repo,
-        default=None,
-        help="umT5 repository, org/name or a huggingface.co link",
-    )
+    sub.add_parser("setup", help="download the VAE and the two experts")
     sub.add_parser("kernels", help="dispatch the fp4, fp8, and int8 matmul")
     quant = sub.add_parser("quantize", help="pack the high-noise and low-noise experts")
     quant.add_argument("--high", type=Path, required=True)
@@ -57,15 +50,6 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="pack every DiT linear as per-channel int8",
     )
-    text = sub.add_parser("quantize-text", help="pack the umT5 encoder")
-    text.add_argument("--out", type=Path, help="packed umT5 directory")
-    text.add_argument("--name", type=_folder_name, default=None, help="packed model folder")
-    text.add_argument(
-        "--umt5",
-        type=_umt5_repo,
-        default=None,
-        help="umT5 repository already under models/",
-    )
     gen = sub.add_parser("generate", help="write one AVI")
     gen.add_argument("--record", type=Path, required=True)
     gen.add_argument("--image", type=Path, required=True)
@@ -80,12 +64,11 @@ def main(argv: list[str] | None = None) -> int:
     gen.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
     if args.command == "setup":
-        from wan22_i2v.source import dit_dir, download, expert_paths, umt5_dir, vae_dir
+        from wan22_i2v.source import dit_dir, download, expert_paths, vae_dir
 
-        download(umt5=args.umt5)
+        download()
         high, low = expert_paths()
         print(vae_dir(), flush=True)
-        print(umt5_dir(repo=args.umt5), flush=True)
         print(dit_dir(), flush=True)
         print(high, flush=True)
         print(low, flush=True)
@@ -94,8 +77,6 @@ def main(argv: list[str] | None = None) -> int:
         return kernels()
     if args.command == "quantize":
         return _quantize(args)
-    if args.command == "quantize-text":
-        return _quantize_text(args)
     if args.command == "generate":
         return _generate(args)
     return 2
@@ -126,13 +107,6 @@ def kernels() -> int:
     print("spatial ok", flush=True)
     print("patch ok", flush=True)
     return 0
-
-
-def _umt5_repo(text: str) -> str:
-    try:
-        return repo_id(text)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def _folder_name(text: str) -> str:
@@ -226,27 +200,6 @@ def _quantize(args: argparse.Namespace) -> int:
     else:
         print(f"high fp8 blocks {manifest['high_promoted']}", flush=True)
         print(f"low fp8 blocks {manifest['low_promoted']}", flush=True)
-    return 0
-
-
-def _quantize_text(args: argparse.Namespace) -> int:
-    from favlo.registry import set_part
-    from wan22_i2v.text import encoder_path
-    from wan22_i2v.umt5_pack import quantize_umt5
-
-    try:
-        from wan22_i2v.umt5_pack import shared_pack_dir
-
-        folder = args.name or _INT8
-        dest = args.out if args.out is not None else shared_pack_dir()
-        src = None if args.umt5 is None else encoder_path(repo=args.umt5)
-        worst = quantize_umt5(src=src, dest=dest)
-        set_part(folder, "umt5", dest)
-    except (OSError, ValueError, RuntimeError) as exc:
-        sys.stderr.write(f"{exc}\n")
-        return 1
-    print(dest, flush=True)
-    print(f"int8 umt5 worst {float(worst):.6f}", flush=True)
     return 0
 
 

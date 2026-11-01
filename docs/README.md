@@ -53,6 +53,8 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [wan22-i2v/SETUP.md](wan22-i2v/SETUP.md) | Wan 2.2 I2V download, pack, and first clip |
 | [wan22-ti2v-5b/README.md](wan22-ti2v-5b/README.md) | Wan 2.2 TI2V-5B pipeline contract |
 | [wan22-ti2v-5b/SETUP.md](wan22-ti2v-5b/SETUP.md) | Wan 2.2 TI2V-5B download, pack, and first clip |
+| [umt5-xxl/README.md](umt5-xxl/README.md) | Shared umT5-XXL int8 pack |
+| [umt5-xxl/SETUP.md](umt5-xxl/SETUP.md) | umT5-XXL download and pack |
 | [wan22-ti2v-5b/ceilings.md](wan22-ti2v-5b/ceilings.md) | Wan 2.2 TI2V-5B kernel ceilings |
 | [ace-step-15-turbo/README.md](ace-step-15-turbo/README.md) | ACE-Step 1.5 XL Turbo pipeline contract |
 | [ace-step-15-turbo/SETUP.md](ace-step-15-turbo/SETUP.md) | ACE-Step download, pack, and first clip |

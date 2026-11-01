@@ -169,6 +169,59 @@ def test_png_and_avi_roundtrip(tmp_path) -> None:
     assert (width, height, count) == ("16", "8", "5")
 
 
+def test_open_sets_the_ledger_cap_and_refuses_a_short_budget(tmp_path: Path, monkeypatch) -> None:
+    from wan22_ti2v_5b import runtime as runtime_mod
+
+    record = tmp_path / "record"
+    record.mkdir()
+    (record / "manifest.json").write_text("{}", encoding="utf-8")
+    caps: list[object] = []
+    monkeypatch.setattr(runtime_mod.memory, "set_max_memory", caps.append)
+    monkeypatch.setattr(runtime_mod.memory, "budget", lambda: runtime_mod._MIN_FRAME * 3 - 1)
+    try:
+        runtime_mod.open_runtime(record, "fp8", None, None, max_memory="16GiB")
+    except MemoryError as exc:
+        assert "does not fit" in str(exc)
+    else:
+        raise AssertionError("a short budget opened")
+    assert caps == ["16GiB"]
+
+
+def test_a_later_budget_raises_the_tile_and_a_dip_does_not(monkeypatch) -> None:
+    from wan22_ti2v_5b.request import VideoRequest
+    from wan22_ti2v_5b.runtime import Runtime, _require_fit
+
+    sequence = [2_000_000_000, 4_000_000_000, 1_000_000_000]
+    held = {"n": sequence[0]}
+
+    def budget() -> int:
+        if sequence:
+            held["n"] = sequence.pop(0)
+        return held["n"]
+
+    monkeypatch.setattr("wan22_ti2v_5b.runtime.memory.budget", budget)
+    runtime = Runtime.__new__(Runtime)
+    runtime._ceiling = 0
+    runtime.frame_tile = 1
+    runtime.refresh_budget()
+    low = runtime.frame_tile
+    runtime.refresh_budget()
+    high = runtime.frame_tile
+    wide = 256 * (480 // 2) * (832 // 2) * 4
+    allowed = max(1, int(4_000_000_000 * 0.45 / wide))
+    assert high > low
+    assert runtime.max_frames(480, 832) == allowed
+    request = VideoRequest("a horse", "", 832, 480, allowed + 1, 0, "high", None)
+    try:
+        _require_fit(runtime, request)
+    except VideoRequestError as exc:
+        assert "does not fit" in str(exc)
+    else:
+        raise AssertionError("a clip past the tile budget was accepted")
+    request.frames = allowed
+    _require_fit(runtime, request)
+
+
 def test_umt5_pack_must_be_int8(tmp_path: Path) -> None:
     pack = tmp_path / "umt5-xxl-int8"
     pack.mkdir()

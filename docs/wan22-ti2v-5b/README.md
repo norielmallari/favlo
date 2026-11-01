@@ -4,9 +4,9 @@ Text-to-video and image-to-video on the Metal 4.1 GPU. The weights are the
 5B transformer from the [Wan-AI/Wan2.2-TI2V-5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B)
 card. The record is `models/Wan2.2-TI2V-5B-int8`. The umT5 encoder is the int8 pack named by `parts.umt5` on the registry
 row, `models/google/umt5-xxl-int8`. A clip reads that pack and does not
-open the BF16 encoder file. The tokenizer is `tokenizer.json` beside the
-source download. This pipeline does not pack the encoder. The VAE is the
-float32 `Wan2.2_VAE.pth` from that card.
+open the BF16 encoder file. The tokenizer is `tokenizer.json` inside that
+pack. `favlo --umt5-xxl` writes the pack. This pipeline does not pack the
+encoder. The VAE is the float32 `Wan2.2_VAE.pth` from that card.
 
 `handle_video` is a `MediaPipeline`. `generate_video_t2v` samples from text. `generate_video_i2v` conditions the
 first latent frame on a PNG. This pipeline is listed by both
@@ -44,14 +44,19 @@ DiT sum at 576×320 and 9 frames is 4.267 s. A printed 832×480 9-frame text
 clip decoded in 18.942 s and the still clip decoded in 15.315 s. That
 measurement is [research/clip-ceiling.md](research/clip-ceiling.md).
 
-The decoder's resident frame tile shrinks until one latent frame fits. A
-request keeps the resolution, frame count, and duration it named. Open
-refuses when that minimum does not fit. The 30 DiT blocks and the 24 text
-blocks stay resident until close.
+The serve ledger answers `memory.budget()`. `--max-memory` is that ledger's
+cap. `open_runtime` calls `memory.set_max_memory` before the first read.
+Device spans come from `device_buffer`. The decoder frame tile and the clip
+fit use the largest answer this opening has seen, and a later dip does not
+shrink them. A request keeps the resolution, frame count, and duration it
+named when that clip fits. Open refuses when three decoder frames do not
+fit. The 30 DiT blocks and the 24 text blocks stay resident until close.
 
 ## Commands
 
 ```text
+uv run favlo --umt5-xxl setup
+uv run favlo --umt5-xxl quantize
 uv run favlo --wan22-ti2v-5b setup
 uv run favlo --wan22-ti2v-5b quantize --weights <checkpoint>
 uv run favlo --wan22-ti2v-5b kernels

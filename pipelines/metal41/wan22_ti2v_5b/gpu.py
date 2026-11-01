@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from favlo.memory import bind, memory
+from favlo.memory import bind, device_buffer, memory
 from wan22_ti2v_5b.spec import FP16_MAX, TILE_M, TILE_N, TILE_N_I8
 
 _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"
@@ -35,7 +35,7 @@ class Gpu:
         return memory.upload(raw.tobytes(), owner=self.owner)
 
     def zeros(self, nbytes: int):
-        return memory.allocate(nbytes, owner=self.owner, zero=True)
+        return device_buffer(self.owner, nbytes, zero=True)
 
     def download(self, handle, dtype: np.dtype, shape: tuple[int, ...]) -> np.ndarray:
         count = int(np.prod(shape)) * np.dtype(dtype).itemsize
@@ -694,7 +694,7 @@ class Gpu:
             return found[1]
         if found is not None:
             self.release(found[1])
-        handle = memory.allocate(int(nbytes), owner=self.owner, zero=False)
+        handle = device_buffer(self.owner, int(nbytes), zero=False)
         self._scratch[key] = (int(nbytes), handle)
         return handle
 

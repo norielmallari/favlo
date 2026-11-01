@@ -24,7 +24,6 @@ class Runtime:
         self,
         record: Path,
         owner: str,
-        budget: int,
         dit: DiT,
         text: TextEncoder,
         vae: WanVae,
@@ -32,13 +31,14 @@ class Runtime:
     ) -> None:
         self.record = record
         self._owner = owner
-        self.budget = budget
         self.dit = dit
         self.text = text
         self.vae = vae
         self.gpu = gpu
         self.clip = Clip(dit, text, vae)
-        self.frame_tile = max(1, int(budget * 0.45 / _MIN_FRAME))
+        self._ceiling = 0
+        self.frame_tile = 1
+        self.refresh_budget()
 
     def close(self) -> None:
         self.vae.close()
@@ -47,9 +47,19 @@ class Runtime:
     def halt(self) -> None:
         self.close()
 
+    def refresh_budget(self) -> int:
+        """The largest ledger answer this opening has seen. A dip does not shrink it."""
+        current = memory.budget()
+        if current > self._ceiling:
+            self._ceiling = current
+        tile = max(1, int(self._ceiling * 0.45 / _MIN_FRAME))
+        if tile > self.frame_tile:
+            self.frame_tile = tile
+        return self._ceiling
+
     def max_frames(self, height: int, width: int) -> int:
         wide = 256 * (height // 2) * (width // 2) * 4
-        return max(1, int(self.budget * 0.45 / max(wide, 1)))
+        return max(1, int(self.refresh_budget() * 0.45 / max(wide, 1)))
 
 
 def open_runtime(
@@ -62,22 +72,25 @@ def open_runtime(
     parts: dict | None = None,
 ) -> Runtime:
     del kv_cache, console, resident_percent
+    memory.set_max_memory(max_memory)
     record = Path(path)
     manifest = json.loads((record / "manifest.json").read_text(encoding="utf-8"))
-    budget = _budget(max_memory)
-    if budget < _MIN_FRAME * 3:
+    if memory.budget() < _MIN_FRAME * 3:
         message = "minimum working set does not fit"
         raise MemoryError(message)
     owner_name = owner or "wan22-ti2v-5b"
     gpu = Gpu(owner_name)
     umt5 = _umt5(parts, record)
     print(f"umt5 {umt5.name}", flush=True)
-    # The tokenizer json sits beside the source download. The BF16 encoder file is not opened.
-    tokenizer = models_dir() / "google" / "umt5-xxl" / "tokenizer.json"
+    # The tokenizer sits in the int8 pack. The BF16 encoder file is not opened.
+    tokenizer = umt5 / "tokenizer.json"
+    if not tokenizer.is_file():
+        message = "umT5 pack is missing tokenizer.json"
+        raise FileNotFoundError(message)
     text = TextEncoder(umt5, gpu, tokenizer)
     vae_path = repo_root() / str(manifest["vae"])
     vae = WanVae(vae_path, gpu)
-    return Runtime(record, owner_name, budget, DiT(record, gpu), text, vae, gpu)
+    return Runtime(record, owner_name, DiT(record, gpu), text, vae, gpu)
 
 
 class Pipeline(MediaPipeline):
@@ -151,25 +164,6 @@ def _require_fit(runtime: Runtime, request: VideoRequest) -> None:
         return
     message = "the clip does not fit the memory budget"
     raise VideoRequestError(message)
-
-
-def _budget(limit: str | None) -> int:
-    available = memory.budget()
-    if not limit:
-        return available
-    text = limit.strip().lower()
-    scale = 1
-    for suffix, factor in (("gib", 1 << 30), ("gb", 10**9), ("mib", 1 << 20), ("mb", 10**6)):
-        if text.endswith(suffix):
-            text = text[: -len(suffix)]
-            scale = factor
-            break
-    try:
-        capped = int(float(text) * scale)
-    except ValueError as exc:
-        message = "max_memory is not a byte count"
-        raise RuntimeError(message) from exc
-    return min(available, capped)
 
 
 def _umt5(parts: dict | None, record: Path) -> Path:

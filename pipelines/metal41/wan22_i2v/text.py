@@ -9,12 +9,8 @@ token, are returned.
 
 from __future__ import annotations
 
-import io
 import math
-import pickle
 import time
-import zipfile
-from collections import OrderedDict
 from collections.abc import Callable
 from pathlib import Path
 
@@ -22,7 +18,7 @@ import numpy as np
 from tokenizers import Tokenizer
 
 from wan22_i2v.metal import Gpu
-from wan22_i2v.source import ENCODER_FILE, TOKENIZER_FILE, umt5_dir
+from wan22_i2v.source import TOKENIZER_FILE
 
 _LAYERS = 24
 _HEADS = 64
@@ -31,16 +27,13 @@ _FFN = 10240
 _BUCKETS = 32
 _MAX_DISTANCE = 128
 _EPS = np.float32(1e-6)
-_PREFIX = "umt5-xxl-enc-bf16/data"
-_PICKLE = "umt5-xxl-enc-bf16/data.pkl"
 
 
-def tokenizer_path(root: Path | None = None, repo: str | None = None) -> Path:
-    return umt5_dir(root, repo) / TOKENIZER_FILE
+def tokenizer_path(root: Path | None = None, pack: Path | None = None) -> Path:
+    """Tokenizer beside the shared int8 pack."""
+    from wan22_i2v.umt5_pack import shared_pack_dir
 
-
-def encoder_path(root: Path | None = None, repo: str | None = None) -> Path:
-    return umt5_dir(root, repo) / ENCODER_FILE
+    return (pack or shared_pack_dir(root)) / TOKENIZER_FILE
 
 
 def relative_buckets(query: int, key: int) -> np.ndarray:
@@ -93,51 +86,4 @@ def encode_prompt(
     elapsed = time.perf_counter() - started
     print(f"umt5 {len(ids)} tokens {elapsed:.2f}s", flush=True)
     return vectors
-
-
-def _metadata(archive: zipfile.ZipFile) -> dict[str, tuple]:
-    class _Unpickler(pickle.Unpickler):
-        def find_class(self, module: str, name: str) -> object:
-            if name == "OrderedDict":
-                return OrderedDict
-            if name == "_rebuild_tensor_v2":
-                return _rebuild
-            if name.endswith("Storage"):
-                return type(name, (), {})
-            message = f"unexpected pickle type {module}.{name}"
-            raise RuntimeError(message)
-
-        def persistent_load(self, pid: tuple) -> tuple:
-            return (str(pid[2]), int(pid[4]))
-
-    def _rebuild(
-        storage: tuple,
-        offset: int,
-        size: tuple[int, ...],
-        stride: tuple[int, ...],
-        requires_grad: bool,
-        hooks: object,
-        metadata: object = None,
-    ) -> tuple:
-        del requires_grad, hooks, metadata
-        return (storage[0], int(offset), tuple(int(v) for v in size), tuple(int(v) for v in stride))
-
-    loaded = _Unpickler(io.BytesIO(archive.read(_PICKLE))).load()
-    if not isinstance(loaded, dict):
-        message = "umT5 checkpoint is not a tensor map"
-        raise RuntimeError(message)
-    return {str(name): value for name, value in loaded.items()}
-
-
-def _float(
-    storage: np.ndarray, offset: int, shape: tuple[int, ...], stride: tuple[int, ...]
-) -> np.ndarray:
-    view = np.lib.stride_tricks.as_strided(
-        storage[offset:],
-        shape=shape,
-        strides=tuple(step * 2 for step in stride),
-    )
-    copied = np.ascontiguousarray(view)
-    bits = copied.astype(np.uint32) << np.uint32(16)
-    return bits.view(np.float32)
 

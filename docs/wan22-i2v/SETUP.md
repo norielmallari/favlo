@@ -2,7 +2,7 @@
 
 How to download, pack, and make a clip with `wan22-i2v`. The kernel contract is [README.md](README.md). The listener is [../serve.md](../serve.md). Pointing a client at the server is [../guides/clients.md](../guides/clients.md).
 
-The official checkpoint is [Wan-AI/Wan2.2-I2V-A14B](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B). The text encoder is [google/umt5-xxl](https://huggingface.co/google/umt5-xxl). Those weights are under the Apache License, Version 2.0.
+The official checkpoint is [Wan-AI/Wan2.2-I2V-A14B](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B). The text encoder is [google/umt5-xxl](https://huggingface.co/google/umt5-xxl), packed by [../umt5-xxl/SETUP.md](../umt5-xxl/SETUP.md). Those weights are under the Apache License, Version 2.0.
 
 ## What you need
 
@@ -14,7 +14,7 @@ The official checkpoint is [Wan-AI/Wan2.2-I2V-A14B](https://huggingface.co/Wan-A
 - A network path to `huggingface.co`
 - Free disk for the download and, after packing, the packed record beside it
 
-The five downloaded files are 117.5 GiB together. `setup` stops when the volume cannot hold the bytes still missing. The download stays on disk after packing.
+The VAE and the two experts are about 106 GiB together. `setup` stops when the volume cannot hold the bytes still missing. The download stays on disk after packing.
 
 8 GB is not enough to run a model capable of real-world agentic workflows.
 
@@ -28,7 +28,16 @@ uv sync --extra dev
 
 The package is not published to PyPI. Later commands use `uv run favlo` from that checkout.
 
-## Download
+## Pack the text encoder
+
+```bash
+uv run favlo --umt5-xxl setup
+uv run favlo --umt5-xxl quantize
+```
+
+That writes `models/google/umt5-xxl-int8` with the tokenizer inside the pack and removes the BF16 checkout. A clip reads that directory. The steps are [../umt5-xxl/SETUP.md](../umt5-xxl/SETUP.md).
+
+## Download the VAE and the experts
 
 ```bash
 uv run favlo --wan22-i2v setup
@@ -36,23 +45,16 @@ uv run favlo --wan22-i2v setup
 
 That command downloads with plain HTTP. A public file does not need a token. Sixteen connections write one file. A short file continues from the ranges already on disk.
 
-The download lands in three places:
+The download lands in two places:
 
 - `models/Wan-AI/Wan2.2-I2V-A14B/Wan2.1_VAE.pth`
-- `models/google/umt5-xxl/`, the umT5 encoder and `tokenizer.json`
 - the two expert files, `high.safetensors` and `low.safetensors`
 
-`setup` prints the VAE directory, the umT5 directory, the expert directory, and those two files. It does not pack a record and does not register one.
-
-`--umt5` downloads a different text encoder. The value is `org/name` or a `https://huggingface.co/org/name` link. That repository must publish `models_t5_umt5-xxl-enc-bf16.pth` and `tokenizer.json`. Those two files are stored under `models/<org>/<name>/`. The VAE and the two experts stay the default download. Their published sizes replace the default text-encoder sizes in the disk check.
-
-```bash
-uv run favlo --wan22-i2v setup --umt5 example-org/example-model
-```
+`setup` prints the VAE directory, the expert directory, and those two files. It does not pack a record and does not register one. It does not download umT5.
 
 ## Pack the experts
 
-`quantize --int8` reads the two expert files `setup` printed. It writes `models/Wan2.2-I2V-A14B-int8` and registers that folder. The registry row stores that directory. The client model field is `Wan2.2-I2V-A14B-int8`. Every DiT linear is symmetric int8 with one float32 scale per output channel. The head weight and its bias are float16. Biases, QK RMSNorm, `norm3`, modulation, and the patch convolution stay float16. The text encoder is the shared int8 pack `models/google/umt5-xxl-int8`.
+`quantize --int8` reads the two expert files `setup` printed. It writes `models/Wan2.2-I2V-A14B-int8` and registers that folder. The registry row stores that directory and points `parts.umt5` at the shared pack. The client model field is `Wan2.2-I2V-A14B-int8`. Every DiT linear is symmetric int8 with one float32 scale per output channel. The head weight and its bias are float16. Biases, QK RMSNorm, `norm3`, modulation, and the patch convolution stay float16. The text encoder is the shared int8 pack `models/google/umt5-xxl-int8`.
 
 ```bash
 uv run favlo --wan22-i2v quantize --int8 --high models/example-model/high.safetensors --low models/example-model/low.safetensors
@@ -79,26 +81,6 @@ uv run favlo --wan22-i2v quantize --high models/example-model/high.safetensors -
 ```
 
 That stores `models/example-high` and `models/example-low` on the `example-model` row.
-
-## Pack the text encoder
-
-```bash
-uv run favlo --wan22-i2v quantize-text
-```
-
-That command reads `models/google/umt5-xxl/models_t5_umt5-xxl-enc-bf16.pth` and writes `models/google/umt5-xxl-int8`. Every linear is symmetric int8. The token embedding, the RMSNorm weights, and the relative buckets stay float16. The registry row stores that directory, and a clip encodes with it. The BF16 file is not opened during a clip. Another pipeline can use the same folder. Without the pack, the prompt bytes index the embedding table.
-
-`--name` writes `models/<name>/umt5` and stores that directory on the row `quantize` registered. `--out` is the quantized umT5 directory, and `--name` is the registry id it belongs to. `--umt5` reads the encoder downloaded for that repository. `quantize` registers the row before `quantize-text` records the umT5 directory.
-
-```bash
-uv run favlo --wan22-i2v quantize-text --name example-model --umt5 example-org/example-model
-```
-
-```bash
-uv run favlo --wan22-i2v quantize-text --name example-model --out models/example-umt5
-```
-
-That stores `models/example-umt5` on the `example-model` row.
 
 ## Make a clip
 
