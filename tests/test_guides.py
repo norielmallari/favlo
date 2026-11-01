@@ -26,6 +26,9 @@ def test_models_guide_names_the_official_checkpoints() -> None:
     assert "packs `models/Qwen3.5-4B-fp8`" in text
     assert "Qwen/Qwen3.6-35B-A3B" in text
     assert "favlo --qwen36-35b-a3b setup" in text
+    assert "google/gemma-4-26B-A4B-it" in text
+    assert "favlo --gemma4-26b-a4b quantize" in text
+    assert "models/gemma-4-26B-A4B-it-fp8-e20" in text
     assert "Qwen/Qwen3.8-27B" in text
     assert "favlo --qwen38-27b download" in text
     assert "download_suggestions" in text
@@ -42,10 +45,16 @@ def test_history_is_the_carrot_naming() -> None:
 
 def test_setup_guides_load_by_pipeline_id() -> None:
     assert "qwen36-35b-a3b" in setup_pipelines()
+    assert "gemma4-26b-a4b" in setup_pipelines()
     assert "qwen38-27b" in setup_pipelines()
     assert "z-image-turbo" in setup_pipelines()
     assert "wan22-i2v" in setup_pipelines()
     assert "ace-step-15-turbo" in setup_pipelines()
+    gemma = read_setup("gemma4-26b-a4b")
+    assert "uv run favlo --gemma4-26b-a4b quantize" in gemma
+    assert "uv run favlo --gemma4-26b-a4b quantize --src models/example-model" in gemma
+    assert "google/gemma-4-26B-A4B-it" in gemma
+    assert "models/gemma-4-26B-A4B-it" in gemma
     text = read_setup("qwen36-35b-a3b")
     assert "uv run favlo --qwen36-35b-a3b setup" in text
     assert "--keep-bf16" in text

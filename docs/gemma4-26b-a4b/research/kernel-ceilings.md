@@ -38,3 +38,7 @@ Local attention at 65,536 keys stays inside the 1,024-key window. Global attenti
 ## Corrections
 
 Later finds are appended here. The sections above stay as committed.
+
+2 November 2026. The live dense kernels are `gemv_fp8`, `embed_fp8`, and `matmul_fp8`. Routed experts are fp8-e20. On an M5 Pro with 48 GB, one command buffer per kernel, then a wait, sums to 37.424 ms (26.72 tok/s) at one key, 40.005 ms (25.00 tok/s) at 1,024 keys, 81.759 ms (12.23 tok/s) at 65,536 keys, and 124.216 ms (8.05 tok/s) at 131,072 keys. A 1,024-token prefill chunk at position 0 sums to 918.141 ms, 1115.30 tok/s. The rows are in [../ceilings.md](../ceilings.md). The sums in the sections above time the 31 October 2026 q4_0 launches.
+
+Queries the same day: "gemma 4 26B-A4B 37.424 ms OR 40.005 ms OR 81.759 ms OR 124.216 ms Metal decode kernel", and "gemma-4-26B-A4B 1115.30 OR 26.72 OR 12.23 tok/s fp8 M5 Pro kernel ceiling 2026". [oMLX cejx1ziv](https://omlx.ai/benchmarks/performance/cejx1ziv) reports 2,308 prefill tok/s and 57.4 decode tok/s at 4,096 tokens for a 4-bit copy on an M5 Pro with 64 GB. [meirong.dev](https://meirong.dev/posts/omlx-gemma4-m5-optimization/) divides 3.85 GB by 307 GB/s and gets about 79.7 tok/s on an M5 Pro. The search did not find 37.424 ms, 40.005 ms, 81.759 ms, 124.216 ms, or 1115.30 tok/s.

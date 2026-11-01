@@ -31,6 +31,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen36-35b-a3b/research/recorded-forward.md](qwen36-35b-a3b/research/recorded-forward.md) | Qwen3.6-35B-A3B recorded prefill and decode sums |
 | [qwen36-35b-a3b/performance.md](qwen36-35b-a3b/performance.md) | Qwen3.6-35B-A3B recorded prefill and decode rates |
 | [gemma4-26b-a4b/README.md](gemma4-26b-a4b/README.md) | Gemma 4 26B-A4B pipeline contract |
+| [gemma4-26b-a4b/SETUP.md](gemma4-26b-a4b/SETUP.md) | Gemma 4 26B-A4B pack and first chat |
 | [qwen35-4b/README.md](qwen35-4b/README.md) | Qwen3.5-4B language pipeline |
 | [qwen35-4b/references.md](qwen35-4b/references.md) | Papers and specifications for the Qwen3.5-4B pipeline |
 | [qwen35-4b/SETUP.md](qwen35-4b/SETUP.md) | Qwen3.5-4B download and pack |
@@ -40,7 +41,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [spark-x26-1-7b/ceilings.md](spark-x26-1-7b/ceilings.md) | Spark-X2.6-1.7B kernel ceilings |
 | [spark-x26-1-7b/research/kernel-ceilings.md](spark-x26-1-7b/research/kernel-ceilings.md) | Spark-X2.6-1.7B isolated dispatch sum |
 | [spark-x26-1-7b/research/recorded-forward.md](spark-x26-1-7b/research/recorded-forward.md) | Spark-X2.6-1.7B recorded prefill and decode runs |
-| [gemma4-26b-a4b/ceilings.md](gemma4-26b-a4b/ceilings.md) | Gemma 4 26B-A4B bandwidth ceilings |
+| [gemma4-26b-a4b/ceilings.md](gemma4-26b-a4b/ceilings.md) | Gemma 4 26B-A4B kernel and bandwidth ceilings |
 | [gemma4-26b-a4b/references.md](gemma4-26b-a4b/references.md) | Papers and specifications for the Gemma 4 pipeline |
 | [gemma4-26b-a4b/research/kernel-ceilings.md](gemma4-26b-a4b/research/kernel-ceilings.md) | Gemma 4 26B-A4B isolated decode sum |
 | [gemma4-26b-a4b/research/recorded-forward.md](gemma4-26b-a4b/research/recorded-forward.md) | Gemma 4 26B-A4B recorded prefill and decode runs |

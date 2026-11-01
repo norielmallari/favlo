@@ -1,17 +1,19 @@
 """Weight planes for Gemma 4.
 
-q4_0 is the stored weight format. A block is 32 values. The scale is the
-QAT lattice step, stored with the ggml sign so the peak maps to code −8, and
-rounded to bfloat16. A block that is not on that lattice falls back to the
-signed peak divided by −8. Codes are −8..7. The low nibble is element ``i``
-and the high nibble is element ``i + 16``. K is padded to a multiple of 32.
+Resident matrices, including the token embedding, are fp8 E4M3. Routed
+experts are fp4 E2M1 or fp8 E4M3. Both planes store one E8M0 scale per 32
+values. fp4 K is a multiple of 256 and fp8 K is a multiple of 128. The fp4
+encoder tries the E8M0 exponents around the peak and keeps the one whose
+nearest E2M1 codes have the smallest squared error. The fp8 encoder uses
+the block peak. A zero block stores exponent 0. The scale row is packed
+tightly, one byte per 32 K.
 
-fp4 E2M1 is the routed-expert plane. Each block of 32 tries the E8M0
-exponents around the peak and keeps the one whose nearest E2M1 codes have
-the smallest squared error. fp8 E4M3 remains for the prefix file and the
-kernel checks. Its scale rounds the power of two up so the block peak fits.
-A zero block stores exponent 0. The scale row is packed tightly, one byte
-per 32 K.
+The q4_0 encoder remains for the lattice tests. A block is 32 values. The
+scale is the QAT lattice step, stored with the ggml sign so the peak maps
+to code −8, and rounded to bfloat16. A block that is not on that lattice
+falls back to the signed peak divided by −8. Codes are −8..7. The low
+nibble is element ``i`` and the high nibble is element ``i + 16``. The
+packed record does not store q4_0.
 """
 
 from __future__ import annotations

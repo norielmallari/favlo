@@ -25,10 +25,9 @@ from gemma4_26b_a4b.geometry import (
 from gemma4_26b_a4b.planes import (
     FP4,
     FP8,
-    Q40,
     align_k,
-    dequant_nbytes,
     expert_bytes,
+    fp8_parts,
     matrix_nbytes,
     pack_matrix,
     restoration_rms,
@@ -37,11 +36,11 @@ from gemma4_26b_a4b.planes import (
 from gemma4_26b_a4b.promote import promotion_count, select_promoted
 
 RECORD_STEM = "gemma-4-26B-A4B-it"
-SOURCE_DIR = "gemma-4-26B-A4B-it-qat-q4_0-unquantized"
-RECORD_NAME = f"{RECORD_STEM}-q4_0"
+SOURCE_DIR = "gemma-4-26B-A4B-it"
+RECORD_NAME = f"{RECORD_STEM}-fp8-e20"
 ALIGN = 128
-EXPERT_FP8_PERCENT = 100
-EXPERT_FORMAT = "fp8"
+EXPERT_FP8_PERCENT = 20
+EXPERT_FORMAT = "fp8-e20"
 _SIDECARS = (
     "config.json",
     "generation_config.json",
@@ -65,8 +64,8 @@ def estimate() -> dict[str, int]:
         if role == FP16:
             fp16 += int(np.prod(shape)) * 2
         elif role == RESIDENT:
-            resident += matrix_nbytes(int(shape[0]), int(shape[-1]), Q40)
-            scratch = max(scratch, dequant_nbytes(int(shape[0]), int(shape[-1])))
+            rows = _stored_rows(int(shape[0]))
+            resident += matrix_nbytes(rows, int(shape[-1]), FP8)
     pool = LAYERS * EXPERTS
     promoted = promotion_count(pool, EXPERT_FP8_PERCENT)
     experts = promoted * expert_bytes(8) + (pool - promoted) * expert_bytes(4)
@@ -83,7 +82,13 @@ def quantize(src: Path, dest: Path) -> None:
     if manifest_path.is_file():
         stored = json.loads(manifest_path.read_text(encoding="utf-8"))
         planes = stored.get("planes")
-        if stored.get("complete") is True and isinstance(planes, dict) and planes.get("experts") == EXPERT_FORMAT:
+        if (
+            stored.get("complete") is True
+            and isinstance(planes, dict)
+            and planes.get("resident") == FP8
+            and planes.get("experts") == EXPERT_FORMAT
+            and planes.get("expert_fp8_percent") == EXPERT_FP8_PERCENT
+        ):
             return
     names = tensor_names(src)
     catalog = expected()
@@ -115,7 +120,7 @@ def quantize(src: Path, dest: Path) -> None:
         "context_length": CONTEXT,
         "checkpoint_context": CHECKPOINT_CONTEXT,
         "planes": {
-            "resident": Q40,
+            "resident": FP8,
             "experts": EXPERT_FORMAT,
             "expert_fp8_percent": EXPERT_FP8_PERCENT,
             "vectors": "fp16",
@@ -164,29 +169,47 @@ def _pack_expert(task: tuple[str, str, str, str, str, int, int]) -> bytes:
 _ROW_CHUNK = 8192
 
 
+def _stored_rows(rows: int) -> int:
+    return (int(rows) + 31) & ~31
+
+
 def _pack_resident(
     src: Path,
     shard: str,
     name: str,
     rows: int,
+    k: int,
     pool: ProcessPoolExecutor,
 ) -> bytes:
-    if rows < _ROW_CHUNK:
-        values = load_tensor(src, shard, name)
-        return pack_matrix(np.ascontiguousarray(values), Q40)
     spans = []
     start = 0
     while start < rows:
         stop = min(rows, start + _ROW_CHUNK)
-        spans.append((str(src), shard, name, start, stop))
+        spans.append((str(src), shard, name, start, stop, stop == rows))
         start = stop
-    return b"".join(pool.map(_pack_rows, spans))
+    blobs = list(pool.map(_pack_rows, spans))
+    data: list[bytes] = []
+    scales: list[bytes] = []
+    stored = _stored_rows(rows)
+    for blob, task in zip(blobs, spans, strict=True):
+        count = stored - task[3] if task[5] else task[4] - task[3]
+        nbytes, scale = fp8_parts(count, k)
+        if len(blob) != nbytes + scale:
+            message = f"{name} fp8 row span is {len(blob)} bytes"
+            raise RuntimeError(message)
+        data.append(blob[:nbytes])
+        scales.append(blob[nbytes:])
+    return b"".join(data) + b"".join(scales)
 
 
-def _pack_rows(task: tuple[str, str, str, int, int]) -> bytes:
-    src, shard, name, start, stop = task
+def _pack_rows(task: tuple[str, str, str, int, int, bool]) -> bytes:
+    src, shard, name, start, stop, last = task
     values = load_tensor(Path(src), shard, name, rows=(start, stop))
-    return pack_matrix(np.ascontiguousarray(values), Q40)
+    if last:
+        extra = _stored_rows(stop) - stop
+        if extra:
+            values = np.pad(values, ((0, extra), (0, 0)))
+    return pack_matrix(np.ascontiguousarray(values), FP8)
 
 
 def _write_experts(
@@ -364,9 +387,12 @@ def _write_resident(
                 if len(shape) != 2:
                     message = f"{name} is not a matrix"
                     raise ValueError(message)
-                packed = _pack_resident(src, names[name], name, int(shape[0]), pool)
-                stored = Q40
-                padded = align_k(int(shape[1]), Q40)
+                packed = _pack_resident(
+                    src, names[name], name, int(shape[0]), int(shape[1]), pool
+                )
+                stored = FP8
+                padded = align_k(int(shape[1]), FP8)
+                rows_pad = _stored_rows(int(shape[0]))
             else:
                 values = load_tensor(src, names[name], name)
                 if tuple(values.shape) != shape:
@@ -382,6 +408,7 @@ def _write_resident(
                     "plane": stored,
                     "shape": list(shape),
                     "padded_k": padded,
+                    "padded_rows": rows_pad if role == RESIDENT else None,
                     "offset": offset,
                     "nbytes": len(packed),
                 }

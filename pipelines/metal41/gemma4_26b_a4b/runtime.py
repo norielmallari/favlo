@@ -21,11 +21,13 @@ def open_runtime(
 ) -> Gemma4Runtime:
     """Load the resident matrices. Routed experts stay in the layer files."""
     del resident_percent, mtp
+    from favlo.memory import memory
+
+    memory.set_max_memory(max_memory)
     return Gemma4Runtime(
         path,
         kv_cache=kv_cache,
         console=console,
-        max_memory=max_memory,
         owner=owner or "gemma4-26b-a4b",
     )
 

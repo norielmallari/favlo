@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from favlo.memory import memory
+from favlo.memory import device_buffer, memory
 from gemma4_26b_a4b.geometry import (
     GLOBAL_DIM,
     GLOBAL_HEADS,
@@ -111,21 +111,37 @@ class ExpertAtlas:
         if self._alloc.get(handle) != size:
             memory.release(handle)
             self._alloc.pop(handle, None)
-            handle = memory.allocate(size, owner=self.owner)
+            handle = device_buffer(self.owner, size)
             self._alloc[handle] = size
         self._read(handle, layer)
         self._files[layer] = handle
         self._order.append(layer)
         return handle
 
+    def admit(self, session: Any, room: int) -> None:
+        """Load more layer files when ``room`` grew. A smaller room stays."""
+        del session
+        limit = self._fit_limit(room)
+        if limit <= self.limit:
+            return
+        self.limit = limit
+        for layer in range(LAYERS):
+            if len(self._files) >= self.limit:
+                break
+            if layer in self._files:
+                continue
+            handle, _size = self._open_layer(layer)
+            self._files[layer] = handle
+            self._order.append(layer)
+        if self.limit >= LAYERS and len(self._files) >= LAYERS:
+            self.complete = True
+
     def retune(self, session: Any, room: int) -> None:
         """Drop layer files until ``room`` holds what remains. A full fit stays."""
-        limit = layer_slots(room, self.layer_bytes, LAYERS)
+        limit = self._fit_limit(room)
         if limit < 1:
             message = "the expert atlas does not fit the memory budget"
             raise RuntimeError(message)
-        if self.sizes and room >= max(self.sizes) and room >= sum(self.sizes):
-            limit = min(LAYERS, len(self.sizes))
         if self.complete and limit >= LAYERS:
             return
         if limit >= len(self._order):
@@ -150,10 +166,16 @@ class ExpertAtlas:
 
     def _open_layer(self, layer: int) -> tuple[object, int]:
         size = self._file_size(layer)
-        handle = memory.allocate(size, owner=self.owner)
+        handle = device_buffer(self.owner, size)
         self._alloc[handle] = size
         self._read(handle, layer)
         return handle, size
+
+    def _fit_limit(self, room: int) -> int:
+        limit = layer_slots(room, self.layer_bytes, LAYERS)
+        if self.sizes and room >= max(self.sizes) and room >= sum(self.sizes):
+            return min(LAYERS, len(self.sizes))
+        return limit
 
     def _read(self, handle: object, layer: int) -> None:
         path = self.root / "experts" / f"{layer}.bin"

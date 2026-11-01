@@ -1119,6 +1119,29 @@ kernel void gemm_q4_0(
 }
 
 
+kernel void embed_fp8(
+    device const uchar* codes [[buffer(0)]],
+    device const uchar* scales [[buffer(1)]],
+    device float* hidden [[buffer(2)]],
+    constant uint& token [[buffer(3)]],
+    constant uint& k_pad [[buffer(4)]],
+    constant uint& k [[buffer(5)]],
+    constant float& embed_scale [[buffer(6)]],
+    uint i [[thread_position_in_grid]])
+{
+    if (i >= k) {
+        return;
+    }
+    uchar code = codes[(ulong)token * k_pad + i];
+    float mag = e4m3_mag(code);
+    if (code & 0x80u) {
+        mag = -mag;
+    }
+    uint block = i >> 5;
+    float scale = as_type<float>(uint(scales[(ulong)token * (k_pad >> 5) + block]) << 23);
+    hidden[i] = mag * scale * embed_scale;
+}
+
 kernel void embed_q4_0(
     device const uchar* table [[buffer(0)]],
     device float* hidden [[buffer(1)]],
@@ -1669,6 +1692,145 @@ kernel void store_kv_rows(
     uint token = index / count;
     uint local = index - token * count;
     cache[(token0 + token) * count + local] = half(source[index]);
+}
+
+// Block-peak E8M0 and nearest E4M3. A tie keeps the even magnitude code.
+static int _fp8_unbiased(float peak) {
+    if (peak <= 0.0f) {
+        return -127;
+    }
+    int exp = 0;
+    float mant = frexp(peak / 448.0f, exp);
+    int unbiased = mant == 0.5f ? exp - 1 : exp;
+    if (unbiased < -127) {
+        unbiased = -127;
+    }
+    if (unbiased > 127) {
+        unbiased = 127;
+    }
+    float limit = 448.0f * exp2(float(unbiased));
+    if (peak > limit && unbiased < 127) {
+        unbiased += 1;
+    } else if (unbiased > -127) {
+        float lower = 448.0f * exp2(float(unbiased - 1));
+        if (peak <= lower) {
+            unbiased -= 1;
+        }
+    }
+    return unbiased;
+}
+
+static uchar _fp8_code(float value, float scale) {
+    float unit = scale == 0.0f ? 0.0f : value / scale;
+    float mag = fabs(unit);
+    if (mag > 448.0f) {
+        mag = 448.0f;
+    }
+    uint code;
+    if (mag < 0.015625f) {
+        float bins = rint(mag * 512.0f);
+        code = bins >= 8.0f ? 0x08u : uint(bins);
+    } else {
+        int exp = 0;
+        float mant = frexp(mag, exp);
+        float significand = mant * 2.0f;
+        int field = exp - 1 + 7;
+        int mant_i = int(rint((significand - 1.0f) * 8.0f));
+        if (mant_i == 8) {
+            field += 1;
+            mant_i = 0;
+        }
+        if (field > 15 || (field == 15 && mant_i > 6)) {
+            code = 126u;
+        } else {
+            code = uint((field << 3) | mant_i);
+        }
+    }
+    if (value < 0.0f) {
+        code |= 0x80u;
+    }
+    return uchar(code);
+}
+
+// One scale block of a filled cache. ``transposed`` packs local values as [dim, count].
+kernel void pack_kv_fp8(
+    device const half* source [[buffer(0)]],
+    device uchar* destination [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    constant uint& heads [[buffer(3)]],
+    constant uint& dim [[buffer(4)]],
+    constant uint& k_pad [[buffer(5)]],
+    constant uint& rows [[buffer(6)]],
+    constant uint& transposed [[buffer(7)]],
+    uint index [[thread_position_in_grid]])
+{
+    uint blocks = k_pad >> 5;
+    uint span = heads * rows * blocks;
+    if (index >= span || blocks == 0u) {
+        return;
+    }
+    uint per_head = rows * blocks;
+    uint head = index / per_head;
+    uint rest = index - head * per_head;
+    uint row = rest / blocks;
+    uint block = rest - row * blocks;
+    float values[32];
+    float peak = 0.0f;
+    uint active = transposed ? count : dim;
+    for (uint lane = 0u; lane < 32u; ++lane) {
+        uint col = block * 32u + lane;
+        float value = 0.0f;
+        if (col < active) {
+            uint token = transposed ? col : row;
+            uint channel = transposed ? row : col;
+            ulong src = (ulong(token) * heads + head) * dim + channel;
+            value = float(source[src]);
+        }
+        values[lane] = value;
+        peak = max(peak, fabs(value));
+    }
+    int unbiased = _fp8_unbiased(peak);
+    float scale = exp2(float(unbiased));
+    ulong data_bytes = ulong(rows) * k_pad;
+    ulong head_bytes = data_bytes + ulong(rows) * blocks;
+    ulong base = ulong(head) * head_bytes + ulong(row) * k_pad + ulong(block) * 32u;
+    for (uint lane = 0u; lane < 32u; ++lane) {
+        destination[base + lane] = _fp8_code(values[lane], scale);
+    }
+    destination[ulong(head) * head_bytes + data_bytes + ulong(row) * blocks + block] =
+        uchar(unbiased + 127);
+}
+
+kernel void unpack_kv_fp8(
+    device const uchar* packed [[buffer(0)]],
+    device half* cache [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    constant uint& heads [[buffer(3)]],
+    constant uint& dim [[buffer(4)]],
+    constant uint& k_pad [[buffer(5)]],
+    constant uint& rows [[buffer(6)]],
+    constant uint& transposed [[buffer(7)]],
+    uint index [[thread_position_in_grid]])
+{
+    uint width = heads * dim;
+    if (index >= count * width || k_pad == 0u) {
+        return;
+    }
+    uint token = index / width;
+    uint rem = index - token * width;
+    uint head = rem / dim;
+    uint channel = rem - head * dim;
+    uint row = transposed ? channel : token;
+    uint col = transposed ? token : channel;
+    uint blocks = k_pad >> 5;
+    ulong data_bytes = ulong(rows) * k_pad;
+    ulong head_bytes = data_bytes + ulong(rows) * blocks;
+    ulong base = ulong(head) * head_bytes;
+    uchar code = packed[base + ulong(row) * k_pad + col];
+    uchar stored = packed[base + data_bytes + ulong(row) * blocks + (col >> 5)];
+    float mag = e4m3_mag(code);
+    float sign = (code & 0x80u) != 0u ? -1.0f : 1.0f;
+    cache[index] = half(sign * mag * exp2(float(int(stored) - 127)));
 }
 
 kernel void geglu_pair(
@@ -2334,6 +2496,97 @@ kernel void gemv_fp8_at(
         }
         if (live > 3u) {
             destination[dest + 3u] = out3;
+        }
+    }
+}
+
+kernel void gemv_fp8(
+    device const uchar* codes [[buffer(0)]],
+    device const uchar* scales [[buffer(1)]],
+    device const float* activation [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& k_pad [[buffer(4)]],
+    constant uint& rows [[buffer(5)]],
+    constant uint& active [[buffer(6)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint span [[threads_per_threadgroup]],
+    uint group [[threadgroup_position_in_grid]])
+{
+    uint row0 = (group * (span >> 5) + simd) * 4u;
+    if (row0 >= rows) {
+        return;
+    }
+    uint live = min(4u, rows - row0);
+    uint blocks = k_pad >> 5;
+    ulong code_stride = (ulong)k_pad;
+    ulong scale_stride = (ulong)blocks;
+    uint step = lane >> 1;
+    uint part = lane & 1u;
+    device const uchar* code_row[4];
+    device const uchar* scale_row[4];
+    for (uint row = 0u; row < 4u; ++row) {
+        uint at = row0 + row;
+        if (at >= rows) {
+            at = row0;
+        }
+        code_row[row] = codes + (ulong)at * code_stride;
+        scale_row[row] = scales + (ulong)at * scale_stride;
+    }
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint block = step; block < blocks; block += 16u) {
+        uint k = (block << 5) + part * 16u;
+        if (k >= active) {
+            continue;
+        }
+        float sample[16];
+        if (k + 16u <= active) {
+            float4 a0 = *((device const float4*)(activation + k));
+            float4 a1 = *((device const float4*)(activation + k + 4u));
+            float4 a2 = *((device const float4*)(activation + k + 8u));
+            float4 a3 = *((device const float4*)(activation + k + 12u));
+            sample[0] = a0.x;
+            sample[1] = a0.y;
+            sample[2] = a0.z;
+            sample[3] = a0.w;
+            sample[4] = a1.x;
+            sample[5] = a1.y;
+            sample[6] = a1.z;
+            sample[7] = a1.w;
+            sample[8] = a2.x;
+            sample[9] = a2.y;
+            sample[10] = a2.z;
+            sample[11] = a2.w;
+            sample[12] = a3.x;
+            sample[13] = a3.y;
+            sample[14] = a3.z;
+            sample[15] = a3.w;
+        } else {
+            uint remain = active - k;
+            for (uint i = 0u; i < 16u; ++i) {
+                sample[i] = i < remain ? activation[k + i] : 0.0f;
+            }
+        }
+        for (uint row = 0u; row < live; ++row) {
+            float scale = as_type<float>(uint(scale_row[row][block]) << 23);
+            acc[row] += _fp8_dot16(
+                code_row[row] + (ulong)block * 32u + (ulong)part * 16u, sample, scale);
+        }
+    }
+    float out0 = simd_sum(acc[0]);
+    float out1 = simd_sum(acc[1]);
+    float out2 = simd_sum(acc[2]);
+    float out3 = simd_sum(acc[3]);
+    if (lane == 0u) {
+        destination[row0] = out0;
+        if (live > 1u) {
+            destination[row0 + 1u] = out1;
+        }
+        if (live > 2u) {
+            destination[row0 + 2u] = out2;
+        }
+        if (live > 3u) {
+            destination[row0 + 3u] = out3;
         }
     }
 }

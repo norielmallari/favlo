@@ -16,7 +16,7 @@ from gemma4_26b_a4b.commands import CARROT_PROMPT
 from gemma4_26b_a4b.forward import Gemma4Runtime
 from gemma4_26b_a4b.sampling import VARIANTS
 
-_ROOT = Path("models/gemma-4-26B-A4B-it-q4_0")
+_ROOT = Path("models/gemma-4-26B-A4B-it-fp8-e20")
 _INSTRUCT_TOKENS = 384
 _THINK_TOKENS = 768
 _ANSWER = re.compile(

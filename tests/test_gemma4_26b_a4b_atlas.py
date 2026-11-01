@@ -37,8 +37,8 @@ def test_a_short_budget_reuses_the_oldest_layer(tmp_path: Path, monkeypatch) -> 
     live: dict[int, bytearray] = {}
     next_id = 0
 
-    def allocate(nbytes: int, *, owner: str) -> int:
-        del owner
+    def allocate(owner: str, nbytes: int, *, zero: bool = False) -> int:
+        del owner, zero
         nonlocal next_id
         handle = next_id
         next_id += 1
@@ -51,7 +51,7 @@ def test_a_short_budget_reuses_the_oldest_layer(tmp_path: Path, monkeypatch) -> 
     def read(handle: int, path: Path) -> None:
         live[handle][:] = path.read_bytes()
 
-    monkeypatch.setattr(atlas_mod.memory, "allocate", allocate)
+    monkeypatch.setattr(atlas_mod, "device_buffer", allocate)
     monkeypatch.setattr(atlas_mod.memory, "release", release)
     resident = ExpertAtlas("owner", tmp_path, layer_bytes, 3, read)
     resident.load(lambda _line: None)
@@ -68,3 +68,8 @@ def test_a_short_budget_reuses_the_oldest_layer(tmp_path: Path, monkeypatch) -> 
     assert kept not in resident._files
     assert 3 in resident._files
     assert live[handle][0] == 4
+    resident.admit(session, layer_bytes * 4)
+    assert resident.slots == 4
+    assert resident.complete is False
+    resident.admit(session, layer_bytes)
+    assert resident.slots == 4

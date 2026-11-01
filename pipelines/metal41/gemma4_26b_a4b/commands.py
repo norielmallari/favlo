@@ -39,7 +39,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     quant = sub.add_parser("quantize", help="pack a local bfloat16 checkout")
     quant.add_argument("--src", type=Path, default=None)
     quant.add_argument("--name", type=_folder, default=None)
-    sub.add_parser("kernels", help="compile the shader library and check one matmul")
+    sub.add_parser("kernels", help="compile the shader library and check matmul and the prefix pack")
     complete = sub.add_parser("complete", help="sample one carrot reply from the packed record")
     complete.add_argument("--name", type=_folder, default=None)
     args = parser.parse_args(list(argv) if argv is not None else None)

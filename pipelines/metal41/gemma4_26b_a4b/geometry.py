@@ -1,7 +1,7 @@
 """Checkpoint shapes for Gemma 4 26B-A4B.
 
 The sizes are the safetensors header of
-``google/gemma-4-26B-A4B-it-qat-q4_0-unquantized``. Global layers are the
+``google/gemma-4-26B-A4B-it``. Global layers are the
 ``full_attention`` entries in that config.
 """
 

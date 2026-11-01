@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from favlo.memory import memory
+from favlo.memory import device_buffer, memory
 
 _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"
 _KERNELS = (
@@ -30,6 +30,7 @@ _KERNELS = (
     "group_expert_slots",
     "gemv_fp4_routed",
     "gemv_fp4_at",
+    "gemv_fp8",
     "gemv_fp8_at",
     "write_rows",
     "write_rows_tight",
@@ -45,6 +46,7 @@ _KERNELS = (
     "rmsnorm_heads",
     "zero_buffer",
     "expand_fp16",
+    "embed_fp8",
     "embed_q4_0",
     "presence_penalty",
     "router_topk",
@@ -60,6 +62,8 @@ _KERNELS = (
     "attend_vision",
     "store_kv",
     "store_kv_rows",
+    "pack_kv_fp8",
+    "unpack_kv_fp8",
     "geglu",
     "geglu_rows",
     "gather_rows",
@@ -131,7 +135,7 @@ class Session:
         self._inflight: list[object] = []
 
     def zeros(self, nbytes: int) -> object:
-        return memory.allocate(nbytes, owner=self.owner, zero=True)
+        return device_buffer(self.owner, nbytes, zero=True)
 
     def upload(self, data: bytes | np.ndarray) -> object:
         return memory.upload(data, owner=self.owner)
@@ -279,6 +283,7 @@ class Session:
         inner: int,
         *,
         commit: bool = True,
+        origins: tuple[int, ...] | None = None,
     ) -> None:
         if rows % _TILE_M or cols % _TILE_N or inner % 32:
             message = f"matmul tile rows {rows} cols {cols} inner {inner}"
@@ -295,6 +300,7 @@ class Session:
             [self._u32(rows), self._u32(cols), self._u32(inner)],
             (cols // _TILE_N, rows // _TILE_M, 1),
             (width * 4, 1, 1),
+            origins=list(origins) if origins is not None else None,
         )
         if commit:
             self.commit()
@@ -602,10 +608,50 @@ def check_matmul() -> None:
         print("kernels fp8 matmul ok", flush=True)
         _check_fp4(session)
         _check_f16(session)
-        _check_q4_0(session)
         _check_select(session)
+        _check_prefix_pack(session)
     finally:
         session.close()
+
+
+def _check_prefix_pack(session: Session) -> None:
+    from gemma4_26b_a4b.planes import restore_matrix
+    from gemma4_26b_a4b.prefix import encode_pack_kv, encode_unpack_kv, fp8_layout, pack_token_major
+
+    rng = np.random.default_rng(0)
+    cases = ((17, 8, 256, True), (4, 8, 256, False), (130, 2, 512, False), (64, 2, 512, True))
+    for count, heads, dim, transposed in cases:
+        raw = np.ascontiguousarray(rng.standard_normal((count, heads, dim)).astype(np.float16))
+        raw.reshape(-1)[0] = np.float16(0)
+        expect = pack_token_major(raw.tobytes(), heads, dim, count, transposed=transposed)
+        source = session.upload(raw)
+        packed = session.zeros(len(expect))
+        wrote = encode_pack_kv(
+            session, source, packed, 0, count, heads, dim, transposed=transposed
+        )
+        session.flush()
+        got = memory.load(packed, 0, wrote)
+        if got != expect:
+            message = f"prefix pack mismatch count {count} dim {dim} transposed {transposed}"
+            raise RuntimeError(message)
+        restored = session.zeros(count * heads * dim * 2)
+        encode_unpack_kv(session, packed, restored, 0, count, heads, dim, transposed=transposed)
+        session.flush()
+        back = np.frombuffer(memory.load(restored, 0, count * heads * dim * 2), dtype=np.float16)
+        back = back.reshape(count, heads, dim)
+        rows, _, one = fp8_layout(count, 1, dim, transposed=transposed)
+        host = np.zeros((count, heads, dim), dtype=np.float32)
+        for head in range(heads):
+            piece = expect[head * one : (head + 1) * one]
+            if transposed:
+                matrix = restore_matrix(piece, rows, count, "fp8")
+                host[:, head, :] = matrix[:, :count].T
+            else:
+                host[:, head, :] = restore_matrix(piece, rows, dim, "fp8")
+        if not np.array_equal(back, host.astype(np.float16)):
+            message = f"prefix unpack mismatch count {count} dim {dim}"
+            raise RuntimeError(message)
+    print("kernels prefix pack ok", flush=True)
 
 
 def _check_select(session: Session) -> None:

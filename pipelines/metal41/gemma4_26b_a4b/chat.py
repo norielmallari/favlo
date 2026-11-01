@@ -271,6 +271,7 @@ class Gemma4Chat(_Hooks):
         except RequestError as exc:
             _reject(reply, str(exc))
             return
+        _carry_tool_thoughts(body.get("messages"), translated)
         _respond(ChatWire(reply), runtime, translated, selection, state)
 
 
@@ -317,15 +318,13 @@ def _respond(
     top_k = int(card["top_k"])
     presence = float(card["presence_penalty"])
     try:
-        messages, saw_reasoning = template_messages(prepared)
+        messages = template_messages(prepared)[0]
         _merge_instruction(messages, format_instruction(prepared))
         search, note = web_search_context(prepared)
         if note:
             messages.append({"role": "user", "content": note})
         tools = function_tools(prepared.get("tools"))
-        rendered, prompt = _fit_prompt(
-            runtime, prepared, messages, tools, thinking, saw_reasoning
-        )
+        rendered, prompt = _fit_prompt(runtime, prepared, messages, tools, thinking)
     except (RequestError, ValueError) as exc:
         _reject(reply, str(exc))
         return
@@ -400,15 +399,74 @@ def _merge_instruction(messages: list[dict[str, Any]], extra: str) -> None:
     messages.insert(0, {"role": "system", "content": extra})
 
 
+def _carry_tool_thoughts(messages: Any, translated: dict[str, Any]) -> None:
+    """Put a tool-call thought back in front of that call.
+
+    The shared translator drops ``reasoning_content``. The template keeps the
+    thought while the call is still after the latest user message.
+    """
+    items = translated.get("input")
+    if not isinstance(messages, list) or not isinstance(items, list):
+        return
+    cursor = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role in ("system", "developer"):
+            continue
+        if role == "tool":
+            cursor = _skip_kind(items, cursor, "function_call_output")
+            if cursor is None:
+                return
+            continue
+        if role != "assistant":
+            cursor = _skip_kind(items, cursor, "message")
+            if cursor is None:
+                return
+            continue
+        calls = message.get("tool_calls")
+        trace = _thought_text(message)
+        if isinstance(calls, list) and calls and trace:
+            items.insert(cursor, _reasoning_item(trace))
+            cursor += 1
+        if isinstance(calls, list):
+            for _call in calls:
+                cursor = _skip_kind(items, cursor, "function_call")
+                if cursor is None:
+                    return
+        if message.get("content"):
+            cursor = _skip_kind(items, cursor, "message")
+            if cursor is None:
+                return
+
+
+def _thought_text(message: dict[str, Any]) -> str:
+    for name in ("reasoning_content", "reasoning"):
+        text = message.get(name)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    return ""
+
+
+def _reasoning_item(text: str) -> dict[str, Any]:
+    return {"type": "reasoning", "content": [{"type": "reasoning_text", "text": text}]}
+
+
+def _skip_kind(items: list[Any], cursor: int, kind: str) -> int | None:
+    if cursor < len(items) and isinstance(items[cursor], dict) and items[cursor].get("type") == kind:
+        return cursor + 1
+    return None
+
+
 def _fit_prompt(
     runtime: Any,
     prepared: dict[str, Any],
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     thinking: bool,
-    saw_reasoning: bool,
 ) -> tuple[str, list[int]]:
-    rendered, prompt = _encode(runtime.root, messages, thinking, tools, saw_reasoning)
+    rendered, prompt = _encode(runtime.root, messages, thinking, tools)
     if len(prompt) <= CONTEXT:
         return rendered, prompt
     if prepared.get("truncation") != "auto":
@@ -418,7 +476,7 @@ def _fit_prompt(
         if drop >= len(messages):
             break
         del messages[drop]
-        rendered, prompt = _encode(runtime.root, messages, thinking, tools, saw_reasoning)
+        rendered, prompt = _encode(runtime.root, messages, thinking, tools)
     if len(prompt) > CONTEXT:
         raise RequestError("input does not fit")
     return rendered, prompt
@@ -429,11 +487,8 @@ def _encode(
     messages: list[dict[str, Any]],
     thinking: bool,
     tools: list[dict[str, Any]],
-    saw_reasoning: bool,
 ) -> tuple[str, list[int]]:
-    rendered = render_chat(
-        messages, thinking, tools or None, preserve_thinking=saw_reasoning
-    )
+    rendered = render_chat(messages, thinking, tools or None)
     return rendered, list(load_tokenizer(root).encode(rendered).ids)
 
 

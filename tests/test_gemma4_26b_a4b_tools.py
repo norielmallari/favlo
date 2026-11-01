@@ -6,7 +6,9 @@ import json
 
 import pytest
 
+from favlo.responses import chat_to_responses, template_messages
 from gemma4_26b_a4b.chat import (
+    _carry_tool_thoughts,
     _delta,
     _finish_reason,
     _stop_strings,
@@ -216,6 +218,46 @@ def test_tool_result_reopens_the_thought_channel() -> None:
     text = render_chat(messages, True, tools=[_read_tool()])
     assert "<|channel>thought\nlook\n<channel|>" in text
     assert text.endswith("<tool_response|><|channel>thought\n")
+
+
+def test_a_tool_thought_returns_until_the_next_user() -> None:
+    call = {
+        "id": "call_0",
+        "type": "function",
+        "function": {"name": "read_file", "arguments": '{"file_path":"ledger.py"}'},
+    }
+    messages = [
+        {"role": "user", "content": "read"},
+        {
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": "look",
+            "tool_calls": [call],
+        },
+        {"role": "tool", "tool_call_id": "call_0", "content": "ok"},
+    ]
+    text = _rendered_chat(messages)
+    assert "<|channel>thought\nlook\n<channel|>" in text
+    assert text.endswith("<tool_response|><|channel>thought\n")
+    messages.append({"role": "user", "content": "next"})
+    assert "look" not in _rendered_chat(messages)
+
+
+def test_a_plain_chat_thought_stays_out_of_the_prompt() -> None:
+    messages = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello", "reasoning_content": "secret"},
+        {"role": "user", "content": "next"},
+    ]
+    assert "secret" not in _rendered_chat(messages)
+
+
+def _rendered_chat(messages: list[dict[str, object]]) -> str:
+    body = {"messages": messages, "tools": [_read_tool()]}
+    translated = chat_to_responses(body)
+    _carry_tool_thoughts(messages, translated)
+    prepared, _seen = template_messages(translated)
+    return render_chat(prepared, True, tools=[_read_tool()])
 
 
 def test_plain_answer_thought_is_not_replayed() -> None:

@@ -52,18 +52,17 @@ class _Runtime:
         return [9], "", ""
 
 
-def _install(monkeypatch: Any, runtime: _Runtime) -> list[tuple[Any, bool, bool]]:
-    seen: list[tuple[Any, bool, bool]] = []
+def _install(monkeypatch: Any, runtime: _Runtime) -> list[tuple[Any, bool]]:
+    seen: list[tuple[Any, bool]] = []
 
     def encode(
         root: Path,
         messages: list[dict[str, Any]],
         thinking: bool,
         tools: list[dict[str, Any]],
-        saw_reasoning: bool,
     ) -> tuple[str, list[int]]:
         del root, tools
-        seen.append((messages, thinking, saw_reasoning))
+        seen.append((messages, thinking))
         return "<|turn>model\n", [1, 2, 3]
 
     monkeypatch.setattr("gemma4_26b_a4b.chat._encode", encode)
@@ -279,9 +278,8 @@ def test_a_stream_sends_one_delta_per_token(monkeypatch: Any) -> None:
         messages: list[dict[str, Any]],
         thinking: bool,
         tools: list[dict[str, Any]],
-        saw_reasoning: bool,
     ) -> tuple[str, list[int]]:
-        del root, messages, thinking, tools, saw_reasoning
+        del root, messages, thinking, tools
         return "<|turn>model\n", [1]
 
     monkeypatch.setattr("gemma4_26b_a4b.chat._encode", encode)
@@ -348,9 +346,8 @@ def test_truncation_auto_drops_the_oldest_item(monkeypatch: Any) -> None:
         messages: list[dict[str, Any]],
         thinking: bool,
         tools: list[dict[str, Any]],
-        saw_reasoning: bool,
     ) -> tuple[str, list[int]]:
-        del root, thinking, tools, saw_reasoning
+        del root, thinking, tools
         seen.append(len(messages))
         if len(messages) > 2:
             return "x", [0] * (CONTEXT + 1)

@@ -1,4 +1,4 @@
-"""Gemma 4 vision tower. Loaded on the first image, from the packed q4_0 rows.
+"""Gemma 4 vision tower. Loaded on the first image, from the packed fp8 rows.
 
 The resize is Algorithm 1 of the Gemma 4 technical report. The encoder is the
 550M ViT in that report: 27 layers, width 1152, 16 heads of dimension 72,
@@ -35,21 +35,24 @@ from gemma4_26b_a4b.geometry import (
     VISION_WIDTH,
     pooled_size,
 )
-from gemma4_26b_a4b.planes import Q40, align_k
+from gemma4_26b_a4b.planes import FP8, align_k, fp8_parts
 
 _MAX_PATCHES = VISION_SOFT_MAX * POOL * POOL
 _MAX_SIDE = VISION_SOFT_MAX * POOL
 _POS_ROWS = 10240
-_MLP_PAD = align_k(VISION_MLP, Q40)
+_MLP_PAD = align_k(VISION_MLP, FP8)
 _ATTN_SCALE = 1.0 / math.sqrt(VISION_HEAD)
 
 
 @dataclass
 class _Matrix:
     data: object
+    scales: object
     rows: int
     k: int
     k_pad: int
+    scale_origin: int
+    rows_pad: int
 
 
 @dataclass
@@ -234,11 +237,15 @@ class VisionTower:
                     raise RuntimeError(message)
                 if plane == "fp16" and len(shape) == 1:
                     found[name] = self._expand(packed)
-                elif plane == Q40 and len(shape) == 2:
+                elif plane == FP8 and len(shape) == 2:
                     handle = self.session.zeros(nbytes)
                     memory.store(handle, 0, packed)
                     rows, k = int(shape[0]), int(shape[1])
-                    found[name] = _Matrix(handle, rows, k, align_k(k, Q40))
+                    stored = int(row.get("padded_rows") or rows)
+                    data, _scale = fp8_parts(stored, k)
+                    found[name] = _Matrix(
+                        handle, handle, rows, k, align_k(k, FP8), data, stored
+                    )
                 else:
                     message = f"{name} is not a vision matrix"
                     raise RuntimeError(message)
@@ -417,7 +424,7 @@ class VisionTower:
 
     def _gemm(self, source: object, matrix: _Matrix, count: int, dest: object) -> None:
         padded = _pad_tokens(count)
-        pad_rows = _pad_rows(matrix.rows)
+        pad_rows = matrix.rows_pad
         self.session.encode(
             "write_rows_tight",
             [source, self.half_a],
@@ -429,33 +436,18 @@ class VisionTower:
             ((matrix.k_pad + 255) // 256, padded, 1),
             (256, 1, 1),
         )
-        if pad_rows > matrix.rows:
-            tail = (pad_rows - matrix.rows) * matrix.k_pad * 2
-            self.session.encode(
-                "zero_buffer",
-                [self.half_w],
-                [self.session._u32(tail)],
-                *_blocks(tail),
-                origins=[matrix.rows * matrix.k_pad * 2],
-            )
-        blocks = matrix.rows * (matrix.k_pad // 32)
-        self.session.encode(
-            "dequant_q4_0",
-            [matrix.data, self.half_w],
-            [self.session._u32(matrix.k_pad), self.session._u32(matrix.rows)],
-            *_blocks(blocks),
-        )
         target = dest if pad_rows == matrix.rows else self.wide
         self.session.matmul(
-            "matmul_f16",
+            "matmul_fp8",
             self.half_a,
-            self.half_w,
-            None,
+            matrix.data,
+            matrix.scales,
             target,
             padded,
             pad_rows,
             matrix.k_pad,
             commit=False,
+            origins=(0, 0, matrix.scale_origin, 0),
         )
         if pad_rows == matrix.rows:
             return

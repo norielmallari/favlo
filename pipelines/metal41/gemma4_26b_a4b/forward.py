@@ -7,8 +7,8 @@ hidden state after the feed-forward residual. The dense MLP uses
 experts use ``pre_feedforward_layernorm_2`` and
 ``post_feedforward_layernorm_2``. The router norm is the full router scale
 times ``1/sqrt(hidden)``. The embedding row is multiplied by ``sqrt(hidden)``.
-Decode reads packed q4_0 for the dense projections. Routed experts are
-fp4 or fp8, one image per expert. A full budget keeps every layer resident.
+Decode reads packed fp8 for the embedding and the dense projections.
+Routed experts are fp4 or fp8, one image per expert. A full budget keeps every layer resident.
 A short budget keeps as many as fit and reads a miss into the oldest slot.
 One threadgroup owns eight output rows.
 Prefill attends a chunk of 1024 tokens in one kernel. A device kernel
@@ -17,9 +17,8 @@ dispatch, so the host does not read the expert ids. Every occupied slot
 is multiplied with ``matmul_fp4_64_at`` or ``matmul_fp8_64_at``.
 The down projection pads K from 704 to 768. A chunk submits every ten layers. The prefill count
 stays short of the prompt until the last of those buffers has finished.
-A dense batch of eight or fewer
-tokens uses that dot. A longer dense batch dequantizes one matrix to
-float16 and multiplies it with matmul2d. Attention scores are the raw
+Growing the cache waits for that work, then copies the live tokens.
+A dense batch multiplies packed fp8 with matmul2d. Attention scores are the raw
 dot. Values are RMSNorm with no
 scale: a global value is that norm of the key projection, without RoPE.
 Global layers rotate the first quarter of the head pairs (p-RoPE). Local
@@ -42,7 +41,7 @@ from typing import Any
 import numpy as np
 
 from favlo.console import format_note, format_rate
-from favlo.memory import memory
+from favlo.memory import device_buffer, memory
 from favlo.prefix import (
     DEFAULT_BUDGET,
     PrefixSession,
@@ -75,7 +74,7 @@ from gemma4_26b_a4b.geometry import (
     local_layers,
 )
 from gemma4_26b_a4b.atlas import ExpertAtlas, kv_bytes, kv_margin, layer_slots
-from gemma4_26b_a4b.planes import FP4, FP8, Q40, align_k, expert_bytes, expert_planes
+from gemma4_26b_a4b.planes import FP4, FP8, align_k, expert_bytes, expert_planes, fp8_parts
 from gemma4_26b_a4b.prefix import RuntimeAdapter
 from gemma4_26b_a4b.session import Session
 
@@ -205,6 +204,8 @@ class Matrix:
     k: int
     k_pad: int
     origin: int = 0
+    scale_origin: int = 0
+    rows_pad: int = 0
 
 
 @dataclass
@@ -242,15 +243,12 @@ class Gemma4Runtime:
         owner: str,
         kv_cache: str = "e4m3",
         console: object = None,
-        max_memory: str | int | None = None,
     ) -> None:
-        from favlo.memory import memory
-
         self.console = console
         self._request_id = 0
         self._prefill_progress = None
         self._load_progress = None
-        self._budget = memory.budget() if not isinstance(max_memory, int) else max_memory
+        self._budget = memory.budget()
         self._closed = False
         self.root = path
         self.owner = owner
@@ -494,6 +492,7 @@ class Gemma4Runtime:
         for start in range(0, len(tokens), _CHUNK):
             if self._stop:
                 return
+            self.refresh_budget()
             span = tokens[start : start + _CHUNK]
             last = finish and start + len(span) == len(tokens)
             self._span(span, last, noted=start)
@@ -567,19 +566,18 @@ class Gemma4Runtime:
 
     def _embed_span(self, tokens: list[int]) -> None:
         plane = self.embed
-        blocks = plane.k_pad // 32
         for index, token in enumerate(tokens):
             self.session.encode(
-                "embed_q4_0",
-                [plane.data, self.span],
+                "embed_fp8",
+                [plane.data, plane.scales, self.span],
                 [
                     self.session._u32(token),
                     self.session._u32(plane.k_pad),
                     self.session._u32(plane.k),
                     self.session._f32(HIDDEN**0.5),
                 ],
-                *self._grid(blocks),
-                origins=[0, index * HIDDEN * 4],
+                *self._grid(plane.k),
+                origins=[plane.origin, plane.scale_origin, index * HIDDEN * 4],
             )
 
     def _block_span(self, layer: Layer, index: int, count: int) -> None:
@@ -863,33 +861,10 @@ class Gemma4Runtime:
         if tokens <= 0:
             return
         active = min(count, matrix.k)
-        if tokens <= 8:
-            self.session.encode(
-                "gemm_q4_0_n",
-                [matrix.data, source, destination],
-                [
-                    self.session._u32(matrix.k_pad),
-                    self.session._u32(matrix.rows),
-                    self.session._u32(tokens),
-                    self.session._u32(active),
-                ],
-                ((matrix.rows + 7) // 8, 1, 1),
-                (64, 1, 1),
-                origins=[matrix.origin, 0, 0],
-            )
-            return
-        blocks = matrix.rows * (matrix.k_pad // 32)
+        cols = matrix.rows_pad or matrix.rows
+        padded = (tokens + 7) & ~7
         self.session.encode(
-            "dequant_q4_0",
-            [matrix.data, self.half_w],
-            [self.session._u32(matrix.k_pad), self.session._u32(matrix.rows)],
-            *self._grid(blocks),
-            origins=[matrix.origin, 0],
-        )
-        wide = tokens >= 32 and matrix.rows % 64 == 0
-        padded = ((tokens + 63) & ~63) if wide else ((tokens + 7) & ~7)
-        self.session.encode(
-            "write_rows",
+            "write_rows_tight",
             [source, self.span_ah],
             [
                 self.session._u32(active),
@@ -899,31 +874,32 @@ class Gemma4Runtime:
             ((matrix.k_pad + 255) // 256, padded, 1),
             (256, 1, 1),
         )
-        if wide:
-            pipe = self.session.pipes["matmul_f16_64"]
-            width = int(pipe.threadExecutionWidth())
-            self.session.encode(
-                "matmul_f16_64",
-                [self.span_ah, self.half_w, destination],
-                [
-                    self.session._u32(padded),
-                    self.session._u32(matrix.rows),
-                    self.session._u32(matrix.k_pad),
-                ],
-                (matrix.rows // 64, padded // 64, 1),
-                (width * 4, 1, 1),
-            )
-            return
+        direct = padded == tokens and cols == matrix.rows
+        target = destination if direct else self.half_w
         self.session.matmul(
-            "matmul_f16",
+            "matmul_fp8",
             self.span_ah,
-            self.half_w,
-            None,
-            destination,
+            matrix.data,
+            matrix.scales,
+            target,
             padded,
-            matrix.rows,
+            cols,
             matrix.k_pad,
             commit=False,
+            origins=(0, matrix.origin, matrix.scale_origin, 0),
+        )
+        if direct:
+            return
+        self.session.encode(
+            "compact_rows",
+            [self.half_w, destination],
+            [
+                self.session._u32(cols),
+                self.session._u32(matrix.rows),
+                self.session._u32(tokens),
+            ],
+            ((matrix.rows + 255) // 256, tokens, 1),
+            (256, 1, 1),
         )
 
     def _copy_at(
@@ -954,17 +930,17 @@ class Gemma4Runtime:
 
     def _embed(self, token: int) -> None:
         plane = self.embed
-        blocks = plane.k_pad // 32
         self.session.encode(
-            "embed_q4_0",
-            [plane.data, self.hidden],
+            "embed_fp8",
+            [plane.data, plane.scales, self.hidden],
             [
                 self.session._u32(token),
                 self.session._u32(plane.k_pad),
                 self.session._u32(plane.k),
                 self.session._f32(HIDDEN**0.5),
             ],
-            *self._grid(blocks),
+            *self._grid(plane.k),
+            origins=[plane.origin, plane.scale_origin, 0],
         )
 
     def _block(self, layer: Layer, index: int) -> None:
@@ -1169,10 +1145,10 @@ class Gemma4Runtime:
         return memory.load(handle, 0, nbytes)
 
     def _linear(self, source: object, matrix: Matrix, count: int) -> None:
-        if matrix.kind == Q40:
+        if matrix.kind == "matmul_fp8":
             self.session.encode(
-                "gemv_q4_0",
-                [matrix.data, source, self.out],
+                "gemv_fp8",
+                [matrix.data, matrix.scales, source, self.out],
                 [
                     self.session._u32(matrix.k_pad),
                     self.session._u32(matrix.rows),
@@ -1180,7 +1156,7 @@ class Gemma4Runtime:
                 ],
                 ((matrix.rows + 7) // 8, 1, 1),
                 (64, 1, 1),
-                origins=[matrix.origin, 0, 0],
+                origins=[matrix.origin, matrix.scale_origin, 0, 0],
             )
             return
         width = min(count, matrix.k)
@@ -1243,7 +1219,18 @@ class Gemma4Runtime:
             *self._grid(count),
         )
 
+    def refresh_budget(self) -> None:
+        """Read the serve ledger again. A larger answer admits more expert layers."""
+        ceiling = memory.budget()
+        if ceiling <= self._budget:
+            return
+        self._budget = ceiling
+        if self.atlas is None:
+            return
+        self.atlas.admit(self.session, self._atlas_room(self.capacity))
+
     def _ensure(self, count: int) -> None:
+        self.refresh_budget()
         if count <= self.capacity:
             return
         if count > CONTEXT:
@@ -1254,6 +1241,7 @@ class Gemma4Runtime:
         if self.atlas is None or layer_slots(room, self.atlas.layer_bytes, LAYERS) < 1:
             message = "the key/value cache does not fit the memory budget"
             raise RuntimeError(message)
+        self.session.flush()
         self.atlas.retune(self.session, room)
         self.local_k = [
             self._grow(handle, LOCAL_HEADS, LOCAL_DIM, larger) for handle in self.local_k
@@ -1485,7 +1473,7 @@ class Gemma4Runtime:
                 if "vision_tower" in name or "embed_vision" in name:
                     self._note_load(nbytes)
                     continue
-                handle = memory.allocate(nbytes, owner=self._owner)
+                handle = device_buffer(self._owner, nbytes)
                 if nbytes:
                     raw_file.seek(offset)
                     _fill(raw_file, memory.map(handle, 0, nbytes), offset)
@@ -1496,8 +1484,10 @@ class Gemma4Runtime:
                         self._scale_vector(found[name], HIDDEN**-0.5)
                 elif plane == "fp16" and len(shape) == 2:
                     found[name] = _matrix_from(handle, shape, "fp16")
-                elif plane == Q40 and len(shape) == 2:
-                    found[name] = _matrix_from(handle, shape, plane)
+                elif plane == FP8 and len(shape) == 2:
+                    found[name] = _matrix_from(
+                        handle, shape, plane, int(row.get("padded_rows") or shape[0])
+                    )
         finally:
             raw_file.close()
         self._map = found
@@ -1647,9 +1637,22 @@ class Gemma4Runtime:
         self._kept_count = count
 
 
-def _matrix_from(handle: object, shape: tuple[int, ...], plane: str) -> Matrix:
+def _matrix_from(
+    handle: object, shape: tuple[int, ...], plane: str, rows_pad: int = 0
+) -> Matrix:
     rows, k = int(shape[0]), int(shape[1])
     if plane == "fp16":
-        return Matrix(handle, None, "matmul_f16", rows, k, k)
-    return Matrix(handle, None, Q40, rows, k, align_k(k, Q40))
+        return Matrix(handle, None, "matmul_f16", rows, k, k, rows_pad=rows)
+    stored = rows_pad or rows
+    data, _scale = fp8_parts(stored, k)
+    return Matrix(
+        handle,
+        handle,
+        "matmul_fp8",
+        rows,
+        k,
+        align_k(k, FP8),
+        scale_origin=data,
+        rows_pad=stored,
+    )
 
