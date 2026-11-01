@@ -97,19 +97,39 @@ def _covering_scratch() -> Scratch:
     return scratch
 
 
+class _Sized:
+    def __init__(self, width: int, height: int) -> None:
+        self.width = width
+        self.height = height
+        self.released = False
+
+    def covers(self, width: int, height: int) -> bool:
+        return self.width >= width and self.height >= height
+
+    def release(self) -> None:
+        self.released = True
+
+
+def _sized(width: int, height: int) -> _Sized:
+    return _Sized(width, height)
+
+
 def test_open_runtime_forwards_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
+    caps: list[object] = []
 
-    def fake(path, console=None, *, owner=None, max_memory=None):
+    def fake(path, console=None, *, owner=None):
         captured["path"] = path
         captured["owner"] = owner
-        captured["max_memory"] = max_memory
+        captured["kwargs"] = {"console": console}
         return "runtime"
 
     monkeypatch.setattr("z_image_turbo.runtime.Runtime", fake)
+    monkeypatch.setattr("z_image_turbo.runtime.memory.set_max_memory", caps.append)
     assert open_runtime(Path("record"), owner="z-image-turbo:7", max_memory="16GiB") == "runtime"
     assert captured["owner"] == "z-image-turbo:7"
-    assert captured["max_memory"] == "16GiB"
+    assert "max_memory" not in captured
+    assert caps == ["16GiB"]
 
 
 def test_a_missing_record_keeps_the_passed_owner(tmp_path: Path) -> None:
@@ -117,9 +137,9 @@ def test_a_missing_record_keeps_the_passed_owner(tmp_path: Path) -> None:
     held: dict[str, str] = {}
 
     class _Probe(Runtime):
-        def __init__(self, path: Path, console=None, *, owner=None, max_memory=None) -> None:
+        def __init__(self, path: Path, console=None, *, owner=None) -> None:
             try:
-                super().__init__(path, console, owner=owner, max_memory=max_memory)
+                super().__init__(path, console, owner=owner)
             except FileNotFoundError:
                 held["owner"] = self._owner
                 raise
@@ -133,9 +153,9 @@ def test_a_missing_record_mints_an_owner(tmp_path: Path) -> None:
     held: dict[str, str] = {}
 
     class _Probe(Runtime):
-        def __init__(self, path: Path, console=None, *, owner=None, max_memory=None) -> None:
+        def __init__(self, path: Path, console=None, *, owner=None) -> None:
             try:
-                super().__init__(path, console, owner=owner, max_memory=max_memory)
+                super().__init__(path, console, owner=owner)
             except FileNotFoundError:
                 held["owner"] = self._owner
                 raise
@@ -154,7 +174,6 @@ def test_scratch_shrinks_with_the_image() -> None:
 def test_a_short_ledger_refuses_the_requested_image() -> None:
     runtime = Runtime.__new__(Runtime)
     runtime.scratch = None
-    runtime._memory_cap = None
     runtime._room = lambda: scratch_bytes(16, 32) - 1
     with pytest.raises(RuntimeError, match="16x32"):
         runtime._reserve_scratch(16, 32)
@@ -184,6 +203,38 @@ def test_a_tight_ledger_reserves_the_requested_size(monkeypatch: pytest.MonkeyPa
     runtime._reserve_scratch(512, 512)
     assert created["size"] == (512, 512)
     assert needed < scratch_bytes(MAX_EDGE, MAX_EDGE)
+
+
+def test_a_larger_ledger_grows_scratch_to_the_training_square(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: dict[str, tuple[int, int]] = {}
+
+    def fake_scratch(gpu, width=MAX_EDGE, height=MAX_EDGE):
+        del gpu
+        created["size"] = (width, height)
+        return _sized(width, height)
+
+    monkeypatch.setattr("z_image_turbo.runtime.Scratch", fake_scratch)
+    runtime = Runtime.__new__(Runtime)
+    runtime.gpu = object()
+    held = _sized(512, 512)
+    runtime.scratch = held
+    runtime._room = lambda: scratch_bytes(MAX_EDGE, MAX_EDGE)
+    runtime._reserve_scratch(512, 512)
+    assert created["size"] == (MAX_EDGE, MAX_EDGE)
+    assert runtime.scratch is not held
+    assert held.released
+
+
+def test_a_smaller_ledger_keeps_scratch_that_covers_the_image() -> None:
+    runtime = Runtime.__new__(Runtime)
+    held = _sized(512, 512)
+    runtime.scratch = held
+    runtime._room = lambda: 0
+    runtime._reserve_scratch(512, 512)
+    assert runtime.scratch is held
+    assert not held.released
 
 
 def test_shifted_knots_have_eight_intervals() -> None:
@@ -669,6 +720,7 @@ def test_generate_closes_the_sample_row(monkeypatch) -> None:
     monkeypatch.setattr(Runtime, "_run", _run)
     runtime = Runtime.__new__(Runtime)
     runtime.scratch = _covering_scratch()
+    runtime._room = lambda: 0
     runtime.console = _bars(store)
     pixels, digest, timing = runtime.generate("a cat", 16, 16, 8, 0)
     assert digest == "digest"
@@ -692,6 +744,7 @@ def test_a_paused_generate_closes_the_sample_row(monkeypatch) -> None:
     monkeypatch.setattr(Runtime, "_run", _run)
     runtime = Runtime.__new__(Runtime)
     runtime.scratch = _covering_scratch()
+    runtime._room = lambda: 0
     runtime.console = _bars(store)
     latent = np.zeros((16, 2, 2), dtype=np.float32)
     with pytest.raises(ImagePaused):
@@ -711,6 +764,7 @@ def test_a_cancelled_generate_closes_the_sample_row(monkeypatch) -> None:
     monkeypatch.setattr(Runtime, "_run", _run)
     runtime = Runtime.__new__(Runtime)
     runtime.scratch = _covering_scratch()
+    runtime._room = lambda: 0
     runtime.console = _bars(store)
     with pytest.raises(ImagePaused):
         runtime.generate("a cat", 16, 16, 8, 0)
@@ -727,6 +781,7 @@ def test_a_failed_generate_closes_the_sample_row(monkeypatch) -> None:
     monkeypatch.setattr(Runtime, "_run", _run)
     runtime = Runtime.__new__(Runtime)
     runtime.scratch = _covering_scratch()
+    runtime._room = lambda: 0
     runtime.console = _bars(store)
     with pytest.raises(RuntimeError, match="latent is not finite"):
         runtime.generate("a cat", 16, 16, 8, 0)
@@ -742,6 +797,7 @@ def test_generate_without_a_console_prints_the_lines(monkeypatch, capsys) -> Non
     monkeypatch.setattr(Runtime, "_run", _run)
     runtime = Runtime.__new__(Runtime)
     runtime.scratch = _covering_scratch()
+    runtime._room = lambda: 0
     runtime.console = None
     runtime.generate("a cat", 16, 16, 8, 0)
     text = capsys.readouterr().out

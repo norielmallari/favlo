@@ -12,7 +12,7 @@ from typing import Any
 import Metal
 import numpy as np
 
-from favlo.memory import memory
+from favlo.memory import device_buffer, memory
 from z_image_turbo.formats import INT8_TILE_N, TILE_M, TILE_N, pad_to
 
 _LIBC = ctypes.CDLL(None, use_errno=True)
@@ -259,7 +259,7 @@ class Gpu:
         return buf
 
     def empty(self, nbytes: int) -> Any:
-        buf = memory.allocate(int(nbytes), owner=self._owner, zero=True)
+        buf = device_buffer(self._owner, int(nbytes), zero=True)
         self._owned.append(buf)
         return buf
 

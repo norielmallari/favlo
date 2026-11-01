@@ -33,13 +33,11 @@ class Runtime:
         console: Any = None,
         *,
         owner: str | None = None,
-        max_memory: str | int | None = None,
     ) -> None:
         self.path = path
         self.console = console
         self._closed = True
         self._owner = owner or f"z-image-turbo:{id(self)}"
-        self._memory_cap = _parse_memory(max_memory)
         self.gpu = None
         self.weights = {}
         self.scratch = None
@@ -109,17 +107,13 @@ class Runtime:
             memory.sweep(owner)
 
     def _room(self) -> int:
-        """Bytes a new span may take. ``max_memory`` caps the ledger."""
-        ceiling = memory.budget()
-        cap = getattr(self, "_memory_cap", None)
-        if cap is not None:
-            ceiling = min(ceiling, cap)
-        return max(0, ceiling - memory.live - memory.pending)
+        """Bytes a new span may take. The serve ledger applies ``--max-memory``."""
+        return memory.room()
 
     def _reserve_scratch(self, width: int, height: int) -> None:
-        """Hold scratch for this image. A short ledger keeps the requested size."""
+        """Hold scratch for this image. A larger ledger grows it; a smaller one keeps it."""
         scratch = self.scratch
-        if scratch is not None and scratch.covers(width, height):
+        if scratch is not None and scratch.covers(MAX_EDGE, MAX_EDGE):
             return
         needed = scratch_bytes(width, height)
         preferred = scratch_bytes(MAX_EDGE, MAX_EDGE)
@@ -127,6 +121,8 @@ class Runtime:
         room = self._room() + held
         if room >= preferred:
             chosen = (MAX_EDGE, MAX_EDGE)
+        elif scratch is not None and scratch.covers(width, height):
+            return
         elif room >= needed:
             chosen = (width, height)
         else:
@@ -397,46 +393,8 @@ def open_runtime(
     owner: str | None = None,
 ) -> Runtime:
     del kv_cache, resident_percent
-    return Runtime(Path(path), console, owner=owner, max_memory=max_memory)
-
-
-def _parse_memory(text: str | int | None) -> int | None:
-    """``32GiB``, ``512MiB``, or a byte count. Empty leaves the ledger uncapped."""
-    if text is None or text == "":
-        return None
-    if isinstance(text, int):
-        if text < 1:
-            message = f"maximum memory {text} is not positive"
-            raise ValueError(message)
-        return text
-    raw = str(text).strip().replace("_", "")
-    suffix = ""
-    digits = raw
-    for ending, name in (
-        ("gib", "GiB"),
-        ("mib", "MiB"),
-        ("gb", "GiB"),
-        ("mb", "MiB"),
-        ("g", "GiB"),
-        ("m", "MiB"),
-    ):
-        if raw.lower().endswith(ending):
-            suffix = name
-            digits = raw[: -len(ending)]
-            break
-    try:
-        number = int(digits)
-    except ValueError as exc:
-        message = f"maximum memory {text} is not a byte count"
-        raise ValueError(message) from exc
-    if number < 1:
-        message = f"maximum memory {text} is not positive"
-        raise ValueError(message)
-    if suffix == "GiB":
-        return number << 30
-    if suffix == "MiB":
-        return number << 20
-    return number
+    memory.set_max_memory(max_memory)
+    return Runtime(Path(path), console, owner=owner)
 
 
 def _decode_image(
