@@ -26,6 +26,7 @@ from favlo.daemon import DAEMON_ENV, alive
 from favlo.images import sweep_images
 from favlo.logs import attach_process_log
 from favlo.music import sweep_music
+from favlo.pipeline_worker import forward_signal
 from favlo.pipelines import pipelines
 from favlo.videos import sweep_videos
 from favlo.voice import sweep_voice
@@ -99,10 +100,11 @@ class _Shutdown:
         signal.signal(signal.SIGTERM, previous[1])
         self._previous = None
 
-    def handle(self, _signum: int, _frame: Any) -> None:
+    def handle(self, signum: int, _frame: Any) -> None:
         if self.closing:
             return
         self.signaled = True
+        forward_signal(signum)
         runtime = self.runtime
         if runtime is not None:
             runtime.halt()

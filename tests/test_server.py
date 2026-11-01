@@ -585,6 +585,24 @@ def test_sigint_during_a_request_releases_the_server() -> None:
     _signal_server(signal.SIGINT, during_request=True)
 
 
+def test_sigterm_is_forwarded_to_pipeline_processes(monkeypatch) -> None:
+    import signal
+
+    from favlo.pipeline_worker import _CHILD_PIDS
+
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr("favlo.pipeline_worker.os.kill", lambda pid, sig: sent.append((pid, sig)))
+    _CHILD_PIDS.add(4242)
+    shutdown = listener._Shutdown()
+    try:
+        shutdown.handle(signal.SIGTERM, None)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        _CHILD_PIDS.discard(4242)
+    assert sent == [(4242, signal.SIGTERM)]
+
+
 def test_sigterm_releases_the_listening_socket() -> None:
     import signal
 

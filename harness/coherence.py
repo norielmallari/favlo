@@ -298,8 +298,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", default=None, help="chat model id; default is the registry default")
     args = parser.parse_args(argv)
     from favlo.cli import repo_root
-    from harness.harness_model import judge_model
     from favlo.daemon import ensure, follow, stop_pid, telemetry_path
+    from harness.harness_model import judge_model
 
     port = args.port or _free_port()
     log = Log()

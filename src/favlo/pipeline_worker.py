@@ -3,8 +3,9 @@
 The pipeline manager spawns this module and keeps the registry, the job queue,
 and the memory ledger. This process loads the pipeline and creates the Metal device.
 Its console events are forwarded to the daemon, which writes the telemetry
-the CLI paints. Before this process exits it sweeps its owners and blocks
-until the ledger says those heaps are gone. When the process exits, including
+the CLI paints. Before a clean exit it sweeps its owners and blocks
+until the ledger says those heaps are gone. A SIGTERM from the daemon ends
+this process, and the kernel releases its device. When the process exits, including
 a clean close, the daemon blocks the next call until the pages that process
 wired are back, then drops the ledger entry. A crash also fails the job.
 """
@@ -31,6 +32,16 @@ _KINDS = {
     "voice": "handle_voice",
 }
 _RUNTIME: list[Any] = []
+_CHILD_PIDS: set[int] = set()
+
+
+def forward_signal(signum: int) -> None:
+    """Deliver ``signum`` to every pipeline process this daemon started."""
+    for pid in tuple(_CHILD_PIDS):
+        try:
+            os.kill(pid, signum)
+        except OSError:
+            pass
 
 
 def _served_kinds(module: Any, stub: bool) -> list[str]:
@@ -255,6 +266,7 @@ class PipelineChild:
             pass_fds=(read_fd,),
             start_new_session=True,
         )
+        _CHILD_PIDS.add(proc.pid)
         os.close(read_fd)
         self._proc = proc
         self._control = write_fd
@@ -334,6 +346,7 @@ class PipelineChild:
         if proc is None:
             return
         proc.wait()
+        _CHILD_PIDS.discard(proc.pid)
         with self._write_lock:
             crashed = not self._shut
             self._shut = True

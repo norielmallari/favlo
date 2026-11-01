@@ -11,7 +11,7 @@ python -m harness.server status
 python -m harness.server run -- <command>
 ```
 
-`status` prints `listening` or `down` for `127.0.0.1:8129`. `run` opens the listener session. A process already listening there is reused and left running. A closed port starts the daemon, and the session stops that process when the command exits. Media harnesses call that same session and do not bind a second port.
+`status` prints `listening` or `down` for `127.0.0.1:8129`. `run` opens the listener session. A process already listening there is reused and left running. A closed port starts `favlo serve`. When the session stops that process, it sends SIGTERM. The daemon forwards that signal to each pipeline process. Media harnesses call that same session and do not bind a second port.
 
 ### Machine lock
 

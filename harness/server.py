@@ -47,7 +47,7 @@ def open_listener(host: str = HOST, port: int = PORT) -> Listener:
 
 
 def close_listener(listener: Listener) -> None:
-    """Stop a listener this session started."""
+    """Close pipelines on a listener this session started, then stop it."""
     if not listener.owned or listener.pid is None:
         return
     from favlo.daemon import stop_pid
