@@ -312,13 +312,14 @@ def _daemon_main(args: Any) -> int:
 def _foreground(args: Any) -> int:
     """This process is the listener. A terminal paints progress on stderr."""
     from favlo.cli import repo_root
-    from favlo.daemon import DaemonError, occupy
+    from favlo.daemon import DaemonError, occupy, reclaim
     from favlo.setup import prepare
 
     if sys.stdin.isatty():
         code = prepare(repo_root(), stdin_tty=True, console=args.console)
         if code != 0:
             return code
+    reclaim(args.host, args.port)
     try:
         occupy(args.host, args.port)
     except DaemonError as exc:
@@ -330,8 +331,9 @@ def _foreground(args: Any) -> int:
 
 def _start_daemon(args: Any) -> int:
     """Spawn the daemon when this address is free, print the listening line, and return."""
-    from favlo.daemon import DaemonError, ensure
+    from favlo.daemon import DaemonError, ensure, reclaim
 
+    reclaim(args.host, args.port)
     try:
         ensure(
             args.host,

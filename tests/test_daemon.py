@@ -1,6 +1,7 @@
 """The serve daemon starts once and the terminal does not become that process."""
 
 import io
+import os
 import sys
 import threading
 import time
@@ -182,6 +183,7 @@ def test_non_interactive_reports_a_daemon_error(
     def fail(*_args: object, **_kwargs: object) -> tuple[int, bool]:
         raise DaemonError("not listening")
 
+    monkeypatch.setattr("favlo.daemon.reclaim", lambda *_a, **_k: None)
     monkeypatch.setattr("favlo.daemon.ensure", fail)
     assert listener.serve_main(["--non-interactive"]) == 1
     assert "not listening" in capsys.readouterr().err
@@ -190,6 +192,7 @@ def test_non_interactive_reports_a_daemon_error(
 def test_non_interactive_starts_the_daemon_and_exits(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    monkeypatch.setattr("favlo.daemon.reclaim", lambda *_a, **_k: None)
     monkeypatch.setattr("favlo.daemon.ensure", lambda *_a, **_k: (7, True))
     assert listener.serve_main(["--non-interactive"]) == 0
     captured = capsys.readouterr()
@@ -205,6 +208,7 @@ def test_a_terminal_is_the_listener(
     monkeypatch.setattr(sys, "stderr", stream)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.setattr(listener, "attach_process_log", lambda _ui: None)
+    monkeypatch.setattr("favlo.daemon.reclaim", lambda *_a, **_k: None)
     monkeypatch.setattr("favlo.daemon.occupy", lambda *_a, **_k: None)
     monkeypatch.setattr("favlo.daemon.release_pid", lambda *_a, **_k: None)
 
@@ -226,9 +230,58 @@ def test_a_taken_address_does_not_start(
     def taken(*_args: object, **_kwargs: object) -> None:
         raise DaemonError("http://127.0.0.1:8129 is already in use")
 
+    monkeypatch.setattr("favlo.daemon.reclaim", lambda *_a, **_k: None)
     monkeypatch.setattr("favlo.daemon.occupy", taken)
     assert listener.serve_main(["--port", "8129"]) == 1
     assert "already in use" in capsys.readouterr().err
+
+
+def test_reclaim_stops_another_serve_and_a_pipeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from favlo.daemon import reclaim
+
+    me = os.getpid()
+    rows = [
+        (me, 50, "python -m favlo serve --port 8129"),
+        (50, 1, "uv run favlo serve"),
+        (77, 1, "python -m favlo serve --port 8129"),
+        (88, 77, "python -m favlo.pipeline_worker"),
+    ]
+    stopped: list[int] = []
+    monkeypatch.setattr("favlo.daemon._process_rows", lambda: rows)
+    monkeypatch.setattr("favlo.daemon.stop_pid", lambda pid: stopped.append(pid))
+    monkeypatch.setattr("favlo.daemon.alive", lambda pid: pid in {77, 88})
+    monkeypatch.setattr("favlo.daemon.port_open", lambda *_a, **_k: False)
+    monkeypatch.setattr("favlo.daemon.read_pid", lambda *_a, **_k: 77)
+    reclaim("127.0.0.1", 8129, home=tmp_path)
+    assert stopped == [77, 88]
+    assert not (tmp_path / "serve" / "8129.pid").exists()
+
+
+def test_serve_reclaims_before_it_listens(monkeypatch: pytest.MonkeyPatch) -> None:
+    order: list[str] = []
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr("favlo.daemon.reclaim", lambda *_a, **_k: order.append("reclaim"))
+    monkeypatch.setattr("favlo.daemon.occupy", lambda *_a, **_k: order.append("occupy"))
+    monkeypatch.setattr(listener, "attach_process_log", lambda _ui: None)
+    monkeypatch.setattr("favlo.daemon.release_pid", lambda *_a, **_k: None)
+    monkeypatch.setattr(listener, "serve", lambda _args: 0)
+    assert listener.serve_main(["--port", "8129", "--console", "plain"]) == 0
+    assert order == ["reclaim", "occupy"]
+
+
+def test_non_interactive_reclaims_before_it_starts(monkeypatch: pytest.MonkeyPatch) -> None:
+    order: list[str] = []
+    monkeypatch.setattr("favlo.daemon.reclaim", lambda *_a, **_k: order.append("reclaim"))
+
+    def started(*_args: object, **_kwargs: object) -> tuple[int, bool]:
+        order.append("ensure")
+        return 7, True
+
+    monkeypatch.setattr("favlo.daemon.ensure", started)
+    assert listener.serve_main(["--non-interactive"]) == 0
+    assert order == ["reclaim", "ensure"]
 
 
 def test_daemon_process_does_not_spawn_another(

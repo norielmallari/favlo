@@ -26,7 +26,7 @@ If nothing is listening, from this repo:
 uv run favlo serve --non-interactive
 ```
 
-That starts a detached daemon and returns. A later `favlo serve` exits when that address is already in use. An agent does not stop it.
+That starts a detached daemon and returns. A later `favlo serve` stops the listener already on that address and any pipeline process, then listens. An agent does not stop it by hand.
 
 `POST /mcp` answers only after the daemon is up. If the `favlo` tools are missing after that POST succeeds, reload the `favlo` server in Cursor. Do not register a second server.
 

@@ -304,6 +304,34 @@ def release_pid(port: int, pid: int, home: Path | None = None) -> None:
         return
 
 
+def reclaim(host: str, port: int, *, home: Path | None = None) -> None:
+    """Stop another ``favlo serve`` and any pipeline process before this one listens."""
+    rows = _process_rows()
+    keep = _ancestors(rows)
+    stopped: set[int] = set()
+
+    def end(pid: int) -> None:
+        if pid in keep or pid in stopped or not alive(pid):
+            return
+        stopped.add(pid)
+        stop_pid(pid)
+
+    recorded = read_pid(port, home)
+    if recorded is not None:
+        end(recorded)
+        release_pid(port, recorded, home)
+    for pid in _matching(rows, keep, "serve"):
+        end(pid)
+    for pid in _matching(_process_rows(), keep, "pipeline"):
+        end(pid)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and port_open(host, port):
+        time.sleep(0.05)
+    existing = read_pid(port, home)
+    if existing is not None and not alive(existing):
+        _clear_pid(port, home)
+
+
 def occupy(host: str, port: int, *, home: Path | None = None) -> None:
     """Claim this process as the listener. Raise when that address is taken."""
     existing = read_pid(port, home)
@@ -374,6 +402,60 @@ def ensure(
             raise DaemonError(str(exc)) from exc
     message = f"server did not become ready on {host}:{port}"
     raise DaemonError(message)
+
+
+def _process_rows() -> list[tuple[int, int, str]]:
+    """Pid, parent pid, and command for every process ``ps`` lists."""
+    completed = subprocess.run(
+        ["ps", "-axww", "-o", "pid=,ppid=,command="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    rows: list[tuple[int, int, str]] = []
+    for line in completed.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+            parent = int(parts[1])
+        except ValueError:
+            continue
+        rows.append((pid, parent, parts[2]))
+    return rows
+
+
+def _ancestors(rows: list[tuple[int, int, str]]) -> set[int]:
+    """This process and the parents that started it."""
+    parent_of = {pid: parent for pid, parent, _command in rows}
+    keep = {os.getpid()}
+    pid = os.getpid()
+    for _step in range(32):
+        parent = parent_of.get(pid)
+        if parent is None or parent <= 1 or parent in keep:
+            break
+        keep.add(parent)
+        pid = parent
+    return keep
+
+
+def _matching(rows: list[tuple[int, int, str]], keep: set[int], kind: str) -> list[int]:
+    found: list[int] = []
+    for pid, _parent, command in rows:
+        if pid in keep or pid in found:
+            continue
+        if _process_kind(command) == kind:
+            found.append(pid)
+    return found
+
+
+def _process_kind(command: str) -> str | None:
+    if "favlo.pipeline_worker" in command:
+        return "pipeline"
+    if "favlo serve" in command:
+        return "serve"
+    return None
 
 
 def _signal(pid: int, signum: int) -> None:
