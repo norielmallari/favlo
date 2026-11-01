@@ -41,7 +41,7 @@ No personal data: no names, home directories, hostnames, or volume paths. A clai
 
 ## Isolation
 
-Leave every other pipeline's entry, package, shaders, tests, and docs untouched. Do not import another pipeline. A served media pipeline inherits `MediaPipeline` and binds `handle_<kind>` to an instance. A served language model inherits `LanguagePipeline` and binds `handle_chat` to an instance. A served embedding model inherits `EmbeddingsPipeline` and binds `handle_embed` to an instance. Do not add another base class, a shared runner, or a kernel that branches on the pipeline. Do not change `src/favlo/` unless the task is the listener, the registry, the console, or the prefix store. A pipeline that keeps a sequence cache imports that store. Load [prefix-caching](../prefix-caching/SKILL.md) before writing the adapter.
+Leave every other pipeline's entry, package, shaders, tests, and docs untouched. Do not import another pipeline. A served media pipeline inherits `MediaPipeline` and binds `handle_<kind>` to an instance. A served language model inherits `LanguagePipeline` and binds `handle_chat` to an instance. A served embedding model inherits `EmbeddingsPipeline` and binds `handle_embed` to an instance. Read the seam rule before writing that class, and add `pipelines/metal41/<package>/**` and `docs/<pipeline>/**` to its globs in the same change: [language-pipeline.mdc](../../rules/language-pipeline.mdc) for a language model, [embeddings-pipeline.mdc](../../rules/embeddings-pipeline.mdc) for an embedding model, and [media-pipeline.mdc](../../rules/media-pipeline.mdc) for a media pipeline. Do not add another base class, a shared runner, or a kernel that branches on the pipeline. Do not change `src/favlo/` unless the task is the listener, the registry, the console, or the prefix store. A pipeline that keeps a sequence cache imports that store. Load [prefix-caching](../prefix-caching/SKILL.md) before writing the adapter.
 
 Re-implement the math from this model's papers, model card, and the vendor documents. Another pipeline's source, tests, comments, and design notes are not a reference. Another application's tree is not a reference.
 
@@ -62,4 +62,5 @@ Record the printed file-agent series and coding-agent series in this pipeline's 
 - `uv run favlo --<pipeline> --help` lists this pipeline's commands.
 - The pipeline smokes and both agent smokes passed on this model.
 - The runtime table and `docs/README.md` each have one new row.
+- The new package and `docs/<pipeline>/**` are in the globs of the seam rule for this pipeline: [language-pipeline.mdc](../../rules/language-pipeline.mdc), [embeddings-pipeline.mdc](../../rules/embeddings-pipeline.mdc), or [media-pipeline.mdc](../../rules/media-pipeline.mdc).
 - `git diff` does not touch another pipeline.
