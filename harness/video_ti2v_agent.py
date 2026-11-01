@@ -1,8 +1,8 @@
 """Agent for the Wan2.2 TI2V-5B text clip and still clip.
 
 The text clip omits the still and uses ``width`` and ``height``. The still
-clip draws one PNG at ``i2v_width`` and ``i2v_height``, then passes that PNG
-to ``generate_video_t2v`` and ``generate_video_i2v``. Exit 0 means both files match
+clip passes ``tests/assets/favlo-horse.png``. The pipeline resizes it to
+``i2v_width`` and ``i2v_height``. Exit 0 means both files match
 ``docs/wan22-ti2v-5b/smoke.json`` and the vision tower affirms frame
 0, the middle frame, and the last frame of the still clip. This command is
 not part of pytest.
@@ -14,16 +14,15 @@ import argparse
 import asyncio
 import base64
 import json
-import struct
 import urllib.request
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Any
 
 from agent_framework import Agent, tool
-from pydantic import Field
 
 from favlo.chat_client import open_chat_client
 from harness.harness_model import judge_model
+from harness.image_attachment import HORSE
 from harness.image_smoke_agent import affirms
 from harness.mcp_media import generate, read_link
 from harness.server import close_listener, open_listener
@@ -61,29 +60,12 @@ def _image_block(path: Path) -> dict[str, str]:
 
 def video_tools(
     port: int,
-    image_body: dict[str, Any],
     video_body: dict[str, Any],
     still: Path,
     text_clip: list[bytes],
     still_clip: list[bytes],
     still_size: str | None = None,
 ) -> list[object]:
-    prompt = str(image_body["prompt"])
-
-    @tool(approval_mode="never_require")
-    def ensure_image(
-        prompt_text: Annotated[str, Field(description="Exact sentence to draw.")],
-    ) -> str:
-        """Draw the still when the file is missing."""
-        if still.is_file():
-            return "image exists"
-        if prompt_text.strip() != prompt:
-            return f"use this prompt exactly: {prompt}"
-        result = generate(port, "generate_image", image_body)
-        still.parent.mkdir(parents=True, exist_ok=True)
-        still.write_bytes(read_link(port, result, "image/png"))
-        return "image ready"
-
     @tool(approval_mode="never_require")
     def generate_text_video() -> str:
         """Generate the text clip. Do not pass an image."""
@@ -104,7 +86,7 @@ def video_tools(
         still_clip.append(read_link(port, result, "video/mp4"))
         return "still video ready"
 
-    return [ensure_image, generate_text_video, generate_still_video]
+    return [generate_text_video, generate_still_video]
 
 
 def _agent(base_url: str, tools: list[object], name: str, text: str, model: str) -> int:
@@ -164,13 +146,6 @@ def check_frame(port: int, png: bytes, sentence: str, model: str) -> str:
     return str(payload["choices"][0]["message"].get("content") or "")
 
 
-def _png_size(blob: bytes) -> tuple[int, int]:
-    if len(blob) < 24 or not blob.startswith(b"\x89PNG\r\n\x1a\n"):
-        return (0, 0)
-    width, height = struct.unpack_from(">II", blob, 16)
-    return int(width), int(height)
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Text clip and still clip for TI2V-5B.")
     parser.add_argument("--root", type=Path, default=Path("."))
@@ -183,15 +158,12 @@ def main(argv: list[str] | None = None) -> int:
     root = args.root.resolve()
     judge_id = args.judge or judge_model(root)
     card = smoke_card(root)
-    still = root / "artifacts" / "video-ti2v-agent.png"
+    still = root / HORSE
+    if not still.is_file():
+        print(f"missing {HORSE.as_posix()}", flush=True)
+        return 1
     text_size = f"{card['width']}x{card['height']}"
     still_size = f"{card['i2v_width']}x{card['i2v_height']}"
-    image_body = {
-        "model": "Z-Image-Turbo-fp4",
-        "prompt": card["prompt"],
-        "size": still_size,
-        "seed": card["seed"],
-    }
     video_body = {
         "model": card["model"],
         "prompt": card["prompt"],
@@ -205,27 +177,15 @@ def main(argv: list[str] | None = None) -> int:
         listener = open_listener()
         port = listener.port
         base = f"http://{HOST}:{port}/v1"
-        expected_size = (int(card["i2v_width"]), int(card["i2v_height"]))
-        if still.is_file() and _png_size(still.read_bytes()) != expected_size:
-            still.unlink()
-        tools = video_tools(port, image_body, video_body, still, [], [], still_size)
-        sentence = f"Create an image of this exact sentence: {card['prompt']}"
-        if _agent(base, [tools[0]], "ensure_image", sentence, judge_id) != 0:
-            return 1
-        if not still.is_file() or _png_size(still.read_bytes()) != expected_size:
-            print("image is missing", flush=True)
-            return 1
         text_clip: list[bytes] = []
         still_clip: list[bytes] = []
-        tools = video_tools(
-            port, image_body, video_body, still, text_clip, still_clip, still_size
-        )
+        tools = video_tools(port, video_body, still, text_clip, still_clip, still_size)
         print("text video", flush=True)
-        if _agent(base, [tools[1]], "generate_text_video", "Generate the text video.", judge_id):
+        if _agent(base, [tools[0]], "generate_text_video", "Generate the text video.", judge_id):
             return 1
         print("still video", flush=True)
         still_text = "Generate the still video."
-        if _agent(base, [tools[2]], "generate_still_video", still_text, judge_id):
+        if _agent(base, [tools[1]], "generate_still_video", still_text, judge_id):
             return 1
         if not text_clip or not still_clip:
             print("video is missing", flush=True)

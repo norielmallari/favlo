@@ -1,10 +1,9 @@
-"""Agent that draws a still, then the shortest 320p clip.
+"""Agent that turns the horse still into the shortest 320p clip.
 
-The Microsoft Agent Framework agent calls ``generate_image`` when the still is
-missing. The still is drawn at the clip's width and height. The next turn
-calls ``generate_video_i2v`` and reads ``favlo://videos/{id}.mp4`` into
-``artifacts/video-smoke-agent.mp4``. The 35B
-vision tower then reads frame 0, the middle frame, and the last frame of
+The still is ``tests/assets/favlo-horse.png``. The pipeline resizes it to the
+clip size. The Microsoft Agent Framework agent calls ``generate_video_i2v``
+and reads ``favlo://videos/{id}.mp4`` into ``artifacts/video-smoke-agent.mp4``.
+The vision tower then reads frame 0, the middle frame, and the last frame of
 that file and must affirm the still sentence. Exit 0 means each of those
 frames was affirmed and the file has the smoke.json frame count at 576×320.
 This command is not part of pytest.
@@ -19,13 +18,13 @@ import json
 import struct
 import urllib.request
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Any
 
 from agent_framework import Agent, tool
-from pydantic import Field
 
 from favlo.chat_client import open_chat_client
 from harness.harness_model import judge_model
+from harness.image_attachment import HORSE
 from harness.image_smoke_agent import affirms
 from harness.mcp_media import generate, read_link
 from harness.server import close_listener, open_listener
@@ -64,27 +63,10 @@ def _image_block(path: Path) -> dict[str, str]:
 
 def video_tools(
     port: int,
-    image_body: dict[str, Any],
     video_body: dict[str, Any],
     still: Path,
     clip: list[bytes],
 ) -> list[object]:
-    prompt = str(image_body["prompt"])
-
-    @tool(approval_mode="never_require")
-    def ensure_image(
-        prompt_text: Annotated[str, Field(description="Exact sentence to draw.")],
-    ) -> str:
-        """Draw the still when the file is missing."""
-        if still.is_file():
-            return "image exists"
-        if prompt_text.strip() != prompt:
-            return f"use this prompt exactly: {prompt}"
-        result = generate(port, "generate_image", image_body)
-        still.parent.mkdir(parents=True, exist_ok=True)
-        still.write_bytes(read_link(port, result, "image/png"))
-        return "image ready"
-
     @tool(approval_mode="never_require")
     def generate_video() -> str:
         """Generate the 320p clip from the still."""
@@ -105,7 +87,7 @@ def video_tools(
         clip.append(read_link(port, result, "video/mp4"))
         return "video ready"
 
-    return [ensure_image, generate_video]
+    return [generate_video]
 
 
 def _agent(
@@ -183,7 +165,7 @@ def _png_size(blob: bytes) -> tuple[int, int]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Draw a still, then the 320p clip.")
+    parser = argparse.ArgumentParser(description="Turn the horse still into the 320p clip.")
     parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument(
         "--judge",
@@ -194,13 +176,10 @@ def main(argv: list[str] | None = None) -> int:
     root = args.root.resolve()
     judge_id = args.judge or judge_model(root)
     video_note = smoke_paths(root)[1]
-    still = root / "artifacts" / "video-smoke-agent.png"
-    image_body = {
-        "model": "Z-Image-Turbo-fp4",
-        "prompt": video_note["prompt"],
-        "size": f"{video_note['width']}x{video_note['height']}",
-        "seed": video_note["seed"],
-    }
+    still = root / HORSE
+    if not still.is_file():
+        print(f"missing {HORSE.as_posix()}", flush=True)
+        return 1
     video_body = {
         "model": video_note["model"],
         "prompt": video_note["video_prompt"],
@@ -213,27 +192,12 @@ def main(argv: list[str] | None = None) -> int:
         listener = open_listener()
         port = listener.port
         base = f"http://{HOST}:{port}/v1"
-        print(f"image on {port}", flush=True)
-        expected_size = (int(video_note["width"]), int(video_note["height"]))
-        if still.is_file() and _png_size(still.read_bytes()) != expected_size:
-            still.unlink()
-        sentence = f"Create an image of this exact sentence: {image_body['prompt']}"
-        image_tools = video_tools(port, image_body, video_body, still, [])
-        image_failed = _agent(base, [image_tools[0]], "ensure_image", sentence, judge_id)
-        if not still.is_file():
-            if image_failed != 0:
-                return 1
-            print("image is missing", flush=True)
-            return 1
-        if _png_size(still.read_bytes()) != expected_size:
-            print(f"image is not {expected_size[0]}x{expected_size[1]}", flush=True)
-            return 1
         clip: list[bytes] = []
-        video_only = video_tools(port, image_body, video_body, still, clip)
+        video_only = video_tools(port, video_body, still, clip)
         print("video", flush=True)
         failed = _agent(
             base,
-            [video_only[1]],
+            [video_only[0]],
             "generate_video",
             f"Generate the {video_note['frames']}-frame 320p video from the image.",
             judge_id,

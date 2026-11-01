@@ -20,7 +20,7 @@ from harness.server import close_listener, open_listener
 
 HOST = "127.0.0.1"
 MODEL = "qwen38-27b"
-HORSE = Path("artifacts") / "favlo-horse.png"
+HORSE = Path("tests/assets") / "favlo-horse.png"
 QUESTION = "Describe the picture. Name the animal and what it is doing."
 _PATCH = 16
 _MERGE = 2
@@ -108,10 +108,9 @@ def post_json(port: int, body: dict[str, Any]) -> dict[str, Any]:
 
 
 def reply_text(payload: dict[str, Any]) -> str:
+    """The Chat Completions reply. Reasoning stays on its own field."""
     message = payload["choices"][0]["message"]
-    content = str(message.get("content") or "")
-    reasoning = str(message.get("reasoning_content") or "")
-    return content if content.strip() else reasoning
+    return str(message.get("content") or "")
 
 
 def prompt_tokens(payload: dict[str, Any]) -> int:

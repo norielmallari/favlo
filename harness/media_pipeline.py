@@ -25,10 +25,10 @@ from typing import Any, NamedTuple
 
 import numpy as np
 from agent_framework import Agent, tool
-from openai import AsyncOpenAI
 
 from favlo.chat_client import open_chat_client
 from harness.harness_model import judge_model
+from harness.image_attachment import HORSE
 from harness.mcp_media import call_tool, read_link, start_task, task_view
 from harness.music_template import smoke_body
 from harness.server import close_listener, open_listener
@@ -493,8 +493,11 @@ def _agent(base_url: str, tools: list[object], name: str, text: str, model: str)
 
 
 async def _run(base_url: str, tools: list[object], name: str, text: str, model: str) -> None:
-    http = AsyncOpenAI(api_key="favlo", base_url=base_url, timeout=None, max_retries=0)
-    client = open_chat_client(model, base_url, async_client=http)
+    client = open_chat_client(model, base_url)
+    http = getattr(client, "client", None)
+    if http is not None:
+        http.timeout = None
+        http.max_retries = 0
     client.function_invocation_configuration["max_iterations"] = 1
     client.function_invocation_configuration["max_consecutive_errors_per_request"] = 1
     agent = Agent(
@@ -535,11 +538,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = args.root.resolve()
     judge_id = args.judge or judge_model(root)
-    still = root / "artifacts" / "video-smoke-agent.png"
-    if not args.pipelines or "i2v" in args.pipelines:
-        if not still.is_file() or _png_size(still.read_bytes()) != (WIDTH, HEIGHT):
-            print(f"still is not {WIDTH}x{HEIGHT}", flush=True)
-            return 1
+    still = root / HORSE
+    if not still.is_file():
+        print(f"missing {HORSE.as_posix()}", flush=True)
+        return 1
     try:
         cases = select_probes(probes(root, still), args.pipelines)
     except ValueError as exc:

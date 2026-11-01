@@ -146,7 +146,7 @@ A Microsoft Agent Framework agent on the registry default chat model calls `gene
 python -m harness.image_attachment
 ```
 
-Posts one chat completion to `qwen38-27b` with `artifacts/favlo-horse.png`. The user content is a text part, then an `image_url` part whose URL is `data:image/png;base64,` and whose `detail` is `auto`. Thinking is off and temperature is 0. The question does not name the animal. Exit 0 means `prompt_tokens` is at least the merged patch count and the reply names a horse plus two marks that are only in the picture: blue, desk, blaze, bandana, chestnut, mane, or hoof. A refusal, including a problem with analysis, fails. Uses the listener session. Does not take the machine lock. Not part of `pytest`. `tests/test_image_attachment.py` checks the request and the reply rule without a listener.
+Posts one chat completion to `qwen38-27b` with `tests/assets/favlo-horse.png`. The user content is a text part, then an `image_url` part whose URL is `data:image/png;base64,` and whose `detail` is `auto`. Thinking is off and temperature is 0. The question does not name the animal. Exit 0 means `prompt_tokens` is at least the merged patch count and the reply names a horse plus two marks that are only in the picture: blue, desk, blaze, bandana, chestnut, mane, or hoof. A refusal, including a problem with analysis, fails. Uses the listener session. Does not take the machine lock. Not part of `pytest`. `tests/test_image_attachment.py` checks the request and the reply rule without a listener.
 
 ### Image persona
 
@@ -164,7 +164,7 @@ The agent instructions are the horse persona. The user asks that horse to draw a
 python -m harness.video_smoke_agent
 ```
 
-Draws `artifacts/video-smoke-agent.png` with `Z-Image-Turbo-fp4` when that file is missing or is not the clip size. The still sentence is `prompt` in `docs/wan22-i2v/smoke.json`. The width, height, and seed are the clip's. The next turn calls `generate_video_i2v` for the model in that file, using `video_prompt`, the smoke frame count, and the still as a PNG image block. It reads `favlo://videos/{id}.mp4` into `artifacts/video-smoke-agent.mp4`. The same model reads frame 0, the middle frame, and the last frame and must affirm the still sentence. Exit 0 means each frame was affirmed and the file has that geometry. Uses the listener session. Not part of `pytest`.
+The still is `tests/assets/favlo-horse.png`. The pipeline resizes it to the clip size. The agent calls `generate_video_i2v` for the model in `docs/wan22-i2v/smoke.json`, using `video_prompt`, the smoke frame count, and that PNG as an image block. It reads `favlo://videos/{id}.mp4` into `artifacts/video-smoke-agent.mp4`. The same model reads frame 0, the middle frame, and the last frame and must affirm `prompt` in that file. Exit 0 means each frame was affirmed and the file has that geometry. Uses the listener session. Not part of `pytest`.
 
 ### TI2V smoke agent
 
@@ -172,7 +172,7 @@ Draws `artifacts/video-smoke-agent.png` with `Z-Image-Turbo-fp4` when that file 
 python -m harness.video_ti2v_agent
 ```
 
-Draws `artifacts/video-ti2v-agent.png` from `prompt` in `docs/wan22-ti2v-5b/smoke.json` at `i2v_width` and `i2v_height`. Then calls `generate_video_t2v` with no still at `width` and `height`, then `generate_video_i2v` with the PNG at the still size. Outputs are `artifacts/video-ti2v-t2v.mp4` and `artifacts/video-ti2v-agent.mp4`. Vision checks frame 0, the middle frame, and the last frame of the still clip against the prompt. Exit 0 means both files match smoke sizes and frame count and each frame was affirmed. Uses the listener session. Not part of `pytest`.
+The text clip omits the still. The still clip passes `tests/assets/favlo-horse.png`, and the pipeline resizes it to `i2v_width` and `i2v_height` from `docs/wan22-ti2v-5b/smoke.json`. The agent calls `generate_video_t2v` with no still at `width` and `height`, then `generate_video_i2v` with the PNG. Outputs are `artifacts/video-ti2v-t2v.mp4` and `artifacts/video-ti2v-agent.mp4`. Vision checks frame 0, the middle frame, and the last frame of the still clip against the prompt. Exit 0 means both files match smoke sizes and frame count and each frame was affirmed. Uses the listener session. Not part of `pytest`.
 
 ### Video quality comparison
 
@@ -180,7 +180,7 @@ Draws `artifacts/video-ti2v-agent.png` from `prompt` in `docs/wan22-ti2v-5b/smok
 python -m harness.video_quality_agent
 ```
 
-Draws `artifacts/video-quality.png` at 416×240 with `generate_image` when that file is missing or is not that size. The still sentence is the `prompt` in `docs/wan22-i2v/smoke.json`. Calls `generate_video_i2v` twice at `quality` `low` and then `max`, with no chat between tasks, and reads each MP4 into `artifacts/video-quality-low.mp4` and `artifacts/video-quality-max.mp4`. Exit 0 means both files are 5 frames at 416×240 and the max file is larger. Uses the listener session. Not part of `pytest`.
+The still is `tests/assets/favlo-horse.png`. The pipeline resizes it to 416×240. Calls `generate_video_i2v` twice at `quality` `low` and then `max`, with no chat between tasks, and reads each MP4 into `artifacts/video-quality-low.mp4` and `artifacts/video-quality-max.mp4`. Exit 0 means both files are 5 frames at 416×240 and the max file is larger. Uses the listener session. Not part of `pytest`.
 
 ## Music
 
