@@ -26,7 +26,7 @@ The files in [`.cursor/rules`](.cursor/rules) are repo rules. Cursor loads them 
 | [media-pipeline.mdc](.cursor/rules/media-pipeline.mdc) | When editing a served media pipeline or `MediaPipeline`. Inherit the listener contract, and run the one preemption harness after that contract changes. |
 | [language-pipeline.mdc](.cursor/rules/language-pipeline.mdc) | When editing a served language model or `LanguagePipeline`. Keep the completion in the pipeline, and run the language harness after the disconnect shell changes. |
 | [embeddings-pipeline.mdc](.cursor/rules/embeddings-pipeline.mdc) | When editing a served embedding model or `EmbeddingsPipeline`. Return the vector and the token count, and let the class write the list object. |
-| [favlo-web.mdc](.cursor/rules/favlo-web.mdc) | When editing `web-spa/`. Unit tests use Jest and `jest-expo`. A feature is complete only after its headless Playwright script passes against a live `favlo serve`. |
+| [web-app.mdc](.cursor/rules/web-app.mdc) | When editing `web-spa/` or `web-api/`, and when a web feature is finished. The same change adds a deterministic Playwright happy path that performs each new action a person can start. An existing script counts only when it performs that action. The feature is finished when that script passes against a live `favlo serve`, with the completing control already inside the viewport. |
 
 ## Changes
 
