@@ -1,6 +1,6 @@
 # Coding primitives
 
-The coding harness exposes six tools. `python -m harness.coding` is the client that drives them. This page is the contract those tools implement.
+The coding harness exposes six tools. `python -m harness.coding` is a Microsoft Agent Framework agent. The framework calls these tools and sends each JSON result back to the model. This page is the contract those tools implement.
 
 A tool result is one JSON object. A failure has `error` and `message`. The tool does not rewrite an argument or call another model.
 
@@ -101,4 +101,4 @@ A job record under `.favlo/jobs/` is not a live process. When the session opens,
 
 The session seeds `notes/brief.txt` when that file is absent. The prompt then asks for the six tools in order: find the note, search it, read it, create `ledger.py` with the difference reversed, edit that return to `after - before`, and run `python3 -c` to print `collect(15, 21)`. The shell step polls `status` until the job succeeds. The loop allows 16 rounds.
 
-Exit 0 means the hidden suite passed and each tool returned successfully at least once. The suite is `harness/coding/checks/test_ledger.py`. It is not copied into the workspace.
+Exit 0 means the hidden suite passed, each tool returned successfully at least once, and the chat contract held. The suite is `harness/coding/checks/test_ledger.py`. It is not copied into the workspace. The contract and `--vision` are [harness.md](harness.md).

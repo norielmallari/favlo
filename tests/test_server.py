@@ -1923,8 +1923,11 @@ def test_media_http_routes_are_gone(monkeypatch, tmp_path) -> None:
 
 
 def test_language_harness_clients_read_chat_completions() -> None:
+    import asyncio
+
+    from agent_framework import Agent
+    from favlo.chat_client import close_chat_client, open_chat_client
     from harness.benchmarks.serve import Request, complete
-    from harness.coding.loop import _post
     from harness.coherence import _stream
     from openai import OpenAI
 
@@ -1939,15 +1942,21 @@ def test_language_harness_clients_read_chat_completions() -> None:
             Request(enable_thinking=False),
             model="text-model",
         )
-        posted = _post(
-            port,
-            {
-                "model": "text-model",
-                "messages": messages,
-                "stream": False,
-                "enable_thinking": True,
-            },
-        )
+        async def _coding_turn() -> str:
+            client = open_chat_client("text-model", f"http://127.0.0.1:{port}/v1")
+            agent = Agent(
+                client=client,
+                name="coding",
+                instructions="Answer in one word.",
+                default_options={"store": False, "extra_body": {"enable_thinking": True}},
+            )
+            try:
+                result = await agent.run("hello")
+                return str(result.text or "")
+            finally:
+                await close_chat_client(client)
+
+        posted = asyncio.run(_coding_turn())
         _reasoning, content, _led = _stream(
             port, messages, presence=0.0, window=20, model="text-model"
         )
@@ -1961,7 +1970,7 @@ def test_language_harness_clients_read_chat_completions() -> None:
         _stop_background(state, thread)
     assert text
     assert reason
-    assert posted["choices"][0]["message"]["content"]
+    assert posted
     assert content or _reasoning
     assert completion.choices[0].message.content
 

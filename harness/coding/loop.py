@@ -1,41 +1,33 @@
-"""Tool loop against ``serve``. The score is the hidden suite, not this loop."""
+"""One Agent Framework run against ``serve``. The score is the hidden suite."""
 
 from __future__ import annotations
 
+import asyncio
 import json
-import urllib.error
-import urllib.request
+import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
-from harness.benchmarks.serve import Request, completion_body
+from harness.benchmarks.serve import Request
+from harness.coding.agent_tools import coding_tools
 from harness.coding.session import session_for
-from harness.coding.workspace import PROMPT, TOOLS, arguments_of, dispatch, prepare_workspace
+from harness.coding.workspace import PROMPT, prepare_workspace
 
-# Six tools, then status polls, then a stop. The suite does not score this bound.
+# One model call per tool step, then status polls, then a stop.
 SESSION_ROUNDS = 16
 
 
-def chat_body(
-    model: str,
-    messages: list[dict[str, Any]],
-    request: Request,
-    *,
-    mtp: bool,
-    mtp_depth: int = 3,
-) -> dict[str, object]:
-    """Bare model id, ``enable_thinking``, and the MTP flag. The listener fills the thinking card."""
-    del request
-    body = completion_body(
-        model.partition(":")[0],
-        messages,
-        None,
-        Request(enable_thinking=True),
-    )
-    body["tools"] = TOOLS
-    body["mtp"] = bool(mtp)
-    body["mtp_depth"] = int(mtp_depth)
-    return body
+def agent_options(request: Request, *, mtp: bool, mtp_depth: int) -> dict[str, object]:
+    """Fields the framework client sends. Sampling stays off the body."""
+    return {
+        "store": False,
+        "extra_body": {
+            "enable_thinking": request.enable_thinking,
+            "mtp": bool(mtp),
+            "mtp_depth": int(mtp_depth),
+        },
+    }
 
 
 def run_session(
@@ -46,79 +38,219 @@ def run_session(
     *,
     mtp: bool,
     mtp_depth: int = 3,
-) -> list[str]:
-    """Let the model use the tools, then return the ones that succeeded."""
+    vision: bytes | None = None,
+) -> tuple[list[str], list[str]]:
+    """Let the agent use the tools. Return the calls that succeeded and any problems."""
     prepare_workspace(workspace)
     session = session_for(workspace)
-    messages: list[dict[str, Any]] = [{"role": "user", "content": PROMPT}]
+    problems: list[str] = []
     try:
-        for _ in range(SESSION_ROUNDS):
-            payload = _post(
+        asyncio.run(
+            _run(
                 port,
-                chat_body(model, messages, request, mtp=mtp, mtp_depth=mtp_depth),
+                model,
+                request,
+                session,
+                mtp=mtp,
+                mtp_depth=mtp_depth,
+                vision=vision,
+                problems=problems,
             )
-            message = _assistant(payload)
-            messages.append(message)
-            calls = message.get("tool_calls")
-            if not isinstance(calls, list) or not calls:
-                return list(session.calls)
-            for index, call in enumerate(calls):
-                if not isinstance(call, dict):
-                    continue
-                name, arguments = arguments_of(call)
-                tool_call_id = str(call.get("id") or f"call_{index}")
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call_id,
-                        "content": dispatch(
-                            workspace,
-                            name,
-                            arguments,
-                            tool_call_id=tool_call_id,
-                        ),
-                    }
-                )
-        return list(session.calls)
+        )
+        return list(session.calls), problems
     finally:
         session.close()
 
 
-def _post(port: int, body: dict[str, object]) -> dict[str, Any]:
-    encoded = json.dumps(body).encode()
-    http = urllib.request.Request(
-        f"http://127.0.0.1:{port}/v1/chat/completions",
-        data=encoded,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+async def _run(
+    port: int,
+    model: str,
+    request: Request,
+    session: Any,
+    *,
+    mtp: bool,
+    mtp_depth: int,
+    vision: bytes | None,
+    problems: list[str],
+) -> None:
+    from agent_framework import Agent
+
+    from favlo.chat_client import close_chat_client, open_chat_client
+
+    client = open_chat_client(model.partition(":")[0], f"http://127.0.0.1:{port}/v1")
+    client.function_invocation_configuration["max_iterations"] = SESSION_ROUNDS
+    client.function_invocation_configuration["max_consecutive_errors_per_request"] = SESSION_ROUNDS
+    client.function_invocation_configuration["allow_concurrent_invocation"] = False
+    options = agent_options(request, mtp=mtp, mtp_depth=mtp_depth)
+    agent = Agent(
+        client=client,
+        name="coding",
+        instructions="Follow the user request. Call each named tool, then stop.",
+        tools=coding_tools(session),
+        default_options=options,
     )
+    printer = TurnPrinter(sys.stdout)
     try:
-        with urllib.request.urlopen(http, timeout=1800) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        message = f"chat completion failed: {exc.code} {detail}"
-        raise RuntimeError(message) from exc
-    if not isinstance(payload, dict):
-        message = "completion response is not an object"
-        raise RuntimeError(message)
-    return payload
+        chat = agent.create_session() if vision else None
+        if vision is not None and chat is not None:
+            await _describe(agent, client, vision, options, chat, printer, problems)
+        stream = agent.run(PROMPT, stream=True, session=chat, options=options)
+        async for update in stream:
+            printer.take(update)
+        printer.close()
+    finally:
+        await close_chat_client(client)
 
 
-def _assistant(payload: dict[str, Any]) -> dict[str, Any]:
-    choices = payload.get("choices")
-    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-        message = "completion has no choices"
-        raise RuntimeError(message)
-    message_body = choices[0].get("message")
-    if not isinstance(message_body, dict):
-        message = "completion message is not an object"
-        raise RuntimeError(message)
-    item = {"role": "assistant", "content": message_body.get("content") or ""}
-    reasoning = message_body.get("reasoning_content")
-    if isinstance(reasoning, str) and reasoning:
-        item["reasoning_content"] = reasoning
-    calls = message_body.get("tool_calls")
-    if isinstance(calls, list) and calls:
-        item["tool_calls"] = calls
-    return item
+async def _describe(
+    agent: Any,
+    client: Any,
+    png: bytes,
+    options: dict[str, object],
+    chat: Any,
+    printer: TurnPrinter,
+    problems: list[str],
+) -> None:
+    """The first chat is the still. Tools stay off so the tower runs before the ledger."""
+    from harness.chat_agent import reply_parts
+    from harness.coding.compliance import ended, image_message, image_turn_problems
+    from harness.image_attachment import png_size
+
+    first = {**options, "tool_choice": {"mode": "none"}}
+    stream = await agent.run(image_message(png), stream=True, session=chat, options=first)
+    async for update in stream:
+        printer.take(update)
+    response = await stream.get_final_response()
+    printer.close()
+    _reasoning, text = reply_parts(response)
+    width, height = png_size(png)
+    counted = getattr(client, "prompt_tokens", None)
+    problems.extend(image_turn_problems(text, counted, width, height))
+    problems.extend(ended(response, "stop"))
+
+
+class TurnPrinter:
+    """Print reasoning, the reply, and tool calls for each model call."""
+
+    def __init__(self, sink: TextIO) -> None:
+        self.sink = sink
+        self.turn = 0
+        self.response_id = ""
+        self.ended = True
+        self.saw_reply = False
+        self.section = ""
+        self.calls: list[dict[str, str]] = []
+
+    def take(self, update: Any) -> None:
+        response_id = getattr(update, "response_id", None) or ""
+        if self.ended and _has_body(update):
+            self._start(response_id)
+        else:
+            self._roll(response_id)
+        role = getattr(update, "role", None)
+        if role in (None, "assistant"):
+            reason = _reasoning(update)
+            if reason:
+                self._reasoning(reason)
+            text = getattr(update, "text", "")
+            if isinstance(text, str) and text:
+                self._reply(text)
+        for item in getattr(update, "contents", None) or []:
+            if getattr(item, "type", None) == "function_call":
+                self._call(item)
+        if getattr(update, "finish_reason", None):
+            self._end()
+
+    def close(self) -> None:
+        self._end()
+
+    def _roll(self, response_id: str) -> None:
+        if self.turn == 0:
+            self._start(response_id)
+            return
+        if response_id and self.response_id and response_id != self.response_id:
+            self._end()
+            self._start(response_id)
+
+    def _start(self, response_id: str) -> None:
+        self.turn += 1
+        self.response_id = response_id
+        self.ended = False
+        self.saw_reply = False
+        self.section = "reasoning"
+        self.calls = []
+        print(f"--- request {self.turn} reasoning ---", file=self.sink, flush=True)
+
+    def _reasoning(self, text: str) -> None:
+        if self.section != "reasoning":
+            print(f"\n--- request {self.turn} reasoning ---", file=self.sink, flush=True)
+            self.section = "reasoning"
+        print(text, end="", file=self.sink, flush=True)
+
+    def _reply(self, text: str) -> None:
+        if not self.saw_reply:
+            print(f"\n--- request {self.turn} reply ---", file=self.sink, flush=True)
+            self.saw_reply = True
+            self.section = "reply"
+        print(text, end="", file=self.sink, flush=True)
+
+    def _call(self, item: Any) -> None:
+        call_id = getattr(item, "call_id", None) or ""
+        if not isinstance(call_id, str):
+            call_id = str(call_id)
+        found = next((row for row in self.calls if row["id"] == call_id), None) if call_id else None
+        if found is None:
+            found = {"id": call_id or f"call_{len(self.calls)}", "name": "", "arguments": ""}
+            self.calls.append(found)
+        name = getattr(item, "name", None) or ""
+        if isinstance(name, str) and name:
+            found["name"] += name
+        arguments = getattr(item, "arguments", None)
+        if isinstance(arguments, dict):
+            found["arguments"] = json.dumps(arguments)
+        elif isinstance(arguments, str) and arguments:
+            found["arguments"] += arguments
+
+    def _end(self) -> None:
+        if self.ended:
+            return
+        self.ended = True
+        if not self.saw_reply:
+            print(f"\n--- request {self.turn} reply ---", file=self.sink, flush=True)
+        named = [row for row in self.calls if row["name"]]
+        if named:
+            print(f"\n--- request {self.turn} tool_calls ---", file=self.sink, flush=True)
+            for row in named:
+                print(f"{row['name']} {row['arguments']}", file=self.sink, flush=True)
+        print(file=self.sink, flush=True)
+
+
+def print_updates(updates: Iterable[Any], sink: TextIO) -> None:
+    """Print one stream of framework updates. Tests use this without a listener."""
+    printer = TurnPrinter(sink)
+    for update in updates:
+        printer.take(update)
+    printer.close()
+
+
+def _has_body(update: Any) -> bool:
+    if _reasoning(update):
+        return True
+    text = getattr(update, "text", "")
+    if isinstance(text, str) and text:
+        return True
+    return any(
+        getattr(item, "type", None) == "function_call"
+        for item in getattr(update, "contents", None) or []
+    )
+
+
+def _reasoning(update: Any) -> str:
+    parts = [
+        item.text
+        for item in getattr(update, "contents", None) or []
+        if getattr(item, "type", None) == "text_reasoning"
+        and isinstance(getattr(item, "text", None), str)
+        and item.text
+    ]
+    return "".join(parts)
