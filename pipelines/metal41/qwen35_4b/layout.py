@@ -48,15 +48,19 @@ VISION_END = 248_054
 IMAGE_TOKEN = 248_056
 VIDEO_TOKEN = 248_057
 
-# Vision tower.
+# Vision tower. The Conv3d patch weight is stored as [hidden, channels * temporal * patch * patch].
 VISION_DEPTH = 24
 VISION_HIDDEN = 1024
 VISION_INTERMEDIATE = 4096
 VISION_HEADS = 16
 VISION_OUT = HIDDEN
+VISION_CHANNELS = 3
+VISION_POSITIONS = 2304
 PATCH = 16
 SPATIAL_MERGE = 2
 TEMPORAL_PATCH = 2
+PATCH_DIM = VISION_CHANNELS * TEMPORAL_PATCH * PATCH * PATCH
+MERGER_DIM = VISION_HIDDEN * SPATIAL_MERGE * SPATIAL_MERGE
 
 
 def is_full(layer: int) -> bool:
@@ -72,11 +76,21 @@ def f16_bytes(count: int) -> int:
     return count * 2
 
 
-def kv_token_bytes() -> int:
-    """fp8 key and value planes of the eight full-attention layers, one token."""
-    per_plane = KV_HEADS * (HEAD_DIM + HEAD_DIM // BLOCK)
+def kv_token_bytes(mode: str = "f16") -> int:
+    """Key and value planes of the eight full-attention layers, one token.
+
+    ``f16`` is two bytes per element. ``e4m3`` is one E4M3 byte plus one E8M0
+    byte per 32 channels.
+    """
+    if mode == "f16":
+        per_plane = KV_HEADS * HEAD_DIM * 2
+    elif mode == "e4m3":
+        per_plane = KV_HEADS * (HEAD_DIM + HEAD_DIM // BLOCK)
+    else:
+        message = f"unknown kv cache {mode}"
+        raise ValueError(message)
     return len(FULL) * 2 * per_plane
 
 
-def cache_bytes(tokens: int) -> int:
-    return kv_token_bytes() * tokens
+def cache_bytes(tokens: int, mode: str = "f16") -> int:
+    return kv_token_bytes(mode) * tokens

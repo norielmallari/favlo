@@ -996,6 +996,204 @@ kernel void attend_prefill(
     output[(ulong(row) * attn_heads + head) * D + tid] = acc / total * sigmoid(gate);
 }
 
+// Float16 key/value cache. Same layouts as the e4m3 store, two bytes per element,
+// no scale plane.
+kernel void store_kv_f16(
+    device const float* key [[buffer(0)]],
+    device const float* value [[buffer(1)]],
+    device half* key_data [[buffer(2)]],
+    device half* value_data [[buffer(3)]],
+    constant uint& position [[buffer(4)]],
+    constant uint& kv_heads [[buffer(5)]],
+    constant uint& plane [[buffer(6)]],
+    uint head [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint dim [[threads_per_threadgroup]])
+{
+    bool is_value = plane == 1u;
+    device const float* source = is_value ? value : key;
+    device half* data = is_value ? value_data : key_data;
+    ulong row = ulong(position) * kv_heads + head;
+    data[row * dim + tid] = half(source[head * dim + tid]);
+}
+
+kernel void store_kv_rows_f16(
+    device const float* key [[buffer(0)]],
+    device const float* value [[buffer(1)]],
+    device half* key_data [[buffer(2)]],
+    device half* value_data [[buffer(3)]],
+    constant uint& position0 [[buffer(4)]],
+    constant uint& kv_heads [[buffer(5)]],
+    constant uint& rows [[buffer(6)]],
+    constant uint& plane [[buffer(7)]],
+    uint2 tgp [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    constexpr uint D = 256u;
+    uint row = tgp.y;
+    uint head = tgp.x;
+    if (row >= rows || head >= kv_heads || tid >= D) {
+        return;
+    }
+    bool is_value = plane == 1u;
+    device const float* source = is_value ? value : key;
+    device half* data = is_value ? value_data : key_data;
+    ulong slot = ulong(position0 + row) * kv_heads + head;
+    data[slot * D + tid] = half(source[(ulong(row) * kv_heads + head) * D + tid]);
+}
+
+kernel void attend_decode_f16(
+    device const float* query_gate [[buffer(0)]],
+    device const half* key_data [[buffer(1)]],
+    device const half* value_data [[buffer(2)]],
+    device float* scores [[buffer(3)]],
+    device float* output [[buffer(4)]],
+    constant uint& length [[buffer(5)]],
+    constant uint& context [[buffer(6)]],
+    constant uint& kv_heads [[buffer(7)]],
+    constant uint& group_size [[buffer(8)]],
+    constant float& scale [[buffer(9)]],
+    uint head [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint simds [[simdgroups_per_threadgroup]])
+{
+    constexpr uint D = 256u;
+    threadgroup float shared[32];
+    uint kvh = head / group_size;
+    device const float* q = query_gate + head * (2u * D);
+    float qreg[8];
+    for (uint j = 0u; j < 8u; ++j) {
+        qreg[j] = q[lane * 8u + j];
+    }
+    device float* row = scores + ulong(head) * context;
+    float local_max = -INFINITY;
+    for (uint p = simd; p < length; p += simds) {
+        ulong slot = ulong(p) * kv_heads + kvh;
+        device const half* k = key_data + slot * D + lane * 8u;
+        float part = 0.0f;
+        for (uint j = 0u; j < 8u; ++j) {
+            part = fma(float(k[j]), qreg[j], part);
+        }
+        float dot = simd_sum(part) * scale;
+        if (lane == 0u) {
+            row[p] = dot;
+        }
+        local_max = max(local_max, dot);
+    }
+    if (lane == 0u) {
+        shared[simd] = local_max;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+    float peak = -INFINITY;
+    for (uint i = 0u; i < simds; ++i) {
+        peak = max(peak, shared[i]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float local_sum = 0.0f;
+    for (uint p = tid; p < length; p += D) {
+        float e = exp(row[p] - peak);
+        row[p] = e;
+        local_sum += e;
+    }
+    float total = block_sum(local_sum, shared, lane, simd, simds);
+    threadgroup_barrier(mem_flags::mem_device);
+    float acc = 0.0f;
+    for (uint p = 0u; p < length; ++p) {
+        ulong slot = ulong(p) * kv_heads + kvh;
+        acc = fma(row[p], float(value_data[slot * D + tid]), acc);
+    }
+    float gate = q[D + tid];
+    output[head * D + tid] = acc / total * sigmoid(gate);
+}
+
+kernel void attend_prefill_f16(
+    device const float* query_gate [[buffer(0)]],
+    device const half* key_data [[buffer(1)]],
+    device const half* value_data [[buffer(2)]],
+    device float* scores [[buffer(3)]],
+    device float* output [[buffer(4)]],
+    constant uint& position0 [[buffer(5)]],
+    constant uint& rows [[buffer(6)]],
+    constant uint& context [[buffer(7)]],
+    constant uint& attn_heads [[buffer(8)]],
+    constant uint& kv_heads [[buffer(9)]],
+    constant uint& group_size [[buffer(10)]],
+    constant float& scale [[buffer(11)]],
+    uint2 tgp [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint simds [[simdgroups_per_threadgroup]])
+{
+    constexpr uint D = 256u;
+    uint row = tgp.y;
+    uint head = tgp.x;
+    if (row >= rows || head >= attn_heads || tid >= D) {
+        return;
+    }
+    threadgroup float shared[32];
+    uint kvh = head / group_size;
+    uint length = position0 + row + 1u;
+    device const float* q = query_gate + (ulong(row) * attn_heads + head) * (2u * D);
+    float qreg[8];
+    for (uint j = 0u; j < 8u; ++j) {
+        qreg[j] = q[lane * 8u + j];
+    }
+    device float* srow = scores + (ulong(row) * attn_heads + head) * context;
+    float local_max = -INFINITY;
+    for (uint p = simd; p < length; p += simds) {
+        ulong slot = ulong(p) * kv_heads + kvh;
+        device const half* k = key_data + slot * D + lane * 8u;
+        float part = 0.0f;
+        for (uint j = 0u; j < 8u; ++j) {
+            part = fma(float(k[j]), qreg[j], part);
+        }
+        float dot = simd_sum(part) * scale;
+        if (lane == 0u) {
+            srow[p] = dot;
+        }
+        local_max = max(local_max, dot);
+    }
+    if (lane == 0u) {
+        shared[simd] = local_max;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+    float peak = -INFINITY;
+    for (uint i = 0u; i < simds; ++i) {
+        peak = max(peak, shared[i]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float local_sum = 0.0f;
+    for (uint p = tid; p < length; p += D) {
+        float e = exp(srow[p] - peak);
+        srow[p] = e;
+        local_sum += e;
+    }
+    float total = block_sum(local_sum, shared, lane, simd, simds);
+    threadgroup_barrier(mem_flags::mem_device);
+    float acc = 0.0f;
+    uint p = 0u;
+    for (; p + 3u < length; p += 4u) {
+        ulong slot0 = ulong(p) * kv_heads + kvh;
+        float v0 = float(value_data[slot0 * D + tid]);
+        float v1 = float(value_data[(slot0 + kv_heads) * D + tid]);
+        float v2 = float(value_data[(slot0 + 2u * kv_heads) * D + tid]);
+        float v3 = float(value_data[(slot0 + 3u * kv_heads) * D + tid]);
+        acc = fma(srow[p], v0, acc);
+        acc = fma(srow[p + 1u], v1, acc);
+        acc = fma(srow[p + 2u], v2, acc);
+        acc = fma(srow[p + 3u], v3, acc);
+    }
+    for (; p < length; ++p) {
+        ulong slot = ulong(p) * kv_heads + kvh;
+        acc = fma(srow[p], float(value_data[slot * D + tid]), acc);
+    }
+    float gate = q[D + tid];
+    output[(ulong(row) * attn_heads + head) * D + tid] = acc / total * sigmoid(gate);
+}
+
 kernel void penalize(
     device float* logits [[buffer(0)]],
     device const uint* counts [[buffer(1)]],
@@ -1264,4 +1462,305 @@ kernel void topk_sample(
         }
     }
     tokens[index] = chosen;
+}
+
+// Interleaved M-RoPE axes for sections (11, 11, 10): t, h, w, repeating, then t, h.
+constant uint MROPE_AXIS[32] = {
+    0u, 1u, 2u, 0u, 1u, 2u, 0u, 1u, 2u, 0u, 1u, 2u, 0u, 1u, 2u, 0u,
+    1u, 2u, 0u, 1u, 2u, 0u, 1u, 2u, 0u, 1u, 2u, 0u, 1u, 2u, 0u, 1u,
+};
+
+// ``positions`` is axis-major ``[3, prompt_len]``. Text rows store one index on every axis.
+kernel void rope_mrope_rows(
+    device float* data [[buffer(0)]],
+    device const uint* positions [[buffer(1)]],
+    constant uint& heads [[buffer(2)]],
+    constant uint& stride [[buffer(3)]],
+    constant uint& rope_dim [[buffer(4)]],
+    constant uint& position0 [[buffer(5)]],
+    constant uint& rows [[buffer(6)]],
+    constant uint& prompt_len [[buffer(7)]],
+    constant float& theta [[buffer(8)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint pairs = rope_dim >> 1;
+    uint row = gid.y;
+    uint at = gid.x;
+    if (row >= rows || at >= heads * pairs) {
+        return;
+    }
+    uint head = at / pairs;
+    uint i = at % pairs;
+    uint axis = MROPE_AXIS[i];
+    uint pos = positions[axis * prompt_len + position0 + row];
+    float freq = pow(theta, -float(2u * i) / float(rope_dim));
+    float angle = float(pos) * freq;
+    float c = cos(angle);
+    float s = sin(angle);
+    device float* rowp = data + (ulong(row) * heads + head) * stride;
+    float x0 = rowp[i];
+    float x1 = rowp[i + pairs];
+    rowp[i] = x0 * c - x1 * s;
+    rowp[i + pairs] = x1 * c + x0 * s;
+}
+
+// Overwrite hidden rows whose index is not 0xFFFFFFFF. ``rows`` is [slots, width].
+kernel void splice_rows(
+    device const float* rows [[buffer(0)]],
+    device const uint* index [[buffer(1)]],
+    device float* hidden [[buffer(2)]],
+    constant uint& position0 [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    constant uint& width [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint col = gid.x;
+    uint row = gid.y;
+    if (row >= count || col >= width) {
+        return;
+    }
+    uint slot = index[position0 + row];
+    if (slot == 0xFFFFFFFFu) {
+        return;
+    }
+    hidden[ulong(row) * width + col] = rows[ulong(slot) * width + col];
+}
+
+kernel void cast_pad_f16(
+    device const float* source [[buffer(0)]],
+    device half* destination [[buffer(1)]],
+    constant uint& rows [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    constant uint& dst_rows [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint col = gid.x;
+    uint row = gid.y;
+    if (col >= cols || row >= dst_rows) {
+        return;
+    }
+    float value = 0.0f;
+    if (row < rows) {
+        value = source[ulong(row) * cols + col];
+    }
+    destination[ulong(row) * cols + col] = half(value);
+}
+
+kernel void copy_bias_f32(
+    device const float* wide [[buffer(0)]],
+    device const half* bias [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint col = gid.x;
+    uint row = gid.y;
+    if (col >= cols || row >= rows) {
+        return;
+    }
+    destination[ulong(row) * cols + col] = wide[ulong(row) * cols + col] + float(bias[col]);
+}
+
+kernel void layernorm_bias_rows(
+    device const float* input [[buffer(0)]],
+    device const half* weight [[buffer(1)]],
+    device const half* bias [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& width [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    constant uint& rows [[buffer(6)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint simds [[simdgroups_per_threadgroup]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    if (row >= rows) {
+        return;
+    }
+    threadgroup float shared[32];
+    device const float* in = input + ulong(row) * width;
+    device float* out = destination + ulong(row) * width;
+    float sum = 0.0f;
+    for (uint i = tid; i < width; i += 256u) {
+        sum += in[i];
+    }
+    float mean = block_sum(sum, shared, lane, simd, simds) / float(width);
+    float var = 0.0f;
+    for (uint i = tid; i < width; i += 256u) {
+        float delta = in[i] - mean;
+        var = fma(delta, delta, var);
+    }
+    float inv = rsqrt(block_sum(var, shared, lane, simd, simds) / float(width) + eps);
+    for (uint i = tid; i < width; i += 256u) {
+        out[i] = (in[i] - mean) * inv * float(weight[i]) + float(bias[i]);
+    }
+}
+
+kernel void gelu_tanh_n(
+    device float* values [[buffer(0)]],
+    constant uint& count [[buffer(1)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= count) {
+        return;
+    }
+    float x = values[tid];
+    // tanh(z) via exp overflows once |x| is past about 10. The cubic is saturated by |x| == 8.
+    if (fabs(x) >= 8.0f) {
+        values[tid] = x > 0.0f ? x : 0.0f;
+        return;
+    }
+    float inner = 0.7978845608028654f * fma(0.044715f * x * x, x, x);
+    values[tid] = 0.5f * x * (1.0f + tanh(inner));
+}
+
+static float erf_f(float x) {
+    float sign = x < 0.0f ? -1.0f : 1.0f;
+    float ax = fabs(x);
+    float t = 1.0f / (1.0f + 0.3275911f * ax);
+    float poly = 1.061405429f;
+    poly = poly * t - 1.453152027f;
+    poly = poly * t + 1.421413741f;
+    poly = poly * t - 0.284496736f;
+    poly = poly * t + 0.254829592f;
+    poly = poly * t;
+    return sign * (1.0f - poly * exp(-ax * ax));
+}
+
+kernel void gelu_erf_n(
+    device float* values [[buffer(0)]],
+    constant uint& count [[buffer(1)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= count) {
+        return;
+    }
+    float x = values[tid];
+    values[tid] = 0.5f * x * (1.0f + erf_f(x * 0.7071067811865476f));
+}
+
+kernel void split_qkv1024(
+    device const float* qkv [[buffer(0)]],
+    device float* q [[buffer(1)]],
+    device float* k [[buffer(2)]],
+    device float* v [[buffer(3)]],
+    constant uint& tokens [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint channel = gid.x;
+    uint token = gid.y;
+    if (token >= tokens || channel >= 1024u) {
+        return;
+    }
+    uint base = token * 3072u + channel;
+    uint out = token * 1024u + channel;
+    q[out] = qkv[base];
+    k[out] = qkv[base + 1024u];
+    v[out] = qkv[base + 2048u];
+}
+
+// Duplicate 32 frequencies are already in the table. Rotate the two halves of the head.
+kernel void vision_rope64(
+    device float* values [[buffer(0)]],
+    device const float* cosv [[buffer(1)]],
+    device const float* sinv [[buffer(2)]],
+    constant uint& tokens [[buffer(3)]],
+    constant uint& heads [[buffer(4)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint token [[threadgroup_position_in_grid]])
+{
+    if (token >= tokens) {
+        return;
+    }
+    uint pairs = heads * 32u;
+    for (uint index = tid; index < pairs; index += 256u) {
+        uint head = index / 32u;
+        uint pair = index - head * 32u;
+        device float* row = values + (token * heads + head) * 64u;
+        float c = cosv[token * 64u + pair];
+        float s = sinv[token * 64u + pair];
+        float x0 = row[pair];
+        float x1 = row[32u + pair];
+        row[pair] = x0 * c - x1 * s;
+        row[32u + pair] = x1 * c + x0 * s;
+    }
+}
+
+kernel void vision_attend64(
+    device const float* query [[buffer(0)]],
+    device const float* key [[buffer(1)]],
+    device const float* value [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& tokens [[buffer(4)]],
+    constant uint& heads [[buffer(5)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint3 tgid [[threadgroup_position_in_grid]])
+{
+    uint head = tgid.x;
+    uint qindex = tgid.y;
+    if (head >= heads || qindex >= tokens) {
+        return;
+    }
+    device const float* qrow = query + (qindex * heads + head) * 64u;
+    threadgroup float red[2];
+    float running_max = -INFINITY;
+    float running_sum = 0.0f;
+    for (uint token = 0u; token < tokens; ++token) {
+        device const float* krow = key + (token * heads + head) * 64u;
+        float mine = qrow[tid] * krow[tid];
+        float part = simd_sum(mine);
+        if (lane == 0u) {
+            red[simd] = part;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float score = (red[0] + red[1]) * 0.125f;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float next = max(running_max, score);
+        running_sum = running_sum * exp(running_max - next) + exp(score - next);
+        running_max = next;
+    }
+    float acc = 0.0f;
+    for (uint token = 0u; token < tokens; ++token) {
+        device const float* krow = key + (token * heads + head) * 64u;
+        device const float* vrow = value + (token * heads + head) * 64u;
+        float mine = qrow[tid] * krow[tid];
+        float part = simd_sum(mine);
+        if (lane == 0u) {
+            red[simd] = part;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float score = (red[0] + red[1]) * 0.125f;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float weight = exp(score - running_max) / running_sum;
+        acc += weight * vrow[tid];
+    }
+    destination[(qindex * heads + head) * 64u + tid] = acc;
+}
+
+kernel void dequant_fp8_rows(
+    device const uchar* weights [[buffer(0)]],
+    device const uchar* scales [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& logical [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    constant uint& rows [[buffer(5)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= rows) {
+        return;
+    }
+    uint blocks = logical >> 5;
+    device const uchar* packed = weights + ulong(row) * inner;
+    device const uchar* row_scale = scales + ulong(row) * (inner >> 5);
+    device float* dest = destination + ulong(row) * logical;
+    for (uint block = 0u; block < blocks; ++block) {
+        float factor = exp2(float(row_scale[block]) - 127.0f);
+        uint element = (block << 5) + lane;
+        dest[element] = e4m3_code(packed[element]) * factor;
+    }
 }

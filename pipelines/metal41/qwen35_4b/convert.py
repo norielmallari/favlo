@@ -6,9 +6,13 @@ import json
 import os
 import shutil
 import struct
+import urllib.error
+import urllib.request
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import numpy as np
 
@@ -19,10 +23,22 @@ from qwen35_4b.layout import (
     HIDDEN,
     INTERMEDIATE,
     LAYERS,
+    MERGER_DIM,
+    PATCH_DIM,
     REPO,
+    VISION_DEPTH,
+    VISION_HIDDEN,
+    VISION_INTERMEDIATE,
+    VISION_OUT,
+    VISION_POSITIONS,
     VOCAB,
     is_full,
 )
+
+_HOST = "https://huggingface.co"
+_CHUNK = 1024 * 1024
+_AGENT = "favlo"
+Progress = Callable[[int, int, str], None]
 
 _SIDECARS = (
     "config.json",
@@ -42,7 +58,7 @@ def record_dir(models: Path) -> Path:
 
 
 def quantize(src: Path, dest: Path) -> Path:
-    """Pack language tensors from ``src`` into ``dest/weights.bin``."""
+    """Pack language and vision tensors from ``src`` into ``dest/weights.bin``."""
     src = Path(src)
     dest = Path(dest)
     manifest_path = dest / "manifest.json"
@@ -51,13 +67,19 @@ def quantize(src: Path, dest: Path) -> Path:
             current = json.loads(manifest_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             current = {}
-        if current.get("complete") is True and (dest / "weights.bin").is_file():
+        stored = current.get("tensors")
+        expected = {logical for _raw, logical, _kind, _shape in _order()}
+        if (
+            current.get("complete") is True
+            and isinstance(stored, dict)
+            and set(stored) == expected
+            and (dest / "weights.bin").is_file()
+        ):
             return dest
         manifest_path.unlink(missing_ok=True)
         (dest / "weights.bin").unlink(missing_ok=True)
     dest.mkdir(parents=True, exist_ok=True)
-    header, data_start = _header(src)
-    tensors, cursor = _pack(dest / "weights.bin", src, header, data_start)
+    tensors, cursor = _pack(dest / "weights.bin", _sources(src))
     for name in _SIDECARS:
         source = src / name
         if source.is_file():
@@ -84,19 +106,101 @@ def quantize(src: Path, dest: Path) -> Path:
     return dest
 
 
-def _header(src: Path) -> tuple[dict[str, Any], int]:
-    single = src / "model.safetensors"
-    index = src / "model.safetensors.index.json"
-    if single.is_file():
-        with single.open("rb") as handle:
-            header_len = struct.unpack("<Q", handle.read(8))[0]
-            header = json.loads(handle.read(header_len))
-        return header, 8 + header_len
-    if index.is_file():
-        message = "sharded checkouts are not packed by this step yet; merge to model.safetensors"
+def list_files(host: str = _HOST, repo: str = REPO) -> list[tuple[str, int]]:
+    """File names and sizes published for the official checkpoint."""
+    url = f"{host}/api/models/{repo}"
+    with _request(url) as response:
+        body = json.loads(response.read().decode())
+    siblings = body.get("siblings") if isinstance(body, dict) else None
+    if not isinstance(siblings, list) or not siblings:
+        message = f"{repo} published no files"
         raise RuntimeError(message)
-    message = f"{src} has no model.safetensors"
-    raise RuntimeError(message)
+    files: list[tuple[str, int]] = []
+    for item in siblings:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("rfilename")
+        if not isinstance(name, str) or not name or name.startswith(".."):
+            continue
+        size = item.get("size")
+        files.append((name, size if isinstance(size, int) and size >= 0 else 0))
+    files.sort(key=lambda item: (item[1], item[0]))
+    return files
+
+
+def download(dest: Path, files: list[tuple[str, int]], on_progress: Progress) -> None:
+    """Fetch the official checkpoint into ``dest``. A finished file is skipped."""
+    dest.mkdir(parents=True, exist_ok=True)
+    total = sum(size for _name, size in files)
+    finished = 0
+    for name, size in files:
+        path = dest / name
+        if path.is_symlink() or ".." in Path(name).parts:
+            message = f"refusing {name}"
+            raise RuntimeError(message)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        url = f"{_HOST}/{REPO}/resolve/main/{quote(name, safe='/')}"
+        have = path.stat().st_size if path.is_file() else 0
+        if size and have == size:
+            finished += size
+            on_progress(finished, total, name)
+            continue
+        if have and size and have > size:
+            path.unlink()
+            have = 0
+        _stream(url, path, have if size else 0)
+        final = path.stat().st_size
+        if size and final != size:
+            message = f"{name} is {final} bytes, expected {size}"
+            raise RuntimeError(message)
+        finished += final if not size else size
+        on_progress(finished, total or finished, name)
+    (dest / "fetch_complete.json").write_text(
+        json.dumps({"repo": REPO, "files": len(files)}) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _sources(src: Path) -> dict[str, tuple[dict[str, Any], int, Path]]:
+    """Each checkpoint tensor mapped to its safetensors header and file."""
+    single = src / "model.safetensors"
+    if single.is_file():
+        header, data_start = _file_header(single)
+        return {
+            name: (header, data_start, single)
+            for name in header
+            if name != "__metadata__"
+        }
+    index_path = src / "model.safetensors.index.json"
+    if not index_path.is_file():
+        message = f"{src} has no model.safetensors"
+        raise RuntimeError(message)
+    body = json.loads(index_path.read_text(encoding="utf-8"))
+    weight_map = body.get("weight_map")
+    if not isinstance(weight_map, dict) or not weight_map:
+        message = f"{index_path} has no weight map"
+        raise RuntimeError(message)
+    headers: dict[str, tuple[dict[str, Any], int]] = {}
+    sources: dict[str, tuple[dict[str, Any], int, Path]] = {}
+    for name, file_name in weight_map.items():
+        if not isinstance(name, str) or not isinstance(file_name, str):
+            message = f"{index_path} has a bad weight map entry"
+            raise RuntimeError(message)
+        if ".." in Path(file_name).parts:
+            message = f"refusing {file_name}"
+            raise RuntimeError(message)
+        if file_name not in headers:
+            headers[file_name] = _file_header(src / file_name)
+        header, data_start = headers[file_name]
+        sources[name] = (header, data_start, src / file_name)
+    return sources
+
+
+def _file_header(path: Path) -> tuple[dict[str, Any], int]:
+    with path.open("rb") as handle:
+        header_len = struct.unpack("<Q", handle.read(8))[0]
+        header = json.loads(handle.read(header_len))
+    return header, 8 + header_len
 
 
 def _workers() -> int:
@@ -181,6 +285,77 @@ def _order() -> list[tuple[str, str, str, tuple[int, ...]]]:
             )
         )
     rows.append(("model.language_model.norm.weight", "final_norm", "f16", (HIDDEN,)))
+    rows.extend(_vision())
+    return rows
+
+
+def _vision() -> list[tuple[str, str, str, tuple[int, ...]]]:
+    """Vision matrices are fp8. LayerNorm weights, LayerNorm biases, and other biases stay float16."""
+    root = "model.visual."
+    rows: list[tuple[str, str, str, tuple[int, ...]]] = [
+        (root + "patch_embed.proj.weight", "visual.patch", "fp8", (VISION_HIDDEN, PATCH_DIM)),
+        (root + "patch_embed.proj.bias", "visual.patch_bias", "f16", (VISION_HIDDEN,)),
+        (root + "pos_embed.weight", "visual.pos", "fp8", (VISION_POSITIONS, VISION_HIDDEN)),
+    ]
+    for index in range(VISION_DEPTH):
+        stem = f"{root}blocks.{index}."
+        name = f"visual.{index}."
+        rows.extend(
+            (
+                (stem + "norm1.weight", name + "norm1", "f16", (VISION_HIDDEN,)),
+                (stem + "norm1.bias", name + "norm1_bias", "f16", (VISION_HIDDEN,)),
+                (
+                    stem + "attn.qkv.weight",
+                    name + "qkv",
+                    "fp8",
+                    (VISION_HIDDEN * 3, VISION_HIDDEN),
+                ),
+                (stem + "attn.qkv.bias", name + "qkv_bias", "f16", (VISION_HIDDEN * 3,)),
+                (
+                    stem + "attn.proj.weight",
+                    name + "proj",
+                    "fp8",
+                    (VISION_HIDDEN, VISION_HIDDEN),
+                ),
+                (stem + "attn.proj.bias", name + "proj_bias", "f16", (VISION_HIDDEN,)),
+                (stem + "norm2.weight", name + "norm2", "f16", (VISION_HIDDEN,)),
+                (stem + "norm2.bias", name + "norm2_bias", "f16", (VISION_HIDDEN,)),
+                (
+                    stem + "mlp.linear_fc1.weight",
+                    name + "fc1",
+                    "fp8",
+                    (VISION_INTERMEDIATE, VISION_HIDDEN),
+                ),
+                (stem + "mlp.linear_fc1.bias", name + "fc1_bias", "f16", (VISION_INTERMEDIATE,)),
+                (
+                    stem + "mlp.linear_fc2.weight",
+                    name + "fc2",
+                    "fp8",
+                    (VISION_HIDDEN, VISION_INTERMEDIATE),
+                ),
+                (stem + "mlp.linear_fc2.bias", name + "fc2_bias", "f16", (VISION_HIDDEN,)),
+            )
+        )
+    rows.extend(
+        (
+            (root + "merger.norm.weight", "visual.merger_norm", "f16", (VISION_HIDDEN,)),
+            (root + "merger.norm.bias", "visual.merger_norm_bias", "f16", (VISION_HIDDEN,)),
+            (
+                root + "merger.linear_fc1.weight",
+                "visual.merger_fc1",
+                "fp8",
+                (MERGER_DIM, MERGER_DIM),
+            ),
+            (root + "merger.linear_fc1.bias", "visual.merger_fc1_bias", "f16", (MERGER_DIM,)),
+            (
+                root + "merger.linear_fc2.weight",
+                "visual.merger_fc2",
+                "fp8",
+                (VISION_OUT, MERGER_DIM),
+            ),
+            (root + "merger.linear_fc2.bias", "visual.merger_fc2_bias", "f16", (VISION_OUT,)),
+        )
+    )
     return rows
 
 
@@ -204,11 +379,10 @@ def _placements() -> list[tuple[str, str, str, tuple[int, ...], int, int, int]]:
 
 
 def _pack(
-    path: Path, src: Path, header: dict[str, Any], data_start: int
+    path: Path, sources: dict[str, tuple[dict[str, Any], int, Path]]
 ) -> tuple[dict[str, Any], int]:
     expected = {raw for raw, *_ in _order()}
-    names = {key for key in header if key != "__metadata__"}
-    missing = sorted(expected - names)
+    missing = sorted(expected - set(sources))
     if missing:
         message = f"missing tensors: {', '.join(missing[:8])}"
         raise RuntimeError(message)
@@ -218,7 +392,19 @@ def _pack(
     try:
         os.ftruncate(fd, total)
         tasks = [
-            (fd, src, header, data_start, raw, logical, kind, shape, cursor, data_bytes, scale_bytes)
+            (
+                fd,
+                sources[raw][2],
+                sources[raw][0],
+                sources[raw][1],
+                raw,
+                logical,
+                kind,
+                shape,
+                cursor,
+                data_bytes,
+                scale_bytes,
+            )
             for raw, logical, kind, shape, cursor, data_bytes, scale_bytes in placed
         ]
         with ThreadPoolExecutor(max_workers=_workers()) as pool:
@@ -231,7 +417,7 @@ def _pack(
 def _pack_tensor(task: tuple[Any, ...]) -> tuple[str, dict[str, Any]]:
     (
         fd,
-        src,
+        file_path,
         header,
         data_start,
         raw,
@@ -245,10 +431,13 @@ def _pack_tensor(task: tuple[Any, ...]) -> tuple[str, dict[str, Any]]:
     os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["OPENBLAS_NUM_THREADS"] = "1"
-    array = _load(src, header, data_start, raw)
+    array = _load(file_path, header, data_start, raw)
     if tuple(array.shape) != tuple(shape):
-        message = f"{raw} has shape {array.shape}, expected {shape}"
-        raise RuntimeError(message)
+        if array.size == _numel(shape):
+            array = array.reshape(shape)
+        else:
+            message = f"{raw} has shape {array.shape}, expected {shape}"
+            raise RuntimeError(message)
     if kind == "fp8":
         rows, inner = shape
         data, scale = quantize_fp8(array.reshape(rows, inner))
@@ -282,10 +471,17 @@ def _pack_tensor(task: tuple[Any, ...]) -> tuple[str, dict[str, Any]]:
     return logical, spec
 
 
-def _load(src: Path, header: dict[str, Any], data_start: int, name: str) -> np.ndarray:
+def _numel(shape: tuple[int, ...]) -> int:
+    count = 1
+    for dim in shape:
+        count *= dim
+    return count
+
+
+def _load(path: Path, header: dict[str, Any], data_start: int, name: str) -> np.ndarray:
     info = header[name]
     start, end = info["data_offsets"]
-    with (src / "model.safetensors").open("rb") as handle:
+    with path.open("rb") as handle:
         handle.seek(data_start + int(start))
         raw = handle.read(int(end) - int(start))
     dtype = info.get("dtype")
@@ -299,3 +495,35 @@ def _load(src: Path, header: dict[str, Any], data_start: int, name: str) -> np.n
         return np.frombuffer(raw, dtype=np.float32).reshape(shape)
     message = f"{name} has unsupported dtype {dtype}"
     raise RuntimeError(message)
+
+
+def _stream(url: str, path: Path, have: int) -> None:
+    headers = {"Range": f"bytes={have}-"} if have else None
+    try:
+        response = _request(url, headers)
+    except urllib.error.HTTPError as exc:
+        message = f"download failed: {exc.code} {url}"
+        raise RuntimeError(message) from exc
+    with response:
+        status = getattr(response, "status", None) or response.getcode()
+        mode = "ab" if status == 206 else "wb"
+        with path.open(mode) as handle:
+            while True:
+                chunk = response.read(_CHUNK)
+                if not chunk:
+                    break
+                handle.write(chunk)
+
+
+def _request(url: str, headers: dict[str, str] | None = None) -> Any:
+    merged = {"User-Agent": _AGENT}
+    if headers:
+        merged.update(headers)
+    request = urllib.request.Request(url, headers=merged)
+    try:
+        return urllib.request.urlopen(request, timeout=120)
+    except urllib.error.URLError as exc:
+        if isinstance(exc, urllib.error.HTTPError):
+            raise
+        message = f"download failed: {exc.reason}"
+        raise RuntimeError(message) from exc

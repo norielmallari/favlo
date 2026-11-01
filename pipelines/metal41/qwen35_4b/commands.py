@@ -7,6 +7,7 @@ import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from favlo.console import Console
 from favlo.registry import load_registry, models_dir, register_quantized, set_alias
@@ -24,13 +25,13 @@ CARROT_PROMPT = (
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog=f"favlo --{PIPELINE}")
     sub = parser.add_subparsers(dest="command")
-    fetch = sub.add_parser("download", help="copy or verify the BF16 checkout under models/")
+    fetch = sub.add_parser("download", help="download the official BF16 checkpoint")
     fetch.add_argument("--check", action="store_true")
     quant = sub.add_parser("quantize", help="write the fp8 record")
     quant.add_argument("--src", type=Path, default=None)
     quant.add_argument("--output", type=Path, default=None)
     quant.add_argument("--console", choices=("auto", "pretty", "plain", "json"), default="auto")
-    setup = sub.add_parser("setup", help="pack the BF16 checkout already on SSD")
+    setup = sub.add_parser("setup", help="download the official checkpoint and pack it")
     setup.add_argument("--src", type=Path, default=None)
     setup.add_argument(
         "--keep-bf16",
@@ -87,22 +88,33 @@ def installed_record() -> Path | None:
     return path
 
 
+def _checkout_present(dest: Path) -> bool:
+    return (dest / "model.safetensors").is_file() or (
+        dest / "model.safetensors.index.json"
+    ).is_file()
+
+
 def _download(args: argparse.Namespace) -> int:
+    from qwen35_4b.convert import download, list_files
+
     dest = checkout_dir(models_dir())
-    weights = dest / "model.safetensors"
     if args.check:
-        if weights.is_file() and (dest / "tokenizer.json").is_file():
+        if _checkout_present(dest) and (dest / "tokenizer.json").is_file():
             sys.stdout.write("ok\n")
             return 0
         sys.stderr.write(f"missing BF16 checkout at {dest}\n")
         return 1
-    if weights.is_file():
+    if (dest / "fetch_complete.json").is_file() or _checkout_present(dest):
         sys.stdout.write(f"present {dest}\n")
         return 0
-    sys.stderr.write(
-        f"copy {REPO} (or a same-tensor checkout) into {dest} before quantize\n"
-    )
-    return 1
+    try:
+        files = list_files()
+        download(dest, files, lambda done, total, name: sys.stdout.write(f"{name} {done}/{total}\n"))
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
+    sys.stdout.write(f"{dest}\n")
+    return 0
 
 
 def _quantize(args: argparse.Namespace) -> int:
@@ -123,30 +135,102 @@ def _quantize(args: argparse.Namespace) -> int:
     register_quantized(
         dest.name,
         source=src,
-        alias=None,
+        alias=PIPELINE,
         directory=dest,
         pipeline=PIPELINE,
         runtime="metal41",
         max_prompt_tokens=CONTEXT_LENGTH,
+        kv_cache="f16",
     )
     return 0
 
 
 def _setup(args: argparse.Namespace) -> int:
-    src = Path(args.src) if args.src else checkout_dir(models_dir())
-    if not (src / "model.safetensors").is_file():
-        sys.stderr.write(f"missing BF16 checkout at {src}\n")
-        return 1
-    code = _quantize(
-        argparse.Namespace(src=src, output=None, console=args.console)
-    )
-    if code != 0:
-        return code
-    if not args.keep_bf16 and src == checkout_dir(models_dir()):
-        import shutil
+    """Download the official checkpoint, pack it, and remove the checkout."""
+    from qwen35_4b.convert import download, list_files
 
-        shutil.rmtree(src, ignore_errors=True)
-    return 0
+    ui = Console.from_env(args.console, pipeline=PIPELINE)
+    src = Path(args.src) if args.src else checkout_dir(models_dir())
+    output = record_dir(models_dir())
+    download_bar = None
+    try:
+        if args.src is None and installed_record() is not None:
+            _register(src, output)
+            if not args.keep_bf16:
+                _remove_checkout(src, spare=output)
+            ui.log(f"record complete: {output}")
+            return 0
+        if not _checkout_present(src):
+            if args.src is not None:
+                sys.stderr.write(f"missing BF16 checkout at {src}\n")
+                return 1
+            files = list_files()
+            total = sum(size for _name, size in files)
+            download_bar = ui.begin(
+                "download",
+                total=max(total, 1),
+                unit="bytes",
+                detail=REPO,
+            )
+            download(
+                src,
+                files,
+                lambda done, whole, name: _advance(download_bar, done, whole, name),
+            )
+            ui.end(download_bar, f"downloaded {REPO}")
+            download_bar = None
+        code = _quantize(argparse.Namespace(src=src, output=None, console=args.console))
+        if code != 0:
+            return code
+        if not args.keep_bf16 and src == checkout_dir(models_dir()):
+            _remove_checkout(src, spare=output)
+        return 0
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        if download_bar is not None:
+            ui.end(download_bar, "")
+        sys.stderr.write(f"{exc}\n")
+        sys.stderr.write("the next serve continues from the files already written\n")
+        return 1
+    finally:
+        ui.close()
+
+
+def _advance(progress: Any, done: int, total: int, detail: str) -> None:
+    progress.done = done
+    progress.total = total
+    progress.detail = detail
+
+
+def _register(src: Path, output: Path) -> None:
+    register_quantized(
+        output.name,
+        source=src,
+        alias=PIPELINE,
+        directory=output,
+        pipeline=PIPELINE,
+        runtime="metal41",
+        max_prompt_tokens=CONTEXT_LENGTH,
+        kv_cache="f16",
+    )
+
+
+def _remove_checkout(path: Path, *, spare: Path | None = None) -> None:
+    """Remove a BF16 checkout that lives under ``models/``."""
+    import shutil
+
+    root = models_dir().resolve()
+    try:
+        target = path.expanduser().resolve()
+        spared = None if spare is None else spare.expanduser().resolve()
+    except OSError:
+        return
+    if target == root or root not in target.parents:
+        return
+    if spared is not None and (target == spared or target in spared.parents):
+        return
+    if path.is_symlink() or not path.is_dir():
+        return
+    shutil.rmtree(target)
 
 
 def _kernels() -> int:
@@ -216,6 +300,7 @@ def _models(args: argparse.Namespace) -> int:
             pipeline=PIPELINE,
             runtime="metal41",
             max_prompt_tokens=CONTEXT_LENGTH,
+            kv_cache="f16",
         )
         return 0
     if args.models_command == "alias":

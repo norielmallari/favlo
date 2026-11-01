@@ -8,7 +8,7 @@ A 2 GiB streaming write finished in 8954.5 µs, 239.82 GB/s. The bandwidth ceili
 
 ## Prefill
 
-One chunk of 256 tokens (the matmul row multiple used for the isolated times below; the forward's `PREFILL_TILE` is 1024), with a 2048-key attention window on the eight full-attention layers. Dense projections use `matmul_fp8` (64×64) and `matmul_fp8_n32` for GDN a/b. Prefill attention is `attend_prefill`. Gated DeltaNet is `gdn_chunk` over the tile. The head is `gemv_fp8` on the last prompt row only.
+One chunk of 256 tokens (the matmul row multiple used for the isolated times below; the forward's `PREFILL_TILE` is 1024), with a 2048-key attention window on the eight full-attention layers. Dense projections use `matmul_fp8` (64×64) and `matmul_fp8_n32` for GDN a/b. Prefill attention in this table is `attend_prefill` on the e4m3 cache. The default cache is now `f16` (`attend_prefill_f16`); those kernels are not in this table. Gated DeltaNet is `gdn_chunk` over the tile. The head is `gemv_fp8` on the last prompt row only.
 
 | Kernel | Shape | Count in one chunk | µs per call |
 |---|---|---:|---:|

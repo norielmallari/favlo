@@ -30,6 +30,7 @@ from favlo.responses import (
     web_search_context,
 )
 from qwen35_4b.closed import RequestClosed
+from qwen35_4b.vision import prepare_prompt
 from qwen35_4b.layout import EOS, IM_END
 from qwen35_4b.sampling import DEFAULT_VARIANT, VARIANTS
 
@@ -65,13 +66,121 @@ def encode_chat(
     env.filters["tojson"] = lambda value: json.dumps(value, ensure_ascii=False)
     env.globals["raise_exception"] = lambda message: (_ for _ in ()).throw(ValueError(message))
     rendered = env.from_string(template).render(
-        messages=_template_messages(messages),
+        messages=_template_messages(_without_historical_reasoning(messages)),
         tools=tools or None,
         add_generation_prompt=True,
         enable_thinking=enable_thinking,
         add_vision_id=False,
     )
     return list(load_tokenizer(root).encode(rendered, add_special_tokens=False).ids)
+
+
+def _without_historical_reasoning(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop thinking from assistant turns at or before the latest user message.
+
+    The Qwen3.5-4B model card says a multi-turn history keeps the final output
+    and leaves the thinking content out. The official template does the same:
+    only an assistant turn after that user message keeps ``reasoning_content``.
+    """
+    merged = _merge_split_reasoning(messages)
+    last_user = _last_user_index(merged)
+    shaped: list[dict[str, Any]] = []
+    for index, message in enumerate(merged):
+        if not isinstance(message, dict) or message.get("role") != "assistant" or index > last_user:
+            shaped.append(message)
+            continue
+        copied = dict(message)
+        copied.pop("reasoning_content", None)
+        content = copied.get("content")
+        if isinstance(content, str) and "</think>" in content:
+            copied["content"] = content.split("</think>")[-1].lstrip("\n")
+        shaped.append(copied)
+    return shaped
+
+
+def _merge_split_reasoning(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Put a reasoning-only assistant turn onto the following assistant reply."""
+    merged: list[dict[str, Any]] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        nxt = messages[index + 1] if index + 1 < len(messages) else None
+        if _reasoning_only(message) and isinstance(nxt, dict) and nxt.get("role") == "assistant":
+            combined = dict(nxt)
+            if not isinstance(combined.get("reasoning_content"), str):
+                combined["reasoning_content"] = message.get("reasoning_content")
+            if message.get("tool_calls") and not combined.get("tool_calls"):
+                combined["tool_calls"] = message["tool_calls"]
+            merged.append(combined)
+            index += 2
+            continue
+        merged.append(message)
+        index += 1
+    return merged
+
+
+def _reasoning_only(message: Any) -> bool:
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return False
+    if not isinstance(message.get("reasoning_content"), str):
+        return False
+    content = message.get("content")
+    text = content.strip() if isinstance(content, str) else ""
+    return text == ""
+
+
+def _last_user_index(messages: list[dict[str, Any]]) -> int:
+    """Index of the latest user message, matching the template's last query."""
+    last = len(messages) - 1
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        text = content.strip() if isinstance(content, str) else ""
+        if text.startswith("<tool_response>") and text.endswith("</tool_response>"):
+            continue
+        return index
+    return last
+
+
+def _attach_chat_reasoning(messages: Any, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Put each chat ``reasoning_content`` back in front of that assistant turn."""
+    if not isinstance(messages, list):
+        return items
+    attached: list[dict[str, Any]] = []
+    cursor = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role in ("system", "developer"):
+            continue
+        if role != "assistant":
+            if cursor < len(items):
+                attached.append(items[cursor])
+                cursor += 1
+            continue
+        reasoning = message.get("reasoning_content")
+        if isinstance(reasoning, str) and reasoning.strip():
+            attached.append(
+                {
+                    "type": "reasoning",
+                    "content": [{"type": "reasoning_text", "text": reasoning}],
+                }
+            )
+        calls = message.get("tool_calls")
+        if isinstance(calls, list):
+            for _call in calls:
+                if cursor < len(items):
+                    attached.append(items[cursor])
+                    cursor += 1
+        if message.get("content"):
+            if cursor < len(items):
+                attached.append(items[cursor])
+                cursor += 1
+    attached.extend(items[cursor:])
+    return attached
 
 
 def _template_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -200,6 +309,9 @@ class _ChatCompletions(_Hooks):
             }
         if "stop" in body and "stop" not in translated:
             translated["stop"] = body["stop"]
+        raw_input = translated.get("input")
+        if isinstance(raw_input, list):
+            translated["input"] = _attach_chat_reasoning(body.get("messages"), raw_input)
         _respond(ChatWire(reply), runtime, translated, selection, state)
 
 
@@ -403,6 +515,16 @@ def _thinking(selection: Any, body: dict[str, Any]) -> bool:
     return True
 
 
+def _output_limit(body: dict[str, Any], thinking: bool, prompt_len: int, context: int) -> int:
+    """An omitted cap on a thinking turn runs to the last context position."""
+    named = body.get("max_output_tokens")
+    if named is not None:
+        return int(named)
+    if thinking:
+        return max(1, context - prompt_len)
+    return 2048
+
+
 def _split_reply(text: str, thinking: bool) -> tuple[str, str, list[dict[str, Any]]]:
     reasoning, visible = split_thinking(text, True)
     visible, calls = parse_tool_calls(visible)
@@ -467,11 +589,12 @@ def _respond(
             messages.append({"role": "user", "content": note})
         tools = function_tools(prepared.get("tools")) if emit_tools else []
         prompt = encode_chat(runtime.root, messages, tools or None, thinking)
+        prompt = prepare_prompt(runtime, messages, prompt)
     except (RequestError, RuntimeError, TemplateError, OSError, ValueError) as exc:
         reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
         return
 
-    limit = int(prepared.get("max_output_tokens") or 2048)
+    limit = _output_limit(prepared, thinking, len(prompt), int(runtime.max_pos))
     stop_strings = _stop_strings(prepared)
     stream = bool(prepared.get("stream"))
     if stream:

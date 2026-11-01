@@ -59,18 +59,19 @@ class Qwen35Runtime:
         self,
         root: Path,
         *,
-        kv_cache: str = "e4m3",
+        kv_cache: str = "f16",
         console: Any = None,
         owner: str | None = None,
         mtp: bool = False,
     ) -> None:
         del mtp
-        if kv_cache != "e4m3":
-            message = f"qwen35-4b keeps an e4m3 cache; {kv_cache} is not built"
+        if kv_cache not in ("f16", "e4m3"):
+            message = f"qwen35-4b cache is f16 or e4m3; {kv_cache} is not built"
             raise RuntimeError(message)
         self.root = Path(root)
         self.console = console
         self.kv_cache = kv_cache
+        self._kv_elem = 2 if kv_cache == "f16" else 1
         self._owner = owner or f"{STEM}:{id(self)}"
         self._stop: Callable[[], bool] | None = None
         self._halted = False
@@ -84,6 +85,11 @@ class Qwen35Runtime:
         self.max_memory = memory.budget()
         self.max_pos = CONTEXT
         self.pos = 0
+        self._rope_delta = 0
+        self._rope_device = None
+        self._rope_length = 0
+        self._vision_rows = None
+        self._vision_index = None
         self._presence = 0.0
         self._frequency = 0.0
         manifest = self.root / "manifest.json"
@@ -133,11 +139,19 @@ class Qwen35Runtime:
         budget = self.max_memory
         capacity = CONTEXT
         while capacity >= _MIN_CTX:
-            need = size + _workspace_bytes(capacity) + gdn + conv + cache_bytes(capacity)
+            need = (
+                size
+                + _workspace_bytes(capacity)
+                + gdn
+                + conv
+                + cache_bytes(capacity, self.kv_cache)
+            )
             if need <= budget:
                 break
             capacity = max(_MIN_CTX, capacity // 2)
-        need = size + _workspace_bytes(capacity) + gdn + conv + cache_bytes(capacity)
+        need = (
+            size + _workspace_bytes(capacity) + gdn + conv + cache_bytes(capacity, self.kv_cache)
+        )
         if need > budget:
             message = (
                 f"qwen35-4b needs {need} bytes for a {_MIN_CTX}-token cache; "
@@ -185,14 +199,16 @@ class Qwen35Runtime:
         self.token_counts = s.allocate(VOCAB * 4, zero=True)
         self.gdn_state = s.allocate(gdn, zero=True)
         self.conv_hist = s.allocate(conv, zero=True)
-        self.k_data = s.allocate(len(FULL) * capacity * KV_HEADS * HEAD_DIM, zero=True)
-        self.k_scale = s.allocate(
-            len(FULL) * capacity * KV_HEADS * (HEAD_DIM // BLOCK), zero=True
-        )
-        self.v_data = s.allocate(len(FULL) * capacity * KV_HEADS * HEAD_DIM, zero=True)
-        self.v_scale = s.allocate(
-            len(FULL) * capacity * KV_HEADS * (HEAD_DIM // BLOCK), zero=True
-        )
+        plane = len(FULL) * capacity * KV_HEADS * HEAD_DIM * self._kv_elem
+        self.k_data = s.allocate(plane, zero=True)
+        self.v_data = s.allocate(plane, zero=True)
+        if self.kv_cache == "e4m3":
+            scales = len(FULL) * capacity * KV_HEADS * (HEAD_DIM // BLOCK)
+            self.k_scale = s.allocate(scales, zero=True)
+            self.v_scale = s.allocate(scales, zero=True)
+        else:
+            self.k_scale = 0
+            self.v_scale = 0
         tile = _TILE
         widest = max(
             HIDDEN,
@@ -435,6 +451,7 @@ class Qwen35Runtime:
             (1, 1, 1),
             offsets=[self._planes["embedding"].data, self._planes["embedding"].scale, 0, 0],
         )
+        self._splice_vision(count, position0)
         for layer in range(LAYERS):
             self._prefill_layer(layer, count, row_pad, position0)
         if logits:
@@ -450,6 +467,47 @@ class Qwen35Runtime:
             self._gemv(self.normed, self._planes["embedding"], self.logits, VOCAB, HIDDEN)
         session.end(wait=False)
         self.pos = position0 + count
+
+    def _splice_vision(self, count: int, position0: int) -> None:
+        rows = self._vision_rows
+        index = self._vision_index
+        if rows is None or index is None or count < 1:
+            return
+        self.session.launch(
+            "splice_rows",
+            [rows, index, self.pf_hidden],
+            [u32(position0), u32(count), u32(HIDDEN)],
+            ((HIDDEN + 255) // 256, count, 1),
+            (256, 1, 1),
+        )
+
+    def _rope_rows(self, data: Any, heads: int, stride: int, count: int, position0: int) -> None:
+        table = self._rope_device
+        length = int(self._rope_length)
+        if table is not None and length > 0:
+            self.session.launch(
+                "rope_mrope_rows",
+                [data, table],
+                [
+                    u32(heads),
+                    u32(stride),
+                    u32(ROPE_DIM),
+                    u32(position0),
+                    u32(count),
+                    u32(length),
+                    f32(THETA),
+                ],
+                (heads * (ROPE_DIM // 2), count, 1),
+                (1, 1, 1),
+            )
+            return
+        self.session.launch(
+            "rope_heads_rows",
+            [data],
+            [u32(heads), u32(stride), u32(ROPE_DIM), u32(position0), u32(count), f32(THETA)],
+            (heads * (ROPE_DIM // 2), count, 1),
+            (1, 1, 1),
+        )
 
     def _prefill_layer(self, layer: int, count: int, row_pad: int, position0: int) -> None:
         session = self.session
@@ -574,13 +632,154 @@ class Qwen35Runtime:
             LINEAR_VALUE_HEADS * LINEAR_HEAD_DIM,
         )
 
+    def _kv_offsets(self, layer: int) -> tuple[int, int]:
+        slot = self._full_index[layer]
+        data = slot * self.max_pos * KV_HEADS * HEAD_DIM * self._kv_elem
+        scale = slot * self.max_pos * KV_HEADS * (HEAD_DIM // BLOCK)
+        return data, scale
+
+    def _store_kv(
+        self,
+        key: int,
+        value: int,
+        *,
+        rows: bool,
+        position: int,
+        count: int,
+        plane: int,
+        data_off: int,
+        scale_off: int,
+    ) -> None:
+        session = self.session
+        if self.kv_cache == "f16":
+            if not rows:
+                session.launch(
+                    "store_kv_f16",
+                    [key, value, self.k_data, self.v_data],
+                    [u32(position), u32(KV_HEADS), u32(plane)],
+                    (KV_HEADS, 1, 1),
+                    (HEAD_DIM, 1, 1),
+                    offsets=[0, 0, data_off, data_off],
+                )
+                return
+            session.launch(
+                "store_kv_rows_f16",
+                [key, value, self.k_data, self.v_data],
+                [u32(position), u32(KV_HEADS), u32(count), u32(plane)],
+                (KV_HEADS, count, 1),
+                (HEAD_DIM, 1, 1),
+                offsets=[0, 0, data_off, data_off],
+            )
+            return
+        if not rows:
+            session.launch(
+                "store_kv",
+                [key, value, self.k_data, self.k_scale, self.v_data, self.v_scale],
+                [u32(position), u32(KV_HEADS), u32(plane)],
+                (KV_HEADS, 1, 1),
+                (HEAD_DIM, 1, 1),
+                offsets=[0, 0, data_off, scale_off, data_off, scale_off],
+            )
+            return
+        session.launch(
+            "store_kv_rows",
+            [key, value, self.k_data, self.k_scale, self.v_data, self.v_scale],
+            [u32(position), u32(KV_HEADS), u32(count), u32(plane)],
+            (KV_HEADS, count, 1),
+            (HEAD_DIM, 1, 1),
+            offsets=[0, 0, data_off, scale_off, data_off, scale_off],
+        )
+
+    def _attend_decode(
+        self,
+        query: int,
+        output: int,
+        *,
+        length: int,
+        data_off: int,
+        scale_off: int,
+        query_off: int = 0,
+        output_off: int = 0,
+    ) -> None:
+        session = self.session
+        consts = [
+            u32(length),
+            u32(self.max_pos),
+            u32(KV_HEADS),
+            u32(_GROUP),
+            f32(ATTN_SCALE),
+        ]
+        grid = (ATTN_HEADS, 1, 1)
+        threads = (HEAD_DIM, 1, 1)
+        if self.kv_cache == "f16":
+            session.launch(
+                "attend_decode_f16",
+                [query, self.k_data, self.v_data, self.scores, output],
+                consts,
+                grid,
+                threads,
+                offsets=[query_off, data_off, data_off, 0, output_off],
+            )
+            return
+        session.launch(
+            "attend_decode",
+            [query, self.k_data, self.k_scale, self.v_data, self.v_scale, self.scores, output],
+            consts,
+            grid,
+            threads,
+            offsets=[query_off, data_off, scale_off, data_off, scale_off, 0, output_off],
+        )
+
+    def _attend_prefill(
+        self,
+        *,
+        position0: int,
+        count: int,
+        data_off: int,
+        scale_off: int,
+    ) -> None:
+        session = self.session
+        consts = [
+            u32(position0),
+            u32(count),
+            u32(self._score_span),
+            u32(ATTN_HEADS),
+            u32(KV_HEADS),
+            u32(_GROUP),
+            f32(ATTN_SCALE),
+        ]
+        grid = (ATTN_HEADS, count, 1)
+        threads = (HEAD_DIM, 1, 1)
+        if self.kv_cache == "f16":
+            session.launch(
+                "attend_prefill_f16",
+                [self.pf_q, self.k_data, self.v_data, self.pf_scores, self.pf_attn],
+                consts,
+                grid,
+                threads,
+                offsets=[0, data_off, data_off, 0, 0],
+            )
+            return
+        session.launch(
+            "attend_prefill",
+            [
+                self.pf_q,
+                self.k_data,
+                self.k_scale,
+                self.v_data,
+                self.v_scale,
+                self.pf_scores,
+                self.pf_attn,
+            ],
+            consts,
+            grid,
+            threads,
+            offsets=[0, data_off, scale_off, data_off, scale_off, 0, 0],
+        )
+
     def _prefill_full(self, layer: int, count: int, row_pad: int, position0: int) -> None:
         session = self.session
-        slot = self._full_index[layer]
-        k_data_off = slot * self.max_pos * KV_HEADS * HEAD_DIM
-        k_scale_off = slot * self.max_pos * KV_HEADS * (HEAD_DIM // BLOCK)
-        v_data_off = k_data_off
-        v_scale_off = k_scale_off
+        k_data_off, k_scale_off = self._kv_offsets(layer)
         qn = self._planes[f"layer.{layer}.q_norm"]
         kn = self._planes[f"layer.{layer}.k_norm"]
         self._cast_half(self.pf_normed, HIDDEN, row_pad, valid=count)
@@ -613,101 +812,37 @@ class Qwen35Runtime:
             (HEAD_DIM, 1, 1),
             offsets=[0, kn.data],
         )
-        session.launch(
-            "rope_heads_rows",
-            [self.pf_q],
-            [
-                u32(ATTN_HEADS),
-                u32(HEAD_DIM * 2),
-                u32(ROPE_DIM),
-                u32(position0),
-                u32(count),
-                f32(THETA),
-            ],
-            (ATTN_HEADS * (ROPE_DIM // 2), count, 1),
-            (1, 1, 1),
-        )
-        session.launch(
-            "rope_heads_rows",
-            [self.pf_k],
-            [
-                u32(KV_HEADS),
-                u32(HEAD_DIM),
-                u32(ROPE_DIM),
-                u32(position0),
-                u32(count),
-                f32(THETA),
-            ],
-            (KV_HEADS * (ROPE_DIM // 2), count, 1),
-            (1, 1, 1),
-        )
+        self._rope_rows(self.pf_q, ATTN_HEADS, HEAD_DIM * 2, count, position0)
+        self._rope_rows(self.pf_k, KV_HEADS, HEAD_DIM, count, position0)
         for plane in (0, 1):
-            session.launch(
-                "store_kv_rows",
-                [
-                    self.pf_k,
-                    self.pf_v,
-                    self.k_data,
-                    self.k_scale,
-                    self.v_data,
-                    self.v_scale,
-                ],
-                [u32(position0), u32(KV_HEADS), u32(count), u32(plane)],
-                (KV_HEADS, count, 1),
-                (HEAD_DIM, 1, 1),
-                offsets=[0, 0, k_data_off, k_scale_off, v_data_off, v_scale_off],
+            self._store_kv(
+                self.pf_k,
+                self.pf_v,
+                rows=True,
+                position=position0,
+                count=count,
+                plane=plane,
+                data_off=k_data_off,
+                scale_off=k_scale_off,
             )
         span = position0 + count
         if span <= self._score_span:
-            session.launch(
-                "attend_prefill",
-                [
-                    self.pf_q,
-                    self.k_data,
-                    self.k_scale,
-                    self.v_data,
-                    self.v_scale,
-                    self.pf_scores,
-                    self.pf_attn,
-                ],
-                [
-                    u32(position0),
-                    u32(count),
-                    u32(self._score_span),
-                    u32(ATTN_HEADS),
-                    u32(KV_HEADS),
-                    u32(_GROUP),
-                    f32(ATTN_SCALE),
-                ],
-                (ATTN_HEADS, count, 1),
-                (HEAD_DIM, 1, 1),
-                offsets=[0, k_data_off, k_scale_off, v_data_off, v_scale_off, 0, 0],
+            self._attend_prefill(
+                position0=position0,
+                count=count,
+                data_off=k_data_off,
+                scale_off=k_scale_off,
             )
         else:
             for index in range(count):
-                q_off = index * ATTN_HEADS * HEAD_DIM * 2 * 4
-                a_off = index * ATTN_HEADS * HEAD_DIM * 4
-                session.launch(
-                    "attend_decode",
-                    [
-                        self.pf_q,
-                        self.k_data,
-                        self.k_scale,
-                        self.v_data,
-                        self.v_scale,
-                        self.scores,
-                        self.pf_attn,
-                    ],
-                    [
-                        u32(position0 + index + 1),
-                        u32(self.max_pos),
-                        u32(KV_HEADS),
-                        u32(_GROUP),
-                        f32(ATTN_SCALE),
-                    ],
-                    (ATTN_HEADS, 1, 1),
-                    (HEAD_DIM, 1, 1),
-                    offsets=[q_off, k_data_off, k_scale_off, v_data_off, v_scale_off, 0, a_off],
+                self._attend_decode(
+                    self.pf_q,
+                    self.pf_attn,
+                    length=position0 + index + 1,
+                    data_off=k_data_off,
+                    scale_off=k_scale_off,
+                    query_off=index * ATTN_HEADS * HEAD_DIM * 2 * 4,
+                    output_off=index * ATTN_HEADS * HEAD_DIM * 4,
                 )
         self._cast_half(self.pf_attn, ATTN_HEADS * HEAD_DIM, row_pad, valid=count)
         self._matmul(
@@ -896,12 +1031,8 @@ class Qwen35Runtime:
 
     def _full_attn(self, layer: int) -> None:
         session = self.session
-        slot = self._full_index[layer]
         length = self.pos + 1
-        k_data_off = slot * self.max_pos * KV_HEADS * HEAD_DIM
-        k_scale_off = slot * self.max_pos * KV_HEADS * (HEAD_DIM // BLOCK)
-        v_data_off = k_data_off
-        v_scale_off = k_scale_off
+        k_data_off, k_scale_off = self._kv_offsets(layer)
         qn = self._planes[f"layer.{layer}.q_norm"]
         kn = self._planes[f"layer.{layer}.k_norm"]
 
@@ -937,57 +1068,38 @@ class Qwen35Runtime:
             offsets=[0, kn.data],
         )
         # rope only the query half: rope_heads with stride 2*HEAD_DIM
+        rope_pos = max(0, self.pos + int(self._rope_delta))
         session.launch(
             "rope_heads",
             [self.q_fuse],
-            [u32(ATTN_HEADS), u32(HEAD_DIM * 2), u32(ROPE_DIM), u32(self.pos), f32(THETA)],
+            [u32(ATTN_HEADS), u32(HEAD_DIM * 2), u32(ROPE_DIM), u32(rope_pos), f32(THETA)],
             ((ATTN_HEADS * (ROPE_DIM // 2) + 255) // 256, 1, 1),
             (256, 1, 1),
         )
         session.launch(
             "rope_heads",
             [self.k_buf],
-            [u32(KV_HEADS), u32(HEAD_DIM), u32(ROPE_DIM), u32(self.pos), f32(THETA)],
+            [u32(KV_HEADS), u32(HEAD_DIM), u32(ROPE_DIM), u32(rope_pos), f32(THETA)],
             ((KV_HEADS * (ROPE_DIM // 2) + 255) // 256, 1, 1),
             (256, 1, 1),
         )
         for plane in (0, 1):
-            session.launch(
-                "store_kv",
-                [
-                    self.k_buf,
-                    self.v_buf,
-                    self.k_data,
-                    self.k_scale,
-                    self.v_data,
-                    self.v_scale,
-                ],
-                [u32(self.pos), u32(KV_HEADS), u32(plane)],
-                (KV_HEADS, 1, 1),
-                (HEAD_DIM, 1, 1),
-                offsets=[0, 0, k_data_off, k_scale_off, v_data_off, v_scale_off],
+            self._store_kv(
+                self.k_buf,
+                self.v_buf,
+                rows=False,
+                position=self.pos,
+                count=1,
+                plane=plane,
+                data_off=k_data_off,
+                scale_off=k_scale_off,
             )
-        session.launch(
-            "attend_decode",
-            [
-                self.q_fuse,
-                self.k_data,
-                self.k_scale,
-                self.v_data,
-                self.v_scale,
-                self.scores,
-                self.attn,
-            ],
-            [
-                u32(length),
-                u32(self.max_pos),
-                u32(KV_HEADS),
-                u32(_GROUP),
-                f32(ATTN_SCALE),
-            ],
-            (ATTN_HEADS, 1, 1),
-            (HEAD_DIM, 1, 1),
-            offsets=[0, k_data_off, k_scale_off, v_data_off, v_scale_off, 0, 0],
+        self._attend_decode(
+            self.q_fuse,
+            self.attn,
+            length=length,
+            data_off=k_data_off,
+            scale_off=k_scale_off,
         )
         self._gemv(
             self.attn, self._planes[f"layer.{layer}.o"], self.delta, HIDDEN, ATTN_HEADS * HEAD_DIM

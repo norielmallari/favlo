@@ -37,7 +37,75 @@ def test_gdn_projection_width() -> None:
 
 def test_fp8_and_cache_sizes() -> None:
     assert fp8_bytes(VOCAB, HIDDEN) == VOCAB * HIDDEN + VOCAB * (HIDDEN // 32)
-    assert cache_bytes(2048) == 2048 * 8 * 2 * 4 * (256 + 8)
+    assert cache_bytes(2048) == 2048 * 8 * 2 * 4 * 256 * 2
+    assert cache_bytes(2048, "e4m3") == 2048 * 8 * 2 * 4 * (256 + 8)
+    assert cache_bytes(2048, "f16") == cache_bytes(2048)
+
+
+def test_vision_pack_list() -> None:
+    from qwen35_4b.convert import _order
+
+    rows = _order()
+    visual = [row for row in rows if row[1].startswith("visual.")]
+    assert len(visual) == 297
+    by_name = {logical: (kind, shape) for _raw, logical, kind, shape in visual}
+    assert by_name["visual.patch"] == ("fp8", (1024, 1536))
+    assert by_name["visual.patch_bias"][0] == "f16"
+    assert by_name["visual.pos"] == ("fp8", (2304, 1024))
+    assert by_name["visual.0.norm1"][0] == "f16"
+    assert by_name["visual.0.qkv"] == ("fp8", (3072, 1024))
+    assert by_name["visual.merger_fc2"] == ("fp8", (2560, 4096))
+    assert by_name["visual.merger_norm"][0] == "f16"
+
+
+def test_thinking_has_no_2048_cap() -> None:
+    from qwen35_4b.chat import _output_limit
+
+    assert _output_limit({}, True, 60, 262144) == 262144 - 60
+    assert _output_limit({"max_output_tokens": 32}, True, 60, 262144) == 32
+    assert _output_limit({}, False, 60, 262144) == 2048
+
+
+def test_vision_still_packing() -> None:
+    from qwen35_4b.layout import IMAGE_TOKEN
+    from qwen35_4b.vision import expand_image_tokens, rope_positions, smart_size, vision_rotary
+
+    assert smart_size(256, 256) == (256, 256)
+    assert smart_size(100, 100)[0] % 32 == 0
+    expanded, spans = expand_image_tokens([1, IMAGE_TOKEN, 2], [4], IMAGE_TOKEN)
+    assert expanded == [1, IMAGE_TOKEN, IMAGE_TOKEN, IMAGE_TOKEN, IMAGE_TOKEN, 2]
+    assert spans == [1]
+    positions, delta = rope_positions(len(expanded), [(1, 2, 2)])
+    assert positions.shape == (3, 6)
+    assert int(positions[0, 1]) == int(positions[0, 0]) + 1
+    assert delta == int(positions.max()) + 1 - len(expanded)
+    cos, sin = vision_rotary(4, 4)
+    assert cos.shape == (16, 64)
+    assert sin.shape == cos.shape
+
+
+def test_historical_reasoning_is_dropped() -> None:
+    from qwen35_4b.chat import _without_historical_reasoning
+
+    history = _without_historical_reasoning(
+        [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "", "reasoning_content": "old trace"},
+            {"role": "assistant", "content": "<think>\nold trace\n</think>\n\napple"},
+            {"role": "user", "content": "second"},
+            {"role": "assistant", "content": "", "reasoning_content": "current trace"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"function": {"name": "lookup", "arguments": {}}}],
+            },
+        ]
+    )
+    assert history[1]["content"] == "apple"
+    assert "reasoning_content" not in history[1]
+    assert "</think>" not in history[1]["content"]
+    assert history[3]["reasoning_content"] == "current trace"
+    assert history[3]["tool_calls"][0]["function"]["name"] == "lookup"
 
 
 def test_sampling_card() -> None:

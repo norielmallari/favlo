@@ -1,7 +1,7 @@
 """OpenAI chat contract for the coding harness.
 
 The coding agent is the production-readiness run. These checks share its
-listener: a system instruction and a user reply, a thinking follow-up, a
+listener: a system instruction and a user reply, one thinking turn, a
 stored follow-up, a required tool call, ``tool_choice`` ``none``, a hosted
 ``web_search``, ``finish_reason`` ``length``, and a streamed reply. The horse
 still is the first coding chat when ``--vision`` is set, not a separate check.
@@ -39,10 +39,7 @@ _INSTRUCTION = "The reply is the single word apple."
 _REPLY = "Name one fruit."
 _LENGTH = "Write a sentence of at least twelve words about a horse."
 _STOP = "Repeat exactly: alpha STOPWORD omega"
-_REASONING = (
-    "What vegetable does a horse eat? Name one.",
-    "Name a second vegetable a horse eats.",
-)
+_REASONING = "What vegetable does a horse eat? Name one."
 _SECRET = "The secret word is apple. Reply with ok."
 _RECALL = "What is the secret word? Reply with that word only."
 _SEARCH = "Search the web for the Qwen3.6-35B-A3B model card and answer in one sentence."
@@ -449,7 +446,7 @@ async def run_reply(base_url: str, model: str) -> list[str]:
 
 
 async def run_reasoning(base_url: str, model: str) -> list[str]:
-    """Two thinking turns. The first turn's reasoning stays on the session."""
+    """One thinking turn. The reasoning stays on the session."""
     from agent_framework import Agent
 
     from favlo.chat_client import close_chat_client, open_chat_client
@@ -459,24 +456,17 @@ async def run_reasoning(base_url: str, model: str) -> list[str]:
     agent = Agent(
         client=client,
         name="coding",
-        instructions="Reply in one short sentence.",
+        instructions="Reason in one sentence. Then answer in one sentence.",
         default_options=options,
     )
     session = agent.create_session()
-    problems: list[str] = []
-    kept = ""
     try:
-        for index, prompt in enumerate(_REASONING, start=1):
-            response = await agent.run(prompt, session=session, options=options)
-            reasoning, text = reply_parts(response)
-            stored = stored_reasoning(session)
-            print(f"reasoning turn {index} reply {text!r}", flush=True)
-            problems.extend(reasoning_problems(text, reasoning, stored=stored))
-            problems.extend(ended(response, "stop"))
-            if index == 1:
-                kept = reasoning
-            elif kept and kept not in stored:
-                problems.append("the first turn's reasoning left the session")
+        response = await agent.run(_REASONING, session=session, options=options)
+        reasoning, text = reply_parts(response)
+        stored = stored_reasoning(session)
+        print(f"reasoning reply {text!r}", flush=True)
+        problems = reasoning_problems(text, reasoning, stored=stored)
+        problems.extend(ended(response, "stop"))
     finally:
         await close_chat_client(client)
     return problems

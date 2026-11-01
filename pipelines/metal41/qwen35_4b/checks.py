@@ -19,6 +19,7 @@ def run_kernels() -> None:
         _check_gemv(session)
         _check_rmsnorm(session)
         _check_gdn(session)
+        _check_kv_f16(session)
     finally:
         session.close()
         memory.sweep(owner)
@@ -133,6 +134,92 @@ def _check_gdn(session: Session) -> None:
     if not np.allclose(got, expect, rtol=1e-3, atol=1e-3):
         message = f"gdn_step mismatch max={np.max(np.abs(got - expect))}"
         raise RuntimeError(message)
+
+
+def _check_kv_f16(session: Session) -> None:
+    """One causal prefill tile and a one-token decode, both on a float16 cache."""
+    heads, kv, dim, rows = 16, 4, 256, 2
+    group = heads // kv
+    scale = dim**-0.5
+    rng = np.random.default_rng(3)
+    query = rng.standard_normal((rows, heads, dim * 2)).astype(np.float32) * 0.05
+    key = rng.standard_normal((rows, kv, dim)).astype(np.float32) * 0.05
+    value = rng.standard_normal((rows, kv, dim)).astype(np.float32) * 0.05
+    q_buf = session.upload(np.ascontiguousarray(query).tobytes())
+    k_buf = session.upload(np.ascontiguousarray(key).tobytes())
+    v_buf = session.upload(np.ascontiguousarray(value).tobytes())
+    k_data = session.allocate(rows * kv * dim * 2, zero=True)
+    v_data = session.allocate(rows * kv * dim * 2, zero=True)
+    scores = session.allocate(rows * heads * rows * 4, zero=True)
+    out = session.allocate(rows * heads * dim * 4, zero=True)
+    for plane in (0, 1):
+        session.launch(
+            "store_kv_rows_f16",
+            [k_buf, v_buf, k_data, v_data],
+            [u32(0), u32(kv), u32(rows), u32(plane)],
+            (kv, rows, 1),
+            (dim, 1, 1),
+        )
+    session.launch(
+        "attend_prefill_f16",
+        [q_buf, k_data, v_data, scores, out],
+        [u32(0), u32(rows), u32(rows), u32(heads), u32(kv), u32(group), f32(scale)],
+        (heads, rows, 1),
+        (dim, 1, 1),
+    )
+    got = np.frombuffer(memory.load(out, 0, rows * heads * dim * 4), dtype=np.float32)
+    got = got.reshape(rows, heads, dim)
+    expect = _kv_f16_reference(query, key, value, scale, group)
+    if not np.allclose(got, expect, rtol=2e-3, atol=2e-3):
+        message = f"attend_prefill_f16 mismatch max={np.max(np.abs(got - expect))}"
+        raise RuntimeError(message)
+
+    q0 = session.upload(np.ascontiguousarray(query[0]).tobytes())
+    scores0 = session.allocate(heads * 4, zero=True)
+    out0 = session.allocate(heads * dim * 4, zero=True)
+    session.launch(
+        "attend_decode_f16",
+        [q0, k_data, v_data, scores0, out0],
+        [u32(1), u32(1), u32(kv), u32(group), f32(scale)],
+        (heads, 1, 1),
+        (dim, 1, 1),
+    )
+    got0 = np.frombuffer(memory.load(out0, 0, heads * dim * 4), dtype=np.float32)
+    if not np.allclose(got0.reshape(heads, dim), expect[0], rtol=2e-3, atol=2e-3):
+        message = f"attend_decode_f16 mismatch max={np.max(np.abs(got0 - expect[0].ravel()))}"
+        raise RuntimeError(message)
+
+
+def _kv_f16_reference(
+    query: np.ndarray,
+    key: np.ndarray,
+    value: np.ndarray,
+    scale: float,
+    group: int,
+) -> np.ndarray:
+    rows, heads, _ = query.shape
+    dim = key.shape[-1]
+    key_h = key.astype(np.float16).astype(np.float32)
+    value_h = value.astype(np.float16).astype(np.float32)
+    expect = np.empty((rows, heads, dim), dtype=np.float32)
+    for row in range(rows):
+        length = row + 1
+        for head in range(heads):
+            q = query[row, head, :dim]
+            gate = query[row, head, dim:].astype(np.float64)
+            kvh = head // group
+            dots = np.empty(length, dtype=np.float64)
+            for position in range(length):
+                dots[position] = float(np.dot(q, key_h[position, kvh])) * scale
+            dots -= dots.max()
+            weight = np.exp(dots)
+            weight /= weight.sum()
+            acc = np.zeros(dim, dtype=np.float64)
+            for position in range(length):
+                acc += weight[position] * value_h[position, kvh]
+            sig = 1.0 / (1.0 + np.exp(-gate))
+            expect[row, head] = (acc * sig).astype(np.float32)
+    return expect
 
 
 def _e8m0(code: int) -> float:

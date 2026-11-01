@@ -50,18 +50,20 @@ When the app is ready, open the printed link in a browser. That address is `http
 
 ## Supported Models
 
-| Pipeline | Note |
-|---|---|
-| `qwen35-4b` | [Qwen3.5-4B](docs/qwen35-4b/README.md) |
-| `qwen36-35b-a3b` | [Qwen3.6-35B-A3B](docs/qwen36-35b-a3b/README.md) |
-| `gemma4-26b-a4b` | [Gemma 4 26B-A4B](docs/gemma4-26b-a4b/README.md) |
-| `qwen38-27b` | [Qwen3.8-27B](docs/qwen38-27b/README.md) |
-| `z-image-turbo` | [Z-Image-Turbo](docs/z-image-turbo/README.md) |
-| `wan22-i2v` | [Wan 2.2 I2V](docs/wan22-i2v/README.md) |
-| `wan22-ti2v-5b` | [Wan2.2 TI2V-5B](docs/wan22-ti2v-5b/README.md) |
-| `ace-step-15-turbo` | [ACE-Step 1.5 XL Turbo](docs/ace-step-15-turbo/README.md) |
-| `bge-m3` | [BGE-M3](docs/bge-m3/README.md) |
-| `voxcpm2` | [VoxCPM2](docs/voxcpm2/README.md) |
+| Pipeline | Note | 16 GB | 24 GB | 48 GB |
+|---|---|---|---|---|
+| `qwen35-4b` | [Qwen3.5-4B](docs/qwen35-4b/README.md) | ✅ | ✅ | ✅ |
+| `qwen36-35b-a3b` | [Qwen3.6-35B-A3B](docs/qwen36-35b-a3b/README.md) | ⚠️ | ⚠️ | ✅ |
+| `gemma4-26b-a4b` | [Gemma 4 26B-A4B](docs/gemma4-26b-a4b/README.md) | ⚠️ | ⚠️ | ✅ |
+| `qwen38-27b` | [Qwen3.8-27B](docs/qwen38-27b/README.md) | ⚠️ | ⚠️ | ✅ |
+| `z-image-turbo` | [Z-Image-Turbo](docs/z-image-turbo/README.md) | ✅ | ✅ | ✅ |
+| `wan22-i2v` | [Wan 2.2 I2V](docs/wan22-i2v/README.md) | ❌ | ⚠️ | ✅ |
+| `wan22-ti2v-5b` | [Wan2.2 TI2V-5B](docs/wan22-ti2v-5b/README.md) | ✅ | ✅ | ✅ |
+| `ace-step-15-turbo` | [ACE-Step 1.5 XL Turbo](docs/ace-step-15-turbo/README.md) | ✅ | ✅ | ✅ |
+| `bge-m3` | [BGE-M3](docs/bge-m3/README.md) | ✅ | ✅ | ✅ |
+| `voxcpm2` | [VoxCPM2](docs/voxcpm2/README.md) | ✅ | ✅ | ✅ |
+
+⚠️ is degraded mode. The pipeline still runs the request, and it shrinks the one knob it owns until that request fits. The request keeps the resolution, the frame count, and the duration it named. ✅ keeps that knob at its full size.
 
 ## Methodology
 
