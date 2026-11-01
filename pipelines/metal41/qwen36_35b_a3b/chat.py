@@ -336,7 +336,11 @@ class Pipeline(_Hooks):
         del args
         try:
             translated = chat_to_responses(body)
+            translated["preserve_thinking"] = preserve_thinking(body)
         except RequestError as exc:
+            reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+            return
+        except RuntimeError as exc:
             reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
             return
         _respond(ChatWire(reply), runtime, translated, selection, state)
@@ -390,7 +394,12 @@ def _respond(
     temperature, top_p, top_k = _sampling(prepared, thinking, card)
     presence = _presence(prepared, thinking, card)
     frequency = _frequency(prepared)
-    messages, saw_reasoning = template_messages(prepared)
+    messages, _ = template_messages(prepared)
+    try:
+        keep_thinking = preserve_thinking(prepared)
+    except RuntimeError as exc:
+        reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+        return
     extra = format_instruction(prepared)
     if extra:
         messages = [{"role": "system", "content": extra}, *messages]
@@ -404,9 +413,9 @@ def _respond(
             messages,
             tools,
             thinking,
-            preserve_thinking=saw_reasoning,
+            preserve_thinking=keep_thinking,
         )
-        prompt = _fit_prompt(runtime, prepared, messages, tools, thinking, saw_reasoning, prompt)
+        prompt = _fit_prompt(runtime, prepared, messages, tools, thinking, keep_thinking, prompt)
         prompt = prepare_prompt(runtime, messages, prompt)
     except RequestError as exc:
         reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
@@ -579,7 +588,7 @@ def _fit_prompt(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     thinking: bool,
-    saw_reasoning: bool,
+    keep_thinking: bool,
     prompt: list[int],
 ) -> list[int]:
     """The opening cache is not the prompt limit. The served window is."""
@@ -601,7 +610,7 @@ def _fit_prompt(
             kept,
             tools,
             thinking,
-            preserve_thinking=saw_reasoning,
+            preserve_thinking=keep_thinking,
         )
     if len(prompt) > ceiling:
         raise RequestError("input does not fit")
