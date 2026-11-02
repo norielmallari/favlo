@@ -47,6 +47,17 @@ _TILE = PREFILL_TILE
 # Dense prefill planes that run int8 x int8. Attention q/k/v/o and GDN a/b stay on
 # the half x fp8 matmul. Decode never reads these paths.
 _I8_PLANES = frozenset({"gate", "up", "down", "qkv", "z", "out"})
+# (cols, inner) of each int8 plane. The FFN planes exist on every layer; qkv, z, and out
+# only on the GDN layers.
+_I8_SHAPES = {
+    "gate": (INTERMEDIATE, HIDDEN),
+    "up": (INTERMEDIATE, HIDDEN),
+    "down": (HIDDEN, INTERMEDIATE),
+    "qkv": (_CONV_CH, HIDDEN),
+    "z": (_GDN_Z, HIDDEN),
+    "out": (HIDDEN, _GDN_Z),
+}
+_I8_FFN = frozenset({"gate", "up", "down"})
 _I8_WEIGHT_BYTES = max(INTERMEDIATE * HIDDEN, _CONV_CH * HIDDEN, _GDN_Z * HIDDEN)
 _I8_INNER = max(HIDDEN, INTERMEDIATE, _GDN_Z)
 _I8_COLS = max(HIDDEN, INTERMEDIATE, _CONV_CH, _GDN_Z)
@@ -165,6 +176,10 @@ class Qwen35Runtime:
             )
             raise RuntimeError(message)
         self.max_pos = capacity
+        # Restored int8 codes and channel scales stay resident when they fit beside the
+        # rest of the opening. Otherwise every int8 matmul restores into the stage.
+        resident = _i8_resident_bytes()
+        self._i8_fits = need + resident <= budget
 
         self.weights = self.session.allocate(size)
         view = memory.map(self.weights, 0, size)
@@ -253,6 +268,27 @@ class Qwen35Runtime:
         self.i8_weight_scale = s.allocate(_I8_COLS * 4, zero=True)
         self.i8_act = s.allocate(tile * _I8_INNER, zero=True)
         self.i8_act_scale = s.allocate(tile * 4, zero=True)
+        self._i8_cache: dict[str, tuple[int, int, int, int]] = {}
+        self._i8_ready: set[str] = set()
+        self.i8_resident: Any = None
+        self.i8_resident_scale: Any = None
+        if self._i8_fits:
+            data_cursor = 0
+            scale_cursor = 0
+            for layer in range(LAYERS):
+                for name, (cols, inner) in _I8_SHAPES.items():
+                    if name not in _I8_FFN and is_full(layer):
+                        continue
+                    self._i8_cache[f"layer.{layer}.{name}"] = (
+                        data_cursor,
+                        scale_cursor,
+                        cols,
+                        inner,
+                    )
+                    data_cursor += cols * inner
+                    scale_cursor += cols * 4
+            self.i8_resident = s.allocate(data_cursor)
+            self.i8_resident_scale = s.allocate(scale_cursor, zero=True)
         self._full_index = {layer: i for i, layer in enumerate(FULL)}
         self._gdn_index: dict[int, int] = {}
         cursor = 0
@@ -447,13 +483,23 @@ class Qwen35Runtime:
         """
         plane = self._planes[f"layer.{layer}.{name}"]
         if name in _I8_PLANES:
-            self._matmul_i8(plane, destination, rows, cols, inner, fresh=fresh, wide=name == "down")
+            self._matmul_i8(
+                plane,
+                f"layer.{layer}.{name}",
+                destination,
+                rows,
+                cols,
+                inner,
+                fresh=fresh,
+                wide=name == "down",
+            )
             return
         self._matmul(plane, destination, rows, cols, inner)
 
     def _matmul_i8(
         self,
         plane: Plane,
+        key: str,
         destination: Any,
         rows: int,
         cols: int,
@@ -466,7 +512,8 @@ class Qwen35Runtime:
 
         The fp8 plane is restored to int8 codes with one channel scale per output
         column, the activation is quantized per row, and ``scale_i8_f32`` rewrites the
-        int32 accumulators in ``destination`` as floats.
+        int32 accumulators in ``destination`` as floats. When the resident atlas fitted,
+        the restore runs once per ``key`` into its offsets and later calls only bind them.
         """
         if rows % 64 != 0 or cols % 64 != 0 or inner % 128 != 0:
             message = f"int8 matmul needs rows, cols multiples of 64 and inner of 128; got {rows}x{cols}x{inner}"
@@ -480,14 +527,34 @@ class Qwen35Runtime:
             message = f"int8 matmul {rows}x{cols}x{inner} exceeds its stage"
             raise ValueError(message)
         session = self.session
-        session.launch(
-            "restore_fp8_i8",
-            [self.weights, self.weights, self.i8_weight, self.i8_weight_scale],
-            [u32(inner)],
-            (cols, 1, 1),
-            (256, 1, 1),
-            offsets=[plane.data, plane.scale, 0, 0],
-        )
+        entry = self._i8_cache.get(key) if self.i8_resident is not None else None
+        if entry is not None:
+            data_off, scale_off, entry_cols, entry_inner = entry
+            if entry_cols != cols or entry_inner != inner:
+                message = f"int8 plane {key} is {entry_cols}x{entry_inner}, not {cols}x{inner}"
+                raise ValueError(message)
+            weight, weight_scale = self.i8_resident, self.i8_resident_scale
+            if key not in self._i8_ready:
+                session.launch(
+                    "restore_fp8_i8",
+                    [self.weights, self.weights, weight, weight_scale],
+                    [u32(inner)],
+                    (cols, 1, 1),
+                    (256, 1, 1),
+                    offsets=[plane.data, plane.scale, data_off, scale_off],
+                )
+                self._i8_ready.add(key)
+        else:
+            data_off = scale_off = 0
+            weight, weight_scale = self.i8_weight, self.i8_weight_scale
+            session.launch(
+                "restore_fp8_i8",
+                [self.weights, self.weights, weight, weight_scale],
+                [u32(inner)],
+                (cols, 1, 1),
+                (256, 1, 1),
+                offsets=[plane.data, plane.scale, 0, 0],
+            )
         if fresh:
             session.launch(
                 "quantize_half_i8",
@@ -499,26 +566,29 @@ class Qwen35Runtime:
         if wide and cols % 128 == 0 and rows % 32 == 0:
             session.launch(
                 "prefill_i8_m32",
-                [self.i8_act, self.i8_weight, destination],
+                [self.i8_act, weight, destination],
                 [u32(rows), u32(cols), u32(inner)],
                 (cols // 128, rows // 32, 1),
                 (128, 1, 1),
+                offsets=[0, data_off, 0],
             )
         else:
             session.launch(
                 "prefill_i8_n64",
-                [self.i8_act, self.i8_weight, destination],
+                [self.i8_act, weight, destination],
                 [u32(rows), u32(cols), u32(inner)],
                 (cols // 64, rows // 64, 1),
                 (128, 1, 1),
+                offsets=[0, data_off, 0],
             )
         quads = rows * (cols // 4)
         session.launch(
             "scale_i8_f32",
-            [destination, self.i8_act_scale, self.i8_weight_scale],
+            [destination, self.i8_act_scale, weight_scale],
             [u32(rows), u32(cols)],
             ((quads + 255) // 256, 1, 1),
             (256, 1, 1),
+            offsets=[0, 0, scale_off],
         )
 
     def _prefill_chunk(self, tokens: list[int], *, logits: bool) -> None:
@@ -1245,6 +1315,16 @@ class Qwen35Runtime:
             )
         session.flush()
         return int.from_bytes(memory.load(self.token_out, 0, 4), "little")
+
+
+def _i8_resident_bytes() -> int:
+    """Bytes of restored int8 codes plus channel scales for every int8 plane."""
+    total = 0
+    for layer in range(LAYERS):
+        for name, (cols, inner) in _I8_SHAPES.items():
+            if name in _I8_FFN or not is_full(layer):
+                total += cols * inner + cols * 4
+    return total
 
 
 def _workspace_bytes(capacity: int) -> int:

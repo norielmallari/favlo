@@ -51,6 +51,6 @@ Coding agent on the e4m3 cache printed `prompt tokens` / `cache miss` per reques
 
 Coding agent on the f16 cache, thinking on, no vision (2 November 2026): prefill 1393.99 tok/s (25747 tok in 18.47s), decode 39.96 tok/s (2028 tok in 50.75s).
 
-After int8 prefill for FFN and GDN qkv/z/out (2 November 2026), the same coding agent printed prefill 1548.58 tok/s (25598 tok in 16.53s) and decode 39.85 tok/s (2384 tok in 59.83s). A 2012-token warm complete on that path prefills at 1739.79 tok/s.
+After int8 prefill for FFN and GDN qkv/z/out (2 November 2026), the same coding agent printed prefill 1548.58 tok/s (25598 tok in 16.53s) and decode 39.85 tok/s (2384 tok in 59.83s). A 2012-token warm complete on that path prefills at 1739.79 tok/s. After the resident int8 weight cache (2 November 2026), coding printed prefill 1671.59 tok/s (25592 tok in 15.31s) and decode 40.40 tok/s (2188 tok in 54.16s). When the budget fits the restored int8 codes and channel scales for every int8 plane beside the rest of the opening, `restore_fp8_i8` runs once per plane into a resident atlas on first use and later prefill matmuls only bind it (a 2012-token prompt prefilled at 1781 tok/s on the first call and about 1852 tok/s warm, 2 November 2026); otherwise each matmul restores into the single stage buffer.
 
 Progress uses `favlo.console` begin / end / note on the console thread (`prompt`, `cache`, load / prefill / decode). Decode streaming uses a separate queue thread. NumPy stays off the hot path.
