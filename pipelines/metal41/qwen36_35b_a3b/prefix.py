@@ -22,7 +22,7 @@ from favlo.prefix import (
     default_prefix_dir,
     read_regions,
 )
-from qwen36_35b_a3b.cache import FULL_ATTENTION, kv_buffer_bytes
+from qwen36_35b_a3b.cache import FULL_ATTENTION, kv_buffer_bytes, kv_mode
 
 _SLOTS = FULL_ATTENTION
 _KV = 2
@@ -161,15 +161,16 @@ def _fits(header: PrefixHeader, count: int, mode: str) -> bool:
 
 
 def _packed_length(count: int, mode: str, kind: str) -> int:
-    if mode == "f16":
+    mode = kv_mode(mode)
+    if mode == "half":
         return _KV * count * _HEAD * 2
     if mode == "f32":
         return _KV * count * _HEAD * 4
-    width = 256 if mode == "e4m3" else 128
+    width = 256 if mode == "fp8_e4m3" else 128
     if kind == "key":
         return _KV * count * (width + 8)
     blocks = (count + 31) // 32
-    if mode == "e4m3":
+    if mode == "fp8_e4m3":
         return _KV * _HEAD * count + _KV * _HEAD * blocks
     return _KV * _HEAD * ((count + 1) // 2) + _KV * _HEAD * blocks
 
@@ -177,10 +178,11 @@ def _packed_length(count: int, mode: str, kind: str) -> int:
 def _slices(
     array: np.ndarray, max_pos: int, count: int, mode: str, kind: str
 ) -> tuple[np.ndarray, np.ndarray | None]:
-    if mode in ("f16", "f32"):
-        row = _HEAD * (2 if mode == "f16" else 4)
+    mode = kv_mode(mode)
+    if mode in ("half", "f32"):
+        row = _HEAD * (2 if mode == "half" else 4)
         return array.reshape(_KV, max_pos, row)[:, :count, :], None
-    width = 256 if mode == "e4m3" else 128
+    width = 256 if mode == "fp8_e4m3" else 128
     scale_base = _KV * max_pos * width
     blocks = (count + 31) // 32
     if kind == "key":
@@ -190,7 +192,7 @@ def _slices(
     if kind != "value":
         message = f"unknown plane {kind}"
         raise ValueError(message)
-    if mode == "e4m3":
+    if mode == "fp8_e4m3":
         data = array[:scale_base].reshape(_KV, _HEAD, max_pos)[:, :, :count]
     else:
         data = array[:scale_base].reshape(_KV, _HEAD, max_pos // 2)[:, :, : (count + 1) // 2]

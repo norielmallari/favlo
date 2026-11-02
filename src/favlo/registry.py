@@ -141,6 +141,7 @@ def add_model(
     runtime: str,
     custom: bool = False,
     max_prompt_tokens: int | None = None,
+    kv_cache: str | None = None,
 ) -> dict[str, Any]:
     data = load_registry(root)
     path = models_dir(root) / folder
@@ -157,6 +158,7 @@ def add_model(
         custom=custom,
         max_prompt_tokens=max_prompt_tokens,
         directory=str(path),
+        kv_cache=kv_cache,
     )
     data["models"][folder] = entry
     _ensure_default_llm(data, folder, alias, entry)

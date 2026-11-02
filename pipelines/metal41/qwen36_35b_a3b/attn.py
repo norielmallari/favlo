@@ -97,7 +97,7 @@ def attend_plane(
     if count < 1 or count > CHUNK:
         message = f"attention count {count} is outside 1..{CHUNK}"
         raise RuntimeError(message)
-    mode = 0 if runtime.kv_cache == "e4m3" else 1
+    mode = 0 if runtime.kv_cache == "fp8_e4m3" else 1
     _store_keys(runtime, key, pos0, count, mode, slot)
     _store_values(runtime, value, pos0, count, mode, slot)
     decode8 = count == 1 and mode == 0

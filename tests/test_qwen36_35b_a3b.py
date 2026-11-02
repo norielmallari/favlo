@@ -1180,7 +1180,7 @@ def test_s3_evicts_a_one_hit_before_a_reused_expert() -> None:
 
 
 def test_a_longer_cache_keeps_the_tokens_already_stored() -> None:
-    mode = "e4m3"
+    mode = "fp8_e4m3"
     old, new, count = 2048, 4096, 5
     src = np.zeros(kv_buffer_bytes(mode, old), dtype=np.uint8)
     src[: 2 * old * 256].reshape(2, old, 256)[1, 4, 9] = 77
@@ -1195,7 +1195,7 @@ def test_a_longer_cache_keeps_the_tokens_already_stored() -> None:
 
 
 def test_context_shrinks_to_the_bytes_the_cache_can_hold() -> None:
-    mode = "e4m3"
+    mode = "fp8_e4m3"
     limit = 8192
     fixed = 1000
     def nothing(_positions: int) -> int:
@@ -1212,7 +1212,7 @@ def test_context_shrinks_to_the_bytes_the_cache_can_hold() -> None:
 
 
 def test_a_tight_budget_keeps_context_by_shrinking_the_atlas() -> None:
-    mode = "e4m3"
+    mode = "fp8_e4m3"
     limit = 8192
     fixed = 1000
 
@@ -1252,17 +1252,22 @@ def test_a_prefill_chunk_splits_experts_that_do_not_fit() -> None:
 
 
 def test_kv_widths_and_atlas_budget() -> None:
-    assert kv_mode(None) == "f16"
-    assert kv_mode("fp16") == "f16"
+    assert kv_mode(None) == "half"
+    assert kv_mode("f16") == "half"
+    assert kv_mode("fp16") == "half"
+    assert kv_mode("half") == "half"
+    assert kv_mode("e4m3") == "fp8_e4m3"
+    assert kv_mode("fp8") == "fp8_e4m3"
+    assert kv_mode("fp8_e4m3") == "fp8_e4m3"
     assert kv_mode("fp4") == "e2m1"
     assert kv_mode("f32") == "f32"
     positions = 262144
-    assert kv_buffer_bytes("f16", positions) == 2 * positions * 512
-    assert kv_buffer_bytes("e4m3", positions) == 2 * positions * 264
+    assert kv_buffer_bytes("half", positions) == 2 * positions * 512
+    assert kv_buffer_bytes("fp8_e4m3", positions) == 2 * positions * 264
     assert kv_buffer_bytes("e2m1", positions) == 2 * positions * 136
     assert kv_buffer_bytes("f32", positions) == 2 * positions * 1024
-    assert cache_bytes("f16", 131072) == 22 * 2 * 131072 * 512
-    assert cache_bytes("e4m3", 131072) == 22 * 2 * 131072 * 264
+    assert cache_bytes("half", 131072) == 22 * 2 * 131072 * 512
+    assert cache_bytes("fp8_e4m3", 131072) == 22 * 2 * 131072 * 264
     file_bytes = 427_819_008
     reserved = 1 << 30
     assert atlas_slots(reserved + file_bytes * 40, file_bytes, reserved) == 40

@@ -143,9 +143,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     complete = sub.add_parser("complete", help="complete from the packed record")
     complete.add_argument(
         "--kv-cache",
-        choices=("f16", "e4m3", "e2m1", "f32"),
-        default="f16",
-        help="key/value width: fp16, fp8, fp4, or float32",
+        choices=("half", "fp8_e4m3", "e2m1", "f32"),
+        default="half",
+        help="key/value width: half, fp8_e4m3, e2m1, or float32",
     )
     complete.add_argument(
         "--max-memory",
@@ -360,6 +360,7 @@ def _quantize(args: argparse.Namespace) -> int:
             directory=output,
             pipeline=PIPELINE,
             runtime="metal41",
+            kv_cache="half",
         )
         if not args.keep_bf16:
             _remove_checkout(src, spare=output)
@@ -511,6 +512,7 @@ def _models(args: argparse.Namespace) -> int:
                 source=args.source,
                 pipeline=PIPELINE,
                 runtime="metal41",
+                kv_cache="half",
             )
         elif command == "alias":
             set_alias(args.folder, args.alias)

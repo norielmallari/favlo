@@ -361,7 +361,7 @@ class Qwen36Runtime:
         self,
         path: Path,
         *,
-        kv_cache: str = "f16",
+        kv_cache: str = "half",
         console: Any = None,
         resident_percent: float | None = None,
         owner: str | None = None,

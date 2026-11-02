@@ -4,10 +4,10 @@ The checkpoint cap is ``max_position_embeddings``. The served window stops at
 ``DEFAULT_CONTEXT_LENGTH``. The live cache starts at one 2048-token chunk and
 grows with the prompt and with decode, up to the longest multiple of 2048 that
 still leaves eight expert images and still fits that window. The atlas then keeps
-as many images as the remaining bytes allow. The cache is fp16 unless the
-caller asks for fp8, fp4, or the float32 values. fp16 and float32 store raw
-values, ``[head, token, channel]``, with no scale plane. fp8 and fp4 keys
-scale every 32 channels. Their values lie
+as many images as the remaining bytes allow. The cache is half unless the
+caller asks for ``fp8_e4m3``, ``e2m1``, or the float32 values. half and
+float32 store raw values, ``[head, token, channel]``, with no scale plane.
+``fp8_e4m3`` and ``e2m1`` keys scale every 32 channels. Their values lie
 along the token axis and scale every 32 tokens.
 """
 
@@ -28,8 +28,15 @@ E4M3_RECORD = HEAD + SCALES
 E2M1_RECORD = HEAD // 2 + SCALES
 F16_RECORD = HEAD * 2
 F32_RECORD = HEAD * 4
-MODES = ("f16", "e4m3", "e2m1", "f32")
-_ALIASES = {"fp16": "f16", "fp8": "e4m3", "fp4": "e2m1", "float32": "f32"}
+MODES = ("half", "fp8_e4m3", "e2m1", "f32")
+_ALIASES = {
+    "f16": "half",
+    "fp16": "half",
+    "e4m3": "fp8_e4m3",
+    "fp8": "fp8_e4m3",
+    "fp4": "e2m1",
+    "float32": "f32",
+}
 _CONTEXT_STEP = 2048
 CONTEXT_STEP = _CONTEXT_STEP
 # Ten language full-attention layers, plus the MTP layer.
@@ -38,23 +45,26 @@ KV_BUFFERS = FULL_ATTENTION * 2
 
 
 def kv_mode(name: str | None) -> str:
-    """``f16``, ``e4m3``, ``e2m1``, or ``f32``. Empty means fp16."""
-    text = "f16" if name is None or name == "" else str(name)
+    """``half``, ``fp8_e4m3``, ``e2m1``, or ``f32``. Empty means half.
+
+    ``f16`` and ``fp16`` are half. ``e4m3`` and ``fp8`` are ``fp8_e4m3``.
+    """
+    text = "half" if name is None or name == "" else str(name)
     text = _ALIASES.get(text, text)
     if text not in MODES:
-        message = f"kv cache {name} is not f16, e4m3, e2m1, or f32"
+        message = f"kv cache {name} is not half, fp8_e4m3, e2m1, or f32"
         raise ValueError(message)
     return text
 
 
 def plain_cache(mode: str) -> bool:
-    """Raw fp16 or float32. Those modes skip the quantized score plane."""
-    return kv_mode(mode) in ("f16", "f32")
+    """Raw half or float32. Those modes skip the quantized score plane."""
+    return kv_mode(mode) in ("half", "f32")
 
 
 def kv_io(mode: str, *, rows: bool) -> tuple[str, str]:
     """Store and attend kernel names for a raw cache."""
-    if kv_mode(mode) == "f16":
+    if kv_mode(mode) == "half":
         if rows:
             return "store_kv_rows_f16", "attend_prefill2_f16"
         return "store_kv_f16", "attend_gqa_heads_f16"
@@ -68,7 +78,7 @@ def kv_record_bytes(mode: str) -> int:
     chosen = kv_mode(mode)
     if chosen == "f32":
         return F32_RECORD
-    if chosen == "f16":
+    if chosen == "half":
         return F16_RECORD
     if chosen == "e2m1":
         return E2M1_RECORD
@@ -132,13 +142,14 @@ def repack_plane(
     dst = np.zeros(kv_buffer_bytes(mode, new_pos), dtype=np.uint8)
     if count < 1:
         return dst
-    if mode in ("f32", "f16"):
+    mode = kv_mode(mode)
+    if mode in ("f32", "half"):
         row = F32_RECORD if mode == "f32" else F16_RECORD
         dst.reshape(KV_HEADS, new_pos, row)[:, :count, :] = src.reshape(KV_HEADS, old_pos, row)[
             :, :count, :
         ]
         return dst
-    width = 256 if mode == "e4m3" else 128
+    width = 256 if mode == "fp8_e4m3" else 128
     old_base = KV_HEADS * old_pos * width
     new_base = KV_HEADS * new_pos * width
     if kind == "key":
@@ -153,7 +164,7 @@ def repack_plane(
         message = f"unknown plane {kind}"
         raise ValueError(message)
     blocks = (count + 31) // 32
-    if mode == "e4m3":
+    if mode == "fp8_e4m3":
         dst[:new_base].reshape(KV_HEADS, HEAD, new_pos)[:, :, :count] = src[:old_base].reshape(
             KV_HEADS, HEAD, old_pos
         )[:, :, :count]
