@@ -235,7 +235,7 @@ class VisionTower:
                 if len(packed) != nbytes:
                     message = f"{name} is short"
                     raise RuntimeError(message)
-                if plane == "fp16" and len(shape) == 1:
+                if plane == "half" and len(shape) == 1:
                     found[name] = self._expand(packed)
                 elif plane == FP8 and len(shape) == 2:
                     handle = self.session.zeros(nbytes)
@@ -301,7 +301,7 @@ class VisionTower:
         memory.store(source, 0, packed)
         dest = self.session.zeros(count * 4)
         self.session.dispatch(
-            "expand_fp16",
+            "expand_half",
             [source, dest],
             [self.session._u32(count)],
             *_blocks(count),
@@ -344,7 +344,7 @@ class VisionTower:
         source = self.session.zeros(len(packed))
         memory.store(source, 0, packed)
         self.session.dispatch(
-            "expand_fp16",
+            "expand_half",
             [source, dest],
             [self.session._u32(count)],
             *_blocks(count),

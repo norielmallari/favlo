@@ -3,7 +3,31 @@
 from pathlib import Path
 
 from gemma4_26b_a4b import atlas as atlas_mod
-from gemma4_26b_a4b.atlas import ExpertAtlas, kv_bytes, layer_slots
+from gemma4_26b_a4b.atlas import ExpertAtlas, kv_bytes, kv_mode, layer_slots
+
+
+def test_kv_mode_is_metal_half() -> None:
+    assert kv_mode(None) == "half"
+    assert kv_mode("") == "half"
+    assert kv_mode("half") == "half"
+    try:
+        kv_mode("f16")
+    except ValueError as exc:
+        assert "f16" in str(exc)
+    else:
+        raise AssertionError("f16 must be rejected")
+    try:
+        kv_mode("fp16")
+    except ValueError as exc:
+        assert "fp16" in str(exc)
+    else:
+        raise AssertionError("fp16 must be rejected")
+    try:
+        kv_mode("fp8_e4m3")
+    except ValueError as exc:
+        assert "fp8_e4m3" in str(exc)
+    else:
+        raise AssertionError("fp8_e4m3 live cache is not built")
 
 
 def test_one_layer_is_the_minimum() -> None:

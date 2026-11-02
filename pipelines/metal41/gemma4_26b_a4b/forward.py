@@ -241,9 +241,11 @@ class Gemma4Runtime:
         path: Path,
         *,
         owner: str,
-        kv_cache: str = "e4m3",
+        kv_cache: str = "half",
         console: object = None,
     ) -> None:
+        from gemma4_26b_a4b.atlas import kv_mode
+
         self.console = console
         self._request_id = 0
         self._prefill_progress = None
@@ -253,7 +255,7 @@ class Gemma4Runtime:
         self.root = path
         self.owner = owner
         self._owner = owner
-        self.kv_cache = kv_cache
+        self.kv_cache = kv_mode(kv_cache)
         self._stop = False
         self.session = Session(owner)
         self.filled = 0
@@ -278,7 +280,7 @@ class Gemma4Runtime:
                     default_prefix_dir(),
                     model="gemma4-26b-a4b",
                     digest=checkpoint_digest(path),
-                    tag=kv_cache,
+                    tag=self.kv_cache,
                     budget=DEFAULT_BUDGET,
                 ),
                 RuntimeAdapter(self),
@@ -1478,12 +1480,12 @@ class Gemma4Runtime:
                     raw_file.seek(offset)
                     _fill(raw_file, memory.map(handle, 0, nbytes), offset)
                     self._note_load(nbytes)
-                if plane == "fp16" and len(shape) == 1:
-                    found[name] = self._expand_fp16(handle, nbytes)
+                if plane == "half" and len(shape) == 1:
+                    found[name] = self._expand_half(handle, nbytes)
                     if name.endswith("router.scale"):
                         self._scale_vector(found[name], HIDDEN**-0.5)
-                elif plane == "fp16" and len(shape) == 2:
-                    found[name] = _matrix_from(handle, shape, "fp16")
+                elif plane == "half" and len(shape) == 2:
+                    found[name] = _matrix_from(handle, shape, "half")
                 elif plane == FP8 and len(shape) == 2:
                     found[name] = _matrix_from(
                         handle, shape, plane, int(row.get("padded_rows") or shape[0])
@@ -1550,11 +1552,11 @@ class Gemma4Runtime:
             struct.pack_into("<f", raw, index * 4, value)
         memory.store(handle, 0, bytes(raw))
 
-    def _expand_fp16(self, source: object, nbytes: int) -> object:
+    def _expand_half(self, source: object, nbytes: int) -> object:
         count = nbytes // 2
         dest = self.session.zeros(count * 4)
         self.session.dispatch(
-            "expand_fp16",
+            "expand_half",
             [source, dest],
             [self.session._u32(count)],
             *self._grid(count),
@@ -1641,8 +1643,8 @@ def _matrix_from(
     handle: object, shape: tuple[int, ...], plane: str, rows_pad: int = 0
 ) -> Matrix:
     rows, k = int(shape[0]), int(shape[1])
-    if plane == "fp16":
-        return Matrix(handle, None, "matmul_f16", rows, k, k, rows_pad=rows)
+    if plane == "half":
+        return Matrix(handle, None, "matmul_half", rows, k, k, rows_pad=rows)
     stored = rows_pad or rows
     data, _scale = fp8_parts(stored, k)
     return Matrix(

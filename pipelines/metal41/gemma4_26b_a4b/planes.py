@@ -356,5 +356,5 @@ def restoration_rms(weight: np.ndarray, plane: str) -> float:
     return relative_rms(weight, restored)
 
 
-def store_fp16(values: np.ndarray) -> bytes:
+def store_half(values: np.ndarray) -> bytes:
     return np.ascontiguousarray(values, dtype=np.float32).astype(np.float16).tobytes()

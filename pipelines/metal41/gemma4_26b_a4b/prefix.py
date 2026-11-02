@@ -1,11 +1,11 @@
 """Key and value prefix for Gemma 4.
 
 Local and global regions each store keys and values. The filled length is
-``count`` tokens. The live cache stays float16. ``pack_kv_fp8`` writes the
-fp8 region and ``unpack_kv_fp8`` restores it. fp8 pads the contraction axis.
-One scale byte covers 32 channels, packed tightly. Local values are stored
-as ``[dim, count]``. An exact-length prefix is not a sample: the next token
-still has to be stepped.
+``count`` tokens. The live cache stays Metal ``half``. ``pack_kv_fp8`` writes
+the Metal ``fp8_e4m3`` region and ``unpack_kv_fp8`` restores it. The pack
+pads the contraction axis. One scale byte covers 32 channels, packed tightly.
+Local values are stored as ``[dim, count]``. An exact-length prefix is not a
+sample: the next token still has to be stepped.
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ def pack_global(keys: object, values: object, count: int) -> bytes:
 
 
 def pack_token_major(raw: object, heads: int, dim: int, count: int, *, transposed: bool) -> bytes:
-    """Pack one ``[count, heads, dim]`` float16 plane. One head is staged at a time."""
+    """Pack one ``[count, heads, dim]`` Metal half plane. One head is staged at a time."""
     if count <= 0 or heads <= 0:
         return b""
     import numpy as np

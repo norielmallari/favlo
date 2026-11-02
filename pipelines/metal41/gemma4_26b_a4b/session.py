@@ -13,9 +13,9 @@ _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"
 _KERNELS = (
     "matmul_fp8",
     "matmul_fp4",
-    "matmul_f16",
-    "matmul_f16_64",
-    "matmul_f16_64_batch",
+    "matmul_half",
+    "matmul_half_64",
+    "matmul_half_64_batch",
     "matmul_fp4_64",
     "matmul_fp4_64_batch",
     "matmul_fp4_64_at",
@@ -45,7 +45,7 @@ _KERNELS = (
     "rmsnorm_rows",
     "rmsnorm_heads",
     "zero_buffer",
-    "expand_fp16",
+    "expand_half",
     "embed_fp8",
     "embed_q4_0",
     "presence_penalty",
@@ -338,7 +338,7 @@ def _check_fp4(session: Session) -> None:
     print("kernels fp4 matmul ok", flush=True)
 
 
-def _check_f16(session: Session) -> None:
+def _check_half(session: Session) -> None:
     rows, cols, inner = 8, 32, 64
     activation = np.zeros((rows, inner), dtype=np.float32)
     activation[0, :4] = np.array([1, -1, 0.5, 2], dtype=np.float32)
@@ -350,14 +350,14 @@ def _check_f16(session: Session) -> None:
     act = session.upload(np.ascontiguousarray(activation.astype(np.float16)))
     weight_h = session.upload(data)
     dest = session.zeros(rows * cols * 4)
-    session.matmul("matmul_f16", act, weight_h, None, dest, rows, cols, inner)
+    session.matmul("matmul_half", act, weight_h, None, dest, rows, cols, inner)
     got = session.download_f32(dest, rows * cols).reshape(rows, cols)
     restored = weight.astype(np.float16).astype(np.float32)
     expect = activation.astype(np.float16).astype(np.float32) @ restored.T
     if not np.allclose(got, expect, rtol=1e-2, atol=1e-2):
-        message = f"fp16 matmul mismatch max {np.max(np.abs(got - expect))}"
+        message = f"half matmul mismatch max {np.max(np.abs(got - expect))}"
         raise RuntimeError(message)
-    print("kernels fp16 matmul ok", flush=True)
+    print("kernels half matmul ok", flush=True)
 
 
 def _check_qmm(session: Session) -> None:
@@ -555,9 +555,9 @@ def _check_q4_0(session: Session) -> None:
         (256, 1, 1),
     )
     tile_dest = session.zeros(tile_m * tile_n * 4)
-    width = int(session.pipes["matmul_f16_64"].threadExecutionWidth())
+    width = int(session.pipes["matmul_half_64"].threadExecutionWidth())
     session.dispatch(
-        "matmul_f16_64",
+        "matmul_half_64",
         [tile_ah, tile_half, tile_dest],
         [session._u32(tile_m), session._u32(tile_n), session._u32(tile_pad)],
         (tile_n // 64, tile_m // 64, 1),
@@ -607,7 +607,7 @@ def check_matmul() -> None:
             raise RuntimeError(message)
         print("kernels fp8 matmul ok", flush=True)
         _check_fp4(session)
-        _check_f16(session)
+        _check_half(session)
         _check_select(session)
         _check_prefix_pack(session)
     finally:

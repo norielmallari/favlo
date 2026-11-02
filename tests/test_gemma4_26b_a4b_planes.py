@@ -221,7 +221,7 @@ def test_prefix_pack_length_and_exact_file_refusal() -> None:
         path=Path("prefix.bin"),
         model="gemma4-26b-a4b",
         digest=b"\0" * 32,
-        tag="e4m3",
+        tag="half",
         tokens=(1, 2, 3, 4),
         regions=(
             RegionRef("local", 0, len(local)),

@@ -28,7 +28,7 @@ def _folder(text: str) -> str:
 def _print_plan() -> None:
     totals = estimate()
     gib = 1024**3
-    for key in ("resident", "scratch", "fp16", "experts"):
+    for key in ("resident", "scratch", "half", "experts"):
         print(f"{key} {totals[key]} {totals[key] / gib:.3f}GiB")
 
 
@@ -78,6 +78,7 @@ def _quantize(src: Path | None, name: str | None) -> int:
         directory=dest,
         pipeline=PIPELINE,
         runtime="metal41",
+        kv_cache="half",
     )
     print(f"wrote {folder}", flush=True)
     return 0
@@ -93,7 +94,7 @@ def _complete(name: str | None) -> int:
         return 2
     runtime = open_runtime(
         path,
-        kv_cache="e4m3",
+        kv_cache="half",
         console=None,
         resident_percent=None,
         owner="gemma4-26b-a4b:complete",

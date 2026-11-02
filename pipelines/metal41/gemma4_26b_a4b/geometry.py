@@ -44,7 +44,7 @@ Role = str
 RESIDENT = "resident"
 EXPERT_UP = "expert-up"
 EXPERT_DOWN = "expert-down"
-FP16 = "fp16"
+HALF = "half"
 
 
 def pooled_size(height: int, width: int, *, n_max: int = VISION_SOFT_MAX) -> tuple[int, int, int]:
@@ -108,18 +108,18 @@ def expected() -> dict[str, tuple[Role, tuple[int, ...]]]:
     """Every tensor in the text decoder and the vision tower."""
     found: dict[str, tuple[Role, tuple[int, ...]]] = {
         "model.language_model.embed_tokens.weight": (RESIDENT, (VOCAB, HIDDEN)),
-        "model.language_model.norm.weight": (FP16, (HIDDEN,)),
+        "model.language_model.norm.weight": (HALF, (HIDDEN,)),
         "model.embed_vision.embedding_projection.weight": (RESIDENT, (HIDDEN, VISION_WIDTH)),
         "model.vision_tower.patch_embedder.input_proj.weight": (
             RESIDENT,
             (VISION_WIDTH, 16 * 16 * 3),
         ),
         "model.vision_tower.patch_embedder.position_embedding_table": (
-            FP16,
+            HALF,
             (2, 10240, VISION_WIDTH),
         ),
-        "model.vision_tower.std_bias": (FP16, (VISION_WIDTH,)),
-        "model.vision_tower.std_scale": (FP16, (VISION_WIDTH,)),
+        "model.vision_tower.std_bias": (HALF, (VISION_WIDTH,)),
+        "model.vision_tower.std_scale": (HALF, (VISION_WIDTH,)),
     }
     for layer in range(LAYERS):
         base = f"model.language_model.layers.{layer}"
@@ -132,11 +132,11 @@ def expected() -> dict[str, tuple[Role, tuple[int, ...]]]:
             "post_feedforward_layernorm_1.weight",
             "post_feedforward_layernorm_2.weight",
         ):
-            found[f"{base}.{name}"] = (FP16, (HIDDEN,))
-        found[f"{base}.layer_scalar"] = (FP16, (1,))
-        found[f"{base}.router.proj.weight"] = (FP16, (EXPERTS, HIDDEN))
-        found[f"{base}.router.scale"] = (FP16, (HIDDEN,))
-        found[f"{base}.router.per_expert_scale"] = (FP16, (EXPERTS,))
+            found[f"{base}.{name}"] = (HALF, (HIDDEN,))
+        found[f"{base}.layer_scalar"] = (HALF, (1,))
+        found[f"{base}.router.proj.weight"] = (HALF, (EXPERTS, HIDDEN))
+        found[f"{base}.router.scale"] = (HALF, (HIDDEN,))
+        found[f"{base}.router.per_expert_scale"] = (HALF, (EXPERTS,))
         found[f"{base}.mlp.gate_proj.weight"] = (RESIDENT, (DENSE_WIDTH, HIDDEN))
         found[f"{base}.mlp.up_proj.weight"] = (RESIDENT, (DENSE_WIDTH, HIDDEN))
         found[f"{base}.mlp.down_proj.weight"] = (RESIDENT, (HIDDEN, DENSE_WIDTH))
@@ -149,7 +149,7 @@ def expected() -> dict[str, tuple[Role, tuple[int, ...]]]:
             (EXPERTS, HIDDEN, EXPERT_WIDTH),
         )
         for name, shape in attention_shapes(layer).items():
-            kind = FP16 if name.endswith("norm") else RESIDENT
+            kind = HALF if name.endswith("norm") else RESIDENT
             found[f"{base}.self_attn.{name}.weight"] = (kind, shape)
     for layer in range(VISION_LAYERS):
         base = f"model.vision_tower.encoder.layers.{layer}"
@@ -159,9 +159,9 @@ def expected() -> dict[str, tuple[Role, tuple[int, ...]]]:
             "pre_feedforward_layernorm.weight",
             "post_feedforward_layernorm.weight",
         ):
-            found[f"{base}.{name}"] = (FP16, (VISION_WIDTH,))
-        found[f"{base}.self_attn.q_norm.weight"] = (FP16, (VISION_HEAD,))
-        found[f"{base}.self_attn.k_norm.weight"] = (FP16, (VISION_HEAD,))
+            found[f"{base}.{name}"] = (HALF, (VISION_WIDTH,))
+        found[f"{base}.self_attn.q_norm.weight"] = (HALF, (VISION_HEAD,))
+        found[f"{base}.self_attn.k_norm.weight"] = (HALF, (VISION_HEAD,))
         for name in ("q_proj", "k_proj", "v_proj", "o_proj"):
             found[f"{base}.self_attn.{name}.linear.weight"] = (
                 RESIDENT,

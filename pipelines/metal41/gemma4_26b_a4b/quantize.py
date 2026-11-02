@@ -17,7 +17,7 @@ from gemma4_26b_a4b.geometry import (
     EXPERT_DOWN,
     EXPERT_UP,
     EXPERTS,
-    FP16,
+    HALF,
     LAYERS,
     RESIDENT,
     expected,
@@ -31,7 +31,7 @@ from gemma4_26b_a4b.planes import (
     matrix_nbytes,
     pack_matrix,
     restoration_rms,
-    store_fp16,
+    store_half,
 )
 from gemma4_26b_a4b.promote import promotion_count, select_promoted
 
@@ -59,10 +59,10 @@ def estimate() -> dict[str, int]:
     """Byte totals from the checkpoint shapes."""
     resident = 0
     scratch = 0
-    fp16 = 0
+    half = 0
     for role, shape in expected().values():
-        if role == FP16:
-            fp16 += int(np.prod(shape)) * 2
+        if role == HALF:
+            half += int(np.prod(shape)) * 2
         elif role == RESIDENT:
             rows = _stored_rows(int(shape[0]))
             resident += matrix_nbytes(rows, int(shape[-1]), FP8)
@@ -72,7 +72,7 @@ def estimate() -> dict[str, int]:
     return {
         "resident": resident,
         "scratch": scratch,
-        "fp16": fp16,
+        "half": half,
         "experts": experts,
     }
 
@@ -123,8 +123,8 @@ def quantize(src: Path, dest: Path) -> None:
             "resident": FP8,
             "experts": EXPERT_FORMAT,
             "expert_fp8_percent": EXPERT_FP8_PERCENT,
-            "vectors": "fp16",
-            "kv": "fp8",
+            "vectors": "half",
+            "kv": "fp8_e4m3",
         },
         "registered": False,
     }
@@ -398,8 +398,8 @@ def _write_resident(
                 if tuple(values.shape) != shape:
                     message = f"{name} shape {tuple(values.shape)} != {shape}"
                     raise ValueError(message)
-                packed = store_fp16(values)
-                stored = "fp16"
+                packed = store_half(values)
+                stored = "half"
                 padded = None
             handle.write(packed)
             index.append(

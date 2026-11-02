@@ -36,7 +36,7 @@ favlo --qwen36-35b-a3b setup
 
 The official checkpoint is `google/gemma-4-26B-A4B-it`. The steps are [gemma4-26b-a4b/SETUP.md](../gemma4-26b-a4b/SETUP.md).
 
-`favlo --gemma4-26b-a4b quantize` packs a local bfloat16 checkout. With no `--src` it reads `models/gemma-4-26B-A4B-it` and writes `models/gemma-4-26B-A4B-it-fp8-e20`. `--src` names another local checkout, including a directory outside `models/`. The row is registered under the alias `gemma4-26b-a4b`. The checkout stays. `--name` is the packed folder. The alias on that row stays `gemma4-26b-a4b`.
+`favlo --gemma4-26b-a4b quantize` packs a local bfloat16 checkout. With no `--src` it reads `models/gemma-4-26B-A4B-it` and writes `models/gemma-4-26B-A4B-it-fp8-e20`. `--src` names another local checkout, including a directory outside `models/`. The row is registered under the alias `gemma4-26b-a4b` with `kv_cache` set to `half`. The checkout stays. `--name` is the packed folder. The alias on that row stays `gemma4-26b-a4b`.
 
 ## Qwen3.8-27B
 

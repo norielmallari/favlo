@@ -22,8 +22,20 @@ from gemma4_26b_a4b.geometry import (
 )
 
 
+KV_MODES = ("half",)
+
+
+def kv_mode(name: str | None) -> str:
+    """``half``. Empty means Metal ``half``."""
+    text = "half" if name is None or name == "" else str(name)
+    if text not in KV_MODES:
+        message = f"kv cache {name} is not half"
+        raise ValueError(message)
+    return text
+
+
 def kv_bytes(capacity: int) -> int:
-    """Float16 key and value bytes for ``capacity`` tokens."""
+    """Metal half key and value bytes for ``capacity`` tokens."""
     if capacity <= 0:
         return 0
     local_layers = LAYERS - len(GLOBAL_LAYERS)

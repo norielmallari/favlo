@@ -91,7 +91,7 @@ kernel void matmul_fp4(
     op.run(left_tile, right_tile, out_tile);
 }
 
-kernel void matmul_f16(
+kernel void matmul_half(
     device half* activation [[buffer(0)]],
     device half* weights [[buffer(1)]],
     device float* destination [[buffer(2)]],
@@ -117,7 +117,7 @@ kernel void matmul_f16(
 
 // Prefill tile from the synthetic matmul2d table: 64 by 64, dynamic K,
 // transpose_right, four simdgroups. Rows and columns are multiples of 64.
-kernel void matmul_f16_64(
+kernel void matmul_half_64(
     device half* activation [[buffer(0)]],
     device half* weights [[buffer(1)]],
     device float* destination [[buffer(2)]],
@@ -141,8 +141,8 @@ kernel void matmul_f16_64(
     op.run(left_tile, right_tile, out_tile);
 }
 
-// Same 64×64 product as matmul_f16_64, one expert per grid z.
-kernel void matmul_f16_64_batch(
+// Same 64×64 product as matmul_half_64, one expert per grid z.
+kernel void matmul_half_64_batch(
     device half* activation [[buffer(0)]],
     device half* weights [[buffer(1)]],
     device float* destination [[buffer(2)]],
@@ -601,7 +601,7 @@ kernel void zero_buffer(
     }
 }
 
-kernel void expand_fp16(
+kernel void expand_half(
     device const half* source [[buffer(0)]],
     device float* destination [[buffer(1)]],
     constant uint& count [[buffer(2)]],

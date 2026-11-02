@@ -1,20 +1,20 @@
 # Ceilings
 
-Bandwidth and kernel ceilings for the kernels `gemma4-26b-a4b` launches. Recompute when `gemv_fp8`, `gemv_fp4_at`, `gemv_fp8_at`, `embed_fp8`, `matmul_fp8`, `matmul_f16`, `matmul_fp4_64_at`, `matmul_fp8_64_at`, `write_row`, `write_rows_tight`, `rmsnorm`, `rmsnorm_rows`, `rmsnorm_heads`, `router_topk`, `rope_pairs`, `rope_rows`, `store_kv`, `store_kv_rows`, `attend_span`, `attend_span4`, `attend_decode`, `geglu_rows`, `geglu_pair`, `group_expert_slots`, `gather_half_slots`, `pad_half_rows`, `scatter_slot_rows`, `mix_experts`, `residual_scale`, `scale_copy`, `zero_buffer`, `softcap`, `topk_groups`, or `sample_topk` changes. The CPU reads one sampled token. Expert ids stay on device.
+Bandwidth and kernel ceilings for the kernels `gemma4-26b-a4b` launches. Recompute when `gemv_fp8`, `gemv_fp4_at`, `gemv_fp8_at`, `embed_fp8`, `matmul_fp8`, `matmul_half`, `matmul_fp4_64_at`, `matmul_fp8_64_at`, `write_row`, `write_rows_tight`, `rmsnorm`, `rmsnorm_rows`, `rmsnorm_heads`, `router_topk`, `rope_pairs`, `rope_rows`, `store_kv`, `store_kv_rows`, `attend_span`, `attend_span4`, `attend_decode`, `geglu_rows`, `geglu_pair`, `group_expert_slots`, `gather_half_slots`, `pad_half_rows`, `scatter_slot_rows`, `mix_experts`, `residual_scale`, `scale_copy`, `zero_buffer`, `softcap`, `topk_groups`, or `sample_topk` changes. The CPU reads one sampled token. Expert ids stay on device.
 
 The divisor is the 2 GiB streaming read on an M5 Pro with 48 GB: 7093.5 µs, 302.74 GB/s. That measurement is recorded in [../qwen36-35b-a3b/ceilings.md](../qwen36-35b-a3b/ceilings.md). Bytes below are divided by 302.74 GB/s.
 
-One token runs 30 layers. Twenty-five are local, with a sliding window of 1024. Five are global and attend every key. Eight of 128 experts run. The timed token uses six fp4 experts and two fp8 experts. A 20% promotion expects 1.6 fp8 experts in those eight. Both `gemv_fp4_at` and `gemv_fp8_at` launch, and a threadgroup returns when the width differs. Dense projections and the tied embedding are fp8. Decode reads them in `gemv_fp8` and `embed_fp8`. The router is one float16 `matmul_f16` of 8 by 128 by 2816. Decode attention at one key is `attend_span`. At 1024 keys and above it is `attend_decode`, with the key range split across eight simdgroups. A value is an RMSNorm with no scale. A global value is that norm of the key projection and is stored apart from the keys.
+One token runs 30 layers. Twenty-five are local, with a sliding window of 1024. Five are global and attend every key. Eight of 128 experts run. The timed token uses six fp4 experts and two fp8 experts. A 20% promotion expects 1.6 fp8 experts in those eight. Both `gemv_fp4_at` and `gemv_fp8_at` launch, and a threadgroup returns when the width differs. Dense projections and the tied embedding are fp8. Decode reads them in `gemv_fp8` and `embed_fp8`. The router is one Metal half `matmul_half` of 8 by 128 by 2816. Decode attention at one key is `attend_span`. At 1024 keys and above it is `attend_decode`, with the key range split across eight simdgroups. A value is an RMSNorm with no scale. A global value is that norm of the key projection and is stored apart from the keys.
 
 ## Bandwidth
 
-Weight bytes are one read of the codes and scales the launch visits. The fp8 dense total includes the logits matrix and one embedding row. A down projection stops at K 2112, so the pad to 2176 is outside that read. Each layer reads six fp4 expert images and two fp8 expert images. Gate-up is read in full. The down plane stops at K 704. The router row is the float16 128 by 2816 matrix, once per layer. The activation column is the source vector once per launch. The output column is the written rows. Attention counts each query head's float16 key and value, the float32 query, and the float32 output. The remaining row is the norm, residual, copy, rotary, store, GeGLU, mix, router scratch, soft cap, and sampler buffers, once each.
+Weight bytes are one read of the codes and scales the launch visits. The fp8 dense total includes the logits matrix and one embedding row. A down projection stops at K 2112, so the pad to 2176 is outside that read. Each layer reads six fp4 expert images and two fp8 expert images. Gate-up is read in full. The down plane stops at K 704. The router row is the Metal half 128 by 2816 matrix, once per layer. The activation column is the source vector once per launch. The output column is the written rows. Attention counts each query head's Metal half key and value, the float32 query, and the float32 output. The remaining row is the norm, residual, copy, rotary, store, GeGLU, mix, router scratch, soft cap, and sampler buffers, once each.
 
 | Traffic | Bytes | ms |
 |---|---:|---:|
 | fp8 dense read | 2,458,134,360 | 8.12 |
 | Routed experts, 6 fp4 and 2 fp8 | 936,714,240 | 3.09 |
-| Router float16 | 21,626,880 | 0.07 |
+| Router half | 21,626,880 | 0.07 |
 | Activation read | 3,485,184 | 0.01 |
 | Projection output | 7,289,856 | 0.02 |
 | Attention at 1 key | 1,720,320 | 0.01 |
@@ -32,7 +32,7 @@ Weight bytes are one read of the codes and scales the launch visits. The fp8 den
 
 ## Prefill
 
-One chunk of 1024 tokens at position 0. The chunk finishes, so the sum includes one tied-logits `gemv_fp8`. A dense product is `matmul_fp8` on the packed matrix. The router is `matmul_f16`. Expert prefill uses 128 slots of 64, one slot for each expert: 102 fp4 and 26 fp8. `matmul_fp4_64_at` and `matmul_fp8_64_at` both launch on that grid. The TFLOP/s column counts the slots whose width matches. Local attention is `attend_span4`. Global attention is `attend_span` over the keys this first chunk has stored. Measured on 2 November 2026, same method as the decode table. The sum is 918.141 ms, 1115.30 tok/s.
+One chunk of 1024 tokens at position 0. The chunk finishes, so the sum includes one tied-logits `gemv_fp8`. A dense product is `matmul_fp8` on the packed matrix. The router is `matmul_half`. Expert prefill uses 128 slots of 64, one slot for each expert: 102 fp4 and 26 fp8. `matmul_fp4_64_at` and `matmul_fp8_64_at` both launch on that grid. The TFLOP/s column counts the slots whose width matches. Local attention is `attend_span4`. Global attention is `attend_span` over the keys this first chunk has stored. Measured on 2 November 2026, same method as the decode table. The sum is 918.141 ms, 1115.30 tok/s.
 
 | Launch | Shape | Count | µs | TFLOP/s |
 |---|---|---:|---:|---:|
@@ -44,7 +44,7 @@ One chunk of 1024 tokens at position 0. The chunk finishes, so the sum includes 
 | `matmul_fp8` | 1024×2816×8192 | 5 | 5125.1 | 9.22 |
 | `matmul_fp8` | 1024×2112×2816 | 60 | 1304.9 | 9.33 |
 | `matmul_fp8` | 1024×2816×2176 | 30 | 1339.4 | 9.37 |
-| `matmul_f16` | 1024×128×2816 | 30 | 60.2 | 12.27 |
+| `matmul_half` | 1024×128×2816 | 30 | 60.2 | 12.27 |
 | `matmul_fp4_64_at` | 102×64×1408×2816 | 30 | 3430.6 | 15.09 |
 | `matmul_fp8_64_at` | 26×64×1408×2816 | 30 | 871.5 | 15.14 |
 | `matmul_fp4_64_at` | 102×64×2816×768 | 30 | 1380.6 | 20.45 |
@@ -133,7 +133,7 @@ Context 1 is 37.424 ms, 26.72 tok/s. Context 1024 is 40.005 ms, 25.00 tok/s. Con
 | `softcap` | 262144 | 1 | 3.9 |
 | `write_row` | router activation | 30 | 2.0 |
 | `router_topk` | 128 to 8 | 30 | 11.7 |
-| `matmul_f16` | 8×128×2816 | 30 | 24.6 |
+| `matmul_half` | 8×128×2816 | 30 | 24.6 |
 | `topk_groups` | 1024, 256, 64, 16, 4, then 1 group | 6 | 67.8, 19.9, 8.5, 6.1, 6.1, 6.2 |
 | `sample_topk` | 64 | 1 | 40.2 |
 
