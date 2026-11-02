@@ -78,18 +78,39 @@ def verify(
     _extend_rope(runtime, pos, len(feeds))
     _capture(runtime)
     from qwen38_27b.prefill import backbone_ids
-    from qwen38_27b.span import load_row, replay_kept, span_pair, span_triple
+    from qwen38_27b.span import (
+        argmax_span_row,
+        load_row,
+        load_span_logits,
+        prime_span_logits,
+        replay_kept,
+        span_pair,
+        span_triple,
+    )
 
     try:
         span_n = 3 if len(feeds) >= 3 else (2 if len(feeds) >= 2 else 0)
         workspace = None
         if span_n == 3:
             span_triple(runtime, int(feeds[0]), int(feeds[1]), int(feeds[2]), pos)
+            prime_span_logits(runtime, span_n)
         elif span_n == 2:
             span_pair(runtime, int(feeds[0]), int(feeds[1]), pos)
+            prime_span_logits(runtime, span_n)
         else:
             workspace = backbone_ids(runtime, feeds, pos)
-        nxt = _score(runtime, workspace, 0, draw, feeds, pos, span_n)
+        nxt = _score(
+            runtime,
+            workspace,
+            0,
+            draw,
+            feeds,
+            pos,
+            span_n,
+            primed=span_n > 0,
+            load_span_logits=load_span_logits,
+            argmax_span_row=argmax_span_row,
+        )
         accepted = 0
         while accepted < len(expected) and int(nxt) == int(expected[accepted]):
             accepted += 1
@@ -97,7 +118,18 @@ def verify(
                 break
             if commit is not None:
                 commit(int(expected[accepted - 1]))
-            nxt = _score(runtime, workspace, accepted, draw, feeds, pos, span_n)
+            nxt = _score(
+                runtime,
+                workspace,
+                accepted,
+                draw,
+                feeds,
+                pos,
+                span_n,
+                primed=span_n > 0,
+                load_span_logits=load_span_logits,
+                argmax_span_row=argmax_span_row,
+            )
     except Exception:
         _restore(runtime)
         raise
@@ -131,11 +163,20 @@ def _score(
     feeds: list[int],
     pos: int,
     span_n: int,
+    *,
+    primed: bool = False,
+    load_span_logits: Any = None,
+    argmax_span_row: Any = None,
 ) -> int:
     if span_n and index < span_n:
         from qwen38_27b.span import load_row
 
         load_row(runtime, index)
+        if primed and draw is None and argmax_span_row is not None:
+            return int(argmax_span_row(runtime, index))
+        if primed and draw is not None and load_span_logits is not None:
+            load_span_logits(runtime, index)
+            return int(draw())
     elif span_n:
         runtime.step(
             int(feeds[index]),

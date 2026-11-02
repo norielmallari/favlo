@@ -88,6 +88,7 @@ def _f32(value: float) -> bytes:
 
 _STATE_BYTES = LINEAR_LAYERS * LINEAR_V * 128 * 128 * 4
 _HISTORY_BYTES = LINEAR_LAYERS * 3 * MIX * 2
+_MTP_LOGITS_BYTES = 3 * VOCAB * 4
 _DEVICE_FIELDS = (
     "resident",
     "history",
@@ -97,6 +98,7 @@ _DEVICE_FIELDS = (
     "hold",
     "_mtp_state",
     "_mtp_history",
+    "_mtp_logits",
     "wide",
     "z",
     "y",
@@ -546,16 +548,18 @@ class Qwen38Runtime:
         if plan.mtp:
             self._mtp_state = zeros(_STATE_BYTES)
             self._mtp_history = zeros(_HISTORY_BYTES)
+            self._mtp_logits = zeros(_MTP_LOGITS_BYTES)
         else:
             self._mtp_state = None
             self._mtp_history = None
+            self._mtp_logits = None
         work = self._prefill
         if work is not None:
             work.mix = zeros(CHUNK * MIX * 4) if plan.mtp else None
         self._restore_planes(count, saved)
         held = [self.resident, self.history, self.state, *self.k_cache, *self.v_cache]
         if self._mtp_state is not None:
-            held.extend([self._mtp_state, self._mtp_history])
+            held.extend([self._mtp_state, self._mtp_history, self._mtp_logits])
         self._held = held
 
     def _extend_cache(self, plan: Any, count: int, saved: list[tuple[int, str, bytes]]) -> None:
@@ -604,8 +608,10 @@ class Qwen38Runtime:
         self.hold = None
         snap_state = getattr(self, "_mtp_state", None)
         snap_history = getattr(self, "_mtp_history", None)
+        snap_logits = getattr(self, "_mtp_logits", None)
         self._mtp_state = None
         self._mtp_history = None
+        self._mtp_logits = None
         scratch: list[Any] = []
         for name in _SCRATCH_FIELDS:
             item = getattr(self, name, None)
@@ -620,7 +626,17 @@ class Qwen38Runtime:
         if isinstance(held, list):
             held.clear()
         release_buffers(
-            (image, resident, hold, snap_state, snap_history, mix, *caches, *scratch)
+            (
+                image,
+                resident,
+                hold,
+                snap_state,
+                snap_history,
+                snap_logits,
+                mix,
+                *caches,
+                *scratch,
+            )
         )
 
     def _capture_planes(self) -> tuple[int, list[tuple[int, str, bytes]]]:
@@ -1344,7 +1360,11 @@ class Qwen38Runtime:
                             sample_counts = dict(counts)
 
                             def draw() -> int:
-                                self._fill_logits()
+                                # Span verify may have already written this row into
+                                # ``logits`` from the shared ``lm_head`` read.
+                                if not getattr(self, "_span_logits_ready", False):
+                                    self._fill_logits()
+                                self._span_logits_ready = False
                                 picked = self._sample(sample_counts, adjust=True)
                                 return self._stable_draw(produced, picked, sample_counts)
 

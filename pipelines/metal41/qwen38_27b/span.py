@@ -26,6 +26,7 @@ from qwen38_27b.layout import (
     Q_HEADS,
     Q_PROJ,
     THETA,
+    VOCAB,
     Z_WIDTH,
 )
 
@@ -177,6 +178,82 @@ def load_row(runtime: Any, index: int) -> None:
     except Exception:
         runtime.session.finish()
         raise
+
+
+def prime_span_logits(runtime: Any, count: int) -> None:
+    """Final-norm and ``lm_head`` every span residual in one command buffer.
+
+    The head projection stays one GEMV per residual. ``gemv_fp4_span3`` on this
+    matrix can flip an argmax against the serial decode path, so the window
+    keeps three reads and drops the host waits between them instead.
+    """
+    if count < 2 or count > 3:
+        message = f"span logit count {count} is outside 2..3"
+        raise RuntimeError(message)
+    logits = getattr(runtime, "_mtp_logits", None)
+    if logits is None:
+        message = "mtp logit buffer is missing"
+        raise RuntimeError(message)
+    span = _buffers(runtime)
+    final = runtime._resolve(
+        "model.language_model.norm.weight",
+        "model.norm.weight",
+    )
+    head = runtime._resolve("lm_head.weight", "model.language_model.lm_head.weight")
+    runtime.session.begin()
+    try:
+        _rms(runtime, span.hidden, final, span.normed, count)
+        _gemv_rows(runtime, span.normed, HIDDEN, head, logits, VOCAB, count)
+        runtime.session.end()
+    except Exception:
+        runtime.session.finish()
+        raise
+
+
+def argmax_span_row(runtime: Any, index: int) -> int:
+    """Argmax of one primed span ``lm_head`` row."""
+    logits = getattr(runtime, "_mtp_logits", None)
+    if logits is None:
+        message = "mtp logit buffer is missing"
+        raise RuntimeError(message)
+    groups = (VOCAB + 255) // 256
+    runtime.session.begin()
+    try:
+        runtime.session.encode(
+            "argmax_partial",
+            [(logits, int(index) * VOCAB * 4), (runtime.best_v, 0), (runtime.best_i, 0)],
+            [_u32(VOCAB)],
+            (groups, 1, 1),
+            (256, 1, 1),
+        )
+        runtime.session.encode(
+            "argmax_final",
+            [(runtime.best_v, 0), (runtime.best_i, 0), (runtime.pick, 0), (runtime.pick, 4)],
+            [_u32(groups)],
+            (1, 1, 1),
+            (1, 1, 1),
+        )
+        runtime.session.end()
+    except Exception:
+        runtime.session.finish()
+        raise
+    return int(runtime._read_pick())
+
+
+def load_span_logits(runtime: Any, index: int) -> None:
+    """Copy one primed span ``lm_head`` row into ``runtime.logits`` for sampling."""
+    logits = getattr(runtime, "_mtp_logits", None)
+    if logits is None:
+        message = "mtp logit buffer is missing"
+        raise RuntimeError(message)
+    runtime.session.begin()
+    try:
+        _copy(runtime, logits, int(index) * VOCAB * 4, runtime.logits, 0, VOCAB)
+        runtime.session.end()
+    except Exception:
+        runtime.session.finish()
+        raise
+    runtime._span_logits_ready = True
 
 
 def _buffers(runtime: Any) -> _Span:
