@@ -32,6 +32,8 @@ from qwen38_27b.layout import (
 
 _TAPE_TOKENS = 3
 _LAYER_FLOATS = _TAPE_TOKENS * (MIX + Z_WIDTH + AB + AB)
+_STATE_WORDS = LINEAR_LAYERS * LINEAR_V * 128 * 128
+_HISTORY_WORDS = LINEAR_LAYERS * 3 * MIX * 2 // 4
 
 
 class _Span:
@@ -67,8 +69,13 @@ def span_triple(runtime: Any, token0: int, token1: int, token2: int, pos: int) -
 def _advance(runtime: Any, tokens: list[int], pos: int) -> None:
     span = _buffers(runtime)
     count = len(tokens)
+    state = getattr(runtime, "_mtp_state", None)
+    history = getattr(runtime, "_mtp_history", None)
     runtime.session.begin()
     try:
+        if state is not None and history is not None:
+            _copy(runtime, runtime.state, 0, state, 0, _STATE_WORDS)
+            _copy(runtime, runtime.history, 0, history, 0, _HISTORY_WORDS)
         for index, token in enumerate(tokens):
             runtime._embed(int(token))
             _copy(runtime, runtime.hidden, 0, span.hidden, index * HIDDEN * 4, HIDDEN)
@@ -208,6 +215,63 @@ def prime_span_logits(runtime: Any, count: int) -> None:
     except Exception:
         runtime.session.finish()
         raise
+
+
+def score_span_argmax(runtime: Any, count: int) -> list[int]:
+    """Final-norm, ``lm_head``, and argmax every span residual in one command buffer."""
+    if count < 2 or count > 3:
+        message = f"span logit count {count} is outside 2..3"
+        raise RuntimeError(message)
+    logits = getattr(runtime, "_mtp_logits", None)
+    picks = getattr(runtime, "_mtp_picks", None)
+    if logits is None or picks is None:
+        message = "mtp score buffers are missing"
+        raise RuntimeError(message)
+    span = _buffers(runtime)
+    final = runtime._resolve(
+        "model.language_model.norm.weight",
+        "model.norm.weight",
+    )
+    head = runtime._resolve("lm_head.weight", "model.language_model.lm_head.weight")
+    groups = (VOCAB + 255) // 256
+    runtime.session.begin()
+    try:
+        _rms(runtime, span.hidden, final, span.normed, count)
+        _gemv_rows(runtime, span.normed, HIDDEN, head, logits, VOCAB, count)
+        for index in range(count):
+            runtime.session.encode(
+                "argmax_partial",
+                [
+                    (logits, int(index) * VOCAB * 4),
+                    (runtime.best_v, 0),
+                    (runtime.best_i, 0),
+                ],
+                [_u32(VOCAB)],
+                (groups, 1, 1),
+                (256, 1, 1),
+            )
+            runtime.session.encode(
+                "argmax_final",
+                [
+                    (runtime.best_v, 0),
+                    (runtime.best_i, 0),
+                    (picks, int(index) * 8),
+                    (picks, int(index) * 8 + 4),
+                ],
+                [_u32(groups)],
+                (1, 1, 1),
+                (1, 1, 1),
+            )
+        runtime.session.end()
+    except Exception:
+        runtime.session.finish()
+        raise
+    blob = runtime.session.download(picks, count * 8)
+    out: list[int] = []
+    for index in range(count):
+        _value, token = struct.unpack_from("<fI", blob, index * 8)
+        out.append(int(token))
+    return out
 
 
 def argmax_span_row(runtime: Any, index: int) -> int:
