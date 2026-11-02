@@ -299,9 +299,19 @@ class Qwen35Runtime:
             if not is_full(layer):
                 self._gdn_index[layer] = cursor
                 cursor += 1
+        from qwen35_4b.prefix import open_session
+
+        self.prefix = open_session(self)
 
     def close(self) -> None:
         try:
+            prefix = getattr(self, "prefix", None)
+            if prefix is not None:
+                try:
+                    prefix.flush()
+                except OSError:
+                    pass
+                self.prefix = None
             if getattr(self, "session", None) is not None:
                 self.session.close()
             memory.sweep(self._owner)
@@ -355,22 +365,29 @@ class Qwen35Runtime:
         self._presence = float(presence)
         self._frequency = float(frequency)
         self.refresh_budget()
-        self._reset_state()
         self._output_ids = []
-        self._cached_tokens = 0
         console = self.console
         progress.note(console, "prompt", tokens=len(prompt))
-        progress.note(console, "cache", hit=0)
-        uncached = len(prompt)
+        hit = self.prefix.align(prompt)
+        if self.prefix.loaded:
+            progress.note(console, "prefix_load", tokens=hit)
+        progress.note(console, "cache", hit=hit)
+        self._cached_tokens = hit
+        suffix = prompt[hit:]
+        uncached = len(suffix)
+        boundary = False
+        produced = 0
         self._prefill_progress = progress.begin_phase(
             console, "prefill", uncached, request=self._request_id
         )
         prefill_start = time.perf_counter()
+        decode_row = None
+        decode_start = prefill_start
         try:
             done = 0
             while done < uncached:
                 self._check()
-                piece = prompt[done : done + _TILE]
+                piece = suffix[done : done + _TILE]
                 done += len(piece)
                 self._prefill_chunk(
                     [int(token) for token in piece],
@@ -379,20 +396,20 @@ class Qwen35Runtime:
                 progress.note_prefill(self._prefill_progress, done)
             self.session.wait()
             next_id = self._sample()
-        finally:
             self._prefill_seconds = time.perf_counter() - prefill_start
             row = self._prefill_progress
             self._prefill_progress = None
             progress.end_phase(
                 console, row, progress.rate("prefill", uncached, self._prefill_seconds)
             )
+            self.prefix.note(prompt)
+            self._store_prefix()
+            boundary = True
 
-        decode_row = progress.begin_phase(
-            console, "decode", 0, request=self._request_id, live=True
-        )
-        decode_start = time.perf_counter()
-        produced = 0
-        try:
+            decode_row = progress.begin_phase(
+                console, "decode", 0, request=self._request_id, live=True
+            )
+            decode_start = time.perf_counter()
             while produced < max_tokens:
                 self._check()
                 if next_id in stop:
@@ -406,12 +423,42 @@ class Qwen35Runtime:
                     break
                 self._step(next_id)
                 next_id = self._sample()
-        finally:
             self._decode_seconds = time.perf_counter() - decode_start
             progress.end_phase(
                 console, decode_row, progress.rate("decode", produced, self._decode_seconds)
             )
+            decode_row = None
+            self.prefix.note((prompt + self._output_ids)[: self.pos])
+            self._store_prefix()
+        except RequestClosed:
+            if boundary:
+                self.prefix.note((prompt + self._output_ids)[: self.pos])
+                self._store_prefix()
+            else:
+                self.prefix.tokens = []
+                self.prefix.dirty = False
+                self._reset_state()
+                self._rope_delta = 0
+            raise
+        finally:
+            if self._prefill_progress is not None:
+                self._prefill_seconds = time.perf_counter() - prefill_start
+                row = self._prefill_progress
+                self._prefill_progress = None
+                progress.end_phase(console, row, "")
+            if decode_row is not None:
+                self._decode_seconds = time.perf_counter() - decode_start
+                progress.end_phase(console, decode_row, "")
         return list(self._output_ids)
+
+    def _store_prefix(self) -> None:
+        try:
+            path = self.prefix.flush()
+        except OSError as exc:
+            progress.note(self.console, "prefix_store_failed", error=exc)
+            return
+        if path is not None:
+            progress.note(self.console, "prefix_store", tokens=len(self.prefix.tokens))
 
     def _check(self) -> None:
         if self._halted or (self._stop is not None and self._stop()):
