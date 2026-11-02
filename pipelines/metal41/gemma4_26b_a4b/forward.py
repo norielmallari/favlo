@@ -415,9 +415,9 @@ class Gemma4Runtime:
         seed: int = 0,
     ) -> str:
         from gemma4_26b_a4b.chat import decode_text, encode_chat, reply_text
-        from gemma4_26b_a4b.sampling import VARIANTS
+        from gemma4_26b_a4b.sampling import DEFAULT_VARIANT, VARIANTS
 
-        card = VARIANTS["thinking" if thinking else "instruct"]
+        card = VARIANTS[DEFAULT_VARIANT]
         prompt = encode_chat(self.root, messages, thinking)
         chosen = float(card["temperature"]) if temperature is None else temperature
         tokens, prefill_line, decode_line = self.generate(

@@ -333,6 +333,54 @@ def test_filling_the_cap_is_length() -> None:
     assert _finish_reason(Runtime(), [{"id": "call_0"}]) == "tool_calls"
 
 
+def test_unsupported_effort_steps_up_or_falls_back() -> None:
+    from gemma4_26b_a4b.sampling import resolve_effort
+
+    assert resolve_effort(None) is None
+    assert resolve_effort("minimal") == "minimal"
+    assert resolve_effort("high") == "high"
+    assert resolve_effort("none") == "minimal"
+    assert resolve_effort("low") == "high"
+    assert resolve_effort("medium") == "high"
+    assert resolve_effort("xhigh") == "high"
+    assert resolve_effort("max") == "high"
+
+
+def test_effort_opens_thinking_without_changing_the_card() -> None:
+    from types import SimpleNamespace
+
+    from gemma4_26b_a4b.chat import _request_effort
+    from gemma4_26b_a4b.sampling import mode_card
+
+    instruct = SimpleNamespace(
+        variant="instruct",
+        sampling={"temperature": 0.95, "top_p": 0.95, "top_k": 64, "presence_penalty": 0.0},
+        variants=None,
+        default_variant="thinking",
+        enable_thinking=None,
+        reasoning_effort=None,
+    )
+    thinking, card = mode_card(instruct, _request_effort({"reasoning": {"effort": "low"}}))
+    assert thinking is True
+    assert card["temperature"] == 0.95
+    closed, still = mode_card(instruct, _request_effort({"reasoning": {"effort": "none"}}))
+    assert closed is False
+    assert still["temperature"] == 0.95
+    minimal, same = mode_card(instruct, _request_effort({"reasoning": {"effort": "minimal"}}))
+    assert minimal is False
+    assert same["temperature"] == 0.95
+    stored = SimpleNamespace(
+        variant="thinking",
+        sampling=None,
+        variants=None,
+        default_variant="thinking",
+        enable_thinking=True,
+        reasoning_effort="minimal",
+    )
+    omitted, _card = mode_card(stored, _request_effort({}))
+    assert omitted is False
+
+
 def _read_tool() -> dict[str, object]:
     return {
         "type": "function",

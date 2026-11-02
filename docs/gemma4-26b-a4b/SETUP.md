@@ -67,7 +67,7 @@ curl http://127.0.0.1:8129/v1/responses \
   -d '{"model":"gemma4-26b-a4b:instruct","input":"Hello"}'
 ```
 
-`GET /v1/models` lists the registered ids. A bare `gemma4-26b-a4b` uses the thinking row. `gemma4-26b-a4b:instruct` is thinking off. Both rows are temperature 0.95, top-p 0.95, top-k 64, and presence penalty 0. `enable_thinking` set to false selects the instruct row when the id has no variant suffix. The server does not check an API key. A client that requires one can send any placeholder, such as `favlo`.
+`GET /v1/models` lists the registered ids. A bare `gemma4-26b-a4b` uses the thinking sampling row. `gemma4-26b-a4b:instruct` is the same sampler numbers under another suffix. Both rows are temperature 0.95, top-p 0.95, top-k 64, and presence penalty 0. Thinking follows the resolved `reasoning.effort` (`minimal` off, `high` on) or the row's `enable_thinking`, not the suffix. The server does not check an API key. A client that requires one can send any placeholder, such as `favlo`.
 
 A user message can include a still image. The served window stops at 131072 tokens. The record has no drafter.
 

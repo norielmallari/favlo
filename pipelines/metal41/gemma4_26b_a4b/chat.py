@@ -28,7 +28,6 @@ from favlo.responses import (
     response_object,
     response_to_chat,
     template_messages,
-    thinking_enabled,
     usage_object,
     web_search_context,
 )
@@ -299,6 +298,21 @@ def _reject(reply: Any, message: str) -> None:
     reply.json(400, {"error": {"message": message, "type": "invalid_request_error"}})
 
 
+def _request_effort(body: dict[str, Any]) -> str | None:
+    """``reasoning.effort`` after the Chat Completions translation.
+
+    ``reasoning_effort`` and ``enable_thinking`` are already mapped onto that
+    field. An omitted effort stays omitted so the registry row can decide.
+    """
+    reasoning = body.get("reasoning")
+    if not isinstance(reasoning, dict):
+        return None
+    effort = reasoning.get("effort")
+    if not isinstance(effort, str) or not effort.strip():
+        return None
+    return effort.strip().lower()
+
+
 def _respond(
     reply: Any,
     runtime: Any,
@@ -311,8 +325,7 @@ def _respond(
     except RequestError as exc:
         _reject(reply, str(exc))
         return
-    requested = thinking_enabled(prepared)
-    thinking, card = mode_card(selection, requested)
+    thinking, card = mode_card(selection, _request_effort(prepared))
     temperature = _field(prepared, "temperature", card["temperature"])
     top_p = _field(prepared, "top_p", card["top_p"])
     top_k = int(card["top_k"])
