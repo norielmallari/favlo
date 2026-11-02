@@ -37,7 +37,13 @@ def carrot_runtime():
         runtime.close()
 
 
-def _complete(runtime: Qwen35Runtime, *, thinking: bool, temperature: float) -> str:
+def _complete(
+    runtime: Qwen35Runtime,
+    *,
+    thinking: bool,
+    temperature: float,
+    mtp: bool = False,
+) -> str:
     prompt = encode_chat(
         runtime.root,
         [{"role": "user", "content": CARROT_PROMPT}],
@@ -54,6 +60,8 @@ def _complete(runtime: Qwen35Runtime, *, thinking: bool, temperature: float) -> 
         top_p=float(card["top_p"]) if temperature else 1.0,
         top_k=int(card["top_k"]) if temperature else 0,
         presence=float(card["presence_penalty"]) if temperature else 0.0,
+        mtp=mtp,
+        mtp_depth=3,
     )
     return decode_text(runtime.root, tokens)
 
@@ -61,6 +69,14 @@ def _complete(runtime: Qwen35Runtime, *, thinking: bool, temperature: float) -> 
 def test_greedy_instruct(carrot_runtime: Qwen35Runtime) -> None:
     text = _complete(carrot_runtime, thinking=False, temperature=0.0)
     assert _ANSWER.search(text)
+
+
+def test_greedy_mtp(carrot_runtime: Qwen35Runtime) -> None:
+    if not carrot_runtime._mtp_ready:
+        pytest.skip("mtp half is not packed into the record")
+    text = _complete(carrot_runtime, thinking=False, temperature=0.0, mtp=True)
+    assert _ANSWER.search(text)
+    assert carrot_runtime._mtp_tries > 0
 
 
 def test_instruct_card(carrot_runtime: Qwen35Runtime) -> None:

@@ -11,7 +11,7 @@ from typing import Any
 
 from favlo.console import Console
 from favlo.registry import load_registry, models_dir, register_quantized, set_alias
-from qwen35_4b.convert import checkout_dir, quantize, record_dir
+from qwen35_4b.convert import checkout_dir, pack_mtp_half, quantize, record_dir
 from qwen35_4b.layout import FOLDER, REPO, STEM
 from qwen35_4b.sampling import CONTEXT_LENGTH
 
@@ -40,6 +40,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     setup.add_argument("--console", choices=("auto", "pretty", "plain", "json"), default="auto")
     sub.add_parser("kernels", help="compile the shader library and run the dispatch checks")
+    mtp = sub.add_parser(
+        "mtp-half",
+        help="append Metal half MTP matrices from the BF16 checkout onto the packed record",
+    )
+    mtp.add_argument(
+        "--src",
+        default=None,
+        help="BF16 checkout with mtp.* (default: models/Qwen3.5-4B-bf16)",
+    )
+    mtp.add_argument(
+        "--record",
+        default=None,
+        help="packed record directory (default: models/Qwen3.5-4B-fp8)",
+    )
+    mtp.add_argument("--console", choices=("auto", "pretty", "plain", "json"), default="auto")
     complete = sub.add_parser("complete", help="argmax completion from the packed record")
     complete.add_argument("--prompt", default=CARROT_PROMPT)
     complete.add_argument("--max-tokens", type=int, default=64)
@@ -66,6 +81,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _setup(args)
     if args.command == "kernels":
         return _kernels()
+    if args.command == "mtp-half":
+        return _mtp_half(args)
     if args.command == "complete":
         return _complete(args)
     if args.command == "models":
@@ -242,6 +259,24 @@ def _kernels() -> int:
         sys.stderr.write(f"{exc}\n")
         return 1
     sys.stdout.write("ok\n")
+    return 0
+
+
+def _mtp_half(args: argparse.Namespace) -> int:
+    src = Path(args.src) if args.src else checkout_dir(models_dir())
+    record = Path(args.record) if args.record else record_dir(models_dir())
+    ui = Console.from_env(args.console, pipeline=PIPELINE)
+    bar = ui.begin("quantize", total=1, unit="files", detail="mtp half")
+    try:
+        pack_mtp_half(record, src)
+        bar.done = 1
+        ui.end(bar, f"mtp half: {record}")
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError, FileNotFoundError) as exc:
+        ui.end(bar, "")
+        sys.stderr.write(f"{exc}\n")
+        return 1
+    finally:
+        ui.close()
     return 0
 
 

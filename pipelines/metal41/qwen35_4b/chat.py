@@ -31,7 +31,7 @@ from favlo.responses import (
 from qwen35_4b.closed import RequestClosed
 from qwen35_4b.vision import prepare_prompt
 from qwen35_4b.layout import EOS, IM_END
-from qwen35_4b.sampling import DEFAULT_THINKING, DEFAULT_VARIANT, VARIANTS, resolve_effort
+from qwen35_4b.sampling import CONTEXT_LENGTH, mode_card
 
 STOP = {EOS, IM_END}
 _THINK_END = "</think>"
@@ -494,38 +494,66 @@ def _chat_reason(response: dict[str, Any]) -> str:
     return "stop"
 
 
-def _variant(selection: Any) -> dict[str, float]:
-    name = getattr(selection, "variant", None) or DEFAULT_VARIANT
-    return dict(VARIANTS.get(str(name)) or VARIANTS[DEFAULT_VARIANT])
-
-
 def _request_effort(body: dict[str, Any]) -> str | None:
-    reasoning = body.get("reasoning")
-    if isinstance(reasoning, dict):
-        effort = reasoning.get("effort")
-        if isinstance(effort, str) and effort.strip():
-            return effort.strip().lower()
-    flag = body.get("enable_thinking")
-    if flag is not None:
-        return "high" if flag else "none"
-    return None
+    """``reasoning.effort`` after the Chat Completions translation.
 
-
-def _thinking(selection: Any, body: dict[str, Any]) -> bool:
-    """Open thinking from the request, else the registry row, else the default.
-
-    The official card is on/off only. Every OpenAI effort is accepted; an
-    unsupported name steps up to the next supported value (see
-    ``resolve_effort``). The model id's variant suffix does not control
-    thinking.
+    ``reasoning_effort`` and ``enable_thinking`` are already mapped onto that
+    field. An omitted effort stays omitted so the selected variant can decide.
     """
-    requested = _request_effort(body)
-    if requested is not None:
-        return resolve_effort(requested) != "none"
-    stored = getattr(selection, "enable_thinking", None) if selection is not None else None
-    if stored is not None:
-        return bool(stored)
-    return DEFAULT_THINKING
+    reasoning = body.get("reasoning")
+    if not isinstance(reasoning, dict):
+        return None
+    effort = reasoning.get("effort")
+    if not isinstance(effort, str) or not effort.strip():
+        return None
+    return effort.strip().lower()
+
+
+def _mtp_body(prepared: dict[str, Any]) -> dict[str, Any]:
+    body: dict[str, Any] = {}
+    if "favlo:mtp" in prepared:
+        body["mtp"] = prepared["favlo:mtp"]
+    if "favlo:mtp_depth" in prepared:
+        body["mtp_depth"] = prepared["favlo:mtp_depth"]
+    if "mtp" in prepared:
+        body["mtp"] = prepared["mtp"]
+    if "mtp_depth" in prepared:
+        body["mtp_depth"] = prepared["mtp_depth"]
+    return body
+
+
+def _mtp_flag(body: dict[str, Any], selection: Any = None) -> bool:
+    """Draft verify. A request field wins. Omitted registry row is off."""
+    if "mtp" in body:
+        flag = body["mtp"]
+        if isinstance(flag, bool):
+            return flag
+        message = "mtp must be true or false"
+        raise RuntimeError(message)
+    folder = getattr(selection, "folder", None) if selection is not None else None
+    if not isinstance(folder, str) or not folder:
+        return False
+    from favlo.registry import model_mtp
+
+    enabled, _depth = model_mtp(folder)
+    return enabled
+
+
+def _mtp_depth(body: dict[str, Any], selection: Any = None) -> int:
+    """Draft length. A request field wins. Omitted registry row is three."""
+    if "mtp_depth" in body:
+        raw = body["mtp_depth"]
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+            message = "mtp_depth must be a positive integer"
+            raise RuntimeError(message)
+        return raw
+    folder = getattr(selection, "folder", None) if selection is not None else None
+    if not isinstance(folder, str) or not folder:
+        return 3
+    from favlo.registry import model_mtp
+
+    _enabled, depth = model_mtp(folder)
+    return depth
 
 
 def _output_limit(body: dict[str, Any], thinking: bool, prompt_len: int, context: int) -> int:
@@ -582,12 +610,19 @@ def _respond(
     if search_tools:
         search_body["tools"] = list(prepared.get("tools") or []) + search_tools
 
-    card = _variant(selection)
+    thinking, card = mode_card(selection, _request_effort(prepared))
+    card = dict(card)
     if prepared.get("temperature") is not None:
         card["temperature"] = float(prepared["temperature"])
     if prepared.get("top_p") is not None:
         card["top_p"] = float(prepared["top_p"])
-    thinking = _thinking(selection, prepared)
+    mtp_fields = _mtp_body(prepared)
+    try:
+        mtp = _mtp_flag(mtp_fields, selection)
+        mtp_depth = _mtp_depth(mtp_fields, selection)
+    except RuntimeError as exc:
+        reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+        return
     emit_tools = prepared.get("tool_choice") != "none"
     try:
         messages, _saw = template_messages(prepared)
@@ -623,6 +658,8 @@ def _respond(
             emit_tools,
             search,
             stop_strings,
+            mtp=mtp,
+            mtp_depth=mtp_depth,
         )
         return
 
@@ -634,6 +671,8 @@ def _respond(
         top_p=float(card["top_p"]),
         top_k=int(card["top_k"]),
         presence=float(card["presence_penalty"]),
+        mtp=mtp,
+        mtp_depth=mtp_depth,
     )
     text = decode_text(runtime.root, tokens)
     for stopper in stop_strings:
@@ -732,12 +771,8 @@ def _payload(
     status = "incomplete" if hit_limit and not calls else "completed"
     incomplete = "max_output_tokens" if status == "incomplete" else None
     model = getattr(reply, "model_id", "") or body.get("model") or ""
-    usage = usage_object(
-        prompt_len,
-        completion_len,
-        int(getattr(runtime, "_cached_tokens", 0) or 0),
-        0,
-    )
+    cached = int(getattr(runtime, "_cached_tokens", 0) or 0)
+    usage = usage_object(prompt_len, completion_len, cached, 0)
     payload = response_object(
         model=model,
         output=output,
@@ -747,13 +782,36 @@ def _payload(
         incomplete=incomplete,
         response_id=response_id or new_id("resp_"),
     )
-    payload["_chat_usage"] = {
-        "prompt_tokens": prompt_len,
-        "completion_tokens": completion_len,
-        "total_tokens": prompt_len + completion_len,
-        "cached_tokens": int(getattr(runtime, "_cached_tokens", 0) or 0),
-    }
+    payload["_chat_usage"] = _usage(runtime, prompt_len, completion_len)
     return payload
+
+
+def _context_length(runtime: Any) -> int:
+    """The opening capacity, capped by the registered window."""
+    live = getattr(runtime, "max_pos", None)
+    if isinstance(live, int) and live > 0:
+        return min(live, CONTEXT_LENGTH)
+    return CONTEXT_LENGTH
+
+
+def _usage(runtime: Any, prompt_tokens: int, completion_tokens: int) -> dict[str, Any]:
+    cached = int(getattr(runtime, "_cached_tokens", 0) or 0)
+    prompt_n = max(0, prompt_tokens - cached)
+    prefill_s = float(getattr(runtime, "_prefill_seconds", 0.0) or 0.0)
+    decode_s = float(getattr(runtime, "_decode_seconds", 0.0) or 0.0)
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+        "context_length": _context_length(runtime),
+        "prompt_tokens_details": {"cached_tokens": cached},
+        "timings": {
+            "prompt_per_second": 0.0 if prefill_s <= 0 else prompt_n / prefill_s,
+            "predicted_per_second": 0.0 if decode_s <= 0 else completion_tokens / decode_s,
+            "prompt_n": prompt_n,
+            "predicted_n": completion_tokens,
+        },
+    }
 
 
 def _stream(
@@ -768,6 +826,9 @@ def _stream(
     emit_tools: bool,
     search: dict[str, Any] | None,
     stop_strings: list[str],
+    *,
+    mtp: bool = False,
+    mtp_depth: int = 3,
 ) -> None:
     try:
         reply.begin_events()
@@ -898,6 +959,8 @@ def _stream(
                 top_p=float(card["top_p"]),
                 top_k=int(card["top_k"]),
                 presence=float(card["presence_penalty"]),
+                mtp=mtp,
+                mtp_depth=mtp_depth,
             )
         finally:
             pending.put(None)

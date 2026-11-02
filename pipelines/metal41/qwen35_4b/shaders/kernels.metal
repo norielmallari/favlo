@@ -514,6 +514,72 @@ kernel void gemv_fp8_vec(
     }
 }
 
+// y[cols] = W[cols, inner] (Metal half) x activation[inner]. One row per threadgroup.
+kernel void gemv_half(
+    device const float* activation [[buffer(0)]],
+    device const half* weights [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint span [[threads_per_threadgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= cols) {
+        return;
+    }
+    device const half* w = weights + (ulong)row * inner;
+    float acc = 0.0f;
+    for (uint i = tid; i < inner; i += span) {
+        acc = fma(activation[i], float(w[i]), acc);
+    }
+    float part = simd_sum(acc);
+    threadgroup float red[8];
+    if (lane == 0u) {
+        red[simd] = part;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0u) {
+        float sum = 0.0f;
+        uint nsimd = span >> 5;
+        for (uint s = 0u; s < nsimd; ++s) {
+            sum += red[s];
+        }
+        destination[row] = sum;
+    }
+}
+
+kernel void concat_pair(
+    device const float* left [[buffer(0)]],
+    device const float* right [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& width [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    if (row >= rows) {
+        return;
+    }
+    for (uint col = tid; col < width; col += 256u) {
+        destination[row * width * 2u + col] = left[row * width + col];
+        destination[row * width * 2u + width + col] = right[row * width + col];
+    }
+}
+
+kernel void copy_f32(
+    device const float* source [[buffer(0)]],
+    device float* destination [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid < count) {
+        destination[gid] = source[gid];
+    }
+}
+
 // Causal depthwise convolution, kernel 4, then SiLU. ``history`` keeps the three
 // prior inputs per channel. Taps are [channels, 4]; tap 3 multiplies the current input.
 kernel void conv_silu(

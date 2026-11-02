@@ -88,19 +88,26 @@ def kv_mode(name: str | None) -> str:
     return text
 
 
-def kv_token_bytes(mode: str = "half") -> int:
-    """Key and value planes of the eight full-attention layers, one token.
+# MTP adds one full-attention KV slot beside the eight language slots.
+MTP_SLOT = len(FULL)
+KV_SLOTS = len(FULL) + 1
+
+
+def kv_token_bytes(mode: str = "half", *, slots: int | None = None) -> int:
+    """Key and value planes for ``slots`` full-attention layers, one token.
 
     ``half`` is two bytes per element. ``fp8_e4m3`` is one Metal
-    ``metal_fp8_e4m3`` byte plus one E8M0 byte per 32 channels.
+    ``metal_fp8_e4m3`` byte plus one E8M0 byte per 32 channels. Default slots
+    are the eight language layers. Pass ``KV_SLOTS`` when the MTP plane is live.
     """
     chosen = kv_mode(mode)
+    count = len(FULL) if slots is None else int(slots)
     if chosen == "half":
         per_plane = KV_HEADS * HEAD_DIM * 2
     else:
         per_plane = KV_HEADS * (HEAD_DIM + HEAD_DIM // BLOCK)
-    return len(FULL) * 2 * per_plane
+    return count * 2 * per_plane
 
 
-def cache_bytes(tokens: int, mode: str = "half") -> int:
-    return kv_token_bytes(mode) * tokens
+def cache_bytes(tokens: int, mode: str = "half", *, slots: int | None = None) -> int:
+    return kv_token_bytes(mode, slots=slots) * tokens

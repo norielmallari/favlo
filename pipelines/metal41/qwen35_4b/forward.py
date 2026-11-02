@@ -24,10 +24,12 @@ from qwen35_4b.layout import (
     HIDDEN,
     INTERMEDIATE,
     KV_HEADS,
+    KV_SLOTS,
     LAYERS,
     LINEAR_HEAD_DIM,
     LINEAR_KEY_HEADS,
     LINEAR_VALUE_HEADS,
+    MTP_SLOT,
     RMS_EPS,
     ROPE_DIM,
     STEM,
@@ -82,7 +84,7 @@ class Qwen35Runtime:
         owner: str | None = None,
         mtp: bool = False,
     ) -> None:
-        del mtp
+        del mtp  # Request flag; readiness comes from the packed record.
         try:
             chosen = kv_mode(kv_cache)
         except ValueError as exc:
@@ -122,6 +124,7 @@ class Qwen35Runtime:
             message = f"incomplete packed record at {self.root}"
             raise RuntimeError(message)
         self._tensors = body["tensors"]
+        self._mtp_ready = "mtp.fc" in self._tensors
         size = weights.stat().st_size
         detail = getattr(console, "load_detail", "") or self.root.name
         self._load_progress = progress.begin_load(console, size, detail)
@@ -132,6 +135,7 @@ class Qwen35Runtime:
             summary = (
                 f"loaded {self.root.name} kv {self.kv_cache} "
                 f"context {self.max_pos} memory {self.max_memory}"
+                f"{' mtp half' if self._mtp_ready else ''}"
             )
         except Exception:
             if getattr(self, "session", None) is not None:
@@ -155,6 +159,7 @@ class Qwen35Runtime:
         }
         gdn = GDN_STATE_BYTES
         conv = (LAYERS - len(FULL)) * _CONV_CH * (CONV_KERNEL - 1) * 4
+        self._kv_slots = KV_SLOTS if self._mtp_ready else len(FULL)
         self.refresh_budget()
         budget = self.max_memory
         capacity = CONTEXT
@@ -164,13 +169,17 @@ class Qwen35Runtime:
                 + _workspace_bytes(capacity)
                 + gdn
                 + conv
-                + cache_bytes(capacity, self.kv_cache)
+                + cache_bytes(capacity, self.kv_cache, slots=self._kv_slots)
             )
             if need <= budget:
                 break
             capacity = max(_MIN_CTX, capacity // 2)
         need = (
-            size + _workspace_bytes(capacity) + gdn + conv + cache_bytes(capacity, self.kv_cache)
+            size
+            + _workspace_bytes(capacity)
+            + gdn
+            + conv
+            + cache_bytes(capacity, self.kv_cache, slots=self._kv_slots)
         )
         if need > budget:
             message = (
@@ -223,16 +232,19 @@ class Qwen35Runtime:
         self.token_counts = s.allocate(VOCAB * 4, zero=True)
         self.gdn_state = s.allocate(gdn, zero=True)
         self.conv_hist = s.allocate(conv, zero=True)
-        plane = len(FULL) * capacity * KV_HEADS * HEAD_DIM * self._kv_elem
+        plane = self._kv_slots * capacity * KV_HEADS * HEAD_DIM * self._kv_elem
         self.k_data = s.allocate(plane, zero=True)
         self.v_data = s.allocate(plane, zero=True)
         if self.kv_cache == "fp8_e4m3":
-            scales = len(FULL) * capacity * KV_HEADS * (HEAD_DIM // BLOCK)
+            scales = self._kv_slots * capacity * KV_HEADS * (HEAD_DIM // BLOCK)
             self.k_scale = s.allocate(scales, zero=True)
             self.v_scale = s.allocate(scales, zero=True)
         else:
             self.k_scale = 0
             self.v_scale = 0
+        self.wide = s.allocate(HIDDEN * 2 * 4, zero=True)
+        self.hold = s.allocate(HIDDEN * 4, zero=True)
+        self._mtp_residual = s.allocate(HIDDEN * 4, zero=True)
         tile = _TILE
         widest = max(
             HIDDEN,
@@ -349,8 +361,6 @@ class Qwen35Runtime:
             think_close,
             think_end,
             thinking_budget,
-            mtp,
-            mtp_depth,
             temperature,
         )
         if self._halted or (self._stop is not None and self._stop()):
@@ -377,12 +387,28 @@ class Qwen35Runtime:
         uncached = len(suffix)
         boundary = False
         produced = 0
+        self._prefill_seconds = 0.0
+        self._decode_seconds = 0.0
+        self._mtp_accepts = 0
+        self._mtp_tries = 0
+        from qwen35_4b.mtp import DEPTH, draft_window, propose, verify
+
+        depth = DEPTH if mtp_depth is None else mtp_depth
+        use_mtp = bool(mtp) and bool(self._mtp_ready)
+        if use_mtp and (isinstance(depth, bool) or not isinstance(depth, int) or depth < 1):
+            message = "mtp_depth must be a positive integer"
+            raise RuntimeError(message)
+        if use_mtp:
+            progress.note(console, "mtp_depth", depth=depth)
         self._prefill_progress = progress.begin_phase(
             console, "prefill", uncached, request=self._request_id
         )
         prefill_start = time.perf_counter()
         decode_row = None
-        decode_start = prefill_start
+        decode_started = prefill_start
+        last_sample = prefill_start
+        prefill_open = True
+        carry: int | None = None
         try:
             done = 0
             while done < uncached:
@@ -395,39 +421,90 @@ class Qwen35Runtime:
                 )
                 progress.note_prefill(self._prefill_progress, done)
             self.session.wait()
-            next_id = self._sample()
-            self._prefill_seconds = time.perf_counter() - prefill_start
-            row = self._prefill_progress
-            self._prefill_progress = None
-            progress.end_phase(
-                console, row, progress.rate("prefill", uncached, self._prefill_seconds)
-            )
-            self.prefix.note(prompt)
-            self._store_prefix()
-            boundary = True
-
-            decode_row = progress.begin_phase(
-                console, "decode", 0, request=self._request_id, live=True
-            )
-            decode_start = time.perf_counter()
             while produced < max_tokens:
                 self._check()
+                if carry is not None:
+                    next_id = int(carry)
+                    carry = None
+                    sampled_at = time.perf_counter()
+                else:
+                    next_id = self._sample()
+                    sampled_at = time.perf_counter()
+                if prefill_open:
+                    self._prefill_seconds = sampled_at - prefill_start
+                    row = self._prefill_progress
+                    self._prefill_progress = None
+                    progress.end_phase(
+                        console,
+                        row,
+                        progress.rate("prefill", uncached, self._prefill_seconds),
+                    )
+                    self.prefix.note(prompt)
+                    self._store_prefix()
+                    boundary = True
+                    decode_started = sampled_at
+                    last_sample = sampled_at
+                    decode_row = progress.begin_phase(
+                        console, "decode", 0, request=self._request_id, live=True
+                    )
+                    prefill_open = False
                 if next_id in stop:
                     break
+                last_sample = sampled_at
                 self._output_ids.append(next_id)
                 produced += 1
                 progress.note_decode(decode_row, produced)
                 if on_token is not None:
                     on_token(next_id)
-                if self.pos >= self.max_pos:
+                if produced >= max_tokens or self.pos >= self.max_pos:
                     break
+                pos = len(prompt) + produced - 1
+                room = max_tokens - produced
+                if use_mtp and room > 0 and pos + 1 < self.max_pos:
+                    drafts = propose(self, next_id, pos, depth)
+                    feeds, expected = draft_window(next_id, drafts, stop, room)
+                    if expected:
+                        self._mtp_tries += len(expected)
+                        accepted, nxt = verify(self, pos, feeds, expected)
+                        self._mtp_accepts += accepted
+                        for token in expected[:accepted]:
+                            if produced >= max_tokens:
+                                break
+                            last_sample = time.perf_counter()
+                            self._output_ids.append(int(token))
+                            produced += 1
+                            progress.note_decode(decode_row, produced)
+                            if on_token is not None:
+                                on_token(int(token))
+                        carry = int(nxt)
+                        continue
                 self._step(next_id)
-                next_id = self._sample()
-            self._decode_seconds = time.perf_counter() - decode_start
-            progress.end_phase(
-                console, decode_row, progress.rate("decode", produced, self._decode_seconds)
-            )
-            decode_row = None
+            if self._mtp_tries:
+                progress.note(
+                    console, "mtp", accepts=self._mtp_accepts, tries=self._mtp_tries
+                )
+            if prefill_open:
+                self._prefill_seconds = time.perf_counter() - prefill_start
+                row = self._prefill_progress
+                self._prefill_progress = None
+                progress.end_phase(
+                    console,
+                    row,
+                    progress.rate("prefill", uncached, self._prefill_seconds),
+                )
+                self.prefix.note(prompt)
+                self._store_prefix()
+                boundary = True
+                self._decode_seconds = 0.0
+            else:
+                elapsed = last_sample - decode_started
+                self._decode_seconds = elapsed if elapsed > 0.0 else 0.0
+                progress.end_phase(
+                    console,
+                    decode_row,
+                    progress.rate("decode", produced, self._decode_seconds),
+                )
+                decode_row = None
             self.prefix.note((prompt + self._output_ids)[: self.pos])
             self._store_prefix()
         except RequestClosed:
@@ -447,7 +524,8 @@ class Qwen35Runtime:
                 self._prefill_progress = None
                 progress.end_phase(console, row, "")
             if decode_row is not None:
-                self._decode_seconds = time.perf_counter() - decode_start
+                elapsed = last_sample - decode_started
+                self._decode_seconds = elapsed if elapsed > 0.0 else 0.0
                 progress.end_phase(console, decode_row, "")
         return list(self._output_ids)
 
@@ -459,6 +537,195 @@ class Qwen35Runtime:
             return
         if path is not None:
             progress.note(self.console, "prefix_store", tokens=len(self.prefix.tokens))
+
+    def _copy_f32(self, source: Any, destination: Any, count: int) -> None:
+        self.session.begin()
+        try:
+            self.session.launch(
+                "copy_f32",
+                [source, destination],
+                [u32(count)],
+                ((count + 255) // 256, 1, 1),
+                (256, 1, 1),
+            )
+            self.session.end()
+        except Exception:
+            self.session.finish()
+            raise
+
+    def _gemv_half(
+        self, activation: Any, plane: Plane, destination: Any, rows: int, inner: int
+    ) -> None:
+        self.session.launch(
+            "gemv_half",
+            [activation, self.weights, destination],
+            [u32(rows), u32(inner)],
+            (rows, 1, 1),
+            (256, 1, 1),
+            offsets=[0, plane.data, 0],
+        )
+
+    def _draft(self, token: int, pos: int, *, backbone: bool) -> int:
+        """Draft the token after ``token``. ``backbone`` applies the final norm first."""
+        session = self.session
+        session.begin()
+        try:
+            if backbone:
+                self._rmsnorm(self.hidden, self._planes["final_norm"], self.normed)
+                session.launch(
+                    "copy_f32",
+                    [self.normed, self.hidden],
+                    [u32(HIDDEN)],
+                    ((HIDDEN + 255) // 256, 1, 1),
+                    (256, 1, 1),
+                )
+            self._mtp_body(token, pos)
+            self._rmsnorm(self.hidden, self._planes["mtp.norm"], self.normed)
+            session.launch(
+                "copy_f32",
+                [self.normed, self.hidden],
+                [u32(HIDDEN)],
+                ((HIDDEN + 255) // 256, 1, 1),
+                (256, 1, 1),
+            )
+            self._gemv(
+                self.normed,
+                self._planes["embedding"],
+                self.logits,
+                VOCAB,
+                HIDDEN,
+            )
+            session.end()
+        except Exception:
+            session.finish()
+            raise
+        return self._sample()
+
+    def _mtp_body(self, token: int, pos: int) -> None:
+        """One MTP full-attention block at ``pos``. ``hidden`` is the fused path input."""
+        session = self.session
+        self._rmsnorm(self.hidden, self._planes["mtp.pre_fc_norm_hidden"], self.hold)
+        emb = self._planes["embedding"]
+        memory.store(self.token_buf, 0, struct.pack("<I", int(token)))
+        session.launch(
+            "embed_row",
+            [self.weights, self.weights, self.token_buf, self.hidden],
+            [u32(0), u32(HIDDEN)],
+            (HIDDEN, 1, 1),
+            (1, 1, 1),
+            offsets=[emb.data, emb.scale, 0, 0],
+        )
+        self._rmsnorm(self.hidden, self._planes["mtp.pre_fc_norm_embedding"], self.normed)
+        session.launch(
+            "concat_pair",
+            [self.normed, self.hold, self.wide],
+            [u32(HIDDEN), u32(1)],
+            (1, 1, 1),
+            (256, 1, 1),
+        )
+        self._gemv_half(self.wide, self._planes["mtp.fc"], self.hidden, HIDDEN, HIDDEN * 2)
+        self._rmsnorm(self.hidden, self._planes["mtp.in_norm"], self.normed)
+        self._mtp_attn(pos)
+        self._rmsnorm(self.hidden, self._planes["mtp.post_norm"], self.normed)
+        self._mtp_ffn()
+
+    def _mtp_attn(self, pos: int) -> None:
+        session = self.session
+        length = int(pos) + 1
+        data_off = MTP_SLOT * self.max_pos * KV_HEADS * HEAD_DIM * self._kv_elem
+        scale_off = MTP_SLOT * self.max_pos * KV_HEADS * (HEAD_DIM // BLOCK)
+        qn = self._planes["mtp.q_norm"]
+        kn = self._planes["mtp.k_norm"]
+        self._gemv_half(
+            self.normed, self._planes["mtp.q"], self.q_fuse, ATTN_HEADS * HEAD_DIM * 2, HIDDEN
+        )
+        self._gemv_half(
+            self.normed, self._planes["mtp.k"], self.k_buf, KV_HEADS * HEAD_DIM, HIDDEN
+        )
+        self._gemv_half(
+            self.normed, self._planes["mtp.v"], self.v_buf, KV_HEADS * HEAD_DIM, HIDDEN
+        )
+        session.launch(
+            "head_rmsnorm",
+            [self.q_fuse, self.weights],
+            [u32(HEAD_DIM * 2), f32(RMS_EPS), f32(1.0)],
+            (ATTN_HEADS, 1, 1),
+            (HEAD_DIM, 1, 1),
+            offsets=[0, qn.data],
+        )
+        session.launch(
+            "head_rmsnorm",
+            [self.k_buf, self.weights],
+            [u32(HEAD_DIM), f32(RMS_EPS), f32(1.0)],
+            (KV_HEADS, 1, 1),
+            (HEAD_DIM, 1, 1),
+            offsets=[0, kn.data],
+        )
+        rope_pos = max(0, int(pos) + int(self._rope_delta))
+        session.launch(
+            "rope_heads",
+            [self.q_fuse],
+            [u32(ATTN_HEADS), u32(HEAD_DIM * 2), u32(ROPE_DIM), u32(rope_pos), f32(THETA)],
+            ((ATTN_HEADS * (ROPE_DIM // 2) + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+        session.launch(
+            "rope_heads",
+            [self.k_buf],
+            [u32(KV_HEADS), u32(HEAD_DIM), u32(ROPE_DIM), u32(rope_pos), f32(THETA)],
+            ((KV_HEADS * (ROPE_DIM // 2) + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+        for plane in (0, 1):
+            self._store_kv(
+                self.k_buf,
+                self.v_buf,
+                rows=False,
+                position=int(pos),
+                count=1,
+                plane=plane,
+                data_off=data_off,
+                scale_off=scale_off,
+            )
+        self._attend_decode(
+            self.q_fuse,
+            self.attn,
+            length=length,
+            data_off=data_off,
+            scale_off=scale_off,
+        )
+        self._gemv_half(
+            self.attn, self._planes["mtp.o"], self.delta, HIDDEN, ATTN_HEADS * HEAD_DIM
+        )
+        session.launch(
+            "residual_add",
+            [self.hidden, self.delta],
+            [u32(HIDDEN)],
+            ((HIDDEN + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+
+    def _mtp_ffn(self) -> None:
+        session = self.session
+        self._gemv_half(
+            self.normed, self._planes["mtp.gate"], self.gate, INTERMEDIATE, HIDDEN
+        )
+        self._gemv_half(self.normed, self._planes["mtp.up"], self.up, INTERMEDIATE, HIDDEN)
+        session.launch(
+            "silu_mul",
+            [self.gate, self.up, self.ff],
+            [u32(INTERMEDIATE)],
+            ((INTERMEDIATE + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+        self._gemv_half(self.ff, self._planes["mtp.down"], self.delta, HIDDEN, INTERMEDIATE)
+        session.launch(
+            "residual_add",
+            [self.hidden, self.delta],
+            [u32(HIDDEN)],
+            ((HIDDEN + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
 
     def _check(self) -> None:
         if self._halted or (self._stop is not None and self._stop()):

@@ -70,23 +70,63 @@ def test_thinking_has_no_2048_cap() -> None:
     assert _output_limit({}, False, 60, 262144) == 2048
 
 
-def test_thinking_follows_request_or_registry_not_variant() -> None:
+def test_effort_opens_thinking_without_changing_the_card() -> None:
     from types import SimpleNamespace
 
-    from qwen35_4b.chat import _thinking
+    from qwen35_4b.chat import _request_effort
+    from qwen35_4b.sampling import mode_card
 
-    thinking = SimpleNamespace(variant="thinking", enable_thinking=None)
-    instruct = SimpleNamespace(variant="instruct", enable_thinking=None)
-    bare = SimpleNamespace(variant=None, enable_thinking=None)
-    closed = SimpleNamespace(variant="thinking", enable_thinking=False)
-    assert _thinking(thinking, {"reasoning": {"effort": "none"}}) is False
-    assert _thinking(instruct, {"reasoning": {"effort": "high"}}) is True
-    assert _thinking(thinking, {"reasoning": {"effort": "low"}}) is True
-    assert _thinking(thinking, {}) is True
-    assert _thinking(instruct, {}) is True
-    assert _thinking(closed, {}) is False
-    assert _thinking(bare, {"reasoning": {"effort": "none"}}) is False
-    assert _thinking(bare, {}) is True
+    instruct = SimpleNamespace(
+        variant="instruct",
+        sampling={"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5},
+        variants=None,
+        default_variant="thinking",
+        enable_thinking=None,
+        reasoning_effort="none",
+    )
+    thinking, card = mode_card(instruct, _request_effort({"reasoning": {"effort": "low"}}))
+    assert thinking is True
+    assert card["temperature"] == 0.7
+    closed, still = mode_card(instruct, _request_effort({"reasoning": {"effort": "none"}}))
+    assert closed is False
+    assert still["temperature"] == 0.7
+    omitted, instruct_card = mode_card(instruct, _request_effort({}))
+    assert omitted is False
+    assert instruct_card["temperature"] == 0.7
+
+    stored = SimpleNamespace(
+        variant="thinking",
+        sampling=None,
+        variants=None,
+        default_variant="thinking",
+        enable_thinking=True,
+        reasoning_effort="high",
+    )
+    open_think, thinking_card = mode_card(stored, _request_effort({}))
+    assert open_think is True
+    assert thinking_card["temperature"] == 1.0
+
+    bare = SimpleNamespace(
+        variant=None,
+        sampling=None,
+        variants=None,
+        default_variant="thinking",
+        enable_thinking=None,
+        reasoning_effort=None,
+    )
+    default_open, default_card = mode_card(bare, _request_effort({}))
+    assert default_open is True
+    assert default_card["temperature"] == 1.0
+
+    row_closed = SimpleNamespace(
+        variant="thinking",
+        sampling=None,
+        variants=None,
+        default_variant="thinking",
+        enable_thinking=False,
+        reasoning_effort=None,
+    )
+    assert mode_card(row_closed, _request_effort({}))[0] is False
 
 
 def test_unsupported_effort_steps_up_or_falls_back() -> None:
@@ -147,5 +187,9 @@ def test_historical_reasoning_is_dropped() -> None:
 def test_sampling_card() -> None:
     assert DEFAULT_VARIANT == "thinking"
     assert set(VARIANTS) == {"thinking", "instruct"}
+    assert VARIANTS["thinking"]["reasoning_effort"] == "high"
+    assert VARIANTS["instruct"]["reasoning_effort"] == "none"
     for row in VARIANTS.values():
-        assert {"temperature", "top_p", "top_k", "presence_penalty"} <= set(row)
+        assert {"temperature", "top_p", "top_k", "presence_penalty", "reasoning_effort"} <= set(
+            row
+        )

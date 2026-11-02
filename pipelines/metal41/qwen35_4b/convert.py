@@ -58,7 +58,11 @@ def record_dir(models: Path) -> Path:
 
 
 def quantize(src: Path, dest: Path) -> Path:
-    """Pack language and vision tensors from ``src`` into ``dest/weights.bin``."""
+    """Pack language and vision tensors from ``src`` into ``dest/weights.bin``.
+
+    MTP is not packed here. ``pack_mtp_half`` appends those matrices from the
+    same BF16 checkout after the language record is complete.
+    """
     src = Path(src)
     dest = Path(dest)
     manifest_path = dest / "manifest.json"
@@ -69,13 +73,16 @@ def quantize(src: Path, dest: Path) -> Path:
             current = {}
         stored = current.get("tensors")
         expected = {logical for _raw, logical, _kind, _shape in _order()}
+        have = set(stored) if isinstance(stored, dict) else set()
+        # A record that already holds MTP still counts as complete for language.
         if (
             current.get("complete") is True
             and isinstance(stored, dict)
-            and set(stored) == expected
+            and expected <= have
             and (dest / "weights.bin").is_file()
         ):
             return dest
+        # Keep MTP bytes when only language is being rebuilt: drop the file.
         manifest_path.unlink(missing_ok=True)
         (dest / "weights.bin").unlink(missing_ok=True)
     dest.mkdir(parents=True, exist_ok=True)
@@ -104,6 +111,82 @@ def quantize(src: Path, dest: Path) -> Path:
         encoding="utf-8",
     )
     return dest
+
+
+def pack_mtp_half(record: Path, source: Path) -> Path:
+    """Append Metal ``half`` MTP matrices from the BF16 checkout onto ``record``.
+
+    Reads ``mtp.*`` from ``source`` (the SSD BF16 tree, including
+    ``mtp.safetensors`` when the language shards omit those tensors). Language
+    and vision bytes stay in place. A record whose MTP planes are already half
+    is left alone.
+    """
+    record = Path(record).expanduser().resolve()
+    source = Path(source).expanduser().resolve()
+    manifest_path = record / "manifest.json"
+    weights = record / "weights.bin"
+    if not manifest_path.is_file() or not weights.is_file():
+        message = f"{record.name} has no packed record"
+        raise FileNotFoundError(message)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    tensors: dict[str, Any] = dict(manifest.get("tensors") or {})
+    order = _mtp_order()
+    logical = [name for _raw, name, _kind, _shape in order]
+    pending = [
+        name
+        for name in logical
+        if name not in tensors or str(tensors[name].get("kind")) != "half"
+    ]
+    if not pending:
+        print("mtp half", flush=True)
+        return record
+    sources = _sources(source)
+    missing = [raw for raw, name, _kind, _shape in order if name in pending and raw not in sources]
+    if missing:
+        message = f"{missing[0]} is not in the BF16 checkout"
+        raise RuntimeError(message)
+    cursor = int(weights.stat().st_size)
+    with weights.open("ab") as handle:
+        for raw, name, kind, shape in order:
+            if name not in pending:
+                continue
+            if kind != "half":
+                message = f"{name} must pack as half"
+                raise RuntimeError(message)
+            header, data_start, path = sources[raw]
+            array = _load(path, header, data_start, raw)
+            if tuple(array.shape) != tuple(shape):
+                if array.size == _numel(shape):
+                    array = array.reshape(shape)
+                else:
+                    message = f"{raw} has shape {array.shape}, expected {shape}"
+                    raise RuntimeError(message)
+            print(f"  {name}", flush=True)
+            blob = half_bytes(array)
+            count = _numel(shape)
+            if len(blob) != count * 2:
+                message = f"{raw} packed {len(blob)} bytes"
+                raise RuntimeError(message)
+            handle.write(blob)
+            tensors[name] = {
+                "kind": "half",
+                "shape": list(shape),
+                "data": cursor,
+                "data_bytes": len(blob),
+                "scale": 0,
+                "scale_bytes": 0,
+            }
+            cursor += len(blob)
+        handle.flush()
+        os.fsync(handle.fileno())
+    manifest["tensors"] = tensors
+    manifest["bytes"] = cursor
+    manifest["mtp_weight"] = "half"
+    temporary = manifest_path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, manifest_path)
+    print(f"mtp half {len(pending)}", flush=True)
+    return record
 
 
 def list_files(host: str = _HOST, repo: str = REPO) -> list[tuple[str, int]]:
@@ -287,6 +370,28 @@ def _order() -> list[tuple[str, str, str, tuple[int, ...]]]:
     rows.append(("model.language_model.norm.weight", "final_norm", "half", (HIDDEN,)))
     rows.extend(_vision())
     return rows
+
+
+def _mtp_order() -> list[tuple[str, str, str, tuple[int, ...]]]:
+    """Official MTP head. Packed as Metal ``half`` (not fp8)."""
+    stem = "mtp.layers.0."
+    return [
+        ("mtp.fc.weight", "mtp.fc", "half", (HIDDEN, HIDDEN * 2)),
+        ("mtp.pre_fc_norm_hidden.weight", "mtp.pre_fc_norm_hidden", "half", (HIDDEN,)),
+        ("mtp.pre_fc_norm_embedding.weight", "mtp.pre_fc_norm_embedding", "half", (HIDDEN,)),
+        ("mtp.norm.weight", "mtp.norm", "half", (HIDDEN,)),
+        (stem + "input_layernorm.weight", "mtp.in_norm", "half", (HIDDEN,)),
+        (stem + "post_attention_layernorm.weight", "mtp.post_norm", "half", (HIDDEN,)),
+        (stem + "self_attn.q_proj.weight", "mtp.q", "half", (8192, HIDDEN)),
+        (stem + "self_attn.k_proj.weight", "mtp.k", "half", (1024, HIDDEN)),
+        (stem + "self_attn.v_proj.weight", "mtp.v", "half", (1024, HIDDEN)),
+        (stem + "self_attn.o_proj.weight", "mtp.o", "half", (HIDDEN, 4096)),
+        (stem + "self_attn.q_norm.weight", "mtp.q_norm", "half", (256,)),
+        (stem + "self_attn.k_norm.weight", "mtp.k_norm", "half", (256,)),
+        (stem + "mlp.gate_proj.weight", "mtp.gate", "half", (INTERMEDIATE, HIDDEN)),
+        (stem + "mlp.up_proj.weight", "mtp.up", "half", (INTERMEDIATE, HIDDEN)),
+        (stem + "mlp.down_proj.weight", "mtp.down", "half", (HIDDEN, INTERMEDIATE)),
+    ]
 
 
 def _vision() -> list[tuple[str, str, str, tuple[int, ...]]]:
