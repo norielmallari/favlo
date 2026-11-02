@@ -31,6 +31,7 @@ KERNELS = (
     "residual_add_rows",
     "gemv_fp8",
     "gemv_fp8_add",
+    "gemv_fp8_vec",
     "conv_silu",
     "conv_silu_chunk",
     "gdn_step",
@@ -60,6 +61,11 @@ KERNELS = (
     "vision_rope64",
     "vision_attend64",
     "dequant_fp8_rows",
+    "restore_fp8_i8",
+    "quantize_half_i8",
+    "prefill_i8_n64",
+    "prefill_i8_m32",
+    "scale_i8_f32",
 )
 
 PREFILL_TILE = 1024

@@ -17,6 +17,7 @@ def run_kernels() -> None:
     session = Session(owner)
     try:
         _check_gemv(session)
+        _check_int8(session)
         _check_rmsnorm(session)
         _check_gdn(session)
         _check_kv_f16(session)
@@ -56,6 +57,102 @@ def _check_gemv(session: Session) -> None:
     if not np.allclose(got, expect, rtol=2e-2, atol=2e-2):
         message = f"gemv_fp8 mismatch max={np.max(np.abs(got - expect))}"
         raise RuntimeError(message)
+
+    out_v = session.allocate(rows * 4, zero=True)
+    session.launch(
+        "gemv_fp8_vec",
+        [act, w, sc, out_v],
+        [u32(rows), u32(inner)],
+        (rows, 1, 1),
+        (32, 1, 1),
+    )
+    got_v = np.frombuffer(memory.load(out_v, 0, rows * 4), dtype=np.float32)
+    if not np.allclose(got_v, expect, rtol=2e-2, atol=2e-2):
+        message = f"gemv_fp8_vec mismatch max={np.max(np.abs(got_v - expect))}"
+        raise RuntimeError(message)
+
+
+def _check_int8(session: Session) -> None:
+    """fp8 -> int8 restore, int8 activation, int8 matmul2d (both tiles), then scale."""
+    rows, cols, inner = 64, 128, 512
+    rng = np.random.default_rng(4)
+    activation = rng.standard_normal((rows, inner)).astype(np.float32)
+    activation[rows - 8 :] = 0.0  # padded rows quantize to zero
+    activation = activation.astype(np.float16)
+    weight = rng.standard_normal((cols, inner)).astype(np.float32) * 0.02
+    data, scale = quantize_fp8(weight)
+    data_u = np.frombuffer(data, dtype=np.uint8).reshape(cols, inner)
+    scale_u = np.frombuffer(scale, dtype=np.uint8).reshape(cols, inner // 32)
+    recon = np.empty_like(weight)
+    for c in range(cols):
+        for b in range(inner // 32):
+            s = _e8m0(int(scale_u[c, b]))
+            for i in range(32):
+                recon[c, b * 32 + i] = _e4m3(int(data_u[c, b * 32 + i])) * s
+    expect = activation.astype(np.float32) @ recon.T
+
+    act = session.upload(activation.tobytes())
+    w = session.upload(data)
+    sc = session.upload(scale)
+    w_i8 = session.allocate(cols * inner, zero=True)
+    w_scale = session.allocate(cols * 4, zero=True)
+    a_i8 = session.allocate(rows * inner, zero=True)
+    a_scale = session.allocate(rows * 4, zero=True)
+    session.launch(
+        "restore_fp8_i8",
+        [w, sc, w_i8, w_scale],
+        [u32(inner)],
+        (cols, 1, 1),
+        (256, 1, 1),
+    )
+    session.launch(
+        "quantize_half_i8",
+        [act, a_i8, a_scale],
+        [u32(inner)],
+        (rows, 1, 1),
+        (256, 1, 1),
+    )
+    codes = np.frombuffer(memory.load(w_i8, 0, cols * inner), dtype=np.int8).reshape(cols, inner)
+    channel = np.frombuffer(memory.load(w_scale, 0, cols * 4), dtype=np.float32)
+    if int(np.abs(codes).max()) != 127 or np.any(channel <= 0.0):
+        message = "restore_fp8_i8 did not fill the int8 range"
+        raise RuntimeError(message)
+    roundtrip = codes.astype(np.float32) * channel[:, None]
+    if not np.allclose(roundtrip, recon, rtol=0.0, atol=float(channel.max())):
+        message = f"restore_fp8_i8 roundtrip max={np.max(np.abs(roundtrip - recon))}"
+        raise RuntimeError(message)
+    act_scale = np.frombuffer(memory.load(a_scale, 0, rows * 4), dtype=np.float32)
+    if np.any(act_scale[rows - 8 :] != 0.0) or np.any(act_scale[: rows - 8] <= 0.0):
+        message = "quantize_half_i8 row scales are wrong"
+        raise RuntimeError(message)
+
+    # Both tiles. 1% of the peak covers the two int8 roundings.
+    limit = 0.02 * float(np.max(np.abs(expect)))
+    for kernel, groups in (
+        ("prefill_i8_n64", (cols // 64, rows // 64, 1)),
+        ("prefill_i8_m32", (cols // 128, rows // 32, 1)),
+    ):
+        out = session.allocate(rows * cols * 4, zero=True)
+        session.launch(
+            kernel,
+            [a_i8, w_i8, out],
+            [u32(rows), u32(cols), u32(inner)],
+            groups,
+            (128, 1, 1),
+        )
+        session.launch(
+            "scale_i8_f32",
+            [out, a_scale, w_scale],
+            [u32(rows), u32(cols)],
+            ((rows * (cols // 4) + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+        got = np.frombuffer(memory.load(out, 0, rows * cols * 4), dtype=np.float32)
+        got = got.reshape(rows, cols)
+        error = float(np.max(np.abs(got - expect)))
+        if not np.isfinite(error) or error > limit:
+            message = f"{kernel} int8 mismatch max={error} limit={limit}"
+            raise RuntimeError(message)
 
 
 def _check_rmsnorm(session: Session) -> None:

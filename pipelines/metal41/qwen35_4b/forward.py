@@ -44,6 +44,12 @@ _GDN_Z = LINEAR_VALUE_HEADS * LINEAR_HEAD_DIM
 _MIN_CTX = 2048
 _GROUP = ATTN_HEADS // KV_HEADS
 _TILE = PREFILL_TILE
+# Dense prefill planes that run int8 x int8. Attention q/k/v/o and GDN a/b stay on
+# the half x fp8 matmul. Decode never reads these paths.
+_I8_PLANES = frozenset({"gate", "up", "down", "qkv", "z", "out"})
+_I8_WEIGHT_BYTES = max(INTERMEDIATE * HIDDEN, _CONV_CH * HIDDEN, _GDN_Z * HIDDEN)
+_I8_INNER = max(HIDDEN, INTERMEDIATE, _GDN_Z)
+_I8_COLS = max(HIDDEN, INTERMEDIATE, _CONV_CH, _GDN_Z)
 
 
 @dataclass(frozen=True)
@@ -241,6 +247,12 @@ class Qwen35Runtime:
         # to the single-query kernel when the live span exceeds this span.
         self._score_span = min(capacity, 8192)
         self.pf_scores = s.allocate(tile * ATTN_HEADS * self._score_span * 4, zero=True)
+        # int8 prefill stages: weight codes, weight channel scales, activation codes,
+        # activation row scales.
+        self.i8_weight = s.allocate(_I8_WEIGHT_BYTES)
+        self.i8_weight_scale = s.allocate(_I8_COLS * 4, zero=True)
+        self.i8_act = s.allocate(tile * _I8_INNER, zero=True)
+        self.i8_act_scale = s.allocate(tile * 4, zero=True)
         self._full_index = {layer: i for i, layer in enumerate(FULL)}
         self._gdn_index: dict[int, int] = {}
         cursor = 0
@@ -417,6 +429,98 @@ class Qwen35Runtime:
             offsets=[0, plane.data, plane.scale, 0],
         )
 
+    def _dense(
+        self,
+        layer: int,
+        name: str,
+        destination: Any,
+        rows: int,
+        cols: int,
+        inner: int,
+        *,
+        fresh: bool = True,
+    ) -> None:
+        """Prefill projection ``layer.<n>.<name>``: int8 for the planes in ``_I8_PLANES``.
+
+        ``fresh`` is False when ``pf_half`` was already quantized for the previous call
+        (up after gate, z after qkv).
+        """
+        plane = self._planes[f"layer.{layer}.{name}"]
+        if name in _I8_PLANES:
+            self._matmul_i8(plane, destination, rows, cols, inner, fresh=fresh, wide=name == "down")
+            return
+        self._matmul(plane, destination, rows, cols, inner)
+
+    def _matmul_i8(
+        self,
+        plane: Plane,
+        destination: Any,
+        rows: int,
+        cols: int,
+        inner: int,
+        *,
+        fresh: bool = True,
+        wide: bool = False,
+    ) -> None:
+        """``pf_half`` [rows, inner] times the fp8 plane through int8 matmul2d.
+
+        The fp8 plane is restored to int8 codes with one channel scale per output
+        column, the activation is quantized per row, and ``scale_i8_f32`` rewrites the
+        int32 accumulators in ``destination`` as floats.
+        """
+        if rows % 64 != 0 or cols % 64 != 0 or inner % 128 != 0:
+            message = f"int8 matmul needs rows, cols multiples of 64 and inner of 128; got {rows}x{cols}x{inner}"
+            raise ValueError(message)
+        if (
+            cols * inner > _I8_WEIGHT_BYTES
+            or inner > _I8_INNER
+            or cols > _I8_COLS
+            or rows > _TILE
+        ):
+            message = f"int8 matmul {rows}x{cols}x{inner} exceeds its stage"
+            raise ValueError(message)
+        session = self.session
+        session.launch(
+            "restore_fp8_i8",
+            [self.weights, self.weights, self.i8_weight, self.i8_weight_scale],
+            [u32(inner)],
+            (cols, 1, 1),
+            (256, 1, 1),
+            offsets=[plane.data, plane.scale, 0, 0],
+        )
+        if fresh:
+            session.launch(
+                "quantize_half_i8",
+                [self.pf_half, self.i8_act, self.i8_act_scale],
+                [u32(inner)],
+                (rows, 1, 1),
+                (256, 1, 1),
+            )
+        if wide and cols % 128 == 0 and rows % 32 == 0:
+            session.launch(
+                "prefill_i8_m32",
+                [self.i8_act, self.i8_weight, destination],
+                [u32(rows), u32(cols), u32(inner)],
+                (cols // 128, rows // 32, 1),
+                (128, 1, 1),
+            )
+        else:
+            session.launch(
+                "prefill_i8_n64",
+                [self.i8_act, self.i8_weight, destination],
+                [u32(rows), u32(cols), u32(inner)],
+                (cols // 64, rows // 64, 1),
+                (128, 1, 1),
+            )
+        quads = rows * (cols // 4)
+        session.launch(
+            "scale_i8_f32",
+            [destination, self.i8_act_scale, self.i8_weight_scale],
+            [u32(rows), u32(cols)],
+            ((quads + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+
     def _prefill_chunk(self, tokens: list[int], *, logits: bool) -> None:
         count = len(tokens)
         if count == 0:
@@ -539,8 +643,8 @@ class Qwen35Runtime:
             offsets=[0, self._planes[f"layer.{layer}.post_norm"].data, 0],
         )
         self._cast_half(self.pf_normed, HIDDEN, row_pad, valid=count)
-        self._matmul(self._planes[f"layer.{layer}.gate"], self.pf_gate, row_pad, INTERMEDIATE, HIDDEN)
-        self._matmul(self._planes[f"layer.{layer}.up"], self.pf_up, row_pad, INTERMEDIATE, HIDDEN)
+        self._dense(layer, "gate", self.pf_gate, row_pad, INTERMEDIATE, HIDDEN)
+        self._dense(layer, "up", self.pf_up, row_pad, INTERMEDIATE, HIDDEN, fresh=False)
         session.launch(
             "silu_mul_rows",
             [self.pf_gate, self.pf_up, self.pf_ff],
@@ -549,7 +653,7 @@ class Qwen35Runtime:
             (1, 1, 1),
         )
         self._cast_half(self.pf_ff, INTERMEDIATE, row_pad, valid=count)
-        self._matmul(self._planes[f"layer.{layer}.down"], self.pf_delta, row_pad, HIDDEN, INTERMEDIATE)
+        self._dense(layer, "down", self.pf_delta, row_pad, HIDDEN, INTERMEDIATE)
         session.launch(
             "residual_add_rows",
             [self.pf_hidden, self.pf_delta],
@@ -564,8 +668,8 @@ class Qwen35Runtime:
         state_off = gdn_i * LINEAR_VALUE_HEADS * LINEAR_HEAD_DIM * LINEAR_HEAD_DIM * 4
         hist_off = gdn_i * _CONV_CH * (CONV_KERNEL - 1) * 4
         self._cast_half(self.pf_normed, HIDDEN, row_pad, valid=count)
-        self._matmul(self._planes[f"layer.{layer}.qkv"], self.pf_mixed, row_pad, _CONV_CH, HIDDEN)
-        self._matmul(self._planes[f"layer.{layer}.z"], self.pf_z, row_pad, _GDN_Z, HIDDEN)
+        self._dense(layer, "qkv", self.pf_mixed, row_pad, _CONV_CH, HIDDEN)
+        self._dense(layer, "z", self.pf_z, row_pad, _GDN_Z, HIDDEN, fresh=False)
         # a/b are 32 cols — matmul2d N=32 tile over the padded chunk.
         self._matmul(
             self._planes[f"layer.{layer}.a"],
@@ -624,8 +728,9 @@ class Qwen35Runtime:
         self._cast_half(
             self.pf_gdn, LINEAR_VALUE_HEADS * LINEAR_HEAD_DIM, row_pad, valid=count
         )
-        self._matmul(
-            self._planes[f"layer.{layer}.out"],
+        self._dense(
+            layer,
+            "out",
             self.pf_delta,
             row_pad,
             HIDDEN,
@@ -1177,5 +1282,6 @@ def _workspace_bytes(capacity: int) -> int:
         + tile * KV_HEADS * HEAD_DIM * 2
         + tile * ATTN_HEADS * min(capacity, 8192)
     )
-    return floats * 4 + tile * widest * 2
+    i8 = _I8_WEIGHT_BYTES + _I8_COLS * 4 + tile * _I8_INNER + tile * 4
+    return floats * 4 + tile * widest * 2 + i8
 

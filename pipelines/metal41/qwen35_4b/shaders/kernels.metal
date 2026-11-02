@@ -214,6 +214,69 @@ kernel void residual_add(
     }
 }
 
+// One E8M0 block of 32 codes against float activation. Two uint4 loads cover the block.
+static float fp8_block(
+    uint4 packed0,
+    uint4 packed1,
+    device const float* activation,
+    uint block,
+    float factor)
+{
+    device const float4* act = (device const float4*)(activation + (block << 5u));
+    float sum = 0.0f;
+    uint4 words[2] = {packed0, packed1};
+    for (uint chunk = 0u; chunk < 2u; ++chunk) {
+        uint word0 = words[chunk].x;
+        uint word1 = words[chunk].y;
+        uint word2 = words[chunk].z;
+        uint word3 = words[chunk].w;
+        float4 a0 = act[chunk * 4u];
+        float4 a1 = act[chunk * 4u + 1u];
+        float4 a2 = act[chunk * 4u + 2u];
+        float4 a3 = act[chunk * 4u + 3u];
+        sum = fma(e4m3_code(word0 & 255u), a0.x, sum);
+        sum = fma(e4m3_code((word0 >> 8u) & 255u), a0.y, sum);
+        sum = fma(e4m3_code((word0 >> 16u) & 255u), a0.z, sum);
+        sum = fma(e4m3_code((word0 >> 24u) & 255u), a0.w, sum);
+        sum = fma(e4m3_code(word1 & 255u), a1.x, sum);
+        sum = fma(e4m3_code((word1 >> 8u) & 255u), a1.y, sum);
+        sum = fma(e4m3_code((word1 >> 16u) & 255u), a1.z, sum);
+        sum = fma(e4m3_code((word1 >> 24u) & 255u), a1.w, sum);
+        sum = fma(e4m3_code(word2 & 255u), a2.x, sum);
+        sum = fma(e4m3_code((word2 >> 8u) & 255u), a2.y, sum);
+        sum = fma(e4m3_code((word2 >> 16u) & 255u), a2.z, sum);
+        sum = fma(e4m3_code((word2 >> 24u) & 255u), a2.w, sum);
+        sum = fma(e4m3_code(word3 & 255u), a3.x, sum);
+        sum = fma(e4m3_code((word3 >> 8u) & 255u), a3.y, sum);
+        sum = fma(e4m3_code((word3 >> 16u) & 255u), a3.z, sum);
+        sum = fma(e4m3_code((word3 >> 24u) & 255u), a3.w, sum);
+    }
+    return sum * factor;
+}
+
+// One simdgroup owns one output row. Lanes walk contiguous 32-byte scale blocks.
+static float dot_fp8_vec(
+    device const float* activation,
+    device const uchar* weights,
+    device const uchar* scales,
+    uint row,
+    uint inner,
+    uint lane)
+{
+    uint blocks = inner >> 5u;
+    device const uchar* row_w = weights + ulong(row) * inner;
+    device const uchar* row_s = scales + ulong(row) * blocks;
+    float acc = 0.0f;
+    for (uint block = lane; block < blocks; block += 32u) {
+        device const uint4* words = (device const uint4*)(row_w + (block << 5u));
+        uint4 p0 = words[0];
+        uint4 p1 = words[1];
+        float factor = e8m0_code(row_s[block]);
+        acc += fp8_block(p0, p1, activation, block, factor);
+    }
+    return simd_sum(acc);
+}
+
 // One fp8 row dotted with a float activation. ``inner`` is a multiple of 512.
 // Each lane reads 16 codes per step; one scale byte covers 32 codes.
 static float dot_fp8_row(
@@ -296,6 +359,26 @@ kernel void gemv_fp8_add(
     acc = simd_sum(acc);
     if (lane == 0u) {
         destination[row] += acc;
+    }
+}
+
+// One simdgroup per row. Kept for checks; decode prefers gemv_fp8.
+kernel void gemv_fp8_vec(
+    device const float* activation [[buffer(0)]],
+    device const uchar* weights [[buffer(1)]],
+    device const uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= rows) {
+        return;
+    }
+    float sum = dot_fp8_vec(activation, weights, scales, row, inner, lane);
+    if (lane == 0u) {
+        destination[row] = sum;
     }
 }
 
@@ -1763,4 +1846,172 @@ kernel void dequant_fp8_rows(
         uint element = (block << 5) + lane;
         dest[element] = e4m3_code(packed[element]) * factor;
     }
+}
+
+// int8 prefill. Activation and weight rows each collapse to one channel scale
+// (peak / 127), the matmul2d runs int8 x int8 -> int32, and scale_i8_f32 turns
+// the int32 accumulators back into floats in place.
+
+// Reduce a per-thread peak over a 256-thread group. ``shared`` holds 8 floats.
+static float group_peak(float value, threadgroup float* shared, uint lane, uint simd, uint tid) {
+    value = simd_max(value);
+    if (lane == 0u) {
+        shared[simd] = value;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float peak = shared[0];
+    for (uint i = 1u; i < 8u; ++i) {
+        peak = max(peak, shared[i]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return peak;
+}
+
+// One threadgroup per weight row: peak = max |e4m3(code) * e8m0(scale)| over K,
+// codes = clamp(rint(value / (peak / 127)), -127, 127). ``channel[row]`` = peak / 127.
+kernel void restore_fp8_i8(
+    device const uchar* weights [[buffer(0)]],
+    device const uchar* scales [[buffer(1)]],
+    device char* codes [[buffer(2)]],
+    device float* channel [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    threadgroup float shared[8];
+    device const uchar4* packed = (device const uchar4*)(weights + ulong(row) * inner);
+    device const uchar* row_scale = scales + ulong(row) * (inner >> 5u);
+    uint quads = inner >> 2u;
+    float peak = 0.0f;
+    for (uint q = tid; q < quads; q += 256u) {
+        uchar4 word = packed[q];
+        float factor = e8m0_code(row_scale[q >> 3u]);
+        peak = max(peak, fabs(e4m3_code(word.x)) * factor);
+        peak = max(peak, fabs(e4m3_code(word.y)) * factor);
+        peak = max(peak, fabs(e4m3_code(word.z)) * factor);
+        peak = max(peak, fabs(e4m3_code(word.w)) * factor);
+    }
+    peak = group_peak(peak, shared, lane, simd, tid);
+    float step = peak / 127.0f;
+    float inverse = step > 0.0f ? 1.0f / step : 0.0f;
+    device char4* out = (device char4*)(codes + ulong(row) * inner);
+    for (uint q = tid; q < quads; q += 256u) {
+        uchar4 word = packed[q];
+        float factor = e8m0_code(row_scale[q >> 3u]) * inverse;
+        float4 scaled = float4(
+            e4m3_code(word.x), e4m3_code(word.y), e4m3_code(word.z), e4m3_code(word.w)) * factor;
+        out[q] = char4(clamp(rint(scaled), -127.0f, 127.0f));
+    }
+    if (tid == 0u) {
+        channel[row] = step;
+    }
+}
+
+// One threadgroup per activation row, same peak / 127 rule over a half row.
+kernel void quantize_half_i8(
+    device const half* activation [[buffer(0)]],
+    device char* codes [[buffer(1)]],
+    device float* channel [[buffer(2)]],
+    constant uint& inner [[buffer(3)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    threadgroup float shared[8];
+    device const half4* source = (device const half4*)(activation + ulong(row) * inner);
+    uint quads = inner >> 2u;
+    float peak = 0.0f;
+    for (uint q = tid; q < quads; q += 256u) {
+        float4 v = fabs(float4(source[q]));
+        peak = max(peak, max(max(v.x, v.y), max(v.z, v.w)));
+    }
+    peak = group_peak(peak, shared, lane, simd, tid);
+    float step = peak / 127.0f;
+    float inverse = step > 0.0f ? 1.0f / step : 0.0f;
+    device char4* out = (device char4*)(codes + ulong(row) * inner);
+    for (uint q = tid; q < quads; q += 256u) {
+        out[q] = char4(clamp(rint(float4(source[q]) * inverse), -127.0f, 127.0f));
+    }
+    if (tid == 0u) {
+        channel[row] = step;
+    }
+}
+
+// y[rows, cols] (int32) = x[rows, inner] (int8) @ W[cols, inner]^T (int8).
+// ``rows`` and ``cols`` are multiples of 64.
+kernel void prefill_i8_n64(
+    device int8_t* activation [[buffer(0)]],
+    device int8_t* weights [[buffer(1)]],
+    device int* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    tensor<device int8_t, dextents<int, 2>, tensor_inline> left(
+        activation, dextents<int, 2>(int(inner), int(rows)), array<int, 2>{1, int(inner)});
+    tensor<device int8_t, dextents<int, 2>, tensor_inline> right(
+        weights, dextents<int, 2>(int(inner), int(cols)), array<int, 2>{1, int(inner)});
+    tensor<device int, dextents<int, 2>, tensor_inline> out(
+        destination, dextents<int, 2>(int(cols), int(rows)), array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(64, 64, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, int(tgid.y) * 64);
+    auto tile_right = right.slice(0, int(tgid.x) * 64);
+    auto tile_out = out.slice(int(tgid.x) * 64, int(tgid.y) * 64);
+    // int8 x int8 -> int32 accumulates in a cooperative tensor, then stores.
+    auto acc = op.get_destination_cooperative_tensor<decltype(tile_left), decltype(tile_right), int>();
+    op.run(tile_left, tile_right, acc);
+    acc.store(tile_out);
+}
+
+// 32 rows x 128 columns per group. ``rows`` is a multiple of 32, ``cols`` of 128.
+kernel void prefill_i8_m32(
+    device int8_t* activation [[buffer(0)]],
+    device int8_t* weights [[buffer(1)]],
+    device int* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    tensor<device int8_t, dextents<int, 2>, tensor_inline> left(
+        activation, dextents<int, 2>(int(inner), int(rows)), array<int, 2>{1, int(inner)});
+    tensor<device int8_t, dextents<int, 2>, tensor_inline> right(
+        weights, dextents<int, 2>(int(inner), int(cols)), array<int, 2>{1, int(inner)});
+    tensor<device int, dextents<int, 2>, tensor_inline> out(
+        destination, dextents<int, 2>(int(cols), int(rows)), array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(32, 128, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, int(tgid.y) * 32);
+    auto tile_right = right.slice(0, int(tgid.x) * 128);
+    auto tile_out = out.slice(int(tgid.x) * 128, int(tgid.y) * 32);
+    // int8 x int8 -> int32 accumulates in a cooperative tensor, then stores.
+    auto acc = op.get_destination_cooperative_tensor<decltype(tile_left), decltype(tile_right), int>();
+    op.run(tile_left, tile_right, acc);
+    acc.store(tile_out);
+}
+
+// In place over the int32 accumulators: float(acc) * row_scale[row] * col_scale[col].
+// Four columns per thread; ``cols`` is a multiple of 4.
+kernel void scale_i8_f32(
+    device uint4* data [[buffer(0)]],
+    device const float* row_scale [[buffer(1)]],
+    device const float* col_scale [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint quads = cols >> 2u;
+    if (gid >= rows * quads) {
+        return;
+    }
+    uint row = gid / quads;
+    uint col = (gid - row * quads) << 2u;
+    float4 acc = float4(as_type<int4>(data[gid]));
+    float4 cs = *((device const float4*)(col_scale + col));
+    data[gid] = as_type<uint4>(acc * cs * row_scale[row]);
 }

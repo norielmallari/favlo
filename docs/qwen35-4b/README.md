@@ -18,7 +18,7 @@ Device spans come from `favlo.memory`. The serve process keeps the ledger. This 
 
 Dense hybrid text backbone: 24 Gated DeltaNet layers and 8 full-attention layers (`[linear × 3, full] × 8`), SwiGLU feed-forward, tied embeddings, and a vision tower in the same packed record. Hidden size 2560, intermediate 9216, vocab 248320. Full attention uses 16 query heads with a fused output gate, 4 KV heads, head dim 256, partial RoPE (64 of 256), and M-RoPE. Gated DeltaNet uses 16 key heads, 32 value heads, head dim 128, and a depthwise conv of width 4.
 
-Weights are fp8 E4M3 with an E8M0 scale every 32 along K. Norms, `A_log`, `dt_bias`, convolution taps, and Q/K gains stay float16. Layer / Q / K / final RMSNorm apply gain as `1 + w`. The GDN gated norm applies `w` then SiLU of `z`. The eight full-attention layers keep a key/value cache. The registry field is `kv_cache`. `f16` is the default (two bytes per element, no scale plane). `e4m3` remains the fp8 cache. Prefill is a 1024-token Metal tile: `matmul_fp8` / `matmul_fp8_n32`, `gdn_chunk`, and `attend_prefill` or `attend_prefill_f16`. Only the last chunk runs the head. Decode stays token-by-token. Kernel ceilings are [ceilings.md](ceilings.md).
+Weights are fp8 E4M3 with an E8M0 scale every 32 along K. Norms, `A_log`, `dt_bias`, convolution taps, and Q/K gains stay float16. Layer / Q / K / final RMSNorm apply gain as `1 + w`. The GDN gated norm applies `w` then SiLU of `z`. The eight full-attention layers keep a key/value cache. The registry field is `kv_cache`. `f16` is the default (two bytes per element, no scale plane). `e4m3` remains the fp8 cache. Prefill is a 1024-token Metal tile. The FFN gate, up, and down planes and the GDN qkv, z, and out planes run int8: `restore_fp8_i8` collapses each fp8 weight row to int8 codes and one channel scale, `quantize_half_i8` does the same per activation row, `prefill_i8_n64` (`prefill_i8_m32` for down) is the int8×int8→int32 `matmul2d`, and `scale_i8_f32` rewrites the accumulators as floats (a 2012-token prompt prefilled at 1730 tok/s against 1520 tok/s on `matmul_fp8`, 2 November 2026). The GDN a/b and attention q/k/v/o planes stay on `matmul_fp8` / `matmul_fp8_n32`. The rest of the tile is `gdn_chunk`, and `attend_prefill` or `attend_prefill_f16`. Only the last chunk runs the head. Decode stays token-by-token. Kernel ceilings are [ceilings.md](ceilings.md).
 
 The vision tower is packed beside the language weights and runs for a still image. Its matrices are fp8 E4M3 with an E8M0 scale every 32 along K. LayerNorm weights, LayerNorm biases, and the other vision biases stay float16. The Conv3d patch embed is stored as `[1024, 1536]`. The position table is `[2304, 1024]`. Each block is LayerNorm, full attention, and tanh GELU. The merger writes 2560-wide rows, and prefill overwrites the image-pad tokens with those rows. A repeated image reuses the embedding. Video is rejected. An image prompt uses interleaved M-RoPE on the three axes; decode adds the position delta from that table.
 
@@ -26,7 +26,7 @@ The packed record's `chat_template.jinja` is the official Qwen3.5 template (tool
 
 ## Sampling
 
-Variants in `sampling.py`: `thinking` (default) and `instruct`. Registry context length is 262144. Temperature 0 is argmax. A presence penalty subtracts once per distinct completion token already drawn. First ship does not run nucleus / top-k on device yet. A thinking request that omits `max_output_tokens` runs until a stop id or the last context position. An instruct request that omits it stops at 2048 tokens. An explicit cap applies to both.
+Variants in `sampling.py`: `thinking` (default) and `instruct`. They are sampling presets only (temperature, top-p, top-k, presence penalty). Registry context length is 262144. Registration also stores `enable_thinking` from the pipeline default. Temperature 0 is argmax. A presence penalty subtracts once per distinct completion token already drawn. First ship does not run nucleus / top-k on device yet. The official card exposes thinking only as `enable_thinking` on/off (no soft `/think` switch and no graduated effort ladder). On the Responses route, every listed `reasoning.effort` is accepted. Supported values are `none` and `high` (thinking on). An unsupported name steps up to the next supported value; when none is higher, it falls back to the next lower (`minimal` / `low` / `medium` → `high`; `xhigh` / `max` → `high`). An omitted effort uses the row's `enable_thinking`, else the pipeline default. The `:suffix` does not open or close the think block and does not remap the sampling card. A thinking request that omits `max_output_tokens` runs until a stop id or the last context position. A non-thinking request that omits it stops at 2048 tokens. An explicit cap applies to both.
 
 ## Measured carrot smoke
 
@@ -38,7 +38,7 @@ Pipeline smoke under the smoke lock (`tests/test_qwen35_4b_smoke.py`), fp8 recor
 | decode (instruct card) | 44.95 tok/s | 105 | 2.34 |
 | decode (thinking card) | 43.34 tok/s | 558 | 12.88 |
 
-A 2012-token prompt on that e4m3 cache prefills at 1060.88 tok/s (1.90 s). The prefill kernel ceiling for a 256-token chunk of the e4m3 attend path is 1007.60 tok/s ([ceilings.md](ceilings.md)).
+A 2012-token prompt on that e4m3 cache prefills at 1060.88 tok/s (1.90 s). The prefill kernel ceiling for a 256-token chunk on the default f16 cache is 1061.69 tok/s ([ceilings.md](ceilings.md)). The earlier e4m3 attend path summed to 1007.60 tok/s.
 
 `complete` on the default f16 cache, same 51-token prompt (2 November 2026): prefill 897.90 tok/s (0.06 s), decode 44.81 tok/s (64 tok in 1.43 s).
 
@@ -49,6 +49,8 @@ Coding agent on the e4m3 cache printed `prompt tokens` / `cache miss` per reques
 | thinking | 993.10 tok/s (25781 tok in 25.96s) | 37.64 tok/s (2384 tok in 63.34s) |
 | instruct | 1049.04 tok/s (23058 tok in 21.98s) | 40.21 tok/s (1863 tok in 46.33s) |
 
-Thinking prefill is 98.6% of the 1007.60 tok/s kernel ceiling ([ceilings.md](ceilings.md)).
+Coding agent on the f16 cache, thinking on, no vision (2 November 2026): prefill 1393.99 tok/s (25747 tok in 18.47s), decode 39.96 tok/s (2028 tok in 50.75s).
+
+After int8 prefill for FFN and GDN qkv/z/out (2 November 2026), the same coding agent printed prefill 1548.58 tok/s (25598 tok in 16.53s) and decode 39.85 tok/s (2384 tok in 59.83s). A 2012-token warm complete on that path prefills at 1739.79 tok/s.
 
 Progress uses `favlo.console` begin / end / note on the console thread (`prompt`, `cache`, load / prefill / decode). Decode streaming uses a separate queue thread. NumPy stays off the hot path.
