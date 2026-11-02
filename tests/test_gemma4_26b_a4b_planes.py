@@ -180,39 +180,27 @@ def test_token_major_pack_matches_the_host_planes() -> None:
     local_v = rng.standard_normal((25, 8, count, 256)).astype(np.float16)
     global_k = rng.standard_normal((5, 2, count, 512)).astype(np.float16)
     global_v = rng.standard_normal((5, 2, count, 512)).astype(np.float16)
-    assert _packed_layers(local_k, transposed=False) + _packed_layers(
-        local_v, transposed=True
-    ) == pack_local(
-        local_k.astype(np.float32),
-        np.transpose(local_v.astype(np.float32), (0, 1, 3, 2)),
-        count,
-    )
-    assert _packed_layers(global_k, transposed=False) + _packed_layers(
-        global_v, transposed=False
-    ) == pack_global(
-        global_k.astype(np.float32),
-        global_v.astype(np.float32),
-        count,
+    assert _packed_layers(local_k) + _packed_layers(local_v) == pack_local(local_k, local_v, count)
+    assert _packed_layers(global_k) + _packed_layers(global_v) == pack_global(
+        global_k, global_v, count
     )
 
 
-def _packed_layers(plane: np.ndarray, *, transposed: bool) -> bytes:
-    layers, heads, _count, dim = plane.shape
+def _packed_layers(plane: np.ndarray) -> bytes:
+    layers, heads, count, dim = plane.shape
     parts: list[bytes] = []
     for layer in range(layers):
         token_major = np.ascontiguousarray(np.transpose(plane[layer], (1, 0, 2)))
-        parts.append(
-            pack_token_major(token_major.tobytes(), heads, dim, plane.shape[2], transposed=transposed)
-        )
+        parts.append(pack_token_major(token_major.tobytes(), heads, dim, count))
     return b"".join(parts)
 
 
 def test_prefix_pack_length_and_exact_file_refusal() -> None:
     count = 4
-    keys = np.zeros((25, 8, count, 256), dtype=np.float32)
-    values = np.zeros((25, 8, 256, count), dtype=np.float32)
-    global_keys = np.zeros((5, 2, count, 512), dtype=np.float32)
-    global_values = np.zeros((5, 2, count, 512), dtype=np.float32)
+    keys = np.zeros((25, 8, count, 256), dtype=np.float16)
+    values = np.zeros((25, 8, count, 256), dtype=np.float16)
+    global_keys = np.zeros((5, 2, count, 512), dtype=np.float16)
+    global_values = np.zeros((5, 2, count, 512), dtype=np.float16)
     local = pack_local(keys, values, count)
     packed_global = pack_global(global_keys, global_values, count)
     assert len(local) == local_nbytes(count)

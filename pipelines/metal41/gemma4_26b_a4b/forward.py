@@ -58,6 +58,8 @@ from gemma4_26b_a4b.geometry import (
     GLOBAL_LAYERS,
     EXPERTS,
     HIDDEN,
+    BOI_TOKEN,
+    EOI_TOKEN,
     IMAGE_TOKEN,
     LAYERS,
     LOCAL_DIM,
@@ -86,6 +88,21 @@ _SLOT = 64
 _FP4_DOWN = align_k(EXPERT_WIDTH, "fp4")
 _FP4_PLANES = expert_planes(FP4)
 _FP8_PLANES = expert_planes(FP8)
+# Widest dense matrix is global q: 8192 by 2816, plus one float scale per row.
+_I8_STAGE = 8192 * HIDDEN + 8192 * 4
+# Global o_proj reads an 8192-wide activation.
+_I8_ACT = _CHUNK * 8192
+# Shapes where restore+quantize+int8 tile beats packed fp8 matmul2d on a
+# 1024-token chunk. Gate-up, down, and local kv stay on matmul_fp8.
+_I8_FASTER = frozenset(
+    {
+        (4096, HIDDEN),
+        (HIDDEN, 4096),
+        (8192, HIDDEN),
+        (1024, HIDDEN),
+        (HIDDEN, 8192),
+    }
+)
 
 
 def _plane_off(width: int, kind: str) -> tuple[int, int]:
@@ -325,12 +342,23 @@ class Gemma4Runtime:
         """Sample after ``prompt``. Returns tokens, the prefill line, and the decode line."""
         pictures = list(images or [])
         halt_at = [item for item in (stops or []) if item]
-        visual = bool(pictures) or IMAGE_TOKEN in prompt
+        if pictures:
+            from gemma4_26b_a4b.vision import expand_image_placeholders
+
+            prompt = expand_image_placeholders(prompt, pictures)
+        visual = bool(pictures) or IMAGE_TOKEN in prompt or BOI_TOKEN in prompt
         self._hit_limit = False
         rng = random.Random(seed)
         self._note("prompt", tokens=len(prompt))
         if visual:
-            cut = prompt.index(IMAGE_TOKEN) if IMAGE_TOKEN in prompt else len(prompt)
+            cut = next(
+                (
+                    index
+                    for index, token in enumerate(prompt)
+                    if token in (IMAGE_TOKEN, BOI_TOKEN)
+                ),
+                len(prompt),
+            )
             hit = self.prefix.align(prompt[:cut])
         else:
             hit = self.prefix.align(prompt)
@@ -338,7 +366,7 @@ class Gemma4Runtime:
             self._note("prefix_load", tokens=hit)
         self._cached_tokens = hit
         self._note("cache", hit=hit)
-        pending = self._visual_tokens(prompt, hit, pictures) if visual else len(prompt) - hit
+        pending = len(prompt) - hit
         prefill_row = self._begin_phase("prefill", max(pending, 0))
         self._prefill_progress = prefill_row
         decode_row = None
@@ -349,7 +377,7 @@ class Gemma4Runtime:
             else:
                 self._prefill(prompt[hit:])
             self.session.flush()
-            prompt_n = self.filled - hit if not visual else pending
+            prompt_n = pending
             self.prompt_tokens = self.filled
             self._note_prefill(prompt_n)
             prefill_s = time.perf_counter() - start
@@ -502,7 +530,13 @@ class Gemma4Runtime:
     def _prefill_visual(self, prompt: list[int], hit: int, images: list[bytes]) -> None:
         from gemma4_26b_a4b.vision import VisionTower
 
-        if prompt.count(IMAGE_TOKEN) != len(images):
+        soft_markers = prompt.count(IMAGE_TOKEN)
+        expected = 0
+        if images:
+            from gemma4_26b_a4b.vision import image_soft_tokens
+
+            expected = sum(image_soft_tokens(blob) for blob in images)
+        if soft_markers != expected:
             message = "image parts do not match the image tokens"
             raise RuntimeError(message)
         tower = self._vision
@@ -514,27 +548,38 @@ class Gemma4Runtime:
         while pos < len(prompt):
             if self._stop:
                 return
-            if prompt[pos] == IMAGE_TOKEN:
-                handle, count = tower.encode(images[image_i])
+            if prompt[pos] == BOI_TOKEN:
+                end = pos + 1
+                self._prefill(prompt[pos:end], finish=False)
+                pos = end
+                if pos >= len(prompt) or prompt[pos] != IMAGE_TOKEN:
+                    message = "begin-of-image is missing soft placeholders"
+                    raise RuntimeError(message)
+                start = pos
+                while pos < len(prompt) and prompt[pos] == IMAGE_TOKEN:
+                    pos += 1
+                span = pos - start
+                handle, count = tower.encode(images[image_i], note=self._status)
                 image_i += 1
-                pos += 1
-                self._accept_rows(handle, count, finish=pos == len(prompt))
+                if count != span:
+                    message = f"soft tokens {count} do not match placeholders {span}"
+                    raise RuntimeError(message)
+                self._accept_rows(handle, count, finish=False)
+                if pos >= len(prompt) or prompt[pos] != EOI_TOKEN:
+                    message = "image placeholders are missing end-of-image"
+                    raise RuntimeError(message)
+                end = pos + 1
+                self._prefill(prompt[pos:end], finish=end == len(prompt))
+                pos = end
                 continue
+            if prompt[pos] == IMAGE_TOKEN:
+                message = "image placeholders must follow begin-of-image"
+                raise RuntimeError(message)
             end = pos + 1
-            while end < len(prompt) and prompt[end] != IMAGE_TOKEN:
+            while end < len(prompt) and prompt[end] not in (IMAGE_TOKEN, BOI_TOKEN):
                 end += 1
             self._prefill(prompt[pos:end], finish=end == len(prompt))
             pos = end
-
-    def _visual_tokens(self, prompt: list[int], hit: int, images: list[bytes]) -> int:
-        from gemma4_26b_a4b.vision import image_soft_tokens
-
-        tail = prompt[hit:]
-        if tail.count(IMAGE_TOKEN) != len(images):
-            message = "image parts do not match the image tokens"
-            raise RuntimeError(message)
-        soft = sum(image_soft_tokens(blob) for blob in images)
-        return len(tail) - len(images) + soft
 
     def _span(self, tokens: list[int], last: bool, *, noted: int) -> None:
         count = len(tokens)
@@ -864,16 +909,32 @@ class Gemma4Runtime:
             return
         active = min(count, matrix.k)
         cols = matrix.rows_pad or matrix.rows
+        inner = matrix.k_pad
+        rows = (tokens + 63) & ~63
+        # Int8 wins on the large attention projections once the chunk is wide
+        # enough that pad-to-64 does not dominate. Short prompts stay on fp8.
+        if (
+            matrix.kind == "matmul_fp8"
+            and (cols, inner) in _I8_FASTER
+            and tokens >= 256
+            and cols % 64 == 0
+            and inner % 128 == 0
+            and rows <= _CHUNK
+            and cols * inner + cols * 4 <= _I8_STAGE
+            and rows * inner <= _I8_ACT
+        ):
+            self._gemm_i8(source, matrix, active, tokens, rows, cols, inner, destination)
+            return
         padded = (tokens + 7) & ~7
         self.session.encode(
             "write_rows_tight",
             [source, self.span_ah],
             [
                 self.session._u32(active),
-                self.session._u32(matrix.k_pad),
+                self.session._u32(inner),
                 self.session._u32(tokens),
             ],
-            ((matrix.k_pad + 255) // 256, padded, 1),
+            ((inner + 255) // 256, padded, 1),
             (256, 1, 1),
         )
         direct = padded == tokens and cols == matrix.rows
@@ -886,9 +947,93 @@ class Gemma4Runtime:
             target,
             padded,
             cols,
-            matrix.k_pad,
+            inner,
             commit=False,
             origins=(0, matrix.origin, matrix.scale_origin, 0),
+        )
+        if direct:
+            return
+        self.session.encode(
+            "compact_rows",
+            [self.half_w, destination],
+            [
+                self.session._u32(cols),
+                self.session._u32(matrix.rows),
+                self.session._u32(tokens),
+            ],
+            ((matrix.rows + 255) // 256, tokens, 1),
+            (256, 1, 1),
+        )
+
+    def _gemm_i8(
+        self,
+        source: object,
+        matrix: Matrix,
+        active: int,
+        tokens: int,
+        rows: int,
+        cols: int,
+        inner: int,
+        destination: object,
+    ) -> None:
+        """Restore the fp8 matrix into int8, quantize the float activation, tile, scale."""
+        self.session.encode(
+            "quantize_float_i8",
+            [source, self.i8_act, self.i8_act_scale],
+            [
+                self.session._u32(tokens),
+                self.session._u32(active),
+                self.session._u32(inner),
+            ],
+            (tokens, 1, 1),
+            (256, 1, 1),
+        )
+        if rows > tokens:
+            self.session.encode(
+                "zero_buffer",
+                [self.i8_act],
+                [self.session._u32((rows - tokens) * inner)],
+                *self._grid((rows - tokens) * inner),
+                origins=[tokens * inner],
+            )
+            self.session.encode(
+                "zero_buffer",
+                [self.i8_act_scale],
+                [self.session._u32((rows - tokens) * 4)],
+                *self._grid((rows - tokens) * 4),
+                origins=[tokens * 4],
+            )
+        scale_at = cols * inner
+        self.session.encode(
+            "restore_fp8_i8",
+            [matrix.data, matrix.scales, self.i8_stage, self.i8_stage],
+            [self.session._u32(cols), self.session._u32(inner)],
+            (cols, 1, 1),
+            (256, 1, 1),
+            origins=[matrix.origin, matrix.scale_origin, 0, scale_at],
+        )
+        width = int(self.session.pipes["prefill_i8_n64"].threadExecutionWidth())
+        direct = cols == matrix.rows
+        target = destination if direct else self.half_w
+        self.session.encode(
+            "prefill_i8_n64",
+            [self.i8_act, self.i8_stage, target],
+            [
+                self.session._u32(rows),
+                self.session._u32(cols),
+                self.session._u32(inner),
+            ],
+            (cols // 64, rows // 64, 1),
+            (width * 4, 1, 1),
+        )
+        n = rows * cols
+        self.session.encode(
+            "scale_i8_f32",
+            [target, self.i8_act_scale, self.i8_stage],
+            [self.session._u32(rows), self.session._u32(cols)],
+            ((n + 255) // 256, 1, 1),
+            (256, 1, 1),
+            origins=[0, 0, scale_at],
         )
         if direct:
             return
@@ -1403,6 +1548,9 @@ class Gemma4Runtime:
         self.span_p = session.zeros(_CHUNK * Q_HEADS * GLOBAL_DIM * 4)
         self.span_h = session.zeros(_CHUNK * HIDDEN * 2)
         self.span_ah = session.zeros(_CHUNK * _MAX_K * 2)
+        self.i8_stage = session.zeros(_I8_STAGE)
+        self.i8_act = session.zeros(_I8_ACT)
+        self.i8_act_scale = session.zeros(_CHUNK * 4)
         self.half_w = session.zeros(8192 * HIDDEN * 2)
         self.expert_ah = session.zeros(_SLOTS * _SLOT * HIDDEN * 2)
         self.slot_grid = session.zeros(6 * 16)

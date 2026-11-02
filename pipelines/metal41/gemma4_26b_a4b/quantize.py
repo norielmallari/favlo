@@ -124,7 +124,7 @@ def quantize(src: Path, dest: Path) -> None:
             "experts": EXPERT_FORMAT,
             "expert_fp8_percent": EXPERT_FP8_PERCENT,
             "vectors": "half",
-            "kv": "fp8_e4m3",
+            "kv": "half",
         },
         "registered": False,
     }

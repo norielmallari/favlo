@@ -78,6 +78,11 @@ _KERNELS = (
     "compact_rows",
     "softcap",
     "router_norm",
+    "restore_fp8_i8",
+    "quantize_half_i8",
+    "quantize_float_i8",
+    "prefill_i8_n64",
+    "scale_i8_f32",
 )
 _TILE_M = 8
 _TILE_N = 32
@@ -242,6 +247,22 @@ class Session:
             if error is not None:
                 message = f"command buffer failed: {error}"
                 raise RuntimeError(message)
+
+    def measure_us(self, launch) -> float:
+        """One kernel per command buffer. Discard the first sample; median of four."""
+        launch()
+        self.flush()
+        samples: list[float] = []
+        for _ in range(4):
+            launch()
+            self.commit()
+            command = self._inflight[-1]
+            self.flush()
+            started = float(command.GPUStartTime())
+            ended = float(command.GPUEndTime())
+            samples.append((ended - started) * 1.0e6)
+        samples.sort()
+        return (samples[1] + samples[2]) / 2.0
 
     def _open(self) -> None:
         if self._encoder is not None:
@@ -606,6 +627,7 @@ def check_matmul() -> None:
             )
             raise RuntimeError(message)
         print("kernels fp8 matmul ok", flush=True)
+        _check_i8_prefill(session)
         _check_fp4(session)
         _check_half(session)
         _check_select(session)
@@ -614,44 +636,121 @@ def check_matmul() -> None:
         session.close()
 
 
+def _channel_i8(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    peak = np.max(np.abs(matrix), axis=1)
+    scale = np.where(peak > 0.0, peak / np.float32(127.0), np.float32(0.0)).astype(np.float32)
+    inv = np.zeros_like(peak)
+    np.divide(np.float32(127.0), peak, out=inv, where=peak > 0.0)
+    codes = np.rint(matrix * inv[:, None])
+    return np.clip(codes, -127, 127).astype(np.int8), scale
+
+
+def _check_i8_prefill(session: Session) -> None:
+    """Packed fp8 restores into int8, then a 64-row int8 tile."""
+    from gemma4_26b_a4b.planes import pack_matrix, restore_matrix
+
+    rng = np.random.default_rng(7)
+    rows, cols, inner = 64, 64, 256
+    activation = rng.normal(scale=0.25, size=(rows, inner)).astype(np.float16)
+    activation[0, :] = np.float16(0.0)
+    weight = rng.normal(scale=0.25, size=(cols, inner)).astype(np.float32)
+    weight[1, :] = np.float32(0.0)
+    blob = pack_matrix(weight, "fp8")
+    restored = restore_matrix(blob, cols, inner, "fp8")
+    expect_codes, expect_scale = _channel_i8(restored)
+    act_codes, act_scale = _channel_i8(activation.astype(np.float32))
+    packed = np.frombuffer(blob, dtype=np.uint8)
+    data = bytes(packed[: cols * inner])
+    scales = bytes(packed[cols * inner :])
+    stage = session.zeros(cols * inner + cols * 4)
+    act = session.zeros(rows * inner)
+    act_factors = session.zeros(rows * 4)
+    destination = session.zeros(rows * cols * 4)
+    width = int(session.pipes["prefill_i8_n64"].threadExecutionWidth())
+    session.encode(
+        "restore_fp8_i8",
+        [session.upload(np.frombuffer(data, dtype=np.uint8)), session.upload(np.frombuffer(scales, dtype=np.uint8)), stage, stage],
+        [session._u32(cols), session._u32(inner)],
+        (cols, 1, 1),
+        (256, 1, 1),
+        origins=[0, 0, 0, cols * inner],
+    )
+    session.encode(
+        "quantize_half_i8",
+        [session.upload(np.ascontiguousarray(activation)), act, act_factors],
+        [session._u32(rows), session._u32(inner)],
+        (rows, 1, 1),
+        (256, 1, 1),
+    )
+    session.encode(
+        "prefill_i8_n64",
+        [act, stage, destination],
+        [session._u32(rows), session._u32(cols), session._u32(inner)],
+        (cols // 64, rows // 64, 1),
+        (width * 4, 1, 1),
+    )
+    session.encode(
+        "scale_i8_f32",
+        [destination, act_factors, stage],
+        [session._u32(rows), session._u32(cols)],
+        ((rows * cols + 255) // 256, 1, 1),
+        (256, 1, 1),
+        origins=[0, 0, cols * inner],
+    )
+    session.flush()
+    raw = memory.load(stage, 0, cols * inner + cols * 4)
+    got_codes = np.frombuffer(raw[: cols * inner], dtype=np.int8).reshape(cols, inner)
+    got_scale = np.frombuffer(raw[cols * inner :], dtype=np.float32)
+    if not np.array_equal(got_codes, expect_codes):
+        message = "fp8 int8 restore codes mismatch"
+        raise RuntimeError(message)
+    if not np.allclose(got_scale, expect_scale, rtol=0, atol=0):
+        # Exact ULP match is expected for the peak / 127 scale.
+        if np.max(np.abs(got_scale.view(np.int32) - expect_scale.view(np.int32))) > 1:
+            message = "fp8 int8 restore scale mismatch"
+            raise RuntimeError(message)
+    got_act = np.frombuffer(memory.load(act, 0, rows * inner), dtype=np.int8).reshape(rows, inner)
+    got_act_scale = np.frombuffer(memory.load(act_factors, 0, rows * 4), dtype=np.float32)
+    if not np.array_equal(got_act, act_codes):
+        message = "int8 activation codes mismatch"
+        raise RuntimeError(message)
+    acc = got_act.astype(np.int64) @ got_codes.astype(np.int64).T
+    expect = (
+        acc
+        * got_act_scale.astype(np.float64)[:, None]
+        * got_scale.astype(np.float64)[None, :]
+    ).astype(np.float32)
+    got = session.download_f32(destination, rows * cols).reshape(rows, cols)
+    if not np.allclose(got, expect, rtol=1e-5, atol=1e-4):
+        message = f"int8 tile mismatch max {np.max(np.abs(got - expect))}"
+        raise RuntimeError(message)
+    print("kernels int8 prefill ok", flush=True)
+
+
 def _check_prefix_pack(session: Session) -> None:
-    from gemma4_26b_a4b.planes import restore_matrix
-    from gemma4_26b_a4b.prefix import encode_pack_kv, encode_unpack_kv, fp8_layout, pack_token_major
+    from gemma4_26b_a4b.prefix import half_plane_nbytes, pack_token_major
 
     rng = np.random.default_rng(0)
-    cases = ((17, 8, 256, True), (4, 8, 256, False), (130, 2, 512, False), (64, 2, 512, True))
-    for count, heads, dim, transposed in cases:
+    cases = ((17, 8, 256), (4, 8, 256), (130, 2, 512), (64, 2, 512))
+    for count, heads, dim in cases:
         raw = np.ascontiguousarray(rng.standard_normal((count, heads, dim)).astype(np.float16))
         raw.reshape(-1)[0] = np.float16(0)
-        expect = pack_token_major(raw.tobytes(), heads, dim, count, transposed=transposed)
+        expect = pack_token_major(raw.tobytes(), heads, dim, count)
+        nbytes = half_plane_nbytes(count, heads, dim)
         source = session.upload(raw)
-        packed = session.zeros(len(expect))
-        wrote = encode_pack_kv(
-            session, source, packed, 0, count, heads, dim, transposed=transposed
-        )
-        session.flush()
-        got = memory.load(packed, 0, wrote)
+        packed = session.zeros(nbytes)
+        memory.copy(source, 0, packed, 0, nbytes)
+        got = memory.load(packed, 0, nbytes)
         if got != expect:
-            message = f"prefix pack mismatch count {count} dim {dim} transposed {transposed}"
+            message = f"prefix half mismatch count {count} dim {dim}"
             raise RuntimeError(message)
-        restored = session.zeros(count * heads * dim * 2)
-        encode_unpack_kv(session, packed, restored, 0, count, heads, dim, transposed=transposed)
-        session.flush()
-        back = np.frombuffer(memory.load(restored, 0, count * heads * dim * 2), dtype=np.float16)
-        back = back.reshape(count, heads, dim)
-        rows, _, one = fp8_layout(count, 1, dim, transposed=transposed)
-        host = np.zeros((count, heads, dim), dtype=np.float32)
-        for head in range(heads):
-            piece = expect[head * one : (head + 1) * one]
-            if transposed:
-                matrix = restore_matrix(piece, rows, count, "fp8")
-                host[:, head, :] = matrix[:, :count].T
-            else:
-                host[:, head, :] = restore_matrix(piece, rows, dim, "fp8")
-        if not np.array_equal(back, host.astype(np.float16)):
-            message = f"prefix unpack mismatch count {count} dim {dim}"
+        restored = session.zeros(nbytes)
+        memory.copy(packed, 0, restored, 0, nbytes)
+        back = memory.load(restored, 0, nbytes)
+        if back != expect:
+            message = f"prefix half restore mismatch count {count} dim {dim}"
             raise RuntimeError(message)
-    print("kernels prefix pack ok", flush=True)
+    print("kernels prefix half ok", flush=True)
 
 
 def _check_select(session: Session) -> None:

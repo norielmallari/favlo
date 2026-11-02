@@ -2,25 +2,30 @@
 
 The resize is Algorithm 1 of the Gemma 4 technical report. The encoder is the
 550M ViT in that report: 27 layers, width 1152, 16 heads of dimension 72,
-non-causal attention, axial 2D-RoPE, and 2D absolute positions. A 3×3 average
-and the embedding projection replace ``<|image|>``. The pixel resize is the
-only host step. The tower itself is Metal.
+non-causal attention, axial 2D-RoPE, and 2D absolute positions. After the
+encoder, a 3×3 average pools patches, the pooled rows are scaled by
+``sqrt(width)``, then ``(row - std_bias) * std_scale`` standardizes them.
+An unscaled RMSNorm then the embedding projection replace ``<|image|>``. The
+pixel resize is the only host step. The tower itself is Metal.
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import math
 import struct
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
 from favlo.memory import memory
 from gemma4_26b_a4b.geometry import (
+    BOI_TOKEN,
+    EOI_TOKEN,
     HIDDEN,
     IMAGE_TOKEN,
     PATCH,
@@ -37,11 +42,15 @@ from gemma4_26b_a4b.geometry import (
 )
 from gemma4_26b_a4b.planes import FP8, align_k, fp8_parts
 
+_POOL_SCALE = VISION_WIDTH**0.5
+_CACHE_LIMIT = 8
+
 _MAX_PATCHES = VISION_SOFT_MAX * POOL * POOL
 _MAX_SIDE = VISION_SOFT_MAX * POOL
 _POS_ROWS = 10240
 _MLP_PAD = align_k(VISION_MLP, FP8)
-_ATTN_SCALE = 1.0 / math.sqrt(VISION_HEAD)
+# Vision attention uses the raw dot. It does not divide by sqrt(head_dim).
+_ATTN_SCALE = 1.0
 
 
 @dataclass
@@ -102,6 +111,33 @@ def image_soft_tokens(blob: bytes) -> int:
     width, height = struct.unpack(">II", blob[16:24])
     _target_h, _target_w, soft = pooled_size(int(height), int(width))
     return soft
+
+
+def expand_image_placeholders(prompt: list[int], images: list[bytes]) -> list[int]:
+    """Wrap each ``<|image|>`` as ``<|image>`` + soft placeholders + ``<image|>``.
+
+    One template image token becomes begin-of-image, one placeholder per soft
+    token, then end-of-image. Soft embeddings replace only the placeholders.
+    """
+    softs = [image_soft_tokens(blob) for blob in images]
+    markers = prompt.count(IMAGE_TOKEN)
+    if markers == len(images):
+        out: list[int] = []
+        index = 0
+        for token in prompt:
+            if token != IMAGE_TOKEN:
+                out.append(int(token))
+                continue
+            count = softs[index]
+            index += 1
+            out.append(BOI_TOKEN)
+            out.extend([IMAGE_TOKEN] * count)
+            out.append(EOI_TOKEN)
+        return out
+    if markers == sum(softs) and softs:
+        return list(prompt)
+    message = "image parts do not match the image tokens"
+    raise RuntimeError(message)
 
 
 def decode_png(blob: bytes) -> np.ndarray:
@@ -183,32 +219,58 @@ class VisionTower:
         self._ready = False
         self._pos_offset = 0
         self.layers: list[_Layer] = []
+        self._cache: dict[bytes, tuple[bytes, int, int]] = {}
+        self._note: Callable[[str], None] | None = None
 
-    def encode(self, png: bytes) -> tuple[object, int]:
+    def encode(self, png: bytes, *, note: Callable[[str], None] | None = None) -> tuple[object, int]:
         """Soft tokens ``(count, hidden)`` already in the text embedding space."""
         self._open()
+        if note is not None:
+            self._note = note
+        key = hashlib.sha256(png).digest()
+        cached = self._cache.get(key)
+        if cached is not None:
+            blob, soft, patches = cached
+            memory.store(self.soft, 0, blob)
+            self._status(f"vision cache {soft}")
+            return self.soft, soft
         image = decode_png(png)
         target_h, target_w, soft = pooled_size(int(image.shape[0]), int(image.shape[1]))
         resized = resize_bicubic(image, target_h, target_w)
-        patches = patch_tokens(resized)
-        count = int(patches.shape[0])
+        patches_arr = patch_tokens(resized)
+        count = int(patches_arr.shape[0])
         grid_h = target_h // PATCH
         grid_w = target_w // PATCH
         if count > _MAX_PATCHES or soft > VISION_SOFT_MAX:
             message = f"image uses {count} patches"
             raise RuntimeError(message)
-        memory.store(self.patch, 0, np.ascontiguousarray(patches, dtype=np.float32).tobytes())
+        self._status(f"vision patches {count}")
+        patches_arr = np.ascontiguousarray(
+            2.0 * (patches_arr.astype(np.float32) - np.float32(0.5)), dtype=np.float32
+        )
+        memory.store(self.patch, 0, patches_arr.tobytes())
         self._gemm(self.patch, self.input_proj, count, self.hidden)
-        self._standardize(count)
         self._positions(grid_h, grid_w)
         self.session.flush()
         for layer in self.layers:
             self._block(layer, count, grid_w)
             self.session.flush()
         self._pool(grid_w, soft)
-        self._gemm(self.pooled, self.project, soft, self.soft)
+        self._scale_pooled(soft)
+        self._standardize(soft)
+        self._norm(self.pooled, self.unit, self.pre_proj, soft)
+        self._gemm(self.pre_proj, self.project, soft, self.soft)
         self.session.flush()
+        blob = memory.load(self.soft, 0, soft * HIDDEN * 4)
+        self._cache[key] = (blob, soft, count)
+        while len(self._cache) > _CACHE_LIMIT:
+            self._cache.pop(next(iter(self._cache)))
         return self.soft, soft
+
+    def _status(self, line: str) -> None:
+        note = self._note
+        if callable(note):
+            note(line)
 
     def _open(self) -> None:
         if self._ready:
@@ -290,9 +352,14 @@ class VisionTower:
         self.half_w = session.zeros(_MLP_PAD * VISION_WIDTH * 2)
         self.half_a = session.zeros(_MAX_PATCHES * _MLP_PAD * 2)
         self.pooled = session.zeros(VISION_SOFT_MAX * VISION_WIDTH * 4)
+        self.pre_proj = session.zeros(VISION_SOFT_MAX * VISION_WIDTH * 4)
         self.soft = session.zeros(VISION_SOFT_MAX * HIDDEN * 4)
-        self.pos_row = session.zeros(_MAX_SIDE * VISION_WIDTH * 4)
-        self.pos_col = session.zeros(_MAX_SIDE * VISION_WIDTH * 4)
+        self.pos_x = session.zeros(_MAX_SIDE * VISION_WIDTH * 4)
+        self.pos_y = session.zeros(_MAX_SIDE * VISION_WIDTH * 4)
+        self.unit = session.zeros(VISION_WIDTH * 4)
+        memory.store(self.unit, 0, struct.pack("<f", 1.0) * VISION_WIDTH)
+        self.head_unit = session.zeros(VISION_HEAD * 4)
+        memory.store(self.head_unit, 0, struct.pack("<f", 1.0) * VISION_HEAD)
         self._ready = True
 
     def _expand(self, packed: bytes) -> object:
@@ -316,21 +383,22 @@ class VisionTower:
         row_bytes = VISION_WIDTH * 2
         raw = open(self.root / "resident.bin", "rb", buffering=0)
         try:
+            # Axis 0 is x (column), axis 1 is y (row).
             raw.seek(self._pos_offset)
-            rows = raw.read(grid_h * row_bytes)
+            xs = raw.read(grid_w * row_bytes)
             raw.seek(self._pos_offset + _POS_ROWS * row_bytes)
-            cols = raw.read(grid_w * row_bytes)
+            ys = raw.read(grid_h * row_bytes)
         finally:
             raw.close()
-        if len(rows) != grid_h * row_bytes or len(cols) != grid_w * row_bytes:
+        if len(xs) != grid_w * row_bytes or len(ys) != grid_h * row_bytes:
             message = "position table is short"
             raise RuntimeError(message)
-        self._expand_into(rows, self.pos_row)
-        self._expand_into(cols, self.pos_col)
+        self._expand_into(xs, self.pos_x)
+        self._expand_into(ys, self.pos_y)
         count = grid_h * grid_w
         self.session.encode(
             "vision_positions",
-            [self.hidden, self.pos_row, self.pos_col],
+            [self.hidden, self.pos_x, self.pos_y],
             [
                 self.session._u32(grid_w),
                 self.session._u32(VISION_WIDTH),
@@ -351,17 +419,23 @@ class VisionTower:
         )
         memory.release(source)
 
-    def _standardize(self, count: int) -> None:
+    def _scale_pooled(self, soft: int) -> None:
+        self.session.encode(
+            "scale_copy",
+            [self.pooled, self.pooled],
+            [self.session._f32(_POOL_SCALE), self.session._u32(soft * VISION_WIDTH)],
+            *_blocks(soft * VISION_WIDTH),
+        )
+
+    def _standardize(self, soft: int) -> None:
         self.session.encode(
             "vision_standardize",
-            [self.hidden, self.std_scale, self.std_bias],
+            [self.pooled, self.std_scale, self.std_bias],
             [
                 self.session._u32(VISION_WIDTH),
-                self.session._f32(RMS_EPS),
-                self.session._u32(count),
+                self.session._u32(soft),
             ],
-            (count, 1, 1),
-            (256, 1, 1),
+            *_grid2(VISION_WIDTH, soft),
         )
 
     def _block(self, layer: _Layer, count: int, grid_w: int) -> None:
@@ -371,6 +445,7 @@ class VisionTower:
         self._gemm(self.norm, layer.v, count, self.value)
         self._heads(self.query, layer.q_norm, count)
         self._heads(self.key, layer.k_norm, count)
+        self._heads(self.value, self.head_unit, count)
         self.session.encode(
             "rope_axial",
             [self.query, self.key],

@@ -1,11 +1,10 @@
 """Key and value prefix for Gemma 4.
 
 Local and global regions each store keys and values. The filled length is
-``count`` tokens. The live cache stays Metal ``half``. ``pack_kv_fp8`` writes
-the Metal ``fp8_e4m3`` region and ``unpack_kv_fp8`` restores it. The pack
-pads the contraction axis. One scale byte covers 32 channels, packed tightly.
-Local values are stored as ``[dim, count]``. An exact-length prefix is not a
-sample: the next token still has to be stepped.
+``count`` tokens. The live cache is Metal ``half``, and the prefix file stores
+that same device layout for positions ``0 .. count-1``. Keys and values are
+token-major ``[count, heads, dim]``. An exact-length prefix is not a sample:
+the next token still has to be stepped.
 """
 
 from __future__ import annotations
@@ -36,83 +35,68 @@ class HostCache:
         self.global_k: bytes = b""
 
 
-def _keys(plane: object, layers: int, heads: int, count: int, dim: int) -> bytes:
-    values = _as_array(plane, (layers, heads, count, dim))
-    parts: list[bytes] = []
-    for layer in range(layers):
-        for head in range(heads):
-            parts.append(pack_matrix(values[layer, head], "fp8"))
-    return b"".join(parts)
+def half_plane_nbytes(count: int, heads: int, dim: int) -> int:
+    """Metal half bytes for one filled cache plane."""
+    if count <= 0 or heads <= 0 or dim <= 0:
+        return 0
+    return count * heads * dim * 2
 
 
-def _values(plane: object, layers: int, heads: int, count: int, dim: int) -> bytes:
-    values = _as_array(plane, (layers, heads, dim, count))
+def local_nbytes(count: int) -> int:
+    layers = len(local_layers())
+    one = half_plane_nbytes(count, LOCAL_HEADS, LOCAL_DIM)
+    return layers * one * 2
+
+
+def global_nbytes(count: int) -> int:
+    one = half_plane_nbytes(count, GLOBAL_HEADS, GLOBAL_DIM)
+    return len(GLOBAL_LAYERS) * one * 2
+
+
+def _plane_bytes(plane: object, layers: int, heads: int, count: int, dim: int) -> bytes:
+    """One plane in the live device order: each layer is ``[count, heads, dim]``."""
+    import numpy as np
+
+    values = _as_half(plane, (layers, heads, count, dim))
     parts: list[bytes] = []
     for layer in range(layers):
-        for head in range(heads):
-            parts.append(pack_matrix(values[layer, head], "fp8"))
+        token_major = np.ascontiguousarray(np.transpose(values[layer], (1, 0, 2)))
+        parts.append(token_major.tobytes())
     return b"".join(parts)
 
 
 def pack_local(keys: object, values: object, count: int) -> bytes:
     layers = len(local_layers())
-    key_bytes = _keys(keys, layers, LOCAL_HEADS, count, LOCAL_DIM)
-    value_bytes = _values(values, layers, LOCAL_HEADS, count, LOCAL_DIM)
-    return key_bytes + value_bytes
+    return _plane_bytes(keys, layers, LOCAL_HEADS, count, LOCAL_DIM) + _plane_bytes(
+        values, layers, LOCAL_HEADS, count, LOCAL_DIM
+    )
 
 
 def pack_global(keys: object, values: object, count: int) -> bytes:
     layers = len(GLOBAL_LAYERS)
-    return _keys(keys, layers, GLOBAL_HEADS, count, GLOBAL_DIM) + _keys(
+    return _plane_bytes(keys, layers, GLOBAL_HEADS, count, GLOBAL_DIM) + _plane_bytes(
         values, layers, GLOBAL_HEADS, count, GLOBAL_DIM
     )
 
 
-def pack_token_major(raw: object, heads: int, dim: int, count: int, *, transposed: bool) -> bytes:
-    """Pack one ``[count, heads, dim]`` Metal half plane. One head is staged at a time."""
+def pack_token_major(raw: object, heads: int, dim: int, count: int) -> bytes:
+    """Pack one ``[count, heads, dim]`` Metal half plane in device order."""
     if count <= 0 or heads <= 0:
         return b""
     import numpy as np
 
     plane = np.ndarray((count, heads, dim), dtype=np.float16, buffer=raw)
-    parts: list[bytes] = []
-    for head in range(heads):
-        matrix = plane[:, head, :].astype(np.float32)
-        if transposed:
-            matrix = np.ascontiguousarray(matrix.T)
-        parts.append(pack_matrix(matrix, "fp8"))
-    return b"".join(parts)
+    return np.ascontiguousarray(plane).tobytes()
 
 
-def fp8_layout(count: int, heads: int, dim: int, *, transposed: bool) -> tuple[int, int, int]:
-    """Matrix rows, padded K, and the packed bytes of one cache plane."""
-    rows = dim if transposed else count
-    active = count if transposed else dim
-    k_pad = (active + 127) & ~127
-    one = rows * k_pad + rows * (k_pad // 32)
-    return rows, k_pad, heads * one
-
-
-def local_nbytes(count: int) -> int:
-    layers = len(local_layers())
-    key = fp8_layout(count, LOCAL_HEADS, LOCAL_DIM, transposed=False)[2]
-    value = fp8_layout(count, LOCAL_HEADS, LOCAL_DIM, transposed=True)[2]
-    return layers * (key + value)
-
-
-def global_nbytes(count: int) -> int:
-    one = fp8_layout(count, GLOBAL_HEADS, GLOBAL_DIM, transposed=False)[2]
-    return len(GLOBAL_LAYERS) * one * 2
-
-
-def _as_array(plane: object, shape: tuple[int, ...]) -> object:
+def _as_half(plane: object, shape: tuple[int, ...]) -> object:
     import numpy as np
 
-    values = np.asarray(plane, dtype=np.float32)
+    values = np.asarray(plane, dtype=np.float16)
     if values.shape != shape:
         message = f"expected {shape}, got {values.shape}"
         raise ValueError(message)
-    return values
+    return np.ascontiguousarray(values)
 
 
 class RuntimeAdapter:
@@ -128,47 +112,38 @@ class RuntimeAdapter:
         local_n = local_nbytes(count)
         global_n = global_nbytes(count)
         scratch = self._scratch(local_n + global_n)
-        cursor = _pack_handles(
-            self.runtime.session,
+        cursor = _copy_handles_out(
             scratch,
             0,
             self.runtime.local_k,
             count,
             LOCAL_HEADS,
             LOCAL_DIM,
-            transposed=False,
         )
-        cursor = _pack_handles(
-            self.runtime.session,
+        cursor = _copy_handles_out(
             scratch,
             cursor,
             self.runtime.local_v,
             count,
             LOCAL_HEADS,
             LOCAL_DIM,
-            transposed=True,
         )
-        cursor = _pack_handles(
-            self.runtime.session,
+        cursor = _copy_handles_out(
             scratch,
             cursor,
             self.runtime.global_k,
             count,
             GLOBAL_HEADS,
             GLOBAL_DIM,
-            transposed=False,
         )
-        _pack_handles(
-            self.runtime.session,
+        _copy_handles_out(
             scratch,
             cursor,
             self.runtime.global_v,
             count,
             GLOBAL_HEADS,
             GLOBAL_DIM,
-            transposed=False,
         )
-        self.runtime.session.flush()
         return [
             Region(LOCAL, memory.load(scratch, 0, local_n)),
             Region(GLOBAL, memory.load(scratch, local_n, global_n)),
@@ -186,45 +161,37 @@ class RuntimeAdapter:
         packed = self._scratch(len(local) + len(blobs[GLOBAL]))
         memory.store(packed, 0, local)
         memory.store(packed, len(local), blobs[GLOBAL])
-        cursor = _unpack_handles(
-            self.runtime.session,
+        cursor = _copy_handles_in(
             packed,
             0,
             self.runtime.local_k,
             count,
             LOCAL_HEADS,
             LOCAL_DIM,
-            transposed=False,
         )
-        cursor = _unpack_handles(
-            self.runtime.session,
+        cursor = _copy_handles_in(
             packed,
             cursor,
             self.runtime.local_v,
             count,
             LOCAL_HEADS,
             LOCAL_DIM,
-            transposed=True,
         )
-        cursor = _unpack_handles(
-            self.runtime.session,
+        cursor = _copy_handles_in(
             packed,
             cursor,
             self.runtime.global_k,
             count,
             GLOBAL_HEADS,
             GLOBAL_DIM,
-            transposed=False,
         )
-        _unpack_handles(
-            self.runtime.session,
+        _copy_handles_in(
             packed,
             cursor,
             self.runtime.global_v,
             count,
             GLOBAL_HEADS,
             GLOBAL_DIM,
-            transposed=False,
         )
         self.runtime.filled = count
         return True
@@ -259,7 +226,10 @@ def encode_pack_kv(
     *,
     transposed: bool,
 ) -> int:
-    """Dispatch ``pack_kv_fp8``. Returns the packed byte count."""
+    """Dispatch ``pack_kv_fp8``. Returns the packed byte count.
+
+    Kept for the shader check. The live prefix path stores Metal half.
+    """
     rows, k_pad, nbytes = fp8_layout(count, heads, dim, transposed=transposed)
     blocks = heads * rows * (k_pad // 32)
     if blocks < 1:
@@ -293,7 +263,10 @@ def encode_unpack_kv(
     *,
     transposed: bool,
 ) -> int:
-    """Dispatch ``unpack_kv_fp8``. Returns the packed byte count consumed."""
+    """Dispatch ``unpack_kv_fp8``. Returns the packed byte count consumed.
+
+    Kept for the shader check. The live prefix path stores Metal half.
+    """
     rows, k_pad, nbytes = fp8_layout(count, heads, dim, transposed=transposed)
     live = count * heads * dim
     if live < 1 or nbytes < 1:
@@ -316,83 +289,81 @@ def encode_unpack_kv(
     return nbytes
 
 
-def _pack_handles(
-    session: object,
+def fp8_layout(count: int, heads: int, dim: int, *, transposed: bool) -> tuple[int, int, int]:
+    """Matrix rows, padded K, and the packed bytes of one fp8 cache plane."""
+    rows = dim if transposed else count
+    active = count if transposed else dim
+    k_pad = (active + 127) & ~127
+    one = rows * k_pad + rows * (k_pad // 32)
+    return rows, k_pad, heads * one
+
+
+def _copy_handles_out(
     dest: object,
     offset: int,
     handles: list[object],
     count: int,
     heads: int,
     dim: int,
-    *,
-    transposed: bool,
 ) -> int:
+    nbytes = half_plane_nbytes(count, heads, dim)
     for handle in handles:
         if handle is None:
             continue
-        offset += encode_pack_kv(
-            session, handle, dest, offset, count, heads, dim, transposed=transposed
-        )
+        if nbytes:
+            memory.copy(handle, 0, dest, offset, nbytes)
+        offset += nbytes
     return offset
 
 
-def _unpack_handles(
-    session: object,
-    packed: object,
+def _copy_handles_in(
+    source: object,
     offset: int,
     handles: list[object],
     count: int,
     heads: int,
     dim: int,
-    *,
-    transposed: bool,
 ) -> int:
+    nbytes = half_plane_nbytes(count, heads, dim)
     for handle in handles:
         if handle is None:
             continue
-        offset += encode_unpack_kv(
-            session, packed, handle, offset, count, heads, dim, transposed=transposed
-        )
+        if nbytes:
+            memory.copy(source, offset, handle, 0, nbytes)
+        offset += nbytes
     return offset
 
 
-def unpack_local(blob: bytes, count: int) -> tuple[object, object]:
+def _unpack_plane(
+    blob: bytes, layers: int, heads: int, count: int, dim: int
+) -> object:
     import numpy as np
 
+    one = half_plane_nbytes(count, heads, dim)
+    out = np.zeros((layers, heads, count, dim), dtype=np.float16)
+    for layer in range(layers):
+        piece = np.frombuffer(blob[layer * one : (layer + 1) * one], dtype=np.float16)
+        token_major = piece.reshape(count, heads, dim)
+        out[layer] = np.transpose(token_major, (1, 0, 2))
+    return out.copy()
+
+
+def unpack_local(blob: bytes, count: int) -> tuple[object, object]:
     layers = len(local_layers())
-    key_n = len(pack_matrix(np.zeros((count, LOCAL_DIM), dtype=np.float32), "fp8"))
-    value_n = len(pack_matrix(np.zeros((LOCAL_DIM, count), dtype=np.float32), "fp8"))
-    keys = np.zeros((layers, LOCAL_HEADS, count, LOCAL_DIM), dtype=np.float32)
-    values = np.zeros((layers, LOCAL_HEADS, count, LOCAL_DIM), dtype=np.float32)
-    offset = 0
-    for layer in range(layers):
-        for head in range(LOCAL_HEADS):
-            piece = blob[offset : offset + key_n]
-            keys[layer, head] = restore_matrix(piece, count, LOCAL_DIM, "fp8")
-            offset += key_n
-    for layer in range(layers):
-        for head in range(LOCAL_HEADS):
-            restored = restore_matrix(blob[offset : offset + value_n], LOCAL_DIM, count, "fp8")
-            values[layer, head] = restored.T
-            offset += value_n
-    return keys, values
+    one = half_plane_nbytes(count, LOCAL_HEADS, LOCAL_DIM) * layers
+    return (
+        _unpack_plane(blob[:one], layers, LOCAL_HEADS, count, LOCAL_DIM),
+        _unpack_plane(blob[one : one * 2], layers, LOCAL_HEADS, count, LOCAL_DIM),
+    )
 
 
 def unpack_global(blob: bytes, count: int) -> tuple[object, object]:
-    import numpy as np
-
     layers = len(GLOBAL_LAYERS)
-    key_n = len(pack_matrix(np.zeros((count, GLOBAL_DIM), dtype=np.float32), "fp8"))
-    keys = np.zeros((layers, GLOBAL_HEADS, count, GLOBAL_DIM), dtype=np.float32)
-    values = np.zeros((layers, GLOBAL_HEADS, count, GLOBAL_DIM), dtype=np.float32)
-    offset = 0
-    for plane in (keys, values):
-        for layer in range(layers):
-            for head in range(GLOBAL_HEADS):
-                piece = blob[offset : offset + key_n]
-                plane[layer, head] = restore_matrix(piece, count, GLOBAL_DIM, "fp8")
-                offset += key_n
-    return keys, values
+    one = half_plane_nbytes(count, GLOBAL_HEADS, GLOBAL_DIM) * layers
+    return (
+        _unpack_plane(blob[:one], layers, GLOBAL_HEADS, count, GLOBAL_DIM),
+        _unpack_plane(blob[one : one * 2], layers, GLOBAL_HEADS, count, GLOBAL_DIM),
+    )
 
 
 def _accept(header: PrefixHeader, prompt: list[int]) -> bool:
@@ -448,8 +419,8 @@ def _empty_local(count: int) -> bytes:
     import numpy as np
 
     layers = len(local_layers())
-    keys = np.zeros((layers, LOCAL_HEADS, count, LOCAL_DIM), dtype=np.float32)
-    values = np.zeros((layers, LOCAL_HEADS, LOCAL_DIM, count), dtype=np.float32)
+    keys = np.zeros((layers, LOCAL_HEADS, count, LOCAL_DIM), dtype=np.float16)
+    values = np.zeros((layers, LOCAL_HEADS, count, LOCAL_DIM), dtype=np.float16)
     return pack_local(keys, values, count)
 
 
@@ -457,8 +428,8 @@ def _empty_global(count: int) -> bytes:
     import numpy as np
 
     shape = (len(GLOBAL_LAYERS), GLOBAL_HEADS, count, GLOBAL_DIM)
-    keys = np.zeros(shape, dtype=np.float32)
-    values = np.zeros(shape, dtype=np.float32)
+    keys = np.zeros(shape, dtype=np.float16)
+    values = np.zeros(shape, dtype=np.float16)
     return pack_global(keys, values, count)
 
 

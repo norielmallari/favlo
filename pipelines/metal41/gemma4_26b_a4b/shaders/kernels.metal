@@ -2927,71 +2927,28 @@ kernel void write_rows_tight(
 }
 
 // Per-token mean and variance, then the learned scale and bias. ε is 10⁻⁶.
+// Final vision standardize: (row - std_bias) * std_scale. Applied after the
+// pool and the sqrt(width) scale. std_bias reaches ~5e4, so this runs in float.
 kernel void vision_standardize(
     device float* rows [[buffer(0)]],
     device const float* scale [[buffer(1)]],
     device const float* bias [[buffer(2)]],
     constant uint& width [[buffer(3)]],
-    constant float& eps [[buffer(4)]],
-    constant uint& count [[buffer(5)]],
-    uint row [[threadgroup_position_in_grid]],
-    uint lane [[thread_index_in_threadgroup]],
-    uint span [[threads_per_threadgroup]])
+    constant uint& count [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
 {
-    if (row >= count) {
+    if (gid.x >= width || gid.y >= count) {
         return;
     }
-    threadgroup float parts[32];
-    device float* values = rows + (ulong)row * width;
-    float sum = 0.0f;
-    for (uint index = lane; index < width; index += span) {
-        sum += values[index];
-    }
-    float grouped = simd_sum(sum);
-    if ((lane & 31u) == 0u) {
-        parts[lane >> 5] = grouped;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (lane == 0u) {
-        float total = 0.0f;
-        uint groups = span >> 5;
-        for (uint index = 0u; index < groups; ++index) {
-            total += parts[index];
-        }
-        parts[0] = total / float(width);
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float mean = parts[0];
-    float var = 0.0f;
-    for (uint index = lane; index < width; index += span) {
-        float delta = values[index] - mean;
-        var += delta * delta;
-    }
-    grouped = simd_sum(var);
-    if ((lane & 31u) == 0u) {
-        parts[lane >> 5] = grouped;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (lane == 0u) {
-        float total = 0.0f;
-        uint groups = span >> 5;
-        for (uint index = 0u; index < groups; ++index) {
-            total += parts[index];
-        }
-        parts[0] = rsqrt(total / float(width) + eps);
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float inv = parts[0];
-    for (uint index = lane; index < width; index += span) {
-        values[index] = (values[index] - mean) * inv * scale[index] + bias[index];
-    }
+    ulong at = (ulong)gid.y * width + gid.x;
+    rows[at] = (rows[at] - bias[gid.x]) * scale[gid.x];
 }
 
-// Add axis 0 at the row and axis 1 at the column.
+// Add table axis 0 at the column (x) and axis 1 at the row (y).
 kernel void vision_positions(
     device float* tokens [[buffer(0)]],
-    device const float* row_table [[buffer(1)]],
-    device const float* col_table [[buffer(2)]],
+    device const float* x_table [[buffer(1)]],
+    device const float* y_table [[buffer(2)]],
     constant uint& grid_w [[buffer(3)]],
     constant uint& width [[buffer(4)]],
     constant uint& count [[buffer(5)]],
@@ -3003,11 +2960,12 @@ kernel void vision_positions(
     uint row = gid.y / grid_w;
     uint col = gid.y - row * grid_w;
     tokens[(ulong)gid.y * width + gid.x] +=
-        row_table[(ulong)row * width + gid.x] + col_table[(ulong)col * width + gid.x];
+        x_table[(ulong)col * width + gid.x] + y_table[(ulong)row * width + gid.x];
 }
 
-// Axial 2D-RoPE. The first half of the head rotates with the row, the second
-// half with the column. Each half pairs its first 18 values with its second 18.
+// Axial 2D-RoPE. The first half of the head rotates with the column (x), the
+// second half with the row (y). Each half pairs its first 18 values with its
+// second 18, matching rotate_half on a 36-wide chunk.
 kernel void rope_axial(
     device float* queries [[buffer(0)]],
     device float* keys [[buffer(1)]],
@@ -3038,18 +2996,18 @@ kernel void rope_axial(
             base = keys;
         }
         base += ((ulong)token * heads + head) * 72u;
-        float sine_y = sin(float(row) / angle_scale);
-        float cosine_y = cos(float(row) / angle_scale);
-        float left = base[pair];
-        float right = base[18u + pair];
-        base[pair] = left * cosine_y - right * sine_y;
-        base[18u + pair] = right * cosine_y + left * sine_y;
         float sine_x = sin(float(col) / angle_scale);
         float cosine_x = cos(float(col) / angle_scale);
+        float left = base[pair];
+        float right = base[18u + pair];
+        base[pair] = left * cosine_x - right * sine_x;
+        base[18u + pair] = right * cosine_x + left * sine_x;
+        float sine_y = sin(float(row) / angle_scale);
+        float cosine_y = cos(float(row) / angle_scale);
         left = base[36u + pair];
         right = base[54u + pair];
-        base[36u + pair] = left * cosine_x - right * sine_x;
-        base[54u + pair] = right * cosine_x + left * sine_x;
+        base[36u + pair] = left * cosine_y - right * sine_y;
+        base[54u + pair] = right * cosine_y + left * sine_y;
     }
 }
 
@@ -3147,4 +3105,216 @@ kernel void compact_rows(
     }
     destination[(ulong)gid.y * dst_stride + gid.x] =
         source[(ulong)gid.y * src_stride + gid.x];
+}
+
+// E8M0 byte as 2^(e-127). A zero code is 2^-127.
+static float e8m0_scale(uint scale) {
+    uint bits = select(scale << 23, 1u << 22, scale == 0u);
+    return as_type<float>(bits);
+}
+
+static float e4m3_signed(uchar code) {
+    float mag = e4m3_mag(code);
+    return (code & 0x80u) ? -mag : mag;
+}
+
+// One output row. The E8M0 groups collapse to one scale, the row peak over 127.
+static void restore_row_i8(
+    device const uchar* packed,
+    device const uchar* row_scale,
+    device int8_t* codes,
+    device float* factors,
+    uint row,
+    uint inner,
+    uint lane,
+    uint span,
+    threadgroup float* parts)
+{
+    float peak = 0.0f;
+    for (uint col = lane; col < inner; col += span) {
+        float unit = e4m3_signed(packed[row * inner + col]);
+        peak = max(peak, fabs(unit * e8m0_scale(row_scale[col >> 5])));
+    }
+    float grouped = simd_max(peak);
+    if ((lane & 31u) == 0u) {
+        parts[lane >> 5] = grouped;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0u) {
+        float total = 0.0f;
+        uint nsimd = span >> 5;
+        for (uint s = 0u; s < nsimd; ++s) {
+            total = max(total, parts[s]);
+        }
+        parts[0] = total;
+        factors[row] = total > 0.0f ? total / 127.0f : 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float total = parts[0];
+    float inv = total > 0.0f ? 127.0f / total : 0.0f;
+    device int8_t* crow = codes + row * inner;
+    for (uint col = lane; col < inner; col += span) {
+        float unit = e4m3_signed(packed[row * inner + col]);
+        float value = unit * e8m0_scale(row_scale[col >> 5]) * inv;
+        int code = int(rint(value));
+        crow[col] = int8_t(clamp(code, -127, 127));
+    }
+}
+
+kernel void restore_fp8_i8(
+    device const uchar* packed [[buffer(0)]],
+    device const uchar* scales [[buffer(1)]],
+    device int8_t* codes [[buffer(2)]],
+    device float* factors [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]],
+    uint span [[threads_per_threadgroup]])
+{
+    threadgroup float parts[8];
+    if (row >= rows) {
+        return;
+    }
+    restore_row_i8(
+        packed, scales + row * (inner >> 5), codes, factors, row, inner, lane, span, parts);
+}
+
+// One token. The scale is that row's peak over 127.
+kernel void quantize_half_i8(
+    device const half* src [[buffer(0)]],
+    device int8_t* codes [[buffer(1)]],
+    device float* factors [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]],
+    uint span [[threads_per_threadgroup]])
+{
+    if (row >= rows) {
+        return;
+    }
+    device const half* srow = src + row * inner;
+    float peak = 0.0f;
+    for (uint col = lane; col < inner; col += span) {
+        peak = max(peak, fabs(float(srow[col])));
+    }
+    float grouped = simd_max(peak);
+    threadgroup float parts[8];
+    if ((lane & 31u) == 0u) {
+        parts[lane >> 5] = grouped;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0u) {
+        float total = 0.0f;
+        uint nsimd = span >> 5;
+        for (uint s = 0u; s < nsimd; ++s) {
+            total = max(total, parts[s]);
+        }
+        parts[0] = total;
+        factors[row] = total > 0.0f ? total / 127.0f : 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float total = parts[0];
+    float inv = total > 0.0f ? 127.0f / total : 0.0f;
+    device int8_t* crow = codes + row * inner;
+    for (uint col = lane; col < inner; col += span) {
+        int code = int(rint(float(srow[col]) * inv));
+        crow[col] = int8_t(clamp(code, -127, 127));
+    }
+}
+
+// Float activation rows. Pads K to ``inner`` with zeros so the int8 tile aligns.
+kernel void quantize_float_i8(
+    device const float* src [[buffer(0)]],
+    device int8_t* codes [[buffer(1)]],
+    device float* factors [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& active [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]],
+    uint span [[threads_per_threadgroup]])
+{
+    if (row >= rows) {
+        return;
+    }
+    device const float* srow = src + row * active;
+    float peak = 0.0f;
+    for (uint col = lane; col < active; col += span) {
+        peak = max(peak, fabs(srow[col]));
+    }
+    float grouped = simd_max(peak);
+    threadgroup float parts[8];
+    if ((lane & 31u) == 0u) {
+        parts[lane >> 5] = grouped;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0u) {
+        float total = 0.0f;
+        uint nsimd = span >> 5;
+        for (uint s = 0u; s < nsimd; ++s) {
+            total = max(total, parts[s]);
+        }
+        parts[0] = total;
+        factors[row] = total > 0.0f ? total / 127.0f : 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float total = parts[0];
+    float inv = total > 0.0f ? 127.0f / total : 0.0f;
+    device int8_t* crow = codes + row * inner;
+    for (uint col = lane; col < inner; col += span) {
+        float value = col < active ? srow[col] : 0.0f;
+        int code = int(rint(value * inv));
+        crow[col] = int8_t(clamp(code, -127, 127));
+    }
+}
+
+kernel void prefill_i8_n64(
+    device int8_t* activation [[buffer(0)]],
+    device int8_t* weights [[buffer(1)]],
+    device int32_t* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    tensor<device int8_t, dextents<int, 2>, tensor_inline> left(
+        activation,
+        dextents<int, 2>(int(inner), int(rows)),
+        array<int, 2>{1, int(inner)});
+    tensor<device int8_t, dextents<int, 2>, tensor_inline> right(
+        weights,
+        dextents<int, 2>(int(inner), int(cols)),
+        array<int, 2>{1, int(inner)});
+    tensor<device int32_t, dextents<int, 2>, tensor_inline> out(
+        destination,
+        dextents<int, 2>(int(cols), int(rows)),
+        array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(
+        64, 64, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, int(tgid.y) * 64);
+    auto tile_right = right.slice(0, int(tgid.x) * 64);
+    auto tile_out = out.slice(int(tgid.x) * 64, int(tgid.y) * 64);
+    op.run(tile_left, tile_right, tile_out);
+}
+
+// Token scale times channel scale. The int32 product and the float result share the buffer.
+kernel void scale_i8_f32(
+    device int* acc [[buffer(0)]],
+    device const float* row_scale [[buffer(1)]],
+    device const float* col_scale [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint n = rows * cols;
+    if (gid >= n) {
+        return;
+    }
+    uint col = gid % cols;
+    uint row = gid / cols;
+    float value = float(acc[gid]) * row_scale[row] * col_scale[col];
+    ((device float*)acc)[gid] = value;
 }

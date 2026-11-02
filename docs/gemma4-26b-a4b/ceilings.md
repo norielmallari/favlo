@@ -1,6 +1,6 @@
 # Ceilings
 
-Bandwidth and kernel ceilings for the kernels `gemma4-26b-a4b` launches. Recompute when `gemv_fp8`, `gemv_fp4_at`, `gemv_fp8_at`, `embed_fp8`, `matmul_fp8`, `matmul_half`, `matmul_fp4_64_at`, `matmul_fp8_64_at`, `write_row`, `write_rows_tight`, `rmsnorm`, `rmsnorm_rows`, `rmsnorm_heads`, `router_topk`, `rope_pairs`, `rope_rows`, `store_kv`, `store_kv_rows`, `attend_span`, `attend_span4`, `attend_decode`, `geglu_rows`, `geglu_pair`, `group_expert_slots`, `gather_half_slots`, `pad_half_rows`, `scatter_slot_rows`, `mix_experts`, `residual_scale`, `scale_copy`, `zero_buffer`, `softcap`, `topk_groups`, or `sample_topk` changes. The CPU reads one sampled token. Expert ids stay on device.
+Bandwidth and kernel ceilings for the kernels `gemma4-26b-a4b` launches. Recompute when `gemv_fp8`, `gemv_fp4_at`, `gemv_fp8_at`, `embed_fp8`, `matmul_fp8`, `matmul_half`, `matmul_fp4_64_at`, `matmul_fp8_64_at`, `restore_fp8_i8`, `quantize_half_i8`, `quantize_float_i8`, `prefill_i8_n64`, `scale_i8_f32`, `write_row`, `write_rows_tight`, `rmsnorm`, `rmsnorm_rows`, `rmsnorm_heads`, `router_topk`, `rope_pairs`, `rope_rows`, `store_kv`, `store_kv_rows`, `attend_span`, `attend_span4`, `attend_decode`, `geglu_rows`, `geglu_pair`, `group_expert_slots`, `gather_half_slots`, `pad_half_rows`, `scatter_slot_rows`, `mix_experts`, `residual_scale`, `scale_copy`, `zero_buffer`, `softcap`, `topk_groups`, or `sample_topk` changes. The CPU reads one sampled token. Expert ids stay on device.
 
 The divisor is the 2 GiB streaming read on an M5 Pro with 48 GB: 7093.5 µs, 302.74 GB/s. That measurement is recorded in [../qwen36-35b-a3b/ceilings.md](../qwen36-35b-a3b/ceilings.md). Bytes below are divided by 302.74 GB/s.
 
@@ -32,16 +32,31 @@ Weight bytes are one read of the codes and scales the launch visits. The fp8 den
 
 ## Prefill
 
-One chunk of 1024 tokens at position 0. The chunk finishes, so the sum includes one tied-logits `gemv_fp8`. A dense product is `matmul_fp8` on the packed matrix. The router is `matmul_half`. Expert prefill uses 128 slots of 64, one slot for each expert: 102 fp4 and 26 fp8. `matmul_fp4_64_at` and `matmul_fp8_64_at` both launch on that grid. The TFLOP/s column counts the slots whose width matches. Local attention is `attend_span4`. Global attention is `attend_span` over the keys this first chunk has stored. Measured on 2 November 2026, same method as the decode table. The sum is 918.141 ms, 1115.30 tok/s.
+One chunk of 1024 tokens at position 0. The chunk finishes, so the sum includes one tied-logits `gemv_fp8`. Large attention projections restore the packed fp8 matrix into a per-row int8 stage, quantize the float activation with `quantize_float_i8`, multiply with `prefill_i8_n64`, and scale the int32 product. That path does not cast through half. Local key and value, the shared gate and up, and the shared down stay on `matmul_fp8` with `write_rows_tight`. The router is `matmul_half`. Expert prefill uses 128 slots of 64, one slot for each expert: 102 fp4 and 26 fp8. `matmul_fp4_64_at` and `matmul_fp8_64_at` both launch on that grid. The TFLOP/s column counts the slots whose width matches. Local attention is `attend_span4`. Global attention is `attend_span` over the keys this first chunk has stored. Int8 rows measured on 2 November 2026; other rows reuse the same-day fp8 measurement. The sum is 867.785 ms, 1180.02 tok/s.
 
 | Launch | Shape | Count | µs | TFLOP/s |
 |---|---|---:|---:|---:|
-| `matmul_fp8` | 1024×4096×2816 | 25 | 2529.6 | 9.34 |
+| `restore_fp8_i8` | 4096×2816 | 25 | 813.1 | |
+| `quantize_float_i8` | 1024×2816 | 25 | 141.6 | |
+| `prefill_i8_n64` | 1024×4096×2816 | 25 | 1051.8 | 22.46 |
+| `scale_i8_f32` | 1024×4096 | 25 | 92.1 | |
 | `matmul_fp8` | 1024×2048×2816 | 50 | 1279.8 | 9.23 |
-| `matmul_fp8` | 1024×2816×4096 | 25 | 2542.6 | 9.29 |
-| `matmul_fp8` | 1024×8192×2816 | 5 | 5085.0 | 9.29 |
-| `matmul_fp8` | 1024×1024×2816 | 5 | 637.9 | 9.26 |
-| `matmul_fp8` | 1024×2816×8192 | 5 | 5125.1 | 9.22 |
+| `restore_fp8_i8` | 2816×4096 | 25 | 794.9 | |
+| `quantize_float_i8` | 1024×4096 | 25 | 170.7 | |
+| `prefill_i8_n64` | 1024×2816×4096 | 25 | 1090.6 | 21.66 |
+| `scale_i8_f32` | 1024×2816 | 25 | 63.6 | |
+| `restore_fp8_i8` | 8192×2816 | 5 | 1620.4 | |
+| `quantize_float_i8` | 1024×2816 | 5 | 62.0 | |
+| `prefill_i8_n64` | 1024×8192×2816 | 5 | 869.9 | 54.34 |
+| `scale_i8_f32` | 1024×8192 | 5 | 205.6 | |
+| `restore_fp8_i8` | 1024×2816 | 5 | 114.1 | |
+| `quantize_float_i8` | 1024×2816 | 5 | 70.4 | |
+| `prefill_i8_n64` | 1024×1024×2816 | 5 | 266.4 | 22.18 |
+| `scale_i8_f32` | 1024×1024 | 5 | 30.7 | |
+| `restore_fp8_i8` | 2816×8192 | 5 | 1547.7 | |
+| `quantize_float_i8` | 1024×8192 | 5 | 259.2 | |
+| `prefill_i8_n64` | 1024×2816×8192 | 5 | 857.8 | 55.11 |
+| `scale_i8_f32` | 1024×2816 | 5 | 39.9 | |
 | `matmul_fp8` | 1024×2112×2816 | 60 | 1304.9 | 9.33 |
 | `matmul_fp8` | 1024×2816×2176 | 30 | 1339.4 | 9.37 |
 | `matmul_half` | 1024×128×2816 | 30 | 60.2 | 12.27 |
@@ -49,9 +64,7 @@ One chunk of 1024 tokens at position 0. The chunk finishes, so the sum includes 
 | `matmul_fp8_64_at` | 26×64×1408×2816 | 30 | 871.5 | 15.14 |
 | `matmul_fp4_64_at` | 102×64×2816×768 | 30 | 1380.6 | 20.45 |
 | `matmul_fp8_64_at` | 26×64×2816×768 | 30 | 389.9 | 18.46 |
-| `write_rows_tight` | K 2816, 1024 tokens | 175 | 32.8 | |
-| `write_rows_tight` | K 4096, 1024 tokens | 25 | 57.0 | |
-| `write_rows_tight` | K 8192, 1024 tokens | 5 | 186.3 | |
+| `write_rows_tight` | K 2816, 1024 tokens | 110 | 32.8 | |
 | `write_rows_tight` | K 2176, 1024 tokens | 30 | 25.1 | |
 | `rmsnorm_rows` | 1024×2816 | 240 | 52.8 | |
 | `rmsnorm_heads` | 16384×256 | 25 | 77.4 | |
