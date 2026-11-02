@@ -66,6 +66,38 @@ def test_thinking_has_no_2048_cap() -> None:
     assert _output_limit({}, False, 60, 262144) == 2048
 
 
+def test_thinking_follows_request_or_registry_not_variant() -> None:
+    from types import SimpleNamespace
+
+    from qwen35_4b.chat import _thinking
+
+    thinking = SimpleNamespace(variant="thinking", enable_thinking=None)
+    instruct = SimpleNamespace(variant="instruct", enable_thinking=None)
+    bare = SimpleNamespace(variant=None, enable_thinking=None)
+    closed = SimpleNamespace(variant="thinking", enable_thinking=False)
+    assert _thinking(thinking, {"reasoning": {"effort": "none"}}) is False
+    assert _thinking(instruct, {"reasoning": {"effort": "high"}}) is True
+    assert _thinking(thinking, {"reasoning": {"effort": "low"}}) is True
+    assert _thinking(thinking, {}) is True
+    assert _thinking(instruct, {}) is True
+    assert _thinking(closed, {}) is False
+    assert _thinking(bare, {"reasoning": {"effort": "none"}}) is False
+    assert _thinking(bare, {}) is True
+
+
+def test_unsupported_effort_steps_up_or_falls_back() -> None:
+    from qwen35_4b.sampling import resolve_effort
+
+    assert resolve_effort(None) is None
+    assert resolve_effort("none") == "none"
+    assert resolve_effort("high") == "high"
+    assert resolve_effort("minimal") == "high"
+    assert resolve_effort("low") == "high"
+    assert resolve_effort("medium") == "high"
+    assert resolve_effort("xhigh") == "high"
+    assert resolve_effort("max") == "high"
+
+
 def test_vision_still_packing() -> None:
     from qwen35_4b.layout import IMAGE_TOKEN
     from qwen35_4b.vision import expand_image_tokens, rope_positions, smart_size, vision_rotary

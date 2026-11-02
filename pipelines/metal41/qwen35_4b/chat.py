@@ -25,14 +25,13 @@ from favlo.responses import (
     response_object,
     response_to_chat,
     template_messages,
-    thinking_enabled,
     usage_object,
     web_search_context,
 )
 from qwen35_4b.closed import RequestClosed
 from qwen35_4b.vision import prepare_prompt
 from qwen35_4b.layout import EOS, IM_END
-from qwen35_4b.sampling import DEFAULT_VARIANT, VARIANTS
+from qwen35_4b.sampling import DEFAULT_THINKING, DEFAULT_VARIANT, VARIANTS, resolve_effort
 
 STOP = {EOS, IM_END}
 _THINK_END = "</think>"
@@ -500,19 +499,33 @@ def _variant(selection: Any) -> dict[str, float]:
     return dict(VARIANTS.get(str(name)) or VARIANTS[DEFAULT_VARIANT])
 
 
-def _thinking(selection: Any, body: dict[str, Any]) -> bool:
-    name = getattr(selection, "variant", None)
-    if name == "instruct":
-        return False
-    if name == "thinking":
-        return True
-    enabled = thinking_enabled(body)
-    if enabled is not None:
-        return enabled
+def _request_effort(body: dict[str, Any]) -> str | None:
+    reasoning = body.get("reasoning")
+    if isinstance(reasoning, dict):
+        effort = reasoning.get("effort")
+        if isinstance(effort, str) and effort.strip():
+            return effort.strip().lower()
     flag = body.get("enable_thinking")
     if flag is not None:
-        return bool(flag)
-    return True
+        return "high" if flag else "none"
+    return None
+
+
+def _thinking(selection: Any, body: dict[str, Any]) -> bool:
+    """Open thinking from the request, else the registry row, else the default.
+
+    The official card is on/off only. Every OpenAI effort is accepted; an
+    unsupported name steps up to the next supported value (see
+    ``resolve_effort``). The model id's variant suffix does not control
+    thinking.
+    """
+    requested = _request_effort(body)
+    if requested is not None:
+        return resolve_effort(requested) != "none"
+    stored = getattr(selection, "enable_thinking", None) if selection is not None else None
+    if stored is not None:
+        return bool(stored)
+    return DEFAULT_THINKING
 
 
 def _output_limit(body: dict[str, Any], thinking: bool, prompt_len: int, context: int) -> int:
