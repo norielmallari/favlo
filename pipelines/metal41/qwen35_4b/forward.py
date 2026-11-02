@@ -35,6 +35,7 @@ from qwen35_4b.layout import (
     VOCAB,
     cache_bytes,
     is_full,
+    kv_mode,
 )
 from qwen35_4b.session import GEMV_ROWS, PREFILL_TILE, Session, f32, u32
 
@@ -76,19 +77,21 @@ class Qwen35Runtime:
         self,
         root: Path,
         *,
-        kv_cache: str = "f16",
+        kv_cache: str = "half",
         console: Any = None,
         owner: str | None = None,
         mtp: bool = False,
     ) -> None:
         del mtp
-        if kv_cache not in ("f16", "e4m3"):
-            message = f"qwen35-4b cache is f16 or e4m3; {kv_cache} is not built"
-            raise RuntimeError(message)
+        try:
+            chosen = kv_mode(kv_cache)
+        except ValueError as exc:
+            message = f"qwen35-4b cache is half or fp8_e4m3; {kv_cache} is not built"
+            raise RuntimeError(message) from exc
         self.root = Path(root)
         self.console = console
-        self.kv_cache = kv_cache
-        self._kv_elem = 2 if kv_cache == "f16" else 1
+        self.kv_cache = chosen
+        self._kv_elem = 2 if chosen == "half" else 1
         self._owner = owner or f"{STEM}:{id(self)}"
         self._stop: Callable[[], bool] | None = None
         self._halted = False
@@ -223,7 +226,7 @@ class Qwen35Runtime:
         plane = len(FULL) * capacity * KV_HEADS * HEAD_DIM * self._kv_elem
         self.k_data = s.allocate(plane, zero=True)
         self.v_data = s.allocate(plane, zero=True)
-        if self.kv_cache == "e4m3":
+        if self.kv_cache == "fp8_e4m3":
             scales = len(FULL) * capacity * KV_HEADS * (HEAD_DIM // BLOCK)
             self.k_scale = s.allocate(scales, zero=True)
             self.v_scale = s.allocate(scales, zero=True)
@@ -430,7 +433,7 @@ class Qwen35Runtime:
                 (256, 1, 1),
             )
         self.session.launch(
-            "cast_f32_f16",
+            "cast_f32_half",
             [source, self.pf_half],
             [u32(kept * width)],
             ((kept * width + 255) // 256, 1, 1),
@@ -826,10 +829,10 @@ class Qwen35Runtime:
         scale_off: int,
     ) -> None:
         session = self.session
-        if self.kv_cache == "f16":
+        if self.kv_cache == "half":
             if not rows:
                 session.launch(
-                    "store_kv_f16",
+                    "store_kv_half",
                     [key, value, self.k_data, self.v_data],
                     [u32(position), u32(KV_HEADS), u32(plane)],
                     (KV_HEADS, 1, 1),
@@ -838,7 +841,7 @@ class Qwen35Runtime:
                 )
                 return
             session.launch(
-                "store_kv_rows_f16",
+                "store_kv_rows_half",
                 [key, value, self.k_data, self.v_data],
                 [u32(position), u32(KV_HEADS), u32(count), u32(plane)],
                 (KV_HEADS, count, 1),
@@ -886,9 +889,9 @@ class Qwen35Runtime:
         ]
         grid = (ATTN_HEADS, 1, 1)
         threads = (HEAD_DIM, 1, 1)
-        if self.kv_cache == "f16":
+        if self.kv_cache == "half":
             session.launch(
-                "attend_decode_f16",
+                "attend_decode_half",
                 [query, self.k_data, self.v_data, self.scores, output],
                 consts,
                 grid,
@@ -925,9 +928,9 @@ class Qwen35Runtime:
         ]
         grid = (ATTN_HEADS, count, 1)
         threads = (HEAD_DIM, 1, 1)
-        if self.kv_cache == "f16":
+        if self.kv_cache == "half":
             session.launch(
-                "attend_prefill_f16",
+                "attend_prefill_half",
                 [self.pf_q, self.k_data, self.v_data, self.pf_scores, self.pf_attn],
                 consts,
                 grid,

@@ -85,6 +85,6 @@ def quantize_fp8(weight: np.ndarray) -> tuple[bytes, bytes]:
     return np.ascontiguousarray(enc_e4m3(scaled)).tobytes(), np.ascontiguousarray(biased).tobytes()
 
 
-def f16_bytes(weight: np.ndarray) -> bytes:
+def half_bytes(weight: np.ndarray) -> bytes:
     values = np.ascontiguousarray(weight, dtype=np.float32).astype(np.float16)
     return values.tobytes()

@@ -465,7 +465,7 @@ def _linear(
     bias_plane = runtime._planes[bias]
     session = runtime.session
     session.launch(
-        "cast_pad_f16",
+        "cast_pad_half",
         [source, ws.half],
         [u32(rows), u32(inner), u32(pad)],
         ((inner + 31) // 32, pad, 1),

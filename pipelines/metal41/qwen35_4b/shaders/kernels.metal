@@ -758,7 +758,7 @@ kernel void embed_rows(
     destination[ulong(row) * inner + col] = e4m3_code(weights[col]) * e8m0_code(scale_row[col >> 5]);
 }
 
-kernel void cast_f32_f16(
+kernel void cast_f32_half(
     device const float* source [[buffer(0)]],
     device half* destination [[buffer(1)]],
     constant uint& count [[buffer(2)]],
@@ -1211,9 +1211,9 @@ kernel void attend_prefill(
     output[(ulong(row) * attn_heads + head) * D + tid] = acc / total * sigmoid(gate);
 }
 
-// Float16 key/value cache. Same layouts as the e4m3 store, two bytes per element,
+// Metal half key/value cache. Same layouts as the fp8_e4m3 store, two bytes per element,
 // no scale plane.
-kernel void store_kv_f16(
+kernel void store_kv_half(
     device const float* key [[buffer(0)]],
     device const float* value [[buffer(1)]],
     device half* key_data [[buffer(2)]],
@@ -1232,7 +1232,7 @@ kernel void store_kv_f16(
     data[row * dim + tid] = half(source[head * dim + tid]);
 }
 
-kernel void store_kv_rows_f16(
+kernel void store_kv_rows_half(
     device const float* key [[buffer(0)]],
     device const float* value [[buffer(1)]],
     device half* key_data [[buffer(2)]],
@@ -1257,7 +1257,7 @@ kernel void store_kv_rows_f16(
     data[slot * D + tid] = half(source[(ulong(row) * kv_heads + head) * D + tid]);
 }
 
-kernel void attend_decode_f16(
+kernel void attend_decode_half(
     device const float* query_gate [[buffer(0)]],
     device const half* key_data [[buffer(1)]],
     device const half* value_data [[buffer(2)]],
@@ -1323,7 +1323,7 @@ kernel void attend_decode_f16(
     output[head * D + tid] = acc / total * sigmoid(gate);
 }
 
-kernel void attend_prefill_f16(
+kernel void attend_prefill_half(
     device const float* query_gate [[buffer(0)]],
     device const half* key_data [[buffer(1)]],
     device const half* value_data [[buffer(2)]],
@@ -1741,7 +1741,7 @@ kernel void splice_rows(
     hidden[ulong(row) * width + col] = rows[ulong(slot) * width + col];
 }
 
-kernel void cast_pad_f16(
+kernel void cast_pad_half(
     device const float* source [[buffer(0)]],
     device half* destination [[buffer(1)]],
     constant uint& rows [[buffer(2)]],

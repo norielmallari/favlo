@@ -12,7 +12,7 @@ from qwen35_4b.forward import Qwen35Runtime
 def open_runtime(
     path: Path,
     *,
-    kv_cache: str = "f16",
+    kv_cache: str = "half",
     console: Any = None,
     resident_percent: float | None = None,
     max_memory: str | int | None = None,

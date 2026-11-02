@@ -20,7 +20,7 @@ def run_kernels() -> None:
         _check_int8(session)
         _check_rmsnorm(session)
         _check_gdn(session)
-        _check_kv_f16(session)
+        _check_kv_half(session)
     finally:
         session.close()
         memory.sweep(owner)
@@ -233,7 +233,7 @@ def _check_gdn(session: Session) -> None:
         raise RuntimeError(message)
 
 
-def _check_kv_f16(session: Session) -> None:
+def _check_kv_half(session: Session) -> None:
     """One causal prefill tile and a one-token decode, both on a float16 cache."""
     heads, kv, dim, rows = 16, 4, 256, 2
     group = heads // kv
@@ -251,14 +251,14 @@ def _check_kv_f16(session: Session) -> None:
     out = session.allocate(rows * heads * dim * 4, zero=True)
     for plane in (0, 1):
         session.launch(
-            "store_kv_rows_f16",
+            "store_kv_rows_half",
             [k_buf, v_buf, k_data, v_data],
             [u32(0), u32(kv), u32(rows), u32(plane)],
             (kv, rows, 1),
             (dim, 1, 1),
         )
     session.launch(
-        "attend_prefill_f16",
+        "attend_prefill_half",
         [q_buf, k_data, v_data, scores, out],
         [u32(0), u32(rows), u32(rows), u32(heads), u32(kv), u32(group), f32(scale)],
         (heads, rows, 1),
@@ -266,16 +266,16 @@ def _check_kv_f16(session: Session) -> None:
     )
     got = np.frombuffer(memory.load(out, 0, rows * heads * dim * 4), dtype=np.float32)
     got = got.reshape(rows, heads, dim)
-    expect = _kv_f16_reference(query, key, value, scale, group)
+    expect = _kv_half_reference(query, key, value, scale, group)
     if not np.allclose(got, expect, rtol=2e-3, atol=2e-3):
-        message = f"attend_prefill_f16 mismatch max={np.max(np.abs(got - expect))}"
+        message = f"attend_prefill_half mismatch max={np.max(np.abs(got - expect))}"
         raise RuntimeError(message)
 
     q0 = session.upload(np.ascontiguousarray(query[0]).tobytes())
     scores0 = session.allocate(heads * 4, zero=True)
     out0 = session.allocate(heads * dim * 4, zero=True)
     session.launch(
-        "attend_decode_f16",
+        "attend_decode_half",
         [q0, k_data, v_data, scores0, out0],
         [u32(1), u32(1), u32(kv), u32(group), f32(scale)],
         (heads, 1, 1),
@@ -283,11 +283,11 @@ def _check_kv_f16(session: Session) -> None:
     )
     got0 = np.frombuffer(memory.load(out0, 0, heads * dim * 4), dtype=np.float32)
     if not np.allclose(got0.reshape(heads, dim), expect[0], rtol=2e-3, atol=2e-3):
-        message = f"attend_decode_f16 mismatch max={np.max(np.abs(got0 - expect[0].ravel()))}"
+        message = f"attend_decode_half mismatch max={np.max(np.abs(got0 - expect[0].ravel()))}"
         raise RuntimeError(message)
 
 
-def _kv_f16_reference(
+def _kv_half_reference(
     query: np.ndarray,
     key: np.ndarray,
     value: np.ndarray,

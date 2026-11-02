@@ -19,6 +19,7 @@ from qwen35_4b.layout import (  # noqa: E402
     cache_bytes,
     fp8_bytes,
     is_full,
+    kv_mode,
 )
 from qwen35_4b.sampling import DEFAULT_VARIANT, VARIANTS  # noqa: E402
 
@@ -38,8 +39,11 @@ def test_gdn_projection_width() -> None:
 def test_fp8_and_cache_sizes() -> None:
     assert fp8_bytes(VOCAB, HIDDEN) == VOCAB * HIDDEN + VOCAB * (HIDDEN // 32)
     assert cache_bytes(2048) == 2048 * 8 * 2 * 4 * 256 * 2
-    assert cache_bytes(2048, "e4m3") == 2048 * 8 * 2 * 4 * (256 + 8)
-    assert cache_bytes(2048, "f16") == cache_bytes(2048)
+    assert cache_bytes(2048, "fp8_e4m3") == 2048 * 8 * 2 * 4 * (256 + 8)
+    assert cache_bytes(2048, "half") == cache_bytes(2048)
+    assert kv_mode(None) == "half"
+    assert kv_mode("half") == "half"
+    assert kv_mode("fp8_e4m3") == "fp8_e4m3"
 
 
 def test_vision_pack_list() -> None:
@@ -50,12 +54,12 @@ def test_vision_pack_list() -> None:
     assert len(visual) == 297
     by_name = {logical: (kind, shape) for _raw, logical, kind, shape in visual}
     assert by_name["visual.patch"] == ("fp8", (1024, 1536))
-    assert by_name["visual.patch_bias"][0] == "f16"
+    assert by_name["visual.patch_bias"][0] == "half"
     assert by_name["visual.pos"] == ("fp8", (2304, 1024))
-    assert by_name["visual.0.norm1"][0] == "f16"
+    assert by_name["visual.0.norm1"][0] == "half"
     assert by_name["visual.0.qkv"] == ("fp8", (3072, 1024))
     assert by_name["visual.merger_fc2"] == ("fp8", (2560, 4096))
-    assert by_name["visual.merger_norm"][0] == "f16"
+    assert by_name["visual.merger_norm"][0] == "half"
 
 
 def test_thinking_has_no_2048_cap() -> None:

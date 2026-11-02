@@ -140,7 +140,7 @@ def _quantize(args: argparse.Namespace) -> int:
         pipeline=PIPELINE,
         runtime="metal41",
         max_prompt_tokens=CONTEXT_LENGTH,
-        kv_cache="f16",
+        kv_cache="half",
     )
     return 0
 
@@ -210,7 +210,7 @@ def _register(src: Path, output: Path) -> None:
         pipeline=PIPELINE,
         runtime="metal41",
         max_prompt_tokens=CONTEXT_LENGTH,
-        kv_cache="f16",
+        kv_cache="half",
     )
 
 
@@ -300,7 +300,7 @@ def _models(args: argparse.Namespace) -> int:
             pipeline=PIPELINE,
             runtime="metal41",
             max_prompt_tokens=CONTEXT_LENGTH,
-            kv_cache="f16",
+            kv_cache="half",
         )
         return 0
     if args.models_command == "alias":

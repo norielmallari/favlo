@@ -16,7 +16,7 @@ from urllib.parse import quote
 
 import numpy as np
 
-from qwen35_4b.formats import bf16_to_f32, f16_bytes, quantize_fp8
+from qwen35_4b.formats import bf16_to_f32, half_bytes, quantize_fp8
 from qwen35_4b.layout import (
     BLOCK,
     FOLDER,
@@ -92,7 +92,7 @@ def quantize(src: Path, dest: Path) -> Path:
             {
                 "complete": True,
                 "weight": "fp8",
-                "kv": "e4m3",
+                "kv": "fp8_e4m3",
                 "source": str(src.name),
                 "official": REPO,
                 "tensors": tensors,
@@ -222,8 +222,8 @@ def _order() -> list[tuple[str, str, str, tuple[int, ...]]]:
                     (stem + "self_attn.k_proj.weight", f"layer.{index}.k", "fp8", (1024, HIDDEN)),
                     (stem + "self_attn.v_proj.weight", f"layer.{index}.v", "fp8", (1024, HIDDEN)),
                     (stem + "self_attn.o_proj.weight", f"layer.{index}.o", "fp8", (HIDDEN, 4096)),
-                    (stem + "self_attn.q_norm.weight", f"layer.{index}.q_norm", "f16", (256,)),
-                    (stem + "self_attn.k_norm.weight", f"layer.{index}.k_norm", "f16", (256,)),
+                    (stem + "self_attn.q_norm.weight", f"layer.{index}.q_norm", "half", (256,)),
+                    (stem + "self_attn.k_norm.weight", f"layer.{index}.k_norm", "half", (256,)),
                 )
             )
         else:
@@ -262,12 +262,12 @@ def _order() -> list[tuple[str, str, str, tuple[int, ...]]]:
                     (
                         stem + "linear_attn.conv1d.weight",
                         f"layer.{index}.conv",
-                        "f16",
+                        "half",
                         (8192, 1, 4),
                     ),
-                    (stem + "linear_attn.A_log", f"layer.{index}.A_log", "f16", (32,)),
-                    (stem + "linear_attn.dt_bias", f"layer.{index}.dt_bias", "f16", (32,)),
-                    (stem + "linear_attn.norm.weight", f"layer.{index}.gdn_norm", "f16", (128,)),
+                    (stem + "linear_attn.A_log", f"layer.{index}.A_log", "half", (32,)),
+                    (stem + "linear_attn.dt_bias", f"layer.{index}.dt_bias", "half", (32,)),
+                    (stem + "linear_attn.norm.weight", f"layer.{index}.gdn_norm", "half", (128,)),
                 )
             )
         rows.extend(
@@ -275,16 +275,16 @@ def _order() -> list[tuple[str, str, str, tuple[int, ...]]]:
                 (stem + "mlp.gate_proj.weight", f"layer.{index}.gate", "fp8", (INTERMEDIATE, HIDDEN)),
                 (stem + "mlp.up_proj.weight", f"layer.{index}.up", "fp8", (INTERMEDIATE, HIDDEN)),
                 (stem + "mlp.down_proj.weight", f"layer.{index}.down", "fp8", (HIDDEN, INTERMEDIATE)),
-                (stem + "input_layernorm.weight", f"layer.{index}.in_norm", "f16", (HIDDEN,)),
+                (stem + "input_layernorm.weight", f"layer.{index}.in_norm", "half", (HIDDEN,)),
                 (
                     stem + "post_attention_layernorm.weight",
                     f"layer.{index}.post_norm",
-                    "f16",
+                    "half",
                     (HIDDEN,),
                 ),
             )
         )
-    rows.append(("model.language_model.norm.weight", "final_norm", "f16", (HIDDEN,)))
+    rows.append(("model.language_model.norm.weight", "final_norm", "half", (HIDDEN,)))
     rows.extend(_vision())
     return rows
 
@@ -294,7 +294,7 @@ def _vision() -> list[tuple[str, str, str, tuple[int, ...]]]:
     root = "model.visual."
     rows: list[tuple[str, str, str, tuple[int, ...]]] = [
         (root + "patch_embed.proj.weight", "visual.patch", "fp8", (VISION_HIDDEN, PATCH_DIM)),
-        (root + "patch_embed.proj.bias", "visual.patch_bias", "f16", (VISION_HIDDEN,)),
+        (root + "patch_embed.proj.bias", "visual.patch_bias", "half", (VISION_HIDDEN,)),
         (root + "pos_embed.weight", "visual.pos", "fp8", (VISION_POSITIONS, VISION_HIDDEN)),
     ]
     for index in range(VISION_DEPTH):
@@ -302,58 +302,58 @@ def _vision() -> list[tuple[str, str, str, tuple[int, ...]]]:
         name = f"visual.{index}."
         rows.extend(
             (
-                (stem + "norm1.weight", name + "norm1", "f16", (VISION_HIDDEN,)),
-                (stem + "norm1.bias", name + "norm1_bias", "f16", (VISION_HIDDEN,)),
+                (stem + "norm1.weight", name + "norm1", "half", (VISION_HIDDEN,)),
+                (stem + "norm1.bias", name + "norm1_bias", "half", (VISION_HIDDEN,)),
                 (
                     stem + "attn.qkv.weight",
                     name + "qkv",
                     "fp8",
                     (VISION_HIDDEN * 3, VISION_HIDDEN),
                 ),
-                (stem + "attn.qkv.bias", name + "qkv_bias", "f16", (VISION_HIDDEN * 3,)),
+                (stem + "attn.qkv.bias", name + "qkv_bias", "half", (VISION_HIDDEN * 3,)),
                 (
                     stem + "attn.proj.weight",
                     name + "proj",
                     "fp8",
                     (VISION_HIDDEN, VISION_HIDDEN),
                 ),
-                (stem + "attn.proj.bias", name + "proj_bias", "f16", (VISION_HIDDEN,)),
-                (stem + "norm2.weight", name + "norm2", "f16", (VISION_HIDDEN,)),
-                (stem + "norm2.bias", name + "norm2_bias", "f16", (VISION_HIDDEN,)),
+                (stem + "attn.proj.bias", name + "proj_bias", "half", (VISION_HIDDEN,)),
+                (stem + "norm2.weight", name + "norm2", "half", (VISION_HIDDEN,)),
+                (stem + "norm2.bias", name + "norm2_bias", "half", (VISION_HIDDEN,)),
                 (
                     stem + "mlp.linear_fc1.weight",
                     name + "fc1",
                     "fp8",
                     (VISION_INTERMEDIATE, VISION_HIDDEN),
                 ),
-                (stem + "mlp.linear_fc1.bias", name + "fc1_bias", "f16", (VISION_INTERMEDIATE,)),
+                (stem + "mlp.linear_fc1.bias", name + "fc1_bias", "half", (VISION_INTERMEDIATE,)),
                 (
                     stem + "mlp.linear_fc2.weight",
                     name + "fc2",
                     "fp8",
                     (VISION_HIDDEN, VISION_INTERMEDIATE),
                 ),
-                (stem + "mlp.linear_fc2.bias", name + "fc2_bias", "f16", (VISION_HIDDEN,)),
+                (stem + "mlp.linear_fc2.bias", name + "fc2_bias", "half", (VISION_HIDDEN,)),
             )
         )
     rows.extend(
         (
-            (root + "merger.norm.weight", "visual.merger_norm", "f16", (VISION_HIDDEN,)),
-            (root + "merger.norm.bias", "visual.merger_norm_bias", "f16", (VISION_HIDDEN,)),
+            (root + "merger.norm.weight", "visual.merger_norm", "half", (VISION_HIDDEN,)),
+            (root + "merger.norm.bias", "visual.merger_norm_bias", "half", (VISION_HIDDEN,)),
             (
                 root + "merger.linear_fc1.weight",
                 "visual.merger_fc1",
                 "fp8",
                 (MERGER_DIM, MERGER_DIM),
             ),
-            (root + "merger.linear_fc1.bias", "visual.merger_fc1_bias", "f16", (MERGER_DIM,)),
+            (root + "merger.linear_fc1.bias", "visual.merger_fc1_bias", "half", (MERGER_DIM,)),
             (
                 root + "merger.linear_fc2.weight",
                 "visual.merger_fc2",
                 "fp8",
                 (VISION_OUT, MERGER_DIM),
             ),
-            (root + "merger.linear_fc2.bias", "visual.merger_fc2_bias", "f16", (VISION_OUT,)),
+            (root + "merger.linear_fc2.bias", "visual.merger_fc2_bias", "half", (VISION_OUT,)),
         )
     )
     return rows
@@ -455,13 +455,13 @@ def _pack_tensor(task: tuple[Any, ...]) -> tuple[str, dict[str, Any]]:
             "scale_bytes": scale_bytes,
         }
     else:
-        data = f16_bytes(array)
+        data = half_bytes(array)
         if len(data) != data_bytes:
             message = f"{raw} packed {len(data)} bytes"
             raise RuntimeError(message)
         os.pwrite(fd, data, cursor)
         spec = {
-            "kind": "f16",
+            "kind": "half",
             "shape": list(shape),
             "data": cursor,
             "data_bytes": data_bytes,

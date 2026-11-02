@@ -72,25 +72,35 @@ def fp8_bytes(rows: int, inner: int) -> int:
     return rows * inner + rows * (inner // BLOCK)
 
 
-def f16_bytes(count: int) -> int:
+def half_bytes(count: int) -> int:
     return count * 2
 
 
-def kv_token_bytes(mode: str = "f16") -> int:
+KV_MODES = ("half", "fp8_e4m3")
+
+
+def kv_mode(name: str | None) -> str:
+    """``half`` or ``fp8_e4m3``. Empty means Metal ``half``."""
+    text = "half" if name is None or name == "" else str(name)
+    if text not in KV_MODES:
+        message = f"kv cache {name} is not half or fp8_e4m3"
+        raise ValueError(message)
+    return text
+
+
+def kv_token_bytes(mode: str = "half") -> int:
     """Key and value planes of the eight full-attention layers, one token.
 
-    ``f16`` is two bytes per element. ``e4m3`` is one E4M3 byte plus one E8M0
-    byte per 32 channels.
+    ``half`` is two bytes per element. ``fp8_e4m3`` is one Metal
+    ``metal_fp8_e4m3`` byte plus one E8M0 byte per 32 channels.
     """
-    if mode == "f16":
+    chosen = kv_mode(mode)
+    if chosen == "half":
         per_plane = KV_HEADS * HEAD_DIM * 2
-    elif mode == "e4m3":
-        per_plane = KV_HEADS * (HEAD_DIM + HEAD_DIM // BLOCK)
     else:
-        message = f"unknown kv cache {mode}"
-        raise ValueError(message)
+        per_plane = KV_HEADS * (HEAD_DIM + HEAD_DIM // BLOCK)
     return len(FULL) * 2 * per_plane
 
 
-def cache_bytes(tokens: int, mode: str = "f16") -> int:
+def cache_bytes(tokens: int, mode: str = "half") -> int:
     return kv_token_bytes(mode) * tokens
