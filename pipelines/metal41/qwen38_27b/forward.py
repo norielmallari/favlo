@@ -727,8 +727,17 @@ class Qwen38Runtime:
     def _gemv(self, act: Any, name: str, dest: Any) -> None:
         buf, offset, entry = self.locate(name)
         rows, inner = (int(value) for value in entry["stored_shape"])
-        scale = self.scale_offset(entry, offset)
         kind = str(entry.get("dtype", "fp4"))
+        if kind in {"half", "f16"}:
+            self.session.encode(
+                "gemv_half",
+                [(act, 0), (buf, offset), (dest, 0)],
+                [_u32(rows), _u32(inner)],
+                (rows, 1, 1),
+                (256, 1, 1),
+            )
+            return
+        scale = self.scale_offset(entry, offset)
         if kind == "fp8":
             if rows % 4 or inner % 16:
                 message = f"{name} is not an fp8 four-row tile"
@@ -861,7 +870,7 @@ class Qwen38Runtime:
         k_name = self._w(layer, "self_attn.k_proj.weight")
         v_name = self._w(layer, "self_attn.v_proj.weight")
         kinds = {self._dtype(name) for name in (q_name, k_name, v_name)}
-        if kinds == {"fp8"}:
+        if kinds <= {"half", "f16"} or kinds == {"fp8"}:
             self._gemv(self.normed, q_name, self.wide)
             self._gemv(self.normed, k_name, self.kv)
             self._gemv(self.normed, v_name, self.vv)
@@ -940,10 +949,10 @@ class Qwen38Runtime:
         _buf, _offset, up_entry = self.locate(up_name)
         gate_kind = str(gate_entry.get("dtype", "fp4"))
         up_kind = str(up_entry.get("dtype", "fp4"))
-        if gate_kind != up_kind or gate_kind not in {"fp4", "fp8"}:
+        if gate_kind != up_kind or gate_kind not in {"fp4", "fp8", "half", "f16"}:
             message = f"{gate_name} and {up_name} widths differ"
             raise RuntimeError(message)
-        if gate_kind == "fp8":
+        if gate_kind in {"fp8", "half", "f16"}:
             self._gemv(self.normed, gate_name, self.wide)
             self._gemv(self.normed, up_name, self.z)
         else:
@@ -1381,10 +1390,14 @@ class Qwen38Runtime:
             self._decode_progress = None
             self._end_phase(decode_row, format_rate("decode", len(out), decode_elapsed))
             decode_row = None
+            out = self._stabilize_output(prompt, out)
+            self._output_ids = list(out)
             self.prefix.note((prompt + out)[: self.filled])
             self._store_prefix()
         except RequestClosed:
             if boundary:
+                out = self._stabilize_output(prompt, out)
+                self._output_ids = list(out)
                 self.prefix.note((prompt + out)[: self.filled])
                 self._store_prefix()
             else:
@@ -1401,6 +1414,39 @@ class Qwen38Runtime:
             self._end_phase(prefill_row, "")
             self._end_phase(decode_row, "")
         return out
+
+    def _stabilize_output(self, prompt: list[int], out: list[int]) -> list[int]:
+        """Replay a completion whose tokens are not the encode of their decode.
+
+        The chat template re-encodes tool calls from structured arguments. When
+        the model drew a different tokenization of the same text, that later
+        prompt would miss the stored prefix. Restoring the prompt-boundary
+        file and stepping the encode-stable ids keeps the device and the file
+        aligned with the next request.
+        """
+        if not out or not prompt:
+            return out
+        from qwen38_27b.chat import decode_text, encode_text
+
+        text = decode_text(self.root, out)
+        canonical = encode_text(self.root, text)
+        if canonical == out:
+            return out
+        self.prefix.dirty = False
+        self.prefix.tokens = []
+        self.prefix.loaded = False
+        self.reset()
+        hit = self.prefix.align(prompt + canonical)
+        if hit != len(prompt):
+            self.prefix.dirty = False
+            self.prefix.tokens = []
+            self.prefix.loaded = False
+            self.reset()
+            return out
+        for index, token in enumerate(canonical):
+            self.step(int(token), hit + index, logits=False)
+        self.filled = hit + len(canonical)
+        return canonical
 
     def _pick(self, argmax_id: int | None, counts: dict[int, int]) -> int:
         if not self._sample_host:

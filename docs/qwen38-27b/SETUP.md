@@ -66,7 +66,7 @@ With no `--src`, `quantize` reads the Hugging Face cache snapshot for [Qwen/Qwen
 - `100` stores all 64 language feed-forward layers as fp8 and writes `models/Qwen3.8-27B-fp8`.
 - Any other percentage stores that share of the language feed-forward layers as fp8 and writes `models/Qwen3.8-27B-fp8-e<P>`, where `<P>` is that percentage. `20` writes `models/Qwen3.8-27B-fp8-e20`. The count is the largest whole number that does not exceed that percentage, so `20` is 12 layers. Those layers are the highest BF16-to-fp4 relative errors. Gate, up, and down move together.
 
-The embedding, the projections, `lm_head`, and the vision tower stay fp4. MTP matrices are fp8 E4M3. One-dimensional parameters, including MTP norms, stay Metal `half`. `mtp-fp8` rewrites a finished record whose MTP matrices are still fp4.
+The embedding, the projections, `lm_head`, and the vision tower stay fp4. MTP matrices are Metal `half`, with rows and K padded to 64. One-dimensional parameters, including MTP norms, stay Metal `half`. `mtp-half` rewrites a finished record whose MTP matrices are still fp4 or fp8.
 
 ```bash
 uv run favlo --qwen38-27b quantize --src models/Qwen3.8-27B-bf16 --ffn-fp8 100

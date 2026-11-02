@@ -14,7 +14,7 @@ from harness.benchmarks.serve import Request, Server
 from harness.coding.agent_tools import coding_tools
 from harness.coding.session import session_for
 from harness.coding.workspace import PROMPT, prepare_workspace
-from harness.file_session import RequestRate, extensions_hold, parse_requests
+from harness.file_session import RequestRate, parse_requests
 
 # One model call per tool step, then status polls, then a stop.
 SESSION_ROUNDS = 16
@@ -37,14 +37,43 @@ def agent_options(request: Request, *, mtp: bool, mtp_depth: int) -> dict[str, o
 
 
 def prefix_problems(requests: list[RequestRate]) -> list[str]:
-    """Problems when the restart did not load the prefix or later turns drifted."""
+    """Problems when the restart did not load the prefix or later turns drifted.
+
+    A later turn may reload the prompt-boundary file when the chat template
+    re-encodes a tool call differently from the drawn tokens. That reload is
+    still a held prefix when the hit equals that boundary or the prior applied
+    length. A cache miss after the first request is not.
+    """
     if len(requests) < 2:
         return ["the ledger made fewer than two requests"]
     if not any(request.prefix_load is not None for request in requests[1:]):
         return ["prefix was not loaded from disk"]
-    if not extensions_hold(requests):
+    if not coding_prefix_holds(requests):
         return ["prefix did not extend"]
     return []
+
+
+def coding_prefix_holds(requests: list[RequestRate]) -> bool:
+    """True when the restart loaded from disk and later turns kept a cache hit."""
+    from harness.file_session import _applied, _cold_start, _extends, _stored_load
+
+    if not requests:
+        return False
+    first = requests[0]
+    if not (_cold_start(first) or _stored_load(first)):
+        return False
+    for previous, current in zip(requests, requests[1:], strict=False):
+        if current.missed or current.prefix_hit is None:
+            return False
+        if current.prefix_load is not None:
+            if not _stored_load(current):
+                return False
+            if current.prefix_hit not in {_applied(previous), previous.prompt_tokens}:
+                return False
+            continue
+        if not _extends(previous, current):
+            return False
+    return True
 
 
 def rebind_chat_client(client: Any, port: int) -> None:

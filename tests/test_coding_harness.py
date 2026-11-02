@@ -54,6 +54,44 @@ decode 1.00 tok/s (1 tok in 1.00s)
 """
     assert prefix_problems(parse_requests(loaded)) == []
     assert prefix_problems([]) == ["the ledger made fewer than two requests"]
+    boundary = """\
+prompt tokens 10
+cache miss
+prefill 1.00 tok/s (10 tok in 10.00s)
+decode 1.00 tok/s (2 tok in 2.00s)
+prefix load 12 tokens
+prompt tokens 20
+cache hit 12
+prefill 1.00 tok/s (8 tok in 8.00s)
+decode 1.00 tok/s (4 tok in 4.00s)
+prompt tokens 30
+cache hit 24
+prefill 1.00 tok/s (6 tok in 6.00s)
+decode 1.00 tok/s (3 tok in 3.00s)
+prefix load 30 tokens
+prompt tokens 50
+cache hit 30
+prefill 1.00 tok/s (20 tok in 20.00s)
+decode 1.00 tok/s (2 tok in 2.00s)
+"""
+    assert prefix_problems(parse_requests(boundary)) == []
+    drifted = """\
+prompt tokens 10
+cache miss
+prefill 1.00 tok/s (10 tok in 10.00s)
+decode 1.00 tok/s (2 tok in 2.00s)
+prefix load 12 tokens
+prompt tokens 20
+cache hit 12
+prefill 1.00 tok/s (8 tok in 8.00s)
+decode 1.00 tok/s (4 tok in 4.00s)
+prefix load 99 tokens
+prompt tokens 50
+cache hit 99
+prefill 1.00 tok/s (0 tok in 0.00s)
+decode 1.00 tok/s (1 tok in 1.00s)
+"""
+    assert prefix_problems(parse_requests(drifted)) == ["prefix did not extend"]
 
 
 def test_thinking_body_omits_sampling_fields() -> None:

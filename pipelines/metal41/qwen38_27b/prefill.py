@@ -398,9 +398,25 @@ def _ffn(
 
     if layer is not None:
         runtime.prepare_ffn(layer)
+    gate = weight("mlp.gate_proj.weight")
+    if runtime._dtype(gate) in {"half", "f16"}:
+        _cast_half(runtime, work, work.normed, count * HIDDEN, rows, HIDDEN)
+        _matmul(runtime, work.half, gate, work.big0, rows)
+        _matmul(runtime, work.half, weight("mlp.up_proj.weight"), work.big1, rows)
+        runtime.session.encode(
+            "swiglu_f32",
+            [(work.big0, 0), (work.big1, 0), (work.big2, 0)],
+            [],
+            (rows * INTERMEDIATE // 256, 1, 1),
+            (256, 1, 1),
+        )
+        _cast_half(runtime, work, work.big2, rows * INTERMEDIATE, rows, INTERMEDIATE)
+        _matmul(runtime, work.half, weight("mlp.down_proj.weight"), work.big0, rows)
+        _add(runtime, work, count, work.big0)
+        return
     _cast_half(runtime, work, work.normed, count * HIDDEN, rows, HIDDEN)
     _quantize_act(runtime, work, rows, HIDDEN)
-    _matmul_i8(runtime, work, weight("mlp.gate_proj.weight"), work.big0, rows)
+    _matmul_i8(runtime, work, gate, work.big0, rows)
     _matmul_i8(runtime, work, weight("mlp.up_proj.weight"), work.big1, rows)
     runtime.session.encode(
         "swiglu_f32",
@@ -481,6 +497,19 @@ def _matmul(runtime: Any, half: Any, name: str, dest: Any, rows: int) -> None:
     buf, offset, entry = runtime.locate(name)
     cols, inner = (int(value) for value in entry["stored_shape"])
     kind = str(entry.get("dtype", "fp4"))
+    if kind in {"half", "f16"}:
+        if cols % 64 or rows % 64:
+            message = f"{name} tile {rows}x{cols}x{inner} is not a 64-row half tile"
+            raise RuntimeError(message)
+        width = int(runtime.session.pipes["prefill_half_n64"].threadExecutionWidth())
+        runtime.session.encode(
+            "prefill_half_n64",
+            [(half, 0), (buf, offset), (dest, 0)],
+            [_u32(rows), _u32(cols), _u32(inner)],
+            (cols // 64, rows // 64, 1),
+            (width * 4, 1, 1),
+        )
+        return
     if kind not in {"fp4", "fp8"} or cols % 64 or inner % 32 or rows % 64:
         message = f"{name} tile {rows}x{cols}x{inner} is not a 64-row {kind} tile"
         raise RuntimeError(message)

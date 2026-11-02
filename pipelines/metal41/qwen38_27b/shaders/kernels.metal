@@ -937,6 +937,66 @@ static void fp8_rows4(
     a3 = acc3;
 }
 
+kernel void gemv_half(
+    device const float* activation [[buffer(0)]],
+    device const half* weights [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint span [[threads_per_threadgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= cols) {
+        return;
+    }
+    device const half* w = weights + (ulong)row * inner;
+    float acc = 0.0f;
+    for (uint i = tid; i < inner; i += span) {
+        acc = fma(activation[i], float(w[i]), acc);
+    }
+    float part = simd_sum(acc);
+    threadgroup float red[8];
+    if (lane == 0u) {
+        red[simd] = part;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0u) {
+        float sum = 0.0f;
+        uint nsimd = span >> 5;
+        for (uint s = 0u; s < nsimd; ++s) {
+            sum += red[s];
+        }
+        destination[row] = sum;
+    }
+}
+
+kernel void prefill_half_n64(
+    device half* activation [[buffer(0)]],
+    device half* weights [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        activation, dextents<int, 2>(int(inner), int(rows)), array<int, 2>{1, int(inner)});
+    tensor<device half, dextents<int, 2>, tensor_inline> right(
+        weights, dextents<int, 2>(int(inner), int(cols)), array<int, 2>{1, int(inner)});
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        destination, dextents<int, 2>(int(cols), int(rows)), array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(
+        64, 64, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto left_tile = left.slice(0, int(tgid.y) * 64);
+    auto right_tile = right.slice(0, int(tgid.x) * 64);
+    auto out_tile = out.slice(int(tgid.x) * 64, int(tgid.y) * 64);
+    op.run(left_tile, right_tile, out_tile);
+}
+
 kernel void gemv_fp8_x4(
     device const float* activation [[buffer(0)]],
     device const uchar* weights [[buffer(1)]],

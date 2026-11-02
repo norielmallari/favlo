@@ -3,7 +3,8 @@
 Every matrix is fp4 E2M1 with an E8M0 scale every 32 along K, except language
 feed-forward layers selected by ``--ffn-fp8``. Those three matrices are fp8
 E4M3. One-dimensional parameters and the depthwise convolution stay Metal ``half``.
-MTP matrices are fp8 E4M3. ``repack_mtp_fp8`` rewrites a record that still stores them as fp4.
+MTP matrices are Metal ``half`` with rows and K padded to 64. ``repack_mtp_half``
+rewrites a record that still stores MTP matrices as fp4 or fp8.
 """
 
 from __future__ import annotations
@@ -84,6 +85,22 @@ def _half_entry(array: np.ndarray) -> tuple[bytes, dict]:
     return flat.tobytes(), body
 
 
+def _half_matrix_entry(array: np.ndarray) -> tuple[bytes, dict]:
+    """Pack a matrix as Metal ``half`` with rows and K padded to 64 for ``matmul2d``."""
+    matrix = np.ascontiguousarray(array, dtype=np.float32)
+    logical = list(matrix.shape)
+    if matrix.ndim == 1:
+        return _half_entry(matrix)
+    if matrix.ndim > 2:
+        matrix = matrix.reshape(matrix.shape[0], -1)
+    rows = stored_rows(matrix.shape[0])
+    cols = ((matrix.shape[1] + 63) // 64) * 64
+    padded = np.zeros((rows, cols), dtype=np.float16)
+    padded[: matrix.shape[0], : matrix.shape[1]] = matrix.astype(np.float16)
+    body = {"dtype": "half", "shape": logical, "stored_shape": [rows, cols]}
+    return padded.tobytes(), body
+
+
 def record_name(percent: float | None, layers: int) -> str:
     """``<model>-fp4``, ``<model>-fp8``, or ``<model>-fp8-e<P>`` for a partial promotion.
 
@@ -153,10 +170,10 @@ def _fp4_entry(array: np.ndarray) -> tuple[bytes, dict]:
     return blob, body
 
 
-def _mtp_fp4(tensors: dict[str, dict]) -> bool:
-    """True when an MTP matrix is still packed as fp4."""
+def _mtp_needs_half(tensors: dict[str, dict]) -> bool:
+    """True when an MTP matrix is still packed as fp4 or fp8."""
     return any(
-        str(name).startswith("mtp.") and str(entry.get("dtype")) == "fp4"
+        str(name).startswith("mtp.") and str(entry.get("dtype")) in {"fp4", "fp8"}
         for name, entry in tensors.items()
         if isinstance(entry, dict)
     )
@@ -298,8 +315,8 @@ def quantize(src: Path, output: Path | None = None, *, ffn_fp8: float | None = N
         if body.get("complete"):
             _budget(body, ffn_fp8, count)
             tensors = body.get("tensors")
-            if isinstance(tensors, dict) and _mtp_fp4(tensors):
-                return repack_mtp_fp8(output, src)
+            if isinstance(tensors, dict) and _mtp_needs_half(tensors):
+                return repack_mtp_half(output, src)
             return output
     weight_map = _weight_map(src)
     promoted = _promoted(src, weight_map, output, ffn_fp8, layers)
@@ -323,6 +340,13 @@ def quantize(src: Path, output: Path | None = None, *, ffn_fp8: float | None = N
                     if done[name].get("dtype") != expected:
                         message = f"{name} is stored as {done[name].get('dtype')}"
                         raise RuntimeError(message)
+                if (
+                    name.startswith("mtp.")
+                    and len(done[name].get("stored_shape") or ()) == 2
+                    and done[name].get("dtype") not in {"half", "f16"}
+                ):
+                    message = f"{name} is stored as {done[name].get('dtype')}"
+                    raise RuntimeError(message)
                 continue
             array = _load(path, header, base, name)
             print(f"  {name}", flush=True)
@@ -331,9 +355,9 @@ def quantize(src: Path, output: Path | None = None, *, ffn_fp8: float | None = N
                 if name.endswith("conv1d.weight") and array.ndim >= 2:
                     flat = array.reshape(array.shape[0], -1)
                 blob, body = _half_entry(flat)
-            elif found is not None and found[0] in chosen:
-                blob, body = _fp8_entry(array)
             elif name.startswith("mtp."):
+                blob, body = _half_matrix_entry(array)
+            elif found is not None and found[0] in chosen:
                 blob, body = _fp8_entry(array)
             else:
                 blob, body = _fp4_entry(array)
@@ -365,8 +389,11 @@ def quantize(src: Path, output: Path | None = None, *, ffn_fp8: float | None = N
     if count:
         manifest["ffn_fp8_percent"] = ffn_fp8
         manifest["ffn_fp8_layers"] = promoted
-    if any(str(name).startswith("mtp.") and str(body.get("dtype")) == "fp8" for name, body in done.items()):
-        manifest["mtp_weight"] = "fp8"
+    if any(
+        str(name).startswith("mtp.") and str(body.get("dtype")) in {"half", "f16"}
+        for name, body in done.items()
+    ):
+        manifest["mtp_weight"] = "half"
     temporary = manifest_path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(manifest))
     os.replace(temporary, manifest_path)
@@ -380,19 +407,19 @@ def quantize(src: Path, output: Path | None = None, *, ffn_fp8: float | None = N
         src_file = src / extra
         if src_file.is_file():
             target = output / extra
-        if not target.exists():
-            shutil.copyfile(src_file, target)
-    if _mtp_fp4(done):
-        return repack_mtp_fp8(output, src)
+            if not target.exists():
+                shutil.copyfile(src_file, target)
+    if _mtp_needs_half(done):
+        return repack_mtp_half(output, src)
     return output
 
 
-def repack_mtp_fp8(record: Path, source: Path) -> Path:
-    """Replace fp4 MTP matrices in ``record`` with fp8 packed from the BF16 checkout.
+def repack_mtp_half(record: Path, source: Path) -> Path:
+    """Replace fp4 or fp8 MTP matrices in ``record`` with Metal ``half`` from the BF16 checkout.
 
     Only ``mtp.*`` matrices are read from ``source``. The rewritten resident file
-    drops the fp4 bytes. Each new span is what the loader copies into memory.
-    A record whose MTP matrices are already fp8 is left in place.
+    drops the quantized bytes. Each new span is what the loader copies into memory.
+    A record whose MTP matrices are already half is left in place.
     """
     from qwen38_27b.budget import tensor_span
 
@@ -408,10 +435,10 @@ def repack_mtp_fp8(record: Path, source: Path) -> Path:
     pending = [
         name
         for name, entry in tensors.items()
-        if name.startswith("mtp.") and str(entry.get("dtype")) == "fp4"
+        if name.startswith("mtp.") and str(entry.get("dtype")) in {"fp4", "fp8"}
     ]
     if not pending:
-        print("mtp fp8", flush=True)
+        print("mtp half", flush=True)
         return record
     weight_map = _weight_map(source)
     missing = [name for name in pending if name not in weight_map]
@@ -429,17 +456,27 @@ def repack_mtp_fp8(record: Path, source: Path) -> Path:
         for name in names:
             array = _load(path, header, base, name)
             print(f"  {name}", flush=True)
-            packed[name] = _fp8_entry(array)
+            packed[name] = _half_matrix_entry(array)
             del array
     free = shutil.disk_usage(record).free
     old_mtp = sum(tensor_span(tensors[name]) for name in pending)
     new_mtp = sum(len(blob) for blob, _body in packed.values())
     need = resident.stat().st_size - old_mtp + new_mtp + 4096
-    if free < need:
-        message = f"need {need} free bytes to rewrite the resident file"
-        raise RuntimeError(message)
     ordered = sorted(tensors, key=lambda name: int(tensors[name]["offset"]))
     fresh = record / "resident.bin.new"
+    if free < need:
+        # The temporary resident may sit on the BF16 volume when the record disk is full.
+        cursor_path = source
+        while True:
+            if shutil.disk_usage(cursor_path).free >= need:
+                fresh = cursor_path / f".{record.name}.resident.bin.new"
+                break
+            if cursor_path.parent == cursor_path:
+                message = f"need {need} free bytes to rewrite the resident file"
+                raise RuntimeError(message)
+            cursor_path = cursor_path.parent
+    if fresh.parent != record:
+        fresh.parent.mkdir(parents=True, exist_ok=True)
     updated: dict[str, dict] = {}
     cursor = 0
     with resident.open("rb") as src, fresh.open("wb") as dst:
@@ -472,19 +509,42 @@ def repack_mtp_fp8(record: Path, source: Path) -> Path:
     if fresh.stat().st_size != cursor:
         message = "resident rewrite length does not match"
         raise RuntimeError(message)
-    backup = record / "resident.bin.bak"
-    os.replace(resident, backup)
+    # Keep the backup on the volume that held the temporary file when the
+    # record disk cannot hold old and new residents at once.
+    if fresh.parent == record:
+        backup = record / "resident.bin.bak"
+    else:
+        backup = fresh.parent / f".{record.name}.resident.bin.bak"
+    if backup.exists():
+        backup.unlink()
+    if backup.parent == record:
+        os.replace(resident, backup)
+    else:
+        shutil.move(str(resident), str(backup))
     try:
-        os.replace(fresh, resident)
+        if fresh.parent == record:
+            os.replace(fresh, resident)
+        else:
+            shutil.copyfile(fresh, resident)
+            fresh.unlink(missing_ok=True)
         manifest["tensors"] = updated
-        manifest["mtp_weight"] = "fp8"
+        manifest["mtp_weight"] = "half"
         temporary = manifest_path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(manifest))
         os.replace(temporary, manifest_path)
     except Exception:
-        if backup.exists():
-            os.replace(backup, resident)
+        if backup.exists() and not resident.exists():
+            if backup.parent == record:
+                os.replace(backup, resident)
+            else:
+                shutil.move(str(backup), str(resident))
+        if fresh.exists() and fresh.parent != record:
+            fresh.unlink(missing_ok=True)
         raise
-    backup.unlink()
-    print(f"mtp fp8 {len(pending)}", flush=True)
+    backup.unlink(missing_ok=True)
+    print(f"mtp half {len(pending)}", flush=True)
     return record
+
+
+# Legacy name kept for callers that still import the fp8 repack entry point.
+repack_mtp_fp8 = repack_mtp_half

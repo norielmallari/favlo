@@ -71,12 +71,16 @@ def _config() -> dict:
     }
 
 
-def test_mtp_matrices_pack_as_fp8() -> None:
-    from qwen38_27b.convert import _keep_half, _mtp_fp4
+def test_mtp_matrices_pack_as_half() -> None:
+    from qwen38_27b.convert import _half_matrix_entry, _keep_half, _mtp_needs_half
 
     assert _keep_half("mtp.norm.weight", np.ones(8, dtype=np.float32)) is True
-    assert _mtp_fp4({"mtp.fc.weight": {"dtype": "fp4"}, "lm_head.weight": {"dtype": "fp4"}}) is True
-    assert _mtp_fp4({"mtp.fc.weight": {"dtype": "fp8"}}) is False
+    assert _mtp_needs_half({"mtp.fc.weight": {"dtype": "fp4"}, "lm_head.weight": {"dtype": "fp4"}}) is True
+    assert _mtp_needs_half({"mtp.fc.weight": {"dtype": "fp8"}}) is True
+    assert _mtp_needs_half({"mtp.fc.weight": {"dtype": "half"}}) is False
+    _blob, body = _half_matrix_entry(np.ones((64, 256), dtype=np.float32))
+    assert body["dtype"] == "half"
+    assert body["stored_shape"] == [64, 256]
 
 
 def test_a_new_27b_row_defaults_mtp_on(tmp_path: Path) -> None:
@@ -2005,7 +2009,7 @@ def test_repack_mtp_replaces_fp4_bytes(tmp_path: Path) -> None:
     import json
 
     from qwen38_27b.budget import tensor_span
-    from qwen38_27b.convert import _fp4_entry, repack_mtp_fp8
+    from qwen38_27b.convert import _fp4_entry, repack_mtp_half
 
     weight = np.linspace(-1.0, 1.0, 64 * 256, dtype=np.float32).reshape(64, 256)
     blob, body = _fp4_entry(weight)
@@ -2047,17 +2051,20 @@ def test_repack_mtp_replaces_fp4_bytes(tmp_path: Path) -> None:
     (source / "model.safetensors.index.json").write_text(
         json.dumps({"weight_map": {"mtp.fc.weight": "model.safetensors"}})
     )
-    repack_mtp_fp8(record, source)
+    repack_mtp_half(record, source)
     packed = json.loads((record / "manifest.json").read_text())
-    assert packed["mtp_weight"] == "fp8"
-    assert packed["tensors"]["mtp.fc.weight"]["dtype"] == "fp8"
+    assert packed["mtp_weight"] == "half"
+    assert packed["tensors"]["mtp.fc.weight"]["dtype"] == "half"
+    assert packed["tensors"]["mtp.fc.weight"]["stored_shape"] == [64, 256]
     assert packed["tensors"]["model.norm.weight"]["dtype"] == "half"
     rewritten = (record / "resident.bin").read_bytes()
     norm = packed["tensors"]["model.norm.weight"]
     start = int(norm["offset"])
     assert rewritten[start : start + tensor_span(norm)] == neighbor
     assert blob not in rewritten
+    mtp = packed["tensors"]["mtp.fc.weight"]
+    assert tensor_span(mtp) == 64 * 256 * 2
     assert not (record / "resident.bin.bak").exists()
-    repack_mtp_fp8(record, source)
+    repack_mtp_half(record, source)
     again = json.loads((record / "manifest.json").read_text())
     assert again["tensors"]["mtp.fc.weight"]["offset"] == packed["tensors"]["mtp.fc.weight"]["offset"]

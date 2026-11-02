@@ -58,6 +58,8 @@ KERNELS = (
     "ffn_gate_up",
     "ffn_gate_up_fp8",
     "gemv_fp8_x4",
+    "gemv_half",
+    "prefill_half_n64",
     "ffn_gate_up_span2",
     "ffn_gate_up_span3",
     "gdn_conv_rows",

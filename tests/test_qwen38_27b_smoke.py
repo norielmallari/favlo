@@ -111,8 +111,8 @@ def _expect_six(text: str, *, thinking: bool) -> None:
 def test_mtp_off_and_on_match(carrot_runtime: Qwen38Runtime) -> None:
     root = carrot_runtime.root
     manifest = json.loads((root / "manifest.json").read_text())
-    if manifest.get("mtp_weight") != "fp8":
-        pytest.skip("mtp matrices are not fp8")
+    if manifest.get("mtp_weight") != "half":
+        pytest.skip("mtp matrices are not half")
     prompt = encode_chat(
         root,
         [{"role": "user", "content": CARROT_PROMPT}],

@@ -478,8 +478,17 @@ def _gemv_rows(
 def _gemv_at(runtime: Any, act: Any, act_off: int, name: str, dest: Any, dest_off: int) -> None:
     buf, offset, entry = runtime.locate(name)
     rows, inner = (int(value) for value in entry["stored_shape"])
-    scale = runtime.scale_offset(entry, offset)
     kind = str(entry.get("dtype", "fp4"))
+    if kind in {"half", "f16"}:
+        runtime.session.encode(
+            "gemv_half",
+            [(act, act_off), (buf, offset), (dest, dest_off)],
+            [_u32(rows), _u32(inner)],
+            (rows, 1, 1),
+            (256, 1, 1),
+        )
+        return
+    scale = runtime.scale_offset(entry, offset)
     bindings = [(act, act_off), (buf, offset), (buf, scale), (dest, dest_off)]
     if kind == "fp8":
         threads = 160 if (inner >> 4) % 160 == 0 else 256
