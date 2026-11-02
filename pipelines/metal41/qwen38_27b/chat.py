@@ -30,13 +30,18 @@ from favlo.responses import (
     response_object,
     response_to_chat,
     template_messages,
-    thinking_enabled,
     usage_object,
     web_search_context,
 )
 from qwen38_27b.cache import DEFAULT_CONTEXT_LENGTH
 from qwen38_27b.forward import RequestClosed
-from qwen38_27b.sampling import VARIANTS, mode_card
+from qwen38_27b.sampling import (
+    DEFAULT_VARIANT,
+    VARIANTS,
+    mode_card,
+    resolve_effort,
+    template_effort,
+)
 from qwen38_27b.tools import (
     StreamText,
     function_has_parameters,
@@ -151,22 +156,41 @@ def _raise(message: str) -> None:
 
 
 def _reasoning_effort(body: dict[str, Any]) -> str | None:
-    """Template effort. ``none`` is omitted, so the template keeps xhigh."""
+    """Template effort after ``resolve_effort``. ``none`` is omitted."""
     effort = body.get("reasoning_effort")
     if not isinstance(effort, str):
         extra = body.get("chat_template_kwargs")
         if isinstance(extra, dict):
             effort = extra.get("reasoning_effort")
-    if not isinstance(effort, str) or effort.strip().lower() == "none":
+    if not isinstance(effort, str):
         return None
-    return effort
+    resolved = resolve_effort(effort)
+    if resolved is None or resolved == "none":
+        return None
+    return resolved
+
+
+def _request_effort(body: dict[str, Any]) -> str | None:
+    """``reasoning.effort`` after the Chat Completions translation.
+
+    ``reasoning_effort`` and ``enable_thinking`` are already mapped onto that
+    field. An omitted effort stays omitted so the registry row can decide.
+    """
+    reasoning = body.get("reasoning")
+    if not isinstance(reasoning, dict):
+        return None
+    effort = reasoning.get("effort")
+    if not isinstance(effort, str) or not effort.strip():
+        return None
+    return effort.strip().lower()
 
 
 def _sampling(
     body: dict[str, Any], thinking: bool, variant: dict[str, Any] | None
 ) -> tuple[float, float, int]:
     """Card values unless the request sets the field. Temperature 0 is an argmax."""
-    card = variant if variant is not None else VARIANTS["thinking" if thinking else "instruct"]
+    del thinking
+    card = variant if variant is not None else VARIANTS[DEFAULT_VARIANT]
     temperature = body.get("temperature")
     top_p = body.get("top_p")
     top_k = body.get("top_k")
@@ -181,10 +205,11 @@ def _presence(body: dict[str, Any], thinking: bool, variant: dict[str, Any] | No
     penalty = body.get("presence_penalty")
     if penalty is not None:
         return float(penalty)
-    card = variant if variant is not None else VARIANTS["thinking" if thinking else "instruct"]
+    del thinking
+    card = variant if variant is not None else VARIANTS[DEFAULT_VARIANT]
     if "presence_penalty" in card:
         return float(card["presence_penalty"])
-    return 0.0
+    return float(VARIANTS[DEFAULT_VARIANT]["presence_penalty"])
 
 
 def _frequency(body: dict[str, Any]) -> float:
@@ -340,7 +365,7 @@ def _respond(
     except RequestError as exc:
         reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
         return
-    requested = thinking_enabled(prepared)
+    requested = _request_effort(prepared)
     required = required_function(prepared.get("tool_choice"))
     thinking, card = mode_card(selection, requested)
     if required:
@@ -358,7 +383,7 @@ def _respond(
     tools = function_tools(prepared.get("tools"))
     if prepared.get("tool_choice") == "none":
         tools = []
-    effort = _template_effort(prepared) if thinking else None
+    effort = template_effort(selection, requested) if thinking else None
     try:
         keep_thinking = preserve_thinking(prepared)
     except RuntimeError as exc:
@@ -430,17 +455,6 @@ def _respond(
     )
     remember(state, prepared, payload)
     reply.json(200, payload)
-
-
-def _template_effort(prepared: dict[str, Any]) -> str | None:
-    """Effort the checkpoint template names. ``none`` leaves thinking off elsewhere."""
-    reasoning = prepared.get("reasoning")
-    if not isinstance(reasoning, dict):
-        return None
-    effort = reasoning.get("effort")
-    if not isinstance(effort, str) or effort.strip().lower() in {"", "none"}:
-        return None
-    return effort
 
 
 def _output_limit(prepared: dict[str, Any]) -> int | None:

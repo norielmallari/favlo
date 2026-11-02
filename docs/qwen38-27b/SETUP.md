@@ -91,7 +91,7 @@ curl http://127.0.0.1:8129/v1/responses \
   -d '{"model":"qwen38-27b:instruct","input":"Hello"}'
 ```
 
-`GET /v1/models` lists the registered ids. A bare `qwen38-27b` uses the thinking card (temperature 1.0, top-p 0.95, top-k 20, presence penalty 0). `qwen38-27b:instruct` uses temperature 0.7, top-p 0.8, top-k 20, presence penalty 1.5. `enable_thinking` set to false selects the instruct card when the id has no variant suffix. A request that omits `reasoning_effort`, or sends `none`, leaves the template default, xhigh. The server does not check an API key. A client that requires one can send any placeholder, such as `favlo`.
+`GET /v1/models` lists the registered ids. A bare `qwen38-27b` uses the thinking sampling card (temperature 1.0, top-p 0.95, top-k 20, presence penalty 0). `qwen38-27b:instruct` uses temperature 0.7, top-p 0.8, top-k 20, presence penalty 1.5. Those suffixes are sampling presets only. Thinking follows the resolved `reasoning.effort` (`none`, `low`, `medium`, or `xhigh`; the other listed names map onto those) or the row's `reasoning_effort` / `enable_thinking`. A request that omits effort leaves the template default, xhigh, when thinking is open. The server does not check an API key. A client that requires one can send any placeholder, such as `favlo`.
 
 A user message can include a still image. The served window stops at 131072 tokens.
 

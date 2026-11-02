@@ -257,6 +257,51 @@ def test_reasoning_effort_none_uses_the_template_default() -> None:
     assert _reasoning_effort({"chat_template_kwargs": {"reasoning_effort": "none"}}) is None
     assert _reasoning_effort({"reasoning_effort": "low"}) == "low"
     assert _reasoning_effort({"chat_template_kwargs": {"reasoning_effort": "medium"}}) == "medium"
+    assert _reasoning_effort({"reasoning_effort": "minimal"}) == "low"
+    assert _reasoning_effort({"reasoning_effort": "high"}) == "xhigh"
+    assert _reasoning_effort({"reasoning_effort": "max"}) == "xhigh"
+
+
+def test_resolve_effort_maps_onto_the_template_set() -> None:
+    from qwen38_27b.sampling import mode_card, resolve_effort
+
+    assert resolve_effort(None) is None
+    assert resolve_effort("none") == "none"
+    assert resolve_effort("low") == "low"
+    assert resolve_effort("medium") == "medium"
+    assert resolve_effort("xhigh") == "xhigh"
+    assert resolve_effort("minimal") == "low"
+    assert resolve_effort("high") == "xhigh"
+    assert resolve_effort("max") == "xhigh"
+
+    from qwen38_27b.chat import _request_effort
+
+    instruct = SimpleNamespace(
+        variant="instruct",
+        sampling=None,
+        variants=None,
+        default_variant="thinking",
+        enable_thinking=False,
+        reasoning_effort=None,
+    )
+    thinking, card = mode_card(instruct, _request_effort({"reasoning": {"effort": "high"}}))
+    assert thinking is True
+    assert card["temperature"] == 0.7
+    closed, still = mode_card(instruct, _request_effort({"reasoning": {"effort": "none"}}))
+    assert closed is False
+    assert still["temperature"] == 0.7
+    omitted, _card = mode_card(
+        SimpleNamespace(
+            variant=None,
+            sampling=None,
+            variants=None,
+            default_variant="thinking",
+            enable_thinking=True,
+            reasoning_effort="medium",
+        ),
+        _request_effort({}),
+    )
+    assert omitted is True
 
 
 def test_responses_body_is_the_generation_path(monkeypatch: pytest.MonkeyPatch) -> None:
