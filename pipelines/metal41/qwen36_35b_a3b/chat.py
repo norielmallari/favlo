@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import queue
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -29,14 +28,12 @@ from qwen36_35b_a3b.tools import (
 from qwen36_35b_a3b.vision import prepare_prompt
 from favlo.responses import (
     RequestError,
-    chat_to_responses,
     format_instruction,
     function_tools,
     new_id,
     prepare_request,
     remember,
     response_object,
-    response_to_chat,
     template_messages,
     usage_object,
     web_search_context,
@@ -304,8 +301,8 @@ def _raise(message: str) -> None:
     raise ValueError(message)
 
 
-class _Hooks(LanguagePipeline):
-    """Disconnect shell shared by the Responses route and the chat adapter."""
+class Pipeline(LanguagePipeline):
+    """One Responses generation for this package."""
 
     def on_open(self, runtime: Any, reply: Any, selection: Any) -> None:
         from qwen36_35b_a3b.firing import open_request
@@ -330,11 +327,7 @@ class _Hooks(LanguagePipeline):
         runtime._stop = None
         finish_request(runtime, selection, complete=complete)
 
-
-class Pipeline(_Hooks):
-    """Chat Completions translated into one Responses generation."""
-
-    def complete(
+    def handle_responses(
         self,
         reply: Any,
         runtime: Any,
@@ -344,48 +337,16 @@ class Pipeline(_Hooks):
         state: dict[str, Any],
     ) -> None:
         del args
-        try:
-            translated = chat_to_responses(body)
-            translated["preserve_thinking"] = preserve_thinking(body)
-        except RequestError as exc:
-            reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
-            return
-        except RuntimeError as exc:
-            reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
-            return
-        _respond(ChatWire(reply), runtime, translated, selection, state)
+        _respond(reply, runtime, body, selection, state)
 
 
-class ResponsesPipeline(_Hooks):
-    """One Responses generation."""
-
-    def complete(
-        self,
-        reply: Any,
-        runtime: Any,
-        body: dict[str, Any],
-        selection: Any,
-        args: Any,
-        state: dict[str, Any],
-    ) -> None:
-        del args
-        _respond(ResponseWire(reply), runtime, body, selection, state)
-
-
-handle_chat = Pipeline()
-handle_responses = ResponsesPipeline()
-
-
-def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any) -> None:
-    """Compatibility entry. Tests that build a chat body still reach generation."""
-    handle_chat.complete(reply, runtime, body, selection, None, {})
+handle_responses = Pipeline()
 
 
 def _request_effort(body: dict[str, Any]) -> str | None:
-    """``reasoning.effort`` after the Chat Completions translation.
+    """``reasoning.effort`` on the Responses body.
 
-    ``reasoning_effort`` and ``enable_thinking`` are already mapped onto that
-    field. An omitted effort stays omitted so the registry row can decide.
+    An omitted effort stays omitted so the registry row can decide.
     """
     reasoning = body.get("reasoning")
     if not isinstance(reasoning, dict):
@@ -583,25 +544,6 @@ def _usage(runtime: Any, prompt_tokens: int, completion_tokens: int) -> dict[str
     }
 
 
-def _frame(
-    reply: Any,
-    choices: list[dict[str, Any]],
-    created: int,
-    usage: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """One ``chat.completion.chunk``. The id, object, created, and model fields are required."""
-    payload: dict[str, Any] = {
-        "id": "chatcmpl-favlo",
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": getattr(reply, "model_id", "") or "",
-        "choices": choices,
-    }
-    if usage is not None:
-        payload["usage"] = usage
-    return payload
-
-
 def _mtp_body(prepared: dict[str, Any]) -> dict[str, Any]:
     body: dict[str, Any] = {}
     if "favlo:mtp" in prepared:
@@ -740,138 +682,6 @@ def _message_item(reply: Any, text: str, annotations: list[dict[str, Any]]) -> d
     }
 
 
-class ChatWire:
-    """Writes a Response as Chat Completions chunks."""
-
-    responses_wire = True
-
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
-        self.model_id = getattr(inner, "model_id", "")
-        self._created = int(time.time())
-        self._calls = 0
-
-    def stopped(self) -> bool:
-        return bool(self._inner.stopped())
-
-    def begin_events(self) -> None:
-        self._inner.begin_events()
-
-    def done(self) -> None:
-        self._inner.done()
-
-    def json(self, status: int, payload: dict[str, Any]) -> None:
-        if payload.get("object") != "response":
-            self._inner.json(status, payload)
-            return
-        extra = payload.pop("_chat_usage", None)
-        chat = response_to_chat(payload, None)
-        if isinstance(extra, dict):
-            chat["usage"] = extra
-        self.model_id = payload.get("model") or self.model_id
-        chat["model"] = self.model_id
-        self._inner.json(status, chat)
-
-    def event(self, payload: dict[str, Any]) -> None:
-        kind = payload.get("type")
-        if kind == "response.created":
-            self._inner.event(
-                _frame(
-                    self,
-                    [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
-                    self._created,
-                )
-            )
-            return
-        if kind == "response.reasoning_text.delta":
-            self._delta({"reasoning_content": payload.get("delta") or ""})
-            return
-        if kind == "response.output_text.delta":
-            self._delta({"content": payload.get("delta") or ""})
-            return
-        if kind == "response.output_item.done":
-            item = payload.get("item")
-            if isinstance(item, dict) and item.get("type") == "function_call":
-                self._delta(
-                    {
-                        "tool_calls": [
-                            {
-                                "index": self._calls,
-                                "id": item.get("call_id"),
-                                "type": "function",
-                                "function": {
-                                    "name": item.get("name") or "",
-                                    "arguments": item.get("arguments") or "{}",
-                                },
-                            }
-                        ]
-                    }
-                )
-                self._calls += 1
-            return
-        if kind == "response.completed":
-            response = payload.get("response")
-            if not isinstance(response, dict):
-                return
-            extra = response.pop("_chat_usage", None)
-            calls = any(
-                isinstance(item, dict) and item.get("type") == "function_call"
-                for item in response.get("output") or []
-            )
-            reason = "tool_calls" if calls else _chat_reason(response)
-            self._inner.event(
-                _frame(self, [{"index": 0, "delta": {}, "finish_reason": reason}], self._created)
-            )
-            usage = extra if isinstance(extra, dict) else {}
-            self._inner.event(_frame(self, [], self._created, usage))
-
-
-    def _delta(self, delta: dict[str, Any]) -> None:
-        self._inner.event(
-            _frame(self, [{"index": 0, "delta": delta, "finish_reason": None}], self._created)
-        )
-
-
-class ResponseWire:
-    """Writes Response events and omits the Chat Completions done marker."""
-
-    responses_wire = True
-
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
-        self.model_id = getattr(inner, "model_id", "")
-
-    def stopped(self) -> bool:
-        return bool(self._inner.stopped())
-
-    def begin_events(self) -> None:
-        self._inner.begin_events()
-
-    def done(self) -> None:
-        return
-
-    def json(self, status: int, payload: dict[str, Any]) -> None:
-        if isinstance(payload, dict):
-            payload.pop("_chat_usage", None)
-        self._inner.json(status, payload)
-
-    def event(self, payload: dict[str, Any]) -> None:
-        if payload.get("type") == "response.completed":
-            response = payload.get("response")
-            if isinstance(response, dict):
-                response.pop("_chat_usage", None)
-        self._inner.event(payload)
-
-
-def _chat_reason(response: dict[str, Any]) -> str:
-    details = response.get("incomplete_details")
-    if isinstance(details, dict) and details.get("reason") == "max_output_tokens":
-        return "length"
-    if response.get("status") == "incomplete":
-        return "length"
-    return "stop"
-
-
 def _stream(
     reply: Any,
     runtime: Any,
@@ -899,11 +709,10 @@ def _stream(
     decode = getattr(runtime, "decode", None)
     if not callable(decode):
         decode = load_tokenizer(runtime.root).decode
-    sink = reply if getattr(reply, "responses_wire", False) else ChatWire(reply)
     request = prepared if isinstance(prepared, dict) else {"model": getattr(reply, "model_id", "") or ""}
     sequence = 0
     try:
-        sink.begin_events()
+        reply.begin_events()
     except OSError:
         raise RequestClosed() from None
 
@@ -912,7 +721,7 @@ def _stream(
         payload["sequence_number"] = sequence
         sequence += 1
         try:
-            sink.event(payload)
+            reply.event(payload)
         except OSError as exc:
             raise RequestClosed() from exc
 
@@ -920,7 +729,7 @@ def _stream(
     reasoning_id = new_id("rs_")
     message_id = new_id("msg_")
     shell = response_object(
-        model=getattr(sink, "model_id", "") or request.get("model") or "",
+        model=getattr(reply, "model_id", "") or request.get("model") or "",
         output=[],
         usage=usage_object(0, 0, 0, 0),
         body=request,
@@ -1012,7 +821,7 @@ def _stream(
     produced = getattr(runtime, "_output_ids", None)
     completion_tokens = len(produced) if isinstance(produced, list) else 0
     payload = _response_payload(
-        sink,
+        reply,
         runtime,
         request,
         search,
@@ -1049,7 +858,7 @@ def _stream(
     event({"type": "response.completed", "response": payload})
     remember(state, request, payload)
     try:
-        sink.done()
+        reply.done()
     except OSError as exc:
         raise RequestClosed() from exc
 
@@ -1101,28 +910,3 @@ def _emit_response(event: Any, channel: str, visible: str, reasoning_id: str, me
         }
     )
 
-
-def _completion(
-    content: str | None,
-    prompt_tokens: int,
-    completion_tokens: int,
-    finish_reason: str,
-    tool_calls: list[dict[str, Any]],
-    reasoning: str,
-    runtime: Any,
-    model: str,
-) -> dict[str, Any]:
-    message: dict[str, Any] = {"role": "assistant", "content": content}
-    if reasoning:
-        message["reasoning_content"] = reasoning
-    if tool_calls:
-        message["tool_calls"] = tool_calls
-        finish_reason = "tool_calls"
-    return {
-        "id": "chatcmpl-favlo",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
-        "usage": _usage(runtime, prompt_tokens, completion_tokens),
-    }

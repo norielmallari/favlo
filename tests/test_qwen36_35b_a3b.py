@@ -533,7 +533,7 @@ def test_stream_delta_holds_a_partial_character() -> None:
 
 
 def test_completion_usage_uses_the_phase_clocks() -> None:
-    from qwen36_35b_a3b.chat import _completion
+    from qwen36_35b_a3b.chat import _usage
 
     runtime = SimpleNamespace(
         _context_limit=131072,
@@ -541,17 +541,17 @@ def test_completion_usage_uses_the_phase_clocks() -> None:
         _prefill_seconds=2.0,
         _decode_seconds=4.0,
     )
-    body = _completion("ok", 100, 4, "stop", [], "", runtime, "example-model")
-    timings = body["usage"]["timings"]
-    assert body["usage"]["prompt_tokens_details"] == {"cached_tokens": 12}
+    usage = _usage(runtime, 100, 4)
+    timings = usage["timings"]
+    assert usage["prompt_tokens_details"] == {"cached_tokens": 12}
     assert timings["prompt_n"] == 88
     assert timings["prompt_per_second"] == 44.0
     assert timings["predicted_n"] == 4
     assert timings["predicted_per_second"] == 1.0
     runtime._decode_seconds = 0.0
-    single = _completion("ok", 100, 1, "stop", [], "", runtime, "example-model")
-    assert single["usage"]["timings"]["predicted_n"] == 1
-    assert single["usage"]["timings"]["predicted_per_second"] == 0.0
+    single = _usage(runtime, 100, 1)
+    assert single["timings"]["predicted_n"] == 1
+    assert single["timings"]["predicted_per_second"] == 0.0
 
 
 def test_a_zero_clock_prints_a_zero_rate() -> None:
@@ -590,28 +590,23 @@ def test_stream_chunks_carry_reasoning_then_the_reply() -> None:
     assert reply.sent == [b"data: [DONE]\n\n"]
     seen: list[tuple[str, object]] = []
     for payload in reply.events:
-        assert payload["object"] == "chat.completion.chunk"
-        assert payload["id"] == "chatcmpl-favlo"
-        assert payload["model"] == "qwen36-35b-a3b"
-        assert isinstance(payload["created"], int)
-        choices = payload["choices"]
-        if not choices:
-            seen.append(("usage", payload["usage"]["timings"]["predicted_n"]))
-            assert payload["usage"]["timings"]["prompt_n"] == 1
-            assert payload["usage"]["timings"]["predicted_per_second"] == 1.0
-            continue
-        delta = choices[0]["delta"]
-        if "reasoning_content" in delta:
-            seen.append(("reasoning", delta["reasoning_content"]))
-        elif "content" in delta:
-            seen.append(("content", delta["content"]))
-        elif choices[0].get("finish_reason"):
-            seen.append(("finish", choices[0]["finish_reason"]))
+        kind = payload.get("type")
+        if kind == "response.reasoning_text.delta":
+            seen.append(("reasoning", payload.get("delta")))
+        elif kind == "response.output_text.delta":
+            seen.append(("content", payload.get("delta")))
+        elif kind == "response.completed":
+            response = payload.get("response") or {}
+            extra = response.get("_chat_usage") or {}
+            timings = extra.get("timings") or {}
+            seen.append(("usage", timings.get("predicted_n")))
+            assert timings.get("prompt_n") == 1
+            assert timings.get("predicted_per_second") == 1.0
+            assert response.get("status") == "completed"
     assert seen == [
         ("reasoning", "Need"),
         ("reasoning", " to"),
         ("content", "4"),
-        ("finish", "stop"),
         ("usage", 4),
     ]
 
