@@ -1,10 +1,11 @@
-"""Context length and the fp8 key/value plane for this pipeline.
+"""Context length and the key/value plane for this pipeline.
 
-Keys are ``[head, token, channel]`` with an E8M0 scale every 32 channels.
-Values are ``[head, channel, token]`` with an E8M0 scale every 32 tokens, so
-both the score product and the value mix are ``matmul2d``. A head at one
-position is 264 bytes either way. The width is fp8 E4M3. The served window
-stops at ``DEFAULT_CONTEXT_LENGTH``.
+``half`` stores Metal halves at ``[head, token, channel]`` with no scale plane:
+512 bytes per head per token. ``fp8_e4m3`` keeps the quantized layout (Metal
+``metal_fp8_e4m3``): keys ``[head, token, channel]`` with an E8M0 scale every
+32 channels, values ``[head, channel, token]`` with an E8M0 scale every 32
+tokens, 264 bytes per head per token. The served window stops at
+``DEFAULT_CONTEXT_LENGTH``.
 """
 
 from __future__ import annotations
@@ -16,46 +17,76 @@ from qwen38_27b.layout import CONTEXT, FULL_LAYERS, HEAD, KV_HEADS
 
 DEFAULT_CONTEXT_LENGTH = 131072
 BLOCK = 32
-RECORD = HEAD + HEAD // BLOCK
+E4M3_RECORD = HEAD + HEAD // BLOCK
+HALF_RECORD = HEAD * 2
+MODES = ("half", "fp8_e4m3")
+_ALIASES = {
+    "e4m3": "fp8_e4m3",
+    "fp8": "fp8_e4m3",
+}
 
 
 def kv_mode(name: str | None) -> str:
-    """The cache width. Empty means fp8 E4M3."""
-    text = "e4m3" if name is None or name == "" else str(name)
-    if text in {"fp8", "e4m3"}:
-        return "e4m3"
-    message = f"kv cache {name} is not e4m3"
-    raise ValueError(message)
+    """``half`` or ``fp8_e4m3``. Empty means half.
+
+    ``e4m3`` and ``fp8`` are ``fp8_e4m3``.
+    """
+    text = "half" if name is None or name == "" else str(name)
+    text = _ALIASES.get(text, text)
+    if text not in MODES:
+        message = f"kv cache {name} is not half or fp8_e4m3"
+        raise ValueError(message)
+    return text
 
 
-def plane_bytes(positions: int) -> int:
-    """One key plane or one value plane, data then scales, for every head."""
-    return KV_HEADS * positions * RECORD
+def plain_cache(mode: str | None) -> bool:
+    """Raw half. That mode skips the quantized score plane."""
+    return kv_mode(mode) == "half"
 
 
-def layer_cache_bytes(positions: int) -> int:
+def kv_record_bytes(mode: str | None) -> int:
+    """Bytes of one head at one position."""
+    if plain_cache(mode):
+        return HALF_RECORD
+    return E4M3_RECORD
+
+
+def plane_bytes(positions: int, mode: str | None = "half") -> int:
+    """One key plane or one value plane for every head."""
+    return KV_HEADS * positions * kv_record_bytes(mode)
+
+
+def layer_cache_bytes(positions: int, mode: str | None = "half") -> int:
     """Key and value planes of one full-attention layer."""
-    return 2 * plane_bytes(positions)
+    return 2 * plane_bytes(positions, mode)
 
 
-def cache_bytes(positions: int) -> int:
+def cache_bytes(positions: int, mode: str | None = "half") -> int:
     """The 16 language full-attention layers."""
-    return FULL_LAYERS * layer_cache_bytes(positions)
+    return FULL_LAYERS * layer_cache_bytes(positions, mode)
 
 
-def sequence_cache_bytes(positions: int, slots: int = FULL_LAYERS) -> int:
+def sequence_cache_bytes(
+    positions: int, slots: int = FULL_LAYERS, mode: str | None = "half"
+) -> int:
     """Key and value planes for ``slots`` full-attention layers, including MTP when present."""
-    return slots * layer_cache_bytes(positions)
+    return slots * layer_cache_bytes(positions, mode)
 
 
-def fit_positions(budget: int, resident: int, scratch: int, slots: int = FULL_LAYERS) -> int:
+def fit_positions(
+    budget: int,
+    resident: int,
+    scratch: int,
+    slots: int = FULL_LAYERS,
+    mode: str | None = "half",
+) -> int:
     """Largest context, a multiple of 2048, whose cache fits in ``budget``.
 
-    ``cache_bytes(1)`` is 33,792: one token across the 16 language layers. A drafted
-    record adds the MTP plane and passes ``slots`` 17, which is 35,904 bytes per token.
+    ``cache_bytes(1)`` is 65,536 for half across the 16 language layers. A drafted
+    record adds the MTP plane and passes ``slots`` 17, which is 69,632 bytes per token.
     """
     room = budget - resident - scratch
-    per_token = sequence_cache_bytes(1, slots)
+    per_token = sequence_cache_bytes(1, slots, mode)
     if room < per_token * 2048:
         message = f"maximum memory leaves {room} bytes for the key/value cache"
         raise RuntimeError(message)
@@ -79,3 +110,7 @@ def max_position(root: Path) -> int:
         message = f"{root.name} has no max_position_embeddings"
         raise RuntimeError(message)
     return min(value, CONTEXT)
+
+
+# Back-compat for callers that still read the quantized-plane constant.
+RECORD = E4M3_RECORD

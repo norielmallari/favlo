@@ -63,7 +63,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     fetch.add_argument("--console", choices=("auto", "pretty", "plain", "json"), default="auto")
     sub.add_parser("bf16", help="run this package's shaders on stored BF16 values")
     complete = sub.add_parser("complete", help="argmax completion from the packed record")
-    complete.add_argument("--kv-cache", choices=("e4m3",), default="e4m3")
+    complete.add_argument(
+        "--kv-cache",
+        choices=("half", "fp8_e4m3"),
+        default="half",
+        help="key/value width: half (default) or fp8_e4m3",
+    )
     complete.add_argument("--max-memory", default=None, help="maximum bytes, such as 32GiB")
     sub.add_parser("kernels", help="compile the shader library and run the dispatch checks")
     mtp_fp8 = sub.add_parser("mtp-fp8", help="repack MTP matrices as fp8 from the BF16 cache")
@@ -214,6 +219,7 @@ def _quantize(args: argparse.Namespace) -> int:
             directory=output,
             pipeline=PIPELINE,
             runtime="metal41",
+            kv_cache="half",
         )
         _ensure_mtp_on(output.name)
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError, KeyError) as exc:
@@ -363,6 +369,7 @@ def _models(args: argparse.Namespace) -> int:
                 source=args.source,
                 pipeline=PIPELINE,
                 runtime="metal41",
+                kv_cache="half",
             )
             _ensure_mtp_on(args.folder)
         elif command == "alias":

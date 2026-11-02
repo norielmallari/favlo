@@ -12,14 +12,14 @@ from qwen38_27b.forward import Qwen38Runtime
 def open_runtime(
     path: Path,
     *,
-    kv_cache: str = "e4m3",
+    kv_cache: str = "half",
     console: Any = None,
     resident_percent: float | None = None,
     max_memory: str | int | None = None,
     owner: str | None = None,
     mtp: bool = False,
 ) -> Qwen38Runtime:
-    """Load the resident fp4 record and the fp8 key/value cache.
+    """Load the resident fp4 record and the key/value cache (``half`` or ``fp8_e4m3``).
 
     ``max_memory`` is the serve ledger's ceiling. ``mtp`` false leaves the MTP block in the record file.
     """

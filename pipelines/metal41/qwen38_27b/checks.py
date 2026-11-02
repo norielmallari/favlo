@@ -433,8 +433,9 @@ def check_attention(session: Session) -> None:
     runtime = Runtime()
     runtime.session = session
     runtime.max_pos = 256
-    runtime.k_cache = [session.zeros(plane_bytes(256))]
-    runtime.v_cache = [session.zeros(plane_bytes(256))]
+    runtime.kv_cache = "fp8_e4m3"
+    runtime.k_cache = [session.zeros(plane_bytes(256, "fp8_e4m3"))]
+    runtime.v_cache = [session.zeros(plane_bytes(256, "fp8_e4m3"))]
     bind_plane(runtime)
     count = 4
     query = np.ones((count, 24, 256), dtype=np.float32)
@@ -464,6 +465,49 @@ def check_attention(session: Session) -> None:
     _close("attention", got, expect, atol=2e-3)
 
 
+def check_attention_half(session: Session) -> None:
+    """Four equal tokens on the half plane. A zero gate is sigmoid 1/2."""
+    from qwen38_27b.attn import attend_plane, bind_plane
+    from qwen38_27b.cache import plane_bytes
+
+    class Runtime:
+        pass
+
+    runtime = Runtime()
+    runtime.session = session
+    runtime.max_pos = 256
+    runtime.kv_cache = "half"
+    runtime.k_cache = [session.zeros(plane_bytes(256, "half"))]
+    runtime.v_cache = [session.zeros(plane_bytes(256, "half"))]
+    bind_plane(runtime)
+    count = 4
+    query = np.ones((count, 24, 256), dtype=np.float32)
+    key = np.ones((count, 4, 256), dtype=np.float32)
+    value = np.ones((count, 4, 256), dtype=np.float32)
+    for token in range(count):
+        value[token] = np.float32(token + 1)
+    gate = np.zeros((count, 24, 256), dtype=np.float32)
+    dest = session.zeros(count * 24 * 256 * 4)
+    session.begin()
+    attend_plane(
+        runtime,
+        query=session.upload(query),
+        key=session.upload(key),
+        value=session.upload(value),
+        gate=session.upload(gate),
+        dest=dest,
+        pos0=0,
+        count=count,
+        slot=0,
+    )
+    session.end()
+    got = session.download_f32(dest, count * 24 * 256).reshape(count, 24, 256)
+    expect = np.zeros_like(got)
+    for token in range(count):
+        expect[token] = np.float32(0.5 * (token + 2) / 2.0)
+    _close("attention half", got, expect, atol=2e-3)
+
+
 def check_attention_blocks(session: Session) -> None:
     """Decode across two 512-key blocks. Values 1 and 2 are exact in fp8."""
     from qwen38_27b.attn import attend_plane, bind_plane
@@ -475,8 +519,9 @@ def check_attention_blocks(session: Session) -> None:
     runtime = Runtime()
     runtime.session = session
     runtime.max_pos = 2048
-    runtime.k_cache = [session.zeros(plane_bytes(2048))]
-    runtime.v_cache = [session.zeros(plane_bytes(2048))]
+    runtime.kv_cache = "fp8_e4m3"
+    runtime.k_cache = [session.zeros(plane_bytes(2048, "fp8_e4m3"))]
+    runtime.v_cache = [session.zeros(plane_bytes(2048, "fp8_e4m3"))]
     bind_plane(runtime)
     count = 1024
     query = np.ones((count, 24, 256), dtype=np.float32)
@@ -938,6 +983,7 @@ CHECKS = (
     ("vision gelu", check_vision_gelu),
     ("vision erf gelu", check_vision_gelu_erf),
     ("attention", check_attention),
+    ("attention half", check_attention_half),
     ("attention blocks", check_attention_blocks),
     ("sample", check_sample),
     ("image rope", check_fill_mrope),

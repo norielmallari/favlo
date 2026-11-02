@@ -1,4 +1,4 @@
-"""Text forward. Weights are fp4, with promoted feed-forward layers at fp8. The key/value cache is fp8.
+"""Text forward. Weights are fp4, with promoted feed-forward layers at fp8. The key/value cache is half or fp8_e4m3.
 
 A feed-forward layer that does not fit stays in the record and is copied into one
 stage before that layer runs. MTP weights stay in the record when MTP is off.
@@ -171,7 +171,7 @@ class Qwen38Runtime:
         self,
         path: Path,
         *,
-        kv_cache: str = "e4m3",
+        kv_cache: str = "half",
         console: Any = None,
         resident_percent: float | None = None,
         owner: str | None = None,
@@ -232,10 +232,17 @@ class Qwen38Runtime:
             self._group,
             self._limit,
             mtp_available=self._mtp_wanted,
+            mode=self.kv_cache,
         )
         summary = ""
         self._load_progress = self._begin_load(
-            startup_bytes(plan.weights, plan.positions, slots=plan.slots, drafts=plan.mtp)
+            startup_bytes(
+                plan.weights,
+                plan.positions,
+                slots=plan.slots,
+                drafts=plan.mtp,
+                mode=self.kv_cache,
+            )
         )
         try:
             self.session = Session(self._owner)
@@ -369,6 +376,7 @@ class Qwen38Runtime:
                 self._group,
                 self._limit,
                 mtp_available=available,
+                mode=self.kv_cache,
             )
         except RuntimeError as exc:
             if "does not fit" not in str(exc):
@@ -421,6 +429,7 @@ class Qwen38Runtime:
                     self._limit,
                     extra_unwire=extra,
                     mtp_available=self._mtp_wanted,
+                    mode=self.kv_cache,
                 )
             except RuntimeError as exc:
                 if "does not fit" not in str(exc):
@@ -491,14 +500,22 @@ class Qwen38Runtime:
         """Bytes the next image may use while the host copy of the live cache stays."""
         self.refresh_budget()
         count = min(int(self.filled), int(self.max_pos))
-        packed = sequence_cache_bytes(count, self.kv_slots) if count > 0 and self.k_cache else 0
+        packed = (
+            sequence_cache_bytes(count, self.kv_slots, self.kv_cache)
+            if count > 0 and self.k_cache
+            else 0
+        )
         return max(0, self._fit_ceiling - packed)
 
     def _held_bytes(self) -> int:
         if self.weights is None or not self.max_pos:
             return 0
         return startup_bytes(
-            self.weights.nbytes, self.max_pos, slots=self.kv_slots, drafts=self.drafts
+            self.weights.nbytes,
+            self.max_pos,
+            slots=self.kv_slots,
+            drafts=self.drafts,
+            mode=self.kv_cache,
         )
 
     def _apply(self, plan: Any, count: int, saved: list[tuple[int, str, bytes]]) -> None:
@@ -519,7 +536,7 @@ class Qwen38Runtime:
         self.max_pos = plan.positions
         self.wire = plan
         zeros = self.session.zeros
-        one = plane_bytes(plan.positions)
+        one = plane_bytes(plan.positions, self.kv_cache)
         self.k_cache = [zeros(one) for _ in range(plan.slots)]
         self.v_cache = [zeros(one) for _ in range(plan.slots)]
         bind_plane(self)
@@ -539,7 +556,7 @@ class Qwen38Runtime:
         try:
             parts = zeros(value_block_bytes(plan.positions))
             made.append(parts)
-            one = plane_bytes(plan.positions)
+            one = plane_bytes(plan.positions, self.kv_cache)
             new_k: list[Any] = []
             new_v: list[Any] = []
             for _slot in range(plan.slots):
@@ -601,10 +618,10 @@ class Qwen38Runtime:
 
     def _pack_plane(self, buffer: Any, count: int, *, kind: str) -> bytes:
         view = np.frombuffer(
-            memoryview(buffer.contents().as_buffer(plane_bytes(self.max_pos))),
+            memoryview(buffer.contents().as_buffer(plane_bytes(self.max_pos, self.kv_cache))),
             dtype=np.uint8,
         )
-        return pack_plane(view, self.max_pos, count, kind=kind)
+        return pack_plane(view, self.max_pos, count, kind=kind, mode=self.kv_cache)
 
     def _restore_planes(self, count: int, saved: list[tuple[int, str, bytes]]) -> None:
         if count < 1:
@@ -614,15 +631,17 @@ class Qwen38Runtime:
                 continue
             buffer = self.k_cache[slot] if kind == "key" else self.v_cache[slot]
             view = np.frombuffer(
-                memoryview(buffer.contents().as_buffer(plane_bytes(self.max_pos))),
+                memoryview(
+                    buffer.contents().as_buffer(plane_bytes(self.max_pos, self.kv_cache))
+                ),
                 dtype=np.uint8,
             )
-            unpack_plane(view, self.max_pos, count, blob, kind=kind)
+            unpack_plane(view, self.max_pos, count, blob, kind=kind, mode=self.kv_cache)
 
     def _loaded_summary(self) -> str:
         text = (
             f"loaded {self.root.name} kv {self.kv_cache} context {self.max_pos} "
-            f"weights {self.weights.nbytes} cache {sequence_cache_bytes(self.max_pos, self.kv_slots)}"
+            f"weights {self.weights.nbytes} cache {sequence_cache_bytes(self.max_pos, self.kv_slots, self.kv_cache)}"
         )
         return text + self._fit_suffix()
 
@@ -674,8 +693,10 @@ class Qwen38Runtime:
         ):
             _wipe(buffer, nbytes)
         for cache in (*self.k_cache, *self.v_cache):
-            _wipe(cache, plane_bytes(self.max_pos))
-        _wipe(self.plane_tail, self.kv_slots * 4 * 32 * 256 * 4)
+            _wipe(cache, plane_bytes(self.max_pos, self.kv_cache))
+        # fp8_e4m3 only: half leaves plane scratch unset.
+        if self.plane_tail is not None:
+            _wipe(self.plane_tail, self.kv_slots * 4 * 32 * 256 * 4)
         self.filled = 0
         del session
 
@@ -1169,6 +1190,7 @@ class Qwen38Runtime:
                 self._group,
                 self._limit,
                 mtp_available=self._mtp_wanted,
+                mode=self.kv_cache,
             ).positions
             message = f"prompt length {len(prompt)} is past {max(self.max_pos, reached)}"
             raise RuntimeError(message)

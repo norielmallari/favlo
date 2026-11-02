@@ -60,7 +60,12 @@ class Wire:
 
 
 def startup_bytes(
-    resident: int, positions: int, *, slots: int = FULL_LAYERS, drafts: bool = False
+    resident: int,
+    positions: int,
+    *,
+    slots: int = FULL_LAYERS,
+    drafts: bool = False,
+    mode: str | None = "half",
 ) -> int:
     """Bytes copied or cleared before the first token: weights, cache, scratch, and the workspace."""
     decode = (
@@ -83,12 +88,12 @@ def startup_bytes(
     hold = HIDDEN * 4 if drafts else 0
     return (
         resident
-        + sequence_cache_bytes(positions, slots)
+        + sequence_cache_bytes(positions, slots, mode)
         + _STATE_BYTES
         + _HISTORY_BYTES
         + hold
         + decode
-        + scratch_bytes(positions, slots)
+        + scratch_bytes(positions, slots, mode)
         + workspace_bytes(drafts=drafts)
     )
 
@@ -101,8 +106,9 @@ def tensor_span(entry: dict) -> int:
             + int(entry.get("scale_pad") or 0)
             + int(entry.get("scale_nbytes") or 0)
         )
-    if str(entry.get("dtype")) != "f16":
-        message = "tensor span is not fp4, fp8, or f16"
+    # ``half`` is Metal's name. Legacy packs may still tag the same bytes ``f16``.
+    if str(entry.get("dtype")) not in {"half", "f16"}:
+        message = "tensor span is not fp4, fp8, or half"
         raise ValueError(message)
     count = 1
     for dim in entry["stored_shape"]:
@@ -208,6 +214,7 @@ def choose_wire(
     *,
     extra_unwire: int = 0,
     mtp_available: bool = True,
+    mode: str | None = "half",
 ) -> Wire:
     """The cheapest image that covers ``needed``, else the longest length with every feed-forward unwired.
 
@@ -227,13 +234,13 @@ def choose_wire(
     fitting: list[Wire] = []
     for mtp, wired in candidates:
         wire = _wire(group, target, mtp, wired)
-        if startup_bytes(wire.weights, target, slots=wire.slots, drafts=mtp) <= budget:
+        if startup_bytes(wire.weights, target, slots=wire.slots, drafts=mtp, mode=mode) <= budget:
             fitting.append(wire)
     if fitting:
         return fitting[min(extra_unwire, len(fitting) - 1)]
     wired: tuple[int, ...] = ()
     weights, stage = _weight_bytes(group, mtp=False, wired=wired)
-    positions = _longest(budget, limit, weights, slots=FULL_LAYERS, drafts=False)
+    positions = _longest(budget, limit, weights, slots=FULL_LAYERS, drafts=False, mode=mode)
     if positions < _STEP:
         message = "the record does not fit a 2048-token cache"
         raise RuntimeError(message)
@@ -289,14 +296,22 @@ def _align(needed: int, limit: int) -> int:
     return min(step, cap)
 
 
-def _longest(budget: int, limit: int, weights: int, *, slots: int, drafts: bool) -> int:
+def _longest(
+    budget: int,
+    limit: int,
+    weights: int,
+    *,
+    slots: int,
+    drafts: bool,
+    mode: str | None = "half",
+) -> int:
     cap = (limit // _STEP) * _STEP
     lo = 0
     hi = cap // _STEP
     while lo < hi:
         mid = (lo + hi + 1) // 2
         positions = mid * _STEP
-        if startup_bytes(weights, positions, slots=slots, drafts=drafts) <= budget:
+        if startup_bytes(weights, positions, slots=slots, drafts=drafts, mode=mode) <= budget:
             lo = mid
         else:
             hi = mid - 1

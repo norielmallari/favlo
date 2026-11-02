@@ -1252,7 +1252,7 @@ kernel void concat_pair(
     }
 }
 
-kernel void cast_f32_f16(
+kernel void cast_f32_half(
     device const float* src [[buffer(0)]],
     device half* dst [[buffer(1)]],
     uint tid [[thread_position_in_grid]])
@@ -2905,6 +2905,231 @@ kernel void kv_attend_write(
     float sum = row_sum[row];
     float inv = sum == 0.0f ? 0.0f : 1.0f / sum;
     destination[index] = acc[row * 256u + channel] * inv * sigmoid_f(gate[index]);
+}
+
+// half cache. Both planes are [head, token, channel], two bytes per element,
+// no scale plane. ``stride`` counts half elements, not bytes.
+
+kernel void store_kv_half(
+    device half* key_cache [[buffer(0)]],
+    device half* value_cache [[buffer(1)]],
+    device const float* key [[buffer(2)]],
+    device const float* value [[buffer(3)]],
+    constant uint& pos [[buffer(4)]],
+    constant uint& stride [[buffer(5)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint head [[threadgroup_position_in_grid]])
+{
+    key_cache[head * stride + pos * 256u + tid] = half(key[head * 256u + tid]);
+    value_cache[head * stride + pos * 256u + tid] = half(value[head * 256u + tid]);
+}
+
+kernel void store_kv_rows_half(
+    device half* key_cache [[buffer(0)]],
+    device half* value_cache [[buffer(1)]],
+    device const float* key [[buffer(2)]],
+    device const float* value [[buffer(3)]],
+    constant uint& pos0 [[buffer(4)]],
+    constant uint& stride [[buffer(5)]],
+    uint2 tgp [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    uint token = tgp.x;
+    uint head = tgp.y;
+    if (head >= KV_HEADS || tid >= 256u) {
+        return;
+    }
+    uint pos = pos0 + token;
+    uint src = (token * KV_HEADS + head) * 256u + tid;
+    key_cache[head * stride + pos * 256u + tid] = half(key[src]);
+    value_cache[head * stride + pos * 256u + tid] = half(value[src]);
+}
+
+kernel void attend_gqa_heads_half(
+    device const float* query [[buffer(0)]],
+    device const half* key_cache [[buffer(1)]],
+    device const half* value_cache [[buffer(2)]],
+    device const float* gate [[buffer(3)]],
+    device float* destination [[buffer(4)]],
+    constant uint& tokens [[buffer(5)]],
+    constant uint& stride [[buffer(6)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint head [[threadgroup_position_in_grid]])
+{
+    // One simdgroup of 32 lanes, eight channels each. Matches attend_prefill_half.
+    // A 256-wide threadgroup reduction over red[8] raced on device.
+    if (head >= Q_HEADS) {
+        return;
+    }
+    uint kv = head / GROUP;
+    device const half* key = key_cache + kv * stride;
+    device const half* value = value_cache + kv * stride;
+    device const float* q = query + head * 256u;
+    float qreg[8];
+    for (uint i = 0u; i < 8u; ++i) {
+        qreg[i] = q[lane * 8u + i];
+    }
+    float running_max = -INFINITY;
+    float running_sum = 0.0f;
+    float outv[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint token = 0u; token < tokens; ++token) {
+        device const half* ks = key + token * 256u;
+        float partial = 0.0f;
+        for (uint i = 0u; i < 8u; ++i) {
+            partial += qreg[i] * float(ks[lane * 8u + i]);
+        }
+        float score = simd_sum(partial) * INV_SQRT_256;
+        float next = max(running_max, score);
+        float rescale = exp(running_max - next);
+        float prob = exp(score - next);
+        running_sum = running_sum * rescale + prob;
+        device const half* vs = value + token * 256u;
+        for (uint i = 0u; i < 8u; ++i) {
+            outv[i] = outv[i] * rescale + prob * float(vs[lane * 8u + i]);
+        }
+        running_max = next;
+    }
+    float inv = running_sum == 0.0f ? 0.0f : 1.0f / running_sum;
+    device float* out = destination + head * 256u;
+    device const float* g = gate + head * 256u;
+    for (uint i = 0u; i < 8u; ++i) {
+        out[lane * 8u + i] = outv[i] * inv * sigmoid_f(g[lane * 8u + i]);
+    }
+}
+
+kernel void attend_prefill_half(
+    device const float* query [[buffer(0)]],
+    device const half* key_cache [[buffer(1)]],
+    device const half* value_cache [[buffer(2)]],
+    device const float* gate [[buffer(3)]],
+    device float* destination [[buffer(4)]],
+    constant uint& count [[buffer(5)]],
+    constant uint& pos0 [[buffer(6)]],
+    constant uint& stride [[buffer(7)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    uint token = tgid.x * 2u;
+    uint head = tgid.y;
+    if (token >= count || head >= Q_HEADS) {
+        return;
+    }
+    uint token1 = token + 1u;
+    bool second = token1 < count;
+    uint kv = head / GROUP;
+    device const half* keys = key_cache + kv * stride;
+    device const half* values = value_cache + kv * stride;
+    device const float* q = query + (token * Q_HEADS + head) * 256u;
+    float qreg[8];
+    float qreg1[8];
+    for (uint i = 0u; i < 8u; ++i) {
+        qreg[i] = q[lane * 8u + i];
+        qreg1[i] = 0.0f;
+    }
+    if (second) {
+        device const float* q1 = query + (token1 * Q_HEADS + head) * 256u;
+        for (uint i = 0u; i < 8u; ++i) {
+            qreg1[i] = q1[lane * 8u + i];
+        }
+    }
+    float running_max = -INFINITY;
+    float running_sum = 0.0f;
+    float running_max1 = -INFINITY;
+    float running_sum1 = 0.0f;
+    float outv[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float outv1[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    uint tokens = pos0 + (second ? token1 : token) + 1u;
+    uint limit0 = pos0 + token + 1u;
+    uint step = 0u;
+    for (; step + 8u <= tokens; step += 8u) {
+        float score[8];
+        float score1[8];
+        for (uint b = 0u; b < 8u; ++b) {
+            device const half* ks = keys + (step + b) * 256u;
+            float partial = 0.0f;
+            float partial1 = 0.0f;
+            for (uint i = 0u; i < 8u; ++i) {
+                float key = float(ks[lane * 8u + i]);
+                partial += qreg[i] * key;
+                partial1 += qreg1[i] * key;
+            }
+            score[b] = simd_sum(partial) * INV_SQRT_256;
+            score1[b] = simd_sum(partial1) * INV_SQRT_256;
+            if (step + b >= limit0) {
+                score[b] = -INFINITY;
+            }
+        }
+        for (uint b = 0u; b < 8u; ++b) {
+            device const half* vs = values + (step + b) * 256u;
+            if (score[b] != -INFINITY) {
+                float next = max(running_max, score[b]);
+                float rescale = exp(running_max - next);
+                float prob = exp(score[b] - next);
+                running_sum = running_sum * rescale + prob;
+                for (uint i = 0u; i < 8u; ++i) {
+                    outv[i] = outv[i] * rescale + prob * float(vs[lane * 8u + i]);
+                }
+                running_max = next;
+            }
+            if (second) {
+                float next1 = max(running_max1, score1[b]);
+                float rescale1 = exp(running_max1 - next1);
+                float prob1 = exp(score1[b] - next1);
+                running_sum1 = running_sum1 * rescale1 + prob1;
+                for (uint i = 0u; i < 8u; ++i) {
+                    outv1[i] = outv1[i] * rescale1 + prob1 * float(vs[lane * 8u + i]);
+                }
+                running_max1 = next1;
+            }
+        }
+    }
+    for (; step < tokens; ++step) {
+        device const half* ks = keys + step * 256u;
+        float partial = 0.0f;
+        float partial1 = 0.0f;
+        for (uint i = 0u; i < 8u; ++i) {
+            float key = float(ks[lane * 8u + i]);
+            partial += qreg[i] * key;
+            partial1 += qreg1[i] * key;
+        }
+        device const half* vs = values + step * 256u;
+        if (step < limit0) {
+            float value = simd_sum(partial) * INV_SQRT_256;
+            float next = max(running_max, value);
+            float rescale = exp(running_max - next);
+            float prob = exp(value - next);
+            running_sum = running_sum * rescale + prob;
+            for (uint i = 0u; i < 8u; ++i) {
+                outv[i] = outv[i] * rescale + prob * float(vs[lane * 8u + i]);
+            }
+            running_max = next;
+        }
+        if (second) {
+            float value1 = simd_sum(partial1) * INV_SQRT_256;
+            float next1 = max(running_max1, value1);
+            float rescale1 = exp(running_max1 - next1);
+            float prob1 = exp(value1 - next1);
+            running_sum1 = running_sum1 * rescale1 + prob1;
+            for (uint i = 0u; i < 8u; ++i) {
+                outv1[i] = outv1[i] * rescale1 + prob1 * float(vs[lane * 8u + i]);
+            }
+            running_max1 = next1;
+        }
+    }
+    float inv = running_sum == 0.0f ? 0.0f : 1.0f / running_sum;
+    device float* out = destination + (token * Q_HEADS + head) * 256u;
+    device const float* g = gate + (token * Q_HEADS + head) * 256u;
+    for (uint i = 0u; i < 8u; ++i) {
+        out[lane * 8u + i] = outv[i] * inv * sigmoid_f(g[lane * 8u + i]);
+    }
+    if (second) {
+        float inv1 = running_sum1 == 0.0f ? 0.0f : 1.0f / running_sum1;
+        device float* out1 = destination + (token1 * Q_HEADS + head) * 256u;
+        device const float* g1 = gate + (token1 * Q_HEADS + head) * 256u;
+        for (uint i = 0u; i < 8u; ++i) {
+            out1[lane * 8u + i] = outv1[i] * inv1 * sigmoid_f(g1[lane * 8u + i]);
+        }
+    }
 }
 
 kernel void dequant_e4m3(

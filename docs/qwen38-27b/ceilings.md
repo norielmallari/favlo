@@ -32,7 +32,7 @@ A warm language step, projections and mixers in one command buffer, measured 63.
 
 ## Attention weights
 
-Softmax writes float32 weights. `matmul2d` does not accept a float activation against fp8 values, so each 512-key block divides by that row's peak, multiplies in float16, and restores the peak in the same dispatch. One decode head runs `kv_softmax_max`, `kv_softmax_prob`, `kv_softmax_close`, then `kv_cast_probs` over every block, `kv_pv_split8` over every block, and `kv_part_sum`. These times are one command buffer each, the median of five dispatches after one discarded sample. The value stride is 262144. The streaming bandwidth above is 254.6 GB/s.
+Softmax writes float32 weights. `matmul2d` does not accept a float activation against fp8 values, so each 512-key block divides by that row's peak, multiplies in Metal `half`, and restores the peak in the same dispatch. One decode head runs `kv_softmax_max`, `kv_softmax_prob`, `kv_softmax_close`, then `kv_cast_probs` over every block, `kv_pv_split8` over every block, and `kv_part_sum`. These times are one command buffer each, the median of five dispatches after one discarded sample. The value stride is 262144. The streaming bandwidth above is 254.6 GB/s.
 
 | Context | `kv_softmax_max` | `kv_softmax_prob` | `kv_softmax_close` | `kv_cast_probs` | `kv_pv_split8` | `kv_part_sum` |
 |---|---:|---:|---:|---:|---:|---:|
@@ -46,7 +46,7 @@ Times are microseconds. A figure under about 30 µs is dispatch and clock noise.
 
 One head at 65536 tokens is 98.6 µs. The language stack has 4 key/value heads and 16 full-attention layers, so 64 of those head steps, 6.31 ms, 158 tok/s. One head at 262144 tokens is 446.6 µs, and 64 heads are 28.6 ms, 35.0 tok/s. `kv_scale_partial` is the prefill restore. Decode applies the peak inside `kv_pv_split8`.
 
-The bytes of one head at context C are the float scores read twice (64 C), the float weight write (32 C), the cast reread (32 C), the float16 window write and read (32 C), the fp8 values and their scales (264 C), the partial write and the in-place scale (48 C), and the block reduction's read of those partials (16 C). That is 488 C bytes per head, 31232 C bytes for 64 heads. At 65536 tokens that is 1.907 GiB. Divided by 254.6 GB/s the bandwidth ceiling of this traffic is 8.04 ms, 124 tok/s. At 262144 tokens it is 32.2 ms, 31.1 tok/s. The 65536 kernel sum sits under that line because most of its dispatches are under 30 µs. The 262144 sum is the one past that noise: 28.6 ms beside the 32.2 ms bandwidth ceiling.
+The bytes of one head at context C are the float scores read twice (64 C), the float weight write (32 C), the cast reread (32 C), the half window write and read (32 C), the fp8 values and their scales (264 C), the partial write and the in-place scale (48 C), and the block reduction's read of those partials (16 C). That is 488 C bytes per head, 31232 C bytes for 64 heads. At 65536 tokens that is 1.907 GiB. Divided by 254.6 GB/s the bandwidth ceiling of this traffic is 8.04 ms, 124 tok/s. At 262144 tokens it is 32.2 ms, 31.1 tok/s. The 65536 kernel sum sits under that line because most of its dispatches are under 30 µs. The 262144 sum is the one past that noise: 28.6 ms beside the 32.2 ms bandwidth ceiling.
 
 One prefill value-mix tile, `prefill_fp8_n64_stride`, is 12288 rows by 2048 keys by 256 channels and measured 614.6 µs. That is one head of one 2048-token chunk. Sixty-four such tiles, each in its own command buffer, are 39.3 ms.
 
@@ -63,7 +63,7 @@ The gate dispatch reads the 91,914,240-byte image and the 20,480-byte activation
 
 ## Prefill, 2048 tokens
 
-The mixed record `Qwen3.8-27B-fp8-e20`. Twelve language feed-forward layers are fp8 and the other fifty-two are fp4. MTP, the embedding, `lm_head`, the vision tower, and the float16 vectors are not in the projection image. The data plane plus the scale plane of the language projections is 14,544,732,160 bytes.
+The mixed record `Qwen3.8-27B-fp8-e20`. Twelve language feed-forward layers are fp8 and the other fifty-two are fp4. MTP, the embedding, `lm_head`, the vision tower, and the half vectors are not in the projection image. The data plane plus the scale plane of the language projections is 14,544,732,160 bytes.
 
 Gate, up, and the attention projections use a 64-row tile, so those 10,979,573,760 bytes are read 32 times in a 2048-token chunk. The down projection uses a 32-row tile, so its 3,565,158,400 bytes are read 64 times. Weight traffic is 579,516,497,920 bytes. The chunk also reads 13,891,534,848 bytes of half activations and writes 31,994,150,912 bytes of float outputs. That is 625,402,183,680 bytes. Divided by 254.6 GB/s the projection bandwidth ceiling is 2.456 s, 834 tok/s.
 
@@ -94,9 +94,9 @@ Each prefill time below is one command buffer, then a wait, the median of five d
 | `prefill_fp8_n64_stride` value | 12288×256×2048 | 64 | 609 | 38.99 |
 | `gdn_state_rows` | 2048 | 48 | 12234 | 587.23 |
 | `gdn_conv_rows` | 2048 | 48 | 869 | 41.69 |
-| `cast_f32_f16` hidden | 2048×5120 | 64 | 244 | 15.64 |
-| `cast_f32_f16` intermediate | 2048×17408 | 64 | 798 | 51.04 |
-| `cast_f32_f16` z or o | 2048×6144 | 64 | 964 | 61.66 |
+| `cast_f32_half` hidden | 2048×5120 | 64 | 244 | 15.64 |
+| `cast_f32_half` intermediate | 2048×17408 | 64 | 798 | 51.04 |
+| `cast_f32_half` z or o | 2048×6144 | 64 | 964 | 61.66 |
 | `zero_f32` | 2048×5120 | 1 | 138 | 0.14 |
 | `swiglu_f32` | 2048×17408 | 64 | 1687 | 107.94 |
 | `residual_rows` | 2048×5120 | 64 | 481 | 30.78 |

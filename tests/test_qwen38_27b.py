@@ -72,9 +72,9 @@ def _config() -> dict:
 
 
 def test_mtp_matrices_pack_as_fp8() -> None:
-    from qwen38_27b.convert import _keep_f16, _mtp_fp4
+    from qwen38_27b.convert import _keep_half, _mtp_fp4
 
-    assert _keep_f16("mtp.norm.weight", np.ones(8, dtype=np.float32)) is True
+    assert _keep_half("mtp.norm.weight", np.ones(8, dtype=np.float32)) is True
     assert _mtp_fp4({"mtp.fc.weight": {"dtype": "fp4"}, "lm_head.weight": {"dtype": "fp4"}}) is True
     assert _mtp_fp4({"mtp.fc.weight": {"dtype": "fp8"}}) is False
 
@@ -209,11 +209,27 @@ def test_text_shapes_follow_the_checkpoint_config() -> None:
     )
 
 
-def test_one_token_cache_is_33792_bytes() -> None:
-    assert plane_bytes(1) == 4 * 264
-    assert cache_bytes(1) == 33792
-    assert cache_bytes(262144) == 33792 * 262144
-    assert sequence_cache_bytes(1, 17) == 35904
+def test_one_token_cache_bytes() -> None:
+    assert plane_bytes(1, "fp8_e4m3") == 4 * 264
+    assert plane_bytes(1, "half") == 4 * 512
+    from qwen38_27b.cache import kv_mode
+
+    assert kv_mode("half") == "half"
+    assert kv_mode("fp8_e4m3") == "fp8_e4m3"
+    assert kv_mode("e4m3") == "fp8_e4m3"
+    assert kv_mode("fp8") == "fp8_e4m3"
+    assert kv_mode(None) == "half"
+    try:
+        kv_mode("fp16")
+    except ValueError as exc:
+        assert "fp16" in str(exc)
+    else:
+        raise AssertionError("fp16 must be rejected")
+    assert cache_bytes(1) == 65536
+    assert cache_bytes(1, "fp8_e4m3") == 33792
+    assert cache_bytes(262144) == 65536 * 262144
+    assert sequence_cache_bytes(1, 17) == 69632
+    assert sequence_cache_bytes(1, 17, "fp8_e4m3") == 35904
 
 
 def test_repeated_tail_catches_a_copied_span() -> None:
@@ -1423,7 +1439,8 @@ def _sample_group(*, layer_span: int = 3000, mtp_span: int = 5000, vision: int =
     return group_tensors(tensors)
 
 
-def test_float16_tensor_span_is_two_bytes_per_element() -> None:
+def test_half_tensor_span_is_two_bytes_per_element() -> None:
+    assert tensor_span({"dtype": "half", "stored_shape": [5120], "offset": 0}) == 10240
     assert tensor_span({"dtype": "f16", "stored_shape": [5120], "offset": 0}) == 10240
 
 
@@ -1542,13 +1559,13 @@ def test_install_reads_one_prefix_region_at_a_time(monkeypatch) -> None:
         names.extend((f"k.{slot}", f"v.{slot}"))
     lengths = {"history": _HISTORY_BYTES, "state": _STATE_BYTES}
     for slot in range(slots):
-        lengths[f"k.{slot}"] = _packed_length(count, "key")
-        lengths[f"v.{slot}"] = _packed_length(count, "value")
+        lengths[f"k.{slot}"] = _packed_length(count, "key", "fp8_e4m3")
+        lengths[f"v.{slot}"] = _packed_length(count, "value", "fp8_e4m3")
     header = PrefixHeader(
         Path("example.bin"),
         "qwen38-27b",
         b"\x00" * 32,
-        "e4m3",
+        "fp8_e4m3",
         tuple(range(count)),
         tuple(RegionRef(name, 16384, lengths[name]) for name in names),
         16384,
@@ -1579,6 +1596,7 @@ def test_install_reads_one_prefix_region_at_a_time(monkeypatch) -> None:
     runtime = SimpleNamespace(
         kv_slots=slots,
         max_pos=32,
+        kv_cache="fp8_e4m3",
         filled=0,
         history=object(),
         state=object(),
@@ -2007,7 +2025,7 @@ def test_repack_mtp_replaces_fp4_bytes(tmp_path: Path) -> None:
         "complete": True,
         "tensors": {
             "model.norm.weight": {
-                "dtype": "f16",
+                "dtype": "half",
                 "shape": [8],
                 "stored_shape": [8],
                 "file": "resident.bin",
@@ -2033,7 +2051,7 @@ def test_repack_mtp_replaces_fp4_bytes(tmp_path: Path) -> None:
     packed = json.loads((record / "manifest.json").read_text())
     assert packed["mtp_weight"] == "fp8"
     assert packed["tensors"]["mtp.fc.weight"]["dtype"] == "fp8"
-    assert packed["tensors"]["model.norm.weight"]["dtype"] == "f16"
+    assert packed["tensors"]["model.norm.weight"]["dtype"] == "half"
     rewritten = (record / "resident.bin").read_bytes()
     norm = packed["tensors"]["model.norm.weight"]
     start = int(norm["offset"])

@@ -1,12 +1,14 @@
-"""fp8 attention on the key and value planes.
+"""Attention on the key and value planes.
 
-Keys are stored ``[head, token, channel]`` with an E8M0 scale every 32 channels.
-Values are stored ``[head, channel, token]`` with an E8M0 scale every 32 tokens.
-Prefill scores 2048 keys at a time on the 64 by 64 ``matmul2d``. Softmax writes
-float32 weights. Each value-mix window divides by that row's peak, multiplies
-in float16, and restores the peak. A one-token step packs eight query rows,
-two of them zero, into one ``matmul2d``. Six of those rows are the queries
-that share a key/value head.
+``half`` stores Metal halves at ``[head, token, channel]`` and mixes with online
+softmax kernels. ``fp8_e4m3`` (Metal ``metal_fp8_e4m3``) keeps keys
+``[head, token, channel]`` with an E8M0 scale every 32 channels and values
+``[head, channel, token]`` with an E8M0 scale every 32 tokens. That path scores
+2048 keys at a time on the 64 by 64 ``matmul2d``. Softmax writes float32
+weights. Each value-mix window divides by that row's peak, multiplies in half,
+and restores the peak. A one-token step packs eight query rows, two of them
+zero, into one ``matmul2d``. Six of those rows are the queries that share a
+key/value head.
 """
 
 from __future__ import annotations
@@ -14,7 +16,8 @@ from __future__ import annotations
 import struct
 from typing import Any
 
-from qwen38_27b.layout import CHUNK, FULL_LAYERS, GROUP, HEAD, KV_HEADS
+from qwen38_27b.cache import plain_cache
+from qwen38_27b.layout import CHUNK, FULL_LAYERS, GROUP, HEAD, KV_HEADS, Q_HEADS
 from qwen38_27b.session import release_buffer, release_buffers
 
 TILE = 256
@@ -23,8 +26,15 @@ BLOCK = 512
 DECODE_ROWS = 8
 
 
-def scratch_bytes(positions: int, slots: int = FULL_LAYERS) -> int:
-    """Score, probability, and value-block scratch for one chunk."""
+def scratch_bytes(
+    positions: int, slots: int = FULL_LAYERS, mode: str | None = "half"
+) -> int:
+    """Score, probability, and value-block scratch for one chunk.
+
+    half attend keeps its state in registers, so that mode claims no plane scratch.
+    """
+    if plain_cache(mode):
+        return 0
     rows = GROUP * CHUNK
     return (
         rows * HEAD * 2
@@ -51,8 +61,12 @@ def value_block_bytes(positions: int) -> int:
 def bind_plane(runtime: Any) -> None:
     """Allocate the score, probability, and value-block scratch.
 
-    The previous scratch is released after the new buffers exist.
+    half leaves those buffers unset. The previous scratch is released after the
+    new buffers exist.
     """
+    if plain_cache(getattr(runtime, "kv_cache", "half")):
+        _clear_plane(runtime)
+        return
     rows = GROUP * CHUNK
     zeros = runtime.session.zeros
     slots = int(getattr(runtime, "kv_slots", FULL_LAYERS))
@@ -82,6 +96,30 @@ def bind_plane(runtime: Any) -> None:
             release_buffer(buf)
 
 
+def _clear_plane(runtime: Any) -> None:
+    names = (
+        "plane_q",
+        "plane_scores",
+        "plane_probs",
+        "plane_prob_half",
+        "plane_row_scale",
+        "plane_parts",
+        "plane_partial",
+        "plane_acc",
+        "plane_max",
+        "plane_sum",
+        "plane_tail",
+        "plane_chunk_max",
+        "plane_chunk_sum",
+    )
+    previous = [getattr(runtime, name, None) for name in names]
+    for name in names:
+        setattr(runtime, name, None)
+    for buf in previous:
+        if buf is not None:
+            release_buffer(buf)
+
+
 def attend_plane(
     runtime: Any,
     *,
@@ -94,13 +132,16 @@ def attend_plane(
     count: int,
     slot: int,
 ) -> None:
-    """Store this chunk on the fp8 plane and mix it with ``matmul2d``."""
+    """Store this chunk and mix it. half uses online softmax; fp8_e4m3 uses ``matmul2d``."""
     if runtime.max_pos % TILE:
         message = f"context {runtime.max_pos} is not a multiple of {TILE}"
         raise RuntimeError(message)
     if count < 1 or count > CHUNK:
         message = f"attention count {count} is outside 1..{CHUNK}"
         raise RuntimeError(message)
+    if plain_cache(runtime.kv_cache):
+        _attend_half(runtime, query, key, value, gate, dest, pos0, count, slot)
+        return
     _store_keys(runtime, key, pos0, count, slot)
     _store_values(runtime, value, pos0, count, slot)
     decode = count == 1
@@ -140,6 +181,77 @@ def attend_plane(
             (count, DECODE_ROWS if decode else GROUP, 1),
             (HEAD, 1, 1),
         )
+
+
+def _attend_half(
+    runtime: Any,
+    query: Any,
+    key: Any,
+    value: Any,
+    gate: Any,
+    dest: Any,
+    pos0: int,
+    count: int,
+    slot: int,
+) -> None:
+    """Store halves and mix with the half online-softmax kernels."""
+    stride = runtime.max_pos * HEAD
+    if count == 1:
+        _encode(
+            runtime,
+            "store_kv_half",
+            [
+                (runtime.k_cache[slot], 0),
+                (runtime.v_cache[slot], 0),
+                (key, 0),
+                (value, 0),
+            ],
+            [_u32(pos0), _u32(stride)],
+            (KV_HEADS, 1, 1),
+            (HEAD, 1, 1),
+        )
+        _encode(
+            runtime,
+            "attend_gqa_heads_half",
+            [
+                (query, 0),
+                (runtime.k_cache[slot], 0),
+                (runtime.v_cache[slot], 0),
+                (gate, 0),
+                (dest, 0),
+            ],
+            [_u32(pos0 + 1), _u32(stride)],
+            (Q_HEADS, 1, 1),
+            (32, 1, 1),
+        )
+        return
+    _encode(
+        runtime,
+        "store_kv_rows_half",
+        [
+            (runtime.k_cache[slot], 0),
+            (runtime.v_cache[slot], 0),
+            (key, 0),
+            (value, 0),
+        ],
+        [_u32(pos0), _u32(stride)],
+        (count, KV_HEADS, 1),
+        (HEAD, 1, 1),
+    )
+    _encode(
+        runtime,
+        "attend_prefill_half",
+        [
+            (query, 0),
+            (runtime.k_cache[slot], 0),
+            (runtime.v_cache[slot], 0),
+            (gate, 0),
+            (dest, 0),
+        ],
+        [_u32(count), _u32(pos0), _u32(stride)],
+        ((count + 1) // 2, Q_HEADS, 1),
+        (32, 1, 1),
+    )
 
 
 def _store_keys(runtime: Any, key: Any, pos0: int, count: int, slot: int) -> None:
@@ -555,7 +667,7 @@ def _cast_probs(
     src_col: int,
     blocks: int = 1,
 ) -> None:
-    """Pack float32 weights into float16, one scale per row of each block."""
+    """Pack float32 weights into Metal half, one scale per row of each block."""
     _encode(
         runtime,
         "kv_cast_probs",
@@ -573,7 +685,7 @@ def _cast_probs(
 def _scale_partial(
     runtime: Any, dest: Any, rows: int, channels: int, blocks: int = 1
 ) -> None:
-    """Undo the per-row scale after the float16 value mix."""
+    """Undo the per-row scale after the half value mix."""
     _encode(
         runtime,
         "kv_scale_partial",

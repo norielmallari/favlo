@@ -3,12 +3,17 @@
 The record stores the tower. A text forward leaves it there. An image request
 copies that span once, then each block is a layer norm, an fp4 projection,
 and a residual. The merger writes one language vector per 2×2 patch block.
+An image this process already embedded is reused, so a later turn does not
+run the tower again.
 """
 
 from __future__ import annotations
 
+import hashlib
 import struct
 from typing import Any
+
+import numpy as np
 
 from qwen38_27b.budget import tensor_span
 from qwen38_27b.vision import IMAGE_PAD, prepare_image
@@ -24,6 +29,8 @@ _DEPTH = 27
 _POS_SIDE = 48
 _POS_ROWS = _POS_SIDE * _POS_SIDE
 _EPS = 1e-6
+_ROW_CACHE: dict[tuple[Any, ...], np.ndarray] = {}
+_ROW_LIMIT = 8
 
 
 def bind_request(runtime: Any, prompt: list[int], hit: int) -> None:
@@ -55,12 +62,38 @@ def bind_request(runtime: Any, prompt: list[int], hit: int) -> None:
     if not any(index >= hit for index in slots):
         _note(runtime, f"vision cached {expected}")
         return
+    key = _row_key(runtime, images)
+    cached = _ROW_CACHE.get(key)
+    if cached is not None:
+        if int(cached.shape[0]) != expected:
+            message = f"vision cache {cached.shape[0]} is not {expected} merged tokens"
+            raise RuntimeError(message)
+        _note(runtime, f"vision cache {expected}")
+        runtime._vision_rows = runtime.session.upload(np.ascontiguousarray(cached, dtype=np.float32))
+        runtime._vision_map = {slot: row for row, slot in enumerate(slots)}
+        return
     patch_count = sum(int(item[0].shape[0]) for item in prepared)
     _note(runtime, f"vision patches {patch_count}")
     rows = _encode(runtime, prepared)
     _note(runtime, f"vision merged {expected}")
+    host = np.ascontiguousarray(
+        runtime.session.download_f32(rows, expected * _LANG).reshape(expected, _LANG),
+        dtype=np.float32,
+    )
+    _ROW_CACHE[key] = host
+    while len(_ROW_CACHE) > _ROW_LIMIT:
+        _ROW_CACHE.pop(next(iter(_ROW_CACHE)))
     runtime._vision_rows = rows
     runtime._vision_map = {slot: row for row, slot in enumerate(slots)}
+
+
+def _row_key(runtime: Any, images: list[tuple[bytes, int, int]]) -> tuple[Any, ...]:
+    parts: list[Any] = [str(getattr(runtime, "root", ""))]
+    for blob, low, high in images:
+        parts.append(hashlib.sha256(blob).digest())
+        parts.append(int(low))
+        parts.append(int(high))
+    return tuple(parts)
 
 
 def _note(runtime: Any, text: str) -> None:

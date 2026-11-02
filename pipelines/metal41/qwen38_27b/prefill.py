@@ -518,7 +518,7 @@ def _cast_half(runtime: Any, work: _Workspace, src: Any, n: int, rows: int, inne
         message = f"cast length {n} is not a multiple of 256"
         raise RuntimeError(message)
     runtime.session.encode(
-        "cast_f32_f16",
+        "cast_f32_half",
         [(src, 0), (work.half, 0)],
         [],
         (n // 256, 1, 1),

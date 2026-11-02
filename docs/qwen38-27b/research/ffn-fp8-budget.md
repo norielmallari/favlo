@@ -50,4 +50,4 @@ Quantize accepts `--ffn-fp8`. A mixed percentage writes `models/Qwen3.8-27B-fp8-
 
 23 October 2026. A later sample of 100 on `Qwen3.8-27B-fp8-e20` is in [../benchmarks.md](../benchmarks.md): IFEval prompt-strict 0.750, GSM8K 93/100, and HumanEval 94/100.
 
-31 October 2026. `quantize` stores MTP matrices as fp8. The language-layer ranking above does not include them. One-dimensional MTP parameters stay float16.
+31 October 2026. `quantize` stores MTP matrices as fp8. The language-layer ranking above does not include them. One-dimensional MTP parameters stay Metal `half`.

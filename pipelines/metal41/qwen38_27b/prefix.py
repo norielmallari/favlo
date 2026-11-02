@@ -26,7 +26,7 @@ from favlo.prefix import (
     default_prefix_dir,
     read_regions,
 )
-from qwen38_27b.cache import plane_bytes
+from qwen38_27b.cache import kv_record_bytes, plain_cache, plane_bytes
 from qwen38_27b.layout import HEAD, KV_HEADS, LINEAR_LAYERS, LINEAR_V, MIX
 
 _HISTORY_BYTES = LINEAR_LAYERS * 3 * MIX * 2
@@ -59,17 +59,30 @@ class CacheAdapter:
             Region("history", _read(self.runtime.history, _HISTORY_BYTES)),
             Region("state", _read(self.runtime.state, _STATE_BYTES)),
         ]
+        mode = self.runtime.kv_cache
         for slot in range(int(self.runtime.kv_slots)):
             regions.append(
                 Region(
                     f"k.{slot}",
-                    _pack(self.runtime.k_cache[slot], self.runtime.max_pos, count, kind="key"),
+                    _pack(
+                        self.runtime.k_cache[slot],
+                        self.runtime.max_pos,
+                        count,
+                        kind="key",
+                        mode=mode,
+                    ),
                 )
             )
             regions.append(
                 Region(
                     f"v.{slot}",
-                    _pack(self.runtime.v_cache[slot], self.runtime.max_pos, count, kind="value"),
+                    _pack(
+                        self.runtime.v_cache[slot],
+                        self.runtime.max_pos,
+                        count,
+                        kind="value",
+                        mode=mode,
+                    ),
                 )
             )
         return regions
@@ -78,12 +91,13 @@ class CacheAdapter:
         count = len(header.tokens)
         if count < 1 or count >= len(prompt):
             return False
-        return _fits(header, count, int(self.runtime.kv_slots))
+        return _fits(header, count, int(self.runtime.kv_slots), self.runtime.kv_cache)
 
     def install(self, header: PrefixHeader) -> bool:
         count = len(header.tokens)
         slots = int(self.runtime.kv_slots)
-        if not _fits(header, count, slots):
+        mode = self.runtime.kv_cache
+        if not _fits(header, count, slots, mode):
             return False
         wrote = False
 
@@ -122,6 +136,7 @@ class CacheAdapter:
                     count,
                     data,
                     kind="key",
+                    mode=mode,
                 ),
             )
             ok = ok and apply(
@@ -132,6 +147,7 @@ class CacheAdapter:
                     count,
                     data,
                     kind="value",
+                    mode=mode,
                 ),
             )
         if not ok:
@@ -145,27 +161,38 @@ class CacheAdapter:
         self.runtime.reset()
 
 
-def pack_plane(buffer: np.ndarray, max_pos: int, count: int, *, kind: str) -> bytes:
+def pack_plane(
+    buffer: np.ndarray, max_pos: int, count: int, *, kind: str, mode: str = "half"
+) -> bytes:
     """Used positions of one key or value plane, packed off the ``max_pos`` stride."""
     if count < 1:
         return b""
     array = np.frombuffer(buffer, dtype=np.uint8) if not isinstance(buffer, np.ndarray) else buffer
-    data, scales = _slices(array, max_pos, count, kind)
+    data, scales = _slices(array, max_pos, count, kind, mode)
     return np.ascontiguousarray(data).tobytes() + np.ascontiguousarray(scales).tobytes()
 
 
-def unpack_plane(buffer: np.ndarray, max_pos: int, count: int, packed: bytes, *, kind: str) -> None:
+def unpack_plane(
+    buffer: np.ndarray,
+    max_pos: int,
+    count: int,
+    packed: bytes,
+    *,
+    kind: str,
+    mode: str = "half",
+) -> None:
     """Write ``packed`` back onto the ``max_pos`` stride. Other positions stay."""
     if count < 1:
         return
     array = np.frombuffer(buffer, dtype=np.uint8) if not isinstance(buffer, np.ndarray) else buffer
-    data, scales = _slices(array, max_pos, count, kind)
+    data, scales = _slices(array, max_pos, count, kind, mode)
     data_bytes = int(np.prod(data.shape))
     data[:] = np.frombuffer(packed[:data_bytes], dtype=np.uint8).reshape(data.shape)
-    scales[:] = np.frombuffer(packed[data_bytes:], dtype=np.uint8).reshape(scales.shape)
+    if scales.size:
+        scales[:] = np.frombuffer(packed[data_bytes:], dtype=np.uint8).reshape(scales.shape)
 
 
-def _fits(header: PrefixHeader, count: int, slots: int) -> bool:
+def _fits(header: PrefixHeader, count: int, slots: int, mode: str) -> bool:
     history = header.region("history")
     state = header.region("state")
     if history is None or history.length != _HISTORY_BYTES:
@@ -177,32 +204,36 @@ def _fits(header: PrefixHeader, count: int, slots: int) -> bool:
         value = header.region(f"v.{slot}")
         if key is None or value is None:
             return False
-        if key.length != _packed_length(count, "key"):
+        if key.length != _packed_length(count, "key", mode):
             return False
-        if value.length != _packed_length(count, "value"):
+        if value.length != _packed_length(count, "value", mode):
             return False
     return True
 
 
-def _packed_length(count: int, kind: str) -> int:
+def _packed_length(count: int, kind: str, mode: str) -> int:
+    if plain_cache(mode):
+        return count * KV_HEADS * kv_record_bytes(mode)
     if kind == "key":
         return count * KV_HEADS * (HEAD + _SCALE)
     blocks = (count + 31) // 32
     return KV_HEADS * HEAD * count + KV_HEADS * HEAD * blocks
 
 
-def _pack(buffer: Any, max_pos: int, count: int, *, kind: str) -> bytes:
+def _pack(buffer: Any, max_pos: int, count: int, *, kind: str, mode: str) -> bytes:
     view = np.frombuffer(
-        memoryview(buffer.contents().as_buffer(plane_bytes(max_pos))), dtype=np.uint8
+        memoryview(buffer.contents().as_buffer(plane_bytes(max_pos, mode))), dtype=np.uint8
     )
-    return pack_plane(view, max_pos, count, kind=kind)
+    return pack_plane(view, max_pos, count, kind=kind, mode=mode)
 
 
-def _unpack(buffer: Any, max_pos: int, count: int, packed: bytes, *, kind: str) -> None:
+def _unpack(
+    buffer: Any, max_pos: int, count: int, packed: bytes, *, kind: str, mode: str
+) -> None:
     view = np.frombuffer(
-        memoryview(buffer.contents().as_buffer(plane_bytes(max_pos))), dtype=np.uint8
+        memoryview(buffer.contents().as_buffer(plane_bytes(max_pos, mode))), dtype=np.uint8
     )
-    unpack_plane(view, max_pos, count, packed, kind=kind)
+    unpack_plane(view, max_pos, count, packed, kind=kind, mode=mode)
 
 
 def _read(buffer: Any, nbytes: int) -> bytes:
@@ -215,8 +246,12 @@ def _write(buffer: Any, payload: bytes) -> None:
 
 
 def _slices(
-    array: np.ndarray, max_pos: int, count: int, kind: str
+    array: np.ndarray, max_pos: int, count: int, kind: str, mode: str
 ) -> tuple[np.ndarray, np.ndarray]:
+    if plain_cache(mode):
+        row = kv_record_bytes(mode)
+        data = array.reshape(KV_HEADS, max_pos, row)[:, :count, :]
+        return data, np.empty((0,), dtype=np.uint8)
     scale_base = KV_HEADS * max_pos * HEAD
     if kind == "key":
         data = array[:scale_base].reshape(KV_HEADS, max_pos, HEAD)[:, :count, :]

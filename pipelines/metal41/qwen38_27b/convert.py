@@ -2,7 +2,7 @@
 
 Every matrix is fp4 E2M1 with an E8M0 scale every 32 along K, except language
 feed-forward layers selected by ``--ffn-fp8``. Those three matrices are fp8
-E4M3. One-dimensional parameters and the depthwise convolution stay float16.
+E4M3. One-dimensional parameters and the depthwise convolution stay Metal ``half``.
 MTP matrices are fp8 E4M3. ``repack_mtp_fp8`` rewrites a record that still stores them as fp4.
 """
 
@@ -77,9 +77,10 @@ def _append(path: Path, blob: bytes) -> int:
     return end
 
 
-def _f16_entry(array: np.ndarray) -> tuple[bytes, dict]:
+def _half_entry(array: np.ndarray) -> tuple[bytes, dict]:
+    """Pack as IEEE binary16, the same width Metal ``half`` uses."""
     flat = np.ascontiguousarray(array, dtype=np.float16)
-    body = {"dtype": "f16", "shape": list(array.shape), "stored_shape": list(flat.shape)}
+    body = {"dtype": "half", "shape": list(array.shape), "stored_shape": list(flat.shape)}
     return flat.tobytes(), body
 
 
@@ -161,7 +162,7 @@ def _mtp_fp4(tensors: dict[str, dict]) -> bool:
     )
 
 
-def _keep_f16(name: str, array: np.ndarray) -> bool:
+def _keep_half(name: str, array: np.ndarray) -> bool:
     if name.endswith("conv1d.weight") or name.endswith("A_log") or name.endswith("dt_bias"):
         return True
     if name.endswith(".bias") or array.ndim == 1:
@@ -325,11 +326,11 @@ def quantize(src: Path, output: Path | None = None, *, ffn_fp8: float | None = N
                 continue
             array = _load(path, header, base, name)
             print(f"  {name}", flush=True)
-            if _keep_f16(name, array):
+            if _keep_half(name, array):
                 flat = array
                 if name.endswith("conv1d.weight") and array.ndim >= 2:
                     flat = array.reshape(array.shape[0], -1)
-                blob, body = _f16_entry(flat)
+                blob, body = _half_entry(flat)
             elif found is not None and found[0] in chosen:
                 blob, body = _fp8_entry(array)
             elif name.startswith("mtp."):
@@ -353,7 +354,7 @@ def quantize(src: Path, output: Path | None = None, *, ffn_fp8: float | None = N
         "pipeline": "qwen38-27b",
         "source": src.name,
         "tensors": done,
-        "kv_cache": "e4m3",
+        "kv_cache": "half",
         "weight": "fp4",
         "feed_forward": feed,
         "layers": layers,
