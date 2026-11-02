@@ -161,7 +161,12 @@ def function_tools(tools: Any) -> list[dict[str, Any]]:
 
 
 def template_messages(body: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
-    """Messages for the checkpoint template, and whether a reasoning item was present."""
+    """Messages for the checkpoint template, and whether a reasoning item was present.
+
+    A reasoning item and the assistant message or function calls that follow it
+    become one assistant turn, so a later prompt that keeps that trace stays a
+    prefix of the tokens already stored.
+    """
     instructions = body.get("instructions")
     messages: list[dict[str, Any]] = []
     if isinstance(instructions, str) and instructions.strip():
@@ -189,6 +194,15 @@ def template_messages(body: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]
             pending.clear()
         messages.append(message)
 
+    def _attach_calls(message: dict[str, Any], calls: list[dict[str, Any]]) -> None:
+        if not calls:
+            return
+        existing = message.get("tool_calls")
+        merged = list(calls)
+        if isinstance(existing, list) and existing:
+            merged.extend(existing)
+        message["tool_calls"] = merged
+
     for item in raw:
         if not isinstance(item, dict):
             continue
@@ -200,7 +214,17 @@ def template_messages(body: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]
                 carried = text
             continue
         if kind == "function_call":
-            pending.append(_call_message(item))
+            call = _call_message(item)
+            last = messages[-1] if messages else None
+            if (
+                isinstance(last, dict)
+                and last.get("role") == "assistant"
+                and not carried
+                and not pending
+            ):
+                _attach_calls(last, [call])
+            else:
+                pending.append(call)
             continue
         if kind == "function_call_output":
             flush()
@@ -213,8 +237,19 @@ def template_messages(body: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]
             )
             continue
         if kind in ("message", None) and item.get("role"):
+            message = _message_item(item)
+            if message.get("role") == "assistant":
+                if carried:
+                    if not isinstance(message.get("reasoning_content"), str):
+                        message["reasoning_content"] = carried
+                    carried = ""
+                if pending:
+                    _attach_calls(message, pending)
+                    pending.clear()
+                messages.append(message)
+                continue
             flush()
-            messages.append(_message_item(item))
+            messages.append(message)
             continue
         if kind == "input_file":
             flush()

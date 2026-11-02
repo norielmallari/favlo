@@ -216,11 +216,17 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def start_server(port: int, max_memory: str | None = None) -> tuple[int, threading.Event, Log]:
+def start_server(
+    port: int,
+    max_memory: str | None = None,
+    log: Log | None = None,
+    *,
+    seen_listening: int = 0,
+) -> tuple[int, threading.Event, Log]:
     from favlo.cli import repo_root
     from favlo.daemon import alive, ensure, follow, telemetry_path
 
-    log = Log()
+    log = log if log is not None else Log()
     pid, _started = ensure(
         "127.0.0.1",
         port,
@@ -235,7 +241,7 @@ def start_server(port: int, max_memory: str | None = None) -> tuple[int, threadi
     follow(telemetry_path(port), on_line, stop, offset=0)
     deadline = time.monotonic() + 600
     while time.monotonic() < deadline:
-        if "listening on" in log.text():
+        if log.text().count("listening on") > seen_listening:
             return pid, stop, log
         if not alive(pid):
             raise RuntimeError(log.text()[-4000:])
@@ -258,8 +264,19 @@ class Server:
         self.pid, self.follow_stop, self.log = start_server(self.port, self.max_memory)
 
     def restart(self) -> None:
-        self.stop()
-        self.start()
+        """Stop and start on a new port. Keep the followed log for prefix checks."""
+        seen = self.log.text().count("listening on")
+        if self.pid is not None:
+            stop_server(self.pid, self.follow_stop)
+            self.pid = None
+            self.follow_stop = None
+        self.port = free_port()
+        self.pid, self.follow_stop, self.log = start_server(
+            self.port,
+            self.max_memory,
+            self.log,
+            seen_listening=seen,
+        )
 
     def stop(self) -> None:
         if self.pid is None:

@@ -20,7 +20,7 @@ _FIELDS = {"content", "create_directories", "file_path", "idempotency_key"}
 
 def perform(ctx: ToolContext, arguments: dict[str, Any]) -> str:
     reject_unknown(arguments, _FIELDS)
-    relative_raw = require_text(arguments, "file_path", allow_empty=False)
+    relative_raw = require_text(arguments, "file_path", allow_empty=False).rstrip()
     content = require_text(arguments, "content", allow_empty=True)
     key = check_key(require_text(arguments, "idempotency_key", allow_empty=False))
     create_directories = optional_bool(arguments, "create_directories", default=False)

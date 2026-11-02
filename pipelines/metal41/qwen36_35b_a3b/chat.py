@@ -268,6 +268,15 @@ def instruct_forbid(root: Path) -> set[int]:
     return {think_open_id(root), end}
 
 
+def tool_call_forbid(root: Path) -> set[int]:
+    """Tool markup. ``tool_choice`` ``none`` keeps those tokens out of the reply."""
+    opened = encode_text(root, "<tool_call>")
+    closed = encode_text(root, "</tool_call>")
+    if len(opened) != 1 or len(closed) != 1:
+        raise RuntimeError("the tool call markers are not one token each")
+    return {opened[0], closed[0]}
+
+
 def think_close_ids(root: Path) -> tuple[list[int], int]:
     """Token ids of the template close ``\\n</think>\\n\\n``, and the ``</think>`` id."""
     close = encode_text(root, "\n</think>\n\n")
@@ -439,6 +448,9 @@ def _respond(
     close, end = think_close_ids(runtime.root) if thinking else ([], None)
     forbid = None if thinking else instruct_forbid(runtime.root)
     emit_tools = prepared.get("tool_choice") != "none"
+    if not emit_tools:
+        blocked = tool_call_forbid(runtime.root)
+        forbid = blocked if forbid is None else forbid | blocked
     stream = bool(prepared.get("stream", False))
     mtp_body = _mtp_body(prepared)
     mtp = _mtp_flag(mtp_body, selection)
@@ -495,7 +507,9 @@ def _respond(
     reasoning, visible = completion_fields(text, thinking)
     content, calls = parse_tool_calls(visible)
     if not emit_tools:
-        content = _shown_reply(visible if thinking else text, content, calls)
+        # Keep the drawn text, including a mistaken tool block, so the next
+        # prompt that replays this turn still matches the stored tokens.
+        content = decode_shown_text(visible if thinking else text)
         calls = []
     elif not thinking:
         content = _shown_reply(text, content, calls)
@@ -989,7 +1003,7 @@ def _stream(
     reasoning, visible = completion_fields(text, thinking)
     content, calls = parse_tool_calls(visible)
     if not emit_tools:
-        content = _shown_reply(visible if thinking else text, content, calls)
+        content = decode_shown_text(visible if thinking else text)
         calls = []
     elif not thinking:
         content = _shown_reply(text, content, calls)

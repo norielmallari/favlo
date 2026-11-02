@@ -1,7 +1,8 @@
 """Flavor registry. One file under models/, never committed.
 
-A flavor is a packed record directory. An alias is a second name for that
-directory. A variant is a sampling row on the same record.
+A flavor is a packed record directory. When the row stores an alias, that
+alias is the public id for ``GET /v1/models`` and for ``resolve``. The folder
+name is the storage key only. A variant is a sampling suffix on that public id.
 """
 
 from __future__ import annotations
@@ -42,7 +43,7 @@ class Selection:
     context_length: int = DEFAULT_CONTEXT_LENGTH
     mtp: bool = False
     mtp_depth: int = 3
-    variants: dict[str, dict[str, float | int]] | None = None
+    variants: dict[str, dict[str, Any]] | None = None
     default_variant: str | None = None
     enable_thinking: bool | None = None
     reasoning_effort: str | None = None
@@ -196,7 +197,7 @@ def set_model_mtp(
     depth: int | None = None,
     root: Path | None = None,
 ) -> str:
-    """Store the draft flag and depth on the row named by a folder, alias, or pipeline."""
+    """Store the draft flag and depth on the row named by its public id."""
     if not isinstance(enabled, bool):
         message = "mtp must be true or false"
         raise ValueError(message)
@@ -356,7 +357,12 @@ def refuse_conflicting_destination(folder: str, source: Path, root: Path | None 
 
 
 def resolve(model: str, *, root: Path | None = None, resident: str | None = None) -> Selection:
-    """Map a client model id onto one folder and an optional sampling row."""
+    """Map a public registry id onto one folder and an optional sampling row.
+
+    The id is the alias when the row stores one, otherwise the folder. A folder
+    name is not accepted when that row has an alias. A pipeline name is not a
+    resolve target unless it is that public id.
+    """
     del resident
     data = load_registry(root)
     text = model.strip()
@@ -374,18 +380,15 @@ def resolve(model: str, *, root: Path | None = None, resident: str | None = None
 
 
 def model_objects(root: Path | None = None, *, resident: str | None = None) -> list[dict[str, Any]]:
+    """One public id per registry row, matching what ``resolve`` accepts."""
     data = load_registry(root)
     created = _created(root)
     rows: list[dict[str, Any]] = []
     for folder, entry in data["models"].items():
-        names = [folder]
-        alias = entry.get("alias")
-        if isinstance(alias, str) and alias:
-            names.append(alias)
-        for name in names:
-            rows.append(_object(name, folder, None, entry, created, resident))
-            for variant in _variant_names(entry):
-                rows.append(_object(f"{name}:{variant}", folder, variant, entry, created, resident))
+        name = _public_id(entry, folder)
+        rows.append(_object(name, folder, None, entry, created, resident))
+        for variant in _variant_names(entry):
+            rows.append(_object(f"{name}:{variant}", folder, variant, entry, created, resident))
     return rows
 
 
@@ -513,10 +516,16 @@ def _language_variant(entry: dict[str, Any]) -> str:
     raise LookupError(message)
 
 
-def _language_model_id(entry: dict[str, Any], folder: str) -> str:
+def _public_id(entry: dict[str, Any], folder: str) -> str:
+    """Client-facing id for a row: the alias when set, otherwise the folder."""
     alias = entry.get("alias")
-    base = alias if isinstance(alias, str) and alias else folder
-    return f"{base}:{_language_variant(entry)}"
+    if isinstance(alias, str) and alias:
+        return alias
+    return folder
+
+
+def _language_model_id(entry: dict[str, Any], folder: str) -> str:
+    return f"{_public_id(entry, folder)}:{_language_variant(entry)}"
 
 
 def _ensure_default_llm(
@@ -813,16 +822,10 @@ def _unknown(text: str, data: dict[str, Any]) -> NoReturn:
 
 
 def _folder_for(data: dict[str, Any], base: str) -> str | None:
-    if base in data["models"]:
-        return base
-    pipeline_hits: list[str] = []
+    """Storage folder for a public id. Folder and pipeline names are not aliases."""
     for folder, entry in data["models"].items():
-        if entry.get("alias") == base:
+        if _public_id(entry, folder) == base:
             return folder
-        if entry.get("pipeline") == base:
-            pipeline_hits.append(folder)
-    if len(pipeline_hits) == 1:
-        return pipeline_hits[0]
     return None
 
 
@@ -835,15 +838,14 @@ def _selection(
 ) -> Selection:
     entry = data["models"][folder]
     stored = _stored_variants(entry)
+    default = _default_variant(entry)
     sampling = None
     if variant is not None:
         row = stored.get(variant)
-        sampling = dict(row) if isinstance(row, dict) and row else None
+        sampling = _sampling_fields(row) if isinstance(row, dict) else None
     alias = entry.get("alias")
     alias_text = alias if isinstance(alias, str) and alias else None
-    parent = alias_text or folder
-    if requested == folder or requested.startswith(f"{folder}:"):
-        parent = folder
+    parent = _public_id(entry, folder)
     percent = entry.get("resident_percent")
     return Selection(
         folder=folder,
@@ -861,9 +863,9 @@ def _selection(
         mtp=mtp_pair(entry)[0],
         mtp_depth=mtp_pair(entry)[1],
         variants=stored,
-        default_variant=_default_variant(entry),
+        default_variant=default,
         enable_thinking=_enable_thinking(entry),
-        reasoning_effort=_reasoning_effort(entry),
+        reasoning_effort=_resolved_effort(entry, stored, variant, default),
         runtime=_require_runtime(entry, folder),
         custom=_custom(entry),
         parts=_parts(entry),
@@ -878,11 +880,7 @@ def _object(
     created: int,
     resident: str | None,
 ) -> dict[str, Any]:
-    alias = entry.get("alias")
-    if model_id == folder or model_id.startswith(f"{folder}:"):
-        parent = folder
-    else:
-        parent = alias or folder
+    parent = _public_id(entry, folder)
     row: dict[str, Any] = {
         "id": model_id,
         "object": "model",
@@ -903,21 +901,16 @@ def _object(
         row["parent"] = parent if ":" not in model_id else model_id.split(":", 1)[0]
         row["variant"] = variant
         variants = entry.get("variants") or {}
-        row["sampling"] = dict(variants.get(variant) or {})
+        card = variants.get(variant) if isinstance(variants, dict) else None
+        row["sampling"] = _sampling_fields(card) if isinstance(card, dict) else {}
+        effort = card.get("reasoning_effort") if isinstance(card, dict) else None
+        if isinstance(effort, str) and effort:
+            row["reasoning_effort"] = effort
     return row
 
 
 def _known_names(data: dict[str, Any]) -> list[str]:
-    names: list[str] = []
-    for folder, entry in data["models"].items():
-        names.append(folder)
-        alias = entry.get("alias")
-        if isinstance(alias, str) and alias and alias not in names:
-            names.append(alias)
-        pipeline = entry.get("pipeline")
-        if isinstance(pipeline, str) and pipeline and pipeline not in names:
-            names.append(pipeline)
-    return names
+    return [_public_id(entry, folder) for folder, entry in data["models"].items()]
 
 
 def _created(root: Path | None) -> int:
@@ -950,10 +943,11 @@ def card_context_length(pipeline: str, *, runtime: str, custom: bool = False) ->
 
 def pipeline_sampling(
     pipeline: str, *, runtime: str, custom: bool = False
-) -> tuple[dict[str, dict[str, float | int]], str]:
+) -> tuple[dict[str, dict[str, Any]], str]:
     """Load ``VARIANTS`` and ``DEFAULT_VARIANT`` from ``<package>/sampling.py``.
 
     The module is loaded by path so registration does not import the pipeline.
+    Each row must set the sampler fields. ``reasoning_effort`` is optional.
     """
     module = _sampling_module(pipeline, runtime=runtime, custom=custom)
     raw = getattr(module, "VARIANTS", None)
@@ -964,20 +958,32 @@ def pipeline_sampling(
     if not isinstance(default, str) or default not in raw:
         message = f"{pipeline} DEFAULT_VARIANT must name a row in VARIANTS"
         raise ValueError(message)
-    variants: dict[str, dict[str, float | int]] = {}
+    variants: dict[str, dict[str, Any]] = {}
     for name, row in raw.items():
         if not isinstance(name, str) or not name or ":" in name:
             message = f"{pipeline} variant name must be a single token"
             raise ValueError(message)
-        if not isinstance(row, dict) or set(row) != set(_CARD_FIELDS):
+        if not isinstance(row, dict):
+            message = f"{pipeline} {name} row must be an object"
+            raise ValueError(message)
+        keys = set(row)
+        if not set(_CARD_FIELDS).issubset(keys):
             message = f"{pipeline} {name} row must set {', '.join(_CARD_FIELDS)}"
             raise ValueError(message)
-        variants[name] = {
+        extra = keys - set(_CARD_FIELDS) - {"reasoning_effort"}
+        if extra:
+            message = f"{pipeline} {name} row has unknown fields: {', '.join(sorted(extra))}"
+            raise ValueError(message)
+        card: dict[str, Any] = {
             "temperature": float(row["temperature"]),
             "top_p": float(row["top_p"]),
             "top_k": int(row["top_k"]),
             "presence_penalty": float(row["presence_penalty"]),
         }
+        effort = row.get("reasoning_effort")
+        if isinstance(effort, str) and effort.strip():
+            card["reasoning_effort"] = effort.strip().lower()
+        variants[name] = card
     return variants, default
 
 
@@ -1018,15 +1024,29 @@ def _variant_names(entry: dict[str, Any]) -> tuple[str, ...]:
     return tuple(_stored_variants(entry))
 
 
-def _stored_variants(entry: dict[str, Any]) -> dict[str, dict[str, float | int]]:
+def _stored_variants(entry: dict[str, Any]) -> dict[str, dict[str, Any]]:
     raw = entry.get("variants")
     if not isinstance(raw, dict):
         return {}
-    stored: dict[str, dict[str, float | int]] = {}
+    stored: dict[str, dict[str, Any]] = {}
     for name, row in raw.items():
         if isinstance(name, str) and isinstance(row, dict):
             stored[name] = dict(row)
     return stored
+
+
+def _sampling_fields(card: dict[str, Any]) -> dict[str, float | int]:
+    """Numeric sampler fields from a variant card."""
+    out: dict[str, float | int] = {}
+    for key in _CARD_FIELDS:
+        if key not in card:
+            continue
+        value = card[key]
+        if key == "top_k":
+            out[key] = int(value)
+        else:
+            out[key] = float(value)
+    return out
 
 
 def _default_variant(entry: dict[str, Any]) -> str | None:
@@ -1047,6 +1067,28 @@ def _reasoning_effort(entry: dict[str, Any]) -> str | None:
     if isinstance(name, str) and name:
         return name
     return None
+
+
+def _resolved_effort(
+    entry: dict[str, Any],
+    stored: dict[str, dict[str, Any]],
+    variant: str | None,
+    default: str | None,
+) -> str | None:
+    """Effort from the selected variant card, else the default card, else the row."""
+    names: list[str] = []
+    if isinstance(variant, str) and variant:
+        names.append(variant)
+    elif isinstance(default, str) and default:
+        names.append(default)
+    for name in names:
+        card = stored.get(name)
+        if not isinstance(card, dict):
+            continue
+        effort = card.get("reasoning_effort")
+        if isinstance(effort, str) and effort.strip():
+            return effort.strip().lower()
+    return _reasoning_effort(entry)
 
 
 def _sampling_path(package: str, *, runtime: str, custom: bool) -> Path:

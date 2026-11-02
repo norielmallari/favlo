@@ -429,11 +429,24 @@ def test_thinking_budget_forces_the_close_then_drops_that_token() -> None:
     assert _sample(logits, 0.0, 1.0, 0, 0.0, set(), {9}) == 8
 
 
-def test_a_natural_close_ends_the_budget() -> None:
+def test_a_natural_close_rewrites_into_the_canonical_close() -> None:
     budget = ThinkBudget([2, 9, 3], 9, 8)
-    assert budget.take(9) == 9
+    assert budget.take(9) == 2
+    assert budget.forcing
+    assert not budget.closed
+    assert budget.take(4) == 9
+    assert budget.take(4) == 3
     assert budget.closed
     assert budget.take(4) == 4
+
+
+def test_a_natural_close_after_the_leading_newline_finishes_the_close() -> None:
+    budget = ThinkBudget([2, 9, 3], 9, 8)
+    assert budget.take(2) == 2
+    assert budget.take(9) == 9
+    assert budget.forcing
+    assert budget.take(4) == 3
+    assert budget.closed
 
 
 def test_expert_image_is_two_fp4_planes() -> None:
@@ -1332,6 +1345,35 @@ def test_preserve_thinking_defaults_on_and_the_request_wins() -> None:
         raise AssertionError("preserve_thinking must be true or false")
 
 
+def test_responses_reasoning_merges_into_the_assistant_turn() -> None:
+    from favlo.responses import template_messages
+
+    messages, saw = template_messages(
+        {
+            "input": [
+                {"type": "message", "role": "user", "content": "Hi"},
+                {
+                    "type": "reasoning",
+                    "content": [{"type": "reasoning_text", "text": "plan"}],
+                },
+                {"type": "message", "role": "assistant", "content": "hello"},
+                {
+                    "type": "function_call",
+                    "call_id": "c1",
+                    "name": "glob",
+                    "arguments": '{"pattern":"*.txt"}',
+                },
+            ]
+        }
+    )
+    assert saw is True
+    assistants = [row for row in messages if row.get("role") == "assistant"]
+    assert len(assistants) == 1
+    assert assistants[0]["reasoning_content"] == "plan"
+    assert assistants[0]["content"] == "hello"
+    assert assistants[0]["tool_calls"][0]["function"]["name"] == "glob"
+
+
 def test_historical_reasoning_follows_the_preserve_setting() -> None:
     root = _chat_root()
     if root is None:
@@ -1391,7 +1433,7 @@ def test_effort_opens_thinking_without_changing_the_card() -> None:
         variants=None,
         default_variant="thinking",
         enable_thinking=None,
-        reasoning_effort=None,
+        reasoning_effort="none",
     )
     thinking, card = mode_card(instruct, _request_effort({"reasoning": {"effort": "low"}}))
     assert thinking is True
@@ -1399,16 +1441,19 @@ def test_effort_opens_thinking_without_changing_the_card() -> None:
     closed, still = mode_card(instruct, _request_effort({"reasoning": {"effort": "none"}}))
     assert closed is False
     assert still["temperature"] == 0.7
+    omitted, instruct_card = mode_card(instruct, _request_effort({}))
+    assert omitted is False
+    assert instruct_card["temperature"] == 0.7
     stored = SimpleNamespace(
         variant="thinking",
         sampling=None,
         variants=None,
         default_variant="thinking",
         enable_thinking=True,
-        reasoning_effort="none",
+        reasoning_effort="high",
     )
-    omitted, _card = mode_card(stored, _request_effort({}))
-    assert omitted is False
+    open_think, _card = mode_card(stored, _request_effort({}))
+    assert open_think is True
 
 
 def test_omitted_sampling_uses_the_pipeline_card() -> None:

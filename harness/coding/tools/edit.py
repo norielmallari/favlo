@@ -27,7 +27,7 @@ _FIELDS = {
 
 def perform(ctx: ToolContext, arguments: dict[str, Any]) -> str:
     reject_unknown(arguments, _FIELDS)
-    raw_path = require_text(arguments, "file_path", allow_empty=False)
+    raw_path = require_text(arguments, "file_path", allow_empty=False).rstrip()
     old = require_text(arguments, "old_string", allow_empty=False)
     new = require_text(arguments, "new_string", allow_empty=True)
     key = check_key(require_text(arguments, "idempotency_key", allow_empty=False))

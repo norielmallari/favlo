@@ -13,7 +13,8 @@ from harness.benchmarks.serve import Request, apply_sampling, card_model_id
 from harness.coding.__main__ import argument_parser
 from harness.coding.agent_tools import coding_tools
 from harness.coding.grade import grade
-from harness.coding.loop import agent_options, print_updates
+from harness.coding.loop import agent_options, prefix_problems, print_updates
+from harness.file_session import parse_requests
 from harness.coding.session import REQUIRED_TOOLS, session_for
 from harness.coding.workspace import PROMPT, dispatch, locate, prepare_workspace
 
@@ -22,6 +23,37 @@ _MODULE = "def collect(before, after):\n    return after - before\n"
 
 def test_thinking_card_id() -> None:
     assert card_model_id("qwen38-27b", thinking=True) == "qwen38-27b:thinking"
+
+
+def test_prefix_problems_require_a_disk_load() -> None:
+    memory = """\
+prompt tokens 10
+cache miss
+prefill 1.00 tok/s (10 tok in 10.00s)
+decode 1.00 tok/s (2 tok in 2.00s)
+prompt tokens 20
+cache hit 12
+prefill 1.00 tok/s (8 tok in 8.00s)
+decode 1.00 tok/s (1 tok in 1.00s)
+"""
+    assert prefix_problems(parse_requests(memory)) == ["prefix was not loaded from disk"]
+    loaded = """\
+prompt tokens 10
+cache miss
+prefill 1.00 tok/s (10 tok in 10.00s)
+decode 1.00 tok/s (2 tok in 2.00s)
+prefix load 12 tokens
+prompt tokens 20
+cache hit 12
+prefill 1.00 tok/s (8 tok in 8.00s)
+decode 1.00 tok/s (1 tok in 1.00s)
+prompt tokens 40
+cache hit 21
+prefill 1.00 tok/s (19 tok in 19.00s)
+decode 1.00 tok/s (1 tok in 1.00s)
+"""
+    assert prefix_problems(parse_requests(loaded)) == []
+    assert prefix_problems([]) == ["the ledger made fewer than two requests"]
 
 
 def test_thinking_body_omits_sampling_fields() -> None:

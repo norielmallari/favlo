@@ -29,27 +29,26 @@ def _record(root, name: str) -> None:
     (path / "manifest.json").write_text(json.dumps({"complete": True}))
 
 
-def test_pipeline_id_names_the_only_row_of_that_pipeline(tmp_path) -> None:
+def test_resolve_uses_the_public_id_not_the_folder_or_pipeline(tmp_path) -> None:
     folder = "Qwen-h128-fp8-c384-fp4"
     _record(tmp_path, folder)
     add_model(folder, alias="flash", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
-    selection = resolve(PIPELINE, root=tmp_path)
-    assert selection.folder == folder
-    assert selection.requested_id == PIPELINE
+    with pytest.raises(LookupError, match="unknown model"):
+        resolve(PIPELINE, root=tmp_path)
+    with pytest.raises(LookupError, match="unknown model"):
+        resolve(folder, root=tmp_path)
+    with pytest.raises(LookupError, match="unknown model"):
+        resolve(f"{folder}:instruct", root=tmp_path)
     thinking = resolve("flash:thinking", root=tmp_path)
     assert thinking.folder == folder
     assert thinking.variant == "thinking"
     assert thinking.sampling is not None
     assert thinking.sampling["temperature"] == 1.0
-    instruct = resolve(f"{folder}:instruct", root=tmp_path)
+    instruct = resolve("flash:instruct", root=tmp_path)
     assert instruct.variant == "instruct"
-    assert instruct.parent == folder
+    assert instruct.parent == "flash"
     assert instruct.sampling is not None
     assert instruct.sampling["presence_penalty"] == 1.5
-    _record(tmp_path, "other")
-    add_model("other", alias="other-name", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
-    with pytest.raises(LookupError, match="unknown model"):
-        resolve(PIPELINE, root=tmp_path)
     assert resolve("flash", root=tmp_path).folder == folder
 
 
@@ -58,7 +57,7 @@ def test_unknown_suffix_names_the_registered_ids(tmp_path) -> None:
     add_model("packed", alias="short", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
     with pytest.raises(LookupError, match="short") as raised:
         resolve("short:draft", root=tmp_path)
-    assert "packed" in str(raised.value)
+    assert "packed" not in str(raised.value)
 
 
 def test_default_llm_id_uses_the_registry_row(tmp_path) -> None:
@@ -71,27 +70,29 @@ def test_default_llm_id_uses_the_registry_row(tmp_path) -> None:
     assert default_llm_id(tmp_path) == "short:thinking"
 
 
-def test_listing_includes_folder_alias_and_variants(tmp_path) -> None:
+def test_listing_uses_the_alias_once_with_variants(tmp_path) -> None:
     _record(tmp_path, "packed")
     add_model("packed", alias="short", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
     rows = model_objects(tmp_path, resident="packed")
     ids = [row["id"] for row in rows]
     assert ids == [
-        "packed",
-        "packed:thinking",
-        "packed:instruct",
         "short",
         "short:thinking",
         "short:instruct",
     ]
+    assert "packed" not in ids
     assert all(row["loaded"] for row in rows)
     assert rows[0]["owned_by"] == "favlo"
     assert rows[0]["object"] == "model"
+    assert rows[0]["root"] == "packed"
     assert rows[0]["context_length"] == 131072
     thinking = rows[1]
     assert thinking["variant"] == "thinking"
-    assert thinking["parent"] == "packed"
+    assert thinking["parent"] == "short"
     assert thinking["sampling"]["top_k"] == 20
+    with pytest.raises(LookupError, match="unknown model"):
+        resolve("packed", root=tmp_path)
+    assert resolve("short", root=tmp_path).folder == "packed"
 
 
 def test_registration_stores_the_passed_max_prompt_tokens(tmp_path) -> None:
@@ -200,6 +201,8 @@ def test_a_second_pipeline_is_listed_without_a_default(tmp_path) -> None:
     assert "qwen36-35b-a3b" in ids
     assert "qwen38-27b" in ids
     assert "qwen38-27b:thinking" in ids
+    assert small not in ids
+    assert dense not in ids
     listing = format_listing(tmp_path)
     assert "pipeline qwen38-27b" in listing
     assert "pipeline qwen36-35b-a3b" in listing
@@ -272,18 +275,23 @@ def test_qwen36_registration_uses_that_pipeline_card(tmp_path) -> None:
     assert entry["default_variant"] == "thinking"
     assert entry["variants"]["thinking"]["presence_penalty"] == 1.5
     assert entry["variants"]["thinking"]["temperature"] == 1.0
+    assert entry["variants"]["thinking"]["reasoning_effort"] == "high"
     assert entry["variants"]["instruct"]["temperature"] == 0.7
     assert entry["variants"]["instruct"]["presence_penalty"] == 1.5
+    assert entry["variants"]["instruct"]["reasoning_effort"] == "none"
     bare = resolve("qwen36-35b-a3b", root=tmp_path)
     assert bare.sampling is None
     assert bare.variant is None
     assert bare.default_variant == "thinking"
+    assert bare.reasoning_effort == "high"
     assert bare.variants is not None
     assert bare.variants["thinking"]["presence_penalty"] == 1.5
     forced = resolve("qwen36-35b-a3b:instruct", root=tmp_path)
     assert forced.variant == "instruct"
     assert forced.sampling is not None
     assert forced.sampling["temperature"] == 0.7
+    assert "reasoning_effort" not in forced.sampling
+    assert forced.reasoning_effort == "none"
     assert forced.sampling["presence_penalty"] == 1.5
 
 
@@ -324,7 +332,9 @@ def test_reregister_refreshes_the_card_from_the_pipeline(tmp_path) -> None:
     )
     entry = load_registry(tmp_path)["models"]["packed"]
     assert entry["directory"] == str(packed)
-    assert resolve("packed", root=tmp_path).path == packed
+    with pytest.raises(LookupError, match="unknown model"):
+        resolve("packed", root=tmp_path)
+    assert resolve("short", root=tmp_path).path == packed
     path, selection = choose_complete(
         model=None, record=None, root=tmp_path, pipeline=PIPELINE
     )
@@ -338,18 +348,20 @@ def test_reregister_refreshes_the_card_from_the_pipeline(tmp_path) -> None:
 def test_model_mtp_is_stored_on_the_row(tmp_path) -> None:
     _record(tmp_path, "packed")
     add_model("packed", alias="short", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
-    assert resolve("packed", root=tmp_path).mtp is False
-    assert resolve("packed", root=tmp_path).mtp_depth == 3
+    assert resolve("short", root=tmp_path).mtp is False
+    assert resolve("short", root=tmp_path).mtp_depth == 3
     assert "mtp off depth 3" in format_listing(tmp_path)
     text = set_model_mtp("short", enabled=True, depth=4, root=tmp_path)
     assert text == "packed mtp on depth 4"
-    selected = resolve("packed", root=tmp_path)
+    selected = resolve("short", root=tmp_path)
     assert selected.mtp is True
     assert selected.mtp_depth == 4
     row = model_objects(tmp_path)[0]
     assert row["mtp"] is True
     assert row["mtp_depth"] == 4
-    kept = set_model_mtp("packed", enabled=False, root=tmp_path)
+    with pytest.raises(LookupError, match="unknown model"):
+        set_model_mtp("packed", enabled=False, root=tmp_path)
+    kept = set_model_mtp("short", enabled=False, root=tmp_path)
     assert kept == "packed mtp off depth 4"
 
 

@@ -5,14 +5,16 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, TextIO
 
-from harness.benchmarks.serve import Request
+from harness.benchmarks.serve import Request, Server
 from harness.coding.agent_tools import coding_tools
 from harness.coding.session import session_for
 from harness.coding.workspace import PROMPT, prepare_workspace
+from harness.file_session import RequestRate, extensions_hold, parse_requests
 
 # One model call per tool step, then status polls, then a stop.
 SESSION_ROUNDS = 16
@@ -34,8 +36,28 @@ def agent_options(request: Request, *, mtp: bool, mtp_depth: int) -> dict[str, o
     }
 
 
+def prefix_problems(requests: list[RequestRate]) -> list[str]:
+    """Problems when the restart did not load the prefix or later turns drifted."""
+    if len(requests) < 2:
+        return ["the ledger made fewer than two requests"]
+    if not any(request.prefix_load is not None for request in requests[1:]):
+        return ["prefix was not loaded from disk"]
+    if not extensions_hold(requests):
+        return ["prefix did not extend"]
+    return []
+
+
+def rebind_chat_client(client: Any, port: int) -> None:
+    """Point the framework client at the restarted listener."""
+    url = f"http://127.0.0.1:{port}/v1"
+    client.base_url = url
+    http = getattr(client, "client", None)
+    if http is not None:
+        http.base_url = url
+
+
 def run_session(
-    port: int,
+    server: Server,
     model: str,
     request: Request,
     workspace: Path,
@@ -51,7 +73,7 @@ def run_session(
     try:
         asyncio.run(
             _run(
-                port,
+                server,
                 model,
                 request,
                 session,
@@ -61,13 +83,14 @@ def run_session(
                 problems=problems,
             )
         )
+        problems.extend(prefix_problems(parse_requests(server.log.text())))
         return list(session.calls), problems
     finally:
         session.close()
 
 
 async def _run(
-    port: int,
+    server: Server,
     model: str,
     request: Request,
     session: Any,
@@ -77,16 +100,28 @@ async def _run(
     vision: bytes | None,
     problems: list[str],
 ) -> None:
-    from agent_framework import Agent
+    from agent_framework import Agent, ChatMiddleware
 
     from favlo.chat_client import close_chat_client, open_chat_client
 
-    client = open_chat_client(model.partition(":")[0], f"http://127.0.0.1:{port}/v1")
+    client = open_chat_client(model.partition(":")[0], f"http://127.0.0.1:{server.port}/v1")
     client.function_invocation_configuration["max_iterations"] = SESSION_ROUNDS
     client.function_invocation_configuration["max_consecutive_errors_per_request"] = SESSION_ROUNDS
     client.function_invocation_configuration["allow_concurrent_invocation"] = False
     client.function_invocation_configuration["include_detailed_errors"] = True
     options = agent_options(request, mtp=mtp, mtp_depth=mtp_depth)
+    restarter = _PrefixRestart(server, client)
+
+    class PrefixRestartMiddleware(ChatMiddleware):
+        """Close the listener after the first model turn so the next loads from SSD."""
+
+        async def process(self, _context: Any, call_next: Any) -> None:
+            if restarter.calls == 1:
+                print("restarting server", flush=True)
+                restarter.restart()
+            await call_next()
+            restarter.calls += 1
+
     agent = Agent(
         client=client,
         name="coding",
@@ -96,6 +131,7 @@ async def _run(
         ),
         tools=coding_tools(session),
         default_options=options,
+        middleware=[PrefixRestartMiddleware()],
     )
     printer = TurnPrinter(sys.stdout)
     try:
@@ -108,6 +144,36 @@ async def _run(
         printer.close()
     finally:
         await close_chat_client(client)
+
+
+class _PrefixRestart:
+    """Restart the private serve once, keeping the followed log."""
+
+    def __init__(self, server: Server, client: Any) -> None:
+        self.server = server
+        self.client = client
+        self.calls = 0
+
+    def restart(self) -> None:
+        _wait_latest_decode(self.server)
+        self.server.restart()
+        rebind_chat_client(self.client, self.server.port)
+
+
+def _wait_latest_decode(server: Server, *, timeout: float = 30.0) -> None:
+    """Block until the open request's decode line is in the followed log.
+
+    The prefix file is written before that line. Stopping earlier can drop the
+    decode telemetry the extension check needs for the applied token count.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        requests = parse_requests(server.log.text())
+        if requests and requests[-1].decode:
+            return
+        time.sleep(0.05)
+    message = "server log did not record decode before restart"
+    raise TimeoutError(message)
 
 
 async def _describe(

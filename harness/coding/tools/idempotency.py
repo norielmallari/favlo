@@ -94,11 +94,14 @@ class IdempotencyStore:
 
 
 def check_key(key: str) -> str:
-    if not isinstance(key, str) or key == "":
+    if not isinstance(key, str):
         raise ToolError("invalid_arguments", "idempotency_key is required")
-    if len(key) > IDEMPOTENCY_KEY_MAX:
+    cleaned = key.strip()
+    if cleaned == "":
+        raise ToolError("invalid_arguments", "idempotency_key is required")
+    if len(cleaned) > IDEMPOTENCY_KEY_MAX:
         raise ToolError("invalid_arguments", "idempotency_key is too long")
-    return key
+    return cleaned
 
 
 def _key(key: str) -> str:

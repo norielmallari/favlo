@@ -3,11 +3,12 @@
 The two registry rows are the model card's general-thinking and instruct sets.
 Registration copies this module. A request that names no variant uses
 ``DEFAULT_VARIANT``. Precise coding stays here because the registry has no
-third variant name. A variant sets sampling defaults only.
+third variant name.
 
-The official card exposes thinking only as ``enable_thinking`` on or off. It
-has no graduated effort ladder. Every OpenAI effort is still accepted.
-``resolve_effort`` maps an unsupported name onto ``none`` or ``high``.
+Each variant stores sampling defaults and ``reasoning_effort``. The official
+card exposes thinking only as ``enable_thinking`` on or off. Every OpenAI
+effort is still accepted. ``resolve_effort`` maps an unsupported name onto
+``none`` or ``high``. ``high`` is thinking on; ``none`` is thinking off.
 """
 
 from typing import Any
@@ -25,12 +26,14 @@ VARIANTS = {
         "top_p": 0.95,
         "top_k": 20,
         "presence_penalty": 1.5,
+        "reasoning_effort": "high",
     },
     "instruct": {
         "temperature": 0.7,
         "top_p": 0.8,
         "top_k": 20,
         "presence_penalty": 1.5,
+        "reasoning_effort": "none",
     },
 }
 
@@ -79,35 +82,52 @@ def requested_thinking(body: dict[str, Any]) -> bool | None:
     return None
 
 
+_SAMPLING_KEYS = ("temperature", "top_p", "top_k", "presence_penalty")
+
+
+def _sampling_fields(card: dict[str, Any]) -> dict[str, float | int]:
+    """Numeric sampler fields only. ``reasoning_effort`` stays off this dict."""
+    out: dict[str, float | int] = {}
+    for key in _SAMPLING_KEYS:
+        if key not in card:
+            continue
+        value = card[key]
+        if key == "top_k":
+            out[key] = int(value)
+        else:
+            out[key] = float(value)
+    return out
+
+
 def sampling_card(selection: Any) -> dict[str, float | int]:
-    """The sampling row for the selected id. The suffix does not change thinking."""
+    """The sampling row for the selected id."""
     variant = getattr(selection, "variant", None) if selection is not None else None
     stored = getattr(selection, "sampling", None) if selection is not None else None
     if isinstance(variant, str) and variant in VARIANTS:
         name = variant
         if isinstance(stored, dict) and stored:
-            return dict(stored)
+            return _sampling_fields(stored)
     else:
         name = getattr(selection, "default_variant", None) if selection is not None else None
         name = name if isinstance(name, str) and name in VARIANTS else DEFAULT_VARIANT
         if isinstance(stored, dict) and stored and variant is None:
-            return dict(stored)
+            return _sampling_fields(stored)
     cards = getattr(selection, "variants", None) if selection is not None else None
     source = cards if isinstance(cards, dict) else VARIANTS
     card = source.get(name) if isinstance(source, dict) else None
     if not isinstance(card, dict):
         card = VARIANTS[name]
-    return dict(card)
+    return _sampling_fields(card)
 
 
 def thinking_for(selection: Any, requested: str | bool | None) -> bool:
-    """Open thinking from a resolved effort, else the registry, else the default.
+    """Open thinking from a resolved effort, else the selection, else the default.
 
     A string is an OpenAI effort. ``resolve_effort`` maps it onto ``none`` or
     ``high``, and ``none`` closes the think block. A bool is that decision
-    already made. None means the request omitted effort: the row's
-    ``reasoning_effort`` wins, then ``enable_thinking``, then
-    ``DEFAULT_THINKING``.
+    already made. None means the request omitted effort: the selection's
+    ``reasoning_effort`` (from the variant card or the row) wins, then
+    ``enable_thinking``, then ``DEFAULT_THINKING``.
     """
     if isinstance(requested, str):
         resolved = resolve_effort(requested)
@@ -131,8 +151,8 @@ def mode_card(
 ) -> tuple[bool, dict[str, float | int]]:
     """Thinking flag and the sampling card for this selection.
 
-    The variant id only supplies the sampling card. ``requested`` is the
-    request effort, or a bool when the caller already resolved it. Changing
-    the effort does not swap the sampling card.
+    ``requested`` is the request effort, or a bool when the caller already
+    resolved it. An omitted effort uses the variant's ``reasoning_effort``.
+    Changing the effort does not swap the sampling card.
     """
     return thinking_for(selection, requested), sampling_card(selection)

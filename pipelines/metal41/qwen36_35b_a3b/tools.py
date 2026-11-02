@@ -10,7 +10,10 @@ _CALL = re.compile(
     r"<tool_call>\s*<function=([^\n>]+)>(.*?)</function>\s*</tool_call>",
     re.DOTALL,
 )
-_PARAM = re.compile(r"<parameter=([^\n>]+)>\n?(.*?)</parameter>", re.DOTALL)
+# The template always writes ``>\\n`` + value + ``\\n</parameter>``. The trailing
+# newline before the close tag is markup, not part of the value. Keeping it out
+# of the capture lets a later prompt re-render the same tokens.
+_PARAM = re.compile(r"<parameter=([^\n>]+)>\n?(.*?)(?:\n)?</parameter>", re.DOTALL)
 _JSON_NUMBER = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\Z")
 _UNICODE = re.compile(r"\\u([0-9a-fA-F]{4})")
 _UNICODE_TAIL = re.compile(r"(?:\\u[0-9a-fA-F]{0,3}|\\)$")
@@ -83,16 +86,19 @@ def parse_tool_calls(text: str) -> tuple[str | None, list[dict[str, Any]]]:
 
 
 def _parameter_value(value: str) -> Any:
-    """A JSON array, object, or number is that value. Other text stays a string."""
-    text = value.strip("\n")
-    stripped = text.strip()
-    parsed = _json_container(stripped)
+    """A JSON array, object, or number is that value. Other text stays a string.
+
+    The parameter regex leaves an intentional trailing newline on the value
+    (for example a file body). JSON detection still trims.
+    """
+    detected = value.strip()
+    parsed = _json_container(detected)
     if parsed is not None:
         return parsed
-    number = _json_number(stripped)
+    number = _json_number(detected)
     if number is not None:
         return number
-    return decode_unicode_escapes(text)
+    return decode_unicode_escapes(value)
 
 
 def _json_number(text: str) -> int | float | None:

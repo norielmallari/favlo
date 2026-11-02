@@ -11,7 +11,10 @@ the tool calls when that call ends. The framework runs the coding tools.
 After the ledger, the same listener runs the chat contract.
 Exit 0 means ``ledger.py`` ``collect`` returns 6, 0, and -6, and every
 contract check held. Which tools the model called is not part of that result.
-Each request's server prefill and decode lines are the thinking series.
+Each request's server prefill and decode lines are the thinking series. The
+listener stops after the first model turn and starts again so the next turn
+loads the prefix from disk. Exit 1 when that load is missing or a later turn
+does not extend it.
 
     uv run python -m harness.coding --model qwen38-27b
     uv run python -m harness.coding --model qwen38-27b --mtp on
@@ -79,12 +82,20 @@ def main(argv: list[str] | None = None) -> int:
                 release(root=root)
             return 1
         vision = HORSE.read_bytes()
+        # Drop a prior disk hit so this run's first tower logs ``vision patches``.
+        # The same bytes are written again before the restart load.
+        from favlo.logs import favlo_home
+
+        cache = favlo_home() / "vision-cache" / stem
+        if cache.is_dir():
+            for child in cache.glob("*.npz"):
+                child.unlink(missing_ok=True)
     server = Server(args.max_memory)
     try:
         server.start()
         print(f"mtp {args.mtp} depth {args.mtp_depth} thinking {args.thinking}", flush=True)
         _, problems = run_session(
-            server.port,
+            server,
             stem,
             Request(enable_thinking=args.thinking == "on"),
             workspace,
@@ -94,9 +105,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         if vision is not None:
             problems.extend(vision_problems(server.log.text()))
+        _print_rates(server.log)
         base_url = f"http://127.0.0.1:{server.port}/v1"
         problems.extend(asyncio.run(run_contract(base_url, stem)))
-        _print_rates(server.log)
         result = grade(workspace)
     finally:
         if created:
@@ -107,6 +118,8 @@ def main(argv: list[str] | None = None) -> int:
     if result.returncode != 0:
         return result.returncode
     if problems:
+        for note in problems:
+            print(note, flush=True)
         return 1
     print("passed")
     return 0

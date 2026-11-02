@@ -2518,16 +2518,19 @@ class Qwen36Runtime:
                 self._decode_seconds = decode_elapsed if decode_elapsed > 0.0 else 0.0
                 self._end_phase(decode_row, format_rate("decode", len(out), self._decode_seconds))
                 decode_row = None
+            out = self._stabilize_output(prompt, out)
             self._output_ids = list(out)
             self.prefix.note((prompt + out)[: self.filled])
             self._store_prefix()
         except ContextFull:
             self._hit_limit = True
             if boundary:
+                out = self._stabilize_output(prompt, out)
                 self.prefix.note((prompt + out)[: self.filled])
                 self._store_prefix()
         except RequestClosed:
             if boundary:
+                out = self._stabilize_output(prompt, out)
                 self.prefix.note((prompt + out)[: self.filled])
                 self._store_prefix()
             else:
@@ -2540,6 +2543,39 @@ class Qwen36Runtime:
             self._end_phase(prefill_row, "")
             self._end_phase(decode_row, "")
         return out
+
+    def _stabilize_output(self, prompt: list[int], out: list[int]) -> list[int]:
+        """Replay a completion whose tokens are not the encode of their decode.
+
+        The chat template re-encodes tool calls from structured arguments. When
+        the model drew a different tokenization of the same text, that later
+        prompt would miss the stored prefix. Restoring the prompt-boundary
+        file and stepping the encode-stable ids keeps the device and the file
+        aligned with the next request.
+        """
+        if not out or not prompt:
+            return out
+        from qwen36_35b_a3b.chat import decode_text, encode_text
+
+        text = decode_text(self.root, out)
+        canonical = encode_text(self.root, text)
+        if canonical == out:
+            return out
+        self.prefix.dirty = False
+        self.prefix.tokens = []
+        self.prefix.loaded = False
+        self.reset()
+        hit = self.prefix.align(prompt + canonical)
+        if hit != len(prompt):
+            self.prefix.dirty = False
+            self.prefix.tokens = []
+            self.prefix.loaded = False
+            self.reset()
+            return out
+        for index, token in enumerate(canonical):
+            self.step(int(token), hit + index, logits=False, download=False)
+        self.filled = hit + len(canonical)
+        return canonical
 
     def _store_prefix(self, *, note: bool = True) -> None:
         try:
@@ -2627,9 +2663,13 @@ class ThinkBudget:
     The prompt already opened ``<think>``. Drawn tokens count until
     ``</think>``. At a configured budget, or when a stop id is drawn while
     the block is still open, the next tokens are ``close``, one id at a
-    time. That stop id is not emitted. After the close, a stop id ends the
-    turn and ``end`` is removed from the logits. An unset budget does not
-    close on a count.
+    time. That stop id is not emitted. A natural ``end`` sample is rewritten
+    into the same ``close`` sequence the chat template emits
+    (``\\n</think>\\n\\n``), so a later prompt that keeps reasoning stays a
+    prefix of the stored tokens. When the last drawn token was already the
+    leading newline of ``close``, only the remainder is forced. After the
+    close, a stop id ends the turn and ``end`` is removed from the logits.
+    An unset budget does not close on a count.
     """
 
     def __init__(self, close: list[int], end: int, budget: int | None) -> None:
@@ -2640,6 +2680,7 @@ class ThinkBudget:
         self.force_at: int | None = None
         self.closed = False
         self.stop_after = False
+        self._last: int | None = None
 
     @property
     def forcing(self) -> bool:
@@ -2649,16 +2690,15 @@ class ThinkBudget:
         if self.forcing:
             return self.forced()
         if self.closed:
-            return sampled
+            return self._emit(int(sampled))
         if self.budget is not None and self.counted >= self.budget:
             return self._start()
         if sampled == self.end:
-            self.closed = True
-            return sampled
+            return self._natural_close()
         if stops is not None and sampled in stops:
             return self._start()
         self.counted += 1
-        return sampled
+        return self._emit(int(sampled))
 
     def forced(self) -> int:
         assert self.force_at is not None
@@ -2667,7 +2707,7 @@ class ThinkBudget:
         if self.force_at >= len(self.close):
             self.force_at = None
             self.closed = True
-        return token
+        return self._emit(token)
 
     def _start(self, stop_after: bool = False) -> int:
         if stop_after:
@@ -2677,7 +2717,26 @@ class ThinkBudget:
             self.closed = True
         else:
             self.force_at = 1
-        return token
+        return self._emit(token)
+
+    def _natural_close(self) -> int:
+        """Rewrite a bare ``end`` into the template's close sequence."""
+        if (
+            self._last is not None
+            and self.close
+            and self._last == self.close[0]
+            and len(self.close) > 1
+        ):
+            if len(self.close) == 2:
+                self.closed = True
+                return self._emit(self.end)
+            self.force_at = 2
+            return self._emit(self.end)
+        return self._start()
+
+    def _emit(self, token: int) -> int:
+        self._last = int(token)
+        return self._last
 
 
 def decode_steps(max_tokens: int, context_limit: int, prompt_tokens: int) -> int:

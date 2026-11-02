@@ -5,8 +5,10 @@ the 48 by 48 table, then reordered into 2 by 2 merge blocks. Each block is
 LayerNorm, full attention, and a tanh GELU MLP. The merger LayerNorms each
 patch, concatenates the block, and applies erf GELU. The language prefill
 overwrites the expanded image-pad rows with that output. An image this
-process already embedded is reused, so a later turn does not run the tower
-again, including after the language model is loaded again.
+process already embedded is reused from the in-memory row cache. The same
+rows are also written under ``~/.favlo/vision-cache/qwen36-35b-a3b/``, so a
+later serve process that sees the same bytes logs ``vision cache`` and does
+not run the tower again.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -417,6 +420,57 @@ _ROW_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, int, int]] = {}
 _ROW_LIMIT = 8
 
 
+def _vision_cache_dir() -> Path:
+    from favlo.logs import favlo_home
+
+    path = favlo_home() / "vision-cache" / "qwen36-35b-a3b"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _vision_cache_path(key: tuple[Any, ...]) -> Path:
+    root, digest, min_pixels, max_pixels = key
+    material = hashlib.sha256()
+    material.update(str(root).encode())
+    material.update(digest if isinstance(digest, bytes) else bytes(digest))
+    material.update(struct.pack("<ii", int(min_pixels), int(max_pixels)))
+    return _vision_cache_dir() / f"{material.hexdigest()}.npz"
+
+
+def _load_vision_disk(
+    key: tuple[Any, ...],
+) -> tuple[np.ndarray, int, int] | None:
+    path = _vision_cache_path(key)
+    if not path.is_file():
+        return None
+    try:
+        payload = np.load(path)
+        embedded = np.ascontiguousarray(payload["embedded"], dtype=np.float32)
+        grid_h = int(payload["grid_h"])
+        grid_w = int(payload["grid_w"])
+    except (OSError, ValueError, KeyError):
+        return None
+    return embedded, grid_h, grid_w
+
+
+def _store_vision_disk(
+    key: tuple[Any, ...], embedded: np.ndarray, grid_h: int, grid_w: int
+) -> None:
+    path = _vision_cache_path(key)
+    tmp = path.with_name(path.stem + ".tmp.npz")
+    try:
+        np.savez(
+            tmp,
+            embedded=np.ascontiguousarray(embedded, dtype=np.float32),
+            grid_h=np.int32(grid_h),
+            grid_w=np.int32(grid_w),
+        )
+        tmp.replace(path)
+    except OSError:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+
+
 def _vision_row(
     runtime: Any,
     blob: bytes,
@@ -432,6 +486,10 @@ def _vision_row(
         int(max_pixels),
     )
     cached = _ROW_CACHE.get(key)
+    if cached is None:
+        cached = _load_vision_disk(key)
+        if cached is not None:
+            _ROW_CACHE[key] = cached
     if cached is not None:
         embedded, grid_h, grid_w = cached
         _note(runtime, f"vision cache {embedded.shape[0]}")
@@ -440,6 +498,7 @@ def _vision_row(
         runtime, blob, min_pixels=min_pixels, max_pixels=max_pixels
     )
     _ROW_CACHE[key] = (embedded, grid_h, grid_w)
+    _store_vision_disk(key, embedded, grid_h, grid_w)
     while len(_ROW_CACHE) > _ROW_LIMIT:
         _ROW_CACHE.pop(next(iter(_ROW_CACHE)))
     return embedded, grid_h, grid_w

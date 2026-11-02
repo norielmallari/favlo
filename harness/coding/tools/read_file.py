@@ -16,7 +16,7 @@ _FIELDS = {"file_path", "limit", "offset"}
 
 def perform(ctx: ToolContext, arguments: dict[str, Any]) -> str:
     reject_unknown(arguments, _FIELDS)
-    path = resolve_inside(ctx.workspace, require_str(arguments, "file_path"))
+    path = resolve_inside(ctx.workspace, require_str(arguments, "file_path").rstrip())
     relative = display_path(ctx.workspace, path)
     assert_readable(relative)
     offset = optional_int(arguments, "offset")

@@ -389,8 +389,9 @@ def _tools(ran: list[str]) -> list[object]:
     @tool(approval_mode="never_require")
     def locker(code: Annotated[str, Field(description="The code to store.")]) -> str:
         """Store a code and return the drawer label."""
-        ran.append(code)
-        return f"drawer holds {code}"
+        cleaned = code.strip()
+        ran.append(cleaned)
+        return f"drawer holds {cleaned}"
 
     return [locker]
 
