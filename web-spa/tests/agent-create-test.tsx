@@ -117,7 +117,6 @@ test('a new agent shows the same options as edit', async () => {
   expect(view.queryByLabelText('Provider for Favlo')).toBeNull();
   await act(() => {
     fireEvent(view.getByRole('switch', { name: 'Conversation tools' }), 'valueChange', true);
-    fireEvent(view.getByLabelText('Thinking'), 'valueChange', 'true');
     fireEvent(view.getByLabelText('Preserve thinking'), 'valueChange', 'false');
     fireEvent(view.getByLabelText('Reasoning effort'), 'valueChange', 'high');
   });
@@ -127,9 +126,10 @@ test('a new agent shows the same options as edit', async () => {
   expect(posted.body?.name).toBe('Reed');
   expect(posted.body?.default_model_id).toBe('model_local');
   expect(posted.body?.tool_groups).toEqual(['conversation']);
-  expect(posted.body?.enable_thinking).toBe(true);
+  expect(posted.body?.enable_thinking).toBeNull();
   expect(posted.body?.preserve_thinking).toBe(false);
   expect(posted.body?.reasoning_effort).toBe('high');
+  expect(view.queryByLabelText('Thinking')).toBeNull();
 });
 
 test('delete removes that agent', async () => {

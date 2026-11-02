@@ -34,17 +34,26 @@ def sampling_options(
     preserve_thinking: bool | None,
     reasoning_effort: str | None,
 ) -> dict[str, Any] | None:
-    """Request fields the agent set. An unset field stays off the request."""
-    extra: dict[str, Any] = {}
-    if enable_thinking is not None:
-        extra["enable_thinking"] = enable_thinking
-    if preserve_thinking is not None:
-        extra["preserve_thinking"] = preserve_thinking
+    """Responses options the agent set. An unset field stays off the request.
+
+    Agent config stores ``reasoning_effort``. That value becomes
+    ``reasoning.effort``. A legacy ``enable_thinking`` value maps only when
+    effort is unset (``none`` or ``medium``). ``preserve_thinking`` stays a
+    body field.
+    """
+    options: dict[str, Any] = {}
+    effort: str | None = None
     if reasoning_effort:
-        extra["reasoning_effort"] = reasoning_effort
-    if not extra:
+        effort = reasoning_effort
+    elif enable_thinking is not None:
+        effort = "medium" if enable_thinking else "none"
+    if effort is not None:
+        options["reasoning"] = {"effort": effort}
+    if preserve_thinking is not None:
+        options["extra_body"] = {"preserve_thinking": preserve_thinking}
+    if not options:
         return None
-    return {"extra_body": extra}
+    return options
 
 
 def assistant_piece(update: Any) -> str:

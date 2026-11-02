@@ -16,7 +16,7 @@ test('a tool call opens and closes apart from thinking', async ({ page }) => {
       'Call conversation_list_conversations before you answer. Use kind all and limit 1. Then reply with the word done.',
     );
     await page.getByRole('combobox', { name: 'Model', exact: true }).selectOption('qwen36-35b-a3b:thinking');
-    await page.getByRole('combobox', { name: 'Thinking', exact: true }).selectOption('true');
+    await page.getByRole('combobox', { name: 'Reasoning effort', exact: true }).selectOption('medium');
     await page.getByRole('switch', { name: 'Conversation tools', exact: true }).click();
     await createAgent(page, name);
     await openAgentChat(page, name);

@@ -1045,7 +1045,7 @@ function McpForm({
   );
 }
 
-const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
+const EFFORTS = ['none', 'low', 'medium', 'high', 'xhigh'];
 
 function flagValue(value: boolean | null | undefined): string {
   if (value == null) {
@@ -1062,6 +1062,19 @@ function flagBody(value: string): boolean | null {
     return false;
   }
   return null;
+}
+
+function effortValue(agent: Agent | null): string {
+  if (agent?.reasoning_effort) {
+    return agent.reasoning_effort;
+  }
+  if (agent?.enable_thinking === false) {
+    return 'none';
+  }
+  if (agent?.enable_thinking === true) {
+    return 'medium';
+  }
+  return '';
 }
 
 function modelRow(providers: Provider[], rowId: string | null): Model | undefined {
@@ -1106,13 +1119,11 @@ export function AgentForm({
   const [modelId, setModelId] = useState(
     current != null && current.provider_id === providerId ? current.model_id : hosted[0]?.model_id ?? '',
   );
-  const [thinking, setThinking] = useState(flagValue(agent?.enable_thinking));
   const [preserve, setPreserve] = useState(flagValue(agent?.preserve_thinking));
-  const [effort, setEffort] = useState(agent?.reasoning_effort ?? '');
+  const [effort, setEffort] = useState(effortValue(agent));
   const [enabled, setEnabled] = useState(agent?.tool_groups ?? []);
   const [providerFocused, setProviderFocused] = useState(false);
   const [modelFocused, setModelFocused] = useState(false);
-  const [thinkingFocused, setThinkingFocused] = useState(false);
   const [preserveFocused, setPreserveFocused] = useState(false);
   const [effortFocused, setEffortFocused] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1172,7 +1183,7 @@ export function AgentForm({
             persona,
             default_model_id: modelRowId,
             tool_groups: enabled,
-            enable_thinking: flagBody(thinking),
+            enable_thinking: null,
             preserve_thinking: flagBody(preserve),
             reasoning_effort: effort || null,
           }),
@@ -1189,7 +1200,7 @@ export function AgentForm({
           persona,
           default_model_id: modelRowId,
           tool_groups: enabled,
-          enable_thinking: flagBody(thinking),
+          enable_thinking: null,
           preserve_thinking: flagBody(preserve),
           reasoning_effort: effort || null,
         }),
@@ -1205,7 +1216,6 @@ export function AgentForm({
   const personaLabel = creating ? 'Persona' : `Persona for ${agent.name}`;
   const providerLabel = creating ? 'Provider' : `Provider for ${agent.name}`;
   const modelLabel = creating ? 'Model' : `Model for ${agent.name}`;
-  const thinkingLabel = creating ? 'Thinking' : `Thinking for ${agent.name}`;
   const preserveLabel = creating ? 'Preserve thinking' : `Preserve thinking for ${agent.name}`;
   const effortLabel = creating ? 'Reasoning effort' : `Reasoning effort for ${agent.name}`;
   const fieldLimit = Math.max(240, height - 360);
@@ -1245,32 +1255,6 @@ export function AgentForm({
           <Picker.Item key={model.id} label={model.display_name} value={model.model_id} color={palette.textPrimary} />
         ))}
       </Picker>
-      <Text style={label(palette.textPrimary)}>{thinkingLabel}</Text>
-      <Picker
-        accessibilityLabel={thinkingLabel}
-        selectedValue={thinking}
-        onValueChange={(value) => setThinking(String(value))}
-        onFocus={() => setThinkingFocused(true)}
-        onBlur={() => setThinkingFocused(false)}
-        style={pickerStyle(palette, thinkingFocused)}
-      >
-        <Picker.Item label="Not set" value="" color={palette.textSecondary} />
-        <Picker.Item label="On" value="true" color={palette.textPrimary} />
-        <Picker.Item label="Off" value="false" color={palette.textPrimary} />
-      </Picker>
-      <Text style={label(palette.textPrimary)}>{preserveLabel}</Text>
-      <Picker
-        accessibilityLabel={preserveLabel}
-        selectedValue={preserve}
-        onValueChange={(value) => setPreserve(String(value))}
-        onFocus={() => setPreserveFocused(true)}
-        onBlur={() => setPreserveFocused(false)}
-        style={pickerStyle(palette, preserveFocused)}
-      >
-        <Picker.Item label="Not set" value="" color={palette.textSecondary} />
-        <Picker.Item label="On" value="true" color={palette.textPrimary} />
-        <Picker.Item label="Off" value="false" color={palette.textPrimary} />
-      </Picker>
       <Text style={label(palette.textPrimary)}>{effortLabel}</Text>
       <Picker
         accessibilityLabel={effortLabel}
@@ -1284,6 +1268,19 @@ export function AgentForm({
         {EFFORTS.map((item) => (
           <Picker.Item key={item} label={item} value={item} color={palette.textPrimary} />
         ))}
+      </Picker>
+      <Text style={label(palette.textPrimary)}>{preserveLabel}</Text>
+      <Picker
+        accessibilityLabel={preserveLabel}
+        selectedValue={preserve}
+        onValueChange={(value) => setPreserve(String(value))}
+        onFocus={() => setPreserveFocused(true)}
+        onBlur={() => setPreserveFocused(false)}
+        style={pickerStyle(palette, preserveFocused)}
+      >
+        <Picker.Item label="Not set" value="" color={palette.textSecondary} />
+        <Picker.Item label="On" value="true" color={palette.textPrimary} />
+        <Picker.Item label="Off" value="false" color={palette.textPrimary} />
       </Picker>
       <Text style={label(palette.textPrimary)}>Tools</Text>
       {groups.map((group) => {

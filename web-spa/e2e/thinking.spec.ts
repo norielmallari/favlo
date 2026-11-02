@@ -14,6 +14,7 @@ test('thinking opens during a reply and closes when the message is stored', asyn
   await page.getByRole('textbox', { name: 'Agent name', exact: true }).fill(name);
   await page.getByRole('textbox', { name: 'Persona', exact: true }).fill('A short persona.');
   await page.getByRole('combobox', { name: 'Model', exact: true }).selectOption('qwen36-35b-a3b:thinking');
+  await page.getByRole('combobox', { name: 'Reasoning effort', exact: true }).selectOption('medium');
   await createAgent(page, name);
   await openAgentChat(page, name);
   await page.getByRole('textbox', { name: 'Message' }).fill('Say hi.');

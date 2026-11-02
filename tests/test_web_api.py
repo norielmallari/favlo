@@ -728,13 +728,14 @@ def test_unset_sampling_stays_off_the_request() -> None:
 def test_a_set_sampling_field_is_the_only_extra() -> None:
     from web_api.chat import sampling_options
 
-    assert sampling_options(True, None, None) == {"extra_body": {"enable_thinking": True}}
+    assert sampling_options(True, None, None) == {"reasoning": {"effort": "medium"}}
+    assert sampling_options(False, None, None) == {"reasoning": {"effort": "none"}}
     assert sampling_options(False, True, "high") == {
-        "extra_body": {
-            "enable_thinking": False,
-            "preserve_thinking": True,
-            "reasoning_effort": "high",
-        }
+        "reasoning": {"effort": "high"},
+        "extra_body": {"preserve_thinking": True},
+    }
+    assert sampling_options(None, False, None) == {
+        "extra_body": {"preserve_thinking": False},
     }
 
 

@@ -30,6 +30,7 @@ test('an agent chats with the 35B thinking model through favlo serve', async ({ 
   await page.getByRole('textbox', { name: 'Agent name', exact: true }).fill(name);
   await page.getByRole('textbox', { name: 'Persona', exact: true }).fill('Reply in one short sentence.');
   await page.getByRole('combobox', { name: 'Model', exact: true }).selectOption(MODEL);
+  await page.getByRole('combobox', { name: 'Reasoning effort', exact: true }).selectOption('medium');
   await createAgent(page, name);
   await openAgentChat(page, name);
   await page.getByRole('textbox', { name: 'Message' }).fill('Reply with the single word ready.');

@@ -30,7 +30,7 @@ test('a new agent shows the same options as edit', async ({ page }) => {
   const chosen = await model.inputValue();
   await page.getByRole('textbox', { name: 'Agent name', exact: true }).fill(name);
   await page.getByRole('textbox', { name: 'Persona', exact: true }).fill('A short persona.');
-  await page.getByRole('combobox', { name: 'Thinking', exact: true }).selectOption('true');
+  await page.getByRole('combobox', { name: 'Reasoning effort', exact: true }).selectOption('medium');
   await page.getByRole('switch', { name: 'Conversation tools', exact: true }).click();
   const wideCreate = page.getByRole('button', { name: 'Create agent' });
   await onScreen(wideCreate);
@@ -40,9 +40,9 @@ test('a new agent shows the same options as edit', async ({ page }) => {
   await expect(page.getByRole('textbox', { name: `Name for ${name}`, exact: true })).toHaveValue(name);
   await expect(page.getByRole('combobox', { name: `Provider for ${name}`, exact: true })).toHaveValue('provider_local');
   await expect(page.getByRole('combobox', { name: `Model for ${name}`, exact: true })).toHaveValue(chosen);
-  await expect(page.getByRole('combobox', { name: `Thinking for ${name}`, exact: true })).toHaveValue('true');
+  await expect(page.getByRole('combobox', { name: `Reasoning effort for ${name}`, exact: true })).toHaveValue('medium');
   await expect(page.getByRole('combobox', { name: `Preserve thinking for ${name}`, exact: true })).toHaveValue('');
-  await expect(page.getByRole('combobox', { name: `Reasoning effort for ${name}`, exact: true })).toHaveValue('');
+  await expect(page.getByRole('combobox', { name: `Thinking for ${name}`, exact: true })).toHaveCount(0);
   await expect(page.getByRole('switch', { name: `Configuration tools for ${name}` })).not.toBeChecked();
   await expect(page.getByRole('switch', { name: `Conversation tools for ${name}` })).toBeChecked();
   await expect(page.getByRole('switch', { name: `Heartbeat tools for ${name}` })).not.toBeChecked();
