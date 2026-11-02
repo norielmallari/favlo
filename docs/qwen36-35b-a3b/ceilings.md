@@ -97,6 +97,22 @@ One draft at context 2048, without the snapshot, is 2.35 ms. The snapshot is 481
 
 Those MTP-on figures are the serial verify: one language token plus one draft. The paired verify is a different forward. `gemv_fp8_pair`, `gdn_in_proj_fp8_pair`, `attn_qkv_fp8_pair`, and `shared_gate_silu_pair` read each dense fp8 weight once for two activation rows. Gated DeltaNet, attention, and the routed experts still run once per token. On 31 October 2026 an M5 Pro with 48 GB timed `gemv_fp8_pair` against `gemv_fp8_vec`, one command buffer then a wait, the first sample discarded, the median of the next four. At 8192 rows the pair took 264.9 µs and the single row 194.1 µs. At 248320 rows the pair took 1861.6 µs and the single row 2252.2 µs. The pair step has not been timed as its own kernel sum.
 
+## Half decode
+
+Measured on 2 November 2026, after the half value mix moved to `prefill_f16_pv_blocks`. Each figure is one command buffer, then a wait, the first sample discarded, the median of the next four. One call is the eight query rows of one key/value head. The forward launches that call 20 times. The softmax rows are the 30 October figures above: those kernels and the float score shape did not change. The other rows of the 30 October token are unchanged. A half key and a half value are two bytes per channel.
+
+| Kernel | Context 2048 µs | Context 65536 µs |
+|---|---:|---:|
+| `prefill_f16_m8` | 37.0 | 193.6 |
+| `kv_softmax_max` | 3.6 | 7.4 |
+| `kv_softmax_prob` | 4.0 | 9.4 |
+| `kv_softmax_close` | 4.0 | 5.2 |
+| `kv_cast_blocks` | 11.4 | 29.0 |
+| `prefill_f16_pv_blocks` | 104.6 | 605.5 |
+| `kv_restore_sum` | 20.7 | 271.8 |
+
+Twenty calls make the attention 3.71 ms at context 2048 and 22.44 ms at context 65536. Added to the unchanged remainder of the 30 October token, context 2048 is 15.16 ms, 66.0 tok/s, and context 65536 is 34.00 ms, 29.4 tok/s. The 90% test for a half decode uses these kernel ceilings.
+
 ## Prefill
 
 One chunk of 2048 tokens, then a prompt of 65536 tokens as 32 of those chunks. The resident projections restore an fp8 matrix into a per-row int8 stage, quantize the half activation, multiply with `prefill_i8_n64`, and scale the int32 product back to float. `in_proj_a` and `in_proj_b` stay on `prefill_fp4_e8m0`. Routed experts are one 64-row tile for each of the 256 experts. `moe_group` splits the 16384 assignments into 16 slices and keeps token order inside each expert. The 3366.9 µs row is the single-thread kernel. The Gated DeltaNet recurrence is 32 sub-chunks of 64 tokens (Yang et al., §3.3). A score window is 16384 query rows by up to 4096 keys. The first chunk's limit is 2048 keys, so that chunk is the one 2048-key window per head in the table. A later chunk walks 4096-key windows and, when the limit is not a multiple of 4096, one 2048-key tail. The value product uses token stride 262144.

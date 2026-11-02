@@ -12,9 +12,10 @@ restores the peak.
 
 The half cache keeps ``[head, token, channel]`` for both keys and values, with
 no scale plane. Decode scores the eight query rows of a key/value head with
-``prefill_f16_m8``, softmaxes the same way as the fp8 step, and mixes values
-with ``prefill_f16_pv``. That is the Metal 4 ``matmul2d`` half path used for
-long-context decode (Dao et al., FlashAttention; Hong et al., FlashDecoding).
+``prefill_f16_m8`` and softmaxes the same way as the fp8 step. The value mix casts each 128-token block with ``kv_cast_blocks``, then
+``prefill_f16_pv_blocks`` reads that block with one threadgroup and one thread
+per channel, so the eight rows share the value row. ``kv_restore_sum`` scales
+each block by its peak and adds it.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from qwen36_35b_a3b.cache import plain_cache
 TILE = 256
 SCORE = 4096
 BLOCK = 512
+_HALF_BLOCK = 128
 HEAD = 256
 CHUNK = 2048
 GROUP = 8
@@ -146,19 +148,7 @@ def attend_half_decode(
                 HEAD,
             )
             _softmax8(runtime, span, pos, start)
-            _cast_probs(runtime, runtime.plane_probs, GROUP, span, span, 0)
-            _matmul_f16_pv(
-                runtime,
-                runtime.plane_prob_half,
-                runtime.v_cache[slot],
-                key_off,
-                runtime.plane_partial,
-                GROUP,
-                HEAD,
-                span,
-            )
-            _scale_partial(runtime, runtime.plane_partial, GROUP, HEAD)
-            _acc_add(runtime, GROUP)
+            _half_pv(runtime, runtime.v_cache[slot], key_off, GROUP, span)
             start += span
         _encode(
             runtime,
@@ -722,6 +712,57 @@ def _matmul_f16_pv(
         [_u32(rows), _u32(cols), _u32(inner)],
         (rows, 1, 1),
         (cols, 1, 1),
+    )
+
+
+def _half_pv(runtime: Any, values: Any, data_off: int, rows: int, span: int) -> None:
+    """Mix one half span. Cast, reduce, and restore each 128-token block."""
+    if rows != GROUP:
+        message = f"half value mix is {GROUP} rows, got {rows}"
+        raise RuntimeError(message)
+    block = _HALF_BLOCK
+    if span % block:
+        message = f"half value span {span} is not a multiple of {block}"
+        raise RuntimeError(message)
+    blocks = span // block
+    need = blocks * rows * HEAD * 4
+    room = (runtime.max_pos // BLOCK) * (GROUP * GROUP) * HEAD * 4
+    peaks = blocks * rows * 4
+    peak_room = (GROUP * CHUNK) * (SCORE // TILE) * 4
+    if need > room or peaks > peak_room:
+        message = f"half value mix partials {need} exceed the plane"
+        raise RuntimeError(message)
+    _encode(
+        runtime,
+        "kv_cast_blocks",
+        [
+            (runtime.plane_probs, 0),
+            (runtime.plane_prob_half, 0),
+            (runtime.plane_chunk_max, 0),
+        ],
+        [_u32(block), _u32(span), _u32(rows)],
+        (blocks, rows, 1),
+        (32, 1, 1),
+    )
+    _encode(
+        runtime,
+        "prefill_f16_pv_blocks",
+        [(runtime.plane_prob_half, 0), (values, data_off), (runtime.plane_parts, 0)],
+        [_u32(rows), _u32(HEAD), _u32(block), _u32(span)],
+        (blocks, 1, 1),
+        (HEAD, 1, 1),
+    )
+    _encode(
+        runtime,
+        "kv_restore_sum",
+        [
+            (runtime.plane_parts, 0),
+            (runtime.plane_chunk_max, 0),
+            (runtime.plane_acc, 0),
+        ],
+        [_u32(blocks), _u32(rows), _u32(HEAD)],
+        ((rows * HEAD) // 256, 1, 1),
+        (256, 1, 1),
     )
 
 

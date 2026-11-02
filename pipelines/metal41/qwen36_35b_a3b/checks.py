@@ -1090,6 +1090,54 @@ def _check_attend_gqa_heads_f16(session: Session, rng: np.random.Generator) -> N
     got = session.download_f32(partial, rows * 256).reshape(rows, 256)
     expect = packed.astype(np.float32) @ value.astype(np.float32)
     _close("prefill_f16_pv", got, expect.astype(np.float32), rtol=3e-2, atol=3e-2)
+    span = 768
+    block = 128
+    blocks = span // block
+    value_long = rng.normal(scale=0.1, size=(span, 256)).astype(np.float16)
+    probs_long = rng.random((rows, span)).astype(np.float32)
+    probs_long /= np.sum(probs_long, axis=1, keepdims=True)
+    score_buf = session.upload(np.ascontiguousarray(probs_long))
+    packed_buf = session.zeros(rows * span * 2)
+    peaks = session.zeros(blocks * rows * 4)
+    parts = session.zeros(blocks * rows * 256 * 4)
+    acc = session.zeros(rows * 256 * 4)
+    session.dispatch(
+        "kv_cast_blocks",
+        [score_buf, packed_buf, peaks],
+        [
+            np.uint32(block).tobytes(),
+            np.uint32(span).tobytes(),
+            np.uint32(rows).tobytes(),
+        ],
+        (blocks, rows, 1),
+        (32, 1, 1),
+    )
+    session.dispatch(
+        "prefill_f16_pv_blocks",
+        [packed_buf, session.upload(value_long.tobytes()), parts],
+        [
+            np.uint32(rows).tobytes(),
+            np.uint32(256).tobytes(),
+            np.uint32(block).tobytes(),
+            np.uint32(span).tobytes(),
+        ],
+        (blocks, 1, 1),
+        (256, 1, 1),
+    )
+    session.dispatch(
+        "kv_restore_sum",
+        [parts, peaks, acc],
+        [
+            np.uint32(blocks).tobytes(),
+            np.uint32(rows).tobytes(),
+            np.uint32(256).tobytes(),
+        ],
+        ((rows * 256) // 256, 1, 1),
+        (256, 1, 1),
+    )
+    mixed = session.download_f32(acc, rows * 256).reshape(rows, 256)
+    expect_long = probs_long @ value_long.astype(np.float32)
+    _close("prefill_f16_pv_blocks", mixed, expect_long, rtol=3e-2, atol=3e-2)
 
 
 def struct_f32(value: float) -> bytes:

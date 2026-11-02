@@ -124,6 +124,38 @@ On 1 November 2026 the same command ran on that machine and record, with MTP off
 
 The summary is prefill 815.15 tok/s (2959 tok in 3.63 s) and decode 64.04 tok/s (1138 tok in 17.77 s).
 
+On 3 November 2026 the command ran with `--thinking off` on an M5 Pro with 48 GB, on `Qwen3.6-35B-A3B-fp8-e20`, with the key/value cache at half and MTP off. The harness printed `mtp off depth 3 thinking off`. The hidden suite passed. It reached 3031 prompt tokens over nine requests. The half decode kernel ceiling at context 2048 is 66.0 tok/s.
+
+| Request | Prompt tokens | Cache | Prefill | Decode |
+|---|---:|---|---|---|
+| 1 | 1911 | miss | 1244.00 tok/s (1911 tok in 1.54 s) | 61.62 tok/s (27 tok in 0.44 s) |
+| 2 | 1971 | prefix load 1938, hit 1938 | 120.28 tok/s (33 tok in 0.27 s) | 61.31 tok/s (52 tok in 0.85 s) |
+| 3 | 2088 | hit 2023 | 255.02 tok/s (65 tok in 0.25 s) | 51.37 tok/s (28 tok in 0.55 s) |
+| 4 | 2239 | hit 2116 | 301.89 tok/s (123 tok in 0.41 s) | 61.14 tok/s (73 tok in 1.19 s) |
+| 5 | 2399 | hit 2312 | 245.53 tok/s (87 tok in 0.35 s) | 61.39 tok/s (82 tok in 1.34 s) |
+| 6 | 2686 | hit 2481 | 418.20 tok/s (205 tok in 0.49 s) | 62.10 tok/s (83 tok in 1.34 s) |
+| 7 | 2803 | hit 2769 | 125.00 tok/s (34 tok in 0.27 s) | 61.58 tok/s (85 tok in 1.38 s) |
+| 8 | 2928 | hit 2888 | 141.69 tok/s (40 tok in 0.28 s) | 56.03 tok/s (42 tok in 0.75 s) |
+| 9 | 3031 | hit 2970 | 188.96 tok/s (61 tok in 0.32 s) | 37.78 tok/s (13 tok in 0.34 s) |
+
+The summary is prefill 612.20 tok/s (2559 tok in 4.18 s) and decode 59.29 tok/s (485 tok in 8.18 s).
+
+The same day the command ran again with the thinking card. The harness printed `mtp off depth 3 thinking on`. The hidden suite passed. It reached 3263 prompt tokens over nine requests.
+
+| Request | Prompt tokens | Cache | Prefill | Decode |
+|---|---:|---|---|---|
+| 1 | 1909 | miss | 1269.96 tok/s (1909 tok in 1.50 s) | 62.90 tok/s (49 tok in 0.78 s) |
+| 2 | 1989 | prefix load 1958, hit 1958 | 115.03 tok/s (31 tok in 0.27 s) | 61.80 tok/s (76 tok in 1.23 s) |
+| 3 | 2128 | hit 2065 | 189.65 tok/s (63 tok in 0.33 s) | 57.97 tok/s (51 tok in 0.88 s) |
+| 4 | 2300 | hit 2179 | 302.69 tok/s (121 tok in 0.40 s) | 63.72 tok/s (133 tok in 2.09 s) |
+| 5 | 2518 | hit 2433 | 236.67 tok/s (85 tok in 0.36 s) | 62.47 tok/s (102 tok in 1.63 s) |
+| 6 | 2823 | hit 2620 | 412.13 tok/s (203 tok in 0.49 s) | 63.78 tok/s (128 tok in 2.01 s) |
+| 7 | 2989 | hit 2951 | 132.69 tok/s (38 tok in 0.29 s) | 63.93 tok/s (129 tok in 2.02 s) |
+| 8 | 3149 | hit 3118 | 112.80 tok/s (31 tok in 0.27 s) | 56.37 tok/s (55 tok in 0.98 s) |
+| 9 | 3263 | hit 3204 | 175.32 tok/s (59 tok in 0.34 s) | 48.31 tok/s (33 tok in 0.68 s) |
+
+The summary is prefill 597.65 tok/s (2540 tok in 4.25 s) and decode 61.46 tok/s (756 tok in 12.30 s).
+
 ## Greedy smoke
 
 `tests/test_qwen36_35b_a3b_smoke.py` on 31 October 2026, on an M5 Pro with 48 GB, on `Qwen3.6-35B-A3B-fp8-e20`. The greedy carrot ran twice. The second run set `mtp` and printed `mtp depth 3`. It kept 67 of 82 drafts. The instruct card and the thinking card omit `mtp`.

@@ -579,6 +579,61 @@ kernel void prefill_f16_m8(
 }
 
 // Eight probability rows against a half value cache. Values are
+// [token, channel]. One threadgroup owns one block of tokens and every channel.
+// Each thread owns one channel and applies all eight rows, so a value row is
+// read once. The partial is [block, row, channel].
+kernel void prefill_f16_pv_blocks(
+    device const half* probs [[buffer(0)]],
+    device const half* values [[buffer(1)]],
+    device float* partial [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& channels [[buffer(4)]],
+    constant uint& block [[buffer(5)]],
+    constant uint& span [[buffer(6)]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint part [[threadgroup_position_in_grid]])
+{
+    if (tid >= channels || rows != 8u) {
+        return;
+    }
+    uint begin = part * block;
+    if (begin >= span) {
+        return;
+    }
+    uint end = begin + block;
+    if (end > span) {
+        end = span;
+    }
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+    float acc4 = 0.0f;
+    float acc5 = 0.0f;
+    float acc6 = 0.0f;
+    float acc7 = 0.0f;
+    for (uint token = begin; token < end; ++token) {
+        float value = float(values[token * channels + tid]);
+        acc0 = fma(float(probs[token]), value, acc0);
+        acc1 = fma(float(probs[span + token]), value, acc1);
+        acc2 = fma(float(probs[2u * span + token]), value, acc2);
+        acc3 = fma(float(probs[3u * span + token]), value, acc3);
+        acc4 = fma(float(probs[4u * span + token]), value, acc4);
+        acc5 = fma(float(probs[5u * span + token]), value, acc5);
+        acc6 = fma(float(probs[6u * span + token]), value, acc6);
+        acc7 = fma(float(probs[7u * span + token]), value, acc7);
+    }
+    partial[(part * 8u + 0u) * channels + tid] = acc0;
+    partial[(part * 8u + 1u) * channels + tid] = acc1;
+    partial[(part * 8u + 2u) * channels + tid] = acc2;
+    partial[(part * 8u + 3u) * channels + tid] = acc3;
+    partial[(part * 8u + 4u) * channels + tid] = acc4;
+    partial[(part * 8u + 5u) * channels + tid] = acc5;
+    partial[(part * 8u + 6u) * channels + tid] = acc6;
+    partial[(part * 8u + 7u) * channels + tid] = acc7;
+}
+
+// Eight probability rows against a half value cache. Values are
 // [token, channel]. One threadgroup is one row; each thread owns a channel.
 kernel void prefill_f16_pv(
     device const half* probs [[buffer(0)]],
