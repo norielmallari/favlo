@@ -540,6 +540,8 @@ def _selection_payload(selection: Any) -> dict[str, Any]:
         "mtp_depth": int(getattr(selection, "mtp_depth", 3) or 3),
         "variants": selection.variants,
         "default_variant": selection.default_variant,
+        "enable_thinking": getattr(selection, "enable_thinking", None),
+        "reasoning_effort": getattr(selection, "reasoning_effort", None),
         "runtime": selection.runtime,
         "custom": selection.custom,
         "parts": {str(key): str(path) for key, path in parts.items()},
@@ -755,6 +757,14 @@ def _open(
         mtp_depth=int(raw["mtp_depth"]) if isinstance(raw.get("mtp_depth"), int) and not isinstance(raw.get("mtp_depth"), bool) and raw["mtp_depth"] >= 1 else 3,
         variants=raw.get("variants") if isinstance(raw.get("variants"), dict) else None,
         default_variant=variant if isinstance(variant, str) else None,
+        enable_thinking=(
+            bool(raw["enable_thinking"]) if "enable_thinking" in raw else None
+        ),
+        reasoning_effort=(
+            raw.get("reasoning_effort")
+            if isinstance(raw.get("reasoning_effort"), str)
+            else None
+        ),
         runtime=str(raw.get("runtime") or ""),
         custom=bool(raw.get("custom")),
         parts={str(key): Path(str(path)) for key, path in parts.items()},

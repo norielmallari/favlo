@@ -1,7 +1,8 @@
 """Production readiness for one language pipeline.
 
-The model id is the pipeline name. ``--thinking on`` is the default and leaves
-every sampling field unset. ``--thinking off`` selects the instruct card. ``--mtp``
+The model id is the pipeline name. ``--thinking on`` is the default and sets
+``reasoning.effort`` to ``medium``. ``--thinking off`` sets it to ``none``.
+Sampling stays on the selected model id. ``--mtp``
 sends the draft flag. Omitted, that flag is off. ``--mtp-depth`` is the draft
 length, three when omitted. ``--vision`` is off unless set. When it is set,
 the first chat is the horse still, and a later request must reuse the tower.

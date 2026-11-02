@@ -64,7 +64,7 @@ def read_prompt(path: str) -> str:
 
 
 def model_stem(model: str) -> str:
-    """The listener selects the instruct card when the id has no variant suffix."""
+    """Bare folder id. Sampling follows that row; thinking follows the request."""
     return model.partition(":")[0]
 
 

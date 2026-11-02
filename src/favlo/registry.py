@@ -44,6 +44,8 @@ class Selection:
     mtp_depth: int = 3
     variants: dict[str, dict[str, float | int]] | None = None
     default_variant: str | None = None
+    enable_thinking: bool | None = None
+    reasoning_effort: str | None = None
     runtime: str = ""
     custom: bool = False
     parts: dict[str, Path] | None = None
@@ -250,6 +252,8 @@ def register_quantized(
     directory_text = str(directory)
     part_text = _part_text(parts)
     variants, default_variant = pipeline_sampling(pipeline, runtime=runtime, custom=custom)
+    thinking = pipeline_enable_thinking(pipeline, runtime=runtime, custom=custom)
+    effort = pipeline_reasoning_effort(pipeline, runtime=runtime, custom=custom)
     current = data["models"].get(folder)
     if current is not None:
         stored = current.get("source")
@@ -258,6 +262,11 @@ def register_quantized(
             _merge_parts(current, part_text)
             current["variants"] = variants
             current["default_variant"] = default_variant
+            current["enable_thinking"] = thinking
+            if effort is not None:
+                current["reasoning_effort"] = effort
+            else:
+                current.pop("reasoning_effort", None)
             current["runtime"] = runtime
             if kv_cache is not None:
                 current["kv_cache"] = kv_cache
@@ -702,6 +711,8 @@ def _entry(
     kv_cache: str | None = None,
 ) -> dict[str, Any]:
     variants, default_variant = pipeline_sampling(pipeline, runtime=runtime, custom=custom)
+    thinking = pipeline_enable_thinking(pipeline, runtime=runtime, custom=custom)
+    effort = pipeline_reasoning_effort(pipeline, runtime=runtime, custom=custom)
     ctx = card_context_length(pipeline, runtime=runtime, custom=custom)
     entry: dict[str, Any] = {
         "pipeline": pipeline,
@@ -713,8 +724,11 @@ def _entry(
         "resident_percent": None,
         "variants": variants,
         "default_variant": default_variant,
+        "enable_thinking": thinking,
         "context_length": ctx if ctx is not None else DEFAULT_CONTEXT_LENGTH,
     }
+    if effort is not None:
+        entry["reasoning_effort"] = effort
     if parts:
         entry["parts"] = parts
     if custom:
@@ -846,6 +860,8 @@ def _selection(
         mtp_depth=mtp_pair(entry)[1],
         variants=stored,
         default_variant=_default_variant(entry),
+        enable_thinking=_enable_thinking(entry),
+        reasoning_effort=_reasoning_effort(entry),
         runtime=_require_runtime(entry, folder),
         custom=_custom(entry),
         parts=_parts(entry),
@@ -937,17 +953,7 @@ def pipeline_sampling(
 
     The module is loaded by path so registration does not import the pipeline.
     """
-    package = pipeline.replace("-", "_")
-    path = _sampling_path(package, runtime=runtime, custom=custom)
-    if not path.is_file():
-        message = f"{pipeline} has no sampling card at {package}/sampling.py"
-        raise ValueError(message)
-    spec = importlib.util.spec_from_file_location(f"{package}.sampling", path)
-    if spec is None or spec.loader is None:
-        message = f"{pipeline} sampling card could not be loaded"
-        raise ValueError(message)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = _sampling_module(pipeline, runtime=runtime, custom=custom)
     raw = getattr(module, "VARIANTS", None)
     default = getattr(module, "DEFAULT_VARIANT", None)
     if not isinstance(raw, dict) or not raw:
@@ -973,6 +979,39 @@ def pipeline_sampling(
     return variants, default
 
 
+def pipeline_enable_thinking(pipeline: str, *, runtime: str, custom: bool = False) -> bool:
+    """``DEFAULT_THINKING`` on the sampling card. Missing means thinking on."""
+    module = _sampling_module(pipeline, runtime=runtime, custom=custom)
+    value = getattr(module, "DEFAULT_THINKING", True)
+    return bool(value)
+
+
+def pipeline_reasoning_effort(
+    pipeline: str, *, runtime: str, custom: bool = False
+) -> str | None:
+    """``DEFAULT_REASONING_EFFORT`` on the sampling card, when the pipeline sets one."""
+    module = _sampling_module(pipeline, runtime=runtime, custom=custom)
+    value = getattr(module, "DEFAULT_REASONING_EFFORT", None)
+    if not isinstance(value, str) or not value:
+        return None
+    return value
+
+
+def _sampling_module(pipeline: str, *, runtime: str, custom: bool = False) -> Any:
+    package = pipeline.replace("-", "_")
+    path = _sampling_path(package, runtime=runtime, custom=custom)
+    if not path.is_file():
+        message = f"{pipeline} has no sampling card at {package}/sampling.py"
+        raise ValueError(message)
+    spec = importlib.util.spec_from_file_location(f"{package}.sampling", path)
+    if spec is None or spec.loader is None:
+        message = f"{pipeline} sampling card could not be loaded"
+        raise ValueError(message)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _variant_names(entry: dict[str, Any]) -> tuple[str, ...]:
     return tuple(_stored_variants(entry))
 
@@ -991,6 +1030,19 @@ def _stored_variants(entry: dict[str, Any]) -> dict[str, dict[str, float | int]]
 def _default_variant(entry: dict[str, Any]) -> str | None:
     name = entry.get("default_variant")
     if isinstance(name, str) and name in _stored_variants(entry):
+        return name
+    return None
+
+
+def _enable_thinking(entry: dict[str, Any]) -> bool | None:
+    if "enable_thinking" not in entry:
+        return None
+    return bool(entry.get("enable_thinking"))
+
+
+def _reasoning_effort(entry: dict[str, Any]) -> str | None:
+    name = entry.get("reasoning_effort")
+    if isinstance(name, str) and name:
         return name
     return None
 
