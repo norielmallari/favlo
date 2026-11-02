@@ -1361,7 +1361,54 @@ def test_historical_reasoning_follows_the_preserve_setting() -> None:
     assert "ok" in live
 
 
+def test_unsupported_effort_steps_up_or_falls_back() -> None:
+    from qwen36_35b_a3b.sampling import resolve_effort
+
+    assert resolve_effort(None) is None
+    assert resolve_effort("none") == "none"
+    assert resolve_effort("high") == "high"
+    assert resolve_effort("minimal") == "high"
+    assert resolve_effort("low") == "high"
+    assert resolve_effort("medium") == "high"
+    assert resolve_effort("xhigh") == "high"
+    assert resolve_effort("max") == "high"
+
+
+def test_effort_opens_thinking_without_changing_the_card() -> None:
+    from types import SimpleNamespace
+
+    from qwen36_35b_a3b.chat import _request_effort
+    from qwen36_35b_a3b.sampling import mode_card
+
+    instruct = SimpleNamespace(
+        variant="instruct",
+        sampling={"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5},
+        variants=None,
+        default_variant="thinking",
+        enable_thinking=None,
+        reasoning_effort=None,
+    )
+    thinking, card = mode_card(instruct, _request_effort({"reasoning": {"effort": "low"}}))
+    assert thinking is True
+    assert card["temperature"] == 0.7
+    closed, still = mode_card(instruct, _request_effort({"reasoning": {"effort": "none"}}))
+    assert closed is False
+    assert still["temperature"] == 0.7
+    stored = SimpleNamespace(
+        variant="thinking",
+        sampling=None,
+        variants=None,
+        default_variant="thinking",
+        enable_thinking=True,
+        reasoning_effort="none",
+    )
+    omitted, _card = mode_card(stored, _request_effort({}))
+    assert omitted is False
+
+
 def test_omitted_sampling_uses_the_pipeline_card() -> None:
+    from types import SimpleNamespace
+
     from qwen36_35b_a3b.chat import _presence, _sampling
     from qwen36_35b_a3b.sampling import mode_card
 
@@ -1369,14 +1416,35 @@ def test_omitted_sampling_uses_the_pipeline_card() -> None:
     assert thinking is True
     assert card is not None
     assert card["presence_penalty"] == 1.5
-    closed, instruct = mode_card(None, False)
+    closed, still_default = mode_card(None, False)
     assert closed is False
-    assert instruct is not None
-    assert instruct["temperature"] == 0.7
+    assert still_default is not None
+    assert still_default["temperature"] == 1.0
+    named = SimpleNamespace(
+        variant="thinking",
+        sampling=None,
+        variants=None,
+        default_variant="thinking",
+        enable_thinking=None,
+    )
+    off, off_card = mode_card(named, False)
+    assert off is False
+    assert off_card is not None
+    assert off_card["temperature"] == 1.0
+    instruct = SimpleNamespace(
+        variant="instruct",
+        sampling={"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5},
+        variants=None,
+        default_variant="thinking",
+        enable_thinking=None,
+    )
+    open_think, instruct_card = mode_card(instruct, True)
+    assert open_think is True
+    assert instruct_card["temperature"] == 0.7
 
     assert _sampling({}, True, None) == (1.0, 0.95, 20)
     assert _presence({}, True, None) == 1.5
-    assert _sampling({}, False, None) == (0.7, 0.8, 20)
+    assert _sampling({}, False, None) == (1.0, 0.95, 20)
     assert _presence({}, False, None) == 1.5
     assert _presence({"presence_penalty": 0}, True, None) == 0.0
 

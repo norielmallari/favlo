@@ -15,7 +15,7 @@ from tokenizers import Tokenizer
 from qwen36_35b_a3b.cache import DEFAULT_CONTEXT_LENGTH
 from favlo.language_pipeline import LanguagePipeline
 from qwen36_35b_a3b.forward import RequestClosed
-from qwen36_35b_a3b.sampling import VARIANTS, mode_card, requested_thinking
+from qwen36_35b_a3b.sampling import DEFAULT_VARIANT, VARIANTS, mode_card
 from qwen36_35b_a3b.tools import (
     StreamText,
     completion_fields,
@@ -38,7 +38,6 @@ from favlo.responses import (
     response_object,
     response_to_chat,
     template_messages,
-    thinking_enabled,
     usage_object,
     web_search_context,
 )
@@ -49,7 +48,8 @@ STOP = {248046, 248044}
 def _sampling(
     body: dict[str, Any], thinking: bool, variant: dict[str, Any] | None
 ) -> tuple[float, float, int]:
-    card = variant if variant is not None else VARIANTS["thinking" if thinking else "instruct"]
+    del thinking
+    card = variant if variant is not None else VARIANTS[DEFAULT_VARIANT]
     defaults = (
         float(card["temperature"]),
         float(card["top_p"]),
@@ -69,10 +69,11 @@ def _presence(body: dict[str, Any], thinking: bool, variant: dict[str, Any] | No
     penalty = body.get("presence_penalty")
     if penalty is not None:
         return float(penalty)
-    card = variant if variant is not None else VARIANTS["thinking" if thinking else "instruct"]
+    del thinking
+    card = variant if variant is not None else VARIANTS[DEFAULT_VARIANT]
     if "presence_penalty" in card:
         return float(card["presence_penalty"])
-    return 0.0 if thinking else 1.5
+    return float(VARIANTS[DEFAULT_VARIANT]["presence_penalty"])
 
 
 def _frequency(body: dict[str, Any]) -> float:
@@ -371,6 +372,21 @@ def _handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any)
     handle_chat.complete(reply, runtime, body, selection, None, {})
 
 
+def _request_effort(body: dict[str, Any]) -> str | None:
+    """``reasoning.effort`` after the Chat Completions translation.
+
+    ``reasoning_effort`` and ``enable_thinking`` are already mapped onto that
+    field. An omitted effort stays omitted so the registry row can decide.
+    """
+    reasoning = body.get("reasoning")
+    if not isinstance(reasoning, dict):
+        return None
+    effort = reasoning.get("effort")
+    if not isinstance(effort, str) or not effort.strip():
+        return None
+    return effort.strip().lower()
+
+
 def _respond(
     reply: Any,
     runtime: Any,
@@ -383,9 +399,8 @@ def _respond(
     except RequestError as exc:
         reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
         return
-    requested = thinking_enabled(prepared)
     required = required_function(prepared.get("tool_choice"))
-    thinking, card = mode_card(selection, requested)
+    thinking, card = mode_card(selection, _request_effort(prepared))
     # A named call is the whole completion. The closed think is the template's
     # empty reasoning turn, encoded with the prompt so the newline stays one token.
     # A :thinking id would otherwise keep the block open around that call.
