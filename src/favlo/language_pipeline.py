@@ -1,7 +1,8 @@
-"""Listener shell for one chat completion.
+"""Listener shell for one Responses generation.
 
-The subclass implements ``complete``. Sampling, tools, and the token loop
-stay there. Hooks are called directly. A hook exception propagates.
+The subclass implements ``handle_responses``. Sampling, tools, and the token
+loop stay there. Chat Completions is translated on the listener. Hooks are
+called directly. A hook exception propagates.
 """
 
 from __future__ import annotations
@@ -13,9 +14,9 @@ from favlo.pipeline import ClientClosed, Pipeline
 
 
 class LanguagePipeline(Pipeline):
-    """Disconnect handling around one pipeline's own completion."""
+    """Disconnect handling around one pipeline's own Responses completion."""
 
-    kind = "chat"
+    kind = "responses"
 
     def handle(
         self,
@@ -31,7 +32,7 @@ class LanguagePipeline(Pipeline):
         try:
             self.prepare(reply, runtime, body, selection, args, state)
             try:
-                self.complete(reply, runtime, body, selection, args, state)
+                self.handle_responses(reply, runtime, body, selection, args, state)
                 completed = True
             except ClientClosed:
                 self.on_disconnect(runtime)
@@ -59,7 +60,7 @@ class LanguagePipeline(Pipeline):
         del reply, runtime, body, selection, args, state
 
     @abstractmethod
-    def complete(
+    def handle_responses(
         self,
         reply: Any,
         runtime: Any,
@@ -68,7 +69,7 @@ class LanguagePipeline(Pipeline):
         args: Any,
         state: dict[str, Any],
     ) -> None:
-        """The pipeline's completion. Raise ``ClientClosed`` to stop."""
+        """The pipeline's Responses completion. Raise ``ClientClosed`` to stop."""
 
     def client_closed(self, exc: OSError) -> bool:
         """True when this ``OSError`` is the client going away."""

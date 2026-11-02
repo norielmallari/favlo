@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from qwen35_4b.chat import handle_chat, handle_responses
+from qwen35_4b.chat import handle_responses
 from qwen35_4b.forward import Qwen35Runtime
 
 
@@ -33,4 +33,4 @@ def open_runtime(
     )
 
 
-__all__ = ["handle_chat", "handle_responses", "open_runtime"]
+__all__ = ["handle_responses", "open_runtime"]

@@ -85,7 +85,7 @@ def test_a_response_carries_the_trace_and_the_reply(monkeypatch: Any) -> None:
     runtime = _Runtime(_TRACE)
     _install(monkeypatch, runtime)
     reply = MemoryReply("gemma4-26b-a4b")
-    handle_responses.complete(
+    handle_responses.handle_responses(
         reply,
         runtime,
         {"model": "gemma4-26b-a4b", "input": "Hi", "temperature": 0.2, "top_k": 3},
@@ -115,7 +115,7 @@ def test_store_false_replays_the_trace(monkeypatch: Any) -> None:
     runtime = _Runtime(_TRACE)
     _install(monkeypatch, runtime)
     reply = MemoryReply()
-    handle_responses.complete(
+    handle_responses.handle_responses(
         reply,
         runtime,
         {
@@ -136,7 +136,7 @@ def test_an_empty_thought_is_not_a_reasoning_item(monkeypatch: Any) -> None:
     runtime = _Runtime(_CALL)
     _install(monkeypatch, runtime)
     reply = MemoryReply()
-    handle_responses.complete(reply, runtime, {"input": "Hi"}, None, None, {})
+    handle_responses.handle_responses(reply, runtime, {"input": "Hi"}, None, None, {})
     kinds = [item["type"] for item in reply.body["output"]]
     assert kinds == ["function_call"]
     assert reply.body["output"][0]["name"] == "glob"
@@ -147,7 +147,7 @@ def test_tool_choice_none_drops_the_call(monkeypatch: Any) -> None:
     runtime = _Runtime(_CALL + "done")
     _install(monkeypatch, runtime)
     reply = MemoryReply()
-    handle_responses.complete(
+    handle_responses.handle_responses(
         reply, runtime, {"input": "Hi", "tool_choice": "none"}, None, None, {}
     )
     kinds = [item["type"] for item in reply.body["output"]]
@@ -160,7 +160,7 @@ def test_a_filled_cap_is_incomplete(monkeypatch: Any) -> None:
     runtime = _Runtime("The", hit_limit=True)
     _install(monkeypatch, runtime)
     reply = MemoryReply()
-    handle_responses.complete(
+    handle_responses.handle_responses(
         reply, runtime, {"input": "Hi", "max_output_tokens": 16}, None, None, {}
     )
     assert reply.body["status"] == "incomplete"
@@ -170,7 +170,7 @@ def test_a_filled_cap_is_incomplete(monkeypatch: Any) -> None:
 
 def test_a_short_cap_is_rejected() -> None:
     reply = MemoryReply()
-    handle_responses.complete(
+    handle_responses.handle_responses(
         reply, None, {"input": "Hi", "max_output_tokens": 4}, None, None, {}
     )
     assert reply.status == 400
@@ -178,7 +178,7 @@ def test_a_short_cap_is_rejected() -> None:
 
 def test_audio_and_a_hosted_tool_are_rejected() -> None:
     audio = MemoryReply()
-    handle_responses.complete(
+    handle_responses.handle_responses(
         audio,
         None,
         {"input": [{"type": "input_audio", "data": "x"}]},
@@ -187,7 +187,7 @@ def test_audio_and_a_hosted_tool_are_rejected() -> None:
         {},
     )
     hosted = MemoryReply()
-    handle_responses.complete(
+    handle_responses.handle_responses(
         hosted,
         None,
         {"input": "Hi", "tools": [{"type": "file_search"}]},
@@ -203,7 +203,7 @@ def test_effort_none_is_thinking_off(monkeypatch: Any) -> None:
     runtime = _Runtime("Hello")
     seen = _install(monkeypatch, runtime)
     reply = MemoryReply()
-    handle_responses.complete(
+    handle_responses.handle_responses(
         reply,
         runtime,
         {"input": "Hi", "reasoning": {"effort": "none"}},
@@ -219,9 +219,9 @@ def test_a_stored_response_is_prepended(monkeypatch: Any) -> None:
     seen = _install(monkeypatch, runtime)
     state: dict[str, Any] = {}
     first = MemoryReply()
-    handle_responses.complete(first, runtime, {"input": "Hi", "store": True}, None, None, state)
+    handle_responses.handle_responses(first, runtime, {"input": "Hi", "store": True}, None, None, state)
     second = MemoryReply()
-    handle_responses.complete(
+    handle_responses.handle_responses(
         second,
         runtime,
         {"input": "Next", "previous_response_id": first.body["id"], "store": True},
@@ -287,7 +287,7 @@ def test_a_stream_sends_one_delta_per_token(monkeypatch: Any) -> None:
     monkeypatch.setattr("gemma4_26b_a4b.chat.collect_images", lambda messages: [])
     monkeypatch.setattr("gemma4_26b_a4b.stream.launch", _launch_local)
     reply = MemoryReply()
-    handle_responses.complete(
+    handle_responses.handle_responses(
         reply, runtime, {"input": "Hi", "stream": True}, None, None, {}
     )
     deltas = [
@@ -299,23 +299,26 @@ def test_a_stream_sends_one_delta_per_token(monkeypatch: Any) -> None:
 
 
 def test_a_stream_shares_one_response_id(monkeypatch: Any) -> None:
+    from favlo.responses import ResponseWire
+
     runtime = _Runtime(_TRACE)
     _install(monkeypatch, runtime)
-    reply = MemoryReply()
-    handle_responses.complete(
+    inner = MemoryReply()
+    reply = ResponseWire(inner)
+    handle_responses.handle_responses(
         reply, runtime, {"input": "Hi", "stream": True, "store": False}, None, None, {}
     )
-    kinds = [event["type"] for event in reply.events]
+    kinds = [event["type"] for event in inner.events]
     assert kinds[0] == "response.created"
     assert "response.in_progress" in kinds
     assert "response.output_text.delta" in kinds
     assert "response.reasoning_text.delta" in kinds
     assert "response.reasoning_text.done" not in kinds
     assert kinds[-1] == "response.completed"
-    opened = reply.events[0]["response"]["id"]
-    assert reply.events[-1]["response"]["id"] == opened
-    assert reply.sent == []
-    reasoning = next(item for item in reply.events[-1]["response"]["output"] if item["type"] == "reasoning")
+    opened = inner.events[0]["response"]["id"]
+    assert inner.events[-1]["response"]["id"] == opened
+    assert inner.sent == []
+    reasoning = next(item for item in inner.events[-1]["response"]["output"] if item["type"] == "reasoning")
     assert reasoning["encrypted_content"] == "Look at the notes."
 
 
@@ -323,7 +326,7 @@ def test_a_streamed_call_sends_the_arguments_once(monkeypatch: Any) -> None:
     runtime = _Runtime(_CALL)
     _install(monkeypatch, runtime)
     reply = MemoryReply()
-    handle_responses.complete(reply, runtime, {"input": "Hi", "stream": True}, None, None, {})
+    handle_responses.handle_responses(reply, runtime, {"input": "Hi", "stream": True}, None, None, {})
     kinds = [event["type"] for event in reply.events]
     assert "response.function_call_arguments.delta" not in kinds
     added = next(
@@ -357,7 +360,7 @@ def test_truncation_auto_drops_the_oldest_item(monkeypatch: Any) -> None:
     monkeypatch.setattr("gemma4_26b_a4b.chat.decode_text", lambda root, tokens: "ok")
     monkeypatch.setattr("gemma4_26b_a4b.chat.collect_images", lambda messages: [])
     reply = MemoryReply()
-    handle_responses.complete(
+    handle_responses.handle_responses(
         reply,
         runtime,
         {
@@ -385,5 +388,5 @@ def test_truncation_disabled_rejects_an_overlong_prompt(monkeypatch: Any) -> Non
 
     monkeypatch.setattr("gemma4_26b_a4b.chat._encode", encode)
     reply = MemoryReply()
-    handle_responses.complete(reply, runtime, {"input": "Hi"}, None, None, {})
+    handle_responses.handle_responses(reply, runtime, {"input": "Hi"}, None, None, {})
     assert reply.status == 400

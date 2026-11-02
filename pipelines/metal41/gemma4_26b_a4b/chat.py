@@ -1,4 +1,4 @@
-"""Chat completion for Gemma 4 26B-A4B."""
+"""Responses generation for Gemma 4 26B-A4B."""
 
 from __future__ import annotations
 
@@ -18,7 +18,6 @@ from favlo.language_pipeline import LanguagePipeline
 from favlo.pipeline import ClientClosed as RequestClosed
 from favlo.responses import (
     RequestError,
-    chat_to_responses,
     citations,
     format_instruction,
     function_tools,
@@ -26,7 +25,6 @@ from favlo.responses import (
     prepare_request,
     remember,
     response_object,
-    response_to_chat,
     template_messages,
     usage_object,
     web_search_context,
@@ -277,18 +275,14 @@ def _after_call(text: str) -> tuple[str, str]:
     return reply_text(rest)
 
 
-class _Hooks(LanguagePipeline):
-    """Disconnect shell shared by the Responses route and the chat adapter."""
+class Pipeline(LanguagePipeline):
+    """One Responses generation for this package."""
 
     def on_open(self, runtime: Any, reply: Any, selection: Any) -> None:
         del reply, selection
         runtime._stop = False
 
-
-class Gemma4Chat(_Hooks):
-    """Chat Completions translated into one Responses generation."""
-
-    def complete(
+    def handle_responses(
         self,
         reply: Any,
         runtime: Any,
@@ -298,33 +292,10 @@ class Gemma4Chat(_Hooks):
         state: dict[str, Any],
     ) -> None:
         del args
-        try:
-            translated = chat_to_responses(body)
-        except RequestError as exc:
-            _reject(reply, str(exc))
-            return
-        _carry_tool_thoughts(body.get("messages"), translated)
-        _respond(ChatWire(reply), runtime, translated, selection, state)
+        _respond(reply, runtime, body, selection, state)
 
 
-class ResponsesPipeline(_Hooks):
-    """One Responses generation."""
-
-    def complete(
-        self,
-        reply: Any,
-        runtime: Any,
-        body: dict[str, Any],
-        selection: Any,
-        args: Any,
-        state: dict[str, Any],
-    ) -> None:
-        del args
-        _respond(ResponseWire(reply), runtime, body, selection, state)
-
-
-handle_chat = Gemma4Chat()
-handle_responses = ResponsesPipeline()
+handle_responses = Pipeline()
 
 
 def _reject(reply: Any, message: str) -> None:
@@ -332,10 +303,9 @@ def _reject(reply: Any, message: str) -> None:
 
 
 def _request_effort(body: dict[str, Any]) -> str | None:
-    """``reasoning.effort`` after the Chat Completions translation.
+    """``reasoning.effort`` on the Responses body.
 
-    ``reasoning_effort`` and ``enable_thinking`` are already mapped onto that
-    field. An omitted effort stays omitted so the registry row can decide.
+    An omitted effort stays omitted so the registry row can decide.
     """
     reasoning = body.get("reasoning")
     if not isinstance(reasoning, dict):
@@ -443,66 +413,6 @@ def _merge_instruction(messages: list[dict[str, Any]], extra: str) -> None:
         messages[0]["content"] = extra + "\n\n" + messages[0]["content"]
         return
     messages.insert(0, {"role": "system", "content": extra})
-
-
-def _carry_tool_thoughts(messages: Any, translated: dict[str, Any]) -> None:
-    """Put a tool-call thought back in front of that call.
-
-    The shared translator drops ``reasoning_content``. The template keeps the
-    thought while the call is still after the latest user message.
-    """
-    items = translated.get("input")
-    if not isinstance(messages, list) or not isinstance(items, list):
-        return
-    cursor = 0
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        role = message.get("role")
-        if role in ("system", "developer"):
-            continue
-        if role == "tool":
-            cursor = _skip_kind(items, cursor, "function_call_output")
-            if cursor is None:
-                return
-            continue
-        if role != "assistant":
-            cursor = _skip_kind(items, cursor, "message")
-            if cursor is None:
-                return
-            continue
-        calls = message.get("tool_calls")
-        trace = _thought_text(message)
-        if isinstance(calls, list) and calls and trace:
-            items.insert(cursor, _reasoning_item(trace))
-            cursor += 1
-        if isinstance(calls, list):
-            for _call in calls:
-                cursor = _skip_kind(items, cursor, "function_call")
-                if cursor is None:
-                    return
-        if message.get("content"):
-            cursor = _skip_kind(items, cursor, "message")
-            if cursor is None:
-                return
-
-
-def _thought_text(message: dict[str, Any]) -> str:
-    for name in ("reasoning_content", "reasoning"):
-        text = message.get(name)
-        if isinstance(text, str) and text.strip():
-            return text.strip()
-    return ""
-
-
-def _reasoning_item(text: str) -> dict[str, Any]:
-    return {"type": "reasoning", "content": [{"type": "reasoning_text", "text": text}]}
-
-
-def _skip_kind(items: list[Any], cursor: int, kind: str) -> int | None:
-    if cursor < len(items) and isinstance(items[cursor], dict) and items[cursor].get("type") == kind:
-        return cursor + 1
-    return None
 
 
 def _fit_prompt(
@@ -659,167 +569,6 @@ def _message_item(text: str, annotations: list[dict[str, Any]]) -> dict[str, Any
         "status": "completed",
         "content": [{"type": "output_text", "text": text, "annotations": annotations}],
     }
-
-
-class ChatWire:
-    """Writes a Response as Chat Completions."""
-
-    responses_wire = True
-
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
-        self.model_id = getattr(inner, "model_id", "")
-        self._created = int(time.time())
-        self._calls = 0
-
-    def stopped(self) -> bool:
-        return bool(self._inner.stopped())
-
-    def begin_events(self) -> None:
-        self._inner.begin_events()
-
-    def done(self) -> None:
-        self._inner.done()
-
-    def json(self, status: int, payload: dict[str, Any]) -> None:
-        if payload.get("object") != "response":
-            self._inner.json(status, payload)
-            return
-        extra = payload.pop("_chat_usage", None)
-        chat = response_to_chat(payload, None)
-        _copy_reasoning(chat)
-        if isinstance(extra, dict):
-            chat["usage"] = extra
-        self.model_id = payload.get("model") or self.model_id
-        chat["model"] = self.model_id
-        self._inner.json(status, chat)
-
-    def event(self, payload: dict[str, Any]) -> None:
-        kind = payload.get("type")
-        if kind == "response.created":
-            self._send(
-                [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]
-            )
-            return
-        if kind == "response.reasoning_text.delta":
-            visible = payload.get("delta") or ""
-            if str(visible).strip():
-                self._send(
-                    [
-                        {
-                            "index": 0,
-                            "delta": {"reasoning": visible, "reasoning_content": visible},
-                            "finish_reason": None,
-                        }
-                    ]
-                )
-            return
-        if kind == "response.output_text.delta":
-            self._send(
-                [
-                    {
-                        "index": 0,
-                        "delta": {"content": payload.get("delta") or ""},
-                        "finish_reason": None,
-                    }
-                ]
-            )
-            return
-        if kind == "response.output_item.done":
-            item = payload.get("item")
-            if isinstance(item, dict) and item.get("type") == "function_call":
-                self._send(
-                    [
-                        {
-                            "index": 0,
-                            "delta": {
-                                "tool_calls": [
-                                    {
-                                        "index": self._calls,
-                                        "id": item.get("call_id"),
-                                        "type": "function",
-                                        "function": {
-                                            "name": item.get("name") or "",
-                                            "arguments": item.get("arguments") or "{}",
-                                        },
-                                    }
-                                ]
-                            },
-                            "finish_reason": None,
-                        }
-                    ]
-                )
-                self._calls += 1
-            return
-        if kind == "response.completed":
-            response = payload.get("response")
-            if not isinstance(response, dict):
-                return
-            extra = response.pop("_chat_usage", None)
-            calls = any(
-                isinstance(item, dict) and item.get("type") == "function_call"
-                for item in response.get("output") or []
-            )
-            reason = "tool_calls" if calls else _chat_reason(response)
-            self._send([{"index": 0, "delta": {}, "finish_reason": reason}])
-            usage = extra if isinstance(extra, dict) else {}
-            self._inner.event(_frame(self, [], self._created, usage))
-
-
-    def _send(self, choices: list[dict[str, Any]]) -> None:
-        self._inner.event(_frame(self, choices, self._created))
-
-
-class ResponseWire:
-    """Writes Response events and omits the Chat Completions done marker."""
-
-    responses_wire = True
-
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
-        self.model_id = getattr(inner, "model_id", "")
-
-    def stopped(self) -> bool:
-        return bool(self._inner.stopped())
-
-    def begin_events(self) -> None:
-        self._inner.begin_events()
-
-    def done(self) -> None:
-        return
-
-    def json(self, status: int, payload: dict[str, Any]) -> None:
-        if isinstance(payload, dict):
-            payload.pop("_chat_usage", None)
-        self._inner.json(status, payload)
-
-    def event(self, payload: dict[str, Any]) -> None:
-        if payload.get("type") == "response.completed":
-            response = payload.get("response")
-            if isinstance(response, dict):
-                response.pop("_chat_usage", None)
-        self._inner.event(payload)
-
-
-def _copy_reasoning(chat: dict[str, Any]) -> None:
-    choices = chat.get("choices")
-    if not isinstance(choices, list) or not choices:
-        return
-    message = choices[0].get("message") if isinstance(choices[0], dict) else None
-    if not isinstance(message, dict):
-        return
-    trace = message.get("reasoning_content")
-    if isinstance(trace, str) and trace.strip():
-        message["reasoning"] = trace
-
-
-def _chat_reason(response: dict[str, Any]) -> str:
-    details = response.get("incomplete_details")
-    if isinstance(details, dict) and details.get("reason") == "max_output_tokens":
-        return "length"
-    if response.get("status") == "incomplete":
-        return "length"
-    return "stop"
 
 
 def _stream(
@@ -1023,88 +772,6 @@ def _emit_response(
     )
 
 
-def openai_message(
-    reasoning: str, content: str | None, calls: list[dict[str, Any]]
-) -> dict[str, Any]:
-    """One assistant message. An empty thought is omitted. A missing reply is null."""
-    message: dict[str, Any] = {"role": "assistant", "content": content or None}
-    trace = reasoning.strip()
-    if trace:
-        message["reasoning"] = trace
-        message["reasoning_content"] = trace
-    if calls:
-        message["tool_calls"] = calls
-    return message
-
-
-def _emit(
-    event: Any,
-    reply: Any,
-    channel: str,
-    visible: str,
-    created: int,
-    sent: dict[str, str] | None = None,
-) -> None:
-    delta = _delta(channel, visible)
-    if delta is None:
-        return
-    if sent is not None:
-        field = "reasoning" if channel == "reasoning" else "content"
-        sent[field] = sent.get(field, "") + visible
-    event(
-        reply,
-        _frame(
-            reply,
-            [{"index": 0, "delta": delta, "finish_reason": None}],
-            created,
-        ),
-    )
-
-
-def _emit_unsent(
-    event: Any,
-    reply: Any,
-    created: int,
-    sent: dict[str, str],
-    reasoning: str,
-    content: str | None,
-) -> None:
-    """Send a trace or reply the token stream did not already deliver."""
-    if reasoning.strip() and not sent.get("reasoning", "").strip():
-        _emit(event, reply, "reasoning", reasoning.strip(), created, sent)
-    if content and content.strip() and not sent.get("content", "").strip():
-        _emit(event, reply, "content", content, created, sent)
-
-
-def _delta(channel: str, visible: str) -> dict[str, str] | None:
-    """OpenAI delta for one piece. A whitespace-only thought is not a trace."""
-    if channel == "reasoning":
-        if not visible.strip():
-            return None
-        return {"reasoning": visible, "reasoning_content": visible}
-    if not visible:
-        return None
-    return {"content": visible}
-
-
-def _frame(
-    reply: Any,
-    choices: list[dict[str, Any]],
-    created: int,
-    usage: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "id": "chatcmpl-favlo",
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": getattr(reply, "model_id", "") or "",
-        "choices": choices,
-    }
-    if usage is not None:
-        payload["usage"] = usage
-    return payload
-
-
 def cut_stop(text: str, stops: list[str]) -> str:
     """Text before the earliest request stop. The stop itself stays out."""
     cut = len(text)
@@ -1124,14 +791,6 @@ def _stop_strings(body: dict[str, Any]) -> list[str]:
     if isinstance(raw, list):
         return [item for item in raw if isinstance(item, str) and item]
     return []
-
-
-def _finish_reason(runtime: Any, calls: list[dict[str, Any]]) -> str:
-    if calls:
-        return "tool_calls"
-    if getattr(runtime, "_hit_limit", False):
-        return "length"
-    return "stop"
 
 
 def _usage(prompt_tokens: int, completion_tokens: int) -> dict[str, Any]:

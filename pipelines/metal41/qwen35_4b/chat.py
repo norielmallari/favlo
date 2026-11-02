@@ -1,4 +1,4 @@
-"""Responses generation shell. Chat Completions translates into this path."""
+"""Responses generation shell."""
 
 from __future__ import annotations
 
@@ -16,14 +16,12 @@ from tokenizers import Tokenizer
 from favlo.language_pipeline import LanguagePipeline
 from favlo.responses import (
     RequestError,
-    chat_to_responses,
     format_instruction,
     function_tools,
     new_id,
     prepare_request,
     remember,
     response_object,
-    response_to_chat,
     template_messages,
     usage_object,
     web_search_context,
@@ -143,45 +141,6 @@ def _last_user_index(messages: list[dict[str, Any]]) -> int:
     return last
 
 
-def _attach_chat_reasoning(messages: Any, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Put each chat ``reasoning_content`` back in front of that assistant turn."""
-    if not isinstance(messages, list):
-        return items
-    attached: list[dict[str, Any]] = []
-    cursor = 0
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        role = message.get("role")
-        if role in ("system", "developer"):
-            continue
-        if role != "assistant":
-            if cursor < len(items):
-                attached.append(items[cursor])
-                cursor += 1
-            continue
-        reasoning = message.get("reasoning_content")
-        if isinstance(reasoning, str) and reasoning.strip():
-            attached.append(
-                {
-                    "type": "reasoning",
-                    "content": [{"type": "reasoning_text", "text": reasoning}],
-                }
-            )
-        calls = message.get("tool_calls")
-        if isinstance(calls, list):
-            for _call in calls:
-                if cursor < len(items):
-                    attached.append(items[cursor])
-                    cursor += 1
-        if message.get("content"):
-            if cursor < len(items):
-                attached.append(items[cursor])
-                cursor += 1
-    attached.extend(items[cursor:])
-    return attached
-
-
 def _template_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Qwen3.5's template walks ``arguments`` with ``|items``, so keep a mapping."""
     shaped: list[dict[str, Any]] = []
@@ -274,7 +233,9 @@ def _coerce(value: str) -> Any:
         return value
 
 
-class _Hooks(LanguagePipeline):
+class Pipeline(LanguagePipeline):
+    """One Responses generation for this package."""
+
     def on_open(self, runtime: Any, reply: Any, selection: Any) -> None:
         del selection
         runtime._halted = False
@@ -283,9 +244,7 @@ class _Hooks(LanguagePipeline):
     def client_closed(self, exc: OSError) -> bool:
         return str(exc) == "client closed"
 
-
-class _ChatCompletions(_Hooks):
-    def complete(
+    def handle_responses(
         self,
         reply: Any,
         runtime: Any,
@@ -295,203 +254,10 @@ class _ChatCompletions(_Hooks):
         state: dict[str, Any],
     ) -> None:
         del args
-        try:
-            translated = chat_to_responses(body)
-        except RequestError as exc:
-            reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
-            return
-        if isinstance(body.get("reasoning"), dict) and "reasoning" not in translated:
-            translated["reasoning"] = body["reasoning"]
-        if body.get("enable_thinking") is not None and "reasoning" not in translated:
-            translated["reasoning"] = {
-                "effort": "medium" if body["enable_thinking"] else "none"
-            }
-        if "stop" in body and "stop" not in translated:
-            translated["stop"] = body["stop"]
-        raw_input = translated.get("input")
-        if isinstance(raw_input, list):
-            translated["input"] = _attach_chat_reasoning(body.get("messages"), raw_input)
-        _respond(ChatWire(reply), runtime, translated, selection, state)
+        _respond(reply, runtime, body, selection, state)
 
 
-class _Responses(_Hooks):
-    def complete(
-        self,
-        reply: Any,
-        runtime: Any,
-        body: dict[str, Any],
-        selection: Any,
-        args: Any,
-        state: dict[str, Any],
-    ) -> None:
-        del args
-        _respond(ResponseWire(reply), runtime, body, selection, state)
-
-
-handle_chat = _ChatCompletions()
-handle_responses = _Responses()
-
-
-class ChatWire:
-    """Writes a Response as Chat Completions chunks."""
-
-    responses_wire = True
-
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
-        self.model_id = getattr(inner, "model_id", "")
-        self._created = int(time.time())
-        self._calls = 0
-
-    def stopped(self) -> bool:
-        return bool(self._inner.stopped())
-
-    def begin_events(self) -> None:
-        self._inner.begin_events()
-
-    def done(self) -> None:
-        self._inner.done()
-
-    def json(self, status: int, payload: dict[str, Any]) -> None:
-        if payload.get("object") != "response":
-            self._inner.json(status, payload)
-            return
-        extra = payload.pop("_chat_usage", None)
-        chat = response_to_chat(payload, None)
-        if isinstance(extra, dict):
-            usage = chat.setdefault("usage", {})
-            usage.update(extra)
-        self.model_id = payload.get("model") or self.model_id
-        chat["model"] = self.model_id
-        self._inner.json(status, chat)
-
-    def event(self, payload: dict[str, Any]) -> None:
-        kind = payload.get("type")
-        if kind == "response.created":
-            self._send([{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}])
-            return
-        if kind == "response.reasoning_text.delta":
-            delta = payload.get("delta") or ""
-            if delta:
-                self._send(
-                    [
-                        {
-                            "index": 0,
-                            "delta": {"reasoning": delta, "reasoning_content": delta},
-                            "finish_reason": None,
-                        }
-                    ]
-                )
-            return
-        if kind == "response.output_text.delta":
-            self._send(
-                [
-                    {
-                        "index": 0,
-                        "delta": {"content": payload.get("delta") or ""},
-                        "finish_reason": None,
-                    }
-                ]
-            )
-            return
-        if kind == "response.output_item.done":
-            item = payload.get("item")
-            if isinstance(item, dict) and item.get("type") == "function_call":
-                self._send(
-                    [
-                        {
-                            "index": 0,
-                            "delta": {
-                                "tool_calls": [
-                                    {
-                                        "index": self._calls,
-                                        "id": item.get("call_id"),
-                                        "type": "function",
-                                        "function": {
-                                            "name": item.get("name") or "",
-                                            "arguments": item.get("arguments") or "{}",
-                                        },
-                                    }
-                                ]
-                            },
-                            "finish_reason": None,
-                        }
-                    ]
-                )
-                self._calls += 1
-            return
-        if kind == "response.completed":
-            response = payload.get("response")
-            if not isinstance(response, dict):
-                return
-            extra = response.pop("_chat_usage", None)
-            calls = any(
-                isinstance(item, dict) and item.get("type") == "function_call"
-                for item in response.get("output") or []
-            )
-            reason = "tool_calls" if calls else _chat_reason(response)
-            self._send([{"index": 0, "delta": {}, "finish_reason": reason}])
-            usage = extra if isinstance(extra, dict) else {}
-            self._inner.event(_frame(self, [], self._created, usage))
-
-    def _send(self, choices: list[dict[str, Any]]) -> None:
-        self._inner.event(_frame(self, choices, self._created))
-
-
-class ResponseWire:
-    responses_wire = True
-
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
-        self.model_id = getattr(inner, "model_id", "")
-
-    def stopped(self) -> bool:
-        return bool(self._inner.stopped())
-
-    def begin_events(self) -> None:
-        self._inner.begin_events()
-
-    def done(self) -> None:
-        return
-
-    def json(self, status: int, payload: dict[str, Any]) -> None:
-        if isinstance(payload, dict):
-            payload.pop("_chat_usage", None)
-        self._inner.json(status, payload)
-
-    def event(self, payload: dict[str, Any]) -> None:
-        if payload.get("type") == "response.completed":
-            response = payload.get("response")
-            if isinstance(response, dict):
-                response.pop("_chat_usage", None)
-        self._inner.event(payload)
-
-
-def _frame(
-    wire: ChatWire,
-    choices: list[dict[str, Any]],
-    created: int,
-    usage: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "id": "chatcmpl-favlo",
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": wire.model_id,
-        "choices": choices,
-    }
-    if usage is not None:
-        payload["usage"] = usage
-    return payload
-
-
-def _chat_reason(response: dict[str, Any]) -> str:
-    details = response.get("incomplete_details")
-    if isinstance(details, dict) and details.get("reason") == "max_output_tokens":
-        return "length"
-    if response.get("status") == "incomplete":
-        return "length"
-    return "stop"
+handle_responses = Pipeline()
 
 
 def _request_effort(body: dict[str, Any]) -> str | None:

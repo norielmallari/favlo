@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from spark_x26_1_7b.chat import handle_chat, handle_responses
+from spark_x26_1_7b.chat import handle_responses
 from spark_x26_1_7b.forward import SparkRuntime
 
 
@@ -30,4 +30,4 @@ def open_runtime(
     )
 
 
-__all__ = ["handle_chat", "handle_responses", "open_runtime"]
+__all__ = ["handle_responses", "open_runtime"]

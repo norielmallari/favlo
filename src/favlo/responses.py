@@ -48,7 +48,13 @@ def new_id(prefix: str) -> str:
 
 
 def chat_to_responses(body: dict[str, Any]) -> dict[str, Any]:
-    """One Chat Completions body as a Responses request."""
+    """One Chat Completions body as a Responses request.
+
+    The translation is the thin wrapper: messages become input items (including
+    ``reasoning_content`` as a reasoning item), sampling fields map onto the
+    Responses body, and generation runs the Responses path. The Response is
+    written back as a chat completion by the pipeline wire.
+    """
     count = body.get("n", 1)
     if count not in (None, 1):
         raise RequestError("n greater than 1 is rejected")
@@ -61,8 +67,12 @@ def chat_to_responses(body: dict[str, Any]) -> dict[str, Any]:
     if instructions:
         translated["instructions"] = instructions
     effort = _chat_effort(body)
+    if effort is None:
+        effort = _effort(body.get("reasoning"))
     if effort is not None:
         translated["reasoning"] = {"effort": effort}
+    elif isinstance(body.get("reasoning"), dict):
+        translated["reasoning"] = body["reasoning"]
     limit = body.get("max_completion_tokens", body.get("max_tokens"))
     if limit is not None:
         translated["max_output_tokens"] = int(limit)
@@ -72,6 +82,8 @@ def chat_to_responses(body: dict[str, Any]) -> dict[str, Any]:
         translated["top_p"] = body["top_p"]
     if "store" in body:
         translated["store"] = body["store"]
+    if "preserve_thinking" in body:
+        translated["preserve_thinking"] = body["preserve_thinking"]
     tools = _chat_tools(body.get("tools"))
     search = body.get("web_search_options")
     if isinstance(search, dict):
@@ -84,7 +96,7 @@ def chat_to_responses(body: dict[str, Any]) -> dict[str, Any]:
     formatted = _chat_format(body.get("response_format"))
     if formatted is not None:
         translated["text"] = {"format": formatted}
-    for name in ("metadata", "user", "service_tier"):
+    for name in ("metadata", "user", "service_tier", "stop"):
         if name in body:
             translated[name] = body[name]
     for source, target in (
@@ -99,6 +111,8 @@ def chat_to_responses(body: dict[str, Any]) -> dict[str, Any]:
             translated["favlo:mtp"] = kwargs["mtp"]
         if "mtp_depth" in kwargs and "favlo:mtp_depth" not in translated:
             translated["favlo:mtp_depth"] = kwargs["mtp_depth"]
+        if "preserve_thinking" in kwargs and "preserve_thinking" not in translated:
+            translated["preserve_thinking"] = kwargs["preserve_thinking"]
     return translated
 
 
@@ -442,6 +456,7 @@ def response_to_chat(payload: dict[str, Any], timings: dict[str, Any] | None = N
     message: dict[str, Any] = {"role": "assistant", "content": text}
     if reasoning:
         message["reasoning_content"] = reasoning
+        message["reasoning"] = reasoning
     if calls:
         message["tool_calls"] = calls
     reason = _chat_finish(payload, bool(calls))
@@ -454,6 +469,173 @@ def response_to_chat(payload: dict[str, Any], timings: dict[str, Any] | None = N
         "choices": [{"index": 0, "message": message, "finish_reason": reason}],
         "usage": usage,
     }
+
+
+class ChatWire:
+    """Listener wire: Response events and JSON as Chat Completions."""
+
+    responses_wire = True
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.model_id = getattr(inner, "model_id", "")
+        self._created = int(time.time())
+        self._calls = 0
+
+    def stopped(self) -> bool:
+        return bool(self._inner.stopped())
+
+    def begin_events(self) -> None:
+        self._inner.begin_events()
+
+    def done(self) -> None:
+        self._inner.done()
+
+    def json(self, status: int, payload: dict[str, Any]) -> None:
+        if payload.get("object") != "response":
+            self._inner.json(status, payload)
+            return
+        extra = payload.pop("_chat_usage", None)
+        chat = response_to_chat(payload, None)
+        if isinstance(extra, dict):
+            usage = chat.setdefault("usage", {})
+            if isinstance(usage, dict):
+                usage.update(extra)
+            else:
+                chat["usage"] = extra
+        self.model_id = payload.get("model") or self.model_id
+        chat["model"] = self.model_id
+        self._inner.json(status, chat)
+
+    def event(self, payload: dict[str, Any]) -> None:
+        kind = payload.get("type")
+        if kind == "response.created":
+            self._send([{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}])
+            return
+        if kind == "response.reasoning_text.delta":
+            delta = payload.get("delta") or ""
+            if str(delta).strip():
+                self._send(
+                    [
+                        {
+                            "index": 0,
+                            "delta": {"reasoning": delta, "reasoning_content": delta},
+                            "finish_reason": None,
+                        }
+                    ]
+                )
+            return
+        if kind == "response.output_text.delta":
+            self._send(
+                [
+                    {
+                        "index": 0,
+                        "delta": {"content": payload.get("delta") or ""},
+                        "finish_reason": None,
+                    }
+                ]
+            )
+            return
+        if kind == "response.output_item.done":
+            item = payload.get("item")
+            if isinstance(item, dict) and item.get("type") == "function_call":
+                self._send(
+                    [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": self._calls,
+                                        "id": item.get("call_id"),
+                                        "type": "function",
+                                        "function": {
+                                            "name": item.get("name") or "",
+                                            "arguments": item.get("arguments") or "{}",
+                                        },
+                                    }
+                                ]
+                            },
+                            "finish_reason": None,
+                        }
+                    ]
+                )
+                self._calls += 1
+            return
+        if kind == "response.completed":
+            response = payload.get("response")
+            if not isinstance(response, dict):
+                return
+            extra = response.pop("_chat_usage", None)
+            calls = any(
+                isinstance(item, dict) and item.get("type") == "function_call"
+                for item in response.get("output") or []
+            )
+            reason = "tool_calls" if calls else _wire_chat_reason(response)
+            self._send([{"index": 0, "delta": {}, "finish_reason": reason}])
+            usage = extra if isinstance(extra, dict) else {}
+            self._inner.event(_chat_chunk(self, [], self._created, usage))
+
+    def _send(self, choices: list[dict[str, Any]]) -> None:
+        self._inner.event(_chat_chunk(self, choices, self._created))
+
+
+class ResponseWire:
+    """Listener wire: Response events without a Chat Completions done marker."""
+
+    responses_wire = True
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.model_id = getattr(inner, "model_id", "")
+
+    def stopped(self) -> bool:
+        return bool(self._inner.stopped())
+
+    def begin_events(self) -> None:
+        self._inner.begin_events()
+
+    def done(self) -> None:
+        return
+
+    def json(self, status: int, payload: dict[str, Any]) -> None:
+        if isinstance(payload, dict):
+            payload.pop("_chat_usage", None)
+        self._inner.json(status, payload)
+
+    def event(self, payload: dict[str, Any]) -> None:
+        if payload.get("type") == "response.completed":
+            response = payload.get("response")
+            if isinstance(response, dict):
+                response.pop("_chat_usage", None)
+        self._inner.event(payload)
+
+
+def _chat_chunk(
+    wire: Any,
+    choices: list[dict[str, Any]],
+    created: int,
+    usage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": "chatcmpl-favlo",
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": getattr(wire, "model_id", "") or "",
+        "choices": choices,
+    }
+    if usage is not None:
+        payload["usage"] = usage
+    return payload
+
+
+def _wire_chat_reason(response: dict[str, Any]) -> str:
+    details = response.get("incomplete_details")
+    if isinstance(details, dict) and details.get("reason") == "max_output_tokens":
+        return "length"
+    if response.get("status") == "incomplete":
+        return "length"
+    return "stop"
 
 
 def _chat_finish(payload: dict[str, Any], calls: bool) -> str:
@@ -551,6 +733,14 @@ def _chat_items(messages: Any) -> tuple[str, list[dict[str, Any]]]:
             )
             continue
         if role == "assistant":
+            reasoning = _chat_reasoning(message)
+            if reasoning is not None:
+                items.append(
+                    {
+                        "type": "reasoning",
+                        "content": [{"type": "reasoning_text", "text": reasoning}],
+                    }
+                )
             for call in message.get("tool_calls") or []:
                 if not isinstance(call, dict):
                     continue
@@ -569,6 +759,15 @@ def _chat_items(messages: Any) -> tuple[str, list[dict[str, Any]]]:
             continue
         items.append({"type": "message", "role": role or "user", "content": _content_parts(message.get("content"))})
     return "\n\n".join(instructions), items
+
+
+def _chat_reasoning(message: dict[str, Any]) -> str | None:
+    """Assistant ``reasoning_content`` (or ``reasoning``) for a Responses item."""
+    for name in ("reasoning_content", "reasoning"):
+        text = message.get(name)
+        if isinstance(text, str) and text.strip():
+            return text
+    return None
 
 
 def _content_parts(content: Any) -> Any:

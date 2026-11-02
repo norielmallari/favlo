@@ -179,7 +179,6 @@ def _halt(runtime: Any) -> None:
 pipelines = Pipelines()
 
 _HANDLERS = {
-    "chat": "handle_chat",
     "responses": "handle_responses",
     "embed": "handle_embed",
     "image": "handle_image",
@@ -394,7 +393,7 @@ def _require_kind(kind: str, selection: Any, module: Any) -> None:
     raise LookupError(message)
 
 
-def bind_request(body: dict[str, Any], state: dict[str, Any], args: Any, kind: str = "chat") -> Any:
+def bind_request(body: dict[str, Any], state: dict[str, Any], args: Any, kind: str = "responses") -> Any:
     """Resolve the model and open the runtime that serves ``kind``."""
     if not getattr(args, "lazy", False):
         return None

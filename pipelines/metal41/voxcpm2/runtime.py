@@ -7,7 +7,7 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
-from favlo.media_pipeline import MediaCall, MediaPaused, MediaPipeline, MediaRequestError
+from favlo.media_pipeline import MediaCall, MediaPaused, MediaRequestError, VoicePipeline
 from voxcpm2.audio import encode_wav
 from voxcpm2.config import ModelConfig, load_config
 from voxcpm2.metal import Session
@@ -188,14 +188,8 @@ class VoiceRequest(NamedTuple):
     output_format: str
 
 
-class Pipeline(MediaPipeline):
+class Pipeline(VoicePipeline):
     """VoxCPM2's listener contract. Speech stays in the runtime."""
-
-    kind = "voice"
-    seeds = False
-    id_prefix = "voice_"
-    object_name = "audio.voice"
-    table_name = "voice"
 
     def parse(self, body: dict[str, Any]) -> VoiceRequest:
         text = body.get("input")

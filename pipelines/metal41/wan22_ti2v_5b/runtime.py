@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from favlo.cli import repo_root
-from favlo.media_pipeline import MediaCall, MediaPaused, MediaPipeline
+from favlo.media_pipeline import MediaCall, MediaPaused, VideoPipeline
 from favlo.memory import memory
 from favlo.registry import models_dir
 from wan22_ti2v_5b.clip import Clip, ClipHold
@@ -93,13 +93,9 @@ def open_runtime(
     return Runtime(record, owner_name, DiT(record, gpu), text, vae, gpu)
 
 
-class Pipeline(MediaPipeline):
+class Pipeline(VideoPipeline):
     """Wan TI2V's listener contract. The clip sampler stays in this package."""
 
-    kind = "video"
-    id_prefix = "video_"
-    object_name = "video"
-    table_name = "videos"
     id_hex = 4
 
     def parse(self, body: dict) -> VideoRequest:

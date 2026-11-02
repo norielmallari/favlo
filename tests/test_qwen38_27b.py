@@ -366,7 +366,7 @@ def test_responses_body_is_the_generation_path(monkeypatch: pytest.MonkeyPatch) 
             return [7]
 
     reply = MemoryReply("qwen38-27b")
-    handle_responses.complete(
+    handle_responses.handle_responses(
         reply,
         Runtime(),
         {
@@ -394,7 +394,7 @@ def test_responses_body_is_the_generation_path(monkeypatch: pytest.MonkeyPatch) 
 
     open_think = MemoryReply("qwen38-27b")
     monkeypatch.setattr("qwen38_27b.chat.decode_text", lambda _root, _ids: "still planning")
-    handle_responses.complete(
+    handle_responses.handle_responses(
         open_think,
         Runtime(),
         {"model": "qwen38-27b", "input": "carrots", "reasoning": {"effort": "low"}},
@@ -406,7 +406,7 @@ def test_responses_body_is_the_generation_path(monkeypatch: pytest.MonkeyPatch) 
     assert open_think.body["output"][0]["content"][0]["text"] == "still planning"
 
     forced = MemoryReply("qwen38-27b")
-    handle_responses.complete(
+    handle_responses.handle_responses(
         forced,
         Runtime(),
         {
@@ -423,7 +423,7 @@ def test_responses_body_is_the_generation_path(monkeypatch: pytest.MonkeyPatch) 
     assert rendered[-1][0] is False
 
     short = MemoryReply("qwen38-27b")
-    handle_responses.complete(
+    handle_responses.handle_responses(
         short,
         Runtime(),
         {"model": "qwen38-27b", "input": "carrots", "max_output_tokens": 8},
@@ -434,7 +434,7 @@ def test_responses_body_is_the_generation_path(monkeypatch: pytest.MonkeyPatch) 
     assert short.status == 400
 
     quiet = MemoryReply("qwen38-27b")
-    handle_responses.complete(
+    handle_responses.handle_responses(
         quiet,
         Runtime(),
         {
@@ -588,11 +588,11 @@ def test_preserve_thinking_defaults_on_and_either_field_overrides() -> None:
         preserve_thinking({"preserve_thinking": "false"})
 
 
-def test_chat_preserve_thinking_false_reaches_the_template(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_preserve_thinking_false_reaches_the_template(monkeypatch: pytest.MonkeyPatch) -> None:
     from pathlib import Path
 
     from favlo.reply import MemoryReply
-    from qwen38_27b.chat import handle_chat
+    from qwen38_27b.chat import handle_responses
 
     seen: dict[str, object] = {}
 
@@ -620,17 +620,21 @@ def test_chat_preserve_thinking_false_reaches_the_template(monkeypatch: pytest.M
             return [7]
 
     reply = MemoryReply("qwen38-27b")
-    handle_chat.complete(
+    handle_responses.handle_responses(
         reply,
         Runtime(),
         {
             "model": "qwen38-27b",
-            "messages": [
-                {"role": "user", "content": "one"},
-                {"role": "assistant", "content": "a", "reasoning_content": "old"},
-                {"role": "user", "content": "two"},
+            "input": [
+                {"type": "message", "role": "user", "content": "one"},
+                {
+                    "type": "reasoning",
+                    "content": [{"type": "reasoning_text", "text": "old"}],
+                },
+                {"type": "message", "role": "assistant", "content": "a"},
+                {"type": "message", "role": "user", "content": "two"},
             ],
-            "enable_thinking": False,
+            "reasoning": {"effort": "none"},
             "preserve_thinking": False,
         },
         None,
@@ -641,14 +645,14 @@ def test_chat_preserve_thinking_false_reaches_the_template(monkeypatch: pytest.M
     assert seen["preserve"] is False
 
     kept = MemoryReply("qwen38-27b")
-    handle_chat.complete(
+    handle_responses.handle_responses(
         kept,
         Runtime(),
         {
             "model": "qwen38-27b",
-            "messages": [{"role": "user", "content": "two"}],
-            "enable_thinking": False,
-            "chat_template_kwargs": {"preserve_thinking": True},
+            "input": "two",
+            "reasoning": {"effort": "none"},
+            "preserve_thinking": True,
         },
         None,
         None,
@@ -1176,8 +1180,8 @@ def test_stream_decodes_off_the_sample_thread() -> None:
     assert decoded_on[0].name == "favlo-stream"
     assert any(
         isinstance(payload, dict)
-        and payload.get("choices")
-        and payload["choices"][0]["delta"].get("content") == "a"
+        and payload.get("type") == "response.output_text.delta"
+        and payload.get("delta") == "a"
         for payload in reply.events
     )
 
@@ -1185,6 +1189,8 @@ def test_stream_decodes_off_the_sample_thread() -> None:
 def test_openai_chunk_streams_one_delta_per_token() -> None:
     openai = pytest.importorskip("openai")
     from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
+
+    from favlo.responses import ChatWire
 
     class _Runtime:
         _hit_limit = False
@@ -1210,11 +1216,12 @@ def test_openai_chunk_streams_one_delta_per_token() -> None:
 
     from favlo.reply import MemoryReply
 
-    reply = MemoryReply("qwen38-27b")
+    inner = MemoryReply("qwen38-27b")
+    reply = ChatWire(inner)
     _stream(reply, _Runtime(), [9, 9], [], False, 8, True)
-    assert b"data: [DONE]\n\n" in reply.sent
+    assert b"data: [DONE]\n\n" in inner.sent
     seen: list[tuple[str, object]] = []
-    for payload in reply.events:
+    for payload in inner.events:
         chunk = ChatCompletionChunk.model_validate(payload)
         assert chunk.id == "chatcmpl-favlo"
         assert chunk.object == "chat.completion.chunk"
@@ -1246,10 +1253,7 @@ def test_openai_chunk_streams_one_delta_per_token() -> None:
 
 
 def test_completion_usage_reports_the_served_window() -> None:
-    pytest.importorskip("openai")
-    from openai.types.chat import ChatCompletion
-
-    from qwen38_27b.chat import _completion
+    from qwen38_27b.chat import _usage
 
     runtime = SimpleNamespace(
         _limit=131072,
@@ -1258,8 +1262,7 @@ def test_completion_usage_reports_the_served_window() -> None:
         _prefill_seconds=2.0,
         _decode_seconds=4.0,
     )
-    body = _completion("ok", 100, 4, "stop", [], "", runtime, "example-model")
-    usage = body["usage"]
+    usage = _usage(runtime, 100, 4)
     assert usage["prompt_tokens"] == 100
     assert usage["completion_tokens"] == 4
     assert usage["total_tokens"] == 104
@@ -1269,13 +1272,6 @@ def test_completion_usage_reports_the_served_window() -> None:
     assert usage["timings"]["prompt_per_second"] == 44.0
     assert usage["timings"]["predicted_n"] == 4
     assert usage["timings"]["predicted_per_second"] == 1.0
-    parsed = ChatCompletion.model_validate(body)
-    assert parsed.usage is not None
-    assert parsed.usage.prompt_tokens == 100
-    assert parsed.usage.prompt_tokens_details is not None
-    assert parsed.usage.prompt_tokens_details.cached_tokens == 12
-    extra = parsed.usage.model_extra if isinstance(parsed.usage.model_extra, dict) else {}
-    assert extra.get("context_length") == 131072
 
 
 def test_usage_rate_is_zero_when_the_clock_is_zero() -> None:
@@ -1373,6 +1369,8 @@ def test_openai_tool_call_delta_carries_an_index() -> None:
     pytest.importorskip("openai")
     from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 
+    from favlo.responses import ChatWire
+
     class _Runtime:
         _hit_limit = False
         _cached_tokens = 0
@@ -1392,11 +1390,12 @@ def test_openai_tool_call_delta_carries_an_index() -> None:
 
     from favlo.reply import MemoryReply
 
-    reply = MemoryReply("qwen38-27b")
+    inner = MemoryReply("qwen38-27b")
+    reply = ChatWire(inner)
     _stream(reply, _Runtime(), [9], [], False, 8, False)
     calls = [
         chunk.choices[0].delta.tool_calls
-        for payload in reply.events
+        for payload in inner.events
         if (chunk := ChatCompletionChunk.model_validate(payload)).choices
         and chunk.choices[0].delta.tool_calls
     ]

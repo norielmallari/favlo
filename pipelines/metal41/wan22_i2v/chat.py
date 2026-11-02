@@ -8,7 +8,7 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
-from favlo.media_pipeline import MediaCall, MediaPipeline, MediaRequestError
+from favlo.media_pipeline import MediaCall, MediaRequestError, VideoPipeline
 from favlo.videos import reported_quality, store_source, sweep_videos
 from wan22_i2v.hold import ClipHold, ClipPaused
 from wan22_i2v.png import decode_png, resize_rgb
@@ -57,13 +57,8 @@ def handle_chat(
     _reject(reply, "wan22-i2v generates video at POST /v1/videos", None)
 
 
-class Pipeline(MediaPipeline):
+class Pipeline(VideoPipeline):
     """Wan I2V's listener contract. The DiT stays in the runtime."""
-
-    kind = "video"
-    id_prefix = "video_"
-    object_name = "video"
-    table_name = "videos"
 
     def parse(self, body: dict[str, Any]) -> VideoFields:
         return video_fields(body)

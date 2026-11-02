@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from qwen35_4b.runtime import handle_chat, handle_responses, open_runtime
+from qwen35_4b.runtime import handle_responses, open_runtime
 
 
 def __getattr__(name: str) -> Any:
@@ -16,4 +16,4 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(message)
 
 
-__all__ = ["handle_chat", "handle_responses", "main", "open_runtime"]
+__all__ = ["handle_responses", "main", "open_runtime"]

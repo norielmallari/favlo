@@ -24,7 +24,6 @@ from typing import Any
 
 _HOLDS = ("image_hold", "video_hold", "music_hold", "voice_hold")
 _KINDS = {
-    "chat": "handle_chat",
     "responses": "handle_responses",
     "embed": "handle_embed",
     "image": "handle_image",

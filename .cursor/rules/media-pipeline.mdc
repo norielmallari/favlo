@@ -6,15 +6,15 @@ alwaysApply: false
 
 # Media pipelines
 
-A served image, video, music, or voice pipeline inherits `MediaPipeline` in `src/favlo/media_pipeline.py`. `MediaPipeline` extends `Pipeline`. A language model, an embedding model, and a failed pipeline do not inherit `MediaPipeline`. The class is the listener seam. It does not run a forward, name stages, acquire a scheduler ticket, or free device memory.
+`MediaPipeline` in `src/favlo/media_pipeline.py` extends `Pipeline` and owns the shared job / pause / pack shell. A language model, an embedding model, and a failed pipeline do not inherit it. Served packages inherit a kind class: `ImagePipeline`, `VideoPipeline`, `MusicPipeline`, or `VoicePipeline`. Those classes fix `kind`, `id_prefix`, `object_name`, and table/hold keys. The class does not run a forward, name stages, acquire a scheduler ticket, or free device memory.
 
-Bind `handle_<kind> = Pipeline()`. `__call__` is `handle`. The subclass implements `parse`, `generate`, and `pack`. The checkpoint type stays in the pipeline package. `ClipPaused` and `ImagePaused` subclass `MediaPaused`.
+Bind `handle_<kind> = Pipeline()` where `Pipeline` subclasses the matching kind class. `__call__` is `handle`. The concrete class implements `parse`, `generate`, and `pack`. Do not restate kind constants the kind class already sets. The checkpoint type stays in the pipeline package. `ClipPaused` and `ImagePaused` subclass `MediaPaused`.
 
 `generate` calls `stop()` at a stage boundary, after the Metal command already submitted has finished. Preempt raises `MediaPaused("preempt", hold)` with the host values the next stage needs. Cancel raises `MediaPaused("cancel", None)`. Device buffers do not go in the hold. They do not survive `close`. Resume calls `generate` again with that hold and the same job id.
 
 Clear a hold with `state[key] = None`. Do not `pop` the key. The exported keys are `image_hold`, `video_hold`, `music_hold`, and `voice_hold`, the same tuple in `pipeline_worker.py` and `pipelines.py`. A new kind adds its key to both tuples in that change.
 
-`parse` or `generate` raises `MediaRequestError` for a bad body. That is a 400. Any other exception fails the job with `error` `{"message", "type"}`. `describe` copies the job keys MCP already reads (`size`, `seconds`, `response_format`). `reply.json` runs once with the job before `generate`. Call it again only when `pack` or `working` returns a different dict. A new abstract method updates every subclass in that same change. One pipeline note records that pipeline's checkpoint. Do not describe another pipeline there.
+`parse` or `generate` raises `MediaRequestError` for a bad body. That is a 400. Any other exception fails the job with `error` `{"message", "type"}`. `describe` copies the job keys MCP already reads (`size`, `seconds`, `response_format`). `reply.json` runs once with the job before `generate`. Call it again only when `pack` or `working` returns a different dict. A new abstract method on `MediaPipeline` updates every served media package in that same change. A new abstract method on one kind class updates only that kind's packages. One pipeline note records that pipeline's checkpoint. Do not describe another pipeline there.
 
 ## Memory
 

@@ -1,5 +1,5 @@
 ---
-description: How a served language model implements LanguagePipeline. Generation follows the OpenAI Responses object. Chat Completions is the translation. NumPy stays off the hot serving path. A prompt up to the configured maximum is accepted. The context working set sizes from the serve ledger, with no private cap. Streaming is a queue off the GPU thread. Progress uses favlo.console begin/end/note, and those writes stay off the hot path. Weights load from SSD into one device buffer. A GPU test uses smoke_lock run. The language-pipeline harness waits and does not take the lock.
+description: How a served language model implements LanguagePipeline. Generation is Responses only. Chat Completions is a listener wrapper over that path, not a pipeline handler. NumPy stays off the hot serving path. A prompt up to the configured maximum is accepted. The context working set sizes from the serve ledger, with no private cap. Streaming is a queue off the GPU thread. CLI progress stores the listener console, emits prompt/cache notes, begins load/prefill/decode, and ticks progress.done on each load read, prefill chunk/layer, and kept decode token. Writes stay off the hot path. Weights load from SSD into one device buffer. A GPU test uses smoke_lock run. The language-pipeline harness waits and does not take the lock.
 globs: src/favlo/pipeline.py,src/favlo/language_pipeline.py,harness/language_pipeline.py,tests/test_language_pipeline.py,pipelines/metal41/qwen36_35b_a3b/**,pipelines/metal41/qwen38_27b/**,pipelines/parked/qwen38_flash_next/**,pipelines/metal41/gemma4_26b_a4b/**,pipelines/parked/spark_x26_1_7b/**,pipelines/parked/spark-x26-1-7b.py,pipelines/metal41/qwen35_4b/**,pipelines/metal41/qwen35-4b.py,docs/qwen36-35b-a3b/**,docs/qwen38-27b/**,docs/qwen38-flash-next/**,docs/gemma4-26b-a4b/**,docs/spark-x26-1-7b/**,docs/qwen35-4b/**
 alwaysApply: false
 ---
@@ -8,17 +8,25 @@ alwaysApply: false
 
 A served language model inherits `LanguagePipeline` in `src/favlo/language_pipeline.py`. That class extends `Pipeline`. A media pipeline does not inherit it. A failed pipeline does not. The class is the disconnect shell around one response. It does not encode a prompt, sample a token, or parse a tool call.
 
-Bind `handle_responses = Pipeline()`. `complete` reads a Responses body and writes a Response, including its sampler and its stream. Bind `handle_chat = Pipeline()` to translate a Chat Completions body into that request and translate the Response back. `RequestClosed` subclasses `ClientClosed`.
+One concrete class per package: `class Pipeline(LanguagePipeline)`. Implement abstract `handle_responses`. That method reads a Responses body and writes a Response, including its sampler and its stream. Bind `handle_responses = Pipeline()`. The daemon calls that instance, which runs the disconnect shell and then the subclass method. Do not keep a `_Hooks` middle class or a package `handle_chat`. `RequestClosed` subclasses `ClientClosed`.
+
+## Chat Completions
+
+Pipelines implement the Responses API only. Do not bind `handle_chat`. Do not translate Chat Completions bodies, write `chat.completion` / `chat.completion.chunk` objects, or wrap the reply in `ChatWire` inside a pipeline. The listener owns that wrapper once: `POST /v1/chat/completions` runs `chat_to_responses`, dispatches the module's `handle_responses` instance, and `ChatWire` (or `ResponseWire` on `POST /v1/responses`) lives in `favlo.responses`.
+
+`POST /v1/responses` is the generation route. The pipeline's `handle_responses` method reads a Responses body and writes a Response. Another pipeline's chat, stream, or markup parser is not a reference. Read the OpenAI Responses fields and this model's own card.
+
+The fields below are the listener Chat Completions translation. `content` is the reply. It is null when the model only calls a tool. `tool_calls` are the calls, in the OpenAI function shape. `reasoning` is the trace when the model wrote one. `reasoning_content` is that same text. An empty thought is not that field. `finish_reason` is `stop`, `length`, or `tool_calls`. The reply fills `usage` with the OpenAI token fields and `max_prompt_tokens` before the body is encoded. A pipeline may set `cached_tokens`, `context_length`, and `max_prompt_tokens` on the Response (including `_chat_usage` for the wire). Missing standard fields are filled.
+
+`chat_to_responses` maps the chat body onto a Responses request (`reasoning_content` becomes a reasoning item, effort and `preserve_thinking` pass through), the daemon runs the same Responses instance, and `ChatWire` writes the Response back as a chat completion. Markers stay out of `content`. A call becomes `tool_calls`. An open trace stays `reasoning_content` and does not become the reply. A call that starts before the trace closes ends the trace. The marker strings belong to that model. They are not taken from a sibling pipeline. Do not drop `reasoning_content` on the way in: a missing reasoning item breaks the stored prefix when `preserve_thinking` is on.
+
+Wrong: `handle_chat` on a language pipeline, a Chat Completions encoder in the package, or a stream that emits `chat.completion.chunk` from the pipeline.
+
+Right: the pipeline writes Responses events and Response JSON; the listener wraps Chat Completions over that path.
 
 `on_open` is the work that already sits outside the try. qwen36 and qwen38-27b reset `_halted` and set `runtime._stop` there. Flash Next only calls `open_request` there. `prepare` is inside the outer try and outside the disconnect try. Only Flash Next uses it, for the tool fields and the sampler. `on_finish` keeps that pipeline's current order and always runs after `prepare`. Hooks are called directly. Do not swallow a hook exception.
 
 A new abstract method on `LanguagePipeline` updates every served language subclass in that same change. A new abstract method on `Pipeline` updates every subclass of every seam.
-
-`POST /v1/responses` is the generation route. The pipeline reads a Responses body and writes a Response. Another pipeline's chat, stream, or markup parser is not a reference. Read the OpenAI Responses fields and this model's own card. `POST /v1/chat/completions` translates into that request and translates the Response back into a Chat Completions object.
-
-The fields below are that translation. `content` is the reply. It is null when the model only calls a tool. `tool_calls` are the calls, in the OpenAI function shape. `reasoning` is the trace when the model wrote one. `reasoning_content` is that same text. An empty thought is not that field. `finish_reason` is `stop`, `length`, or `tool_calls`. The reply fills `usage` with the OpenAI token fields and `max_prompt_tokens` before the body is encoded. A pipeline may set `cached_tokens`, `context_length`, and `max_prompt_tokens`. Missing standard fields are filled.
-
-The Chat Completions translation converts the pipeline's markup into those fields before that object is written. Markers stay out of `content`. A call becomes `tool_calls`. An open trace stays `reasoning_content` and does not become the reply. A call that starts before the trace closes ends the trace. The marker strings belong to that model. They are not taken from a sibling pipeline.
 
 ## Variants
 
@@ -74,19 +82,25 @@ Wrong: the decode loop writes the event before the next GPU step.
 
 Right: the decode loop puts the token id on a queue, and a stream thread writes the event.
 
-Progress uses `favlo.console` only. The pipeline does not print its own status rows. Phases are `load`, `prefill`, and `decode` on the serve path (`download` and `quantize` on setup). Diagnostics go through `console.note` (or `format_note` when the console is absent). Canonical note topics are `prompt`, `cache`, `prefix_load`, `prefix_store`, `prefix_store_failed`, `mtp_depth`, `mtp`, `incoming`, `output`, and `context`. Pretty folds those into the daemon log. While a listener request is open, prefill and decode summaries wait and print as one durable line when the request closes.
+## Progress (CLI)
+
+Every served language pipeline keeps the pretty/plain CLI moving for the whole request. `open_runtime` stores the listener `console` on the runtime; load, generate, and close talk only through that object. Do not invent a second status channel. A local helper module is fine when it calls the same `favlo.console` API.
+
+Progress uses `favlo.console` only. The pipeline does not `print` its own status rows and does not write tok/s by hand. Phases are `load`, `prefill`, and `decode` on the serve path (`download` and `quantize` on setup). Required notes on every generate, in order: `prompt` (full prompt length), then `prefix_load` when a stored prefix was loaded, then `cache` (hit length). Optional notes are `prefix_store`, `prefix_store_failed`, `mtp_depth`, `mtp`, `incoming`, `output`, and `context`. Use `console.note` (or `format_note` when the console is absent). Pretty folds those into the daemon log. While a listener request is open, prefill and decode summaries wait and print as one durable line when the request closes. A zero-duration phase still closes with `format_rate` (rate 0).
 
 No progress write blocks the hot path. Prefill and decode store `progress.done` and return. Opening a phase, closing a phase, and a diagnostic note are enqueued. The console thread formats the line and writes it. The enqueue returns without waiting for that write. A slow pipe or a slow terminal does not stall the next GPU step. The decode thread does not join the console thread between kernels.
 
-Load: `begin("load", total=bytes, unit="bytes")` while the resident record (and any atlas) is read into device buffers. Advance `done` by each sequential read. End with a short loaded summary naming the record and the live context.
+Load: `begin("load", total=bytes, unit="bytes")` while the resident record (and any atlas) is read into device buffers. Advance `done` by each sequential read as bytes land. End with a short loaded summary naming the record and the live context. A silent load with a stuck bar is a bug.
 
-Prefill: `begin("prefill", total=uncached_tok, unit="tok")` after prefix align. Advance `done` as each chunk (and each layer of a chunk, when that pipeline reports per layer) finishes. The prefill clock starts at the uncached forward and ends when the first output token is sampled. The forward that produced that token's logits stays inside prefill. The prompt prefix write stays outside. End with `format_rate("prefill", uncached_tok, seconds)`.
+Prefill: after prefix align, when the uncached suffix length is greater than zero, `begin("prefill", total=uncached_tok, unit="tok")`. Do not open a prefill row for a full cache hit. Keep the row on the runtime so the chunk loop can reach it. Advance `done` as work finishes, not once at the end: after each chunk, and inside a multi-layer chunk as each finished layer lands (map finished layers onto token progress; do not wait for the whole suffix). Monotonic only; never move `done` backward. Cap at `total`. The prefill clock starts at the uncached forward and ends when the first output token is sampled. The forward that produced that token's logits stays inside prefill. The prompt prefix write stays outside. Close with `format_rate("prefill", uncached_tok, seconds)` on that first sample, then clear the stored row.
 
-Decode: after that first sample, `begin("decode", total=0, unit="tok")` when `console.live_decode` is true (pretty). An open-ended row uses a spinner. Set `progress.done` to the completion length after each kept token. The decode clock starts at that first sample and ends at the last. A send between samples stays inside decode. The last send and the finished-sequence prefix write stay outside. End with `format_rate("decode", completion_tok, seconds)`. On cancel or disconnect, end an open row with an empty summary.
+Decode: after that first sample, `begin("decode", total=0, unit="tok")` when `console.live_decode` is true (pretty). An open-ended row uses a spinner. Set `progress.done` to the completion length after each kept token on the decode/GPU path. The decode clock starts at that first sample and ends at the last. A send between samples stays inside decode. The last send and the finished-sequence prefix write stay outside. Close with `format_rate("decode", completion_tok, seconds)`. On cancel or disconnect, end every open row with an empty summary.
 
-Wrong: `print` a tok/s line from the forward, skip `begin`/`end`, advance the bar from the stream thread, or wait on a phase write before the next GPU step.
+A generate that opens load/prefill/decode but leaves `done` at 0 until `end`, or that only prints the close line, is unfinished. The live pretty bar and the plain ticks must move while kernels run.
 
-Right: the hot path stores `progress.done` and enqueues the phase open, the phase close, and the note. The console thread writes them. `format_rate` is the close string the harness parses.
+Wrong: `print` a tok/s line from the forward; skip `begin`/`end`; open prefill with `total=0` on a full hit; advance the bar only after the whole prefill or only from the stream thread; leave `console` unset on the runtime; wait on a phase write before the next GPU step; hand-roll a rate string the harness cannot parse.
+
+Right: store the listener `console` at open; emit `prompt` / `prefix_load` / `cache`; open load, prefill (when uncached > 0), and decode through `console.begin`; tick `progress.done` from the load reads, the prefill chunk/layer loop, and each kept decode token; close with `format_rate`. The console thread writes.
 
 NumPy stays off the hot serving path. Prefill, decode, routing, expert grouping, and sampling do not import it, build an array with it, or read a device buffer back through it. The sampled token id may come back as bytes. Checkpoint packing, prefix packing, and the kernel self-checks are not that path.
 
@@ -108,9 +122,9 @@ Right: one buffer, an 8 MiB read into that buffer, and `setBuffer:offset:` at th
 
 MAF and other clients pass those fields through. They do not scan for markup, close a trace, or copy reasoning into the reply. The chat client in `src/favlo/chat_client.py` is that pass-through. A harness does not add its own parser for markup.
 
-Wrong: a client that treats `reasoning_content` as `content`, a shared sampler in `LanguagePipeline`, or a chat path copied from another pipeline.
+Wrong: a client that treats `reasoning_content` as `content`, a chat adapter that drops `reasoning_content` when building Responses input, a shared sampler in `LanguagePipeline`, a chat path copied from another pipeline, or Chat Completions implemented in the pipeline.
 
-Right: the pipeline writes the Response from its own markup, the Chat Completions translation fills `content` and `tool_calls`, and the client stores those fields as returned.
+Right: the pipeline writes the Response from its own markup; the listener wraps Chat Completions over Responses (including historical reasoning); `ChatWire` fills `content` / `tool_calls` / `reasoning_content`; the client stores those fields as returned.
 
 After a change to this shell, run:
 
@@ -119,10 +133,10 @@ uv run pytest tests/test_language_pipeline.py
 uv run python -m harness.language_pipeline
 ```
 
-The harness is the one agent for the registry default chat model and `bge-m3-int8`. It does not take the machine lock. `harness.server` waits until no live pid holds `artifacts/pipeline-test.lock`, then uses one `favlo serve` on `127.0.0.1:8129`. Exit 0 means `check_embeddings` ran and every paraphrase cosine beat every cross-topic cosine. A kernel or quantize edit that leaves `complete`, the disconnect shell, and the reply alone does not run the harness.
+The harness is the one agent for the registry default chat model and `bge-m3-int8`. It does not take the machine lock. `harness.server` waits until no live pid holds `artifacts/pipeline-test.lock`, then uses one `favlo serve` on `127.0.0.1:8129`. Exit 0 means `check_embeddings` ran and every paraphrase cosine beat every cross-topic cosine. A kernel or quantize edit that leaves `handle_responses`, the disconnect shell, and the reply alone does not run the harness.
 
 A command that compiles shaders, loads a checkpoint, or starts its own serve uses `python -m favlo.smoke_lock run`. `python -m harness`, `python -m harness.coding`, and `python -m harness.worktree` take that lock and release it before they stop the private serve they started. They need port 8129 free. They do not attach to a listener someone else left running. Do not kill serve to free the GPU. Close during a live hold is 409.
 
 Wrong: a shared sampler in `LanguagePipeline`, or a second harness per language model.
 
-Right: `complete` raises `RequestClosed`, and the shell clears `runtime._stop`.
+Right: `handle_responses` raises `RequestClosed`, and the shell clears `runtime._stop`.

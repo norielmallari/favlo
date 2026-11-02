@@ -8,13 +8,9 @@ import pytest
 
 from favlo.responses import chat_to_responses, template_messages
 from gemma4_26b_a4b.chat import (
-    _carry_tool_thoughts,
-    _delta,
-    _finish_reason,
     _stop_strings,
     completion_fields,
     cut_stop,
-    openai_message,
     render_chat,
     reply_text,
 )
@@ -308,7 +304,6 @@ def test_a_plain_chat_thought_stays_out_of_the_prompt() -> None:
 def _rendered_chat(messages: list[dict[str, object]]) -> str:
     body = {"messages": messages, "tools": [_read_tool()]}
     translated = chat_to_responses(body)
-    _carry_tool_thoughts(messages, translated)
     prepared, _seen = template_messages(translated)
     return render_chat(prepared, True, tools=[_read_tool()])
 
@@ -343,28 +338,19 @@ def test_an_empty_thought_is_not_a_trace() -> None:
     text = '<|channel>thought\n<channel|><|tool_call>call:glob{pattern:"**/*.txt"}<tool_call|>'
     reasoning, content, calls = completion_fields(text)
     assert reasoning == ""
-    message = openai_message(reasoning, content, calls)
-    assert message["content"] is None
-    assert "reasoning" not in message
-    assert "reasoning_content" not in message
-    assert message["tool_calls"][0]["function"]["name"] == "glob"
-    assert _delta("reasoning", "\n") is None
+    assert content is None or content == ""
+    assert calls[0]["function"]["name"] == "glob"
 
 
-def test_a_thought_and_a_reply_are_openai_fields() -> None:
+def test_a_thought_and_a_reply_are_completion_fields() -> None:
     text = (
         "<|channel>thought\nLook at the notes.\n<channel|>"
         "The notes are short.\n"
     )
     reasoning, content, calls = completion_fields(text)
-    message = openai_message(reasoning, content, calls)
-    assert message["reasoning"] == "Look at the notes."
-    assert message["reasoning_content"] == "Look at the notes."
-    assert message["content"] == "The notes are short.\n"
-    assert "tool_calls" not in message
-    delta = _delta("reasoning", "\nLook at the notes.\n")
-    assert delta is not None
-    assert delta["reasoning"] == delta["reasoning_content"]
+    assert reasoning == "Look at the notes."
+    assert content == "The notes are short.\n"
+    assert calls == []
 
 
 def test_a_stop_string_is_left_out_of_the_reply() -> None:
@@ -374,16 +360,6 @@ def test_a_stop_string_is_left_out_of_the_reply() -> None:
     assert _stop_strings({"stop": "STOPWORD"}) == ["STOPWORD"]
     assert _stop_strings({"stop": ["STOPWORD", ""]}) == ["STOPWORD"]
     assert _stop_strings({}) == []
-
-
-def test_filling_the_cap_is_length() -> None:
-    class Runtime:
-        _hit_limit = True
-
-    assert _finish_reason(Runtime(), []) == "length"
-    Runtime._hit_limit = False
-    assert _finish_reason(Runtime(), []) == "stop"
-    assert _finish_reason(Runtime(), [{"id": "call_0"}]) == "tool_calls"
 
 
 def test_unsupported_effort_steps_up_or_falls_back() -> None:

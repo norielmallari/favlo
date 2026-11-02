@@ -2,7 +2,7 @@
 
 As-built note for the `qwen35-4b` language pipeline. The official checkpoint is [Qwen/Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B) (Apache License 2.0). `favlo serve` on a terminal with an empty registry runs this pipeline's `setup`. The packed directory is `models/Qwen3.5-4B-fp8`. Papers and config fields are [references.md](references.md). Setup commands are [SETUP.md](SETUP.md).
 
-`handle_responses` is a `LanguagePipeline`. `handle_chat` translates a Chat Completions body into that request. Clients reach this pipeline through `favlo serve` once the record is registered.
+`handle_responses` is a `LanguagePipeline`. The listener translates a Chat Completions body into that request. Clients reach this pipeline through `favlo serve` once the record is registered.
 
 ```text
 uv run favlo --qwen35-4b --help

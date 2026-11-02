@@ -39,7 +39,7 @@ class _ChatSaw:
     def __init__(self) -> None:
         self.stopped = False
 
-    def handle_chat(self, reply, runtime, body, selection, args, state) -> None:
+    def handle_responses(self, reply, runtime, body, selection, args, state) -> None:
         del runtime, body, selection, args, state
         self.stopped = bool(reply.stopped())
         reply.json(200, {"id": "chat", "choices": []})
@@ -123,7 +123,7 @@ def test_a_disconnected_chat_is_stopped_before_it_streams() -> None:
         module,
         SimpleNamespace(),
         None,
-        {"kind": "chat", "body": {}, "disconnect": True},
+        {"kind": "responses", "body": {}, "disconnect": True},
         _control(),
         False,
         None,

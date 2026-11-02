@@ -7,10 +7,9 @@ from types import SimpleNamespace
 import numpy as np
 
 from favlo.reply import MemoryReply
-from favlo.responses import chat_to_responses
+from favlo.responses import ResponseWire, chat_to_responses
 from spark_x26_1_7b.cache import take_channel_major, take_token_major
 from spark_x26_1_7b.chat import (
-    ResponseWire,
     _fields,
     _mode,
     _response_payload,
@@ -93,21 +92,21 @@ def test_effort_selects_the_template_level() -> None:
         default_variant="high",
     )
     thinking, effort, card = _mode(selection, {})
-    assert thinking is True and effort == "low" and card["top_k"] == 4
+    assert thinking is True and effort == "high" and card["top_k"] == 4
     thinking, effort, card = _mode(selection, {"reasoning": {"effort": "high"}})
-    assert thinking is True and effort == "high" and card["top_k"] == 7
+    assert thinking is True and effort == "high" and card["top_k"] == 4
     thinking, effort, card = _mode(selection, {"reasoning": {"effort": "minimal"}})
-    assert effort == "low"
+    assert effort == "low" and card["top_k"] == 4
     thinking, effort, card = _mode(selection, {"reasoning": {"effort": "xhigh"}})
-    assert effort == "high"
+    assert effort == "high" and card["top_k"] == 4
     thinking, effort, card = _mode(selection, {"reasoning": {"effort": "none"}})
-    assert thinking is False and effort is None and card["top_k"] == 1
+    assert thinking is False and effort is None and card["top_k"] == 4
     temperature, _top_p, top_k, presence, frequency = _sampling(
         {"temperature": 0.4, "top_k": 99, "presence_penalty": 3}, card
     )
     assert temperature == 0.4
-    assert top_k == 1
-    assert presence == 0.0
+    assert top_k == 4
+    assert presence == 1.0
     assert frequency == 0.0
     low = chat_to_responses(
         {
@@ -196,7 +195,7 @@ def test_responses_route_rejects_what_the_core_does_not_run() -> None:
 
     assert callable(pipeline.handle_responses)
     reply = MemoryReply("spark-x26-1-7b")
-    handle_responses.complete(
+    handle_responses.handle_responses(
         reply,
         None,
         {"max_output_tokens": 8, "input": "hello"},
@@ -206,7 +205,7 @@ def test_responses_route_rejects_what_the_core_does_not_run() -> None:
     )
     assert reply.status == 400
     reply = MemoryReply("spark-x26-1-7b")
-    handle_responses.complete(
+    handle_responses.handle_responses(
         reply,
         SimpleNamespace(),
         {

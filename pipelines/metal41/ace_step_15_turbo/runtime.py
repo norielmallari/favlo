@@ -15,7 +15,7 @@ from ace_step_15_turbo.record import load, weight_bytes
 from ace_step_15_turbo.request import MusicRequest, parse_music
 from ace_step_15_turbo.schedule import HOP, LYRIC_LIMIT, STEPS, TEXT_LIMIT, latent_frames
 from ace_step_15_turbo.tiles import tile_frames
-from favlo.media_pipeline import MediaCall, MediaPipeline, MediaRequestError
+from favlo.media_pipeline import MediaCall, MediaRequestError, MusicPipeline
 from favlo.memory import memory
 
 _UNITS = 28 + 8 + 4 + 32 * STEPS + 7
@@ -47,13 +47,9 @@ def handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any, 
     )
 
 
-class Pipeline(MediaPipeline):
+class Pipeline(MusicPipeline):
     """ACE-Step's listener contract. The graph stays in this package."""
 
-    kind = "music"
-    id_prefix = "music_"
-    object_name = "audio.music"
-    table_name = "music"
     id_hex = 16
 
     def parse(self, body: dict[str, Any]) -> MusicRequest:

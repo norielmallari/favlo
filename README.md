@@ -91,9 +91,10 @@ Weights follow the Open Compute Project *Microscaling Formats (MX) Specification
 |---|---|---|
 | `LanguagePipeline` | `POST /v1/responses` | The disconnect shell around one response |
 | `EmbeddingsPipeline` | `POST /v1/embeddings` | The embeddings list object |
-| `MediaPipeline` | `POST /mcp` | The job, the pause, and the host checkpoint |
+| `MediaPipeline` | `POST /mcp` | Shared job, pause, and host checkpoint |
+| `ImagePipeline` / `VideoPipeline` / `MusicPipeline` / `VoicePipeline` | `POST /mcp` | Kind constants; subclass implements `parse` / `generate` / `pack` |
 
-A served language model inherits `LanguagePipeline` and binds `handle_responses`. `handle_chat` translates `POST /v1/chat/completions` into that request and translates the Response back. A served embedding model inherits `EmbeddingsPipeline` and binds `handle_embed`. A served image, video, music, or voice pipeline inherits `MediaPipeline` and binds `handle_image`, `handle_video`, `handle_music`, or `handle_voice`. A pipeline that is not served inherits none of them. The map is [ARCHITECTURE.md](ARCHITECTURE.md).
+A served language model inherits `LanguagePipeline` and binds `handle_responses`. The listener translates `POST /v1/chat/completions` into that request and translates the Response back. A served embedding model inherits `EmbeddingsPipeline` and binds `handle_embed`. A served image, video, music, or voice pipeline inherits the matching kind class and binds `handle_image`, `handle_video`, `handle_music`, or `handle_voice`. A pipeline that is not served inherits none of them. The map is [ARCHITECTURE.md](ARCHITECTURE.md).
 
 The daemon records the resident pipeline process. That process loads the registry row the request named and creates the device. The row stores the packed record, the pipeline entry, and the sampling card. One chat or media process stays resident. A different chat or media row halts that process. The next open waits until its pages are reclaimable, or until the reclaimable count stops rising and the bytes stay as returning. An embeddings request opens its own process beside the resident model and closes that process when the request returns. It does not halt the resident model. A crash fails the job that was running. The daemon stays up, drops that process from the ledger, and listens for the next request.
 

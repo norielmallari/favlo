@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import threading
 
-from favlo.media_pipeline import MediaCall, MediaPaused, MediaPipeline, MediaRequestError
+from favlo.media_pipeline import (
+    MediaCall,
+    MediaPaused,
+    MediaRequestError,
+    VideoPipeline,
+)
 
 
 class _Reply:
@@ -31,11 +36,7 @@ class _Runtime:
         return self.result
 
 
-class _Pipe(MediaPipeline):
-    kind = "video"
-    id_prefix = "video_"
-    object_name = "video"
-    table_name = "videos"
+class _Pipe(VideoPipeline):
     same = True
 
     def parse(self, body: dict) -> dict:

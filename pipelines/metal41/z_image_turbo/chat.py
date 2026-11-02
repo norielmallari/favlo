@@ -16,7 +16,7 @@ from typing import Any, NamedTuple
 import numpy as np
 
 from favlo.images import load_image, store_source, sweep_images
-from favlo.media_pipeline import MediaCall, MediaPaused, MediaPipeline, MediaRequestError
+from favlo.media_pipeline import ImagePipeline, MediaCall, MediaPaused, MediaRequestError
 from z_image_turbo.hold import ImageHold, ImageJob, ImagePaused
 from z_image_turbo.png import REPORTED_QUALITY, pack_rgb, write_png
 from z_image_turbo.schedule import STEPS
@@ -56,12 +56,8 @@ def handle_chat(
     )
 
 
-class Pipeline(MediaPipeline):
+class Pipeline(ImagePipeline):
     """Z-Image's listener contract. The DiT stays in the runtime."""
-
-    kind = "image"
-    id_prefix = "image_"
-    object_name = "image"
 
     def parse(self, body: dict[str, Any]) -> ImageFields:
         return _fields(body)

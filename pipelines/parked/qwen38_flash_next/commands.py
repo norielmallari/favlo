@@ -730,7 +730,7 @@ class Pipeline(LanguagePipeline):
             "stream": bool(body.get("stream", False)),
         }
 
-    def complete(
+    def handle_responses(
         self,
         reply: Any,
         runtime: Any,

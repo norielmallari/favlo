@@ -8,7 +8,13 @@ import pytest
 
 from favlo.embeddings_pipeline import EmbeddingsPipeline
 from favlo.language_pipeline import LanguagePipeline
-from favlo.media_pipeline import MediaPipeline
+from favlo.media_pipeline import (
+    ImagePipeline,
+    MediaPipeline,
+    MusicPipeline,
+    VideoPipeline,
+    VoicePipeline,
+)
 from favlo.pipeline import ClientClosed, Pipeline
 
 
@@ -25,15 +31,23 @@ class _Reply:
 
 def test_media_pipeline_extends_the_daemon_base() -> None:
     assert issubclass(MediaPipeline, Pipeline)
+    assert issubclass(ImagePipeline, MediaPipeline)
+    assert issubclass(VideoPipeline, MediaPipeline)
+    assert issubclass(MusicPipeline, MediaPipeline)
+    assert issubclass(VoicePipeline, MediaPipeline)
     assert issubclass(LanguagePipeline, Pipeline)
     assert issubclass(EmbeddingsPipeline, Pipeline)
+    assert ImagePipeline.kind == "image"
+    assert VideoPipeline.kind == "video"
+    assert MusicPipeline.kind == "music"
+    assert VoicePipeline.kind == "voice"
 
 
 def test_a_closed_client_clears_stop_and_does_not_fail() -> None:
     notes: list[str] = []
 
     class Pipe(LanguagePipeline):
-        def complete(self, reply, runtime, body, selection, args, state) -> None:
+        def handle_responses(self, reply, runtime, body, selection, args, state) -> None:
             del reply, body, selection, args, state
             raise ClientClosed()
 
@@ -49,7 +63,7 @@ def test_a_closed_client_clears_stop_and_does_not_fail() -> None:
 
 def test_an_unrelated_oserror_propagates_and_clears_stop() -> None:
     class Pipe(LanguagePipeline):
-        def complete(self, reply, runtime, body, selection, args, state) -> None:
+        def handle_responses(self, reply, runtime, body, selection, args, state) -> None:
             del reply, runtime, body, selection, args, state
             raise OSError("disk")
 
@@ -61,7 +75,7 @@ def test_an_unrelated_oserror_propagates_and_clears_stop() -> None:
 
 def test_a_named_oserror_can_count_as_the_client() -> None:
     class Pipe(LanguagePipeline):
-        def complete(self, reply, runtime, body, selection, args, state) -> None:
+        def handle_responses(self, reply, runtime, body, selection, args, state) -> None:
             del reply, runtime, body, selection, args, state
             raise OSError("client closed")
 
@@ -74,18 +88,18 @@ def test_a_named_oserror_can_count_as_the_client() -> None:
 
 
 def test_qwen38_27b_on_open_resets_halted() -> None:
-    from qwen38_27b.chat import Pipeline as Chat
+    from qwen38_27b.chat import Pipeline
 
     runtime = SimpleNamespace(_halted=True, _stop=True)
-    Chat().on_open(runtime, _Reply(stopped=False), None)
+    Pipeline().on_open(runtime, _Reply(stopped=False), None)
     assert runtime._halted is False
     assert runtime._stop is False
 
 
 def test_qwen36_treats_only_the_client_message_as_closed() -> None:
-    from qwen36_35b_a3b.chat import Pipeline as Chat
+    from qwen36_35b_a3b.chat import Pipeline
 
-    pipe = Chat()
+    pipe = Pipeline()
     assert pipe.client_closed(OSError("client closed"))
     assert not pipe.client_closed(OSError("disk"))
 

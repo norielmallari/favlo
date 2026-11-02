@@ -1,9 +1,10 @@
 """Listener contract for one media request.
 
-A served image, video, music, or voice pipeline inherits ``MediaPipeline``.
-The class reads cancel and preempt, stores the host checkpoint, and writes
-the job dict the daemon already reads. The subclass parses the body and
-runs the forward. The class does not name stages or dispatch a kernel.
+``MediaPipeline`` is the shared job / pause / pack shell. A served package
+inherits ``ImagePipeline``, ``VideoPipeline``, ``MusicPipeline``, or
+``VoicePipeline``, implements ``parse`` / ``generate`` / ``pack``, and binds
+``handle_<kind>`` to one instance. The class does not name stages or dispatch
+a kernel.
 """
 
 from __future__ import annotations
@@ -44,10 +45,10 @@ class MediaCall:
 
 
 class MediaPipeline(Pipeline):
-    """What the listener calls for one media kind.
+    """Shared media shell. Prefer a kind subclass (``ImagePipeline``, …).
 
-    The module binds ``handle_<kind> = Pipeline()``. ``__call__`` is
-    ``handle``, which is the signature the listener already looks up.
+    The module binds ``handle_<kind> = Concrete()``. ``__call__`` is
+    ``handle``, which is the attribute the listener already looks up.
     """
 
     kind: str
@@ -304,8 +305,6 @@ class MediaPipeline(Pipeline):
         seconds = getattr(request, "seconds", None)
         if "seconds" not in raw and seconds is not None:
             raw["seconds"] = seconds
-        if self.kind == "voice" and isinstance(raw.get("text"), str):
-            raw["input"] = raw["text"]
         found: dict[str, Any] = {}
         for key, value in raw.items():
             if not isinstance(key, str) or key.startswith("_"):
@@ -452,3 +451,54 @@ def _jsonable(value: Any) -> Any:
             found[str(key)] = encoded
         return found
     return _SKIP
+
+
+class ImagePipeline(MediaPipeline):
+    """Abstract image generation. Bind ``handle_image = Concrete()``."""
+
+    kind = "image"
+    id_prefix = "image_"
+    object_name = "image"
+
+
+class VideoPipeline(MediaPipeline):
+    """Abstract video generation. Bind ``handle_video = Concrete()``."""
+
+    kind = "video"
+    id_prefix = "video_"
+    object_name = "video"
+    table_name = "videos"
+
+
+class MusicPipeline(MediaPipeline):
+    """Abstract music generation. Bind ``handle_music = Concrete()``."""
+
+    kind = "music"
+    id_prefix = "music_"
+    object_name = "audio.music"
+    table_name = "music"
+
+
+class VoicePipeline(MediaPipeline):
+    """Abstract speech generation. Bind ``handle_voice = Concrete()``."""
+
+    kind = "voice"
+    id_prefix = "voice_"
+    object_name = "audio.voice"
+    table_name = "voice"
+    seeds = False
+
+    def parameters(self, request: Any) -> dict[str, Any]:
+        """Map the spoken line onto ``input`` for stored metadata."""
+        fields = super().parameters(request)
+        if "input" in fields:
+            return fields
+        text = getattr(request, "text", None)
+        if isinstance(text, str):
+            fields = dict(fields)
+            fields["input"] = text
+            return fields
+        if isinstance(request, dict) and isinstance(request.get("text"), str):
+            fields = dict(fields)
+            fields["input"] = request["text"]
+        return fields

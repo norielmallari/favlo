@@ -941,7 +941,7 @@ def test_an_image_request_does_not_enter_the_chat_runtime(monkeypatch) -> None:
     resident = _Runtime()
     resident.counts = {}
     state = _embed_state(resident)
-    state["module"] = SimpleNamespace(handle_chat=lambda *_args: None)
+    state["module"] = SimpleNamespace(handle_responses=lambda *_args: None)
 
     def start(selection, args, schedule=None):
         del selection, args, schedule
@@ -1368,22 +1368,12 @@ class _QueueMedia:
         self.chat_release = threading.Event()
         self.video_called = False
 
-    def handle_chat(self, reply, runtime, body, selection, args, state) -> None:
+    def handle_responses(self, reply, runtime, body, selection, args, state) -> None:
         del runtime, body, selection, args
         self.log.append("chat")
         self.chat_entered.set()
         self.chat_release.wait(5)
         reply.json(200, {"id": "chat", "choices": []})
-
-    def handle_responses(self, reply, runtime, body, selection, args, state) -> None:
-        self.handle_chat(
-            reply,
-            runtime,
-            {"messages": [{"role": "user", "content": _user_content(body)}]},
-            selection,
-            args,
-            state,
-        )
 
     def handle_image(self, reply, runtime, body, selection, args, state) -> None:
         del runtime, selection, args
@@ -2004,24 +1994,14 @@ class _EmbedOrder:
         self.hold_release = threading.Event()
         self.embed_saw_preempt = False
 
-    def handle_chat(self, reply, runtime, body, selection, args, state) -> None:
+    def handle_responses(self, reply, runtime, body, selection, args, state) -> None:
         del runtime, selection, args, state
-        name = body["messages"][0]["content"]
+        name = _user_content(body)
         if name == "hold":
             self.hold_entered.set()
             self.hold_release.wait(5)
         self.order.append(f"chat:{name}")
         reply.json(200, {"id": name, "choices": []})
-
-    def handle_responses(self, reply, runtime, body, selection, args, state) -> None:
-        self.handle_chat(
-            reply,
-            runtime,
-            {"messages": [{"role": "user", "content": _user_content(body)}]},
-            selection,
-            args,
-            state,
-        )
 
     def handle_embed(self, reply, runtime, body, selection, args, state) -> None:
         del runtime, selection, args
@@ -2142,20 +2122,10 @@ class _ForegroundMedia:
         self.order.append("resume")
         reply.json(200, {"data": [{"id": "image_queue"}]})
 
-    def handle_chat(self, reply, runtime, body, selection, args, state) -> None:
-        del runtime, selection, args, state
-        self.order.append("chat:" + body["messages"][0]["content"])
-        reply.json(200, {"id": "chat", "choices": []})
-
     def handle_responses(self, reply, runtime, body, selection, args, state) -> None:
-        self.handle_chat(
-            reply,
-            runtime,
-            {"messages": [{"role": "user", "content": _user_content(body)}]},
-            selection,
-            args,
-            state,
-        )
+        del runtime, selection, args, state
+        self.order.append("chat:" + _user_content(body))
+        reply.json(200, {"id": "chat", "choices": []})
 
     def handle_embed(self, reply, runtime, body, selection, args, state) -> None:
         del runtime, selection, args, state
@@ -2245,20 +2215,10 @@ class _TwoSlices:
         self.order.append("resume")
         reply.json(200, {"data": [{"id": "image_queue"}]})
 
-    def handle_chat(self, reply, runtime, body, selection, args, state) -> None:
-        del runtime, selection, args, state
-        self.order.append("chat:" + body["messages"][0]["content"])
-        reply.json(200, {"id": "chat", "choices": []})
-
     def handle_responses(self, reply, runtime, body, selection, args, state) -> None:
-        self.handle_chat(
-            reply,
-            runtime,
-            {"messages": [{"role": "user", "content": _user_content(body)}]},
-            selection,
-            args,
-            state,
-        )
+        del runtime, selection, args, state
+        self.order.append("chat:" + _user_content(body))
+        reply.json(200, {"id": "chat", "choices": []})
 
 
 def test_a_later_chat_preempts_the_next_media_slice() -> None:

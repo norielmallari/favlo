@@ -607,8 +607,23 @@ def _run_once(
         except (json.JSONDecodeError, ValueError) as exc:
             reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
             return
+        dispatch = kind
+        if kind == "chat":
+            from favlo.responses import ChatWire, RequestError, chat_to_responses
+
+            try:
+                body = chat_to_responses(body)
+            except RequestError as exc:
+                reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+                return
+            reply = ChatWire(reply)
+            dispatch = "responses"
+        elif kind == "responses":
+            from favlo.responses import ResponseWire
+
+            reply = ResponseWire(reply)
         try:
-            prepared = open_for(kind, body, state, args)
+            prepared = open_for(kind if kind not in {"chat", "responses"} else "responses", body, state, args)
         except LookupError as exc:
             reply.json(404, {"error": {"message": str(exc), "type": "not_found"}})
             return
@@ -622,7 +637,7 @@ def _run_once(
         if runtime is None or module is None:
             reply.json(404, {"error": {"message": "no model is loaded", "type": "not_found"}})
             return
-        call = handler_for(kind, module)
+        call = handler_for(dispatch, module)
         if call is None:
             if kind in {"chat", "responses"}:
                 name = state.get("pipeline") or "pipeline"
@@ -890,7 +905,7 @@ def _language_pipelines() -> set[str]:
 def _is_language_module(module: Any) -> bool:
     if media_kinds(module) or callable(getattr(module, "handle_embed", None)):
         return False
-    return callable(getattr(module, "handle_chat", None))
+    return callable(getattr(module, "handle_responses", None))
 
 
 def _media_rows(media: str, mode: str | None = None) -> list[dict[str, Any]]:
