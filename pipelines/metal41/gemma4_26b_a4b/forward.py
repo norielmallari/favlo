@@ -418,7 +418,7 @@ class Gemma4Runtime:
                 self._hit_limit = True
             decode_s = time.perf_counter() - decode_start
             if not visual:
-                self.prefix.note(prompt + drawn)
+                self.prefix.note((prompt + drawn)[: self.filled])
                 self._store_prefix()
             decode_line = format_rate("decode", len(drawn), decode_s)
             self._end_phase(decode_row, decode_line)

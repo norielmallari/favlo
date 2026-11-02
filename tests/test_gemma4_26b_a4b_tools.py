@@ -220,6 +220,59 @@ def test_tool_result_reopens_the_thought_channel() -> None:
     assert text.endswith("<tool_response|><|channel>thought\n")
 
 
+def test_empty_tool_thought_stays_in_the_next_prompt() -> None:
+    """An omitted whitespace thought still matches the tokens already on device."""
+    call = {
+        "id": "call_0",
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "arguments": {"file_path": "ledger.py"},
+        },
+    }
+    messages = [
+        {"role": "user", "content": "read"},
+        {"role": "assistant", "tool_calls": [call]},
+        {"role": "tool", "tool_call_id": "call_0", "content": "ok"},
+    ]
+    text = render_chat(messages, True, tools=[_read_tool()])
+    assert "<|turn>model\n<|channel>thought\n<channel|><|tool_call>" in text
+    assert text.count("<|channel>thought\n<channel|>") == 1
+    assert text.endswith("<tool_response|><|channel>thought\n")
+
+
+def test_empty_tool_thought_replays_after_a_tool_result() -> None:
+    first = {
+        "id": "call_0",
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "arguments": {"file_path": "ledger.py"},
+        },
+    }
+    second = {
+        "id": "call_1",
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "arguments": {"file_path": "notes.txt"},
+        },
+    }
+    messages = [
+        {"role": "user", "content": "read"},
+        {"role": "assistant", "tool_calls": [first]},
+        {"role": "tool", "tool_call_id": "call_0", "content": "ok"},
+        {"role": "assistant", "tool_calls": [second]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+    ]
+    text = render_chat(messages, True, tools=[_read_tool()])
+    assert (
+        "<tool_response|><|channel>thought\n<channel|><|tool_call>call:read_file"
+        in text
+    )
+    assert text.count("<|channel>thought\n<channel|>") == 2
+
+
 def test_a_tool_thought_returns_until_the_next_user() -> None:
     call = {
         "id": "call_0",
@@ -350,35 +403,40 @@ def test_effort_opens_thinking_without_changing_the_card() -> None:
     from types import SimpleNamespace
 
     from gemma4_26b_a4b.chat import _request_effort
-    from gemma4_26b_a4b.sampling import mode_card
+    from gemma4_26b_a4b.sampling import VARIANTS, mode_card
 
     instruct = SimpleNamespace(
         variant="instruct",
         sampling={"temperature": 0.95, "top_p": 0.95, "top_k": 64, "presence_penalty": 0.0},
-        variants=None,
+        variants=VARIANTS,
         default_variant="thinking",
         enable_thinking=None,
-        reasoning_effort=None,
+        reasoning_effort="minimal",
     )
     thinking, card = mode_card(instruct, _request_effort({"reasoning": {"effort": "low"}}))
     assert thinking is True
     assert card["temperature"] == 0.95
+    assert "reasoning_effort" not in card
     closed, still = mode_card(instruct, _request_effort({"reasoning": {"effort": "none"}}))
     assert closed is False
     assert still["temperature"] == 0.95
     minimal, same = mode_card(instruct, _request_effort({"reasoning": {"effort": "minimal"}}))
     assert minimal is False
     assert same["temperature"] == 0.95
-    stored = SimpleNamespace(
-        variant="thinking",
-        sampling=None,
-        variants=None,
-        default_variant="thinking",
-        enable_thinking=True,
-        reasoning_effort="minimal",
-    )
-    omitted, _card = mode_card(stored, _request_effort({}))
+    omitted, _card = mode_card(instruct, _request_effort({}))
     assert omitted is False
+    bare = SimpleNamespace(
+        variant=None,
+        sampling=None,
+        variants=VARIANTS,
+        default_variant="thinking",
+        enable_thinking=None,
+        reasoning_effort="high",
+    )
+    open_by_default, thinking_card = mode_card(bare, _request_effort({}))
+    assert open_by_default is True
+    assert thinking_card["temperature"] == 0.95
+    assert "reasoning_effort" not in thinking_card
 
 
 def _read_tool() -> dict[str, object]:

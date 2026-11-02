@@ -1,13 +1,13 @@
 """Sampling card for Gemma 4 26B-A4B.
 
-Both rows use top-p 0.95 and top-k 64 from the model card, with temperature
-0.95. A variant sets sampling defaults only. Thinking comes from the request
-or the registry ``enable_thinking`` / ``reasoning_effort`` fields.
+The two registry rows are the thinking and instruct presets. Registration
+copies this module. A request that names no variant uses ``DEFAULT_VARIANT``.
 
-The official card and the Gemini API expose thinking only as on or off. The
-Gemini API names those levels ``high`` (on) and ``minimal`` (off). Every
-OpenAI effort is still accepted. ``resolve_effort`` maps an unsupported name
-onto ``minimal`` or ``high``.
+Each variant stores sampling defaults and ``reasoning_effort``. The official
+card and the Gemini API expose thinking only as on or off. The Gemini API
+names those levels ``high`` (on) and ``minimal`` (off). Every OpenAI effort
+is still accepted. ``resolve_effort`` maps an unsupported name onto
+``minimal`` or ``high``.
 """
 
 from typing import Any
@@ -20,16 +20,21 @@ CONTEXT_LENGTH = 131072
 EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 SUPPORTED_EFFORTS = frozenset({"minimal", "high"})
 
-_CARD = {
-    "temperature": 0.95,
-    "top_p": 0.95,
-    "top_k": 64,
-    "presence_penalty": 0.0,
-}
-
 VARIANTS = {
-    "thinking": dict(_CARD),
-    "instruct": dict(_CARD),
+    "thinking": {
+        "temperature": 0.95,
+        "top_p": 0.95,
+        "top_k": 64,
+        "presence_penalty": 0.0,
+        "reasoning_effort": "high",
+    },
+    "instruct": {
+        "temperature": 0.95,
+        "top_p": 0.95,
+        "top_k": 64,
+        "presence_penalty": 0.0,
+        "reasoning_effort": "minimal",
+    },
 }
 
 
@@ -70,35 +75,52 @@ def requested_thinking(body: dict[str, Any]) -> bool | None:
     return None
 
 
+_SAMPLING_KEYS = ("temperature", "top_p", "top_k", "presence_penalty")
+
+
+def _sampling_fields(card: dict[str, Any]) -> dict[str, float | int]:
+    """Numeric sampler fields only. ``reasoning_effort`` stays off this dict."""
+    out: dict[str, float | int] = {}
+    for key in _SAMPLING_KEYS:
+        if key not in card:
+            continue
+        value = card[key]
+        if key == "top_k":
+            out[key] = int(value)
+        else:
+            out[key] = float(value)
+    return out
+
+
 def sampling_card(selection: Any) -> dict[str, float | int]:
-    """The sampling row for the selected id. The suffix does not change thinking."""
+    """The sampling row for the selected id."""
     variant = getattr(selection, "variant", None) if selection is not None else None
     stored = getattr(selection, "sampling", None) if selection is not None else None
     if isinstance(variant, str) and variant in VARIANTS:
         name = variant
         if isinstance(stored, dict) and stored:
-            return dict(stored)
+            return _sampling_fields(stored)
     else:
         name = getattr(selection, "default_variant", None) if selection is not None else None
         name = name if isinstance(name, str) and name in VARIANTS else DEFAULT_VARIANT
         if isinstance(stored, dict) and stored and variant is None:
-            return dict(stored)
+            return _sampling_fields(stored)
     cards = getattr(selection, "variants", None) if selection is not None else None
     source = cards if isinstance(cards, dict) else VARIANTS
     card = source.get(name) if isinstance(source, dict) else None
     if not isinstance(card, dict):
         card = VARIANTS[name]
-    return dict(card)
+    return _sampling_fields(card)
 
 
 def thinking_for(selection: Any, requested: str | bool | None) -> bool:
-    """Open thinking from a resolved effort, else the registry, else the default.
+    """Open thinking from a resolved effort, else the selection, else the default.
 
     A string is an OpenAI effort. ``resolve_effort`` maps it onto ``minimal`` or
     ``high``, and ``minimal`` closes the think block. A bool is that decision
-    already made. None means the request omitted effort: the row's
-    ``reasoning_effort`` wins, then ``enable_thinking``, then
-    ``DEFAULT_THINKING``.
+    already made. None means the request omitted effort: the selection's
+    ``reasoning_effort`` (from the variant card or the row) wins, then
+    ``enable_thinking``, then ``DEFAULT_THINKING``.
     """
     if isinstance(requested, str):
         resolved = resolve_effort(requested)
@@ -122,8 +144,8 @@ def mode_card(
 ) -> tuple[bool, dict[str, float | int]]:
     """Thinking flag and the sampling card for this selection.
 
-    The variant id only supplies the sampling card. ``requested`` is the
-    request effort, or a bool when the caller already resolved it. Changing
-    the effort does not swap the sampling card.
+    ``requested`` is the request effort, or a bool when the caller already
+    resolved it. An omitted effort uses the variant's ``reasoning_effort``.
+    Changing the effort does not swap the sampling card.
     """
     return thinking_for(selection, requested), sampling_card(selection)

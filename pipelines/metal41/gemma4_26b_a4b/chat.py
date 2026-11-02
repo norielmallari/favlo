@@ -45,7 +45,10 @@ _DEFAULT_LIMIT = 4096
 _TEMPLATE = Path(__file__).with_name("chat_template.jinja")
 _THOUGHT = "<|channel>thought"
 _THOUGHT_CLOSE = "<channel|>"
+_EMPTY_THOUGHT = f"{_THOUGHT}\n{_THOUGHT_CLOSE}"
 _TOOL_OPEN = "<|tool_call>"
+_TOOL_RESPONSE_CLOSE = "<tool_response|>"
+_MODEL_TURN = "<|turn>model\n"
 
 
 _tokenizers: dict[Path, Tokenizer] = {}
@@ -59,6 +62,35 @@ def load_tokenizer(root: Path) -> Tokenizer:
     return found
 
 
+def _replay_empty_tool_thoughts(text: str) -> str:
+    """Put back the empty closed thought the model wrote before a tool call.
+
+    A whitespace-only thought is omitted from the Response, so the next encode
+    would drop ``<|channel>thought\\n<channel|>`` and break the prefix cache.
+    Thinking off also puts that empty channel in the generation prompt before
+    the call is drawn. Replay it whenever a tool call is not already preceded
+    by a closed thought.
+    """
+    pieces: list[str] = []
+    pos = 0
+    while True:
+        at = text.find(_TOOL_OPEN, pos)
+        if at < 0:
+            pieces.append(text[pos:])
+            break
+        pieces.append(text[pos:at])
+        before = text[:at]
+        if before.endswith(_THOUGHT_CLOSE):
+            pieces.append(_TOOL_OPEN)
+        elif before.endswith(_MODEL_TURN) or before.endswith(_TOOL_RESPONSE_CLOSE):
+            pieces.append(_EMPTY_THOUGHT)
+            pieces.append(_TOOL_OPEN)
+        else:
+            pieces.append(_TOOL_OPEN)
+        pos = at + len(_TOOL_OPEN)
+    return "".join(pieces)
+
+
 def render_chat(
     messages: list[dict[str, Any]],
     thinking: bool,
@@ -69,7 +101,7 @@ def render_chat(
     """The canonical Gemma 4 template. Tool arguments are objects before render."""
     environment = Environment(autoescape=False, keep_trailing_newline=True)
     template = environment.from_string(_TEMPLATE.read_text(encoding="utf-8"))
-    return template.render(
+    rendered = template.render(
         messages=_messages(messages),
         tools=tools,
         add_generation_prompt=True,
@@ -78,6 +110,7 @@ def render_chat(
         bos_token="<bos>",
         eos_token="<eos>",
     )
+    return _replay_empty_tool_thoughts(rendered)
 
 
 def encode_chat(
