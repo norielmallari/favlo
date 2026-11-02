@@ -3,9 +3,9 @@
 The head drafts ``mtp_depth`` tokens from the current residual. Absent, that
 depth is three. The first three feeds share one fp4 weight read when three
 are present. Two feeds share one read. Each later feed is a serial step. The DeltaNet state
-and the convolution history are copied first. A rejected tail restores that copy
-and replays the recorded convolution and recurrence rows for the kept tokens.
-The language weights are not read again. Temperature 0 keeps a draft that matches
+and the convolution history are copied first into device snap buffers. A rejected
+tail restores that snap and replays the recorded convolution and recurrence rows
+for the kept tokens. The language weights are not read again. Temperature 0 keeps a draft that matches
 the target argmax. A sampler keeps a draft that matches its draw. The
 request flag ``mtp`` turns the verify off.
 """
@@ -76,7 +76,7 @@ def verify(
         message = f"{len(feeds)} feeds and {len(expected)} drafts"
         raise RuntimeError(message)
     _extend_rope(runtime, pos, len(feeds))
-    snap = _capture(runtime)
+    _capture(runtime)
     from qwen38_27b.prefill import backbone_ids
     from qwen38_27b.span import load_row, replay_kept, span_pair, span_triple
 
@@ -99,16 +99,16 @@ def verify(
                 commit(int(expected[accepted - 1]))
             nxt = _score(runtime, workspace, accepted, draw, feeds, pos, span_n)
     except Exception:
-        _restore(runtime, snap)
+        _restore(runtime)
         raise
     keep = len(feeds) if accepted == len(feeds) else accepted + 1
     if span_n and keep < span_n:
-        _restore(runtime, snap)
+        _restore(runtime)
         replay_kept(runtime, keep)
         runtime.filled = pos + keep
         load_row(runtime, keep - 1)
     elif span_n == 0 and keep < len(feeds):
-        _restore(runtime, snap)
+        _restore(runtime)
         for offset, token in enumerate(feeds[:keep]):
             runtime.step(int(token), pos + offset, logits=False, rope=_rope_at(runtime, pos + offset))
     else:
@@ -166,20 +166,44 @@ def _copy_hidden(runtime: Any, workspace: Any, index: int) -> None:
         raise
 
 
-def _capture(runtime: Any) -> tuple[bytes, bytes]:
-    session = runtime.session
-    return session.download(runtime.state, _STATE_BYTES), session.download(runtime.history, _HISTORY_BYTES)
+def _capture(runtime: Any) -> None:
+    """Copy the DeltaNet state and the convolution history into the device snap."""
+    state = getattr(runtime, "_mtp_state", None)
+    history = getattr(runtime, "_mtp_history", None)
+    if state is None or history is None:
+        message = "mtp snap buffers are missing"
+        raise RuntimeError(message)
+    _copy_words(runtime, runtime.state, 0, state, 0, _STATE_BYTES // 4)
+    _copy_words(runtime, runtime.history, 0, history, 0, _HISTORY_BYTES // 4)
 
 
-def _restore(runtime: Any, snap: tuple[bytes, bytes]) -> None:
-    state, history = snap
-    _put(runtime.state, state)
-    _put(runtime.history, history)
+def _restore(runtime: Any) -> None:
+    """Copy the device snap back over the live state and history."""
+    state = getattr(runtime, "_mtp_state", None)
+    history = getattr(runtime, "_mtp_history", None)
+    if state is None or history is None:
+        message = "mtp snap buffers are missing"
+        raise RuntimeError(message)
+    _copy_words(runtime, state, 0, runtime.state, 0, _STATE_BYTES // 4)
+    _copy_words(runtime, history, 0, runtime.history, 0, _HISTORY_BYTES // 4)
 
 
-def _put(buffer: Any, blob: bytes) -> None:
-    view = memoryview(buffer.contents().as_buffer(len(blob)))
-    view[:] = blob
+def _copy_words(
+    runtime: Any, src: Any, src_off: int, dest: Any, dest_off: int, count: int
+) -> None:
+    runtime.session.begin()
+    try:
+        runtime.session.encode(
+            "copy_f32",
+            [(src, src_off), (dest, dest_off)],
+            [struct.pack("<I", int(count))],
+            ((int(count) + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+        runtime.session.end()
+    except Exception:
+        runtime.session.finish()
+        raise
 
 
 def _extend_rope(runtime: Any, pos: int, count: int) -> None:

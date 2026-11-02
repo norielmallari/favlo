@@ -86,11 +86,15 @@ def startup_bytes(
         + 16
     )
     hold = HIDDEN * 4 if drafts else 0
+    # MTP verify keeps a device copy of the DeltaNet state and the convolution
+    # history so a rejected tail can restore without a host download.
+    snap = (_STATE_BYTES + _HISTORY_BYTES) if drafts else 0
     return (
         resident
         + sequence_cache_bytes(positions, slots, mode)
         + _STATE_BYTES
         + _HISTORY_BYTES
+        + snap
         + hold
         + decode
         + scratch_bytes(positions, slots, mode)

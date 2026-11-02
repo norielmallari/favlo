@@ -95,6 +95,8 @@ _DEVICE_FIELDS = (
     "hidden",
     "normed",
     "hold",
+    "_mtp_state",
+    "_mtp_history",
     "wide",
     "z",
     "y",
@@ -541,11 +543,20 @@ class Qwen38Runtime:
         self.v_cache = [zeros(one) for _ in range(plan.slots)]
         bind_plane(self)
         self.hold = zeros(HIDDEN * 4) if plan.mtp else None
+        if plan.mtp:
+            self._mtp_state = zeros(_STATE_BYTES)
+            self._mtp_history = zeros(_HISTORY_BYTES)
+        else:
+            self._mtp_state = None
+            self._mtp_history = None
         work = self._prefill
         if work is not None:
             work.mix = zeros(CHUNK * MIX * 4) if plan.mtp else None
         self._restore_planes(count, saved)
-        self._held = [self.resident, self.history, self.state, *self.k_cache, *self.v_cache]
+        held = [self.resident, self.history, self.state, *self.k_cache, *self.v_cache]
+        if self._mtp_state is not None:
+            held.extend([self._mtp_state, self._mtp_history])
+        self._held = held
 
     def _extend_cache(self, plan: Any, count: int, saved: list[tuple[int, str, bytes]]) -> None:
         """Replace the key/value planes and release the planes they replace."""
@@ -591,6 +602,10 @@ class Qwen38Runtime:
         self.v_cache = []
         hold = getattr(self, "hold", None)
         self.hold = None
+        snap_state = getattr(self, "_mtp_state", None)
+        snap_history = getattr(self, "_mtp_history", None)
+        self._mtp_state = None
+        self._mtp_history = None
         scratch: list[Any] = []
         for name in _SCRATCH_FIELDS:
             item = getattr(self, name, None)
@@ -604,7 +619,9 @@ class Qwen38Runtime:
         held = getattr(self, "_held", None)
         if isinstance(held, list):
             held.clear()
-        release_buffers((image, resident, hold, mix, *caches, *scratch))
+        release_buffers(
+            (image, resident, hold, snap_state, snap_history, mix, *caches, *scratch)
+        )
 
     def _capture_planes(self) -> tuple[int, list[tuple[int, str, bytes]]]:
         count = min(int(self.filled), int(self.max_pos))

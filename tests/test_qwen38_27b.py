@@ -897,6 +897,8 @@ def test_extend_cache_releases_the_planes_it_replaces() -> None:
     runtime.resident = None
     runtime.history = None
     runtime.state = None
+    runtime.kv_cache = "half"
+    runtime._restore_planes = lambda count, saved: None
     plan = SimpleNamespace(positions=4096, slots=1)
     runtime._extend_cache(plan, 0, [])
     assert released == ["parts", "k", "v"]
@@ -929,6 +931,7 @@ def test_extend_cache_keeps_the_old_planes_when_the_device_refuses() -> None:
     runtime.k_cache = [old]
     runtime.v_cache = [old]
     runtime.plane_parts = old
+    runtime.kv_cache = "half"
     plan = SimpleNamespace(positions=4096, slots=1)
     with pytest.raises(RuntimeError, match="device refused"):
         runtime._extend_cache(plan, 0, [])
@@ -1297,6 +1300,10 @@ def test_generate_clock_ends_prefill_at_the_first_sample(monkeypatch: pytest.Mon
     runtime.max_pos = 3
     runtime._limit = 128
     runtime.filled = 0
+    runtime._record_mtp = False
+    runtime.wire = SimpleNamespace(mtp=False)
+    runtime.drafts = False
+    runtime._mtp_wanted = False
     clock = {"t": 100.0}
 
     def now() -> float:
@@ -1335,7 +1342,14 @@ def test_generate_clock_ends_prefill_at_the_first_sample(monkeypatch: pytest.Mon
 
     runtime.step = step
     runtime._pick = lambda argmax_id, counts: int(argmax_id)
+    runtime._stable_draw = lambda produced, chosen, counts: int(chosen)
+    runtime._stabilize_output = lambda prompt, out: list(out)
     runtime._check_stop = lambda: None
+    runtime._note = lambda *args, **kwargs: None
+    runtime._note_prefill = lambda *args, **kwargs: None
+    runtime._store_prefix = lambda: None
+    runtime._begin_phase = lambda *args, **kwargs: None
+    runtime._end_phase = lambda *args, **kwargs: None
     monkeypatch.setattr("qwen38_27b.forward.time.perf_counter", now)
 
     def on_token(_token: int) -> None:

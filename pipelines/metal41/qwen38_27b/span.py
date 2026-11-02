@@ -1,8 +1,9 @@
 """Language step for two or three tokens. Each fp4 weight row is read once.
 
 Every residual is already known at the start of a layer, so the projections
-share one read. The Gated DeltaNet recurrence and the attention mix still run
-in token order. Each linear layer records its pre-convolution rows so a
+share one read. The Gated DeltaNet recurrence still runs in token order. The
+attention mix stores every key and value in the window, then runs the prefill
+half attend once. Each linear layer records its pre-convolution rows so a
 partial keep can replay the recurrence without reading the language weights
 again. A feed past the third stays on the serial step.
 """
@@ -315,6 +316,8 @@ def _attend(runtime: Any, span: _Span, layer: int, pos: int, count: int) -> None
             (Q_HEADS + 4, 1, 1),
             (256, 1, 1),
         )
+    # One prefill-style mix for the whole window. Serial decode attend used to
+    # copy each later token into the first slot and walk the cache three times.
     attend_plane(
         runtime,
         query=span.q,
@@ -323,26 +326,9 @@ def _attend(runtime: Any, span: _Span, layer: int, pos: int, count: int) -> None
         gate=span.gate,
         dest=span.y,
         pos0=pos,
-        count=1,
+        count=count,
         slot=slot,
     )
-    for token in range(1, count):
-        _copy(runtime, span.q, token * ATTN_OUT * 4, span.q, 0, ATTN_OUT)
-        _copy(runtime, span.kv, token * KV_PROJ * 4, span.kv, 0, KV_PROJ)
-        _copy(runtime, span.vv, token * KV_PROJ * 4, span.vv, 0, KV_PROJ)
-        _copy(runtime, span.gate, token * ATTN_OUT * 4, span.gate, 0, ATTN_OUT)
-        attend_plane(
-            runtime,
-            query=span.q,
-            key=span.kv,
-            value=span.vv,
-            gate=span.gate,
-            dest=span.out,
-            pos0=pos + token,
-            count=1,
-            slot=slot,
-        )
-        _copy(runtime, span.out, 0, span.y, token * ATTN_OUT * 4, ATTN_OUT)
     _project(runtime, span.y, ATTN_OUT, runtime.weight(layer, "self_attn.o_proj.weight"), span.out, count)
     _residual(runtime, span, count)
 
