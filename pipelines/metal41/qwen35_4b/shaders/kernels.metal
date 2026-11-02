@@ -59,6 +59,41 @@ static uint e4m3_encode(float x) {
     return sign | (uint(biased) << 3) | m;
 }
 
+constant float E4M3_TABLE[256] = {
+    0.0f, 0.001953125f, 0.00390625f, 0.005859375f, 0.0078125f, 0.009765625f, 0.01171875f, 0.013671875f,
+    0.015625f, 0.017578125f, 0.01953125f, 0.021484375f, 0.0234375f, 0.025390625f, 0.02734375f, 0.029296875f,
+    0.03125f, 0.03515625f, 0.0390625f, 0.04296875f, 0.046875f, 0.05078125f, 0.0546875f, 0.05859375f,
+    0.0625f, 0.0703125f, 0.078125f, 0.0859375f, 0.09375f, 0.1015625f, 0.109375f, 0.1171875f,
+    0.125f, 0.140625f, 0.15625f, 0.171875f, 0.1875f, 0.203125f, 0.21875f, 0.234375f,
+    0.25f, 0.28125f, 0.3125f, 0.34375f, 0.375f, 0.40625f, 0.4375f, 0.46875f,
+    0.5f, 0.5625f, 0.625f, 0.6875f, 0.75f, 0.8125f, 0.875f, 0.9375f,
+    1.0f, 1.125f, 1.25f, 1.375f, 1.5f, 1.625f, 1.75f, 1.875f,
+    2.0f, 2.25f, 2.5f, 2.75f, 3.0f, 3.25f, 3.5f, 3.75f,
+    4.0f, 4.5f, 5.0f, 5.5f, 6.0f, 6.5f, 7.0f, 7.5f,
+    8.0f, 9.0f, 10.0f, 11.0f, 12.0f, 13.0f, 14.0f, 15.0f,
+    16.0f, 18.0f, 20.0f, 22.0f, 24.0f, 26.0f, 28.0f, 30.0f,
+    32.0f, 36.0f, 40.0f, 44.0f, 48.0f, 52.0f, 56.0f, 60.0f,
+    64.0f, 72.0f, 80.0f, 88.0f, 96.0f, 104.0f, 112.0f, 120.0f,
+    128.0f, 144.0f, 160.0f, 176.0f, 192.0f, 208.0f, 224.0f, 240.0f,
+    256.0f, 288.0f, 320.0f, 352.0f, 384.0f, 416.0f, 448.0f, 480.0f,
+    -0.0f, -0.001953125f, -0.00390625f, -0.005859375f, -0.0078125f, -0.009765625f, -0.01171875f, -0.013671875f,
+    -0.015625f, -0.017578125f, -0.01953125f, -0.021484375f, -0.0234375f, -0.025390625f, -0.02734375f, -0.029296875f,
+    -0.03125f, -0.03515625f, -0.0390625f, -0.04296875f, -0.046875f, -0.05078125f, -0.0546875f, -0.05859375f,
+    -0.0625f, -0.0703125f, -0.078125f, -0.0859375f, -0.09375f, -0.1015625f, -0.109375f, -0.1171875f,
+    -0.125f, -0.140625f, -0.15625f, -0.171875f, -0.1875f, -0.203125f, -0.21875f, -0.234375f,
+    -0.25f, -0.28125f, -0.3125f, -0.34375f, -0.375f, -0.40625f, -0.4375f, -0.46875f,
+    -0.5f, -0.5625f, -0.625f, -0.6875f, -0.75f, -0.8125f, -0.875f, -0.9375f,
+    -1.0f, -1.125f, -1.25f, -1.375f, -1.5f, -1.625f, -1.75f, -1.875f,
+    -2.0f, -2.25f, -2.5f, -2.75f, -3.0f, -3.25f, -3.5f, -3.75f,
+    -4.0f, -4.5f, -5.0f, -5.5f, -6.0f, -6.5f, -7.0f, -7.5f,
+    -8.0f, -9.0f, -10.0f, -11.0f, -12.0f, -13.0f, -14.0f, -15.0f,
+    -16.0f, -18.0f, -20.0f, -22.0f, -24.0f, -26.0f, -28.0f, -30.0f,
+    -32.0f, -36.0f, -40.0f, -44.0f, -48.0f, -52.0f, -56.0f, -60.0f,
+    -64.0f, -72.0f, -80.0f, -88.0f, -96.0f, -104.0f, -112.0f, -120.0f,
+    -128.0f, -144.0f, -160.0f, -176.0f, -192.0f, -208.0f, -224.0f, -240.0f,
+    -256.0f, -288.0f, -320.0f, -352.0f, -384.0f, -416.0f, -448.0f, -480.0f,
+};
+
 static float silu(float x) {
     return x / (1.0f + exp(-x));
 }
@@ -297,10 +332,10 @@ static float dot_fp8_row(
         for (uint j = 0u; j < 4u; ++j) {
             uint word = words[j];
             float4 xv = x4[(base >> 2) + j];
-            part = fma(e4m3_code(word & 0xFFu), xv.x, part);
-            part = fma(e4m3_code((word >> 8) & 0xFFu), xv.y, part);
-            part = fma(e4m3_code((word >> 16) & 0xFFu), xv.z, part);
-            part = fma(e4m3_code(word >> 24), xv.w, part);
+            part = fma(E4M3_TABLE[word & 0xFFu], xv.x, part);
+            part = fma(E4M3_TABLE[(word >> 8) & 0xFFu], xv.y, part);
+            part = fma(E4M3_TABLE[(word >> 16) & 0xFFu], xv.z, part);
+            part = fma(E4M3_TABLE[word >> 24], xv.w, part);
         }
         acc = fma(part, scale, acc);
     }
@@ -359,6 +394,103 @@ kernel void gemv_fp8_add(
     acc = simd_sum(acc);
     if (lane == 0u) {
         destination[row] += acc;
+    }
+}
+
+
+// Four output rows share one activation stream. cols is a multiple of 4.
+kernel void gemv_fp8_x4(
+    device const float* activation [[buffer(0)]],
+    device const uchar* weights [[buffer(1)]],
+    device const uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint group [[threadgroup_position_in_grid]])
+{
+    uint row0 = group << 2;
+    if (row0 >= rows) {
+        return;
+    }
+    uint blocks = inner >> 5;
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+    device const uchar* w0 = weights + ulong(row0) * inner;
+    device const uchar* w1 = w0 + inner;
+    device const uchar* w2 = w1 + inner;
+    device const uchar* w3 = w2 + inner;
+    device const uchar* s0 = scales + ulong(row0) * blocks;
+    device const uchar* s1 = s0 + blocks;
+    device const uchar* s2 = s1 + blocks;
+    device const uchar* s3 = s2 + blocks;
+    device const float4* x4 = (device const float4*)activation;
+    for (uint base = lane * 16u; base < inner; base += 512u) {
+        float4 xv0 = x4[(base >> 2) + 0u];
+        float4 xv1 = x4[(base >> 2) + 1u];
+        float4 xv2 = x4[(base >> 2) + 2u];
+        float4 xv3 = x4[(base >> 2) + 3u];
+        float scale0 = e8m0_code(s0[base >> 5]);
+        float scale1 = e8m0_code(s1[base >> 5]);
+        float scale2 = e8m0_code(s2[base >> 5]);
+        float scale3 = e8m0_code(s3[base >> 5]);
+        device const uint4* p0 = (device const uint4*)(w0 + base);
+        device const uint4* p1 = (device const uint4*)(w1 + base);
+        device const uint4* p2 = (device const uint4*)(w2 + base);
+        device const uint4* p3 = (device const uint4*)(w3 + base);
+        uint4 a = p0[0];
+        uint4 b = p1[0];
+        uint4 c = p2[0];
+        uint4 d = p3[0];
+        float4 xs[4] = {xv0, xv1, xv2, xv3};
+        uint words0[4] = {a.x, a.y, a.z, a.w};
+        uint words1[4] = {b.x, b.y, b.z, b.w};
+        uint words2[4] = {c.x, c.y, c.z, c.w};
+        uint words3[4] = {d.x, d.y, d.z, d.w};
+        float part0 = 0.0f;
+        float part1 = 0.0f;
+        float part2 = 0.0f;
+        float part3 = 0.0f;
+        for (uint j = 0u; j < 4u; ++j) {
+            float4 xv = xs[j];
+            uint w;
+            w = words0[j];
+            part0 = fma(E4M3_TABLE[w & 0xFFu], xv.x, part0);
+            part0 = fma(E4M3_TABLE[(w >> 8) & 0xFFu], xv.y, part0);
+            part0 = fma(E4M3_TABLE[(w >> 16) & 0xFFu], xv.z, part0);
+            part0 = fma(E4M3_TABLE[w >> 24], xv.w, part0);
+            w = words1[j];
+            part1 = fma(E4M3_TABLE[w & 0xFFu], xv.x, part1);
+            part1 = fma(E4M3_TABLE[(w >> 8) & 0xFFu], xv.y, part1);
+            part1 = fma(E4M3_TABLE[(w >> 16) & 0xFFu], xv.z, part1);
+            part1 = fma(E4M3_TABLE[w >> 24], xv.w, part1);
+            w = words2[j];
+            part2 = fma(E4M3_TABLE[w & 0xFFu], xv.x, part2);
+            part2 = fma(E4M3_TABLE[(w >> 8) & 0xFFu], xv.y, part2);
+            part2 = fma(E4M3_TABLE[(w >> 16) & 0xFFu], xv.z, part2);
+            part2 = fma(E4M3_TABLE[w >> 24], xv.w, part2);
+            w = words3[j];
+            part3 = fma(E4M3_TABLE[w & 0xFFu], xv.x, part3);
+            part3 = fma(E4M3_TABLE[(w >> 8) & 0xFFu], xv.y, part3);
+            part3 = fma(E4M3_TABLE[(w >> 16) & 0xFFu], xv.z, part3);
+            part3 = fma(E4M3_TABLE[w >> 24], xv.w, part3);
+        }
+        acc0 = fma(part0, scale0, acc0);
+        acc1 = fma(part1, scale1, acc1);
+        acc2 = fma(part2, scale2, acc2);
+        acc3 = fma(part3, scale3, acc3);
+    }
+    acc0 = simd_sum(acc0);
+    acc1 = simd_sum(acc1);
+    acc2 = simd_sum(acc2);
+    acc3 = simd_sum(acc3);
+    if (lane == 0u) {
+        destination[row0] = acc0;
+        destination[row0 + 1u] = acc1;
+        destination[row0 + 2u] = acc2;
+        destination[row0 + 3u] = acc3;
     }
 }
 

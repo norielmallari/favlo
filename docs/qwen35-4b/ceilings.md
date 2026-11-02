@@ -20,7 +20,7 @@ The byte count for that first chunk (dense projections, tied embed and head, Gat
 
 ## Decode
 
-One token at context 2048. Dense projections use `gemv_fp8` (eight rows per threadgroup). Attention is `attend_decode_f16` on the float16 cache.
+One token at context 2048. Dense projections use `gemv_fp8` (eight rows per threadgroup). Mid-width outs (256–16384 rows, inner ≤4096) use `gemv_fp8_x4` in the forward; the table below is still the eight-row kernel. Attention is `attend_decode_f16` on the float16 cache.
 
 | Kernel | Shape | Count | µs |
 |---|---|---:|---:|

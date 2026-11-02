@@ -31,6 +31,7 @@ KERNELS = (
     "residual_add_rows",
     "gemv_fp8",
     "gemv_fp8_add",
+    "gemv_fp8_x4",
     "gemv_fp8_vec",
     "conv_silu",
     "conv_silu_chunk",
