@@ -1,7 +1,24 @@
 import { act, render } from '@testing-library/react-native';
 
-import { downloadName, MessageBody, mediaFrame, messageParts } from '@/components/MessageBody';
+import { downloadName, formatActionNewlines, MessageBody, mediaFrame, messageParts } from '@/components/MessageBody';
 import { ThemeProvider } from '@/theme/Theme';
+
+test('a closed action gets one newline and a model newline is dropped', () => {
+  expect(formatActionNewlines('*smiles*Hello')).toBe('*smiles*\nHello');
+  expect(formatActionNewlines('*smiles* Hello')).toBe('*smiles*\nHello');
+  expect(formatActionNewlines('*smiles*\nHello')).toBe('*smiles*\nHello');
+  expect(formatActionNewlines('*smiles*\r\nHello')).toBe('*smiles*\nHello');
+  expect(formatActionNewlines('*smiles*\n\nHello')).toBe('*smiles*\n\nHello');
+  expect(formatActionNewlines('*a* *b* next')).toBe('*a*\n*b*\nnext');
+  expect(formatActionNewlines('**bold** stays')).toBe('**bold** stays');
+  expect(formatActionNewlines('*open')).toBe('*open');
+  expect(formatActionNewlines('*smiles*')).toBe('*smiles*');
+  expect(formatActionNewlines('> *smiles* Hello')).toBe('> *smiles* Hello');
+  expect(formatActionNewlines('> *smiles*\n> more')).toBe('> *smiles*\n> more');
+  expect(formatActionNewlines('> *a* quoted\n*b* outside')).toBe('> *a* quoted\n*b*\noutside');
+  expect(formatActionNewlines('```xml\n*smiles* Hello\n```')).toBe('```xml\n*smiles* Hello\n```');
+  expect(formatActionNewlines('```json\n*a* x\n```\n*b* y')).toBe('```json\n*a* x\n```\n*b*\ny');
+});
 
 test('a favlo image link becomes a generated image', async () => {
   const parts = messageParts('generate_image finished.\nimage_abc\nfavlo://images/image_abc.png\n');

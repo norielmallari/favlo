@@ -7,7 +7,68 @@ import { MarkdownText } from '@/components/MarkdownText';
 import { useTheme } from '@/theme/Theme';
 
 const MEDIA = /favlo:\/\/(images|videos|voice|music)\/([A-Za-z0-9_-]+)\.(png|mp4|mp3|wav|flac)/g;
+const ACTION = /(?<!\*)\*([^*\n]+)\*(?!\*)/g;
 const MEDIA_MAX_HEIGHT = 480;
+
+/** Display-only: put a line break after a closed ``*action*``. One model newline after it is dropped. Block quotes and fenced code are left alone. */
+export function formatActionNewlines(text: string): string {
+  let out = '';
+  let last = 0;
+  for (const match of text.matchAll(ACTION)) {
+    if (match.index == null || inBlockquote(text, match.index) || inFencedCode(text, match.index)) {
+      continue;
+    }
+    const end = match.index + match[0].length;
+    out += text.slice(last, end);
+    last = end;
+    if (last >= text.length) {
+      break;
+    }
+    if (text.startsWith('\r\n', last)) {
+      last += 2;
+    } else if (text[last] === '\n') {
+      last += 1;
+    }
+    if (text[last] === ' ') {
+      last += 1;
+    }
+    if (last < text.length) {
+      out += '\n';
+    }
+  }
+  out += text.slice(last);
+  return out;
+}
+
+function inBlockquote(text: string, index: number): boolean {
+  const lineStart = text.lastIndexOf('\n', index - 1) + 1;
+  return /^\s{0,3}>/.test(text.slice(lineStart));
+}
+
+function inFencedCode(text: string, index: number): boolean {
+  let fence: string | null = null;
+  let cursor = 0;
+  while (cursor < index) {
+    const lineStart = cursor;
+    const lineEnd = text.indexOf('\n', cursor);
+    const end = lineEnd < 0 ? text.length : lineEnd;
+    const line = text.slice(lineStart, end);
+    const marked = /^( {0,3})(`{3,}|~{3,})/.exec(line);
+    if (marked) {
+      const marker = marked[2];
+      if (fence == null) {
+        fence = marker[0] ?? null;
+      } else if (marker[0] === fence && marker.length >= 3) {
+        fence = null;
+      }
+    }
+    if (end >= index) {
+      break;
+    }
+    cursor = end + 1;
+  }
+  return fence != null;
+}
 
 export const mediaFrame: CSSProperties = {
   display: 'block',
@@ -25,9 +86,10 @@ export type MessagePart =
   | { type: 'image' | 'video' | 'audio'; src: string; label: string };
 
 export function messageParts(body: string): MessagePart[] {
+  const source = formatActionNewlines(body);
   const parts: MessagePart[] = [];
   let cursor = 0;
-  for (const match of body.matchAll(MEDIA)) {
+  for (const match of source.matchAll(MEDIA)) {
     const kind = match[1];
     const id = match[2];
     const ext = match[3];
@@ -35,7 +97,7 @@ export function messageParts(body: string): MessagePart[] {
       continue;
     }
     if (match.index > cursor) {
-      pushText(parts, body.slice(cursor, match.index));
+      pushText(parts, source.slice(cursor, match.index));
     }
     parts.push({
       type: kind === 'images' ? 'image' : kind === 'videos' ? 'video' : 'audio',
@@ -44,8 +106,8 @@ export function messageParts(body: string): MessagePart[] {
     });
     cursor = match.index + match[0].length;
   }
-  if (cursor < body.length) {
-    pushText(parts, body.slice(cursor));
+  if (cursor < source.length) {
+    pushText(parts, source.slice(cursor));
   }
   return parts;
 }
