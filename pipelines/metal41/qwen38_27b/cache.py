@@ -27,7 +27,7 @@ _ALIASES = {
 
 
 def kv_mode(name: str | None) -> str:
-    """``half`` or ``fp8_e4m3``. Empty means half.
+    """``half`` or ``fp8_e4m3``. Empty means ``half``.
 
     ``e4m3`` and ``fp8`` are ``fp8_e4m3``.
     """

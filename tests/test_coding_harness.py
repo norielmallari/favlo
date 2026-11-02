@@ -13,7 +13,8 @@ from harness.benchmarks.serve import Request, apply_sampling, card_model_id
 from harness.coding.__main__ import argument_parser
 from harness.coding.agent_tools import coding_tools
 from harness.coding.grade import grade
-from harness.coding.loop import agent_options, prefix_problems, print_updates
+from harness.coding.loop import agent_options, prefix_problems
+from harness.turn_printer import print_updates
 from harness.file_session import parse_requests
 from harness.coding.session import REQUIRED_TOOLS, session_for
 from harness.coding.workspace import PROMPT, dispatch, locate, prepare_workspace

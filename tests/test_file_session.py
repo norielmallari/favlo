@@ -40,25 +40,34 @@ def test_model_stem_drops_a_variant_suffix() -> None:
     assert model_stem("qwen38-27b:thinking") == "qwen38-27b"
 
 
-def test_source_files_skip_models_and_read_largest_first(tmp_path: Path) -> None:
-    (tmp_path / "a.py").write_text("a" * 10)
-    (tmp_path / "b.metal").write_text("b" * 30)
-    (tmp_path / "empty.py").write_text("")
-    (tmp_path / "note.bin").write_text("no")
-    (tmp_path / "models").mkdir()
-    (tmp_path / "models" / "c.py").write_text("c" * 100)
-    (tmp_path / ".venv").mkdir()
-    (tmp_path / ".venv" / "d.py").write_text("d" * 100)
+def test_source_files_read_shared_package_largest_first(tmp_path: Path) -> None:
+    package = tmp_path / "src" / "favlo"
+    package.mkdir(parents=True)
+    (package / "a.py").write_text("a" * 10)
+    (package / "b.py").write_text("b" * 30)
+    (package / "empty.py").write_text("")
+    (package / "note.bin").write_text("no")
+    (package / "__pycache__").mkdir()
+    (package / "__pycache__" / "c.py").write_text("c" * 100)
+    (tmp_path / "pipelines").mkdir()
+    (tmp_path / "pipelines" / "big.py").write_text("d" * 200)
     found = source_files(tmp_path)
-    assert [path.name for path in found] == ["b.metal", "a.py"]
-    allowed = {path.relative_to(tmp_path).as_posix() for path in found}
-    assert read_repository_file(tmp_path, "b.metal", allowed) == "b" * 30
-    assert read_repository_file(tmp_path, "B.METAL", allowed) == "b" * 30
-    assert read_repository_file(tmp_path, "missing.py", allowed, "b.metal") == "b" * 30
+    assert [path.name for path in found] == ["b.py", "a.py"]
+    allowed = {path.relative_to(package).as_posix() for path in found}
+    assert read_repository_file(tmp_path, "b.py", allowed) == "b" * 30
+    assert read_repository_file(tmp_path, "B.PY", allowed) == "b" * 30
+    assert read_repository_file(tmp_path, "missing.py", allowed, "b.py") == "b" * 30
     with pytest.raises(ValueError):
         read_repository_file(tmp_path, "../secret.txt", allowed)
     with pytest.raises(ValueError):
-        read_repository_file(tmp_path, "models/c.py", allowed)
+        read_repository_file(tmp_path, "pipelines/big.py", allowed)
+
+
+def test_instruct_model_pins_the_instruct_card() -> None:
+    from harness.file_session import instruct_model
+
+    assert instruct_model("qwen36-35b-a3b") == "qwen36-35b-a3b:instruct"
+    assert instruct_model("qwen36-35b-a3b:thinking") == "qwen36-35b-a3b:instruct"
 
 
 def test_parse_requests_and_prefix_extension() -> None:

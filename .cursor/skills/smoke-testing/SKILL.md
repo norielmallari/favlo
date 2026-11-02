@@ -54,13 +54,13 @@ Instruct decode and thinking-card decode stay two series. The 90% check compares
 
 ### File agent
 
-Instruct. `enable_thinking` false. Default target 65536 tokens. Pass `--tokens` when this pipeline's prompt limit is different.
+Instruct. Opens `<pipeline>:instruct` with `enable_thinking` false. Default target 65536 tokens. Pass `--tokens` when this pipeline's prompt limit is different.
 
 ```text
 uv run python -m harness --model <pipeline>
 ```
 
-The session reads repository source until `prompt tokens` reaches the target. The server stops after the first turn and a new server starts, so the next turn loads the prefix from disk. Later turns extend that prefix in memory. The command prints each request's context, `prefill`, and `decode`, then the summed rates. Exit 0 means the target was reached and the prefix reload held.
+A Microsoft Agent Framework agent reads `src/favlo` until `prompt tokens` reaches the target. The corpus is shared package code only. The server stops after the first turn and a new server starts, so the next turn loads the prefix from disk. Later turns extend that prefix in memory. The command streams each model call, then prints each request's context, `prefill`, and `decode`, then the summed rates. Exit 0 means the target was reached and the prefix reload held.
 
 `python -m harness.file_agent` is the short create, edit, and confirm check. Pytest runs that check. It is not this rate run.
 

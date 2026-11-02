@@ -1,24 +1,26 @@
-"""Read repository files until the prompt reaches a token target.
+"""Read shared package sources until the prompt reaches a token target.
 
-The file agent calls ``read_file`` on the OpenAI chat endpoint, then analyzes
-the file it got back. The model id is the pipeline name. The request sets
-``enable_thinking`` false and leaves every other sampling field unset, so the
-listener fills the instruct card. The first completion of each task is required
-to call ``read_file``. The server stops after the first task and starts again,
-so the next task loads the prefix from disk. Later tasks keep that server. A
-request that does not extend the stored token ids stops the run. Each request
-prints the server's prefill and decode lines. Those lines are the instruct
-series.
+A Microsoft Agent Framework agent calls ``read_file``, then analyzes the file
+it got back. The corpus is ``src/favlo`` only, so the ladder does not depend on
+any pipeline package. The model id is the pipeline name under test. The request
+sets ``reasoning.effort`` to ``none`` and opens the ``:instruct`` sampling card.
+``--mtp on`` or ``--mtp off`` sends ``favlo:mtp``; omitted, the registry row
+decides. The first completion of each task is required to call ``read_file``.
+The server stops after the first task and starts again, so the next task loads
+the prefix from disk. Later tasks keep that server. A request that does not
+extend the stored token ids stops the run. Each model call streams its reply
+and tool calls. Each request also prints the server's prefill and decode lines.
+Those lines are the instruct series.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import os
 import re
 import socket
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -29,13 +31,15 @@ from agent_framework import Agent, tool
 from pydantic import Field
 
 from favlo.chat_client import close_chat_client, open_chat_client
+from harness.turn_printer import TurnPrinter
 
 TARGET_TOKENS = 65536
+SHARED_PACKAGE = Path("src") / "favlo"
 INSTRUCTIONS = (
     "You are a repository agent. Call read_file with the path the user names. "
-    "Think through the files already returned before that call. "
-    "After the file comes back, think through what it does and how it relates "
-    "to those files, then reply with that analysis."
+    "Use the files already returned before that call. "
+    "After the file comes back, say what it does and how it relates to those "
+    "files, then reply with that analysis."
 )
 SKIP_PARTS = frozenset(
     {
@@ -49,7 +53,7 @@ SKIP_PARTS = frozenset(
         ".pytest_cache",
     }
 )
-TEXT_SUFFIXES = frozenset({".py", ".metal", ".md", ".toml"})
+TEXT_SUFFIXES = frozenset({".py", ".md", ".toml"})
 _TOKENS = re.compile(r"\((\d+) tok in ")
 _SPAN = re.compile(r"\((\d+) tok in ([0-9.]+)s")
 
@@ -68,11 +72,23 @@ def model_stem(model: str) -> str:
     return model.partition(":")[0]
 
 
+def instruct_model(model: str) -> str:
+    """Instruct variant of the pipeline. The file agent never opens thinking."""
+    return f"{model_stem(model)}:instruct"
+
+
+def shared_package(root: Path) -> Path:
+    """The shared runtime package the ladder reads. Independent of any pipeline."""
+    return (root.resolve() / SHARED_PACKAGE).resolve()
+
+
 def source_files(root: Path) -> list[Path]:
-    """UTF-8 source files, largest first. Models, artifacts, and caches are omitted."""
-    base = root.resolve()
+    """UTF-8 files under ``src/favlo``, largest first. Caches are omitted."""
+    package = shared_package(root)
+    if not package.is_dir():
+        return []
     found: list[tuple[int, Path]] = []
-    for dirpath, dirnames, filenames in os.walk(base):
+    for dirpath, dirnames, filenames in os.walk(package):
         dirnames[:] = [name for name in dirnames if name not in SKIP_PARTS]
         for name in filenames:
             path = Path(dirpath) / name
@@ -85,14 +101,14 @@ def source_files(root: Path) -> list[Path]:
             if size == 0:
                 continue
             found.append((size, path))
-    found.sort(key=lambda item: (-item[0], item[1].relative_to(base).as_posix()))
+    found.sort(key=lambda item: (-item[0], item[1].relative_to(package).as_posix()))
     return [path for _size, path in found]
 
 
 def read_repository_file(
     root: Path, path: str, allowed: set[str], task: str | None = None
 ) -> str:
-    """Return one allowed source file. Any other path is refused.
+    """Return one allowed shared-package file. Any other path is refused.
 
     A path that matches one allowed file regardless of case is that file.
     ``task`` is the file this turn asked for. A call whose path does not
@@ -107,12 +123,12 @@ def read_repository_file(
         elif task in allowed:
             chosen = task
         else:
-            message = "path is not a repository source file"
+            message = "path is not a shared package source file"
             raise ValueError(message)
-    base = root.resolve()
-    target = (base / chosen).resolve()
-    if not target.is_relative_to(base) or not target.is_file():
-        message = "path is not a repository source file"
+    package = shared_package(root)
+    target = (package / chosen).resolve()
+    if not target.is_relative_to(package) or not target.is_file():
+        message = "path is not a shared package source file"
         raise ValueError(message)
     return target.read_text(encoding="utf-8", errors="replace")
 
@@ -379,9 +395,11 @@ class RunResult:
 def _read_tool(root: Path, allowed: set[str], loaded: list[str], task: dict[str, str]):
     @tool(approval_mode="never_require")
     def read_file(
-        path: Annotated[str, Field(description="Repository-relative path of the source file.")],
+        path: Annotated[
+            str, Field(description="Path of the shared package source file under src/favlo.")
+        ],
     ) -> str:
-        """Return one repository source file."""
+        """Return one shared package source file."""
         text = read_repository_file(root, path, allowed, task.get("path"))
         loaded.append(path)
         return text + "\n\nThe file is above. Reply with the analysis of this file."
@@ -456,19 +474,32 @@ def _completions(log: Log) -> str:
     return "\n---\n".join(blocks[-2:])
 
 
-def _open_agent(base_url: str, model: str, read: object) -> tuple[object, Agent]:
-    client = open_chat_client(model_stem(model), base_url)
+def _open_agent(
+    base_url: str,
+    model: str,
+    read: object,
+    *,
+    mtp: bool | None,
+    mtp_depth: int,
+) -> tuple[object, Agent]:
+    client = open_chat_client(instruct_model(model), base_url)
     # One tool call, then the framework asks for a reply with tools disabled.
     client.function_invocation_configuration["max_iterations"] = 1
+    options: dict[str, object] = {
+        "tool_choice": {"mode": "required", "required_function_name": "read_file"},
+        "reasoning": {"effort": "none"},
+    }
+    if mtp is not None:
+        options["extra_body"] = {
+            "favlo:mtp": mtp,
+            "favlo:mtp_depth": mtp_depth,
+        }
     agent = Agent(
         client=client,
         name="file-agent",
         instructions=INSTRUCTIONS,
         tools=[read],
-        default_options={
-            "tool_choice": {"mode": "required", "required_function_name": "read_file"},
-            "extra_body": {"enable_thinking": False},
-        },
+        default_options=options,
     )
     return client, agent
 
@@ -480,25 +511,29 @@ async def run_file_agent(
     server: Server,
     *,
     model: str,
+    mtp: bool | None = None,
+    mtp_depth: int = 3,
 ) -> RunResult:
-    """Read source files until ``prompt tokens`` reaches ``target``.
+    """Read shared package files until ``prompt tokens`` reaches ``target``.
 
-    Each task is one agent run: the model calls ``read_file``, the framework
-    returns the file, and the model analyzes it. The server is stopped after
-    the first task and replaced. Later tasks use that new process and the
-    same session.
+    Each task is one Agent Framework run: the model calls ``read_file``, the
+    framework returns the file, and the model analyzes it. The stream printer
+    writes each model call as it arrives. The server is stopped after the first
+    task and replaced. Later tasks use that new process and the same session.
     """
     root = root.resolve()
+    package = shared_package(root)
     files = source_files(root)
     if not files:
-        return RunResult([], False, False, "no source files")
-    allowed = {path.relative_to(root).as_posix() for path in files}
+        return RunResult([], False, False, f"no source files under {SHARED_PACKAGE.as_posix()}")
+    allowed = {path.relative_to(package).as_posix() for path in files}
     loaded: list[str] = []
     task = {"path": ""}
     read = _read_tool(root, allowed, loaded, task)
     base_url = f"http://127.0.0.1:{server.port}/v1"
-    chat, agent = _open_agent(base_url, model, read)
+    chat, agent = _open_agent(base_url, model, read, mtp=mtp, mtp_depth=mtp_depth)
     session = agent.create_session()
+    printer = TurnPrinter(sys.stdout)
     seen = 0
     turn = 0
     requests: list[RequestRate] = []
@@ -506,10 +541,13 @@ async def run_file_agent(
         for index, path in enumerate(files):
             if turn >= 2 and requests and requests[-1].prompt_tokens >= target:
                 break
-            rel = path.relative_to(root).as_posix()
+            rel = path.relative_to(package).as_posix()
             task["path"] = rel
+            print(f"turn {turn + 1} read {SHARED_PACKAGE.as_posix()}/{rel}", flush=True)
             before_requests = len(parse_requests(log.text()))
-            await agent.run(read_prompt(rel), session=session)
+            stream = agent.run(read_prompt(rel), stream=True, session=session)
+            async for update in stream:
+                printer.take(update)
             requests = _wait_requests(log, before_requests, server)
             for row, request in enumerate(requests[seen:], start=seen + 1):
                 print(format_request(row, request), flush=True)
@@ -517,7 +555,7 @@ async def run_file_agent(
             if not prefix_so_far(requests):
                 note = "prefix did not extend\n" + _completions(log)
                 return RunResult(requests, False, False, note)
-            print(f"read {rel}", flush=True)
+            print(f"read {SHARED_PACKAGE.as_posix()}/{rel}", flush=True)
             turn += 1
             if turn == 1 and index + 1 < len(files):
                 print("restarting server", flush=True)
@@ -526,13 +564,14 @@ async def run_file_agent(
                 _restart(server, log)
                 chat, agent = _open_agent(f"http://127.0.0.1:{server.port}/v1", model, read)
     finally:
+        printer.close()
         if chat is not None:
             await close_chat_client(chat)
     context = requests[-1].prompt_tokens if requests else 0
     reached = context >= target
     extended = extensions_hold(requests)
     if not reached:
-        note = f"source files ended at {context} tokens"
+        note = f"shared package files ended at {context} tokens"
     elif not extended:
         note = "prefix was not loaded from disk"
     else:
@@ -601,16 +640,23 @@ def _restart(server: Server, log: Log) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Read repository files until the prompt reaches a token target."
+        description=(
+            "Instruct file agent: read src/favlo until the prompt reaches a token target."
+        )
     )
     parser.add_argument("--tokens", type=int, default=TARGET_TOKENS)
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--model", required=True)
     parser.add_argument("--max-memory", default=None, help="serve memory cap, such as 16GiB")
+    parser.add_argument("--mtp", choices=("on", "off"), default=None)
+    parser.add_argument("--mtp-depth", type=int, default=3)
     args = parser.parse_args(argv)
     if args.tokens < 1:
         print("token target must be positive")
+        return 1
+    if args.mtp_depth < 1:
+        print("--mtp-depth must be a positive integer")
         return 1
     stem = model_stem(args.model)
     from favlo.cli import repo_root
@@ -620,12 +666,23 @@ def main(argv: list[str] | None = None) -> int:
     created = hold(root=root, pipeline=stem, command="file-agent")
     log = Log()
     server: Server | None = None
+    mtp = None if args.mtp is None else args.mtp == "on"
     try:
         port = args.port or _free_port()
         server = _spawn(port, log, args.max_memory)
         _wait_listening(server, log, 0)
+        if args.mtp is not None:
+            print(f"mtp {args.mtp} depth {args.mtp_depth}", flush=True)
         result = asyncio.run(
-            run_file_agent(args.repo, args.tokens, log, server, model=stem)
+            run_file_agent(
+                args.repo,
+                args.tokens,
+                log,
+                server,
+                model=stem,
+                mtp=mtp,
+                mtp_depth=args.mtp_depth,
+            )
         )
     except Exception as exc:
         print(exc)

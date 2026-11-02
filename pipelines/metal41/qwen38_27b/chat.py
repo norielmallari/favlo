@@ -725,11 +725,6 @@ def _stream(
         try:
             while True:
                 item = pending.get()
-                if item == "prefill":
-                    keepalive = getattr(sink, "keepalive", None)
-                    if callable(keepalive):
-                        keepalive()
-                    continue
                 final = item is None
                 if not final:
                     produced.append(int(item))
@@ -755,11 +750,6 @@ def _stream(
             raise RequestClosed()
         pending.put(token)
 
-    def on_prefill(_done: int) -> None:
-        if failed:
-            raise RequestClosed()
-        pending.put("prefill")
-
     try:
         runtime.generate(
             prompt,
@@ -768,7 +758,6 @@ def _stream(
             forced=forced,
             stop_after_forced=stop_after_forced,
             on_token=enqueue,
-            on_prefill=on_prefill,
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,

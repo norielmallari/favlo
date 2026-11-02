@@ -45,10 +45,10 @@ python -m harness.server run -- <command>
 ### Prefix reload rate
 
 ```bash
-python -m harness --model <id>
+python -m harness --model <id> [--mtp on|off] [--mtp-depth <n>]
 ```
 
-Starts `serve`, reads repository files one turn at a time until the prompt reaches the token target (default 65536), and prints the server's prefill and decode rates. The model field is the pipeline name. The request sets `enable_thinking` false and leaves every other sampling field unset, so thinking stays closed and sampling uses the selected id's card. The server stops after the first turn and starts another, so the second turn loads the prefix from disk. Later turns stay on that server. Takes the machine lock. Not part of `pytest`.
+Starts `serve`, then a Microsoft Agent Framework agent reads `src/favlo` files one turn at a time until the prompt reaches the token target (default 65536). The corpus is the shared package only, so the ladder does not depend on any pipeline tree. The client opens the `<id>:instruct` card and sets `reasoning.effort` to `none` (thinking off). `--mtp on` sends `favlo:mtp` true; `--mtp off` sends false. Omitted, the request leaves `mtp` unset and the registry row decides. `--mtp-depth` sends `favlo:mtp_depth` when `--mtp` is set; omitted depth is 3. Each model call streams its reply and tool calls. The command also prints the server's prefill and decode rates. The server stops after the first turn and starts another, so the second turn loads the prefix from disk. Later turns stay on that server. Takes the machine lock. Not part of `pytest`.
 
 ### File agent
 

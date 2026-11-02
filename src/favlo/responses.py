@@ -482,6 +482,14 @@ class ChatWire:
         self._created = int(time.time())
         self._calls = 0
 
+    @property
+    def started(self) -> bool:
+        return bool(getattr(self._inner, "started", False))
+
+    @property
+    def payload(self) -> Any:
+        return getattr(self._inner, "payload", None)
+
     def stopped(self) -> bool:
         return bool(self._inner.stopped())
 
@@ -588,6 +596,14 @@ class ResponseWire:
     def __init__(self, inner: Any) -> None:
         self._inner = inner
         self.model_id = getattr(inner, "model_id", "")
+
+    @property
+    def started(self) -> bool:
+        return bool(getattr(self._inner, "started", False))
+
+    @property
+    def payload(self) -> Any:
+        return getattr(self._inner, "payload", None)
 
     def stopped(self) -> bool:
         return bool(self._inner.stopped())

@@ -2,7 +2,20 @@
 
 from __future__ import annotations
 
-from favlo.responses import chat_to_responses, response_to_chat, template_messages
+from favlo.reply import MemoryReply
+from favlo.responses import ChatWire, ResponseWire, chat_to_responses, response_to_chat, template_messages
+
+
+def test_wires_expose_started_and_payload() -> None:
+    for wire_cls in (ChatWire, ResponseWire):
+        inner = MemoryReply(model_id="example-model")
+        wire = wire_cls(inner)
+        assert wire.started is False
+        assert wire.payload == {}
+        inner.begin_events()
+        assert wire.started is True
+        inner.json(200, {"ok": True})
+        assert wire.payload == {"ok": True}
 
 
 def test_chat_reasoning_content_becomes_a_reasoning_item() -> None:

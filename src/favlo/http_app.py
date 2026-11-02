@@ -19,9 +19,11 @@ import threading
 from typing import Any
 
 import uvicorn
+from sse_starlette.event import ServerSentEvent
+from sse_starlette.sse import EventSourceResponse
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import Response, StreamingResponse
+from starlette.responses import Response
 from starlette.routing import Route
 
 from favlo.mcp_server import build_mcp, media_kinds
@@ -41,6 +43,9 @@ from favlo.registry import load_registry, model_objects, one_model
 from favlo.reply import LiveReply
 
 _MAX_BODY = 64 * 1024 * 1024
+# Same default as agent-framework-ag-ui keepalive_seconds.
+_STREAM_KEEPALIVE_SECONDS = 15
+_STREAM_KEEPALIVE_COMMENT = "keepalive"
 
 
 class ServeHandle:
@@ -463,10 +468,17 @@ async def _locked(request: Request, args: Any, state: dict[str, Any], kind: str)
         finally:
             watcher.cancel()
 
-    return StreamingResponse(
+    # MAF AG-UI transport keepalive: sse-starlette ping comments, not protocol events.
+    return EventSourceResponse(
         chunks(),
+        ping=_STREAM_KEEPALIVE_SECONDS,
+        ping_message_factory=lambda: ServerSentEvent(comment=_STREAM_KEEPALIVE_COMMENT),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
