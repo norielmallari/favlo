@@ -547,6 +547,60 @@ kernel void prefill_f16(
     op.run(tile_left, tile_right, tile_out);
 }
 
+// Eight live query rows against a half key cache tile. Keys are
+// [token, channel]. One threadgroup owns a 256-key score tile.
+kernel void prefill_f16_m8(
+    device half* activation [[buffer(0)]],
+    device half* keys [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint gid [[threadgroup_position_in_grid]])
+{
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        activation,
+        dextents<int, 2>(int(inner), int(rows)),
+        array<int, 2>{1, int(inner)});
+    tensor<device half, dextents<int, 2>, tensor_inline> right(
+        keys,
+        dextents<int, 2>(int(inner), int(cols)),
+        array<int, 2>{1, int(inner)});
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        destination,
+        dextents<int, 2>(int(cols), int(rows)),
+        array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(8, 256, 256, false, true, false);
+    matmul2d<desc, execution_simdgroups<2>> op;
+    auto tile_left = left.slice(0, 0);
+    auto tile_right = right.slice(0, int(gid) * 256);
+    auto tile_out = out.slice(int(gid) * 256, 0);
+    op.run(tile_left, tile_right, tile_out);
+}
+
+// Eight probability rows against a half value cache. Values are
+// [token, channel]. One threadgroup is one row; each thread owns a channel.
+kernel void prefill_f16_pv(
+    device const half* probs [[buffer(0)]],
+    device const half* values [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= rows || tid >= cols) {
+        return;
+    }
+    device const half* prow = probs + row * inner;
+    float acc = 0.0f;
+    for (uint token = 0u; token < inner; ++token) {
+        acc += float(prow[token]) * float(values[token * cols + tid]);
+    }
+    destination[row * cols + tid] = acc;
+}
+
 kernel void prefill_fp4_n64(
     device half* activation [[buffer(0)]],
     device uchar* weights [[buffer(1)]],
@@ -2261,6 +2315,9 @@ kernel void store_kv_f16(
     value_cache[head * stride + pos * 256u + tid] = half(value[head * 256u + tid]);
 }
 
+// One simdgroup per key/value head. The eight query heads that share that
+// plane score against each key once, so the half cache is not reread eight
+// times. Online softmax, eight tokens at a time, no threadgroup barrier.
 kernel void attend_gqa_heads_f16(
     device const float* query [[buffer(0)]],
     device const half* key_cache [[buffer(1)]],
@@ -2269,53 +2326,102 @@ kernel void attend_gqa_heads_f16(
     device float* destination [[buffer(4)]],
     constant uint& tokens [[buffer(5)]],
     constant uint& stride [[buffer(6)]],
-    uint tid [[thread_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]],
-    uint simd [[simdgroup_index_in_threadgroup]],
-    uint head [[threadgroup_position_in_grid]])
+    uint kv [[threadgroup_position_in_grid]])
 {
-    threadgroup float red[8];
-    uint kv = head >> 3;
-    device const half* key = key_cache + kv * stride;
-    device const half* value = value_cache + kv * stride;
-    device const float* q = query + head * 256u;
-    float running_max = -INFINITY;
-    float running_sum = 0.0f;
-    for (uint token = 0u; token < tokens; ++token) {
-        float mine = q[tid] * float(key[token * 256u + tid]);
-        float part = simd_sum(mine);
-        if (lane == 0u) {
-            red[simd] = part;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        float score = 0.0f;
+    device const half* keys = key_cache + kv * stride;
+    device const half* values = value_cache + kv * stride;
+    float qreg[8][8];
+    for (uint h = 0u; h < 8u; ++h) {
+        device const float* q = query + (kv * 8u + h) * 256u;
         for (uint i = 0u; i < 8u; ++i) {
-            score += red[i];
+            qreg[h][i] = q[lane * 8u + i];
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        score *= INV_SQRT_256;
-        float next = max(running_max, score);
-        running_sum = running_sum * exp(running_max - next) + exp(score - next);
-        running_max = next;
     }
-    float acc = 0.0f;
-    for (uint token = 0u; token < tokens; ++token) {
-        float mine = q[tid] * float(key[token * 256u + tid]);
-        float part = simd_sum(mine);
-        if (lane == 0u) {
-            red[simd] = part;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        float score = 0.0f;
+    float running_max[8];
+    float running_sum[8];
+    float outv[8][8];
+    for (uint h = 0u; h < 8u; ++h) {
+        running_max[h] = -INFINITY;
+        running_sum[h] = 0.0f;
         for (uint i = 0u; i < 8u; ++i) {
-            score += red[i];
+            outv[h][i] = 0.0f;
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        score *= INV_SQRT_256;
-        float weight = exp(score - running_max) / running_sum;
-        acc += weight * float(value[token * 256u + tid]);
     }
-    destination[head * 256u + tid] = acc * sigmoid_f(gate[head * 256u + tid]);
+    uint step = 0u;
+    for (; step + 8u <= tokens; step += 8u) {
+        float score[8][8];
+        for (uint b = 0u; b < 8u; ++b) {
+            device const half* ks = keys + (step + b) * 256u;
+            float kreg[8];
+            for (uint i = 0u; i < 8u; ++i) {
+                kreg[i] = float(ks[lane * 8u + i]);
+            }
+            for (uint h = 0u; h < 8u; ++h) {
+                float partial = 0.0f;
+                for (uint i = 0u; i < 8u; ++i) {
+                    partial += qreg[h][i] * kreg[i];
+                }
+                score[h][b] = simd_sum(partial) * INV_SQRT_256;
+            }
+        }
+        for (uint b = 0u; b < 8u; ++b) {
+            device const half* vs = values + (step + b) * 256u;
+            float vreg[8];
+            for (uint i = 0u; i < 8u; ++i) {
+                vreg[i] = float(vs[lane * 8u + i]);
+            }
+            for (uint h = 0u; h < 8u; ++h) {
+                float next = max(running_max[h], score[h][b]);
+                float rescale = exp(running_max[h] - next);
+                float prob = exp(score[h][b] - next);
+                running_sum[h] = running_sum[h] * rescale + prob;
+                for (uint i = 0u; i < 8u; ++i) {
+                    outv[h][i] = outv[h][i] * rescale + prob * vreg[i];
+                }
+                running_max[h] = next;
+            }
+        }
+    }
+    for (; step < tokens; ++step) {
+        device const half* ks = keys + step * 256u;
+        float kreg[8];
+        for (uint i = 0u; i < 8u; ++i) {
+            kreg[i] = float(ks[lane * 8u + i]);
+        }
+        float score[8];
+        for (uint h = 0u; h < 8u; ++h) {
+            float partial = 0.0f;
+            for (uint i = 0u; i < 8u; ++i) {
+                partial += qreg[h][i] * kreg[i];
+            }
+            score[h] = simd_sum(partial) * INV_SQRT_256;
+        }
+        device const half* vs = values + step * 256u;
+        float vreg[8];
+        for (uint i = 0u; i < 8u; ++i) {
+            vreg[i] = float(vs[lane * 8u + i]);
+        }
+        for (uint h = 0u; h < 8u; ++h) {
+            float next = max(running_max[h], score[h]);
+            float rescale = exp(running_max[h] - next);
+            float prob = exp(score[h] - next);
+            running_sum[h] = running_sum[h] * rescale + prob;
+            for (uint i = 0u; i < 8u; ++i) {
+                outv[h][i] = outv[h][i] * rescale + prob * vreg[i];
+            }
+            running_max[h] = next;
+        }
+    }
+    for (uint h = 0u; h < 8u; ++h) {
+        uint head = kv * 8u + h;
+        device float* dest = destination + head * 256u;
+        device const float* grow = gate + head * 256u;
+        float inv = 1.0f / running_sum[h];
+        for (uint i = 0u; i < 8u; ++i) {
+            dest[lane * 8u + i] = outv[h][i] * inv * sigmoid_f(grow[lane * 8u + i]);
+        }
+    }
 }
 
 // Eight routed gate-up rows, plus the shared expert. Each job owns one of the

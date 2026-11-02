@@ -24,7 +24,13 @@ from qwen36_35b_a3b.atlas import (
     atlas_slots,
     read_expert_layout,
 )
-from qwen36_35b_a3b.attn import attend_plane, bind_plane, plane_bytes, resize_plane
+from qwen36_35b_a3b.attn import (
+    attend_half_decode,
+    attend_plane,
+    bind_plane,
+    plane_bytes,
+    resize_plane,
+)
 from qwen36_35b_a3b.cache import (
     CONTEXT_STEP,
     DEFAULT_CONTEXT_LENGTH,
@@ -361,7 +367,7 @@ class Qwen36Runtime:
         self,
         path: Path,
         *,
-        kv_cache: str = "half",
+        kv_cache: str = "fp8_e4m3",
         console: Any = None,
         resident_percent: float | None = None,
         owner: str | None = None,
@@ -408,9 +414,10 @@ class Qwen36Runtime:
         # Eight images is one token. A larger atlas is what remains after the cache.
 
         def _plane(positions: int) -> int:
-            if plain_cache(self.kv_cache):
-                return 0
-            return plane_bytes(positions)
+            mode = kv_mode(self.kv_cache)
+            if mode in ("fp8_e4m3", "e2m1", "half"):
+                return plane_bytes(positions)
+            return 0
 
         ceiling = fit_positions(
             self.max_memory, fixed, self.kv_cache, card, _plane, keep=MIN_IMAGES * image
@@ -983,19 +990,29 @@ class Qwen36Runtime:
                 (KV, 1, 1),
                 (HEAD, 1, 1),
             )
-            self.session.encode(
-                attend,
-                [
-                    (self.query, 0),
-                    (self.k_cache[slot], 0),
-                    (self.v_cache[slot], 0),
-                    (self.gate, 0),
-                    (self.attn, 0),
-                ],
-                [_u32(pos + 1), _u32(stride)],
-                (Q_HEADS, 1, 1),
-                (HEAD, 1, 1),
-            )
+            if self.kv_cache == "half":
+                attend_half_decode(
+                    self,
+                    query=self.query,
+                    gate=self.gate,
+                    dest=self.attn,
+                    pos=pos,
+                    slot=slot,
+                )
+            else:
+                self.session.encode(
+                    attend,
+                    [
+                        (self.query, 0),
+                        (self.k_cache[slot], 0),
+                        (self.v_cache[slot], 0),
+                        (self.gate, 0),
+                        (self.attn, 0),
+                    ],
+                    [_u32(pos + 1), _u32(stride)],
+                    (Q_HEADS, 1, 1),
+                    (HEAD, 1, 1),
+                )
         else:
             attend_plane(
                 self,
@@ -1825,19 +1842,29 @@ class Qwen36Runtime:
                 (KV, 1, 1),
                 (HEAD, 1, 1),
             )
-            self.session.encode(
-                attend,
-                [
-                    (self.query, 0),
-                    (self.k_cache[MTP_SLOT], 0),
-                    (self.v_cache[MTP_SLOT], 0),
-                    (self.gate, 0),
-                    (self.attn, 0),
-                ],
-                [_u32(pos + 1), _u32(stride)],
-                (Q_HEADS, 1, 1),
-                (HEAD, 1, 1),
-            )
+            if self.kv_cache == "half":
+                attend_half_decode(
+                    self,
+                    query=self.query,
+                    gate=self.gate,
+                    dest=self.attn,
+                    pos=pos,
+                    slot=MTP_SLOT,
+                )
+            else:
+                self.session.encode(
+                    attend,
+                    [
+                        (self.query, 0),
+                        (self.k_cache[MTP_SLOT], 0),
+                        (self.v_cache[MTP_SLOT], 0),
+                        (self.gate, 0),
+                        (self.attn, 0),
+                    ],
+                    [_u32(pos + 1), _u32(stride)],
+                    (Q_HEADS, 1, 1),
+                    (HEAD, 1, 1),
+                )
         else:
             attend_plane(
                 self,

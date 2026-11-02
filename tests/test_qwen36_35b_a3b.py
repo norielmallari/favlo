@@ -1260,7 +1260,7 @@ def test_a_prefill_chunk_splits_experts_that_do_not_fit() -> None:
 
 
 def test_kv_widths_and_atlas_budget() -> None:
-    assert kv_mode(None) == "half"
+    assert kv_mode(None) == "fp8_e4m3"
     assert kv_mode("f16") == "half"
     assert kv_mode("fp16") == "half"
     assert kv_mode("half") == "half"

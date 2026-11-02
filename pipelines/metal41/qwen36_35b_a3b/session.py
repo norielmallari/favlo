@@ -129,6 +129,8 @@ KERNELS = (
     "prefill_fp4_expert_tile_w",
     "prefill_fp8_expert_tile_at",
     "prefill_f16",
+    "prefill_f16_m8",
+    "prefill_f16_pv",
     "prefill_fp4_n64",
     "prefill_fp4_n64_stride",
     "restore_fp4_i8",

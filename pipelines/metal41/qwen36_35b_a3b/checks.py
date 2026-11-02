@@ -1044,6 +1044,52 @@ def check_gather_and_attend(session: Session) -> None:
     weights = np.exp(scores - np.max(scores))
     weights /= np.sum(weights)
     _close("attend", session.download_f32(out, 256), (weights @ value).astype(np.float32))
+    _check_attend_gqa_heads_f16(session, rng)
+
+
+def _check_attend_gqa_heads_f16(session: Session, rng: np.random.Generator) -> None:
+    """Half decode matmul2d score and value mix match the host formulas."""
+    tokens = 256
+    rows = 8
+    query = rng.normal(scale=0.1, size=(rows, 256)).astype(np.float16)
+    key = rng.normal(scale=0.1, size=(tokens, 256)).astype(np.float16)
+    value = rng.normal(scale=0.1, size=(tokens, 256)).astype(np.float16)
+    scores = session.zeros(rows * tokens * 4)
+    width = int(session.pipes["prefill_f16_m8"].threadExecutionWidth())
+    session.dispatch(
+        "prefill_f16_m8",
+        [session.upload(query.tobytes()), session.upload(key.tobytes()), scores],
+        [
+            np.uint32(rows).tobytes(),
+            np.uint32(tokens).tobytes(),
+            np.uint32(256).tobytes(),
+        ],
+        (tokens // 256, 1, 1),
+        (width * 2, 1, 1),
+    )
+    got_scores = session.download_f32(scores, rows * tokens).reshape(rows, tokens)
+    expect_scores = (query.astype(np.float32) @ key.astype(np.float32).T).astype(np.float32)
+    _close("prefill_f16_m8", got_scores, expect_scores, rtol=2e-2, atol=2e-2)
+    probs = (expect_scores / np.float32(16.0)).astype(np.float32)
+    probs = np.exp(probs - np.max(probs, axis=1, keepdims=True))
+    probs /= np.sum(probs, axis=1, keepdims=True)
+    peak = np.max(np.abs(probs), axis=1, keepdims=True)
+    packed = (probs / np.maximum(peak, 1e-8)).astype(np.float16)
+    partial = session.zeros(rows * 256 * 4)
+    session.dispatch(
+        "prefill_f16_pv",
+        [session.upload(packed.tobytes()), session.upload(value.tobytes()), partial],
+        [
+            np.uint32(rows).tobytes(),
+            np.uint32(256).tobytes(),
+            np.uint32(tokens).tobytes(),
+        ],
+        (rows, 1, 1),
+        (256, 1, 1),
+    )
+    got = session.download_f32(partial, rows * 256).reshape(rows, 256)
+    expect = packed.astype(np.float32) @ value.astype(np.float32)
+    _close("prefill_f16_pv", got, expect.astype(np.float32), rtol=3e-2, atol=3e-2)
 
 
 def struct_f32(value: float) -> bytes:

@@ -1,15 +1,20 @@
-"""Attention on the fp8 or fp4 plane.
+"""Attention on the fp8, fp4, or half plane.
 
-Keys are stored ``[head, token, channel]`` with an E8M0 scale every 32 channels.
-Values are stored ``[head, channel, token]`` with an E8M0 scale every 32 tokens.
-Prefill scores up to 4096 keys at a time: one 64 by 64 ``matmul2d`` for the scores,
-a parallel softmax over 256-key chunks, and one strided value mix.
-A one-token fp8 step packs the eight live query rows into one 8-row
-``matmul2d``, softmaxes 256-key chunks in parallel, and splits the value mix
-into blocks of 512 keys.
-The score product is a dense ``matmul2d``. The value mix is a ``matmul2d`` with
-the context length as its token stride. Softmax writes float32 weights. Each
-window divides by that row's peak, multiplies in float16, then restores the peak.
+Keys are stored ``[head, token, channel]`` with an E8M0 scale every 32 channels
+on the quantized planes. Values on those planes are ``[head, channel, token]``
+with an E8M0 scale every 32 tokens. Prefill scores up to 4096 keys at a time:
+one 64 by 64 ``matmul2d`` for the scores, a parallel softmax over 256-key
+chunks, and one strided value mix. A one-token fp8 step packs the eight live
+query rows into one 8-row ``matmul2d``, softmaxes 256-key chunks in parallel,
+and splits the value mix into blocks of 512 keys. Softmax writes float32
+weights. Each window divides by that row's peak, multiplies in float16, then
+restores the peak.
+
+The half cache keeps ``[head, token, channel]`` for both keys and values, with
+no scale plane. Decode scores the eight query rows of a key/value head with
+``prefill_f16_m8``, softmaxes the same way as the fp8 step, and mixes values
+with ``prefill_f16_pv``. That is the Metal 4 ``matmul2d`` half path used for
+long-context decode (Dao et al., FlashAttention; Hong et al., FlashDecoding).
 """
 
 from __future__ import annotations
@@ -72,10 +77,102 @@ def bind_plane(runtime: Any) -> None:
 
 def resize_plane(runtime: Any) -> None:
     """Grow the value-mix scratch after the context length changes."""
-    if plain_cache(runtime.kv_cache):
+    if runtime.kv_cache == "f32":
+        return
+    if plain_cache(runtime.kv_cache) and runtime.kv_cache != "half":
         return
     blocks = max(runtime.max_pos, BLOCK) // BLOCK
     runtime.plane_parts = runtime.session.zeros(blocks * (GROUP * GROUP) * HEAD * 4)
+
+
+def attend_half_decode(
+    runtime: Any,
+    *,
+    query: Any,
+    gate: Any,
+    dest: Any,
+    pos: int,
+    slot: int,
+) -> None:
+    """One-token half decode. Eight query rows per key/value head via matmul2d."""
+    if runtime.max_pos % TILE:
+        message = f"context {runtime.max_pos} is not a multiple of {TILE}"
+        raise RuntimeError(message)
+    limit = pos + 1
+    aligned = (limit + TILE - 1) // TILE * TILE
+    if aligned > runtime.max_pos:
+        aligned = runtime.max_pos
+    if aligned < limit:
+        message = f"attention span {limit} does not fit context {runtime.max_pos}"
+        raise RuntimeError(message)
+    room = (GROUP * CHUNK * SCORE) // GROUP
+    room = room // TILE * TILE
+    if room < TILE:
+        message = f"score buffer cannot hold {GROUP} rows"
+        raise RuntimeError(message)
+    for head in range(2):
+        _zero(runtime, runtime.plane_q, GROUP * HEAD // 2)
+        _encode(
+            runtime,
+            "kv_row_init",
+            [(runtime.plane_max, 0), (runtime.plane_sum, 0), (runtime.plane_acc, 0)],
+            [],
+            (GROUP, 1, 1),
+            (HEAD, 1, 1),
+        )
+        _encode(
+            runtime,
+            "kv_cast_q",
+            [(query, 0), (runtime.plane_q, 0)],
+            [_u32(1), _u32(head)],
+            (1, GROUP, 1),
+            (HEAD, 1, 1),
+        )
+        start = 0
+        while start < aligned:
+            span = min(room, aligned - start)
+            if span % TILE:
+                message = f"decode span {span} is not a multiple of {TILE}"
+                raise RuntimeError(message)
+            key_off = (head * runtime.max_pos + start) * HEAD * 2
+            _matmul_f16_m8(
+                runtime,
+                runtime.plane_q,
+                runtime.k_cache[slot],
+                key_off,
+                runtime.plane_scores,
+                GROUP,
+                span,
+                HEAD,
+            )
+            _softmax8(runtime, span, pos, start)
+            _cast_probs(runtime, runtime.plane_probs, GROUP, span, span, 0)
+            _matmul_f16_pv(
+                runtime,
+                runtime.plane_prob_half,
+                runtime.v_cache[slot],
+                key_off,
+                runtime.plane_partial,
+                GROUP,
+                HEAD,
+                span,
+            )
+            _scale_partial(runtime, runtime.plane_partial, GROUP, HEAD)
+            _acc_add(runtime, GROUP)
+            start += span
+        _encode(
+            runtime,
+            "kv_attend_write",
+            [
+                (runtime.plane_acc, 0),
+                (runtime.plane_sum, 0),
+                (gate, 0),
+                (dest, 0),
+            ],
+            [_u32(1), _u32(1), _u32(head)],
+            (1, GROUP, 1),
+            (HEAD, 1, 1),
+        )
 
 
 def attend_plane(
@@ -583,6 +680,48 @@ def _matmul_m8(
         [_u32(rows), _u32(cols), _u32(inner)],
         (cols // TILE, 1, 1),
         (width * 2, 1, 1),
+    )
+
+
+def _matmul_f16_m8(
+    runtime: Any,
+    left: Any,
+    right: Any,
+    data_off: int,
+    dest: Any,
+    rows: int,
+    cols: int,
+    inner: int,
+) -> None:
+    name = "prefill_f16_m8"
+    width = int(runtime.session.pipes[name].threadExecutionWidth())
+    _encode(
+        runtime,
+        name,
+        [(left, 0), (right, data_off), (dest, 0)],
+        [_u32(rows), _u32(cols), _u32(inner)],
+        (cols // TILE, 1, 1),
+        (width * 2, 1, 1),
+    )
+
+
+def _matmul_f16_pv(
+    runtime: Any,
+    left: Any,
+    right: Any,
+    data_off: int,
+    dest: Any,
+    rows: int,
+    cols: int,
+    inner: int,
+) -> None:
+    _encode(
+        runtime,
+        "prefill_f16_pv",
+        [(left, 0), (right, data_off), (dest, 0)],
+        [_u32(rows), _u32(cols), _u32(inner)],
+        (rows, 1, 1),
+        (cols, 1, 1),
     )
 
 
