@@ -492,10 +492,12 @@ def _sampling(
     thinking: bool,
     variant: dict[str, Any] | None = None,
 ) -> tuple[float, float, int]:
-    """Model-card sampling for the mode, unless the request sets a field.
+    """Sampling from the selected card, unless the request sets a field.
 
-    Temperature 0 stays an argmax. Thinking is 1.0 / 0.95 / 20. Instruct is 0.7 / 0.8 / 20.
+    Temperature 0 stays an argmax. A missing card uses the default variant row.
+    Thinking does not pick the card.
     """
+    del thinking
     temperature = body.get("temperature", None)
     top_p = body.get("top_p", None)
     top_k = body.get("top_k", None)
@@ -505,10 +507,8 @@ def _sampling(
             float(variant["top_p"]),
             int(variant["top_k"]),
         )
-    elif thinking:
-        defaults = (THINKING_TEMPERATURE, THINKING_TOP_P, THINKING_TOP_K)
     else:
-        defaults = (INSTRUCT_TEMPERATURE, INSTRUCT_TOP_P, INSTRUCT_TOP_K)
+        defaults = (THINKING_TEMPERATURE, THINKING_TOP_P, THINKING_TOP_K)
     return (
         defaults[0] if temperature is None else float(temperature),
         defaults[1] if top_p is None else float(top_p),

@@ -552,20 +552,20 @@ def test_bare_id_uses_this_pipeline_card() -> None:
     assert thinking is True
     assert card is not None
     assert card["presence_penalty"] == 0.0
-    closed, instruct = mode_card(None, False)
+    closed, still_default = mode_card(None, False)
     assert closed is False
-    assert instruct is not None
-    assert instruct["presence_penalty"] == 1.5
+    assert still_default is not None
+    assert still_default["presence_penalty"] == 0.0
 
 
 def test_omitted_sampling_follows_the_model_card() -> None:
     import qwen38_flash_next.commands as commands
 
     assert commands._sampling({}, thinking=True) == (1.0, 0.95, 20)
-    assert commands._sampling({}, thinking=False) == (0.7, 0.8, 20)
+    assert commands._sampling({}, thinking=False) == (1.0, 0.95, 20)
     assert commands._sampling(
         {"temperature": None, "top_p": None, "top_k": None}, thinking=False
-    ) == (0.7, 0.8, 20)
+    ) == (1.0, 0.95, 20)
     assert commands._sampling({"temperature": 0}, thinking=True) == (0.0, 0.95, 20)
     assert commands._sampling({"temperature": 0, "top_p": 1, "top_k": 0}, thinking=False) == (
         0.0,

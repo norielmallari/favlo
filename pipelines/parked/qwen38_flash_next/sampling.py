@@ -1,12 +1,14 @@
 """Sampling card for Qwen3.8-Flash-Next.
 
 Registration copies this module onto the registry row. A request that names
-no variant uses ``DEFAULT_VARIANT``.
+no variant uses ``DEFAULT_VARIANT``. A variant sets sampling defaults only.
+Thinking comes from the request or the registry ``enable_thinking`` field.
 """
 
 from typing import Any
 
 DEFAULT_VARIANT = "thinking"
+DEFAULT_THINKING = True
 
 VARIANTS = {
     "thinking": {
@@ -34,28 +36,43 @@ def requested_thinking(body: dict[str, Any]) -> bool | None:
     return None
 
 
-def mode_card(
-    selection: Any, requested: bool | None
-) -> tuple[bool, dict[str, float | int] | None]:
-    """The row this pipeline applies.
-
-    A ``:thinking`` or ``:instruct`` id keeps that row. A bare id uses
-    ``requested`` when the body set it, and ``DEFAULT_VARIANT`` when the body
-    omitted it.
-    """
+def sampling_card(selection: Any) -> dict[str, float | int]:
+    """The sampling row for the selected id. The suffix does not change thinking."""
     variant = getattr(selection, "variant", None) if selection is not None else None
-    if variant in VARIANTS:
-        stored = getattr(selection, "sampling", None)
-        card = stored if isinstance(stored, dict) and stored else VARIANTS[variant]
-        return variant == "thinking", dict(card)
-    if requested is None:
+    stored = getattr(selection, "sampling", None) if selection is not None else None
+    if isinstance(variant, str) and variant in VARIANTS:
+        name = variant
+        if isinstance(stored, dict) and stored:
+            return dict(stored)
+    else:
         name = getattr(selection, "default_variant", None) if selection is not None else None
         name = name if isinstance(name, str) and name in VARIANTS else DEFAULT_VARIANT
-    else:
-        name = "thinking" if requested else "instruct"
+        if isinstance(stored, dict) and stored and variant is None:
+            return dict(stored)
     cards = getattr(selection, "variants", None) if selection is not None else None
     source = cards if isinstance(cards, dict) else VARIANTS
     card = source.get(name) if isinstance(source, dict) else None
     if not isinstance(card, dict):
         card = VARIANTS[name]
-    return name == "thinking", dict(card)
+    return dict(card)
+
+
+def thinking_for(selection: Any, requested: bool | None) -> bool:
+    """Open thinking from the request, else the registry row, else the default."""
+    if requested is not None:
+        return requested
+    flag = getattr(selection, "enable_thinking", None) if selection is not None else None
+    if flag is not None:
+        return bool(flag)
+    return DEFAULT_THINKING
+
+
+def mode_card(
+    selection: Any, requested: bool | None
+) -> tuple[bool, dict[str, float | int]]:
+    """Thinking flag and the sampling card for this selection.
+
+    The variant id only supplies the sampling card. ``requested`` and the
+    registry ``enable_thinking`` field control the think block.
+    """
+    return thinking_for(selection, requested), sampling_card(selection)

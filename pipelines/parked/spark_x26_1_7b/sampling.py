@@ -1,6 +1,7 @@
 """Sampling card from the checkpoint ``generation_config.json``.
 
-The three names change the chat template. They share one sampler.
+The three names are sampling presets that share one sampler. Template
+effort comes from the request or the registry ``reasoning_effort`` field.
 ``top_k`` 0 leaves the nucleus uncut. The checkpoint stores that as ``-1``.
 """
 
@@ -22,3 +23,5 @@ VARIANTS = {
 }
 
 DEFAULT_VARIANT = "high"
+DEFAULT_THINKING = True
+DEFAULT_REASONING_EFFORT = "high"

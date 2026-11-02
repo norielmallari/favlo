@@ -285,30 +285,45 @@ def _respond(
 def _mode(selection: Any, body: dict[str, Any]) -> tuple[bool, str | None, dict[str, Any]]:
     """Template level and the sampler card.
 
-    ``reasoning.effort`` replaces a variant on the id. ``none`` turns thinking
-    off. ``minimal`` and ``low`` use the low instruction. The other listed
-    efforts use the high instruction. An omitted effort uses the id's variant,
-    or ``high``.
+    ``reasoning.effort`` controls the template. ``none`` turns thinking off.
+    ``minimal`` and ``low`` use the low instruction. The other listed efforts
+    use the high instruction. An omitted effort uses the registry
+    ``reasoning_effort`` field, else the pipeline default. The variant id only
+    supplies the sampling card.
     """
+    from spark_x26_1_7b.sampling import DEFAULT_REASONING_EFFORT
+
     named = _listed_effort(body.get("reasoning"))
-    variant = getattr(selection, "variant", None) if selection is not None else None
+    card = _sampling_card(selection)
     if named is not None:
         name = named
-    elif isinstance(variant, str) and variant in VARIANTS:
-        name = variant
     else:
-        default = getattr(selection, "default_variant", None) if selection is not None else None
-        name = default if isinstance(default, str) and default in VARIANTS else DEFAULT_VARIANT
-    if name == variant:
-        stored = getattr(selection, "sampling", None) if selection is not None else None
-        card = dict(stored) if isinstance(stored, dict) and stored else dict(VARIANTS[name])
-    else:
-        cards = getattr(selection, "variants", None) if selection is not None else None
-        source = cards if isinstance(cards, dict) else VARIANTS
-        row = source.get(name) if isinstance(source, dict) else None
-        card = dict(row) if isinstance(row, dict) else dict(VARIANTS[name])
+        stored = getattr(selection, "reasoning_effort", None) if selection is not None else None
+        if isinstance(stored, str) and stored in VARIANTS:
+            name = stored
+        elif getattr(selection, "enable_thinking", None) is False:
+            name = "none"
+        else:
+            name = DEFAULT_REASONING_EFFORT
     thinking = name != "none"
     return thinking, (name if thinking else None), card
+
+
+def _sampling_card(selection: Any) -> dict[str, Any]:
+    variant = getattr(selection, "variant", None) if selection is not None else None
+    stored = getattr(selection, "sampling", None) if selection is not None else None
+    if isinstance(variant, str) and variant in VARIANTS:
+        if isinstance(stored, dict) and stored:
+            return dict(stored)
+        return dict(VARIANTS[variant])
+    name = getattr(selection, "default_variant", None) if selection is not None else None
+    name = name if isinstance(name, str) and name in VARIANTS else DEFAULT_VARIANT
+    if isinstance(stored, dict) and stored and variant is None:
+        return dict(stored)
+    cards = getattr(selection, "variants", None) if selection is not None else None
+    source = cards if isinstance(cards, dict) else VARIANTS
+    row = source.get(name) if isinstance(source, dict) else None
+    return dict(row) if isinstance(row, dict) else dict(VARIANTS[name])
 
 
 def _listed_effort(reasoning: Any) -> str | None:
