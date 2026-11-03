@@ -11,8 +11,8 @@ weights. Each window divides by that row's peak, multiplies in float16, then
 restores the peak.
 
 The half cache keeps ``[head, token, channel]`` for both keys and values, with
-no scale plane. Decode scores the eight query rows of a key/value head with
-``prefill_f16_m8`` and softmaxes the same way as the fp8 step. The value mix casts each 128-token block with ``kv_cast_blocks``, then
+no scale plane. Decode scores the eight query rows of a key/value head in
+float with ``score_f32_m8`` and softmaxes the same way as the fp8 step. The value mix casts each 128-token block with ``kv_cast_blocks``, then
 ``prefill_f16_pv_blocks`` reads that block with one threadgroup and one thread
 per channel, so the eight rows share the value row. ``kv_restore_sum`` scales
 each block by its peak and adds it.
@@ -96,7 +96,7 @@ def attend_half_decode(
     pos: int,
     slot: int,
 ) -> None:
-    """One-token half decode. Eight query rows per key/value head via matmul2d."""
+    """One-token half decode. Eight float query rows per key/value head."""
     if runtime.max_pos % TILE:
         message = f"context {runtime.max_pos} is not a multiple of {TILE}"
         raise RuntimeError(message)
@@ -113,21 +113,12 @@ def attend_half_decode(
         message = f"score buffer cannot hold {GROUP} rows"
         raise RuntimeError(message)
     for head in range(2):
-        _zero(runtime, runtime.plane_q, GROUP * HEAD // 2)
         _encode(
             runtime,
             "kv_row_init",
             [(runtime.plane_max, 0), (runtime.plane_sum, 0), (runtime.plane_acc, 0)],
             [],
             (GROUP, 1, 1),
-            (HEAD, 1, 1),
-        )
-        _encode(
-            runtime,
-            "kv_cast_q",
-            [(query, 0), (runtime.plane_q, 0)],
-            [_u32(1), _u32(head)],
-            (1, GROUP, 1),
             (HEAD, 1, 1),
         )
         start = 0
@@ -137,15 +128,14 @@ def attend_half_decode(
                 message = f"decode span {span} is not a multiple of {TILE}"
                 raise RuntimeError(message)
             key_off = (head * runtime.max_pos + start) * HEAD * 2
-            _matmul_f16_m8(
+            _score_f32_m8(
                 runtime,
-                runtime.plane_q,
+                query,
+                head * GROUP * HEAD * 4,
                 runtime.k_cache[slot],
                 key_off,
                 runtime.plane_scores,
-                GROUP,
                 span,
-                HEAD,
             )
             _softmax8(runtime, span, pos, start)
             _half_pv(runtime, runtime.v_cache[slot], key_off, GROUP, span)
@@ -670,6 +660,25 @@ def _matmul_m8(
         [_u32(rows), _u32(cols), _u32(inner)],
         (cols // TILE, 1, 1),
         (width * 2, 1, 1),
+    )
+
+
+def _score_f32_m8(
+    runtime: Any,
+    query: Any,
+    query_off: int,
+    keys: Any,
+    key_off: int,
+    dest: Any,
+    cols: int,
+) -> None:
+    _encode(
+        runtime,
+        "score_f32_m8",
+        [(query, query_off), (keys, key_off), (dest, 0)],
+        [_u32(GROUP), _u32(cols), _u32(HEAD)],
+        (cols // TILE, 1, 1),
+        (TILE, 1, 1),
     )
 
 

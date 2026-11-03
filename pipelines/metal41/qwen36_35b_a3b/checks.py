@@ -1047,6 +1047,29 @@ def check_gather_and_attend(session: Session) -> None:
     _check_attend_gqa_heads_f16(session, rng)
 
 
+def _check_score_f32_m8(session: Session, rng: np.random.Generator) -> None:
+    """Half decode scores a float query against half keys."""
+    tokens = 256
+    rows = 8
+    query = rng.normal(scale=0.1, size=(rows, 256)).astype(np.float32)
+    key = rng.normal(scale=0.1, size=(tokens, 256)).astype(np.float16)
+    scores = session.zeros(rows * tokens * 4)
+    session.dispatch(
+        "score_f32_m8",
+        [session.upload(query.tobytes()), session.upload(key.tobytes()), scores],
+        [
+            np.uint32(rows).tobytes(),
+            np.uint32(tokens).tobytes(),
+            np.uint32(256).tobytes(),
+        ],
+        (tokens // 256, 1, 1),
+        (256, 1, 1),
+    )
+    got = session.download_f32(scores, rows * tokens).reshape(rows, tokens)
+    expect = query @ key.astype(np.float32).T
+    _close("score_f32_m8", got, expect, rtol=1e-4, atol=1e-4)
+
+
 def _check_attend_gqa_heads_f16(session: Session, rng: np.random.Generator) -> None:
     """Half decode matmul2d score and value mix match the host formulas."""
     tokens = 256
@@ -1070,6 +1093,7 @@ def _check_attend_gqa_heads_f16(session: Session, rng: np.random.Generator) -> N
     got_scores = session.download_f32(scores, rows * tokens).reshape(rows, tokens)
     expect_scores = (query.astype(np.float32) @ key.astype(np.float32).T).astype(np.float32)
     _close("prefill_f16_m8", got_scores, expect_scores, rtol=2e-2, atol=2e-2)
+    _check_score_f32_m8(session, rng)
     probs = (expect_scores / np.float32(16.0)).astype(np.float32)
     probs = np.exp(probs - np.max(probs, axis=1, keepdims=True))
     probs /= np.sum(probs, axis=1, keepdims=True)

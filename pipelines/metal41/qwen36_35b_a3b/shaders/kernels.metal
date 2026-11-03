@@ -578,6 +578,55 @@ kernel void prefill_f16_m8(
     op.run(tile_left, tile_right, tile_out);
 }
 
+// Eight float query rows against a half key tile. The query stays float.
+// Keys are [token, channel]. One thread owns one key in a 256-key tile.
+kernel void score_f32_m8(
+    device const float* query [[buffer(0)]],
+    device const half* keys [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint gid [[threadgroup_position_in_grid]])
+{
+    if (tid >= 256u || rows != 8u || inner != 256u) {
+        return;
+    }
+    uint col = gid * 256u + tid;
+    if (col >= cols) {
+        return;
+    }
+    device const half* key = keys + col * 256u;
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+    float acc4 = 0.0f;
+    float acc5 = 0.0f;
+    float acc6 = 0.0f;
+    float acc7 = 0.0f;
+    for (uint channel = 0u; channel < 256u; ++channel) {
+        float value = float(key[channel]);
+        acc0 = fma(query[channel], value, acc0);
+        acc1 = fma(query[256u + channel], value, acc1);
+        acc2 = fma(query[512u + channel], value, acc2);
+        acc3 = fma(query[768u + channel], value, acc3);
+        acc4 = fma(query[1024u + channel], value, acc4);
+        acc5 = fma(query[1280u + channel], value, acc5);
+        acc6 = fma(query[1536u + channel], value, acc6);
+        acc7 = fma(query[1792u + channel], value, acc7);
+    }
+    destination[col] = acc0;
+    destination[cols + col] = acc1;
+    destination[2u * cols + col] = acc2;
+    destination[3u * cols + col] = acc3;
+    destination[4u * cols + col] = acc4;
+    destination[5u * cols + col] = acc5;
+    destination[6u * cols + col] = acc6;
+    destination[7u * cols + col] = acc7;
+}
+
 // Eight probability rows against a half value cache. Values are
 // [token, channel]. One threadgroup owns one block of tokens and every channel.
 // Each thread owns one channel and applies all eight rows, so a value row is

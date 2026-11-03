@@ -13,7 +13,9 @@ from favlo import listener
 from favlo.daemon import (
     DAEMON_ENV,
     DaemonError,
+    _delivered_prefix,
     ensure,
+    follow,
     follow_events,
     plain_text,
     read_pid,
@@ -45,6 +47,39 @@ def test_plain_text_keeps_log_lines_and_summaries() -> None:
     assert "prefill 10.00 tok/s" in text
     assert text.splitlines()[-1].startswith("decode ")
     assert "tick" not in text
+
+
+def _replace_log(path: Path, text: str) -> None:
+    temporary = path.with_suffix(".log.tmp")
+    temporary.write_text(text, encoding="utf-8")
+    temporary.replace(path)
+
+
+def test_a_rolled_log_is_not_delivered_again(tmp_path: Path) -> None:
+    assert _delivered_prefix(b"abc\ndef\n", b"def\nghi\n") == len(b"def\n")
+    assert _delivered_prefix(b"abc\ndef\n", b"abc\ndef\n") == len(b"abc\ndef\n")
+    path = tmp_path / "serve.log"
+    path.write_text("prompt tokens 10\ncache miss\nprefill 1.00 tok/s (10 tok in 10.00s)\n", encoding="utf-8")
+    seen: list[str] = []
+    stop = threading.Event()
+    follow(path, seen.append, stop, offset=0)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and len(seen) < 3:
+        time.sleep(0.05)
+    _replace_log(
+        path,
+        "prefill 1.00 tok/s (10 tok in 10.00s)\ndecode 2.00 tok/s (1 tok in 0.50s)\n",
+    )
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and seen[-1:] != ["decode 2.00 tok/s (1 tok in 0.50s)"]:
+        time.sleep(0.05)
+    stop.set()
+    assert seen == [
+        "prompt tokens 10",
+        "cache miss",
+        "prefill 1.00 tok/s (10 tok in 10.00s)",
+        "decode 2.00 tok/s (1 tok in 0.50s)",
+    ]
 
 
 def test_follow_events_keeps_ticks(tmp_path: Path) -> None:

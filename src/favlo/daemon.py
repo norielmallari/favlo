@@ -172,6 +172,9 @@ def _traceback_continuation(raw: str) -> bool:
     return "await " in text or text == ")" or text.startswith(")")
 
 
+_SEEN_LIMIT = 16 * 1024 * 1024
+
+
 def telemetry_event(raw: str) -> dict[str, Any] | None:
     """One telemetry object. A plain line is a log event. Ticks stay in the object."""
     text = raw.strip()
@@ -188,6 +191,35 @@ def telemetry_event(raw: str) -> dict[str, Any] | None:
     return None
 
 
+def _delivered_prefix(seen: bytes, new: bytes) -> int:
+    """Leading bytes of ``new`` that are already a suffix of ``seen``.
+
+    A rolling log replaces the file with its own tail. That tail starts with
+    lines the follower has already delivered.
+    """
+    if not seen or not new:
+        return 0
+    fail = [0] * len(new)
+    length = 0
+    for index in range(1, len(new)):
+        while length and new[index] != new[length]:
+            length = fail[length - 1]
+        if new[index] == new[length]:
+            length += 1
+        fail[index] = length
+    matched = 0
+    last = 0
+    for byte in seen:
+        while matched and byte != new[matched]:
+            matched = fail[matched - 1]
+        if byte == new[matched]:
+            matched += 1
+        last = matched
+        if matched == len(new):
+            matched = fail[matched - 1]
+    return last
+
+
 def _follow(
     path: Path,
     stop: threading.Event,
@@ -195,19 +227,46 @@ def _follow(
     take: Callable[[str], None],
     on_idle: Callable[[], None] | None = None,
 ) -> threading.Thread:
+    def deliver(pending: bytes) -> bytes:
+        while b"\n" in pending:
+            raw, pending = pending.split(b"\n", 1)
+            take(raw.decode("utf-8", errors="replace"))
+        return pending
+
     def run() -> None:
         position = offset
         pending = b""
+        seen = b""
+        identity: tuple[int, int] | None = None
         while not stop.is_set():
             size = position
+            current: tuple[int, int] | None = None
             if path.is_file():
                 try:
-                    size = path.stat().st_size
+                    stat = path.stat()
                 except OSError:
-                    size = position
-                if size < position:
-                    position = 0
-                if size > position:
+                    stat = None
+                if stat is not None:
+                    size = stat.st_size
+                    current = (stat.st_dev, stat.st_ino)
+                replaced = (
+                    current is not None
+                    and identity is not None
+                    and (current != identity or size < position)
+                )
+                if replaced:
+                    try:
+                        with path.open("rb") as handle:
+                            new = handle.read()
+                    except OSError:
+                        new = None
+                    if new is not None:
+                        novel = new[_delivered_prefix(seen, new) :]
+                        seen = new[-_SEEN_LIMIT:]
+                        position = len(new)
+                        identity = current
+                        pending = deliver(novel)
+                elif size > position:
                     try:
                         with path.open("rb") as handle:
                             handle.seek(position)
@@ -216,10 +275,9 @@ def _follow(
                         chunk = b""
                     else:
                         position = size
-                    pending += chunk
-                    while b"\n" in pending:
-                        raw, pending = pending.split(b"\n", 1)
-                        take(raw.decode("utf-8", errors="replace"))
+                        seen = (seen + chunk)[-_SEEN_LIMIT:]
+                        identity = current
+                    pending = deliver(pending + chunk)
             if on_idle is not None and b"\n" not in pending and position >= size:
                 if path.is_file():
                     try:

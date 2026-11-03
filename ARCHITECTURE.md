@@ -109,7 +109,7 @@ src/favlo/              process entry; the pipeline manager loads the pipeline a
   voice.py              stored spoken WAV and the MP3 or FLAC encoded from it; voice_ttl_seconds drops an older clip
 web-api/                FastAPI process for favlo web, package web_api. The note is web-api/README.md
 web-spa/                Expo web app. The note is web-spa/README.md
-harness/                file agent, coding agent, worktree agent, chat agent, and the three benchmarks
+harness/                file agent, coding agent, needle agent, worktree agent, chat agent, and the three benchmarks
 docs/                   as-built notes; see docs/README.md
 ```
 
@@ -129,6 +129,8 @@ uv run python -m harness.file_agent --base-url http://127.0.0.1:8129/v1 --worksp
 uv run python -m harness --model qwen38-27b
 uv run python -m harness.benchmarks --model qwen38-27b
 uv run python -m harness.coding --model qwen38-27b
+uv run python -m harness.needle --model qwen36-35b-a3b --tokens 65536
+uv run python -m harness.needle --model qwen36-35b-a3b --tokens 65536 --mode retrieve --depth 0.5
 uv run python -m harness.worktree --model qwen36-35b-a3b
 uv run python -m harness.image_smoke_agent
 uv run python -m harness.image_persona

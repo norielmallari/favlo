@@ -255,6 +255,28 @@ def parse_requests(text: str) -> list[RequestRate]:
     return requests
 
 
+def printed_requests(requests: list[RequestRate]) -> list[RequestRate]:
+    """One printed row per prompt length.
+
+    A rolled serve log delivers the same ``prompt tokens`` line again, and the
+    lines that follow it can be a different request's prefill. That repeat is
+    the same chat request. The later row replaces the earlier one when it has
+    a prefill or a decode line.
+    """
+    order: list[int] = []
+    by_prompt: dict[int, RequestRate] = {}
+    for request in requests:
+        prompt = request.prompt_tokens
+        previous = by_prompt.get(prompt)
+        if previous is None:
+            order.append(prompt)
+            by_prompt[prompt] = request
+            continue
+        if request.prefill or request.decode:
+            by_prompt[prompt] = request
+    return [by_prompt[prompt] for prompt in order]
+
+
 def _cold_start(request: RequestRate) -> bool:
     if request.prefix_load is not None:
         return False

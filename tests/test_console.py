@@ -577,6 +577,32 @@ def test_a_later_burst_keeps_the_phase_start() -> None:
     ui.end(progress, "")
 
 
+def test_a_begin_event_keeps_the_phase_start() -> None:
+    ui, stream, clock = _ui("json")
+    progress = ui.begin("prefill", total=100, unit="tok")
+    started = progress.started
+    clock.now += 5
+    ui._emit_begin(progress)
+    events = [json.loads(line) for line in stream.getvalue().splitlines() if '"begin"' in line]
+    assert events[-1]["ts"] == started
+    ui.end(progress, "")
+
+
+def test_a_short_window_does_not_publish_a_rate() -> None:
+    ui, stream, clock = _ui("json")
+    progress = ui.begin("decode", total=0, unit="tok")
+    progress.done = 1
+    clock.now += 0.0001
+    ui.sample()
+    clock.now += 0.5
+    progress.done = 8
+    ui.sample()
+    ticks = [json.loads(line) for line in stream.getvalue().splitlines() if '"tick"' in line]
+    assert ticks[0]["rate"] is None
+    assert ticks[1]["rate"] == pytest.approx(8 / 0.5001)
+    ui.end(progress, "")
+
+
 def test_a_mirrored_phase_starts_at_the_event_time() -> None:
     ui, stream, clock = _ui("json")
     clock.now = 1000

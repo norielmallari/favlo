@@ -34,7 +34,7 @@ from harness.benchmarks.serve import Request, Server
 from harness.coding.compliance import run_contract, vision_problems
 from harness.coding.grade import grade
 from harness.coding.loop import run_session
-from harness.file_session import format_request, format_summary, parse_requests
+from harness.file_session import format_request, format_summary, parse_requests, printed_requests
 from harness.image_attachment import HORSE
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -92,8 +92,16 @@ def main(argv: list[str] | None = None) -> int:
                 child.unlink(missing_ok=True)
     server = Server(args.max_memory)
     try:
+        from favlo.registry import resolve
+
+        selection = resolve(args.model, root=root)
         server.start()
-        print(f"mtp {args.mtp} depth {args.mtp_depth} thinking {args.thinking}", flush=True)
+        vision_flag = "on" if args.vision else "off"
+        print(
+            f"kv {selection.kv_cache} mtp {args.mtp} depth {args.mtp_depth} "
+            f"thinking {args.thinking} vision {vision_flag}",
+            flush=True,
+        )
         _, problems = run_session(
             server,
             stem,
@@ -131,9 +139,9 @@ def _print_rates(log: object) -> None:
     if not callable(text):
         return
     deadline = time.monotonic() + 2
-    requests = parse_requests(text())
+    requests = printed_requests(parse_requests(text()))
     while time.monotonic() < deadline:
-        requests = parse_requests(text())
+        requests = printed_requests(parse_requests(text()))
         if requests and requests[-1].decode:
             break
         time.sleep(0.05)

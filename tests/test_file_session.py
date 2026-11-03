@@ -7,6 +7,7 @@ from harness.file_session import (
     extensions_hold,
     model_stem,
     parse_requests,
+    printed_requests,
     read_repository_file,
     source_files,
 )
@@ -33,6 +34,48 @@ prefill 80.00 tok/s (116 tok in 1.45s)
 output tokens 4
 decode 8.00 tok/s (4 tok in 0.50s)
 """
+
+
+def test_a_replayed_log_prints_each_request_once() -> None:
+    once = parse_requests(_LOG)
+    replayed = printed_requests(parse_requests(_LOG + _LOG))
+    assert [row.prompt_tokens for row in replayed] == [row.prompt_tokens for row in once]
+    pending = "prompt tokens 100\ncache miss\n"
+    closed = pending + "prefill 50.00 tok/s (100 tok in 2.00s)\ndecode 10.00 tok/s (20 tok in 2.00s)\n"
+    rows = printed_requests(parse_requests(pending + closed + closed))
+    assert len(rows) == 1
+    assert rows[0].decode.startswith("decode ")
+
+
+def test_a_rolled_log_keeps_one_row_when_the_prefill_line_changes() -> None:
+    first = """\
+prompt tokens 505
+cache miss
+prefill 763.24 tok/s (505 tok in 0.66s)
+decode 68.43 tok/s (27 tok in 0.39s)
+prompt tokens 11795
+cache hit 532
+prefill 883.45 tok/s (11263 tok in 12.75s)
+decode 64.08 tok/s (41 tok in 0.64s)
+"""
+    replay = """\
+prompt tokens 11795
+cache hit 532
+prefill 763.24 tok/s (505 tok in 0.66s)
+decode 68.43 tok/s (27 tok in 0.39s)
+prompt tokens 505
+cache miss
+prefill 763.24 tok/s (505 tok in 0.66s)
+decode 68.43 tok/s (27 tok in 0.39s)
+prompt tokens 11795
+cache hit 532
+prefill 110.58 tok/s (11516 tok in 104.14s)
+decode 8.56 tok/s (42 tok in 4.91s)
+"""
+    rows = printed_requests(parse_requests((first + replay) * 1500))
+    assert [row.prompt_tokens for row in rows] == [505, 11795]
+    assert rows[1].prefill.startswith("prefill 110.58 tok/s")
+    assert rows[1].decode_tokens == 42
 
 
 def test_model_stem_drops_a_variant_suffix() -> None:

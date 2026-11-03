@@ -130,6 +130,7 @@ KERNELS = (
     "prefill_fp8_expert_tile_at",
     "prefill_f16",
     "prefill_f16_m8",
+    "score_f32_m8",
     "prefill_f16_pv_blocks",
     "prefill_f16_pv",
     "prefill_fp4_n64",

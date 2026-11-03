@@ -367,7 +367,7 @@ class Qwen36Runtime:
         self,
         path: Path,
         *,
-        kv_cache: str = "half",
+        kv_cache: str = "fp8_e4m3",
         console: Any = None,
         resident_percent: float | None = None,
         owner: str | None = None,
@@ -2355,8 +2355,10 @@ class Qwen36Runtime:
                     self._end_phase(prefill_row, format_rate("prefill", len(suffix), elapsed))
                     prefill_row = None
                     boundary = True
+                    # The prompt prefix write stays outside the decode clock.
+                    before_store = time.perf_counter()
                     self._store_prefix(note=False)
-                    decode_started = last_sample
+                    decode_started = last_sample + (time.perf_counter() - before_store)
                     decode_row = self._begin_phase("decode", max_tokens, live=True)
                     prefill_open = False
                 if nxt in stop:

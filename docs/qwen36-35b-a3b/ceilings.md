@@ -99,7 +99,7 @@ Those MTP-on figures are the serial verify: one language token plus one draft. T
 
 ## Half decode
 
-Measured on 2 November 2026, after the half value mix moved to `prefill_f16_pv_blocks`. Each figure is one command buffer, then a wait, the first sample discarded, the median of the next four. One call is the eight query rows of one key/value head. The forward launches that call 20 times. The softmax rows are the 30 October figures above: those kernels and the float score shape did not change. The other rows of the 30 October token are unchanged. A half key and a half value are two bytes per channel.
+Measured on 2 November 2026, after the half value mix moved to `prefill_f16_pv_blocks`. The live decode score is `score_f32_m8`, which keeps the query in float. The `prefill_f16_m8` row is that day's half-query matmul. Each figure is one command buffer, then a wait, the first sample discarded, the median of the next four. One call is the eight query rows of one key/value head. The forward launches that call 20 times. The softmax rows are the 30 October figures above: those kernels and the float score shape did not change. The other rows of the 30 October token are unchanged. A half key and a half value are two bytes per channel.
 
 | Kernel | Context 2048 µs | Context 65536 µs |
 |---|---:|---:|

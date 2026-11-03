@@ -51,3 +51,23 @@ The package license and readme are the rerun instructions. Do not add another li
 - A sort key with no table stays a plan. No catalog row.
 - A cited equation, a checkpoint operand order, a tile or stride constraint, and an unmeasured gap stay in the serving note. No research file.
 - A measured dispatch sum or recorded rate for this implementation is a research file. The remainder is that table.
+
+## Key/value plane
+
+A recorded rate, a dispatch sum, or a needle row names the key/value plane that serve loaded. Planes differ in width, scale, and layout. A number measured on one plane does not fill a row for another. The pipeline note lists the planes that server accepts. Write the loaded name after aliases resolve. On `qwen36-35b-a3b` those names are `half`, `fp8_e4m3`, `e2m1`, and `f32`. `f16` and `fp16` resolve to `half`. `e4m3` and `fp8` resolve to `fp8_e4m3`. `fp4` resolves to `e2m1`.
+
+## Needle
+
+`python -m harness.needle` writes one file of an exact token length and asks for the passkey in it. `--depth` is 0 at the first line and 1 at the last. `--mode page` is the default. It passes when the reply contains the number and one `read_file` returned that line. The number may sit in the newest window. That run is a long-transcript rate. It is not a retrieval claim.
+
+`--mode retrieve` tells the agent to follow `next_offset` until a read has none, and only then to reply. A pass requires the number, a read of its line, a last read with no `next_offset`, and a last window that starts after that line. Depth 1 has no later line, so a depth-1 retrieve run does not fill the retrieval table.
+
+The claim table is one row per length, depth, and plane: pass or fail, the prefill sum, and the decode sum. The command carries `--mode retrieve`, `--tokens`, `--depth`, and the model id. The harness prints the loaded plane. One row at one depth and one seed is a measured run. A grid of lengths and depths is the table set next to a published needle score. The search names that score. The "not found" sentence names this grid.
+
+The finished transcript has to fit the served window. The file is replayed inside tool results, so a file as long as the window does not fit. `input does not fit` is a failed row, not a pass.
+
+## Coding agent
+
+`python -m harness.coding` is the production-readiness run. Exit 0 means `ledger.py` `collect` returns 6, 0, and -6, a later request loaded the prefix from disk, and the chat contract held. Which tools the model called is not the result. The run is a recorded rate. It is not a retrieval claim.
+
+The claim table is one row per plane, MTP setting, thinking card, and vision flag: pass or fail, the prefill sum, and the decode sum. The command carries `--mtp`, `--thinking`, `--vision` when the pipeline embeds an image, and the model id. The harness prints the loaded plane, MTP, thinking, and vision. A pipeline whose sampling lists both `thinking` and `instruct` has two rows, thinking first. A row that omits the plane, or that was measured on another plane, does not fill this table. The "not found" sentence names this table.

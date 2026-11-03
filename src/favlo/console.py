@@ -717,7 +717,7 @@ class Console:
             "total": progress.total,
             "unit": progress.unit,
             "detail": progress.detail,
-            "ts": self._clock(),
+            "ts": progress.started if kind == "begin" else self._clock(),
         }
         if progress.request is not None:
             event["request"] = progress.request
@@ -761,12 +761,16 @@ class Console:
     def _cumulative(
         self, progress: Progress, now: float
     ) -> tuple[float | None, int, bool]:
-        """Work completed divided by the time since the phase started."""
+        """Work completed divided by the time since the phase started.
+
+        A window shorter than ``_WINDOW_MIN`` does not publish a rate. One
+        token recorded in the same instant as ``begin`` is not a throughput.
+        """
         done = progress.done
         elapsed = now - progress.started
-        if done <= 0 or elapsed <= 0:
+        if done <= 0 or elapsed < _WINDOW_MIN:
             return None, done, False
-        return done / elapsed, done, elapsed >= _WINDOW_MIN
+        return done / elapsed, done, True
 
     def _row(self, progress: Progress, now: float) -> str:
         rate, _display, eta = self._rates(progress, now)
