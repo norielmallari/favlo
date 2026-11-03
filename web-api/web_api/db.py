@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS provider_model (
 CREATE TABLE IF NOT EXISTS settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     default_model_id TEXT,
+    gallery_vision_model_id TEXT,
     exchange_budget INTEGER NOT NULL,
     revision INTEGER NOT NULL
 );
@@ -42,6 +43,8 @@ CREATE TABLE IF NOT EXISTS agent (
     enable_thinking INTEGER,
     preserve_thinking INTEGER,
     reasoning_effort TEXT,
+    expand_trace TEXT,
+    compaction_percent INTEGER,
     revision INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS channel (
@@ -61,7 +64,11 @@ CREATE TABLE IF NOT EXISTS session (
     channel_id TEXT,
     participant_id TEXT,
     created_at TEXT NOT NULL,
-    maf_state TEXT
+    maf_state TEXT,
+    definition TEXT,
+    definition_hash TEXT,
+    agui_state TEXT,
+    loaded_mcp TEXT
 );
 CREATE TABLE IF NOT EXISTS message (
     id TEXT PRIMARY KEY,
@@ -151,7 +158,8 @@ CREATE TABLE IF NOT EXISTS workspace (
     type TEXT NOT NULL,
     revision INTEGER NOT NULL,
     created_at TEXT NOT NULL,
-    focus_folder_id TEXT
+    focus_folder_id TEXT,
+    compaction_percent INTEGER
 );
 CREATE TABLE IF NOT EXISTS folder (
     id TEXT PRIMARY KEY,
@@ -197,13 +205,10 @@ CREATE TABLE IF NOT EXISTS global_skill (
 );
 """
 
-LOCAL_PROVIDER_ID = "provider_local"
+from web_api.ids import FAVLO_AGENT_ID, FAVLO_CHANNEL_ID, FAVLO_MCP_ID, LOCAL_PROVIDER_ID
+
 LOCAL_BASE_URL = "http://127.0.0.1:8129/v1"
 LOCAL_MCP_URL = "http://127.0.0.1:8129/mcp"
-FAVLO_AGENT_ID = "agent_favlo"
-FAVLO_CHANNEL_ID = "channel_favlo"
-FAVLO_SESSION_ID = "session_favlo"
-FAVLO_MCP_ID = "mcp_favlo"
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -322,6 +327,14 @@ def migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE session ADD COLUMN workspace_id TEXT")
     if "maf_state" not in session_columns:
         conn.execute("ALTER TABLE session ADD COLUMN maf_state TEXT")
+    if "definition" not in session_columns:
+        conn.execute("ALTER TABLE session ADD COLUMN definition TEXT")
+    if "definition_hash" not in session_columns:
+        conn.execute("ALTER TABLE session ADD COLUMN definition_hash TEXT")
+    if "agui_state" not in session_columns:
+        conn.execute("ALTER TABLE session ADD COLUMN agui_state TEXT")
+    if "loaded_mcp" not in session_columns:
+        conn.execute("ALTER TABLE session ADD COLUMN loaded_mcp TEXT")
     agent_columns = {row[1] for row in conn.execute("PRAGMA table_info(agent)")}
     if agent_columns and "enable_thinking" not in agent_columns:
         conn.execute("ALTER TABLE agent ADD COLUMN enable_thinking INTEGER")
@@ -329,16 +342,25 @@ def migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE agent ADD COLUMN preserve_thinking INTEGER")
     if agent_columns and "reasoning_effort" not in agent_columns:
         conn.execute("ALTER TABLE agent ADD COLUMN reasoning_effort TEXT")
+    if agent_columns and "compaction_percent" not in agent_columns:
+        conn.execute("ALTER TABLE agent ADD COLUMN compaction_percent INTEGER")
+    if agent_columns and "expand_trace" not in agent_columns:
+        conn.execute("ALTER TABLE agent ADD COLUMN expand_trace TEXT")
     _migrate_folders(conn)
     workspace_columns = {row[1] for row in conn.execute("PRAGMA table_info(workspace)")}
     if workspace_columns and "focus_folder_id" not in workspace_columns:
         conn.execute("ALTER TABLE workspace ADD COLUMN focus_folder_id TEXT")
+    if workspace_columns and "compaction_percent" not in workspace_columns:
+        conn.execute("ALTER TABLE workspace ADD COLUMN compaction_percent INTEGER")
+    settings_columns = {row[1] for row in conn.execute("PRAGMA table_info(settings)")}
+    if settings_columns and "gallery_vision_model_id" not in settings_columns:
+        conn.execute("ALTER TABLE settings ADD COLUMN gallery_vision_model_id TEXT")
     row = conn.execute("SELECT id FROM settings WHERE id = 1").fetchone()
     if row is None:
         conn.execute(
             """
-            INSERT INTO settings (id, default_model_id, exchange_budget, revision)
-            VALUES (1, NULL, 10, 1)
+            INSERT INTO settings (id, default_model_id, gallery_vision_model_id, exchange_budget, revision)
+            VALUES (1, NULL, NULL, 10, 1)
             """
         )
     provider = conn.execute("SELECT id FROM provider WHERE id = ?", (LOCAL_PROVIDER_ID,)).fetchone()
@@ -369,10 +391,14 @@ def migrate(conn: sqlite3.Connection) -> None:
     _seed_gallery_workspace_skills(conn)
     _refresh_manage_gallery(conn)
     _refresh_empty_folder_rule(conn)
+    _refresh_manage_gallery_place(conn)
+    _refresh_manage_gallery_unlike(conn)
     conn.commit()
 
 
 def _seed_favlo(conn: sqlite3.Connection) -> None:
+    from web_api.ids import guid
+
     row = conn.execute("SELECT id FROM agent WHERE id = ?", (FAVLO_AGENT_ID,)).fetchone()
     if row is not None:
         return
@@ -396,7 +422,7 @@ def _seed_favlo(conn: sqlite3.Connection) -> None:
         INSERT INTO session (id, kind, channel_id, participant_id, created_at)
         VALUES (?, 'channel', ?, ?, ?)
         """,
-        (FAVLO_SESSION_ID, FAVLO_CHANNEL_ID, FAVLO_AGENT_ID, now()),
+        (guid(), FAVLO_CHANNEL_ID, FAVLO_AGENT_ID, now()),
     )
 
 
@@ -442,7 +468,7 @@ def _seed_favlo_mcp(conn: sqlite3.Connection) -> None:
 def _seed_global_skills(conn: sqlite3.Connection) -> None:
     """Add catalog skills from skills-global once each. A later choice stays."""
     from web_api.global_skill_catalog import catalog_skills
-    from web_api.ids import mint
+    from web_api.ids import guid
 
     for name, description, definition in catalog_skills():
         marked = conn.execute(
@@ -465,7 +491,7 @@ def _seed_global_skills(conn: sqlite3.Connection) -> None:
                 )
                 VALUES (?, ?, ?, ?, 1, 1, ?)
                 """,
-                (mint("skill"), name, description, definition, now()),
+                (guid(), name, description, definition, now()),
             )
         elif existing is not None and split is None and not str(existing["definition"] or "").strip():
             conn.execute(
@@ -488,7 +514,7 @@ def _seed_global_skills(conn: sqlite3.Connection) -> None:
                 )
                 VALUES (?, ?, ?, ?, ?, 1, ?)
                 """,
-                (mint("skill"), FAVLO_AGENT_ID, name, description, definition, now()),
+                (guid(), FAVLO_AGENT_ID, name, description, definition, now()),
             )
         elif on_favlo is not None and split is None and not str(on_favlo["definition"] or "").strip():
             conn.execute(
@@ -513,7 +539,7 @@ def _seed_global_skills(conn: sqlite3.Connection) -> None:
 
 def _seed_gallery_workspace_skills(conn: sqlite3.Connection) -> None:
     """Add gallery workspace skills once. A later delete stays."""
-    from web_api.ids import mint
+    from web_api.ids import guid
     from web_api.workspace_skill_catalog import skills_for
 
     rows = conn.execute("SELECT id FROM workspace WHERE type = 'gallery'").fetchall()
@@ -535,7 +561,7 @@ def _seed_gallery_workspace_skills(conn: sqlite3.Connection) -> None:
                     )
                     VALUES (?, ?, ?, ?, ?, 1, ?)
                     """,
-                    (mint("skill"), workspace["id"], name, description, definition, now()),
+                    (guid(), workspace["id"], name, description, definition, now()),
                 )
             conn.execute("INSERT INTO meta (key, value) VALUES (?, '1')", (key,))
 
@@ -621,6 +647,107 @@ def _refresh_empty_folder_rule(conn: sqlite3.Connection) -> None:
             (workspace["id"], "manage-gallery"),
         ).fetchone()
         if skill is not None and skill["definition"].strip() == _MANAGE_GALLERY_BEFORE_EMPTY:
+            conn.execute(
+                "UPDATE skill SET description = ?, definition = ?, revision = revision + 1 WHERE id = ?",
+                (description, definition, skill["id"]),
+            )
+        conn.execute("INSERT INTO meta (key, value) VALUES (?, '1')", (key,))
+
+
+_MANAGE_GALLERY_BEFORE_PLACE = (
+    "This session is the gallery. Paths are relative to its local folder. "
+    "Do not use a host path, another workspace id, a folder row, or a cloud folder.\n\n"
+    "The turn names the open folder and, when an image is selected, that image. "
+    "This folder means the open folder. This image means the selected image. "
+    "A generated image is saved into the open folder unless the message names a different folder.\n\n"
+    "After `generate_image` finishes, call `gallery_write_image` with the `favlo://` URI "
+    "as source and a path inside the open folder. Do not leave the image only as a chat link.\n\n"
+    "Use `gallery_list_folder` to list the open folder. Pass another relative path only "
+    "when the message names one.\n\n"
+    "Use `gallery_delete_image` when the message asks to delete this image. The path is "
+    "the selected image.\n\n"
+    "Use `gallery_move_image` to move an image. This image is the selected image. "
+    "The destination is the folder the message names, or the parent when the message "
+    "says to move it up.\n\n"
+    "Use `gallery_create_folder` to create a directory inside the open folder.\n\n"
+    "Use `gallery_rename_folder` to rename a directory. This folder is the open folder.\n\n"
+    "Use `gallery_move_folder` to move a directory inside the local folder.\n\n"
+    "Use `gallery_delete_folder` to delete a directory. This folder is the open folder. "
+    "Delete it only when it is empty. The local folder itself cannot be deleted.\n\n"
+    "These tools cannot add or delete a folder row, and they cannot use a cloud folder."
+)
+
+
+def _refresh_manage_gallery_place(conn: sqlite3.Connection) -> None:
+    """Replace manage-gallery with find/search/place wording once."""
+    from web_api.workspace_skill_catalog import skills_for
+
+    current = next((item for item in skills_for("gallery") if item[0] == "manage-gallery"), None)
+    if current is None:
+        return
+    _name, description, definition = current
+    rows = conn.execute("SELECT id FROM workspace WHERE type = 'gallery'").fetchall()
+    for workspace in rows:
+        key = f"workspace_skill_place:{workspace['id']}:manage-gallery"
+        if conn.execute("SELECT key FROM meta WHERE key = ?", (key,)).fetchone() is not None:
+            continue
+        skill = conn.execute(
+            "SELECT id, definition FROM skill WHERE workspace_id = ? AND name = ?",
+            (workspace["id"], "manage-gallery"),
+        ).fetchone()
+        if skill is not None and skill["definition"].strip() == _MANAGE_GALLERY_BEFORE_PLACE:
+            conn.execute(
+                "UPDATE skill SET description = ?, definition = ?, revision = revision + 1 WHERE id = ?",
+                (description, definition, skill["id"]),
+            )
+        conn.execute("INSERT INTO meta (key, value) VALUES (?, '1')", (key,))
+
+
+_MANAGE_GALLERY_BEFORE_UNLIKE = (
+    "This session is the gallery. Paths are relative to its local folder. "
+    "Do not use a host path, another workspace id, a folder row, or a cloud folder.\n\n"
+    "The turn names the selected media when one is selected. This image means that path. "
+    "A generated image is saved beside the selected media, or at the folder root when none is selected.\n\n"
+    "After `generate_image` finishes, call `gallery_write_image` with the `favlo://` URI "
+    "as source and a path inside the local folder. Do not leave the image only as a chat link.\n\n"
+    "Use `gallery_find_media` to list images, mp3, and mp4 under the local folder "
+    "(including nested folders). Use `gallery_search_media` when the request is about meaning. "
+    "Then call `workspace_place` with a full elements list. Keep `preview` on slot `stage` "
+    "with props `{\"fit\":\"contain\"}` unless the user asks to remove it. Put `filmstrip` on "
+    "slot `rail` with props `{\"title\":\"\",\"items\":[{\"path\":\"...\"}]}` using only paths "
+    "from find or search. Do not describe the layout in prose.\n\n"
+    "Use `gallery_delete_image` when the message asks to delete this image. The path is "
+    "the selected media.\n\n"
+    "Use `gallery_move_image` to move an image. This image is the selected media. "
+    "The destination is the folder the message names, or the parent when the message "
+    "says to move it up.\n\n"
+    "Use `gallery_create_folder` to create a directory inside the local folder.\n\n"
+    "Use `gallery_rename_folder` to rename a directory.\n\n"
+    "Use `gallery_move_folder` to move a directory inside the local folder.\n\n"
+    "Use `gallery_delete_folder` to delete a directory. Delete it only when it is empty. "
+    "The local folder itself cannot be deleted.\n\n"
+    "These tools cannot add or delete a folder row, and they cannot use a cloud folder."
+)
+
+
+def _refresh_manage_gallery_unlike(conn: sqlite3.Connection) -> None:
+    """Teach manage-gallery about gallery_search_unlike_media once."""
+    from web_api.workspace_skill_catalog import skills_for
+
+    current = next((item for item in skills_for("gallery") if item[0] == "manage-gallery"), None)
+    if current is None:
+        return
+    _name, description, definition = current
+    rows = conn.execute("SELECT id FROM workspace WHERE type = 'gallery'").fetchall()
+    for workspace in rows:
+        key = f"workspace_skill_unlike:{workspace['id']}:manage-gallery"
+        if conn.execute("SELECT key FROM meta WHERE key = ?", (key,)).fetchone() is not None:
+            continue
+        skill = conn.execute(
+            "SELECT id, definition FROM skill WHERE workspace_id = ? AND name = ?",
+            (workspace["id"], "manage-gallery"),
+        ).fetchone()
+        if skill is not None and skill["definition"].strip() == _MANAGE_GALLERY_BEFORE_UNLIKE:
             conn.execute(
                 "UPDATE skill SET description = ?, definition = ?, revision = revision + 1 WHERE id = ?",
                 (description, definition, skill["id"]),

@@ -64,7 +64,9 @@ export function Composer({ value, working, onChange, onSend, onStop, agentName }
           label={stop ? 'Stop' : 'Send'}
           disabled={!stop && idle}
           onPress={stop ? (onStop ?? onSend) : onSend}
-          background={!stop && idle ? palette.disabledSurface : stop ? palette.danger : palette.accent}
+          background={
+            !stop && idle ? palette.disabledSurface : stop ? palette.danger : palette.accent
+          }
           color={!stop && idle ? palette.disabledText : stop ? palette.onDanger : palette.onAccent}
         />
       </View>

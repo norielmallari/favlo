@@ -45,6 +45,16 @@ test('a message renders bold, italics, and a table', async () => {
   expect(view.getByLabelText('Generated image')).toBeTruthy();
 });
 
+test('inline code and emphasis keep the message text color', async () => {
+  const view = await render(
+    <ThemeProvider>
+      <MarkdownText text={'See `carrot_horse.png` and **bold** names.'} color="#E8EDF5" />
+    </ThemeProvider>,
+  );
+  expect(view.getByText('carrot_horse.png').props.style).toMatchObject({ color: '#E8EDF5' });
+  expect(view.getByText('bold').props.style).toMatchObject({ color: '#E8EDF5' });
+});
+
 test('a bullet keeps wrapped text beside the marker', async () => {
   const view = await render(
     <ThemeProvider>

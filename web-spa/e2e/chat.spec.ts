@@ -1,8 +1,9 @@
-import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
 
+import { assertWcagAa } from './a11y';
 import { deleteAgentsNamed } from './cleanup';
 import { onScreen } from './on-screen';
+import { LOCAL_PROVIDER_ID } from '../src/api/seed-ids';
 
 test('two agent channels keep separate conversations', async ({ page }) => {
   const models = await liveModels();
@@ -32,6 +33,7 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await expect(saveTurns.getByTestId('press-feedback')).toBeVisible();
   await page.mouse.up();
   await expect(page.getByRole('status')).toHaveText(/Maximum turns saved/);
+  await expect(page.getByRole('combobox', { name: 'Gallery vision model' })).toBeVisible();
   await expect(page.getByLabel('Agents list')).toHaveCount(0);
   await expect(page.getByLabel('Providers list')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'New agent' }).filter({ visible: true })).toHaveCount(0);
@@ -54,8 +56,11 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await expect(page.getByLabel('Providers list')).toHaveCount(0);
   await expectColumns(page, 'Agents list', page.getByRole('textbox', { name: 'Name for Favlo' }));
   await expect(page.getByText('Persona for Favlo', { exact: true })).toBeVisible();
-  await expect(page.getByRole('combobox', { name: 'Provider for Favlo' })).toHaveValue('provider_local');
-  await expect(page.getByRole('combobox', { name: 'Model for Favlo' })).not.toHaveValue('');
+  await expect(page.getByRole('combobox', { name: 'Provider for Favlo' })).toHaveValue('');
+  await expect(page.getByRole('combobox', { name: 'Model for Favlo' })).toHaveCount(0);
+  await expect(
+    page.getByText('Uses the default provider and model from Configuration → Providers.'),
+  ).toBeVisible();
   await expect(page.getByRole('switch', { name: 'Configuration tools for Favlo' })).toBeChecked();
   const conversation = page.getByRole('switch', { name: 'Conversation tools for Favlo' });
   await expect(conversation).not.toBeChecked();
@@ -93,6 +98,7 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await createBrook.click();
   await expect(agents.getByRole('button', { name: brook, exact: true })).toBeVisible();
   await expect(page.getByRole('textbox', { name: `Name for ${brook}` })).toHaveValue(brook);
+  await page.getByRole('button', { name: 'Dismiss' }).click();
   await expect(page.getByRole('switch', { name: `Configuration tools for ${brook}` })).not.toBeChecked();
   await expect(page.getByRole('switch', { name: `Conversation tools for ${brook}` })).not.toBeChecked();
   await expect(page.getByRole('switch', { name: `Heartbeat tools for ${brook}` })).not.toBeChecked();
@@ -106,6 +112,11 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await expectHeartbeatColumns(page);
   await page.getByLabel('Agents list').getByRole('button', { name: 'Favlo', exact: true }).click();
   await page.getByRole('button', { name: 'New heartbeat' }).click();
+  await expect(
+    page.getByText(
+      'Uses the default provider and model from Configuration → Providers (Favlo has no provider set).',
+    ),
+  ).toBeVisible();
   await page.getByRole('textbox', { name: 'Cron for Favlo' }).fill('nope');
   await page.getByRole('button', { name: 'Create heartbeat' }).click();
   await expect(page.getByRole('alert')).toContainText('five fields');
@@ -172,8 +183,11 @@ test('two agent channels keep separate conversations', async ({ page }) => {
 
   await page.getByRole('tab', { name: 'Agents' }).click();
   await page.getByLabel('Agents list').getByRole('button', { name: brook, exact: true }).click();
+  await expect(page.getByRole('combobox', { name: `Provider for ${brook}` })).toHaveValue('');
+  await expect(page.getByRole('combobox', { name: `Model for ${brook}` })).toHaveCount(0);
+  await page.getByRole('combobox', { name: `Provider for ${brook}` }).selectOption(LOCAL_PROVIDER_ID);
   const brookModel = page.getByRole('combobox', { name: `Model for ${brook}` });
-  await expect(page.getByRole('combobox', { name: `Provider for ${brook}` })).toHaveValue('provider_local');
+  await expect(brookModel).toBeVisible();
   const modelChoices = await brookModel.locator('option').evaluateAll((nodes) =>
     nodes.map((node) => (node as HTMLOptionElement).value).filter((value) => value !== ''),
   );
@@ -182,7 +196,12 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await page.getByRole('button', { name: `Save ${brook}` }).click();
   await page.getByLabel('Agents list').getByRole('button', { name: 'Favlo', exact: true }).click();
   await page.getByLabel('Agents list').getByRole('button', { name: brook, exact: true }).click();
+  await expect(page.getByRole('combobox', { name: `Provider for ${brook}` })).toHaveValue(LOCAL_PROVIDER_ID);
   await expect(page.getByRole('combobox', { name: `Model for ${brook}` })).toHaveValue(chosen);
+  await page.getByRole('combobox', { name: `Provider for ${brook}` }).selectOption('');
+  await page.getByRole('button', { name: `Save ${brook}` }).click();
+  await expect(page.getByRole('combobox', { name: `Provider for ${brook}` })).toHaveValue('');
+  await expect(page.getByRole('combobox', { name: `Model for ${brook}` })).toHaveCount(0);
 
   const listed = page.waitForResponse(
     (response) => response.url().includes('/channels') && response.request().method() === 'GET',
@@ -298,10 +317,7 @@ async function createAgent(page: Page, name: string, persona: string) {
 }
 
 async function assertShell(page: Page) {
-  const results = await new AxeBuilder({ page })
-    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'])
-    .analyze();
-  expect(results.violations).toEqual([]);
+  await assertWcagAa(page);
 }
 
 async function liveModels(): Promise<string[]> {

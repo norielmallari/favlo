@@ -1,4 +1,4 @@
-import { Text, View } from 'react-native';
+import { Platform, Text, View } from 'react-native';
 
 import { FeatherIcon } from '@/components/FeatherIcon';
 import { Pressable } from '@/components/Pressable';
@@ -24,11 +24,14 @@ export function MenuRow({
   selectedTestId?: string;
 }) {
   const { palette } = useTheme();
+  const webExpanded =
+    Platform.OS === 'web' && expanded !== undefined ? ({ 'aria-expanded': expanded } as const) : null;
   return (
     <Pressable
       accessibilityRole={role}
       accessibilityLabel={label}
       accessibilityState={{ selected, ...(expanded == null ? {} : { expanded }) }}
+      {...(webExpanded ?? {})}
       onPress={onPress}
       style={{
         minHeight: 44,

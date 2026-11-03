@@ -1,12 +1,13 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 
 import { onScreen } from './on-screen';
+import { FAVLO_AGENT_ID } from '../src/api/seed-ids';
 
 test('the Favlo chat shows a generated image', async ({ page }) => {
   const channels = await page.request.get('http://127.0.0.1:8130/channels');
   expect(channels.ok()).toBeTruthy();
   const listed = (await channels.json()) as { channels: { name: string; agent_id: string; session_id: string }[] };
-  const favlo = listed.channels.find((item) => item.agent_id === 'agent_favlo');
+  const favlo = listed.channels.find((item) => item.agent_id === FAVLO_AGENT_ID);
   expect(favlo).toBeTruthy();
   const snapshot = await page.request.get(`http://127.0.0.1:8130/sessions/${favlo?.session_id}`);
   expect(snapshot.ok()).toBeTruthy();

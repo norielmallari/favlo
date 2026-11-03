@@ -3,13 +3,14 @@ import { Dimensions } from 'react-native';
 
 import { AgentForm, SettingsScreen } from '@/components/SettingsScreen';
 import { ThemeProvider } from '@/theme/Theme';
+import { FAVLO_AGENT_ID, LOCAL_PROVIDER_ID } from '@/api/seed-ids';
 
 jest.mock('expo-router', () => ({
   useRouter: () => ({ push: jest.fn() }),
 }));
 
 const agent = {
-  id: 'agent_favlo',
+  id: FAVLO_AGENT_ID,
   name: 'Favlo',
   persona: '',
   default_model_id: null,
@@ -19,13 +20,13 @@ const agent = {
 
 const providers = [
   {
-    id: 'provider_local',
+    id: LOCAL_PROVIDER_ID,
     name: 'Favlo',
     base_url: 'http://127.0.0.1:8129/v1',
     models: [
       {
         id: 'model_local',
-        provider_id: 'provider_local',
+        provider_id: LOCAL_PROVIDER_ID,
         model_id: 'example-model',
         display_name: 'Example',
         enabled: true,
@@ -110,7 +111,9 @@ test('a new agent shows the same options as edit', async () => {
   expect(view.getByLabelText('Agent name')).toBeTruthy();
   expect(view.getByLabelText('Persona')).toBeTruthy();
   expect(view.getByLabelText('Provider')).toBeTruthy();
-  expect(view.getByLabelText('Model')).toBeTruthy();
+  expect(view.queryByLabelText('Model')).toBeNull();
+  expect(view.queryByRole('button', { name: 'Refresh models' })).toBeNull();
+  expect(view.getByText('Uses the default provider and model from Configuration → Providers.')).toBeTruthy();
   expect(view.getByRole('switch', { name: 'Configuration tools' })).toBeTruthy();
   expect(view.getByRole('switch', { name: 'Conversation tools' })).toBeTruthy();
   expect(view.getByRole('switch', { name: 'Heartbeat tools' })).toBeTruthy();
@@ -124,12 +127,36 @@ test('a new agent shows the same options as edit', async () => {
   await user.press(view.getByRole('button', { name: 'Create agent' }));
   expect(await view.findByText('Reed was created.')).toBeTruthy();
   expect(posted.body?.name).toBe('Reed');
-  expect(posted.body?.default_model_id).toBe('model_local');
+  expect(posted.body?.default_model_id).toBeNull();
   expect(posted.body?.tool_groups).toEqual(['conversation']);
   expect(posted.body?.enable_thinking).toBeNull();
   expect(posted.body?.preserve_thinking).toBe(false);
   expect(posted.body?.reasoning_effort).toBe('high');
   expect(view.queryByLabelText('Thinking')).toBeNull();
+});
+
+test('unset provider hides model controls; picking a provider shows them', async () => {
+  const view = await render(
+    <ThemeProvider>
+      <AgentForm
+        agent={agent}
+        groups={groups}
+        providers={providers}
+        onSuccess={jest.fn()}
+        onSaved={jest.fn()}
+      />
+    </ThemeProvider>,
+  );
+  expect(view.getByLabelText('Provider for Favlo')).toBeTruthy();
+  expect(view.queryByLabelText('Model for Favlo')).toBeNull();
+  expect(view.queryByRole('button', { name: 'Refresh models' })).toBeNull();
+  expect(view.getByText('Uses the default provider and model from Configuration → Providers.')).toBeTruthy();
+  await act(() => {
+    fireEvent(view.getByLabelText('Provider for Favlo'), 'valueChange', LOCAL_PROVIDER_ID);
+  });
+  expect(view.getByLabelText('Model for Favlo')).toBeTruthy();
+  expect(view.getByRole('button', { name: 'Refresh models' })).toBeTruthy();
+  expect(view.queryByText('Uses the default provider and model from Configuration → Providers.')).toBeNull();
 });
 
 test('delete removes that agent', async () => {
@@ -156,7 +183,6 @@ test('delete removes that agent', async () => {
         agent={reed}
         groups={groups}
         providers={providers}
-        settings={{ default_model_id: 'model_local', exchange_budget: 10, revision: 1 }}
         onSuccess={jest.fn()}
         onSaved={jest.fn()}
         onDeleted={onDeleted}
@@ -180,7 +206,7 @@ test('refresh loads the models the server lists', async () => {
           ...providers[0].models,
           {
             id: 'model_gemma',
-            provider_id: 'provider_local',
+            provider_id: LOCAL_PROVIDER_ID,
             model_id: 'gemma4-26b-a4b:instruct',
             display_name: 'Gemma 4',
             enabled: true,
@@ -198,7 +224,6 @@ test('refresh loads the models the server lists', async () => {
         agent={null}
         groups={groups}
         providers={providers}
-        settings={{ default_model_id: 'model_local', exchange_budget: 10, revision: 1 }}
         onSuccess={jest.fn()}
         onSaved={jest.fn()}
         onModels={onModels}
@@ -206,10 +231,13 @@ test('refresh loads the models the server lists', async () => {
     </ThemeProvider>,
   );
   const user = userEvent.setup();
+  await act(() => {
+    fireEvent(view.getByLabelText('Provider'), 'valueChange', LOCAL_PROVIDER_ID);
+  });
   await user.press(view.getByRole('button', { name: 'Refresh models' }));
-  expect(posted).toEqual(['http://127.0.0.1:8130/providers/provider_local/refresh']);
+  expect(posted).toEqual(['http://127.0.0.1:8130/providers/' + LOCAL_PROVIDER_ID + '/refresh']);
   expect(await view.findByText('Models refreshed')).toBeTruthy();
-  expect(onModels).toHaveBeenCalledWith('provider_local', expect.arrayContaining([
+  expect(onModels).toHaveBeenCalledWith(LOCAL_PROVIDER_ID, expect.arrayContaining([
     expect.objectContaining({ model_id: 'gemma4-26b-a4b:instruct' }),
   ]));
 });
@@ -221,7 +249,6 @@ test('Favlo has no delete button', async () => {
         agent={agent}
         groups={groups}
         providers={providers}
-        settings={{ default_model_id: 'model_local', exchange_budget: 10, revision: 1 }}
         onSuccess={jest.fn()}
         onSaved={jest.fn()}
       />

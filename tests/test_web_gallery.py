@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "web-api"))
 
 from web_api.api import create_app  # noqa: E402
+from web_api.ids import FAVLO_AGENT_ID  # noqa: E402
 from web_api.folder_port import LocalFolder  # noqa: E402
 from web_api.store import Rejected, Store  # noqa: E402
 
@@ -33,23 +34,31 @@ def client(tmp_path: Path):
         yield test_client
 
 
+
+def _loc(tmp_path: Path, name: str = "gallery-root") -> str:
+    root = tmp_path / name
+    root.mkdir(exist_ok=True)
+    return str(root)
+
+
 def _gallery(client: TestClient, tmp_path: Path) -> dict:
     channel_id = client.get("/channels").json()["channels"][0]["id"]
+    root = tmp_path / "gallery"
+    root.mkdir()
     created = client.post(
         "/workspaces",
         headers={"Idempotency-Key": "ws-1"},
-        json={"channel_id": channel_id, "name": "Stills", "type": "gallery"},
+        json={
+            "channel_id": channel_id,
+            "name": "Stills",
+            "type": "gallery",
+            "location": str(root),
+        },
     )
     assert created.status_code == 201
-    root = tmp_path / "gallery"
-    root.mkdir()
-    saved = client.post(
-        f"/workspaces/{created.json()['id']}/folders",
-        headers={"Idempotency-Key": "root-1"},
-        json={"name": "Stills", "kind": "local", "location": str(root)},
-    )
-    assert saved.status_code == 201
-    return created.json() | {"root_path": root, "channel_id": channel_id, "folder": saved.json()}
+    folders = client.get(f"/workspaces/{created.json()['id']}/folders").json()["folders"]
+    local = next(item for item in folders if item["kind"] == "local")
+    return created.json() | {"root_path": root, "channel_id": channel_id, "folder": local}
 
 
 def test_profile_lists_disabled_cloud_kinds(client: TestClient) -> None:
@@ -67,10 +76,12 @@ def test_a_gallery_stores_many_folders(client: TestClient, tmp_path: Path) -> No
     created = client.post(
         "/workspaces",
         headers={"Idempotency-Key": "ws-empty"},
-        json={"channel_id": channel_id, "name": "Empty", "type": "gallery"},
+        json={"channel_id": channel_id, "name": "Empty", "type": "gallery", "location": _loc(tmp_path)},
     )
     workspace_id = created.json()["id"]
-    assert client.get(f"/workspaces/{workspace_id}/folders").json()["folders"] == []
+    roots = client.get(f"/workspaces/{workspace_id}/folders").json()["folders"]
+    assert len(roots) == 1
+    assert roots[0]["kind"] == "local"
     cloud = client.post(
         f"/workspaces/{workspace_id}/folders",
         headers={"Idempotency-Key": "cloud"},
@@ -143,19 +154,44 @@ def test_pick_root_returns_the_chosen_directory(
     created = client.post(
         "/workspaces",
         headers={"Idempotency-Key": "ws-pick"},
-        json={"channel_id": channel_id, "name": "Stills", "type": "gallery"},
+        json={"channel_id": channel_id, "name": "Stills", "type": "gallery", "location": _loc(tmp_path)},
     )
     workspace_id = created.json()["id"]
     chosen = tmp_path / "picked"
     chosen.mkdir()
     monkeypatch.setattr("web_api.routes.workspaces.choose_directory", lambda: str(chosen))
-    picked = client.post(f"/workspaces/{workspace_id}/folders/pick")
+    picked = client.post("/folders/pick")
     assert picked.status_code == 200
     assert picked.json() == {"cancelled": False, "location": str(chosen)}
+    workspace_pick = client.post(f"/workspaces/{workspace_id}/folders/pick")
+    assert workspace_pick.status_code == 200
+    assert workspace_pick.json() == {"cancelled": False, "location": str(chosen)}
     monkeypatch.setattr("web_api.routes.workspaces.choose_directory", lambda: None)
-    cancelled = client.post(f"/workspaces/{workspace_id}/folders/pick")
+    cancelled = client.post("/folders/pick")
     assert cancelled.status_code == 200
     assert cancelled.json() == {"cancelled": True}
+
+
+def test_gallery_create_requires_a_local_folder(client: TestClient, tmp_path: Path) -> None:
+    channel_id = client.get("/channels").json()["channels"][0]["id"]
+    missing = client.post(
+        "/workspaces",
+        headers={"Idempotency-Key": "ws-no-folder"},
+        json={"channel_id": channel_id, "name": "NoFolder", "type": "gallery"},
+    )
+    assert missing.status_code == 400
+    assert "local folder" in missing.json()["message"].lower()
+    absent = client.post(
+        "/workspaces",
+        headers={"Idempotency-Key": "ws-missing-dir"},
+        json={
+            "channel_id": channel_id,
+            "name": "MissingDir",
+            "type": "gallery",
+            "location": str(tmp_path / "nope"),
+        },
+    )
+    assert absent.status_code == 400
 
 
 def test_images_and_folders_stay_inside_the_local_folder(client: TestClient, tmp_path: Path) -> None:
@@ -234,21 +270,16 @@ def test_images_and_folders_stay_inside_the_local_folder(client: TestClient, tmp
 
 def test_gallery_tools_are_only_on_the_workspace_session(tmp_path: Path) -> None:
     from web_api.chat import turn_setup
-    from web_api.db import FAVLO_SESSION_ID
 
     store = Store(tmp_path / "app.db")
     try:
+        home = next(
+            row["session_id"] for row in store.channels() if row["agent_id"] == FAVLO_AGENT_ID
+        )
         channel_id = store.channels()[0]["id"]
         _status, workspace, _events = store.create_workspace(
             "ws-tools",
-            {"channel_id": channel_id, "name": "Tools", "type": "gallery"},
-        )
-        root = tmp_path / "root"
-        root.mkdir()
-        store.add_folder(
-            "root-tools",
-            workspace["id"],
-            {"kind": "local", "location": str(root), "name": "Tools"},
+            {"channel_id": channel_id, "name": "Tools", "type": "gallery", "location": _loc(tmp_path)},
         )
         home_instructions, home_tools = turn_setup(
             "You are Favlo.",
@@ -256,8 +287,8 @@ def test_gallery_tools_are_only_on_the_workspace_session(tmp_path: Path) -> None
             [],
             "http://127.0.0.1:8129/v1",
             store,
-            "agent_favlo",
-            FAVLO_SESSION_ID,
+            FAVLO_AGENT_ID,
+            home,
             None,
         )
         gallery_instructions, gallery_tools = turn_setup(
@@ -266,7 +297,7 @@ def test_gallery_tools_are_only_on_the_workspace_session(tmp_path: Path) -> None
             [],
             "http://127.0.0.1:8129/v1",
             store,
-            "agent_favlo",
+            FAVLO_AGENT_ID,
             workspace["session_id"],
             None,
         )
@@ -276,13 +307,10 @@ def test_gallery_tools_are_only_on_the_workspace_session(tmp_path: Path) -> None
     gallery_names = {_tool_name(item) for item in gallery_tools}
     assert "gallery_create_folder" not in home_names
     assert "gallery_write_image" not in home_names
-    assert "gallery_create_folder" in gallery_names
     assert "gallery_write_image" in gallery_names
-    assert "gallery_rename_folder" in gallery_names
-    assert "gallery_move_folder" in gallery_names
-    assert "gallery_move_image" in gallery_names
-    assert "gallery_delete_image" in gallery_names
-    assert "gallery_delete_folder" in gallery_names
+    assert "gallery_load_folder_tools" in gallery_names
+    assert "gallery_create_folder" not in gallery_names
+    assert "gallery_search_unlike_media" not in gallery_names
     assert "operating in a gallery workspace" in gallery_instructions.lower()
     assert "local folder" in gallery_instructions.lower()
     assert "operating in a gallery workspace" not in home_instructions.lower()
@@ -298,7 +326,7 @@ def test_a_workspace_session_gets_the_type_prompt_before_the_root(tmp_path: Path
         channel_id = store.channels()[0]["id"]
         _status, workspace, _events = store.create_workspace(
             "ws-prompt",
-            {"channel_id": channel_id, "name": "Prompt", "type": "gallery"},
+            {"channel_id": channel_id, "name": "Prompt", "type": "gallery", "location": _loc(tmp_path)},
         )
         instructions, tools = turn_setup(
             "You are Favlo.",
@@ -306,7 +334,7 @@ def test_a_workspace_session_gets_the_type_prompt_before_the_root(tmp_path: Path
             [],
             "http://127.0.0.1:8129/v1",
             store,
-            "agent_favlo",
+            FAVLO_AGENT_ID,
             workspace["session_id"],
             None,
         )
@@ -315,7 +343,13 @@ def test_a_workspace_session_gets_the_type_prompt_before_the_root(tmp_path: Path
     names = {_tool_name(item) for item in tools}
     assert WORKSPACE_INSTRUCTIONS["gallery"] in instructions
     assert WORKSPACE_INSTRUCTIONS["coding"] not in instructions
+    assert "gallery_load_folder_tools" in names
+    assert "gallery_find_media" in names
+    assert "gallery_search_media" in names
+    assert "gallery_search_unlike_media" not in names
     assert "gallery_create_folder" not in names
+    assert "workspace_place" in names
+    assert "gallery_list_folder" not in names
     assert "this session is using" not in instructions.lower()
 
 
@@ -329,18 +363,20 @@ def test_workspace_prompt_is_fixed_per_type() -> None:
     assert text_for("unknown") is None
 
 
-def test_workspace_skills_are_name_and_description(client: TestClient) -> None:
+def test_workspace_skills_are_name_and_description(client: TestClient, tmp_path: Path) -> None:
     channel_id = client.get("/channels").json()["channels"][0]["id"]
     created = client.post(
         "/workspaces",
         headers={"Idempotency-Key": "ws-skill"},
-        json={"channel_id": channel_id, "name": "Skills", "type": "gallery"},
+        json={"channel_id": channel_id, "name": "Skills", "type": "gallery", "location": _loc(tmp_path)},
     )
     workspace_id = created.json()["id"]
     assert [item["name"] for item in created.json()["skills"]] == ["manage-gallery"]
     assert "gallery_write_image" in created.json()["skills"][0]["definition"]
-    assert "gallery_delete_image" in created.json()["skills"][0]["definition"]
-    assert "open folder" in created.json()["skills"][0]["definition"]
+    assert "gallery_find_media" in created.json()["skills"][0]["definition"]
+    assert "gallery_search_unlike_media" in created.json()["skills"][0]["definition"]
+    assert "workspace_place" in created.json()["skills"][0]["definition"]
+    assert "gallery_list_folder" not in created.json()["skills"][0]["definition"]
     added = client.post(
         f"/workspaces/{workspace_id}/skills",
         headers={"Idempotency-Key": "skill-1"},
@@ -383,7 +419,7 @@ def test_workspace_skills_join_the_system_prompt(tmp_path: Path) -> None:
         channel_id = store.channels()[0]["id"]
         _status, workspace, _events = store.create_workspace(
             "ws-skill-prompt",
-            {"channel_id": channel_id, "name": "Prompt", "type": "gallery"},
+            {"channel_id": channel_id, "name": "Prompt", "type": "gallery", "location": _loc(tmp_path)},
         )
         store.create_skill(
             "skill-caption",
@@ -398,7 +434,7 @@ def test_workspace_skills_join_the_system_prompt(tmp_path: Path) -> None:
         store.create_agent_skill(
             "agent-skill",
             {
-                "agent_id": "agent_favlo",
+                "agent_id": FAVLO_AGENT_ID,
                 "name": "Global captions",
                 "description": "Keep names short.",
             },
@@ -413,22 +449,23 @@ def test_workspace_skills_join_the_system_prompt(tmp_path: Path) -> None:
             [],
             "http://127.0.0.1:8129/v1",
             store,
-            "agent_favlo",
+            FAVLO_AGENT_ID,
             workspace["session_id"],
             None,
         )
-        agent_skills = store.list_agent_skills("agent_favlo")
+        agent_skills = store.list_agent_skills(FAVLO_AGENT_ID)
         stored = agent_skills + store.list_skills(workspace["id"])
-        from web_api.db import FAVLO_SESSION_ID
-
+        home_id = next(
+            row["session_id"] for row in store.channels() if row["agent_id"] == FAVLO_AGENT_ID
+        )
         home, _home_tools = turn_setup(
             "You are Favlo.",
             "Favlo",
             [],
             "http://127.0.0.1:8129/v1",
             store,
-            "agent_favlo",
-            FAVLO_SESSION_ID,
+            FAVLO_AGENT_ID,
+            home_id,
             None,
         )
     finally:
@@ -452,7 +489,7 @@ def test_agent_skills_are_name_and_description(client: TestClient) -> None:
         "/agent-skills",
         headers={"Idempotency-Key": "global-skill"},
         json={
-            "agent_id": "agent_favlo",
+            "agent_id": FAVLO_AGENT_ID,
             "name": "Photo captions",
             "description": "Write a one-line caption.",
         },
@@ -466,7 +503,7 @@ def test_agent_skills_are_name_and_description(client: TestClient) -> None:
         "/agent-skills",
         headers={"Idempotency-Key": "global-skill-dup"},
         json={
-            "agent_id": "agent_favlo",
+            "agent_id": FAVLO_AGENT_ID,
             "name": "Photo captions",
             "description": "Other",
         },
@@ -488,7 +525,9 @@ def test_agent_skills_are_name_and_description(client: TestClient) -> None:
     assert skill["id"] not in [row["id"] for row in empty]
 
 
-def test_a_catalog_skill_copies_without_following_later_edits(client: TestClient) -> None:
+def test_a_catalog_skill_copies_without_following_later_edits(
+    client: TestClient, tmp_path: Path
+) -> None:
     created = client.post(
         "/global-skills",
         headers={"Idempotency-Key": "catalog-skill"},
@@ -518,10 +557,10 @@ def test_a_catalog_skill_copies_without_following_later_edits(client: TestClient
     copied = client.post(
         f"/global-skills/{skill['id']}/copy",
         headers={"Idempotency-Key": "copy-agent"},
-        json={"agent_id": "agent_favlo"},
+        json={"agent_id": FAVLO_AGENT_ID},
     )
     assert copied.status_code == 201
-    assert copied.json()["agent_id"] == "agent_favlo"
+    assert copied.json()["agent_id"] == FAVLO_AGENT_ID
     assert copied.json()["description"] == "Write a one-line caption."
     edited = client.patch(
         f"/global-skills/{skill['id']}",
@@ -538,14 +577,14 @@ def test_a_catalog_skill_copies_without_following_later_edits(client: TestClient
     again = client.post(
         f"/global-skills/{skill['id']}/copy",
         headers={"Idempotency-Key": "copy-agent-again"},
-        json={"agent_id": "agent_favlo"},
+        json={"agent_id": FAVLO_AGENT_ID},
     )
     assert again.status_code == 400
     channel_id = client.get("/channels").json()["channels"][0]["id"]
     workspace = client.post(
         "/workspaces",
         headers={"Idempotency-Key": "catalog-workspace"},
-        json={"channel_id": channel_id, "name": "Catalog", "type": "gallery"},
+        json={"channel_id": channel_id, "name": "Catalog", "type": "gallery", "location": _loc(tmp_path)},
     )
     assert workspace.status_code == 201
     copied_workspace = client.post(
@@ -680,19 +719,27 @@ def test_local_folder_rejects_an_escape(tmp_path: Path) -> None:
     assert listed["images"][0]["name"] == "ok.png"
 
 
-def test_workspace_session_refuses_messages_before_a_local_folder(client: TestClient) -> None:
+def test_workspace_session_accepts_messages_when_created_with_a_local_folder(
+    client: TestClient, tmp_path: Path
+) -> None:
     channel_id = client.get("/channels").json()["channels"][0]["id"]
     created = client.post(
         "/workspaces",
         headers={"Idempotency-Key": "ws-msg"},
-        json={"channel_id": channel_id, "name": "Later", "type": "gallery"},
+        json={
+            "channel_id": channel_id,
+            "name": "Ready",
+            "type": "gallery",
+            "location": _loc(tmp_path),
+        },
     )
-    refused = client.post(
+    assert created.status_code == 201
+    accepted = client.post(
         f"/workspaces/{created.json()['id']}/session/messages",
         headers={"Idempotency-Key": "msg"},
         json={"text": "Hello"},
     )
-    assert refused.status_code == 400
+    assert accepted.status_code in {200, 201, 202}
 
 
 def test_delete_image_removes_the_file(tmp_path: Path) -> None:
@@ -731,12 +778,12 @@ def test_a_named_image_in_the_message_is_read_from_the_gallery_folder(tmp_path: 
         channel = store.channels()[0]
         _status, workspace, _events = store.create_workspace(
             "ws-named",
-            {"channel_id": channel["id"], "name": "Named", "type": "gallery"},
-        )
-        store.add_folder(
-            "root-named",
-            workspace["id"],
-            {"kind": "local", "location": str(root), "name": "Named"},
+            {
+                "channel_id": channel["id"],
+                "name": "Named",
+                "type": "gallery",
+                "location": str(root),
+            },
         )
         home = images_in_message(store, channel["session_id"], "see zebra.png")
         found = images_in_message(store, workspace["session_id"], "look at zebra.png")
@@ -784,7 +831,7 @@ def test_a_sent_turn_records_the_open_folder_and_image(tmp_path: Path) -> None:
         channel_id = store.channels()[0]["id"]
         _status, workspace, _events = store.create_workspace(
             "ws-turn",
-            {"channel_id": channel_id, "name": "Turn", "type": "gallery"},
+            {"channel_id": channel_id, "name": "Turn", "type": "gallery", "location": _loc(tmp_path)},
         )
         store.add_folder("root-turn", workspace["id"], {"kind": "local", "location": str(root), "name": "Turn"})
         _status, started, _events = store.begin_message(
@@ -825,7 +872,7 @@ def test_seeded_manage_gallery_is_refreshed_once(tmp_path: Path) -> None:
     store = Store(path)
     try:
         channel_id = store.channels()[0]["id"]
-        store.create_workspace("ws-refresh", {"channel_id": channel_id, "name": "Refresh", "type": "gallery"})
+        store.create_workspace("ws-refresh", {"channel_id": channel_id, "name": "Refresh", "type": "gallery", "location": _loc(tmp_path)})
     finally:
         store.close()
     conn = sqlite3.connect(path)
@@ -861,7 +908,61 @@ def test_seeded_manage_gallery_is_refreshed_once(tmp_path: Path) -> None:
     _refresh_manage_gallery(conn)
     kept = conn.execute("SELECT definition FROM skill WHERE name = 'manage-gallery'").fetchone()
     assert kept["definition"] == _PREVIOUS_MANAGE_GALLERY
+    from web_api.db import _MANAGE_GALLERY_BEFORE_UNLIKE, _refresh_manage_gallery_unlike
+
+    conn.execute(
+        "UPDATE skill SET definition = ? WHERE name = 'manage-gallery'",
+        (_MANAGE_GALLERY_BEFORE_UNLIKE,),
+    )
+    conn.execute("DELETE FROM meta WHERE key LIKE 'workspace_skill_unlike:%'")
+    _refresh_manage_gallery_unlike(conn)
+    unlike = conn.execute("SELECT definition FROM skill WHERE name = 'manage-gallery'").fetchone()
+    assert "gallery_search_unlike_media" in unlike["definition"]
+    conn.execute(
+        "UPDATE skill SET definition = ? WHERE name = 'manage-gallery'",
+        (_MANAGE_GALLERY_BEFORE_UNLIKE,),
+    )
+    _refresh_manage_gallery_unlike(conn)
+    kept_unlike = conn.execute("SELECT definition FROM skill WHERE name = 'manage-gallery'").fetchone()
+    assert kept_unlike["definition"] == _MANAGE_GALLERY_BEFORE_UNLIKE
     conn.close()
+
+
+def test_create_coding_workspace(client: TestClient) -> None:
+    channel_id = client.get("/channels").json()["channels"][0]["id"]
+    created = client.post(
+        "/workspaces",
+        headers={"Idempotency-Key": "ws-coding"},
+        json={"channel_id": channel_id, "name": "Repos", "type": "coding"},
+    )
+    assert created.status_code == 201
+    body = created.json()
+    assert body["type"] == "coding"
+    assert body["name"] == "Repos"
+    listed = client.get(f"/workspaces?channel_id={channel_id}").json()["workspaces"]
+    assert any(row["id"] == body["id"] and row["type"] == "coding" for row in listed)
+
+
+def test_delete_workspace_keeps_disk_files(client: TestClient, tmp_path: Path) -> None:
+    gallery = _gallery(client, tmp_path)
+    still = gallery["root_path"] / "horse.png"
+    still.write_bytes(PNG)
+    removed = client.delete(f"/workspaces/{gallery['id']}")
+    assert removed.status_code == 200
+    assert still.exists()
+    assert still.read_bytes() == PNG
+    listed = client.get(f"/workspaces?channel_id={gallery['channel_id']}").json()["workspaces"]
+    assert all(row["id"] != gallery["id"] for row in listed)
+
+
+def test_create_workspace_rejects_unknown_type(client: TestClient) -> None:
+    channel_id = client.get("/channels").json()["channels"][0]["id"]
+    created = client.post(
+        "/workspaces",
+        headers={"Idempotency-Key": "ws-bad-type"},
+        json={"channel_id": channel_id, "name": "Odd", "type": "music"},
+    )
+    assert created.status_code == 422
 
 
 def _tool_name(item: object) -> str:

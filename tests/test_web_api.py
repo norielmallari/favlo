@@ -16,8 +16,32 @@ from fastapi.testclient import TestClient
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "web-api"))
 
+from web_api.ids import (  # noqa: E402
+    FAVLO_AGENT_ID,
+    FAVLO_MCP_ID,
+    LOCAL_PROVIDER_ID,
+    is_guid,
+)
 from web_api.api import create_app  # noqa: E402
 from web_api.discovery import DiscoveryFailed, ids_from_payload  # noqa: E402
+
+
+
+def _loc(tmp_path: Path, name: str = "gallery-root") -> str:
+    root = tmp_path / name
+    root.mkdir(exist_ok=True)
+    return str(root)
+
+
+def _favlo_session(store_or_client) -> str:
+    """The Home chat GUID for the seeded Favlo agent."""
+    if hasattr(store_or_client, "channels"):
+        channels = store_or_client.channels()
+    else:
+        channels = store_or_client.get("/channels").json()["channels"]
+    match = next(row for row in channels if row["agent_id"] == FAVLO_AGENT_ID)
+    return str(match["session_id"])
+
 
 
 async def _reply(**_kwargs: object):
@@ -36,7 +60,7 @@ def test_the_default_agent_is_the_horse(client: TestClient) -> None:
     from favlo.persona import PERSONA
 
     agents = client.get("/agents").json()["agents"]
-    favlo = next(row for row in agents if row["id"] == "agent_favlo")
+    favlo = next(row for row in agents if row["id"] == FAVLO_AGENT_ID)
     assert favlo["name"] == "Favlo"
     assert favlo["persona"] == PERSONA
     assert favlo["default_model_id"] is None
@@ -45,9 +69,9 @@ def test_the_default_agent_is_the_horse(client: TestClient) -> None:
     assert favlo["reasoning_effort"] is None
     assert favlo["tool_groups"] == ["favlo-config"]
     channels = client.get("/channels").json()["channels"]
-    match = next(row for row in channels if row["agent_id"] == "agent_favlo")
+    match = next(row for row in channels if row["agent_id"] == FAVLO_AGENT_ID)
     assert match["name"] == "Favlo"
-    assert match["session_id"] == "session_favlo"
+    assert is_guid(match["session_id"])
 
 
 def test_the_initial_model_comes_from_the_registry(tmp_path: Path) -> None:
@@ -79,7 +103,7 @@ def test_the_default_agent_is_seeded_once(tmp_path: Path) -> None:
 
 
 def test_favlo_media_mcp_is_seeded_once(tmp_path: Path) -> None:
-    from web_api.db import FAVLO_AGENT_ID, FAVLO_MCP_ID, LOCAL_MCP_URL
+    from web_api.db import LOCAL_MCP_URL
     from web_api.store import Store
 
     path = tmp_path / "app.db"
@@ -100,19 +124,19 @@ def test_favlo_media_mcp_is_seeded_once(tmp_path: Path) -> None:
 
 
 def test_session_commands_stay_on_the_session_that_sent_them(tmp_path: Path) -> None:
-    from web_api.db import FAVLO_SESSION_ID
     from web_api.session_commands import ARCHIVE_CUE
     from web_api.store import Store
 
     store = Store(tmp_path / "app.db")
     try:
-        channel = next(row for row in store.channels() if row["session_id"] == FAVLO_SESSION_ID)
+        home_id = _favlo_session(store)
+        channel = next(row for row in store.channels() if row["session_id"] == home_id)
         _status, workspace, _events = store.create_workspace(
             "ws",
-            {"channel_id": channel["id"], "name": "Stills", "type": "gallery"},
+            {"channel_id": channel["id"], "name": "Stills", "type": "gallery", "location": _loc(tmp_path)},
         )
         workspace_id = workspace["session_id"]
-        _status, channel_turn, _events = store.begin_message("channel-note", FAVLO_SESSION_ID, "Channel note")
+        _status, channel_turn, _events = store.begin_message("channel-note", home_id, "Channel note")
         store.complete_run(channel_turn["run_id"], "Hi")
         _status, workspace_turn, _events = store.begin_message("workspace-note", workspace_id, "Workspace note")
         store.complete_run(workspace_turn["run_id"], "Hi")
@@ -121,17 +145,19 @@ def test_session_commands_stay_on_the_session_that_sent_them(tmp_path: Path) -> 
         assert status == 200
         assert cleared["cleared"] is True
         assert "run_id" not in cleared
+        workspace_id = cleared["session_id"]
         assert events[0]["type"] == "session.cleared"
         assert events[0]["stream_id"] == f"session:{workspace_id}"
         assert store.session_snapshot(workspace_id)["messages"] == []
-        assert _bodies(store, FAVLO_SESSION_ID) == ["Channel note", "Hi"]
+        assert _bodies(store, home_id) == ["Channel note", "Hi"]
 
         _status, again, _events = store.begin_message("workspace-again", workspace_id, "Still here")
         store.complete_run(again["run_id"], "Hi")
-        status, cleared, events = store.begin_message("clear-channel", FAVLO_SESSION_ID, "/session clear")
+        status, cleared, events = store.begin_message("clear-channel", home_id, "/session clear")
         assert status == 200
-        assert events[0]["stream_id"] == f"session:{FAVLO_SESSION_ID}"
-        assert store.session_snapshot(FAVLO_SESSION_ID)["messages"] == []
+        home_id = cleared["session_id"]
+        assert events[0]["stream_id"] == f"session:{home_id}"
+        assert store.session_snapshot(home_id)["messages"] == []
         assert _bodies(store, workspace_id) == ["Still here", "Hi"]
 
         _status, remembered, _events = store.begin_message("remember", workspace_id, "Remember the red door")
@@ -146,9 +172,10 @@ def test_session_commands_stay_on_the_session_that_sent_them(tmp_path: Path) -> 
         assert [item["text"] for item in context["prior"]] == ["Still here", "Hi", "Remember the red door", "Noted"]
         done = store.complete_run(archived["run_id"], "Stored.")
         assert [event["type"] for event in done] == ["run.completed", "session.cleared"]
+        workspace_id = done[-1]["payload"]["session_id"]
         assert done[-1]["stream_id"] == f"session:{workspace_id}"
         assert store.session_snapshot(workspace_id)["messages"] == []
-        assert store.session_snapshot(FAVLO_SESSION_ID)["messages"] == []
+        assert store.session_snapshot(home_id)["messages"] == []
 
         _status, kept, _events = store.begin_message("keep", workspace_id, "Keep me")
         store.complete_run(kept["run_id"], "Ok")
@@ -161,12 +188,13 @@ def test_session_commands_stay_on_the_session_that_sent_them(tmp_path: Path) -> 
         emptied = store.finish_archive(empty_archive["run_id"])
         assert emptied is not None
         assert emptied[-1]["type"] == "session.cleared"
+        workspace_id = emptied[-1]["payload"]["session_id"]
         assert store.session_snapshot(workspace_id)["messages"] == []
         assert store.finish_archive(failed_archive["run_id"]) is None
 
         status, ordinary, _events = store.begin_message(
             "ordinary",
-            FAVLO_SESSION_ID,
+            home_id,
             "please /session clear",
         )
         assert status == 202
@@ -197,14 +225,8 @@ def test_the_configuration_group_adds_its_instructions() -> None:
     )
     assert "read_setup" in text
     assert "You live in this terminal" not in text
-    assert [item.name for item in enabled] == [
-        "config_read_guide",
-        "config_list_models",
-        "config_set_model_mtp",
-        "config_download_suggestions",
-        "config_read_setup",
-        "config_run_setup",
-    ]
+    assert [item.name for item in enabled] == ["config_load_tools"]
+    assert "config_load_tools" in text
 
 
 def test_conversation_tools_read_every_transcript(tmp_path: Path) -> None:
@@ -227,8 +249,9 @@ def test_conversation_tools_read_every_transcript(tmp_path: Path) -> None:
         {"name": "River", "persona": "A short persona.", "default_model_id": None},
     )
     river = created[1]["channel"]["session_id"]
+    home = _favlo_session(store)
     store.close()
-    _note(path, "session_favlo", "m-favlo", "user", "The garden is open.", "2026-10-27T01:00:00Z")
+    _note(path, home, "m-favlo", "user", "The garden is open.", "2026-10-27T01:00:00Z")
     _note(path, river, "m-river-1", "user", "Bring the oats.", "2026-10-27T02:00:00Z")
     _note(path, river, "m-river-2", "assistant", "The oats are in.", "2026-10-27T02:01:00Z")
     _session(path, "session_hall", "channel", "channel_hall", "group", "Hall")
@@ -238,12 +261,12 @@ def test_conversation_tools_read_every_transcript(tmp_path: Path) -> None:
     _session(path, "session_hall_2", "channel", "channel_hall_2", "group", "Hall")
     store = Store(path)
     found = search_messages(store, "garden", "agent", 10)
-    assert "session_favlo" in found
+    assert home in found
     assert "The garden is open." in found
     assert search_messages(store, "garden", "workspace_chat", 10) == "No messages matched."
     carrots = search_messages(store, "carrots", "workspace_chat", 10)
     assert "session_desk" in carrots
-    assert "session_favlo" not in carrots
+    assert home not in carrots
     hall = search_messages(store, "hall", "channel", 10)
     assert "session_hall" in hall
     assert search_messages(store, "hall", "agent", 10) == "No messages matched."
@@ -264,11 +287,8 @@ def test_conversation_tools_read_every_transcript(tmp_path: Path) -> None:
     )
     assert "search_messages" in text
     assert "read_recent_messages" in text
-    assert [item.name for item in enabled] == [
-        "conversation_list_conversations",
-        "conversation_search_messages",
-        "conversation_read_recent_messages",
-    ]
+    assert [item.name for item in enabled] == ["conversation_load_tools"]
+    assert "conversation_load_tools" in text
     bare, idle = turn_setup(
         "You are River.",
         "River",
@@ -358,7 +378,7 @@ def test_a_new_agent_leaves_configuration_tools_off(client: TestClient) -> None:
         {"id": "heartbeats", "name": "Heartbeat tools"},
     ]
     agents = client.get("/agents").json()["agents"]
-    favlo = next(row for row in agents if row["id"] == "agent_favlo")
+    favlo = next(row for row in agents if row["id"] == FAVLO_AGENT_ID)
     saved = client.patch(
         f"/agents/{favlo['id']}",
         json={
@@ -389,11 +409,11 @@ def test_disabling_configuration_tools_stays_off(tmp_path: Path) -> None:
 
     path = tmp_path / "app.db"
     first = Store(path)
-    favlo = next(row for row in first.agents() if row["id"] == "agent_favlo")
+    favlo = next(row for row in first.agents() if row["id"] == FAVLO_AGENT_ID)
     first.update_agent(favlo["id"], favlo["revision"], "Favlo", favlo["persona"], None, [])
     first.close()
     second = Store(path)
-    again = next(row for row in second.agents() if row["id"] == "agent_favlo")
+    again = next(row for row in second.agents() if row["id"] == FAVLO_AGENT_ID)
     second.close()
     assert again["tool_groups"] == []
 
@@ -412,7 +432,7 @@ def test_favlo_runs_with_the_configuration_group(tmp_path: Path) -> None:
             "/provider-models",
             headers={"Idempotency-Key": "model-tools"},
             json={
-                "provider_id": "provider_local",
+                "provider_id": LOCAL_PROVIDER_ID,
                 "model_id": "example-model",
                 "display_name": "Example",
             },
@@ -429,12 +449,12 @@ def test_favlo_runs_with_the_configuration_group(tmp_path: Path) -> None:
         )
         assert saved.status_code == 200
         sent = test_client.post(
-            "/sessions/session_favlo/messages",
+            "/sessions/" + _favlo_session(test_client) + "/messages",
             headers={"Idempotency-Key": "favlo-tools"},
             json={"text": "Hello"},
         )
         assert sent.status_code == 202
-        _wait(test_client, "session_favlo")
+        _wait(test_client, _favlo_session(test_client))
     assert seen == [["favlo-config"]]
 
 
@@ -465,7 +485,7 @@ def test_an_agent_stores_its_own_model(client: TestClient) -> None:
         "/provider-models",
         headers={"Idempotency-Key": "agent-model"},
         json={
-            "provider_id": "provider_local",
+            "provider_id": LOCAL_PROVIDER_ID,
             "model_id": "example-model",
             "display_name": "Example",
         },
@@ -533,7 +553,7 @@ def test_a_reply_is_stored_on_that_agents_session(client: TestClient, tmp_path: 
         "/provider-models",
         headers={"Idempotency-Key": "model-1"},
         json={
-            "provider_id": "provider_local",
+            "provider_id": LOCAL_PROVIDER_ID,
             "model_id": "example-model",
             "display_name": "Example",
         },
@@ -582,7 +602,7 @@ def test_reasoning_is_stored_beside_the_reply(tmp_path: Path) -> None:
             "/provider-models",
             headers={"Idempotency-Key": "model-reason"},
             json={
-                "provider_id": "provider_local",
+                "provider_id": LOCAL_PROVIDER_ID,
                 "model_id": "example-model",
                 "display_name": "Example",
             },
@@ -599,12 +619,12 @@ def test_reasoning_is_stored_beside_the_reply(tmp_path: Path) -> None:
         )
         assert saved.status_code == 200
         sent = test_client.post(
-            "/sessions/session_favlo/messages",
+            "/sessions/" + _favlo_session(test_client) + "/messages",
             headers={"Idempotency-Key": "reason-1"},
             json={"text": "Hello"},
         )
         assert sent.status_code == 202
-        snapshot = _wait(test_client, "session_favlo")
+        snapshot = _wait(test_client, _favlo_session(test_client))
     assistant = snapshot["messages"][-1]
     assert assistant["body"] == "Hello"
     assert assistant["reasoning"] == "Looking"
@@ -665,7 +685,7 @@ def test_a_tool_call_is_stored_on_the_message(tmp_path: Path) -> None:
             "/provider-models",
             headers={"Idempotency-Key": "model-tool"},
             json={
-                "provider_id": "provider_local",
+                "provider_id": LOCAL_PROVIDER_ID,
                 "model_id": "example-model",
                 "display_name": "Example",
             },
@@ -682,12 +702,12 @@ def test_a_tool_call_is_stored_on_the_message(tmp_path: Path) -> None:
         )
         assert saved.status_code == 200
         sent = test_client.post(
-            "/sessions/session_favlo/messages",
+            "/sessions/" + _favlo_session(test_client) + "/messages",
             headers={"Idempotency-Key": "tool-1"},
             json={"text": "Hello"},
         )
         assert sent.status_code == 202
-        snapshot = _wait(test_client, "session_favlo")
+        snapshot = _wait(test_client, _favlo_session(test_client))
     assistant = snapshot["messages"][-1]
     assert assistant["body"] == "Done"
     assert assistant["trace"][0]["kind"] == "tool"
@@ -706,7 +726,8 @@ def test_reasoning_without_text_finishes_the_turn(tmp_path: Path) -> None:
     from web_api.store import Store
 
     store = Store(tmp_path / "app.db")
-    _status, started, _events = store.begin_message("empty", "session_favlo", "hello")
+    home = _favlo_session(store)
+    _status, started, _events = store.begin_message("empty", home, "hello")
     events = store.complete_run(started["run_id"], "", "User handed over carrots.")
     prior = store.run_context(started["run_id"])
     store.close()
@@ -778,9 +799,10 @@ def test_the_next_turn_includes_stored_reasoning(tmp_path: Path) -> None:
     from web_api.store import Store
 
     store = Store(tmp_path / "app.db")
-    _status, first, _events = store.begin_message("one", "session_favlo", "hello")
+    home = _favlo_session(store)
+    _status, first, _events = store.begin_message("one", home, "hello")
     store.complete_run(first["run_id"], "Hi", "Looking")
-    _status, second, _events = store.begin_message("two", "session_favlo", "again")
+    _status, second, _events = store.begin_message("two", home, "again")
     prior = store.run_context(second["run_id"])["prior"]
     store.close()
     assert prior == [
@@ -813,6 +835,57 @@ def test_reasoning_content_stays_out_of_the_reply() -> None:
     assert read_reasoning(object(), parsed) == parsed
 
 
+def test_session_cancel_stops_every_running_turn(tmp_path: Path) -> None:
+    started = threading.Event()
+    released = threading.Event()
+
+    async def hanging(**kwargs: object):
+        started.set()
+        cancel = kwargs["cancel"]
+        assert isinstance(cancel, asyncio.Event)
+        await cancel.wait()
+        released.set()
+        return
+        yield "nope"
+
+    app = create_app(tmp_path, reply=hanging)
+    with TestClient(app) as client:
+        model = client.post(
+            "/provider-models",
+            headers={"Idempotency-Key": "model-session-cancel"},
+            json={
+                "provider_id": LOCAL_PROVIDER_ID,
+                "model_id": "example-model",
+                "display_name": "Example",
+            },
+        )
+        assert model.status_code == 201
+        settings = client.get("/settings").json()
+        saved = client.patch(
+            "/settings",
+            json={
+                "expected_revision": settings["revision"],
+                "default_model_id": model.json()["id"],
+                "exchange_budget": 10,
+            },
+        )
+        assert saved.status_code == 200
+        session_id = _favlo_session(client)
+        sent = client.post(
+            f"/sessions/{session_id}/messages",
+            headers={"Idempotency-Key": "session-cancel-1"},
+            json={"text": "Hello"},
+        )
+        assert sent.status_code == 202
+        assert started.wait(2)
+        stopped = client.post(f"/sessions/{session_id}/cancel")
+        assert stopped.status_code == 200
+        assert stopped.json()["cancelled_run_ids"] == [sent.json()["run_id"]]
+        assert released.wait(2)
+        snapshot = _wait(client, session_id)
+    assert snapshot["runs"][-1]["status"] == "cancelled"
+
+
 def test_stop_ends_a_run_that_is_still_waiting(tmp_path: Path) -> None:
     started = threading.Event()
     released = threading.Event()
@@ -832,7 +905,7 @@ def test_stop_ends_a_run_that_is_still_waiting(tmp_path: Path) -> None:
             "/provider-models",
             headers={"Idempotency-Key": "model-stop"},
             json={
-                "provider_id": "provider_local",
+                "provider_id": LOCAL_PROVIDER_ID,
                 "model_id": "example-model",
                 "display_name": "Example",
             },
@@ -849,7 +922,7 @@ def test_stop_ends_a_run_that_is_still_waiting(tmp_path: Path) -> None:
         )
         assert saved.status_code == 200
         sent = client.post(
-            "/sessions/session_favlo/messages",
+            "/sessions/" + _favlo_session(client) + "/messages",
             headers={"Idempotency-Key": "stop-1"},
             json={"text": "Hello"},
         )
@@ -858,7 +931,7 @@ def test_stop_ends_a_run_that_is_still_waiting(tmp_path: Path) -> None:
         stopped = client.post(f"/runs/{sent.json()['run_id']}/cancel")
         assert stopped.status_code == 202
         assert released.wait(2)
-        snapshot = _wait(client, "session_favlo")
+        snapshot = _wait(client, _favlo_session(client))
     assert snapshot["runs"][-1]["status"] == "cancelled"
 
 
@@ -1026,12 +1099,12 @@ def test_a_turn_sends_the_stored_agent_framework_session(
     from agent_framework import AgentSession, InMemoryHistoryProvider, Message
 
     from web_api.chat import stream_reply
-    from web_api.db import FAVLO_SESSION_ID
     from web_api.gallery_tools import turn_note
     from web_api.store import Store
 
     store = Store(tmp_path / "app.db")
-    session = AgentSession(session_id=FAVLO_SESSION_ID)
+    home = _favlo_session(store)
+    session = AgentSession(session_id=home)
     provider = InMemoryHistoryProvider()
 
     async def seed() -> None:
@@ -1043,7 +1116,7 @@ def test_a_turn_sends_the_stored_agent_framework_session(
         )
 
     asyncio.run(seed())
-    store.save_maf_session(FAVLO_SESSION_ID, session.to_dict())
+    store.save_maf_session(home, session.to_dict())
     seen: dict[str, object] = {}
 
     class Stream:
@@ -1088,7 +1161,7 @@ def test_a_turn_sends_the_stored_agent_framework_session(
 
     monkeypatch.setattr("agent_framework.Agent", Agent)
     monkeypatch.setattr("web_api.chat.open_chat_client", lambda *_args, **_kwargs: Client())
-    note = turn_note("photos", None)
+    note = turn_note("", "photos/horse.png", strip_count=2)
 
     async def once() -> None:
         collected = []
@@ -1099,7 +1172,7 @@ def test_a_turn_sends_the_stored_agent_framework_session(
             agent_name="Favlo",
             user_text="Next",
             store=store,
-            session_id=FAVLO_SESSION_ID,
+            session_id=home,
             cancel=asyncio.Event(),
             gallery_note=note,
         ):
@@ -1112,21 +1185,21 @@ def test_a_turn_sends_the_stored_agent_framework_session(
         restored = seen["session"]
         assert isinstance(restored, AgentSession)
         assert "Next" in prompt
-        assert "photos" in prompt
-        assert "photos" not in str(seen["instructions"])
+        assert "photos/horse.png" in prompt
+        assert "photos/horse.png" not in str(seen["instructions"])
         assert seen["options"] == {"store": False}
         assert seen["persist"] is True
         providers = seen["providers"]
         assert isinstance(providers, list)
         assert type(providers[0]).__name__ == "InMemoryHistoryProvider"
         assert providers[0].skip_excluded is True
-        assert type(providers[1]).__name__ == "PromptWindow"
+        assert type(providers[1]).__name__ == "PercentWindow"
         messages = restored.state[provider.source_id]["messages"]
         assert [item.text for item in messages] == ["Hello", "Hi"]
-        saved = store.maf_session(FAVLO_SESSION_ID)
+        saved = store.maf_session(home)
         assert saved is not None
-        assert saved["session_id"] == FAVLO_SESSION_ID
-        assert "maf_state" not in store.session_snapshot(FAVLO_SESSION_ID)["session"]
+        assert saved["session_id"] == home
+        assert "maf_state" not in store.session_snapshot(home)["session"]
     finally:
         store.close()
 
@@ -1137,13 +1210,13 @@ def test_a_cancelled_turn_leaves_the_stored_session(
     from agent_framework import AgentSession
 
     from web_api.chat import stream_reply
-    from web_api.db import FAVLO_SESSION_ID
     from web_api.store import Store
 
     store = Store(tmp_path / "app.db")
+    home = _favlo_session(store)
     store.save_maf_session(
-        FAVLO_SESSION_ID,
-        AgentSession(session_id=FAVLO_SESSION_ID).to_dict(),
+        home,
+        AgentSession(session_id=home).to_dict(),
     )
 
     class Stream:
@@ -1202,14 +1275,14 @@ def test_a_cancelled_turn_leaves_the_stored_session(
             agent_name="Favlo",
             user_text="Hello",
             store=store,
-            session_id=FAVLO_SESSION_ID,
+            session_id=home,
             cancel=cancel,
         ):
             pass
 
     try:
         asyncio.run(once())
-        saved = store.maf_session(FAVLO_SESSION_ID)
+        saved = store.maf_session(home)
         assert saved is not None
         assert "marked" not in saved["state"]
     finally:
@@ -1217,18 +1290,19 @@ def test_a_cancelled_turn_leaves_the_stored_session(
 
 
 def test_clearing_a_session_drops_its_agent_framework_session(tmp_path: Path) -> None:
-    from web_api.db import FAVLO_SESSION_ID
     from web_api.store import Store
 
     store = Store(tmp_path / "app.db")
     try:
+        home = _favlo_session(store)
         store.save_maf_session(
-            FAVLO_SESSION_ID,
-            {"type": "session", "session_id": FAVLO_SESSION_ID, "state": {}},
+            home,
+            {"type": "session", "session_id": home, "state": {}},
         )
-        assert store.maf_session(FAVLO_SESSION_ID)["session_id"] == FAVLO_SESSION_ID
-        store.clear_session_messages(FAVLO_SESSION_ID)
-        assert store.maf_session(FAVLO_SESSION_ID) is None
+        assert store.maf_session(home)["session_id"] == home
+        cleared, _events = store.clear_chat(home)
+        assert store.maf_session(home) is None
+        assert store.maf_session(cleared["session_id"]) is None
     finally:
         store.close()
 
@@ -1285,13 +1359,13 @@ def test_the_favlo_provider_is_present_and_uses_its_models(
     assert [row["model_id"] for row in again.json()["providers"][0]["models"]] == ["example-model"]
     settings = client.get("/settings").json()
     chosen = client.post(
-        "/providers/provider_local/models",
+        "/providers/" + LOCAL_PROVIDER_ID + "/models",
         json={"model_id": "example-model", "expected_revision": settings["revision"]},
     )
     assert chosen.status_code == 200
     assert chosen.json()["model_id"] == "example-model"
     rejected = client.post(
-        "/providers/provider_local/models",
+        "/providers/" + LOCAL_PROVIDER_ID + "/models",
         json={"model_id": "other-model", "expected_revision": chosen.json()["revision"]},
     )
     assert rejected.status_code == 400
@@ -1310,11 +1384,11 @@ def test_refresh_replaces_the_hosted_models(
 
     monkeypatch.setattr("web_api.routes.providers.fetch_model_ids", advertised)
     client.get("/providers")
-    refreshed = client.post("/providers/provider_local/refresh")
+    refreshed = client.post("/providers/" + LOCAL_PROVIDER_ID + "/refresh")
     assert refreshed.status_code == 200
     assert refreshed.json()["message"] == "Models refreshed"
     assert [row["model_id"] for row in refreshed.json()["models"]] == ["example-model-2"]
-    stored = client.get("/providers/provider_local/models")
+    stored = client.get("/providers/" + LOCAL_PROVIDER_ID + "/models")
     assert stored.json()["models"] == ["example-model-2"]
 
 
@@ -1334,7 +1408,7 @@ def test_a_failed_discovery_leaves_the_list_empty(
     assert favlo["models"] == []
     client.get("/providers")
     assert calls["count"] == 1
-    refreshed = client.post("/providers/provider_local/refresh")
+    refreshed = client.post("/providers/" + LOCAL_PROVIDER_ID + "/refresh")
     assert refreshed.json()["message"] == "Connection failed"
     assert refreshed.json()["models"] == []
     assert calls["count"] == 2
@@ -1345,7 +1419,7 @@ def test_a_heartbeat_is_stored_on_its_agent(client: TestClient) -> None:
         "/heartbeats",
         headers={"Idempotency-Key": "beat"},
         json={
-            "agent_id": "agent_favlo",
+            "agent_id": FAVLO_AGENT_ID,
             "cron_expression": "15 * * * *",
             "timezone": "UTC",
             "instructions": "Check the garden.",
@@ -1354,7 +1428,7 @@ def test_a_heartbeat_is_stored_on_its_agent(client: TestClient) -> None:
     )
     assert created.status_code == 201
     body = created.json()
-    assert body["agent_id"] == "agent_favlo"
+    assert body["agent_id"] == FAVLO_AGENT_ID
     assert body["cron_expression"] == "15 * * * *"
     assert body["timezone"] == "UTC"
     assert body["enabled"] is True
@@ -1381,7 +1455,7 @@ def test_a_heartbeat_rejects_a_schedule_finer_than_one_minute(client: TestClient
         "/heartbeats",
         headers={"Idempotency-Key": "fine"},
         json={
-            "agent_id": "agent_favlo",
+            "agent_id": FAVLO_AGENT_ID,
             "cron_expression": "* * * * * *",
             "timezone": "UTC",
             "instructions": "",
@@ -1394,7 +1468,7 @@ def test_a_heartbeat_rejects_a_schedule_finer_than_one_minute(client: TestClient
         "/heartbeats",
         headers={"Idempotency-Key": "minute"},
         json={
-            "agent_id": "agent_favlo",
+            "agent_id": FAVLO_AGENT_ID,
             "cron_expression": "* * * * *",
             "timezone": "UTC",
             "instructions": "",
@@ -1406,7 +1480,7 @@ def test_a_heartbeat_rejects_a_schedule_finer_than_one_minute(client: TestClient
         "/heartbeats",
         headers={"Idempotency-Key": "zone"},
         json={
-            "agent_id": "agent_favlo",
+            "agent_id": FAVLO_AGENT_ID,
             "cron_expression": "0 * * * *",
             "timezone": "Not/AZone",
             "instructions": "",
@@ -1436,11 +1510,11 @@ def test_run_now_keeps_one_session_and_skips_a_busy_one(tmp_path: Path) -> None:
     app = create_app(tmp_path, reply=_reply)
     with TestClient(app):
         store = app.state.store
-        added = add_heartbeat(store, "agent_favlo", "15 * * * *", "Check the garden.", "UTC")
+        added = add_heartbeat(store, FAVLO_AGENT_ID, "15 * * * *", "Check the garden.", "UTC")
         assert "runs 15 * * * *" in added
-        assert "Check the garden." in list_heartbeats(store, "agent_favlo")
+        assert "Check the garden." in list_heartbeats(store, FAVLO_AGENT_ID)
         assert list_heartbeats(store, "agent_other") == "No heartbeats are stored."
-        assert "five fields" in add_heartbeat(store, "agent_favlo", "nope", "Later.", "UTC")
+        assert "five fields" in add_heartbeat(store, FAVLO_AGENT_ID, "nope", "Later.", "UTC")
         row = store.heartbeats()[0]
         status, result, events = store.begin_heartbeat_run("run-1", row["id"])
         assert status == 202
@@ -1467,11 +1541,11 @@ def test_an_agent_changes_and_deletes_only_its_own_heartbeat(tmp_path: Path) -> 
     with TestClient(app) as client:
         store = app.state.store
         other = _agent(client, "Cedar", "cedar-beat")
-        add_heartbeat(store, "agent_favlo", "15 * * * *", "Check the garden.", "UTC")
-        row = next(item for item in store.heartbeats() if item["agent_id"] == "agent_favlo")
+        add_heartbeat(store, FAVLO_AGENT_ID, "15 * * * *", "Check the garden.", "UTC")
+        row = next(item for item in store.heartbeats() if item["agent_id"] == FAVLO_AGENT_ID)
         changed = update_heartbeat(
             store,
-            "agent_favlo",
+            FAVLO_AGENT_ID,
             row["id"],
             cron_expression="0 9 * * *",
             instructions="Water the garden.",
@@ -1479,20 +1553,20 @@ def test_an_agent_changes_and_deletes_only_its_own_heartbeat(tmp_path: Path) -> 
         )
         assert "0 9 * * *" in changed
         assert "disabled" in changed
-        assert "Water the garden." in list_heartbeats(store, "agent_favlo")
+        assert "Water the garden." in list_heartbeats(store, FAVLO_AGENT_ID)
         assert "five fields" in update_heartbeat(
-            store, "agent_favlo", row["id"], cron_expression="nope"
+            store, FAVLO_AGENT_ID, row["id"], cron_expression="nope"
         )
         add_heartbeat(store, other["agent"]["id"], "0 * * * *", "Stay.", "UTC")
         foreign = next(
             item for item in store.heartbeats() if item["agent_id"] == other["agent"]["id"]
         )
         missing = "That heartbeat does not exist."
-        assert update_heartbeat(store, "agent_favlo", foreign["id"], instructions="No.") == missing
-        assert delete_heartbeat(store, "agent_favlo", foreign["id"]) == missing
-        removed = delete_heartbeat(store, "agent_favlo", row["id"])
+        assert update_heartbeat(store, FAVLO_AGENT_ID, foreign["id"], instructions="No.") == missing
+        assert delete_heartbeat(store, FAVLO_AGENT_ID, foreign["id"]) == missing
+        removed = delete_heartbeat(store, FAVLO_AGENT_ID, row["id"])
         assert removed == f"Heartbeat {row['id']} was deleted."
-        assert list_heartbeats(store, "agent_favlo") == "No heartbeats are stored."
+        assert list_heartbeats(store, FAVLO_AGENT_ID) == "No heartbeats are stored."
         assert "Stay." in list_heartbeats(store, other["agent"]["id"])
 
 
@@ -1501,7 +1575,7 @@ def test_deleting_an_agent_removes_its_downstream_rows(client: TestClient, tmp_p
         "/provider-models",
         headers={"Idempotency-Key": "delete-model"},
         json={
-            "provider_id": "provider_local",
+            "provider_id": LOCAL_PROVIDER_ID,
             "model_id": "example-model",
             "display_name": "Example",
         },
@@ -1603,7 +1677,7 @@ def test_deleting_an_agent_removes_its_downstream_rows(client: TestClient, tmp_p
     assert removed.json()["name"] == "Reed"
     again = client.delete(f"/agents/{agent_id}")
     assert again.status_code == 404
-    refused = client.delete("/agents/agent_favlo")
+    refused = client.delete("/agents/" + FAVLO_AGENT_ID)
     assert refused.status_code == 400
     assert refused.json()["message"] == "Favlo stays."
     missing = client.delete("/agents/agent_missing")

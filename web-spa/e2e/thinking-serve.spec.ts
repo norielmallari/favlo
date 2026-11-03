@@ -3,6 +3,7 @@ import { expect, test } from '@playwright/test';
 import { deleteAgentsNamed } from './cleanup';
 import { onScreen } from './on-screen';
 import { createAgent, openAgentChat } from './open-agent-chat';
+import { LOCAL_PROVIDER_ID } from '../src/api/seed-ids';
 
 const MODEL = 'qwen36-35b-a3b:thinking';
 
@@ -15,7 +16,7 @@ test.afterAll(async () => {
 });
 
 test('an agent chats with the 35B thinking model through favlo serve', async ({ page }) => {
-  const refreshed = await fetch('http://127.0.0.1:8130/providers/provider_local/refresh', { method: 'POST' });
+  const refreshed = await fetch('http://127.0.0.1:8130/providers/' + LOCAL_PROVIDER_ID + '/refresh', { method: 'POST' });
   expect(refreshed.ok).toBe(true);
   const listed = (await refreshed.json()) as { models?: { model_id?: string; enabled?: boolean }[] };
   const enabled = (listed.models ?? []).some((row) => row.model_id === MODEL && row.enabled !== false);

@@ -4,6 +4,7 @@ import { Dimensions, StyleSheet } from 'react-native';
 import { ChatScreen } from '@/components/ChatScreen';
 import { EmptyState } from '@/components/EmptyState';
 import { ThemeProvider } from '@/theme/Theme';
+import { FAVLO_AGENT_ID, FAVLO_CHANNEL_ID } from '@/api/seed-ids';
 
 jest.mock('expo-router', () => ({
   useRouter: () => ({ push: jest.fn() }),
@@ -89,13 +90,13 @@ function mockChat(runs: { id: string; status: string; error: string | null }[] =
     const path = String(input).replace('http://127.0.0.1:8130', '');
     if (path === '/channels') {
       return json({
-        channels: [{ id: 'channel_favlo', name: 'Favlo', agent_id: 'agent_favlo', session_id: 'session_favlo' }],
+        channels: [{ id: FAVLO_CHANNEL_ID, name: 'Favlo', agent_id: FAVLO_AGENT_ID, session_id: '11111111-1111-4111-8111-111111111111' }],
       });
     }
     if (path === '/settings') {
       return json({ default_model_id: 'model_local', exchange_budget: 10, revision: 1 });
     }
-    if (path === '/sessions/session_favlo') {
+    if (path === '/sessions/11111111-1111-4111-8111-111111111111') {
       return json({ messages: [], runs, cursor: 0 });
     }
     if (path.startsWith('/workspaces')) {

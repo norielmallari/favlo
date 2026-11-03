@@ -12,6 +12,33 @@ Write that script before treating the feature as finished. Then run it. The feat
 
 A change a person cannot start, and that leaves the screen the same, adds neither check below.
 
+## Borders and splitters
+
+Painted border width is not the hit target. Keep seams quiet; make interaction targets comfortable.
+
+| Role | Visible width | Hit target | Paint |
+|---|---|---|---|
+| Passive panel / column seam | `1` | n/a | `palette.border` or `palette.borderStrong` |
+| Resizable splitter (wide web) | `1` at rest; `2` on hover, focus, or drag | at least `space[3]` (12) centered on the seam | hairline + optional centered grip pill; track stays transparent until hot, then `palette.accentSubtle` |
+| Control / input outline | `1` | the control | `palette.border` or `palette.borderStrong`; focus uses `palette.focusRing` (see `Pressable`) |
+
+Do not fill the whole grab strip as a solid border bar. A fat painted divider (for example an 8px `backgroundColor` track with no hairline) reads as chrome, not as a seam.
+
+For a resizable edge:
+
+- Hairline uses `palette.borderStrong` at rest and `palette.accent` when hot.
+- A short grip pill on the seam (about 4×28, `radius.pill`) marks that the edge moves; omit it only when the boundary is not meant to invite drag.
+- Cursor is `col-resize` or `row-resize`. Keyboard arrows (and Home/End when useful) change the size. Double-click may restore the default size.
+- Gallery wide chat uses `web-spa/src/workspace/GalleryChatResizeHandle.tsx` as the reference.
+
+Token colors only. Pair with [web-spa.mdc](web-spa.mdc) for surfaces and contrast.
+
+## Curated gallery and workspace shell
+
+The gallery workspace is generative UI on a shared shell (closed catalog, agent placement, AG-UI state). The single as-built note is in the closed tree: [favlo-cloud/docs/maf/curated-gallery.md](../../../favlo-cloud/docs/maf/curated-gallery.md). When a change touches that surface, update that note in the same change. Keep short pointers only in [web-spa/README.md](../../web-spa/README.md), [web-api/README.md](../../web-api/README.md), and [docs/ai-assistance/README.md](../../docs/ai-assistance/README.md).
+
+Catalog names and versions in `web_api/catalog.py` and `web-spa/src/workspace/catalog.ts` stay paired. A new element updates both registries, the guide when it may place it, the as-built note, and the happy-path script for that action.
+
 ## Unit tests
 
 Use Jest with the `jest-expo` preset and `@testing-library/react-native`. Router tests use `expo-router/testing-library` and live outside `app/`. These tests do not start `favlo serve` or a browser.
@@ -24,15 +51,20 @@ cd web-spa && npx jest <test>
 
 Playwright simulates the person in headless Chromium. The script is deterministic: one fixed sequence of clicks, typing, and keys. It does not branch on model wording, timings, or the text of a reply. `favlo web` is running, and it calls a live `favlo serve`. Do not stub the model or a media tool.
 
+Never use the Cursor IDE browser, Computer Use, or any interactive browser MCP to test or drive the Favlo web app. Those tools are not deterministic, can open native dialogs, and are not the project’s evidence. Always use the headless Playwright scripts under `web-spa/e2e/` (and Jest for unit tests). Stub only what the script already stubs (for example `**/folders/pick`); do not drive the macOS folder dialog by hand.
+
 ```bash
 cd web-spa && npx playwright test e2e/<feature>.spec.ts --project=chromium
 ```
+
+The list reporter prints each test and each `step(...)` as it starts. Prefer `step` from `e2e/progress.ts` for long agent waits. Do not pipe the run through `tail`; that hides live progress.
 
 The script is `web-spa/e2e/<feature>.spec.ts`. A fresh install uses `e2e/web-new-user-e2e-setup/`. `web-spa/playwright.config.ts` sets `screenshot` to `on`.
 
 | Feature | Script |
 |---|---|
 | Chat, configuration, heartbeats | `e2e/chat.spec.ts` |
+| Gallery vision model (Orchestration) | `e2e/gallery-vision-settings.spec.ts` |
 | Short transcript on the composer | `e2e/chat-align.spec.ts` |
 | New agent | `e2e/agent-create.spec.ts` |
 | Delete agent | `e2e/agent-delete.spec.ts` |
@@ -46,10 +78,14 @@ The script is `web-spa/e2e/<feature>.spec.ts`. A fresh install uses `e2e/web-new
 | Stored media | `e2e/media.spec.ts` |
 | MCP server | `e2e/mcp.spec.ts` |
 | Global skill copied onto an agent | `e2e/agent-skills.spec.ts` |
-| Gallery folder | `e2e/gallery.spec.ts` |
+| Gallery guide | `e2e/gallery.spec.ts` |
+| Gallery folder bind | `e2e/gallery-bind.spec.ts` |
+| Gallery chat width resize | `e2e/gallery-chat-resize.spec.ts` |
+| Gallery placement change | `e2e/workspace-placement.spec.ts` |
 | Gallery image embedded once | `e2e/gallery-image.spec.ts` |
 | Session clear and archive | `e2e/session.spec.ts` |
 | Workspace skill | `e2e/workspace-skills.spec.ts` |
+| Workspace type and delete | `e2e/workspace-type-delete.spec.ts` |
 | Fresh install and first chat | `e2e/web-new-user-e2e-setup/setup.spec.ts` |
 | Failed reply sent again | `e2e/reply-error.spec.ts` |
 

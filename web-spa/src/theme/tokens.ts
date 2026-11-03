@@ -45,7 +45,7 @@ export const light: Palette = {
   danger: '#B91C1C',
   dangerSubtle: '#FDECEC',
   onDanger: '#FFFFFF',
-  disabledText: '#7A879B',
+  disabledText: '#5A6578',
   disabledSurface: '#E6EBF2',
   overlay: 'rgba(15, 23, 42, 0.48)',
 };
@@ -71,7 +71,7 @@ export const dark: Palette = {
   danger: '#F87171',
   dangerSubtle: '#3A1818',
   onDanger: '#0F172A',
-  disabledText: '#7A869A',
+  disabledText: '#8B97AB',
   disabledSurface: '#232A38',
   overlay: 'rgba(0, 0, 0, 0.64)',
 };

@@ -26,6 +26,8 @@ The files in [`.cursor/rules`](.cursor/rules) are repo rules. Cursor loads them 
 | [language-pipeline.mdc](.cursor/rules/language-pipeline.mdc) | When editing a served language model or `LanguagePipeline`. Keep the completion in the pipeline, and run the language harness after the disconnect shell changes. |
 | [embeddings-pipeline.mdc](.cursor/rules/embeddings-pipeline.mdc) | When editing a served embedding model or `EmbeddingsPipeline`. Return the vector and the token count, and let the class write the list object. |
 | [web-app.mdc](.cursor/rules/web-app.mdc) | When editing `web-spa/` or `web-api/`, and when a web feature is finished. The same change adds a deterministic Playwright happy path that performs each new action a person can start. An existing script counts only when it performs that action. The feature is finished when that script passes against a live `favlo serve`, with the completing control already inside the viewport. |
+| [web-spa.mdc](.cursor/rules/web-spa.mdc) | When editing `web-spa/`. Palette tokens, `textStyle` colors, and `IconButton` tones (`accent` / `danger` / `surface` / `ghost`). No hardcoded control colors. |
+| [playwright-e2e.mdc](.cursor/rules/playwright-e2e.mdc) | When editing `web-spa/e2e/`. Natural-language prompts, teardown of agents and workspaces, Home/expand races, AG-UI durability before Stop, WCAG AA, fail-fast suite runs. |
 
 ## Changes
 
@@ -42,6 +44,10 @@ Edit one runtime. Leave every other runtime's files untouched. The write set and
 Adding a model adds an entry file under `pipelines/metal41/`, a package beside it, a `docs/<pipeline>/` note, and one row in the runtime table. Load [bootstrap-new-model](.cursor/skills/bootstrap-new-model/SKILL.md) before creating one. Load [prefix-caching](.cursor/skills/prefix-caching/SKILL.md) before wiring a pipeline to the shared prefix store.
 
 The listener runs one request. A language-model pipeline does not fuse a whole layer. An image, video, music, or voice pipeline may place several kernels of one generation in one command buffer and may fuse those kernels. The Neural Engine may run a module. A missing Metal kernel stays missing. It is not replaced by a host GEMV, a CPU matmul, or any other stand-in forward.
+
+## Open items
+
+When listing decisions still open for the operator, number each item uniquely in that reply (`1.`, `2.`, …). Do not reuse a number for a different item in the same list. For every numbered item, list the **options** first, then mark which of those options is the **recommendation**. An item with a single viable path still lists that path as the only option and marks it as recommended.
 
 ## Memory
 

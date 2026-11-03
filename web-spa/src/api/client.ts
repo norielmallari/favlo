@@ -27,3 +27,7 @@ export function idempotencyKey(): string {
 export function socketUrl(): string {
   return `${API_URL.replace(/^http/, 'ws')}/events`;
 }
+
+export function agUiUrl(): string {
+  return `${API_URL}/ag-ui`;
+}

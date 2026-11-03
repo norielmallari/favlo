@@ -1,5 +1,6 @@
 const API = 'http://127.0.0.1:8130';
-const FAVLO = 'agent_favlo';
+import { FAVLO_AGENT_ID } from '../src/api/seed-ids';
+const FAVLO = FAVLO_AGENT_ID;
 
 type Agent = { id: string; name: string };
 type Channel = { id: string };

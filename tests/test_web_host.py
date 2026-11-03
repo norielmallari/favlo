@@ -18,8 +18,23 @@ def test_web_does_not_start_without_a_registered_model(monkeypatch, capsys) -> N
     assert capsys.readouterr().err == "favlo web did not start. No model is registered.\n"
 
 
-def test_web_prefers_the_first_pipeline_when_registered(monkeypatch) -> None:
+def test_web_prefers_the_35b_when_registered(monkeypatch) -> None:
     monkeypatch.setattr("favlo.registry.resolve", lambda model, root=None: object())
+    monkeypatch.setattr(
+        "favlo.registry.default_llm_id",
+        lambda root=None: (_ for _ in ()).throw(AssertionError("default should not run")),
+    )
+    assert _registered_model() == "qwen36-35b-a3b:thinking"
+
+
+def test_web_falls_back_to_the_4b_when_35b_is_missing(monkeypatch) -> None:
+    def resolve(model: str, root=None):
+        del root
+        if model.startswith("qwen36-35b-a3b"):
+            raise LookupError("missing")
+        return object()
+
+    monkeypatch.setattr("favlo.registry.resolve", resolve)
     monkeypatch.setattr(
         "favlo.registry.default_llm_id",
         lambda root=None: (_ for _ in ()).throw(AssertionError("default should not run")),

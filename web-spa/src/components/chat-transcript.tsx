@@ -3,6 +3,7 @@ import { Platform, Text, View } from 'react-native';
 
 import { humanText, MessageBody } from '@/components/MessageBody';
 import { IconButton } from '@/components/IconButton';
+import { type ExpandTrace } from '@/components/expandTrace';
 import { Thinking } from '@/components/Thinking';
 import { ToolCall, type ToolCallRecord } from '@/components/ToolCall';
 import { useTheme } from '@/theme/Theme';
@@ -168,36 +169,60 @@ export function LiveReply({
   steps,
   speaker,
   measured = false,
+  expandTrace = 'collapsed',
+  forceOpen = false,
 }: {
   steps: ReplyStep[];
   speaker?: string;
   measured?: boolean;
+  expandTrace?: ExpandTrace;
+  forceOpen?: boolean;
 }) {
-  return steps.map((step, index) => {
-    if (step.kind === 'thinking') {
-      const text = step.text.trim();
-      if (!text) {
-        return null;
-      }
-      return <Thinking key={`thinking-${index}`} text={text} settled={step.settled} />;
-    }
-    if (step.kind === 'tool') {
-      return <ToolCall key={step.call.id} call={step.call} settled={step.settled} />;
-    }
-    const text = step.text.trim();
-    if (!text) {
-      return null;
-    }
-    return (
-      <View
-        key={`reply-${index}`}
-        accessibilityLabel={speaker ? `${speaker} said: ${humanText(step.text)}` : undefined}
-        style={measured ? measureStyle : undefined}
-      >
-        <MessageBody body={step.text} />
-      </View>
-    );
-  });
+  return (
+    <View style={{ width: '100%', maxWidth: '100%', minWidth: 0, alignSelf: 'stretch', gap: space[2] }}>
+      {steps.map((step, index) => {
+        if (step.kind === 'thinking') {
+          const text = step.text.trim();
+          if (!text) {
+            return null;
+          }
+          return (
+            <Thinking
+              key={`thinking-${index}`}
+              text={text}
+              settled={step.settled}
+              expandTrace={expandTrace}
+              forceOpen={forceOpen}
+            />
+          );
+        }
+        if (step.kind === 'tool') {
+          return (
+            <ToolCall
+              key={step.call.id}
+              call={step.call}
+              settled={step.settled}
+              expandTrace={expandTrace}
+              forceOpen={forceOpen}
+            />
+          );
+        }
+        const text = step.text.trim();
+        if (!text) {
+          return null;
+        }
+        return (
+          <View
+            key={`reply-${index}`}
+            accessibilityLabel={speaker ? `${speaker} said: ${humanText(step.text)}` : undefined}
+            style={[{ width: '100%', maxWidth: '100%', alignSelf: 'stretch' }, measured ? measureStyle : null]}
+          >
+            <MessageBody body={step.text} />
+          </View>
+        );
+      })}
+    </View>
+  );
 }
 
 export function showsMessage(text?: string, reasoning?: string | null, tools?: unknown): boolean {
@@ -223,13 +248,24 @@ export type SentMessage = {
   text?: string;
   run_id?: string;
   cleared?: boolean;
+  session_id?: string;
+  previous_session_id?: string;
 };
 
 export function clearedTranscript(
-  event: { type: string; stream_id?: string },
+  event: {
+    type: string;
+    stream_id?: string;
+    payload?: { session_id?: string; previous_session_id?: string };
+  },
   sessionId: string | undefined,
 ): boolean {
-  return sessionId != null && event.type === 'session.cleared' && event.stream_id === `session:${sessionId}`;
+  if (sessionId == null || event.type !== 'session.cleared') {
+    return false;
+  }
+  // Clear only when this view is still on the replaced session. The birth
+  // event on the new stream must not wipe messages loaded after that clear.
+  return event.payload?.previous_session_id === sessionId;
 }
 
 export function keepLatest(following: boolean, placed: boolean, fromBottom: number): boolean {
@@ -359,6 +395,7 @@ export function TranscriptTurn({
   reasoning,
   toolCalls,
   trace,
+  expandTrace = 'collapsed',
 }: {
   name: string;
   role: string;
@@ -366,6 +403,7 @@ export function TranscriptTurn({
   reasoning?: string;
   toolCalls?: ToolCallRecord[];
   trace?: StoredPart[];
+  expandTrace?: ExpandTrace;
 }) {
   const { palette } = useTheme();
   const [empty, setEmpty] = useState(false);
@@ -380,12 +418,18 @@ export function TranscriptTurn({
   return (
     <View
       accessibilityLabel={`${name} said: ${humanText(body)}`}
-      style={{ alignItems: mine ? 'flex-end' : 'flex-start', maxWidth: '100%' }}
+      style={{
+        alignItems: mine ? 'flex-end' : 'stretch',
+        width: '100%',
+        maxWidth: '100%',
+      }}
     >
       <View
         style={{
+          width: mine ? undefined : '100%',
           maxWidth: mine ? '85%' : '100%',
-          gap: space[1],
+          alignSelf: mine ? undefined : 'stretch',
+          gap: space[2],
           padding: mine ? space[3] : 0,
           borderRadius: radius.card,
           backgroundColor: mine ? palette.accentSubtle : 'transparent',
@@ -394,10 +438,19 @@ export function TranscriptTurn({
         <Text style={textStyle('label', palette.textPrimary, '600')}>{name}</Text>
         {steps.map((step, index) => {
           if (step.kind === 'thinking') {
-            return <Thinking key={`thinking-${index}`} text={step.text.trim()} settled />;
+            return (
+              <Thinking
+                key={`thinking-${index}`}
+                text={step.text.trim()}
+                settled
+                expandTrace={expandTrace}
+              />
+            );
           }
           if (step.kind === 'tool') {
-            return <ToolCall key={step.call.id} call={step.call} settled />;
+            return (
+              <ToolCall key={step.call.id} call={step.call} settled expandTrace={expandTrace} />
+            );
           }
           return <MessageBody key={`reply-${index}`} body={step.text} onEmpty={replyOnly ? reportEmpty : undefined} />;
         })}

@@ -5,22 +5,26 @@ description: Arranges this gallery and saves generated images into it. Use when 
 
 This session is the gallery. Paths are relative to its local folder. Do not use a host path, another workspace id, a folder row, or a cloud folder.
 
-The turn names the open folder and, when an image is selected, that image. This folder means the open folder. This image means the selected image. A generated image is saved into the open folder unless the message names a different folder.
+The turn names the selected media when one is selected. This image means that path. A generated image is saved beside the selected media, or at the folder root when none is selected.
 
-After `generate_image` finishes, call `gallery_write_image` with the `favlo://` URI as source and a path inside the open folder. Do not leave the image only as a chat link.
+After `generate_image` finishes, call `gallery_write_image` with the `favlo://` URI as source and a path inside the local folder. Do not leave the image only as a chat link.
 
-Use `gallery_list_folder` to list the open folder. Pass another relative path only when the message names one.
+When asked to fill the filmstrip: call `gallery_find_media` once, then `workspace_place` once in the same turn. Do not call find twice. Use `gallery_search_media` only when the request is about meaning. Keep `preview` on slot `stage` with props `{"fit":"contain"}` unless the user asks to remove it. Put `filmstrip` on slot `rail` with props `{"title":"","items":[{"path":"..."}]}` using only paths from find or search. When the filmstrip has items, always pass `selection` as `{"kind":"file","path":"..."}` for one of those paths so the preview shows it. Do not describe the layout in prose.
 
-Use `gallery_delete_image` when the message asks to delete this image. The path is the selected image.
+Before `gallery_search_unlike_media` or any folder mutate tool, call `gallery_load_folder_tools` once.
 
-Use `gallery_move_image` to move an image. This image is the selected image. The destination is the folder the message names, or the parent when the message says to move it up.
+Use `gallery_search_unlike_media` when the request wants media that does not match the meaning.
 
-Use `gallery_create_folder` to create a directory inside the open folder.
+Use `gallery_delete_image` when the message asks to delete this image. The path is the selected media.
 
-Use `gallery_rename_folder` to rename a directory. This folder is the open folder.
+Use `gallery_move_image` to move an image. This image is the selected media. The destination is the folder the message names, or the parent when the message says to move it up.
+
+Use `gallery_create_folder` to create a directory inside the local folder.
+
+Use `gallery_rename_folder` to rename a directory.
 
 Use `gallery_move_folder` to move a directory inside the local folder.
 
-Use `gallery_delete_folder` to delete a directory. This folder is the open folder. Delete it only when it is empty. The local folder itself cannot be deleted.
+Use `gallery_delete_folder` to delete a directory. Delete it only when it is empty. The local folder itself cannot be deleted.
 
 These tools cannot add or delete a folder row, and they cannot use a cloud folder.

@@ -42,6 +42,9 @@ test('qwen35 reasoning effort none hides thinking and medium shows it', async ({
     await sendPrompt(page, PROMPT);
     const thinking = page.getByRole('button', { name: 'Thinking' });
     await expect(thinking).toBeVisible({ timeout: 180_000 });
+    await expect(thinking).toHaveAttribute('aria-expanded', 'false');
+    await onScreen(thinking);
+    await thinking.click();
     await expect(thinking).toHaveAttribute('aria-expanded', 'true');
     await expect(page.getByTestId('thinking-text')).toBeVisible();
     await expect(page.getByTestId('thinking-text')).not.toHaveText('');

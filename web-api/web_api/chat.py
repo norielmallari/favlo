@@ -235,6 +235,9 @@ def turn_setup(
             if GALLERY_INSTRUCTIONS not in instructions:
                 instructions = f"{instructions}\n\n{GALLERY_INSTRUCTIONS}"
             tool_list.extend(gallery_tools(store, workspace_id, bus))
+            from web_api.workspace_tools import tools as workspace_place_tools
+
+            tool_list.extend(workspace_place_tools(store, workspace_id, guide_id="gallery"))
     return instructions, tool_list
 
 
@@ -329,6 +332,29 @@ def _open_session(agent: Any, store: Any | None, session_id: str | None) -> Any:
     return agent.create_session()
 
 
+def _mcp_for_definition(
+    definition: dict[str, Any], opened: list[object]
+) -> list[object]:
+    """Keep MCP tools whose server id was frozen with the chat."""
+    rows = definition.get("mcp") or []
+    if not isinstance(rows, list) or not rows:
+        return []
+    allowed = {
+        str(row.get("server_id") or "")
+        for row in rows
+        if isinstance(row, dict) and row.get("server_id")
+    }
+    if not allowed:
+        return []
+    kept: list[object] = []
+    for tool in opened:
+        turn = getattr(tool, "turn", None)
+        server_id = getattr(turn, "server_id", None) if turn is not None else None
+        if server_id and str(server_id) in allowed:
+            kept.append(tool)
+    return kept
+
+
 async def stream_reply(
     *,
     base_url: str,
@@ -351,51 +377,104 @@ async def stream_reply(
 ) -> AsyncIterator[ReplyPiece]:
     from agent_framework import Agent, InMemoryHistoryProvider
 
-    client = open_chat_client(model, base_url)
     mcp_text = ""
     mcp_tools: list[object] = []
     if store is not None and agent_id and session_id and bus is not None and pending is not None:
         from web_api.mcp_tools import bundle
 
         mcp_text, mcp_tools = await bundle(store, agent_id, session_id, bus, pending)
-    instructions, tool_list = turn_setup(
-        persona,
-        agent_name,
-        tool_groups or [],
-        base_url,
-        store,
-        agent_id,
-        session_id,
-        bus,
-        pending,
-        mcp_text=mcp_text,
-        mcp_tools=mcp_tools,
-    )
-    if tool_list:
-        client.function_invocation_configuration["max_iterations"] = 6
-    options = sampling_options(enable_thinking, preserve_thinking, reasoning_effort) or {}
-    options["store"] = False
-    built: dict[str, Any] = {
-        "client": client,
-        "name": agent_name,
-        "instructions": instructions,
-        "tools": tool_list,
-        "default_options": options,
-        "require_per_service_call_history_persistence": True,
-        "context_providers": [
-            InMemoryHistoryProvider(skip_excluded=True),
-            prompt_window(),
-        ],
-    }
-    agent = Agent(**built)
+    frozen = store.definition(session_id) if store is not None and session_id else None
+    if frozen is None:
+        instructions, tool_list = turn_setup(
+            persona,
+            agent_name,
+            tool_groups or [],
+            base_url,
+            store,
+            agent_id,
+            session_id,
+            bus,
+            pending,
+            mcp_text=mcp_text,
+            mcp_tools=mcp_tools,
+        )
+        options = sampling_options(enable_thinking, preserve_thinking, reasoning_effort) or {}
+        options = {**options, "store": False}
+        if store is not None and session_id and agent_id:
+            from web_api.definition import build as build_definition
+            from web_api.definition import hash_of
+
+            agent_row = {
+                "id": agent_id,
+                "name": agent_name,
+                "persona": persona,
+                "tool_groups": tool_groups or [],
+                "enable_thinking": enable_thinking,
+                "preserve_thinking": preserve_thinking,
+                "reasoning_effort": reasoning_effort,
+                "default_model_id": None,
+            }
+            payload = build_definition(
+                store=store,
+                agent=agent_row,
+                session_id=session_id,
+                base_url=base_url,
+                model=model,
+                mcp_text=mcp_text,
+                mcp_tools=mcp_tools,
+                bus=bus,
+                pending=pending,
+            )
+            payload["instructions"] = instructions
+            payload["options"] = options
+            payload["hash"] = hash_of(payload)
+            store.freeze_definition(session_id, payload)
+            frozen = payload
+        client = open_chat_client(model, base_url)
+        if tool_list:
+            client.function_invocation_configuration["max_iterations"] = int(
+                (frozen or {}).get("max_iterations") or 6
+            )
+        providers: list[Any] = [InMemoryHistoryProvider(skip_excluded=True)]
+        if store is not None and session_id:
+            from web_api.compaction import percent_window
+
+            providers.append(percent_window(store.compaction_percent(session_id)))
+        else:
+            providers.append(prompt_window())
+        agent = Agent(
+            client=client,
+            name=agent_name,
+            instructions=instructions,
+            tools=tool_list,
+            default_options=options,
+            require_per_service_call_history_persistence=True,
+            context_providers=providers,
+        )
+    else:
+        from web_api.agent_factory import from_definition
+
+        if store is None or not session_id:
+            raise RuntimeError("A frozen definition needs a store session.")
+        mcp_tools = _mcp_for_definition(frozen, mcp_tools)
+        agent = from_definition(
+            definition=frozen,
+            store=store,
+            session_id=session_id,
+            bus=bus,
+            mcp_tools=mcp_tools,
+        )
+        client = agent.client
     session = _open_session(agent, store, session_id)
     prompt = user_turn(user_text, gallery_note, unsent_images(user_images, session))
     clients = contextlib.AsyncExitStack()
     await clients.__aenter__()
     try:
-        from web_api.mcp_tools import open_clients
+        from web_api.mcp_tools import open_clients, restore_loaded
 
         await open_clients(mcp_tools, clients)
+        if store is not None and session_id:
+            await restore_loaded(mcp_tools, store, session_id)
         stream = agent.run(prompt, session=session, stream=True)
     except Exception:
         await clients.aclose()
@@ -467,6 +546,11 @@ async def stream_reply(
                 await abort
         if keep and store is not None and session_id and hasattr(session, "to_dict"):
             store.save_maf_session(session_id, session.to_dict())
+        if keep and store is not None and session_id and mcp_tools:
+            with contextlib.suppress(Exception):
+                from web_api.mcp_tools import persist_loaded
+
+                persist_loaded(mcp_tools, store, session_id)
         with contextlib.suppress(Exception):
             closer = getattr(agent, "close", None)
             if closer is not None:

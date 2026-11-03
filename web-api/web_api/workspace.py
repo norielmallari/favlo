@@ -7,7 +7,10 @@ from typing import Any
 INSTRUCTIONS = {
     "gallery": (
         "You are operating in a gallery workspace. "
-        "This conversation is that workspace, not the home channel."
+        "This conversation is that gallery's workspace session, not the home channel. "
+        "The user sees this gallery's shell (preview and filmstrip) beside the chat. "
+        "Stay in this gallery: use its local folder and gallery tools, "
+        "place the filmstrip with workspace_place, and do not treat the turn as a home-channel chat."
     ),
     "coding": (
         "You are operating in a coding workspace. "

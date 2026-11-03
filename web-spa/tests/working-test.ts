@@ -1,17 +1,18 @@
-import { workingShimmer } from '@/components/working';
+import { workingActivity } from '@/components/working';
 import { dark, light } from '@/theme/tokens';
 
-test('working text sweeps a light band and stays still when motion is reduced', () => {
-  const day = workingShimmer(light.textSecondary);
-  expect(day).toContain('@keyframes favlo-working-shimmer');
-  expect(day).toContain('animation: favlo-working-shimmer 2s linear infinite');
-  expect(day).toContain(light.textSecondary);
-  expect(day).toContain('color-mix(in srgb,');
+test('working activity pulses the dot with ease-in-out and stays still when motion is reduced', () => {
+  const day = workingActivity(light.accent);
+  expect(day).toContain('@keyframes favlo-working-pulse');
+  expect(day).toContain('animation: favlo-working-pulse 2.4s ease-in-out infinite');
+  expect(day).toContain('[data-testid="working-dot"]');
+  expect(day).toContain(light.accent);
   expect(day).toContain('prefers-reduced-motion: reduce');
   expect(day).toContain('animation: none');
-  expect(day).not.toContain(dark.textSecondary);
+  expect(day).not.toContain('background-clip');
+  expect(day).not.toContain(dark.accent);
 
-  const night = workingShimmer(dark.textSecondary);
-  expect(night).toContain(dark.textSecondary);
-  expect(night).not.toContain(light.textSecondary);
+  const night = workingActivity(dark.accent);
+  expect(night).toContain(dark.accent);
+  expect(night).not.toContain(light.accent);
 });

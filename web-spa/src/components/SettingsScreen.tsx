@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { Platform, ScrollView, Switch, Text, TextInput, useWindowDimensions, View } from 'react-native';
 
 import { api, idempotencyKey } from '@/api/client';
+import { FAVLO_AGENT_ID, LOCAL_PROVIDER_ID } from '@/api/seed-ids';
 import { Confirmation } from '@/components/Confirmation';
 import { FeatherIcon } from '@/components/FeatherIcon';
 import { Frame } from '@/components/Frame';
@@ -12,7 +13,7 @@ import { buttonRow, IconButton } from '@/components/IconButton';
 import { focusRingInset, Pressable } from '@/components/Pressable';
 import { SkillForm, type SkillFields } from '@/components/SkillForm';
 import { useTheme } from '@/theme/Theme';
-import { radius } from '@/theme/tokens';
+import { radius, type as typeScale } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
 
 export type Model = {
@@ -26,6 +27,7 @@ export type Model = {
 export type Provider = { id: string; name: string; base_url: string; models: Model[] };
 export type Settings = {
   default_model_id: string | null;
+  gallery_vision_model_id: string | null;
   exchange_budget: number;
   revision: number;
 };
@@ -37,6 +39,7 @@ export type Agent = {
   enable_thinking?: boolean | null;
   preserve_thinking?: boolean | null;
   reasoning_effort?: string | null;
+  expand_trace?: string | null;
   revision: number;
   tool_groups: string[];
 };
@@ -118,6 +121,7 @@ export function SettingsScreen() {
   const [saved, setSaved] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [modelFocused, setModelFocused] = useState(false);
+  const [visionFocused, setVisionFocused] = useState(false);
   const [drawer, setDrawer] = useState<'sections' | null>(null);
   const [showDetail, setShowDetail] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -176,7 +180,7 @@ export function SettingsScreen() {
       if (current != null && providerRows.some((row) => row.id === current)) {
         return current;
       }
-      return providerRows.find((row) => row.id === 'provider_local')?.id ?? providerRows[0]?.id ?? null;
+      return providerRows.find((row) => row.id === LOCAL_PROVIDER_ID)?.id ?? providerRows[0]?.id ?? null;
     });
     setAgents(agentRows);
     setGroups(listedGroups.groups);
@@ -209,7 +213,7 @@ export function SettingsScreen() {
       if (current != null && agentRows.some((row) => row.id === current)) {
         return current;
       }
-      return agentRows.find((row) => row.id === 'agent_favlo')?.id ?? agentRows[0]?.id ?? null;
+      return agentRows.find((row) => row.id === FAVLO_AGENT_ID)?.id ?? agentRows[0]?.id ?? null;
     });
     setSettings(nextSettings);
     setBudget(String(nextSettings.exchange_budget));
@@ -242,9 +246,13 @@ export function SettingsScreen() {
   }, []);
 
   const provider = providers.find((item) => item.id === providerId) ?? null;
+  const localProvider = providers.find((item) => item.id === LOCAL_PROVIDER_ID) ?? null;
   const agent = agents.find((item) => item.id === agentId) ?? null;
   const hosted = (provider?.models ?? []).filter((model) => model.enabled);
+  const visionModels = (localProvider?.models ?? []).filter((model) => model.enabled);
   const selectedModel = hosted.find((model) => model.id === settings?.default_model_id)?.model_id ?? '';
+  const visionRowId = settings?.gallery_vision_model_id ?? settings?.default_model_id ?? null;
+  const selectedVisionModel = visionModels.find((model) => model.id === visionRowId)?.model_id ?? '';
   const current = SECTIONS.find((item) => item.id === section) ?? SECTIONS[0];
   const catalog = current.catalog;
   const showSections = wide || drawer === 'sections';
@@ -425,6 +433,46 @@ export function SettingsScreen() {
     }
   }
 
+  async function patchSettings(body: {
+    default_model_id: string | null;
+    gallery_vision_model_id: string | null;
+    exchange_budget: number;
+  }) {
+    if (settings == null) {
+      return null;
+    }
+    const next = await api<Settings>('/settings', {
+      method: 'PATCH',
+      body: JSON.stringify({
+        expected_revision: settings.revision,
+        ...body,
+      }),
+    });
+    setSettings(next);
+    return next;
+  }
+
+  async function chooseGalleryVision(modelId: string) {
+    if (settings == null || modelId === '' || modelId === selectedVisionModel) {
+      return;
+    }
+    const row = visionModels.find((model) => model.model_id === modelId);
+    if (row == null) {
+      return;
+    }
+    try {
+      await patchSettings({
+        default_model_id: settings.default_model_id,
+        gallery_vision_model_id: row.id,
+        exchange_budget: settings.exchange_budget,
+      });
+      setSaved('Gallery vision model saved.');
+      setError(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Gallery vision model was not saved.');
+    }
+  }
+
   async function saveBudget() {
     if (settings == null) {
       return;
@@ -435,15 +483,11 @@ export function SettingsScreen() {
       return;
     }
     try {
-      const next = await api<Settings>('/settings', {
-        method: 'PATCH',
-        body: JSON.stringify({
-          expected_revision: settings.revision,
-          default_model_id: settings.default_model_id,
-          exchange_budget: value,
-        }),
+      await patchSettings({
+        default_model_id: settings.default_model_id,
+        gallery_vision_model_id: settings.gallery_vision_model_id,
+        exchange_budget: value,
       });
-      setSettings(next);
       setSaved('Maximum turns saved.');
       setError(null);
     } catch (caught) {
@@ -572,12 +616,12 @@ export function SettingsScreen() {
                 <View style={{ gap: 12 }}>
                   <Text accessibilityRole="header" aria-level={2} style={heading(palette.textPrimary)}>{provider.name}</Text>
                   <Text style={label(palette.textPrimary)}>Address</Text>
-                  <Text style={{ color: palette.textSecondary, fontSize: 14 }}>{provider.base_url}</Text>
+                  <Text style={textStyle('small', palette.textSecondary)}>{provider.base_url}</Text>
                   <View style={buttonRow}>
                     <IconButton icon="zap" label="Test connection" onPress={() => void testConnection()} background={palette.accent} color={palette.onAccent} />
                     <IconButton icon="refresh-cw" label="Refresh models" onPress={() => void refreshModels()} background={palette.surface} border={palette.borderStrong} color={palette.textPrimary} />
                   </View>
-                  {status ? <Text accessibilityLiveRegion="polite" style={{ color: palette.textPrimary, fontSize: 14 }}>{status}</Text> : null}
+                  {status ? <Text accessibilityLiveRegion="polite" style={textStyle('small', palette.textPrimary)}>{status}</Text> : null}
                   <Text style={label(palette.textPrimary)}>Default model</Text>
                   <Picker
                     accessibilityLabel="Default model"
@@ -601,7 +645,6 @@ export function SettingsScreen() {
                       agent={null}
                       groups={groups}
                       providers={providers}
-                      settings={settings}
                       onSuccess={setSaved}
                       onSaved={rememberAgent}
                       onModels={replaceModels}
@@ -612,14 +655,13 @@ export function SettingsScreen() {
                       agent={agent}
                       groups={groups}
                       providers={providers}
-                      settings={settings}
                       onSuccess={setSaved}
                       onSaved={rememberAgent}
                       onDeleted={forgetAgent}
                       onModels={replaceModels}
                     />
                   ) : (
-                    <Text style={{ color: palette.textPrimary, fontSize: 16 }}>Choose an agent.</Text>
+                    <Text style={textStyle('body', palette.textPrimary)}>Choose an agent.</Text>
                   )}
                   {!creating && agent != null ? (
                     <View accessibilityLabel="Agent skills" style={{ gap: 8 }}>
@@ -637,7 +679,7 @@ export function SettingsScreen() {
                         />
                       ))}
                       {skillsForAgent.length === 0 ? (
-                        <Text style={{ color: palette.textSecondary, fontSize: 14 }}>No skills</Text>
+                        <Text style={textStyle('small', palette.textSecondary)}>No skills</Text>
                       ) : null}
                       {creatingAgentSkill || agentSkill != null ? (
                         <SkillForm
@@ -659,9 +701,28 @@ export function SettingsScreen() {
                     <TextInput accessibilityLabel="Maximum turns" value={budget} onChangeText={setBudget} keyboardType="number-pad" style={field} />
                   </View>
                   <IconButton icon="check" label="Save maximum turns" onPress={() => void saveBudget()} background={palette.surface} border={palette.borderStrong} color={palette.textPrimary} />
+                  <View style={{ gap: 8 }}>
+                    <Text style={label(palette.textPrimary)}>Gallery vision model</Text>
+                    <Text style={textStyle('small', palette.textSecondary)}>
+                      Indexes gallery images. Prefer the same large model already loaded for chat.
+                    </Text>
+                    <Picker
+                      accessibilityLabel="Gallery vision model"
+                      selectedValue={selectedVisionModel}
+                      onValueChange={(value) => void chooseGalleryVision(String(value))}
+                      onFocus={() => setVisionFocused(true)}
+                      onBlur={() => setVisionFocused(false)}
+                      style={pickerStyle(palette, visionFocused)}
+                    >
+                      <Picker.Item label="Choose a model" value="" color={palette.textSecondary} />
+                      {visionModels.map((model) => (
+                        <Picker.Item key={model.id} label={model.display_name} value={model.model_id} color={palette.textPrimary} />
+                      ))}
+                    </Picker>
+                  </View>
                 </View>
               ) : null}
-              {error ? <Text accessibilityRole="alert" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text> : null}
+              {error ? <Text accessibilityRole="alert" style={textStyle('small', palette.danger)}>{error}</Text> : null}
             </ScrollView>
           ) : null}
           {heartbeatAgents ? (
@@ -709,7 +770,7 @@ export function SettingsScreen() {
                     }}
                   />
                 ))}
-                {agentHeartbeats.length === 0 ? <Text style={{ color: palette.textSecondary, fontSize: 14 }}>No heartbeats</Text> : null}
+                {agentHeartbeats.length === 0 ? <Text style={textStyle('small', palette.textSecondary)}>No heartbeats</Text> : null}
               </ScrollView>
             </View>
           ) : null}
@@ -719,7 +780,7 @@ export function SettingsScreen() {
                 <IconButton icon="arrow-left" label="Back" accessibilityLabel="Back to heartbeats" onPress={() => setHeartbeatPane('list')} background="transparent" border="transparent" color={palette.accent} />
               ) : null}
               {agent == null ? (
-                <Text style={{ color: palette.textPrimary, fontSize: 16 }}>Choose an agent.</Text>
+                <Text style={textStyle('body', palette.textPrimary)}>Choose an agent.</Text>
               ) : (
                 <View style={{ gap: 12 }}>
                   {creatingHeartbeat ? (
@@ -742,11 +803,11 @@ export function SettingsScreen() {
                       onSaved={() => void reload()}
                     />
                   ) : (
-                    <Text style={{ color: palette.textPrimary, fontSize: 16 }}>Choose a heartbeat.</Text>
+                    <Text style={textStyle('body', palette.textPrimary)}>Choose a heartbeat.</Text>
                   )}
                 </View>
               )}
-              {error ? <Text accessibilityRole="alert" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text> : null}
+              {error ? <Text accessibilityRole="alert" style={textStyle('small', palette.danger)}>{error}</Text> : null}
             </ScrollView>
           ) : null}
           {skillList ? (
@@ -767,7 +828,7 @@ export function SettingsScreen() {
                     }}
                   />
                 ))}
-                {globalSkills.length === 0 ? <Text style={{ color: palette.textSecondary, fontSize: 14 }}>No skills</Text> : null}
+                {globalSkills.length === 0 ? <Text style={textStyle('small', palette.textSecondary)}>No skills</Text> : null}
               </ScrollView>
             </View>
           ) : null}
@@ -786,7 +847,7 @@ export function SettingsScreen() {
                     onDelete={creatingGlobal ? undefined : deleteGlobalSkill}
                   />
                 ) : (
-                  <Text style={{ color: palette.textPrimary, fontSize: 16 }}>Choose a skill.</Text>
+                  <Text style={textStyle('body', palette.textPrimary)}>Choose a skill.</Text>
                 )}
                 {!creatingGlobal && globalSkill != null ? (
                   <GlobalCopy
@@ -801,7 +862,7 @@ export function SettingsScreen() {
                   />
                 ) : null}
               </View>
-              {error ? <Text accessibilityRole="alert" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text> : null}
+              {error ? <Text accessibilityRole="alert" style={textStyle('small', palette.danger)}>{error}</Text> : null}
             </ScrollView>
           ) : null}
           {mcpAgents ? (
@@ -849,7 +910,7 @@ export function SettingsScreen() {
                     }}
                   />
                 ))}
-                {agentServers.length === 0 ? <Text style={{ color: palette.textSecondary, fontSize: 14 }}>No MCP servers</Text> : null}
+                {agentServers.length === 0 ? <Text style={textStyle('small', palette.textSecondary)}>No MCP servers</Text> : null}
               </ScrollView>
             </View>
           ) : null}
@@ -859,7 +920,7 @@ export function SettingsScreen() {
                 <IconButton icon="arrow-left" label="Back" accessibilityLabel="Back to MCP" onPress={() => setMcpPane('list')} background="transparent" border="transparent" color={palette.accent} />
               ) : null}
               {agent == null ? (
-                <Text style={{ color: palette.textPrimary, fontSize: 16 }}>Choose an agent.</Text>
+                <Text style={textStyle('body', palette.textPrimary)}>Choose an agent.</Text>
               ) : (
                 <View style={{ gap: 12 }}>
                   {creatingMcp ? (
@@ -882,7 +943,7 @@ export function SettingsScreen() {
                       onSaved={(row) => void reload(undefined, row.id)}
                     />
                   ) : (
-                    <Text style={{ color: palette.textPrimary, fontSize: 16 }}>Choose an MCP server.</Text>
+                    <Text style={textStyle('body', palette.textPrimary)}>Choose an MCP server.</Text>
                   )}
                 </View>
               )}
@@ -995,7 +1056,7 @@ function McpForm({
               style={[button(on ? palette.accentSubtle : palette.surface, palette.borderStrong), { flexDirection: 'row', alignItems: 'center', gap: 8 }]}
             >
               <FeatherIcon name={choice === 'http' ? 'globe' : 'terminal'} size={18} color={palette.textPrimary} />
-              <Text style={{ color: palette.textPrimary, fontSize: 14, fontWeight: '600' }}>{box}</Text>
+              <Text style={textStyle('small', palette.textPrimary, typeScale.weight.semibold)}>{box}</Text>
             </Pressable>
           );
         })}
@@ -1012,7 +1073,7 @@ function McpForm({
         </>
       )}
       <SettingSwitch label={enabledBox} value={enabled} onValueChange={setEnabled} />
-      {notice ? <Text accessibilityLiveRegion="polite" style={{ color: palette.textPrimary, fontSize: 14 }}>{notice}</Text> : null}
+      {notice ? <Text accessibilityLiveRegion="polite" style={textStyle('small', palette.textPrimary)}>{notice}</Text> : null}
       {groups.length > 0 ? <Text style={label(palette.textPrimary)}>Tools</Text> : null}
       {groups.map((group) => {
         const box = `${group.name} for ${server?.name ?? name}`;
@@ -1026,7 +1087,7 @@ function McpForm({
               }
             />
             {group.tools.map((tool) => (
-              <Text key={tool} style={{ color: palette.textSecondary, fontSize: 14 }}>{tool}</Text>
+              <Text key={tool} style={textStyle('small', palette.textSecondary)}>{tool}</Text>
             ))}
           </View>
         );
@@ -1040,7 +1101,7 @@ function McpForm({
         background={palette.accent}
         color={palette.onAccent}
       />
-      {error ? <Text accessibilityRole="alert" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text> : null}
+      {error ? <Text accessibilityRole="alert" style={textStyle('small', palette.danger)}>{error}</Text> : null}
     </View>
   );
 }
@@ -1088,7 +1149,6 @@ export function AgentForm({
   agent,
   groups,
   providers,
-  settings,
   onSuccess,
   onSaved,
   onDeleted,
@@ -1097,7 +1157,6 @@ export function AgentForm({
   agent: Agent | null;
   groups: ToolGroup[];
   providers: Provider[];
-  settings: Settings | null;
   onSuccess: (message: string) => void;
   onSaved: (agent: Agent) => void;
   onDeleted?: (agent: Agent) => void;
@@ -1106,31 +1165,37 @@ export function AgentForm({
   const { palette } = useTheme();
   const { height } = useWindowDimensions();
   const creating = agent == null;
-  const current = modelRow(providers, agent?.default_model_id ?? settings?.default_model_id ?? null);
+  // Only the agent's own model row; null means Not set (global Providers default).
+  const current = modelRow(providers, agent?.default_model_id ?? null);
   const [name, setName] = useState(agent?.name ?? '');
   const [persona, setPersona] = useState(agent?.persona ?? '');
-  const [providerId, setProviderId] = useState(
-    current?.provider_id ?? providers.find((item) => item.id === 'provider_local')?.id ?? providers[0]?.id ?? '',
-  );
+  const [providerId, setProviderId] = useState(current?.provider_id ?? '');
   const [listed, setListed] = useState<Record<string, Model[]>>({});
   const hosted = (listed[providerId] ?? providers.find((item) => item.id === providerId)?.models ?? []).filter(
     (model) => model.enabled,
   );
   const [modelId, setModelId] = useState(
-    current != null && current.provider_id === providerId ? current.model_id : hosted[0]?.model_id ?? '',
+    current != null && current.provider_id === providerId ? current.model_id : '',
   );
+  const providerUnset = providerId === '';
   const [preserve, setPreserve] = useState(flagValue(agent?.preserve_thinking));
   const [effort, setEffort] = useState(effortValue(agent));
+  const [expandTrace, setExpandTrace] = useState(agent?.expand_trace ?? '');
   const [enabled, setEnabled] = useState(agent?.tool_groups ?? []);
   const [providerFocused, setProviderFocused] = useState(false);
   const [modelFocused, setModelFocused] = useState(false);
   const [preserveFocused, setPreserveFocused] = useState(false);
   const [effortFocused, setEffortFocused] = useState(false);
+  const [expandFocused, setExpandFocused] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   function chooseProvider(next: string) {
     setProviderId(next);
+    if (next === '') {
+      setModelId('');
+      return;
+    }
     const models = (listed[next] ?? providers.find((item) => item.id === next)?.models ?? []).filter(
       (model) => model.enabled,
     );
@@ -1171,8 +1236,9 @@ export function AgentForm({
   }
 
   async function save() {
-    const row = hosted.find((model) => model.model_id === modelId);
-    const modelRowId = row?.id ?? null;
+    const modelRowId = providerUnset
+      ? null
+      : (hosted.find((model) => model.model_id === modelId)?.id ?? null);
     try {
       if (agent == null) {
         const created = await api<{ agent: Agent }>('/agents', {
@@ -1186,6 +1252,7 @@ export function AgentForm({
             enable_thinking: null,
             preserve_thinking: flagBody(preserve),
             reasoning_effort: effort || null,
+            expand_trace: expandTrace || null,
           }),
         });
         onSuccess(`${created.agent.name} was created.`);
@@ -1203,6 +1270,7 @@ export function AgentForm({
           enable_thinking: null,
           preserve_thinking: flagBody(preserve),
           reasoning_effort: effort || null,
+          expand_trace: expandTrace || null,
         }),
       });
       onSuccess(`${name.trim() || agent.name} was saved.`);
@@ -1218,6 +1286,9 @@ export function AgentForm({
   const modelLabel = creating ? 'Model' : `Model for ${agent.name}`;
   const preserveLabel = creating ? 'Preserve thinking' : `Preserve thinking for ${agent.name}`;
   const effortLabel = creating ? 'Reasoning effort' : `Reasoning effort for ${agent.name}`;
+  const expandLabel = creating
+    ? 'Expand thinking and tool calls'
+    : `Expand thinking and tool calls for ${agent.name}`;
   const fieldLimit = Math.max(240, height - 360);
 
   return (
@@ -1237,24 +1308,33 @@ export function AgentForm({
         onBlur={() => setProviderFocused(false)}
         style={pickerStyle(palette, providerFocused)}
       >
+        <Picker.Item label="Not set" value="" color={palette.textSecondary} />
         {providers.map((item) => (
           <Picker.Item key={item.id} label={item.name} value={item.id} color={palette.textPrimary} />
         ))}
       </Picker>
-      <Text style={label(palette.textPrimary)}>{modelLabel}</Text>
-      <Picker
-        accessibilityLabel={modelLabel}
-        selectedValue={modelId}
-        onValueChange={(value) => setModelId(String(value))}
-        onFocus={() => setModelFocused(true)}
-        onBlur={() => setModelFocused(false)}
-        style={pickerStyle(palette, modelFocused)}
-      >
-        <Picker.Item label="Choose a model" value="" color={palette.textSecondary} />
-        {hosted.map((model) => (
-          <Picker.Item key={model.id} label={model.display_name} value={model.model_id} color={palette.textPrimary} />
-        ))}
-      </Picker>
+      {providerUnset ? (
+        <Text style={textStyle('small', palette.textSecondary)}>
+          Uses the default provider and model from Configuration → Providers.
+        </Text>
+      ) : (
+        <>
+          <Text style={label(palette.textPrimary)}>{modelLabel}</Text>
+          <Picker
+            accessibilityLabel={modelLabel}
+            selectedValue={modelId}
+            onValueChange={(value) => setModelId(String(value))}
+            onFocus={() => setModelFocused(true)}
+            onBlur={() => setModelFocused(false)}
+            style={pickerStyle(palette, modelFocused)}
+          >
+            <Picker.Item label="Choose a model" value="" color={palette.textSecondary} />
+            {hosted.map((model) => (
+              <Picker.Item key={model.id} label={model.display_name} value={model.model_id} color={palette.textPrimary} />
+            ))}
+          </Picker>
+        </>
+      )}
       <Text style={label(palette.textPrimary)}>{effortLabel}</Text>
       <Picker
         accessibilityLabel={effortLabel}
@@ -1282,6 +1362,19 @@ export function AgentForm({
         <Picker.Item label="On" value="true" color={palette.textPrimary} />
         <Picker.Item label="Off" value="false" color={palette.textPrimary} />
       </Picker>
+      <Text style={label(palette.textPrimary)}>{expandLabel}</Text>
+      <Picker
+        accessibilityLabel={expandLabel}
+        selectedValue={expandTrace}
+        onValueChange={(value) => setExpandTrace(String(value))}
+        onFocus={() => setExpandFocused(true)}
+        onBlur={() => setExpandFocused(false)}
+        style={pickerStyle(palette, expandFocused)}
+      >
+        <Picker.Item label="Collapsed (default)" value="" color={palette.textSecondary} />
+        <Picker.Item label="Open while running" value="running" color={palette.textPrimary} />
+        <Picker.Item label="Always open" value="always" color={palette.textPrimary} />
+      </Picker>
       <Text style={label(palette.textPrimary)}>Tools</Text>
       {groups.map((group) => {
         const on = enabled.includes(group.id);
@@ -1299,14 +1392,16 @@ export function AgentForm({
       })}
       </ScrollView>
       <View style={buttonRow}>
-        <IconButton
-          icon="refresh-cw"
-          label="Refresh models"
-          onPress={() => void refreshModels()}
-          background={palette.surface}
-          border={palette.borderStrong}
-          color={palette.textPrimary}
-        />
+        {!providerUnset ? (
+          <IconButton
+            icon="refresh-cw"
+            label="Refresh models"
+            onPress={() => void refreshModels()}
+            background={palette.surface}
+            border={palette.borderStrong}
+            color={palette.textPrimary}
+          />
+        ) : null}
         <IconButton
           icon={creating ? 'plus' : 'check'}
           label={creating ? 'Create agent' : `Save ${agent.name}`}
@@ -1315,20 +1410,19 @@ export function AgentForm({
           border={creating ? palette.accent : palette.borderStrong}
           color={creating ? palette.onAccent : palette.textPrimary}
         />
-        {!creating && agent.id !== 'agent_favlo' ? (
+        {!creating && agent.id !== FAVLO_AGENT_ID ? (
           <IconButton
             icon="trash-2"
             label={`Delete ${agent.name}`}
             onPress={() => void remove()}
-            background={palette.danger}
-            color={palette.onAccent}
+            tone="danger"
           />
         ) : null}
       </View>
       {notice ? (
-        <Text accessibilityLiveRegion="polite" style={{ color: palette.textPrimary, fontSize: 14 }}>{notice}</Text>
+        <Text accessibilityLiveRegion="polite" style={textStyle('small', palette.textPrimary)}>{notice}</Text>
       ) : null}
-      {error ? <Text accessibilityRole="alert" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text> : null}
+      {error ? <Text accessibilityRole="alert" style={textStyle('small', palette.danger)}>{error}</Text> : null}
     </View>
   );
 }
@@ -1400,6 +1494,11 @@ function HeartbeatForm({
       <Text accessibilityRole="header" aria-level={2} style={heading(palette.textPrimary)}>
         {heartbeat?.cron_expression ?? 'New heartbeat'}
       </Text>
+      <Text style={textStyle('small', palette.textSecondary)}>
+        {agent.default_model_id
+          ? `Runs with ${agent.name}'s provider and model.`
+          : `Uses the default provider and model from Configuration → Providers (${agent.name} has no provider set).`}
+      </Text>
       <Text style={label(palette.textPrimary)}>Cron for {agent.name}</Text>
       <TextInput accessibilityLabel={`Cron for ${agent.name}`} value={cron} onChangeText={setCron} style={fieldStyle(palette)} />
       <Text style={label(palette.textPrimary)}>Timezone for {agent.name}</Text>
@@ -1425,8 +1524,8 @@ function HeartbeatForm({
           <IconButton icon="play" label="Run heartbeat" onPress={() => void runNow()} background={palette.surface} border={palette.borderStrong} color={palette.textPrimary} />
         ) : null}
       </View>
-      {notice ? <Text accessibilityLiveRegion="polite" style={{ color: palette.textPrimary, fontSize: 14 }}>{notice}</Text> : null}
-      {error ? <Text accessibilityRole="alert" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text> : null}
+      {notice ? <Text accessibilityLiveRegion="polite" style={textStyle('small', palette.textPrimary)}>{notice}</Text> : null}
+      {error ? <Text accessibilityRole="alert" style={textStyle('small', palette.danger)}>{error}</Text> : null}
     </View>
   );
 }
@@ -1444,7 +1543,7 @@ function GlobalCopy({
 }) {
   const { palette } = useTheme();
   const [agentId, setAgentId] = useState(
-    agents.find((item) => item.id === 'agent_favlo')?.id ?? agents[0]?.id ?? '',
+    agents.find((item) => item.id === FAVLO_AGENT_ID)?.id ?? agents[0]?.id ?? '',
   );
   const [workspaceId, setWorkspaceId] = useState(workspaces[0]?.id ?? '');
   const [agentFocused, setAgentFocused] = useState(false);
@@ -1492,7 +1591,7 @@ function GlobalCopy({
       />
       <Text style={label(palette.textPrimary)}>Copy to a workspace</Text>
       {workspaces.length === 0 ? (
-        <Text style={{ color: palette.textSecondary, fontSize: 14 }}>No workspaces</Text>
+        <Text style={textStyle('small', palette.textSecondary)}>No workspaces</Text>
       ) : (
         <Picker
           accessibilityLabel="Workspace for copy"
@@ -1516,7 +1615,7 @@ function GlobalCopy({
         border={palette.borderStrong}
         color={workspace == null ? palette.disabledText : palette.textPrimary}
       />
-      {error ? <Text accessibilityRole="alert" style={{ color: palette.danger, fontSize: 14 }}>{error}</Text> : null}
+      {error ? <Text accessibilityRole="alert" style={textStyle('small', palette.danger)}>{error}</Text> : null}
     </View>
   );
 }
@@ -1533,7 +1632,7 @@ function SettingSwitch({
   const { palette } = useTheme();
   return (
     <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, minHeight: 44, width: '100%', maxWidth: '100%' }}>
-      <Text onPress={() => onValueChange(!value)} style={{ color: palette.textPrimary, fontSize: 16, flex: 1 }}>
+      <Text onPress={() => onValueChange(!value)} style={[textStyle('body', palette.textPrimary), { flex: 1 }]}>
         {label}
       </Text>
       <Switch
@@ -1574,6 +1673,7 @@ function pickerStyle(
   focused: boolean,
 ) {
   return {
+    ...textStyle('body', palette.textPrimary),
     width: '100%' as const,
     maxWidth: '100%' as const,
     minWidth: 0,
@@ -1582,9 +1682,7 @@ function pickerStyle(
     borderColor: palette.borderStrong,
     borderRadius: radius.control,
     paddingHorizontal: 12,
-    color: palette.textPrimary,
     backgroundColor: palette.surface,
-    fontSize: 16,
     outlineStyle: 'solid' as const,
     outlineWidth: 2,
     outlineOffset: 2,

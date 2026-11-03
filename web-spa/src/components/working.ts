@@ -1,32 +1,18 @@
-/** A light band sweeping across the Working label. Reduced motion leaves the word still. */
-export function workingShimmer(base: string): string {
+/** Soft activity pulse for the Working chip. Reduced motion leaves the dot still. */
+export function workingActivity(accent: string): string {
   return `
-    @keyframes favlo-working-shimmer {
-      from { background-position: -100% center; }
-      to { background-position: 200% center; }
+    @keyframes favlo-working-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.35; }
     }
-    [data-testid="working"] {
-      background-image: linear-gradient(
-        90deg,
-        ${base} 0%,
-        ${base} 40%,
-        color-mix(in srgb, ${base} 25%, white) 50%,
-        ${base} 60%,
-        ${base} 100%
-      );
-      background-size: 200% 100%;
-      -webkit-background-clip: text;
-      background-clip: text;
-      -webkit-text-fill-color: transparent;
-      color: transparent;
-      animation: favlo-working-shimmer 2s linear infinite;
+    [data-testid="working-dot"] {
+      background-color: ${accent};
+      animation: favlo-working-pulse 2.4s ease-in-out infinite;
     }
     @media (prefers-reduced-motion: reduce) {
-      [data-testid="working"] {
+      [data-testid="working-dot"] {
         animation: none;
-        background-image: none;
-        -webkit-text-fill-color: ${base};
-        color: ${base};
+        opacity: 1;
       }
     }
   `;

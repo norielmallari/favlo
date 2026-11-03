@@ -5,14 +5,21 @@ import path from 'path';
 import { expect, test, type Page } from '@playwright/test';
 
 import { deleteWorkspacesNamed } from './cleanup';
+import { createGalleryWorkspace } from './gallery-create';
 import { onScreen } from './on-screen';
+import { step } from './progress';
 
 const TINY_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
   'base64',
 );
 
-test('a gallery preview and filmstrip browse local folders', async ({ page }) => {
+test('a gallery guide binds a folder, places a strip, and browses without AG-UI', async ({ page }) => {
+  const models = await fetch('http://127.0.0.1:8129/v1/models', {
+    signal: AbortSignal.timeout(15_000),
+  });
+  test.skip(!models.ok, 'favlo serve has no language model');
+
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'favlo-gallery-'));
   const albums = path.join(root, 'Albums');
   fs.mkdirSync(albums);
@@ -20,126 +27,137 @@ test('a gallery preview and filmstrip browse local folders', async ({ page }) =>
   fs.writeFileSync(path.join(root, 'cat.png'), TINY_PNG);
   fs.writeFileSync(path.join(albums, 'zebra.png'), TINY_PNG);
   const name = `Stills ${Date.now()}`;
+  let aguiCount = 0;
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && request.url().includes('/ag-ui')) {
+      aguiCount += 1;
+    }
+  });
   try {
-    await page.setViewportSize({ width: 1280, height: 800 });
-    await page.goto('http://localhost:8012/');
-    await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8012\/?$/);
-    await expect(page.getByRole('button', { name: 'New workspace' })).toBeVisible();
-
-    await page.getByRole('button', { name: 'New workspace' }).click();
-    await page.getByRole('textbox', { name: 'Workspace name' }).fill(name);
-    const createWorkspace = page.getByRole('button', { name: 'Create workspace' });
-    await onScreen(createWorkspace);
-    await createWorkspace.click();
-    await expect(page.getByRole('heading', { name })).toBeVisible();
-    await expect(page.getByLabel('Gallery', { exact: true })).toBeVisible();
-    await expect(page.getByText('No folders')).toBeVisible();
-
-    await page.getByRole('button', { name: 'New folder' }).click();
-    await page.getByRole('textbox', { name: 'Folder name' }).fill('Camera');
-    await page.route('**/workspaces/*/folders/pick', async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ cancelled: false, location: root }),
-      });
+    await step('open app and create gallery with folder (no AG-UI)', async () => {
+      const beforeBind = aguiCount;
+      await page.setViewportSize({ width: 1280, height: 800 });
+      await page.goto('http://127.0.0.1:8012/');
+      await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8012\/?$/);
+      await expect(page.getByRole('button', { name: 'New workspace' })).toBeVisible();
+      await createGalleryWorkspace(page, name, root);
+      await expect(page.getByText('Ask the agent to fill the filmstrip')).toBeVisible();
+      await expect(page.getByText('No media selected')).toBeVisible();
+      // Index wake writes per-folder sidecars (Albums owns its .favlo_metadata).
+      await expect
+        .poll(() => fs.existsSync(path.join(albums, '.favlo_metadata', 'zebra.png.json')))
+        .toBe(true);
+      await expect
+        .poll(() => fs.existsSync(path.join(root, '.favlo_metadata', 'horse.png.json')))
+        .toBe(true);
+      expect(aguiCount).toBe(beforeBind);
     });
-    await page.getByRole('button', { name: 'Choose folder' }).click();
-    const saveFolder = page.getByRole('button', { name: 'Save folder' });
-    await onScreen(saveFolder);
-    await saveFolder.click();
-    await expect(page.getByRole('button', { name: 'Camera' })).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'horse.png', exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Albums' })).toBeVisible();
-    await page.getByRole('button', { name: 'horse.png', exact: true }).click();
-    await expect(page.getByRole('img', { name: 'horse.png' })).toBeVisible();
 
-    await page.getByRole('button', { name: 'Albums' }).click();
-    await expect(page.getByLabel('Breadcrumb').getByText('Albums')).toBeVisible();
-    await expect(page.getByRole('img', { name: 'zebra.png' })).toBeVisible();
+    await step('agent fills filmstrip', async () => {
+      const zebra = page.getByRole('button', { name: 'zebra.png', exact: true });
+      await page.getByRole('textbox', { name: 'Message', exact: true }).fill(
+        'Put every image from this folder on the filmstrip.',
+      );
+      const send = page.getByRole('button', { name: 'Send', exact: true });
+      await onScreen(send);
+      await send.click();
+      await expect(page.getByTestId('working')).toBeVisible();
+      try {
+        await expect(zebra).toBeVisible();
+      } catch {
+        await expect(page.getByTestId('working')).toHaveCount(0);
+        await page.getByRole('textbox', { name: 'Message', exact: true }).fill(
+          'Please put every image on the filmstrip now, including Albums/zebra.png.',
+        );
+        await onScreen(send);
+        await send.click();
+        await expect(page.getByTestId('working')).toBeVisible();
+        await expect(zebra).toBeVisible();
+      }
+      await expect(page.getByTestId('working')).toHaveCount(0);
+      await expect(page.getByRole('button', { name: 'horse.png', exact: true })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'cat.png', exact: true })).toBeVisible();
+      await expect(page.getByText('No media selected')).toHaveCount(0);
+      await expect(page.getByRole('button', { name: /Download .+\.png/ })).toBeVisible();
+      await expectChatRestsOnComposer(page);
+    });
 
-    await page.getByLabel('Breadcrumb').getByRole('button', { name }).click();
-    await page.getByRole('button', { name: 'cat.png', exact: true }).click();
-    await expect(page.getByRole('img', { name: 'cat.png' })).toBeVisible();
-    await page.keyboard.press('ArrowRight');
-    await expect(page.getByRole('img', { name: 'horse.png' })).toBeVisible();
-    await page.keyboard.press('ArrowLeft');
-    await expect(page.getByRole('img', { name: 'cat.png' })).toBeVisible();
+    await step('browse strip without AG-UI', async () => {
+      const beforeBrowse = aguiCount;
+      await page.getByRole('button', { name: 'zebra.png', exact: true }).click();
+      await expect(page.getByRole('button', { name: 'Download zebra.png' })).toBeVisible();
+      await page.keyboard.press('ArrowRight');
+      await page.keyboard.press('ArrowLeft');
+      await expect(page.getByRole('button', { name: 'Download zebra.png' })).toBeVisible();
+      const download = page.waitForEvent('download', { timeout: 15_000 });
+      await page.getByRole('button', { name: 'Download zebra.png' }).click();
+      expect((await download).suggestedFilename()).toBe('zebra.png');
+      await page.getByRole('button', { name: 'Add to chat' }).click();
+      await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue(
+        /(?:^|\n)Albums\/zebra\.png$/,
+      );
+      expect(aguiCount).toBe(beforeBrowse);
+    });
 
-    await page.setViewportSize({ width: 1280, height: 640 });
-    await page.getByRole('button', { name: 'New folder' }).click();
-    const sheetSave = page.getByRole('button', { name: 'Save folder' });
-    await onScreen(sheetSave);
-    await page.getByRole('button', { name: 'Close new folder' }).click();
+    await step('reload restores strip without AG-UI', async () => {
+      const beforeReload = aguiCount;
+      await page.reload();
+      await expect(page.getByRole('heading', { name })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'zebra.png', exact: true })).toBeVisible();
+      expect(aguiCount).toBe(beforeReload);
+    });
 
-    await page.setViewportSize({ width: 1280, height: 800 });
-    await page.getByRole('button', { name: 'Move horse.png' }).click();
-    const moved = page.waitForResponse(
-      (response) => response.url().includes('/images/move') && response.request().method() === 'POST',
-    );
-    await page.getByRole('button', { name: 'Albums' }).click();
-    await moved;
-    await expect(page.getByRole('button', { name: 'horse.png' })).toHaveCount(0);
-    await page.getByRole('button', { name: 'Albums' }).click();
-    await expect(page.getByRole('button', { name: 'horse.png', exact: true })).toBeVisible();
-
-    await page.getByLabel('Breadcrumb').getByRole('button', { name }).click();
-    await page.getByRole('button', { name: 'cat.png', exact: true }).click();
-    await page.getByRole('button', { name: 'Delete cat.png' }).click();
-    await page.getByRole('button', { name: 'Delete cat.png' }).click();
-    await expect(page.getByRole('button', { name: 'cat.png', exact: true })).toHaveCount(0);
-
-    await page.getByRole('button', { name: 'Albums' }).click();
-    await expect(page.getByRole('button', { name: 'Delete Albums' })).toBeDisabled();
-    await page.getByRole('button', { name: 'horse.png', exact: true }).click();
-    await page.getByRole('button', { name: 'Delete horse.png' }).click();
-    await page.getByRole('button', { name: 'Delete horse.png' }).click();
-    await expect(page.getByRole('button', { name: 'horse.png' })).toHaveCount(0);
-    const removeFolder = page.getByRole('button', { name: 'Delete Albums' });
-    await expect(removeFolder).toBeEnabled();
-    await removeFolder.click();
-    await page.getByRole('button', { name: 'Delete Albums' }).click();
-    await expect(page.getByRole('button', { name: 'Albums' })).toHaveCount(0);
-
-    await page.getByRole('button', { name: 'zebra.png', exact: true }).click();
-    await page.getByRole('button', { name: 'Add to chat' }).click();
-    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('zebra.png');
-    const chatLine = `Gallery path ${Date.now()}`;
-    await page.getByRole('textbox', { name: 'Message', exact: true }).fill(`${chatLine}\nzebra.png`);
-    let send = page.getByRole('button', { name: 'Send' });
-    await onScreen(send);
-    const posted = page.waitForRequest(
-      (request) => request.method() === 'POST' && request.url().includes('/session/messages'),
-    );
-    await send.click();
-    const body = (await posted).postDataJSON() as { image?: string; attachment?: string; text?: string };
-    expect(body.image).toBe('zebra.png');
-    expect(body.attachment).toBe('zebra.png');
-    await expect(page.getByLabel(`You said: ${chatLine}`)).toBeVisible();
-
-    await page.getByRole('button', { name: 'New folder' }).click();
-    await page.getByRole('combobox', { name: 'Folder type' }).selectOption('cloud');
-    await page.getByRole('combobox', { name: 'Cloud provider' }).selectOption('onedrive');
-    await page.getByRole('textbox', { name: 'Folder name' }).fill('OneDrive');
-    await page.getByRole('button', { name: 'Save folder' }).click();
-    await expect(page.getByRole('button', { name: 'OneDrive' })).toBeVisible();
-
-    await expect(page.getByRole('button', { name: 'Back to channel' })).toBeVisible();
-    await expect(page.getByLabel('Conversation')).toBeVisible();
-    await expect(page.getByLabel('Breadcrumb')).toBeVisible();
-
-    await page.setViewportSize({ width: 390, height: 844 });
-    await expect(page.getByRole('button', { name: 'Chat' })).toBeVisible();
-    await page.getByRole('button', { name: 'Chat' }).click();
-    await expect(page.getByLabel('Conversation')).toBeVisible();
-    await page.getByRole('button', { name: 'Back to gallery' }).click();
-    await expect(page.getByLabel('Gallery', { exact: true })).toBeVisible();
-    await expect(page.getByLabel('Breadcrumb').getByText(name)).toBeVisible();
-    await expectFits(page);
+    await step('narrow chat / back to workspace', async () => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      const chatTab = page.getByRole('button', { name: 'Chat', exact: true });
+      await expect(chatTab).toBeVisible();
+      await chatTab.click();
+      await expect(page.getByLabel('Conversation')).toBeVisible();
+      await expectChatRestsOnComposer(page);
+      await page.getByRole('button', { name: 'Back to workspace' }).click();
+      await expect(page.getByLabel('Gallery', { exact: true })).toBeVisible();
+      await expectFits(page);
+    });
   } finally {
     await deleteWorkspacesNamed(name);
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+async function expectChatRestsOnComposer(page: Page) {
+  const place = await page.getByTestId('transcript').evaluate((node) => {
+    const scroller = node as HTMLElement;
+    const conversation = scroller.closest('[aria-label="Conversation"]') as HTMLElement | null;
+    const composer = conversation?.querySelector('[aria-label="Message"]') as HTMLElement | null;
+    const rows = [...scroller.querySelectorAll('[aria-label]')].filter((el) =>
+      / said: /.test(el.getAttribute('aria-label') ?? ''),
+    );
+    const first = rows[0]?.getBoundingClientRect();
+    const last = rows[rows.length - 1]?.getBoundingClientRect();
+    const box = scroller.getBoundingClientRect();
+    const shell = conversation?.getBoundingClientRect();
+    const input = composer?.getBoundingClientRect();
+    return {
+      count: rows.length,
+      overflow: scroller.scrollHeight > scroller.clientHeight + 2,
+      fromBottom: scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop,
+      firstTop: first == null ? 0 : first.top - box.top,
+      lastBottom: last == null ? box.height : box.bottom - last.bottom,
+      height: box.height,
+      // Composer should sit on the bottom of the conversation column (home chat).
+      composerGap:
+        shell == null || input == null ? Number.POSITIVE_INFINITY : shell.bottom - input.bottom,
+    };
+  });
+  expect(place.count).toBeGreaterThan(0);
+  expect(place.fromBottom).toBeLessThan(8);
+  expect(place.lastBottom).toBeLessThan(place.height * 0.25);
+  expect(place.composerGap).toBeLessThan(64);
+  // A single short reply leaves empty space above the first bubble, like home chat.
+  if (!place.overflow && place.count === 1) {
+    expect(place.firstTop).toBeGreaterThan(place.height * 0.25);
+  }
+}
 
 async function expectFits(page: Page) {
   await onScreen(page.getByRole('button', { name: 'Configuration' }));

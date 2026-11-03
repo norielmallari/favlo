@@ -9,7 +9,7 @@ from typing import Any
 from web_api.bus import Bus
 from web_api.chat import ReplyPiece, public_call, record_tool, stream_reply
 from web_api.events import envelope
-from web_api.ids import mint
+from web_api.ids import guid
 from web_api.reply_error import spoken_error
 from web_api.store import Store
 
@@ -19,7 +19,7 @@ Reply = Callable[..., AsyncIterator[str | ReplyPiece]]
 def _delta(context: dict[str, Any], run_id: str, agui: dict[str, Any]) -> dict[str, Any]:
     session_id = context["run"]["session_id"]
     return envelope(
-        event_id=mint("evt"),
+        event_id=guid(),
         stream_id=f"session:{session_id}",
         event_type="run.delta",
         payload={"agui": agui},
@@ -45,7 +45,7 @@ async def perform(
             store.finish_run(run_id, "failed", "Choose an enabled model in configuration."),
         )
         return
-    message_id = mint("message")
+    message_id = guid()
     parts: list[str] = []
     reasoning: list[str] = []
     calls: list[dict[str, Any]] = []

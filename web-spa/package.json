@@ -9,6 +9,8 @@
     "test": "jest"
   },
   "dependencies": {
+    "@ag-ui/client": "^1.0.3",
+    "@ag-ui/core": "^1.0.3",
     "@react-native-picker/picker": "2.11.4",
     "@react-native-vector-icons/feather": "^14.0.0",
     "expo": "58.0.19",

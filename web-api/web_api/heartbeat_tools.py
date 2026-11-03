@@ -13,6 +13,7 @@ SOURCE = "heartbeat"
 
 INSTRUCTIONS = (
     "When you should check something on a schedule, use the heartbeat tools. "
+    f"Call {qualified(SOURCE, 'load_tools')} once before the other heartbeat tools. "
     f"Call {qualified(SOURCE, 'list_heartbeats')} to see the schedules already stored for you. "
     f"Call {qualified(SOURCE, 'add_heartbeat')} with a five-field cron expression, a timezone, and the "
     f"instructions for that run. Call {qualified(SOURCE, 'update_heartbeat')} to change one of yours. "
@@ -21,12 +22,28 @@ INSTRUCTIONS = (
 
 
 def tools(store: Any, agent_id: str) -> list[object]:
-    return [
+    cold = [
         _list_tool(store, agent_id),
         _add_tool(store, agent_id),
         _update_tool(store, agent_id),
         _delete_tool(store, agent_id),
     ]
+    return [_load_tools(cold)]
+
+
+def _load_tools(cold: list[object]) -> object:
+    from agent_framework import FunctionInvocationContext, tool
+
+    @tool(approval_mode="never_require", name=qualified(SOURCE, "load_tools"))
+    def load_tools(ctx: FunctionInvocationContext) -> str:
+        """Load heartbeat list/add/update/delete tools for later calls in this run."""
+        ctx.add_tools(cold)
+        return (
+            "Loaded heartbeat_list_heartbeats, heartbeat_add_heartbeat, "
+            "heartbeat_update_heartbeat, and heartbeat_delete_heartbeat."
+        )
+
+    return load_tools
 
 
 def list_heartbeats(store: Any, agent_id: str) -> str:
@@ -156,12 +173,12 @@ def _add_tool(store: Any, agent_id: str) -> object:
     def add_heartbeat_tool(
         cron_expression: Annotated[
             str,
-            Field(description="Five cron fields: minute hour day month weekday."),
+            Field(description="minute hour day month weekday."),
         ],
-        instructions: Annotated[str, Field(description="What to do when this heartbeat runs.")],
+        instructions: Annotated[str, Field(description="Heartbeat prompt.")],
         timezone: Annotated[
             str,
-            Field(description="IANA timezone. UTC when omitted."),
+            Field(description="IANA; default UTC."),
         ] = "UTC",
     ) -> str:
         """Store one heartbeat for yourself.
@@ -181,22 +198,22 @@ def _update_tool(store: Any, agent_id: str) -> object:
 
     @tool(approval_mode="never_require", name=qualified(SOURCE, "update_heartbeat"))
     def update_heartbeat_tool(
-        heartbeat_id: Annotated[str, Field(description="The heartbeat id from list_heartbeats.")],
+        heartbeat_id: Annotated[str, Field(description="Id from list_heartbeats.")],
         cron_expression: Annotated[
             str | None,
-            Field(description="Five cron fields. Omit to keep the current expression."),
+            Field(description="Five cron fields; omit = keep."),
         ] = None,
         timezone: Annotated[
             str | None,
-            Field(description="IANA timezone. Omit to keep the current timezone."),
+            Field(description="IANA; omit = keep."),
         ] = None,
         instructions: Annotated[
             str | None,
-            Field(description="What to do when this heartbeat runs. Omit to keep them."),
+            Field(description="Heartbeat prompt; omit = keep."),
         ] = None,
         enabled: Annotated[
             bool | None,
-            Field(description="True enables the schedule. False disables it. Omit to leave it."),
+            Field(description="True/False; omit = keep."),
         ] = None,
     ) -> str:
         """Change one of your heartbeats.
@@ -224,7 +241,7 @@ def _delete_tool(store: Any, agent_id: str) -> object:
 
     @tool(approval_mode="never_require", name=qualified(SOURCE, "delete_heartbeat"))
     def delete_heartbeat_tool(
-        heartbeat_id: Annotated[str, Field(description="The heartbeat id from list_heartbeats.")],
+        heartbeat_id: Annotated[str, Field(description="Id from list_heartbeats.")],
     ) -> str:
         """Remove one of your heartbeats."""
         return delete_heartbeat(store, agent_id, heartbeat_id)

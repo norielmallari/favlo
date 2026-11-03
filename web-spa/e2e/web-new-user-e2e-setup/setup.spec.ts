@@ -5,6 +5,7 @@ import path from 'node:path';
 import { expect, test } from '@playwright/test';
 
 import { onScreen } from '../on-screen';
+import { FAVLO_AGENT_ID, FAVLO_CHANNEL_ID, FAVLO_MCP_ID, LOCAL_PROVIDER_ID } from '../../src/api/seed-ids';
 
 const API = 'http://127.0.0.1:8130';
 const PROMPT = 'Reply with the single word ready.';
@@ -23,21 +24,25 @@ test('a new install seeds Favlo and answers the first chat', async ({ page }) =>
 
   const agents = await read<{ agents: Agent[] }>('/agents');
   expect(agents.agents.map((agent) => agent.name)).toEqual(['Favlo']);
-  expect(agents.agents[0].id).toBe('agent_favlo');
+  expect(agents.agents[0].id).toBe(FAVLO_AGENT_ID);
   expect(agents.agents[0].persona.length).toBeGreaterThan(0);
   expect(agents.agents[0].tool_groups).toEqual(['favlo-config']);
 
   const channels = await read<{ channels: Channel[] }>('/channels');
   expect(channels.channels).toEqual([
-    expect.objectContaining({ id: 'channel_favlo', name: 'Favlo', agent_id: 'agent_favlo', session_id: 'session_favlo' }),
+    expect.objectContaining({ id: FAVLO_CHANNEL_ID, name: 'Favlo', agent_id: FAVLO_AGENT_ID }),
   ]);
-  const session = await read<{ messages: unknown[] }>('/sessions/session_favlo');
+  const homeId = channels.channels[0].session_id;
+  expect(homeId).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+  );
+  const session = await read<{ messages: unknown[] }>(`/sessions/${homeId}`);
   expect(session.messages).toEqual([]);
 
   const settings = await read<{ default_model_id: string | null }>('/settings');
   expect(settings.default_model_id).toBeTruthy();
   const providers = await read<{ providers: Provider[] }>('/providers');
-  const local = providers.providers.find((provider) => provider.id === 'provider_local');
+  const local = providers.providers.find((provider) => provider.id === LOCAL_PROVIDER_ID);
   expect(local?.base_url).toBe('http://127.0.0.1:8129/v1');
   const chosen = local?.models.find((row) => row.id === settings.default_model_id);
   if (local?.models.some((row) => row.model_id === 'spark-x26-1-7b:high')) {
@@ -46,8 +51,8 @@ test('a new install seeds Favlo and answers the first chat', async ({ page }) =>
   const mcp = await read<{ servers: McpServer[] }>('/mcp-servers');
   expect(mcp.servers).toEqual([
     expect.objectContaining({
-      id: 'mcp_favlo',
-      agent_id: 'agent_favlo',
+      id: FAVLO_MCP_ID,
+      agent_id: FAVLO_AGENT_ID,
       name: 'Favlo media',
       transport: 'http',
       url: 'http://127.0.0.1:8129/mcp',
@@ -61,7 +66,7 @@ test('a new install seeds Favlo and answers the first chat', async ({ page }) =>
   expect(catalog.skills.every((skill) => skill.add_by_default)).toBe(true);
   const copied = await read<{ skills: Skill[] }>('/agent-skills');
   expect(copied.skills.map((skill) => skill.name).sort()).toEqual(['session-remember']);
-  expect(copied.skills.every((skill) => skill.agent_id === 'agent_favlo')).toBe(true);
+  expect(copied.skills.every((skill) => skill.agent_id === FAVLO_AGENT_ID)).toBe(true);
 
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto('http://localhost:8012/');

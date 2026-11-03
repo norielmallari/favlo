@@ -17,11 +17,13 @@ export function Frame({
   onSkip,
   link,
   title = 'Favlo',
+  brand = true,
 }: {
   children: ReactNode;
   onSkip?: () => void;
   link: { label: string; onPress: () => void };
   title?: string;
+  brand?: boolean;
 }) {
   const router = useRouter();
   const { palette, preference, setPreference } = useTheme();
@@ -89,14 +91,24 @@ export function Frame({
             color={palette.accent}
           />
         ) : null}
-        <Pressable accessibilityRole="link" accessibilityLabel="Favlo" onPress={() => router.push('/')} style={target}>
-          <Text accessibilityRole="header" style={textStyle('title', palette.textPrimary)}>
-            Favlo
-          </Text>
-        </Pressable>
+        {brand ? (
+          <Pressable accessibilityRole="link" accessibilityLabel="Favlo" onPress={() => router.push('/')} style={target}>
+            <Text accessibilityRole="header" style={textStyle('title', palette.textPrimary)}>
+              Favlo
+            </Text>
+          </Pressable>
+        ) : null}
         <View
           testID="banner-slot"
-          style={{ flexDirection: 'row', alignItems: 'center', gap: space[2], flexShrink: 1, minWidth: 0 }}
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: space[2],
+            flexGrow: brand ? 0 : 1,
+            flexShrink: 1,
+            flexBasis: brand ? 'auto' : 0,
+            minWidth: 0,
+          }}
         />
         <View style={{ marginLeft: narrow ? 0 : 'auto', flexDirection: 'row', alignItems: 'center' }}>
           <View testID="banner-actions" style={{ flexDirection: 'row', alignItems: 'center' }} />
@@ -210,7 +222,7 @@ const target = { minHeight: 44, justifyContent: 'center' as const };
 function AppearanceMark({ preference, color }: { preference: Preference; color: string }) {
   if (Platform.OS !== 'web') {
     const glyph = preference === 'light' ? '☀' : preference === 'dark' ? '☾' : '◐';
-    return <Text style={{ color, fontSize: 18, lineHeight: 22 }}>{glyph}</Text>;
+    return <Text style={textStyle('label', color)}>{glyph}</Text>;
   }
   const shape = preference === 'light' ? sun(color) : preference === 'dark' ? moon(color) : contrast(color);
   return createElement('svg', {

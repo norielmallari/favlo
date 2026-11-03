@@ -18,7 +18,7 @@ const call = { id: 'call_1', name: 'conversation_list_conversations', arguments:
 function Host({ settled }: { settled: boolean }) {
   return (
     <ThemeProvider>
-      <ToolCall call={call} settled={settled} />
+      <ToolCall call={call} settled={settled} expandTrace="running" />
     </ThemeProvider>
   );
 }
@@ -33,6 +33,29 @@ test('a tool call stays on screen without reply text', () => {
   ]);
 });
 
+test('each tool call is its own full-width row', async () => {
+  const second = { id: 'call_2', name: 'gallery_search_media', arguments: '{}' };
+  const view = await render(
+    <ThemeProvider>
+      <LiveReply
+        steps={[
+          { kind: 'tool', call, settled: true },
+          { kind: 'tool', call: second, settled: true },
+        ]}
+      />
+    </ThemeProvider>,
+  );
+  const rows = view.getAllByTestId('tool-call');
+  expect(rows).toHaveLength(2);
+  for (const row of rows) {
+    expect(row.props.style).toEqual(
+      expect.objectContaining({ width: '100%', alignSelf: 'stretch' }),
+    );
+  }
+  expect(view.getByRole('button', { name: 'Tool call conversation_list_conversations' })).toBeTruthy();
+  expect(view.getByRole('button', { name: 'Tool call gallery_search_media' })).toBeTruthy();
+});
+
 test('thinking closes on a tool call and the tool call closes when thinking starts', async () => {
   let steps: ReplyStep[] = [];
   steps = noteReasoning(steps, 'First look.');
@@ -40,7 +63,7 @@ test('thinking closes on a tool call and the tool call closes when thinking star
   steps = noteTool(steps, { ...call, arguments: '{"kind": "all", "limit": 1}' });
   const view = await render(
     <ThemeProvider>
-      <LiveReply steps={steps} />
+      <LiveReply steps={steps} expandTrace="running" />
     </ThemeProvider>,
   );
   expect(view.getByRole('button', { name: 'Thinking' }).props.accessibilityState).toMatchObject({ expanded: false });
@@ -51,7 +74,7 @@ test('thinking closes on a tool call and the tool call closes when thinking star
   steps = noteReasoning(steps, 'After the tool.');
   view.rerender(
     <ThemeProvider>
-      <LiveReply steps={steps} />
+      <LiveReply steps={steps} expandTrace="running" />
     </ThemeProvider>,
   );
   await waitFor(() => {

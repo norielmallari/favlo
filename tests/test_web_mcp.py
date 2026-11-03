@@ -13,11 +13,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "web-api"))
 
 from web_api.bus import Bus  # noqa: E402
-from web_api.db import FAVLO_AGENT_ID, FAVLO_SESSION_ID  # noqa: E402
+from web_api.ids import FAVLO_AGENT_ID, guid  # noqa: E402
 from web_api.mcp_client import list_tools  # noqa: E402
 from web_api.mcp_tasks import _finish, settle  # noqa: E402
 from web_api.mcp_tools import INSTRUCTIONS, _description, groups_from, prepare_catalog  # noqa: E402
 from web_api.store import Store, _mcp_fields  # noqa: E402
+
+
+def _home(store: Store) -> str:
+    return next(row["session_id"] for row in store.channels() if row["agent_id"] == FAVLO_AGENT_ID)
 
 
 def test_a_favlo_listener_address_uses_the_mcp_path() -> None:
@@ -77,7 +81,7 @@ def test_the_framework_session_advertises_tasks() -> None:
     identifiers = [getattr(item, "identifier", None) for item in client.extensions]
     assert TASKS_EXTENSION_ID in identifiers
     server = _HttpServer(
-        "agent_favlo",
+        FAVLO_AGENT_ID,
         client,
         name="Favlo",
         tool_name_prefix="favlo",
@@ -106,7 +110,7 @@ def test_save_keeps_a_disabled_group_and_lists_its_tools(
         _status, created, _events = store.create_mcp_server(
             "mcp-save",
             {
-                "agent_id": "agent_favlo",
+                "agent_id": FAVLO_AGENT_ID,
                 "name": "Favlo media",
                 "transport": "http",
                 "command": "",
@@ -132,10 +136,12 @@ def test_save_keeps_a_disabled_group_and_lists_its_tools(
             ]
 
         monkeypatch.setattr("web_api.mcp_cache.catalog.get", listed)
-        _text, enabled = asyncio.run(bundle(store, "agent_favlo", "session_favlo", None, set()))
-        assert len(enabled) == 1
-        assert enabled[0].tool_name_prefix == "favlo_media"
-        assert list(enabled[0].allowed_tools) == ["echo"]
+        _text, enabled = asyncio.run(bundle(store, FAVLO_AGENT_ID, _home(store), None, set()))
+        created_tool = next(
+            item for item in enabled if list(item.allowed_tools) == ["echo"]
+        )
+        assert created_tool.tool_name_prefix.startswith("favlo_media")
+        assert list(created_tool.allowed_tools) == ["echo"]
     finally:
         store.close()
 
@@ -146,6 +152,10 @@ def test_media_instructions_require_a_listed_model_id() -> None:
     assert "set_video_t2v_model" in INSTRUCTIONS
     assert "set_music_model" in INSTRUCTIONS
     assert "set_voice_model" in INSTRUCTIONS
+    assert "progressive disclosure" in INSTRUCTIONS
+    assert "load_tool" in INSTRUCTIONS
+    assert "Match the generate tool to what the user asked for" in INSTRUCTIONS
+    assert "Do not offer or insist on video when they asked for an image" in INSTRUCTIONS
     assert "Repeat the returned session id" in INSTRUCTIONS
     assert "returns when the task is accepted" in INSTRUCTIONS
     assert "Do not paste the JSON" in INSTRUCTIONS
@@ -155,6 +165,110 @@ def test_media_instructions_require_a_listed_model_id() -> None:
     )
     assert "set_image_model" in described
     assert "session" in described
+
+
+def test_mcp_always_load_covers_image_memory_and_media_tasks() -> None:
+    from web_api.mcp_tools import ALWAYS_LOAD
+
+    assert "generate_image" in ALWAYS_LOAD
+    assert "remember" in ALWAYS_LOAD
+    assert "media_status" in ALWAYS_LOAD
+    assert "generate_video_i2v" not in ALWAYS_LOAD
+    assert "generate_music" not in ALWAYS_LOAD
+    assert "generate_voice" not in ALWAYS_LOAD
+
+
+def test_dumps_for_model_omits_spaces() -> None:
+    from favlo.json_model import dumps_for_model
+
+    text = dumps_for_model({"a": 1, "b": "x"})
+    assert text == '{"a":1,"b":"x"}'
+
+
+def test_dumps_for_model_drops_empty_fields() -> None:
+    from favlo.json_model import dumps_for_model
+
+    text = dumps_for_model({"path": "a.png", "title": "", "tags": [], "score": 0.1})
+    assert text == '{"path":"a.png","score":0.1}'
+
+
+def test_progressive_mcp_server_flags_and_eager_mask() -> None:
+    from web_api.mcp_tools import ALWAYS_LOAD, _server
+
+    class _Client:
+        pass
+
+    opened = _server(
+        {
+            "server_id": "s1",
+            "server_name": "favlo",
+            "transport": "http",
+            "url": "http://127.0.0.1:8129/mcp",
+        },
+        "agent",
+        "favlo",
+        sorted(ALWAYS_LOAD | {"generate_video_i2v", "generate_music"}),
+        sorted(ALWAYS_LOAD),
+        None,
+    )
+    assert opened is not None
+    # Replace the real client so construction stayed side-effect free for flags.
+    opened.owned_client = _Client()
+    assert opened.use_progressive_disclosure is True
+    assert set(opened.always_load or []) == set(ALWAYS_LOAD)
+    assert "generate_video_i2v" in set(opened.allowed_tools or [])
+    assert "generate_video_i2v" not in set(opened.always_load or [])
+
+
+def test_progressive_initial_functions_exclude_cold_media() -> None:
+    """Eager progressive surface has loaders + always_load, not video/music generate."""
+    from agent_framework import FunctionTool
+
+    from web_api.mcp_tools import ALWAYS_LOAD, _server
+
+    opened = _server(
+        {
+            "server_id": "s1",
+            "server_name": "favlo",
+            "transport": "http",
+            "url": "http://127.0.0.1:8129/mcp",
+        },
+        "agent",
+        "favlo",
+        sorted(ALWAYS_LOAD | {"generate_video_i2v", "generate_music", "generate_voice"}),
+        sorted(ALWAYS_LOAD),
+        None,
+    )
+    assert opened is not None
+
+    def _fake(name: str, remote: str) -> FunctionTool:
+        async def _run() -> str:
+            return name
+
+        return FunctionTool(
+            name=name,
+            description=remote,
+            approval_mode="never_require",
+            additional_properties={
+                "_mcp_normalized_name": remote,
+                "_mcp_remote_name": remote,
+            },
+            func=_run,
+        )
+
+    fakes = [
+        _fake(f"favlo_{remote}", remote)
+        for remote in sorted(ALWAYS_LOAD | {"generate_video_i2v", "generate_music", "generate_voice"})
+    ]
+    opened._filtered_functions = lambda: fakes  # type: ignore[method-assign]
+    opened._progressive_loader_functions = None
+    names = {func.name for func in opened._progressive_functions()}
+    assert "favlo_load_tool" in names
+    assert "favlo_list_mcp_tools" in names
+    assert "favlo_generate_image" in names
+    assert "favlo_generate_video_i2v" not in names
+    assert "favlo_generate_music" not in names
+    assert "favlo_generate_voice" not in names
 
 
 def test_a_finished_image_stays_finished() -> None:
@@ -174,7 +288,7 @@ def test_an_unknown_model_result_starts_a_correction_turn(tmp_path: Path) -> Non
                 "remote_id": "task-1",
                 "server_id": "server-1",
                 "agent_id": FAVLO_AGENT_ID,
-                "session_id": FAVLO_SESSION_ID,
+                "session_id": _home(store),
                 "tool_name": "generate_image",
                 "poll_interval_ms": 1000,
             }
@@ -188,7 +302,7 @@ def test_an_unknown_model_result_starts_a_correction_turn(tmp_path: Path) -> Non
                 "Error calling tool 'generate_image': unknown model flux-schnell",
             )
         )
-        snapshot = store.session_snapshot(FAVLO_SESSION_ID)
+        snapshot = store.session_snapshot(_home(store))
         bodies = [message["body"] for message in snapshot["messages"]]
         assert not any("unknown model" in body for body in bodies)
         running = [row for row in snapshot["runs"] if row["status"] == "running"]
@@ -199,7 +313,7 @@ def test_an_unknown_model_result_starts_a_correction_turn(tmp_path: Path) -> Non
         assert "unknown model" in context["user_text"]
         assert not any("unknown model" in row["text"] for row in context["prior"])
         again, _events, waiting = store.begin_task_correction(
-            FAVLO_SESSION_ID, FAVLO_AGENT_ID, "again"
+            _home(store), FAVLO_AGENT_ID, "again"
         )
         assert again is None
         assert waiting is True
@@ -228,7 +342,7 @@ def test_mcp_tools_from_two_servers_keep_unique_names(
         store.create_mcp_server(
             "mcp-a",
             {
-                "agent_id": "agent_favlo",
+                "agent_id": FAVLO_AGENT_ID,
                 "name": "Favlo media",
                 "transport": "http",
                 "command": "",
@@ -239,7 +353,7 @@ def test_mcp_tools_from_two_servers_keep_unique_names(
         store.create_mcp_server(
             "mcp-b",
             {
-                "agent_id": "agent_favlo",
+                "agent_id": FAVLO_AGENT_ID,
                 "name": "Favlo media",
                 "transport": "http",
                 "command": "",
@@ -247,8 +361,11 @@ def test_mcp_tools_from_two_servers_keep_unique_names(
                 "enabled": True,
             },
         )
-        text, tools = asyncio.run(bundle(store, "agent_favlo", "session_favlo", None, set()))
-        assert [item.tool_name_prefix for item in tools] == ["favlo_media", "favlo_media_2"]
+        text, tools = asyncio.run(bundle(store, FAVLO_AGENT_ID, _home(store), None, set()))
+        prefixes = [item.tool_name_prefix for item in tools]
+        assert prefixes[0] == "favlo_media"
+        assert "favlo_media_2" in prefixes
+        assert len(prefixes) == len(set(prefixes))
         assert all(list(item.allowed_tools) == ["generate_image"] for item in tools)
         assert "favlo_media_generate_image" in text
         described = _description(
@@ -271,6 +388,7 @@ def test_mcp_tools_from_two_servers_keep_unique_names(
 
 def test_an_old_catalog_table_becomes_group_switches(tmp_path: Path) -> None:
     path = tmp_path / "app.db"
+    server_id = guid()
     raw = sqlite3.connect(path)
     raw.execute(
         """
@@ -314,37 +432,34 @@ def test_an_old_catalog_table_becomes_group_switches(tmp_path: Path) -> None:
         INSERT INTO mcp_server (
             id, agent_id, name, transport, command, url, enabled,
             status, status_message, revision
-        ) VALUES (
-            'mcp_old', 'agent_favlo', 'Favlo media', 'http', '',
-            'http://127.0.0.1:8129/mcp', 1, 'connected', '', 1
-        )
-        """
+        ) VALUES (?, ?, 'Favlo media', 'http', '', ?, 1, 'connected', '', 1)
+        """,
+        (server_id, FAVLO_AGENT_ID, "http://127.0.0.1:8129/mcp"),
     )
     raw.execute(
         """
         INSERT INTO mcp_tool (server_id, name, group_id, description, schema)
-        VALUES (
-            'mcp_old', 'generate_image', 'image', 'Generate.',
-            '{"type":"object","required":["model"]}'
-        )
-        """
+        VALUES (?, 'generate_image', 'image', 'Generate.', ?)
+        """,
+        (server_id, '{"type":"object","required":["model"]}'),
     )
     raw.execute(
         """
         INSERT INTO mcp_tool_group (server_id, group_id, name, enabled)
-        VALUES ('mcp_old', 'image', 'Image', 0)
-        """
+        VALUES (?, 'image', 'Image', 0)
+        """,
+        (server_id,),
     )
     raw.commit()
     raw.close()
     store = Store(path)
     try:
-        server = store.mcp_server("mcp_old")
+        server = store.mcp_server(server_id)
         assert server is not None
         assert server["groups"] == [
             {"id": "image", "name": "Image", "enabled": False, "tools": []}
         ]
-        kept = store.enabled_mcp_servers("agent_favlo")
+        kept = store.enabled_mcp_servers(FAVLO_AGENT_ID)
         assert kept[0]["switches"] == {"image": False}
     finally:
         store.close()
@@ -435,7 +550,7 @@ def test_a_framework_server_keeps_the_agents_own_client() -> None:
         client = _mcp_client({"transport": "http", "url": "http://127.0.0.1:9/mcp"})
         assert client is not None
         server = _HttpServer(
-            "agent_favlo",
+            FAVLO_AGENT_ID,
             client,
             name="Favlo",
             tool_name_prefix="favlo",
@@ -451,7 +566,7 @@ def test_a_framework_server_keeps_the_agents_own_client() -> None:
     finally:
         MCPStreamableHTTPTool.call_tool = monkeypatch_base  # type: ignore[method-assign]
     assert seen["tool"] == "recall"
-    assert seen["arguments"] == {"query": "tea", "client": "agent_favlo"}
+    assert seen["arguments"] == {"query": "tea", "client": FAVLO_AGENT_ID}
 
 
 def _peer(tmp_path: Path, tasks_get: str) -> str:
@@ -527,7 +642,7 @@ def test_a_modern_server_returns_when_the_task_is_accepted(tmp_path: Path) -> No
         client = _mcp_client({"transport": "stdio", "command": command})
         assert client is not None
         server = _StdioServer(
-            "agent_favlo",
+            FAVLO_AGENT_ID,
             client,
             name="Peer",
             tool_name_prefix="peer",
@@ -571,7 +686,7 @@ def test_a_task_result_arrives_on_a_later_turn(tmp_path: Path) -> None:
             server = _StdioServer(
                 FAVLO_AGENT_ID,
                 client,
-                _Turn(store, Bus(), jobs, "peer", FAVLO_AGENT_ID, FAVLO_SESSION_ID),
+                _Turn(store, Bus(), jobs, "peer", FAVLO_AGENT_ID, _home(store)),
                 name="Peer",
                 tool_name_prefix="peer",
                 approval_mode="never_require",
@@ -583,7 +698,7 @@ def test_a_task_result_arrives_on_a_later_turn(tmp_path: Path) -> None:
                 result = await asyncio.wait_for(server.call_tool("echo", text="hi"), 2)
                 shown = _shown(result)
                 for _ in range(40):
-                    snapshot = store.session_snapshot(FAVLO_SESSION_ID)
+                    snapshot = store.session_snapshot(_home(store))
                     running = [row for row in snapshot["runs"] if row["status"] == "running"]
                     if running:
                         return shown + "\n" + store.run_context(running[0]["id"])["user_text"]

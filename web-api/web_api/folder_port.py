@@ -8,9 +8,20 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from web_api.gallery_metadata import (
+    KIND_SUFFIXES,
+    METADATA_DIR,
+    kind_for,
+    move_sidecar,
+    relocate_metadata_prefix,
+    remove_metadata_prefix,
+    remove_sidecar,
+    sidecar_path,
+)
 from web_api.store import Rejected
 
-_IMAGES = {".png", ".jpg", ".jpeg", ".webp"}
+_IMAGES = KIND_SUFFIXES["image"]
+_MEDIA = {suffix for group in KIND_SUFFIXES.values() for suffix in group}
 _NOTE_SUFFIX = ".json"
 
 
@@ -135,15 +146,104 @@ class LocalFolder:
 
     def stat(self, relative: str) -> dict[str, Any]:
         path = self.resolve(relative, file=True)
+        media_kind = kind_for(path) or "image"
+        rel = self._relative(path)
+        side = sidecar_path(self.root, rel)
         return {
-            "path": self._relative(path),
+            "path": rel,
             "name": path.name,
-            "kind": "image",
+            "kind": media_kind,
             "media_type": _media_type(path.suffix),
             "size": path.stat().st_size,
             "revision": _revision(path),
             "note": _note(path),
+            "has_sidecar": side.is_file(),
         }
+
+    def walk_media(
+        self,
+        relative: str = "",
+        *,
+        name_contains: str = "",
+        kinds: list[str] | None = None,
+        depth_limit: int = 8,
+        record_limit: int = 80,
+        visit_limit: int = 5000,
+    ) -> dict[str, Any]:
+        """Capped recursive media list. Dot dirs and adjacent ``*.json`` notes are skipped."""
+        allowed = set(kinds or ["image", "audio", "video"])
+        suffixes = {
+            suffix
+            for kind, group in KIND_SUFFIXES.items()
+            if kind in allowed
+            for suffix in group
+        }
+        start = self.resolve(relative, directory=True)
+        needle = name_contains.strip().lower()
+        records: list[dict[str, Any]] = []
+        visited = 0
+        truncated = False
+        depth_limit_hit = False
+
+        def walk(directory: Path, depth: int) -> None:
+            nonlocal visited, truncated, depth_limit_hit
+            if truncated:
+                return
+            try:
+                children = sorted(directory.iterdir(), key=lambda item: item.name.lower())
+            except OSError:
+                return
+            for child in children:
+                if truncated:
+                    return
+                if child.name.startswith("."):
+                    continue
+                visited += 1
+                if visited > visit_limit:
+                    truncated = True
+                    return
+                try:
+                    resolved = child.resolve()
+                except OSError:
+                    continue
+                if resolved != self.root and self.root not in resolved.parents:
+                    continue
+                if child.is_dir():
+                    if depth >= depth_limit:
+                        depth_limit_hit = True
+                        continue
+                    walk(child, depth + 1)
+                    continue
+                if not child.is_file():
+                    continue
+                if child.name.endswith(".json"):
+                    continue
+                if child.suffix.lower() not in suffixes:
+                    continue
+                if needle and needle not in child.name.lower():
+                    continue
+                if len(records) >= record_limit:
+                    truncated = True
+                    return
+                path = self._relative(child)
+                item = self.stat(path)
+                item["folder"] = str(Path(path).parent.as_posix()).lstrip(".") or ""
+                if item["folder"] == "":
+                    item["folder"] = ""
+                records.append(item)
+
+        walk(start, 0)
+        return {
+            "root": self._relative(start),
+            "media": records,
+            "images": records,
+            "truncated": truncated,
+            "depth_limit_hit": depth_limit_hit,
+        }
+
+    def walk_images(self, relative: str = "", **kwargs: Any) -> dict[str, Any]:
+        """Image-only walk kept for callers that have not moved to ``walk_media``."""
+        return self.walk_media(relative, kinds=["image"], **kwargs)
 
     def create_folder(self, relative: str) -> dict[str, str]:
         path = self.resolve(relative, create=True, folder=True)
@@ -154,6 +254,7 @@ class LocalFolder:
                 raise Rejected("That folder already exists.")
             raise Rejected("That path is a file.")
         path.mkdir(parents=False)
+        (path / METADATA_DIR).mkdir(exist_ok=True)
         return {"path": self._relative(path), "name": path.name, "kind": "folder"}
 
     def rename_folder(self, relative: str, name: str) -> dict[str, str]:
@@ -168,8 +269,11 @@ class LocalFolder:
             raise Rejected("That name is not allowed.")
         if target.exists():
             raise Rejected("That folder already exists.")
+        old_rel = self._relative(path)
         path.rename(target)
-        return {"path": self._relative(target), "name": target.name, "kind": "folder"}
+        new_rel = self._relative(target)
+        relocate_metadata_prefix(self.root, old_rel, new_rel)
+        return {"path": new_rel, "name": target.name, "kind": "folder"}
 
     def move_folder(self, relative: str, destination: str) -> dict[str, str]:
         path = self.resolve(relative, directory=True)
@@ -187,8 +291,11 @@ class LocalFolder:
         target.parent.mkdir(parents=False, exist_ok=True)
         if not target.parent.is_dir():
             raise Rejected("The parent folder does not exist.")
+        old_rel = self._relative(path)
         shutil.move(str(path), str(target))
-        return {"path": self._relative(target), "name": target.name, "kind": "folder"}
+        new_rel = self._relative(target)
+        relocate_metadata_prefix(self.root, old_rel, new_rel)
+        return {"path": new_rel, "name": target.name, "kind": "folder"}
 
     def move(self, relative: str, destination: str) -> dict[str, Any]:
         path = self.resolve(relative, file=True)
@@ -202,20 +309,25 @@ class LocalFolder:
         if target.exists():
             raise Rejected("That file already exists.")
         note = path.with_name(path.name + _NOTE_SUFFIX)
+        old_rel = self._relative(path)
         shutil.move(str(path), str(target))
         if note.is_file():
             shutil.move(str(note), str(target.with_name(target.name + _NOTE_SUFFIX)))
-        return self.stat(self._relative(target))
+        new_rel = self._relative(target)
+        move_sidecar(self.root, old_rel, new_rel)
+        return self.stat(new_rel)
 
     def delete_image(self, relative: str) -> dict[str, str]:
         path = self.resolve(relative, file=True)
         if path.suffix.lower() not in _IMAGES:
             raise Rejected("The gallery stores png, jpg, jpeg, or webp files.")
         note = path.with_name(path.name + _NOTE_SUFFIX)
+        rel = self._relative(path)
         path.unlink()
         if note.is_file():
             note.unlink()
-        return {"path": self._relative(path), "name": path.name, "kind": "image"}
+        remove_sidecar(self.root, rel)
+        return {"path": rel, "name": path.name, "kind": "image"}
 
     def delete_folder(self, relative: str) -> dict[str, str]:
         path = self.resolve(relative, directory=True)
@@ -223,7 +335,9 @@ class LocalFolder:
             raise Rejected("The local folder cannot be deleted.")
         if _occupied(path):
             raise Rejected("That folder is not empty.")
+        rel = self._relative(path)
         shutil.rmtree(path)
+        remove_metadata_prefix(self.root, rel)
         return {"path": relative.strip("/")}
 
     def resolve(
@@ -286,6 +400,8 @@ def _media_type(suffix: str) -> str:
         ".jpg": "image/jpeg",
         ".jpeg": "image/jpeg",
         ".webp": "image/webp",
+        ".mp3": "audio/mpeg",
+        ".mp4": "video/mp4",
     }
     return mapping.get(suffix.lower(), "application/octet-stream")
 

@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 
 import { deleteAgentsNamed } from './cleanup';
 import { onScreen } from './on-screen';
+import { LOCAL_PROVIDER_ID } from '../src/api/seed-ids';
 
 test('a new agent shows the same options as edit', async ({ page }) => {
   const name = `Reed ${Date.now()}`;
@@ -15,31 +16,50 @@ test('a new agent shows the same options as edit', async ({ page }) => {
   await expect(page.getByRole('textbox', { name: 'Agent name', exact: true })).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Persona', exact: true })).toBeVisible();
   const provider = page.getByRole('combobox', { name: 'Provider', exact: true });
-  const model = page.getByRole('combobox', { name: 'Model', exact: true });
-  await expect(provider).toBeVisible();
-  await expect(model).not.toHaveValue('');
+  await expect(provider).toHaveValue('');
+  await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Refresh models', exact: true })).toHaveCount(0);
+  await expect(
+    page.getByText('Uses the default provider and model from Configuration → Providers.'),
+  ).toBeVisible();
   await expect(page.getByRole('switch', { name: 'Configuration tools', exact: true })).toBeVisible();
   await expect(page.getByRole('switch', { name: 'Conversation tools', exact: true })).not.toBeChecked();
   await expect(page.getByRole('switch', { name: 'Heartbeat tools', exact: true })).toBeVisible();
+
+  await provider.selectOption(LOCAL_PROVIDER_ID);
+  await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toBeVisible();
   const refresh = page.getByRole('button', { name: 'Refresh models', exact: true });
   await onScreen(refresh);
   await refresh.click();
   const refreshed = page.getByText('Models refreshed');
   await onScreen(refreshed);
   await expect(refreshed).toBeVisible();
-  const chosen = await model.inputValue();
+  await provider.selectOption('');
+  await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Refresh models', exact: true })).toHaveCount(0);
+
   await page.getByRole('textbox', { name: 'Agent name', exact: true }).fill(name);
   await page.getByRole('textbox', { name: 'Persona', exact: true }).fill('A short persona.');
   await page.getByRole('combobox', { name: 'Reasoning effort', exact: true }).selectOption('medium');
   await page.getByRole('switch', { name: 'Conversation tools', exact: true }).click();
   const wideCreate = page.getByRole('button', { name: 'Create agent' });
   await onScreen(wideCreate);
+  const created = page.waitForResponse(
+    (response) =>
+      response.url().includes('/agents') &&
+      response.request().method() === 'POST' &&
+      response.ok(),
+  );
   await wideCreate.click();
+  const createdBody = (await (await created).json()) as {
+    agent: { default_model_id: string | null };
+  };
+  expect(createdBody.agent.default_model_id).toBeNull();
   await expect(page.getByTestId('save-confirmation')).toContainText(`${name} was created.`);
   await expect(page.getByLabel('Agents list').getByRole('button', { name, exact: true })).toBeVisible();
   await expect(page.getByRole('textbox', { name: `Name for ${name}`, exact: true })).toHaveValue(name);
-  await expect(page.getByRole('combobox', { name: `Provider for ${name}`, exact: true })).toHaveValue('provider_local');
-  await expect(page.getByRole('combobox', { name: `Model for ${name}`, exact: true })).toHaveValue(chosen);
+  await expect(page.getByRole('combobox', { name: `Provider for ${name}`, exact: true })).toHaveValue('');
+  await expect(page.getByRole('combobox', { name: `Model for ${name}`, exact: true })).toHaveCount(0);
   await expect(page.getByRole('combobox', { name: `Reasoning effort for ${name}`, exact: true })).toHaveValue('medium');
   await expect(page.getByRole('combobox', { name: `Preserve thinking for ${name}`, exact: true })).toHaveValue('');
   await expect(page.getByRole('combobox', { name: `Thinking for ${name}`, exact: true })).toHaveCount(0);
@@ -51,13 +71,15 @@ test('a new agent shows the same options as edit', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Channels' })).toBeVisible();
   await page.setViewportSize({ width: 1280, height: 640 });
   await page.getByRole('button', { name: 'New agent' }).click();
+  await expect(page.getByRole('combobox', { name: 'Provider', exact: true })).toHaveValue('');
+  await expect(page.getByRole('button', { name: 'Refresh models', exact: true })).toHaveCount(0);
+  await page.getByRole('combobox', { name: 'Provider', exact: true }).selectOption(LOCAL_PROVIDER_ID);
   const shortRefresh = page.getByRole('button', { name: 'Refresh models', exact: true });
   await onScreen(page.getByRole('button', { name: 'Create agent' }));
   await onScreen(shortRefresh);
   await shortRefresh.click();
   const shortRefreshed = page.getByText('Models refreshed');
   await onScreen(shortRefreshed);
-  await expect(page.getByRole('combobox', { name: 'Provider', exact: true })).toBeVisible();
   await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toBeVisible();
   await expect(page.getByRole('switch', { name: 'Heartbeat tools', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Close new agent' }).click();
@@ -66,8 +88,11 @@ test('a new agent shows the same options as edit', async ({ page }) => {
   await page.getByRole('button', { name: 'Configuration' }).click();
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByLabel('Agents list').getByRole('button', { name: 'Favlo', exact: true }).click();
+  await expect(page.getByRole('combobox', { name: 'Provider for Favlo', exact: true })).toHaveValue('');
+  await expect(page.getByRole('combobox', { name: 'Model for Favlo', exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Back to list' }).click();
   await page.getByRole('button', { name: 'New agent' }).click();
+  await page.getByRole('combobox', { name: 'Provider', exact: true }).selectOption(LOCAL_PROVIDER_ID);
   const narrowRefresh = page.getByRole('button', { name: 'Refresh models', exact: true });
   await onScreen(page.getByRole('button', { name: 'Create agent' }));
   await onScreen(narrowRefresh);

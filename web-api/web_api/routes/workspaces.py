@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
 from web_api.folder_pick import choose_directory
 from web_api.folder_port import folder_for
-from web_api.gallery_tools import image_bytes
+from web_api.gallery_metadata import write_sidecar
+from web_api.gallery_tools import image_payload
 from web_api.http import json_body, key
 from web_api.profile import document
 from web_api.runs import perform
@@ -53,7 +55,21 @@ async def create_workspace(body: WorkspaceCreate, request: Request):
     )
     for event in events:
         await request.app.state.bus.publish(event)
+    if status < 300 and body.type == "gallery" and isinstance(result, dict):
+        from web_api.gallery_embed import request_wake
+
+        request_wake(request.app, result.get("id"), vision=False)
     return json_body(status, result)
+
+
+@router.post("/folders/pick")
+async def pick_directory(request: Request):
+    """Open the native folder dialog. No workspace is required yet."""
+    del request
+    location = await asyncio.to_thread(choose_directory)
+    if location is None:
+        return json_body(200, {"cancelled": True})
+    return json_body(200, {"cancelled": False, "location": location})
 
 
 @router.get("/workspaces/{workspace_id}")
@@ -143,6 +159,10 @@ async def create_folder_row(workspace_id: str, body: FolderRecord, request: Requ
     )
     for event in events:
         await request.app.state.bus.publish(event)
+    if status < 300 and body.kind == "local":
+        from web_api.gallery_embed import request_wake
+
+        request_wake(request.app, workspace_id, vision=False)
     return json_body(status, result)
 
 
@@ -209,10 +229,18 @@ async def read_file(workspace_id: str, folder_id: str, request: Request, path: s
     return Response(content=payload, media_type=stat["media_type"])
 
 
+@router.get("/workspaces/{workspace_id}/file")
+async def read_workspace_file(workspace_id: str, request: Request, path: str):
+    folder = folder_for(request.app.state.store, workspace_id)
+    payload = await asyncio.to_thread(folder.read, path)
+    stat = await asyncio.to_thread(folder.stat, path)
+    return Response(content=payload, media_type=stat["media_type"])
+
+
 @router.post("/workspaces/{workspace_id}/folders/{folder_id}/images")
 async def write_image(workspace_id: str, folder_id: str, body: ImageWrite, request: Request):
     folder = folder_for(request.app.state.store, workspace_id, folder_id)
-    payload = image_bytes(source=body.source, data=body.data)
+    payload, meta = image_payload(source=body.source, data=body.data)
     written = await asyncio.to_thread(
         folder.write,
         body.path,
@@ -220,6 +248,11 @@ async def write_image(workspace_id: str, folder_id: str, body: ImageWrite, reque
         body.note,
         body.expected_revision,
     )
+    if meta is not None:
+        meta = dict(meta)
+        meta["filename"] = Path(written["path"]).name
+        await asyncio.to_thread(write_sidecar, folder.root, written["path"], meta)
+        written = await asyncio.to_thread(folder.stat, written["path"])
     events = await asyncio.to_thread(request.app.state.store.note_gallery, workspace_id, written)
     for event in events:
         await request.app.state.bus.publish(event)
@@ -331,16 +364,23 @@ async def send(workspace_id: str, body: MessageCreate, request: Request):
     if result.get("run_id"):
         cancel = asyncio.Event()
         request.app.state.cancels[result["run_id"]] = cancel
-        task = asyncio.create_task(
-            perform(
-                request.app.state.store,
-                bus,
-                cancel,
-                result["run_id"],
-                request.app.state.reply,
-                request.app.state.tasks,
-            )
-        )
+
+        async def _run_then_index() -> None:
+            try:
+                await perform(
+                    request.app.state.store,
+                    bus,
+                    cancel,
+                    result["run_id"],
+                    request.app.state.reply,
+                    request.app.state.tasks,
+                )
+            finally:
+                from web_api.gallery_embed import request_wake
+
+                request_wake(request.app, workspace_id, vision=False)
+
+        task = asyncio.create_task(_run_then_index())
         request.app.state.tasks.add(task)
         task.add_done_callback(request.app.state.tasks.discard)
     for run_id in result.get("cancelled_run_ids") or []:

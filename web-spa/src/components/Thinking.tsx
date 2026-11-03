@@ -1,23 +1,42 @@
 import { useState } from 'react';
-import { Text, View } from 'react-native';
+import { View } from 'react-native';
 
 import { IconButton } from '@/components/IconButton';
 import { MarkdownText } from '@/components/MarkdownText';
+import { type ExpandTrace, traceStartsOpen } from '@/components/expandTrace';
 import { useTheme } from '@/theme/Theme';
 import { space } from '@/theme/tokens';
-import { textStyle } from '@/theme/type';
 
-export function Thinking({ text, settled }: { text: string; settled: boolean }) {
+export function Thinking({
+  text,
+  settled,
+  expandTrace = 'collapsed',
+  forceOpen = false,
+}: {
+  text: string;
+  settled: boolean;
+  expandTrace?: ExpandTrace;
+  forceOpen?: boolean;
+}) {
   const { palette } = useTheme();
-  const [open, setOpen] = useState(!settled);
-  const [wasSettled, setWasSettled] = useState(settled);
-  if (settled !== wasSettled) {
-    setWasSettled(settled);
-    setOpen(!settled);
+  const wantOpen = traceStartsOpen(settled, expandTrace, forceOpen);
+  const [open, setOpen] = useState(wantOpen);
+  const [wasWant, setWasWant] = useState(wantOpen);
+  if (wantOpen !== wasWant) {
+    setWasWant(wantOpen);
+    setOpen(wantOpen);
   }
 
   return (
-    <View style={{ gap: space[1], maxWidth: '100%', minWidth: 0 }}>
+    <View
+      style={{
+        gap: space[1],
+        width: '100%',
+        maxWidth: '100%',
+        minWidth: 0,
+        alignSelf: 'stretch',
+      }}
+    >
       <IconButton
         icon={open ? 'chevron-down' : 'chevron-right'}
         label="Thinking"
@@ -26,6 +45,7 @@ export function Thinking({ text, settled }: { text: string; settled: boolean }) 
         border="transparent"
         color={palette.textSecondary}
         accessibilityState={{ expanded: open }}
+        block
       />
       {open ? (
         <View
@@ -38,7 +58,7 @@ export function Thinking({ text, settled }: { text: string; settled: boolean }) 
             minWidth: 0,
           }}
         >
-          <MarkdownText text={text} color={palette.textSecondary} fontSize={14} lineHeight={22} />
+          <MarkdownText text={text} color={palette.textSecondary} role="small" />
         </View>
       ) : null}
     </View>

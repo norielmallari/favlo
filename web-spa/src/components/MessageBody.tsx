@@ -5,6 +5,8 @@ import { Image, Platform, Text, View } from 'react-native';
 import { API_URL } from '@/api/client';
 import { MarkdownText } from '@/components/MarkdownText';
 import { useTheme } from '@/theme/Theme';
+import { type as typeScale } from '@/theme/tokens';
+import { textStyle } from '@/theme/type';
 
 const MEDIA = /favlo:\/\/(images|videos|voice|music)\/([A-Za-z0-9_-]+)\.(png|mp4|mp3|wav|flac)/g;
 const ACTION = /(?<!\*)\*([^*\n]+)\*(?!\*)/g;
@@ -310,7 +312,7 @@ function WebMedia({
     <View style={{ gap: 8, maxWidth: '100%', alignSelf: 'flex-start' }}>
       {player}
       {createElement('button', { type: 'button', onClick: () => void save(), style: actionButton(palette.surface, palette.textPrimary, palette.border) }, downloadLabel)}
-      {failed ? <Text style={{ color: palette.danger, fontSize: 14 }}>The file could not be saved.</Text> : null}
+      {failed ? <Text style={textStyle('small', palette.danger)}>The file could not be saved.</Text> : null}
     </View>
   );
 }
@@ -426,7 +428,7 @@ function MediaDialog({
           createElement('button', { type: 'button', onClick: onSave, style: actionButton(palette.accent, palette.onAccent, palette.accent) }, label),
           createElement('button', { type: 'button', onClick: onClose, style: actionButton(palette.surface, palette.textPrimary, palette.border) }, 'Close'),
         ),
-        failed ? createElement('p', { style: { margin: 0, color: palette.danger, fontSize: 14 } }, 'The file could not be saved.') : null,
+        failed ? createElement('p', { style: { margin: 0, ...textStyle('small', palette.danger) } }, 'The file could not be saved.') : null,
         createElement('div', { style: { paddingTop: 12 } }, preview),
       ),
     ),
@@ -461,8 +463,10 @@ function actionButton(background: string, color: string, border: string): CSSPro
     border: `1px solid ${border}`,
     background,
     color,
-    fontSize: 14,
-    fontWeight: 600,
+    fontSize: typeScale.size.small,
+    fontWeight: typeScale.weight.semibold,
+    lineHeight: `${typeScale.line.small}px`,
+    fontFamily: typeScale.family.ui,
     cursor: 'pointer',
   };
 }

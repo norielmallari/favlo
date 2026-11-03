@@ -2,6 +2,8 @@ import { Platform, Text, type AccessibilityState } from 'react-native';
 
 import { FeatherIcon } from '@/components/FeatherIcon';
 import { Pressable } from '@/components/Pressable';
+import { useTheme } from '@/theme/Theme';
+import { buttonPaint, type ButtonTone } from '@/theme/buttons';
 import { radius, space } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
 
@@ -15,33 +17,56 @@ export const buttonRow = {
   minWidth: 0,
 };
 
-export function IconButton({
-  icon,
-  label,
-  onPress,
-  disabled = false,
-  background,
-  border,
-  color,
-  accessibilityLabel,
-  accessibilityState,
-  testID,
-  role = 'button',
-  iconOnly = false,
-}: {
+type Common = {
   icon: string;
   label: string;
   onPress: () => void;
   disabled?: boolean;
-  background: string;
-  border?: string;
-  color: string;
   accessibilityLabel?: string;
   accessibilityState?: AccessibilityState;
   testID?: string;
   role?: 'button' | 'link';
   iconOnly?: boolean;
-}) {
+  /** Full-width row (tool calls / thinking in the transcript). */
+  block?: boolean;
+};
+
+type ToneProps = Common & {
+  tone: ButtonTone;
+  background?: undefined;
+  border?: undefined;
+  color?: undefined;
+};
+
+type PaintProps = Common & {
+  tone?: undefined;
+  background: string;
+  border?: string;
+  color: string;
+};
+
+export function IconButton(props: ToneProps | PaintProps) {
+  const { palette } = useTheme();
+  const paint =
+    props.tone != null
+      ? buttonPaint(palette, props.tone)
+      : {
+          background: props.background,
+          border: props.border ?? props.background,
+          color: props.color,
+        };
+  const {
+    icon,
+    label,
+    onPress,
+    disabled = false,
+    accessibilityLabel,
+    accessibilityState,
+    testID,
+    role = 'button',
+    iconOnly = false,
+    block = false,
+  } = props;
   const expanded = accessibilityState?.expanded;
   const webExpanded =
     Platform.OS === 'web' && expanded !== undefined ? ({ 'aria-expanded': expanded } as const) : null;
@@ -58,22 +83,25 @@ export function IconButton({
         minHeight: 44,
         minWidth: iconOnly ? 44 : 0,
         maxWidth: '100%',
-        alignSelf: 'flex-start',
+        width: block ? '100%' : undefined,
+        alignSelf: block ? 'stretch' : 'flex-start',
         flexDirection: 'row',
         flexShrink: 1,
-        flexGrow: 0,
+        flexGrow: block ? 1 : 0,
         alignItems: 'center',
         gap: space[2],
         borderRadius: radius.control,
         borderWidth: 1,
-        borderColor: border ?? background,
-        backgroundColor: background,
+        borderColor: paint.border,
+        backgroundColor: paint.background,
         paddingHorizontal: iconOnly ? 0 : space[3],
-        justifyContent: 'center',
+        justifyContent: block ? 'flex-start' : 'center',
       }}
     >
-      <FeatherIcon name={icon} size={18} color={color} />
-      {iconOnly ? null : <Text style={[textStyle('small', color, '600'), { flexShrink: 1, minWidth: 0 }]}>{label}</Text>}
+      <FeatherIcon name={icon} size={18} color={paint.color} />
+      {iconOnly ? null : (
+        <Text style={[textStyle('small', paint.color, '600'), { flexShrink: 1, minWidth: 0 }]}>{label}</Text>
+      )}
     </Pressable>
   );
 }

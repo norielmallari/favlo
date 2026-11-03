@@ -1,0 +1,58 @@
+---
+description: Favlo web-spa design tokens, text roles, and button paints. Use palette and textStyle; never hardcode colors on controls.
+globs: web-spa/**
+alwaysApply: false
+---
+
+# Favlo web-spa design system
+
+Tokens live in `web-spa/src/theme/tokens.ts` (`light` / `dark` palettes, `space`, `radius`, `type`). Read the active palette with `useTheme()`. Paint text with `textStyle(role, palette.<token>)` from `web-spa/src/theme/type.ts`. Do not omit the color argument on visible text. Do not hardcode `#…`, `rgb(…)`, or theme-relative defaults on `Text`, icons, or buttons.
+
+## Contrast
+
+Body and UI text meet WCAG AA against the surface behind them. Prefer these pairs:
+
+| Role | Token |
+|---|---|
+| Primary copy on `background` / `surface` | `palette.textPrimary` |
+| Secondary / caption | `palette.textSecondary` |
+| Links and ghost controls | `palette.accent` |
+| Errors / destructive labels | `palette.danger` |
+| Disabled label | `palette.disabledText` on `palette.disabledSurface` |
+
+Nested `Text` (markdown strong, em, code, links, and other inline roles) sets its own `color`; it does not inherit a parent RN-web style. Omitting color leaves browser defaults that fail on dark surfaces.
+
+## Buttons
+
+`IconButton` takes either `tone` or an explicit `background` + `color` paint. Prefer `tone` so pairs stay correct:
+
+| Tone | Fill | Label / icon |
+|---|---|---|
+| `accent` | `palette.accent` | `palette.onAccent` |
+| `danger` | `palette.danger` | `palette.onDanger` |
+| `surface` | `palette.surface` | `palette.textPrimary` (border `borderStrong`) |
+| `ghost` | transparent | `palette.accent` |
+| `dangerGhost` | transparent | `palette.danger` |
+
+`buttonPaint(palette, tone)` in `web-spa/src/theme/buttons.ts` is the single map. Wrong: `background={palette.danger}` with `color={palette.onAccent}` or with no color. Wrong: an `IconButton` with neither `tone` nor `background`/`color`. Disabled controls use `disabledSurface` / `disabledText`, not a muted accent.
+
+## Surfaces
+
+Page chrome uses `palette.background`. Cards, drawers, and dialogs use `palette.surface` or `palette.surfaceRaised`. Borders use `palette.border` or `palette.borderStrong`. Focus rings use `palette.focusRing` (see `Pressable`). Overlays use `palette.overlay`.
+
+## Layout (react-native-web)
+
+Do not mix the `flex` shorthand with `flexGrow`, `flexShrink`, or `flexBasis` on the same style object, and do not toggle `flex` to `undefined` across renders while those longhands stay set. RN-web warns and can leave stale CSS. Prefer longhands when any one of them varies (`flexGrow` / `flexShrink` / `flexBasis`).
+
+## Motion
+
+Keep ambient activity quiet. Prefer opacity (and tiny scale) pulses with `ease-in-out` over traveling high-contrast light on text. Cycles for “still working” feedback should land around 2–2.5s, not under ~1.5s with `linear`. Do not clip label text with a shimmer gradient that flashes to `onAccent` or white. Honor `prefers-reduced-motion: reduce` by freezing decorative loops. The Working chip uses `workingActivity` in `web-spa/src/components/working.ts`.
+
+## Checklist before finishing a SPA change
+
+- Every new `Text` passes a palette color into `textStyle`.
+- Every `IconButton` / filled control uses `tone` or a documented paint pair.
+- No new raw hex in component files (tokens only).
+- Dark and light both stay readable; if unsure, check `contrast()` in `tokens.ts` (AA ≥ 4.5 for small text).
+- No `flex` shorthand mixed with `flexGrow` / `flexShrink` / `flexBasis`.
+- New ambient loops follow Motion above and respect reduced motion.

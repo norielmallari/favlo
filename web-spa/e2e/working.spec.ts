@@ -4,7 +4,7 @@ import { deleteAgentsNamed } from './cleanup';
 import { onScreen } from './on-screen';
 import { createAgent, openAgentChat } from './open-agent-chat';
 
-test('working sweeps a light band across the word during a reply', async ({ page }) => {
+test('working pulses the activity dot during a reply', async ({ page }) => {
   const name = `Wren ${Date.now()}`;
   try {
   await page.setViewportSize({ width: 1280, height: 800 });
@@ -23,9 +23,10 @@ test('working sweeps a light band across the word during a reply', async ({ page
 
   const working = page.getByTestId('working');
   await expect(working).toBeVisible({ timeout: 180_000 });
-  await expect(working).toHaveText('Working');
-  await expect(working).toHaveCSS('animation-name', 'favlo-working-shimmer');
-  await expect(working).toHaveCSS('-webkit-background-clip', 'text');
+  await expect(working).toHaveText(/^(Working|Thinking|Tool call)/);
+  await expect(page.getByTestId('working-dot')).toHaveCSS('animation-name', 'favlo-working-pulse');
+  await expect(working).not.toHaveCSS('-webkit-background-clip', 'text');
+  await expect(page.getByRole('button', { name: /^(Working|Thinking|Tool call)/ })).toBeVisible();
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole('textbox', { name: 'Message' }).fill('Count slowly to five.');
@@ -33,7 +34,7 @@ test('working sweeps a light band across the word during a reply', async ({ page
   await onScreen(send);
   await send.click();
   await expect(working).toBeVisible({ timeout: 180_000 });
-  await onScreen(working);
+  await onScreen(page.getByRole('button', { name: /^(Working|Thinking|Tool call)/ }));
   const stop = page.getByRole('button', { name: 'Stop' });
   await onScreen(stop);
   await stop.click();

@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import shlex
+import warnings
 from typing import Any
 
 from agent_framework import MCPStdioTool, MCPStreamableHTTPTool
+from agent_framework._feature_stage import ExperimentalWarning
 from agent_framework.exceptions import ToolExecutionException
 
 from web_api.mcp_cache import catalog
@@ -18,12 +20,37 @@ from web_api.tool_names import slug
 
 _MEMORY = {"remember", "recall", "forget"}
 
+# Eager under MAF progressive disclosure. Cold media groups stay in allowed_tools.
+ALWAYS_LOAD = frozenset(
+    {
+        "generate_image",
+        "list_image_models",
+        "set_image_model",
+        "remember",
+        "recall",
+        "forget",
+        "media_status",
+        "media_cancel",
+        "read_media",
+    }
+)
+
 INSTRUCTIONS = (
-    "Enabled MCP tools are available on every turn. "
-    "remember, recall, and forget use only this agent's memories. "
+    "Enabled MCP tools use progressive disclosure. "
+    "Image generate, memory, and media_status/cancel/read_media are available immediately. "
     "Each MCP tool name starts with the server name, then the tool. "
-    "generate_image, generate_video_i2v, generate_video_t2v, generate_music, and generate_voice "
-    "use the registry default for that media type. "
+    "Before calling a video, music, or voice tool, call that server's load_tool with the "
+    "remote tool name (or a list of names). Prefer loading a whole media group together: "
+    "list, set, and generate for that kind (i2v and t2v are separate). "
+    "Do not call list_mcp_tools just to browse; it returns full schemas. "
+    "remember, recall, and forget use only this agent's memories. "
+    "Match the generate tool to what the user asked for. "
+    "generate_image is for a still (image, picture, photo, illustration, drawing). "
+    "Do not call generate_video_i2v or generate_video_t2v unless the user asked for "
+    "video, a clip, motion, animation, or to animate a still. "
+    "Do not offer or insist on video when they asked for an image. "
+    "generate_music and generate_voice only when they asked for music or spoken audio. "
+    "Those generate tools use the registry default for that media type. "
     "To change a model, call the matching list tool, then set_image_model, set_video_i2v_model, "
     "set_video_t2v_model, set_music_model, or set_voice_model, each with that server prefix. "
     "Repeat the returned session id in your reply. "
@@ -57,7 +84,7 @@ async def bundle(
         return "", []
     taken: set[str] = set()
     tools = []
-    names = []
+    eager_names: list[str] = []
     for server in servers:
         try:
             listed = await catalog.get(server)
@@ -73,21 +100,28 @@ async def bundle(
         if not allowed:
             continue
         prefix = _prefix(str(server["server_name"] or server["server_id"]), taken)
+        always = [name for name in allowed if name in ALWAYS_LOAD]
         opened = _server(
             server,
             agent_id,
             prefix,
             allowed,
+            always,
             _Turn(store, bus, pending, str(server["server_id"]), agent_id, session_id),
         )
         if opened is None:
             continue
         tools.append(opened)
-        names.extend(f"{prefix}_{name}" for name in allowed)
-    if not names:
+        eager_names.extend(f"{prefix}_{name}" for name in always)
+        eager_names.append(f"{prefix}_load_tool")
+    if not tools:
         return "", []
-    joined = ", ".join(names)
-    return f"{INSTRUCTIONS} This turn's MCP tools are: {joined}.", tools
+    joined = ", ".join(eager_names)
+    return (
+        f"{INSTRUCTIONS} This turn's eager MCP tools include: {joined}. "
+        "Load cold tools with that server's load_tool before calling them.",
+        tools,
+    )
 
 
 def overlay(server: dict[str, Any], tools: list[dict[str, Any]]) -> dict[str, Any]:
@@ -189,6 +223,74 @@ async def open_clients(tools: list[object], stack: contextlib.AsyncExitStack) ->
             await stack.enter_async_context(_Lease(client, tool))
 
 
+async def restore_loaded(tools: list[object], store: Any, session_id: str) -> None:
+    """Re-apply session-persisted progressive loads after MCP tools have connected."""
+    saved = store.loaded_mcp_tools(session_id)
+    if not saved:
+        return
+    for tool in tools:
+        turn = getattr(tool, "turn", None)
+        if turn is None:
+            continue
+        remotes = saved.get(str(turn.server_id)) or []
+        if not remotes:
+            continue
+        connect = getattr(tool, "connect", None)
+        if connect is not None:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", ExperimentalWarning)
+                await connect()
+        _apply_loaded_remotes(tool, remotes)
+
+
+def persist_loaded(tools: list[object], store: Any, session_id: str) -> None:
+    """Write progressively loaded remote names for the next turn."""
+    payload: dict[str, list[str]] = dict(store.loaded_mcp_tools(session_id))
+    for tool in tools:
+        turn = getattr(tool, "turn", None)
+        if turn is None:
+            continue
+        remotes = _loaded_remotes(tool)
+        if remotes:
+            payload[str(turn.server_id)] = sorted(remotes)
+        elif str(turn.server_id) in payload:
+            del payload[str(turn.server_id)]
+    store.save_loaded_mcp_tools(session_id, payload)
+
+
+def _apply_loaded_remotes(tool: Any, remotes: list[str]) -> None:
+    wanted = set(remotes)
+    names = getattr(tool, "_progressive_loaded_tool_names", None)
+    if not isinstance(names, set):
+        return
+    filtered = getattr(tool, "_filtered_functions", None)
+    if filtered is None:
+        return
+    for func in filtered():
+        props = getattr(func, "additional_properties", None) or {}
+        remote = props.get("_mcp_remote_name")
+        if isinstance(remote, str) and remote in wanted:
+            names.add(func.name)
+
+
+def _loaded_remotes(tool: Any) -> list[str]:
+    names = getattr(tool, "_progressive_loaded_tool_names", None)
+    if not isinstance(names, set) or not names:
+        return []
+    filtered = getattr(tool, "_filtered_functions", None)
+    if filtered is None:
+        return []
+    remotes: list[str] = []
+    for func in filtered():
+        if func.name not in names:
+            continue
+        props = getattr(func, "additional_properties", None) or {}
+        remote = props.get("_mcp_remote_name")
+        if isinstance(remote, str):
+            remotes.append(remote)
+    return remotes
+
+
 class _Turn:
     def __init__(
         self,
@@ -237,6 +339,7 @@ def _server(
     agent_id: str,
     prefix: str,
     allowed: list[str],
+    always_load: list[str],
     turn: _Turn | None = None,
 ) -> MCPStdioTool | MCPStreamableHTTPTool | None:
     client = _mcp_client(server)
@@ -247,10 +350,14 @@ def _server(
         "tool_name_prefix": prefix,
         "approval_mode": "never_require",
         "allowed_tools": allowed,
+        "always_load": always_load,
+        "use_progressive_disclosure": True,
         "load_prompts": False,
     }
     kind = _StdioServer if server.get("transport") == "stdio" else _HttpServer
-    return kind(agent_id, client, turn, **shared)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ExperimentalWarning)
+        return kind(agent_id, client, turn, **shared)
 
 
 def _arm(server: Any, agent_id: str, client: Any, turn: _Turn | None) -> None:
@@ -365,9 +472,8 @@ def _description(row: dict[str, Any], exposed: str | None = None) -> str:
         prefix = exposed[: -len(original)]
     listed, setter = pair
     note = (
-        f"The registry default is already selected. "
-        f"To use another model, call {prefix}{listed}, then {prefix}{setter}, "
-        f"repeat the returned session id in your reply, and pass it as session."
+        f"Default model selected. For another: {prefix}{listed}, "
+        f"then {prefix}{setter}; pass session."
     )
     if note in text:
         return text

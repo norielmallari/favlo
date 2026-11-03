@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,6 +18,7 @@ from web_api.bus import Bus
 from web_api.chat import stream_reply
 from web_api.heartbeat_clock import watch
 from web_api.mcp_tasks import bind_followup, resume
+from web_api import agui
 from web_api.routes import (
     agents,
     channels,
@@ -64,9 +66,16 @@ def create_app(home: Path | None = None, reply: Callable[..., Any] | None = None
                 await app.state.bus.publish(event)
         stop = asyncio.Event()
         app.state.heartbeat_stop = stop
+        app.state.gallery_index_running = {}
+        app.state.gallery_index_lock = threading.Lock()
         clock = asyncio.create_task(watch(app))
         app.state.tasks.add(clock)
         clock.add_done_callback(app.state.tasks.discard)
+        from web_api.gallery_embed import watch as watch_gallery
+
+        gallery_clock = asyncio.create_task(watch_gallery(app))
+        app.state.tasks.add(gallery_clock)
+        gallery_clock.add_done_callback(app.state.tasks.discard)
 
         async def follow(run_id: str) -> None:
             cancel = asyncio.Event()
@@ -112,6 +121,7 @@ def create_app(home: Path | None = None, reply: Callable[..., Any] | None = None
     app.include_router(media.router)
     app.include_router(workspaces.router)
     app.include_router(events.router)
+    app.include_router(agui.router)
 
     @app.get("/health")
     async def health() -> dict[str, bool]:
@@ -140,6 +150,9 @@ def create_app(home: Path | None = None, reply: Callable[..., Any] | None = None
         pending = request.app.state.cancels.get(run_id)
         if pending is not None:
             pending.set()
+        # SSE may already be gone after a client abort; still close the run row.
+        for event in request.app.state.store.finish_run(run_id, "cancelled", None):
+            await request.app.state.bus.publish(event)
         return JSONResponse(status_code=202, content={"status": "accepted", "run_id": row["id"]})
 
     @app.exception_handler(NotFound)

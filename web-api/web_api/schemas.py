@@ -15,6 +15,11 @@ class AgentCreate(BaseModel):
     enable_thinking: bool | None = None
     preserve_thinking: bool | None = None
     reasoning_effort: str | None = Field(default=None, max_length=32)
+    expand_trace: str | None = Field(
+        default=None,
+        max_length=16,
+        description="collapsed (default), running, or always",
+    )
 
 
 class AgentUpdate(BaseModel):
@@ -26,6 +31,7 @@ class AgentUpdate(BaseModel):
     enable_thinking: bool | None = None
     preserve_thinking: bool | None = None
     reasoning_effort: str | None = Field(default=None, max_length=32)
+    expand_trace: str | None = Field(default=None, max_length=16)
 
 
 class ModelChoice(BaseModel):
@@ -47,6 +53,7 @@ class ModelUpdate(BaseModel):
 class SettingsUpdate(BaseModel):
     expected_revision: int = Field(ge=1)
     default_model_id: str | None = None
+    gallery_vision_model_id: str | None = None
     exchange_budget: int = Field(ge=1)
 
 
@@ -55,6 +62,10 @@ class MessageCreate(BaseModel):
     folder: str | None = None
     image: str | None = None
     attachment: str | None = None
+
+
+class ArchiveRequest(BaseModel):
+    run_id: str = Field(min_length=1, max_length=64)
 
 
 class McpGroupUpdate(BaseModel):
@@ -108,7 +119,11 @@ class HeartbeatUpdate(BaseModel):
 class WorkspaceCreate(BaseModel):
     channel_id: str
     name: str = Field(min_length=1, max_length=80)
-    type: str = "gallery"
+    type: str = Field(default="gallery", pattern="^(gallery|coding)$")
+    location: str | None = Field(
+        default=None,
+        description="Required local folder path when type is gallery.",
+    )
 
 
 class FolderRecord(BaseModel):

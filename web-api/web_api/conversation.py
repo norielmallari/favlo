@@ -18,6 +18,7 @@ _BODY = 2000
 INSTRUCTIONS = (
     "When a question depends on an earlier message in any agent session, channel, "
     "or workspace chat, use the conversation tools before you answer. "
+    f"Call {qualified(SOURCE, 'load_tools')} once before the other conversation tools. "
     f"Call {qualified(SOURCE, 'list_conversations')} to see which conversations exist. "
     f"Call {qualified(SOURCE, 'search_messages')} with the words you are looking for. "
     f"Call {qualified(SOURCE, 'read_recent_messages')} with the conversation id and how many of the latest "
@@ -28,7 +29,23 @@ INSTRUCTIONS = (
 
 
 def tools(store: Any) -> list[object]:
-    return [_list_tool(store), _search_tool(store), _read_tool(store)]
+    cold = [_list_tool(store), _search_tool(store), _read_tool(store)]
+    return [_load_tools(cold)]
+
+
+def _load_tools(cold: list[object]) -> object:
+    from agent_framework import FunctionInvocationContext, tool
+
+    @tool(approval_mode="never_require", name=qualified(SOURCE, "load_tools"))
+    def load_tools(ctx: FunctionInvocationContext) -> str:
+        """Load conversation list/search/read tools for later calls in this run."""
+        ctx.add_tools(cold)
+        return (
+            "Loaded conversation_list_conversations, conversation_search_messages, "
+            "and conversation_read_recent_messages."
+        )
+
+    return load_tools
 
 
 def list_conversations(store: Any, kind: str, limit: int) -> str:
@@ -87,11 +104,11 @@ def _list_tool(store: Any) -> object:
     def list_conversations_tool(
         kind: Annotated[
             str,
-            Field(description="agent, channel, workspace_chat, or all."),
+            Field(description="agent|channel|workspace_chat|all."),
         ] = "all",
         limit: Annotated[
             int,
-            Field(description="How many conversations to return. At most 20."),
+            Field(description="Max 20."),
         ] = 10,
     ) -> str:
         """List agent sessions, channels, and workspace chats.
@@ -111,12 +128,12 @@ def _search_tool(store: Any) -> object:
 
     @tool(approval_mode="never_require", name=qualified(SOURCE, "search_messages"))
     def search_messages_tool(
-        query: Annotated[str, Field(description="Text to find in a message.")],
+        query: Annotated[str, Field(description="Message text.")],
         kind: Annotated[
             str,
-            Field(description="agent, channel, workspace_chat, or all."),
+            Field(description="agent|channel|workspace_chat|all."),
         ] = "all",
-        limit: Annotated[int, Field(description="How many matches to return. At most 20.")] = 10,
+        limit: Annotated[int, Field(description="Max 20.")] = 10,
     ) -> str:
         """Search message text in every agent session, channel, and workspace chat.
 
@@ -135,10 +152,10 @@ def _read_tool(store: Any) -> object:
 
     @tool(approval_mode="never_require", name=qualified(SOURCE, "read_recent_messages"))
     def read_recent_messages_tool(
-        conversation: Annotated[str, Field(description="A conversation id or its exact name.")],
+        conversation: Annotated[str, Field(description="Conversation id or exact name.")],
         limit: Annotated[
             int,
-            Field(description="How many of the latest messages to read. At most 50."),
+            Field(description="Latest messages; max 50."),
         ] = 20,
     ) -> str:
         """Read the latest messages in one agent session, channel, or workspace chat.

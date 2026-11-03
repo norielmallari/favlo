@@ -5,32 +5,33 @@ import remarkGfm from 'remark-gfm';
 
 import { useTheme } from '@/theme/Theme';
 import { type as typeScale } from '@/theme/tokens';
-import { monoStyle, textStyle } from '@/theme/type';
+import { monoStyle, textStyle, type TypeRole } from '@/theme/type';
 
-type Props = { text: string; color: string; fontSize?: number; lineHeight?: number };
+type Props = { text: string; color: string; role?: TypeRole };
 
-export function MarkdownText({ text, color, fontSize = 16, lineHeight = 24 }: Props) {
+export function MarkdownText({ text, color, role = 'body' }: Props) {
   const { palette } = useTheme();
-  const block = bodyStyle(color, fontSize, lineHeight);
+  const block = bodyStyle(color, role);
   const cell = cellStyle(palette.borderStrong);
+  // Nested Text on RN-web does not inherit color; every role paints it.
   const components: Components = {
     p: ({ children }) => <Text style={block}>{children}</Text>,
-    strong: ({ children }) => <Text style={strong}>{children}</Text>,
-    em: ({ children }) => <Text style={emphasis}>{children}</Text>,
-    del: ({ children }) => <Text style={strike}>{children}</Text>,
-    a: ({ href, children }) => <Link href={href} color={palette.accent}>{children}</Link>,
+    strong: ({ children }) => <Text style={{ ...block, fontWeight: typeScale.weight.bold }}>{children}</Text>,
+    em: ({ children }) => <Text style={{ ...block, fontStyle: 'italic' }}>{children}</Text>,
+    del: ({ children }) => <Text style={{ ...block, textDecorationLine: 'line-through' }}>{children}</Text>,
+    a: ({ href, children }) => <Link href={href} color={palette.accent} fallback={color}>{children}</Link>,
     img: ({ alt }) => (alt ? <Text style={block}>{alt}</Text> : null),
-    h1: ({ children }) => <Text style={headingStyle(block, typeScale.size.title)}>{children}</Text>,
-    h2: ({ children }) => <Text style={headingStyle(block, typeScale.size.label)}>{children}</Text>,
-    h3: ({ children }) => <Text style={headingStyle(block, typeScale.size.label)}>{children}</Text>,
-    h4: ({ children }) => <Text style={headingStyle(block, typeScale.size.body)}>{children}</Text>,
-    h5: ({ children }) => <Text style={headingStyle(block, typeScale.size.body)}>{children}</Text>,
-    h6: ({ children }) => <Text style={headingStyle(block, typeScale.size.body)}>{children}</Text>,
+    h1: ({ children }) => <Text style={headingStyle(color, 'title')}>{children}</Text>,
+    h2: ({ children }) => <Text style={headingStyle(color, 'label')}>{children}</Text>,
+    h3: ({ children }) => <Text style={headingStyle(color, 'label')}>{children}</Text>,
+    h4: ({ children }) => <Text style={headingStyle(color, 'body')}>{children}</Text>,
+    h5: ({ children }) => <Text style={headingStyle(color, 'body')}>{children}</Text>,
+    h6: ({ children }) => <Text style={headingStyle(color, 'body')}>{children}</Text>,
     ul: ({ children }) => <View style={list}>{children}</View>,
     ol: ({ children }) => <View style={list}>{children}</View>,
     li: ({ children }) => (
       <View style={item}>
-        <Text style={markerStyle(color, fontSize, lineHeight)}>•</Text>
+        <Text style={markerStyle(color, role)}>•</Text>
         <View style={itemBody}>{children}</View>
       </View>
     ),
@@ -40,7 +41,7 @@ export function MarkdownText({ text, color, fontSize = 16, lineHeight = 24 }: Pr
     pre: ({ children }) => (
       <View style={{ padding: 12, borderRadius: 8, backgroundColor: palette.surfaceHover, maxWidth: '100%' }}>{children}</View>
     ),
-    code: ({ children }) => <Text style={codeStyle(block)}>{children}</Text>,
+    code: ({ children }) => <Text style={codeStyle(color, role)}>{children}</Text>,
     table: ({ children }) => (
       <ScrollView horizontal testID="markdown-table" style={tableScroll}>
         <View role="table" style={table}>{children}</View>
@@ -51,7 +52,7 @@ export function MarkdownText({ text, color, fontSize = 16, lineHeight = 24 }: Pr
     tr: ({ children }) => <View role="row" style={row}>{children}</View>,
     th: ({ children, style }) => (
       <View role="columnheader" style={[cell, headerCell(palette.surfaceHover), { alignItems: alignItems(style) }]}>
-        <Text style={[block, strong]}>{children}</Text>
+        <Text style={{ ...block, fontWeight: typeScale.weight.bold }}>{children}</Text>
       </View>
     ),
     td: ({ children, style }) => (
@@ -60,7 +61,7 @@ export function MarkdownText({ text, color, fontSize = 16, lineHeight = 24 }: Pr
       </View>
     ),
     hr: () => <View style={{ height: 1, backgroundColor: palette.border, maxWidth: '100%' }} />,
-    br: () => <Text style={hardBreak}>{'\n'}</Text>,
+    br: () => <Text style={{ ...hardBreak, color }}>{'\n'}</Text>,
     input: () => null,
   };
   return (
@@ -72,9 +73,19 @@ export function MarkdownText({ text, color, fontSize = 16, lineHeight = 24 }: Pr
   );
 }
 
-function Link({ href, color, children }: { href?: string; color: string; children?: ReactNode }) {
+function Link({
+  href,
+  color,
+  fallback,
+  children,
+}: {
+  href?: string;
+  color: string;
+  fallback: string;
+  children?: ReactNode;
+}) {
   if (!href || (!href.startsWith('https://') && !href.startsWith('http://') && !href.startsWith('mailto:'))) {
-    return <Text>{children}</Text>;
+    return <Text style={{ color: fallback }}>{children}</Text>;
   }
   return (
     <Text
@@ -91,20 +102,20 @@ function Link({ href, color, children }: { href?: string; color: string; childre
   );
 }
 
-function bodyStyle(color: string, fontSize: number, lineHeight: number): TextStyle {
-  return { ...textStyle('body', color), fontSize, lineHeight, maxWidth: '100%', whiteSpace: 'normal' };
+function bodyStyle(color: string, role: TypeRole): TextStyle {
+  return { ...textStyle(role, color), maxWidth: '100%', whiteSpace: 'normal' };
 }
 
-function markerStyle(color: string, fontSize: number, lineHeight: number): TextStyle {
-  return { ...textStyle('body', color), fontSize, lineHeight, flexGrow: 0, flexShrink: 0 };
+function markerStyle(color: string, role: TypeRole): TextStyle {
+  return { ...textStyle(role, color), flexGrow: 0, flexShrink: 0 };
 }
 
-function headingStyle(block: TextStyle, fontSize: number): TextStyle {
-  return { ...block, fontSize, fontWeight: '600' };
+function headingStyle(color: string, role: TypeRole): TextStyle {
+  return { ...textStyle(role, color, typeScale.weight.semibold), maxWidth: '100%', whiteSpace: 'normal' };
 }
 
-function codeStyle(block: TextStyle): TextStyle {
-  return { ...block, ...monoStyle(), whiteSpace: 'pre-wrap' };
+function codeStyle(color: string, role: TypeRole): TextStyle {
+  return { ...textStyle(role, color), ...monoStyle(color), color, whiteSpace: 'pre-wrap' };
 }
 
 function cellStyle(border: string): ViewStyle {
@@ -187,9 +198,6 @@ function clean(node: HastNode, tag: string) {
   node.children = next;
 }
 
-const strong: TextStyle = { fontWeight: '700' };
-const emphasis: TextStyle = { fontStyle: 'italic' };
-const strike: TextStyle = { textDecorationLine: 'line-through' };
 const list: ViewStyle = { gap: 4, maxWidth: '100%' };
 const item: ViewStyle = { flexDirection: 'row', alignItems: 'flex-start', gap: 8, maxWidth: '100%' };
 const itemBody: ViewStyle = { flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 0 };

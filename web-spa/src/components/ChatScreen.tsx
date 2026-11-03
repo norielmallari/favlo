@@ -1,5 +1,5 @@
 import { useFocusEffect, useRouter } from 'expo-router';
-import { createElement, useCallback, useEffect, useRef, useState, type ComponentRef } from 'react';
+import { useCallback, useEffect, useRef, useState, type ComponentRef } from 'react';
 import {
   Platform,
   ScrollView,
@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 
 import { api, idempotencyKey, socketUrl } from '@/api/client';
+import { FAVLO_AGENT_ID } from '@/api/seed-ids';
 import { spokenError } from '@/reply-error';
 import {
   chatMessage,
@@ -20,40 +21,45 @@ import {
   sessionCommand,
   LATEST_SLACK,
   LiveReply,
-  noteReasoning,
-  noteReply,
-  noteTool,
   readDraft,
   replyVisible,
   showsMessage,
-  toolCallDelta,
   transcriptFrame,
   TranscriptTurn,
   writeDraft,
   type ChatMessage,
   type ReplyStep,
-  type SentMessage,
 } from '@/components/chat-transcript';
+import { useAguiChat } from '@/components/use-agui-chat';
 import { Composer } from '@/components/Composer';
 import { ReplyAlert } from '@/components/ReplyAlert';
 import { Confirmation } from '@/components/Confirmation';
 import { EmptyState } from '@/components/EmptyState';
 import { Frame } from '@/components/Frame';
 import { buttonRow, IconButton } from '@/components/IconButton';
-import { GalleryWorkspace } from '@/components/GalleryWorkspace';
+import { CodingWorkspace } from '@/components/CodingWorkspace';
+import { WorkspaceScreen } from '@/workspace/WorkspaceScreen';
 import { MenuRow } from '@/components/MenuRow';
 import { Modal } from '@/components/Modal';
 import { focusRingInset, Pressable } from '@/components/Pressable';
-import { AgentForm, type Provider, type Settings, type ToolGroup } from '@/components/SettingsScreen';
+import { AgentForm, type Provider, type ToolGroup } from '@/components/SettingsScreen';
 import { Workspaces, type Workspace } from '@/components/Workspaces';
-import { workingShimmer } from '@/components/working';
+import { readExpandTrace, workingLabel } from '@/components/expandTrace';
+import { WorkingStatus } from '@/components/WorkingStatus';
 import { useTheme } from '@/theme/Theme';
+import { Picker } from '@react-native-picker/picker';
 import { radius, space, z } from '@/theme/tokens';
 import { measureStyle, textStyle } from '@/theme/type';
 
 export { clearedTranscript, keepLatest, showsMessage };
 
-type Channel = { id: string; name: string; agent_id: string; session_id: string };
+type Channel = {
+  id: string;
+  name: string;
+  agent_id: string;
+  session_id: string;
+  expand_trace?: string | null;
+};
 type Snapshot = {
   messages: { id: string; role: string; body: string; reasoning?: string | null; tool_calls?: unknown; trace?: unknown }[];
   runs: { id: string; status: string; error: string | null }[];
@@ -73,6 +79,10 @@ type AgentEvent = {
     tool_calls?: unknown;
     message?: string;
     status?: string;
+    tool_calls?: unknown;
+    trace?: unknown;
+    session_id?: string;
+    previous_session_id?: string;
     agui?: { type?: string; delta?: string; id?: string; name?: string; arguments?: string; result?: string };
   };
 };
@@ -96,24 +106,33 @@ export function ChatScreen() {
   const [draft, setDraft] = useState('');
   const [steps, setSteps] = useState<ReplyStep[]>([]);
   const [working, setWorking] = useState(false);
-  const [runId, setRunId] = useState<string | null>(null);
+  const [traceForcedOpen, setTraceForcedOpen] = useState(false);
+  useEffect(() => {
+    if (!working) {
+      setTraceForcedOpen(false);
+    }
+  }, [working]);
+  const [, setRunId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const [drawer, setDrawer] = useState<'channels' | null>(null);
-  const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [workspaceOpen, setWorkspaceOpen] = useState(() => readOpenWorkspace() != null);
   const [creating, setCreating] = useState(false);
   const [welcomeAgentId, setWelcomeAgentId] = useState<string | null>(null);
   const [createToken, setCreateToken] = useState(0);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [groups, setGroups] = useState<ToolGroup[]>([]);
-  const [settings, setSettings] = useState<Settings | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [selectedWorkspace, setSelectedWorkspace] = useState<string | null>(null);
+  const [selectedWorkspace, setSelectedWorkspace] = useState<string | null>(() => readOpenWorkspace());
   const [expanded, setExpanded] = useState<string | null>(null);
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [workspaceName, setWorkspaceName] = useState('');
+  const [workspaceType, setWorkspaceType] = useState<'gallery' | 'coding'>('gallery');
+  const [workspaceTypeFocused, setWorkspaceTypeFocused] = useState(false);
+  const [workspaceLocation, setWorkspaceLocation] = useState('');
+  const [workspacePickBusy, setWorkspacePickBusy] = useState(false);
 
   function replaceModels(id: string, models: Provider['models']) {
     setProviders((rows) => rows.map((item) => (item.id === id ? { ...item, models } : item)));
@@ -122,6 +141,36 @@ export function ChatScreen() {
   const channel = channels.find((item) => item.id === selected) ?? null;
   const workspace = workspaces.find((item) => item.id === selectedWorkspace) ?? null;
 
+  const chat = useAguiChat({
+    threadId: channel?.session_id ?? null,
+    onMessages: setMessages,
+    onSteps: setSteps,
+    onWorking: setWorking,
+    onRunId: setRunId,
+    onError: setError,
+    onStatus: setStatus,
+    onSessionId: (sessionId) => {
+      if (channel == null) {
+        return;
+      }
+      setChannels((rows) =>
+        rows.map((item) => (item.id === channel.id ? { ...item, session_id: sessionId } : item)),
+      );
+    },
+    hydrate: async () => {
+      if (channel == null) {
+        return { messages: [] };
+      }
+      const snap = await api<Snapshot & { state?: Record<string, unknown> }>(
+        `/sessions/${channel.session_id}`,
+      );
+      return {
+        messages: snap.messages.map((item) => chatMessage(item)),
+        state: snap.state,
+      };
+    },
+  });
+
   const loadChannels = useCallback(async () => {
     const body = await api<{ channels: Channel[] }>('/channels');
     setChannels(body.channels);
@@ -129,7 +178,7 @@ export function ChatScreen() {
       if (current != null && body.channels.some((item) => item.id === current)) {
         return current;
       }
-      const favlo = body.channels.find((item) => item.agent_id === 'agent_favlo');
+      const favlo = body.channels.find((item) => item.agent_id === FAVLO_AGENT_ID);
       return favlo?.id ?? body.channels[0]?.id ?? null;
     });
   }, []);
@@ -139,9 +188,18 @@ export function ChatScreen() {
       `/workspaces?channel_id=${encodeURIComponent(channelId)}`,
     );
     setWorkspaces(body.workspaces ?? []);
-    setSelectedWorkspace((current) =>
-      current != null && (body.workspaces ?? []).some((item) => item.id === current) ? current : null,
-    );
+    setSelectedWorkspace((current) => {
+      const next =
+        current != null && (body.workspaces ?? []).some((item) => item.id === current) ? current : null;
+      if (next == null) {
+        writeOpenWorkspace(null);
+        setWorkspaceOpen(false);
+      } else {
+        writeOpenWorkspace(next);
+        setWorkspaceOpen(true);
+      }
+      return next;
+    });
   }, []);
 
   useEffect(() => {
@@ -155,21 +213,18 @@ export function ChatScreen() {
       void Promise.all([
         api<{ providers: Provider[] }>('/providers'),
         api<{ groups: ToolGroup[] }>('/tool-groups'),
-        api<Settings>('/settings'),
       ])
-        .then(([listedProviders, listedGroups, nextSettings]) => {
+        .then(([listedProviders, listedGroups]) => {
           if (!active) {
             return;
           }
           setProviders(listedProviders.providers);
           setGroups(listedGroups.groups);
-          setSettings(nextSettings);
         })
         .catch(() => {
           if (active) {
             setProviders([]);
             setGroups([]);
-            setSettings(null);
           }
         });
       return () => {
@@ -312,7 +367,9 @@ export function ChatScreen() {
       if (event.type === 'workspace.deleted' && event.payload && 'id' in (event.payload as object)) {
         const deleted = (event.payload as { id?: string }).id;
         if (deleted != null && deleted === selectedWorkspace) {
+          writeOpenWorkspace(null);
           setSelectedWorkspace(null);
+          setWorkspaceOpen(false);
         }
       }
       return;
@@ -370,34 +427,13 @@ export function ChatScreen() {
       setStatus(null);
       setRunId(event.run_id ?? null);
     }
-    if (
-      event.type === 'run.delta' &&
-      event.run_id != null &&
-      event.run_id === openRun.current &&
-      event.payload?.agui?.type === 'TEXT_MESSAGE_CONTENT'
-    ) {
-      setSteps((current) => noteReply(current, event.payload?.agui?.delta ?? ''));
-    }
-    if (
-      event.type === 'run.delta' &&
-      event.run_id != null &&
-      event.run_id === openRun.current &&
-      event.payload?.agui?.type === 'REASONING_MESSAGE_CONTENT'
-    ) {
-      setSteps((current) => noteReasoning(current, event.payload?.agui?.delta ?? ''));
-    }
-    if (
-      event.type === 'run.delta' &&
-      event.run_id != null &&
-      event.run_id === openRun.current &&
-      event.payload?.agui?.type === 'TOOL_CALL'
-    ) {
-      const call = toolCallDelta(event.payload.agui);
-      if (call) {
-        setSteps((current) => noteTool(current, call));
-      }
+    if (event.type === 'run.delta') {
+      return;
     }
     if (event.type === 'run.failed' || event.type === 'run.cancelled') {
+      if (event.run_id != null && event.run_id === openRun.current) {
+        return;
+      }
       openRun.current = null;
       setWorking(false);
       setSteps([]);
@@ -414,41 +450,6 @@ export function ChatScreen() {
     }
   }
 
-  async function postMessage(text: string) {
-    if (channel == null || text.trim() === '') {
-      return;
-    }
-    const result = await api<SentMessage>(`/sessions/${channel.session_id}/messages`, {
-      method: 'POST',
-      headers: { 'Idempotency-Key': idempotencyKey() },
-      body: JSON.stringify({ text }),
-    });
-    if (result.cleared) {
-      openRun.current = null;
-      setMessages([]);
-      setSteps([]);
-      setWorking(false);
-      setRunId(null);
-      setError(null);
-      setStatus(null);
-      return;
-    }
-    if (result.message_id) {
-      setMessages((current) =>
-        current.some((item) => item.id === result.message_id)
-          ? current
-          : [...current, { id: result.message_id, role: 'user', body: result.text ?? text }],
-      );
-    }
-    if (result.run_id) {
-      openRun.current = result.run_id;
-      setWorking(true);
-      setRunId(result.run_id);
-      setError(null);
-      setStatus(null);
-    }
-  }
-
   async function send() {
     const command = sessionCommand(draft);
     if (channel == null || draft.trim() === '' || (working && command !== 'clear')) {
@@ -457,7 +458,16 @@ export function ChatScreen() {
     const text = draft;
     updateDraft('');
     try {
-      await postMessage(text);
+      if (command === 'clear') {
+        await chat.clear();
+        return;
+      }
+      if (command === 'archive') {
+        await chat.archive();
+        return;
+      }
+      openRun.current = null;
+      await chat.send(text);
     } catch (caught) {
       updateDraft(text);
       setNotice(caught instanceof Error ? caught.message : 'The message was not sent.');
@@ -470,9 +480,36 @@ export function ChatScreen() {
       return;
     }
     try {
-      await postMessage(last.body);
+      openRun.current = null;
+      await chat.send(last.body);
     } catch (caught) {
       setNotice(caught instanceof Error ? caught.message : 'The message was not sent.');
+    }
+  }
+
+  function resetWorkspaceForm() {
+    setWorkspaceName('');
+    setWorkspaceType('gallery');
+    setWorkspaceLocation('');
+    setWorkspacePickBusy(false);
+  }
+
+  async function pickWorkspaceFolder() {
+    setWorkspacePickBusy(true);
+    setNotice(null);
+    try {
+      const picked = await api<{ cancelled?: boolean; location?: string }>('/folders/pick', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': idempotencyKey() },
+        body: '{}',
+      });
+      if (!picked.cancelled && picked.location) {
+        setWorkspaceLocation(picked.location);
+      }
+    } catch (caught) {
+      setNotice(caught instanceof Error ? caught.message : 'The folder was not chosen.');
+    } finally {
+      setWorkspacePickBusy(false);
     }
   }
 
@@ -480,15 +517,24 @@ export function ChatScreen() {
     if (channel == null || workspaceName.trim() === '') {
       return;
     }
+    if (workspaceType === 'gallery' && workspaceLocation.trim() === '') {
+      return;
+    }
     try {
       const created = await api<Workspace>('/workspaces', {
         method: 'POST',
         headers: { 'Idempotency-Key': idempotencyKey() },
-        body: JSON.stringify({ channel_id: channel.id, name: workspaceName.trim(), type: 'gallery' }),
+        body: JSON.stringify({
+          channel_id: channel.id,
+          name: workspaceName.trim(),
+          type: workspaceType,
+          ...(workspaceType === 'gallery' ? { location: workspaceLocation.trim() } : {}),
+        }),
       });
       setCreatingWorkspace(false);
-      setWorkspaceName('');
+      resetWorkspaceForm();
       setWorkspaces((current) => [...current, created]);
+      writeOpenWorkspace(created.id);
       setSelectedWorkspace(created.id);
       setWorkspaceOpen(true);
     } catch (caught) {
@@ -496,12 +542,15 @@ export function ChatScreen() {
     }
   }
 
+  function closeWorkspace() {
+    writeOpenWorkspace(null);
+    setWorkspaceOpen(false);
+    setSelectedWorkspace(null);
+  }
+
   async function stop() {
-    if (runId == null) {
-      return;
-    }
     try {
-      await api(`/runs/${runId}/cancel`, { method: 'POST' });
+      await chat.stop();
     } catch (caught) {
       setNotice(caught instanceof Error ? caught.message : 'The reply did not stop.');
     }
@@ -510,6 +559,7 @@ export function ChatScreen() {
   const hasReply = messages.some((item) => item.role === 'assistant') || replyVisible(steps);
   const conversation = hasReply || working;
   const greeting = !conversation && channel != null && channel.agent_id === welcomeAgentId;
+  const expandTrace = readExpandTrace(channel?.expand_trace);
   const transcript = (
     <>
       {messages.map((item) => (
@@ -521,14 +571,23 @@ export function ChatScreen() {
           reasoning={item.reasoning}
           toolCalls={item.toolCalls}
           trace={item.trace}
+          expandTrace={expandTrace}
         />
       ))}
-      <LiveReply steps={steps} speaker={channel?.name ?? 'Agent'} measured />
+      <LiveReply
+        steps={steps}
+        speaker={channel?.name ?? 'Agent'}
+        measured
+        expandTrace={expandTrace}
+        forceOpen={traceForcedOpen}
+      />
     </>
   );
 
   return (
     <Frame
+      brand={!workspaceOpen}
+      title={workspaceOpen && workspace != null ? workspace.name : 'Favlo'}
       onSkip={() => {
         if (Platform.OS === 'web') {
           document.querySelector<HTMLElement>('[aria-label="Message"]')?.focus();
@@ -536,7 +595,7 @@ export function ChatScreen() {
       }}
       link={{ label: 'Configuration', onPress: () => router.push('/settings') }}
     >
-      <View style={{ flex: 1, minWidth: 0, maxWidth: '100%' }}>
+      <View style={{ flex: 1, minWidth: 0, minHeight: 0, maxWidth: '100%' }}>
         {!wide && !workspaceOpen ? (
           <View style={[buttonRow, { padding: space[2] }]}>
             <IconButton icon="menu" label="Channels" onPress={() => setDrawer('channels')} background={palette.surface} border={palette.borderStrong} color={palette.textPrimary} />
@@ -582,12 +641,14 @@ export function ChatScreen() {
                       homeSelected={item.id === selected && !workspaceOpen}
                       onHome={() => {
                         setSelected(item.id);
+                        writeOpenWorkspace(null);
                         setSelectedWorkspace(null);
                         setWorkspaceOpen(false);
                         setDrawer(null);
                       }}
                       onSelect={(id) => {
                         setSelected(item.id);
+                        writeOpenWorkspace(id);
                         setSelectedWorkspace(id);
                         setWorkspaceOpen(true);
                         setDrawer(null);
@@ -610,14 +671,21 @@ export function ChatScreen() {
           )}
           {workspaceOpen && workspace != null ? (
             <View style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
-              <GalleryWorkspace
-                workspaceId={workspace.id}
-                agentName={channel?.name ?? 'Agent'}
-                onBack={() => {
-                  setWorkspaceOpen(false);
-                  setSelectedWorkspace(null);
-                }}
-              />
+              {workspace.type === 'coding' ? (
+                <CodingWorkspace
+                  workspaceId={workspace.id}
+                  agentName={channel?.name ?? 'Agent'}
+                  onBack={closeWorkspace}
+                  onDeleted={closeWorkspace}
+                />
+              ) : (
+                <WorkspaceScreen
+                  workspaceId={workspace.id}
+                  agentName={channel?.name ?? 'Agent'}
+                  onBack={closeWorkspace}
+                  onDeleted={closeWorkspace}
+                />
+              )}
             </View>
           ) : (
           <View accessibilityLabel="Conversation" style={{ flex: 1, minWidth: 0, minHeight: 0, maxWidth: '100%', padding: space[4], overflow: 'hidden' }}>
@@ -657,18 +725,11 @@ export function ChatScreen() {
               </View>
             )}
             {working ? (
-              <>
-                {Platform.OS === 'web'
-                  ? createElement('style', { 'data-testid': 'working-shimmer' }, workingShimmer(palette.textSecondary))
-                  : null}
-                <Text
-                  testID="working"
-                  accessibilityLiveRegion="polite"
-                  style={textStyle('small', palette.textSecondary)}
-                >
-                  Working
-                </Text>
-              </>
+              <WorkingStatus
+                label={workingLabel(steps)}
+                expanded={traceForcedOpen}
+                onPress={() => setTraceForcedOpen((value) => !value)}
+              />
             ) : null}
             {status ? (
               <Text
@@ -702,8 +763,16 @@ export function ChatScreen() {
           )}
         </View>
         {creatingWorkspace ? (
-          <Modal label="New workspace" closeLabel="Close new workspace" onClose={() => setCreatingWorkspace(false)}>
+          <Modal
+            label="New workspace"
+            closeLabel="Close new workspace"
+            onClose={() => {
+              setCreatingWorkspace(false);
+              resetWorkspaceForm();
+            }}
+          >
             <View style={{ gap: space[3] }}>
+              <Text style={textStyle('label', palette.textPrimary)}>Name</Text>
               <TextInput
                 accessibilityLabel="Workspace name"
                 value={workspaceName}
@@ -718,13 +787,86 @@ export function ChatScreen() {
                   backgroundColor: palette.surface,
                 }}
               />
+              <Text style={textStyle('label', palette.textPrimary)}>Type</Text>
+              <Picker
+                accessibilityLabel="Workspace type"
+                selectedValue={workspaceType}
+                onValueChange={(value) => {
+                  const next = String(value) as 'gallery' | 'coding';
+                  setWorkspaceType(next);
+                  if (next === 'coding') {
+                    setWorkspaceLocation('');
+                  }
+                }}
+                onFocus={() => setWorkspaceTypeFocused(true)}
+                onBlur={() => setWorkspaceTypeFocused(false)}
+                style={{
+                  ...textStyle('body', palette.textPrimary),
+                  width: '100%',
+                  maxWidth: '100%',
+                  minWidth: 0,
+                  minHeight: 44,
+                  borderWidth: 1,
+                  borderColor: workspaceTypeFocused ? palette.focusRing : palette.borderStrong,
+                  borderRadius: radius.control,
+                  paddingHorizontal: 12,
+                  backgroundColor: palette.surface,
+                }}
+              >
+                <Picker.Item label="Gallery" value="gallery" color={palette.textPrimary} />
+                <Picker.Item label="Coding" value="coding" color={palette.textPrimary} />
+              </Picker>
+              {workspaceType === 'gallery' ? (
+                <View style={{ gap: space[2] }}>
+                  <Text style={textStyle('label', palette.textPrimary)}>Local folder</Text>
+                  <Text style={textStyle('small', palette.textSecondary)}>
+                    Favlo indexes images, mp3, and mp4 in that folder for the gallery filmstrip.
+                  </Text>
+                  <IconButton
+                    icon="folder"
+                    label="Choose folder"
+                    disabled={workspacePickBusy}
+                    onPress={() => void pickWorkspaceFolder()}
+                    tone="accent"
+                  />
+                  <TextInput
+                    accessibilityLabel="Folder location"
+                    value={workspaceLocation}
+                    onChangeText={setWorkspaceLocation}
+                    placeholder="Folder location"
+                    placeholderTextColor={palette.textSecondary}
+                    style={{
+                      ...textStyle('body', palette.textPrimary),
+                      minHeight: 44,
+                      borderWidth: 1,
+                      borderColor: palette.borderStrong,
+                      borderRadius: radius.control,
+                      paddingHorizontal: 12,
+                      backgroundColor: palette.surface,
+                    }}
+                  />
+                </View>
+              ) : null}
               <IconButton
                 icon="plus"
                 label="Create workspace"
-                disabled={workspaceName.trim() === ''}
+                disabled={
+                  workspaceName.trim() === '' ||
+                  (workspaceType === 'gallery' && workspaceLocation.trim() === '')
+                }
                 onPress={() => void createWorkspace()}
-                background={workspaceName.trim() === '' ? palette.disabledSurface : palette.accent}
-                color={workspaceName.trim() === '' ? palette.disabledText : palette.onAccent}
+                background={
+                  workspaceName.trim() === '' ||
+                  (workspaceType === 'gallery' && workspaceLocation.trim() === '')
+                    ? palette.disabledSurface
+                    : palette.accent
+                }
+                color={
+                  workspaceName.trim() === '' ||
+                  (workspaceType === 'gallery' && workspaceLocation.trim() === '')
+                    ? palette.disabledText
+                    : palette.onAccent
+                }
               />
             </View>
           </Modal>
@@ -736,7 +878,6 @@ export function ChatScreen() {
               agent={null}
               groups={groups}
               providers={providers}
-              settings={settings}
               onModels={replaceModels}
               onSuccess={setSaved}
               onSaved={(agent) => {
@@ -754,6 +895,25 @@ export function ChatScreen() {
 }
 
 const menuRows = { gap: focusRingInset * 2, padding: focusRingInset };
+const OPEN_WORKSPACE_KEY = 'favlo.openWorkspace';
+
+function readOpenWorkspace(): string | null {
+  if (Platform.OS !== 'web' || typeof sessionStorage === 'undefined') {
+    return null;
+  }
+  return sessionStorage.getItem(OPEN_WORKSPACE_KEY);
+}
+
+function writeOpenWorkspace(id: string | null) {
+  if (Platform.OS !== 'web' || typeof sessionStorage === 'undefined') {
+    return;
+  }
+  if (id == null) {
+    sessionStorage.removeItem(OPEN_WORKSPACE_KEY);
+    return;
+  }
+  sessionStorage.setItem(OPEN_WORKSPACE_KEY, id);
+}
 
 function barButton(background: string, border: string) {
   return {

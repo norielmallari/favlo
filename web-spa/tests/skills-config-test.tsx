@@ -3,13 +3,14 @@ import { Dimensions } from 'react-native';
 
 import { SettingsScreen } from '@/components/SettingsScreen';
 import { ThemeProvider } from '@/theme/Theme';
+import { FAVLO_AGENT_ID } from '@/api/seed-ids';
 
 jest.mock('expo-router', () => ({
   useRouter: () => ({ push: jest.fn() }),
 }));
 
 const agent = {
-  id: 'agent_favlo',
+  id: FAVLO_AGENT_ID,
   name: 'Favlo',
   persona: '',
   default_model_id: null,
