@@ -44,6 +44,8 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen35-4b/research/int8-prefill.md](qwen35-4b/research/int8-prefill.md) | Qwen3.5-4B int8 prefill recorded rates |
 | [qwen35-4b/research/kernel-ceilings.md](qwen35-4b/research/kernel-ceilings.md) | Qwen3.5-4B isolated dispatch sum |
 | [qwen35-4b/research/recorded-forward.md](qwen35-4b/research/recorded-forward.md) | Qwen3.5-4B recorded prefill and decode runs |
+| [qwen35-4b/research/needle-page.md](qwen35-4b/research/needle-page.md) | Qwen3.5-4B page needle on fp8 keys and values |
+| [qwen35-4b/research/coding-agent.md](qwen35-4b/research/coding-agent.md) | Qwen3.5-4B vision coding agent on fp8 keys and values |
 | [spark-x26-1-7b/README.md](spark-x26-1-7b/README.md) | Parked Spark-X2.6-1.7B pipeline |
 | [spark-x26-1-7b/references.md](spark-x26-1-7b/references.md) | Papers and specifications for the Spark pipeline |
 | [spark-x26-1-7b/ceilings.md](spark-x26-1-7b/ceilings.md) | Spark-X2.6-1.7B kernel ceilings |

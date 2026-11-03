@@ -247,7 +247,6 @@ def _check_kv_half(session: Session) -> None:
     v_buf = session.upload(np.ascontiguousarray(value).tobytes())
     k_data = session.allocate(rows * kv * dim * 2, zero=True)
     v_data = session.allocate(rows * kv * dim * 2, zero=True)
-    scores = session.allocate(rows * heads * rows * 4, zero=True)
     out = session.allocate(rows * heads * dim * 4, zero=True)
     for plane in (0, 1):
         session.launch(
@@ -259,10 +258,10 @@ def _check_kv_half(session: Session) -> None:
         )
     session.launch(
         "attend_prefill_half",
-        [q_buf, k_data, v_data, scores, out],
-        [u32(0), u32(rows), u32(rows), u32(heads), u32(kv), u32(group), f32(scale)],
-        (heads, rows, 1),
-        (dim, 1, 1),
+        [q_buf, k_data, v_data, out],
+        [u32(0), u32(rows), u32(heads), u32(kv), u32(group), f32(scale)],
+        ((rows + 1) // 2, heads, 1),
+        (32, 1, 1),
     )
     got = np.frombuffer(memory.load(out, 0, rows * heads * dim * 4), dtype=np.float32)
     got = got.reshape(rows, heads, dim)
@@ -272,14 +271,13 @@ def _check_kv_half(session: Session) -> None:
         raise RuntimeError(message)
 
     q0 = session.upload(np.ascontiguousarray(query[0]).tobytes())
-    scores0 = session.allocate(heads * 4, zero=True)
     out0 = session.allocate(heads * dim * 4, zero=True)
     session.launch(
         "attend_decode_half",
-        [q0, k_data, v_data, scores0, out0],
-        [u32(1), u32(1), u32(kv), u32(group), f32(scale)],
+        [q0, k_data, v_data, out0],
+        [u32(1), u32(kv), u32(group), f32(scale)],
         (heads, 1, 1),
-        (dim, 1, 1),
+        (32, 1, 1),
     )
     got0 = np.frombuffer(memory.load(out0, 0, heads * dim * 4), dtype=np.float32)
     if not np.allclose(got0.reshape(heads, dim), expect[0], rtol=2e-3, atol=2e-3):

@@ -52,22 +52,72 @@ def load_tokenizer(root: Path) -> Tokenizer:
     return found
 
 
+def _preserve_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    message = "preserve_thinking must be true or false"
+    raise RuntimeError(message)
+
+
+def preserve_thinking(body: dict[str, Any], settings: dict[str, Any] | None = None) -> bool:
+    """Whether historical reasoning stays in the prompt.
+
+    A top-level ``preserve_thinking`` wins over ``chat_template_kwargs``.
+    Either wins over ``settings.json``. Omitted is on, so a later prompt
+    extends the stored prefix.
+    """
+    if "preserve_thinking" in body:
+        return _preserve_flag(body.get("preserve_thinking"))
+    kwargs = body.get("chat_template_kwargs")
+    if isinstance(kwargs, dict) and "preserve_thinking" in kwargs:
+        return _preserve_flag(kwargs.get("preserve_thinking"))
+    if settings is None:
+        from favlo.logs import favlo_home, load_settings
+
+        settings = load_settings(favlo_home())
+    value = settings.get("preserve_thinking")
+    if value is None:
+        return True
+    return bool(value)
+
+
+def _bridge_omitted_assistant(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Insert an empty assistant turn where a prior prompt already closed thinking."""
+    bridged: list[dict[str, Any]] = []
+    previous: str | None = None
+    for message in messages:
+        role = message.get("role") if isinstance(message, dict) else None
+        if role == "user" and previous in {"user", "tool"}:
+            bridged.append({"role": "assistant", "content": ""})
+        bridged.append(message)
+        previous = role if isinstance(role, str) else None
+    return bridged
+
+
 def encode_chat(
     root: Path,
     messages: list[dict[str, Any]],
     tools: Any,
     enable_thinking: bool,
+    *,
+    preserve_thinking: bool = False,
 ) -> list[int]:
+    prepared = messages
+    if preserve_thinking:
+        prepared = _bridge_omitted_assistant(prepared)
+    else:
+        prepared = _without_historical_reasoning(prepared)
     template = (root / "chat_template.jinja").read_text(encoding="utf-8")
     env = Environment()
     env.filters["tojson"] = lambda value: json.dumps(value, ensure_ascii=False)
     env.globals["raise_exception"] = lambda message: (_ for _ in ()).throw(ValueError(message))
     rendered = env.from_string(template).render(
-        messages=_template_messages(_without_historical_reasoning(messages)),
+        messages=_template_messages(prepared),
         tools=tools or None,
         add_generation_prompt=True,
         enable_thinking=enable_thinking,
         add_vision_id=False,
+        preserve_thinking=preserve_thinking,
     )
     return list(load_tokenizer(root).encode(rendered, add_special_tokens=False).ids)
 
@@ -175,8 +225,75 @@ def _template_tool_call(call: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def encode_text(root: Path, text: str) -> list[int]:
+    return list(load_tokenizer(root).encode(text, add_special_tokens=False).ids)
+
+
+def tool_close_id(root: Path) -> int:
+    """Token id of ``</tool_call>``. A forced open stops when this lands."""
+    closed = encode_text(root, "</tool_call>")
+    if len(closed) != 1:
+        raise RuntimeError("the tool call close is not one token")
+    return closed[0]
+
+
 def encode_prompt(root: Path, text: str, *, thinking: bool = False) -> list[int]:
     return encode_chat(root, [{"role": "user", "content": text}], None, thinking)
+
+
+def function_has_parameters(tools: Any, name: str) -> bool:
+    """True unless that function's schema lists no properties and no required names."""
+    if not isinstance(tools, list):
+        return True
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function") if isinstance(tool.get("function"), dict) else None
+        if function is None and tool.get("name") == name:
+            function = tool
+        if not isinstance(function, dict) or function.get("name") != name:
+            continue
+        parameters = function.get("parameters")
+        if not isinstance(parameters, dict):
+            return False
+        properties = parameters.get("properties")
+        required = parameters.get("required")
+        if isinstance(required, list) and required:
+            return True
+        if isinstance(properties, dict) and properties:
+            return True
+        return False
+    return True
+
+
+def required_function(tool_choice: Any) -> str | None:
+    """The function named by an OpenAI or Responses ``tool_choice`` object."""
+    if not isinstance(tool_choice, dict):
+        return None
+    if tool_choice.get("mode") == "required":
+        name = tool_choice.get("required_function_name")
+        if isinstance(name, str) and name:
+            return name
+    if tool_choice.get("type") == "function":
+        function = tool_choice.get("function")
+        if isinstance(function, dict):
+            name = function.get("name")
+            if isinstance(name, str) and name:
+                return name
+        name = tool_choice.get("name")
+        if isinstance(name, str) and name:
+            return name
+    return None
+
+
+def _forced_call(root: Path, tools: Any, required: str | None) -> tuple[list[int], bool]:
+    """Opening of a named call, or the whole call when that function takes no arguments."""
+    if not required:
+        return [], False
+    if function_has_parameters(tools, required):
+        return encode_text(root, f"<tool_call>\n<function={required}>\n"), False
+    text = f"<tool_call>\n<function={required}>\n</function>\n</tool_call>"
+    return encode_text(root, text), True
 
 
 def decode_text(root: Path, ids: list[int]) -> str:
@@ -390,6 +507,11 @@ def _respond(
         reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
         return
     emit_tools = prepared.get("tool_choice") != "none"
+    required = required_function(prepared.get("tool_choice"))
+    # A named call is the whole completion. Keep the template's empty reasoning
+    # turn out of the way of the forced markup (35B / 27B same rule).
+    if required:
+        thinking = False
     try:
         messages, _saw = template_messages(prepared)
         extra = format_instruction(prepared)
@@ -401,13 +523,24 @@ def _respond(
         search, note = web_search_context(search_body)
         if note:
             messages.append({"role": "user", "content": note})
-        tools = function_tools(prepared.get("tools")) if emit_tools else []
-        prompt = encode_chat(runtime.root, messages, tools or None, thinking)
+        # Keep tools in the prompt under tool_choice none so a later turn that
+        # re-enables tools still matches the stored prefix (35B same rule).
+        tools = function_tools(prepared.get("tools"))
+        keep_thinking = preserve_thinking(prepared)
+        prompt = encode_chat(
+            runtime.root,
+            messages,
+            tools or None,
+            thinking,
+            preserve_thinking=keep_thinking,
+        )
         prompt = prepare_prompt(runtime, messages, prompt)
     except (RequestError, RuntimeError, TemplateError, OSError, ValueError) as exc:
         reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
         return
 
+    forced, stop_after_forced = _forced_call(runtime.root, tools, required)
+    tool_close = None if stop_after_forced or not forced else tool_close_id(runtime.root)
     limit = _output_limit(prepared, thinking, len(prompt), int(runtime.max_pos))
     stop_strings = _stop_strings(prepared)
     stream = bool(prepared.get("stream"))
@@ -426,6 +559,10 @@ def _respond(
             stop_strings,
             mtp=mtp,
             mtp_depth=mtp_depth,
+            forced=forced,
+            stop_after_forced=stop_after_forced,
+            tool_close=tool_close,
+            required=bool(required),
         )
         return
 
@@ -439,6 +576,9 @@ def _respond(
         presence=float(card["presence_penalty"]),
         mtp=mtp,
         mtp_depth=mtp_depth,
+        forced=forced,
+        stop_after_forced=stop_after_forced,
+        tool_close=tool_close,
     )
     text = decode_text(runtime.root, tokens)
     for stopper in stop_strings:
@@ -452,6 +592,8 @@ def _respond(
     reasoning, visible, calls = _split_reply(text, thinking)
     if not emit_tools:
         calls = []
+    elif required and calls:
+        calls = calls[:1]
     payload = _payload(
         reply,
         runtime,
@@ -595,6 +737,10 @@ def _stream(
     *,
     mtp: bool = False,
     mtp_depth: int = 3,
+    forced: list[int] | None = None,
+    stop_after_forced: bool = False,
+    tool_close: int | None = None,
+    required: bool = False,
 ) -> None:
     try:
         reply.begin_events()
@@ -727,6 +873,9 @@ def _stream(
                 presence=float(card["presence_penalty"]),
                 mtp=mtp,
                 mtp_depth=mtp_depth,
+                forced=forced,
+                stop_after_forced=stop_after_forced,
+                tool_close=tool_close,
             )
         finally:
             pending.put(None)
@@ -747,6 +896,8 @@ def _stream(
     reasoning, visible, calls = _split_reply(text, thinking)
     if not emit_tools:
         calls = []
+    elif required and calls:
+        calls = calls[:1]
     hit_limit = len(produced) >= limit
     payload = _payload(
         reply,

@@ -29,3 +29,20 @@ def test_phase_helpers_use_format_rate() -> None:
     assert "prefill 5.00 tok/s (10 tok in 2.00s)" in text
     assert "prompt tokens 10" in text
     assert "cache miss" in text
+
+
+def test_prefill_chunk_waits_before_the_progress_tick() -> None:
+    """A non-blocking prefill end made the live bar track host encode time."""
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "pipelines"
+        / "metal41"
+        / "qwen35_4b"
+        / "forward.py"
+    )
+    text = path.read_text(encoding="utf-8")
+    start = text.index("def _prefill_chunk")
+    end = text.index("\n    def ", start + 1)
+    body = text[start:end]
+    assert "session.end(wait=True)" in body
+    assert "end(wait=False)" not in body

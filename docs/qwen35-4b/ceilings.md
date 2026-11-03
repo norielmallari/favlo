@@ -8,7 +8,7 @@ The divisor for bandwidth is the 2 GiB streaming read on an M5 Pro with 48 GB: 7
 
 ## Prefill
 
-One chunk of 256 tokens (the matmul row multiple used for the isolated times below; the forward's `PREFILL_TILE` is 1024), with a 2048-key attention window on the eight full-attention layers. Prefill attention is `attend_prefill_half` on the half cache. Gated DeltaNet is `gdn_chunk`. The head is `gemv_fp8` on the last prompt row only.
+One chunk of 256 tokens (the matmul row multiple used for the isolated times below; the forward's `PREFILL_TILE` is 1024), with a 2048-key attention window on the eight full-attention layers. Prefill attention is `attend_prefill_half` on the half cache (online softmax, no score plane). Gated DeltaNet is `gdn_chunk`. The head is `gemv_fp8` on the last prompt row only.
 
 Designed dense path for FFN gate/up/down and GDN qkv/z/out: `restore_fp8_i8`, `quantize_half_i8`, `prefill_i8_n64` (or `prefill_i8_m32` for down), `scale_i8_f32`. GDN a/b and attention q/k/v/o stay on `matmul_fp8` / `matmul_fp8_n32`.
 
@@ -20,7 +20,7 @@ The byte count for that first chunk (dense projections, tied embed and head, Gat
 
 ## Decode
 
-One token at context 2048. Dense projections use `gemv_fp8` (eight rows per threadgroup). Mid-width outs (256–16384 rows, inner ≤4096) use `gemv_fp8_x4` in the forward; the table below is still the eight-row kernel. Attention is `attend_decode_half` on the half cache.
+One token at context 2048. Dense projections use `gemv_fp8` (eight rows per threadgroup). Mid-width outs (256–16384 rows, inner ≤4096) use `gemv_fp8_x4` in the forward; the table below is still the eight-row kernel. Attention is `attend_decode_half` on the half cache (online softmax, no score plane). The isolated `attend_decode_half` row below was measured on the earlier score-plane kernel; recompute that row when the next ceiling pass times the online path.
 
 | Kernel | Shape | Count | µs |
 |---|---|---:|---:|

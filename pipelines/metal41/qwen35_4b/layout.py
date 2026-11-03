@@ -80,8 +80,8 @@ KV_MODES = ("half", "fp8_e4m3")
 
 
 def kv_mode(name: str | None) -> str:
-    """``half`` or ``fp8_e4m3``. Empty means Metal ``half``."""
-    text = "half" if name is None or name == "" else str(name)
+    """``half`` or ``fp8_e4m3``. Empty means ``fp8_e4m3``."""
+    text = "fp8_e4m3" if name is None or name == "" else str(name)
     if text not in KV_MODES:
         message = f"kv cache {name} is not half or fp8_e4m3"
         raise ValueError(message)
@@ -93,7 +93,7 @@ MTP_SLOT = len(FULL)
 KV_SLOTS = len(FULL) + 1
 
 
-def kv_token_bytes(mode: str = "half", *, slots: int | None = None) -> int:
+def kv_token_bytes(mode: str = "fp8_e4m3", *, slots: int | None = None) -> int:
     """Key and value planes for ``slots`` full-attention layers, one token.
 
     ``half`` is two bytes per element. ``fp8_e4m3`` is one Metal
@@ -109,5 +109,5 @@ def kv_token_bytes(mode: str = "half", *, slots: int | None = None) -> int:
     return count * 2 * per_plane
 
 
-def cache_bytes(tokens: int, mode: str = "half", *, slots: int | None = None) -> int:
+def cache_bytes(tokens: int, mode: str = "fp8_e4m3", *, slots: int | None = None) -> int:
     return kv_token_bytes(mode, slots=slots) * tokens

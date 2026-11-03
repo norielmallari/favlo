@@ -79,7 +79,7 @@ class Qwen35Runtime:
         self,
         root: Path,
         *,
-        kv_cache: str = "half",
+        kv_cache: str = "fp8_e4m3",
         console: Any = None,
         owner: str | None = None,
         mtp: bool = False,
@@ -166,7 +166,7 @@ class Qwen35Runtime:
         while capacity >= _MIN_CTX:
             need = (
                 size
-                + _workspace_bytes(capacity)
+                + _workspace_bytes(capacity, self.kv_cache)
                 + gdn
                 + conv
                 + cache_bytes(capacity, self.kv_cache, slots=self._kv_slots)
@@ -176,7 +176,7 @@ class Qwen35Runtime:
             capacity = max(_MIN_CTX, capacity // 2)
         need = (
             size
-            + _workspace_bytes(capacity)
+            + _workspace_bytes(capacity, self.kv_cache)
             + gdn
             + conv
             + cache_bytes(capacity, self.kv_cache, slots=self._kv_slots)
@@ -222,7 +222,8 @@ class Qwen35Runtime:
         self.k_buf = s.allocate(KV_HEADS * HEAD_DIM * 4, zero=True)
         self.v_buf = s.allocate(KV_HEADS * HEAD_DIM * 4, zero=True)
         self.attn = s.allocate(ATTN_HEADS * HEAD_DIM * 4, zero=True)
-        self.scores = s.allocate(ATTN_HEADS * capacity * 4, zero=True)
+        # Attend is online softmax on both planes; no score scratch.
+        self.scores = 0
         self.logits = s.allocate(VOCAB * 4, zero=True)
         groups = (VOCAB + 255) // 256
         self.argmax_v = s.allocate(groups * 4, zero=True)
@@ -273,10 +274,8 @@ class Qwen35Runtime:
         self.pf_k = s.allocate(tile * KV_HEADS * HEAD_DIM * 4, zero=True)
         self.pf_v = s.allocate(tile * KV_HEADS * HEAD_DIM * 4, zero=True)
         self.pf_attn = s.allocate(tile * ATTN_HEADS * HEAD_DIM * 4, zero=True)
-        # Score scratch for batched prefill attention. Long contexts fall back
-        # to the single-query kernel when the live span exceeds this span.
-        self._score_span = min(capacity, 8192)
-        self.pf_scores = s.allocate(tile * ATTN_HEADS * self._score_span * 4, zero=True)
+        self._score_span = 0
+        self.pf_scores = 0
         # int8 prefill stages: weight codes, weight channel scales, activation codes,
         # activation row scales.
         self.i8_weight = s.allocate(_I8_WEIGHT_BYTES)
@@ -341,6 +340,7 @@ class Qwen35Runtime:
         *,
         forced: list[int] | None = None,
         stop_after_forced: bool = False,
+        tool_close: int | None = None,
         on_token: Callable[[int], None] | None = None,
         temperature: float = 1.0,
         top_p: float = 1.0,
@@ -354,8 +354,6 @@ class Qwen35Runtime:
         mtp_depth: int | None = None,
     ) -> list[int]:
         del (
-            forced,
-            stop_after_forced,
             top_p,
             top_k,
             think_close,
@@ -409,6 +407,11 @@ class Qwen35Runtime:
         last_sample = prefill_start
         prefill_open = True
         carry: int | None = None
+        pending_forced = list(forced or [])
+        close_after = bool(stop_after_forced) and bool(pending_forced)
+        # A required call with parameters forces the open markup only. Stop when
+        # the first </tool_call> lands so a second call is not drawn (35B same rule).
+        close_call = int(tool_close) if tool_close is not None and pending_forced else None
         try:
             done = 0
             while done < uncached:
@@ -423,7 +426,15 @@ class Qwen35Runtime:
             self.session.wait()
             while produced < max_tokens:
                 self._check()
-                if carry is not None:
+                forced_token = False
+                finished_forced = False
+                if pending_forced:
+                    next_id = int(pending_forced.pop(0))
+                    finished_forced = close_after and not pending_forced
+                    forced_token = True
+                    sampled_at = time.perf_counter()
+                    carry = None
+                elif carry is not None:
                     next_id = int(carry)
                     carry = None
                     sampled_at = time.perf_counter()
@@ -456,17 +467,31 @@ class Qwen35Runtime:
                 progress.note_decode(decode_row, produced)
                 if on_token is not None:
                     on_token(next_id)
-                if produced >= max_tokens or self.pos >= self.max_pos:
+                closed_call = (
+                    close_call is not None
+                    and not pending_forced
+                    and not forced_token
+                    and next_id == close_call
+                )
+                if (
+                    finished_forced
+                    or closed_call
+                    or produced >= max_tokens
+                    or self.pos >= self.max_pos
+                ):
+                    if finished_forced or closed_call:
+                        self._step(next_id)
                     break
                 pos = len(prompt) + produced - 1
                 room = max_tokens - produced
-                if use_mtp and room > 0 and pos + 1 < self.max_pos:
+                if use_mtp and not forced_token and room > 0 and pos + 1 < self.max_pos:
                     drafts = propose(self, next_id, pos, depth)
                     feeds, expected = draft_window(next_id, drafts, stop, room)
                     if expected:
                         self._mtp_tries += len(expected)
                         accepted, nxt = verify(self, pos, feeds, expected)
                         self._mtp_accepts += accepted
+                        stop_mtp = False
                         for token in expected[:accepted]:
                             if produced >= max_tokens:
                                 break
@@ -476,6 +501,11 @@ class Qwen35Runtime:
                             progress.note_decode(decode_row, produced)
                             if on_token is not None:
                                 on_token(int(token))
+                            if close_call is not None and int(token) == close_call:
+                                stop_mtp = True
+                                break
+                        if stop_mtp:
+                            break
                         carry = int(nxt)
                         continue
                 self._step(next_id)
@@ -956,7 +986,9 @@ class Qwen35Runtime:
             )
             self._rmsnorm(self.hidden, self._planes["final_norm"], self.normed)
             self._gemv(self.normed, self._planes["embedding"], self.logits, VOCAB, HIDDEN)
-        session.end(wait=False)
+        # Wait before the caller advances the prefill bar. A non-blocking end
+        # made the live tok/s track host encode time instead of GPU work.
+        session.end(wait=True)
         self.pos = position0 + count
 
     def _splice_vision(self, count: int, position0: int) -> None:
@@ -1194,32 +1226,23 @@ class Qwen35Runtime:
         output_off: int = 0,
     ) -> None:
         session = self.session
-        consts = [
-            u32(length),
-            u32(self.max_pos),
-            u32(KV_HEADS),
-            u32(_GROUP),
-            f32(ATTN_SCALE),
-        ]
-        grid = (ATTN_HEADS, 1, 1)
-        threads = (HEAD_DIM, 1, 1)
         if self.kv_cache == "half":
             session.launch(
                 "attend_decode_half",
-                [query, self.k_data, self.v_data, self.scores, output],
-                consts,
-                grid,
-                threads,
-                offsets=[query_off, data_off, data_off, 0, output_off],
+                [query, self.k_data, self.v_data, output],
+                [u32(length), u32(KV_HEADS), u32(_GROUP), f32(ATTN_SCALE)],
+                (ATTN_HEADS, 1, 1),
+                (32, 1, 1),
+                offsets=[query_off, data_off, data_off, output_off],
             )
             return
         session.launch(
             "attend_decode",
-            [query, self.k_data, self.k_scale, self.v_data, self.v_scale, self.scores, output],
-            consts,
-            grid,
-            threads,
-            offsets=[query_off, data_off, scale_off, data_off, scale_off, 0, output_off],
+            [query, self.k_data, self.k_scale, self.v_data, self.v_scale, output],
+            [u32(length), u32(KV_HEADS), u32(_GROUP), f32(ATTN_SCALE)],
+            (ATTN_HEADS, 1, 1),
+            (32, 1, 1),
+            offsets=[query_off, data_off, scale_off, data_off, scale_off, output_off],
         )
 
     def _attend_prefill(
@@ -1231,25 +1254,21 @@ class Qwen35Runtime:
         scale_off: int,
     ) -> None:
         session = self.session
-        consts = [
-            u32(position0),
-            u32(count),
-            u32(self._score_span),
-            u32(ATTN_HEADS),
-            u32(KV_HEADS),
-            u32(_GROUP),
-            f32(ATTN_SCALE),
-        ]
-        grid = (ATTN_HEADS, count, 1)
-        threads = (HEAD_DIM, 1, 1)
         if self.kv_cache == "half":
             session.launch(
                 "attend_prefill_half",
-                [self.pf_q, self.k_data, self.v_data, self.pf_scores, self.pf_attn],
-                consts,
-                grid,
-                threads,
-                offsets=[0, data_off, data_off, 0, 0],
+                [self.pf_q, self.k_data, self.v_data, self.pf_attn],
+                [
+                    u32(position0),
+                    u32(count),
+                    u32(ATTN_HEADS),
+                    u32(KV_HEADS),
+                    u32(_GROUP),
+                    f32(ATTN_SCALE),
+                ],
+                ((count + 1) // 2, ATTN_HEADS, 1),
+                (32, 1, 1),
+                offsets=[0, data_off, data_off, 0],
             )
             return
         session.launch(
@@ -1260,13 +1279,19 @@ class Qwen35Runtime:
                 self.k_scale,
                 self.v_data,
                 self.v_scale,
-                self.pf_scores,
                 self.pf_attn,
             ],
-            consts,
-            grid,
-            threads,
-            offsets=[0, data_off, scale_off, data_off, scale_off, 0, 0],
+            [
+                u32(position0),
+                u32(count),
+                u32(ATTN_HEADS),
+                u32(KV_HEADS),
+                u32(_GROUP),
+                f32(ATTN_SCALE),
+            ],
+            ((count + 1) // 2, ATTN_HEADS, 1),
+            (32, 1, 1),
+            offsets=[0, data_off, scale_off, data_off, scale_off, 0],
         )
 
     def _prefill_full(self, layer: int, count: int, row_pad: int, position0: int) -> None:
@@ -1317,25 +1342,12 @@ class Qwen35Runtime:
                 data_off=k_data_off,
                 scale_off=k_scale_off,
             )
-        span = position0 + count
-        if span <= self._score_span:
-            self._attend_prefill(
-                position0=position0,
-                count=count,
-                data_off=k_data_off,
-                scale_off=k_scale_off,
-            )
-        else:
-            for index in range(count):
-                self._attend_decode(
-                    self.pf_q,
-                    self.pf_attn,
-                    length=position0 + index + 1,
-                    data_off=k_data_off,
-                    scale_off=k_scale_off,
-                    query_off=index * ATTN_HEADS * HEAD_DIM * 2 * 4,
-                    output_off=index * ATTN_HEADS * HEAD_DIM * 4,
-                )
+        self._attend_prefill(
+            position0=position0,
+            count=count,
+            data_off=k_data_off,
+            scale_off=k_scale_off,
+        )
         self._cast_half(self.pf_attn, ATTN_HEADS * HEAD_DIM, row_pad, valid=count)
         self._matmul(
             self._planes[f"layer.{layer}.o"],
@@ -1657,7 +1669,8 @@ def _i8_resident_bytes() -> int:
     return total
 
 
-def _workspace_bytes(capacity: int) -> int:
+def _workspace_bytes(capacity: int, kv_cache: str = "fp8_e4m3") -> int:
+    del capacity, kv_cache  # Online attend; no score plane sized by context.
     tile = _TILE
     widest = max(
         HIDDEN,
@@ -1677,7 +1690,6 @@ def _workspace_bytes(capacity: int) -> int:
         + LINEAR_VALUE_HEADS * 2
         + ATTN_HEADS * HEAD_DIM * 3
         + KV_HEADS * HEAD_DIM * 2
-        + ATTN_HEADS * capacity
         + VOCAB
         + (VOCAB + 255) // 256 * 2
         + 2
@@ -1690,7 +1702,6 @@ def _workspace_bytes(capacity: int) -> int:
         + tile * LINEAR_VALUE_HEADS * LINEAR_HEAD_DIM
         + tile * ATTN_HEADS * HEAD_DIM * 3
         + tile * KV_HEADS * HEAD_DIM * 2
-        + tile * ATTN_HEADS * min(capacity, 8192)
     )
     i8 = _I8_WEIGHT_BYTES + _I8_COLS * 4 + tile * _I8_INNER + tile * 4
     return floats * 4 + tile * widest * 2 + i8

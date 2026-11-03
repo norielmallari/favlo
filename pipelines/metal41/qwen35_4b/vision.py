@@ -4,8 +4,9 @@ The patch embed is the flattened Conv3d. Position rows are a bilinear sample of
 the 48 by 48 table, then reordered into 2 by 2 merge blocks. Each block is
 LayerNorm, full attention, and a tanh GELU MLP. The merger LayerNorms each
 patch, concatenates the block, and applies erf GELU. The language prefill
-overwrites the expanded image-pad rows with that output. An image this
-process already embedded is reused.
+overwrites the expanded image-pad rows with that output. Rows are also written
+under ``~/.favlo/vision-cache/qwen35-4b/``, so a later serve process that sees
+the same bytes logs ``vision cache`` and does not re-run the tower.
 """
 
 from __future__ import annotations
@@ -14,9 +15,11 @@ import base64
 import hashlib
 import ipaddress
 import socket
+import struct
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -58,6 +61,57 @@ _EMPTY = 0xFFFFFFFF
 
 _ROW_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, int, int]] = {}
 _ROW_LIMIT = 8
+
+
+def _vision_cache_dir() -> Path:
+    from favlo.logs import favlo_home
+
+    path = favlo_home() / "vision-cache" / "qwen35-4b"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _vision_cache_path(key: tuple[Any, ...]) -> Path:
+    root, digest, min_pixels, max_pixels = key
+    material = hashlib.sha256()
+    material.update(str(root).encode())
+    material.update(digest if isinstance(digest, bytes) else bytes(digest))
+    material.update(struct.pack("<ii", int(min_pixels), int(max_pixels)))
+    return _vision_cache_dir() / f"{material.hexdigest()}.npz"
+
+
+def _load_vision_disk(
+    key: tuple[Any, ...],
+) -> tuple[np.ndarray, int, int] | None:
+    path = _vision_cache_path(key)
+    if not path.is_file():
+        return None
+    try:
+        payload = np.load(path)
+        embedded = np.ascontiguousarray(payload["embedded"], dtype=np.float32)
+        grid_h = int(payload["grid_h"])
+        grid_w = int(payload["grid_w"])
+    except (OSError, ValueError, KeyError):
+        return None
+    return embedded, grid_h, grid_w
+
+
+def _store_vision_disk(
+    key: tuple[Any, ...], embedded: np.ndarray, grid_h: int, grid_w: int
+) -> None:
+    path = _vision_cache_path(key)
+    tmp = path.with_name(path.stem + ".tmp.npz")
+    try:
+        np.savez(
+            tmp,
+            embedded=np.ascontiguousarray(embedded, dtype=np.float32),
+            grid_h=np.int32(grid_h),
+            grid_w=np.int32(grid_w),
+        )
+        tmp.replace(path)
+    except OSError:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
 
 
 def smart_size(
@@ -264,8 +318,10 @@ def prepare_prompt(runtime: Any, messages: list[dict[str, Any]], ids: list[int])
     rows: list[np.ndarray] = []
     lengths: list[int] = []
     grids: list[tuple[int, int]] = []
-    for blob in blobs:
-        embedded, grid_h, grid_w = _vision_row(runtime, blob)
+    for blob, low, high in blobs:
+        embedded, grid_h, grid_w = _vision_row(
+            runtime, blob, min_pixels=low, max_pixels=high
+        )
         merged_h = grid_h // MERGE
         merged_w = grid_w // MERGE
         if embedded.shape != (merged_h * merged_w, HIDDEN):
@@ -287,9 +343,17 @@ def prepare_prompt(runtime: Any, messages: list[dict[str, Any]], ids: list[int])
     return expanded
 
 
-def embed_image(runtime: Any, blob: bytes) -> tuple[np.ndarray, int, int]:
+def embed_image(
+    runtime: Any,
+    blob: bytes,
+    *,
+    min_pixels: int = MIN_PIXELS,
+    max_pixels: int = MAX_PIXELS,
+) -> tuple[np.ndarray, int, int]:
     """Merged rows ``[tokens, 2560]`` and the patch grid for one still image."""
-    pixels, grid_h, grid_w = pack_image(_decode_bitmap(blob))
+    pixels, grid_h, grid_w = pack_image(
+        _decode_bitmap(blob), min_pixels=min_pixels, max_pixels=max_pixels
+    )
     patches = int(pixels.shape[0])
     if patches % (MERGE * MERGE) != 0:
         message = f"vision patches {patches} are not a merge block"
@@ -549,15 +613,34 @@ def _dequant_positions(runtime: Any, ws: _Workspace) -> None:
     session.end(wait=True)
 
 
-def _vision_row(runtime: Any, blob: bytes) -> tuple[np.ndarray, int, int]:
-    key = (str(getattr(runtime, "root", "")), hashlib.sha256(blob).digest())
+def _vision_row(
+    runtime: Any,
+    blob: bytes,
+    *,
+    min_pixels: int,
+    max_pixels: int,
+) -> tuple[np.ndarray, int, int]:
+    """The merged rows for these bytes. A later serve reuses the stored rows."""
+    key = (
+        str(getattr(runtime, "root", "")),
+        hashlib.sha256(blob).digest(),
+        int(min_pixels),
+        int(max_pixels),
+    )
     cached = _ROW_CACHE.get(key)
+    if cached is None:
+        cached = _load_vision_disk(key)
+        if cached is not None:
+            _ROW_CACHE[key] = cached
     if cached is not None:
         embedded, grid_h, grid_w = cached
         _note(runtime, f"vision cache {embedded.shape[0]}")
         return embedded, grid_h, grid_w
-    embedded, grid_h, grid_w = embed_image(runtime, blob)
+    embedded, grid_h, grid_w = embed_image(
+        runtime, blob, min_pixels=min_pixels, max_pixels=max_pixels
+    )
     _ROW_CACHE[key] = (embedded, grid_h, grid_w)
+    _store_vision_disk(key, embedded, grid_h, grid_w)
     while len(_ROW_CACHE) > _ROW_LIMIT:
         _ROW_CACHE.pop(next(iter(_ROW_CACHE)))
     return embedded, grid_h, grid_w
@@ -602,8 +685,8 @@ def _reject_video(messages: list[dict[str, Any]]) -> None:
                 raise RuntimeError(message_text)
 
 
-def _image_blobs(messages: list[dict[str, Any]]) -> list[bytes]:
-    blobs: list[bytes] = []
+def _image_blobs(messages: list[dict[str, Any]]) -> list[tuple[bytes, int, int]]:
+    blobs: list[tuple[bytes, int, int]] = []
     for message in messages:
         if not isinstance(message, dict):
             continue
@@ -612,12 +695,45 @@ def _image_blobs(messages: list[dict[str, Any]]) -> list[bytes]:
             continue
         for item in content:
             if isinstance(item, dict) and _is_image(item):
-                blobs.append(_image_bytes(item))
+                low, high = _pixel_bounds(item)
+                blobs.append((_image_bytes(item), low, high))
     return blobs
 
 
 def _is_image(item: dict[str, Any]) -> bool:
     return "image" in item or "image_url" in item or item.get("type") in {"image", "image_url", "input_image"}
+
+
+def _pixel_bounds(item: dict[str, Any]) -> tuple[int, int]:
+    nested = item.get("image_url")
+    if not isinstance(nested, dict):
+        nested = {}
+    low = _pixel_field(item, nested, "min_pixels")
+    high = _pixel_field(item, nested, "max_pixels")
+    detail = nested.get("detail", item.get("detail"))
+    if detail is not None and detail not in {"auto", "low", "high", "original"}:
+        message = f"image detail {detail} is unsupported"
+        raise RuntimeError(message)
+    if low is None and high is None:
+        if detail == "low":
+            return MIN_PIXELS, MIN_PIXELS
+        return MIN_PIXELS, MAX_PIXELS
+    low = MIN_PIXELS if low is None else low
+    high = MAX_PIXELS if high is None else high
+    if low < MIN_PIXELS or high > MAX_PIXELS or low > high:
+        message = f"image pixels {low}..{high} are outside {MIN_PIXELS}..{MAX_PIXELS}"
+        raise RuntimeError(message)
+    return low, high
+
+
+def _pixel_field(item: dict[str, Any], nested: dict[str, Any], key: str) -> int | None:
+    value = item[key] if key in item else nested.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        message = f"image {key} is not an integer"
+        raise RuntimeError(message)
+    return value
 
 
 def _image_bytes(item: dict[str, Any]) -> bytes:

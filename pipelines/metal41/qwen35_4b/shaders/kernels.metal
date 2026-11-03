@@ -727,39 +727,32 @@ kernel void store_kv(
     }
 }
 
-// Decode attention for one query head over positions [0, length). Query rows are
-// [q(256) | gate(256)] per head; the gate is applied as sigmoid after the softmax
-// mix. ``scores`` is [heads][context] float scratch. One threadgroup of 256 per head.
+// Online softmax over the fp8_e4m3 cache. One simdgroup, eight channels per lane.
 kernel void attend_decode(
     device const float* query_gate [[buffer(0)]],
     device const uchar* key_data [[buffer(1)]],
     device const uchar* key_scale [[buffer(2)]],
     device const uchar* value_data [[buffer(3)]],
     device const uchar* value_scale [[buffer(4)]],
-    device float* scores [[buffer(5)]],
-    device float* output [[buffer(6)]],
-    constant uint& length [[buffer(7)]],
-    constant uint& context [[buffer(8)]],
-    constant uint& kv_heads [[buffer(9)]],
-    constant uint& group_size [[buffer(10)]],
-    constant float& scale [[buffer(11)]],
-    uint head [[threadgroup_position_in_grid]],
-    uint tid [[thread_index_in_threadgroup]],
+    device float* output [[buffer(5)]],
+    constant uint& length [[buffer(6)]],
+    constant uint& kv_heads [[buffer(7)]],
+    constant uint& group_size [[buffer(8)]],
+    constant float& scale [[buffer(9)]],
     uint lane [[thread_index_in_simdgroup]],
-    uint simd [[simdgroup_index_in_threadgroup]],
-    uint simds [[simdgroups_per_threadgroup]])
+    uint head [[threadgroup_position_in_grid]])
 {
     constexpr uint D = 256u;
-    threadgroup float shared[32];
     uint kvh = head / group_size;
     device const float* q = query_gate + head * (2u * D);
     float qreg[8];
     for (uint j = 0u; j < 8u; ++j) {
         qreg[j] = q[lane * 8u + j];
     }
-    device float* row = scores + ulong(head) * context;
-    float local_max = -INFINITY;
-    for (uint p = simd; p < length; p += simds) {
+    float running_max = -INFINITY;
+    float running_sum = 0.0f;
+    float outv[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint p = 0u; p < length; ++p) {
         ulong slot = ulong(p) * kv_heads + kvh;
         device const uchar* k = key_data + slot * D + lane * 8u;
         float ks = e8m0_code(key_scale[slot * (D >> 5) + (lane >> 2)]);
@@ -769,37 +762,27 @@ kernel void attend_decode(
             part = fma(e4m3_code((packed.x >> (8u * j)) & 0xFFu), qreg[j], part);
             part = fma(e4m3_code((packed.y >> (8u * j)) & 0xFFu), qreg[4u + j], part);
         }
-        float dot = simd_sum(part * ks) * scale;
-        if (lane == 0u) {
-            row[p] = dot;
+        float score = simd_sum(part * ks) * scale;
+        float next = max(running_max, score);
+        float rescale = exp(running_max - next);
+        float prob = exp(score - next);
+        running_sum = running_sum * rescale + prob;
+        device const uchar* v = value_data + slot * D + lane * 8u;
+        float vs = e8m0_code(value_scale[slot * (D >> 5) + (lane >> 2)]);
+        uint2 vpack = *((device const uint2*)v);
+        for (uint j = 0u; j < 4u; ++j) {
+            outv[j] = outv[j] * rescale + prob * e4m3_code((vpack.x >> (8u * j)) & 0xFFu) * vs;
+            outv[4u + j] =
+                outv[4u + j] * rescale + prob * e4m3_code((vpack.y >> (8u * j)) & 0xFFu) * vs;
         }
-        local_max = max(local_max, dot);
+        running_max = next;
     }
-    if (lane == 0u) {
-        shared[simd] = local_max;
+    float inv = running_sum == 0.0f ? 0.0f : 1.0f / running_sum;
+    device float* out = output + head * D;
+    device const float* g = q + D;
+    for (uint j = 0u; j < 8u; ++j) {
+        out[lane * 8u + j] = outv[j] * inv * sigmoid(g[lane * 8u + j]);
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
-    float peak = -INFINITY;
-    for (uint i = 0u; i < simds; ++i) {
-        peak = max(peak, shared[i]);
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float local_sum = 0.0f;
-    for (uint p = tid; p < length; p += D) {
-        float e = exp(row[p] - peak);
-        row[p] = e;
-        local_sum += e;
-    }
-    float total = block_sum(local_sum, shared, lane, simd, simds);
-    threadgroup_barrier(mem_flags::mem_device);
-    float acc = 0.0f;
-    for (uint p = 0u; p < length; ++p) {
-        ulong slot = ulong(p) * kv_heads + kvh;
-        float vs = e8m0_code(value_scale[slot * (D >> 5) + (tid >> 5)]);
-        acc = fma(row[p], e4m3_code(value_data[slot * D + tid]) * vs, acc);
-    }
-    float gate = q[D + tid];
-    output[head * D + tid] = acc / total * sigmoid(gate);
 }
 
 // logits -= presence * [count > 0] + frequency * count.
@@ -1178,103 +1161,115 @@ kernel void store_kv_rows(
     }
 }
 
-// Prefill attention for ``rows`` queries. Query rows are [q|gate] per head.
-// Causal: query row r attends to positions [0, position0 + r].
+// Prefill attention for ``rows`` queries on the fp8_e4m3 cache. Online softmax;
+// two query rows per threadgroup. Causal: query row r attends [0, position0 + r].
 kernel void attend_prefill(
     device const float* query_gate [[buffer(0)]],
     device const uchar* key_data [[buffer(1)]],
     device const uchar* key_scale [[buffer(2)]],
     device const uchar* value_data [[buffer(3)]],
     device const uchar* value_scale [[buffer(4)]],
-    device float* scores [[buffer(5)]],
-    device float* output [[buffer(6)]],
-    constant uint& position0 [[buffer(7)]],
-    constant uint& rows [[buffer(8)]],
-    constant uint& context [[buffer(9)]],
-    constant uint& attn_heads [[buffer(10)]],
-    constant uint& kv_heads [[buffer(11)]],
-    constant uint& group_size [[buffer(12)]],
-    constant float& scale [[buffer(13)]],
-    uint2 tgp [[threadgroup_position_in_grid]],
-    uint tid [[thread_index_in_threadgroup]],
+    device float* output [[buffer(5)]],
+    constant uint& position0 [[buffer(6)]],
+    constant uint& rows [[buffer(7)]],
+    constant uint& attn_heads [[buffer(8)]],
+    constant uint& kv_heads [[buffer(9)]],
+    constant uint& group_size [[buffer(10)]],
+    constant float& scale [[buffer(11)]],
     uint lane [[thread_index_in_simdgroup]],
-    uint simd [[simdgroup_index_in_threadgroup]],
-    uint simds [[simdgroups_per_threadgroup]])
+    uint2 tgid [[threadgroup_position_in_grid]])
 {
     constexpr uint D = 256u;
-    uint row = tgp.y;
-    uint head = tgp.x;
-    if (row >= rows || head >= attn_heads || tid >= D) {
+    uint token = tgid.x * 2u;
+    uint head = tgid.y;
+    if (token >= rows || head >= attn_heads) {
         return;
     }
-    threadgroup float shared[32];
+    uint token1 = token + 1u;
+    bool second = token1 < rows;
     uint kvh = head / group_size;
-    uint length = position0 + row + 1u;
-    device const float* q = query_gate + (ulong(row) * attn_heads + head) * (2u * D);
+    device const float* q = query_gate + (ulong(token) * attn_heads + head) * (2u * D);
     float qreg[8];
+    float qreg1[8];
     for (uint j = 0u; j < 8u; ++j) {
         qreg[j] = q[lane * 8u + j];
+        qreg1[j] = 0.0f;
     }
-    device float* srow = scores + (ulong(row) * attn_heads + head) * context;
-    float local_max = -INFINITY;
-    for (uint p = simd; p < length; p += simds) {
-        ulong slot = ulong(p) * kv_heads + kvh;
-        device const uchar* k = key_data + slot * D + lane * 8u;
-        float ks = e8m0_code(key_scale[slot * (D >> 5) + (lane >> 2)]);
-        uint2 packed = *((device const uint2*)k);
-        float part = 0.0f;
+    if (second) {
+        device const float* q1 = query_gate + (ulong(token1) * attn_heads + head) * (2u * D);
+        for (uint j = 0u; j < 8u; ++j) {
+            qreg1[j] = q1[lane * 8u + j];
+        }
+    }
+    float running_max = -INFINITY;
+    float running_sum = 0.0f;
+    float running_max1 = -INFINITY;
+    float running_sum1 = 0.0f;
+    float outv[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float outv1[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    uint tokens = position0 + (second ? token1 : token) + 1u;
+    uint limit0 = position0 + token + 1u;
+    for (uint step = 0u; step < tokens; ++step) {
+        ulong slot = ulong(step) * kv_heads + kvh;
+        device const uchar* ks = key_data + slot * D + lane * 8u;
+        float key_s = e8m0_code(key_scale[slot * (D >> 5) + (lane >> 2)]);
+        uint2 packed = *((device const uint2*)ks);
+        float partial = 0.0f;
+        float partial1 = 0.0f;
         for (uint j = 0u; j < 4u; ++j) {
-            part = fma(e4m3_code((packed.x >> (8u * j)) & 0xFFu), qreg[j], part);
-            part = fma(e4m3_code((packed.y >> (8u * j)) & 0xFFu), qreg[4u + j], part);
+            float k0 = e4m3_code((packed.x >> (8u * j)) & 0xFFu);
+            float k1 = e4m3_code((packed.y >> (8u * j)) & 0xFFu);
+            partial = fma(k0, qreg[j], partial);
+            partial = fma(k1, qreg[4u + j], partial);
+            partial1 = fma(k0, qreg1[j], partial1);
+            partial1 = fma(k1, qreg1[4u + j], partial1);
         }
-        float dot = simd_sum(part * ks) * scale;
-        if (lane == 0u) {
-            srow[p] = dot;
+        device const uchar* vs = value_data + slot * D + lane * 8u;
+        float value_s = e8m0_code(value_scale[slot * (D >> 5) + (lane >> 2)]);
+        uint2 vpack = *((device const uint2*)vs);
+        float vchan[8];
+        for (uint j = 0u; j < 4u; ++j) {
+            vchan[j] = e4m3_code((vpack.x >> (8u * j)) & 0xFFu) * value_s;
+            vchan[4u + j] = e4m3_code((vpack.y >> (8u * j)) & 0xFFu) * value_s;
         }
-        local_max = max(local_max, dot);
+        if (step < limit0) {
+            float value = simd_sum(partial * key_s) * scale;
+            float next = max(running_max, value);
+            float rescale = exp(running_max - next);
+            float prob = exp(value - next);
+            running_sum = running_sum * rescale + prob;
+            for (uint j = 0u; j < 8u; ++j) {
+                outv[j] = outv[j] * rescale + prob * vchan[j];
+            }
+            running_max = next;
+        }
+        if (second) {
+            float value1 = simd_sum(partial1 * key_s) * scale;
+            float next1 = max(running_max1, value1);
+            float rescale1 = exp(running_max1 - next1);
+            float prob1 = exp(value1 - next1);
+            running_sum1 = running_sum1 * rescale1 + prob1;
+            for (uint j = 0u; j < 8u; ++j) {
+                outv1[j] = outv1[j] * rescale1 + prob1 * vchan[j];
+            }
+            running_max1 = next1;
+        }
     }
-    if (lane == 0u) {
-        shared[simd] = local_max;
+    float inv = running_sum == 0.0f ? 0.0f : 1.0f / running_sum;
+    device float* out = output + (ulong(token) * attn_heads + head) * D;
+    device const float* g = q + D;
+    for (uint j = 0u; j < 8u; ++j) {
+        out[lane * 8u + j] = outv[j] * inv * sigmoid(g[lane * 8u + j]);
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
-    float peak = -INFINITY;
-    for (uint i = 0u; i < simds; ++i) {
-        peak = max(peak, shared[i]);
+    if (second) {
+        float inv1 = running_sum1 == 0.0f ? 0.0f : 1.0f / running_sum1;
+        device float* out1 = output + (ulong(token1) * attn_heads + head) * D;
+        device const float* q1 = query_gate + (ulong(token1) * attn_heads + head) * (2u * D);
+        device const float* g1 = q1 + D;
+        for (uint j = 0u; j < 8u; ++j) {
+            out1[lane * 8u + j] = outv1[j] * inv1 * sigmoid(g1[lane * 8u + j]);
+        }
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float local_sum = 0.0f;
-    for (uint p = tid; p < length; p += D) {
-        float e = exp(srow[p] - peak);
-        srow[p] = e;
-        local_sum += e;
-    }
-    float total = block_sum(local_sum, shared, lane, simd, simds);
-    threadgroup_barrier(mem_flags::mem_device);
-    float acc = 0.0f;
-    uint p = 0u;
-    // Unrolled value mix; each thread owns one output dim and walks the keys.
-    for (; p + 3u < length; p += 4u) {
-        ulong slot0 = ulong(p) * kv_heads + kvh;
-        ulong slot1 = slot0 + kv_heads;
-        ulong slot2 = slot1 + kv_heads;
-        ulong slot3 = slot2 + kv_heads;
-        uint scale_i = tid >> 5;
-        float v0 = e4m3_code(value_data[slot0 * D + tid]) * e8m0_code(value_scale[slot0 * (D >> 5) + scale_i]);
-        float v1 = e4m3_code(value_data[slot1 * D + tid]) * e8m0_code(value_scale[slot1 * (D >> 5) + scale_i]);
-        float v2 = e4m3_code(value_data[slot2 * D + tid]) * e8m0_code(value_scale[slot2 * (D >> 5) + scale_i]);
-        float v3 = e4m3_code(value_data[slot3 * D + tid]) * e8m0_code(value_scale[slot3 * (D >> 5) + scale_i]);
-        acc = fma(srow[p], v0, acc);
-        acc = fma(srow[p + 1u], v1, acc);
-        acc = fma(srow[p + 2u], v2, acc);
-        acc = fma(srow[p + 3u], v3, acc);
-    }
-    for (; p < length; ++p) {
-        ulong slot = ulong(p) * kv_heads + kvh;
-        float vs = e8m0_code(value_scale[slot * (D >> 5) + (tid >> 5)]);
-        acc = fma(srow[p], e4m3_code(value_data[slot * D + tid]) * vs, acc);
-    }
-    float gate = q[D + tid];
-    output[(ulong(row) * attn_heads + head) * D + tid] = acc / total * sigmoid(gate);
 }
 
 // Metal half key/value cache. Same layouts as the fp8_e4m3 store, two bytes per element,
@@ -1323,156 +1318,195 @@ kernel void store_kv_rows_half(
     data[slot * D + tid] = half(source[(ulong(row) * kv_heads + head) * D + tid]);
 }
 
+// Online softmax over the half cache. One simdgroup, eight channels per lane.
+// Score scratch stays off device; matches the 27B half attend shape for this
+// token-major [position, kv_head, channel] layout and fused query|gate.
 kernel void attend_decode_half(
     device const float* query_gate [[buffer(0)]],
     device const half* key_data [[buffer(1)]],
     device const half* value_data [[buffer(2)]],
-    device float* scores [[buffer(3)]],
-    device float* output [[buffer(4)]],
-    constant uint& length [[buffer(5)]],
-    constant uint& context [[buffer(6)]],
-    constant uint& kv_heads [[buffer(7)]],
-    constant uint& group_size [[buffer(8)]],
-    constant float& scale [[buffer(9)]],
-    uint head [[threadgroup_position_in_grid]],
-    uint tid [[thread_index_in_threadgroup]],
+    device float* output [[buffer(3)]],
+    constant uint& length [[buffer(4)]],
+    constant uint& kv_heads [[buffer(5)]],
+    constant uint& group_size [[buffer(6)]],
+    constant float& scale [[buffer(7)]],
     uint lane [[thread_index_in_simdgroup]],
-    uint simd [[simdgroup_index_in_threadgroup]],
-    uint simds [[simdgroups_per_threadgroup]])
+    uint head [[threadgroup_position_in_grid]])
 {
     constexpr uint D = 256u;
-    threadgroup float shared[32];
     uint kvh = head / group_size;
     device const float* q = query_gate + head * (2u * D);
     float qreg[8];
     for (uint j = 0u; j < 8u; ++j) {
         qreg[j] = q[lane * 8u + j];
     }
-    device float* row = scores + ulong(head) * context;
-    float local_max = -INFINITY;
-    for (uint p = simd; p < length; p += simds) {
+    float running_max = -INFINITY;
+    float running_sum = 0.0f;
+    float outv[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint p = 0u; p < length; ++p) {
         ulong slot = ulong(p) * kv_heads + kvh;
         device const half* k = key_data + slot * D + lane * 8u;
         float part = 0.0f;
         for (uint j = 0u; j < 8u; ++j) {
             part = fma(float(k[j]), qreg[j], part);
         }
-        float dot = simd_sum(part) * scale;
-        if (lane == 0u) {
-            row[p] = dot;
+        float score = simd_sum(part) * scale;
+        float next = max(running_max, score);
+        float rescale = exp(running_max - next);
+        float prob = exp(score - next);
+        running_sum = running_sum * rescale + prob;
+        device const half* v = value_data + slot * D + lane * 8u;
+        for (uint j = 0u; j < 8u; ++j) {
+            outv[j] = outv[j] * rescale + prob * float(v[j]);
         }
-        local_max = max(local_max, dot);
+        running_max = next;
     }
-    if (lane == 0u) {
-        shared[simd] = local_max;
+    float inv = running_sum == 0.0f ? 0.0f : 1.0f / running_sum;
+    device float* out = output + head * D;
+    device const float* g = q + D;
+    for (uint j = 0u; j < 8u; ++j) {
+        out[lane * 8u + j] = outv[j] * inv * sigmoid(g[lane * 8u + j]);
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
-    float peak = -INFINITY;
-    for (uint i = 0u; i < simds; ++i) {
-        peak = max(peak, shared[i]);
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float local_sum = 0.0f;
-    for (uint p = tid; p < length; p += D) {
-        float e = exp(row[p] - peak);
-        row[p] = e;
-        local_sum += e;
-    }
-    float total = block_sum(local_sum, shared, lane, simd, simds);
-    threadgroup_barrier(mem_flags::mem_device);
-    float acc = 0.0f;
-    for (uint p = 0u; p < length; ++p) {
-        ulong slot = ulong(p) * kv_heads + kvh;
-        acc = fma(row[p], float(value_data[slot * D + tid]), acc);
-    }
-    float gate = q[D + tid];
-    output[head * D + tid] = acc / total * sigmoid(gate);
 }
 
 kernel void attend_prefill_half(
     device const float* query_gate [[buffer(0)]],
     device const half* key_data [[buffer(1)]],
     device const half* value_data [[buffer(2)]],
-    device float* scores [[buffer(3)]],
-    device float* output [[buffer(4)]],
-    constant uint& position0 [[buffer(5)]],
-    constant uint& rows [[buffer(6)]],
-    constant uint& context [[buffer(7)]],
-    constant uint& attn_heads [[buffer(8)]],
-    constant uint& kv_heads [[buffer(9)]],
-    constant uint& group_size [[buffer(10)]],
-    constant float& scale [[buffer(11)]],
-    uint2 tgp [[threadgroup_position_in_grid]],
-    uint tid [[thread_index_in_threadgroup]],
+    device float* output [[buffer(3)]],
+    constant uint& position0 [[buffer(4)]],
+    constant uint& rows [[buffer(5)]],
+    constant uint& attn_heads [[buffer(6)]],
+    constant uint& kv_heads [[buffer(7)]],
+    constant uint& group_size [[buffer(8)]],
+    constant float& scale [[buffer(9)]],
     uint lane [[thread_index_in_simdgroup]],
-    uint simd [[simdgroup_index_in_threadgroup]],
-    uint simds [[simdgroups_per_threadgroup]])
+    uint2 tgid [[threadgroup_position_in_grid]])
 {
     constexpr uint D = 256u;
-    uint row = tgp.y;
-    uint head = tgp.x;
-    if (row >= rows || head >= attn_heads || tid >= D) {
+    uint token = tgid.x * 2u;
+    uint head = tgid.y;
+    if (token >= rows || head >= attn_heads) {
         return;
     }
-    threadgroup float shared[32];
+    uint token1 = token + 1u;
+    bool second = token1 < rows;
     uint kvh = head / group_size;
-    uint length = position0 + row + 1u;
-    device const float* q = query_gate + (ulong(row) * attn_heads + head) * (2u * D);
+    device const float* q = query_gate + (ulong(token) * attn_heads + head) * (2u * D);
     float qreg[8];
+    float qreg1[8];
     for (uint j = 0u; j < 8u; ++j) {
         qreg[j] = q[lane * 8u + j];
+        qreg1[j] = 0.0f;
     }
-    device float* srow = scores + (ulong(row) * attn_heads + head) * context;
-    float local_max = -INFINITY;
-    for (uint p = simd; p < length; p += simds) {
-        ulong slot = ulong(p) * kv_heads + kvh;
-        device const half* k = key_data + slot * D + lane * 8u;
-        float part = 0.0f;
+    if (second) {
+        device const float* q1 = query_gate + (ulong(token1) * attn_heads + head) * (2u * D);
         for (uint j = 0u; j < 8u; ++j) {
-            part = fma(float(k[j]), qreg[j], part);
+            qreg1[j] = q1[lane * 8u + j];
         }
-        float dot = simd_sum(part) * scale;
-        if (lane == 0u) {
-            srow[p] = dot;
+    }
+    float running_max = -INFINITY;
+    float running_sum = 0.0f;
+    float running_max1 = -INFINITY;
+    float running_sum1 = 0.0f;
+    float outv[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float outv1[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    uint tokens = position0 + (second ? token1 : token) + 1u;
+    uint limit0 = position0 + token + 1u;
+    uint step = 0u;
+    for (; step + 8u <= tokens; step += 8u) {
+        float score[8];
+        float score1[8];
+        for (uint b = 0u; b < 8u; ++b) {
+            ulong slot = ulong(step + b) * kv_heads + kvh;
+            device const half* ks = key_data + slot * D + lane * 8u;
+            float partial = 0.0f;
+            float partial1 = 0.0f;
+            for (uint j = 0u; j < 8u; ++j) {
+                float key = float(ks[j]);
+                partial = fma(qreg[j], key, partial);
+                partial1 = fma(qreg1[j], key, partial1);
+            }
+            score[b] = simd_sum(partial) * scale;
+            score1[b] = simd_sum(partial1) * scale;
+            if (step + b >= limit0) {
+                score[b] = -INFINITY;
+            }
         }
-        local_max = max(local_max, dot);
+        for (uint b = 0u; b < 8u; ++b) {
+            ulong slot = ulong(step + b) * kv_heads + kvh;
+            device const half* vs = value_data + slot * D + lane * 8u;
+            if (score[b] != -INFINITY) {
+                float next = max(running_max, score[b]);
+                float rescale = exp(running_max - next);
+                float prob = exp(score[b] - next);
+                running_sum = running_sum * rescale + prob;
+                for (uint j = 0u; j < 8u; ++j) {
+                    outv[j] = outv[j] * rescale + prob * float(vs[j]);
+                }
+                running_max = next;
+            }
+            if (second) {
+                float next1 = max(running_max1, score1[b]);
+                float rescale1 = exp(running_max1 - next1);
+                float prob1 = exp(score1[b] - next1);
+                running_sum1 = running_sum1 * rescale1 + prob1;
+                for (uint j = 0u; j < 8u; ++j) {
+                    outv1[j] = outv1[j] * rescale1 + prob1 * float(vs[j]);
+                }
+                running_max1 = next1;
+            }
+        }
     }
-    if (lane == 0u) {
-        shared[simd] = local_max;
+    for (; step < tokens; ++step) {
+        ulong slot = ulong(step) * kv_heads + kvh;
+        device const half* ks = key_data + slot * D + lane * 8u;
+        float partial = 0.0f;
+        float partial1 = 0.0f;
+        for (uint j = 0u; j < 8u; ++j) {
+            float key = float(ks[j]);
+            partial = fma(qreg[j], key, partial);
+            partial1 = fma(qreg1[j], key, partial1);
+        }
+        device const half* vs = value_data + slot * D + lane * 8u;
+        if (step < limit0) {
+            float value = simd_sum(partial) * scale;
+            float next = max(running_max, value);
+            float rescale = exp(running_max - next);
+            float prob = exp(value - next);
+            running_sum = running_sum * rescale + prob;
+            for (uint j = 0u; j < 8u; ++j) {
+                outv[j] = outv[j] * rescale + prob * float(vs[j]);
+            }
+            running_max = next;
+        }
+        if (second) {
+            float value1 = simd_sum(partial1) * scale;
+            float next1 = max(running_max1, value1);
+            float rescale1 = exp(running_max1 - next1);
+            float prob1 = exp(value1 - next1);
+            running_sum1 = running_sum1 * rescale1 + prob1;
+            for (uint j = 0u; j < 8u; ++j) {
+                outv1[j] = outv1[j] * rescale1 + prob1 * float(vs[j]);
+            }
+            running_max1 = next1;
+        }
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
-    float peak = -INFINITY;
-    for (uint i = 0u; i < simds; ++i) {
-        peak = max(peak, shared[i]);
+    float inv = running_sum == 0.0f ? 0.0f : 1.0f / running_sum;
+    device float* out = output + (ulong(token) * attn_heads + head) * D;
+    device const float* g = q + D;
+    for (uint j = 0u; j < 8u; ++j) {
+        out[lane * 8u + j] = outv[j] * inv * sigmoid(g[lane * 8u + j]);
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float local_sum = 0.0f;
-    for (uint p = tid; p < length; p += D) {
-        float e = exp(srow[p] - peak);
-        srow[p] = e;
-        local_sum += e;
+    if (second) {
+        float inv1 = running_sum1 == 0.0f ? 0.0f : 1.0f / running_sum1;
+        device float* out1 = output + (ulong(token1) * attn_heads + head) * D;
+        device const float* q1 = query_gate + (ulong(token1) * attn_heads + head) * (2u * D);
+        device const float* g1 = q1 + D;
+        for (uint j = 0u; j < 8u; ++j) {
+            out1[lane * 8u + j] = outv1[j] * inv1 * sigmoid(g1[lane * 8u + j]);
+        }
     }
-    float total = block_sum(local_sum, shared, lane, simd, simds);
-    threadgroup_barrier(mem_flags::mem_device);
-    float acc = 0.0f;
-    uint p = 0u;
-    for (; p + 3u < length; p += 4u) {
-        ulong slot0 = ulong(p) * kv_heads + kvh;
-        float v0 = float(value_data[slot0 * D + tid]);
-        float v1 = float(value_data[(slot0 + kv_heads) * D + tid]);
-        float v2 = float(value_data[(slot0 + 2u * kv_heads) * D + tid]);
-        float v3 = float(value_data[(slot0 + 3u * kv_heads) * D + tid]);
-        acc = fma(srow[p], v0, acc);
-        acc = fma(srow[p + 1u], v1, acc);
-        acc = fma(srow[p + 2u], v2, acc);
-        acc = fma(srow[p + 3u], v3, acc);
-    }
-    for (; p < length; ++p) {
-        ulong slot = ulong(p) * kv_heads + kvh;
-        acc = fma(srow[p], float(value_data[slot * D + tid]), acc);
-    }
-    float gate = q[D + tid];
-    output[(ulong(row) * attn_heads + head) * D + tid] = acc / total * sigmoid(gate);
 }
 
 kernel void penalize(
