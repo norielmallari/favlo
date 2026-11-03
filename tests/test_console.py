@@ -40,6 +40,31 @@ def _ui(mode: str, *, width: int = 120, color: int = 0) -> tuple[Console, io.Str
     return ui, stream, clock
 
 
+def test_a_console_stores_the_loaded_record_name() -> None:
+    ui, _stream, _clock = _ui("plain")
+    assert ui.load_detail == ""
+    ui.load_detail = "bge-m3-int8"
+    assert ui.load_detail == "bge-m3-int8"
+
+
+def test_open_embed_restores_the_loaded_record_name(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from favlo.pipelines import close_embed, open_embed
+
+    ui, _stream, _clock = _ui("pretty")
+    selection = SimpleNamespace(pipeline="bge-m3", alias="bge-m3-int8", folder="bge-m3-int8")
+    child = SimpleNamespace(counts={}, selection=selection, proxy=None, close=lambda: None)
+    monkeypatch.setattr("favlo.pipelines.start_pipeline", lambda *_args, **_kwargs: child)
+    args = SimpleNamespace(console_ui=ui)
+    opened = open_embed({}, args, selection)
+    assert ui.pipeline == "bge-m3"
+    assert ui.load_detail == "bge-m3-int8"
+    close_embed(opened, args)
+    assert ui.pipeline == "qwen36-35b-a3b"
+    assert ui.load_detail == ""
+
+
 def test_a_traceback_is_not_painted_over() -> None:
     ui, stream, _clock = _ui("pretty", color=0)
     progress = ui.begin("prefill", total=50, unit="tok")

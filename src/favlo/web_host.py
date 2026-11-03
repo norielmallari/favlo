@@ -72,22 +72,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _registered_model() -> str | None:
-    """Prefer 35B when registered, else the first-run 4B, else the registry default."""
-    from favlo.registry import default_llm_id, pipeline_sampling, resolve
-    from favlo.setup import FIRST_PIPELINE
+    """The registry default: the model id favlo serve uses when a request names none."""
+    from favlo.registry import default_llm_id, resolve
 
-    for pipeline in ("qwen36-35b-a3b", FIRST_PIPELINE):
-        try:
-            _variants, default = pipeline_sampling(pipeline, runtime="metal41")
-            preferred = f"{pipeline}:{default}"
-            resolve(preferred)
-            return preferred
-        except (LookupError, ValueError):
-            continue
     try:
-        return default_llm_id()
+        model_id = default_llm_id()
     except LookupError:
         return None
+    try:
+        resolve(model_id)
+    except LookupError:
+        return None
+    return model_id
 
 
 def _store_initial_model(model_id: str) -> None:

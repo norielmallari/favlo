@@ -170,20 +170,23 @@ export function LiveReply({
   speaker,
   measured = false,
   expandTrace = 'collapsed',
+  expandTools,
   forceOpen = false,
 }: {
   steps: ReplyStep[];
   speaker?: string;
   measured?: boolean;
   expandTrace?: ExpandTrace;
+  expandTools?: ExpandTrace;
   forceOpen?: boolean;
 }) {
+  const toolExpand = expandTools ?? expandTrace;
   return (
     <View style={{ width: '100%', maxWidth: '100%', minWidth: 0, alignSelf: 'stretch', gap: space[2] }}>
       {steps.map((step, index) => {
         if (step.kind === 'thinking') {
           const text = step.text.trim();
-          if (!text) {
+          if (!text || expandTrace === 'hidden') {
             return null;
           }
           return (
@@ -197,12 +200,15 @@ export function LiveReply({
           );
         }
         if (step.kind === 'tool') {
+          if (toolExpand === 'hidden') {
+            return null;
+          }
           return (
             <ToolCall
               key={step.call.id}
               call={step.call}
               settled={step.settled}
-              expandTrace={expandTrace}
+              expandTrace={toolExpand}
               forceOpen={forceOpen}
             />
           );
@@ -325,6 +331,18 @@ export function readTrace(value: unknown): StoredPart[] {
   });
 }
 
+/** Keep one bubble when the optimistic send and the stored message arrive as two ids. */
+export function includeCreatedMessage(current: ChatMessage[], message: ChatMessage): ChatMessage[] {
+  if (current.some((item) => item.id === message.id)) {
+    return current;
+  }
+  const last = current[current.length - 1];
+  if (last != null && last.role === message.role && last.body === message.body) {
+    return [...current.slice(0, -1), message];
+  }
+  return [...current, message];
+}
+
 export function chatMessage(item: {
   id: string;
   role: string;
@@ -396,6 +414,7 @@ export function TranscriptTurn({
   toolCalls,
   trace,
   expandTrace = 'collapsed',
+  expandTools,
 }: {
   name: string;
   role: string;
@@ -404,7 +423,9 @@ export function TranscriptTurn({
   toolCalls?: ToolCallRecord[];
   trace?: StoredPart[];
   expandTrace?: ExpandTrace;
+  expandTools?: ExpandTrace;
 }) {
+  const toolExpand = expandTools ?? expandTrace;
   const { palette } = useTheme();
   const [empty, setEmpty] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -438,6 +459,9 @@ export function TranscriptTurn({
         <Text style={textStyle('label', palette.textPrimary, '600')}>{name}</Text>
         {steps.map((step, index) => {
           if (step.kind === 'thinking') {
+            if (expandTrace === 'hidden') {
+              return null;
+            }
             return (
               <Thinking
                 key={`thinking-${index}`}
@@ -448,8 +472,11 @@ export function TranscriptTurn({
             );
           }
           if (step.kind === 'tool') {
+            if (toolExpand === 'hidden') {
+              return null;
+            }
             return (
-              <ToolCall key={step.call.id} call={step.call} settled expandTrace={expandTrace} />
+              <ToolCall key={step.call.id} call={step.call} settled expandTrace={toolExpand} />
             );
           }
           return <MessageBody key={`reply-${index}`} body={step.text} onEmpty={replyOnly ? reportEmpty : undefined} />;

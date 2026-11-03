@@ -106,7 +106,7 @@ def ask_with_image(
     mime: str | None = None,
     detail: str = "auto",
     store: bool = False,
-    reasoning_effort: str = "none",
+    reasoning_effort: str | None = None,
 ) -> str | None:
     """Load ``image``, POST Responses with text + ``input_image``, return output text."""
     data_url = image_data_url(image, mime=mime)
@@ -127,6 +127,8 @@ def ask_with_image(
     }
     if reasoning_effort:
         body["reasoning"] = {"effort": reasoning_effort}
+    if reasoning_effort == "none":
+        body["enable_thinking"] = False
     payload = post_responses(base_url, body)
     if payload is None:
         return None

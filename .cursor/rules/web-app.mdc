@@ -64,7 +64,7 @@ The script is `web-spa/e2e/<feature>.spec.ts`. A fresh install uses `e2e/web-new
 | Feature | Script |
 |---|---|
 | Chat, configuration, heartbeats | `e2e/chat.spec.ts` |
-| Gallery vision model (Orchestration) | `e2e/gallery-vision-settings.spec.ts` |
+| Gallery captions use the agent model (Orchestration) | `e2e/gallery-vision-settings.spec.ts` |
 | Short transcript on the composer | `e2e/chat-align.spec.ts` |
 | New agent | `e2e/agent-create.spec.ts` |
 | Delete agent | `e2e/agent-delete.spec.ts` |
@@ -79,6 +79,7 @@ The script is `web-spa/e2e/<feature>.spec.ts`. A fresh install uses `e2e/web-new
 | MCP server | `e2e/mcp.spec.ts` |
 | Global skill copied onto an agent | `e2e/agent-skills.spec.ts` |
 | Gallery guide | `e2e/gallery.spec.ts` |
+| Gallery theme | `e2e/gallery-theme.spec.ts` |
 | Gallery folder bind | `e2e/gallery-bind.spec.ts` |
 | Gallery chat width resize | `e2e/gallery-chat-resize.spec.ts` |
 | Gallery placement change | `e2e/workspace-placement.spec.ts` |
@@ -86,6 +87,8 @@ The script is `web-spa/e2e/<feature>.spec.ts`. A fresh install uses `e2e/web-new
 | Session clear and archive | `e2e/session.spec.ts` |
 | Workspace skill | `e2e/workspace-skills.spec.ts` |
 | Workspace type and delete | `e2e/workspace-type-delete.spec.ts` |
+| Delete a workspace from the channel menu | `e2e/workspace-menu-delete.spec.ts` |
+| Workspace shells from the API | `e2e/workspace-shells.spec.ts` |
 | Fresh install and first chat | `e2e/web-new-user-e2e-setup/setup.spec.ts` |
 | Failed reply sent again | `e2e/reply-error.spec.ts` |
 

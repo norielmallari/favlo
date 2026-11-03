@@ -17,6 +17,7 @@ from web_api.profile import document
 from web_api.runs import perform
 from web_api.schemas import (
     FocusUpdate,
+    GalleryThemeUpdate,
     FolderCreate,
     FolderDelete,
     FolderPatch,
@@ -40,6 +41,12 @@ async def profile():
     return json_body(200, document())
 
 
+@router.get("/shells")
+async def list_shells(request: Request):
+    rows = await asyncio.to_thread(request.app.state.store.list_shells)
+    return json_body(200, {"shells": rows})
+
+
 @router.get("/workspaces")
 async def list_workspaces(request: Request, channel_id: str | None = None):
     rows = await asyncio.to_thread(request.app.state.store.list_workspaces, channel_id)
@@ -53,12 +60,17 @@ async def create_workspace(body: WorkspaceCreate, request: Request):
         key(request),
         body.model_dump(),
     )
+    if status < 300 and isinstance(result, dict):
+        claimed = await asyncio.to_thread(
+            request.app.state.store.claim_provisioning, result["id"]
+        )
+        if claimed:
+            result = await asyncio.to_thread(request.app.state.store.workspace, result["id"])
+            from web_api.provision import schedule
+
+            schedule(request.app, result["id"])
     for event in events:
         await request.app.state.bus.publish(event)
-    if status < 300 and body.type == "gallery" and isinstance(result, dict):
-        from web_api.gallery_embed import request_wake
-
-        request_wake(request.app, result.get("id"), vision=False)
     return json_body(status, result)
 
 
@@ -78,6 +90,18 @@ async def read_workspace(workspace_id: str, request: Request):
     body = document()
     body["workspace"] = row
     return json_body(200, body)
+
+
+@router.put("/workspaces/{workspace_id}/theme")
+async def update_theme(workspace_id: str, body: GalleryThemeUpdate, request: Request):
+    result, events = await asyncio.to_thread(
+        request.app.state.store.set_gallery_theme,
+        workspace_id,
+        body.theme,
+    )
+    for event in events:
+        await request.app.state.bus.publish(event)
+    return json_body(200, result)
 
 
 @router.delete("/workspaces/{workspace_id}")

@@ -69,7 +69,8 @@ async def update_agent(agent_id: str, body: AgentUpdate, request: Request):
         body.enable_thinking,
         body.preserve_thinking,
         body.reasoning_effort,
-        body.expand_trace,
+        body.expand_thinking,
+        body.expand_tools,
     )
     for event in events:
         await request.app.state.bus.publish(event)

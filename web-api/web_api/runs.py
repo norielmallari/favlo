@@ -11,7 +11,7 @@ from web_api.chat import ReplyPiece, public_call, record_tool, stream_reply
 from web_api.events import envelope
 from web_api.ids import guid
 from web_api.reply_error import spoken_error
-from web_api.store import Store
+from web_api.store import Rejected, Store
 
 Reply = Callable[..., AsyncIterator[str | ReplyPiece]]
 
@@ -38,12 +38,10 @@ async def perform(
     reply: Reply = stream_reply,
     pending: set[asyncio.Task[Any]] | None = None,
 ) -> None:
-    context = store.run_context(run_id)
-    if not context["model"] or not context["base_url"]:
-        await _publish(
-            bus,
-            store.finish_run(run_id, "failed", "Choose an enabled model in configuration."),
-        )
+    try:
+        context = store.run_context(run_id)
+    except Rejected as exc:
+        await _publish(bus, store.finish_run(run_id, "failed", str(exc)))
         return
     message_id = guid()
     parts: list[str] = []
@@ -98,7 +96,7 @@ async def perform(
             if incoming_piece.kind == "reasoning":
                 if incoming_piece.text:
                     reasoning.append(incoming_piece.text)
-                    _note_text(trace, "thinking", incoming_piece.text)
+                    _note_reasoning(trace, incoming_piece.text)
                     await bus.publish(
                         _delta(
                             context,
@@ -177,6 +175,21 @@ async def perform(
         )
     except Exception as exc:
         await _publish(bus, store.finish_run(run_id, "failed", spoken_error(str(exc))))
+
+
+def _note_reasoning(trace: list[dict[str, Any]], text: str) -> None:
+    """Record a thinking delta. Text recovered after the reply starts stays above that reply."""
+    if not text:
+        return
+    if any(part.get("kind") == "thinking" for part in trace):
+        _note_text(trace, "thinking", text)
+        return
+    if not text.strip():
+        return
+    if trace:
+        trace.insert(0, {"kind": "thinking", "text": text})
+        return
+    trace.append({"kind": "thinking", "text": text})
 
 
 def _note_text(trace: list[dict[str, Any]], kind: str, text: str) -> None:

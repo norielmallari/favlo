@@ -11,16 +11,8 @@ export type ElementProps = {
   onAddToChat: (path: string) => void;
 };
 
-export const CATALOG: Record<
-  string,
-  { name: string; version: number; slots: string[]; component: ComponentType<ElementProps> }
-> = {
-  preview: { name: 'preview', version: 1, slots: ['stage'], component: Preview },
-  filmstrip: { name: 'filmstrip', version: 1, slots: ['rail'], component: Filmstrip },
+/** Local painters. The shell document names them; an unknown name is skipped. */
+export const COMPONENTS: Record<string, ComponentType<ElementProps>> = {
+  preview: Preview,
+  filmstrip: Filmstrip,
 };
-
-export const RESERVED = ['transcript', 'file_list', 'file_view', 'diff', 'terminal_log'] as const;
-
-export function catalogNames(): string[] {
-  return Object.keys(CATALOG).sort();
-}

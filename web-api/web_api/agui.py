@@ -84,8 +84,6 @@ async def ag_ui_run(request: Request) -> StreamingResponse:
     if agent is None:
         raise NotFound("That agent does not exist.")
     model_id, base_url = store.chat_model(agent_id)
-    if not model_id or not base_url:
-        raise Rejected("Choose an enabled model in configuration.")
 
     state = body.get("state")
     if isinstance(state, dict):
@@ -159,7 +157,7 @@ async def ag_ui_run(request: Request) -> StreamingResponse:
                 user_images=user_images,
                 enable_thinking=agent.get("enable_thinking"),
                 preserve_thinking=agent.get("preserve_thinking"),
-                reasoning_effort=agent.get("reasoning_effort"),
+                reasoning_effort=store.reasoning_effort(str(agent_id)),
             ):
                 if cancel.is_set():
                     break

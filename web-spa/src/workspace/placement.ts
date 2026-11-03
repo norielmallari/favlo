@@ -12,15 +12,24 @@ export type PlacementState = {
   };
 };
 
-export function initialGallery(): PlacementState {
+export type ShellDocument = {
+  id: string;
+  slots?: string[];
+  elements?: { name: string; slot: string; initial_props?: Record<string, unknown> }[];
+};
+
+/** First placement from the shell document. An empty document paints nothing. */
+export function documentFromShell(shell: ShellDocument | null | undefined): PlacementState {
   return {
     favlo_workspace: {
       version: 1,
-      guide: 'gallery',
-      elements: [
-        { key: 'preview', element: 'preview', slot: 'stage', props: { fit: 'contain' } },
-        { key: 'filmstrip', element: 'filmstrip', slot: 'rail', props: { title: '', items: [] } },
-      ],
+      guide: shell?.id || '',
+      elements: (shell?.elements ?? []).map((item) => ({
+        key: item.name,
+        element: item.name,
+        slot: item.slot,
+        props: item.initial_props ?? {},
+      })),
       selection: null,
     },
   };

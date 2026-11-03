@@ -32,6 +32,7 @@ from web_api.routes import (
     workspaces,
 )
 from web_api.runs import perform
+from web_api.infrastructure.db.database import prepare
 from web_api.store import Conflict, NotFound, Rejected, Store
 
 BROWSER_ORIGIN = "http://127.0.0.1:8012"
@@ -49,7 +50,9 @@ def create_app(home: Path | None = None, reply: Callable[..., Any] | None = None
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        app.state.store = Store(root / "app.db")
+        database = root / "app.db"
+        await asyncio.to_thread(prepare, database)
+        app.state.store = Store(database)
         app.state.bus = Bus()
         app.state.cancels = {}
         app.state.tasks = set()

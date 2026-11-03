@@ -23,7 +23,7 @@ test('an empty conversation shows starters and an empty workspaces column', asyn
   await expect(page.getByText('Chat, images, music, and voice on this machine.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Generate an image' })).toBeVisible();
   await expect(page.getByLabel('Workspaces')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'New workspace' })).toBeVisible();
+  await expect(page.getByRole('button', { name: `New workspace for ${name}` })).toBeVisible();
   await expect(page.getByText('No workspaces')).toBeVisible();
   await page.getByRole('button', { name: 'List registered models' }).click();
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('Which models are registered?');

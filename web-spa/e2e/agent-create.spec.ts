@@ -41,6 +41,12 @@ test('a new agent shows the same options as edit', async ({ page }) => {
   await page.getByRole('textbox', { name: 'Agent name', exact: true }).fill(name);
   await page.getByRole('textbox', { name: 'Persona', exact: true }).fill('A short persona.');
   await page.getByRole('combobox', { name: 'Reasoning effort', exact: true }).selectOption('medium');
+  const thinking = page.getByRole('combobox', { name: 'Expand thinking', exact: true });
+  const toolCalls = page.getByRole('combobox', { name: 'Expand tool calls', exact: true });
+  await expect(thinking.locator('option:checked')).toHaveText('Collapsed (default)');
+  await expect(toolCalls.locator('option:checked')).toHaveText('Not shown (default)');
+  await thinking.selectOption('hidden');
+  await toolCalls.selectOption('collapsed');
   await page.getByRole('switch', { name: 'Conversation tools', exact: true }).click();
   const wideCreate = page.getByRole('button', { name: 'Create agent' });
   await onScreen(wideCreate);
@@ -61,11 +67,28 @@ test('a new agent shows the same options as edit', async ({ page }) => {
   await expect(page.getByRole('combobox', { name: `Provider for ${name}`, exact: true })).toHaveValue('');
   await expect(page.getByRole('combobox', { name: `Model for ${name}`, exact: true })).toHaveCount(0);
   await expect(page.getByRole('combobox', { name: `Reasoning effort for ${name}`, exact: true })).toHaveValue('medium');
+  await expect(page.getByRole('combobox', { name: `Expand thinking for ${name}`, exact: true })).toHaveValue('hidden');
+  await expect(page.getByRole('combobox', { name: `Expand tool calls for ${name}`, exact: true })).toHaveValue('collapsed');
+  await page.getByRole('combobox', { name: `Expand thinking for ${name}`, exact: true }).selectOption('always');
+  await page.getByRole('combobox', { name: `Expand tool calls for ${name}`, exact: true }).selectOption('running');
+  const save = page.getByRole('button', { name: `Save ${name}` });
+  await onScreen(save);
+  await save.click();
+  await expect(page.getByRole('combobox', { name: `Expand thinking for ${name}`, exact: true })).toHaveValue('always');
+  await expect(page.getByRole('combobox', { name: `Expand tool calls for ${name}`, exact: true })).toHaveValue('running');
   await expect(page.getByRole('combobox', { name: `Preserve thinking for ${name}`, exact: true })).toHaveValue('');
   await expect(page.getByRole('combobox', { name: `Thinking for ${name}`, exact: true })).toHaveCount(0);
   await expect(page.getByRole('switch', { name: `Configuration tools for ${name}` })).not.toBeChecked();
   await expect(page.getByRole('switch', { name: `Conversation tools for ${name}` })).toBeChecked();
   await expect(page.getByRole('switch', { name: `Heartbeat tools for ${name}` })).not.toBeChecked();
+
+  await page.getByRole('tab', { name: 'MCP' }).click();
+  const media = page.getByLabel('MCP list').getByRole('button', { name: 'Favlo media', exact: true });
+  await onScreen(media);
+  await media.click();
+  const url = page.getByRole('textbox', { name: 'URL' });
+  await onScreen(url);
+  await expect(url).toHaveValue('http://127.0.0.1:8129/mcp');
 
   await page.getByRole('button', { name: 'Chat' }).click();
   await expect(page.getByRole('heading', { name: 'Channels' })).toBeVisible();

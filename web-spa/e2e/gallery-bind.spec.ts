@@ -25,8 +25,6 @@ test('gallery create binds folder once and opens the shell', async ({ page }) =>
       await page.setViewportSize({ width: 1280, height: 800 });
       await page.goto('http://127.0.0.1:8012/');
       await createGalleryWorkspace(page, name, root);
-      await expect(page.getByText('Ask the agent to fill the filmstrip')).toBeVisible();
-      await expect(page.getByText('No media selected')).toBeVisible();
       await expect(page.getByLabel('Gallery', { exact: true })).toBeVisible();
     });
 

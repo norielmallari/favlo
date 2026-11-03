@@ -11,6 +11,26 @@ from web_api.guides import GUIDES
 _MAX_BYTES = 64 * 1024
 
 
+def initial_document(shell_id: str, elements: list[dict[str, Any]]) -> dict[str, Any]:
+    """First placement for a shell, taken from that shell's element rows."""
+    return {
+        "favlo_workspace": {
+            "version": 1,
+            "guide": shell_id,
+            "elements": [
+                {
+                    "key": str(item["name"]),
+                    "element": str(item["name"]),
+                    "slot": str(item["slot"]),
+                    "props": dict(item.get("initial_props") or {}),
+                }
+                for item in elements
+            ],
+            "selection": None,
+        }
+    }
+
+
 def initial_for(guide_id: str) -> dict[str, Any]:
     guide = GUIDES.get(guide_id) or GUIDES["gallery"]
     return {
@@ -204,16 +224,20 @@ def _clamp_props(name: str, props: dict[str, Any], ignored: list[str]) -> dict[s
         items: list[dict[str, str]] = []
         seen: set[str] = set()
         for row in items_raw[:60]:
-            if not isinstance(row, dict):
+            if isinstance(row, str):
+                path = row.strip()
+                caption = ""
+            elif isinstance(row, dict):
+                path = str(row.get("path") or "").strip()
+                caption = str(row.get("caption") or "").strip()
+            else:
                 ignored.append("dropped filmstrip item")
                 continue
-            path = str(row.get("path") or "").strip()
             if not path or path in seen:
                 ignored.append("dropped filmstrip path")
                 continue
             seen.add(path)
             item: dict[str, str] = {"path": path}
-            caption = str(row.get("caption") or "").strip()
             if caption:
                 item["caption"] = caption[:80]
             items.append(item)

@@ -2,17 +2,26 @@ import { render, userEvent, waitFor } from '@testing-library/react-native';
 
 import { ThemeProvider } from '@/theme/Theme';
 import { WorkspaceScreen } from '@/workspace/WorkspaceScreen';
-import { filmstripPaths, initialGallery, selectPath } from '@/workspace/placement';
+import { documentFromShell, filmstripPaths, selectPath, type ShellDocument } from '@/workspace/placement';
 
-test('initial gallery has preview and an empty filmstrip', () => {
-  const state = initialGallery();
+const galleryShell: ShellDocument = {
+  id: 'gallery',
+  slots: ['stage', 'rail'],
+  elements: [
+    { name: 'preview', slot: 'stage', initial_props: { fit: 'contain' } },
+    { name: 'filmstrip', slot: 'rail', initial_props: { title: '', items: [] } },
+  ],
+};
+
+test('the shell document starts with preview and an empty filmstrip', () => {
+  const state = documentFromShell(galleryShell);
   expect(state.favlo_workspace.elements.map((item) => item.element)).toEqual(['preview', 'filmstrip']);
   expect(filmstripPaths(state)).toEqual([]);
   expect(state.favlo_workspace.selection).toBeNull();
 });
 
 test('selectPath updates selection only', () => {
-  const next = selectPath(initialGallery(), 'Albums/zebra.png');
+  const next = selectPath(documentFromShell(galleryShell), 'Albums/zebra.png');
   expect(next.favlo_workspace.selection).toEqual({ kind: 'file', path: 'Albums/zebra.png' });
   expect(filmstripPaths(next)).toEqual([]);
 });
@@ -50,10 +59,19 @@ function mockWorkspace() {
           session_id: 'session_1',
           channel_id: 'channel_1',
           skills: [],
+          provisioning_state: 'provisioned',
+          shell: {
+            id: 'gallery',
+            slots: ['stage', 'rail'],
+            elements: [
+              { name: 'preview', slot: 'stage', initial_props: { fit: 'contain' } },
+              { name: 'filmstrip', slot: 'rail', initial_props: { title: '', items: [] } },
+            ],
+          },
         },
       });
     }
-    if (path === '/workspaces/workspace_1/folders/pick' && method === 'POST') {
+    if (path === '/folders/pick' && method === 'POST') {
       return json({ cancelled: false, location: '/tmp/gallery' });
     }
     if (path === '/workspaces/workspace_1/folders' && method === 'POST') {

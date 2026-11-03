@@ -52,7 +52,7 @@ export function Frame({
   }, [menu]);
 
   return (
-    <View style={{ flex: 1, width: '100%', maxWidth: '100%', backgroundColor: palette.background }}>
+    <View testID="app-frame" style={{ flex: 1, width: '100%', maxWidth: '100%', backgroundColor: palette.background }}>
       {Platform.OS === 'web' && onSkip
         ? createElement(
             'style',

@@ -143,6 +143,40 @@ def public_call(row: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _session_messages(session: Any) -> list[Any]:
+    state = getattr(session, "state", None)
+    if not isinstance(state, dict):
+        return []
+    memory = state.get("in_memory")
+    if not isinstance(memory, dict):
+        return []
+    messages = memory.get("messages")
+    return messages if isinstance(messages, list) else []
+
+
+def _message_reasoning(message: Any) -> str:
+    parts: list[str] = []
+    for item in getattr(message, "contents", None) or []:
+        if getattr(item, "type", None) != "text_reasoning":
+            continue
+        text = getattr(item, "text", None)
+        if isinstance(text, str) and text.strip():
+            parts.append(text)
+    return "".join(parts)
+
+
+def _turn_reasoning(session: Any, start: int) -> str:
+    """Reasoning stored on assistant messages this turn added."""
+    chunks: list[str] = []
+    for message in _session_messages(session)[start:]:
+        if getattr(message, "role", None) != "assistant":
+            continue
+        text = _message_reasoning(message)
+        if text:
+            chunks.append(text)
+    return "".join(chunks)
+
+
 def reasoning_piece(update: Any) -> str:
     """Reasoning text on one stream update."""
     contents = getattr(update, "contents", None) or []
@@ -475,6 +509,7 @@ async def stream_reply(
         await open_clients(mcp_tools, clients)
         if store is not None and session_id:
             await restore_loaded(mcp_tools, store, session_id)
+        prior_messages = len(_session_messages(session))
         stream = agent.run(prompt, session=session, stream=True)
     except Exception:
         await clients.aclose()
@@ -524,20 +559,27 @@ async def stream_reply(
             stopped = True
         if stopped:
             return
-        if not content_yielded:
+        if not content_yielded or not saw_reasoning:
             final = await stream.get_final_response()
+            messages = getattr(final, "messages", None) or []
             if not saw_reasoning:
-                for message in getattr(final, "messages", None) or []:
+                for message in messages:
                     reason = reasoning_piece(message)
                     if reason:
+                        saw_reasoning = True
                         yield ReplyPiece("reasoning", reason)
-            if not saw_tool:
-                for message in getattr(final, "messages", None) or []:
-                    for call in tool_pieces(message):
-                        yield call
-            text = getattr(final, "text", None)
-            if isinstance(text, str) and text.strip():
-                yield ReplyPiece("content", text)
+                if not saw_reasoning:
+                    recovered = _turn_reasoning(session, prior_messages)
+                    if recovered:
+                        yield ReplyPiece("reasoning", recovered)
+            if not content_yielded:
+                if not saw_tool:
+                    for message in messages:
+                        for call in tool_pieces(message):
+                            yield call
+                text = getattr(final, "text", None)
+                if isinstance(text, str) and text.strip():
+                    yield ReplyPiece("content", text)
         keep = True
     finally:
         if abort is not None:

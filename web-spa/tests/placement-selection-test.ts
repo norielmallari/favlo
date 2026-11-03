@@ -1,6 +1,6 @@
 import {
+  documentFromShell,
   ensureFilmstripSelection,
-  initialGallery,
   type PlacementState,
 } from '@/workspace/placement';
 
@@ -41,5 +41,15 @@ test('ensureFilmstripSelection replaces a path that left the strip', () => {
 test('ensureFilmstripSelection clears selection when the strip is empty', () => {
   const next = ensureFilmstripSelection(strip([], 'a.png'));
   expect(next.favlo_workspace.selection).toBeNull();
-  expect(ensureFilmstripSelection(initialGallery()).favlo_workspace.selection).toBeNull();
+  expect(
+    ensureFilmstripSelection(
+      documentFromShell({
+        id: 'gallery',
+        elements: [
+          { name: 'preview', slot: 'stage', initial_props: { fit: 'contain' } },
+          { name: 'filmstrip', slot: 'rail', initial_props: { title: '', items: [] } },
+        ],
+      }),
+    ).favlo_workspace.selection,
+  ).toBeNull();
 });

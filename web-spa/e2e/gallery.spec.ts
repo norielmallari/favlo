@@ -15,6 +15,7 @@ const TINY_PNG = Buffer.from(
 );
 
 test('a gallery guide binds a folder, places a strip, and browses without AG-UI', async ({ page }) => {
+  test.setTimeout(360_000);
   const models = await fetch('http://127.0.0.1:8129/v1/models', {
     signal: AbortSignal.timeout(15_000),
   });
@@ -28,7 +29,8 @@ test('a gallery guide binds a folder, places a strip, and browses without AG-UI'
   fs.writeFileSync(path.join(albums, 'zebra.png'), TINY_PNG);
   const name = `Stills ${Date.now()}`;
   let aguiCount = 0;
-  page.on('request', (request) => {
+  let gallery: Page;
+  page.context().on('request', (request) => {
     if (request.method() === 'POST' && request.url().includes('/ag-ui')) {
       aguiCount += 1;
     }
@@ -39,61 +41,39 @@ test('a gallery guide binds a folder, places a strip, and browses without AG-UI'
       await page.setViewportSize({ width: 1280, height: 800 });
       await page.goto('http://127.0.0.1:8012/');
       await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8012\/?$/);
-      await expect(page.getByRole('button', { name: 'New workspace' })).toBeVisible();
-      await createGalleryWorkspace(page, name, root);
-      await expect(page.getByText('Ask the agent to fill the filmstrip')).toBeVisible();
-      await expect(page.getByText('No media selected')).toBeVisible();
-      // Index wake writes per-folder sidecars (Albums owns its .favlo_metadata).
-      await expect
-        .poll(() => fs.existsSync(path.join(albums, '.favlo_metadata', 'zebra.png.json')))
-        .toBe(true);
-      await expect
-        .poll(() => fs.existsSync(path.join(root, '.favlo_metadata', 'horse.png.json')))
-        .toBe(true);
+      await expect(page.getByRole('button', { name: 'New workspace for Favlo' })).toBeVisible();
+      gallery = await createGalleryWorkspace(page, name, root);
+      await expect(gallery.getByLabel(/said:/).first()).toBeVisible();
+      assertCaption(path.join(root, '.favlo_metadata', 'horse.png.json'));
+      assertCaption(path.join(root, '.favlo_metadata', 'cat.png.json'));
+      assertCaption(path.join(albums, '.favlo_metadata', 'zebra.png.json'));
       expect(aguiCount).toBe(beforeBind);
     });
 
-    await step('agent fills filmstrip', async () => {
-      const zebra = page.getByRole('button', { name: 'zebra.png', exact: true });
-      await page.getByRole('textbox', { name: 'Message', exact: true }).fill(
-        'Put every image from this folder on the filmstrip.',
-      );
-      const send = page.getByRole('button', { name: 'Send', exact: true });
-      await onScreen(send);
-      await send.click();
-      await expect(page.getByTestId('working')).toBeVisible();
-      try {
-        await expect(zebra).toBeVisible();
-      } catch {
-        await expect(page.getByTestId('working')).toHaveCount(0);
-        await page.getByRole('textbox', { name: 'Message', exact: true }).fill(
-          'Please put every image on the filmstrip now, including Albums/zebra.png.',
-        );
-        await onScreen(send);
-        await send.click();
-        await expect(page.getByTestId('working')).toBeVisible();
-        await expect(zebra).toBeVisible();
-      }
-      await expect(page.getByTestId('working')).toHaveCount(0);
-      await expect(page.getByRole('button', { name: 'horse.png', exact: true })).toBeVisible();
-      await expect(page.getByRole('button', { name: 'cat.png', exact: true })).toBeVisible();
-      await expect(page.getByText('No media selected')).toHaveCount(0);
-      await expect(page.getByRole('button', { name: /Download .+\.png/ })).toBeVisible();
-      await expectChatRestsOnComposer(page);
+    await step('opening filmstrip shows the images', async () => {
+      const zebra = gallery.getByRole('button', { name: 'zebra.png', exact: true });
+      await expect(zebra).toBeVisible();
+      await expect(zebra).toHaveText('');
+      await expect(gallery.locator('img[alt="zebra.png"]').first()).toHaveJSProperty('naturalWidth', 1);
+      await expect(gallery.getByRole('button', { name: 'horse.png', exact: true })).toBeVisible();
+      await expect(gallery.getByRole('button', { name: 'cat.png', exact: true })).toBeVisible();
+      await expect(gallery.getByText('No media selected')).toHaveCount(0);
+      await expect(gallery.getByRole('button', { name: /Download .+\.png/ })).toBeVisible();
+      await expectChatRestsOnComposer(gallery);
     });
 
     await step('browse strip without AG-UI', async () => {
       const beforeBrowse = aguiCount;
-      await page.getByRole('button', { name: 'zebra.png', exact: true }).click();
-      await expect(page.getByRole('button', { name: 'Download zebra.png' })).toBeVisible();
-      await page.keyboard.press('ArrowRight');
-      await page.keyboard.press('ArrowLeft');
-      await expect(page.getByRole('button', { name: 'Download zebra.png' })).toBeVisible();
-      const download = page.waitForEvent('download', { timeout: 15_000 });
-      await page.getByRole('button', { name: 'Download zebra.png' }).click();
+      await gallery.getByRole('button', { name: 'zebra.png', exact: true }).click();
+      await expect(gallery.getByRole('button', { name: 'Download zebra.png' })).toBeVisible();
+      await gallery.keyboard.press('ArrowRight');
+      await gallery.keyboard.press('ArrowLeft');
+      await expect(gallery.getByRole('button', { name: 'Download zebra.png' })).toBeVisible();
+      const download = gallery.waitForEvent('download', { timeout: 15_000 });
+      await gallery.getByRole('button', { name: 'Download zebra.png' }).click();
       expect((await download).suggestedFilename()).toBe('zebra.png');
-      await page.getByRole('button', { name: 'Add to chat' }).click();
-      await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue(
+      await gallery.getByRole('button', { name: 'Add to chat' }).click();
+      await expect(gallery.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue(
         /(?:^|\n)Albums\/zebra\.png$/,
       );
       expect(aguiCount).toBe(beforeBrowse);
@@ -101,22 +81,22 @@ test('a gallery guide binds a folder, places a strip, and browses without AG-UI'
 
     await step('reload restores strip without AG-UI', async () => {
       const beforeReload = aguiCount;
-      await page.reload();
-      await expect(page.getByRole('heading', { name })).toBeVisible();
-      await expect(page.getByRole('button', { name: 'zebra.png', exact: true })).toBeVisible();
+      await gallery.reload();
+      await expect(gallery.getByRole('heading', { name })).toBeVisible();
+      await expect(gallery.getByRole('button', { name: 'zebra.png', exact: true })).toBeVisible();
       expect(aguiCount).toBe(beforeReload);
     });
 
     await step('narrow chat / back to workspace', async () => {
-      await page.setViewportSize({ width: 390, height: 844 });
-      const chatTab = page.getByRole('button', { name: 'Chat', exact: true });
+      await gallery.setViewportSize({ width: 390, height: 844 });
+      const chatTab = gallery.getByRole('button', { name: 'Chat', exact: true });
       await expect(chatTab).toBeVisible();
       await chatTab.click();
-      await expect(page.getByLabel('Conversation')).toBeVisible();
-      await expectChatRestsOnComposer(page);
-      await page.getByRole('button', { name: 'Back to workspace' }).click();
-      await expect(page.getByLabel('Gallery', { exact: true })).toBeVisible();
-      await expectFits(page);
+      await expect(gallery.getByLabel('Conversation')).toBeVisible();
+      await expectChatRestsOnComposer(gallery);
+      await gallery.getByRole('button', { name: 'Back to workspace' }).click();
+      await expect(gallery.getByLabel('Gallery', { exact: true })).toBeVisible();
+      await expectFits(gallery);
     });
   } finally {
     await deleteWorkspacesNamed(name);
@@ -159,8 +139,13 @@ async function expectChatRestsOnComposer(page: Page) {
   }
 }
 
+function assertCaption(file: string) {
+  const side = JSON.parse(fs.readFileSync(file, 'utf8')) as { description?: string };
+  expect(side.description ?? '').not.toMatch(/^A \w+ file at /);
+}
+
 async function expectFits(page: Page) {
-  await onScreen(page.getByRole('button', { name: 'Configuration' }));
+  await onScreen(page.getByRole('button', { name: 'Favlo', exact: true }));
   const overflow = await page.evaluate(
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
   );

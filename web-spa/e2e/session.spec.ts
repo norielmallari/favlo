@@ -18,18 +18,18 @@ test('session clear and archive stay on their session', async ({ page }) => {
   const folderRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'favlo-session-'));
   try {
     await page.setViewportSize({ width: 1280, height: 800 });
-    await page.addInitScript(() => sessionStorage.removeItem('favlo.openWorkspace'));
     await clearFavloSession();
     await page.goto('http://127.0.0.1:8012/');
     await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8012\/?$/);
     await openFavloHome(page);
-    await expect(page.getByLabel('Gallery workspace')).toHaveCount(0);
+    await expect(page.getByLabel('Gallery workspace', { exact: true })).toHaveCount(0);
     await waitIdle(page);
 
     const channel = page
       .getByLabel('Conversation')
       .filter({ has: page.getByRole('heading', { name: 'Favlo', exact: true }) });
-    const gallery = () => page.getByLabel('Gallery workspace');
+    let galleryPage = page;
+    const gallery = () => galleryPage.getByLabel('Gallery workspace', { exact: true });
 
     await step('send channel note', async () => {
       await sendLine(page, channelLine);
@@ -37,30 +37,28 @@ test('session clear and archive stay on their session', async ({ page }) => {
     });
 
     await step('create gallery with folder, send workspace note', async () => {
-      await createGalleryWorkspace(page, workspaceName, folderRoot);
-      await expect(page.getByText('Ask the agent to fill the filmstrip')).toBeVisible();
-      await sendLine(page, workspaceLine);
+      galleryPage = await createGalleryWorkspace(page, workspaceName, folderRoot, { keepChannel: true });
+      await sendLine(galleryPage, workspaceLine);
       await expect(gallery().getByLabel(`You said: ${workspaceLine}`).first()).toBeVisible();
-      await waitIdle(page);
+      await waitIdle(galleryPage);
     });
 
     await step('clear workspace chat; strip resets', async () => {
-      await waitIdle(page);
-      await sendLine(page, '/session clear');
+      await waitIdle(galleryPage);
+      await sendLine(galleryPage, '/session clear');
       await expect(gallery().getByLabel(`You said: ${workspaceLine}`)).toHaveCount(0);
-      await expect(page.getByText('Ask the agent to fill the filmstrip')).toBeVisible();
-      await expect(page.getByRole('heading', { name: workspaceName })).toBeVisible();
+      await expect(galleryPage.getByText('Ask the agent to fill the filmstrip')).toBeVisible();
+      await expect(galleryPage.getByRole('heading', { name: workspaceName })).toBeVisible();
     });
 
     await step('channel note survives; workspace note can be resent', async () => {
-      await page.getByRole('button', { name: 'Back to channel' }).click();
       await expect(channel.getByLabel(`You said: ${channelLine}`).first()).toBeVisible();
-      await page.getByRole('button', { name: workspaceName, exact: true }).click();
-      await expect(page.getByRole('heading', { name: workspaceName })).toBeVisible();
-      await waitIdle(page);
-      await sendLine(page, workspaceLine);
+      galleryPage = await openWorkspaceNamed(page, workspaceName);
+      await expect(galleryPage.getByRole('heading', { name: workspaceName })).toBeVisible();
+      await waitIdle(galleryPage);
+      await sendLine(galleryPage, workspaceLine);
       await expect(gallery().getByLabel(`You said: ${workspaceLine}`).first()).toBeVisible();
-      await waitIdle(page);
+      await waitIdle(galleryPage);
     });
 
     await step('clear home; workspace chat remains', async () => {
@@ -68,8 +66,8 @@ test('session clear and archive stay on their session', async ({ page }) => {
       await waitIdle(page);
       await sendLine(page, '/session clear');
       await expect(channel.getByLabel(`You said: ${channelLine}`)).toHaveCount(0);
-      await page.getByRole('button', { name: workspaceName, exact: true }).click();
-      await expect(page.getByRole('heading', { name: workspaceName })).toBeVisible();
+      galleryPage = await openWorkspaceNamed(page, workspaceName);
+      await expect(galleryPage.getByRole('heading', { name: workspaceName })).toBeVisible();
       const bodies = await workspaceMessageBodies(workspaceName);
       expect(bodies, `server messages for ${workspaceName}`).toContain(workspaceLine);
       await expect(gallery().getByLabel(`You said: ${workspaceLine}`).first()).toBeVisible();
@@ -92,34 +90,22 @@ test('session clear and archive stay on their session', async ({ page }) => {
       await expect(channel.getByLabel(`You said: ${ordinary}`)).toHaveCount(0, { timeout: 360_000 });
       await expect(page.getByTestId('working')).toHaveCount(0, { timeout: 360_000 });
       await expect(channel.getByLabel(/^You said: /)).toHaveCount(0);
-      await page.getByRole('button', { name: workspaceName, exact: true }).click();
+      galleryPage = await openWorkspaceNamed(page, workspaceName);
       await expect(gallery().getByLabel(`You said: ${workspaceLine}`).first()).toBeVisible();
     });
 
     await step('narrow workspace clear', async () => {
-      await page.setViewportSize({ width: 390, height: 844 });
-      if ((await page.getByLabel('Gallery workspace').count()) === 0) {
-        await page.getByRole('button', { name: 'Channels' }).click();
-        const favlo = page.getByLabel('Channels').getByRole('button', { name: 'Favlo', exact: true });
-        await expect(favlo).toBeVisible();
-        try {
-          await expect(favlo).toHaveAttribute('aria-expanded', 'true', { timeout: 3_000 });
-        } catch {
-          await favlo.click();
-          await expect(favlo).toHaveAttribute('aria-expanded', 'true');
-        }
-        await page.getByRole('button', { name: workspaceName, exact: true }).click();
-      }
-      await expect(page.getByRole('heading', { name: workspaceName })).toBeVisible();
-      await page.getByRole('button', { name: 'Chat' }).click();
-      await waitIdle(page);
+      await galleryPage.setViewportSize({ width: 390, height: 844 });
+      await expect(galleryPage.getByRole('heading', { name: workspaceName })).toBeVisible();
+      await galleryPage.getByRole('button', { name: 'Chat' }).click();
+      await waitIdle(galleryPage);
       const narrowLine = `Narrow workspace ${Date.now()}`;
-      await sendLine(page, narrowLine);
+      await sendLine(galleryPage, narrowLine);
       await expect(gallery().getByLabel(`You said: ${narrowLine}`).first()).toBeVisible();
-      await waitIdle(page);
-      await sendLine(page, '/session clear');
+      await waitIdle(galleryPage);
+      await sendLine(galleryPage, '/session clear');
       await expect(gallery().getByLabel(`You said: ${narrowLine}`)).toHaveCount(0);
-      await expect(page.getByRole('heading', { name: workspaceName })).toBeVisible();
+      await expect(galleryPage.getByRole('heading', { name: workspaceName })).toBeVisible();
     });
   } finally {
     await deleteWorkspacesNamed(workspaceName);
@@ -166,11 +152,16 @@ async function sendLine(page: Page, text: string) {
   ]);
 }
 
+async function openWorkspaceNamed(page: Page, name: string): Promise<Page> {
+  const popupPromise = page.waitForEvent('popup');
+  await page.getByRole('button', { name, exact: true }).click();
+  const workspace = await popupPromise;
+  await expect(workspace).toHaveURL(/\/w\/.+/);
+  await expect(workspace.getByRole('heading', { name })).toBeVisible();
+  return workspace;
+}
+
 async function openFavloHome(page: Page) {
-  if ((await page.getByLabel('Gallery workspace').count()) > 0) {
-    await page.getByRole('button', { name: 'Back to channel' }).click();
-    await expect(page.getByLabel('Gallery workspace')).toHaveCount(0);
-  }
   const channels = page.getByLabel('Channels');
   const favlo = channels.getByRole('button', { name: 'Favlo', exact: true });
   const home = channels.getByRole('button', { name: 'Home', exact: true });
@@ -183,7 +174,7 @@ async function openFavloHome(page: Page) {
     await expect(home).toBeVisible();
   }
   await home.click();
-  await expect(page.getByLabel('Gallery workspace')).toHaveCount(0);
+  await expect(page.getByLabel('Gallery workspace', { exact: true })).toHaveCount(0);
 }
 
 async function favloSessionId(): Promise<string | null> {

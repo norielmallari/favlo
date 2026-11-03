@@ -1,4 +1,4 @@
-import { render, userEvent, within } from '@testing-library/react-native';
+import { render, userEvent, waitFor, within } from '@testing-library/react-native';
 import { Dimensions, StyleSheet } from 'react-native';
 
 import { ChatScreen } from '@/components/ChatScreen';
@@ -35,7 +35,7 @@ test('an empty conversation keeps the transcript and shows workspaces', async ()
   expect(view.queryByRole('button', { name: 'Home' })).toBeNull();
   expect(view.queryByText('Chat, images, music, and voice on this machine.')).toBeNull();
   await user.press(view.getByRole('button', { name: 'Favlo' }));
-  expect(view.getByRole('button', { name: 'New workspace' })).toBeTruthy();
+  expect(view.getByRole('button', { name: 'New workspace for Favlo' })).toBeTruthy();
   expect(view.getByTestId('selected-mark')).toBeTruthy();
   expect(within(view.getByTestId('reading-column')).getByLabelText('Message')).toBeTruthy();
 });
@@ -56,6 +56,61 @@ test('a compact empty conversation uses a channels drawer', async () => {
   expect(within(view.getByTestId('reading-column')).getByLabelText('Message')).toBeTruthy();
   await user.press(view.getByRole('button', { name: 'Channels' }));
   expect(view.getByRole('button', { name: 'New agent' })).toBeTruthy();
+});
+
+test('new workspace binds to the agent whose menu is open', async () => {
+  jest.spyOn(Dimensions, 'get').mockReturnValue({ width: 1280, height: 800, scale: 1, fontScale: 1 });
+  const posts: string[] = [];
+  globalThis.fetch = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input).replace('http://127.0.0.1:8130', '');
+    if (path === '/channels') {
+      return json({
+        channels: [
+          { id: FAVLO_CHANNEL_ID, name: 'Favlo', agent_id: FAVLO_AGENT_ID, session_id: '11111111-1111-4111-8111-111111111111' },
+          { id: 'channel-lane', name: 'Lane', agent_id: 'agent-lane', session_id: '22222222-2222-4222-8222-222222222222' },
+        ],
+      });
+    }
+    if (path === '/shells') {
+      return json({
+        shells: [{ id: 'coding', label: 'Coding', icon: 'terminal', setup: 'none', setup_hint: '' }],
+      });
+    }
+    if (path.startsWith('/sessions/')) {
+      return json({ messages: [], runs: [], cursor: 0 });
+    }
+    if (path === '/workspaces' && init?.method === 'POST') {
+      posts.push(String(init.body));
+      return json({
+        id: 'workspace-1',
+        name: 'Notes',
+        type: 'coding',
+        session_id: '33333333-3333-4333-8333-333333333333',
+      });
+    }
+    if (path.startsWith('/workspaces')) {
+      return json({ workspaces: [] });
+    }
+    return json({});
+  }) as typeof fetch;
+  const user = userEvent.setup();
+  const view = await render(
+    <ThemeProvider>
+      <ChatScreen />
+    </ThemeProvider>,
+  );
+  expect(await view.findByRole('button', { name: 'New workspace for Favlo' })).toBeTruthy();
+  await user.press(view.getByRole('button', { name: 'Lane', exact: true }));
+  await user.press(await view.findByRole('button', { name: 'New workspace for Lane' }));
+  expect(view.getByRole('header', { name: 'New workspace for Lane' })).toBeTruthy();
+  await user.type(view.getByLabelText('Workspace name'), 'Notes');
+  const create = view.getByRole('button', { name: 'Create workspace' });
+  await waitFor(() => {
+    expect(create.props.accessibilityState).toEqual(expect.objectContaining({ disabled: false }));
+  });
+  await user.press(create);
+  await waitFor(() => expect(posts).toHaveLength(1));
+  expect(JSON.parse(posts[0]).channel_id).toBe('channel-lane');
 });
 
 test('a reply in progress keeps the empty greeting off', async () => {

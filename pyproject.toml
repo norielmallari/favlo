@@ -23,6 +23,8 @@ dependencies = [
     "tokenizers>=0.22",
     "uvicorn>=0.32",
     "agent-framework-ag-ui>=1.7.1",
+    "sqlalchemy>=2.1.6",
+    "alembic>=1.20.1",
 ]
 
 [project.optional-dependencies]

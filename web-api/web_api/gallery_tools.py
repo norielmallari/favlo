@@ -27,13 +27,19 @@ INSTRUCTIONS = (
     "Always pass selection for one filmstrip path when the strip has items. "
     "Do not invent media descriptions; Favlo's index job writes metadata under "
     ".favlo_metadata beside the media (for example Albums/.favlo_metadata/media.mp3.json). "
+    "When the person asks to change a caption, title, tags, or other image metadata, call "
+    f"{qualified(SOURCE, 'update_metadata')} with that image's relative path. "
+    "Send only the fields they want changed. "
     "This image or this clip means the selected media path on the turn, when one is named. "
     "After an image generate tool finishes, call "
     f"{qualified(SOURCE, 'write_image')} with the favlo:// URI as source and a path "
     "beside the selected media or at the folder root. "
     "Before folder mutate tools or "
     f"{qualified(SOURCE, 'search_unlike_media')}, call "
-    f"{qualified(SOURCE, 'load_folder_tools')} once."
+    f"{qualified(SOURCE, 'load_folder_tools')} once. "
+    "The gallery color scheme is favlo, rose-pine, or catppuccin. Call "
+    f"{qualified(SOURCE, 'set_theme')} when the person asks to change how the gallery looks. "
+    "Light, dark, and system stay their appearance setting."
 )
 
 
@@ -163,7 +169,9 @@ def tools(store: Any, workspace_id: str, bus: Any | None = None) -> list[object]
         _find_tool(store, workspace_id),
         _search_tool(store, workspace_id),
         _write_tool(store, workspace_id, bus),
+        _update_metadata_tool(store, workspace_id),
         _load_folder_tools(cold),
+        _theme_tool(store, workspace_id, bus),
     ]
 
 
@@ -182,6 +190,29 @@ def _load_folder_tools(cold: list[object]) -> object:
     return load_folder_tools
 
 
+def _theme_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
+    from agent_framework import tool
+
+    @tool(approval_mode="never_require", name=qualified(SOURCE, "set_theme"))
+    async def gallery_set_theme(theme: str) -> str:
+        """Set this gallery's color scheme.
+
+        theme is favlo, rose-pine, or catppuccin. Light, dark, and system stay
+        the person's appearance setting.
+        """
+        try:
+            result, events = store.set_gallery_theme(workspace_id, theme)
+        except Rejected as exc:
+            return _dump({"error": str(exc)})
+        if bus is not None:
+            for event in events:
+                await bus.publish(event)
+        return _dump(result)
+
+    gallery_set_theme.__name__ = "gallery_set_theme"
+    return gallery_set_theme
+
+
 def _bind_or_message(store: Any, workspace_id: str) -> Any | str:
     if not store.has_local_folder(workspace_id):
         return "Bind a local folder first."
@@ -189,6 +220,29 @@ def _bind_or_message(store: Any, workspace_id: str) -> Any | str:
         return folder_for(store, workspace_id)
     except Rejected as exc:
         return str(exc)
+
+
+def _attach_captions(folder: Any, listing: dict[str, Any]) -> dict[str, Any]:
+    """Copy sidecar title, description, and tags onto each media row."""
+    from web_api.gallery_metadata import read_sidecar
+
+    media: list[dict[str, Any]] = []
+    for item in listing.get("media") or []:
+        row = dict(item)
+        relative = str(row.get("path") or "")
+        side = read_sidecar(folder.root, relative) if relative else None
+        if isinstance(side, dict):
+            title = str(side.get("title") or "").strip()
+            description = str(side.get("description") or "").strip()
+            tags = side.get("tags") if isinstance(side.get("tags"), list) else []
+            if title:
+                row["title"] = title
+            if description:
+                row["description"] = description
+            if tags:
+                row["tags"] = tags
+        media.append(row)
+    return {**listing, "media": media, "images": media}
 
 
 def _find_tool(store: Any, workspace_id: str) -> object:
@@ -202,6 +256,7 @@ def _find_tool(store: Any, workspace_id: str) -> object:
     ) -> str:
         """List media under the local folder in one capped recursive walk.
 
+        Each row includes title, description, and tags when a sidecar exists.
         kinds may be image, audio, and video. Prefer gallery_search_media for meaning.
         """
         folder = _bind_or_message(store, workspace_id)
@@ -209,6 +264,7 @@ def _find_tool(store: Any, workspace_id: str) -> object:
             return folder
         listing = folder.walk_media(path, name_contains=name_contains, kinds=kinds)
         if isinstance(listing, dict):
+            listing = _attach_captions(folder, listing)
             listing = {
                 **listing,
                 "next": (
@@ -292,6 +348,93 @@ def _search_hits(
             pass
         enriched.append(row)
     return _dump({"media": enriched, "indexed": index.count(workspace_id), "unlike": unlike})
+
+
+def _update_metadata_tool(store: Any, workspace_id: str) -> object:
+    from agent_framework import tool
+
+    @tool(approval_mode="never_require", name=qualified(SOURCE, "update_metadata"))
+    def update_metadata(
+        path: str,
+        title: str | None = None,
+        description: str | None = None,
+        tags: list[str] | None = None,
+        place: str | None = None,
+        people: list[str] | None = None,
+        time: str | None = None,
+        objects: list[str] | None = None,
+        style: str | None = None,
+        colors: list[str] | None = None,
+        text_in_image: str | None = None,
+        nsfw: bool | None = None,
+    ) -> str:
+        """Update one image's sidecar. Omitted fields stay as they are.
+
+        path is relative to the local folder. tags, people, objects, and colors
+        replace that whole list when sent. Returns the stored fields.
+        """
+        folder = _bind_or_message(store, workspace_id)
+        if isinstance(folder, str):
+            return folder
+        changes = {
+            "title": title,
+            "description": description,
+            "tags": tags,
+            "place": place,
+            "people": people,
+            "time": time,
+            "objects": objects,
+            "style": style,
+            "colors": colors,
+            "text_in_image": text_in_image,
+            "nsfw": nsfw,
+        }
+        if all(value is None for value in changes.values()):
+            return _dump(
+                {
+                    "error": "missing_fields",
+                    "message": "Name at least one metadata field to update.",
+                }
+            )
+        try:
+            relative = str(folder.stat(path)["path"])
+        except Rejected as exc:
+            return _dump({"error": "missing", "message": str(exc)})
+        from web_api.gallery_metadata import build_index_sidecar, clamp, kind_for, read_sidecar, write_sidecar
+
+        if kind_for(relative) != "image":
+            return _dump({"error": "not_an_image", "message": "Metadata updates are for images."})
+        existing = read_sidecar(folder.root, relative)
+        if existing is None:
+            existing = build_index_sidecar(folder.resolve(relative, file=True), relative=relative)
+        merged = dict(existing)
+        for key, value in changes.items():
+            if value is not None:
+                merged[key] = value
+        stored = clamp(merged)
+        write_sidecar(folder.root, relative, stored)
+        from web_api.gallery_embed import index_sidecar
+
+        indexed = index_sidecar(store, workspace_id, folder.root, relative, stored)
+        return _dump(
+            {
+                "path": relative,
+                "title": stored.get("title") or "",
+                "description": stored.get("description") or "",
+                "tags": stored.get("tags") or [],
+                "place": stored.get("place") or "",
+                "people": stored.get("people") or [],
+                "time": stored.get("time") or "",
+                "objects": stored.get("objects") or [],
+                "style": stored.get("style") or "",
+                "colors": stored.get("colors") or [],
+                "text_in_image": stored.get("text_in_image") or "",
+                "nsfw": bool(stored.get("nsfw")),
+                "indexed": indexed,
+            }
+        )
+
+    return update_metadata
 
 
 def _write_tool(store: Any, workspace_id: str, bus: Any | None) -> object:

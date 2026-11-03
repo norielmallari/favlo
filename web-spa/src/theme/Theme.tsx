@@ -1,6 +1,7 @@
 import { createContext, createElement, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Appearance, Platform, useColorScheme } from 'react-native';
 
+import { gallerySchemes, type GalleryScheme } from '@/theme/gallery-schemes';
 import { scrollbarStyle } from '@/theme/scrollbar';
 import { dark, light, type Palette } from '@/theme/tokens';
 
@@ -61,6 +62,44 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       {children}
     </ThemeContext.Provider>
   );
+}
+
+export function GallerySchemeProvider({
+  scheme,
+  children,
+}: {
+  scheme: GalleryScheme;
+  children: ReactNode;
+}) {
+  const parent = useTheme();
+  const system = useColorScheme();
+  const palette = useMemo(() => {
+    if (scheme === 'favlo') {
+      return parent.palette;
+    }
+    const mode = parent.preference === 'system' ? (system ?? Appearance.getColorScheme()) : parent.preference;
+    const pair = gallerySchemes[scheme];
+    return mode === 'dark' ? pair.dark : pair.light;
+  }, [parent.palette, parent.preference, scheme, system]);
+  const value = useMemo(
+    () => ({ preference: parent.preference, palette, setPreference: parent.setPreference }),
+    [palette, parent.preference, parent.setPreference],
+  );
+
+  useEffect(() => {
+    if (Platform.OS !== 'web' || scheme === 'favlo' || typeof document === 'undefined') {
+      return;
+    }
+    const node = document.createElement('style');
+    node.dataset.testid = 'gallery-scrollbar';
+    node.textContent = scrollbarStyle(palette);
+    document.head.appendChild(node);
+    return () => {
+      node.remove();
+    };
+  }, [palette, scheme]);
+
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }
 
 export function useTheme(): ThemeValue {

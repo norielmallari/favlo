@@ -28,9 +28,12 @@ export type Provider = { id: string; name: string; base_url: string; models: Mod
 export type Settings = {
   default_model_id: string | null;
   gallery_vision_model_id: string | null;
+  reasoning_effort?: string | null;
   exchange_budget: number;
   revision: number;
 };
+
+const EFFORTS = ['none', 'low', 'medium', 'high', 'xhigh'];
 export type Agent = {
   id: string;
   name: string;
@@ -39,7 +42,8 @@ export type Agent = {
   enable_thinking?: boolean | null;
   preserve_thinking?: boolean | null;
   reasoning_effort?: string | null;
-  expand_trace?: string | null;
+  expand_thinking?: string | null;
+  expand_tools?: string | null;
   revision: number;
   tool_groups: string[];
 };
@@ -121,7 +125,7 @@ export function SettingsScreen() {
   const [saved, setSaved] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [modelFocused, setModelFocused] = useState(false);
-  const [visionFocused, setVisionFocused] = useState(false);
+  const [effortFocused, setEffortFocused] = useState(false);
   const [drawer, setDrawer] = useState<'sections' | null>(null);
   const [showDetail, setShowDetail] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -246,13 +250,9 @@ export function SettingsScreen() {
   }, []);
 
   const provider = providers.find((item) => item.id === providerId) ?? null;
-  const localProvider = providers.find((item) => item.id === LOCAL_PROVIDER_ID) ?? null;
   const agent = agents.find((item) => item.id === agentId) ?? null;
   const hosted = (provider?.models ?? []).filter((model) => model.enabled);
-  const visionModels = (localProvider?.models ?? []).filter((model) => model.enabled);
   const selectedModel = hosted.find((model) => model.id === settings?.default_model_id)?.model_id ?? '';
-  const visionRowId = settings?.gallery_vision_model_id ?? settings?.default_model_id ?? null;
-  const selectedVisionModel = visionModels.find((model) => model.id === visionRowId)?.model_id ?? '';
   const current = SECTIONS.find((item) => item.id === section) ?? SECTIONS[0];
   const catalog = current.catalog;
   const showSections = wide || drawer === 'sections';
@@ -436,6 +436,7 @@ export function SettingsScreen() {
   async function patchSettings(body: {
     default_model_id: string | null;
     gallery_vision_model_id: string | null;
+    reasoning_effort: string | null;
     exchange_budget: number;
   }) {
     if (settings == null) {
@@ -452,27 +453,6 @@ export function SettingsScreen() {
     return next;
   }
 
-  async function chooseGalleryVision(modelId: string) {
-    if (settings == null || modelId === '' || modelId === selectedVisionModel) {
-      return;
-    }
-    const row = visionModels.find((model) => model.model_id === modelId);
-    if (row == null) {
-      return;
-    }
-    try {
-      await patchSettings({
-        default_model_id: settings.default_model_id,
-        gallery_vision_model_id: row.id,
-        exchange_budget: settings.exchange_budget,
-      });
-      setSaved('Gallery vision model saved.');
-      setError(null);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Gallery vision model was not saved.');
-    }
-  }
-
   async function saveBudget() {
     if (settings == null) {
       return;
@@ -486,12 +466,30 @@ export function SettingsScreen() {
       await patchSettings({
         default_model_id: settings.default_model_id,
         gallery_vision_model_id: settings.gallery_vision_model_id,
+        reasoning_effort: settings.reasoning_effort ?? null,
         exchange_budget: value,
       });
       setSaved('Maximum turns saved.');
       setError(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Settings were not saved.');
+    }
+  }
+
+  async function chooseEffort(value: string) {
+    if (settings == null || value === (settings.reasoning_effort ?? '')) {
+      return;
+    }
+    try {
+      await patchSettings({
+        default_model_id: settings.default_model_id,
+        gallery_vision_model_id: settings.gallery_vision_model_id,
+        reasoning_effort: value || null,
+        exchange_budget: settings.exchange_budget,
+      });
+      setError(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'The reasoning effort was not saved.');
     }
   }
 
@@ -636,6 +634,23 @@ export function SettingsScreen() {
                       <Picker.Item key={model.id} label={model.display_name} value={model.model_id} color={palette.textPrimary} />
                     ))}
                   </Picker>
+                  <Text style={label(palette.textPrimary)}>Reasoning effort</Text>
+                  <Picker
+                    accessibilityLabel="Reasoning effort"
+                    selectedValue={settings?.reasoning_effort ?? ''}
+                    onValueChange={(value) => void chooseEffort(String(value))}
+                    onFocus={() => setEffortFocused(true)}
+                    onBlur={() => setEffortFocused(false)}
+                    style={pickerStyle(palette, effortFocused)}
+                  >
+                    <Picker.Item label="Not set" value="" color={palette.textSecondary} />
+                    {EFFORTS.map((item) => (
+                      <Picker.Item key={item} label={item} value={item} color={palette.textPrimary} />
+                    ))}
+                  </Picker>
+                  <Text style={textStyle('small', palette.textSecondary)}>
+                    Not set leaves reasoning off the request unless an agent sets an effort. An agent effort wins.
+                  </Text>
                 </View>
               ) : null}
               {section === 'agents' ? (
@@ -701,25 +716,9 @@ export function SettingsScreen() {
                     <TextInput accessibilityLabel="Maximum turns" value={budget} onChangeText={setBudget} keyboardType="number-pad" style={field} />
                   </View>
                   <IconButton icon="check" label="Save maximum turns" onPress={() => void saveBudget()} background={palette.surface} border={palette.borderStrong} color={palette.textPrimary} />
-                  <View style={{ gap: 8 }}>
-                    <Text style={label(palette.textPrimary)}>Gallery vision model</Text>
-                    <Text style={textStyle('small', palette.textSecondary)}>
-                      Indexes gallery images. Prefer the same large model already loaded for chat.
-                    </Text>
-                    <Picker
-                      accessibilityLabel="Gallery vision model"
-                      selectedValue={selectedVisionModel}
-                      onValueChange={(value) => void chooseGalleryVision(String(value))}
-                      onFocus={() => setVisionFocused(true)}
-                      onBlur={() => setVisionFocused(false)}
-                      style={pickerStyle(palette, visionFocused)}
-                    >
-                      <Picker.Item label="Choose a model" value="" color={palette.textSecondary} />
-                      {visionModels.map((model) => (
-                        <Picker.Item key={model.id} label={model.display_name} value={model.model_id} color={palette.textPrimary} />
-                      ))}
-                    </Picker>
-                  </View>
+                  <Text style={textStyle('small', palette.textSecondary)}>
+                    Gallery captions use the workspace agent's model. When that agent has no model, they use the default model from Providers.
+                  </Text>
                 </View>
               ) : null}
               {error ? <Text accessibilityRole="alert" style={textStyle('small', palette.danger)}>{error}</Text> : null}
@@ -1106,8 +1105,6 @@ function McpForm({
   );
 }
 
-const EFFORTS = ['none', 'low', 'medium', 'high', 'xhigh'];
-
 function flagValue(value: boolean | null | undefined): string {
   if (value == null) {
     return '';
@@ -1180,13 +1177,15 @@ export function AgentForm({
   const providerUnset = providerId === '';
   const [preserve, setPreserve] = useState(flagValue(agent?.preserve_thinking));
   const [effort, setEffort] = useState(effortValue(agent));
-  const [expandTrace, setExpandTrace] = useState(agent?.expand_trace ?? '');
+  const [expandThinking, setExpandThinking] = useState(agent?.expand_thinking ?? '');
+  const [expandTools, setExpandTools] = useState(agent?.expand_tools ?? '');
   const [enabled, setEnabled] = useState(agent?.tool_groups ?? []);
   const [providerFocused, setProviderFocused] = useState(false);
   const [modelFocused, setModelFocused] = useState(false);
   const [preserveFocused, setPreserveFocused] = useState(false);
   const [effortFocused, setEffortFocused] = useState(false);
-  const [expandFocused, setExpandFocused] = useState(false);
+  const [expandThinkingFocused, setExpandThinkingFocused] = useState(false);
+  const [expandToolsFocused, setExpandToolsFocused] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -1252,7 +1251,8 @@ export function AgentForm({
             enable_thinking: null,
             preserve_thinking: flagBody(preserve),
             reasoning_effort: effort || null,
-            expand_trace: expandTrace || null,
+            expand_thinking: expandThinking || null,
+            expand_tools: expandTools || null,
           }),
         });
         onSuccess(`${created.agent.name} was created.`);
@@ -1270,7 +1270,8 @@ export function AgentForm({
           enable_thinking: null,
           preserve_thinking: flagBody(preserve),
           reasoning_effort: effort || null,
-          expand_trace: expandTrace || null,
+          expand_thinking: expandThinking || null,
+          expand_tools: expandTools || null,
         }),
       });
       onSuccess(`${name.trim() || agent.name} was saved.`);
@@ -1286,9 +1287,8 @@ export function AgentForm({
   const modelLabel = creating ? 'Model' : `Model for ${agent.name}`;
   const preserveLabel = creating ? 'Preserve thinking' : `Preserve thinking for ${agent.name}`;
   const effortLabel = creating ? 'Reasoning effort' : `Reasoning effort for ${agent.name}`;
-  const expandLabel = creating
-    ? 'Expand thinking and tool calls'
-    : `Expand thinking and tool calls for ${agent.name}`;
+  const thinkingLabel = creating ? 'Expand thinking' : `Expand thinking for ${agent.name}`;
+  const toolsLabel = creating ? 'Expand tool calls' : `Expand tool calls for ${agent.name}`;
   const fieldLimit = Math.max(240, height - 360);
 
   return (
@@ -1362,16 +1362,31 @@ export function AgentForm({
         <Picker.Item label="On" value="true" color={palette.textPrimary} />
         <Picker.Item label="Off" value="false" color={palette.textPrimary} />
       </Picker>
-      <Text style={label(palette.textPrimary)}>{expandLabel}</Text>
+      <Text style={label(palette.textPrimary)}>{thinkingLabel}</Text>
       <Picker
-        accessibilityLabel={expandLabel}
-        selectedValue={expandTrace}
-        onValueChange={(value) => setExpandTrace(String(value))}
-        onFocus={() => setExpandFocused(true)}
-        onBlur={() => setExpandFocused(false)}
-        style={pickerStyle(palette, expandFocused)}
+        accessibilityLabel={thinkingLabel}
+        selectedValue={expandThinking}
+        onValueChange={(value) => setExpandThinking(String(value))}
+        onFocus={() => setExpandThinkingFocused(true)}
+        onBlur={() => setExpandThinkingFocused(false)}
+        style={pickerStyle(palette, expandThinkingFocused)}
       >
         <Picker.Item label="Collapsed (default)" value="" color={palette.textSecondary} />
+        <Picker.Item label="Not shown" value="hidden" color={palette.textPrimary} />
+        <Picker.Item label="Open while running" value="running" color={palette.textPrimary} />
+        <Picker.Item label="Always open" value="always" color={palette.textPrimary} />
+      </Picker>
+      <Text style={label(palette.textPrimary)}>{toolsLabel}</Text>
+      <Picker
+        accessibilityLabel={toolsLabel}
+        selectedValue={expandTools}
+        onValueChange={(value) => setExpandTools(String(value))}
+        onFocus={() => setExpandToolsFocused(true)}
+        onBlur={() => setExpandToolsFocused(false)}
+        style={pickerStyle(palette, expandToolsFocused)}
+      >
+        <Picker.Item label="Not shown (default)" value="" color={palette.textSecondary} />
+        <Picker.Item label="Collapsed" value="collapsed" color={palette.textPrimary} />
         <Picker.Item label="Open while running" value="running" color={palette.textPrimary} />
         <Picker.Item label="Always open" value="always" color={palette.textPrimary} />
       </Picker>

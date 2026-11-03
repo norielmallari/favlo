@@ -15,10 +15,15 @@ class AgentCreate(BaseModel):
     enable_thinking: bool | None = None
     preserve_thinking: bool | None = None
     reasoning_effort: str | None = Field(default=None, max_length=32)
-    expand_trace: str | None = Field(
+    expand_thinking: str | None = Field(
         default=None,
         max_length=16,
-        description="collapsed (default), running, or always",
+        description="collapsed (default), hidden, running, or always",
+    )
+    expand_tools: str | None = Field(
+        default=None,
+        max_length=16,
+        description="hidden (default), collapsed, running, or always",
     )
 
 
@@ -31,7 +36,8 @@ class AgentUpdate(BaseModel):
     enable_thinking: bool | None = None
     preserve_thinking: bool | None = None
     reasoning_effort: str | None = Field(default=None, max_length=32)
-    expand_trace: str | None = Field(default=None, max_length=16)
+    expand_thinking: str | None = Field(default=None, max_length=16)
+    expand_tools: str | None = Field(default=None, max_length=16)
 
 
 class ModelChoice(BaseModel):
@@ -54,6 +60,7 @@ class SettingsUpdate(BaseModel):
     expected_revision: int = Field(ge=1)
     default_model_id: str | None = None
     gallery_vision_model_id: str | None = None
+    reasoning_effort: str | None = Field(default=None, max_length=32)
     exchange_budget: int = Field(ge=1)
 
 
@@ -119,10 +126,10 @@ class HeartbeatUpdate(BaseModel):
 class WorkspaceCreate(BaseModel):
     channel_id: str
     name: str = Field(min_length=1, max_length=80)
-    type: str = Field(default="gallery", pattern="^(gallery|coding)$")
+    type: str = Field(min_length=1, max_length=80)
     location: str | None = Field(
         default=None,
-        description="Required local folder path when type is gallery.",
+        description="Required local folder path when the shell setup is local_folder.",
     )
 
 
@@ -144,6 +151,10 @@ class FolderRecordUpdate(BaseModel):
 
 class FocusUpdate(BaseModel):
     folder_id: str | None = None
+
+
+class GalleryThemeUpdate(BaseModel):
+    theme: str = Field(min_length=1, max_length=32)
 
 
 class ImageMove(BaseModel):

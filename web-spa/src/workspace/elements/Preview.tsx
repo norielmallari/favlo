@@ -22,7 +22,7 @@ export function Preview({ props, selection, fileUrl, onAddToChat }: ElementProps
   const name = path.split('/').pop() ?? path;
   return (
     <View style={{ flex: 1, padding: space[3], gap: space[2] }}>
-      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', width: '100%' }}>
+      <View style={{ flex: 1, minHeight: 160, alignItems: 'center', justifyContent: 'center', width: '100%' }}>
         {lower.endsWith('.mp3') ? (
           // @ts-expect-error web audio element
           <audio controls src={url} style={{ width: '100%', maxWidth: 480, margin: '0 auto', display: 'block' }} />
@@ -38,7 +38,7 @@ export function Preview({ props, selection, fileUrl, onAddToChat }: ElementProps
           <img
             alt={name}
             src={url}
-            style={{ maxWidth: '100%', maxHeight: '100%', objectFit: fit, margin: '0 auto', display: 'block' }}
+            style={{ width: '100%', height: '100%', objectFit: fit, display: 'block' }}
           />
         )}
       </View>

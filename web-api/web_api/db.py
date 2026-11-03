@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     default_model_id TEXT,
     gallery_vision_model_id TEXT,
+    reasoning_effort TEXT,
     exchange_budget INTEGER NOT NULL,
     revision INTEGER NOT NULL
 );
@@ -43,7 +44,8 @@ CREATE TABLE IF NOT EXISTS agent (
     enable_thinking INTEGER,
     preserve_thinking INTEGER,
     reasoning_effort TEXT,
-    expand_trace TEXT,
+    expand_thinking TEXT,
+    expand_tools TEXT,
     compaction_percent INTEGER,
     revision INTEGER NOT NULL
 );
@@ -344,8 +346,10 @@ def migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE agent ADD COLUMN reasoning_effort TEXT")
     if agent_columns and "compaction_percent" not in agent_columns:
         conn.execute("ALTER TABLE agent ADD COLUMN compaction_percent INTEGER")
-    if agent_columns and "expand_trace" not in agent_columns:
-        conn.execute("ALTER TABLE agent ADD COLUMN expand_trace TEXT")
+    if agent_columns and "expand_thinking" not in agent_columns:
+        conn.execute("ALTER TABLE agent ADD COLUMN expand_thinking TEXT")
+    if agent_columns and "expand_tools" not in agent_columns:
+        conn.execute("ALTER TABLE agent ADD COLUMN expand_tools TEXT")
     _migrate_folders(conn)
     workspace_columns = {row[1] for row in conn.execute("PRAGMA table_info(workspace)")}
     if workspace_columns and "focus_folder_id" not in workspace_columns:
@@ -355,6 +359,8 @@ def migrate(conn: sqlite3.Connection) -> None:
     settings_columns = {row[1] for row in conn.execute("PRAGMA table_info(settings)")}
     if settings_columns and "gallery_vision_model_id" not in settings_columns:
         conn.execute("ALTER TABLE settings ADD COLUMN gallery_vision_model_id TEXT")
+    if settings_columns and "reasoning_effort" not in settings_columns:
+        conn.execute("ALTER TABLE settings ADD COLUMN reasoning_effort TEXT")
     row = conn.execute("SELECT id FROM settings WHERE id = 1").fetchone()
     if row is None:
         conn.execute(

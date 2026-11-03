@@ -13,6 +13,7 @@ import { api, idempotencyKey, socketUrl } from '@/api/client';
 import { spokenError } from '@/reply-error';
 import {
   chatMessage,
+  includeCreatedMessage,
   clearedTranscript,
   keepLatest,
   sessionCommand,
@@ -45,7 +46,8 @@ type WorkspaceDetail = {
   session_id: string;
   channel_id: string;
   skills: WorkspaceSkill[];
-  expand_trace?: string | null;
+  expand_thinking?: string | null;
+  expand_tools?: string | null;
 };
 
 type Snapshot = {
@@ -83,7 +85,7 @@ export function CodingWorkspace({
 }: {
   workspaceId: string;
   agentName: string;
-  onBack: () => void;
+  onBack?: () => void;
   onDeleted?: () => void;
 }) {
   const { palette } = useTheme();
@@ -257,19 +259,17 @@ export function CodingWorkspace({
       const role = event.payload.role ?? 'assistant';
       const body = event.payload.text ?? '';
       setMessages((currentMessages) =>
-        currentMessages.some((item) => item.id === id)
-          ? currentMessages
-          : [
-              ...currentMessages,
-              chatMessage({
-                id,
-                role,
-                body,
-                reasoning: event.payload?.reasoning,
-                tool_calls: event.payload?.tool_calls,
-                trace: event.payload?.trace,
-              }),
-            ],
+        includeCreatedMessage(
+          currentMessages,
+          chatMessage({
+            id,
+            role,
+            body,
+            reasoning: event.payload?.reasoning,
+            tool_calls: event.payload?.tool_calls,
+            trace: event.payload?.trace,
+          }),
+        ),
       );
       if (role === 'assistant') {
         openRun.current = null;
@@ -369,7 +369,7 @@ export function CodingWorkspace({
       await api(`/workspaces/${workspaceId}`, { method: 'DELETE' });
       setConfirmDelete(false);
       onDeleted?.();
-      onBack();
+      onBack?.();
     } catch (caught) {
       setConfirmDelete(false);
       setNotice(caught instanceof Error ? caught.message : 'The workspace was not deleted.');
@@ -391,14 +391,16 @@ export function CodingWorkspace({
 
   const workspaceBar = (
     <>
-      <IconButton
-        icon="arrow-left"
-        label="Back to channel"
-        onPress={onBack}
-        background={palette.surface}
-        border={palette.borderStrong}
-        color={palette.textPrimary}
-      />
+      {onBack ? (
+        <IconButton
+          icon="arrow-left"
+          label="Back to channel"
+          onPress={onBack}
+          background={palette.surface}
+          border={palette.borderStrong}
+          color={palette.textPrimary}
+        />
+      ) : null}
       <Text accessibilityRole="header" aria-level={2} style={textStyle('title', palette.textPrimary)}>
         {detail?.name ?? 'Coding'}
       </Text>
@@ -480,20 +482,26 @@ export function CodingWorkspace({
               reasoning={item.reasoning}
               toolCalls={item.toolCalls}
               trace={item.trace}
-              expandTrace={readExpandTrace(detail?.expand_trace)}
+              expandTrace={readExpandTrace(detail?.expand_thinking)}
+              expandTools={readExpandTrace(detail?.expand_tools, 'hidden')}
             />
           ))}
           <LiveReply
             steps={steps}
             speaker={agentName}
             measured
-            expandTrace={readExpandTrace(detail?.expand_trace)}
+            expandTrace={readExpandTrace(detail?.expand_thinking)}
+            expandTools={readExpandTrace(detail?.expand_tools, 'hidden')}
             forceOpen={traceForcedOpen}
           />
         </ScrollView>
         {working ? (
           <WorkingStatus
-            label={workingLabel(steps)}
+            label={workingLabel(
+              steps,
+              readExpandTrace(detail?.expand_thinking),
+              readExpandTrace(detail?.expand_tools, 'hidden'),
+            )}
             expanded={traceForcedOpen}
             onPress={() => setTraceForcedOpen((value) => !value)}
           />

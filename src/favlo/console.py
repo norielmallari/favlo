@@ -120,6 +120,7 @@ class Console:
             raise ValueError(message)
         self.mode = mode
         self.pipeline = pipeline
+        self.load_detail = ""
         self.stream = stream if stream is not None else sys.stderr
         self._clock = clock or time.perf_counter
         self._sleep = sleep or time.sleep

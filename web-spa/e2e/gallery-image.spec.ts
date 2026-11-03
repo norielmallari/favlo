@@ -40,26 +40,28 @@ test('an attached strip image is embedded once across later messages', async ({ 
 
     await step('agent places frame.png on filmstrip', async () => {
       const frame = page.getByRole('button', { name: 'frame.png', exact: true });
-      await page.getByRole('textbox', { name: 'Message', exact: true }).fill(
-        'Put every image from this folder on the filmstrip, and keep the preview so I can open one.',
-      );
-      const send = page.getByRole('button', { name: 'Send', exact: true });
-      await onScreen(send);
-      await send.click();
-      await expect(page.getByTestId('working')).toBeVisible();
-      try {
-        await expect(frame).toBeVisible();
-      } catch {
-        await expect(page.getByTestId('working')).toHaveCount(0);
+      if (!(await frame.isVisible().catch(() => false))) {
         await page.getByRole('textbox', { name: 'Message', exact: true }).fill(
-          'Please put frame.png on the filmstrip now.',
+          'Put every image from this folder on the filmstrip, and keep the preview so I can open one.',
         );
+        const send = page.getByRole('button', { name: 'Send', exact: true });
         await onScreen(send);
         await send.click();
         await expect(page.getByTestId('working')).toBeVisible();
-        await expect(frame).toBeVisible();
+        try {
+          await expect(frame).toBeVisible({ timeout: 180_000 });
+        } catch {
+          await expect(page.getByTestId('working')).toHaveCount(0, { timeout: 180_000 });
+          await page.getByRole('textbox', { name: 'Message', exact: true }).fill(
+            'Please put frame.png on the filmstrip now.',
+          );
+          await onScreen(send);
+          await send.click();
+          await expect(page.getByTestId('working')).toBeVisible();
+          await expect(frame).toBeVisible({ timeout: 180_000 });
+        }
       }
-      await expect(page.getByTestId('working')).toHaveCount(0);
+      await expect(page.getByTestId('working')).toHaveCount(0, { timeout: 180_000 });
     });
 
     await step('add frame.png to chat', async () => {

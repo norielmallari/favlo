@@ -123,6 +123,31 @@ def test_favlo_media_mcp_is_seeded_once(tmp_path: Path) -> None:
     assert [row["id"] for row in again] == [FAVLO_MCP_ID]
 
 
+def test_a_new_agent_starts_with_favlo_media(tmp_path: Path) -> None:
+    from web_api.db import LOCAL_MCP_URL
+    from web_api.store import Store
+
+    store = Store(tmp_path / "app.db")
+    try:
+        _status, created, _events = store.create_agent(
+            "reed",
+            {"name": "Reed", "persona": "A short persona.", "default_model_id": None},
+        )
+        agent_id = created["agent"]["id"]
+        servers = [row for row in store.mcp_servers() if row["agent_id"] == agent_id]
+        assert len(servers) == 1
+        assert servers[0]["id"] != FAVLO_MCP_ID
+        assert servers[0]["name"] == "Favlo media"
+        assert servers[0]["transport"] == "http"
+        assert servers[0]["url"] == LOCAL_MCP_URL
+        assert servers[0]["enabled"] is True
+        assert servers[0]["command"] == ""
+        favlo = [row for row in store.mcp_servers() if row["agent_id"] == FAVLO_AGENT_ID]
+        assert [row["id"] for row in favlo] == [FAVLO_MCP_ID]
+    finally:
+        store.close()
+
+
 def test_session_commands_stay_on_the_session_that_sent_them(tmp_path: Path) -> None:
     from web_api.session_commands import ARCHIVE_CUE
     from web_api.store import Store
@@ -777,6 +802,8 @@ def test_agent_sampling_fields_round_trip(client: TestClient) -> None:
     assert agent["enable_thinking"] is True
     assert agent["preserve_thinking"] is False
     assert agent["reasoning_effort"] == "high"
+    assert agent["expand_thinking"] is None
+    assert agent["expand_tools"] is None
     saved = client.patch(
         f"/agents/{agent['id']}",
         json={
@@ -786,6 +813,8 @@ def test_agent_sampling_fields_round_trip(client: TestClient) -> None:
             "enable_thinking": None,
             "preserve_thinking": None,
             "reasoning_effort": None,
+            "expand_thinking": "always",
+            "expand_tools": "running",
         },
     )
     assert saved.status_code == 200
@@ -793,6 +822,89 @@ def test_agent_sampling_fields_round_trip(client: TestClient) -> None:
     assert body["enable_thinking"] is None
     assert body["preserve_thinking"] is None
     assert body["reasoning_effort"] is None
+    assert body["expand_thinking"] == "always"
+    assert body["expand_tools"] == "running"
+    hidden = client.patch(
+        f"/agents/{agent['id']}",
+        json={
+            "expected_revision": body["revision"],
+            "name": "Reed",
+            "persona": "",
+            "expand_thinking": "hidden",
+            "expand_tools": "hidden",
+        },
+    )
+    assert hidden.status_code == 200
+    assert hidden.json()["expand_thinking"] == "hidden"
+    assert hidden.json()["expand_tools"] is None
+    shown = client.patch(
+        f"/agents/{agent['id']}",
+        json={
+            "expected_revision": hidden.json()["revision"],
+            "name": "Reed",
+            "persona": "",
+            "expand_thinking": "collapsed",
+            "expand_tools": "collapsed",
+        },
+    )
+    assert shown.status_code == 200
+    assert shown.json()["expand_thinking"] is None
+    assert shown.json()["expand_tools"] == "collapsed"
+
+
+def test_providers_effort_fills_in_when_the_agent_leaves_it_unset(client: TestClient) -> None:
+    settings = client.get("/settings").json()
+    assert settings["reasoning_effort"] is None
+    assert client.app.state.store.reasoning_effort(FAVLO_AGENT_ID) is None
+    saved = client.patch(
+        "/settings",
+        json={
+            "expected_revision": settings["revision"],
+            "default_model_id": settings["default_model_id"],
+            "exchange_budget": settings["exchange_budget"],
+            "reasoning_effort": "medium",
+        },
+    )
+    assert saved.status_code == 200
+    assert saved.json()["reasoning_effort"] == "medium"
+    assert client.app.state.store.reasoning_effort(FAVLO_AGENT_ID) == "medium"
+    agent = next(row for row in client.get("/agents").json()["agents"] if row["id"] == FAVLO_AGENT_ID)
+    chosen = client.patch(
+        f"/agents/{FAVLO_AGENT_ID}",
+        json={
+            "expected_revision": agent["revision"],
+            "name": agent["name"],
+            "persona": agent["persona"],
+            "tool_groups": agent["tool_groups"],
+            "reasoning_effort": "high",
+        },
+    )
+    assert chosen.status_code == 200
+    assert client.app.state.store.reasoning_effort(FAVLO_AGENT_ID) == "high"
+    cleared = client.patch(
+        f"/agents/{FAVLO_AGENT_ID}",
+        json={
+            "expected_revision": chosen.json()["revision"],
+            "name": agent["name"],
+            "persona": agent["persona"],
+            "tool_groups": agent["tool_groups"],
+            "reasoning_effort": None,
+        },
+    )
+    assert cleared.status_code == 200
+    assert client.app.state.store.reasoning_effort(FAVLO_AGENT_ID) == "medium"
+    unset = client.patch(
+        "/settings",
+        json={
+            "expected_revision": saved.json()["revision"],
+            "default_model_id": settings["default_model_id"],
+            "exchange_budget": settings["exchange_budget"],
+            "reasoning_effort": None,
+        },
+    )
+    assert unset.status_code == 200
+    assert unset.json()["reasoning_effort"] is None
+    assert client.app.state.store.reasoning_effort(FAVLO_AGENT_ID) is None
 
 
 def test_the_next_turn_includes_stored_reasoning(tmp_path: Path) -> None:
@@ -1091,6 +1203,189 @@ def test_a_cancel_event_still_streams_the_reply(monkeypatch: pytest.MonkeyPatch)
     asyncio.run(once())
 
 
+def test_streamed_reply_keeps_reasoning_from_the_final_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from web_api.chat import stream_reply
+    from web_api.runs import _note_reasoning
+
+    class Part:
+        def __init__(self, kind: str, text: str) -> None:
+            self.type = kind
+            self.text = text
+
+    class Update:
+        role = "assistant"
+        contents: list[object] = []
+        raw_representation = None
+
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    async def pieces():
+        yield Update("Hello")
+
+    class Stream:
+        def __init__(self) -> None:
+            self._it = pieces()
+
+        def __aiter__(self):
+            return self._it
+
+        async def close(self) -> None:
+            return None
+
+        async def get_final_response(self) -> SimpleNamespace:
+            message = SimpleNamespace(
+                contents=[Part("text_reasoning", "Looking"), Part("text", "Hello")],
+                raw_representation=None,
+            )
+            return SimpleNamespace(text="Hello", messages=[message])
+
+    class Session:
+        def __init__(self) -> None:
+            self.state: dict[str, object] = {}
+
+    class Agent:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def create_session(self) -> Session:
+            return Session()
+
+        def run(self, *_args: object, **_kwargs: object) -> Stream:
+            return Stream()
+
+    class HTTP:
+        async def close(self) -> None:
+            return None
+
+    class Client:
+        def __init__(self) -> None:
+            self.client = HTTP()
+            self.function_invocation_configuration: dict[str, object] = {}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("agent_framework.Agent", Agent)
+    monkeypatch.setattr("web_api.chat.open_chat_client", lambda *_args, **_kwargs: Client())
+
+    async def once() -> None:
+        collected = []
+        async for piece in stream_reply(
+            base_url="http://127.0.0.1:8129/v1",
+            model="example-model",
+            persona="A short persona.",
+            agent_name="Favlo",
+            user_text="Hello",
+            cancel=asyncio.Event(),
+        ):
+            collected.append((piece.kind, piece.text))
+        assert collected == [("content", "Hello"), ("reasoning", "Looking")]
+
+    asyncio.run(once())
+    trace: list[dict[str, str]] = [{"kind": "reply", "text": "Hello"}]
+    _note_reasoning(trace, "Looking")
+    assert [part["kind"] for part in trace] == ["thinking", "reply"]
+    assert trace[0]["text"] == "Looking"
+
+
+def test_session_reasoning_is_kept_when_the_final_message_omits_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from web_api.chat import stream_reply
+
+    class Part:
+        def __init__(self, kind: str, text: str) -> None:
+            self.type = kind
+            self.text = text
+
+    class Stored:
+        role = "assistant"
+
+        def __init__(self) -> None:
+            self.contents = [Part("text_reasoning", "Looking")]
+
+    class Update:
+        role = "assistant"
+        contents: list[object] = []
+        raw_representation = None
+
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    async def pieces():
+        yield Update("Hello")
+
+    class Stream:
+        def __init__(self) -> None:
+            self._it = pieces()
+
+        def __aiter__(self):
+            return self._it
+
+        async def close(self) -> None:
+            return None
+
+        async def get_final_response(self) -> SimpleNamespace:
+            return SimpleNamespace(text="Hello", messages=[])
+
+    class Session:
+        def __init__(self) -> None:
+            self.state: dict[str, object] = {}
+
+    class Agent:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def create_session(self) -> Session:
+            return Session()
+
+        def run(self, *_args: object, session: object = None, **_kwargs: object) -> Stream:
+            assert isinstance(session, Session)
+            memory = session.state.setdefault("in_memory", {})
+            assert isinstance(memory, dict)
+            messages = memory.setdefault("messages", [])
+            assert isinstance(messages, list)
+            messages.append(Stored())
+            return Stream()
+
+    class HTTP:
+        async def close(self) -> None:
+            return None
+
+    class Client:
+        def __init__(self) -> None:
+            self.client = HTTP()
+            self.function_invocation_configuration: dict[str, object] = {}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("agent_framework.Agent", Agent)
+    monkeypatch.setattr("web_api.chat.open_chat_client", lambda *_args, **_kwargs: Client())
+
+    async def once() -> None:
+        collected = []
+        async for piece in stream_reply(
+            base_url="http://127.0.0.1:8129/v1",
+            model="example-model",
+            persona="A short persona.",
+            agent_name="Favlo",
+            user_text="Hello",
+            cancel=asyncio.Event(),
+        ):
+            collected.append((piece.kind, piece.text))
+        assert collected == [("content", "Hello"), ("reasoning", "Looking")]
+
+    asyncio.run(once())
+
+
 def test_a_turn_sends_the_stored_agent_framework_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1308,10 +1603,17 @@ def test_clearing_a_session_drops_its_agent_framework_session(tmp_path: Path) ->
 
 
 def test_an_older_message_table_gains_reasoning(tmp_path: Path) -> None:
-    from web_api.db import connect, migrate
+    import sqlite3
 
+    from sqlalchemy import inspect
+
+    from web_api.db import connect, migrate
+    from web_api.infrastructure.db.database import open_session
+
+    assert callable(connect)
+    assert callable(migrate)
     path = tmp_path / "app.db"
-    conn = connect(path)
+    conn = sqlite3.connect(path)
     conn.execute(
         """
         CREATE TABLE message (
@@ -1327,10 +1629,12 @@ def test_an_older_message_table_gains_reasoning(tmp_path: Path) -> None:
     )
     conn.commit()
     conn.close()
-    again = connect(path)
-    migrate(again)
-    names = {row[1] for row in again.execute("PRAGMA table_info(message)")}
-    again.close()
+    session = open_session(path)
+    try:
+        names = {column["name"] for column in inspect(session.get_bind()).get_columns("message")}
+    finally:
+        session.close()
+        session.get_bind().dispose()
     assert "reasoning" in names
     assert "trace" in names
 

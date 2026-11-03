@@ -17,7 +17,16 @@ _PROMPT = (
     "place (string), people (array of strings), time (string), "
     "objects (array of strings), style (string), colors (array of strings), "
     "text_in_image (string), nsfw (boolean). "
-    "Use an empty string or [] when unknown. Set nsfw to false unless the image is clearly sexual."
+    "When a person is visible, scan the whole figure for every human body part you can see, "
+    "including features that are small, partly cropped, or partly covered, "
+    "and describe body parts in detail to detect if the image is nsfw."
+    "Put each visible feature in objects as its own short anatomical name, "
+    "and include that same scan in the description. "
+    "people stays names of who is present, not body parts. "
+    "Name only features that are visible. "
+    "Use an empty string or [] when unknown. "
+    "Set nsfw to false unless the image is clearly not safe for work: "
+    "sexual content, gore, graphic violence, or other adult or disturbing content."
 )
 
 
@@ -28,6 +37,7 @@ def analyze_image(
     model: str,
     base_url: str,
     existing: dict[str, Any] | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any] | None:
     """Load the image through Responses and return a clamped sidecar.
 
@@ -40,7 +50,7 @@ def analyze_image(
         prompt=_PROMPT,
         image=path,
         store=False,
-        reasoning_effort="none",
+        reasoning_effort=reasoning_effort,
     )
     if text is None:
         return None

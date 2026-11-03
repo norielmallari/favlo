@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -178,8 +179,73 @@ def run_once(
     return total
 
 
+def hold_index(target: Any, workspace_id: str) -> bool:
+    """Mark one workspace's index as running so the watcher skips it."""
+    app = _app_of(target)
+    if app is None:
+        return False
+    ensured = _ensure_index_state(app.state)
+    if ensured is None:
+        return False
+    lock, running = ensured
+    for _ in range(40):
+        with lock:
+            if not running.get(workspace_id):
+                running[workspace_id] = True
+                store = getattr(app.state, "store", None)
+                if store is not None:
+                    store.gallery_index_running = dict(running)
+                return True
+        time.sleep(0.25)
+    return False
+
+
+def release_index(target: Any, workspace_id: str) -> None:
+    app = _app_of(target)
+    if app is None:
+        return
+    ensured = _ensure_index_state(app.state)
+    if ensured is None:
+        return
+    lock, running = ensured
+    with lock:
+        running.pop(workspace_id, None)
+        store = getattr(app.state, "store", None)
+        if store is not None:
+            store.gallery_index_running = dict(running)
+
+
+def write_path_sidecars(store: Any, workspace_id: str) -> int:
+    """Write a path sidecar for every media file. No vision and no pass cap."""
+    return _pass(store, None, workspace_id, False, cap=None)
+
+
+def write_vision_sidecars(store: Any, workspace_id: str) -> int:
+    """Caption every image that still lacks a vision description. No vision cap."""
+    return _pass(store, None, workspace_id, True, cap=None, vision_cap=None)
+
+
+def uncaptioned_images(store: Any, workspace_id: str) -> list[str]:
+    """Image paths that still have no vision caption."""
+    folder = LocalFolder(store.local_location(workspace_id))
+    listing = folder.walk_media(record_limit=5000)
+    pending: list[str] = []
+    for item in listing.get("media") or []:
+        if str(item.get("kind") or "") != "image":
+            continue
+        relative = str(item["path"])
+        if _needs_vision(read_sidecar(folder.root, relative), relative):
+            pending.append(relative)
+    return pending
+
+
 def _pass(
-    store: Any, index: GalleryIndex | None, workspace_id: str, vision: bool = True
+    store: Any,
+    index: GalleryIndex | None,
+    workspace_id: str,
+    vision: bool = True,
+    cap: int | None = _PASS_CAP,
+    vision_cap: int | None = _VISION_CAP,
 ) -> int:
     if index is None:
         index = GalleryIndex(Path(store.path).with_name("gallery_index.db"))
@@ -197,18 +263,19 @@ def _pass(
         return 0
     worked = 0
     vision_used = 0
-    model, base_url = _chat_endpoint(store) if vision else (None, None)
-    listing = folder.walk_media()
+    model, base_url, effort = _chat_endpoint(store, workspace_id) if vision else (None, None, None)
+    listing = folder.walk_media(record_limit=5000 if cap is None else 80)
     for item in listing.get("media") or []:
-        if worked >= _PASS_CAP:
+        if cap is not None and worked >= cap:
             break
         relative = str(item["path"])
         absolute = folder.resolve(relative, file=True)
         kind = str(item.get("kind") or "image")
         allow_vision = False
-        if vision and kind == "image" and model and base_url and vision_used < _VISION_CAP:
+        under_cap = vision_cap is None or vision_used < vision_cap
+        if vision and kind == "image" and model and base_url and under_cap:
             existing = read_sidecar(folder.root, relative)
-            if existing is None or _needs_generation_enrichment(existing):
+            if _needs_vision(existing, relative):
                 allow_vision = True
         status = _load_and_embed(
             folder=folder,
@@ -220,6 +287,7 @@ def _pass(
             model=model,
             base_url=base_url,
             allow_vision=allow_vision,
+            reasoning_effort=effort,
         )
         if status == "deferred":
             continue
@@ -242,6 +310,7 @@ def _load_and_embed(
     model: str | None,
     base_url: str | None,
     allow_vision: bool,
+    reasoning_effort: str | None = None,
 ) -> str:
     """Ensure metadata exists, then embed when the prompt is new.
 
@@ -256,6 +325,7 @@ def _load_and_embed(
                 relative=relative,
                 model=model,
                 base_url=base_url,
+                reasoning_effort=reasoning_effort,
             )
             if sidecar is None:
                 return "failed"
@@ -269,14 +339,21 @@ def _load_and_embed(
                 mtime_iso=stamped,
             )
         write_sidecar(folder.root, relative, sidecar)
-    elif kind == "image" and allow_vision and model and base_url and _needs_generation_enrichment(sidecar):
-        # Enrich a generation-only sidecar with vision; keep generation intact.
+    elif (
+        kind == "image"
+        and allow_vision
+        and model
+        and base_url
+        and _needs_vision(sidecar, relative)
+    ):
+        # Replace a path or generation sidecar with a vision caption.
         enriched = analyze_image(
             absolute,
             relative=relative,
             model=model,
             base_url=base_url,
             existing=sidecar,
+            reasoning_effort=reasoning_effort,
         )
         if enriched is not None:
             sidecar = enriched
@@ -302,13 +379,35 @@ def _load_and_embed(
     return "indexed"
 
 
-def _chat_endpoint(store: Any) -> tuple[str | None, str | None]:
-    """Gallery vision model from settings (falls back to the app default)."""
+def _chat_endpoint(store: Any, workspace_id: str) -> tuple[str, str, str | None]:
+    """The workspace agent's model and the effort that agent would send.
+
+    An unset effort stays off the request, the same as chat.
+    """
+    model, base = store.gallery_vision_model(workspace_id)
+    effort = store.gallery_vision_effort(workspace_id)
+    return model, base, effort
+
+
+def index_sidecar(store: Any, workspace_id: str, root: str | Path, relative: str, sidecar: dict[str, Any]) -> bool:
+    """Embed one sidecar into this gallery's index. False when the vector is missing."""
+    prompt = prompt_text(sidecar)
+    vector = _embed(prompt)
+    if vector is None:
+        return False
     try:
-        model, base = store.gallery_vision_model()
+        index = GalleryIndex(Path(store.path).with_name("gallery_index.db"))
+        index.upsert(
+            workspace_id,
+            relative,
+            kind=str(sidecar.get("kind") or "image"),
+            sidecar_mtime=_mtime_iso(sidecar_path(root, relative)),
+            prompt_text=prompt,
+            vector=vector,
+        )
     except Exception:
-        return None, LOCAL_BASE_URL
-    return model, base or LOCAL_BASE_URL
+        return False
+    return True
 
 
 def _embed(text: str) -> list[float] | None:
@@ -321,6 +420,22 @@ def _embed(text: str) -> list[float] | None:
     if isinstance(result, str):
         return None
     return result
+
+
+def _path_only(sidecar: dict[str, Any], relative: str) -> bool:
+    """True when the sidecar is the path sentence and has not been captioned."""
+    kind = str(sidecar.get("kind") or "image")
+    description = str(sidecar.get("description") or "")
+    return description.startswith(f"A {kind} file at {relative}.")
+
+
+def _needs_vision(sidecar: dict[str, Any] | None, relative: str) -> bool:
+    """True when this image still needs a vision caption."""
+    if sidecar is None:
+        return True
+    if _needs_generation_enrichment(sidecar):
+        return True
+    return _path_only(sidecar, relative)
 
 
 def _needs_generation_enrichment(sidecar: dict[str, Any]) -> bool:

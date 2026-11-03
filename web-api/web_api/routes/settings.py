@@ -26,5 +26,6 @@ async def update_settings(body: SettingsUpdate, request: Request):
         body.default_model_id,
         body.exchange_budget,
         body.gallery_vision_model_id,
+        body.reasoning_effort,
     )
     return json_body(200, updated)

@@ -142,7 +142,7 @@ def test_run_once_writes_path_sidecar_without_chat_model(tmp_path: Path, monkeyp
 
     home = tmp_path / "web"
     store = Store(home / "app.db")
-    monkeypatch.setattr(store, "gallery_vision_model", lambda: (None, None))
+    monkeypatch.setattr(store, "gallery_vision_model", lambda workspace_id=None: (None, None))
     monkeypatch.setattr("web_api.gallery_embed._embed", lambda _text: [0.0] * 1024)
 
     channel = store.channels()[0]
@@ -169,8 +169,9 @@ def test_run_once_writes_path_sidecar_without_chat_model(tmp_path: Path, monkeyp
     assert not (root / "still.png.json").exists()
 
 
-def test_gallery_vision_model_prefers_settings_over_default(tmp_path: Path) -> None:
+def test_gallery_vision_uses_the_agent_model_or_the_global_default(tmp_path: Path) -> None:
     from web_api.db import LOCAL_PROVIDER_ID
+    from web_api.ids import FAVLO_AGENT_ID
     from web_api.store import Store
 
     home = tmp_path / "web"
@@ -179,7 +180,7 @@ def test_gallery_vision_model_prefers_settings_over_default(tmp_path: Path) -> N
         "vision-default",
         {
             "provider_id": LOCAL_PROVIDER_ID,
-            "model_id": "qwen36-35b-a3b",
+            "model_id": "qwen36-35b-a3b:thinking",
             "display_name": "35B",
         },
     )
@@ -188,7 +189,7 @@ def test_gallery_vision_model_prefers_settings_over_default(tmp_path: Path) -> N
         "vision-other",
         {
             "provider_id": LOCAL_PROVIDER_ID,
-            "model_id": "qwen35-4b",
+            "model_id": "qwen35-4b:thinking",
             "display_name": "4B",
         },
     )
@@ -200,13 +201,41 @@ def test_gallery_vision_model_prefers_settings_over_default(tmp_path: Path) -> N
         10,
         other[1]["id"],
     )
-    model, base = store.gallery_vision_model()
-    assert model == "qwen35-4b"
+    channel = next(row for row in store.channels() if row["agent_id"] == FAVLO_AGENT_ID)
+    root = tmp_path / "photos"
+    root.mkdir()
+    _status, workspace, _events = store.create_workspace(
+        "vision-model",
+        {
+            "channel_id": channel["id"],
+            "name": "Lib",
+            "type": "gallery",
+            "location": str(root),
+        },
+    )
+    model, base = store.gallery_vision_model(workspace["id"])
+    assert model == "qwen36-35b-a3b:thinking"
     assert base
-    cleared = store.settings()
-    store.update_settings(cleared["revision"], default[1]["id"], 10, None)
-    model, _ = store.gallery_vision_model()
-    assert model == "qwen36-35b-a3b"
+    favlo = next(row for row in store.agents() if row["id"] == FAVLO_AGENT_ID)
+    store.update_agent(
+        favlo["id"],
+        favlo["revision"],
+        favlo["name"],
+        str(favlo.get("persona") or ""),
+        other[1]["id"],
+    )
+    model, _base = store.gallery_vision_model(workspace["id"])
+    assert model == "qwen35-4b:thinking"
+
+
+def test_provider_model_throws_when_settings_has_no_model(tmp_path: Path) -> None:
+    import pytest
+    from web_api.ids import FAVLO_AGENT_ID
+    from web_api.store import Rejected, Store
+
+    store = Store(tmp_path / "web" / "app.db")
+    with pytest.raises(Rejected, match="model"):
+        store.chat_model(FAVLO_AGENT_ID)
 
 
 def test_run_once_skips_embed_when_prompt_hash_matches(tmp_path: Path, monkeypatch) -> None:
@@ -215,7 +244,7 @@ def test_run_once_skips_embed_when_prompt_hash_matches(tmp_path: Path, monkeypat
 
     home = tmp_path / "web"
     store = Store(home / "app.db")
-    monkeypatch.setattr(store, "gallery_vision_model", lambda: (None, None))
+    monkeypatch.setattr(store, "gallery_vision_model", lambda workspace_id=None: (None, None))
     embeds: list[str] = []
 
     def fake_embed(text: str) -> list[float]:

@@ -34,10 +34,12 @@ import { useAguiChat } from '@/components/use-agui-chat';
 import { WorkspaceSkills, type WorkspaceSkill } from '@/components/WorkspaceSkills';
 import { readExpandTrace, workingLabel } from '@/components/expandTrace';
 import { WorkingStatus } from '@/components/WorkingStatus';
+import { isGalleryScheme, type GalleryScheme } from '@/theme/gallery-schemes';
 import { useTheme } from '@/theme/Theme';
 import { space } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
 import { FolderSetup } from '@/workspace/FolderSetup';
+import { GalleryThemeMenu } from '@/workspace/GalleryThemeMenu';
 import { GalleryChatResizeHandle } from '@/workspace/GalleryChatResizeHandle';
 import {
   clampGalleryChatWidth,
@@ -45,7 +47,7 @@ import {
   writeGalleryChatWidth,
 } from '@/workspace/gallery-chat-width';
 import { WorkspaceShell } from '@/workspace/WorkspaceShell';
-import { ensureFilmstripSelection, initialGallery, type PlacementState } from '@/workspace/placement';
+import { documentFromShell, ensureFilmstripSelection, type PlacementState, type ShellDocument } from '@/workspace/placement';
 
 type WorkspaceDetail = {
   id: string;
@@ -54,7 +56,10 @@ type WorkspaceDetail = {
   session_id: string;
   channel_id: string;
   skills: WorkspaceSkill[];
-  expand_trace?: string | null;
+  expand_thinking?: string | null;
+  expand_tools?: string | null;
+  theme?: string;
+  shell?: ShellDocument;
 };
 
 type Snapshot = {
@@ -69,12 +74,16 @@ const LATEST_SLACK = 64;
 export function WorkspaceScreen({
   workspaceId,
   agentName,
+  scheme = 'favlo',
+  onTheme,
   onBack,
   onDeleted,
 }: {
   workspaceId: string;
   agentName: string;
-  onBack: () => void;
+  scheme?: GalleryScheme;
+  onTheme?: (scheme: GalleryScheme) => void;
+  onBack?: () => void;
   onDeleted?: () => void;
 }) {
   const { palette } = useTheme();
@@ -110,7 +119,9 @@ export function WorkspaceScreen({
   const [notice, setNotice] = useState<string | null>(null);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [placement, setPlacement] = useState<PlacementState>(initialGallery());
+  const [placement, setPlacement] = useState<PlacementState>(documentFromShell(null));
+  const shellRef = useRef<ShellDocument | null>(null);
+  shellRef.current = detail?.shell ?? null;
   const [bound, setBound] = useState(false);
   const transcriptRef = useRef<ComponentRef<typeof ScrollView>>(null);
   const followLatest = useRef(true);
@@ -136,7 +147,7 @@ export function WorkspaceScreen({
     },
     onSessionId: (nextId) => {
       setDetail((value) => (value == null ? value : { ...value, session_id: nextId }));
-      setPlacement(initialGallery());
+      setPlacement(documentFromShell(shellRef.current));
     },
     hydrate: async () => {
       if (sessionId == null) {
@@ -151,10 +162,10 @@ export function WorkspaceScreen({
           state: placed as unknown as Record<string, unknown>,
         };
       }
-      setPlacement(initialGallery());
+      setPlacement(documentFromShell(shellRef.current));
       return {
         messages: snap.messages.map((item) => chatMessage(item)),
-        state: initialGallery() as unknown as Record<string, unknown>,
+        state: documentFromShell(shellRef.current) as unknown as Record<string, unknown>,
       };
     },
   });
@@ -167,15 +178,19 @@ export function WorkspaceScreen({
     const snap = await api<Snapshot>(`/sessions/${workspace.session_id}`);
     cursorRef.current = snap.cursor;
     setMessages(snap.messages.map((item) => chatMessage(item)));
+    shellRef.current = workspace.shell ?? null;
     if (snap.state?.favlo_workspace) {
       setPlacement(ensureFilmstripSelection(snap.state));
     } else {
-      setPlacement(initialGallery());
+      setPlacement(documentFromShell(workspace.shell));
     }
     setDraft(readDraft(workspace.session_id));
+    if (isGalleryScheme(workspace.theme)) {
+      onTheme?.(workspace.theme);
+    }
     // Set detail last so the socket effect subscribes with the loaded cursor.
     setDetail(workspace);
-  }, [workspaceId]);
+  }, [onTheme, workspaceId]);
 
   useEffect(() => {
     void load().catch((caught: Error) => setNotice(caught.message));
@@ -216,6 +231,7 @@ export function WorkspaceScreen({
             session_id?: string;
             previous_session_id?: string;
             trace?: unknown;
+            theme?: string;
           };
         };
         if (seen.current.has(payload.event_id)) {
@@ -231,12 +247,15 @@ export function WorkspaceScreen({
           setSteps([]);
           setWorking(false);
           setRunId(null);
-          setPlacement(initialGallery());
+          setPlacement(documentFromShell(shellRef.current));
           if (payload.payload?.session_id) {
             setDetail((value) =>
               value == null ? value : { ...value, session_id: payload.payload!.session_id! },
             );
           }
+        }
+        if (payload.type === 'workspace.theme_set' && isGalleryScheme(payload.payload?.theme)) {
+          onTheme?.(payload.payload.theme);
         }
         if (payload.type === 'run.started' && payload.run_id !== openRun.current) {
           setWorking(true);
@@ -262,7 +281,7 @@ export function WorkspaceScreen({
       clearTimeout(timer);
       socket?.close();
     };
-  }, [load, sessionId]);
+  }, [load, onTheme, sessionId]);
 
   function updateDraft(next: string) {
     setDraft(next);
@@ -281,7 +300,7 @@ export function WorkspaceScreen({
     try {
       if (command === 'clear') {
         await chat.clear();
-        setPlacement(initialGallery());
+        setPlacement(documentFromShell(shellRef.current));
         return;
       }
       if (command === 'archive') {
@@ -353,6 +372,7 @@ export function WorkspaceScreen({
         style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 0, minWidth: 0, maxWidth: '100%' }}
         contentContainerStyle={transcriptFrame(space[4])}
         onContentSizeChange={showLatest}
+        onLayout={showLatest}
         onScroll={noteScroll}
         scrollEventThrottle={16}
       >
@@ -365,20 +385,26 @@ export function WorkspaceScreen({
             reasoning={item.reasoning}
             toolCalls={item.toolCalls}
             trace={item.trace}
-            expandTrace={readExpandTrace(detail?.expand_trace)}
+            expandTrace={readExpandTrace(detail?.expand_thinking)}
+            expandTools={readExpandTrace(detail?.expand_tools, 'hidden')}
           />
         ))}
         <LiveReply
           steps={steps}
           speaker={agentName}
           measured
-          expandTrace={readExpandTrace(detail?.expand_trace)}
+          expandTrace={readExpandTrace(detail?.expand_thinking)}
+          expandTools={readExpandTrace(detail?.expand_tools, 'hidden')}
           forceOpen={traceForcedOpen}
         />
       </ScrollView>
       {working ? (
         <WorkingStatus
-          label={workingLabel(steps)}
+          label={workingLabel(
+            steps,
+            readExpandTrace(detail?.expand_thinking),
+            readExpandTrace(detail?.expand_tools, 'hidden'),
+          )}
           expanded={traceForcedOpen}
           onPress={() => setTraceForcedOpen((value) => !value)}
         />
@@ -430,15 +456,17 @@ export function WorkspaceScreen({
             maxWidth: '100%',
           }}
         >
-          <IconButton
-            label="Back to channel"
-            icon="arrow-left"
-            onPress={onBack}
-            iconOnly={narrow}
-            background="transparent"
-            border="transparent"
-            color={palette.accent}
-          />
+          {onBack ? (
+            <IconButton
+              label="Back to channel"
+              icon="arrow-left"
+              onPress={onBack}
+              iconOnly={narrow}
+              background="transparent"
+              border="transparent"
+              color={palette.accent}
+            />
+          ) : null}
           <Text
             accessibilityRole="header"
             aria-level={2}
@@ -462,6 +490,18 @@ export function WorkspaceScreen({
               color={palette.accent}
             />
           ) : null}
+          <GalleryThemeMenu
+            scheme={scheme}
+            narrow={narrow}
+            onSelect={(next) => {
+              void api(`/workspaces/${workspaceId}/theme`, {
+                method: 'PUT',
+                body: JSON.stringify({ theme: next }),
+              })
+                .then(() => onTheme?.(next))
+                .catch((caught: Error) => setNotice(caught.message));
+            }}
+          />
           <IconButton
             label="Skills"
             icon="book"
@@ -513,6 +553,7 @@ export function WorkspaceScreen({
             ) : (
               <WorkspaceShell
                 state={placement}
+                slots={detail?.shell?.slots ?? []}
                 fileUrl={fileUrl}
                 onChange={setPlacement}
                 onAddToChat={(path) => updateDraft(draft ? `${draft}\n${path}` : path)}
@@ -547,7 +588,7 @@ export function WorkspaceScreen({
               void api(`/workspaces/${workspaceId}`, { method: 'DELETE' })
                 .then(() => {
                   onDeleted?.();
-                  onBack();
+                  onBack?.();
                 })
                 .catch((caught: Error) => setNotice(caught.message));
             }}

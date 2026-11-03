@@ -18,6 +18,54 @@ def tools(store: Any, workspace_id: str, guide_id: str = "gallery") -> list[obje
     return [_place_tool(store, workspace_id, guide_id)]
 
 
+def ensure_opening_filmstrip(store: Any, workspace_id: str) -> None:
+    """Place every image, with its sidecar caption, through the filmstrip clamps.
+
+    The model does not call this. ``apply_placement`` keeps the same clamps as
+    ``workspace_place``: 60 items, unique paths, and an 80-character caption.
+    """
+    from web_api.gallery_metadata import read_sidecar
+
+    try:
+        folder = folder_for(store, workspace_id)
+    except Rejected:
+        return
+    listing = folder.walk_media(kinds=["image"], record_limit=5000)
+    items: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in listing.get("media") or []:
+        path = str(row.get("path") or "")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        item: dict[str, str] = {"path": path}
+        side = read_sidecar(folder.root, path) or {}
+        caption = str(side.get("title") or side.get("description") or "").strip()
+        if caption:
+            item["caption"] = caption
+        items.append(item)
+    if not items:
+        return
+    # A longer list is rejected by the 64 KiB state clamp before the filmstrip
+    # clamp runs. The first 60 are what that clamp keeps.
+    items = items[:60]
+    apply_placement(
+        store,
+        workspace_id,
+        [
+            {"key": "preview", "element": "preview", "slot": "stage", "props": {"fit": "contain"}},
+            {
+                "key": "filmstrip",
+                "element": "filmstrip",
+                "slot": "rail",
+                "props": {"title": "", "items": items},
+            },
+        ],
+        {"kind": "file", "path": items[0]["path"]},
+        guide_id="gallery",
+    )
+
+
 def _place_tool(store: Any, workspace_id: str, guide_id: str) -> object:
     from agent_framework import tool
 
@@ -33,67 +81,74 @@ def _place_tool(store: Any, workspace_id: str, guide_id: str) -> object:
         If selection is omitted or not on the strip, Favlo selects the first path.
         Filmstrip paths must come from gallery_find_media or gallery_search_media.
         Do not describe the layout in prose.
+        A path string in items is the same as {"path": that string}.
         """
-        prior = None
-        session_id = store.workspace_session_id(workspace_id)
-        if session_id:
-            prior = store.agui_state(session_id)
-        if not isinstance(elements, list) or not elements:
-            return dumps_for_model(
-                {
-                    "error": "elements must be a non-empty list of catalog placements",
-                    "ignored": [],
-                }
-            )
-        payload = {
-            "favlo_workspace": {
-                "version": 1,
-                "guide": guide_id,
-                "elements": elements,
-                "selection": selection,
-            }
-        }
-        state, ignored = validate(payload, guide_id=guide_id, prior=prior)
-        workspace = state["favlo_workspace"]
-        try:
-            folder = folder_for(store, workspace_id)
-        except Rejected as exc:
-            return dumps_for_model({"error": str(exc), "ignored": ignored})
-        missing: list[str] = []
-        for element in workspace.get("elements") or []:
-            if element.get("element") != "filmstrip":
-                continue
-            items = []
-            for item in (element.get("props") or {}).get("items") or []:
-                path = str(item.get("path") or "")
-                resolved = _resolve_media_path(folder, path)
-                if resolved is None:
-                    missing.append(path)
-                    continue
-                row = dict(item)
-                row["path"] = resolved
-                items.append(row)
-            element["props"]["items"] = items
-        selection_obj = workspace.get("selection")
-        if isinstance(selection_obj, dict):
-            path = str(selection_obj.get("path") or "")
-            resolved = _resolve_media_path(folder, path) if path else None
-            if path and resolved is None:
-                missing.append(path)
-                selection_obj = None
-            elif resolved is not None:
-                selection_obj = {"kind": "file", "path": resolved}
-        workspace["selection"] = selection_for_elements(
-            list(workspace.get("elements") or []),
-            selection_obj if isinstance(selection_obj, dict) else None,
-        )
-        if session_id:
-            store.save_agui_state(session_id, state)
-        if missing:
-            ignored.extend(f"missing path {path}" for path in missing)
-        return dumps_for_model({"state": state, "ignored": ignored})
+        result = apply_placement(store, workspace_id, elements, selection, guide_id=guide_id)
+        return dumps_for_model(result)
 
     return workspace_place
+
+
+def apply_placement(
+    store: Any,
+    workspace_id: str,
+    elements: list[dict[str, Any]] | None,
+    selection: dict[str, Any] | None,
+    *,
+    guide_id: str,
+) -> dict[str, Any]:
+    """Validate a placement, keep paths that exist, and store it on the workspace chat."""
+    session_id = store.workspace_session_id(workspace_id)
+    prior = store.agui_state(session_id) if session_id else None
+    if not isinstance(elements, list) or not elements:
+        return {"error": "elements must be a non-empty list of catalog placements", "ignored": []}
+    payload = {
+        "favlo_workspace": {
+            "version": 1,
+            "guide": guide_id,
+            "elements": elements,
+            "selection": selection,
+        }
+    }
+    state, ignored = validate(payload, guide_id=guide_id, prior=prior)
+    workspace = state["favlo_workspace"]
+    try:
+        folder = folder_for(store, workspace_id)
+    except Rejected as exc:
+        return {"error": str(exc), "ignored": ignored}
+    missing: list[str] = []
+    for element in workspace.get("elements") or []:
+        if element.get("element") != "filmstrip":
+            continue
+        items = []
+        for item in (element.get("props") or {}).get("items") or []:
+            path = str(item.get("path") or "")
+            resolved = _resolve_media_path(folder, path)
+            if resolved is None:
+                missing.append(path)
+                continue
+            row = dict(item)
+            row["path"] = resolved
+            items.append(row)
+        element["props"]["items"] = items
+    selection_obj = workspace.get("selection")
+    if isinstance(selection_obj, dict):
+        path = str(selection_obj.get("path") or "")
+        resolved = _resolve_media_path(folder, path) if path else None
+        if path and resolved is None:
+            missing.append(path)
+            selection_obj = None
+        elif resolved is not None:
+            selection_obj = {"kind": "file", "path": resolved}
+    workspace["selection"] = selection_for_elements(
+        list(workspace.get("elements") or []),
+        selection_obj if isinstance(selection_obj, dict) else None,
+    )
+    if session_id:
+        store.save_agui_state(session_id, state)
+    if missing:
+        ignored.extend(f"missing path {path}" for path in missing)
+    return {"state": state, "ignored": ignored}
 
 
 def _media_exists(folder: Any, path: str) -> bool:

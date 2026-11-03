@@ -28,3 +28,7 @@ Use `gallery_move_folder` to move a directory inside the local folder.
 Use `gallery_delete_folder` to delete a directory. Delete it only when it is empty. The local folder itself cannot be deleted.
 
 These tools cannot add or delete a folder row, and they cannot use a cloud folder.
+
+When the person asks to change a caption, title, tags, people, objects, place, or whether an image is not safe for work, call `gallery_update_metadata` with that image's relative path. Send only the fields they want changed. Omitted fields stay as they are.
+
+When the person asks to change how the gallery looks, call `gallery_set_theme` with `favlo`, `rose-pine`, or `catppuccin`. Light, dark, and system stay their appearance setting.

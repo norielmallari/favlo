@@ -1,14 +1,17 @@
-/** How thinking and tool-call blocks open in the transcript. */
-export type ExpandTrace = 'collapsed' | 'running' | 'always';
+/** How one transcript block opens. Thinking and tool calls each store their own value. */
+export type ExpandTrace = 'hidden' | 'collapsed' | 'running' | 'always';
 
-export function readExpandTrace(value: unknown): ExpandTrace {
-  if (value === 'running' || value === 'always') {
+export function readExpandTrace(value: unknown, fallback: ExpandTrace = 'collapsed'): ExpandTrace {
+  if (value === 'hidden' || value === 'collapsed' || value === 'running' || value === 'always') {
     return value;
   }
-  return 'collapsed';
+  return fallback;
 }
 
 export function traceStartsOpen(settled: boolean, mode: ExpandTrace, forceOpen: boolean): boolean {
+  if (mode === 'hidden') {
+    return false;
+  }
   if (forceOpen || mode === 'always') {
     return true;
   }
@@ -20,6 +23,8 @@ export function traceStartsOpen(settled: boolean, mode: ExpandTrace, forceOpen: 
 
 export function workingLabel(
   steps: { kind: string; settled?: boolean; call?: { name?: string } }[],
+  thinking: ExpandTrace = 'collapsed',
+  tools: ExpandTrace = 'hidden',
 ): string {
   for (let index = steps.length - 1; index >= 0; index -= 1) {
     const step = steps[index];
@@ -27,9 +32,12 @@ export function workingLabel(
       continue;
     }
     if (step.kind === 'thinking') {
-      return 'Thinking';
+      return thinking === 'hidden' ? 'Working' : 'Thinking';
     }
     if (step.kind === 'tool') {
+      if (tools === 'hidden') {
+        return 'Working';
+      }
       const name = step.call?.name?.trim();
       return name ? `Tool call ${name}` : 'Tool call';
     }

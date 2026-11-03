@@ -349,6 +349,8 @@ def test_a_workspace_session_gets_the_type_prompt_before_the_root(tmp_path: Path
     assert "gallery_search_unlike_media" not in names
     assert "gallery_create_folder" not in names
     assert "workspace_place" in names
+    assert "gallery_set_theme" in names
+    assert "gallery_update_metadata" in names
     assert "gallery_list_folder" not in names
     assert "this session is using" not in instructions.lower()
 
@@ -374,6 +376,7 @@ def test_workspace_skills_are_name_and_description(client: TestClient, tmp_path:
     assert [item["name"] for item in created.json()["skills"]] == ["manage-gallery"]
     assert "gallery_write_image" in created.json()["skills"][0]["definition"]
     assert "gallery_find_media" in created.json()["skills"][0]["definition"]
+    assert "gallery_update_metadata" in created.json()["skills"][0]["definition"]
     assert "gallery_search_unlike_media" in created.json()["skills"][0]["definition"]
     assert "workspace_place" in created.json()["skills"][0]["definition"]
     assert "gallery_list_folder" not in created.json()["skills"][0]["definition"]
@@ -660,8 +663,12 @@ def test_deleting_a_workspace_keeps_the_files(client: TestClient, tmp_path: Path
 def test_an_old_root_row_gains_a_parent(tmp_path: Path) -> None:
     import sqlite3
 
-    from web_api.db import SCHEMA, migrate
+    from sqlalchemy import inspect
 
+    from web_api.db import SCHEMA, migrate
+    from web_api.infrastructure.db.database import open_session
+
+    assert callable(migrate)
     path = tmp_path / "old.db"
     conn = sqlite3.connect(path)
     conn.execute(
@@ -687,18 +694,27 @@ def test_an_old_root_row_gains_a_parent(tmp_path: Path) -> None:
             id, workspace_id, name, role, kind, provider, location,
             machine_id, remote_id, revision, created_at
         )
-        VALUES ('folder_old', 'workspace_old', 'Stills', 'root', 'local', NULL, '/tmp/gallery', '', NULL, 1, '2026-01-01')
+        VALUES (
+            'folder_old', 'workspace_old', 'Stills', 'root', 'local',
+            NULL, '/tmp/gallery', '', NULL, 1, '2026-01-01'
+        )
         """
     )
     conn.commit()
     conn.close()
-    again = sqlite3.connect(path)
-    again.row_factory = sqlite3.Row
-    migrate(again)
-    row = again.execute("SELECT * FROM folder WHERE id = 'folder_old'").fetchone()
-    again.close()
-    assert row["parent_id"] is None
-    assert row["name"] == "Stills"
+    session = open_session(path)
+    try:
+        columns = {column["name"] for column in inspect(session.get_bind()).get_columns("folder")}
+        nullable = {
+            column["name"]: column["nullable"]
+            for column in inspect(session.get_bind()).get_columns("folder")
+        }
+    finally:
+        session.close()
+        session.get_bind().dispose()
+    assert "parent_id" in columns
+    assert nullable["parent_id"] is True
+    assert "name" in columns
     assert "folder (" in SCHEMA
 
 
@@ -955,6 +971,225 @@ def test_delete_workspace_keeps_disk_files(client: TestClient, tmp_path: Path) -
     assert all(row["id"] != gallery["id"] for row in listed)
 
 
+def test_shells_are_listed_from_the_database(client: TestClient) -> None:
+    shells = client.get("/shells").json()["shells"]
+    ids = [row["id"] for row in shells]
+    assert ids == ["gallery", "coding"]
+    gallery = shells[0]
+    assert gallery["label"] == "Gallery"
+    assert gallery["icon"] == "image"
+    assert gallery["setup"] == "local_folder"
+    assert gallery["renderer"] == "media"
+    assert [item["name"] for item in gallery["elements"]] == ["preview", "filmstrip"]
+    assert shells[1]["renderer"] == "chat"
+    assert shells[1]["elements"] == []
+
+
+def test_gallery_greeting_does_not_place_the_filmstrip() -> None:
+    from web_api.provision import _cue
+
+    text = _cue({"type": "gallery", "name": "Pixel"})
+    assert "Do not call tools." in text
+    assert "gallery_find_media" not in text
+    assert "workspace_place" not in text
+    assert "Do not send a second greeting." in text
+
+
+def test_opening_filmstrip_keeps_the_placement_clamps(client: TestClient, tmp_path: Path) -> None:
+    import time
+
+    from web_api.gallery_metadata import write_sidecar
+    from web_api.workspace_tools import ensure_opening_filmstrip
+
+    gallery = _gallery(client, tmp_path)
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        snap = client.get(f"/sessions/{gallery['session_id']}").json()
+        if snap["messages"]:
+            break
+        time.sleep(0.05)
+    root = gallery["root_path"]
+    for index in range(61):
+        (root / f"frame-{index:02d}.png").write_bytes(PNG)
+    write_sidecar(
+        root,
+        "frame-00.png",
+        {
+            "filename": "frame-00.png",
+            "kind": "image",
+            "title": "H" * 120,
+            "description": "A long description that must not replace the title.",
+            "tags": ["frame"],
+            "source": "index",
+        },
+    )
+    ensure_opening_filmstrip(client.app.state.store, gallery["id"])
+    snap = client.get(f"/sessions/{gallery['session_id']}").json()
+    items = snap["state"]["favlo_workspace"]["elements"][1]["props"]["items"]
+    assert len(items) == 60
+    assert items[0]["path"] == "frame-00.png"
+    assert items[0]["caption"] == "H" * 80
+    assert snap["state"]["favlo_workspace"]["selection"]["path"] == "frame-00.png"
+
+
+def test_find_media_includes_the_caption(tmp_path: Path) -> None:
+    import json
+
+    from web_api.gallery_metadata import write_sidecar
+    from web_api.gallery_tools import _attach_captions
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    (root / "horse.png").write_bytes(PNG)
+    write_sidecar(
+        root,
+        "horse.png",
+        {
+            "filename": "horse.png",
+            "kind": "image",
+            "title": "Horse",
+            "description": "A painted horse in a field.",
+            "tags": ["horse"],
+            "source": "index",
+        },
+    )
+    folder = LocalFolder(root)
+    listing = _attach_captions(folder, folder.walk_media())
+    row = listing["media"][0]
+    assert row["path"] == "horse.png"
+    assert row["description"] == "A painted horse in a field."
+    assert row["title"] == "Horse"
+    assert json.dumps(listing["images"][0]) == json.dumps(row)
+
+
+def test_gallery_creation_captions_before_the_greeting(client: TestClient, tmp_path: Path, monkeypatch) -> None:
+    import json
+    import time
+
+    calls: list[str] = []
+
+    def fake_analyze(path, *, relative, model, base_url, existing=None, reasoning_effort=None):
+        calls.append(model)
+        return {
+            "filename": "a.png",
+            "kind": "image",
+            "title": "Horse",
+            "description": "A painted horse in a field.",
+            "tags": ["horse"],
+            "source": "index",
+        }
+
+    monkeypatch.setattr("web_api.gallery_embed.analyze_image", fake_analyze)
+    monkeypatch.setattr("web_api.gallery_embed._embed", lambda _text: [0.0] * 1024)
+
+    def vision_model(workspace_id=None):
+        return ("qwen36-35b-a3b:thinking", "http://127.0.0.1:9")
+
+    client.app.state.store.gallery_vision_model = vision_model
+    channel_id = client.get("/channels").json()["channels"][0]["id"]
+    root = tmp_path / "captioned"
+    root.mkdir()
+    (root / "a.png").write_bytes(PNG)
+    created = client.post(
+        "/workspaces",
+        headers={"Idempotency-Key": "ws-vision"},
+        json={
+            "channel_id": channel_id,
+            "name": "Captioned",
+            "type": "gallery",
+            "location": str(root),
+        },
+    )
+    assert created.status_code == 201
+    body = created.json()
+    deadline = time.time() + 10
+    row = body
+    while time.time() < deadline:
+        row = client.get(f"/workspaces/{body['id']}").json()["workspace"]
+        if row["provisioning_state"] == "provisioned":
+            break
+        time.sleep(0.05)
+    assert row["provisioning_state"] == "provisioned"
+    assert calls == ["qwen36-35b-a3b:thinking"]
+    side = json.loads((root / ".favlo_metadata" / "a.png.json").read_text())
+    assert side["description"] == "A painted horse in a field."
+    snap = client.get(f"/sessions/{body['session_id']}").json()
+    items = snap["state"]["favlo_workspace"]["elements"][1]["props"]["items"]
+    assert [item["path"] for item in items] == ["a.png"]
+    assert items[0]["caption"] == "Horse"
+    assert snap["state"]["favlo_workspace"]["selection"]["path"] == "a.png"
+
+
+def test_create_provisions_then_shows_the_failure_in_chat(client: TestClient, tmp_path: Path) -> None:
+    import time
+
+    channel_id = client.get("/channels").json()["channels"][0]["id"]
+    root = tmp_path / "prov"
+    root.mkdir()
+    (root / "a.png").write_bytes(PNG)
+    created = client.post(
+        "/workspaces",
+        headers={"Idempotency-Key": "ws-provision"},
+        json={
+            "channel_id": channel_id,
+            "name": "Fresh",
+            "type": "gallery",
+            "location": str(root),
+        },
+    )
+    assert created.status_code == 201
+    body = created.json()
+    assert body["provisioning_state"] == "provisioning"
+    assert body["shell"]["slots"] == ["stage", "rail"]
+    deadline = time.time() + 5
+    row = body
+    snap = {"messages": []}
+    while time.time() < deadline:
+        row = client.get(f"/workspaces/{body['id']}").json()["workspace"]
+        snap = client.get(f"/sessions/{body['session_id']}").json()
+        if snap["messages"]:
+            break
+        time.sleep(0.05)
+    assert row["provisioning_state"] == "provisioning"
+    assert (root / ".favlo_metadata" / "a.png.json").is_file()
+    snap = client.get(f"/sessions/{body['session_id']}").json()
+    assert [item["role"] for item in snap["messages"]] == ["assistant"]
+    assert "model" in snap["messages"][0]["body"].lower()
+    names = [item["element"] for item in snap["state"]["favlo_workspace"]["elements"]]
+    assert names == ["preview", "filmstrip"]
+    coding = client.post(
+        "/workspaces",
+        headers={"Idempotency-Key": "ws-provision-coding"},
+        json={"channel_id": channel_id, "name": "Code", "type": "coding"},
+    )
+    assert coding.status_code == 201
+    coding_id = coding.json()["id"]
+    deadline = time.time() + 10
+    coding_row = coding.json()
+    while time.time() < deadline:
+        coding_row = client.get(f"/workspaces/{coding_id}").json()["workspace"]
+        if coding_row["provisioning_state"] == "provisioned":
+            break
+        time.sleep(0.05)
+    assert coding_row["provisioning_state"] == "provisioned"
+    coding_snap = client.get(f"/sessions/{coding.json()['session_id']}").json()
+    assert coding_snap["state"]["favlo_workspace"]["elements"] == []
+    replay = client.post(
+        "/workspaces",
+        headers={"Idempotency-Key": "ws-provision"},
+        json={
+            "channel_id": channel_id,
+            "name": "Fresh",
+            "type": "gallery",
+            "location": str(root),
+        },
+    )
+    assert replay.status_code == 201
+    assert replay.json()["id"] == body["id"]
+    again = client.get(f"/sessions/{body['session_id']}").json()
+    assert len(again["messages"]) == 1
+
+
 def test_create_workspace_rejects_unknown_type(client: TestClient) -> None:
     channel_id = client.get("/channels").json()["channels"][0]["id"]
     created = client.post(
@@ -962,7 +1197,155 @@ def test_create_workspace_rejects_unknown_type(client: TestClient) -> None:
         headers={"Idempotency-Key": "ws-bad-type"},
         json={"channel_id": channel_id, "name": "Odd", "type": "music"},
     )
-    assert created.status_code == 422
+    assert created.status_code == 400
+
+
+def test_gallery_theme_round_trip(client: TestClient, tmp_path: Path) -> None:
+    import asyncio
+    import json
+
+    from web_api.gallery_tools import tools
+
+    gallery = _gallery(client, tmp_path)
+    assert client.get(f"/workspaces/{gallery['id']}").json()["workspace"]["theme"] == "rose-pine"
+    updated = client.put(f"/workspaces/{gallery['id']}/theme", json={"theme": "rose-pine"})
+    assert updated.status_code == 200
+    assert updated.json()["theme"] == "rose-pine"
+    assert client.get(f"/workspaces/{gallery['id']}").json()["workspace"]["theme"] == "rose-pine"
+    rejected = client.put(f"/workspaces/{gallery['id']}/theme", json={"theme": "neon"})
+    assert rejected.status_code == 400
+
+    class _Bus:
+        def __init__(self) -> None:
+            self.events: list[dict[str, object]] = []
+
+        async def publish(self, event: dict[str, object]) -> None:
+            self.events.append(event)
+
+    bus = _Bus()
+    tool = next(
+        item
+        for item in tools(client.app.state.store, gallery["id"], bus)
+        if _tool_name(item) == "gallery_set_theme"
+    )
+    body = json.loads(asyncio.run(tool.invoke(arguments={"theme": "catppuccin"}, skip_parsing=True)))
+    assert body["theme"] == "catppuccin"
+    assert bus.events[0]["type"] == "workspace.theme_set"
+    assert client.get(f"/workspaces/{gallery['id']}").json()["workspace"]["theme"] == "catppuccin"
+    missing = json.loads(asyncio.run(tool.invoke(arguments={"theme": "neon"}, skip_parsing=True)))
+    assert "error" in missing
+
+
+def _tool_json(tool: object, arguments: dict) -> dict:
+    import asyncio
+    import json
+
+    result = asyncio.run(tool.invoke(arguments=arguments))
+    text = result if isinstance(result, str) else result[0].text
+    loaded = json.loads(text)
+    assert isinstance(loaded, dict)
+    return loaded
+
+
+def test_update_metadata_changes_only_the_named_fields(client: TestClient, tmp_path: Path, monkeypatch) -> None:
+    import time
+
+    from web_api.gallery_metadata import read_sidecar
+    from web_api.gallery_tools import tools
+
+    monkeypatch.setattr("web_api.gallery_embed._embed", lambda _text: [0.0] * 1024)
+    root = tmp_path / "meta"
+    root.mkdir()
+    (root / "horse.png").write_bytes(PNG)
+    (root / "clip.mp3").write_bytes(b"id3")
+    channel_id = client.get("/channels").json()["channels"][0]["id"]
+    created = client.post(
+        "/workspaces",
+        headers={"Idempotency-Key": "ws-meta"},
+        json={"channel_id": channel_id, "name": "Meta", "type": "gallery", "location": str(root)},
+    )
+    assert created.status_code == 201
+    tool = next(
+        item
+        for item in tools(client.app.state.store, created.json()["id"], None)
+        if _tool_name(item) == "gallery_update_metadata"
+    )
+    schema = tool.parameters()
+    assert schema["required"] == ["path"]
+    assert "description" in schema["properties"]
+    deadline = time.time() + 5
+    while time.time() < deadline and not (root / ".favlo_metadata" / "horse.png.json").is_file():
+        time.sleep(0.05)
+    empty = _tool_json(tool, {"path": "horse.png"})
+    assert empty["error"] == "missing_fields"
+    updated = _tool_json(
+        tool,
+        {"path": "horse.png", "title": "Painted horse", "tags": ["horse"], "nsfw": True},
+    )
+    assert updated["title"] == "Painted horse"
+    assert updated["tags"] == ["horse"]
+    assert updated["nsfw"] is True
+    assert updated["indexed"] is True
+    side = read_sidecar(root, "horse.png")
+    assert side is not None
+    assert side["title"] == "Painted horse"
+    assert side["description"]
+    assert side["description"] != "Painted horse"
+    audio = _tool_json(tool, {"path": "clip.mp3", "title": "Nope"})
+    assert audio["error"] == "not_an_image"
+    missing = _tool_json(tool, {"path": "gone.png", "title": "Nope"})
+    assert missing["error"] == "missing"
+    coerced = _tool_json(tool, {"path": "horse.png", "nsfw": "false"})
+    assert coerced["nsfw"] is False
+
+
+def test_vision_request_uses_the_agent_effort(client: TestClient, tmp_path: Path, monkeypatch) -> None:
+    from web_api.gallery_vision import analyze_image
+    from web_api.ids import FAVLO_AGENT_ID
+
+    gallery = _gallery(client, tmp_path)
+    store = client.app.state.store
+    assert store.gallery_vision_effort(gallery["id"]) is None
+    agent = next(item for item in client.get("/agents").json()["agents"] if item["id"] == FAVLO_AGENT_ID)
+    updated = client.patch(
+        f"/agents/{FAVLO_AGENT_ID}",
+        json={
+            "expected_revision": agent["revision"],
+            "name": agent["name"],
+            "persona": agent["persona"],
+            "default_model_id": agent["default_model_id"],
+            "tool_groups": agent["tool_groups"],
+            "reasoning_effort": "high",
+        },
+    )
+    assert updated.status_code == 200
+    assert store.gallery_vision_effort(gallery["id"]) == "high"
+
+    seen: dict[str, object] = {}
+
+    def fake_post(_base: str, body: dict[str, object]) -> dict[str, str]:
+        seen["body"] = body
+        return {"output_text": '{"title":"Horse","description":"A horse."}'}
+
+    monkeypatch.setattr("favlo.responses_client.post_responses", fake_post)
+    image = tmp_path / "a.png"
+    image.write_bytes(PNG)
+    analyze_image(image, relative="a.png", model="example-model", base_url="http://127.0.0.1:9")
+    body = seen["body"]
+    assert isinstance(body, dict)
+    assert "reasoning" not in body
+    assert "enable_thinking" not in body
+    analyze_image(
+        image,
+        relative="a.png",
+        model="example-model",
+        base_url="http://127.0.0.1:9",
+        reasoning_effort="high",
+    )
+    sent = seen["body"]
+    assert isinstance(sent, dict)
+    assert sent["reasoning"] == {"effort": "high"}
+    assert "enable_thinking" not in sent
 
 
 def _tool_name(item: object) -> str:

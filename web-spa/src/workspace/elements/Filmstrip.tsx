@@ -6,7 +6,7 @@ import { radius, space } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
 import type { ElementProps } from '@/workspace/catalog';
 
-type Item = { path: string; caption?: string };
+type Item = { path: string };
 
 export function Filmstrip({ props, selection, fileUrl, onSelect }: ElementProps) {
   const { palette } = useTheme();
@@ -73,7 +73,7 @@ export function Filmstrip({ props, selection, fileUrl, onSelect }: ElementProps)
                   <img
                     alt={name}
                     src={fileUrl(item.path)}
-                    style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', display: 'block' }}
+                    style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
                   />
                 </View>
               )}

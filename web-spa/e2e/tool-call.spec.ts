@@ -18,6 +18,7 @@ test('a tool call opens and closes apart from thinking', async ({ page }) => {
     await page.getByRole('combobox', { name: 'Model', exact: true }).selectOption('qwen36-35b-a3b:thinking');
     await page.getByRole('combobox', { name: 'Reasoning effort', exact: true }).selectOption('medium');
     await page.getByRole('switch', { name: 'Conversation tools', exact: true }).click();
+    await page.getByRole('combobox', { name: 'Expand tool calls', exact: true }).selectOption('collapsed');
     await createAgent(page, name);
     await openAgentChat(page, name);
     await page.getByRole('textbox', { name: 'Message' }).fill('List the conversations.');

@@ -33,7 +33,11 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await expect(saveTurns.getByTestId('press-feedback')).toBeVisible();
   await page.mouse.up();
   await expect(page.getByRole('status')).toHaveText(/Maximum turns saved/);
-  await expect(page.getByRole('combobox', { name: 'Gallery vision model' })).toBeVisible();
+  await expect(
+    page.getByText(
+      "Gallery captions use the workspace agent's model. When that agent has no model, they use the default model from Providers.",
+    ),
+  ).toBeVisible();
   await expect(page.getByLabel('Agents list')).toHaveCount(0);
   await expect(page.getByLabel('Providers list')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'New agent' }).filter({ visible: true })).toHaveCount(0);
@@ -177,6 +181,13 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await expect(page.getByText('Models refreshed')).toBeVisible();
   const modelsList = page.getByRole('combobox', { name: 'Default model' });
   await expect(modelsList).toBeVisible();
+  const effort = page.getByRole('combobox', { name: 'Reasoning effort', exact: true });
+  await onScreen(effort);
+  await expect(effort).toHaveValue('');
+  await effort.selectOption('medium');
+  await expect(effort).toHaveValue('medium');
+  await effort.selectOption('');
+  await expect(effort).toHaveValue('');
   await assertShell(page);
   await modelsList.selectOption(modelId);
   await expect(modelsList).toHaveValue(modelId);
@@ -237,8 +248,8 @@ test('two agent channels keep separate conversations', async ({ page }) => {
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole('button', { name: 'Channels' }).click();
-  await expect(page.getByRole('button', { name: 'River' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Cedar' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'River', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Cedar', exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('button', { name: 'Close channels' })).toHaveCount(0);
   } finally {
