@@ -33,6 +33,8 @@ from favlo.pipelines import (
     admission_epoch,
     admit,
     close_embed,
+    park_embed_child,
+    release_embed_cache,
     drop_runtime,
     foreground_busy,
     handler_for,
@@ -593,6 +595,7 @@ def _run_once(
     selection = None
     embed_child = None
     drop_embed = False
+    park_embed = False
     try:
         if kind in _MEDIA_KINDS and foreground_busy(state):
             state["media_yield"] = True
@@ -644,6 +647,7 @@ def _run_once(
         module = prepared.module
         embed_child = prepared.embed_child
         drop_embed = prepared.drop_embed
+        park_embed = prepared.park_embed
         if selection is not None:
             reply.model_id = selection.requested_id
         if runtime is None or module is None:
@@ -687,7 +691,16 @@ def _run_once(
                 reply.json(500, {"error": {"message": str(exc), "type": type(exc).__name__}})
     finally:
         try:
-            if embed_child is not None:
+            if park_embed and (embed_child is not None or drop_embed):
+                park_embed_child(
+                    state,
+                    args,
+                    child=embed_child,
+                    drop_resident=bool(drop_embed and embed_child is None),
+                    folder=getattr(selection, "folder", None) if selection is not None else None,
+                    pipeline=getattr(selection, "pipeline", None) if selection is not None else None,
+                )
+            elif embed_child is not None:
                 close_embed(embed_child, args)
             elif drop_embed:
                 drop_runtime(state, args)

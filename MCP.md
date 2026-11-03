@@ -25,6 +25,8 @@ mcp_servers:
 
 There is no `/v1/images`, `/v1/videos`, or `/v1/audio` HTTP API. Stored bytes are read with `resources/read` on a `favlo://` URI.
 
+Each Favlo tool `description` from `tools/list` is at most 256 characters (`TOOL_DESCRIPTION_MAX_CHARS`). That is stricter than the OpenAI Chat Completions limit of 1024 on `tools[].function.description`. The MCP specification does not set a description length cap. Each parameter property `description` in the tool input schema is at most 48 characters (`TOOL_PARAM_DESCRIPTION_MAX_CHARS`); an empty property description is allowed when the name and type carry the meaning. `tests/test_mcp_tool_descriptions.py` checks both bounds, including the agent-facing tool text after the web list/set model note.
+
 ## Tasks
 
 Five tools are optional tasks: `generate_image`, `generate_video_i2v`, `generate_video_t2v`, `generate_music`, and `generate_voice`. Poll interval is 2000 ms.
@@ -156,7 +158,7 @@ Removes one stored sentence.
 
 ### `generate_image`
 
-Optional task.
+Optional task. Use for a still when the user asked for an image, picture, photo, or illustration. Do not substitute a video tool for that request.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -167,11 +169,11 @@ Optional task.
 | `include_image` | boolean | `false` | Inline PNG in the result when decoded size ≤ 1 MiB |
 | `session` | string | `""` | Session id from a `set_*` call. Omitted uses the registry default |
 
-**Result:** Text content with the `image_*` id, a second text block with the stored parameters (the seed, the prompt, and the other fields used), a `resource_link` `favlo://images/{id}.png`, and optionally an inline `image` block. The same JSON is `<id>.json` beside the PNG.
+**Result:** Text content with the `image_*` id, a second text block with the standardized metadata JSON (semantic fields plus a nested `generation` object for the prompt, seed, model, and other parameters), a `resource_link` `favlo://images/{id}.png`, and optionally an inline `image` block. The same JSON is `images/.favlo_metadata/<id>.png.json`.
 
 ### `generate_video_i2v`
 
-Optional task. Produces one MP4.
+Optional task. Produces one MP4. Call only when the user asked for video, a clip, motion, animation, or to animate a still.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -188,11 +190,11 @@ Optional task. Produces one MP4.
 
 `image` refuses a filesystem path and a `favlo://` URI.
 
-**Result:** Text with `video_*` id (and optional `size` / `seconds` fields), a text block with the stored parameters, plus `resource_link` `favlo://videos/{id}.mp4`. Video is never inlined. The same JSON is `<id>.json` beside the MP4. The still is not stored in that file.
+**Result:** Text with `video_*` id (and optional `size` / `seconds` fields), a text block with the standardized metadata JSON (including nested `generation`), plus `resource_link` `favlo://videos/{id}.mp4`. Video is never inlined. The same JSON is `videos/.favlo_metadata/<id>.mp4.json`. The still is not stored in that file.
 
 ### `generate_video_t2v`
 
-Optional task. Same parameters and result shape as I2V except there is no `image`. `size` comes from `list_video_models_t2v`.
+Optional task. Same routing as I2V: only when the user asked for video or motion. Same parameters and result shape as I2V except there is no `image`. `size` comes from `list_video_models_t2v`.
 
 ### `generate_music`
 
@@ -212,7 +214,7 @@ Optional task.
 | `include_audio` | boolean | `false` | Inline audio when decoded size ≤ 1 MiB |
 | `session` | string | `""` | Session id from a `set_*` call. Omitted uses the registry default |
 
-**Result:** `music_*` id, a text block with the stored parameters (including the prompt, lyrics, and seed), `resource_link` `favlo://music/{id}.{ext}`, optional inline `audio`. The same JSON is `<id>.json` beside the clip.
+**Result:** `music_*` id, a text block with the standardized metadata JSON (including nested `generation` for the prompt, lyrics, and seed), `resource_link` `favlo://music/{id}.{ext}`, optional inline `audio`. The same JSON is `music/.favlo_metadata/<id>.wav.json`.
 
 ### `generate_voice`
 
@@ -227,17 +229,17 @@ Optional task.
 | `include_audio` | boolean | `false` | Inline audio when decoded size ≤ 1 MiB |
 | `session` | string | `""` | Session id from a `set_*` call. Omitted uses the registry default |
 
-**Result:** `voice_*` id, a text block with the stored parameters (the spoken line and the other fields used), `resource_link` `favlo://voice/{id}.{ext}`, optional inline `audio`. The same JSON is `<id>.json` beside the clip. Voice has no seed.
+**Result:** `voice_*` id, a text block with the standardized metadata JSON (including nested `generation` for the spoken line and other fields), `resource_link` `favlo://voice/{id}.{ext}`, optional inline `audio`. The same JSON is `voice/.favlo_metadata/<id>.wav.json`. Voice has no seed.
 
 ### `read_media`
 
-Immediate. Returns the JSON stored for one generated file.
+Immediate. Returns the standardized metadata JSON for one generated file (the same `.favlo_metadata` sidecar used for embeddings).
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `name` | string | Id starting with `image_`, `video_`, `music_`, or `voice_` |
 
-An unknown id is an error. The record is `name`, `kind`, `model` when the job named one, `seed` when the pipeline uses one, and the other resolved parameters, including the prompts.
+An unknown id is an error. The record uses the shared media metadata schema: semantic fields (`title`, `description`, `tags`, and the rest) plus a nested `generation` object with the model, prompt, seed, and other resolved parameters when the file was generated.
 
 ## Resources
 
@@ -245,7 +247,7 @@ Read with MCP `resources/read`. URIs may include a file suffix; the suffix selec
 
 | URI template | MIME | Content |
 |--------------|------|---------|
-| `favlo://images/{image_id}` | `image/png` | Stored PNG; optional `.png` suffix |
+| `favlo://images/{image_id}` | `image/png` (+ JSON) | Stored PNG, then the standardized metadata JSON when present; optional `.png` suffix |
 | `favlo://videos/{video_id}` | `video/mp4` | Stored MP4; optional `.mp4` suffix |
 | `favlo://music/{music_id}` | from suffix | `mp3`, `wav`, or `flac`; bare id uses the job format in memory, else WAV on disk |
 | `favlo://voice/{voice_id}` | from suffix | Same rules as music |

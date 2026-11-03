@@ -18,7 +18,6 @@ Chat completion is not a tool.
 from __future__ import annotations
 
 import base64
-import json
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -38,6 +37,7 @@ from mcp.shared.exceptions import MCPError
 
 from favlo import __version__
 from favlo.images import load_image
+from favlo.json_model import dumps_for_model
 from favlo.media_session import assign, choose
 from favlo.memory_mcp import (
     FORGET_DESCRIPTION,
@@ -58,6 +58,11 @@ _MEDIA = (
     ("music", "handle_music"),
     ("voice", "handle_voice"),
 )
+# Favlo tool descriptions stay at or under this length (stricter than OpenAI's 1024).
+# The MCP spec does not cap description length.
+TOOL_DESCRIPTION_MAX_CHARS = 256
+# Parameter property descriptions in tools/list stay at or under this length.
+TOOL_PARAM_DESCRIPTION_MAX_CHARS = 48
 _POLL = timedelta(seconds=2)
 _TASK = TaskConfig(mode="optional", poll_interval=_POLL)
 _INLINE = 1024 * 1024
@@ -131,7 +136,7 @@ def build_mcp(
         """The parameters stored with one generated file.
 
         Args:
-            name: Id starting with image_, video_, music_, or voice_.
+            name: image_/video_/music_/voice_ id.
         """
         from favlo.media_meta import kind_of, load_media
 
@@ -141,7 +146,7 @@ def build_mcp(
         record = load_media(name, home=_home(tasks.state, f"{kind}_home"))
         if record is None:
             raise ToolError("unknown media")
-        return json.dumps(record)
+        return dumps_for_model(record)
 
     store = open_store(state.get("memory_home"))
 
@@ -175,7 +180,7 @@ def build_mcp(
 
         Args:
             model: Id from list_image_models.
-            session: Omit to start a session. Pass an id to change that session.
+            session: Omit to mint; pass id to change.
         """
         return _set_model("image", model, session)
 
@@ -185,7 +190,7 @@ def build_mcp(
 
         Args:
             model: Id from list_video_models_i2v.
-            session: Omit to start a session. Pass an id to change that session.
+            session: Omit to mint; pass id to change.
         """
         return _set_model("i2v", model, session)
 
@@ -195,7 +200,7 @@ def build_mcp(
 
         Args:
             model: Id from list_video_models_t2v.
-            session: Omit to start a session. Pass an id to change that session.
+            session: Omit to mint; pass id to change.
         """
         return _set_model("t2v", model, session)
 
@@ -205,7 +210,7 @@ def build_mcp(
 
         Args:
             model: Id from list_music_models.
-            session: Omit to start a session. Pass an id to change that session.
+            session: Omit to mint; pass id to change.
         """
         return _set_model("music", model, session)
 
@@ -215,7 +220,7 @@ def build_mcp(
 
         Args:
             model: Id from list_voice_models.
-            session: Omit to start a session. Pass an id to change that session.
+            session: Omit to mint; pass id to change.
         """
         return _set_model("voice", model, session)
 
@@ -228,19 +233,17 @@ def build_mcp(
         include_image: bool = False,
         session: str = "",
     ) -> ToolResult:
-        """Generate one PNG.
+        """Still PNG for an image or picture request only, not video.
 
-        ``size`` defaults to ``720x1280``. ``auto`` is that same 9:16 frame.
-        ``session`` is a set_* id. Omitted uses the registry default.
-        An omitted seed is a random integer. The result includes those parameters.
+        size defaults to 720x1280 (auto is 9:16). session from set_*; omitted seed is random.
 
         Args:
             prompt: Image prompt.
-            size: WIDTHxHEIGHT. auto is the same 9:16 frame.
+            size: WxH; auto = 9:16.
             quality: Quality preset.
-            seed: Omitted draws a random seed.
-            include_image: Inline the PNG when it is at most 1 MiB.
-            session: Session id from a set_* call. Omitted uses the registry default.
+            seed: Omit for random.
+            include_image: Inline PNG if ≤1 MiB.
+            session: set_* id; omit = registry default.
         """
         body: dict[str, Any] = {
             "prompt": prompt,
@@ -300,19 +303,21 @@ def build_mcp(
         steps: int = 0,
         session: str = "",
     ) -> ToolResult:
-        """Generate one MP4 from a still. Read favlo://videos/{id}.mp4.
+        """MP4 from a still only when the user asked for video or motion, not a still.
+
+        Use generate_image for stills. Read favlo://videos/{id}.mp4.
 
         Args:
-            prompt: Motion prompt. The still is the first frame.
-            size: Required WIDTHxHEIGHT from list_video_models_i2v.
-            image: Id starting with image_, or a PNG block.
-            duration: Clip length in seconds. Omitted uses the model default.
-            seed: Omitted draws a random seed.
-            quality: auto, low, medium, high, xhigh, max, standard, or hd.
-            negative_prompt: Empty uses Wan's sample negative.
-            guidance_scale: One number or [low, high]. Default 1.
-            steps: Euler steps from 1 to 40. 0 uses 4.
-            session: Session id from a set_* call. Omitted uses the registry default.
+            prompt: Motion prompt; still is frame 0.
+            size: Required WxH from list_video_models_i2v.
+            image: image_ id or PNG block.
+            duration: Seconds; omit = model default.
+            seed: Omit for random.
+            quality: auto|low|medium|high|xhigh|max|standard|hd.
+            negative_prompt: Empty = Wan sample negative.
+            guidance_scale: Number or [low, high]; default 1.
+            steps: Euler 1-40; 0 = 4.
+            session: set_* id; omit = registry default.
         """
         return await _generate_video(
             prompt,
@@ -340,18 +345,20 @@ def build_mcp(
         steps: int = 0,
         session: str = "",
     ) -> ToolResult:
-        """Generate one MP4 from text. Read favlo://videos/{id}.mp4.
+        """MP4 from text only when the user asked for video or motion, not a still.
+
+        Use generate_image for stills. Read favlo://videos/{id}.mp4.
 
         Args:
             prompt: Motion prompt.
-            size: Required WIDTHxHEIGHT from list_video_models_t2v.
-            duration: Clip length in seconds. Omitted uses the model default.
-            seed: Omitted draws a random seed.
-            quality: auto, low, medium, high, xhigh, max, standard, or hd.
-            negative_prompt: Empty uses Wan's sample negative.
-            guidance_scale: One number or [low, high]. Default 1.
-            steps: Euler steps from 1 to 40. 0 uses 4.
-            session: Session id from a set_* call. Omitted uses the registry default.
+            size: Required WxH from list_video_models_t2v.
+            duration: Seconds; omit = model default.
+            seed: Omit for random.
+            quality: auto|low|medium|high|xhigh|max|standard|hd.
+            negative_prompt: Empty = Wan sample negative.
+            guidance_scale: Number or [low, high]; default 1.
+            steps: Euler 1-40; 0 = 4.
+            session: set_* id; omit = registry default.
         """
         return await _generate_video(
             prompt,
@@ -381,11 +388,7 @@ def build_mcp(
         include_audio: bool = False,
         session: str = "",
     ) -> ToolResult:
-        """Generate one clip. ``response_format`` is mp3, wav, or flac.
-
-        ``session`` is a set_* id. Omitted uses the registry default.
-        An omitted seed is a random integer. The result includes those parameters.
-        """
+        """One music clip (mp3, wav, or flac). session from set_*; omitted seed is random."""
         body: dict[str, Any] = {
             "prompt": prompt,
             "model": _model(tasks.state, "music", session),
@@ -417,13 +420,9 @@ def build_mcp(
         include_audio: bool = False,
         session: str = "",
     ) -> ToolResult:
-        """Speak one line.
+        """Speak one line. voice and emotions from list_voice_models; mp3, wav, or flac.
 
-        ``voice`` is a speaker id from ``list_voice_models``.
-        A square-bracket tag in ``input`` is an emotion id from that row.
-        ``response_format`` is mp3, wav, or flac.
-        ``session`` is a set_* id. Omitted uses the registry default.
-        The result includes the parameters stored for the clip.
+        session from set_*.
         """
         body: dict[str, Any] = {
             "input": input,
@@ -438,14 +437,27 @@ def build_mcp(
         return _voice_result(payload, include_audio, tasks.state)
 
     @mcp.resource("favlo://images/{image_id}", mime_type="image/png")
-    def read_image(image_id: str) -> bytes:
-        """The stored PNG. A ``.png`` suffix is the same file."""
+    def read_image(image_id: str) -> ResourceResult:
+        """The stored PNG plus its standardized metadata JSON when present."""
         stem, _ext = _split_suffix(image_id, _IMAGE_EXT)
         raw = load_image(stem, home=_home(tasks.state, "image_home"))
         if raw is None:
             message = "stored image is missing"
             raise ToolError(message)
-        return raw
+        contents: list[ResourceContent] = [
+            ResourceContent(raw, mime_type="image/png"),
+        ]
+        from favlo.media_meta import load_media
+
+        record = load_media(stem, home=_home(tasks.state, "image_home"))
+        if record is not None:
+            contents.append(
+                ResourceContent(
+                    dumps_for_model(record),
+                    mime_type="application/json",
+                )
+            )
+        return ResourceResult(contents)
 
     @mcp.resource("favlo://videos/{video_id}", mime_type="video/mp4")
     def read_video(video_id: str) -> bytes:
@@ -757,7 +769,7 @@ def _metadata_text(name: str, state: dict[str, Any]) -> mcp_types.TextContent | 
     record = load_media(name, home=_home(state, f"{kind}_home"))
     if record is None:
         return None
-    return mcp_types.TextContent(type="text", text=json.dumps(record))
+    return mcp_types.TextContent(type="text", text=dumps_for_model(record))
 
 
 def _media_link(kind: str, item_id: str, ext: str, mime: str) -> mcp_types.ResourceLink:

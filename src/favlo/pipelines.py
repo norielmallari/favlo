@@ -25,7 +25,7 @@ class Pipelines:
     """Runtimes opened in this process.
 
     One chat or media model stays resident. An embeddings process can sit
-    beside it until that request returns.
+    beside it and stays warm for ``embeddings_ttl_seconds`` after a request.
     """
 
     def __init__(self) -> None:
@@ -106,6 +106,13 @@ class Pipelines:
         runtimes = list(self._items)
         if current is not None and current not in runtimes:
             runtimes.append(current)
+        cache = state.get("embed_cache")
+        if isinstance(cache, dict):
+            child = cache.get("child")
+            if child is not None and child not in runtimes:
+                runtimes.append(child)
+        cancel_embed_ttl(state)
+        state.pop("embed_cache", None)
         resident_owners = _owners(state.get("memory_owners"))
         for runtime in runtimes:
             owners = self._owners.get(id(runtime), ())
@@ -202,12 +209,14 @@ class Opened:
         *,
         embed_child: Any = None,
         drop_embed: bool = False,
+        park_embed: bool = False,
     ) -> None:
         self.selection = selection
         self.runtime = runtime
         self.module = module
         self.embed_child = embed_child
         self.drop_embed = drop_embed
+        self.park_embed = park_embed
 
 
 def pipeline_module(selection: Any) -> Any:
@@ -324,6 +333,12 @@ def install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
     from favlo.listener import _log
     from favlo.memory import memory
 
+    cache = state.get("embed_cache")
+    if isinstance(cache, dict) and cache.get("drop_resident"):
+        # The embeddings resident is about to be retired below; drop the TTL
+        # marker so a later expire does not clear the next chat or media model.
+        cancel_embed_ttl(state)
+        state.pop("embed_cache", None)
     old = state.get("runtime")
     previous = state.get("memory_owners")
     state["runtime"] = None
@@ -363,8 +378,8 @@ def install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
         _log(f"loaded {label} {selection.folder}")
 
 
-def drop_runtime(state: dict[str, Any], args: Any) -> str | None:
-    """Close the resident pipeline, sweep its owners, and leave the listener up."""
+def _clear_resident(state: dict[str, Any], args: Any) -> str | None:
+    """Close the resident pipeline without touching a parked embeddings child."""
     from favlo.listener import _log
 
     old = state.get("runtime")
@@ -383,6 +398,20 @@ def drop_runtime(state: dict[str, Any], args: Any) -> str | None:
         _log(f"released {folder}")
         return folder
     return None
+
+
+def drop_runtime(state: dict[str, Any], args: Any) -> str | None:
+    """Close the resident pipeline, sweep its owners, and leave the listener up.
+
+    A parked embeddings child stays warm for the rest of its TTL. When the
+    resident itself was the embeddings model parked for that window, only the
+    cache marker is cleared — ``_clear_resident`` closes the process.
+    """
+    cache = state.get("embed_cache")
+    if isinstance(cache, dict) and cache.get("drop_resident"):
+        cancel_embed_ttl(state)
+        state.pop("embed_cache", None)
+    return _clear_resident(state, args)
 
 
 def _require_kind(kind: str, selection: Any, module: Any) -> None:
@@ -464,6 +493,67 @@ def close_embed(child: Any, args: Any) -> None:
         _log(f"released {folder}")
 
 
+def cancel_embed_ttl(state: dict[str, Any]) -> None:
+    """Cancel a pending warm-release timer for a parked embeddings process."""
+    timer = state.pop("embed_ttl_timer", None)
+    if timer is not None:
+        timer.cancel()
+
+
+def release_embed_cache(state: dict[str, Any], args: Any) -> None:
+    """Close a parked embeddings process and clear its cache entry."""
+    cancel_embed_ttl(state)
+    cache = state.pop("embed_cache", None)
+    if not isinstance(cache, dict):
+        return
+    if cache.get("drop_resident"):
+        _clear_resident(state, args)
+        return
+    child = cache.get("child")
+    if child is not None:
+        close_embed(child, args)
+
+
+def park_embed_child(
+    state: dict[str, Any],
+    args: Any,
+    *,
+    child: Any = None,
+    drop_resident: bool = False,
+    folder: str | None = None,
+    pipeline: str | None = None,
+) -> None:
+    """Keep an embeddings process warm until ``embeddings_ttl_seconds`` elapses."""
+    from favlo.logs import embeddings_ttl_seconds
+
+    cancel_embed_ttl(state)
+    ttl = embeddings_ttl_seconds()
+    if drop_resident:
+        state["embed_cache"] = {
+            "drop_resident": True,
+            "folder": folder or state.get("record"),
+            "pipeline": pipeline or state.get("pipeline"),
+        }
+    else:
+        state["embed_cache"] = {
+            "child": child,
+            "folder": folder or getattr(getattr(child, "selection", None), "folder", None),
+            "pipeline": pipeline
+            or getattr(getattr(child, "selection", None), "pipeline", None),
+        }
+    if ttl <= 0:
+        release_embed_cache(state, args)
+        return
+
+    def _expire() -> None:
+        release_embed_cache(state, args)
+
+    timer = threading.Timer(ttl, _expire)
+    timer.daemon = True
+    state["embed_ttl_timer"] = timer
+    timer.start()
+
+
 def _open_embed_for(body: dict[str, Any], state: dict[str, Any], args: Any) -> Opened:
     model = body.get("model")
     if not isinstance(model, str) or not model.strip():
@@ -479,16 +569,48 @@ def _open_embed_for(body: dict[str, Any], state: dict[str, Any], args: Any) -> O
     selection = resolve(model, resident=state.get("record"))
     module = pipeline_module(selection)
     _require_kind("embed", selection, module)
-    same = (
-        state.get("runtime") is not None
-        and state.get("record") == selection.folder
-        and state.get("pipeline") == selection.pipeline
-    )
-    if same:
-        opened = Opened(selection, state.get("runtime"), state.get("module"), drop_embed=True)
+    cache = state.get("embed_cache")
+    if (
+        isinstance(cache, dict)
+        and not cache.get("drop_resident")
+        and cache.get("folder") == selection.folder
+        and cache.get("pipeline") == selection.pipeline
+        and cache.get("child") is not None
+    ):
+        cancel_embed_ttl(state)
+        child = cache["child"]
+        opened = Opened(
+            selection,
+            child,
+            child.proxy,
+            embed_child=child,
+            park_embed=True,
+        )
     else:
-        child = open_embed(state, args, selection)
-        opened = Opened(selection, child, child.proxy, embed_child=child)
+        if isinstance(cache, dict):
+            release_embed_cache(state, args)
+        same = (
+            state.get("runtime") is not None
+            and state.get("record") == selection.folder
+            and state.get("pipeline") == selection.pipeline
+        )
+        if same:
+            opened = Opened(
+                selection,
+                state.get("runtime"),
+                state.get("module"),
+                drop_embed=True,
+                park_embed=True,
+            )
+        else:
+            child = open_embed(state, args, selection)
+            opened = Opened(
+                selection,
+                child,
+                child.proxy,
+                embed_child=child,
+                park_embed=True,
+            )
     state["requests"] = int(state.get("requests") or 0) + 1
     if opened.runtime is not None:
         opened.runtime._request_id = state["requests"]

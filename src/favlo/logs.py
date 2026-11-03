@@ -24,6 +24,7 @@ DEFAULT_VIDEO_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_IMAGE_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_MUSIC_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_VOICE_TTL_SECONDS = 24 * 60 * 60
+DEFAULT_EMBEDDINGS_TTL_SECONDS = 60
 DEFAULT_HEARTBEAT_SECONDS = 5 * 60
 _SETTINGS_NAME = "settings.json"
 _LOG_NAME = "favlo.log"
@@ -103,6 +104,19 @@ def voice_ttl_seconds(settings: dict[str, Any]) -> int:
     return _ttl_seconds(settings, "voice_ttl_seconds", DEFAULT_VOICE_TTL_SECONDS)
 
 
+def embeddings_ttl_seconds(settings: dict[str, Any] | None = None) -> int:
+    """Seconds an embeddings process stays warm after a request. Default 60. Zero closes immediately."""
+    source = load_settings(favlo_home()) if settings is None else settings
+    value = source.get("embeddings_ttl_seconds", DEFAULT_EMBEDDINGS_TTL_SECONDS)
+    try:
+        ttl = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_EMBEDDINGS_TTL_SECONDS
+    if ttl < 0:
+        return DEFAULT_EMBEDDINGS_TTL_SECONDS
+    return ttl
+
+
 def _ttl_seconds(settings: dict[str, Any], key: str, default: int) -> int:
     value = settings.get(key, default)
     try:
@@ -121,6 +135,7 @@ def _default_settings() -> dict[str, Any]:
         "image_ttl_seconds": DEFAULT_IMAGE_TTL_SECONDS,
         "music_ttl_seconds": DEFAULT_MUSIC_TTL_SECONDS,
         "voice_ttl_seconds": DEFAULT_VOICE_TTL_SECONDS,
+        "embeddings_ttl_seconds": DEFAULT_EMBEDDINGS_TTL_SECONDS,
         "heartbeat_seconds": DEFAULT_HEARTBEAT_SECONDS,
     }
 

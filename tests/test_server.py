@@ -731,6 +731,7 @@ def test_an_embedding_request_leaves_the_resident_runtime(monkeypatch) -> None:
         "favlo.pipelines.pipeline_module",
         lambda selection: SimpleNamespace(handle_embed=handle_embed),
     )
+    monkeypatch.setattr("favlo.logs.embeddings_ttl_seconds", lambda settings=None: 0)
     args = _args()
     args.lazy = True
     reply = _embed_reply()
@@ -748,6 +749,156 @@ def test_an_embedding_request_leaves_the_resident_runtime(monkeypatch) -> None:
     assert state["record"] == "qwen"
     assert state["pipeline"] == "qwen36-35b-a3b"
     assert opened[0].closed is True
+
+
+def test_an_embedding_child_stays_warm_for_the_ttl_window(monkeypatch) -> None:
+    from favlo.http_app import _run_once
+
+    resident = _Runtime()
+    resident.counts = {}
+    state = _embed_state(resident)
+    opened: list[_Runtime] = []
+    timers: list[SimpleNamespace] = []
+
+    def handle_embed(reply, runtime, body, selection, args, request_state) -> None:
+        del body, selection, args, request_state
+        assert runtime is opened[0]
+        reply.json(200, {"object": "list", "data": []})
+
+    def start(selection, args, schedule=None):
+        del args, schedule
+        child = _Runtime()
+        child.counts = {}
+        child.selection = selection
+        child.proxy = SimpleNamespace(handle_embed=handle_embed)
+        opened.append(child)
+        return child
+
+    def fake_timer(interval, function):
+        timer = SimpleNamespace(interval=interval, function=function, cancelled=False)
+
+        def cancel() -> None:
+            timer.cancelled = True
+
+        def start_timer() -> None:
+            return None
+
+        timer.cancel = cancel
+        timer.start = start_timer
+        timers.append(timer)
+        return timer
+
+    monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
+    monkeypatch.setattr(
+        "favlo.registry.resolve",
+        lambda model, resident=None: _selection("bge-m3-int8", "bge-m3"),
+    )
+    monkeypatch.setattr(
+        "favlo.pipelines.pipeline_module",
+        lambda selection: SimpleNamespace(handle_embed=handle_embed),
+    )
+    monkeypatch.setattr("favlo.logs.embeddings_ttl_seconds", lambda settings=None: 60)
+    monkeypatch.setattr("favlo.pipelines.threading.Timer", fake_timer)
+    args = _args()
+    args.lazy = True
+    reply = _embed_reply()
+    _run_once(
+        args,
+        state,
+        "embed",
+        "application/json",
+        b'{"model": "bge-m3-int8", "input": "bridge"}',
+        reply,
+    )
+    assert reply.status == 200
+    assert opened[0].closed is False
+    assert state["embed_cache"]["child"] is opened[0]
+    assert len(timers) == 1
+    assert timers[0].interval == 60
+    drop_runtime(state, args)
+    assert resident.closed is True
+    assert opened[0].closed is False
+    assert state["embed_cache"]["child"] is opened[0]
+    assert timers[0].cancelled is False
+    timers[0].function()
+    assert opened[0].closed is True
+    assert state.get("embed_cache") is None
+
+
+def test_a_warm_embedding_child_is_reused_within_ttl(monkeypatch) -> None:
+    from favlo.http_app import _run_once
+
+    resident = _Runtime()
+    resident.counts = {}
+    state = _embed_state(resident)
+    opened: list[_Runtime] = []
+    timers: list[SimpleNamespace] = []
+
+    def handle_embed(reply, runtime, body, selection, args, request_state) -> None:
+        del body, selection, args, request_state
+        reply.json(200, {"object": "list", "data": []})
+
+    def start(selection, args, schedule=None):
+        del args, schedule
+        child = _Runtime()
+        child.counts = {}
+        child.selection = selection
+        child.proxy = SimpleNamespace(handle_embed=handle_embed)
+        opened.append(child)
+        return child
+
+    def fake_timer(interval, function):
+        timer = SimpleNamespace(interval=interval, function=function, cancelled=False)
+
+        def cancel() -> None:
+            timer.cancelled = True
+
+        def start_timer() -> None:
+            return None
+
+        timer.cancel = cancel
+        timer.start = start_timer
+        timers.append(timer)
+        return timer
+
+    monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
+    monkeypatch.setattr(
+        "favlo.registry.resolve",
+        lambda model, resident=None: _selection("bge-m3-int8", "bge-m3"),
+    )
+    monkeypatch.setattr(
+        "favlo.pipelines.pipeline_module",
+        lambda selection: SimpleNamespace(handle_embed=handle_embed),
+    )
+    monkeypatch.setattr("favlo.logs.embeddings_ttl_seconds", lambda settings=None: 60)
+    monkeypatch.setattr("favlo.pipelines.threading.Timer", fake_timer)
+    args = _args()
+    args.lazy = True
+    first = _embed_reply()
+    _run_once(
+        args,
+        state,
+        "embed",
+        "application/json",
+        b'{"model": "bge-m3-int8", "input": "bridge"}',
+        first,
+    )
+    second = _embed_reply()
+    _run_once(
+        args,
+        state,
+        "embed",
+        "application/json",
+        b'{"model": "bge-m3-int8", "input": "river"}',
+        second,
+    )
+    assert first.status == 200
+    assert second.status == 200
+    assert len(opened) == 1
+    assert opened[0].closed is False
+    assert timers[0].cancelled is True
+    assert len(timers) == 2
+    assert state["embed_cache"]["child"] is opened[0]
 
 
 def test_an_embedding_child_exit_keeps_the_resident_runtime(monkeypatch) -> None:
@@ -781,6 +932,7 @@ def test_an_embedding_child_exit_keeps_the_resident_runtime(monkeypatch) -> None
         "favlo.pipelines.pipeline_module",
         lambda selection: SimpleNamespace(handle_embed=handle_embed),
     )
+    monkeypatch.setattr("favlo.logs.embeddings_ttl_seconds", lambda settings=None: 0)
     args = _args()
     args.lazy = True
     reply = _embed_reply()
@@ -827,6 +979,7 @@ def test_the_resident_embeddings_model_closes_when_the_request_returns(monkeypat
         "favlo.pipelines.pipeline_module",
         lambda selection: SimpleNamespace(handle_embed=handle_embed),
     )
+    monkeypatch.setattr("favlo.logs.embeddings_ttl_seconds", lambda settings=None: 0)
     args = _args()
     args.lazy = True
     reply = _embed_reply()
@@ -874,6 +1027,7 @@ def test_an_embedding_request_uses_the_registry_default_when_model_is_omitted(mo
         "favlo.pipelines.pipeline_module",
         lambda selection: SimpleNamespace(handle_embed=handle_embed),
     )
+    monkeypatch.setattr("favlo.logs.embeddings_ttl_seconds", lambda settings=None: 0)
     args = _args()
     args.lazy = True
     reply = _embed_reply()
@@ -895,6 +1049,7 @@ def test_an_embedding_request_without_a_default_is_not_found(monkeypatch) -> Non
 
     monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
     monkeypatch.setattr("favlo.registry.embeddings_default", lambda root=None: "")
+    monkeypatch.setattr("favlo.logs.embeddings_ttl_seconds", lambda settings=None: 0)
     args = _args()
     args.lazy = True
     reply = _embed_reply()
@@ -919,6 +1074,7 @@ def test_an_embedding_request_refuses_a_model_that_does_not_embed(monkeypatch) -
         lambda model, resident=None: _selection("qwen", "qwen36-35b-a3b"),
     )
     monkeypatch.setattr("favlo.pipelines.pipeline_module", lambda selection: SimpleNamespace())
+    monkeypatch.setattr("favlo.logs.embeddings_ttl_seconds", lambda settings=None: 0)
     args = _args()
     args.lazy = True
     reply = _embed_reply()
@@ -953,6 +1109,7 @@ def test_an_image_request_does_not_enter_the_chat_runtime(monkeypatch) -> None:
         lambda model, resident=None: _selection("qwen", "qwen36-35b-a3b"),
     )
     monkeypatch.setattr("favlo.pipelines.pipeline_module", lambda selection: SimpleNamespace())
+    monkeypatch.setattr("favlo.logs.embeddings_ttl_seconds", lambda settings=None: 0)
     args = _args()
     args.lazy = True
     reply = _embed_reply()
@@ -1002,6 +1159,7 @@ def test_an_image_request_opens_the_image_runtime(monkeypatch) -> None:
         "favlo.pipelines.pipeline_module",
         lambda selection: SimpleNamespace(handle_image=handle_image),
     )
+    monkeypatch.setattr("favlo.logs.embeddings_ttl_seconds", lambda settings=None: 0)
     args = _args()
     args.lazy = True
     reply = _embed_reply()

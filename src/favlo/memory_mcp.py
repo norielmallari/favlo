@@ -12,9 +12,8 @@ from typing import Any
 from favlo.memory_notes import DIM, EMBED_MODEL, MemoryStore, memory_db_path
 
 REMEMBER_DESCRIPTION = (
-    "Store one sentence that will still make sense next session: a lasting fact or a "
-    "preference. Do not store a greeting, a refusal, a one-off question, the "
-    "transcript, or a secret."
+    "Store one lasting fact or preference for later sessions. "
+    "Not a greeting, refusal, one-off question, transcript, or secret."
 )
 
 RECALL_DESCRIPTION = (
@@ -84,7 +83,9 @@ def open_store(home: Any = None) -> MemoryStore:
 
 def embed_http(base: str, text: str, model: str = EMBED_MODEL) -> list[float] | str:
     """POST one string to ``/v1/embeddings`` on the listener."""
-    url = base.rstrip("/") + "/v1/embeddings"
+    from favlo.responses_client import normalize_v1_base
+
+    url = normalize_v1_base(base) + "/embeddings"
     body = json.dumps({"model": model, "input": text}).encode()
     request = urllib.request.Request(
         url,

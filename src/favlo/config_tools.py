@@ -10,6 +10,7 @@ GROUP_ID = "favlo-config"
 GROUP_NAME = "Configuration tools"
 
 INSTRUCTIONS = (
+    "Before any config_* tool except the loader, call config_load_tools once. "
     "When someone asks how to connect a client, which address or model id to use, "
     "how to download or quantize a supported model, or how to register one, "
     "call config_read_guide before you answer. "
@@ -41,8 +42,8 @@ INSTRUCTIONS = (
 
 
 def tools(base: str, home: Path | None) -> list[object]:
-    """The configuration tools, in the order the group offers them."""
-    return [
+    """Eager loader plus deferred configuration tools."""
+    cold = [
         _guide_tool(),
         _models_tool(),
         _mtp_tool(),
@@ -50,6 +51,22 @@ def tools(base: str, home: Path | None) -> list[object]:
         _setup_guide_tool(),
         _setup_run_tool(base),
     ]
+    return [_load_tools(cold)]
+
+
+def _load_tools(cold: list[object]) -> object:
+    from agent_framework import FunctionInvocationContext, tool
+
+    @tool(approval_mode="never_require", name="config_load_tools")
+    def config_load_tools(ctx: FunctionInvocationContext) -> str:
+        """Load configuration tools for later calls in this run."""
+        ctx.add_tools(cold)
+        return (
+            "Loaded config_read_guide, config_list_models, config_set_model_mtp, "
+            "config_download_suggestions, config_read_setup, and config_run_setup."
+        )
+
+    return config_load_tools
 
 
 def registered_models(root: Path | None = None) -> str:
@@ -72,7 +89,7 @@ def _guide_tool() -> object:
 
     @tool(approval_mode="never_require", name="config_read_guide")
     def read_guide(
-        name: Annotated[str, Field(description="clients, models, or history.")],
+        name: Annotated[str, Field(description="clients|models|history.")],
     ) -> str:
         """Read one guide.
 
@@ -97,7 +114,7 @@ def _suggestions_tool(home: Path | None) -> object:
     def download_suggestions(
         enabled: Annotated[
             bool,
-            Field(description="False stores download reminders as off. True stores them as on."),
+            Field(description="False off; True on."),
         ],
     ) -> str:
         """Store whether download reminders are enabled.
@@ -121,7 +138,7 @@ def _setup_guide_tool() -> object:
     def read_setup(
         pipeline: Annotated[
             str,
-            Field(description="Pipeline id, such as wan22-i2v."),
+            Field(description="Pipeline id (e.g. wan22-i2v)."),
         ],
     ) -> str:
         """Read one pipeline's setup guide.
@@ -151,7 +168,7 @@ def _setup_run_tool(base: str) -> object:
     def run_setup(
         command: Annotated[
             str,
-            Field(description="One command copied from the setup guide."),
+            Field(description="One setup-guide command."),
         ],
     ) -> str:
         """Run one setup-guide command in this install.
@@ -219,10 +236,10 @@ def _mtp_tool() -> object:
     @tool(approval_mode="never_require", name="config_set_model_mtp")
     def set_model_mtp(
         model: Annotated[str, Field(description="Folder, alias, or pipeline id.")],
-        enabled: Annotated[bool, Field(description="True drafts. False stays on one token.")],
+        enabled: Annotated[bool, Field(description="True = draft; False = one token.")],
         depth: Annotated[
             int | None,
-            Field(description="Draft length. Omit it to keep the depth already stored."),
+            Field(description="Draft length; omit = keep stored."),
         ] = None,
     ) -> str:
         """Store MTP and its draft depth on one registry row.
