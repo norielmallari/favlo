@@ -181,12 +181,12 @@ class StreamText:
 
     def _push_reply(self) -> list[tuple[str, Any]]:
         if not self._tools:
-            emit = self._held
+            emit = self._held.replace("<think>", "").replace(_THINK_CLOSE, "")
             self._held = ""
             return [("content", emit)] if emit else []
         at = self._held.find(_TOOL_OPEN)
         if at >= 0:
-            emit = self._held[:at]
+            emit = self._held[:at].replace("<think>", "").replace(_THINK_CLOSE, "")
             rest = self._held[at + len(_TOOL_OPEN) :]
             self._held = ""
             self._in_call = True
@@ -197,10 +197,10 @@ class StreamText:
             return out
         keep = _held_suffix(self._held, _TOOL_OPEN)
         if keep == 0:
-            emit = self._held
+            emit = self._held.replace("<think>", "").replace(_THINK_CLOSE, "")
             self._held = ""
             return [("content", emit)] if emit else []
-        emit = self._held[:-keep]
+        emit = self._held[:-keep].replace("<think>", "").replace(_THINK_CLOSE, "")
         self._held = self._held[-keep:]
         return [("content", emit)] if emit else []
 
@@ -298,14 +298,17 @@ def split_thinking(text: str, thinking: bool) -> tuple[str, str]:
     """Reasoning and the reply after a closed think block.
 
     A ``<tool_call>`` before ``</think>`` ends the trace. The call is the reply.
-    With neither marker the reply is empty.
+    With neither marker the reply is empty. A later ``</think>`` in the reply
+    span is dropped so think markup stays out of the visible message.
     """
     if not thinking:
         return "", text
     marker = "</think>"
     at = text.find(marker)
     if at >= 0:
-        return text[:at], text[at + len(marker) :].lstrip("\n")
+        visible = text[at + len(marker) :].lstrip("\n")
+        visible = visible.replace("<think>", "").replace(marker, "")
+        return text[:at], visible
     tool = text.find("<tool_call>")
     if tool >= 0:
         return text[:tool], text[tool:]

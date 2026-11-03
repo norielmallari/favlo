@@ -9,6 +9,8 @@ checkpoint processor: rescale by 1/255, then mean 0.5 and standard deviation
 resampled with Catmull-Rom so both sides stay on that grid and the pixel
 count stays inside 65536 through 16777216. ``detail`` and per-part
 ``min_pixels`` and ``max_pixels`` choose the budget inside those edges.
+``embed_image`` runs the Metal tower for one still; the row cache lives in
+``tower``.
 """
 
 from __future__ import annotations
@@ -39,6 +41,19 @@ CHANNELS = 3
 _FETCH_SECONDS = 30.0
 
 _PNG = b"\x89PNG\r\n\x1a\n"
+
+
+def embed_image(
+    runtime: Any,
+    blob: bytes,
+    *,
+    min_pixels: int = MIN_PIXELS,
+    max_pixels: int = MAX_PIXELS,
+) -> tuple[np.ndarray, int, int]:
+    """Merged rows ``[tokens, 5120]`` and the patch grid for one still image."""
+    from qwen38_27b.tower import embed_image as _embed
+
+    return _embed(runtime, blob, min_pixels=min_pixels, max_pixels=max_pixels)
 
 
 def collect_images(

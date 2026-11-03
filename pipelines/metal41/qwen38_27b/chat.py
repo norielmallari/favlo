@@ -49,6 +49,8 @@ from qwen38_27b.tools import (
 )
 
 STOP = {248046, 248044}
+THINK_END = 248069
+TOOL_CALL_FORBID = {248058, 248059}
 
 
 def load_tokenizer(root: Path) -> Tokenizer:
@@ -276,6 +278,12 @@ def _limit(body: dict[str, Any]) -> int | None:
     return output_token_limit(body)
 
 
+def tool_call_forbid(root: Path) -> set[int]:
+    """Tool markup. ``tool_choice`` ``none`` keeps those tokens out of the reply."""
+    del root
+    return set(TOOL_CALL_FORBID)
+
+
 def _forced_call(root: Path, tools: Any, required: str | None) -> tuple[list[int], bool]:
     if not required:
         return [], False
@@ -340,8 +348,6 @@ def _respond(
     if note:
         messages.append({"role": "user", "content": note})
     tools = function_tools(prepared.get("tools"))
-    if prepared.get("tool_choice") == "none":
-        tools = []
     effort = template_effort(selection, requested) if thinking else None
     try:
         keep_thinking = preserve_thinking(prepared)
@@ -358,6 +364,11 @@ def _respond(
         return
     forced, stop_after_forced = _forced_call(runtime.root, tools, required)
     emit_tools = prepared.get("tool_choice") != "none"
+    bias = _logit_bias(prepared)
+    if not emit_tools:
+        for token in tool_call_forbid(runtime.root):
+            bias[token] = -1e9
+    think_end = THINK_END if thinking else None
     stream = bool(prepared.get("stream", False))
     mtp_body = _mtp_body(prepared)
     mtp = _mtp_flag(mtp_body, selection)
@@ -377,6 +388,8 @@ def _respond(
             top_k=top_k,
             presence=presence,
             frequency=frequency,
+            logit_bias=bias,
+            think_end=think_end,
             emit_tools=emit_tools,
             mtp=mtp,
             mtp_depth=mtp_depth,
@@ -396,6 +409,8 @@ def _respond(
         top_k=top_k,
         presence=presence,
         frequency=frequency,
+        logit_bias=bias,
+        think_end=think_end,
         mtp=mtp,
         mtp_depth=mtp_depth,
     )
@@ -659,6 +674,7 @@ def _stream(
     presence: float = 0.0,
     frequency: float = 0.0,
     logit_bias: dict[int, float] | None = None,
+    think_end: int | None = None,
     rng: np.random.Generator | None = None,
     mtp: bool = False,
     mtp_depth: int | None = None,
@@ -666,7 +682,7 @@ def _stream(
     state: dict[str, Any] | None = None,
     search: dict[str, Any] | None = None,
 ) -> None:
-    del logit_bias, rng
+    del rng
     decode = getattr(runtime, "decode", None)
     if not callable(decode):
         tokenizer = load_tokenizer(runtime.root)
@@ -763,6 +779,8 @@ def _stream(
             top_k=top_k,
             presence=presence,
             frequency=frequency,
+            logit_bias=logit_bias,
+            think_end=think_end,
             mtp=mtp,
             mtp_depth=mtp_depth,
         )

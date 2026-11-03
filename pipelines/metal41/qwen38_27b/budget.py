@@ -67,7 +67,7 @@ def startup_bytes(
     *,
     slots: int = FULL_LAYERS,
     drafts: bool = False,
-    mode: str | None = "half",
+    mode: str | None = "fp8_e4m3",
 ) -> int:
     """Bytes copied or cleared before the first token: weights, cache, scratch, and the workspace."""
     decode = (
@@ -221,7 +221,7 @@ def choose_wire(
     *,
     extra_unwire: int = 0,
     mtp_available: bool = True,
-    mode: str | None = "half",
+    mode: str | None = "fp8_e4m3",
 ) -> Wire:
     """The cheapest image that covers ``needed``, else the longest length with every feed-forward unwired.
 
@@ -310,7 +310,7 @@ def _longest(
     *,
     slots: int,
     drafts: bool,
-    mode: str | None = "half",
+    mode: str | None = "fp8_e4m3",
 ) -> int:
     cap = (limit // _STEP) * _STEP
     lo = 0

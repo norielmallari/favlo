@@ -222,18 +222,18 @@ def test_one_token_cache_bytes() -> None:
     assert kv_mode("fp8_e4m3") == "fp8_e4m3"
     assert kv_mode("e4m3") == "fp8_e4m3"
     assert kv_mode("fp8") == "fp8_e4m3"
-    assert kv_mode(None) == "half"
+    assert kv_mode(None) == "fp8_e4m3"
     try:
         kv_mode("fp16")
     except ValueError as exc:
         assert "fp16" in str(exc)
     else:
         raise AssertionError("fp16 must be rejected")
-    assert cache_bytes(1) == 65536
-    assert cache_bytes(1, "fp8_e4m3") == 33792
-    assert cache_bytes(262144) == 65536 * 262144
-    assert sequence_cache_bytes(1, 17) == 69632
-    assert sequence_cache_bytes(1, 17, "fp8_e4m3") == 35904
+    assert cache_bytes(1) == 33792
+    assert cache_bytes(1, "half") == 65536
+    assert cache_bytes(262144) == 33792 * 262144
+    assert sequence_cache_bytes(1, 17) == 35904
+    assert sequence_cache_bytes(1, 17, "half") == 69632
 
 
 def test_repeated_tail_catches_a_copied_span() -> None:
@@ -449,7 +449,16 @@ def test_responses_body_is_the_generation_path(monkeypatch: pytest.MonkeyPatch) 
         {},
     )
     assert quiet.status == 200
-    assert seen["tools"] == []
+    assert seen["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "locker",
+                "description": "",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
     assert rendered[-1][0] is False
     assert not any(item.get("type") == "function_call" for item in quiet.body["output"])
 
@@ -1716,6 +1725,22 @@ def test_an_image_is_logged_before_its_bytes_are_read() -> None:
     bind_request(tower, prompt, 4)
     assert cached == ["vision cached 4"]
     assert tower._vision_rows is None
+
+
+def test_vision_disk_cache_round_trip(tmp_path, monkeypatch) -> None:
+    from qwen38_27b import tower
+
+    monkeypatch.setattr(tower, "_vision_cache_dir", lambda: tmp_path)
+    key = ("example-model", b"\x01\x02", 65536, 16777216)
+    rows = np.arange(8, dtype=np.float32).reshape(2, 4)
+    tower._store_vision_disk(key, rows)
+    loaded = tower._load_vision_disk(key)
+    assert loaded is not None
+    assert loaded.shape == (2, 4)
+    assert np.allclose(loaded, rows)
+    from qwen38_27b import vision
+
+    assert callable(vision.embed_image)
 
 
 def test_png_round_trip_and_square_grid() -> None:

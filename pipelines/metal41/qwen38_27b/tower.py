@@ -3,20 +3,23 @@
 The record stores the tower. A text forward leaves it there. An image request
 copies that span once, then each block is a layer norm, an fp4 projection,
 and a residual. The merger writes one language vector per 2×2 patch block.
-An image this process already embedded is reused, so a later turn does not
-run the tower again.
+An image this process already embedded is reused from the in-memory row
+cache. The same rows are also written under
+``~/.favlo/vision-cache/qwen38-27b/``, so a later serve process that sees the
+same bytes logs ``vision cache`` and does not run the tower again.
 """
 
 from __future__ import annotations
 
 import hashlib
 import struct
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from qwen38_27b.budget import tensor_span
-from qwen38_27b.vision import IMAGE_PAD, prepare_image
+from qwen38_27b.vision import IMAGE_PAD, MAX_PIXELS, MIN_PIXELS, prepare_image
 
 _HIDDEN = 1152
 _HEADS = 16
@@ -62,29 +65,76 @@ def bind_request(runtime: Any, prompt: list[int], hit: int) -> None:
     if not any(index >= hit for index in slots):
         _note(runtime, f"vision cached {expected}")
         return
+    host = _cached_rows(runtime, images, prepared, expected)
+    runtime._vision_rows = runtime.session.upload(np.ascontiguousarray(host, dtype=np.float32))
+    runtime._vision_map = {slot: row for row, slot in enumerate(slots)}
+
+
+def embed_image(
+    runtime: Any,
+    blob: bytes,
+    *,
+    min_pixels: int = MIN_PIXELS,
+    max_pixels: int = MAX_PIXELS,
+) -> tuple[np.ndarray, int, int]:
+    """Merged rows ``[tokens, 5120]`` and the patch grid for one still image."""
+    from qwen38_27b.vision import merged_grid
+
+    prepared = prepare_image(blob, min_pixels=min_pixels, max_pixels=max_pixels)
+    patches, (grid_h, grid_w) = prepared
+    _note(runtime, f"vision patches {int(patches.shape[0])}")
+    rows = _encode(runtime, [prepared])
+    height, width = merged_grid((grid_h, grid_w))
+    expected = height * width
+    host = np.ascontiguousarray(
+        runtime.session.download_f32(rows, expected * _LANG).reshape(expected, _LANG),
+        dtype=np.float32,
+    )
+    _note(runtime, f"vision merged {expected}")
+    return host, int(grid_h), int(grid_w)
+
+
+def _cached_rows(
+    runtime: Any,
+    images: list[tuple[bytes, int, int]],
+    prepared: list[tuple[Any, tuple[int, int]]],
+    expected: int,
+) -> np.ndarray:
+    """Merged host rows from memory, disk, or a fresh tower run."""
     key = _row_key(runtime, images)
     cached = _ROW_CACHE.get(key)
+    if cached is None:
+        cached = _load_vision_disk(key)
+        if cached is not None:
+            _ROW_CACHE[key] = cached
     if cached is not None:
         if int(cached.shape[0]) != expected:
             message = f"vision cache {cached.shape[0]} is not {expected} merged tokens"
             raise RuntimeError(message)
         _note(runtime, f"vision cache {expected}")
-        runtime._vision_rows = runtime.session.upload(np.ascontiguousarray(cached, dtype=np.float32))
-        runtime._vision_map = {slot: row for row, slot in enumerate(slots)}
-        return
-    patch_count = sum(int(item[0].shape[0]) for item in prepared)
-    _note(runtime, f"vision patches {patch_count}")
-    rows = _encode(runtime, prepared)
-    _note(runtime, f"vision merged {expected}")
-    host = np.ascontiguousarray(
-        runtime.session.download_f32(rows, expected * _LANG).reshape(expected, _LANG),
-        dtype=np.float32,
-    )
+        return cached
+    if len(images) == 1:
+        blob, low, high = images[0]
+        host, _grid_h, _grid_w = embed_image(
+            runtime, blob, min_pixels=low, max_pixels=high
+        )
+    else:
+        patch_count = sum(int(item[0].shape[0]) for item in prepared)
+        _note(runtime, f"vision patches {patch_count}")
+        rows = _encode(runtime, prepared)
+        _note(runtime, f"vision merged {expected}")
+        host = np.ascontiguousarray(
+            runtime.session.download_f32(rows, expected * _LANG).reshape(expected, _LANG),
+            dtype=np.float32,
+        )
+    if int(host.shape[0]) != expected:
+        message = f"vision rows {host.shape[0]} are not {expected} merged tokens"
+        raise RuntimeError(message)
     _ROW_CACHE[key] = host
+    _store_vision_disk(key, host)
     while len(_ROW_CACHE) > _ROW_LIMIT:
         _ROW_CACHE.pop(next(iter(_ROW_CACHE)))
-    runtime._vision_rows = rows
-    runtime._vision_map = {slot: row for row, slot in enumerate(slots)}
+    return host
 
 
 def _row_key(runtime: Any, images: list[tuple[bytes, int, int]]) -> tuple[Any, ...]:
@@ -94,6 +144,47 @@ def _row_key(runtime: Any, images: list[tuple[bytes, int, int]]) -> tuple[Any, .
         parts.append(int(low))
         parts.append(int(high))
     return tuple(parts)
+
+
+def _vision_cache_dir() -> Path:
+    from favlo.logs import favlo_home
+
+    path = favlo_home() / "vision-cache" / "qwen38-27b"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _vision_cache_path(key: tuple[Any, ...]) -> Path:
+    material = hashlib.sha256()
+    material.update(str(key[0]).encode())
+    for part in key[1:]:
+        if isinstance(part, (bytes, bytearray)):
+            material.update(part)
+        else:
+            material.update(struct.pack("<i", int(part)))
+    return _vision_cache_dir() / f"{material.hexdigest()}.npz"
+
+
+def _load_vision_disk(key: tuple[Any, ...]) -> np.ndarray | None:
+    path = _vision_cache_path(key)
+    if not path.is_file():
+        return None
+    try:
+        payload = np.load(path)
+        return np.ascontiguousarray(payload["embedded"], dtype=np.float32)
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def _store_vision_disk(key: tuple[Any, ...], embedded: np.ndarray) -> None:
+    path = _vision_cache_path(key)
+    tmp = path.with_name(path.stem + ".tmp.npz")
+    try:
+        np.savez(tmp, embedded=np.ascontiguousarray(embedded, dtype=np.float32))
+        tmp.replace(path)
+    except OSError:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
 
 
 def _note(runtime: Any, text: str) -> None:

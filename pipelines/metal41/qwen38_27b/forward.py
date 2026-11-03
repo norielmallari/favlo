@@ -177,7 +177,7 @@ class Qwen38Runtime:
         self,
         path: Path,
         *,
-        kv_cache: str = "half",
+        kv_cache: str = "fp8_e4m3",
         console: Any = None,
         resident_percent: float | None = None,
         owner: str | None = None,
@@ -1204,6 +1204,7 @@ class Qwen38Runtime:
         presence: float = 0.0,
         frequency: float = 0.0,
         logit_bias: dict[int, float] | None = None,
+        think_end: int | None = None,
         rng: np.random.Generator | None = None,
         mtp: bool = False,
         mtp_depth: int | None = None,
@@ -1215,12 +1216,15 @@ class Qwen38Runtime:
         self._presence = float(presence)
         self._frequency = float(frequency)
         self._logit_bias = dict(logit_bias or {})
+        self._think_end = None if think_end is None else int(think_end)
+        self._think_closed = False
         self._rng = rng or np.random.default_rng()
         self._sample_host = (
             self._temperature > 0.0
             or self._presence != 0.0
             or self._frequency != 0.0
             or bool(self._logit_bias)
+            or self._think_end is not None
         )
         self._output_ids = []
         self._prefill_seconds = 0.0
@@ -1328,6 +1332,7 @@ class Qwen38Runtime:
                 out.append(chosen)
                 counts[chosen] = counts.get(chosen, 0) + 1
                 emitted += 1
+                self._note_think_token(chosen)
                 self._output_ids = list(out)
                 if decode_row is not None:
                     decode_row.done = len(out)
@@ -1406,6 +1411,7 @@ class Qwen38Runtime:
                                 out.append(int(token))
                                 counts[int(token)] = counts.get(int(token), 0) + 1
                                 emitted += 1
+                                self._note_think_token(int(token))
                                 self._output_ids = list(out)
                                 if decode_row is not None:
                                     decode_row.done = len(out)
@@ -1569,6 +1575,16 @@ class Qwen38Runtime:
             (1, 1, 1),
             (1, 1, 1),
         )
+
+    def _note_think_token(self, token: int) -> None:
+        """After the first ``</think>``, keep that id out of later draws."""
+        if self._think_end is None or self._think_closed:
+            return
+        if int(token) != self._think_end:
+            return
+        self._think_closed = True
+        self._logit_bias[self._think_end] = -1e9
+        self._sample_host = True
 
     def _encode_penalties(self, counts: dict[int, int]) -> None:
         merged: dict[int, float] = {}

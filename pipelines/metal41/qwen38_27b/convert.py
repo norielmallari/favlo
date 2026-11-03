@@ -378,7 +378,7 @@ def quantize(src: Path, output: Path | None = None, *, ffn_fp8: float | None = N
         "pipeline": "qwen38-27b",
         "source": src.name,
         "tensors": done,
-        "kv_cache": "half",
+        "kv_cache": "fp8_e4m3",
         "weight": "fp4",
         "feed_forward": feed,
         "layers": layers,

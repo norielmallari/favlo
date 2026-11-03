@@ -162,7 +162,7 @@ class CacheAdapter:
 
 
 def pack_plane(
-    buffer: np.ndarray, max_pos: int, count: int, *, kind: str, mode: str = "half"
+    buffer: np.ndarray, max_pos: int, count: int, *, kind: str, mode: str = "fp8_e4m3"
 ) -> bytes:
     """Used positions of one key or value plane, packed off the ``max_pos`` stride."""
     if count < 1:
@@ -179,7 +179,7 @@ def unpack_plane(
     packed: bytes,
     *,
     kind: str,
-    mode: str = "half",
+    mode: str = "fp8_e4m3",
 ) -> None:
     """Write ``packed`` back onto the ``max_pos`` stride. Other positions stay."""
     if count < 1:

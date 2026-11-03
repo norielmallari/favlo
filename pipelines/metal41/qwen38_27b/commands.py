@@ -66,8 +66,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     complete.add_argument(
         "--kv-cache",
         choices=("half", "fp8_e4m3"),
-        default="half",
-        help="key/value width: half (default) or fp8_e4m3",
+        default="fp8_e4m3",
+        help="key/value width: fp8_e4m3 (default) or half",
     )
     complete.add_argument("--max-memory", default=None, help="maximum bytes, such as 32GiB")
     sub.add_parser("kernels", help="compile the shader library and run the dispatch checks")
@@ -219,7 +219,7 @@ def _quantize(args: argparse.Namespace) -> int:
             directory=output,
             pipeline=PIPELINE,
             runtime="metal41",
-            kv_cache="half",
+            kv_cache="fp8_e4m3",
         )
         _ensure_mtp_on(output.name)
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError, KeyError) as exc:
@@ -369,7 +369,7 @@ def _models(args: argparse.Namespace) -> int:
                 source=args.source,
                 pipeline=PIPELINE,
                 runtime="metal41",
-                kv_cache="half",
+                kv_cache="fp8_e4m3",
             )
             _ensure_mtp_on(args.folder)
         elif command == "alias":

@@ -27,11 +27,11 @@ _ALIASES = {
 
 
 def kv_mode(name: str | None) -> str:
-    """``half`` or ``fp8_e4m3``. Empty means ``half``.
+    """``half`` or ``fp8_e4m3``. Empty means ``fp8_e4m3``.
 
     ``e4m3`` and ``fp8`` are ``fp8_e4m3``.
     """
-    text = "half" if name is None or name == "" else str(name)
+    text = "fp8_e4m3" if name is None or name == "" else str(name)
     text = _ALIASES.get(text, text)
     if text not in MODES:
         message = f"kv cache {name} is not half or fp8_e4m3"
@@ -51,23 +51,23 @@ def kv_record_bytes(mode: str | None) -> int:
     return E4M3_RECORD
 
 
-def plane_bytes(positions: int, mode: str | None = "half") -> int:
+def plane_bytes(positions: int, mode: str | None = "fp8_e4m3") -> int:
     """One key plane or one value plane for every head."""
     return KV_HEADS * positions * kv_record_bytes(mode)
 
 
-def layer_cache_bytes(positions: int, mode: str | None = "half") -> int:
+def layer_cache_bytes(positions: int, mode: str | None = "fp8_e4m3") -> int:
     """Key and value planes of one full-attention layer."""
     return 2 * plane_bytes(positions, mode)
 
 
-def cache_bytes(positions: int, mode: str | None = "half") -> int:
+def cache_bytes(positions: int, mode: str | None = "fp8_e4m3") -> int:
     """The 16 language full-attention layers."""
     return FULL_LAYERS * layer_cache_bytes(positions, mode)
 
 
 def sequence_cache_bytes(
-    positions: int, slots: int = FULL_LAYERS, mode: str | None = "half"
+    positions: int, slots: int = FULL_LAYERS, mode: str | None = "fp8_e4m3"
 ) -> int:
     """Key and value planes for ``slots`` full-attention layers, including MTP when present."""
     return slots * layer_cache_bytes(positions, mode)
@@ -78,12 +78,13 @@ def fit_positions(
     resident: int,
     scratch: int,
     slots: int = FULL_LAYERS,
-    mode: str | None = "half",
+    mode: str | None = "fp8_e4m3",
 ) -> int:
     """Largest context, a multiple of 2048, whose cache fits in ``budget``.
 
-    ``cache_bytes(1)`` is 65,536 for half across the 16 language layers. A drafted
-    record adds the MTP plane and passes ``slots`` 17, which is 69,632 bytes per token.
+    ``cache_bytes(1)`` is 33,792 for ``fp8_e4m3`` across the 16 language layers
+    (65,536 for half). A drafted record adds the MTP plane and passes ``slots`` 17,
+    which is 35,904 bytes per token on ``fp8_e4m3`` (69,632 on half).
     """
     room = budget - resident - scratch
     per_token = sequence_cache_bytes(1, slots, mode)

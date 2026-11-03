@@ -27,7 +27,7 @@ DECODE_ROWS = 8
 
 
 def scratch_bytes(
-    positions: int, slots: int = FULL_LAYERS, mode: str | None = "half"
+    positions: int, slots: int = FULL_LAYERS, mode: str | None = "fp8_e4m3"
 ) -> int:
     """Score, probability, and value-block scratch for one chunk.
 
