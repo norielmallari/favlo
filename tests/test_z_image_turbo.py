@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from favlo.media_meta import load_media
 from favlo.reply import MemoryReply
 from z_image_turbo.chat import ImageRequestError, _fields, handle_image
 from z_image_turbo.formats import (
@@ -385,14 +386,16 @@ def test_an_omitted_seed_is_stored_with_the_prompt(tmp_path, monkeypatch) -> Non
     reply = MemoryReply()
     handle_image(reply, _Runtime(), {"prompt": "a red cube"}, None, None, {"image_home": tmp_path})
     image_id = reply.body["data"][0]["id"]
-    record = json.loads((tmp_path / "images" / f"{image_id}.json").read_text())
+    record = load_media(image_id, home=tmp_path)
     assert seen == [17]
-    assert record["name"] == image_id
+    assert record is not None
+    assert record["filename"] == f"{image_id}.png"
     assert record["kind"] == "image"
-    assert record["seed"] == 17
-    assert record["prompt"] == "a red cube"
-    assert record["size"] == "720x1280"
-    assert "b64_json" not in record
+    assert record["source"] == "generate"
+    assert record["generation"]["seed"] == 17
+    assert record["generation"]["prompt"] == "a red cube"
+    assert record["generation"]["size"] == "720x1280"
+    assert "b64_json" not in record["generation"]
 
 
 def test_an_explicit_zero_seed_stays(tmp_path) -> None:
@@ -409,9 +412,10 @@ def test_an_explicit_zero_seed_stays(tmp_path) -> None:
     state = {"image_home": tmp_path}
     handle_image(reply, _Runtime(), {"prompt": "a cat", "seed": 0}, None, None, state)
     image_id = reply.body["data"][0]["id"]
-    record = json.loads((tmp_path / "images" / f"{image_id}.json").read_text())
+    record = load_media(image_id, home=tmp_path)
     assert seen == [0]
-    assert record["seed"] == 0
+    assert record is not None
+    assert record["generation"]["seed"] == 0
 
 
 def test_a_resumed_image_keeps_the_drawn_seed(tmp_path, monkeypatch) -> None:
@@ -445,9 +449,10 @@ def test_a_resumed_image_keeps_the_drawn_seed(tmp_path, monkeypatch) -> None:
     handle_image(reply, runtime, {"prompt": "a cat"}, None, None, state)
     assert runtime.seeds == [17, 17]
     image_id = reply.body["data"][0]["id"]
-    record = json.loads((tmp_path / "images" / f"{image_id}.json").read_text())
-    assert record["seed"] == 17
-    assert record["prompt"] == "a cat"
+    record = load_media(image_id, home=tmp_path)
+    assert record is not None
+    assert record["generation"]["seed"] == 17
+    assert record["generation"]["prompt"] == "a cat"
 
 
 def _picture(seed: int) -> np.ndarray:

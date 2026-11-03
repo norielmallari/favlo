@@ -770,10 +770,13 @@ def test_preempt_pauses_and_the_same_job_resumes(tmp_path) -> None:
     assert state.get("video_hold") is None
     stored = load_video(job["id"], home=tmp_path)
     assert stored is not None and stored[4:8] == b"ftyp"
-    record = json.loads((tmp_path / "videos" / f"{job['id']}.json").read_text())
-    assert record["prompt"] == "move"
-    assert record["seed"] == body["seed"]
-    assert "image" not in record
+    from favlo.media_meta import load_media
+
+    record = load_media(job["id"], home=tmp_path)
+    assert record is not None
+    assert record["generation"]["prompt"] == "move"
+    assert record["generation"]["seed"] == body["seed"]
+    assert "image" not in record["generation"]
 
 
 def test_expert_load_checkpoints_the_unfinished_step(monkeypatch) -> None:
