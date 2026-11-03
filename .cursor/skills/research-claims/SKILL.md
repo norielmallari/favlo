@@ -1,6 +1,6 @@
 ---
 name: research-claims
-description: Search public literature and write a Favlo research claim for one pipeline. Use when the user asks to document research claims, check an implementation against published work, or add a row to RESEARCH.md.
+description: Search public literature and write a Favlo research claim for one pipeline. Use when a needle run or a coding-agent run prints a prefill and decode rate, and when the user asks to document research claims, check an implementation against published work, or add a row to RESEARCH.md. File the printed rate when that plane, MTP setting, and card are not already a row.
 ---
 
 # Research claims
@@ -10,6 +10,10 @@ Read [research-evidence.mdc](../../rules/research-evidence.mdc) and [RESEARCH.md
 Work on `main`. Do not create a branch unless the user asks. Land the note, the catalog row, and the README link in one change. Commit only when the user asks.
 
 One pipeline. Do not edit another pipeline's package, shaders, tests, or docs. [RESEARCH.md](../../../RESEARCH.md) is the shared index and receives one new row.
+
+## After a printed rate
+
+A needle run or a coding-agent run that exits 0 and prints a prefill sum and a decode sum is a candidate. Read [RESEARCH.md](../../../RESEARCH.md). When that pipeline, plane, MTP setting, mode, length, depth, thinking card, and vision flag are already a row, stop. Otherwise search and file in the same turn. Asking only to run the harness is enough. Page mode is a long-transcript rate and is filed. Retrieve mode is the retrieval table.
 
 ## Search
 
@@ -54,15 +58,15 @@ The package license and readme are the rerun instructions. Do not add another li
 
 ## Key/value plane
 
-A recorded rate, a dispatch sum, or a needle row names the key/value plane that serve loaded. Planes differ in width, scale, and layout. A number measured on one plane does not fill a row for another. The pipeline note lists the planes that server accepts. Write the loaded name after aliases resolve. On `qwen36-35b-a3b` those names are `half`, `fp8_e4m3`, `e2m1`, and `f32`. `f16` and `fp16` resolve to `half`. `e4m3` and `fp8` resolve to `fp8_e4m3`. `fp4` resolves to `e2m1`.
+A recorded rate, a dispatch sum, or a needle row names the key/value plane that serve loaded. Planes differ in width, scale, and layout. A number measured on one plane does not fill a row for another. The pipeline note lists the planes that server accepts. Read that note for the names, and write the loaded name after aliases resolve. On `qwen36-35b-a3b` those names are `half`, `fp8_e4m3`, `e2m1`, and `f32`. `f16` and `fp16` resolve to `half`. `e4m3` and `fp8` resolve to `fp8_e4m3`. `fp4` resolves to `e2m1`.
 
 ## Needle
 
-`python -m harness.needle` writes one file of an exact token length and asks for the passkey in it. `--depth` is 0 at the first line and 1 at the last. `--mode page` is the default. It passes when the reply contains the number and one `read_file` returned that line. The number may sit in the newest window. That run is a long-transcript rate. It is not a retrieval claim.
+`python -m harness.needle` writes one file of an exact token length and asks for the passkey in it. `--depth` is 0 at the first line and 1 at the last. `--mode page` is the default. It passes when the reply contains the number and one `read_file` returned that line. The number may sit in the newest window. That run is a long-transcript rate and is filed on its own row.
 
 `--mode retrieve` tells the agent to follow `next_offset` until a read has none, and only then to reply. A pass requires the number, a read of its line, a last read with no `next_offset`, and a last window that starts after that line. Depth 1 has no later line, so a depth-1 retrieve run does not fill the retrieval table.
 
-The claim table is one row per length, depth, and plane: pass or fail, the prefill sum, and the decode sum. The command carries `--mode retrieve`, `--tokens`, `--depth`, and the model id. The harness prints the loaded plane. One row at one depth and one seed is a measured run. A grid of lengths and depths is the table set next to a published needle score. The search names that score. The "not found" sentence names this grid.
+The claim table is one row per plane, MTP setting, thinking card, length, depth, and mode: pass or fail, the prefill sum, and the decode sum. The command carries `--mode`, `--tokens`, `--depth`, `--mtp`, `--thinking`, and the model id. The harness prints the loaded plane, MTP, and thinking. One row at one depth and one seed is a measured run. A grid of lengths and depths is the table set next to a published needle score. The search names that score. The "not found" sentence names this grid.
 
 The finished transcript has to fit the served window. The file is replayed inside tool results, so a file as long as the window does not fit. `input does not fit` is a failed row, not a pass.
 

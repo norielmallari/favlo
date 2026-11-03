@@ -66,6 +66,8 @@ uv run python -m harness.coding --model qwen36-35b-a3b --vision --thinking on
 uv run python -m harness.coding --model qwen36-35b-a3b --vision --thinking off
 ```
 
+A needle run or a coding-agent run that prints a prefill sum and a decode sum is a measured rate. Load [research-claims](.cursor/skills/research-claims/SKILL.md) in that same turn and file the row when [RESEARCH.md](RESEARCH.md) does not already hold that plane, MTP setting, length, depth, mode, and card. Asking to run the harness is enough.
+
 ## Agents
 
 Every agent is a Microsoft Agent Framework agent. Chat goes through the shared client in `src/favlo/chat_client.py`.
@@ -88,7 +90,7 @@ Do not invent routing hits, calibration energies, or hidden-state errors. A meas
 
 A pipeline change updates that pipeline's `docs/<pipeline>/` note in the same change. A process change (listener, registry, console, or the write set) updates [ARCHITECTURE.md](ARCHITECTURE.md). An AI-assisted feature change updates [docs/ai-assistance](docs/ai-assistance/README.md) in the same change. Add a page under that folder when the feature needs its own note, and list the page from that folder's README. Do not edit another pipeline's note to describe this one.
 
-`docs/` is as-built only, plus a measured research remainder at `docs/<pipeline>/research/<slug>.md`. That file does not change the serving note until the behavior ships. Do not commit plan or option-comparison notes under `docs/`. Load [research-claims](.cursor/skills/research-claims/SKILL.md) before documenting a research claim.
+`docs/` is as-built only, plus a measured research remainder at `docs/<pipeline>/research/<slug>.md`. That file does not change the serving note until the behavior ships. Do not commit plan or option-comparison notes under `docs/`. Load [research-claims](.cursor/skills/research-claims/SKILL.md) before documenting a research claim. A needle or coding-agent run that printed a prefill sum and a decode sum is that claim.
 
 ## Commits
 
