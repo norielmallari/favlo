@@ -53,8 +53,11 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [spark-x26-1-7b/research/recorded-forward.md](spark-x26-1-7b/research/recorded-forward.md) | Spark-X2.6-1.7B recorded prefill and decode runs |
 | [gemma4-26b-a4b/ceilings.md](gemma4-26b-a4b/ceilings.md) | Gemma 4 26B-A4B kernel and bandwidth ceilings |
 | [gemma4-26b-a4b/references.md](gemma4-26b-a4b/references.md) | Papers and specifications for the Gemma 4 pipeline |
-| [gemma4-26b-a4b/research/kernel-ceilings.md](gemma4-26b-a4b/research/kernel-ceilings.md) | Gemma 4 26B-A4B isolated decode sum |
+| [gemma4-26b-a4b/research/kernel-ceilings.md](gemma4-26b-a4b/research/kernel-ceilings.md) | Gemma 4 26B-A4B packed kernel ceiling |
 | [gemma4-26b-a4b/research/recorded-forward.md](gemma4-26b-a4b/research/recorded-forward.md) | Gemma 4 26B-A4B recorded prefill and decode runs |
+| [gemma4-26b-a4b/research/coding-agent.md](gemma4-26b-a4b/research/coding-agent.md) | Gemma 4 26B-A4B vision coding-agent rates |
+| [gemma4-26b-a4b/research/coding-text.md](gemma4-26b-a4b/research/coding-text.md) | Gemma 4 26B-A4B text coding-agent rate |
+| [gemma4-26b-a4b/research/needle-page.md](gemma4-26b-a4b/research/needle-page.md) | Gemma 4 26B-A4B page-needle rate |
 | [gemma4-26b-a4b/benchmarks.md](gemma4-26b-a4b/benchmarks.md) | Gemma 4 26B-A4B harness scores against `serve` |
 | [qwen38-27b/benchmarks.md](qwen38-27b/benchmarks.md) | Harness scores against `serve` |
 | [qwen36-35b-a3b/benchmarks.md](qwen36-35b-a3b/benchmarks.md) | Harness scores against `serve` |

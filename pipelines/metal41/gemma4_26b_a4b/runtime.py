@@ -12,7 +12,7 @@ from gemma4_26b_a4b.forward import Gemma4Runtime
 def open_runtime(
     path: Path,
     *,
-    kv_cache: str = "half",
+    kv_cache: str = "fp8_e4m3",
     console: Any = None,
     resident_percent: float | None = None,
     owner: str | None = None,

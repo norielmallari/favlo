@@ -11,7 +11,7 @@ Decode reads packed fp8 for the embedding and the dense projections.
 Routed experts are fp4 or fp8, one image per expert. A full budget keeps every layer resident.
 A short budget keeps as many as fit and reads a miss into the oldest slot.
 One threadgroup owns eight output rows.
-Prefill attends a chunk of 1024 tokens in one kernel. A device kernel
+Prefill attends a chunk of 1024 tokens. fp8 keys are dequantized a tile at a time and scored with matmul2d. A device kernel
 groups the routed rows into slots of 64. The matmul grid is an indirect
 dispatch, so the host does not read the expert ids. Every occupied slot
 is multiplied with ``matmul_fp4_64_at`` or ``matmul_fp8_64_at``.
@@ -75,7 +75,16 @@ from gemma4_26b_a4b.geometry import (
     WINDOW,
     local_layers,
 )
-from gemma4_26b_a4b.atlas import ExpertAtlas, kv_bytes, kv_margin, layer_slots
+from gemma4_26b_a4b.attn import attend_fp8, bind_attention
+from gemma4_26b_a4b.atlas import (
+    ExpertAtlas,
+    kv_bytes,
+    kv_margin,
+    kv_record_bytes,
+    layer_slots,
+    plain_cache,
+    plane_bytes,
+)
 from gemma4_26b_a4b.planes import FP4, FP8, align_k, expert_bytes, expert_planes, fp8_parts
 from gemma4_26b_a4b.prefix import RuntimeAdapter
 from gemma4_26b_a4b.session import Session
@@ -103,6 +112,15 @@ _I8_FASTER = frozenset(
         (HIDDEN, 8192),
     }
 )
+
+
+def _e4m3_mag(code: int) -> float:
+    finite = code & 0x7F
+    exp = (finite >> 3) & 0xF
+    mant = finite & 0x7
+    if exp == 0:
+        return (mant / 8.0) * (2.0**-6)
+    return (1.0 + mant / 8.0) * (2.0 ** (exp - 7))
 
 
 def _plane_off(width: int, kind: str) -> tuple[int, int]:
@@ -258,7 +276,7 @@ class Gemma4Runtime:
         path: Path,
         *,
         owner: str,
-        kv_cache: str = "half",
+        kv_cache: str = "fp8_e4m3",
         console: object = None,
     ) -> None:
         from gemma4_26b_a4b.atlas import kv_mode
@@ -273,6 +291,7 @@ class Gemma4Runtime:
         self.owner = owner
         self._owner = owner
         self.kv_cache = kv_mode(kv_cache)
+        self._plain_kv = plain_cache(self.kv_cache)
         self._stop = False
         self.session = Session(owner)
         self.filled = 0
@@ -343,25 +362,22 @@ class Gemma4Runtime:
         pictures = list(images or [])
         halt_at = [item for item in (stops or []) if item]
         if pictures:
-            from gemma4_26b_a4b.vision import expand_image_placeholders
+            from gemma4_26b_a4b.vision import VisionTower, expand_image_placeholders
 
             prompt = expand_image_placeholders(prompt, pictures)
+            # Warm the soft-token cache (and log patches/cache) even when a
+            # prefix hit already covers the image span after a serve restart.
+            tower = self._vision
+            if tower is None:
+                tower = VisionTower(self.session, self.root, self._owner)
+                self._vision = tower
+            for blob in pictures:
+                tower.encode(blob, note=self._status)
         visual = bool(pictures) or IMAGE_TOKEN in prompt or BOI_TOKEN in prompt
         self._hit_limit = False
         rng = random.Random(seed)
         self._note("prompt", tokens=len(prompt))
-        if visual:
-            cut = next(
-                (
-                    index
-                    for index, token in enumerate(prompt)
-                    if token in (IMAGE_TOKEN, BOI_TOKEN)
-                ),
-                len(prompt),
-            )
-            hit = self.prefix.align(prompt[:cut])
-        else:
-            hit = self.prefix.align(prompt)
+        hit = self.prefix.align(prompt)
         if self.prefix.loaded:
             self._note("prefix_load", tokens=hit)
         self._cached_tokens = hit
@@ -385,9 +401,8 @@ class Gemma4Runtime:
             self._prefill_progress = None
             self._end_phase(prefill_row, prefill_line)
             prefill_row = None
-            if not visual:
-                self.prefix.note(prompt[: self.filled])
-                self._store_prefix()
+            self.prefix.note(prompt[: self.filled])
+            self._store_prefix()
             drawn: list[int] = []
             seen: list[int] = []
             decode_row = self._begin_phase("decode", limit, live=True)
@@ -417,19 +432,14 @@ class Gemma4Runtime:
             if not halted:
                 self._hit_limit = True
             decode_s = time.perf_counter() - decode_start
-            if not visual:
-                self.prefix.note((prompt + drawn)[: self.filled])
-                self._store_prefix()
+            self.prefix.note((prompt + drawn)[: self.filled])
+            self._store_prefix()
             decode_line = format_rate("decode", len(drawn), decode_s)
             self._end_phase(decode_row, decode_line)
             decode_row = None
             return drawn, prefill_line, decode_line
         finally:
             self._prefill_progress = None
-            if visual:
-                self.prefix.tokens = []
-                self.prefix.dirty = False
-                self.prefix.loaded = False
             if prefill_row is not None:
                 self._end_phase(prefill_row, "")
             if decode_row is not None:
@@ -498,14 +508,52 @@ class Gemma4Runtime:
             self._write_cache(self.global_v[layer], values[index], GLOBAL_HEADS, GLOBAL_DIM)
 
     def _read_cache(self, handle: object, heads: int, dim: int, count: int) -> np.ndarray:
-        raw = memory.load(handle, 0, count * heads * dim * 2)
-        values = np.frombuffer(raw, dtype=np.float16).astype(np.float32)
-        return values.reshape(count, heads, dim).transpose(1, 0, 2)
+        if self._plain_kv:
+            raw = memory.load(handle, 0, count * heads * dim * 2)
+            values = np.frombuffer(raw, dtype=np.float16).astype(np.float32)
+            return values.reshape(count, heads, dim).transpose(1, 0, 2)
+        record = kv_record_bytes(dim, self.kv_cache)
+        raw = memory.load(handle, 0, count * heads * record)
+        packed = np.frombuffer(raw, dtype=np.uint8).reshape(count, heads, record)
+        out = np.zeros((heads, count, dim), dtype=np.float32)
+        blocks = dim // 32
+        for token in range(count):
+            for head in range(heads):
+                row = packed[token, head]
+                codes = row[:dim]
+                scales = row[dim : dim + blocks].astype(np.int16) - 127
+                for block in range(blocks):
+                    scale = float(2.0 ** int(scales[block]))
+                    for lane in range(32):
+                        code = int(codes[block * 32 + lane])
+                        mag = _e4m3_mag(code & 0x7F)
+                        sign = -1.0 if code & 0x80 else 1.0
+                        out[head, token, block * 32 + lane] = sign * mag * scale
+        return out
 
     def _write_cache(self, handle: object, plane: np.ndarray, heads: int, dim: int) -> None:
         # plane is [heads, count, dim]
-        ordered = np.ascontiguousarray(plane.transpose(1, 0, 2).astype(np.float16))
-        memory.store(handle, 0, ordered.tobytes())
+        ordered = np.ascontiguousarray(plane.transpose(1, 0, 2).astype(np.float32))
+        count = int(ordered.shape[0])
+        if self._plain_kv:
+            memory.store(handle, 0, ordered.astype(np.float16).tobytes())
+            return
+        staging = self.session.zeros(count * heads * dim * 4)
+        memory.store(staging, 0, ordered.tobytes())
+        self.session.encode(
+            "store_kv_rows_fp8",
+            [staging, handle],
+            [
+                self.session._u32(heads),
+                self.session._u32(dim),
+                self.session._u32(0),
+                self.session._u32(count),
+            ],
+            (count, heads, 1),
+            (32, 1, 1),
+        )
+        self.session.flush()
+        memory.release(staging)
 
     def _step(self, token: int) -> None:
         self.session.flush()
@@ -665,23 +713,41 @@ class Gemma4Runtime:
         self._store_rows(self.span_v, cache_v, kv_heads, q_dim, count)
         window = 0 if layer.global_attn else WINDOW
         group = Q_HEADS // kv_heads
-        attend = "attend_span4" if q_dim == LOCAL_DIM else "attend_span"
-        groups = ((count + 3) // 4, Q_HEADS, 1) if q_dim == LOCAL_DIM else (count, Q_HEADS, 1)
-        self.session.encode(
-            attend,
-            [self.span_q, cache_k, cache_v, self.span_a],
-            [
-                self.session._u32(Q_HEADS),
-                self.session._u32(kv_heads),
-                self.session._u32(q_dim),
-                self.session._u32(group),
-                self.session._u32(self.filled),
-                self.session._u32(count),
-                self.session._u32(window),
-            ],
-            groups,
-            (32, 1, 1),
-        )
+        if not self._plain_kv:
+            attend_fp8(
+                self,
+                self.span_q,
+                cache_k,
+                cache_v,
+                self.span_a,
+                pos0=self.filled,
+                count=count,
+                kv_heads=kv_heads,
+                dim=q_dim,
+                window=window,
+            )
+        else:
+            if q_dim == LOCAL_DIM:
+                attend = "attend_span4" if self._plain_kv else "attend_span4_fp8"
+                groups = ((count + 3) // 4, Q_HEADS, 1)
+            else:
+                attend = "attend_span" if self._plain_kv else "attend_span_fp8"
+                groups = (count, Q_HEADS, 1)
+            self.session.encode(
+                attend,
+                [self.span_q, cache_k, cache_v, self.span_a],
+                [
+                    self.session._u32(Q_HEADS),
+                    self.session._u32(kv_heads),
+                    self.session._u32(q_dim),
+                    self.session._u32(group),
+                    self.session._u32(self.filled),
+                    self.session._u32(count),
+                    self.session._u32(window),
+                ],
+                groups,
+                (32, 1, 1),
+            )
         self._gemm(self.span_a, layer.o, q_width, count, self.span_m)
         self._norm_rows(self.span_m, layer.post_attn, self.span_n, count)
         self._axpy(self.span, self.span_n, 1.0, count * HIDDEN)
@@ -875,9 +941,61 @@ class Gemma4Runtime:
             origins=[0, 0, at * 4, at * 4],
         )
 
-    def _store_rows(self, source: object, cache: object, heads: int, dim: int, count: int) -> None:
+    def _yield_gpu(self) -> None:
+        """Commit the open buffer so the window server can run between key tiles."""
+        session = self.session
+        session.commit()
+        inflight = session._inflight
+        while len(inflight) > 2:
+            command = inflight.pop(0)
+            command.waitUntilCompleted()
+            failed = getattr(command, "error", None)
+            error = failed() if callable(failed) else None
+            if error is not None:
+                message = f"command buffer failed: {error}"
+                raise RuntimeError(message)
+
+    def _store_one(self, source: object, cache: object, heads: int, dim: int) -> None:
+        if self._plain_kv:
+            self.session.encode(
+                "store_kv",
+                [source, cache],
+                [
+                    self.session._u32(heads),
+                    self.session._u32(dim),
+                    self.session._u32(self.filled),
+                ],
+                *self._grid(heads * dim),
+            )
+            return
         self.session.encode(
-            "store_kv_rows",
+            "store_kv_fp8",
+            [source, cache],
+            [
+                self.session._u32(heads),
+                self.session._u32(dim),
+                self.session._u32(self.filled),
+            ],
+            (heads, 1, 1),
+            (32, 1, 1),
+        )
+
+    def _store_rows(self, source: object, cache: object, heads: int, dim: int, count: int) -> None:
+        if self._plain_kv:
+            self.session.encode(
+                "store_kv_rows",
+                [source, cache],
+                [
+                    self.session._u32(heads),
+                    self.session._u32(dim),
+                    self.session._u32(self.filled),
+                    self.session._u32(count),
+                ],
+                *self._grid(count * heads * dim),
+            )
+            return
+        self.session.encode(
+            "store_kv_rows_fp8",
             [source, cache],
             [
                 self.session._u32(heads),
@@ -885,7 +1003,8 @@ class Gemma4Runtime:
                 self.session._u32(self.filled),
                 self.session._u32(count),
             ],
-            *self._grid(count * heads * dim),
+            (count, heads, 1),
+            (32, 1, 1),
         )
 
     def _norm_rows(self, source: object, weight: object, destination: object, count: int) -> None:
@@ -1121,49 +1240,49 @@ class Gemma4Runtime:
             *self._grid(Q_HEADS * (q_dim // 2) + kv_heads * (q_dim // 2)),
         )
         cache_k = self.global_k[index] if layer.global_attn else self.local_k[index]
-        self.session.encode(
-            "store_kv",
-            [self.key, cache_k],
-            [
-                self.session._u32(kv_heads),
-                self.session._u32(q_dim),
-                self.session._u32(self.filled),
-            ],
-            *self._grid(kv_heads * q_dim),
-        )
+        self._store_one(self.key, cache_k, kv_heads, q_dim)
         cache_v = self.global_v[index] if layer.v is None else self.local_v[index]
-        self.session.encode(
-            "store_kv",
-            [self.value, cache_v],
-            [
-                self.session._u32(kv_heads),
-                self.session._u32(q_dim),
-                self.session._u32(self.filled),
-            ],
-            *self._grid(kv_heads * q_dim),
-        )
+        self._store_one(self.value, cache_v, kv_heads, q_dim)
         values = cache_v
         window = 0 if layer.global_attn else WINDOW
         group = Q_HEADS // kv_heads
         keys = self.filled + 1
         if window:
             keys = min(keys, window)
-        simds = 8 if keys >= 1024 else 4 if keys >= 256 else 1
-        self.session.encode(
-            "attend_span" if simds == 1 else "attend_decode",
-            [self.query, cache_k, values, self.attn],
-            [
-                self.session._u32(Q_HEADS),
-                self.session._u32(kv_heads),
-                self.session._u32(q_dim),
-                self.session._u32(group),
-                self.session._u32(self.filled),
-                self.session._u32(1),
-                self.session._u32(window),
-            ],
-            (1, Q_HEADS, 1),
-            (32 * simds, 1, 1),
-        )
+        if not self._plain_kv:
+            attend_fp8(
+                self,
+                self.query,
+                cache_k,
+                values,
+                self.attn,
+                pos0=self.filled,
+                count=1,
+                kv_heads=kv_heads,
+                dim=q_dim,
+                window=window,
+            )
+        else:
+            simds = 8 if keys >= 1024 else 4 if keys >= 256 else 1
+            if simds == 1:
+                attend = "attend_span" if self._plain_kv else "attend_span_fp8"
+            else:
+                attend = "attend_decode" if self._plain_kv else "attend_decode_fp8"
+            self.session.encode(
+                attend,
+                [self.query, cache_k, values, self.attn],
+                [
+                    self.session._u32(Q_HEADS),
+                    self.session._u32(kv_heads),
+                    self.session._u32(q_dim),
+                    self.session._u32(group),
+                    self.session._u32(self.filled),
+                    self.session._u32(1),
+                    self.session._u32(window),
+                ],
+                (1, Q_HEADS, 1),
+                (32 * simds, 1, 1),
+            )
         self._linear(self.attn, layer.o, Q_HEADS * q_dim)
         self._copy(self.out, self.mixed, HIDDEN)
         self._norm(self.mixed, layer.post_attn, self.norm)
@@ -1384,7 +1503,7 @@ class Gemma4Runtime:
             message = f"prompt length {count} is past {CONTEXT}"
             raise RuntimeError(message)
         larger = min(CONTEXT, max(self.capacity * 2, count))
-        room = self._atlas_room(larger, margin=kv_margin(larger))
+        room = self._atlas_room(larger, margin=kv_margin(larger, self.kv_cache))
         if self.atlas is None or layer_slots(room, self.atlas.layer_bytes, LAYERS) < 1:
             message = "the key/value cache does not fit the memory budget"
             raise RuntimeError(message)
@@ -1408,8 +1527,8 @@ class Gemma4Runtime:
     def _atlas_room(self, capacity: int, *, margin: int = 0) -> int:
         owner = memory.owner_bytes().get(self._owner, 0)
         atlas = 0 if self.atlas is None else self.atlas.nbytes
-        fixed = owner - atlas - kv_bytes(self.capacity)
-        return self._budget - fixed - kv_bytes(capacity) - margin
+        fixed = owner - atlas - kv_bytes(self.capacity, self.kv_cache)
+        return self._budget - fixed - kv_bytes(capacity, self.kv_cache) - margin
 
     def _open_atlas(self, path: Path, resident_bytes: int, layer_bytes: int) -> None:
         room = self._atlas_room(self.capacity)
@@ -1523,8 +1642,10 @@ class Gemma4Runtime:
     def _grow(self, handle: object, heads: int, dim: int, capacity: int) -> object:
         if handle is None:
             return None
-        fresh = self.session.zeros(capacity * heads * dim * 2)
-        memory.copy(handle, 0, fresh, 0, self.filled * heads * dim * 2)
+        record = kv_record_bytes(dim, self.kv_cache)
+        fresh = self.session.zeros(capacity * heads * record)
+        if self.filled > 0:
+            memory.copy(handle, 0, fresh, 0, self.filled * heads * record)
         memory.release(handle)
         return fresh
 
@@ -1545,6 +1666,9 @@ class Gemma4Runtime:
         self.span_k = session.zeros(_CHUNK * LOCAL_HEADS * GLOBAL_DIM * 4)
         self.span_v = session.zeros(_CHUNK * LOCAL_HEADS * GLOBAL_DIM * 4)
         self.span_a = session.zeros(_CHUNK * Q_HEADS * GLOBAL_DIM * 4)
+        self.fp8_acc = session.zeros(_CHUNK * Q_HEADS * GLOBAL_DIM * 4)
+        self.fp8_stats = session.zeros(_CHUNK * Q_HEADS * 2 * 4)
+        bind_attention(self)
         self.span_p = session.zeros(_CHUNK * Q_HEADS * GLOBAL_DIM * 4)
         self.span_h = session.zeros(_CHUNK * HIDDEN * 2)
         self.span_ah = session.zeros(_CHUNK * _MAX_K * 2)
@@ -1590,21 +1714,19 @@ class Gemma4Runtime:
         self.local_v = []
         self.global_k = []
         self.global_v = []
+        local_n = plane_bytes(self.capacity, LOCAL_HEADS, LOCAL_DIM, self.kv_cache)
+        global_n = plane_bytes(self.capacity, GLOBAL_HEADS, GLOBAL_DIM, self.kv_cache)
         for _layer in range(LAYERS):
             if _layer in GLOBAL_LAYERS:
                 self.local_k.append(None)
                 self.local_v.append(None)
-                self.global_k.append(
-                    self.session.zeros(self.capacity * GLOBAL_HEADS * GLOBAL_DIM * 2)
-                )
-                self.global_v.append(
-                    self.session.zeros(self.capacity * GLOBAL_HEADS * GLOBAL_DIM * 2)
-                )
+                self.global_k.append(self.session.zeros(global_n))
+                self.global_v.append(self.session.zeros(global_n))
             else:
                 self.global_k.append(None)
                 self.global_v.append(None)
-                self.local_k.append(self.session.zeros(self.capacity * LOCAL_HEADS * LOCAL_DIM * 2))
-                self.local_v.append(self.session.zeros(self.capacity * LOCAL_HEADS * LOCAL_DIM * 2))
+                self.local_k.append(self.session.zeros(local_n))
+                self.local_v.append(self.session.zeros(local_n))
 
     def _load(self, path: Path) -> None:
         import json

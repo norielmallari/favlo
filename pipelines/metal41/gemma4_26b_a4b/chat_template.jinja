@@ -240,6 +240,11 @@
     {%- set thinking_gate = (loop.index0 > ns_turn.last_user_idx) or (preserve_thinking and message.get('tool_calls')) -%}
     {%- if thinking_text and thinking_gate -%}
         {{- '<|channel>thought\n' + thinking_text + '\n<channel|>' -}}
+    {%- elif role == 'model' and not enable_thinking -%}
+        {#- Thinking off opens generation with an empty closed thought. Replay
+            that channel on prior model turns so the next encode keeps the
+            prefix that serve stored after the previous prefill. -#}
+        {{- '<|channel>thought\n<channel|>' -}}
     {%- endif -%}
 
             {%- if message.get('tool_calls') -%}

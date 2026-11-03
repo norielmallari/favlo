@@ -3,31 +3,26 @@
 from pathlib import Path
 
 from gemma4_26b_a4b import atlas as atlas_mod
-from gemma4_26b_a4b.atlas import ExpertAtlas, kv_bytes, kv_mode, layer_slots
+from gemma4_26b_a4b.atlas import ExpertAtlas, kv_bytes, kv_mode, layer_slots, plain_cache
 
 
-def test_kv_mode_is_metal_half() -> None:
-    assert kv_mode(None) == "half"
-    assert kv_mode("") == "half"
+def test_kv_mode_defaults_to_fp8() -> None:
+    assert kv_mode(None) == "fp8_e4m3"
+    assert kv_mode("") == "fp8_e4m3"
+    assert kv_mode("fp8_e4m3") == "fp8_e4m3"
+    assert kv_mode("fp8") == "fp8_e4m3"
+    assert kv_mode("e4m3") == "fp8_e4m3"
     assert kv_mode("half") == "half"
+    assert kv_mode("f16") == "half"
+    assert kv_mode("fp16") == "half"
+    assert plain_cache("half") is True
+    assert plain_cache("fp8_e4m3") is False
     try:
-        kv_mode("f16")
+        kv_mode("f32")
     except ValueError as exc:
-        assert "f16" in str(exc)
+        assert "f32" in str(exc)
     else:
-        raise AssertionError("f16 must be rejected")
-    try:
-        kv_mode("fp16")
-    except ValueError as exc:
-        assert "fp16" in str(exc)
-    else:
-        raise AssertionError("fp16 must be rejected")
-    try:
-        kv_mode("fp8_e4m3")
-    except ValueError as exc:
-        assert "fp8_e4m3" in str(exc)
-    else:
-        raise AssertionError("fp8_e4m3 live cache is not built")
+        raise AssertionError("f32 must be rejected")
 
 
 def test_one_layer_is_the_minimum() -> None:
@@ -42,6 +37,7 @@ def test_kv_grows_with_capacity() -> None:
     assert kv_bytes(0) == 0
     assert kv_bytes(256) == 256 * kv_bytes(1)
     assert kv_bytes(1) > 0
+    assert kv_bytes(1, "fp8_e4m3") < kv_bytes(1, "half")
 
 
 class _Session:

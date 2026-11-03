@@ -78,7 +78,7 @@ def _quantize(src: Path | None, name: str | None) -> int:
         directory=dest,
         pipeline=PIPELINE,
         runtime="metal41",
-        kv_cache="half",
+        kv_cache="fp8_e4m3",
     )
     print(f"wrote {folder}", flush=True)
     return 0
@@ -94,7 +94,7 @@ def _complete(name: str | None) -> int:
         return 2
     runtime = open_runtime(
         path,
-        kv_cache="half",
+        kv_cache="fp8_e4m3",
         console=None,
         resident_percent=None,
         owner="gemma4-26b-a4b:complete",

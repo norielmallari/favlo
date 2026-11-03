@@ -1,9 +1,11 @@
 """Key and value prefix for Gemma 4.
 
 Local and global regions each store keys and values. The filled length is
-``count`` tokens. The live cache is Metal ``half``, and the prefix file stores
-that same device layout for positions ``0 .. count-1``. Keys and values are
-token-major ``[count, heads, dim]``. An exact-length prefix is not a sample:
+``count`` tokens. The live cache is Metal ``half`` or ``fp8_e4m3``, and the
+prefix file stores that same device layout for positions ``0 .. count-1``.
+``half`` keys and values are token-major ``[count, heads, dim]``. ``fp8_e4m3``
+stores one E4M3 record per head per token (``dim`` codes plus ``dim/32`` E8M0
+scales) in the same token-major order. An exact-length prefix is not a sample:
 the next token still has to be stepped.
 """
 
@@ -11,6 +13,7 @@ from __future__ import annotations
 
 from favlo.memory import device_buffer, memory
 from favlo.prefix import PrefixHeader, Region, read_regions
+from gemma4_26b_a4b.atlas import kv_mode, plane_bytes
 from gemma4_26b_a4b.geometry import (
     GLOBAL_DIM,
     GLOBAL_HEADS,
@@ -37,23 +40,21 @@ class HostCache:
 
 def half_plane_nbytes(count: int, heads: int, dim: int) -> int:
     """Metal half bytes for one filled cache plane."""
-    if count <= 0 or heads <= 0 or dim <= 0:
-        return 0
-    return count * heads * dim * 2
+    return plane_bytes(count, heads, dim, "half")
 
 
-def local_nbytes(count: int) -> int:
+def local_nbytes(count: int, mode: str | None = "half") -> int:
     layers = len(local_layers())
-    one = half_plane_nbytes(count, LOCAL_HEADS, LOCAL_DIM)
+    one = plane_bytes(count, LOCAL_HEADS, LOCAL_DIM, mode)
     return layers * one * 2
 
 
-def global_nbytes(count: int) -> int:
-    one = half_plane_nbytes(count, GLOBAL_HEADS, GLOBAL_DIM)
+def global_nbytes(count: int, mode: str | None = "half") -> int:
+    one = plane_bytes(count, GLOBAL_HEADS, GLOBAL_DIM, mode)
     return len(GLOBAL_LAYERS) * one * 2
 
 
-def _plane_bytes(plane: object, layers: int, heads: int, count: int, dim: int) -> bytes:
+def _plane_host(plane: object, layers: int, heads: int, count: int, dim: int) -> bytes:
     """One plane in the live device order: each layer is ``[count, heads, dim]``."""
     import numpy as np
 
@@ -67,14 +68,14 @@ def _plane_bytes(plane: object, layers: int, heads: int, count: int, dim: int) -
 
 def pack_local(keys: object, values: object, count: int) -> bytes:
     layers = len(local_layers())
-    return _plane_bytes(keys, layers, LOCAL_HEADS, count, LOCAL_DIM) + _plane_bytes(
+    return _plane_host(keys, layers, LOCAL_HEADS, count, LOCAL_DIM) + _plane_host(
         values, layers, LOCAL_HEADS, count, LOCAL_DIM
     )
 
 
 def pack_global(keys: object, values: object, count: int) -> bytes:
     layers = len(GLOBAL_LAYERS)
-    return _plane_bytes(keys, layers, GLOBAL_HEADS, count, GLOBAL_DIM) + _plane_bytes(
+    return _plane_host(keys, layers, GLOBAL_HEADS, count, GLOBAL_DIM) + _plane_host(
         values, layers, GLOBAL_HEADS, count, GLOBAL_DIM
     )
 
@@ -109,8 +110,9 @@ class RuntimeAdapter:
         count = int(self.runtime.filled)
         if count < 1:
             return [Region(LOCAL, b""), Region(GLOBAL, b"")]
-        local_n = local_nbytes(count)
-        global_n = global_nbytes(count)
+        mode = kv_mode(getattr(self.runtime, "kv_cache", "half"))
+        local_n = local_nbytes(count, mode)
+        global_n = global_nbytes(count, mode)
         scratch = self._scratch(local_n + global_n)
         cursor = _copy_handles_out(
             scratch,
@@ -119,6 +121,7 @@ class RuntimeAdapter:
             count,
             LOCAL_HEADS,
             LOCAL_DIM,
+            mode,
         )
         cursor = _copy_handles_out(
             scratch,
@@ -127,6 +130,7 @@ class RuntimeAdapter:
             count,
             LOCAL_HEADS,
             LOCAL_DIM,
+            mode,
         )
         cursor = _copy_handles_out(
             scratch,
@@ -135,6 +139,7 @@ class RuntimeAdapter:
             count,
             GLOBAL_HEADS,
             GLOBAL_DIM,
+            mode,
         )
         _copy_handles_out(
             scratch,
@@ -143,6 +148,7 @@ class RuntimeAdapter:
             count,
             GLOBAL_HEADS,
             GLOBAL_DIM,
+            mode,
         )
         return [
             Region(LOCAL, memory.load(scratch, 0, local_n)),
@@ -156,6 +162,7 @@ class RuntimeAdapter:
         if blobs is None:
             return False
         count = len(header.tokens)
+        mode = kv_mode(getattr(self.runtime, "kv_cache", "half"))
         self.runtime._ensure(count)
         local = blobs[LOCAL]
         packed = self._scratch(len(local) + len(blobs[GLOBAL]))
@@ -168,6 +175,7 @@ class RuntimeAdapter:
             count,
             LOCAL_HEADS,
             LOCAL_DIM,
+            mode,
         )
         cursor = _copy_handles_in(
             packed,
@@ -176,6 +184,7 @@ class RuntimeAdapter:
             count,
             LOCAL_HEADS,
             LOCAL_DIM,
+            mode,
         )
         cursor = _copy_handles_in(
             packed,
@@ -184,6 +193,7 @@ class RuntimeAdapter:
             count,
             GLOBAL_HEADS,
             GLOBAL_DIM,
+            mode,
         )
         _copy_handles_in(
             packed,
@@ -192,6 +202,7 @@ class RuntimeAdapter:
             count,
             GLOBAL_HEADS,
             GLOBAL_DIM,
+            mode,
         )
         self.runtime.filled = count
         return True
@@ -200,7 +211,8 @@ class RuntimeAdapter:
         self.runtime.reset()
 
     def accept(self, header: PrefixHeader, prompt: list[int]) -> bool:
-        return _accept(header, prompt)
+        mode = kv_mode(getattr(self.runtime, "kv_cache", "half"))
+        return _accept(header, prompt, mode)
 
     def _scratch(self, nbytes: int) -> object:
         runtime = self.runtime
@@ -305,8 +317,9 @@ def _copy_handles_out(
     count: int,
     heads: int,
     dim: int,
+    mode: str | None = "half",
 ) -> int:
-    nbytes = half_plane_nbytes(count, heads, dim)
+    nbytes = plane_bytes(count, heads, dim, mode)
     for handle in handles:
         if handle is None:
             continue
@@ -323,8 +336,9 @@ def _copy_handles_in(
     count: int,
     heads: int,
     dim: int,
+    mode: str | None = "half",
 ) -> int:
-    nbytes = half_plane_nbytes(count, heads, dim)
+    nbytes = plane_bytes(count, heads, dim, mode)
     for handle in handles:
         if handle is None:
             continue
@@ -366,7 +380,7 @@ def unpack_global(blob: bytes, count: int) -> tuple[object, object]:
     )
 
 
-def _accept(header: PrefixHeader, prompt: list[int]) -> bool:
+def _accept(header: PrefixHeader, prompt: list[int], mode: str | None = "half") -> bool:
     count = len(header.tokens)
     if count == 0 or count >= len(prompt):
         return False
@@ -376,7 +390,9 @@ def _accept(header: PrefixHeader, prompt: list[int]) -> bool:
     global_region = header.region(GLOBAL)
     if local is None or global_region is None:
         return False
-    return local.length == local_nbytes(count) and global_region.length == global_nbytes(count)
+    return local.length == local_nbytes(count, mode) and global_region.length == global_nbytes(
+        count, mode
+    )
 
 
 class CacheAdapter:
@@ -412,7 +428,7 @@ class CacheAdapter:
         self.cache.global_k = b""
 
     def accept(self, header: PrefixHeader, prompt: list[int]) -> bool:
-        return _accept(header, prompt)
+        return _accept(header, prompt, "half")
 
 
 def _empty_local(count: int) -> bytes:

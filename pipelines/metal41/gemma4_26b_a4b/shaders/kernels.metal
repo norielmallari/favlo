@@ -39,6 +39,25 @@ static float e4m3_mag(uchar code) {
     return (1.0f + float(mant) / 8.0f) * exp2(float(exp) - 7.0f);
 }
 
+// Live fp8_e4m3 cache load. Record is ``dim`` codes plus ``dim/32`` E8M0 scales.
+static float load_kv_fp8(
+    device const uchar* cache,
+    uint token,
+    uint heads,
+    uint dim,
+    uint head,
+    uint channel)
+{
+    uint blocks = dim >> 5;
+    uint record = dim + blocks;
+    uint base = (token * heads + head) * record;
+    uchar code = cache[base + channel];
+    uchar stored = cache[base + dim + (channel >> 5)];
+    float mag = e4m3_mag(code);
+    float sign = (code & 0x80u) != 0u ? -1.0f : 1.0f;
+    return sign * mag * exp2(float(int(stored) - 127));
+}
+
 kernel void matmul_fp8(
     device half* activation [[buffer(0)]],
     device uchar* weights [[buffer(1)]],
@@ -56,6 +75,34 @@ kernel void matmul_fp8(
         scales_plane(scales));
     tensor<device float, dextents<int, 2>, tensor_inline> out(
         destination, dextents<int, 2>(int(cols), int(rows)), array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(
+        8, 32, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto left_tile = left.slice(0, int(tgid.y) * 8);
+    auto right_tile = right.slice(0, int(tgid.x) * 32);
+    auto out_tile = out.slice(int(tgid.x) * 32, int(tgid.y) * 8);
+    op.run(left_tile, right_tile, out_tile);
+}
+
+// Same 8×32 product as matmul_half, one key head per grid z.
+kernel void matmul_half_batch(
+    device half* activation [[buffer(0)]],
+    device half* weights [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint3 tgid [[threadgroup_position_in_grid]])
+{
+    device half* act = activation + (ulong)tgid.z * rows * inner;
+    device half* w = weights + (ulong)tgid.z * cols * inner;
+    device float* dest = destination + (ulong)tgid.z * rows * cols;
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        act, dextents<int, 2>(int(inner), int(rows)), array<int, 2>{1, int(inner)});
+    tensor<device half, dextents<int, 2>, tensor_inline> right(
+        w, dextents<int, 2>(int(inner), int(cols)), array<int, 2>{1, int(inner)});
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        dest, dextents<int, 2>(int(cols), int(rows)), array<int, 2>{1, int(cols)});
     constexpr auto desc = matmul2d_descriptor(
         8, 32, static_cast<int>(dynamic_extent), false, true, false);
     matmul2d<desc, execution_simdgroups<4>> op;
@@ -1661,6 +1708,686 @@ kernel void attend_span4(
     }
 }
 
+kernel void attend_span_fp8(
+    device const float* queries [[buffer(0)]],
+    device const uchar* keys [[buffer(1)]],
+    device const uchar* values [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& query_heads [[buffer(4)]],
+    constant uint& key_heads [[buffer(5)]],
+    constant uint& dim [[buffer(6)]],
+    constant uint& group [[buffer(7)]],
+    constant uint& pos0 [[buffer(8)]],
+    constant uint& count [[buffer(9)]],
+    constant uint& window [[buffer(10)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    uint token = tgid.x;
+    uint head = tgid.y;
+    if (token >= count || head >= query_heads) {
+        return;
+    }
+    uint width = dim >> 5;
+    uint length = pos0 + token + 1u;
+    uint start = 0u;
+    if (window > 0u && length > window) {
+        start = length - window;
+    }
+    uint key_head = head / group;
+    device const float* q = queries + ((ulong)token * query_heads + head) * dim;
+    float qreg[16];
+    for (uint i = 0u; i < 16u; ++i) {
+        qreg[i] = i < width ? q[lane * width + i] : 0.0f;
+    }
+    float running = -INFINITY;
+    float mass = 0.0f;
+    float outv[16];
+    for (uint i = 0u; i < 16u; ++i) {
+        outv[i] = 0.0f;
+    }
+    for (uint key = start; key < length; ++key) {
+        float partial = 0.0f;
+        for (uint i = 0u; i < width; ++i) {
+            uint channel = lane * width + i;
+            partial += qreg[i] * load_kv_fp8(keys, key, key_heads, dim, key_head, channel);
+        }
+        float score = simd_sum(partial);
+        float next = max(running, score);
+        float fix = exp(running - next);
+        float weight = exp(score - next);
+        running = next;
+        mass = mass * fix + weight;
+        for (uint i = 0u; i < width; ++i) {
+            uint channel = lane * width + i;
+            float value = load_kv_fp8(values, key, key_heads, dim, key_head, channel);
+            outv[i] = outv[i] * fix + weight * value;
+        }
+    }
+    float inv = mass > 0.0f ? 1.0f / mass : 0.0f;
+    device float* dest = destination + ((ulong)token * query_heads + head) * dim;
+    for (uint i = 0u; i < width; ++i) {
+        dest[lane * width + i] = outv[i] * inv;
+    }
+}
+
+kernel void attend_decode_fp8(
+    device const float* queries [[buffer(0)]],
+    device const uchar* keys [[buffer(1)]],
+    device const uchar* values [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& query_heads [[buffer(4)]],
+    constant uint& key_heads [[buffer(5)]],
+    constant uint& dim [[buffer(6)]],
+    constant uint& group [[buffer(7)]],
+    constant uint& pos0 [[buffer(8)]],
+    constant uint& count [[buffer(9)]],
+    constant uint& window [[buffer(10)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint simds [[simdgroups_per_threadgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    uint token = tgid.x;
+    uint head = tgid.y;
+    uint width = dim >> 5;
+    uint length = pos0 + token + 1u;
+    uint start = 0u;
+    if (window > 0u && length > window) {
+        start = length - window;
+    }
+    threadgroup float red_max[8];
+    threadgroup float red_mass[8];
+    threadgroup float red_out[8][32][16];
+    if (token >= count || head >= query_heads || simd >= 8u) {
+        return;
+    }
+    uint key_head = head / group;
+    device const float* q = queries + ((ulong)token * query_heads + head) * dim;
+    float qreg[16];
+    for (uint i = 0u; i < 16u; ++i) {
+        qreg[i] = i < width ? q[lane * width + i] : 0.0f;
+    }
+    float running = -INFINITY;
+    float mass = 0.0f;
+    float outv[16];
+    for (uint i = 0u; i < 16u; ++i) {
+        outv[i] = 0.0f;
+    }
+    uint span = length - start;
+    uint chunk = (span + simds - 1u) / simds;
+    uint key0 = start + simd * chunk;
+    uint key1 = key0 + chunk;
+    if (key0 > length) {
+        key0 = length;
+    }
+    if (key1 > length) {
+        key1 = length;
+    }
+    for (uint key = key0; key < key1; ++key) {
+        float partial = 0.0f;
+        for (uint i = 0u; i < width; ++i) {
+            uint channel = lane * width + i;
+            partial += qreg[i] * load_kv_fp8(keys, key, key_heads, dim, key_head, channel);
+        }
+        float score = simd_sum(partial);
+        float next = max(running, score);
+        float fix = exp(running - next);
+        float weight = exp(score - next);
+        running = next;
+        mass = mass * fix + weight;
+        for (uint i = 0u; i < width; ++i) {
+            uint channel = lane * width + i;
+            float value = load_kv_fp8(values, key, key_heads, dim, key_head, channel);
+            outv[i] = outv[i] * fix + weight * value;
+        }
+    }
+    if (lane == 0u) {
+        red_max[simd] = running;
+        red_mass[simd] = mass;
+    }
+    for (uint i = 0u; i < 16u; ++i) {
+        red_out[simd][lane][i] = outv[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simd != 0u) {
+        return;
+    }
+    float global = -INFINITY;
+    for (uint part = 0u; part < simds; ++part) {
+        global = max(global, red_max[part]);
+    }
+    float acc[16];
+    for (uint i = 0u; i < 16u; ++i) {
+        acc[i] = 0.0f;
+    }
+    float total = 0.0f;
+    for (uint part = 0u; part < simds; ++part) {
+        if (red_mass[part] == 0.0f) {
+            continue;
+        }
+        float fix = exp(red_max[part] - global);
+        total += red_mass[part] * fix;
+        for (uint i = 0u; i < width; ++i) {
+            acc[i] += red_out[part][lane][i] * fix;
+        }
+    }
+    float inv = total > 0.0f ? 1.0f / total : 0.0f;
+    device float* dest = destination + ((ulong)token * query_heads + head) * dim;
+    for (uint i = 0u; i < width; ++i) {
+        dest[lane * width + i] = acc[i] * inv;
+    }
+}
+
+kernel void attend_span4_fp8(
+    device const float* queries [[buffer(0)]],
+    device const uchar* keys [[buffer(1)]],
+    device const uchar* values [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& query_heads [[buffer(4)]],
+    constant uint& key_heads [[buffer(5)]],
+    constant uint& dim [[buffer(6)]],
+    constant uint& group [[buffer(7)]],
+    constant uint& pos0 [[buffer(8)]],
+    constant uint& count [[buffer(9)]],
+    constant uint& window [[buffer(10)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    uint token0 = tgid.x * 4u;
+    uint head = tgid.y;
+    uint width = dim >> 5;
+    uint key_head = head / group;
+    float qreg[4][8];
+    float outv[4][8];
+    float running[4];
+    float mass[4];
+    uint start_k[4];
+    uint end_k[4];
+    for (uint q = 0u; q < 4u; ++q) {
+        running[q] = -INFINITY;
+        mass[q] = 0.0f;
+        for (uint i = 0u; i < 8u; ++i) {
+            qreg[q][i] = 0.0f;
+            outv[q][i] = 0.0f;
+        }
+        uint token = token0 + q;
+        end_k[q] = pos0 + token + 1u;
+        start_k[q] = 0u;
+        if (window > 0u && end_k[q] > window) {
+            start_k[q] = end_k[q] - window;
+        }
+        if (token < count && head < query_heads) {
+            device const float* query = queries + ((ulong)token * query_heads + head) * dim;
+            for (uint i = 0u; i < width && i < 8u; ++i) {
+                qreg[q][i] = query[lane * width + i];
+            }
+        } else {
+            end_k[q] = 0u;
+        }
+    }
+    uint key_begin = start_k[0];
+    uint key_end = end_k[0];
+    for (uint q = 1u; q < 4u; ++q) {
+        key_begin = min(key_begin, start_k[q]);
+        key_end = max(key_end, end_k[q]);
+    }
+    for (uint key = key_begin; key < key_end; ++key) {
+        float partial0 = 0.0f;
+        float partial1 = 0.0f;
+        float partial2 = 0.0f;
+        float partial3 = 0.0f;
+        for (uint i = 0u; i < width && i < 8u; ++i) {
+            uint channel = lane * width + i;
+            float packed = load_kv_fp8(keys, key, key_heads, dim, key_head, channel);
+            partial0 += qreg[0][i] * packed;
+            partial1 += qreg[1][i] * packed;
+            partial2 += qreg[2][i] * packed;
+            partial3 += qreg[3][i] * packed;
+        }
+        float score0 = simd_sum(partial0);
+        float score1 = simd_sum(partial1);
+        float score2 = simd_sum(partial2);
+        float score3 = simd_sum(partial3);
+        float score[4] = {score0, score1, score2, score3};
+        for (uint q = 0u; q < 4u; ++q) {
+            if (key < start_k[q] || key >= end_k[q]) {
+                continue;
+            }
+            float next = max(running[q], score[q]);
+            float fix = exp(running[q] - next);
+            float weight = exp(score[q] - next);
+            running[q] = next;
+            mass[q] = mass[q] * fix + weight;
+            for (uint i = 0u; i < width && i < 8u; ++i) {
+                uint channel = lane * width + i;
+                float value = load_kv_fp8(values, key, key_heads, dim, key_head, channel);
+                outv[q][i] = outv[q][i] * fix + weight * value;
+            }
+        }
+    }
+    for (uint q = 0u; q < 4u; ++q) {
+        uint token = token0 + q;
+        if (token >= count || head >= query_heads || mass[q] == 0.0f) {
+            continue;
+        }
+        float inv = 1.0f / mass[q];
+        device float* dest = destination + ((ulong)token * query_heads + head) * dim;
+        for (uint i = 0u; i < width && i < 8u; ++i) {
+            dest[lane * width + i] = outv[q][i] * inv;
+        }
+    }
+}
+
+// Global fp8 attention. One threadgroup owns one query token and one key head,
+// so the eight queries that share that head load each key once. A tile is 256
+// keys. The host commits between tiles, which lets the window server run.
+kernel void attend_fp8_gqa_tile(
+    device const float* queries [[buffer(0)]],
+    device const uchar* keys [[buffer(1)]],
+    device const uchar* values [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    device float* acc [[buffer(4)]],
+    device float* stats [[buffer(5)]],
+    constant uint& query_heads [[buffer(6)]],
+    constant uint& key_heads [[buffer(7)]],
+    constant uint& dim [[buffer(8)]],
+    constant uint& group [[buffer(9)]],
+    constant uint& pos0 [[buffer(10)]],
+    constant uint& count [[buffer(11)]],
+    constant uint& window [[buffer(12)]],
+    constant uint& key0 [[buffer(13)]],
+    constant uint& tile [[buffer(14)]],
+    constant uint& first [[buffer(15)]],
+    constant uint& last [[buffer(16)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint simds [[simdgroups_per_threadgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    uint token = tgid.x;
+    uint key_head = tgid.y;
+    if (token >= count || key_head >= key_heads || group > 8u || simds > 4u) {
+        return;
+    }
+    uint channels = dim / (simds * 32u);
+    if (channels == 0u || channels > 4u) {
+        return;
+    }
+    uint channel0 = tid * channels;
+    float qreg[8][4];
+    float outv[8][4];
+    float running[8];
+    float mass[8];
+    for (uint q = 0u; q < group; ++q) {
+        running[q] = -INFINITY;
+        mass[q] = 0.0f;
+        uint q_head = key_head * group + q;
+        device const float* query = queries + ((ulong)token * query_heads + q_head) * dim + channel0;
+        ulong slot = ((ulong)token * query_heads + q_head);
+        for (uint i = 0u; i < channels; ++i) {
+            qreg[q][i] = query[i];
+            outv[q][i] = first != 0u ? 0.0f : acc[slot * dim + channel0 + i];
+        }
+        if (first == 0u) {
+            running[q] = stats[slot * 2u];
+            mass[q] = stats[slot * 2u + 1u];
+        }
+    }
+    uint end = pos0 + token + 1u;
+    uint start = 0u;
+    if (window > 0u && end > window) {
+        start = end - window;
+    }
+    uint key_begin = max(key0, start);
+    uint key_end = min(key0 + tile, end);
+    threadgroup float red[8][4];
+    threadgroup float score_box[8];
+    for (uint key = key_begin; key < key_end; ++key) {
+        float packed[4];
+        uint blocks = dim >> 5;
+        uint record = dim + blocks;
+        uint base = (key * key_heads + key_head) * record;
+        uchar stored = keys[base + dim + (channel0 >> 5)];
+        float scale = exp2(float(int(stored) - 127));
+        for (uint i = 0u; i < channels; ++i) {
+            uchar code = keys[base + channel0 + i];
+            float mag = e4m3_mag(code);
+            float sign = (code & 0x80u) != 0u ? -1.0f : 1.0f;
+            packed[i] = sign * mag * scale;
+        }
+        float partial[8];
+        for (uint q = 0u; q < group; ++q) {
+            float dot = 0.0f;
+            for (uint i = 0u; i < channels; ++i) {
+                dot += qreg[q][i] * packed[i];
+            }
+            partial[q] = dot;
+        }
+        for (uint q = 0u; q < group; ++q) {
+            float sum = simd_sum(partial[q]);
+            if (lane == 0u) {
+                red[q][simd] = sum;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (simd == 0u && lane == 0u) {
+            for (uint q = 0u; q < group; ++q) {
+                float total = 0.0f;
+                for (uint part = 0u; part < simds; ++part) {
+                    total += red[q][part];
+                }
+                score_box[q] = total;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        uchar vscale_b = values[base + dim + (channel0 >> 5)];
+        float vscale = exp2(float(int(vscale_b) - 127));
+        float vpack[4];
+        for (uint i = 0u; i < channels; ++i) {
+            uchar code = values[base + channel0 + i];
+            float mag = e4m3_mag(code);
+            float sign = (code & 0x80u) != 0u ? -1.0f : 1.0f;
+            vpack[i] = sign * mag * vscale;
+        }
+        for (uint q = 0u; q < group; ++q) {
+            float score = score_box[q];
+            float next = max(running[q], score);
+            float fix = exp(running[q] - next);
+            float weight = exp(score - next);
+            running[q] = next;
+            mass[q] = mass[q] * fix + weight;
+            for (uint i = 0u; i < channels; ++i) {
+                outv[q][i] = outv[q][i] * fix + weight * vpack[i];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    for (uint q = 0u; q < group; ++q) {
+        uint q_head = key_head * group + q;
+        ulong slot = ((ulong)token * query_heads + q_head);
+        for (uint i = 0u; i < channels; ++i) {
+            acc[slot * dim + channel0 + i] = outv[q][i];
+        }
+        if (tid == 0u) {
+            stats[slot * 2u] = running[q];
+            stats[slot * 2u + 1u] = mass[q];
+        }
+        if (last != 0u) {
+            float inv = mass[q] > 0.0f ? 1.0f / mass[q] : 0.0f;
+            device float* dest = destination + slot * dim + channel0;
+            for (uint i = 0u; i < channels; ++i) {
+                dest[i] = outv[q][i] * inv;
+            }
+        }
+    }
+}
+
+// One head of the token-major fp8 record, dequantized to half for matmul2d.
+// transposed 0 writes [key, dim]. transposed 1 writes [dim, key].
+kernel void kv_dequant_head(
+    device const uchar* cache [[buffer(0)]],
+    device half* destination [[buffer(1)]],
+    constant uint& head [[buffer(2)]],
+    constant uint& heads [[buffer(3)]],
+    constant uint& dim [[buffer(4)]],
+    constant uint& key0 [[buffer(5)]],
+    constant uint& cols [[buffer(6)]],
+    constant uint& cols_pad [[buffer(7)]],
+    constant uint& length [[buffer(8)]],
+    constant uint& transposed [[buffer(9)]],
+    uint local [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]])
+{
+    if (local >= cols_pad || lane >= 32u || (dim & 31u) != 0u) {
+        return;
+    }
+    uint blocks = dim >> 5;
+    uint record = dim + blocks;
+    uint kpos = key0 + local;
+    bool live = local < cols && kpos < length;
+    device const uchar* rec = cache + ((ulong)kpos * heads + head) * record;
+    for (uint block = 0u; block < blocks; ++block) {
+        float value = 0.0f;
+        if (live) {
+            uchar code = rec[block * 32u + lane];
+            uchar stored = rec[dim + block];
+            float mag = e4m3_mag(code);
+            float sign = (code & 0x80u) != 0u ? -1.0f : 1.0f;
+            value = sign * mag * exp2(float(int(stored) - 127));
+        }
+        uint channel = block * 32u + lane;
+        if (transposed == 0u) {
+            destination[(ulong)local * dim + channel] = half(value);
+        } else {
+            destination[(ulong)channel * cols_pad + local] = half(value);
+        }
+    }
+}
+
+// Every key head of one decode span. Plane z is ``cols_pad * dim`` or ``dim * cols_pad``.
+kernel void kv_dequant_heads(
+    device const uchar* cache [[buffer(0)]],
+    device half* destination [[buffer(1)]],
+    constant uint& heads [[buffer(2)]],
+    constant uint& dim [[buffer(3)]],
+    constant uint& key0 [[buffer(4)]],
+    constant uint& cols [[buffer(5)]],
+    constant uint& cols_pad [[buffer(6)]],
+    constant uint& length [[buffer(7)]],
+    constant uint& transposed [[buffer(8)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 local [[thread_position_in_threadgroup]])
+{
+    uint key = tgid.x;
+    uint head = tgid.y;
+    uint lane = local.x;
+    if (key >= cols_pad || head >= heads || lane >= 32u || (dim & 31u) != 0u) {
+        return;
+    }
+    uint blocks = dim >> 5;
+    uint record = dim + blocks;
+    uint kpos = key0 + key;
+    bool live = key < cols && kpos < length;
+    device const uchar* rec = cache + ((ulong)kpos * heads + head) * record;
+    ulong plane = transposed == 0u ? (ulong)cols_pad * dim : (ulong)dim * cols_pad;
+    device half* dest = destination + (ulong)head * plane;
+    for (uint block = 0u; block < blocks; ++block) {
+        float value = 0.0f;
+        if (live) {
+            uchar code = rec[block * 32u + lane];
+            uchar stored = rec[dim + block];
+            float mag = e4m3_mag(code);
+            float sign = (code & 0x80u) != 0u ? -1.0f : 1.0f;
+            value = sign * mag * exp2(float(int(stored) - 127));
+        }
+        uint channel = block * 32u + lane;
+        if (transposed == 0u) {
+            dest[(ulong)key * dim + channel] = half(value);
+        } else {
+            dest[(ulong)channel * cols_pad + key] = half(value);
+        }
+    }
+}
+
+// Query rows for one key head: [token, group] then pad, as half [row, dim].
+kernel void kv_cast_q(
+    device const float* queries [[buffer(0)]],
+    device half* destination [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    constant uint& group [[buffer(3)]],
+    constant uint& dim [[buffer(4)]],
+    constant uint& kv_head [[buffer(5)]],
+    constant uint& query_heads [[buffer(6)]],
+    constant uint& rows_pad [[buffer(7)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint channel [[thread_position_in_threadgroup]])
+{
+    if (row >= rows_pad || channel >= dim) {
+        return;
+    }
+    uint live = count * group;
+    float value = 0.0f;
+    if (row < live) {
+        uint token = row / group;
+        uint q = row - token * group;
+        uint q_head = kv_head * group + q;
+        value = queries[((ulong)token * query_heads + q_head) * dim + channel];
+    }
+    destination[(ulong)row * dim + channel] = half(value);
+}
+
+// Raw-dot online softmax. A key outside the causal window stores probability 0.
+kernel void kv_softmax_raw(
+    device const float* scores [[buffer(0)]],
+    device half* probs [[buffer(1)]],
+    device float* acc [[buffer(2)]],
+    device float* stats [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    constant uint& group [[buffer(5)]],
+    constant uint& dim [[buffer(6)]],
+    constant uint& kv_head [[buffer(7)]],
+    constant uint& query_heads [[buffer(8)]],
+    constant uint& cols [[buffer(9)]],
+    constant uint& cols_pad [[buffer(10)]],
+    constant uint& pos0 [[buffer(11)]],
+    constant uint& key0 [[buffer(12)]],
+    constant uint& window [[buffer(13)]],
+    constant uint& first [[buffer(14)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint simds [[simdgroups_per_threadgroup]],
+    uint threads [[threads_per_threadgroup]])
+{
+    uint live = count * group;
+    if (row >= live) {
+        for (uint col = tid; col < cols_pad; col += threads) {
+            probs[(ulong)row * cols_pad + col] = half(0.0f);
+        }
+        return;
+    }
+    uint token = row / group;
+    uint q = row - token * group;
+    uint q_head = kv_head * group + q;
+    ulong slot = (ulong)token * query_heads + q_head;
+    uint end = pos0 + token + 1u;
+    uint start = 0u;
+    if (window > 0u && end > window) {
+        start = end - window;
+    }
+    float local = -INFINITY;
+    for (uint col = tid; col < cols_pad; col += threads) {
+        uint kpos = key0 + col;
+        bool valid = col < cols && kpos >= start && kpos < end;
+        float score = valid ? scores[(ulong)row * cols_pad + col] : -INFINITY;
+        local = max(local, score);
+    }
+    float grouped = simd_max(local);
+    threadgroup float parts[8];
+    if (lane == 0u) {
+        parts[simd] = grouped;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0u) {
+        float total = -INFINITY;
+        for (uint s = 0u; s < simds; ++s) {
+            total = max(total, parts[s]);
+        }
+        parts[0] = total;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float tile_max = parts[0];
+    float old_m = first != 0u ? -INFINITY : stats[slot * 2u];
+    float old_s = first != 0u ? 0.0f : stats[slot * 2u + 1u];
+    bool tile_live = !isinf(tile_max);
+    float new_m = tile_live ? max(old_m, tile_max) : old_m;
+    float alpha = 0.0f;
+    if (!isinf(old_m)) {
+        alpha = tile_live ? exp(old_m - new_m) : 1.0f;
+    }
+    float psum = 0.0f;
+    for (uint col = tid; col < cols_pad; col += threads) {
+        uint kpos = key0 + col;
+        bool valid = col < cols && kpos >= start && kpos < end && tile_live;
+        float prob = 0.0f;
+        if (valid) {
+            prob = exp(scores[(ulong)row * cols_pad + col] - new_m);
+        }
+        probs[(ulong)row * cols_pad + col] = half(prob);
+        psum += prob;
+    }
+    psum = simd_sum(psum);
+    if (lane == 0u) {
+        parts[simd] = psum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0u) {
+        float total = 0.0f;
+        for (uint s = 0u; s < simds; ++s) {
+            total += parts[s];
+        }
+        parts[0] = total;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float mass = parts[0];
+    if (!isinf(old_m)) {
+        for (uint channel = tid; channel < dim; channel += threads) {
+            acc[slot * dim + channel] *= alpha;
+        }
+    }
+    if (tid == 0u) {
+        stats[slot * 2u] = new_m;
+        stats[slot * 2u + 1u] = old_s * alpha + mass;
+    }
+}
+
+kernel void kv_acc_add(
+    device float* acc [[buffer(0)]],
+    device const float* partial [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    constant uint& group [[buffer(3)]],
+    constant uint& dim [[buffer(4)]],
+    constant uint& kv_head [[buffer(5)]],
+    constant uint& query_heads [[buffer(6)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint channel [[thread_position_in_threadgroup]])
+{
+    uint live = count * group;
+    if (row >= live || channel >= dim) {
+        return;
+    }
+    uint token = row / group;
+    uint q = row - token * group;
+    uint q_head = kv_head * group + q;
+    ulong slot = (ulong)token * query_heads + q_head;
+    acc[slot * dim + channel] += partial[(ulong)row * dim + channel];
+}
+
+kernel void kv_attend_store(
+    device const float* acc [[buffer(0)]],
+    device const float* stats [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    constant uint& dim [[buffer(4)]],
+    constant uint& query_heads [[buffer(5)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 local [[thread_position_in_threadgroup]])
+{
+    uint token = tgid.x;
+    uint q_head = tgid.y;
+    uint channel = local.x;
+    if (token >= count || q_head >= query_heads || channel >= dim) {
+        return;
+    }
+    ulong slot = (ulong)token * query_heads + q_head;
+    float sum = stats[slot * 2u + 1u];
+    float inv = sum > 0.0f ? 1.0f / sum : 0.0f;
+    destination[slot * dim + channel] = acc[slot * dim + channel] * inv;
+}
+
 kernel void store_kv(
     device const float* source [[buffer(0)]],
     device half* cache [[buffer(1)]],
@@ -1750,6 +2477,67 @@ static uchar _fp8_code(float value, float scale) {
         code |= 0x80u;
     }
     return uchar(code);
+}
+
+// Live fp8_e4m3 store. One head-token record is ``dim`` E4M3 codes plus
+// ``dim/32`` E8M0 scales, token-major ``[token, heads, record]``.
+kernel void store_kv_fp8(
+    device const float* source [[buffer(0)]],
+    device uchar* cache [[buffer(1)]],
+    constant uint& heads [[buffer(2)]],
+    constant uint& dim [[buffer(3)]],
+    constant uint& token [[buffer(4)]],
+    uint head [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]])
+{
+    if (head >= heads || lane >= 32u || (dim & 31u) != 0u) {
+        return;
+    }
+    uint blocks = dim >> 5;
+    uint record = dim + blocks;
+    device uchar* dest = cache + (token * heads + head) * record;
+    device const float* src = source + head * dim;
+    for (uint block = 0u; block < blocks; ++block) {
+        float value = src[block * 32u + lane];
+        float peak = simd_max(fabs(value));
+        int unbiased = _fp8_unbiased(peak);
+        float scale = exp2(float(unbiased));
+        dest[block * 32u + lane] = _fp8_code(value, scale);
+        if (lane == 0u) {
+            dest[dim + block] = uchar(unbiased + 127);
+        }
+    }
+}
+
+kernel void store_kv_rows_fp8(
+    device const float* source [[buffer(0)]],
+    device uchar* cache [[buffer(1)]],
+    constant uint& heads [[buffer(2)]],
+    constant uint& dim [[buffer(3)]],
+    constant uint& token0 [[buffer(4)]],
+    constant uint& tokens [[buffer(5)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]])
+{
+    uint token = tgid.x;
+    uint head = tgid.y;
+    if (token >= tokens || head >= heads || lane >= 32u || (dim & 31u) != 0u) {
+        return;
+    }
+    uint blocks = dim >> 5;
+    uint record = dim + blocks;
+    device uchar* dest = cache + ((token0 + token) * heads + head) * record;
+    device const float* src = source + (token * heads + head) * dim;
+    for (uint block = 0u; block < blocks; ++block) {
+        float value = src[block * 32u + lane];
+        float peak = simd_max(fabs(value));
+        int unbiased = _fp8_unbiased(peak);
+        float scale = exp2(float(unbiased));
+        dest[block * 32u + lane] = _fp8_code(value, scale);
+        if (lane == 0u) {
+            dest[dim + block] = uchar(unbiased + 127);
+        }
+    }
 }
 
 // One scale block of a filled cache. ``transposed`` packs local values as [dim, count].

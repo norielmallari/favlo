@@ -1,10 +1,10 @@
 # Ceilings
 
-Bandwidth and kernel ceilings for the kernels `gemma4-26b-a4b` launches. Recompute when `gemv_fp8`, `gemv_fp4_at`, `gemv_fp8_at`, `embed_fp8`, `matmul_fp8`, `matmul_half`, `matmul_fp4_64_at`, `matmul_fp8_64_at`, `restore_fp8_i8`, `quantize_half_i8`, `quantize_float_i8`, `prefill_i8_n64`, `scale_i8_f32`, `write_row`, `write_rows_tight`, `rmsnorm`, `rmsnorm_rows`, `rmsnorm_heads`, `router_topk`, `rope_pairs`, `rope_rows`, `store_kv`, `store_kv_rows`, `attend_span`, `attend_span4`, `attend_decode`, `geglu_rows`, `geglu_pair`, `group_expert_slots`, `gather_half_slots`, `pad_half_rows`, `scatter_slot_rows`, `mix_experts`, `residual_scale`, `scale_copy`, `zero_buffer`, `softcap`, `topk_groups`, or `sample_topk` changes. The CPU reads one sampled token. Expert ids stay on device.
+Bandwidth and kernel ceilings for the kernels `gemma4-26b-a4b` launches. Recompute when `gemv_fp8`, `gemv_fp4_at`, `gemv_fp8_at`, `embed_fp8`, `matmul_fp8`, `matmul_half`, `matmul_fp4_64_at`, `matmul_fp8_64_at`, `restore_fp8_i8`, `quantize_half_i8`, `quantize_float_i8`, `prefill_i8_n64`, `scale_i8_f32`, `write_row`, `write_rows_tight`, `rmsnorm`, `rmsnorm_rows`, `rmsnorm_heads`, `router_topk`, `rope_pairs`, `rope_rows`, `store_kv`, `store_kv_rows`, `kv_dequant_heads`, `kv_cast_q`, `kv_softmax_raw`, `kv_acc_add`, `kv_attend_store`, `matmul_half_batch`, `matmul_half_64_batch`, `attend_span`, `attend_span4`, `attend_decode`, `geglu_rows`, `geglu_pair`, `group_expert_slots`, `gather_half_slots`, `pad_half_rows`, `scatter_slot_rows`, `mix_experts`, `residual_scale`, `scale_copy`, `zero_buffer`, `softcap`, `topk_groups`, or `sample_topk` changes. The CPU reads one sampled token. Expert ids stay on device.
 
 The divisor is the 2 GiB streaming read on an M5 Pro with 48 GB: 7093.5 µs, 302.74 GB/s. That measurement is recorded in [../qwen36-35b-a3b/ceilings.md](../qwen36-35b-a3b/ceilings.md). Bytes below are divided by 302.74 GB/s.
 
-One token runs 30 layers. Twenty-five are local, with a sliding window of 1024. Five are global and attend every key. Eight of 128 experts run. The timed token uses six fp4 experts and two fp8 experts. A 20% promotion expects 1.6 fp8 experts in those eight. Both `gemv_fp4_at` and `gemv_fp8_at` launch, and a threadgroup returns when the width differs. Dense projections and the tied embedding are fp8. Decode reads them in `gemv_fp8` and `embed_fp8`. The router is one Metal half `matmul_half` of 8 by 128 by 2816. Decode attention at one key is `attend_span`. At 1024 keys and above it is `attend_decode`, with the key range split across eight simdgroups. A value is an RMSNorm with no scale. A global value is that norm of the key projection and is stored apart from the keys.
+One token runs 30 layers. Twenty-five are local, with a sliding window of 1024. Five are global and attend every key. Eight of 128 experts run. The timed token uses six fp4 experts and two fp8 experts. A 20% promotion expects 1.6 fp8 experts in those eight. Both `gemv_fp4_at` and `gemv_fp8_at` launch, and a threadgroup returns when the width differs. Dense projections and the tied embedding are fp8. Decode reads them in `gemv_fp8` and `embed_fp8`. The router is one Metal half `matmul_half` of 8 by 128 by 2816. The default cache is `fp8_e4m3`. Decode dequantizes every key head with `kv_dequant_heads` and scores that half plane with `matmul_half_batch`. Prefill does the same with `matmul_half_64_batch` on tiles of 256 keys. `attend_span` and `attend_decode` remain the `half` cache. A value is an RMSNorm with no scale. A global value is that norm of the key projection and is stored apart from the keys.
 
 ## Bandwidth
 
@@ -32,7 +32,7 @@ Weight bytes are one read of the codes and scales the launch visits. The fp8 den
 
 ## Prefill
 
-One chunk of 1024 tokens at position 0. The chunk finishes, so the sum includes one tied-logits `gemv_fp8`. Large attention projections restore the packed fp8 matrix into a per-row int8 stage, quantize the float activation with `quantize_float_i8`, multiply with `prefill_i8_n64`, and scale the int32 product. That path does not cast through half. Local key and value, the shared gate and up, and the shared down stay on `matmul_fp8` with `write_rows_tight`. The router is `matmul_half`. Expert prefill uses 128 slots of 64, one slot for each expert: 102 fp4 and 26 fp8. `matmul_fp4_64_at` and `matmul_fp8_64_at` both launch on that grid. The TFLOP/s column counts the slots whose width matches. Local attention is `attend_span4`. Global attention is `attend_span` over the keys this first chunk has stored. Int8 rows measured on 2 November 2026; other rows reuse the same-day fp8 measurement. The sum is 867.785 ms, 1180.02 tok/s.
+One chunk of 1024 tokens at position 0. The chunk finishes, so the sum includes one tied-logits `gemv_fp8`. Large attention projections restore the packed fp8 matrix into a per-row int8 stage, quantize the float activation with `quantize_float_i8`, multiply with `prefill_i8_n64`, and scale the int32 product. That path does not cast through half. Local key and value, the shared gate and up, and the shared down stay on `matmul_fp8` with `write_rows_tight`. The router is `matmul_half`. Expert prefill uses 128 slots of 64, one slot for each expert: 102 fp4 and 26 fp8. `matmul_fp4_64_at` and `matmul_fp8_64_at` both launch on that grid. The TFLOP/s column counts the slots whose width matches. The 90% test uses the packed chunk, measured on 3 November 2026. The cache is `fp8_e4m3` and already holds the chunk, so growth is outside the interval. The chunk commits every ten layers: three command buffers, and those intervals do not overlap. The first sample is discarded. The figure is the median of the next four. The union is 588.022 ms, 1741.43 tok/s. The launch rows below were measured one kernel per command buffer on 2 November 2026. They are not added into this interval. A sum of those rows counts a command-buffer gap on every dispatch, and the packed chunk is faster than that sum.
 
 | Launch | Shape | Count | µs | TFLOP/s |
 |---|---|---:|---:|---:|
@@ -75,8 +75,6 @@ One chunk of 1024 tokens at position 0. The chunk finishes, so the sum includes 
 | `rope_rows` | global, 1024 tokens | 5 | 270.6 | |
 | `store_kv_rows` | local | 50 | 22.8 | |
 | `store_kv_rows` | global | 10 | 11.1 | |
-| `attend_span4` | local, 1024 queries at position 0 | 25 | 6253.4 | |
-| `attend_span` | global, 1024 queries at position 0 | 5 | 21984.0 | |
 | `residual_scale` | 1024×2816 | 120 | 91.0 | |
 | `scale_copy` | 1024×2816 | 30 | 44.1 | |
 | `scale_copy` | global value, 1024×1024 | 5 | 13.6 | |
@@ -97,9 +95,11 @@ One chunk of 1024 tokens at position 0. The chunk finishes, so the sum includes 
 
 ## Decode kernels
 
-Measured on 2 November 2026. Each kernel is one command buffer, then a wait. The time is the device interval, `GPUEndTime` minus `GPUStartTime`. The first sample is discarded. The figure is the median of the next four. The sum adds those medians before the rows are rounded to 0.1 µs. The 90% test uses this kernel ceiling.
+The 90% test uses the packed step, measured on 3 November 2026. One decode step is the embedding, the 30 layers, the tied logits, and the sample, in one command buffer. The cache is `fp8_e4m3`. The time is `GPUEndTime` minus `GPUStartTime`. The first sample is discarded. The figure is the median of the next four. Each sample rewrites the same position, so the key count stays fixed. Context 1 attends one key. Context 1024 starts at position 1023. Context 65536 starts at position 65535. Context 131072 starts at position 131071. Local layers keep the 1024-key window.
 
-Context 1 is 37.424 ms, 26.72 tok/s. Context 1024 is 40.005 ms, 25.00 tok/s. Context 65536 is 81.759 ms, 12.23 tok/s. Context 131072 is 124.216 ms, 8.05 tok/s. The projection rows do not change with context. The attention rows do.
+Context 1 is 21.675 ms, 46.14 tok/s. Context 1024 is 24.641 ms, 40.58 tok/s. Context 65536 is 46.195 ms, 21.65 tok/s. Context 131072 is 67.564 ms, 14.80 tok/s.
+
+The rows below time each projection kernel in its own command buffer, on 2 November 2026. They are not added into the packed step. A sum of those rows counts a command-buffer gap on every dispatch, and the live step is faster than that sum.
 
 | Kernel | Shape or launch | Count | µs |
 |---|---|---:|---:|
@@ -128,12 +128,6 @@ Context 1 is 37.424 ms, 26.72 tok/s. Context 1024 is 40.005 ms, 25.00 tok/s. Con
 | `rope_pairs` | global | 5 | 2.8 |
 | `store_kv` | local key or value | 50 | 2.3 |
 | `store_kv` | global key or value | 10 | 2.4 |
-| `attend_span` | local, 1 key | 25 | 4.5 |
-| `attend_span` | global, 1 key | 5 | 4.7 |
-| `attend_decode` | local, 1024 keys | 25 | 83.6 |
-| `attend_decode` | global, 1024 keys | 5 | 125.1 |
-| `attend_decode` | global, 65536 keys | 5 | 8475.9 |
-| `attend_decode` | global, 131072 keys | 5 | 16967.4 |
 | `geglu_pair` | 2112 | 30 | 2.1 |
 | `residual_scale` | 2816 | 120 | 1.9 |
 | `scale_copy` | 4096 | 25 | 2.0 |
@@ -150,4 +144,4 @@ Context 1 is 37.424 ms, 26.72 tok/s. Context 1024 is 40.005 ms, 25.00 tok/s. Con
 | `topk_groups` | 1024, 256, 64, 16, 4, then 1 group | 6 | 67.8, 19.9, 8.5, 6.1, 6.1, 6.2 |
 | `sample_topk` | 64 | 1 | 40.2 |
 
-Context 1 uses the 1-key attention rows. Context 1024 uses the 1024-key rows. Context 65536 and context 131072 keep the local window at 1024 and use the matching global row.
+The packed intervals above are the kernel ceiling. Local attention at 65536 and 131072 keys stays inside the 1024-key window. Global attention walks every key.

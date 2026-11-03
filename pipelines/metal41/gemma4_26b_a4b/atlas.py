@@ -22,33 +22,63 @@ from gemma4_26b_a4b.geometry import (
 )
 
 
-KV_MODES = ("half",)
+KV_MODES = ("half", "fp8_e4m3")
+_ALIASES = {
+    "e4m3": "fp8_e4m3",
+    "fp8": "fp8_e4m3",
+    "f16": "half",
+    "fp16": "half",
+}
 
 
 def kv_mode(name: str | None) -> str:
-    """``half``. Empty means Metal ``half``."""
-    text = "half" if name is None or name == "" else str(name)
+    """``half`` or ``fp8_e4m3``. Empty means ``fp8_e4m3``.
+
+    ``e4m3`` and ``fp8`` are ``fp8_e4m3``. ``f16`` and ``fp16`` are ``half``.
+    """
+    text = "fp8_e4m3" if name is None or name == "" else str(name)
+    text = _ALIASES.get(text, text)
     if text not in KV_MODES:
-        message = f"kv cache {name} is not half"
+        message = f"kv cache {name} is not half or fp8_e4m3"
         raise ValueError(message)
     return text
 
 
-def kv_bytes(capacity: int) -> int:
-    """Metal half key and value bytes for ``capacity`` tokens."""
+def plain_cache(mode: str | None) -> bool:
+    """Raw Metal half. That mode skips the E4M3 record."""
+    return kv_mode(mode) == "half"
+
+
+def kv_record_bytes(dim: int, mode: str | None = "fp8_e4m3") -> int:
+    """Bytes of one head at one position."""
+    if plain_cache(mode):
+        return dim * 2
+    if dim % 32:
+        message = f"fp8 key/value dim {dim} is not a multiple of 32"
+        raise ValueError(message)
+    return dim + dim // 32
+
+
+def plane_bytes(capacity: int, heads: int, dim: int, mode: str | None = "fp8_e4m3") -> int:
+    """One key plane or one value plane."""
+    if capacity <= 0 or heads <= 0 or dim <= 0:
+        return 0
+    return capacity * heads * kv_record_bytes(dim, mode)
+
+
+def kv_bytes(capacity: int, mode: str | None = "fp8_e4m3") -> int:
+    """Key and value bytes for ``capacity`` tokens."""
     if capacity <= 0:
         return 0
     local_layers = LAYERS - len(GLOBAL_LAYERS)
-    local = local_layers * capacity * LOCAL_HEADS * LOCAL_DIM * 2 * 2
-    glob = len(GLOBAL_LAYERS) * capacity * GLOBAL_HEADS * GLOBAL_DIM * 2 * 2
+    local = local_layers * plane_bytes(capacity, LOCAL_HEADS, LOCAL_DIM, mode) * 2
+    glob = len(GLOBAL_LAYERS) * plane_bytes(capacity, GLOBAL_HEADS, GLOBAL_DIM, mode) * 2
     return local + glob
 
 
-def kv_margin(capacity: int) -> int:
+def kv_margin(capacity: int, mode: str | None = "fp8_e4m3") -> int:
     """One local cache buffer. Growth allocates it before the old one is released."""
-    if capacity <= 0:
-        return 0
-    return capacity * LOCAL_HEADS * LOCAL_DIM * 2
+    return plane_bytes(capacity, LOCAL_HEADS, LOCAL_DIM, mode)
 
 
 def layer_slots(room: int, layer_bytes: int, layers: int) -> int:

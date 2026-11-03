@@ -14,7 +14,7 @@ The official checkpoint is [google/gemma-4-26B-A4B-it](https://huggingface.co/go
 - A local bfloat16 checkout of that repository
 - Free disk for that checkout and the packed record at the same time
 
-`plan` prints the packed sizes: resident 2.824 GiB, Metal half vectors 0.066 GiB, and expert images 13.833 GiB. Registration sets `kv_cache` to `half`. The checkout stays after `quantize`.
+`plan` prints the packed sizes: resident 2.824 GiB, Metal half vectors 0.066 GiB, and expert images 13.833 GiB. Registration sets `kv_cache` to `fp8_e4m3`. The checkout stays after `quantize`.
 
 16 GB and 24 GB run in degraded mode. The runtime keeps as many expert layers as fit and reads the rest from the record. 8 GB is not enough to run a model capable of real-world agentic workflows.
 
