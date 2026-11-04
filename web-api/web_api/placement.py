@@ -196,6 +196,52 @@ def filmstrip_paths(elements: list[dict[str, Any]]) -> list[str]:
     return paths
 
 
+def append_filmstrip_path(state: dict[str, Any], path: str) -> dict[str, Any] | None:
+    """Add ``path`` to the first filmstrip and select it."""
+    workspace = state.get("favlo_workspace")
+    if not isinstance(workspace, dict):
+        return None
+    cleaned = path.strip().lstrip("/")
+    if not cleaned:
+        return None
+    elements = workspace.get("elements")
+    if not isinstance(elements, list):
+        return None
+    next_elements: list[Any] = []
+    found_strip = False
+    for element in elements:
+        if not isinstance(element, dict) or element.get("element") != "filmstrip":
+            next_elements.append(element)
+            continue
+        if found_strip:
+            next_elements.append(element)
+            continue
+        found_strip = True
+        props = dict(element.get("props") or {})
+        items = list(props.get("items") if isinstance(props.get("items"), list) else [])
+        existing = {
+            str(item.get("path") or "").strip()
+            for item in items
+            if isinstance(item, dict)
+        }
+        if cleaned not in existing:
+            items.append({"path": cleaned})
+            props["items"] = items
+            next_elements.append({**element, "props": props})
+        else:
+            next_elements.append(element)
+    if not found_strip:
+        return None
+    return {
+        **state,
+        "favlo_workspace": {
+            **workspace,
+            "elements": next_elements,
+            "selection": {"kind": "file", "path": cleaned},
+        },
+    }
+
+
 def retarget_media(
     state: dict[str, Any],
     source: str,

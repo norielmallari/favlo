@@ -125,6 +125,28 @@ def sync_media_placement(
     return updated
 
 
+def append_media_placement(
+    store: Any,
+    workspace_id: str,
+    path: str,
+) -> dict[str, Any] | None:
+    """Add a relative path to the gallery filmstrip and select it."""
+    from web_api.placement import append_filmstrip_path
+
+    session_id = store.workspace_session_id(workspace_id)
+    if not session_id:
+        return None
+    current = _placement_state(store, session_id)
+    if current is None:
+        return None
+    updated = append_filmstrip_path(current, path)
+    if updated is None:
+        return None
+    store.save_agui_state(session_id, updated)
+    _write_snapshot_state(store, session_id, updated)
+    return updated
+
+
 def apply_placement(
     store: Any,
     workspace_id: str,

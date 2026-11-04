@@ -140,6 +140,41 @@ def test_agui_rejects_second_running_turn(client: TestClient) -> None:
     assert "RUN_ERROR" in _sse_types(response.text)
 
 
+def test_open_run_surfaces_the_user_message_before_snapshot_save(
+    client: TestClient,
+) -> None:
+    thread = _favlo_session(client)
+    store = client.app.state.store
+    # Prior turn already in the durable snapshot.
+    store.append_thread_snapshot_message(
+        "favlo",
+        thread,
+        {"id": guid(), "role": "user", "content": "Earlier"},
+    )
+    store.append_thread_snapshot_message(
+        "favlo",
+        thread,
+        {"id": guid(), "role": "assistant", "content": "Got it"},
+    )
+    message_id = guid()
+    started = store.begin_agui_run(thread, guid(), "Draw a square.", message_id=message_id)
+    assert started["message_id"] == message_id
+    view = client.get(f"/sessions/{thread}").json()
+    bodies = [row["body"] for row in view["messages"] if row["role"] == "user"]
+    assert "Earlier" in bodies
+    assert "Draw a square." in bodies
+
+
+def test_settle_agui_run_cancelled_clears_the_running_row(client: TestClient) -> None:
+    thread = _favlo_session(client)
+    store = client.app.state.store
+    run_id = guid()
+    store.begin_agui_run(thread, run_id, "hi")
+    events = store.settle_agui_run(run_id, "cancelled", None)
+    assert events[0]["type"] == "run.cancelled"
+    assert store.running_run_ids(thread) == []
+
+
 def test_clear_route_mints_new_guid(client: TestClient) -> None:
     thread = _favlo_session(client)
     cleared = client.post(f"/sessions/{thread}/clear")
@@ -173,6 +208,21 @@ def test_fenced_host_cues_stay_off_the_transcript() -> None:
     assert [row["role"] for row in rows] == ["user", "assistant"]
     assert rows[0]["body"] == "Show the meadow"
     assert "horse.png" not in rows[0]["body"]
+    riding = project_messages(
+        [
+            {
+                "id": "user",
+                "role": "user",
+                "content": (
+                    "Show the meadow\n\n"
+                    "<system_reminder>\n"
+                    "The selected media on this turn is zebra.png. This image means that path.\n"
+                    "</system_reminder>"
+                ),
+            }
+        ]
+    )
+    assert riding[0]["body"] == "Show the meadow"
     assert rows[1]["body"] == "Here it is."
 
 

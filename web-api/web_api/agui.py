@@ -180,6 +180,7 @@ class FavloAguiHost(AgentFrameworkAgent):
             )
             if agent_row is None:
                 raise NotFound("That agent does not exist.")
+            user_id: str | None = None
             if not adopt:
                 if archive:
                     running = next(
@@ -195,9 +196,21 @@ class FavloAguiHost(AgentFrameworkAgent):
                         for event in started.get("events") or []:
                             await bus.publish(event)
                 else:
-                    started = store.begin_agui_run(thread_id, run_id, text, archive=False)
+                    message_id = _user_message_id(messages)
+                    started = store.begin_agui_run(
+                        thread_id,
+                        run_id,
+                        text,
+                        archive=False,
+                        message_id=message_id,
+                    )
                     for event in started.get("events") or []:
                         await bus.publish(event)
+                    # Keep the client id on the AG-UI input so the library save
+                    # and MessageRow share one id. Do not pre-append that row to
+                    # the thread snapshot: the service-session path would then
+                    # treat the turn as already stored and run with no messages.
+                    user_id = str(started.get("message_id") or message_id or guid())
             _prefer_stored_state(store, thread_id, prepared)
             if not archive:
                 if silent:
@@ -212,18 +225,26 @@ class FavloAguiHost(AgentFrameworkAgent):
                     prepared["messages"] = [{"id": guid(), "role": "user", "content": ""}]
                 else:
                     prior_messages = list(snapshot.get("messages") or [])
-                    prepared["messages"] = _with_selection_cue(
+                    prepared["messages"], fresh = _with_selection_cue(
                         store,
                         thread_id,
                         list(prepared.get("messages") or []),
+                        prepared.get("state"),
                     )
                     names = text
                     if adopt:
                         names = _adopted_named_text(store, run_id, text)
+                    if fresh:
+                        names = f"{names}\n{fresh}"
                     prepared["messages"] = _with_images(
                         list(prepared.get("messages") or []),
                         _images(store, thread_id, names, prior_messages),
                     )
+                    if user_id:
+                        prepared["messages"] = _with_message_id(
+                            list(prepared.get("messages") or []),
+                            user_id,
+                        )
             before_ids = _assistant_ids(snapshot["messages"])
         except (Conflict, NotFound, Rejected) as exc:
             if adopt:
@@ -317,19 +338,23 @@ class FavloAguiHost(AgentFrameworkAgent):
             yield RunErrorEvent(message=spoken_error(str(exc)), code="failed")
         finally:
             self._app.state.cancels.pop(run_id, None)
-            await _close_mcp(agent)
-            if closer is not None:
-                await closer.aclose()
-            await _close_client(agent)
             if not settled and not archive:
                 events = await asyncio.to_thread(
                     store.settle_agui_run,
                     run_id,
-                    "failed",
-                    "The reply stopped.",
+                    "cancelled",
+                    None,
                 )
                 for item in events:
                     await bus.publish(item)
+                settled = True
+            from web_api.media_delivery import schedule
+
+            schedule(self._app, thread_id)
+            await _close_mcp(agent)
+            if closer is not None:
+                await closer.aclose()
+            await _close_client(agent)
 
 
 def install(app: FastAPI) -> None:
@@ -363,6 +388,29 @@ def _user_text(messages: list[Any]) -> str:
             if text:
                 return text
     return ""
+
+
+def _user_message_id(messages: list[Any]) -> str | None:
+    for item in reversed(messages):
+        if not isinstance(item, dict) or item.get("role") != "user":
+            continue
+        message_id = str(item.get("id") or "").strip()
+        if message_id:
+            return message_id
+    return None
+
+
+def _with_message_id(messages: list[Any], message_id: str) -> list[Any]:
+    """Ensure the latest user row carries the durable snapshot id."""
+    if not messages:
+        return [{"id": message_id, "role": "user", "content": ""}]
+    out = list(messages)
+    for index in range(len(out) - 1, -1, -1):
+        item = out[index]
+        if isinstance(item, dict) and item.get("role") == "user":
+            out[index] = {**item, "id": message_id}
+            return out
+    return out
 
 
 def _prefer_stored_state(store: Any, thread_id: str, prepared: dict[str, Any]) -> None:
@@ -439,55 +487,76 @@ def _with_images(
     return copied
 
 
+def _selection_on_turn(state: Any) -> tuple[bool, str | None]:
+    """Path on this POST, when the body carries a gallery placement.
+
+    The first value is false when this request has no ``favlo_workspace``.
+    Stored placement is not a stand-in for that field.
+    """
+    if not isinstance(state, dict):
+        return False, None
+    workspace = state.get("favlo_workspace")
+    if not isinstance(workspace, dict):
+        return False, None
+    selection = workspace.get("selection")
+    if not isinstance(selection, dict):
+        return True, None
+    path = str(selection.get("path") or "").strip() or None
+    return True, path
+
+
 def _with_selection_cue(
     store: Any,
     thread_id: str,
     messages: list[Any],
-) -> list[Any]:
-    """Persist a selection-change cue as a fenced, UI-hidden user message.
+    state: Any = None,
+) -> tuple[list[Any], str | None]:
+    """Ride the selected sidecar on the user message the model receives.
 
-    The typed user message stays clean. The cue is a durable host row in the
-    thread snapshot (``<system_reminder>`` fence + AG-UI
-    ``metadata.favlo.ui=hidden``). No-op when selection is unchanged.
+    The path comes from this POST's ``state``. A separate snapshot row is
+    skipped by the service-session suffix, so the model would not see it.
+    The fence sits on that user message. The same path is not written again.
+    The returned path is the one whose pixels should ride with this message.
     """
     from web_api.gallery_tools import (
         announced_selection_from_history,
         selection_announcement,
     )
-    from web_api.gallery_metadata import read_sidecar
+    from web_api.gallery_metadata import prompt_text, read_sidecar
     from web_api.folder_port import folder_for
-    from web_api.host_cues import host_cue_message
+    from web_api.host_cues import fence_cue
 
     workspace_id = store.gallery_for_session(thread_id)
     if not workspace_id:
-        return messages
-    placement = store.agui_state(thread_id) or {}
-    workspace = placement.get("favlo_workspace") if isinstance(placement, dict) else None
-    selected = None
-    if isinstance(workspace, dict):
-        selection = workspace.get("selection")
-        if isinstance(selection, dict):
-            selected = str(selection.get("path") or "").strip() or None
+        return messages, None
+    present, selected = _selection_on_turn(state)
+    if not present:
+        return messages, None
     document = store.thread_snapshot(_SNAPSHOT_SCOPE, thread_id) or {}
     history = list(document.get("messages") or []) if isinstance(document, dict) else []
     previous = announced_selection_from_history(history)
-    description = ""
+    metadata = ""
     if selected:
         try:
             folder = folder_for(store, workspace_id)
             side = read_sidecar(folder.root, selected) or {}
-            description = str(side.get("description") or "").strip()
+            metadata = prompt_text(side)
         except Rejected:
-            description = ""
-    cue = selection_announcement(selected, previous, description)
+            metadata = ""
+    cue = selection_announcement(selected, previous, metadata)
     if not cue:
-        return messages
-    store.append_thread_snapshot_message(
-        _SNAPSHOT_SCOPE,
-        thread_id,
-        host_cue_message(cue, message_id=guid()),
-    )
-    return messages
+        return messages, None
+    fenced = fence_cue(cue)
+    copied = [dict(item) if isinstance(item, dict) else item for item in messages]
+    for index in range(len(copied) - 1, -1, -1):
+        item = copied[index]
+        if not isinstance(item, dict) or item.get("role") != "user":
+            continue
+        content = item.get("content")
+        text = content if isinstance(content, str) else _user_text([item])
+        item["content"] = f"{text.rstrip()}\n\n{fenced}"
+        break
+    return copied, selected
 
 
 def _previous_user_text(messages: list[Any]) -> str:
@@ -659,7 +728,9 @@ async def _build_agent(
         store.freeze_definition(thread_id, payload)
         from favlo.chat_client import open_chat_client
 
-        client = open_chat_client(str(model_id), base_url)
+        from web_api.media_delivery import media_middleware
+
+        client = open_chat_client(str(model_id), base_url, middleware=media_middleware())
         if tool_list:
             client.function_invocation_configuration["max_iterations"] = int(
                 payload.get("max_iterations") or 6

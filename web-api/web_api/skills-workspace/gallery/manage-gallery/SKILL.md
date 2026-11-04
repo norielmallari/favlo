@@ -7,7 +7,7 @@ This session is the gallery. Paths are relative to its local folder. Do not use 
 
 When the turn names the selected media, this image means that path. A generated image is saved beside the selected media, or at the folder root when none is selected.
 
-After `generate_image` finishes, call `gallery_write_image` with the `favlo://` URI as source and a path inside the local folder. Do not leave the image only as a chat link.
+`generate_image` returns a task id and the file is not ready. Reply in that same turn. Do not call `media_status` on this turn. The chat shows the `favlo://` link when the file is ready, and the host writes that file into the gallery folder and filmstrip. Use `gallery_write_image` only when the person asks to save a chat link under a different path.
 
 When asked to fill the filmstrip: call `gallery_find_media` once, then `workspace_place` once in the same turn. Do not call find twice. Use `gallery_search_media` only when the request is about meaning. Find and search return path and kind only. Keep `preview` on slot `stage` with props `{"fit":"contain"}` unless the user asks to remove it. Put `filmstrip` on slot `rail` with props `{"title":"","items":[{"path":"..."}]}` using only paths from find or search. When the filmstrip has items, always pass `selection` as `{"kind":"file","path":"..."}` for one of those paths so the preview shows it. Do not describe the layout in prose.
 

@@ -2228,9 +2228,14 @@ class Store:
     def append_thread_snapshot_message(
         self, scope: str, thread_id: str, message: dict[str, Any]
     ) -> None:
-        """Append one server-owned message to the durable AG-UI thread snapshot."""
+        """Append one server-owned message to the durable AG-UI thread snapshot.
+
+        When ``message`` carries an ``id`` that is already present, the row is
+        left unchanged so a run-start user row and the library save stay one row.
+        """
 
         def write(db: Session) -> None:
+            message_id = message.get("id") if isinstance(message, dict) else None
             row = db.scalars(
                 select(ThreadSnapshotRow).where(
                     ThreadSnapshotRow.scope == scope,
@@ -2264,6 +2269,10 @@ class Store:
             messages = document.get("messages")
             if not isinstance(messages, list):
                 messages = []
+            if message_id:
+                for existing in messages:
+                    if isinstance(existing, dict) and existing.get("id") == message_id:
+                        return
             messages.append(message)
             document["messages"] = messages
             row.document = json.dumps(document)
@@ -2659,8 +2668,18 @@ class Store:
 
         return self._write(write)
 
-    def record_assistant(self, session_id: str, text: str) -> list[dict[str, Any]]:
-        """Store one assistant message. Used when provisioning fails before a reply."""
+    def record_assistant(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        task_ids: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Store one assistant message. Used when provisioning fails before a reply.
+
+        ``task_ids`` marks a background media delivery so the UI does not clear
+        Working for an open run.
+        """
 
         def write(db: Session) -> list[dict[str, Any]]:
             chat = db.get(SessionRow, session_id)
@@ -2680,12 +2699,51 @@ class Store:
                     created_at=created,
                 )
             )
+            payload: dict[str, Any] = {
+                "message_id": message_id,
+                "role": "assistant",
+                "text": cleaned,
+            }
+            if task_ids:
+                payload["task_ids"] = [item for item in task_ids if item]
             return [
                 self._event(
                     db,
                     stream_id=f"session:{session_id}",
                     event_type="message.created",
-                    payload={"message_id": message_id, "role": "assistant", "text": cleaned},
+                    payload=payload,
+                    channel_id=chat.channel_id,
+                    session_id=session_id,
+                    actor={"kind": "agent", "id": chat.participant_id or ""},
+                )
+            ]
+
+        return self._write(write)
+
+    def note_media_pending(
+        self,
+        session_id: str,
+        task_id: str,
+        kind: str,
+        status: str,
+    ) -> list[dict[str, Any]]:
+        """Publish a host media placeholder event keyed by task id (no run_id)."""
+
+        def write(db: Session) -> list[dict[str, Any]]:
+            chat = db.get(SessionRow, session_id)
+            cleaned = task_id.strip()
+            if chat is None or not cleaned:
+                return []
+            return [
+                self._event(
+                    db,
+                    stream_id=f"session:{session_id}",
+                    event_type="media.pending",
+                    payload={
+                        "task_id": cleaned,
+                        "kind": kind.strip() or "image",
+                        "status": status.strip() or "working",
+                    },
                     channel_id=chat.channel_id,
                     session_id=session_id,
                     actor={"kind": "agent", "id": chat.participant_id or ""},
@@ -3454,14 +3512,15 @@ class Store:
             chat = db.get(SessionRow, session_id)
             if chat is None:
                 raise NotFound("That session does not exist.")
-            messages = []
+            row_messages = []
             for row in db.scalars(
                 select(MessageRow).where(MessageRow.session_id == session_id).order_by(_ROW_ID)
             ):
                 item = _view(row)
                 item["tool_calls"] = _tool_calls(item.get("tool_calls"))
                 item["trace"] = _trace(item.get("trace"))
-                messages.append(item)
+                row_messages.append(item)
+            messages = list(row_messages)
             runs = [
                 _view(row)
                 for row in db.scalars(
@@ -3489,6 +3548,15 @@ class Store:
                     recorded = document.get("messages")
                     if isinstance(recorded, list):
                         messages = project_messages(recorded)
+                        # While a run is open the library has not saved the user
+                        # turn yet. Surface that MessageRow so a reload keeps it.
+                        if any(str(run.get("status") or "") == "running" for run in runs):
+                            seen = {str(item.get("id") or "") for item in messages}
+                            for item in row_messages:
+                                item_id = str(item.get("id") or "")
+                                if item_id and item_id not in seen and item.get("role") == "user":
+                                    messages.append(item)
+                                    seen.add(item_id)
                     shared = document.get("state")
                     if isinstance(shared, dict) and shared:
                         state = shared
@@ -3520,8 +3588,13 @@ class Store:
         text: str,
         *,
         archive: bool = False,
+        message_id: str | None = None,
     ) -> dict[str, Any]:
-        """Record the user message (unless archive) and open a running run."""
+        """Record the user message (unless archive) and open a running run.
+
+        ``message_id`` is the client AG-UI message id when present so the
+        snapshot row at run start and the library save keep one row for that id.
+        """
 
         def write(db: Session) -> dict[str, Any]:
             chat = db.get(SessionRow, session_id)
@@ -3537,7 +3610,7 @@ class Store:
                 raise Conflict("A reply is already in progress.")
             created = now()
             actor = {"kind": "user", "id": "local"}
-            message_id = None
+            stored_message_id = None
             events: list[dict[str, Any]] = []
             if archive:
                 db.add(
@@ -3556,10 +3629,10 @@ class Store:
                 cleaned = text.strip()
                 if not cleaned:
                     raise Rejected("A user message is required.")
-                message_id = guid()
+                stored_message_id = (message_id or "").strip() or guid()
                 db.add(
                     MessageRow(
-                        id=message_id,
+                        id=stored_message_id,
                         session_id=session_id,
                         role="user",
                         body=cleaned,
@@ -3584,7 +3657,11 @@ class Store:
                         db,
                         stream_id=f"session:{session_id}",
                         event_type="message.created",
-                        payload={"message_id": message_id, "role": "user", "text": cleaned},
+                        payload={
+                            "message_id": stored_message_id,
+                            "role": "user",
+                            "text": cleaned,
+                        },
                         channel_id=chat.channel_id,
                         session_id=session_id,
                         actor=actor,
@@ -3604,12 +3681,20 @@ class Store:
             )
             return {
                 "run_id": run_id,
-                "message_id": message_id,
+                "message_id": stored_message_id,
                 "session_id": session_id,
                 "events": events,
             }
 
         return self._write(write)
+
+    def session_exists(self, session_id: str) -> bool:
+        """True when this chat GUID is still in the database."""
+
+        def read(db: Session) -> bool:
+            return db.get(SessionRow, session_id) is not None
+
+        return self._read(read)
 
     def arm_archive(self, session_id: str, run_id: str) -> dict[str, Any]:
         """Mark the chat as archiving and return the run id for the AG-UI wrap-up."""

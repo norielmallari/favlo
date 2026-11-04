@@ -18,7 +18,7 @@ METADATA_DIR = ".favlo_metadata"
 
 KIND_SUFFIXES = {
     "image": {".png", ".jpg", ".jpeg", ".webp"},
-    "audio": {".mp3"},
+    "audio": {".mp3", ".wav"},
     "video": {".mp4"},
 }
 

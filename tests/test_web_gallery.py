@@ -1070,7 +1070,8 @@ def test_selection_announcement_only_when_path_changes() -> None:
         {"role": "assistant", "content": "ok"},
     ]
     assert announced_selection_from_history(history) == "horse.png"
-    assert announced_selection_from_history([{"role": "user", "content": prior}]) is None
+    assert announced_selection_from_history([{"role": "user", "content": prior}]) == "horse.png"
+    assert announced_selection_from_history([{"role": "user", "content": "show this"}]) is None
     # Legacy developer/system rows still count.
     assert announced_selection_from_history(
         [{"role": "developer", "content": prior}]
@@ -1132,17 +1133,36 @@ def test_silent_server_cue_is_a_fenced_host_snapshot_row(tmp_path: Path) -> None
         store.close()
 
 
-def test_selection_cue_is_a_fenced_host_snapshot_row(tmp_path: Path) -> None:
-    from web_api.agui import _with_selection_cue
-    from web_api.gallery_tools import selection_cue
-    from web_api.host_cues import fence_cue
+def _placement(path: str | None) -> dict:
+    selection = None if path is None else {"kind": "file", "path": path}
+    return {
+        "favlo_workspace": {
+            "version": 1,
+            "guide": "gallery",
+            "elements": [],
+            "selection": selection,
+        }
+    }
+
+
+def test_selection_metadata_rides_the_model_suffix(tmp_path: Path) -> None:
+    from agent_framework_ag_ui._agent_run import _split_service_session_input
+
+    from web_api.agui import _images, _with_selection_cue
+    from web_api.gallery_metadata import prompt_text, read_sidecar
+    from web_api.snapshots import project_messages
 
     root = Path(_loc(tmp_path, "cue-root"))
     (root / "horse.png").write_bytes(PNG)
+    (root / "zebra.png").write_bytes(PNG)
     meta = root / ".favlo_metadata"
     meta.mkdir()
     (meta / "horse.png.json").write_text(
         '{"version":1,"filename":"horse.png","kind":"image","description":"A painted horse."}\n',
+        encoding="utf-8",
+    )
+    (meta / "zebra.png.json").write_text(
+        '{"version":1,"filename":"zebra.png","kind":"image","description":"A striped zebra."}\n',
         encoding="utf-8",
     )
     store = Store(tmp_path / "app.db")
@@ -1158,33 +1178,38 @@ def test_selection_cue_is_a_fenced_host_snapshot_row(tmp_path: Path) -> None:
             },
         )
         thread_id = str(workspace["session_id"])
-        store.save_agui_state(
-            thread_id,
-            {
-                "favlo_workspace": {
-                    "version": 1,
-                    "guide": "gallery",
-                    "elements": [],
-                    "selection": {"path": "horse.png"},
-                }
-            },
-        )
+        store.save_agui_state(thread_id, _placement("horse.png"))
         incoming = [{"id": "u1", "role": "user", "content": "Show the meadow"}]
-        out = _with_selection_cue(store, thread_id, incoming)
-        assert out == incoming
-        assert out[0]["content"] == "Show the meadow"
-        document = store.thread_snapshot("favlo", thread_id)
-        assert document is not None
-        messages = document["messages"]
-        assert len(messages) == 1
-        assert messages[0]["role"] == "user"
-        assert messages[0]["content"] == fence_cue(
-            selection_cue("horse.png", "A painted horse.")
+        zebra = read_sidecar(root, "zebra.png")
+        assert zebra is not None
+        out, fresh = _with_selection_cue(store, thread_id, incoming, _placement("zebra.png"))
+        assert fresh == "zebra.png"
+        assert incoming[0]["content"] == "Show the meadow"
+        assert out[0]["content"].startswith("Show the meadow")
+        assert "zebra.png" in out[0]["content"]
+        assert prompt_text(zebra) in out[0]["content"]
+        assert "horse.png" not in out[0]["content"]
+        stored = [{"id": "greet", "role": "assistant", "content": "Welcome."}]
+        suffix, _full = _split_service_session_input(stored, out)
+        assert len(suffix) == 1
+        assert "A striped zebra." in suffix[0]["content"]
+        pixels = _images(store, thread_id, f"Show the meadow\n{fresh}", [])
+        assert pixels and pixels[0][1] == "image/png"
+        shown = project_messages([*stored, suffix[0]])
+        assert shown[-1]["body"] == "Show the meadow"
+        assert "zebra" not in shown[-1]["body"]
+        store.save_thread_snapshot(
+            "favlo",
+            thread_id,
+            {"messages": [*stored, suffix[0]], "state": None, "interrupt": None, "session_state": None},
         )
-        assert messages[0]["metadata"]["favlo"]["ui"] == "hidden"
-        again = _with_selection_cue(store, thread_id, incoming)
-        assert again == incoming
-        assert len(store.thread_snapshot("favlo", thread_id)["messages"]) == 1
+        again, skipped = _with_selection_cue(store, thread_id, incoming, _placement("zebra.png"))
+        assert skipped is None
+        assert again[0]["content"] == "Show the meadow"
+        assert _images(store, thread_id, "Show the meadow", [suffix[0]]) == []
+        missing, none = _with_selection_cue(store, thread_id, incoming, None)
+        assert none is None
+        assert missing[0]["content"] == "Show the meadow"
     finally:
         store.close()
 

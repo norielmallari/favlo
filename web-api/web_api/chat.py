@@ -428,7 +428,9 @@ async def stream_reply(
             payload["hash"] = hash_of(payload)
             store.freeze_definition(session_id, payload)
             frozen = payload
-        client = open_chat_client(model, base_url)
+        from web_api.media_delivery import media_middleware
+
+        client = open_chat_client(model, base_url, middleware=media_middleware())
         if tool_list:
             client.function_invocation_configuration["max_iterations"] = int(
                 (frozen or {}).get("max_iterations") or 6

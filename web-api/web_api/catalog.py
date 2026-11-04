@@ -12,7 +12,7 @@ ELEMENTS: dict[str, dict[str, Any]] = {
         "max": 1,
         "agent_props": ["fit"],
         "local_props": [],
-        "gestures": ["download", "add_to_chat"],
+        "gestures": ["download", "add_to_chat", "delete"],
         "props": {
             "type": "object",
             "additionalProperties": False,

@@ -42,6 +42,7 @@ def project_messages(messages: list[Any]) -> list[dict[str, Any]]:
             pending_calls.extend(_tool_calls(raw))
             continue
         if role == "user":
+            body = _typed_text(body)
             if not body.strip():
                 # Silent server turns keep an empty user row for the protocol only.
                 continue
@@ -135,6 +136,16 @@ def _trace(
     if body.strip():
         parts.append({"kind": "reply", "text": body})
     return parts
+
+
+def _typed_text(body: str) -> str:
+    """Drop a selection fence riding on the user message. The model still receives it."""
+    from web_api.host_cues import FENCE_OPEN
+
+    start = body.find(FENCE_OPEN)
+    if start == -1:
+        return body
+    return body[:start].strip()
 
 
 def message_text(content: Any) -> str:

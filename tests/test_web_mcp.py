@@ -156,7 +156,9 @@ def test_media_instructions_require_a_listed_model_id() -> None:
     assert "Match the generate tool to what the user asked for" in INSTRUCTIONS
     assert "Do not offer or insist on video when they asked for an image" in INSTRUCTIONS
     assert "Repeat the returned session id" in INSTRUCTIONS
-    assert "returns when the file is ready" in INSTRUCTIONS
+    assert "file is still being made" in INSTRUCTIONS
+    assert "file is not ready" in INSTRUCTIONS
+    assert "media_status" in INSTRUCTIONS
     assert "Do not paste the JSON" in INSTRUCTIONS
     assert "tell the user you are generating" in INSTRUCTIONS
     described = _description(
@@ -516,7 +518,7 @@ def test_a_framework_server_keeps_the_agents_own_client() -> None:
     assert seen["arguments"] == {"query": "tea", "client": FAVLO_AGENT_ID}
 
 
-def _peer(tmp_path: Path, tasks_get: str) -> str:
+def _peer(tmp_path: Path, tasks_get: str, tool: str = "echo") -> str:
     script = tmp_path / "peer.py"
     script.write_text(
         "import json, sys\n"
@@ -549,7 +551,7 @@ def _peer(tmp_path: Path, tasks_get: str) -> str:
         "                     'requested': '2025-11-25'}})\n"
         "    elif method == 'tools/list':\n"
         "        reply(msg, {'tools': [{\n"
-        "            'name': 'echo', 'description': 'Echo.',\n"
+        f"            'name': {tool!r}, 'description': 'Echo.',\n"
         "            'inputSchema': {'type': 'object',\n"
         "                'properties': {'text': {'type': 'string'}}}}],\n"
         "            'resultType': 'complete', 'ttlMs': 0,\n"
@@ -612,6 +614,44 @@ def test_a_task_result_returns_in_the_tool_call(tmp_path: Path) -> None:
 
     text = asyncio.run(run())
     assert text == "ready"
+
+
+def test_a_generate_tool_returns_the_task_id(tmp_path: Path) -> None:
+    from web_api.mcp_tools import _mcp_client, _StdioServer
+
+    command = _peer(
+        tmp_path,
+        "import time; time.sleep(30)",
+        tool="generate_image",
+    )
+
+    async def run() -> str:
+        client = _mcp_client({"transport": "stdio", "command": command})
+        assert client is not None
+        server = _StdioServer(
+            FAVLO_AGENT_ID,
+            client,
+            name="Peer",
+            tool_name_prefix="peer",
+            approval_mode="never_require",
+            allowed_tools=["generate_image"],
+            load_prompts=False,
+        )
+        async with client:
+            await server.connect()
+            result = await asyncio.wait_for(
+                server.call_tool("generate_image", prompt="a horse"),
+                2,
+            )
+            await server.close()
+        return _shown(result)
+
+    text = asyncio.run(run())
+    assert "task-1" in text
+    assert "not ready" in text
+    assert "no favlo:// link yet" in text
+    assert "Do not call another tool" in text
+    assert "media_status" not in text
 
 
 class _ScopedClient:

@@ -90,6 +90,7 @@ def open_chat_client(
     model: str,
     base_url: str,
     async_client: Any | None = None,
+    middleware: Any | None = None,
 ) -> Any:
     """Chat client that sends reasoning back on the next request."""
     kwargs: dict[str, Any] = {
@@ -99,6 +100,8 @@ def open_chat_client(
     }
     if async_client is not None:
         kwargs["async_client"] = async_client
+    if middleware is not None:
+        kwargs["middleware"] = middleware
     client = _chat_client_type()(**kwargs)
     if async_client is None:
         http = getattr(client, "client", None)

@@ -30,7 +30,8 @@ INSTRUCTIONS = (
     "captions or other sidecar fields, or before an edit. "
     "Call "
     f"{qualified(SOURCE, 'load_image')} for one path when the sidecar description is not enough "
-    "and the model must see the pixels. Do not load an image only because it is selected. "
+    "and the model must see the pixels. When the selected path changed, that user message "
+    "already includes the sidecar and the image. Do not load an image only because it is selected. "
     "Always pass selection for one filmstrip path when the strip has items. "
     "Do not invent media descriptions; Favlo's index job writes metadata under "
     ".favlo_metadata beside the media (for example Albums/.favlo_metadata/media.mp3.json). "
@@ -38,9 +39,12 @@ INSTRUCTIONS = (
     f"{qualified(SOURCE, 'update_metadata')} with that image's relative path. "
     "Send only the fields they want changed. "
     "This image or this clip means the selected media path on the turn, when one is named. "
-    "After an image generate tool finishes, call "
-    f"{qualified(SOURCE, 'write_image')} with the favlo:// URI as source and a path "
-    "beside the selected media or at the folder root. "
+    "An image generate tool returns a task id and the file is not ready. "
+    "Reply in that same turn. Do not call media_status on this turn. "
+    "The chat shows the favlo:// link when the file is ready, and the host "
+    "writes that file into the gallery folder and filmstrip. "
+    f"Call {qualified(SOURCE, 'write_image')} only when the person asks to save "
+    "a chat link under a different path. "
     "Folder mutate tools and "
     f"{qualified(SOURCE, 'search_unlike_media')} are available without a load step. "
     "The gallery color scheme is favlo, rose-pine, or catppuccin. Call "
@@ -55,7 +59,7 @@ _NONE_SELECTED = "No media is selected on this turn."
 
 
 def selection_cue(path: str | None, description: str = "") -> str:
-    """Path cue and optional vision description for a newly selected image."""
+    """Path cue and sidecar metadata text for a newly selected image."""
     cleaned = (path or "").strip()
     if not cleaned:
         return _NONE_SELECTED
@@ -109,7 +113,7 @@ def announced_selection_from_history(messages: list[Any] | None) -> str | None:
         host = host_cue_text(item)
         if host is not None:
             text = host
-        elif role in {"developer", "system"}:
+        elif role in {"user", "developer", "system"}:
             content = item.get("content")
             if isinstance(content, str):
                 text = content

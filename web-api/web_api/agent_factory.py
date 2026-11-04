@@ -42,7 +42,9 @@ def from_definition(
         agent_id=str(agent_id) if agent_id else None,
         mcp_tools=mcp_tools or [],
     )
-    client = open_chat_client(model, base_url)
+    from web_api.media_delivery import media_middleware
+
+    client = open_chat_client(model, base_url, middleware=media_middleware())
     if tool_list:
         client.function_invocation_configuration["max_iterations"] = int(
             definition.get("max_iterations") or 6

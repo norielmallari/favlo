@@ -140,8 +140,8 @@ class LocalFolder:
         expected_revision: str | None = None,
     ) -> dict[str, Any]:
         path = self.resolve(relative, create=True)
-        if path.suffix.lower() not in _IMAGES:
-            raise Rejected("The gallery stores png, jpg, jpeg, or webp files.")
+        if path.suffix.lower() not in _MEDIA:
+            raise Rejected("The gallery stores png, jpg, jpeg, webp, mp3, wav, or mp4 files.")
         if path.exists() and path.is_dir():
             raise Rejected("That path is a folder.")
         parent = path.parent
@@ -417,6 +417,7 @@ def _media_type(suffix: str) -> str:
         ".jpeg": "image/jpeg",
         ".webp": "image/webp",
         ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
         ".mp4": "video/mp4",
     }
     return mapping.get(suffix.lower(), "application/octet-stream")

@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "web-api"))
 
 from web_api.api import create_app  # noqa: E402
-from web_api.placement import initial_for, retarget_media, validate  # noqa: E402
+from web_api.placement import append_filmstrip_path, initial_for, retarget_media, validate  # noqa: E402
 from web_api.store import Store  # noqa: E402
 
 PNG = bytes.fromhex(
@@ -390,6 +390,20 @@ def test_workspace_file_serves_relative_media(client: TestClient, tmp_path: Path
     assert response.status_code == 200
     assert response.content == PNG
     assert "image/png" in response.headers["content-type"]
+
+
+def test_append_filmstrip_path_adds_and_selects() -> None:
+    state = initial_for("gallery")
+    first = append_filmstrip_path(state, "new.png")
+    assert first is not None
+    assert first["favlo_workspace"]["selection"]["path"] == "new.png"
+    items = first["favlo_workspace"]["elements"][1]["props"]["items"]
+    assert items[-1]["path"] == "new.png"
+    again = append_filmstrip_path(first, "new.png")
+    assert again is not None
+    assert [item["path"] for item in again["favlo_workspace"]["elements"][1]["props"]["items"]].count(
+        "new.png"
+    ) == 1
 
 
 def test_retarget_media_rewrites_or_drops_one_path() -> None:

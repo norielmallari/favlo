@@ -55,12 +55,15 @@ INSTRUCTIONS = (
     "Pass that same id as session on later set and generate calls. "
     "Omit session to use the registry defaults. "
     "An omitted seed is chosen at random. "
-    "The generate result includes the parameters used, including the seed and the prompts. "
     "read_media(name) returns that record. "
     "When you call a generate tool, tell the user you are generating "
     "that image, video, music, or voice. "
-    "The tool returns when the file is ready. "
-    "Include each favlo:// link from the result. "
+    "The tool returns a task id while the file is still being made. "
+    "That result says the file is not ready and names the id. "
+    "There is no favlo:// link in it. "
+    "Reply to the user in that same turn. "
+    "Do not call media_status, read_media, or another tool after that generate. "
+    "The chat shows each favlo:// link when the file is ready. "
     "Do not paste the JSON, the tool name, or a file id. "
     "When the result says the tool failed or names an unknown model, "
     "call the matching list and set tools, repeat the session id, "
@@ -193,7 +196,7 @@ def _memory_arguments(tool_name: str, arguments: dict[str, Any], agent_id: str) 
 
 
 def _mcp_client(server: dict[str, Any]) -> Any | None:
-    """A caller-owned client whose ``call_tool`` resolves a task result."""
+    """A caller-owned client. ``call_tool`` resolves a task. A generate tool returns the task id."""
     from fastmcp_tasks.client import TasksClientExtension
     from mcp import Client
 
@@ -423,6 +426,9 @@ class _HttpServer(MCPStreamableHTTPTool):
 
     async def call_tool(self, tool_name: str, **kwargs: Any) -> Any:
         arguments = _memory_arguments(tool_name, kwargs, self._agent_id)
+        started = await _generate_task(self, tool_name, arguments)
+        if started is not None:
+            return started
         return await super().call_tool(tool_name, **arguments)
 
 
@@ -442,7 +448,47 @@ class _StdioServer(MCPStdioTool):
 
     async def call_tool(self, tool_name: str, **kwargs: Any) -> Any:
         arguments = _memory_arguments(tool_name, kwargs, self._agent_id)
+        started = await _generate_task(self, tool_name, arguments)
+        if started is not None:
+            return started
         return await super().call_tool(tool_name, **arguments)
+
+
+async def _generate_task(server: Any, tool_name: str, arguments: dict[str, Any]) -> str | None:
+    """Return a generate task id. Other tools stay on ``Client.call_tool``.
+
+    ``session.call_tool(..., allow_claimed=True)`` is the early return.
+    ``Client.call_tool`` would poll ``tasks/get`` until the file exists.
+    """
+    if tool_name not in GENERATE:
+        return None
+    client = getattr(server, "owned_client", None)
+    if client is None:
+        return None
+    from fastmcp_tasks.client_models import ClientCreateTaskResult
+
+    filtered, meta = server._prepare_call_kwargs(tool_name, arguments)
+    raw = await client.session.call_tool(
+        tool_name,
+        arguments=filtered or None,
+        meta=meta if isinstance(meta, dict) else None,
+        allow_claimed=True,
+    )
+    if not isinstance(raw, ClientCreateTaskResult):
+        parser = server.parse_tool_results or server._parse_tool_result_from_mcp
+        return parser(raw)
+    task_id = str(raw.task_id)
+    target = getattr(client, "server", None)
+    if isinstance(target, str):
+        from web_api.media_delivery import kind_for_tool, note_task
+
+        note_task(task_id, target, kind=kind_for_tool(tool_name))
+    return (
+        f"Task {task_id} is working. The file is not ready. "
+        "There is no favlo:// link yet. "
+        "Reply to the user now. Do not call another tool on this turn. "
+        "The chat shows the file when it is ready."
+    )
 
 
 def _description(row: dict[str, Any], exposed: str | None = None) -> str:
