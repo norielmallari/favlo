@@ -43,3 +43,21 @@ The banner prints the loaded plane, MTP, thinking, and vision.
 ## Corrections
 
 Later finds are appended here. The sections above stay as committed.
+
+### 4 November 2026 — vision × thinking × store
+
+`--store off` is the harness default. `--store on` sends `store` true for the ledger and the contract. Vision stayed on. MTP stayed off. Prefill summed between 299.89 and 316.78 tok/s. Decode summed between 14.16 and 14.36 tok/s. A search the same day did not find that table. Queries: "299.89 OR 315.96 OR 316.78 OR 301.51 Qwen3.8-27B coding agent vision store tok/s", and "Qwen3.8-27B coding agent ledger vision horse store on M5 Pro 48GB". Closest overlaps were [an RTX PRO 6000 coding-agent decode](https://safaia.net/hanxiao/Qwen3.8-27B-abliterated-AWQ-SGLang-DFlash2-RTX-PRO-6000) at about 220 tok/s and [an NVFP4 vision build](https://huggingface.co/dbrasdasilva/Qwen3.8-27B-Text-NVFP4-MTP/raw/main/README.md) at about 77 tok/s decode with MTP off. Neither is this `fp8_e4m3` table.
+
+```text
+uv run python -m harness.coding --model qwen38-27b --vision --thinking on --store off
+uv run python -m harness.coding --model qwen38-27b --vision --thinking off --store off
+uv run python -m harness.coding --model qwen38-27b --vision --thinking on --store on
+uv run python -m harness.coding --model qwen38-27b --vision --thinking off --store on
+```
+
+| Thinking | Store | Result | Prefill | Decode |
+|---|---|---|---|---|
+| on | off | pass | 299.89 tok/s (2813 tok in 9.38 s) | 14.24 tok/s (781 tok in 54.83 s) |
+| off | off | pass | 315.96 tok/s (2831 tok in 8.96 s) | 14.33 tok/s (811 tok in 56.61 s) |
+| on | on | pass | 316.78 tok/s (2775 tok in 8.76 s) | 14.36 tok/s (698 tok in 48.61 s) |
+| off | on | pass | 301.51 tok/s (2795 tok in 9.27 s) | 14.16 tok/s (468 tok in 33.05 s) |
