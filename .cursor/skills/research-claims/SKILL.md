@@ -1,6 +1,6 @@
 ---
 name: research-claims
-description: Search public literature and write a Favlo research claim for one pipeline. Use when a needle run or a coding-agent run prints a prefill and decode rate, and when the user asks to document research claims, check an implementation against published work, or add a row to RESEARCH.md. File the printed rate when that plane, MTP setting, and card are not already a row.
+description: Search public literature and write a Favlo research claim for one pipeline. Use when a needle run, a coding-agent run, or a synthetic-prompt run prints a prefill and decode rate, and when the user asks to document research claims, check an implementation against published work, or add a row to RESEARCH.md. File the printed rate when that plane, MTP setting, length, and card are not already a row.
 ---
 
 # Research claims
@@ -13,7 +13,7 @@ One pipeline. Do not edit another pipeline's package, shaders, tests, or docs. [
 
 ## After a printed rate
 
-A needle run or a coding-agent run that exits 0 and prints a prefill sum and a decode sum is a candidate. Read [RESEARCH.md](../../../RESEARCH.md). When that pipeline, plane, MTP setting, mode, length, depth, thinking card, and vision flag are already a row, stop. Otherwise search and file in the same turn. Asking only to run the harness is enough. Page mode is a long-transcript rate and is filed. Retrieve mode is the retrieval table.
+A needle run, a coding-agent run, or `python -m harness.synthetic` that exits 0 and prints a prefill sum and a decode sum is a candidate. The synthetic prompt's end-to-end line is those two clocks added. File it on its own row for that plane, MTP setting, thinking card, and prompt length. Read [RESEARCH.md](../../../RESEARCH.md). When that pipeline, plane, MTP setting, mode, length, depth, thinking card, and vision flag are already a row, stop. Otherwise search and file in the same turn. Asking only to run the harness is enough. Page mode is a long-transcript rate and is filed. Retrieve mode is the retrieval table.
 
 ## Search
 
@@ -75,3 +75,9 @@ The finished transcript has to fit the served window. The file is replayed insid
 `python -m harness.coding` is the production-readiness run. Exit 0 means `ledger.py` `collect` returns 6, 0, and -6, a later request loaded the prefix from disk, and the chat contract held. Which tools the model called is not the result. The run is a recorded rate. It is not a retrieval claim.
 
 The claim table is one row per plane, MTP setting, thinking card, and vision flag: pass or fail, the prefill sum, and the decode sum. The command carries `--mtp`, `--thinking`, `--vision` when the pipeline embeds an image, and the model id. The harness prints the loaded plane, MTP, thinking, and vision. A pipeline whose sampling lists both `thinking` and `instruct` has two rows, thinking first. A row that omits the plane, or that was measured on another plane, does not fill this table. The "not found" sentence names this table.
+
+## Synthetic prompt
+
+`python -m harness.synthetic` sends one user message of an exact prompt length and stops. The default lengths are 512 and 10000. `--decode` caps the sampled tokens at 128. Exit 0 means each measured prompt length matched the server and the prefill was a cache miss. The run is a recorded rate. It is not a coding-agent row and not a needle row.
+
+The claim table is one row per plane, MTP setting, thinking card, and prompt length: the prefill sum, the decode sum, and the end-to-end sum. The end-to-end sum is prefill tokens plus decode tokens over those two clocks. The command carries `--tokens`, `--decode`, `--mtp`, `--thinking`, and the model id. The harness prints the loaded plane, MTP, and thinking. A 512-token row is the local-engine comparison. A 10000-token row is the hosted-API comparison. The "not found" sentence names this table.

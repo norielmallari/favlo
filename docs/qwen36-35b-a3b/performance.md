@@ -211,3 +211,16 @@ The run used two requests and stopped at 611 prompt tokens.
 | 2 | 611 | hit 591 | 74.87 tok/s (20 tok in 0.27 s) | 38.60 tok/s (60 tok in 1.55 s) |
 
 The summary is prefill 134.29 tok/s (419 tok in 3.12 s) and decode 34.19 tok/s (252 tok in 7.37 s).
+
+## Synthetic prompt
+
+On 4 November 2026 the command ran on an M5 Pro with 48 GB, on `Qwen3.6-35B-A3B-fp8-e20`, with the key/value cache at `fp8_e4m3` and MTP off. The harness printed `kv fp8_e4m3 mtp off depth 3 thinking off decode 128`. Each prompt was one user message, a cache miss, and the instruct card. Decode was capped at 128 tokens. The end-to-end column adds the prefill tokens to the decode tokens and adds those two clocks.
+
+```text
+uv run python -m harness.synthetic --model qwen36-35b-a3b
+```
+
+| Prompt tokens | Cache | Prefill | Decode | End to end |
+|---:|---|---|---|---|
+| 512 | miss | 825.26 tok/s (512 tok in 0.62 s) | 67.97 tok/s (128 tok in 1.88 s) | 256.00 tok/s (640 tok in 2.50 s) |
+| 10000 | miss | 1272.73 tok/s (10000 tok in 7.86 s) | 67.79 tok/s (128 tok in 1.89 s) | 1038.77 tok/s (10128 tok in 9.75 s) |

@@ -18,6 +18,7 @@ python -m harness.server run -- <command>
 ```bash
 python -m harness --model <id>
 python -m harness.coding --model <id>
+python -m harness.synthetic --model <id>
 python -m harness.worktree --model <id>
 ```
 
@@ -89,6 +90,14 @@ python -m harness.needle --model <id> [--tokens 65536] [--depth 0.5] [--seed 0] 
 ```
 
 Reuses the listener on `127.0.0.1:8129`. Python writes `haystack.txt` before the agent starts. The file is repeated ordinary sentences and one line, `The special magic number is <digits>.` `--tokens` is the exact length of that file under the model tokenizer. The default is 65536. `--depth` is 0 at the first line and 1 at the last. The default is the middle. `--seed` fixes the number and the filler. The same seed, length, and depth write the same file. A Microsoft Agent Framework agent has one tool, the coding `read_file` window, and is asked for the number. The needle tool drops `limit`, so each read is a full window. Page mode replies only after a read shows the magic-number line. A page-mode miss or a transcript that does not fit starts a fresh turn at the last `next_offset`. `store` is false, so a later read replays the windows already returned. `--thinking off` is the default and sets `reasoning.effort` to `none`. `--thinking on` sets it to `medium`. `--mtp off` is the default. `--mode page` is the default. Exit 0 means the reply contains the number and one read returned that line. `--mode retrieve` tells the agent to follow `next_offset` until a read has none, and exit 0 also requires that the last window starts after the needle line. An empty page is not that window. A transcript longer than the served window exits 1 with `the transcript did not fit`. The banner prints the loaded key/value plane. Prints each request's prefill and decode line. A pass that prints those rates is filed with the research-claims skill in the same turn. Does not take the machine lock. Not part of `pytest`. `tests/test_needle_harness.py` checks the file and the grade without a listener.
+
+### Synthetic prompt
+
+```bash
+python -m harness.synthetic --model <id> [--tokens 512 --tokens 10000] [--decode 128] [--thinking on|off]
+```
+
+Reuses the listener on `127.0.0.1:8129`. A Microsoft Agent Framework agent sends one user message and stops. The message is ordinary sentences under a length label, and it encodes to exactly `--tokens` under that model's chat template. The default lengths are 512 and 10000. `--decode` is the maximum sampled tokens, 128 when omitted. `--thinking off` is the default and selects the instruct card with `reasoning.effort` `none`. `--thinking on` selects the thinking card with `reasoning.effort` `medium`. `--mtp off` is the default. A warmup prompt of 64 tokens runs first, with a 16-token cap, so the measured prompts are not the load. Each measured prompt starts with its own label, so the prefill is a cache miss. Sampling stays on the card. The end-to-end line is the server's prefill tokens plus its decode tokens, over those two clocks. Exit 0 means each measured prompt length matched and the prefill did not reuse a prefix. A pass that prints the end-to-end rate is filed with the research-claims skill in the same turn. Does not take the machine lock. Not part of `pytest`. `tests/test_synthetic_harness.py` checks the prompt and the rate line without a listener.
 
 ### Worktree summarization
 

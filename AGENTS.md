@@ -61,7 +61,7 @@ A pipeline reads `memory.budget()` when it opens and shrinks the one knob it own
 
 A media harness does not take the machine lock. It calls the listener. A media harness uses one `favlo serve` on `127.0.0.1:8129`. That is `harness.image`, `harness.image_smoke_agent`, `harness.image_persona`, `harness.image_attachment`, `harness.video_smoke_agent`, `harness.video_ti2v_agent`, `harness.video_quality_agent`, `harness.media_pipeline`, `harness.language_pipeline`, `harness.music_smoke_agent`, `harness.music_long_agent`, `harness.voice_smoke_agent`, `harness.embeddings_agent`, and `harness.memory_agent`. `uv run python -m harness.server run -- <command>` opens that listener, runs the command, and closes the session. `uv run python -m harness.server status` prints `listening` or `down`. An existing listener is reused and left running. A listener this session started is stopped with SIGTERM when the command exits. The daemon forwards that signal to each pipeline process. These commands do not bind a second port. The same session is what those modules call, so running one of them directly follows this rule.
 
-`uv run python -m harness`, `uv run python -m harness.coding`, `uv run python -m harness.needle`, `uv run python -m harness.worktree`, `uv run python -m harness.coherence`, and `uv run python -m harness.benchmarks` use that same listener through `uv run python -m favlo.smoke_lock attach`. They do not take the machine lock. When the pipeline they name is resident and its sources are newer than that worker, the model is unloaded before the run. A prefix check unloads the resident model after the first turn so the next turn loads the prefix from disk. The listener stays up.
+`uv run python -m harness`, `uv run python -m harness.coding`, `uv run python -m harness.needle`, `uv run python -m harness.synthetic`, `uv run python -m harness.worktree`, `uv run python -m harness.coherence`, and `uv run python -m harness.benchmarks` use that same listener through `uv run python -m favlo.smoke_lock attach`. They do not take the machine lock. When the pipeline they name is resident and its sources are newer than that worker, the model is unloaded before the run. A prefix check unloads the resident model after the first turn so the next turn loads the prefix from disk. The listener stays up.
 
 `harness.chat_agent` uses that same listener and does not take the machine lock.
 
@@ -74,7 +74,7 @@ uv run python -m harness.coding --model qwen36-35b-a3b --vision --thinking on
 uv run python -m harness.coding --model qwen36-35b-a3b --vision --thinking off
 ```
 
-A needle run or a coding-agent run that prints a prefill sum and a decode sum is a measured rate. Load [research-claims](.cursor/skills/research-claims/SKILL.md) in that same turn and file the row when [RESEARCH.md](RESEARCH.md) does not already hold that plane, MTP setting, length, depth, mode, and card. Asking to run the harness is enough.
+A needle run, a coding-agent run, or a synthetic-prompt run that prints a prefill sum and a decode sum is a measured rate. The synthetic prompt also prints an end-to-end rate, the sum of those two clocks. Load [research-claims](.cursor/skills/research-claims/SKILL.md) in that same turn and file the row when [RESEARCH.md](RESEARCH.md) does not already hold that plane, MTP setting, length, depth, mode, and card. Asking to run the harness is enough.
 
 ## Agents
 
