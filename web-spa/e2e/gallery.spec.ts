@@ -50,6 +50,28 @@ test('a gallery guide binds a folder, places a strip, and browses without AG-UI'
       expect(aguiCount).toBe(beforeBind);
     });
 
+    await step('workspace header menu and Open Favlo chat', async () => {
+      await expect(gallery).toHaveTitle(`${name} — Gallery`);
+      const title = gallery.getByRole('button', { name: `${name}, Gallery workspace menu` });
+      await onScreen(title);
+      await title.click();
+      await onScreen(gallery.getByRole('menuitem', { name: 'Skills' }));
+      await onScreen(gallery.getByRole('menuitem', { name: 'Appearance' }));
+      await onScreen(gallery.getByRole('menuitem', { name: 'Open Favlo chat' }));
+      await onScreen(gallery.getByRole('menuitem', { name: 'Delete workspace' }));
+      await gallery.getByRole('menuitem', { name: 'Appearance' }).click();
+      await expect(gallery.getByRole('menu', { name: 'Appearance' })).toBeVisible();
+      await gallery.keyboard.press('Escape');
+      await title.click();
+      const favlo = gallery.getByRole('menuitem', { name: 'Open Favlo chat' });
+      await onScreen(favlo);
+      const popupPromise = gallery.waitForEvent('popup');
+      await favlo.click();
+      const chat = await popupPromise;
+      await expect(chat).toHaveURL(/^http:\/\/127\.0\.0\.1:8012\/?/);
+      await chat.close();
+    });
+
     await step('opening filmstrip shows the images', async () => {
       const zebra = gallery.getByRole('button', { name: 'zebra.png', exact: true });
       await expect(zebra).toBeVisible();
@@ -97,7 +119,7 @@ test('a gallery guide binds a folder, places a strip, and browses without AG-UI'
     await step('reload restores strip without AG-UI', async () => {
       const beforeReload = aguiCount;
       await gallery.reload();
-      await expect(gallery.getByRole('heading', { name })).toBeVisible();
+      await expect(gallery.getByRole('button', { name: `${name}, Gallery workspace menu` })).toBeVisible();
       await expect(gallery.getByRole('button', { name: 'zebra.png', exact: true })).toHaveCount(0);
       await expect(gallery.getByRole('button', { name: 'horse.png', exact: true })).toBeVisible();
       expect(aguiCount).toBe(beforeReload);
@@ -163,7 +185,7 @@ function assertCaption(file: string) {
 }
 
 async function expectFits(page: Page) {
-  await onScreen(page.getByRole('button', { name: 'Favlo', exact: true }));
+  await onScreen(page.getByTestId('app-banner'));
   const overflow = await page.evaluate(
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
   );

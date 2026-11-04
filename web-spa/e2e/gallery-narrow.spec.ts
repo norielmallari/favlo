@@ -46,6 +46,24 @@ test('narrow gallery keeps preview, filmstrip, and chat in one view', async ({ p
       await onScreen(page.getByRole('button', { name: 'Send', exact: true }));
     });
 
+    await step('narrow title menu, Appearance, and Open Favlo chat stay on screen', async () => {
+      const title = page.getByRole('button', { name: `${name}, Gallery workspace menu` });
+      await onScreen(title);
+      await title.click();
+      await onScreen(page.getByRole('menuitem', { name: 'Skills' }));
+      await onScreen(page.getByRole('menuitem', { name: 'Appearance' }));
+      const remove = page.getByRole('menuitem', { name: 'Delete workspace' });
+      await onScreen(remove);
+      await page.getByRole('menuitem', { name: 'Appearance' }).click();
+      await expect(page.getByRole('menu', { name: 'Appearance' })).toBeVisible();
+      await onScreen(page.getByRole('menuitemradio', { name: 'Rosé Pine', exact: true }));
+      await page.keyboard.press('Escape');
+      await title.click();
+      await onScreen(page.getByRole('menuitem', { name: 'Open Favlo chat' }));
+      await page.keyboard.press('Escape');
+      await expect(page).toHaveTitle(`${name} — Gallery`);
+    });
+
     await step('select the second image and read its place', async () => {
       const horse = page.getByRole('button', { name: 'horse.png', exact: true });
       await onScreen(horse);

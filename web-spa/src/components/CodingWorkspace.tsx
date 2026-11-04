@@ -28,10 +28,9 @@ import {
   type ReplyStep,
 } from '@/components/chat-transcript';
 import { useAguiChat } from '@/components/use-agui-chat';
-import { BannerPortal } from '@/components/Frame';
 import { Composer } from '@/components/Composer';
 import { ReplyAlert } from '@/components/ReplyAlert';
-import { buttonRow, IconButton } from '@/components/IconButton';
+import { IconButton } from '@/components/IconButton';
 import { Modal } from '@/components/Modal';
 import { WorkspaceSkills, type WorkspaceSkill } from '@/components/WorkspaceSkills';
 import { readExpandTrace, workingLabel } from '@/components/expandTrace';
@@ -39,6 +38,7 @@ import { WorkingStatus } from '@/components/WorkingStatus';
 import { useTheme } from '@/theme/Theme';
 import { space, type as typeScale } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
+import { useRegisterWorkspaceChrome } from '@/workspace/workspace-chrome';
 
 type WorkspaceDetail = {
   id: string;
@@ -111,6 +111,10 @@ export function CodingWorkspace({
   const [status, setStatus] = useState<string | null>(null);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  useRegisterWorkspaceChrome({
+    openSkills: () => setSkillsOpen(true),
+    requestDelete: () => setConfirmDelete(true),
+  });
   const cursorRef = useRef(0);
   const seen = useRef(new Set<string>());
   const transcriptRef = useRef<ComponentRef<typeof ScrollView>>(null);
@@ -406,47 +410,6 @@ export function CodingWorkspace({
     }
   }
 
-  const skillsButton = (
-    <View style={{ marginRight: space[2] }}>
-      <IconButton
-        icon="book-open"
-        label="Skills"
-        onPress={() => setSkillsOpen(true)}
-        background={palette.surface}
-        border={palette.borderStrong}
-        color={palette.textPrimary}
-      />
-    </View>
-  );
-
-  const workspaceBar = (
-    <>
-      {onBack ? (
-        <IconButton
-          icon="arrow-left"
-          label="Back to channel"
-          onPress={onBack}
-          background={palette.surface}
-          border={palette.borderStrong}
-          color={palette.textPrimary}
-        />
-      ) : null}
-      <Text accessibilityRole="header" aria-level={2} style={textStyle('title', palette.textPrimary)}>
-        {detail?.name ?? 'Coding'}
-      </Text>
-      <Text style={textStyle('small', palette.textSecondary)}>Coding</Text>
-      {Platform.OS === 'web' ? null : skillsButton}
-      <IconButton
-        icon="trash-2"
-        label="Delete workspace"
-        onPress={() => setConfirmDelete(true)}
-        background={palette.surface}
-        border={palette.borderStrong}
-        color={palette.textPrimary}
-      />
-    </>
-  );
-
   return (
     <View
       accessibilityLabel="Coding workspace"
@@ -458,12 +421,6 @@ export function CodingWorkspace({
         ...(narrow && Platform.OS === 'web' ? { height: Math.max(320, height - 56), maxHeight: height - 56 } : null),
       }}
     >
-      {Platform.OS === 'web' ? <BannerPortal hostId="banner-actions">{skillsButton}</BannerPortal> : null}
-      {narrow ? (
-        <View style={[buttonRow, { padding: space[3], borderBottomWidth: 1, borderBottomColor: palette.border }]}>{workspaceBar}</View>
-      ) : (
-        <BannerPortal>{workspaceBar}</BannerPortal>
-      )}
       {notice ? (
         <Text
           accessibilityRole="alert"

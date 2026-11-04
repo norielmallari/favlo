@@ -46,7 +46,7 @@ export async function createGalleryWorkspace(
   await create.click();
   const workspace = await popupPromise;
   await expect(workspace).toHaveURL(/\/w\/.+/);
-  await expect(workspace.getByRole('heading', { name })).toBeVisible();
+  await expect(workspace.getByRole('button', { name: `${name}, Gallery workspace menu` })).toBeVisible();
   const list = page.getByLabel('Workspaces');
   if (await list.isVisible()) {
     await expect(list.getByTestId('workspace-creating').first()).toBeVisible();
@@ -60,7 +60,7 @@ export async function createGalleryWorkspace(
   const url = workspace.url();
   await workspace.close();
   await page.goto(url);
-  await expect(page.getByRole('heading', { name })).toBeVisible();
+  await expect(page.getByRole('button', { name: `${name}, Gallery workspace menu` })).toBeVisible();
   await expect(page.getByLabel('Gallery workspace', { exact: true })).toBeVisible();
   return page;
 }

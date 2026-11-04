@@ -1,13 +1,13 @@
 import { useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { Platform } from 'react-native';
 
 import { api } from '@/api/client';
 import { CodingWorkspace } from '@/components/CodingWorkspace';
-import { Frame } from '@/components/Frame';
-import { isGalleryScheme, type GalleryScheme } from '@/theme/gallery-schemes';
-import { GallerySchemeProvider } from '@/theme/Theme';
+import { isWorkspaceScheme, type WorkspaceScheme } from '@/theme/workspace-schemes';
+import { WorkspaceSchemeProvider } from '@/theme/Theme';
+import { workspaceAppForRenderer } from '@/workspace/workspace-apps';
 import { WorkspaceCreating } from '@/workspace/WorkspaceCreating';
+import { WorkspaceFrame } from '@/workspace/WorkspaceFrame';
 import { WorkspaceGone } from '@/workspace/WorkspaceGone';
 import { WorkspaceScreen } from '@/workspace/WorkspaceScreen';
 
@@ -28,7 +28,7 @@ export default function WorkspaceRoute() {
   const [agentName, setAgentName] = useState('Agent');
   const [missing, setMissing] = useState(false);
   const [gone, setGone] = useState(false);
-  const [scheme, setScheme] = useState<GalleryScheme>('rose-pine');
+  const [scheme, setScheme] = useState<WorkspaceScheme>('rose-pine');
 
   useEffect(() => {
     if (workspaceId == null || workspaceId === '') {
@@ -43,8 +43,11 @@ export default function WorkspaceRoute() {
         if (cancel) {
           return;
         }
-        if (isGalleryScheme(body.workspace.theme)) {
+        const app = workspaceAppForRenderer(body.workspace.renderer);
+        if (isWorkspaceScheme(body.workspace.theme)) {
           setScheme(body.workspace.theme);
+        } else {
+          setScheme(app.defaultScheme);
         }
         setDetail(body.workspace);
         const listed = await api<{ channels: { id: string; name: string }[] }>('/channels');
@@ -80,43 +83,45 @@ export default function WorkspaceRoute() {
   }, [workspaceId]);
 
   const closed = gone || missing || workspaceId == null;
+  const app = workspaceAppForRenderer(detail?.renderer);
   const title = closed ? 'This workspace is gone' : (detail?.name ?? 'Workspace');
-  const page = (
-    <Frame
-      brand={false}
-      title={title}
-      link={{
-        label: 'Favlo',
-        onPress: () => {
-          if (Platform.OS === 'web') {
-            window.open('/', '_blank', 'noopener');
-          }
-        },
-      }}
-    >
-      {closed ? (
-        <WorkspaceGone />
-      ) : detail == null ? null : detail.provisioning_state === 'new' || detail.provisioning_state === 'provisioning' ? (
-        <WorkspaceCreating name={detail.name} />
-      ) : detail.renderer === 'chat' ? (
-        <CodingWorkspace
-          workspaceId={workspaceId}
-          agentName={agentName}
-          onDeleted={() => setGone(true)}
-        />
-      ) : (
-        <WorkspaceScreen
-          workspaceId={workspaceId}
-          agentName={agentName}
-          scheme={scheme}
-          onTheme={setScheme}
-          onDeleted={() => setGone(true)}
-        />
-      )}
-    </Frame>
+
+  const applyScheme = (next: WorkspaceScheme) => {
+    setScheme(next);
+    if (workspaceId == null || closed) {
+      return;
+    }
+    void api(`/workspaces/${workspaceId}/theme`, {
+      method: 'PUT',
+      body: JSON.stringify({ theme: next }),
+    }).catch(() => undefined);
+  };
+
+  const body =
+    closed ? (
+      <WorkspaceGone />
+    ) : detail == null ? null : detail.provisioning_state === 'new' || detail.provisioning_state === 'provisioning' ? (
+      <WorkspaceCreating name={detail.name} />
+    ) : detail.renderer === 'chat' ? (
+      <CodingWorkspace
+        workspaceId={workspaceId}
+        agentName={agentName}
+        onDeleted={() => setGone(true)}
+      />
+    ) : (
+      <WorkspaceScreen
+        workspaceId={workspaceId}
+        agentName={agentName}
+        onTheme={setScheme}
+        onDeleted={() => setGone(true)}
+      />
+    );
+
+  return (
+    <WorkspaceSchemeProvider scheme={scheme}>
+      <WorkspaceFrame app={app} name={title} closed={closed} scheme={scheme} onScheme={applyScheme}>
+        {body}
+      </WorkspaceFrame>
+    </WorkspaceSchemeProvider>
   );
-  if (detail?.renderer === 'media' && !gone && !missing) {
-    return <GallerySchemeProvider scheme={scheme}>{page}</GallerySchemeProvider>;
-  }
-  return page;
 }

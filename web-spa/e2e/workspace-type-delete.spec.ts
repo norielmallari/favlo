@@ -28,9 +28,9 @@ test('creating a coding workspace picks the type and delete asks first', async (
       workspace = await popupPromise;
       await expect(workspace).toHaveURL(/\/w\/.+/);
       await waitUntilProvisioned(workspace);
-      await expect(workspace.getByRole('heading', { name })).toBeVisible();
-      await expect(workspace.getByLabel('Coding workspace')).toBeVisible();
-      await expect(workspace.getByText('Coding', { exact: true })).toBeVisible();
+      await expect(workspace.getByLabel('Coding workspace', { exact: true })).toBeVisible();
+      await expect(workspace.getByRole('button', { name: `${name}, Coding workspace menu` })).toBeVisible();
+      await expect(workspace).toHaveTitle(`${name} — Coding`);
     });
 
     await step('chat once then delete with confirm', async () => {
@@ -39,7 +39,12 @@ test('creating a coding workspace picks the type and delete asks first', async (
       await onScreen(send);
       await send.click();
       await expect(workspace.getByLabel(`You said: ${line}`)).toBeVisible();
-      await workspace.getByRole('button', { name: 'Delete workspace' }).click();
+      const title = workspace.getByRole('button', { name: `${name}, Coding workspace menu` });
+      await onScreen(title);
+      await title.click();
+      const remove = workspace.getByRole('menuitem', { name: 'Delete workspace' });
+      await onScreen(remove);
+      await remove.click();
       await expect(workspace.getByRole('dialog', { name: 'Delete workspace' })).toBeVisible();
       await expect(workspace.getByText('Folders and files on disk stay.')).toBeVisible();
       const confirm = workspace.getByRole('button', { name: `Delete ${name}`, exact: true });

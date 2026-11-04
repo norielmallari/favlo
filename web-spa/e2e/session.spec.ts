@@ -157,7 +157,7 @@ async function openWorkspaceNamed(page: Page, name: string): Promise<Page> {
   await page.getByRole('button', { name, exact: true }).click();
   const workspace = await popupPromise;
   await expect(workspace).toHaveURL(/\/w\/.+/);
-  await expect(workspace.getByRole('heading', { name })).toBeVisible();
+  await expect(workspace.getByRole('button', { name: `${name}, Gallery workspace menu` })).toBeVisible();
   return workspace;
 }
 

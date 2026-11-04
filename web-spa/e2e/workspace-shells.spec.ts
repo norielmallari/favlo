@@ -42,8 +42,8 @@ test('new workspace lists the shells from the API', async ({ page, request }) =>
       const workspace = await popupPromise;
       await expect(workspace).toHaveURL(/\/w\/.+/);
       await waitUntilProvisioned(workspace);
-      await expect(workspace.getByRole('heading', { name })).toBeVisible();
-      await expect(workspace.getByLabel('Coding workspace')).toBeVisible();
+      await expect(workspace.getByRole('button', { name: `${name}, Coding workspace menu` })).toBeVisible();
+      await expect(workspace.getByLabel('Coding workspace', { exact: true })).toBeVisible();
     });
   } finally {
     await deleteWorkspacesNamed(name);

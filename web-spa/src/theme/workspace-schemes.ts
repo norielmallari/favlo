@@ -1,26 +1,26 @@
-import type { Palette } from '@/theme/tokens';
+import { dark, light, type Palette } from '@/theme/tokens';
 
 /**
- * Gallery-only color schemes. The Favlo app stays on the blue palette in tokens.ts.
+ * Workspace color schemes. The Favlo chat stays on the blue palette in tokens.ts.
  * Light and dark pairs follow the published Rosé Pine Dawn/Moon and Catppuccin Latte/Mocha roles.
  * A few text and button colors are darkened so small text stays at WCAG AA on the surface it sits on.
  * Rosé Pine: https://rosepinetheme.com/palette/
  * Catppuccin: https://catppuccin.com/palette/
  */
-export type GalleryScheme = 'favlo' | 'rose-pine' | 'catppuccin';
+export type WorkspaceScheme = 'favlo' | 'rose-pine' | 'catppuccin';
 
-export const GALLERY_SCHEMES: { id: GalleryScheme; label: string }[] = [
+export const WORKSPACE_SCHEMES: { id: WorkspaceScheme; label: string }[] = [
   { id: 'favlo', label: 'Favlo' },
   { id: 'rose-pine', label: 'Rosé Pine' },
   { id: 'catppuccin', label: 'Catppuccin' },
 ];
 
-export function isGalleryScheme(value: string | undefined): value is GalleryScheme {
+export function isWorkspaceScheme(value: string | undefined): value is WorkspaceScheme {
   return value === 'favlo' || value === 'rose-pine' || value === 'catppuccin';
 }
 
-export function gallerySchemeLabel(scheme: GalleryScheme): string {
-  return GALLERY_SCHEMES.find((item) => item.id === scheme)?.label ?? 'Favlo';
+export function workspaceSchemeLabel(scheme: WorkspaceScheme): string {
+  return WORKSPACE_SCHEMES.find((item) => item.id === scheme)?.label ?? 'Favlo';
 }
 
 const rosePineDawn: Palette = {
@@ -127,7 +127,20 @@ const catppuccinMocha: Palette = {
   overlay: 'rgba(0, 0, 0, 0.64)',
 };
 
-export const gallerySchemes: Record<Exclude<GalleryScheme, 'favlo'>, { light: Palette; dark: Palette }> = {
+export const workspaceSchemes: Record<Exclude<WorkspaceScheme, 'favlo'>, { light: Palette; dark: Palette }> = {
   'rose-pine': { light: rosePineDawn, dark: rosePineMoon },
   catppuccin: { light: catppuccinLatte, dark: catppuccinMocha },
 };
+
+export function workspaceSchemeSwatches(scheme: WorkspaceScheme, mode: 'light' | 'dark'): {
+  background: string;
+  surface: string;
+  accent: string;
+} {
+  if (scheme === 'favlo') {
+    const pair = mode === 'dark' ? dark : light;
+    return { background: pair.background, surface: pair.surface, accent: pair.accent };
+  }
+  const pair = workspaceSchemes[scheme][mode];
+  return { background: pair.background, surface: pair.surface, accent: pair.accent };
+}

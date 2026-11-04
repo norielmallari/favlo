@@ -27,7 +27,6 @@ import {
   type ChatMessage,
   type ReplyStep,
 } from '@/components/chat-transcript';
-import { BannerPortal } from '@/components/Frame';
 import { Composer } from '@/components/Composer';
 import { ReplyAlert } from '@/components/ReplyAlert';
 import { IconButton } from '@/components/IconButton';
@@ -37,13 +36,13 @@ import { WorkspaceSkills, type WorkspaceSkill } from '@/components/WorkspaceSkil
 import { readExpandTrace, workingLabel } from '@/components/expandTrace';
 import { WorkingStatus } from '@/components/WorkingStatus';
 import { useKeyboardInset } from '@/hooks/useKeyboardInset';
-import { isGalleryScheme, type GalleryScheme } from '@/theme/gallery-schemes';
+import { isWorkspaceScheme, type WorkspaceScheme } from '@/theme/workspace-schemes';
 import { useTheme } from '@/theme/Theme';
 import { space } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
 import { FolderSetup } from '@/workspace/FolderSetup';
-import { GalleryThemeMenu } from '@/workspace/GalleryThemeMenu';
 import { GalleryChatDock } from '@/workspace/GalleryChatDock';
+import { useRegisterWorkspaceChrome } from '@/workspace/workspace-chrome';
 import { GalleryChatResizeHandle } from '@/workspace/GalleryChatResizeHandle';
 import {
   type GalleryChatDetent,
@@ -83,15 +82,13 @@ const LATEST_SLACK = 64;
 export function WorkspaceScreen({
   workspaceId,
   agentName,
-  scheme = 'favlo',
   onTheme,
   onBack,
   onDeleted,
 }: {
   workspaceId: string;
   agentName: string;
-  scheme?: GalleryScheme;
-  onTheme?: (scheme: GalleryScheme) => void;
+  onTheme?: (scheme: WorkspaceScheme) => void;
   onBack?: () => void;
   onDeleted?: () => void;
 }) {
@@ -130,6 +127,10 @@ export function WorkspaceScreen({
   const [notice, setNotice] = useState<string | null>(null);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  useRegisterWorkspaceChrome({
+    openSkills: () => setSkillsOpen(true),
+    requestDelete: () => setConfirmDelete(true),
+  });
   const [confirmImage, setConfirmImage] = useState<string | null>(null);
   const [removingImage, setRemovingImage] = useState(false);
   const [placement, setPlacement] = useState<PlacementState>(documentFromShell(null));
@@ -212,7 +213,7 @@ export function WorkspaceScreen({
       setPlacement(documentFromShell(workspace.shell));
     }
     setDraft(readDraft(workspace.session_id));
-    if (isGalleryScheme(workspace.theme)) {
+    if (isWorkspaceScheme(workspace.theme)) {
       onTheme?.(workspace.theme);
     }
     // Set detail last so the socket effect subscribes with the loaded cursor.
@@ -287,7 +288,7 @@ export function WorkspaceScreen({
             );
           }
         }
-        if (payload.type === 'workspace.theme_set' && isGalleryScheme(payload.payload?.theme)) {
+        if (payload.type === 'workspace.theme_set' && isWorkspaceScheme(payload.payload?.theme)) {
           onTheme?.(payload.payload.theme);
         }
         if (payload.type === 'gallery.updated' && payload.payload?.state?.favlo_workspace) {
@@ -696,72 +697,6 @@ export function WorkspaceScreen({
 
   return (
     <View accessibilityLabel="Gallery workspace" style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 0, minHeight: 0 }}>
-      <BannerPortal>
-        <View
-          style={{
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: space[2],
-            flexShrink: 1,
-            minWidth: 0,
-            maxWidth: '100%',
-          }}
-        >
-          {onBack ? (
-            <IconButton
-              label="Back to channel"
-              icon="arrow-left"
-              onPress={onBack}
-              iconOnly={narrow}
-              background="transparent"
-              border="transparent"
-              color={palette.accent}
-            />
-          ) : null}
-          <Text
-            accessibilityRole="header"
-            aria-level={2}
-            numberOfLines={1}
-            style={[textStyle('title', palette.textPrimary), { flexShrink: 1, minWidth: 0 }]}
-          >
-            {detail?.name ?? 'Workspace'}
-          </Text>
-          {narrow ? null : (
-            <Text style={textStyle('caption', palette.textSecondary)}>Gallery</Text>
-          )}
-          {narrow ? null : <View style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0 }} />}
-          <GalleryThemeMenu
-            scheme={scheme}
-            narrow={narrow}
-            onSelect={(next) => {
-              void api(`/workspaces/${workspaceId}/theme`, {
-                method: 'PUT',
-                body: JSON.stringify({ theme: next }),
-              })
-                .then(() => onTheme?.(next))
-                .catch((caught: Error) => setNotice(caught.message));
-            }}
-          />
-          <IconButton
-            label="Skills"
-            icon="book"
-            onPress={() => setSkillsOpen(true)}
-            iconOnly={narrow}
-            background="transparent"
-            border="transparent"
-            color={palette.textPrimary}
-          />
-          <IconButton
-            label="Delete workspace"
-            icon="trash-2"
-            onPress={() => setConfirmDelete(true)}
-            iconOnly={narrow}
-            background="transparent"
-            border="transparent"
-            color={palette.textPrimary}
-          />
-        </View>
-      </BannerPortal>
       {notice ? (
         <Text style={[textStyle('body', palette.danger), { padding: space[3] }]}>{notice}</Text>
       ) : null}

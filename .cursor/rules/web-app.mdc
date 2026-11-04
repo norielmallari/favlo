@@ -113,6 +113,7 @@ The script is `web-spa/e2e/<feature>.spec.ts`. A fresh install uses `e2e/web-new
 | Global skill copied onto an agent | `e2e/agent-skills.spec.ts` |
 | Gallery guide | `e2e/gallery.spec.ts` |
 | Gallery theme | `e2e/gallery-theme.spec.ts` |
+| Coding workspace header | `e2e/coding-workspace-header.spec.ts` |
 | Gallery folder bind | `e2e/gallery-bind.spec.ts` |
 | Gallery chat width resize | `e2e/gallery-chat-resize.spec.ts` |
 | Gallery narrow one-view chat | `e2e/gallery-narrow.spec.ts` |

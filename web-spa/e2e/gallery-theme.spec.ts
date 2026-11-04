@@ -10,36 +10,37 @@ import { createGalleryWorkspace } from './gallery-create';
 import { onScreen } from './on-screen';
 import { step } from './progress';
 
-test('gallery theme changes the workspace and leaves the Favlo page alone', async ({ page }) => {
+test('gallery appearance changes the workspace and leaves the Favlo page alone', async ({ page }) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'favlo-theme-'));
   const name = `Theme ${Date.now()}`;
   try {
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.goto('http://127.0.0.1:8012/');
-    await setAppearance(page, 'Light');
+    await setChatAppearance(page, 'Light');
     const workspace = await createGalleryWorkspace(page, name, root, { keepChannel: true });
     await workspace.setViewportSize({ width: 1280, height: 800 });
 
     await step('a new gallery starts on Rosé Pine and the channel stays Favlo', async () => {
-      await expect(workspace.getByRole('button', { name: 'Gallery theme, Rosé Pine' })).toBeVisible();
+      await expect(workspace).toHaveTitle(`${name} — Gallery`);
       await expectBackground(workspace, '#faf4ed');
       await expectBackground(page, '#F6F8FC');
+      await expectSelectedScheme(workspace, name, 'Rosé Pine');
     });
 
     await step('Rosé Pine follows dark appearance', async () => {
-      await setAppearance(workspace, 'Dark');
+      await setWorkspaceAppearance(workspace, name, 'Dark');
       await expectBackground(workspace, '#232136');
       await page.reload();
       await expectBackground(page, '#0F1117');
     });
 
     await step('Catppuccin follows light, dark, and system', async () => {
-      await setAppearance(workspace, 'Light');
-      await chooseTheme(workspace, 'Catppuccin');
+      await setWorkspaceAppearance(workspace, name, 'Light');
+      await chooseScheme(workspace, name, 'Catppuccin');
       await expectBackground(workspace, '#eff1f5');
-      await setAppearance(workspace, 'Dark');
+      await setWorkspaceAppearance(workspace, name, 'Dark');
       await expectBackground(workspace, '#1e1e2e');
-      await setAppearance(workspace, 'System');
+      await setWorkspaceAppearance(workspace, name, 'System');
       await workspace.emulateMedia({ colorScheme: 'dark' });
       await expectBackground(workspace, '#1e1e2e');
       await workspace.emulateMedia({ colorScheme: 'light' });
@@ -47,35 +48,47 @@ test('gallery theme changes the workspace and leaves the Favlo page alone', asyn
     });
 
     await step('the scheme stays after reload', async () => {
-      await setAppearance(workspace, 'Light');
+      await setWorkspaceAppearance(workspace, name, 'Light');
       await workspace.reload();
-      await expect(workspace.getByRole('button', { name: 'Gallery theme, Catppuccin' })).toBeVisible();
+      await expect(workspace).toHaveTitle(`${name} — Gallery`);
+      await expectSelectedScheme(workspace, name, 'Catppuccin');
       await expectBackground(workspace, '#eff1f5');
     });
 
     await step('both schemes meet WCAG AA in light and dark', async () => {
-      await setAppearance(workspace, 'Light');
+      await setWorkspaceAppearance(workspace, name, 'Light');
+      await expectBackground(workspace, '#eff1f5');
       await assertWcagAa(workspace);
-      await setAppearance(workspace, 'Dark');
+      await openAppearance(workspace, name);
       await assertWcagAa(workspace);
-      await setAppearance(workspace, 'Light');
-      await chooseTheme(workspace, 'Rosé Pine');
+      await workspace.keyboard.press('Escape');
+      await setWorkspaceAppearance(workspace, name, 'Dark');
+      await expectBackground(workspace, '#1e1e2e');
       await assertWcagAa(workspace);
-      await setAppearance(workspace, 'Dark');
+      await openAppearance(workspace, name);
+      await assertWcagAa(workspace);
+      await workspace.keyboard.press('Escape');
+      await setWorkspaceAppearance(workspace, name, 'Light');
+      await chooseScheme(workspace, name, 'Rosé Pine');
+      await expectBackground(workspace, '#faf4ed');
+      await assertWcagAa(workspace);
+      await setWorkspaceAppearance(workspace, name, 'Dark');
+      await expectBackground(workspace, '#232136');
       await assertWcagAa(workspace);
     });
 
     await step('a narrow window can choose the theme', async () => {
       await workspace.setViewportSize({ width: 390, height: 844 });
-      await setAppearance(workspace, 'Light');
-      await chooseTheme(workspace, 'Catppuccin');
+      await setWorkspaceAppearance(workspace, name, 'Light');
+      await chooseScheme(workspace, name, 'Catppuccin');
       await expectBackground(workspace, '#eff1f5');
+      await onScreen(workspace.getByRole('button', { name: `${name}, Gallery workspace menu` }));
     });
 
     await step('the wide gallery shows Rosé Pine', async () => {
       await workspace.setViewportSize({ width: 1280, height: 800 });
-      await chooseTheme(workspace, 'Rosé Pine');
-      await expect(workspace.getByRole('button', { name: 'Gallery theme, Rosé Pine' })).toBeVisible();
+      await chooseScheme(workspace, name, 'Rosé Pine');
+      await expectSelectedScheme(workspace, name, 'Rosé Pine');
       await expectBackground(workspace, '#faf4ed');
     });
   } finally {
@@ -84,21 +97,54 @@ test('gallery theme changes the workspace and leaves the Favlo page alone', asyn
   }
 });
 
-async function chooseTheme(page: Page, label: string) {
-  const button = page.getByRole('button', { name: /^Gallery theme, / });
+async function openTitleMenu(page: Page, name: string) {
+  const button = page.getByRole('button', { name: `${name}, Gallery workspace menu` });
   await onScreen(button);
-  const current = await button.getAttribute('aria-label');
-  if (current === `Gallery theme, ${label}`) {
-    return;
+  if ((await button.getAttribute('aria-expanded')) !== 'true') {
+    await button.click();
   }
-  await button.click();
-  const item = page.getByRole('menuitem', { name: label, exact: true });
-  await onScreen(item);
-  await item.click();
-  await expect(page.getByRole('button', { name: `Gallery theme, ${label}` })).toBeVisible();
+  await expect(page.getByRole('menuitem', { name: 'Skills' })).toBeVisible();
 }
 
-async function setAppearance(page: Page, mode: 'Light' | 'Dark' | 'System') {
+async function openAppearance(page: Page, name: string) {
+  await openTitleMenu(page, name);
+  const appearance = page.getByRole('menuitem', { name: 'Appearance' });
+  await onScreen(appearance);
+  await appearance.click();
+  await expect(page.getByRole('menu', { name: 'Appearance' })).toBeVisible();
+}
+
+async function chooseScheme(page: Page, name: string, label: string) {
+  await openAppearance(page, name);
+  const item = page.getByRole('menuitemradio', { name: label, exact: true });
+  await onScreen(item);
+  await item.click();
+  await expect(page.getByRole('menu', { name: 'Appearance' })).toHaveCount(0);
+}
+
+async function setWorkspaceAppearance(page: Page, name: string, mode: 'Light' | 'Dark' | 'System') {
+  await openAppearance(page, name);
+  const item = page.getByRole('menuitemradio', { name: mode, exact: true });
+  const selected = await item.getAttribute('aria-checked');
+  if (selected === 'true') {
+    await page.keyboard.press('Escape');
+    return;
+  }
+  await onScreen(item);
+  await item.click();
+  await expect(page.getByRole('menu', { name: 'Appearance' })).toHaveCount(0);
+}
+
+async function expectSelectedScheme(page: Page, name: string, label: string) {
+  await openAppearance(page, name);
+  await expect(page.getByRole('menuitemradio', { name: label, exact: true })).toHaveAttribute(
+    'aria-checked',
+    'true',
+  );
+  await page.keyboard.press('Escape');
+}
+
+async function setChatAppearance(page: Page, mode: 'Light' | 'Dark' | 'System') {
   const appearance = page.getByRole('button', { name: /^Appearance, / });
   await onScreen(appearance);
   const current = await appearance.getAttribute('aria-label');

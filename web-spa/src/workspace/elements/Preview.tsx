@@ -1,11 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Platform, Text, View } from 'react-native';
 
 import { IconButton } from '@/components/IconButton';
 import { useTheme } from '@/theme/Theme';
-import { duration, radius, space } from '@/theme/tokens';
+import { duration, space } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
 import type { ElementProps } from '@/workspace/catalog';
+import { useRegisterBannerEnd } from '@/workspace/workspace-chrome';
 
 const IMAGE = /\.(png|jpe?g|webp)$/i;
 const SWIPE_THRESHOLD = 48;
@@ -31,6 +32,100 @@ export function Preview({
     typeof window !== 'undefined' &&
     Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
 
+  const name = path == null ? '' : (path.split('/').pop() ?? path);
+  const url = path == null ? '' : fileUrl(path);
+  const live = useRef({
+    path,
+    name,
+    url,
+    fullScreen,
+    onAddToChat,
+    onRequestDelete,
+    onToggleFullScreen,
+  });
+  live.current = {
+    path,
+    name,
+    url,
+    fullScreen,
+    onAddToChat,
+    onRequestDelete,
+    onToggleFullScreen,
+  };
+
+  const bannerActions = useMemo(() => {
+    if (path == null) {
+      return null;
+    }
+    const canFullScreen = onToggleFullScreen != null;
+    return (
+      <>
+        {canFullScreen ? (
+          <IconButton
+            label={fullScreen ? 'Exit full screen' : 'Full screen preview'}
+            icon={fullScreen ? 'minimize-2' : 'maximize-2'}
+            iconOnly
+            tone="ghost"
+            onPress={() => live.current.onToggleFullScreen?.()}
+          />
+        ) : null}
+        <IconButton
+          label={`Download ${name}`}
+          icon="download"
+          iconOnly
+          tone="surface"
+          onPress={() => {
+            void (async () => {
+              if (typeof document === 'undefined') {
+                return;
+              }
+              const current = live.current;
+              const response = await fetch(current.url);
+              if (!response.ok) {
+                throw new Error(`Download failed (${response.status})`);
+              }
+              const objectUrl = URL.createObjectURL(await response.blob());
+              const link = document.createElement('a');
+              link.href = objectUrl;
+              link.download = current.name;
+              link.click();
+              URL.revokeObjectURL(objectUrl);
+            })();
+          }}
+        />
+        <IconButton
+          label="Add to chat"
+          accessibilityLabel="Add to chat"
+          icon="plus"
+          iconOnly
+          tone="accent"
+          onPress={() => {
+            const current = live.current;
+            if (current.path != null) {
+              current.onAddToChat(current.path);
+            }
+          }}
+        />
+        {IMAGE.test(path) ? (
+          <IconButton
+            label={`Delete ${name}`}
+            icon="trash-2"
+            iconOnly
+            tone="danger"
+            onPress={() => {
+              const current = live.current;
+              if (current.path != null) {
+                current.onRequestDelete(current.path);
+              }
+            }}
+          />
+        ) : null}
+      </>
+    );
+  }, [fullScreen, name, onToggleFullScreen, path]);
+
+  useRegisterBannerEnd(bannerActions);
+
   useEffect(() => {
     if (path === shownPath.current) {
       return;
@@ -55,10 +150,7 @@ export function Preview({
       </View>
     );
   }
-  const lower = path.toLowerCase();
-  const url = fileUrl(path);
-  const name = path.split('/').pop() ?? path;
-  const displayPath = shownPath.current ?? path;
+  const displayPath = shownPath.current ?? path
   const displayUrl = fileUrl(displayPath);
   const displayLower = displayPath.toLowerCase();
   const displayName = displayPath.split('/').pop() ?? displayPath;
@@ -139,70 +231,6 @@ export function Preview({
             style={{ width: '100%', height: '100%', objectFit: fit, display: 'block' }}
           />
         )}
-      </View>
-      <View
-        style={{
-          position: 'absolute',
-          top: space[3],
-          right: space[3],
-          flexDirection: 'row',
-          gap: space[1],
-          backgroundColor: palette.surface,
-          borderWidth: 1,
-          borderColor: palette.borderStrong,
-          borderRadius: radius.control,
-          padding: space[1],
-        }}
-      >
-        {onToggleFullScreen ? (
-          <IconButton
-            label={fullScreen ? 'Exit full screen' : 'Full screen preview'}
-            icon={fullScreen ? 'minimize-2' : 'maximize-2'}
-            iconOnly
-            tone="ghost"
-            onPress={onToggleFullScreen}
-          />
-        ) : null}
-        <IconButton
-          label={`Download ${name}`}
-          icon="download"
-          iconOnly
-          tone="surface"
-          onPress={() => {
-            void (async () => {
-              if (typeof document === 'undefined') {
-                return;
-              }
-              const response = await fetch(url);
-              if (!response.ok) {
-                throw new Error(`Download failed (${response.status})`);
-              }
-              const objectUrl = URL.createObjectURL(await response.blob());
-              const link = document.createElement('a');
-              link.href = objectUrl;
-              link.download = name;
-              link.click();
-              URL.revokeObjectURL(objectUrl);
-            })();
-          }}
-        />
-        <IconButton
-          label="Add to chat"
-          accessibilityLabel="Add to chat"
-          icon="plus"
-          iconOnly
-          tone="accent"
-          onPress={() => onAddToChat(path)}
-        />
-        {IMAGE.test(path) ? (
-          <IconButton
-            label={`Delete ${name}`}
-            icon="trash-2"
-            iconOnly
-            tone="danger"
-            onPress={() => onRequestDelete(path)}
-          />
-        ) : null}
       </View>
     </View>
   );
