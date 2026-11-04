@@ -101,6 +101,10 @@ def main(argv: list[str] | None = None) -> int:
         server.start()
         vision_flag = "on" if args.vision else "off"
         store = args.store == "on"
+        if vision is not None:
+            from favlo.smoke_lock import unload_model
+
+            unload_model()
         print(
             f"kv {selection.kv_cache} mtp {args.mtp} depth {args.mtp_depth} "
             f"thinking {args.thinking} vision {vision_flag} store {args.store}",
