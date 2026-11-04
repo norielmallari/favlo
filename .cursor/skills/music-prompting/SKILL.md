@@ -7,7 +7,7 @@ description: Write an ACE-Step caption, lyrics, and metadata in Favlo, then chec
 
 Favlo does not run ACE-Step's caption LM. An empty `bpm`, `keyscale`, or `timesignature` is written as `N/A`. Set them on the request when the clip needs a key or a tempo.
 
-Generation time is [optimization-music](../optimization-music/SKILL.md). Before a generate, take the GPU with `uv run python -m favlo.smoke_lock run --pipeline <stem> --command <name> -- <command>`. `run` releases when that command exits.
+Generation time is [optimization-music](../optimization-music/SKILL.md). A generate calls the listener. `uv run python -m favlo.smoke_lock attach --pipeline <stem> --command <name> -- <command>` waits until the lock is clear, reuses that listener, and unloads the model when that pipeline's sources are newer than its worker. Do not wrap the generate in `run`.
 
 ## Three fields
 

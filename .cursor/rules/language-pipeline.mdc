@@ -135,7 +135,7 @@ uv run python -m harness.language_pipeline
 
 The harness is the one agent for the registry default chat model and `bge-m3-int8`. It does not take the machine lock. `harness.server` waits until no live pid holds `artifacts/pipeline-test.lock`, then uses one `favlo serve` on `127.0.0.1:8129`. Exit 0 means `check_embeddings` ran and every paraphrase cosine beat every cross-topic cosine. A kernel or quantize edit that leaves `handle_responses`, the disconnect shell, and the reply alone does not run the harness.
 
-A command that compiles shaders, loads a checkpoint, or starts its own serve uses `python -m favlo.smoke_lock run`. `python -m harness`, `python -m harness.coding`, and `python -m harness.worktree` take that lock and release it before they stop the private serve they started. They need port 8129 free. They do not attach to a listener someone else left running. Do not kill serve to free the GPU. Close during a live hold is 409.
+A command that compiles shaders, loads a checkpoint, or uses the GPU in its own process uses `python -m favlo.smoke_lock run`. `python -m harness`, `python -m harness.coding`, `python -m harness.needle`, and `python -m harness.worktree` call `python -m favlo.smoke_lock attach`. That reuses `127.0.0.1:8129` and does not take the lock. When the named pipeline is resident and its sources are newer than that worker, the model is unloaded before the command. A prefix check unloads the resident model after the first turn so the next turn loads the prefix from disk. Do not kill serve to free the GPU. Close during a live hold is 409.
 
 Wrong: a shared sampler in `LanguagePipeline`, or a second harness per language model.
 

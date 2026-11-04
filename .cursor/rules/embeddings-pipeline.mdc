@@ -42,4 +42,4 @@ Right: `memory.budget()` sizes the limit, and an input past that limit is refuse
 
 The language harness posts this route. After a change to `embed` or the list object, run `uv run python -m harness.language_pipeline`. That command is in [language-pipeline.mdc](language-pipeline.mdc). `python -m harness.embeddings_agent` remains the direct check of the same six sentences. Both use one `favlo serve` on `127.0.0.1:8129` and do not take the machine lock. `harness.server` waits until no live pid holds `artifacts/pipeline-test.lock` before it talks to that listener.
 
-A command that compiles shaders, loads a checkpoint, or starts its own serve uses `python -m favlo.smoke_lock run`. It releases on failure and on SIGINT. Do not kill serve to free the GPU. Close during a live hold is 409.
+A command that compiles shaders, loads a checkpoint, or uses the GPU in its own process uses `python -m favlo.smoke_lock run`. It releases on failure and on SIGINT. A harness that calls the listener uses `python -m favlo.smoke_lock attach` and does not take the lock. Do not kill serve to free the GPU. Close during a live hold is 409.

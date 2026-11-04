@@ -10,7 +10,17 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from favlo.smoke_lock import acquire, clear_hold, hold, main, owner_pid, release, run
+from favlo.smoke_lock import (
+    acquire,
+    attach,
+    clear_hold,
+    hold,
+    main,
+    owner_pid,
+    release,
+    run,
+    unload_if_changed,
+)
 
 
 class _Scripted(BaseHTTPRequestHandler):
@@ -292,3 +302,135 @@ def test_acquire_does_not_steal_a_live_lock(tmp_path: Path) -> None:
     )
     assert code == 3
     assert json.loads(path.read_text())["pid"] == os.getppid()
+
+
+def test_attach_reuses_a_listener_and_does_not_lock(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr("favlo.smoke_lock.wait_clear", lambda **_kwargs: None)
+    monkeypatch.setattr("favlo.daemon.port_open", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("favlo.smoke_lock.unload_if_changed", lambda **_kwargs: False)
+    code = attach(
+        root=tmp_path,
+        pipeline="qwen36-35b-a3b",
+        command="coding",
+        argv=[sys.executable, "-c", "print('ran')"],
+    )
+    text = capsys.readouterr().out
+    assert code == 0
+    assert "reuse 127.0.0.1:8129" in text
+    assert not (tmp_path / "artifacts" / "pipeline-test.lock").exists()
+
+
+def test_attach_stops_a_listener_it_started(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr("favlo.smoke_lock.wait_clear", lambda **_kwargs: None)
+    monkeypatch.setattr("favlo.daemon.port_open", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr("favlo.daemon.ensure", lambda *_args, **_kwargs: (77, True))
+    monkeypatch.setattr("favlo.smoke_lock.unload_if_changed", lambda **_kwargs: False)
+    stopped: list[int] = []
+    monkeypatch.setattr("favlo.daemon.stop_pid", lambda pid: stopped.append(pid))
+    code = attach(
+        root=tmp_path,
+        pipeline="qwen36-35b-a3b",
+        command="coding",
+        argv=[sys.executable, "-c", "print('ran')"],
+    )
+    text = capsys.readouterr().out
+    assert code == 0
+    assert stopped == [77]
+    assert "started 127.0.0.1:8129" in text
+    assert "stopped 127.0.0.1:8129" in text
+    assert not (tmp_path / "artifacts" / "pipeline-test.lock").exists()
+
+
+def test_attach_requires_a_command(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("favlo.smoke_lock.repo_root", lambda: tmp_path)
+    code = main(["attach", "--pipeline", "qwen36-35b-a3b", "--command", "coding"])
+    assert code == 2
+
+
+def test_unload_if_changed_closes_a_stale_pipeline(tmp_path: Path, monkeypatch) -> None:
+    class _Close(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, fmt: str, *args: object) -> None:
+            del fmt, args
+
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            self.rfile.read(length)
+            body = json.dumps({"unloaded": True, "closed": "example-model"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Close)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = int(server.server_address[1])
+    monkeypatch.setattr(
+        "favlo.daemon.read_resident_stamp",
+        lambda _port, home=None: {"pipeline": "qwen36-35b-a3b", "started": 1.0},
+    )
+    monkeypatch.setattr("favlo.pipelines.source_mtime", lambda _selection: 50.0)
+    monkeypatch.setattr("favlo.registry.resolve", lambda *_args, **_kwargs: object())
+    try:
+        closed = unload_if_changed(root=tmp_path, pipeline="qwen36-35b-a3b", port=port)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert closed is True
+
+
+def test_unload_if_changed_uses_the_worker_clock_without_a_stamp(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class _Close(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, fmt: str, *args: object) -> None:
+            del fmt, args
+
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            self.rfile.read(length)
+            body = json.dumps({"unloaded": True, "closed": "example-model"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Close)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = int(server.server_address[1])
+    monkeypatch.setattr("favlo.daemon.read_resident_stamp", lambda _port, home=None: None)
+    monkeypatch.setattr("favlo.smoke_lock._worker_started", lambda: 1.0)
+    monkeypatch.setattr("favlo.pipelines.source_mtime", lambda _selection: 50.0)
+    monkeypatch.setattr("favlo.registry.resolve", lambda *_args, **_kwargs: object())
+    try:
+        closed = unload_if_changed(root=tmp_path, pipeline="qwen36-35b-a3b", port=port)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert closed is True
+
+
+def test_etime_parses_days_hours_and_minutes() -> None:
+    from favlo.smoke_lock import _etime_seconds
+
+    assert _etime_seconds("01:02") == 62
+    assert _etime_seconds("01:02:03") == 3723
+    assert _etime_seconds("2-01:02:03") == 2 * 86400 + 3723
+    assert _etime_seconds("nope") is None
+
+
+def test_unload_if_changed_keeps_a_current_pipeline(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "favlo.daemon.read_resident_stamp",
+        lambda _port, home=None: {"pipeline": "qwen36-35b-a3b", "started": 50.0},
+    )
+    monkeypatch.setattr("favlo.pipelines.source_mtime", lambda _selection: 1.0)
+    monkeypatch.setattr("favlo.registry.resolve", lambda *_args, **_kwargs: object())
+    assert unload_if_changed(root=tmp_path, pipeline="qwen36-35b-a3b", port=1) is False

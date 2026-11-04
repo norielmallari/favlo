@@ -673,6 +673,69 @@ def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
     assert state["pipeline"] == "qwen38-27b"
 
 
+def test_a_changed_pipeline_reopens_the_resident_runtime(monkeypatch) -> None:
+    opened: list[_Runtime] = []
+
+    def start(selection, args, schedule=None):
+        del args, schedule
+        runtime = _Runtime()
+        runtime.counts = {}
+        runtime.proxy = SimpleNamespace()
+        runtime.started = 1.0
+        opened.append(runtime)
+        return runtime
+
+    monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
+    monkeypatch.setattr("favlo.pipelines.source_mtime", lambda _selection: 10.0)
+    state: dict = {"runtime": None, "record": None, "pipeline": None}
+    selection = SimpleNamespace(
+        folder="small",
+        pipeline="qwen36-35b-a3b",
+        runtime="metal41",
+        custom=False,
+        alias=None,
+        resident_percent=None,
+        kv_cache="e4m3",
+        path="small",
+    )
+    install_runtime(state, _args(), selection)
+    install_runtime(state, _args(), selection)
+    assert len(opened) == 2
+    assert opened[0].closed
+    assert state["runtime"] is opened[1]
+
+
+def test_an_unchanged_pipeline_keeps_the_resident_runtime(monkeypatch) -> None:
+    opened: list[_Runtime] = []
+
+    def start(selection, args, schedule=None):
+        del args, schedule
+        runtime = _Runtime()
+        runtime.counts = {}
+        runtime.proxy = SimpleNamespace()
+        runtime.started = 10.0
+        opened.append(runtime)
+        return runtime
+
+    monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
+    monkeypatch.setattr("favlo.pipelines.source_mtime", lambda _selection: 1.0)
+    state: dict = {"runtime": None, "record": None, "pipeline": None}
+    selection = SimpleNamespace(
+        folder="small",
+        pipeline="qwen36-35b-a3b",
+        runtime="metal41",
+        custom=False,
+        alias=None,
+        resident_percent=None,
+        kv_cache="e4m3",
+        path="small",
+    )
+    install_runtime(state, _args(), selection)
+    install_runtime(state, _args(), selection)
+    assert len(opened) == 1
+    assert state["runtime"] is opened[0]
+
+
 def _embed_reply() -> SimpleNamespace:
     reply = SimpleNamespace(started=False, payload=None, model_id=None, status=0)
 

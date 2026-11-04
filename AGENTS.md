@@ -35,6 +35,8 @@ Do not edit, create, or delete a file until the operator gives a go signal. `pro
 
 Work on `main`. Do not create a branch unless the user asks for one.
 
+Run Python through `uv run` so the command uses this checkout's environment. A module is `uv run python -m <module>`. A script is `uv run python <path>`. Pytest is `uv run pytest`. Do not call `python` or `python3` from `PATH`.
+
 Changes stay in this repository. Edit another repository only when the user asks for that repository.
 
 The closed source implementation is the sibling directory `favlo-cloud`, when that checkout is present. It holds the hosted account service. Read it only when the task is the hosted product. When the sibling checkout is absent, ignore the closed source implementation and continue in this repository.
@@ -57,9 +59,9 @@ A pipeline reads `memory.budget()` when it opens and shrinks the one knob it own
 
 ## Harness
 
-A media harness does not take the machine lock. It calls the listener. A media harness uses one `favlo serve` on `127.0.0.1:8129`. That is `harness.image`, `harness.image_smoke_agent`, `harness.image_persona`, `harness.image_attachment`, `harness.video_smoke_agent`, `harness.video_ti2v_agent`, `harness.video_quality_agent`, `harness.media_pipeline`, `harness.language_pipeline`, `harness.music_smoke_agent`, `harness.music_long_agent`, `harness.voice_smoke_agent`, `harness.embeddings_agent`, and `harness.memory_agent`. `python -m harness.server run -- <command>` opens that listener, runs the command, and closes the session. `python -m harness.server status` prints `listening` or `down`. An existing listener is reused and left running. A listener this session started is stopped with SIGTERM when the command exits. The daemon forwards that signal to each pipeline process. These commands do not bind a second port. The same session is what those modules call, so running one of them directly follows this rule.
+A media harness does not take the machine lock. It calls the listener. A media harness uses one `favlo serve` on `127.0.0.1:8129`. That is `harness.image`, `harness.image_smoke_agent`, `harness.image_persona`, `harness.image_attachment`, `harness.video_smoke_agent`, `harness.video_ti2v_agent`, `harness.video_quality_agent`, `harness.media_pipeline`, `harness.language_pipeline`, `harness.music_smoke_agent`, `harness.music_long_agent`, `harness.voice_smoke_agent`, `harness.embeddings_agent`, and `harness.memory_agent`. `uv run python -m harness.server run -- <command>` opens that listener, runs the command, and closes the session. `uv run python -m harness.server status` prints `listening` or `down`. An existing listener is reused and left running. A listener this session started is stopped with SIGTERM when the command exits. The daemon forwards that signal to each pipeline process. These commands do not bind a second port. The same session is what those modules call, so running one of them directly follows this rule.
 
-`python -m harness`, `python -m harness.coding`, and `python -m harness.worktree` restart the process they started so a later turn reloads a prefix. They require port 8129 to be free. They do not attach to a listener someone else left running, and they do not bind a second port beside it.
+`uv run python -m harness`, `uv run python -m harness.coding`, `uv run python -m harness.needle`, `uv run python -m harness.worktree`, `uv run python -m harness.coherence`, and `uv run python -m harness.benchmarks` use that same listener through `uv run python -m favlo.smoke_lock attach`. They do not take the machine lock. When the pipeline they name is resident and its sources are newer than that worker, the model is unloaded before the run. A prefix check unloads the resident model after the first turn so the next turn loads the prefix from disk. The listener stays up.
 
 `harness.chat_agent` uses that same listener and does not take the machine lock.
 

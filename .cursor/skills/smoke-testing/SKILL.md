@@ -16,7 +16,7 @@ uv run python -m favlo.smoke_lock run --pipeline <stem> --command smoke -- \
 
 A stretch of several commands in one shell uses `acquire --wait` and one `release` at the end. `acquire` without `--wait` is for tests of exit 2 and 3.
 
-The file-agent and coding-agent commands start their own serve. They still need port 8129 free. Do not point them at a listener already on that port, and do not stop a daemon the user left running.
+The file-agent and coding-agent commands reuse the listener on `127.0.0.1:8129` through `python -m favlo.smoke_lock attach`. They do not take the machine lock. When that pipeline is resident and its sources are newer than the worker, the model is unloaded before the run. Do not stop a daemon the user left running.
 
 Stop at the first failure. Do not start agent smoke while a pipeline smoke is failing.
 
@@ -48,7 +48,7 @@ The file covers, in order: greedy decode, the instruct card, the thinking card a
 
 ## Agent smoke
 
-Each command starts its own `serve`. Do not point it at a listener already on `8129`.
+Each command reuses the listener on `127.0.0.1:8129`. Do not start a second listener.
 
 Instruct decode and thinking-card decode stay two series. The 90% check compares the phase being optimized with the kernel ceiling on the series for that agent.
 
@@ -60,7 +60,7 @@ Instruct. Opens `<pipeline>:instruct` with `enable_thinking` false. Default targ
 uv run python -m harness --model <pipeline>
 ```
 
-A Microsoft Agent Framework agent reads `src/favlo` until `prompt tokens` reaches the target. The corpus is shared package code only. The server stops after the first turn and a new server starts, so the next turn loads the prefix from disk. Later turns extend that prefix in memory. The command streams each model call, then prints each request's context, `prefill`, and `decode`, then the summed rates. Exit 0 means the target was reached and the prefix reload held.
+A Microsoft Agent Framework agent reads `src/favlo` until `prompt tokens` reaches the target. The corpus is shared package code only. After the first turn the harness unloads the resident model, so the next turn loads the prefix from disk. Later turns extend that prefix in memory. The listener stays up. The command streams each model call, then prints each request's context, `prefill`, and `decode`, then the summed rates. Exit 0 means the target was reached and the prefix reload held.
 
 `python -m harness.file_agent` is the short create, edit, and confirm check. Pytest runs that check. It is not this rate run.
 

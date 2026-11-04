@@ -54,10 +54,8 @@ def main(argv: list[str] | None = None) -> int:
     stem = args.model.partition(":")[0]
     from favlo.cli import repo_root
     from favlo.registry import resolve
-    from favlo.smoke_lock import hold, release
 
     root = repo_root()
-    created = hold(root=root, pipeline=stem, command="needle")
     workspace = _ROOT / "artifacts" / "needle" / stem
     server: Server | None = None
     try:
@@ -73,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
             f"haystack {haystack.tokens} tokens line {haystack.line} depth {args.depth}",
             flush=True,
         )
-        server = Server(args.max_memory)
+        server = Server(args.max_memory, pipeline=stem)
         server.start()
         print(
             f"kv {selection.kv_cache} mtp {args.mtp} depth {args.mtp_depth} "
@@ -96,8 +94,6 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if server is not None:
             server.stop()
-        if created:
-            release(root=root)
     if problems:
         for note in problems:
             print(note, flush=True)

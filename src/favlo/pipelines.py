@@ -127,6 +127,7 @@ class Pipelines:
         shutdown = getattr(args, "shutdown", None)
         if shutdown is not None:
             shutdown.runtime = None
+        _clear_stamp(args)
         if drop_modules:
             for key in _HOLDS:
                 value = state.pop(key, None)
@@ -322,16 +323,95 @@ def start_pipeline(selection: Any, args: Any, schedule: Any = None) -> Any:
     return child
 
 
+def source_mtime(selection: Any) -> float:
+    """Newest source mtime for the pipeline tree, or 0 when that tree is missing.
+
+    The entry file and the package beside it count. ``__pycache__`` does not.
+    A checkpoint under ``models/`` is not part of this tree.
+    """
+    runtime = getattr(selection, "runtime", "")
+    pipeline = getattr(selection, "pipeline", "")
+    if not isinstance(runtime, str) or not runtime or not isinstance(pipeline, str) or not pipeline:
+        return 0.0
+    from favlo.cli import pipeline_tree
+
+    try:
+        root = pipeline_tree(runtime, custom=bool(getattr(selection, "custom", False)))
+    except ValueError:
+        return 0.0
+    newest = 0.0
+    entry = root / f"{pipeline}.py"
+    package = root / pipeline.replace("-", "_")
+    files: list[Path] = []
+    if entry.is_file():
+        files.append(entry)
+    if package.is_dir():
+        for path in package.rglob("*"):
+            if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
+                continue
+            files.append(path)
+    for path in files:
+        try:
+            newest = max(newest, path.stat().st_mtime)
+        except OSError:
+            continue
+    return newest
+
+
+def _sources_newer(selection: Any, runtime: Any) -> bool:
+    """True when pipeline sources were saved after this worker started."""
+    started = getattr(runtime, "started", None)
+    if isinstance(started, bool) or not isinstance(started, (int, float)):
+        return False
+    return source_mtime(selection) > float(started)
+
+
+def _stamp_port(args: Any) -> int:
+    port = getattr(args, "port", 0)
+    if isinstance(port, bool) or not isinstance(port, int):
+        return 0
+    return port
+
+
+def _write_stamp(args: Any, runtime: Any, selection: Any) -> None:
+    started = getattr(runtime, "started", None)
+    port = _stamp_port(args)
+    if port <= 0 or isinstance(started, bool) or not isinstance(started, (int, float)):
+        return
+    folder = selection.folder if isinstance(selection.folder, str) else ""
+    from favlo.daemon import write_resident_stamp
+
+    write_resident_stamp(port, selection.pipeline, folder, float(started))
+
+
+def _clear_stamp(args: Any) -> None:
+    port = _stamp_port(args)
+    if port <= 0:
+        return
+    from favlo.daemon import clear_resident_stamp
+
+    clear_resident_stamp(port)
+
+
 def install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
-    """Switch the resident runtime to ``selection``. The same process stays."""
-    if (
-        state.get("runtime") is not None
+    """Switch the resident runtime to ``selection``. The same process stays.
+
+    The same folder and pipeline stay resident until that pipeline's sources
+    are newer than the worker. A newer tree closes the worker and opens again.
+    """
+    resident = state.get("runtime")
+    same = (
+        resident is not None
         and state.get("record") == selection.folder
         and state.get("pipeline") == selection.pipeline
-    ):
+    )
+    if same and not _sources_newer(selection, resident):
         return
     from favlo.listener import _log
     from favlo.memory import memory
+
+    if same:
+        _log(f"reloading {selection.pipeline}")
 
     cache = state.get("embed_cache")
     if isinstance(cache, dict) and cache.get("drop_resident"):
@@ -346,6 +426,7 @@ def install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
     state["pipeline"] = None
     state["module"] = None
     state["memory_owners"] = None
+    _clear_stamp(args)
     pipelines.retire(old, previous)
     ui = getattr(args, "console_ui", None)
     if ui is not None:
@@ -370,6 +451,7 @@ def install_runtime(state: dict[str, Any], args: Any, selection: Any) -> None:
     state["record"] = selection.folder
     state["pipeline"] = selection.pipeline
     state["module"] = child.proxy
+    _write_stamp(args, child, selection)
     shutdown = getattr(args, "shutdown", None)
     if shutdown is not None:
         shutdown.runtime = child
@@ -393,6 +475,7 @@ def _clear_resident(state: dict[str, Any], args: Any) -> str | None:
     shutdown = getattr(args, "shutdown", None)
     if shutdown is not None:
         shutdown.runtime = None
+    _clear_stamp(args)
     pipelines.retire(old, owners)
     if isinstance(folder, str) and folder:
         _log(f"released {folder}")

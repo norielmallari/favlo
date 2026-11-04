@@ -33,19 +33,15 @@ class Listener:
 def open_listener(host: str = HOST, port: int = PORT) -> Listener:
     """Reuse a listener on ``host:port``, or start one and own it."""
     from favlo.cli import repo_root
-    from favlo.daemon import ensure, port_open
-    from favlo.smoke_lock import wait_clear
+    from favlo.smoke_lock import open_attached
 
-    wait_clear(root=repo_root())
-    if port_open(host, port):
-        print(f"reuse {host}:{port}", flush=True)
-        return Listener(host=host, port=port, owned=False)
-    pid, started = ensure(host, port, root=repo_root())
-    if not started:
-        print(f"reuse {host}:{port}", flush=True)
-        return Listener(host=host, port=port, owned=False, pid=pid)
-    print(f"started {host}:{port}", flush=True)
-    return Listener(host=host, port=port, owned=True, pid=pid)
+    attached = open_attached(root=repo_root(), host=host, port=port)
+    return Listener(
+        host=attached.host,
+        port=attached.port,
+        owned=attached.owned,
+        pid=attached.pid,
+    )
 
 
 def close_listener(listener: Listener) -> None:

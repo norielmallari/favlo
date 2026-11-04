@@ -35,6 +35,54 @@ def pid_path(port: int, home: Path | None = None) -> Path:
     return root / "serve" / f"{port}.pid"
 
 
+def resident_stamp_path(port: int, home: Path | None = None) -> Path:
+    """JSON stamp of the resident pipeline and the time its worker started."""
+    root = favlo_home() if home is None else home
+    return root / "serve" / f"{port}.resident.json"
+
+
+def write_resident_stamp(
+    port: int,
+    pipeline: str,
+    folder: str,
+    started: float,
+    home: Path | None = None,
+) -> None:
+    """Record the worker that is resident. A port of 0 writes nothing."""
+    if port <= 0:
+        return
+    path = resident_stamp_path(port, home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"pipeline": pipeline, "folder": folder, "started": started}
+    path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+
+def read_resident_stamp(port: int, home: Path | None = None) -> dict[str, Any] | None:
+    """The resident stamp, or None when the file is missing or not that object."""
+    if port <= 0:
+        return None
+    try:
+        body = json.loads(resident_stamp_path(port, home).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    pipeline = body.get("pipeline")
+    started = body.get("started")
+    if not isinstance(pipeline, str) or not pipeline:
+        return None
+    if isinstance(started, bool) or not isinstance(started, (int, float)):
+        return None
+    return body
+
+
+def clear_resident_stamp(port: int, home: Path | None = None) -> None:
+    """Remove the resident stamp. A port of 0 does nothing."""
+    if port <= 0:
+        return
+    resident_stamp_path(port, home).unlink(missing_ok=True)
+
+
 def telemetry_path(port: int, home: Path | None = None) -> Path:
     root = favlo_home() if home is None else home
     return root / "logs" / f"serve-{port}.log"

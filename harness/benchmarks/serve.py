@@ -1,11 +1,9 @@
-"""One local server and one chat completion at a time."""
+"""One shared listener and one chat completion at a time."""
 
 from __future__ import annotations
 
 import json
-import socket
 import threading
-import time
 import urllib.request
 from dataclasses import dataclass
 
@@ -210,88 +208,80 @@ class Log:
             return "".join(self._lines)
 
 
-def free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def start_server(
-    port: int,
-    max_memory: str | None = None,
-    log: Log | None = None,
-    *,
-    seen_listening: int = 0,
-) -> tuple[int, threading.Event, Log]:
-    from favlo.cli import repo_root
-    from favlo.daemon import alive, ensure, follow, telemetry_path
-
-    log = log if log is not None else Log()
-    pid, _started = ensure(
-        "127.0.0.1",
-        port,
-        max_memory=max_memory,
-        root=repo_root(),
-    )
-    stop = threading.Event()
-
-    def on_line(line: str) -> None:
-        log.append(line + "\n")
-
-    follow(telemetry_path(port), on_line, stop, offset=0)
-    deadline = time.monotonic() + 600
-    while time.monotonic() < deadline:
-        if log.text().count("listening on") > seen_listening:
-            return pid, stop, log
-        if not alive(pid):
-            raise RuntimeError(log.text()[-4000:])
-        time.sleep(0.2)
-    raise TimeoutError(log.text()[-4000:])
-
-
 class Server:
-    """The local serve process. A dropped connection starts a new one."""
+    """The shared listener on ``127.0.0.1:8129``.
 
-    def __init__(self, max_memory: str | None = None) -> None:
-        self.port = 0
+    ``start`` reuses a daemon that is already listening and starts one only
+    when the port is closed. ``restart`` unloads the resident model on that
+    same listener. ``stop`` stops the daemon only when this session started it.
+    """
+
+    def __init__(self, max_memory: str | None = None, *, pipeline: str = "") -> None:
+        self.port = 8129
         self.max_memory = max_memory
+        self.pipeline = pipeline
+        self.owned = False
         self.pid: int | None = None
         self.follow_stop: threading.Event | None = None
         self.log = Log()
 
     def start(self) -> None:
-        self.port = free_port()
-        self.pid, self.follow_stop, self.log = start_server(self.port, self.max_memory)
+        from favlo.cli import repo_root
+        from favlo.daemon import alive, follow, read_pid, telemetry_path
+        from favlo.smoke_lock import open_attached
+
+        path = telemetry_path(8129)
+        before = path.stat().st_size if path.is_file() else 0
+        attached = open_attached(
+            root=repo_root(),
+            pipeline=self.pipeline,
+            max_memory=self.max_memory,
+        )
+        self.port = attached.port
+        self.owned = attached.owned
+        self.pid = attached.pid
+        if not self.pid:
+            found = read_pid(self.port)
+            if found is not None and alive(found):
+                self.pid = found
+        if self.follow_stop is not None:
+            self.follow_stop.set()
+        self.follow_stop = threading.Event()
+        path = telemetry_path(self.port)
+        size = path.stat().st_size if path.is_file() else 0
+        offset = before if size >= before else 0
+
+        def on_line(line: str) -> None:
+            self.log.append(line + "\n")
+
+        follow(path, on_line, self.follow_stop, offset=offset)
 
     def restart(self) -> None:
-        """Stop and start on a new port. Keep the followed log for prefix checks."""
-        seen = self.log.text().count("listening on")
-        if self.pid is not None:
-            stop_server(self.pid, self.follow_stop)
-            self.pid = None
-            self.follow_stop = None
-        self.port = free_port()
-        self.pid, self.follow_stop, self.log = start_server(
-            self.port,
-            self.max_memory,
-            self.log,
-            seen_listening=seen,
-        )
+        """Unload the resident model. Keep the listener and the followed log."""
+        from favlo.daemon import alive, port_open
+        from favlo.smoke_lock import unload_model
+
+        unload_model(port=self.port)
+        daemon_up = port_open("127.0.0.1", self.port)
+        if self.pid is not None and not alive(self.pid):
+            daemon_up = False
+        if daemon_up:
+            return
+        self.start()
 
     def stop(self) -> None:
-        if self.pid is None:
+        if self.follow_stop is not None:
+            self.follow_stop.set()
+            self.follow_stop = None
+        if not self.owned or self.pid is None:
+            self.pid = None
             return
-        stop_server(self.pid, self.follow_stop)
+        from favlo.daemon import stop_pid
+
+        stop_pid(self.pid)
+        print(f"stopped 127.0.0.1:{self.port}", flush=True)
         self.pid = None
-        self.follow_stop = None
-
-
-def stop_server(pid: int, follow_stop: threading.Event | None = None) -> None:
-    from favlo.daemon import stop_pid
-
-    if follow_stop is not None:
-        follow_stop.set()
-    stop_pid(pid)
+        self.owned = False
 
 
 def complete(

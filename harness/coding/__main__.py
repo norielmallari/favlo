@@ -12,9 +12,9 @@ After the ledger, the same listener runs the chat contract.
 Exit 0 means ``ledger.py`` ``collect`` returns 6, 0, and -6, and every
 contract check held. Which tools the model called is not part of that result.
 Each request's server prefill and decode lines are the thinking series. The
-listener stops after the first model turn and starts again so the next turn
-loads the prefix from disk. Exit 1 when that load is missing or a later turn
-does not extend it.
+harness reuses ``127.0.0.1:8129``. After the first model turn it unloads the
+resident model so the next turn loads the prefix from disk. Exit 1 when that
+load is missing or a later turn does not extend it.
 
     uv run python -m harness.coding --model qwen38-27b
     uv run python -m harness.coding --model qwen38-27b --mtp on
@@ -62,10 +62,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--mtp-depth must be a positive integer")
     stem = args.model.partition(":")[0]
     from favlo.cli import repo_root
-    from favlo.smoke_lock import hold, release
 
     root = repo_root()
-    created = hold(root=root, pipeline=stem, command="coding")
     workspace = _ROOT / "artifacts" / "coding" / stem
     if workspace.exists():
         for child in sorted(workspace.rglob("*"), reverse=True):
@@ -78,8 +76,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.vision:
         if not HORSE.is_file():
             print(f"missing {HORSE.as_posix()}", flush=True)
-            if created:
-                release(root=root)
             return 1
         vision = HORSE.read_bytes()
         # Drop a prior disk hit so this run's first tower logs ``vision patches``.
@@ -90,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         if cache.is_dir():
             for child in cache.glob("*.npz"):
                 child.unlink(missing_ok=True)
-    server = Server(args.max_memory)
+    server = Server(args.max_memory, pipeline=stem)
     try:
         from favlo.registry import resolve
 
@@ -118,8 +114,6 @@ def main(argv: list[str] | None = None) -> int:
         problems.extend(asyncio.run(run_contract(base_url, stem)))
         result = grade(workspace)
     finally:
-        if created:
-            release(root=root)
         server.stop()
     sys.stdout.write(result.stdout)
     sys.stderr.write(result.stderr)

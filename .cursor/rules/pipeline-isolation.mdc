@@ -42,10 +42,13 @@ Device buffers do not survive `close`. A value the next stage needs is in the ho
 
 Wait until the machine is free before a test command. That includes `pytest`, `kernels`, `quantize`, `complete`, `bf16`, `probe`, `matmul`, `python -m harness`, and `python -m harness.coding`: any command that compiles shaders, dispatches Metal, loads a checkpoint, quantizes, or starts `favlo serve`. Editing the write set does not wait. Reading another pipeline does not.
 
-The machine is busy when `artifacts/pipeline-test.lock` exists and the `pid` in it is still running. A running `favlo serve` is not itself a reason to wait. `python -m favlo.smoke_lock run` is the only take-and-release path. It waits until this shell owns the lock, runs the command, and releases on every exit, including a failed command and SIGINT. When the daemon is up and no request is open, the script closes the resident model and holds chat until that release. The daemon stays up. Do not kill the server, and do not kill the process that holds the lock. Do not sleep and retry acquire outside the script.
+The machine is busy when `artifacts/pipeline-test.lock` exists and the `pid` in it is still running. A running `favlo serve` is not itself a reason to wait. `python -m favlo.smoke_lock run` is the take-and-release path for a command that uses the GPU in its own process. It waits until this shell owns the lock, runs the command, and releases on every exit, including a failed command and SIGINT. When the daemon is up and no request is open, the script closes the resident model and holds chat until that release. The daemon stays up. Do not kill the server, and do not kill the process that holds the lock. Do not sleep and retry acquire outside the script.
+
+A command that calls the listener uses `attach`. It waits until the lock is clear, reuses `127.0.0.1:8129`, and does not take the lock. It starts the daemon only when that port is closed, and stops it only when this call started it. When `--pipeline` is the resident model and that pipeline's sources are newer than its worker, `attach` closes the model before the command. The listener closes that worker on the next request when the sources are newer, then loads it again.
 
 ```text
 uv run python -m favlo.smoke_lock run --pipeline <stem> --command <name> -- <command...>
+uv run python -m favlo.smoke_lock attach --pipeline <stem> --command <name> -- <command...>
 ```
 
 A stretch of several commands in one shell uses one blocking acquire and one release:

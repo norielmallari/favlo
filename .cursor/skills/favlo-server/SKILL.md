@@ -18,7 +18,7 @@ The listener is `favlo serve` on `127.0.0.1:8129`. Cursor reads [`.cursor/mcp.js
 
 If `127.0.0.1:8129` already accepts a connection, leave that process alone. Do not kill it and do not start a second listener. Unload a smoke hold with `uv run python -m favlo.smoke_lock release`, not by stopping the daemon. One exception: `POST /mcp` returns `not found`. That process was started before the route existed. Stop that pid and start the daemon again.
 
-A media harness uses that same listener. `python -m harness.server run -- <command>` reuses it, or starts one and stops that process when the command exits. Do not point a harness at a second port.
+A media harness and a language harness use that same listener. `python -m harness.server run -- <command>` and `python -m favlo.smoke_lock attach --pipeline <stem> --command <name> -- <command>` reuse it, or start one and stop that process when the command exits. `attach` closes the named pipeline first when that model is resident and its sources are newer than the worker. Do not point a harness at a second port.
 
 If nothing is listening, from this repo:
 

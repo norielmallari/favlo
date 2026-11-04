@@ -4,7 +4,16 @@
 is open, then writes ``artifacts/pipeline-test.lock``. ``release`` clears
 that hold. The daemon process stays up. The next chat loads a model again.
 
-Exit 0 means the lock is held, or was cleared.
+``attach`` does not take that lock. It reuses ``127.0.0.1:8129``, starts the
+daemon only when that port is closed, and stops the daemon only when this
+call started it. When ``--pipeline`` is the resident model and that
+pipeline's sources are newer than its worker, ``attach`` closes the model
+before the command. The listener does the same check on the next request.
+
+``run`` is the in-process GPU path. It holds the lock for the command.
+A harness that calls the listener uses ``attach``.
+
+Exit 0 means the lock is held, was cleared, or the attached command exited 0.
 Exit 2 means a request is open. The lock was not taken.
 Exit 3 means another live pid holds the lock.
 """
@@ -20,6 +29,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -185,6 +195,204 @@ def release(
     return 0
 
 
+@dataclass(frozen=True)
+class Attached:
+    """The listener a command is using. ``owned`` is true when this call started it."""
+
+    host: str
+    port: int
+    owned: bool
+    pid: int | None = None
+
+
+def open_attached(
+    *,
+    root: Path,
+    pipeline: str = "",
+    host: str = _HOST,
+    port: int = _PORT,
+    max_memory: str | None = None,
+) -> Attached:
+    """Reuse the listener, or start one. Unload ``pipeline`` when its sources changed.
+
+    This call does not take the machine lock. It waits until no live pid holds it.
+    """
+    from favlo.daemon import ensure, port_open
+
+    wait_clear(root=root)
+    if port_open(host, port):
+        print(f"reuse {host}:{port}", flush=True)
+        attached = Attached(host=host, port=port, owned=False)
+    else:
+        pid, started = ensure(host, port, max_memory=max_memory, root=root)
+        if started:
+            print(f"started {host}:{port}", flush=True)
+            attached = Attached(host=host, port=port, owned=True, pid=pid)
+        else:
+            print(f"reuse {host}:{port}", flush=True)
+            attached = Attached(host=host, port=port, owned=False, pid=pid)
+    if pipeline and unload_if_changed(root=root, pipeline=pipeline, host=host, port=port):
+        print(f"unloaded {pipeline}", flush=True)
+    return attached
+
+
+def unload_if_changed(
+    *,
+    root: Path,
+    pipeline: str,
+    host: str = _HOST,
+    port: int = _PORT,
+) -> bool:
+    """Close the resident model when ``pipeline`` sources are newer than its worker.
+
+    A stamp that names a different model stays until the next request names
+    this one. With no stamp, the newest pipeline worker's start time is the
+    clock. A request that is open is left running. The listener reloads on
+    the next request for this pipeline.
+    """
+    from favlo.daemon import read_resident_stamp
+    from favlo.pipelines import source_mtime
+    from favlo.registry import resolve
+
+    stamp = read_resident_stamp(port)
+    if stamp is not None and stamp.get("pipeline") != pipeline:
+        return False
+    started = stamp.get("started") if stamp is not None else _worker_started()
+    if isinstance(started, bool) or not isinstance(started, (int, float)):
+        return False
+    try:
+        selection = resolve(pipeline, root=root)
+    except (LookupError, OSError, ValueError):
+        return False
+    if source_mtime(selection) <= float(started):
+        return False
+    code, body = _post(host, port, "/v1/pipelines/close", {})
+    if code == 200:
+        return True
+    if code == 409:
+        error = body.get("error")
+        message = error.get("message") if isinstance(error, dict) else None
+        print(message if isinstance(message, str) and message else "a request is open")
+    elif code == 0:
+        print("serve is not listening")
+    else:
+        print("unload failed")
+    return False
+
+
+def _worker_started() -> float | None:
+    """Start time of the newest pipeline worker, or None when none is running.
+
+    Used when the listener has not written a resident stamp. The clock is
+    ``time.time()`` minus the elapsed time ``ps`` reports.
+    """
+    try:
+        completed = subprocess.run(
+            ["ps", "-axww", "-o", "etime=,command="],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    newest: float | None = None
+    now = time.time()
+    for line in completed.stdout.splitlines():
+        if "favlo.pipeline_worker" not in line:
+            continue
+        elapsed = _etime_seconds(line.split(None, 1)[0])
+        if elapsed is None:
+            continue
+        started = now - elapsed
+        if newest is None or started > newest:
+            newest = started
+    return newest
+
+
+def _etime_seconds(text: str) -> int | None:
+    """Parse ``ps`` elapsed time ``[[dd-]hh:]mm:ss``."""
+    days = 0
+    clock = text.strip()
+    if "-" in clock:
+        day, clock = clock.split("-", 1)
+        try:
+            days = int(day)
+        except ValueError:
+            return None
+    try:
+        pieces = [int(part) for part in clock.split(":")]
+    except ValueError:
+        return None
+    if len(pieces) == 2:
+        hours, minutes, seconds = 0, pieces[0], pieces[1]
+    elif len(pieces) == 3:
+        hours, minutes, seconds = pieces
+    else:
+        return None
+    return days * 86400 + hours * 3600 + minutes * 60 + seconds
+
+
+def unload_model(*, host: str = _HOST, port: int = _PORT) -> str | None:
+    """Close the resident model. The listener stays up.
+
+    Return the closed folder, or None when nothing was closed.
+    """
+    code, body = _post(host, port, "/v1/pipelines/close", {})
+    if code == 200:
+        closed = body.get("closed")
+        return closed if isinstance(closed, str) else ""
+    if code == 409:
+        error = body.get("error")
+        message = error.get("message") if isinstance(error, dict) else None
+        print(message if isinstance(message, str) and message else "a request is open")
+        return None
+    if code == 0:
+        print("serve is not listening")
+        return None
+    print("unload failed")
+    return None
+
+
+def close_attached(attached: Attached) -> None:
+    """Stop a listener this call started. A reused listener stays up."""
+    if not attached.owned or attached.pid is None:
+        return
+    from favlo.daemon import stop_pid
+
+    stop_pid(attached.pid)
+    print(f"stopped {attached.host}:{attached.port}", flush=True)
+
+
+def attach(
+    *,
+    root: Path,
+    pipeline: str,
+    command: str,
+    argv: list[str],
+    host: str = _HOST,
+    port: int = _PORT,
+    max_memory: str | None = None,
+) -> int:
+    """Reuse the listener, unload a changed ``pipeline``, run ``argv``, then leave it.
+
+    ``command`` is recorded only in the log line. This path does not write the lock.
+    """
+    del command
+    if not argv:
+        print("a command is required")
+        return 2
+    attached = open_attached(
+        root=root,
+        pipeline=pipeline,
+        host=host,
+        port=port,
+        max_memory=max_memory,
+    )
+    return _run_child(argv, finally_fn=lambda: close_attached(attached))
+
+
 def wait_clear(
     *,
     root: Path,
@@ -221,6 +429,16 @@ def run(
         port=port,
         wait=wait,
     )
+
+    def _finish() -> None:
+        if created:
+            release(root=root, host=host, port=port)
+
+    return _run_child(argv, finally_fn=_finish)
+
+
+def _run_child(argv: list[str], *, finally_fn: Any) -> int:
+    """Run ``argv`` and call ``finally_fn`` on every exit, including SIGINT."""
     child: subprocess.Popen[bytes] | None = None
     previous = {
         signal.SIGINT: signal.getsignal(signal.SIGINT),
@@ -251,8 +469,7 @@ def run(
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         try:
-            if created:
-                release(root=root, host=host, port=port)
+            finally_fn()
         finally:
             for signum, handler in previous.items():
                 signal.signal(signum, handler)
@@ -379,6 +596,11 @@ def main(argv: list[str] | None = None) -> int:
     wrapped.add_argument("--command", required=True)
     wrapped.add_argument("--wait", type=float, default=5.0)
     wrapped.add_argument("argv", nargs=argparse.REMAINDER)
+    joined = sub.add_parser("attach")
+    joined.add_argument("--pipeline", required=True)
+    joined.add_argument("--command", required=True)
+    joined.add_argument("--max-memory", default=None)
+    joined.add_argument("argv", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     root = repo_root()
     if args.action == "acquire":
@@ -398,6 +620,19 @@ def main(argv: list[str] | None = None) -> int:
             command=args.command,
             host=args.host,
             port=args.port,
+        )
+    if args.action == "attach":
+        command = list(args.argv)
+        if command[:1] == ["--"]:
+            command = command[1:]
+        return attach(
+            root=root,
+            pipeline=args.pipeline,
+            command=args.command,
+            argv=command,
+            host=args.host,
+            port=args.port,
+            max_memory=args.max_memory,
         )
     if args.action == "run":
         command = list(args.argv)

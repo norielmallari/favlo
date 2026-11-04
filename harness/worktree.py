@@ -38,10 +38,8 @@ from harness.file_session import (
     Log,
     Server,
     _completions,
-    _free_port,
     _spawn,
     _stop_server,
-    _wait_listening,
     _wait_requests,
     format_request,
     format_summary,
@@ -464,7 +462,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Edit a worktree of main, then summarize a 131072-token session."
     )
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--port", type=int, default=8129)
     parser.add_argument("--model", required=True)
     parser.add_argument("--tokens", type=int, default=TARGET_TOKENS)
     parser.add_argument("--max-memory", default=None, help="serve memory cap, such as 16GiB")
@@ -473,17 +471,10 @@ def main(argv: list[str] | None = None) -> int:
         print("token target must be positive")
         return 1
     stem = model_stem(args.model)
-    from favlo.cli import repo_root
-    from favlo.smoke_lock import hold, release
-
-    root = repo_root()
-    created = hold(root=root, pipeline=stem, command="worktree")
     log = Log()
     server: Server | None = None
     try:
-        port = args.port or _free_port()
-        server = _spawn(port, log, args.max_memory)
-        _wait_listening(server, log, 0)
+        server = _spawn(log, stem, args.max_memory, args.port or 8129)
         requests, _gate, note = asyncio.run(
             run_worktree_agent(args.repo, log, server, model=stem, target=args.tokens)
         )
@@ -492,8 +483,6 @@ def main(argv: list[str] | None = None) -> int:
         print(log.text()[-3000:])
         return 1
     finally:
-        if created:
-            release(root=root)
         if server is not None:
             _stop_server(server)
     print(format_summary(requests, args.tokens))

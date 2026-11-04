@@ -6,11 +6,11 @@ any pipeline package. The model id is the pipeline name under test. The request
 sets ``reasoning.effort`` to ``none`` and opens the ``:instruct`` sampling card.
 ``--mtp on`` or ``--mtp off`` sends ``favlo:mtp``; omitted, the registry row
 decides. The first completion of each task is required to call ``read_file``.
-The server stops after the first task and starts again, so the next task loads
-the prefix from disk. Later tasks keep that server. A request that does not
-extend the stored token ids stops the run. Each model call streams its reply
-and tool calls. Each request also prints the server's prefill and decode lines.
-Those lines are the instruct series.
+The harness reuses ``127.0.0.1:8129``. After the first task it unloads the
+resident model, so the next task loads the prefix from disk. Later tasks keep
+that listener. A request that does not extend the stored token ids stops the
+run. Each model call streams its reply and tool calls. Each request also
+prints the server's prefill and decode lines. Those lines are the instruct series.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ import argparse
 import asyncio
 import os
 import re
-import socket
 import sys
 import threading
 import time
@@ -435,6 +434,7 @@ class Server:
     port: int
     max_memory: str | None = None
     follow_stop: threading.Event | None = None
+    owned: bool = False
 
 
 def _wait_requests(log: Log, previous: int, server: Server) -> list[RequestRate]:
@@ -444,7 +444,7 @@ def _wait_requests(log: Log, previous: int, server: Server) -> list[RequestRate]
     stable_at: float | None = None
     last = previous
     while time.monotonic() < deadline:
-        if not alive(server.pid):
+        if server.pid > 0 and not alive(server.pid):
             message = "server exited\n" + log.text()[-4000:]
             raise RuntimeError(message)
         requests = parse_requests(log.text())
@@ -540,8 +540,8 @@ async def run_file_agent(
 
     Each task is one Agent Framework run: the model calls ``read_file``, the
     framework returns the file, and the model analyzes it. The stream printer
-    writes each model call as it arrives. The server is stopped after the first
-    task and replaced. Later tasks use that new process and the same session.
+    writes each model call as it arrives. The resident model is unloaded after
+    the first task. Later tasks use the same listener and the same session.
     """
     root = root.resolve()
     package = shared_package(root)
@@ -580,11 +580,7 @@ async def run_file_agent(
             print(f"read {SHARED_PACKAGE.as_posix()}/{rel}", flush=True)
             turn += 1
             if turn == 1 and index + 1 < len(files):
-                print("restarting server", flush=True)
-                await close_chat_client(chat)
-                chat = None
                 _restart(server, log)
-                chat, agent = _open_agent(f"http://127.0.0.1:{server.port}/v1", model, read)
     finally:
         printer.close()
         if chat is not None:
@@ -601,63 +597,61 @@ async def run_file_agent(
     return RunResult(requests, reached, extended, note)
 
 
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def _wait_listening(server: Server, log: Log, seen: int) -> None:
-    from favlo.daemon import alive
-
-    deadline = time.monotonic() + 300
-    while time.monotonic() < deadline:
-        if log.text().count("listening on") > seen:
-            return
-        if not alive(server.pid):
-            message = log.text()[-4000:]
-            raise RuntimeError(message)
-        time.sleep(0.2)
-    message = log.text()[-4000:]
-    raise TimeoutError(message)
-
-
-def _spawn(port: int, log: Log, max_memory: str | None = None) -> Server:
+def _spawn(
+    log: Log,
+    pipeline: str,
+    max_memory: str | None = None,
+    port: int = 8129,
+) -> Server:
     from favlo.cli import repo_root
-    from favlo.daemon import ensure, follow, telemetry_path
+    from favlo.daemon import alive, follow, read_pid, telemetry_path
+    from favlo.smoke_lock import open_attached
 
-    pid, _started = ensure(
-        "127.0.0.1",
-        port,
-        max_memory=max_memory,
+    path = telemetry_path(port)
+    before = path.stat().st_size if path.is_file() else 0
+    attached = open_attached(
         root=repo_root(),
+        pipeline=pipeline,
+        port=port,
+        max_memory=max_memory,
     )
+    pid = attached.pid or 0
+    if pid <= 0:
+        found = read_pid(attached.port)
+        if found is not None and alive(found):
+            pid = found
     stop = threading.Event()
 
     def on_line(line: str) -> None:
         log.append(line + "\n")
 
-    follow(telemetry_path(port), on_line, stop, offset=0)
-    return Server(pid, port, max_memory, stop)
+    path = telemetry_path(attached.port)
+    size = path.stat().st_size if path.is_file() else 0
+    offset = before if size >= before else 0
+    follow(path, on_line, stop, offset=offset)
+    return Server(pid, attached.port, max_memory, stop, attached.owned)
 
 
 def _stop_server(server: Server) -> None:
-    """SIGTERM the daemon. It forwards that signal to each pipeline process."""
+    """Stop the log follower. SIGTERM the daemon only when this session started it."""
     from favlo.daemon import stop_pid
 
     if server.follow_stop is not None:
         server.follow_stop.set()
+        server.follow_stop = None
+    if not server.owned:
+        return
     stop_pid(server.pid)
+    print(f"stopped 127.0.0.1:{server.port}", flush=True)
 
 
 def _restart(server: Server, log: Log) -> None:
-    _stop_server(server)
-    seen = log.text().count("listening on")
-    server.port = _free_port()
-    started = _spawn(server.port, log, server.max_memory)
-    server.pid = started.pid
-    server.follow_stop = started.follow_stop
-    _wait_listening(server, log, seen)
+    """Unload the resident model. The listener and the followed log stay."""
+    del log
+    from favlo.smoke_lock import unload_model
+
+    print("unloading model", flush=True)
+    unload_model(port=server.port)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -668,7 +662,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--tokens", type=int, default=TARGET_TOKENS)
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--port", type=int, default=8129)
     parser.add_argument("--model", required=True)
     parser.add_argument("--max-memory", default=None, help="serve memory cap, such as 16GiB")
     parser.add_argument("--mtp", choices=("on", "off"), default=None)
@@ -681,18 +675,11 @@ def main(argv: list[str] | None = None) -> int:
         print("--mtp-depth must be a positive integer")
         return 1
     stem = model_stem(args.model)
-    from favlo.cli import repo_root
-    from favlo.smoke_lock import hold, release
-
-    root = repo_root()
-    created = hold(root=root, pipeline=stem, command="file-agent")
     log = Log()
     server: Server | None = None
     mtp = None if args.mtp is None else args.mtp == "on"
     try:
-        port = args.port or _free_port()
-        server = _spawn(port, log, args.max_memory)
-        _wait_listening(server, log, 0)
+        server = _spawn(log, stem, args.max_memory, args.port or 8129)
         if args.mtp is not None:
             print(f"mtp {args.mtp} depth {args.mtp_depth}", flush=True)
         result = asyncio.run(
@@ -711,8 +698,6 @@ def main(argv: list[str] | None = None) -> int:
         print(log.text()[-3000:])
         return 1
     finally:
-        if created:
-            release(root=root)
         if server is not None:
             _stop_server(server)
     print(format_summary(result.requests, args.tokens))

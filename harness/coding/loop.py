@@ -141,11 +141,11 @@ async def _run(
     restarter = _PrefixRestart(server, client)
 
     class PrefixRestartMiddleware(ChatMiddleware):
-        """Close the listener after the first model turn so the next loads from SSD."""
+        """Unload the resident model after the first turn so the next loads from SSD."""
 
         async def process(self, _context: Any, call_next: Any) -> None:
             if restarter.calls == 1:
-                print("restarting server", flush=True)
+                print("unloading model", flush=True)
                 restarter.restart()
             await call_next()
             restarter.calls += 1
@@ -175,7 +175,7 @@ async def _run(
 
 
 class _PrefixRestart:
-    """Restart the private serve once, keeping the followed log."""
+    """Unload the resident model once, keeping the listener and the followed log."""
 
     def __init__(self, server: Server, client: Any) -> None:
         self.server = server

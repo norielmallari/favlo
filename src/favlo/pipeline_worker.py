@@ -18,6 +18,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -120,6 +121,7 @@ class PipelineChild:
         self._released = threading.Event()
         self._busy = False
         self.admission: Any = None
+        self.started: float | None = None
 
     def open(self) -> None:
         """Spawn the process and wait until it has reported its owners."""
@@ -253,6 +255,8 @@ class PipelineChild:
     def _start(self) -> None:
         from favlo.memory import reclaimable_bytes
 
+        # Before the child imports the pipeline, so a later save is newer.
+        self.started = time.time()
         self._baseline = reclaimable_bytes()
         read_fd, write_fd = os.pipe()
         os.set_inheritable(read_fd, True)

@@ -22,7 +22,7 @@ As-built harness scores for this pipeline. The process contract is
 
 The harness scores IFEval, GSM8K, and HumanEval against `serve`.
 The `model` field names this pipeline. The checker reads `message.content`.
-A dropped connection restarts the server and sends the same request again.
+A dropped connection unloads the resident model and sends the same request again.
 
 ## Request
 
@@ -184,7 +184,7 @@ def _ask(
             return complete(server.port, messages, max_tokens, request, model=model)
         except (OSError, json.JSONDecodeError, RuntimeError) as exc:
             last = f"{type(exc).__name__}: {exc}"
-            print(f"restarting server: {last}", flush=True)
+            print(f"unloading model: {last}", flush=True)
             server.restart()
     return None, "error", last
 
@@ -433,7 +433,7 @@ def run(
     limit: int | None = None,
     model: str,
 ) -> int:
-    server = Server()
+    server = Server(pipeline=model.partition(":")[0])
     server.start()
     try:
         _smoke(server.port, model, request)

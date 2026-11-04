@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import socket
 import threading
 import time
 import urllib.error
@@ -139,12 +138,6 @@ class Log:
     def text(self) -> str:
         with self._lock:
             return "".join(self._lines)
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 def _wait_listening(pid: int, log: Log) -> None:
@@ -292,29 +285,47 @@ def run(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Thinking-mode persona coherence.")
-    parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--port", type=int, default=8129)
     parser.add_argument("--presence-penalty", type=float, default=0.0)
     parser.add_argument("--penalty-window", type=int, default=20)
     parser.add_argument("--model", default=None, help="chat model id; default is the registry default")
     args = parser.parse_args(argv)
     from favlo.cli import repo_root
-    from favlo.daemon import ensure, follow, stop_pid, telemetry_path
+    from favlo.daemon import alive, follow, read_pid, telemetry_path
+    from favlo.smoke_lock import close_attached, open_attached
     from harness.harness_model import judge_model
 
-    port = args.port or _free_port()
+    root = repo_root()
+    model = args.model or judge_model(root)
     log = Log()
-    pid, _started = ensure("127.0.0.1", port, root=repo_root())
+    attached = None
     follow_stop = threading.Event()
 
     def on_line(line: str) -> None:
         log.append(line + "\n")
 
-    follow(telemetry_path(port), on_line, follow_stop, offset=0)
     try:
-        _wait_listening(pid, log)
-        model = args.model or judge_model(repo_root())
+        port = args.port or 8129
+        path = telemetry_path(port)
+        before = path.stat().st_size if path.is_file() else 0
+        attached = open_attached(
+            root=root,
+            pipeline=model.partition(":")[0],
+            port=port,
+        )
+        path = telemetry_path(attached.port)
+        size = path.stat().st_size if path.is_file() else 0
+        offset = before if size >= before else 0
+        follow(path, on_line, follow_stop, offset=offset)
+        pid = attached.pid
+        if not pid:
+            found = read_pid(attached.port)
+            if found is not None and alive(found):
+                pid = found
+        if attached.owned and pid:
+            _wait_listening(pid, log)
         problems = run(
-            port,
+            attached.port,
             log,
             presence=args.presence_penalty,
             window=args.penalty_window,
@@ -332,7 +343,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     finally:
         follow_stop.set()
-        stop_pid(pid)
+        if attached is not None:
+            close_attached(attached)
     if problems:
         print("coherence failed:")
         for problem in problems:
