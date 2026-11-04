@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 
+import { LOCAL_PROVIDER_ID } from '../src/api/seed-ids';
 import { deleteAgentsNamed } from './cleanup';
 import { onScreen } from './on-screen';
 import { createAgent, openAgentChat } from './open-agent-chat';
@@ -21,7 +22,7 @@ test('qwen35 reasoning effort none hides thinking and medium shows it', async ({
     await page.getByRole('button', { name: 'New agent' }).click();
     await page.getByRole('textbox', { name: 'Agent name', exact: true }).fill(quiet);
     await page.getByRole('textbox', { name: 'Persona', exact: true }).fill('A short persona.');
-    await page.getByRole('combobox', { name: 'Model', exact: true }).selectOption(model);
+    await chooseModel(page, model);
     await page.getByRole('combobox', { name: 'Reasoning effort', exact: true }).selectOption('none');
     await createAgent(page, quiet);
     await openAgentChat(page, quiet);
@@ -35,12 +36,12 @@ test('qwen35 reasoning effort none hides thinking and medium shows it', async ({
     await page.getByRole('button', { name: 'New agent' }).click();
     await page.getByRole('textbox', { name: 'Agent name', exact: true }).fill(loud);
     await page.getByRole('textbox', { name: 'Persona', exact: true }).fill('A short persona.');
-    await page.getByRole('combobox', { name: 'Model', exact: true }).selectOption(model);
+    await chooseModel(page, model);
     await page.getByRole('combobox', { name: 'Reasoning effort', exact: true }).selectOption('medium');
     await createAgent(page, loud);
     await openAgentChat(page, loud);
     await sendPrompt(page, PROMPT);
-    const thinking = page.getByRole('button', { name: 'Thinking' });
+    const thinking = page.getByTestId('transcript').getByRole('button', { name: 'Thinking', exact: true });
     await expect(thinking).toBeVisible({ timeout: 180_000 });
     await expect(thinking).toHaveAttribute('aria-expanded', 'false');
     await onScreen(thinking);
@@ -60,9 +61,18 @@ test('qwen35 reasoning effort none hides thinking and medium shows it', async ({
   }
 });
 
+async function chooseModel(page: Page, model: string): Promise<void> {
+  await page.getByRole('combobox', { name: 'Provider', exact: true }).selectOption(LOCAL_PROVIDER_ID);
+  const refresh = page.getByRole('button', { name: 'Refresh models', exact: true });
+  await onScreen(refresh);
+  await refresh.click();
+  await onScreen(page.getByText('Models refreshed'));
+  await page.getByRole('combobox', { name: 'Model', exact: true }).selectOption(model);
+}
+
 async function sendPrompt(page: Page, prompt: string): Promise<void> {
   await page.getByRole('textbox', { name: 'Message' }).fill(prompt);
-  const send = page.getByRole('button', { name: 'Send' });
+  const send = page.getByRole('button', { name: 'Send', exact: true });
   await onScreen(send);
   await send.click();
 }

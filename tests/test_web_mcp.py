@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "web-api"))
 
 from web_api.bus import Bus  # noqa: E402
-from web_api.ids import FAVLO_AGENT_ID, guid  # noqa: E402
+from web_api.ids import FAVLO_AGENT_ID, FAVLO_MCP_ID, guid  # noqa: E402
 from web_api.mcp_client import list_tools  # noqa: E402
 from web_api.mcp_tasks import _finish, settle  # noqa: E402
 from web_api.mcp_tools import INSTRUCTIONS, _description, groups_from, prepare_catalog  # noqa: E402
@@ -282,6 +282,7 @@ def test_a_finished_image_stays_finished() -> None:
 
 def test_an_unknown_model_result_starts_a_correction_turn(tmp_path: Path) -> None:
     store = Store(tmp_path / "app.db")
+    store.ensure_initial_model("example-model")
     try:
         task = store.begin_mcp_task(
             {
@@ -386,7 +387,7 @@ def test_mcp_tools_from_two_servers_keep_unique_names(
         store.close()
 
 
-def test_an_old_catalog_table_becomes_group_switches(tmp_path: Path) -> None:
+def test_an_unstamped_database_is_rebuilt(tmp_path: Path) -> None:
     path = tmp_path / "app.db"
     server_id = guid()
     raw = sqlite3.connect(path)
@@ -454,13 +455,11 @@ def test_an_old_catalog_table_becomes_group_switches(tmp_path: Path) -> None:
     raw.close()
     store = Store(path)
     try:
-        server = store.mcp_server(server_id)
-        assert server is not None
-        assert server["groups"] == [
-            {"id": "image", "name": "Image", "enabled": False, "tools": []}
-        ]
-        kept = store.enabled_mcp_servers(FAVLO_AGENT_ID)
-        assert kept[0]["switches"] == {"image": False}
+        assert store.mcp_server(server_id) is None
+        seeded = store.mcp_server(FAVLO_MCP_ID)
+        assert seeded is not None
+        assert seeded["name"] == "Favlo media"
+        assert seeded["groups"] == []
     finally:
         store.close()
     check = sqlite3.connect(path)
@@ -677,6 +676,7 @@ def test_a_task_result_arrives_on_a_later_turn(tmp_path: Path) -> None:
         "                'isError': False}})",
     )
     store = Store(tmp_path / "app.db")
+    store.ensure_initial_model("example-model")
     jobs: set[asyncio.Task[object]] = set()
     try:
 

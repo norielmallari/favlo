@@ -169,6 +169,7 @@ export function useAguiChat(options: Options) {
       options.onSteps(() => []);
       options.onRunId(runId);
       try {
+        let failed = false;
         for await (const event of runAgUi({
           threadId: options.threadId,
           runId,
@@ -176,9 +177,12 @@ export function useAguiChat(options: Options) {
           state: options.state,
           signal: controller.signal,
         })) {
+          if (event.type === 'RUN_ERROR') {
+            failed = true;
+          }
           applyEvent(event);
         }
-        if (options.hydrate) {
+        if (!failed && options.hydrate) {
           const snap = await options.hydrate();
           options.onMessages(() => snap.messages);
           if (snap.state) {
@@ -249,7 +253,7 @@ export function useAguiChat(options: Options) {
         threadId: options.threadId,
         runId,
         messages: [],
-        favlo_archive: true,
+        favloArchive: true,
         state: options.state,
         signal: controller.signal,
       })) {

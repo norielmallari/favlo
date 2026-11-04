@@ -83,16 +83,7 @@ def create_app(home: Path | None = None, reply: Callable[..., Any] | None = None
         async def follow(run_id: str) -> None:
             cancel = asyncio.Event()
             app.state.cancels[run_id] = cancel
-            job = asyncio.create_task(
-                perform(
-                    app.state.store,
-                    app.state.bus,
-                    cancel,
-                    run_id,
-                    app.state.reply,
-                    app.state.tasks,
-                )
-            )
+            job = asyncio.create_task(perform(app, cancel, run_id))
             app.state.tasks.add(job)
             job.add_done_callback(app.state.tasks.discard)
 
@@ -124,7 +115,7 @@ def create_app(home: Path | None = None, reply: Callable[..., Any] | None = None
     app.include_router(media.router)
     app.include_router(workspaces.router)
     app.include_router(events.router)
-    app.include_router(agui.router)
+    agui.install(app)
 
     @app.get("/health")
     async def health() -> dict[str, bool]:

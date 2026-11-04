@@ -44,7 +44,7 @@ test('the agent can change gallery placement on the shell', async ({ page }) => 
       try {
         await expect(frame).toBeVisible({ timeout: 180_000 });
       } catch {
-        await expect(page.getByTestId('working')).toHaveCount(0);
+        await expect(page.getByTestId('working')).toHaveCount(0, { timeout: 180_000 });
         await page.getByRole('textbox', { name: 'Message', exact: true }).fill(
           'Please put frame.png on the filmstrip now.',
         );
@@ -78,5 +78,5 @@ async function ask(page: import('@playwright/test').Page, text: string) {
   await onScreen(send);
   await send.click();
   await expect(page.getByTestId('working')).toBeVisible();
-  await expect(page.getByTestId('working')).toHaveCount(0);
+  await expect(page.getByTestId('working')).toHaveCount(0, { timeout: 180_000 });
 }

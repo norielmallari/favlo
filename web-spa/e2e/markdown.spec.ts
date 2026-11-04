@@ -8,13 +8,20 @@ test('a chat message renders bold, italics, and a table', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto('http://127.0.0.1:8012/');
   await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8012\/?$/);
+  const stop = page.getByRole('button', { name: 'Stop' });
+  let send = page.getByRole('button', { name: 'Send', exact: true });
+  await expect(stop.or(send)).toBeVisible();
+  if (await stop.isVisible()) {
+    await onScreen(stop);
+    await stop.click();
+    await expect(send).toBeVisible();
+  }
   await page.getByRole('textbox', { name: 'Message' }).fill('/session clear');
-  let send = page.getByRole('button', { name: 'Send' });
   await onScreen(send);
   await send.click();
   await expect(page.getByLabel(/^You said: /)).toHaveCount(0);
   await page.getByRole('textbox', { name: 'Message' }).fill(message);
-  send = page.getByRole('button', { name: 'Send' });
+  send = page.getByRole('button', { name: 'Send', exact: true });
   await onScreen(send);
   await send.click();
   await expect(page.getByTestId('working')).toBeVisible({ timeout: 180_000 });
@@ -43,7 +50,7 @@ test('a chat message renders bold, italics, and a table', async ({ page }) => {
     '- Hair:\n  Long, wavy pink, flowing past shoulders with extra detail so the line wraps in a narrow column.';
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.getByRole('textbox', { name: 'Message' }).fill(listMessage);
-  send = page.getByRole('button', { name: 'Send' });
+  send = page.getByRole('button', { name: 'Send', exact: true });
   await onScreen(send);
   await send.click();
   await expect(page.getByTestId('working')).toBeVisible({ timeout: 180_000 });

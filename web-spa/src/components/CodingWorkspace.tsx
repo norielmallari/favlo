@@ -296,11 +296,33 @@ export function CodingWorkspace({
       setStatus(null);
       setRunId(event.run_id ?? null);
     }
+    if (event.type === 'run.completed' && sessionId != null) {
+      if (event.payload?.status === 'archived') {
+        openRun.current = null;
+        setMessages([]);
+        setSteps([]);
+        setWorking(false);
+        setRunId(null);
+        setError(null);
+        setStatus(null);
+        return;
+      }
+      void api<Snapshot>(`/workspaces/${workspaceId}/session`)
+        .then((snapshot) => {
+          setMessages(snapshot.messages.map(chatMessage));
+          setSteps([]);
+          setWorking(false);
+          setRunId(null);
+          setStatus('Reply ready');
+        })
+        .catch((caught: Error) => setNotice(caught.message));
+      return;
+    }
     if (event.type === 'run.delta') {
       return;
     }
     if (event.type === 'run.failed' || event.type === 'run.cancelled') {
-      if (event.run_id != null && event.run_id === openRun.current) {
+      if (event.run_id != null && openRun.current != null && event.run_id !== openRun.current) {
         return;
       }
       openRun.current = null;

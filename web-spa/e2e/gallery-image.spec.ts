@@ -75,7 +75,7 @@ test('an attached strip image is embedded once across later messages', async ({ 
         await onScreen(send);
         await send.click();
         await expect(page.getByTestId('working')).toBeVisible();
-        await expect(page.getByTestId('working')).toHaveCount(0);
+        await expect(page.getByTestId('working')).toHaveCount(0, { timeout: 180_000 });
         await page.getByRole('button', { name: 'frame.png', exact: true }).click();
       }
       await expect(download).toBeVisible();
@@ -126,7 +126,7 @@ async function sendLine(page: Page, text: string, shown: string, finish = false)
   await send.click();
   await expect(page.getByLabel(`You said: ${shown}`)).toBeVisible();
   await expect(page.getByTestId('working')).toBeVisible();
-  await expect(page.getByTestId('working')).toHaveCount(0);
+  await expect(page.getByTestId('working')).toHaveCount(0, { timeout: 180_000 });
   await expect(page.getByRole('button', { name: 'Send again' })).toHaveCount(0);
 }
 

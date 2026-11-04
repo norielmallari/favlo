@@ -41,14 +41,7 @@ async def tick(app: Any, moment: datetime) -> None:
         cancel = asyncio.Event()
         app.state.cancels[result["run_id"]] = cancel
         task = asyncio.create_task(
-            perform(
-                app.state.store,
-                bus,
-                cancel,
-                result["run_id"],
-                app.state.reply,
-                app.state.tasks,
-            )
+            perform(app, cancel, result["run_id"])
         )
         app.state.tasks.add(task)
         task.add_done_callback(app.state.tasks.discard)

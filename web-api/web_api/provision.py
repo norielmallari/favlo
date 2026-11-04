@@ -89,14 +89,7 @@ async def _greet(app: Any, workspace: dict[str, Any]) -> None:
     cancel = asyncio.Event()
     app.state.cancels[run_id] = cancel
     try:
-        await perform(
-            store,
-            bus,
-            cancel,
-            run_id,
-            reply=app.state.reply,
-            pending=app.state.tasks,
-        )
+        await perform(app, cancel, run_id)
     finally:
         app.state.cancels.pop(run_id, None)
     after = await asyncio.to_thread(store.session_snapshot, session_id)

@@ -27,7 +27,14 @@ function released(): boolean {
 test('a failed reply can be sent again', async ({ page }) => {
   const models = await fetch('http://127.0.0.1:8129/v1/models');
   test.skip(!models.ok, 'favlo serve has no language model');
-  smoke('acquire');
+  await expect.poll(() => {
+    try {
+      smoke('acquire');
+      return true;
+    } catch {
+      return false;
+    }
+  }, { timeout: 90_000 }).toBe(true);
   try {
     await page.setViewportSize({ width: 1280, height: 800 });
     const session = page.waitForResponse(

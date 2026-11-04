@@ -95,6 +95,34 @@ def test_agui_text_turn_order(client: TestClient) -> None:
     assert "state" in snapshot
 
 
+async def _reply_with_reasoning(**_kwargs: object):
+    yield ReplyPiece("reasoning", "Looking")
+    yield ReplyPiece("content", "Hello")
+
+
+def test_agui_reasoning_lands_on_the_assistant_row(tmp_path: Path) -> None:
+    app = create_app(tmp_path, reply=_reply_with_reasoning)
+    with TestClient(app) as client:
+        _enable_model(client)
+        thread = _favlo_session(client)
+        response = client.post(
+            "/ag-ui",
+            json={
+                "threadId": thread,
+                "runId": guid(),
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+        )
+        assert response.status_code == 200
+        types = _sse_types(response.text)
+        assert "REASONING_MESSAGE_CONTENT" in types
+        assert "TEXT_MESSAGE_CONTENT" in types
+        snapshot = client.get(f"/sessions/{thread}").json()
+        assistant = next(row for row in snapshot["messages"] if row["role"] == "assistant")
+        assert assistant["reasoning"] == "Looking"
+        assert "Hello" in assistant["body"]
+
+
 def test_agui_rejects_second_running_turn(client: TestClient) -> None:
     thread = _favlo_session(client)
     store = client.app.state.store
@@ -108,7 +136,8 @@ def test_agui_rejects_second_running_turn(client: TestClient) -> None:
             "messages": [{"role": "user", "content": "second"}],
         },
     )
-    assert response.status_code == 409
+    assert response.status_code == 200
+    assert "RUN_ERROR" in _sse_types(response.text)
 
 
 def test_clear_route_mints_new_guid(client: TestClient) -> None:
@@ -125,6 +154,50 @@ def test_clear_route_mints_new_guid(client: TestClient) -> None:
     assert ok.status_code == 200
     assert ok.json()["messages"] == []
     assert ok.json()["state"] == {}
+
+
+def test_tool_rounds_stay_on_the_transcript() -> None:
+    from web_api.snapshots import project_messages
+
+    earlier = {
+        "id": "call-a",
+        "type": "function",
+        "function": {"name": "conversation_load_tools", "arguments": "{}"},
+    }
+    later = {
+        "id": "call-b",
+        "type": "function",
+        "function": {"name": "conversation_list_conversations", "arguments": "{\"kind\": \"all\"}"},
+    }
+    rows = project_messages(
+        [
+            {"id": "user", "role": "user", "content": "List"},
+            {"id": "tool-a", "role": "assistant", "tool_calls": [earlier]},
+            {"id": "result-a", "role": "tool", "toolCallId": "call-a", "content": "loaded"},
+            {"id": "tool-b", "role": "assistant", "tool_calls": [later]},
+            {"id": "result-b", "role": "tool", "toolCallId": "call-b", "content": "[]"},
+            {"id": "reply", "role": "assistant", "content": "Done"},
+        ]
+    )
+    assistant = rows[-1]
+    assert assistant["body"] == "Done"
+    assert [call["name"] for call in assistant["tool_calls"]] == [
+        "conversation_load_tools",
+        "conversation_list_conversations",
+    ]
+    assert assistant["tool_calls"][1]["result"] == "[]"
+
+    trailing = project_messages(
+        [
+            {"id": "user", "role": "user", "content": "List"},
+            {"id": "reply", "role": "assistant", "content": "Now let me list the conversations: done"},
+            {"id": "tool-b", "role": "assistant", "tool_calls": [later]},
+            {"id": "result-b", "role": "tool", "toolCallId": "call-b", "content": "[]"},
+        ]
+    )
+    stored = trailing[-1]
+    assert stored["tool_calls"][0]["name"] == "conversation_list_conversations"
+    assert stored["trace"][0]["kind"] == "tool"
 
 
 def test_archive_arm_returns_run_id(client: TestClient) -> None:

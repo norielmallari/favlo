@@ -17,7 +17,7 @@ _PROMPT = (
     "place (string), people (array of strings), time (string), "
     "objects (array of strings), style (string), colors (array of strings), "
     "text_in_image (string), nsfw (boolean). "
-    "When a person is visible, scan the whole figure for every human body part you can see, "
+    "Scan figures for every body part you can see, "
     "including features that are small, partly cropped, or partly covered, "
     "and describe body parts in detail to detect if the image is nsfw."
     "Put each visible feature in objects as its own short anatomical name, "

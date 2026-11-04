@@ -51,14 +51,8 @@ async def run_stream(
         yield piece
 
 
-async def run_server_turn(
-    store: Any,
-    bus: Any,
-    cancel: Any,
-    run_id: str,
-    pending: set[Any] | None = None,
-) -> None:
-    """Drive a heartbeat or MCP follow-up through the same reply path."""
+async def run_server_turn(app: Any, cancel: Any, run_id: str) -> None:
+    """Drive a heartbeat or MCP follow-up through the AG-UI host."""
     from web_api.runs import perform
 
-    await perform(store, bus, cancel, run_id, stream_reply, pending)
+    await perform(app, cancel, run_id)

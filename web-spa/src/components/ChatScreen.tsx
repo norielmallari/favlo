@@ -78,6 +78,7 @@ type AgentEvent = {
   event_id: string;
   stream_id?: string;
   run_id?: string;
+  sequence?: number;
   type: string;
   payload?: {
     message_id?: string;
@@ -107,6 +108,9 @@ export function ChatScreen() {
   const followLatest = useRef(true);
   const placedLatest = useRef(false);
   const openRun = useRef<string | null>(null);
+  const listEpoch = useRef(0);
+  const loadSeq = useRef(0);
+  const viewEpoch = useRef(0);
   const expandedSeed = useRef(false);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -124,6 +128,8 @@ export function ChatScreen() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [listen, setListen] = useState(false);
+  const [messageSession, setMessageSession] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const [drawer, setDrawer] = useState<'channels' | null>(null);
   const [creating, setCreating] = useState(false);
@@ -176,6 +182,8 @@ export function ChatScreen() {
       if (channel == null) {
         return;
       }
+      listEpoch.current += 1;
+      viewEpoch.current += 1;
       setChannels((rows) =>
         rows.map((item) => (item.id === channel.id ? { ...item, session_id: sessionId } : item)),
       );
@@ -195,7 +203,12 @@ export function ChatScreen() {
   });
 
   const loadChannels = useCallback(async () => {
+    const seq = ++loadSeq.current;
+    const epoch = listEpoch.current;
     const body = await api<{ channels: Channel[] }>('/channels');
+    if (seq !== loadSeq.current || epoch !== listEpoch.current) {
+      return;
+    }
     setChannels(body.channels);
     setSelected((current) => {
       if (current != null && body.channels.some((item) => item.id === current)) {
@@ -262,11 +275,25 @@ export function ChatScreen() {
 
   useEffect(() => {
     if (channel == null) {
+      setListen(false);
       return;
     }
-    const stored = readDraft(channel.session_id);
-    setDraft(stored);
-    void api<Snapshot>(`/sessions/${channel.session_id}`).then((snapshot) => {
+    let cancelled = false;
+    const epoch = viewEpoch.current;
+    const sessionId = channel.session_id;
+    setListen(false);
+    setMessages([]);
+    setSteps([]);
+    setWorking(false);
+    setRunId(null);
+    setError(null);
+    setMessageSession(sessionId);
+    openRun.current = null;
+    setDraft(readDraft(sessionId));
+    void api<Snapshot>(`/sessions/${sessionId}`).then((snapshot) => {
+      if (cancelled || epoch !== viewEpoch.current) {
+        return;
+      }
       cursorRef.current = snapshot.cursor;
       setMessages(snapshot.messages.map(chatMessage));
       const latest = snapshot.runs.at(-1);
@@ -276,8 +303,16 @@ export function ChatScreen() {
       setRunId(running);
       setError(latest?.status === 'failed' ? latest.error : null);
       setSteps([]);
-    }).catch((caught: Error) => setNotice(caught.message));
-  }, [channel]);
+      setListen(true);
+    }).catch((caught: Error) => {
+      if (!cancelled && epoch === viewEpoch.current) {
+        setNotice(caught.message);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [channel?.session_id]);
 
   useEffect(() => {
     followLatest.current = true;
@@ -322,7 +357,7 @@ export function ChatScreen() {
       socket = new WebSocket(socketUrl());
       socket.onopen = () => {
         socket?.send(JSON.stringify({ action: 'subscribe', stream_id: 'app', cursor: 0 }));
-        if (channel != null) {
+        if (listen && channel != null) {
           socket?.send(
             JSON.stringify({
               action: 'subscribe',
@@ -345,7 +380,7 @@ export function ChatScreen() {
       clearTimeout(timer);
       socket?.close();
     };
-  }, [channel?.session_id]);
+  }, [channel?.session_id, listen]);
 
   useEffect(() => {
     if (Platform.OS !== 'web') {
@@ -384,6 +419,9 @@ export function ChatScreen() {
     }
     if (event.stream_id !== `session:${channel?.session_id}`) {
       return;
+    }
+    if (event.sequence != null && event.sequence > cursorRef.current) {
+      cursorRef.current = event.sequence;
     }
     if (
       event.type === 'message.created' &&
@@ -433,11 +471,33 @@ export function ChatScreen() {
       setStatus(null);
       setRunId(event.run_id ?? null);
     }
+    if (event.type === 'run.completed' && channel != null) {
+      if (event.payload?.status === 'archived') {
+        openRun.current = null;
+        setMessages([]);
+        setSteps([]);
+        setWorking(false);
+        setRunId(null);
+        setError(null);
+        setStatus(null);
+        return;
+      }
+      void api<Snapshot>(`/sessions/${channel.session_id}`)
+        .then((snapshot) => {
+          setMessages(snapshot.messages.map(chatMessage));
+          setSteps([]);
+          setWorking(false);
+          setRunId(null);
+          setStatus('Reply ready');
+        })
+        .catch((caught: Error) => setNotice(caught.message));
+      return;
+    }
     if (event.type === 'run.delta') {
       return;
     }
     if (event.type === 'run.failed' || event.type === 'run.cancelled') {
-      if (event.run_id != null && event.run_id === openRun.current) {
+      if (event.run_id != null && openRun.current != null && event.run_id !== openRun.current) {
         return;
       }
       openRun.current = null;
@@ -463,6 +523,7 @@ export function ChatScreen() {
     }
     const text = draft;
     updateDraft('');
+    viewEpoch.current += 1;
     try {
       if (command === 'clear') {
         await chat.clear();
@@ -485,6 +546,7 @@ export function ChatScreen() {
     if (channel == null || working || last == null || last.body.trim() === '') {
       return;
     }
+    viewEpoch.current += 1;
     try {
       openRun.current = null;
       await chat.send(last.body);
@@ -556,14 +618,17 @@ export function ChatScreen() {
     }
   }
 
-  const hasReply = messages.some((item) => item.role === 'assistant') || replyVisible(steps);
-  const conversation = hasReply || working;
+  const transcriptReady = channel != null && channel.session_id === messageSession;
+  const shownMessages = transcriptReady ? messages : [];
+  const shownSteps = transcriptReady ? steps : [];
+  const hasReply = shownMessages.some((item) => item.role === 'assistant') || replyVisible(shownSteps);
+  const conversation = hasReply || (transcriptReady && working);
   const greeting = !conversation && channel != null && channel.agent_id === welcomeAgentId;
   const expandThinking = readExpandTrace(channel?.expand_thinking);
   const expandTools = readExpandTrace(channel?.expand_tools, 'hidden');
   const transcript = (
     <>
-      {messages.map((item) => (
+      {shownMessages.map((item) => (
         <TranscriptTurn
           key={item.id}
           name={item.role === 'user' ? 'You' : channel?.name ?? 'Agent'}
@@ -577,7 +642,7 @@ export function ChatScreen() {
         />
       ))}
       <LiveReply
-        steps={steps}
+        steps={shownSteps}
         speaker={channel?.name ?? 'Agent'}
         measured
         expandTrace={expandThinking}
@@ -693,7 +758,7 @@ export function ChatScreen() {
                 {transcript}
               </ScrollView>
             ) : (
-              <View style={{ flex: 1, justifyContent: 'flex-end', gap: space[4], maxWidth: '100%' }}>
+              <View style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0, justifyContent: 'flex-end', gap: space[4], maxWidth: '100%' }}>
                 {channel != null ? (
                   <EmptyState
                     name={channel.name}
@@ -709,7 +774,7 @@ export function ChatScreen() {
                 {transcript}
               </View>
             )}
-            {working ? (
+            {transcriptReady && working ? (
               <WorkingStatus
                 label={workingLabel(steps, expandThinking, expandTools)}
                 expanded={traceForcedOpen}
@@ -728,7 +793,7 @@ export function ChatScreen() {
                 {status}
               </Text>
             ) : null}
-            {error ? (
+            {transcriptReady && error ? (
               <ReplyAlert message={spokenError(error)} disabled={working} onResend={() => void resend()} />
             ) : null}
             {notice ? (
@@ -742,7 +807,7 @@ export function ChatScreen() {
               onSend={() => void send()}
               onStop={() => void stop()}
             />
-            {greeting ? <View style={{ flex: 1 }} /> : null}
+            {greeting ? <View style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0 }} /> : null}
             </View>
           </View>
         </View>

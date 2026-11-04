@@ -296,6 +296,18 @@ class AgentSkillRow(Base):
     created_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
+class ThreadSnapshotRow(Base):
+    """One AG-UI thread snapshot. The library owns the document shape."""
+
+    __tablename__ = "thread_snapshot"
+    __table_args__ = (UniqueConstraint("scope", "thread_id"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    scope: Mapped[str] = mapped_column(String, nullable=False)
+    thread_id: Mapped[str] = mapped_column(String, nullable=False)
+    document: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class GlobalSkillRow(Base):
     __tablename__ = "global_skill"
 

@@ -75,14 +75,7 @@ async def send(session_id: str, body: MessageCreate, request: Request):
 
         async def _run_then_index() -> None:
             try:
-                await perform(
-                    request.app.state.store,
-                    bus,
-                    cancel,
-                    result["run_id"],
-                    request.app.state.reply,
-                    request.app.state.tasks,
-                )
+                await perform(request.app, cancel, result["run_id"])
             finally:
                 if workspace_id:
                     from web_api.gallery_embed import request_wake

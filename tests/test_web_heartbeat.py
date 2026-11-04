@@ -161,6 +161,7 @@ def test_the_clock_uses_the_heartbeat_timezone(tmp_path: Path) -> None:
 
 def test_startup_fails_an_abandoned_heartbeat_run(tmp_path: Path) -> None:
     store = Store(tmp_path / "app.db")
+    store.ensure_initial_model("example-model")
     add_heartbeat(store, FAVLO_AGENT_ID, "30 3 15 6 *", "Check the garden.", "UTC")
     row = store.heartbeats()[0]
     _status, result, _events = store.begin_heartbeat_run("manual", row["id"])

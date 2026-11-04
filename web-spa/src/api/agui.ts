@@ -25,7 +25,7 @@ export type AguiRunInput = {
   runId: string;
   messages: { role: string; content: string }[];
   state?: Record<string, unknown>;
-  favlo_archive?: boolean;
+  favloArchive?: boolean;
   signal?: AbortSignal;
 };
 
@@ -42,7 +42,7 @@ export async function* runAgUi(input: AguiRunInput): AsyncGenerator<AguiEvent> {
       runId: input.runId,
       messages: input.messages,
       state: input.state,
-      favlo_archive: input.favlo_archive,
+      forwardedProps: input.favloArchive ? { favloArchive: true } : undefined,
     }),
     signal: input.signal,
   });

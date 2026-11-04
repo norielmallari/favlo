@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 
+import { LOCAL_PROVIDER_ID } from '../src/api/seed-ids';
 import { deleteAgentsNamed } from './cleanup';
 import { onScreen } from './on-screen';
 import { createAgent, openAgentChat } from './open-agent-chat';
@@ -13,12 +14,17 @@ test('thinking opens during a reply and closes when the message is stored', asyn
   await page.getByRole('button', { name: 'New agent' }).click();
   await page.getByRole('textbox', { name: 'Agent name', exact: true }).fill(name);
   await page.getByRole('textbox', { name: 'Persona', exact: true }).fill('A short persona.');
+  await page.getByRole('combobox', { name: 'Provider', exact: true }).selectOption(LOCAL_PROVIDER_ID);
+  const refresh = page.getByRole('button', { name: 'Refresh models', exact: true });
+  await onScreen(refresh);
+  await refresh.click();
+  await onScreen(page.getByText('Models refreshed'));
   await page.getByRole('combobox', { name: 'Model', exact: true }).selectOption('qwen36-35b-a3b:thinking');
   await page.getByRole('combobox', { name: 'Reasoning effort', exact: true }).selectOption('medium');
   await createAgent(page, name);
   await openAgentChat(page, name);
   await page.getByRole('textbox', { name: 'Message' }).fill('Say hi.');
-  let send = page.getByRole('button', { name: 'Send' });
+  let send = page.getByRole('button', { name: 'Send', exact: true });
   await onScreen(send);
   await send.click();
 
@@ -34,7 +40,7 @@ test('thinking opens during a reply and closes when the message is stored', asyn
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole('textbox', { name: 'Message' }).fill('Say hi again.');
-  send = page.getByRole('button', { name: 'Send' });
+  send = page.getByRole('button', { name: 'Send', exact: true });
   await onScreen(send);
   await send.click();
   const secondTurn = page.getByLabel(new RegExp(`^${name} said:`)).last();

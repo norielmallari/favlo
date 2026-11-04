@@ -258,6 +258,11 @@ def test_validate_drops_unknown_elements_and_wrong_slots() -> None:
     assert any("wrong slot" in item for item in ignored)
 
 
+def _placed(value: object) -> dict:
+    text = value if isinstance(value, str) else getattr(value, "text", "")
+    return json.loads(text)
+
+
 def test_workspace_place_persists_existing_media(client: TestClient, tmp_path: Path) -> None:
     channel_id = client.get("/channels").json()["channels"][0]["id"]
     root = tmp_path / "library"
@@ -283,7 +288,7 @@ def test_workspace_place_persists_existing_media(client: TestClient, tmp_path: P
 
     store: Store = client.app.state.store
     [place] = place_tools(store, workspace["id"], guide_id="gallery")
-    result = json.loads(
+    result = _placed(
         place.func(
             elements=[
                 {"key": "preview", "element": "preview", "slot": "stage", "props": {"fit": "contain"}},
@@ -311,7 +316,7 @@ def test_workspace_place_persists_existing_media(client: TestClient, tmp_path: P
     assert snap["state"]["favlo_workspace"]["selection"]["path"] == "Albums/zebra.png"
 
     # Omitted selection keeps the prior path when it is still on the strip.
-    without = json.loads(
+    without = _placed(
         place.func(
             elements=[
                 {"key": "preview", "element": "preview", "slot": "stage", "props": {"fit": "contain"}},
@@ -328,7 +333,7 @@ def test_workspace_place_persists_existing_media(client: TestClient, tmp_path: P
     assert without["state"]["favlo_workspace"]["selection"]["path"] == "Albums/zebra.png"
 
     # A strip that drops the prior path falls back to the first remaining item.
-    moved = json.loads(
+    moved = _placed(
         place.func(
             elements=[
                 {"key": "preview", "element": "preview", "slot": "stage", "props": {"fit": "contain"}},
@@ -345,7 +350,7 @@ def test_workspace_place_persists_existing_media(client: TestClient, tmp_path: P
     assert moved["state"]["favlo_workspace"]["selection"]["path"] == "horse.png"
 
     # Basename-only paths resolve when unique under the folder.
-    by_name = json.loads(
+    by_name = _placed(
         place.func(
             elements=[
                 {"key": "preview", "element": "preview", "slot": "stage", "props": {"fit": "contain"}},

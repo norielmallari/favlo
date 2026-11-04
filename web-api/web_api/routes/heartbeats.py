@@ -57,14 +57,7 @@ async def run_heartbeat(heartbeat_id: str, request: Request):
         cancel = asyncio.Event()
         request.app.state.cancels[result["run_id"]] = cancel
         task = asyncio.create_task(
-            perform(
-                request.app.state.store,
-                bus,
-                cancel,
-                result["run_id"],
-                request.app.state.reply,
-                request.app.state.tasks,
-            )
+            perform(request.app, cancel, result["run_id"])
         )
         request.app.state.tasks.add(task)
         task.add_done_callback(request.app.state.tasks.discard)

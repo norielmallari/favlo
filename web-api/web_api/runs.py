@@ -1,180 +1,45 @@
-"""Run a stored user message and publish the reply."""
+"""Drive an already-open run through the AG-UI host."""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from web_api.bus import Bus
-from web_api.chat import ReplyPiece, public_call, record_tool, stream_reply
-from web_api.events import envelope
-from web_api.ids import guid
-from web_api.reply_error import spoken_error
-from web_api.store import Rejected, Store
-
-Reply = Callable[..., AsyncIterator[str | ReplyPiece]]
+from web_api.chat import ReplyPiece, public_call
+from web_api.session_commands import ARCHIVE_CUE
+from web_api.store import NotFound, Rejected
 
 
-def _delta(context: dict[str, Any], run_id: str, agui: dict[str, Any]) -> dict[str, Any]:
-    session_id = context["run"]["session_id"]
-    return envelope(
-        event_id=guid(),
-        stream_id=f"session:{session_id}",
-        event_type="run.delta",
-        payload={"agui": agui},
-        channel_id=context["session"]["channel_id"],
-        session_id=session_id,
-        run_id=run_id,
-        actor={"kind": "agent", "id": context["agent"]["id"]},
-    )
-
-
-async def perform(
-    store: Store,
-    bus: Bus,
-    cancel: asyncio.Event,
-    run_id: str,
-    reply: Reply = stream_reply,
-    pending: set[asyncio.Task[Any]] | None = None,
-) -> None:
+async def perform(app: Any, cancel: asyncio.Event, run_id: str) -> None:
+    """One heartbeat, greeting, follow-up, or REST message, on the library runner."""
+    store = app.state.store
+    bus = app.state.bus
     try:
-        context = store.run_context(run_id)
-    except Rejected as exc:
+        context = await asyncio.to_thread(store.run_context, run_id)
+    except (Rejected, NotFound) as exc:
         await _publish(bus, store.finish_run(run_id, "failed", str(exc)))
         return
-    message_id = guid()
-    parts: list[str] = []
-    reasoning: list[str] = []
-    calls: list[dict[str, Any]] = []
-    trace: list[dict[str, Any]] = []
-    try:
-        await bus.publish(
-            _delta(
-                context,
-                run_id,
-                {"type": "TEXT_MESSAGE_START", "messageId": message_id, "role": "assistant"},
-            )
-        )
-        gallery_note = ""
-        agent = context["agent"] or {}
-        folder = context.get("gallery_folder")
-        image = context.get("gallery_image")
-        attached = context.get("gallery_attachment")
-        from web_api.gallery_tools import images_in_message, turn_note
-
-        if folder is not None or image or attached:
-            gallery_note = turn_note(folder or "", image)
-        user_images = images_in_message(
-            store,
-            context["run"]["session_id"],
-            context["user_text"],
-        )
-        async for piece in reply(
-            base_url=context["base_url"],
-            model=context["model"],
-            persona=context["agent"]["persona"],
-            agent_name=context["agent"]["name"],
-            user_text=context["user_text"],
-            tool_groups=context["agent"]["tool_groups"],
-            store=store,
-            agent_id=context["agent"]["id"] if context["agent"] else None,
-            session_id=context["run"]["session_id"],
-            bus=bus,
-            pending=pending,
-            cancel=cancel,
-            gallery_note=gallery_note,
-            user_images=user_images,
-            enable_thinking=agent.get("enable_thinking"),
-            preserve_thinking=agent.get("preserve_thinking"),
-            reasoning_effort=agent.get("reasoning_effort"),
-        ):
-            if cancel.is_set():
-                await _publish(bus, store.finish_run(run_id, "cancelled", None))
-                return
-            incoming_piece = _as_piece(piece)
-            if incoming_piece.kind == "reasoning":
-                if incoming_piece.text:
-                    reasoning.append(incoming_piece.text)
-                    _note_reasoning(trace, incoming_piece.text)
-                    await bus.publish(
-                        _delta(
-                            context,
-                            run_id,
-                            {
-                                "type": "REASONING_MESSAGE_CONTENT",
-                                "messageId": message_id,
-                                "delta": incoming_piece.text,
-                            },
-                        )
-                    )
-                continue
-            if incoming_piece.kind in ("tool", "tool_result"):
-                updated = record_tool(calls, incoming_piece)
-                _note_tool(trace, updated)
-                if updated["name"] or updated["arguments"] or updated["result"]:
-                    shown = public_call(updated)
-                    await bus.publish(
-                        _delta(
-                            context,
-                            run_id,
-                            {
-                                "type": "TOOL_CALL",
-                                "messageId": message_id,
-                                "id": shown["id"],
-                                "name": shown["name"],
-                                "arguments": shown["arguments"],
-                                "result": shown["result"],
-                            },
-                        )
-                    )
-                continue
-            incoming = incoming_piece.text
-            joined = "".join(parts)
-            extra = incoming[len(joined) :] if incoming.startswith(joined) else incoming
-            if not extra:
-                continue
-            parts.append(extra)
-            _note_text(trace, "reply", extra)
-            await bus.publish(
-                _delta(
-                    context,
-                    run_id,
-                    {"type": "TEXT_MESSAGE_CONTENT", "messageId": message_id, "delta": extra},
-                )
-            )
+    session_id = str(context["run"]["session_id"])
+    text = str(context["user_text"] or "")
+    cue = str(context["run"].get("cue") or "")
+    props: dict[str, Any] = {"favloAdopt": True}
+    if cue == ARCHIVE_CUE:
+        props["favloArchive"] = True
+    elif cue:
+        props["favloSilent"] = True
+    app.state.cancels[run_id] = cancel
+    host = app.state.agui_host
+    async for _event in host.run(
+        {
+            "thread_id": session_id,
+            "run_id": run_id,
+            "messages": [] if cue == ARCHIVE_CUE else [{"role": "user", "content": text}],
+            "forwarded_props": props,
+        }
+    ):
         if cancel.is_set():
-            await _publish(bus, store.finish_run(run_id, "cancelled", None))
             return
-        text = "".join(parts).strip()
-        thought = "".join(reasoning).strip()
-        stored_calls = [public_call(row) for row in calls if row["name"] or row["arguments"]]
-        stored_trace = public_trace(trace)
-        if not text:
-            archived = store.finish_archive(run_id)
-            if archived is not None:
-                await _publish(bus, archived)
-                return
-            if thought or stored_calls:
-                await _publish(
-                    bus,
-                    store.complete_run(run_id, "", thought, stored_calls, stored_trace),
-                )
-                return
-            await _publish(
-                bus,
-                store.finish_run(run_id, "failed", "The model returned an empty reply."),
-            )
-            return
-        await bus.publish(
-            _delta(context, run_id, {"type": "TEXT_MESSAGE_END", "messageId": message_id})
-        )
-        await _publish(
-            bus,
-            store.complete_run(run_id, text, thought, stored_calls, stored_trace),
-        )
-    except Exception as exc:
-        await _publish(bus, store.finish_run(run_id, "failed", spoken_error(str(exc))))
 
 
 def _note_reasoning(trace: list[dict[str, Any]], text: str) -> None:

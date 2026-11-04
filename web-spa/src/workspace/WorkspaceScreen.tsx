@@ -228,6 +228,7 @@ export function WorkspaceScreen({
             reasoning?: string;
             tool_calls?: unknown;
             message?: string;
+            status?: string;
             session_id?: string;
             previous_session_id?: string;
             trace?: unknown;
@@ -259,6 +260,16 @@ export function WorkspaceScreen({
         }
         if (payload.type === 'run.started' && payload.run_id !== openRun.current) {
           setWorking(true);
+        }
+        if (payload.type === 'run.completed' && payload.payload?.status === 'archived') {
+          openRun.current = null;
+          setMessages([]);
+          setSteps([]);
+          setWorking(false);
+          setRunId(null);
+          setError(null);
+          setStatus(null);
+          return;
         }
         if (
           payload.type === 'run.completed' ||

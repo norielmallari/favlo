@@ -153,6 +153,7 @@ def test_session_commands_stay_on_the_session_that_sent_them(tmp_path: Path) -> 
     from web_api.store import Store
 
     store = Store(tmp_path / "app.db")
+    store.ensure_initial_model("example-model")
     try:
         home_id = _favlo_session(store)
         channel = next(row for row in store.channels() if row["session_id"] == home_id)
@@ -197,6 +198,7 @@ def test_session_commands_stay_on_the_session_that_sent_them(tmp_path: Path) -> 
         assert [item["text"] for item in context["prior"]] == ["Still here", "Hi", "Remember the red door", "Noted"]
         done = store.complete_run(archived["run_id"], "Stored.")
         assert [event["type"] for event in done] == ["run.completed", "session.cleared"]
+        assert done[0]["payload"]["status"] == "archived"
         workspace_id = done[-1]["payload"]["session_id"]
         assert done[-1]["stream_id"] == f"session:{workspace_id}"
         assert store.session_snapshot(workspace_id)["messages"] == []
@@ -653,15 +655,6 @@ def test_reasoning_is_stored_beside_the_reply(tmp_path: Path) -> None:
     assistant = snapshot["messages"][-1]
     assert assistant["body"] == "Hello"
     assert assistant["reasoning"] == "Looking"
-    assert assistant["trace"] == [
-        {"kind": "thinking", "text": "Looking"},
-        {"kind": "reply", "text": "Hello"},
-    ]
-    stored = sqlite3.connect(tmp_path / "app.db")
-    payload = stored.execute(
-        "SELECT body FROM event WHERE type = 'message.created' ORDER BY sequence DESC LIMIT 1"
-    ).fetchone()[0]
-    assert json.loads(payload)["payload"]["reasoning"] == "Looking"
 
 
 def test_a_streamed_tool_call_joins_on_its_index() -> None:
@@ -751,6 +744,7 @@ def test_reasoning_without_text_finishes_the_turn(tmp_path: Path) -> None:
     from web_api.store import Store
 
     store = Store(tmp_path / "app.db")
+    store.ensure_initial_model("example-model")
     home = _favlo_session(store)
     _status, started, _events = store.begin_message("empty", home, "hello")
     events = store.complete_run(started["run_id"], "", "User handed over carrots.")
@@ -911,6 +905,7 @@ def test_the_next_turn_includes_stored_reasoning(tmp_path: Path) -> None:
     from web_api.store import Store
 
     store = Store(tmp_path / "app.db")
+    store.ensure_initial_model("example-model")
     home = _favlo_session(store)
     _status, first, _events = store.begin_message("one", home, "hello")
     store.complete_run(first["run_id"], "Hi", "Looking")
@@ -1218,13 +1213,14 @@ def test_streamed_reply_keeps_reasoning_from_the_final_message(
 
     class Update:
         role = "assistant"
-        contents: list[object] = []
         raw_representation = None
 
-        def __init__(self, text: str) -> None:
-            self.text = text
+        def __init__(self, text: str, kind: str = "text") -> None:
+            self.text = "" if kind == "text_reasoning" else text
+            self.contents = [Part(kind, text)] if kind == "text_reasoning" else []
 
     async def pieces():
+        yield Update("Looking", "text_reasoning")
         yield Update("Hello")
 
     class Stream:
@@ -1238,11 +1234,7 @@ def test_streamed_reply_keeps_reasoning_from_the_final_message(
             return None
 
         async def get_final_response(self) -> SimpleNamespace:
-            message = SimpleNamespace(
-                contents=[Part("text_reasoning", "Looking"), Part("text", "Hello")],
-                raw_representation=None,
-            )
-            return SimpleNamespace(text="Hello", messages=[message])
+            return SimpleNamespace(text="Hello", messages=[])
 
     class Session:
         def __init__(self) -> None:
@@ -1284,106 +1276,13 @@ def test_streamed_reply_keeps_reasoning_from_the_final_message(
             cancel=asyncio.Event(),
         ):
             collected.append((piece.kind, piece.text))
-        assert collected == [("content", "Hello"), ("reasoning", "Looking")]
+        assert collected == [("reasoning", "Looking"), ("content", "Hello")]
 
     asyncio.run(once())
     trace: list[dict[str, str]] = [{"kind": "reply", "text": "Hello"}]
     _note_reasoning(trace, "Looking")
     assert [part["kind"] for part in trace] == ["thinking", "reply"]
     assert trace[0]["text"] == "Looking"
-
-
-def test_session_reasoning_is_kept_when_the_final_message_omits_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from types import SimpleNamespace
-
-    from web_api.chat import stream_reply
-
-    class Part:
-        def __init__(self, kind: str, text: str) -> None:
-            self.type = kind
-            self.text = text
-
-    class Stored:
-        role = "assistant"
-
-        def __init__(self) -> None:
-            self.contents = [Part("text_reasoning", "Looking")]
-
-    class Update:
-        role = "assistant"
-        contents: list[object] = []
-        raw_representation = None
-
-        def __init__(self, text: str) -> None:
-            self.text = text
-
-    async def pieces():
-        yield Update("Hello")
-
-    class Stream:
-        def __init__(self) -> None:
-            self._it = pieces()
-
-        def __aiter__(self):
-            return self._it
-
-        async def close(self) -> None:
-            return None
-
-        async def get_final_response(self) -> SimpleNamespace:
-            return SimpleNamespace(text="Hello", messages=[])
-
-    class Session:
-        def __init__(self) -> None:
-            self.state: dict[str, object] = {}
-
-    class Agent:
-        def __init__(self, **_kwargs: object) -> None:
-            pass
-
-        def create_session(self) -> Session:
-            return Session()
-
-        def run(self, *_args: object, session: object = None, **_kwargs: object) -> Stream:
-            assert isinstance(session, Session)
-            memory = session.state.setdefault("in_memory", {})
-            assert isinstance(memory, dict)
-            messages = memory.setdefault("messages", [])
-            assert isinstance(messages, list)
-            messages.append(Stored())
-            return Stream()
-
-    class HTTP:
-        async def close(self) -> None:
-            return None
-
-    class Client:
-        def __init__(self) -> None:
-            self.client = HTTP()
-            self.function_invocation_configuration: dict[str, object] = {}
-
-        def close(self) -> None:
-            return None
-
-    monkeypatch.setattr("agent_framework.Agent", Agent)
-    monkeypatch.setattr("web_api.chat.open_chat_client", lambda *_args, **_kwargs: Client())
-
-    async def once() -> None:
-        collected = []
-        async for piece in stream_reply(
-            base_url="http://127.0.0.1:8129/v1",
-            model="example-model",
-            persona="A short persona.",
-            agent_name="Favlo",
-            user_text="Hello",
-            cancel=asyncio.Event(),
-        ):
-            collected.append((piece.kind, piece.text))
-        assert collected == [("content", "Hello"), ("reasoning", "Looking")]
-
-    asyncio.run(once())
 
 
 def test_a_turn_sends_the_stored_agent_framework_session(

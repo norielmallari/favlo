@@ -843,6 +843,7 @@ def test_a_sent_turn_records_the_open_folder_and_image(tmp_path: Path) -> None:
     root.mkdir()
     (root / "ok.png").write_bytes(PNG)
     store = Store(tmp_path / "app.db")
+    store.ensure_initial_model("example-model")
     try:
         channel_id = store.channels()[0]["id"]
         _status, workspace, _events = store.create_workspace(

@@ -67,10 +67,12 @@ def ensure_opening_filmstrip(store: Any, workspace_id: str) -> None:
 
 
 def _place_tool(store: Any, workspace_id: str, guide_id: str) -> object:
-    from agent_framework import tool
+    from agent_framework import Content, tool
 
     @tool(approval_mode="never_require", name=qualified(SOURCE, "place"))
-    def workspace_place(elements: list[dict[str, Any]], selection: dict[str, Any] | None = None) -> str:
+    def workspace_place(
+        elements: list[dict[str, Any]], selection: dict[str, Any] | None = None
+    ) -> str | Content:
         """Place only catalog elements on the workspace shell.
 
         Pass the full elements list. Each element needs key, element, slot, and
@@ -84,7 +86,13 @@ def _place_tool(store: Any, workspace_id: str, guide_id: str) -> object:
         A path string in items is the same as {"path": that string}.
         """
         result = apply_placement(store, workspace_id, elements, selection, guide_id=guide_id)
-        return dumps_for_model(result)
+        text = dumps_for_model(result)
+        state = result.get("state") if isinstance(result, dict) else None
+        if isinstance(state, dict):
+            from agent_framework_ag_ui import state_update
+
+            return state_update(text, state=state)
+        return text
 
     return workspace_place
 

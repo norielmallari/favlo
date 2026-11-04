@@ -47,6 +47,7 @@ from web_api.infrastructure.db.models import (
     ShellElementRow,
     ShellRow,
     SkillRow,
+    ThreadSnapshotRow,
     WorkspaceRow,
 )
 from web_api.infrastructure.db.row import as_dict
@@ -1947,6 +1948,7 @@ class Store:
         _drop(db, MessageRow, MessageRow.session_id == session_id)
         _drop(db, RunRow, RunRow.session_id == session_id)
         _drop(db, EventRow, EventRow.stream_id == f"session:{session_id}")
+        _drop(db, ThreadSnapshotRow, ThreadSnapshotRow.thread_id == session_id)
         new_id = guid()
         created = now()
         db.add(
@@ -2069,6 +2071,133 @@ class Store:
             found.agui_state = encoded
 
         self._write(write)
+
+    def save_thread_snapshot(self, scope: str, thread_id: str, document: dict[str, Any]) -> None:
+        """Replace the AG-UI snapshot for one thread."""
+        encoded = json.dumps(document)
+
+        def write(db: Session) -> None:
+            row = db.scalars(
+                select(ThreadSnapshotRow).where(
+                    ThreadSnapshotRow.scope == scope,
+                    ThreadSnapshotRow.thread_id == thread_id,
+                )
+            ).first()
+            if row is None:
+                db.add(
+                    ThreadSnapshotRow(
+                        id=guid(),
+                        scope=scope,
+                        thread_id=thread_id,
+                        document=encoded,
+                    )
+                )
+                return
+            row.document = encoded
+
+        self._write(write)
+
+    def hide_snapshot_cue(self, thread_id: str, cue: str) -> None:
+        """Drop a server cue from the snapshot. It is not a chat line."""
+        from web_api.snapshots import message_text
+
+        cleaned = cue.strip()
+        if not cleaned:
+            return
+
+        def write(db: Session) -> None:
+            rows = db.scalars(
+                select(ThreadSnapshotRow).where(ThreadSnapshotRow.thread_id == thread_id)
+            )
+            for row in rows:
+                document = json.loads(row.document)
+                messages = document.get("messages") if isinstance(document, dict) else None
+                if not isinstance(messages, list):
+                    continue
+                for index in range(len(messages) - 1, -1, -1):
+                    item = messages[index]
+                    if not isinstance(item, dict) or item.get("role") != "user":
+                        continue
+                    if message_text(item.get("content")).strip() == cleaned:
+                        del messages[index]
+                        row.document = json.dumps(document)
+                        break
+
+        self._write(write)
+
+    def thread_snapshot(self, scope: str, thread_id: str) -> dict[str, Any] | None:
+        def read(db: Session) -> dict[str, Any] | None:
+            row = db.scalars(
+                select(ThreadSnapshotRow).where(
+                    ThreadSnapshotRow.scope == scope,
+                    ThreadSnapshotRow.thread_id == thread_id,
+                )
+            ).first()
+            if row is None or not row.document:
+                return None
+            loaded = json.loads(row.document)
+            return loaded if isinstance(loaded, dict) else None
+
+        return self._read(read)
+
+    def delete_thread_snapshot(self, scope: str, thread_id: str) -> bool:
+        def write(db: Session) -> bool:
+            row = db.scalars(
+                select(ThreadSnapshotRow).where(
+                    ThreadSnapshotRow.scope == scope,
+                    ThreadSnapshotRow.thread_id == thread_id,
+                )
+            ).first()
+            if row is None:
+                return False
+            db.delete(row)
+            return True
+
+        return self._write(write)
+
+    def clear_thread_snapshots(self, scope: str | None) -> None:
+        def write(db: Session) -> None:
+            if scope is None:
+                _drop(db, ThreadSnapshotRow)
+                return
+            _drop(db, ThreadSnapshotRow, ThreadSnapshotRow.scope == scope)
+
+        self._write(write)
+
+    def settle_agui_run(self, run_id: str, status: str, error: str | None = None) -> list[dict[str, Any]]:
+        """Close a library turn without writing a second assistant row."""
+
+        def write(db: Session) -> list[dict[str, Any]]:
+            run = db.get(RunRow, run_id)
+            if run is None or run.status != "running":
+                return []
+            chat = db.get(SessionRow, run.session_id)
+            run.status = status
+            run.error = error
+            run.finished_at = now()
+            if status == "completed":
+                event_type = "run.completed"
+            elif status == "cancelled":
+                event_type = "run.cancelled"
+            else:
+                event_type = "run.failed"
+            payload: dict[str, Any] = {"status": status}
+            if error:
+                payload["message"] = error
+            return [
+                self._event(
+                    db,
+                    stream_id=f"session:{run.session_id}",
+                    event_type=event_type,
+                    payload=payload,
+                    channel_id=chat.channel_id if chat is not None else None,
+                    session_id=run.session_id,
+                    run_id=run_id,
+                    actor={"kind": "agent", "id": run.agent_id},
+                )
+            ]
+
+        return self._write(write)
 
     def loaded_mcp_tools(self, session_id: str) -> dict[str, list[str]]:
         """Remote MCP tool names loaded via progressive disclosure for this chat."""
@@ -3257,6 +3386,20 @@ class Store:
             if chat.agui_state:
                 loaded = json.loads(chat.agui_state)
                 state = loaded if isinstance(loaded, dict) else None
+            snapshot_row = db.scalars(
+                select(ThreadSnapshotRow).where(ThreadSnapshotRow.thread_id == session_id)
+            ).first()
+            if snapshot_row is not None and snapshot_row.document:
+                from web_api.snapshots import project_messages
+
+                document = json.loads(snapshot_row.document)
+                if isinstance(document, dict):
+                    recorded = document.get("messages")
+                    if isinstance(recorded, list):
+                        messages = project_messages(recorded)
+                    shared = document.get("state")
+                    if isinstance(shared, dict) and shared:
+                        state = shared
             if not state:
                 state = {}
                 if chat.kind == "workspace_chat" and chat.workspace_id:
@@ -3795,7 +3938,7 @@ class Store:
                 db,
                 stream_id=f"session:{run.session_id}",
                 event_type="run.completed",
-                payload={"status": "completed"},
+                payload={"status": "archived"},
                 channel_id=chat.channel_id,
                 session_id=run.session_id,
                 run_id=run.id,

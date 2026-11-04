@@ -67,10 +67,16 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   ).toBeVisible();
   await expect(page.getByRole('switch', { name: 'Configuration tools for Favlo' })).toBeChecked();
   const conversation = page.getByRole('switch', { name: 'Conversation tools for Favlo' });
+  const saveFavlo = page.getByRole('button', { name: 'Save Favlo' });
+  if (await conversation.isChecked()) {
+    await conversation.click();
+    await onScreen(saveFavlo);
+    await saveFavlo.click();
+    await expect(page.getByRole('status')).toHaveText(/Favlo was saved/);
+  }
   await expect(conversation).not.toBeChecked();
   await expect(page.getByRole('switch', { name: 'Heartbeat tools for Favlo' })).not.toBeChecked();
   await conversation.click();
-  const saveFavlo = page.getByRole('button', { name: 'Save Favlo' });
   await onScreen(saveFavlo);
   await saveFavlo.click();
   await expect(page.getByRole('status')).toHaveText(/Favlo was saved/);
@@ -86,6 +92,13 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await expect(page.getByText('Connection succeeded')).toBeVisible();
   await expect(page.getByText('generate_image', { exact: true })).toBeVisible();
   const imageTools = page.getByRole('switch', { name: 'Image for Favlo media' });
+  const saveMedia = page.getByRole('button', { name: 'Save Favlo media' });
+  if (!(await imageTools.isChecked())) {
+    await imageTools.click();
+    await onScreen(saveMedia);
+    await saveMedia.click();
+    await expect(imageTools).toBeChecked();
+  }
   await expect(imageTools).toBeChecked();
   await imageTools.click();
   await page.getByRole('button', { name: 'Save Favlo media' }).click();
@@ -110,6 +123,8 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await expect(page.getByRole('switch', { name: 'Configuration tools for Favlo' })).toBeChecked();
   await expect(page.getByRole('switch', { name: 'Conversation tools for Favlo' })).toBeChecked();
 
+  const seconds = Math.floor(Date.now() / 1000);
+  const cron = `${seconds % 60} ${Math.floor(seconds / 60) % 24} ${(Math.floor(seconds / 3600) % 28) + 1} ${(Math.floor(seconds / 86400) % 12) + 1} ${Math.floor(seconds / 86400) % 7}`;
   await page.getByRole('tab', { name: 'Heartbeats' }).click();
   await expect(page.getByLabel('Agents list').getByRole('button', { name: 'Favlo', exact: true })).toBeVisible();
   await expect(page.getByLabel('Heartbeats list')).toBeVisible();
@@ -124,22 +139,28 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await page.getByRole('textbox', { name: 'Cron for Favlo' }).fill('nope');
   await page.getByRole('button', { name: 'Create heartbeat' }).click();
   await expect(page.getByRole('alert')).toContainText('five fields');
-  await page.getByRole('textbox', { name: 'Cron for Favlo' }).fill('15 * * * *');
+  await page.getByRole('textbox', { name: 'Cron for Favlo' }).fill(cron);
   await page.getByRole('textbox', { name: 'Instructions for Favlo' }).fill('Check the garden.');
   await page.setViewportSize({ width: 1280, height: 640 });
   const createHeartbeat = page.getByRole('button', { name: 'Create heartbeat' });
   await onScreen(createHeartbeat);
   await createHeartbeat.click();
-  const beat = page.getByLabel('Heartbeats list').getByRole('button', { name: '15 * * * *' });
+  const beat = page.getByLabel('Heartbeats list').getByRole('button', { name: cron, exact: true });
   await expect(beat).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Instructions for Favlo' })).toHaveValue('Check the garden.');
   await page.getByLabel('Agents list').getByRole('button', { name: brook, exact: true }).click();
-  await expect(page.getByLabel('Heartbeats list').getByRole('button', { name: '15 * * * *' })).toHaveCount(0);
+  await expect(page.getByLabel('Heartbeats list').getByRole('button', { name: cron, exact: true })).toHaveCount(0);
   await page.getByLabel('Agents list').getByRole('button', { name: 'Favlo', exact: true }).click();
   await beat.click();
-  await expect(page.getByRole('textbox', { name: 'Cron for Favlo' })).toHaveValue('15 * * * *');
+  await expect(page.getByRole('textbox', { name: 'Cron for Favlo' })).toHaveValue(cron);
   await page.getByRole('button', { name: 'Run heartbeat' }).click();
   await expect(page.getByText('The heartbeat is running.')).toBeVisible();
+  const beats = await page.request.get('http://127.0.0.1:8130/heartbeats');
+  const rows = (await beats.json()).heartbeats as { cron_expression: string; session_id?: string | null }[];
+  const mine = rows.find((row) => row.cron_expression === cron && row.session_id);
+  if (mine?.session_id) {
+    await page.request.post(`http://127.0.0.1:8130/sessions/${mine.session_id}/cancel`);
+  }
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole('button', { name: 'Back to heartbeats' }).click();
@@ -149,8 +170,8 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await expect(page.getByLabel('Agents list')).toBeVisible();
   await expect(page.getByLabel('Heartbeats list')).toHaveCount(0);
   await page.getByLabel('Agents list').getByRole('button', { name: 'Favlo', exact: true }).click();
-  await page.getByLabel('Heartbeats list').getByRole('button', { name: '15 * * * *' }).click();
-  await expect(page.getByRole('textbox', { name: 'Cron for Favlo' })).toHaveValue('15 * * * *');
+  await page.getByLabel('Heartbeats list').getByRole('button', { name: cron, exact: true }).click();
+  await expect(page.getByRole('textbox', { name: 'Cron for Favlo' })).toHaveValue(cron);
 
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.getByRole('tab', { name: 'Agents' }).click();
@@ -235,7 +256,7 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   const replies = page.getByLabel(/^River said: .+/);
   const before = await replies.count();
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill(prompt);
-  const send = page.getByRole('button', { name: 'Send' });
+  const send = page.getByRole('button', { name: 'Send', exact: true });
   await onScreen(send);
   await send.click();
   await expect.poll(async () => replies.count(), { timeout: 360_000 }).toBeGreaterThan(before);
