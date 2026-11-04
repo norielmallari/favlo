@@ -99,7 +99,7 @@ def test_a_response_carries_the_trace_and_the_reply(monkeypatch: Any) -> None:
     kinds = [item["type"] for item in body["output"]]
     assert kinds == ["reasoning", "message"]
     assert body["output"][0]["content"][0]["text"] == "Look at the notes."
-    assert "encrypted_content" not in body["output"][0]
+    assert body["output"][0]["encrypted_content"] == "Look at the notes."
     assert body["output"][1]["content"][0]["text"] == "The notes are short.\n"
     assert body["usage"]["input_tokens"] == 4
     assert body["usage"]["output_tokens"] == 1
@@ -219,9 +219,9 @@ def test_a_stored_response_is_prepended(monkeypatch: Any) -> None:
     seen = _install(monkeypatch, runtime)
     state: dict[str, Any] = {}
     first = MemoryReply()
-    handle_responses.handle_responses(first, runtime, {"input": "Hi", "store": True}, None, None, state)
+    handle_responses(first, runtime, {"input": "Hi", "store": True}, None, None, state)
     second = MemoryReply()
-    handle_responses.handle_responses(
+    handle_responses(
         second,
         runtime,
         {"input": "Next", "previous_response_id": first.body["id"], "store": True},

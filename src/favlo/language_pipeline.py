@@ -28,11 +28,23 @@ class LanguagePipeline(Pipeline):
         state: dict[str, Any],
     ) -> None:
         self.on_open(runtime, reply, selection)
+        from favlo.response_chain import ChainError, finish_turn, present, recording_reply
+
+        try:
+            presented, turn = present(body, state)
+        except ChainError as exc:
+            reply.json(
+                400,
+                {"error": {"message": str(exc), "type": "invalid_request_error"}},
+            )
+            self.on_finish(runtime, selection, complete=False)
+            return
+        recorded = recording_reply(reply, previous=None if turn is None else turn.previous)
         completed = False
         try:
-            self.prepare(reply, runtime, body, selection, args, state)
+            self.prepare(recorded, runtime, presented, selection, args, state)
             try:
-                self.handle_responses(reply, runtime, body, selection, args, state)
+                self.handle_responses(recorded, runtime, presented, selection, args, state)
                 completed = True
             except ClientClosed:
                 self.on_disconnect(runtime)
@@ -41,6 +53,7 @@ class LanguagePipeline(Pipeline):
                     raise
                 self.on_disconnect(runtime)
         finally:
+            finish_turn(turn, recorded, state)
             self.on_finish(runtime, selection, complete=completed)
 
     def on_open(self, runtime: Any, reply: Any, selection: Any) -> None:

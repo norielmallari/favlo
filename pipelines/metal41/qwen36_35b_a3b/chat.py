@@ -32,7 +32,6 @@ from favlo.responses import (
     function_tools,
     new_id,
     prepare_request,
-    remember,
     response_object,
     template_messages,
     usage_object,
@@ -490,7 +489,6 @@ def _respond(
         completion_tokens,
         bool(getattr(runtime, "_hit_limit", False)),
     )
-    remember(state, prepared, payload)
     reply.json(200, payload)
 
 
@@ -605,9 +603,6 @@ def _response_payload(
     output: list[dict[str, Any]] = []
     if search is not None:
         output.append(search)
-    store = prepared.get("store", True) is not False
-    include = prepared.get("include")
-    encrypt = (not store) or (isinstance(include, list) and "reasoning.encrypted_content" in include)
     if reasoning:
         item: dict[str, Any] = {
             "type": "reasoning",
@@ -619,8 +614,7 @@ def _response_payload(
         summary = prepared.get("reasoning")
         if isinstance(summary, dict) and summary.get("summary"):
             item["summary"] = [{"type": "summary_text", "text": reasoning}]
-        if encrypt:
-            item["encrypted_content"] = reasoning
+        item["encrypted_content"] = reasoning
         output.append(item)
     annotations: list[dict[str, Any]] = []
     visible = content or ""
@@ -856,7 +850,6 @@ def _stream(
             )
             event({"type": "response.output_item.done", "output_index": index, "item": item})
     event({"type": "response.completed", "response": payload})
-    remember(state, request, payload)
     try:
         reply.done()
     except OSError as exc:

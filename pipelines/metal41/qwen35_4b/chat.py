@@ -20,7 +20,6 @@ from favlo.responses import (
     function_tools,
     new_id,
     prepare_request,
-    remember,
     response_object,
     template_messages,
     usage_object,
@@ -606,7 +605,6 @@ def _respond(
         len(tokens),
         hit_limit,
     )
-    remember(state, prepared, payload)
     reply.json(200, payload)
 
 
@@ -637,9 +635,6 @@ def _payload(
     output: list[dict[str, Any]] = []
     if search is not None:
         output.append(search)
-    store = body.get("store", True) is not False
-    include = body.get("include")
-    encrypt = (not store) or (isinstance(include, list) and "reasoning.encrypted_content" in include)
     if reasoning:
         item: dict[str, Any] = {
             "type": "reasoning",
@@ -651,8 +646,7 @@ def _payload(
         summary = body.get("reasoning")
         if isinstance(summary, dict) and summary.get("summary"):
             item["summary"] = [{"type": "summary_text", "text": reasoning}]
-        if encrypt:
-            item["encrypted_content"] = reasoning
+        item["encrypted_content"] = reasoning
         output.append(item)
     for call in calls:
         function = call.get("function") if isinstance(call.get("function"), dict) else {}
@@ -913,7 +907,6 @@ def _stream(
         response_id=response_id,
         reasoning_id=reasoning_id,
     )
-    remember(state, prepared, payload)
     for index, item in enumerate(payload.get("output") or []):
         if not isinstance(item, dict):
             continue

@@ -117,7 +117,12 @@ def chat_to_responses(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def prepare_request(body: dict[str, Any], state: dict[str, Any] | None) -> dict[str, Any]:
-    """Reject a body this plan does not run, and prepend a stored chain."""
+    """Reject a body this plan does not run.
+
+    The response chain has already rebuilt ``input`` when ``store`` is on.
+    This function does not read ``store`` or ``previous_response_id``.
+    """
+    del state
     if _has_audio(body):
         raise RequestError("audio is an invalid request")
     tools = body.get("tools")
@@ -131,11 +136,7 @@ def prepare_request(body: dict[str, Any], state: dict[str, Any] | None) -> dict[
     effort = _effort(body.get("reasoning"))
     if effort is not None and effort not in _EFFORTS:
         raise RequestError("reasoning.effort is not a listed value")
-    if body.get("conversation") and body.get("previous_response_id"):
-        raise RequestError("conversation and previous_response_id are not set together")
-    prepared = dict(body)
-    prepared["input"] = _joined_input(body, state)
-    return prepared
+    return dict(body)
 
 
 def thinking_enabled(body: dict[str, Any]) -> bool | None:
@@ -412,19 +413,9 @@ def usage_object(prompt: int, completion: int, cached: int, reasoning_tokens: in
 
 def remember(state: dict[str, Any] | None, body: dict[str, Any], response: dict[str, Any]) -> None:
     """Keep a response when store is on, and append it to a conversation."""
-    if not isinstance(state, dict):
-        return
-    if body.get("store", True) is not False:
-        store = state.setdefault("responses", {})
-        store[response["id"]] = response
-        inputs = state.setdefault("response_inputs", {})
-        inputs[response["id"]] = _input_list(body.get("input"))
-    conversation = body.get("conversation")
-    if isinstance(conversation, str) and conversation:
-        bucket = state.setdefault("conversations", {})
-        container = bucket.setdefault(conversation, {"id": conversation, "object": "conversation", "items": []})
-        container["items"].extend(_input_list(body.get("input")))
-        container["items"].extend(response.get("output") or [])
+    from favlo.response_chain import remember as remember_chain
+
+    remember_chain(state, body, response)
 
 
 def open_conversation(state: dict[str, Any]) -> dict[str, Any]:
@@ -435,19 +426,15 @@ def open_conversation(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def stored_response(state: dict[str, Any], identifier: str) -> dict[str, Any] | None:
-    store = state.get("responses")
-    if not isinstance(store, dict):
-        return None
-    found = store.get(identifier)
-    return found if isinstance(found, dict) else None
+    from favlo.response_chain import stored_response as stored
+
+    return stored(state, identifier)
 
 
 def drop_response(state: dict[str, Any], identifier: str) -> bool:
-    store = state.get("responses")
-    if not isinstance(store, dict) or identifier not in store:
-        return False
-    del store[identifier]
-    return True
+    from favlo.response_chain import drop_response as drop
+
+    return drop(state, identifier)
 
 
 def response_to_chat(payload: dict[str, Any], timings: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -681,48 +668,6 @@ def _chat_usage(usage: Any, timings: dict[str, Any] | None) -> dict[str, Any]:
         if timings.get("context_length"):
             chat["context_length"] = timings["context_length"]
     return chat
-
-
-def _joined_input(body: dict[str, Any], state: dict[str, Any] | None) -> Any:
-    fresh = body.get("input")
-    previous = body.get("previous_response_id")
-    conversation = body.get("conversation")
-    stored: list[Any] = []
-    if isinstance(previous, str) and previous:
-        if not isinstance(state, dict):
-            raise RequestError("previous_response_id is not stored")
-        found = stored_response(state, previous)
-        if found is None:
-            raise RequestError("previous_response_id is not stored")
-        stored.extend(_stored_input(state, previous))
-        stored.extend(found.get("output") or [])
-    if isinstance(conversation, str) and conversation:
-        if not isinstance(state, dict):
-            raise RequestError("conversation is not stored")
-        bucket = state.get("conversations")
-        container = bucket.get(conversation) if isinstance(bucket, dict) else None
-        if not isinstance(container, dict):
-            raise RequestError("conversation is not stored")
-        stored = list(container.get("items") or []) + stored
-    if not stored:
-        return fresh
-    return [*stored, *_input_list(fresh)]
-
-
-def _stored_input(state: dict[str, Any], identifier: str) -> list[Any]:
-    inputs = state.get("response_inputs")
-    if not isinstance(inputs, dict):
-        return []
-    found = inputs.get(identifier)
-    return list(found) if isinstance(found, list) else []
-
-
-def _input_list(raw: Any) -> list[Any]:
-    if isinstance(raw, str):
-        return [{"type": "message", "role": "user", "content": raw}]
-    if isinstance(raw, list):
-        return list(raw)
-    return []
 
 
 def _chat_items(messages: Any) -> tuple[str, list[dict[str, Any]]]:
