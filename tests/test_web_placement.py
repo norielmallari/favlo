@@ -454,7 +454,6 @@ def test_move_and_delete_update_the_session_placement(
     root.mkdir()
     (root / "horse.png").write_bytes(PNG)
     (root / "zebra.png").write_bytes(PNG)
-    (root / "Albums").mkdir()
     created = client.post(
         "/workspaces",
         headers={"Idempotency-Key": "ws-retarget"},
@@ -500,13 +499,13 @@ def test_move_and_delete_update_the_session_placement(
     folder_id = client.get(f"/workspaces/{workspace['id']}/folders").json()["folders"][0]["id"]
     moved = client.post(
         f"/workspaces/{workspace['id']}/folders/{folder_id}/images/move",
-        json={"path": "horse.png", "to": "Albums/horse.png"},
+        json={"path": "horse.png", "to": "pony.png"},
     )
     assert moved.status_code == 200
-    assert moved.json()["state"]["favlo_workspace"]["selection"]["path"] == "Albums/horse.png"
+    assert moved.json()["state"]["favlo_workspace"]["selection"]["path"] == "pony.png"
     snap = client.get(f"/sessions/{session_id}").json()
     items = snap["state"]["favlo_workspace"]["elements"][1]["props"]["items"]
-    assert [item["path"] for item in items] == ["Albums/horse.png", "zebra.png"]
+    assert [item["path"] for item in items] == ["pony.png", "zebra.png"]
     assert items[0]["caption"] == "Horse"
     deleted = client.request(
         "DELETE",
@@ -516,5 +515,5 @@ def test_move_and_delete_update_the_session_placement(
     assert deleted.status_code == 200
     after = client.get(f"/sessions/{session_id}").json()
     left = after["state"]["favlo_workspace"]["elements"][1]["props"]["items"]
-    assert [item["path"] for item in left] == ["Albums/horse.png"]
-    assert after["state"]["favlo_workspace"]["selection"]["path"] == "Albums/horse.png"
+    assert [item["path"] for item in left] == ["pony.png"]
+    assert after["state"]["favlo_workspace"]["selection"]["path"] == "pony.png"

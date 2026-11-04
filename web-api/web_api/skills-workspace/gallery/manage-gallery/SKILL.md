@@ -1,13 +1,13 @@
 ---
 name: manage-gallery
-description: Arranges this gallery and saves generated images into it. Use when working in a gallery workspace, generating an image, or changing its folders and files.
+description: Arranges this gallery and saves generated images into it. Use when working in a gallery workspace, generating an image, or changing its files.
 ---
 
-This session is the gallery. Paths are relative to its local folder. Do not use a host path, another workspace id, a folder row, or a cloud folder.
+This session is the gallery. Paths are relative to its local folder root. Do not use a host path, another workspace id, a folder row, a cloud folder, or a nested directory.
 
-When the turn names the selected media, this image means that path. A generated image is saved beside the selected media, or at the folder root when none is selected.
+When the turn names the selected media, this image means that path. A generated image is saved at the folder root when none is selected, or beside the selected media only when that media is also at the root.
 
-`generate_image` returns a task id and the file is not ready. Reply in that same turn. Do not call `media_status` on this turn. The chat shows the `favlo://` link when the file is ready, and the host writes that file into the gallery folder and filmstrip. Use `gallery_write_image` only when the person asks to save a chat link under a different path.
+`generate_image` returns a task id and the file is not ready. Reply in that same turn. Do not call `media_status` on this turn. The chat shows the `favlo://` link when the file is ready, and the host writes that file into the gallery folder and filmstrip. Use `gallery_write_image` only when the person asks to save a chat link under a different root path.
 
 When asked to fill the filmstrip: call `gallery_find_media` once, then `workspace_place` once in the same turn. Do not call find twice. Use `gallery_search_media` only when the request is about meaning. Find and search return path and kind only. Keep `preview` on slot `stage` with props `{"fit":"contain"}` unless the user asks to remove it. Put `filmstrip` on slot `rail` with props `{"title":"","items":[{"path":"..."}]}` using only paths from find or search. When the filmstrip has items, always pass `selection` as `{"kind":"file","path":"..."}` for one of those paths so the preview shows it. Do not describe the layout in prose.
 
@@ -17,19 +17,11 @@ Call `gallery_load_image` for one path when the sidecar description is not enoug
 
 Use `gallery_search_unlike_media` when the request wants media that does not match the meaning.
 
-Use `gallery_delete_image` when the message asks to delete this image. The file moves to the Trash. The path is the selected media.
+Use `gallery_delete_image` when the message asks to delete this image. The file moves to the Trash. The path is the selected media at the folder root.
 
-Use `gallery_move_image` to move an image. This image is the selected media. The destination is the folder the message names, or the parent when the message says to move it up.
+Use `gallery_move_image` to rename an image at the folder root. This image is the selected media. The destination is another root file name.
 
-Use `gallery_create_folder` to create a directory inside the local folder.
-
-Use `gallery_rename_folder` to rename a directory.
-
-Use `gallery_move_folder` to move a directory inside the local folder.
-
-Use `gallery_delete_folder` to delete a directory. Delete it only when it is empty. The local folder itself cannot be deleted.
-
-These tools cannot add or delete a folder row, and they cannot use a cloud folder.
+These tools cannot add or delete a folder row, create directories, or use a cloud folder.
 
 When the user asks to change a caption, title, tags, people, objects, place, or whether an image is not safe for work, call `gallery_update_metadata` with that image's relative path. Send only the fields they want changed. Omitted fields stay as they are.
 

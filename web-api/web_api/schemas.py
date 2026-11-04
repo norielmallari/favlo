@@ -233,16 +233,3 @@ class ImageWrite(BaseModel):
     note: dict[str, Any] | None = None
     expected_revision: str | None = None
 
-
-class FolderCreate(BaseModel):
-    path: str = Field(min_length=1)
-
-
-class FolderPatch(BaseModel):
-    path: str = Field(min_length=1)
-    name: str | None = None
-    to: str | None = None
-
-
-class FolderDelete(BaseModel):
-    path: str = Field(min_length=1)

@@ -204,7 +204,7 @@ def test_gallery_create_requires_a_local_folder(client: TestClient, tmp_path: Pa
     assert absent.status_code == 400
 
 
-def test_images_and_folders_stay_inside_the_local_folder(
+def test_images_stay_at_the_local_folder_root(
     client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _drop_instead_of_trash(monkeypatch)
@@ -225,60 +225,40 @@ def test_images_and_folders_stay_inside_the_local_folder(
     assert png.status_code == 200
     assert png.content == PNG
     nested = client.post(
-        f"/workspaces/{workspace_id}/folders/{folder_id}/directories",
-        json={"path": "shots"},
+        f"/workspaces/{workspace_id}/folders/{folder_id}/images",
+        json={"path": "shots/horse.png", "bytes": encoded},
     )
-    assert nested.status_code == 201
-    moved = client.patch(
-        f"/workspaces/{workspace_id}/folders/{folder_id}/directories",
-        json={"path": "shots", "to": "takes"},
-    )
-    assert moved.status_code == 200
-    renamed = client.patch(
-        f"/workspaces/{workspace_id}/folders/{folder_id}/directories",
-        json={"path": "takes", "name": "stills"},
-    )
-    assert renamed.json()["path"] == "stills"
-    image = client.post(
+    assert nested.status_code == 400
+    nested_list = client.get(f"/workspaces/{workspace_id}/folders/{folder_id}/images?path=shots")
+    assert nested_list.status_code == 400
+    renamed = client.post(
         f"/workspaces/{workspace_id}/folders/{folder_id}/images/move",
-        json={"path": "horse.png", "to": "stills/horse.png"},
+        json={"path": "horse.png", "to": "pony.png"},
     )
-    assert image.status_code == 200
-    assert image.json()["path"] == "stills/horse.png"
-    occupied = client.request(
-        "DELETE",
-        f"/workspaces/{workspace_id}/folders/{folder_id}/directories",
-        json={"path": "stills"},
+    assert renamed.status_code == 200
+    assert renamed.json()["path"] == "pony.png"
+    nested_move = client.post(
+        f"/workspaces/{workspace_id}/folders/{folder_id}/images/move",
+        json={"path": "pony.png", "to": "shots/pony.png"},
     )
-    assert occupied.status_code == 400
+    assert nested_move.status_code == 400
     deleted = client.request(
         "DELETE",
         f"/workspaces/{workspace_id}/folders/{folder_id}/images",
-        json={"path": "stills/horse.png"},
+        json={"path": "pony.png"},
     )
     assert deleted.status_code == 200
-    assert deleted.json()["name"] == "horse.png"
-    assert not (gallery["root_path"] / "stills" / "horse.png").exists()
-    listing = client.get(f"/workspaces/{workspace_id}/folders/{folder_id}/images?path=stills").json()
-    assert listing["empty"] is True
+    assert deleted.json()["name"] == "pony.png"
+    assert not (gallery["root_path"] / "pony.png").exists()
     escape = client.post(
         f"/workspaces/{workspace_id}/folders/{folder_id}/images",
         json={"path": "../outside.png", "bytes": encoded},
     )
     assert escape.status_code == 400
-    root = client.request(
-        "DELETE",
+    assert client.post(
         f"/workspaces/{workspace_id}/folders/{folder_id}/directories",
-        json={"path": "/"},
-    )
-    assert root.status_code == 400
-    removed = client.request(
-        "DELETE",
-        f"/workspaces/{workspace_id}/folders/{folder_id}/directories",
-        json={"path": "stills"},
-    )
-    assert removed.status_code == 200
-    assert not (gallery["root_path"] / "stills").exists()
+        json={"path": "shots"},
+    ).status_code == 404
 
 
 def test_gallery_tools_are_only_on_the_workspace_session(tmp_path: Path) -> None:
@@ -318,11 +298,11 @@ def test_gallery_tools_are_only_on_the_workspace_session(tmp_path: Path) -> None
         store.close()
     home_names = {_tool_name(item) for item in home_tools}
     gallery_names = {_tool_name(item) for item in gallery_tools}
-    assert "gallery_create_folder" not in home_names
+    assert "gallery_delete_image" not in home_names
     assert "gallery_write_image" not in home_names
     assert "gallery_write_image" in gallery_names
     assert "gallery_search_unlike_media" in gallery_names
-    assert "gallery_create_folder" in gallery_names
+    assert "gallery_delete_image" in gallery_names
     assert "gallery_load_folder_tools" not in gallery_names
     assert "operating in a gallery workspace" in gallery_instructions.lower()
     assert "local folder" in gallery_instructions.lower()
@@ -362,7 +342,7 @@ def test_a_workspace_session_gets_the_type_prompt_before_the_root(tmp_path: Path
     assert "gallery_get_metadata" in names
     assert "gallery_load_image" in names
     assert "gallery_search_unlike_media" in names
-    assert "gallery_create_folder" in names
+    assert "gallery_delete_image" in names
     assert "workspace_place" in names
     assert "gallery_set_theme" in names
     assert "gallery_update_metadata" in names
@@ -749,9 +729,9 @@ def test_local_folder_rejects_an_escape(tmp_path: Path) -> None:
     with pytest.raises(Rejected):
         folder.write("/tmp/out.png", PNG)
     with pytest.raises(Rejected):
-        folder.create_folder("..")
+        folder.write("..", PNG)
     with pytest.raises(Rejected):
-        folder.create_folder("")
+        folder.resolve("..", directory=True)
     listed = folder.list("")
     assert listed["images"][0]["name"] == "ok.png"
 

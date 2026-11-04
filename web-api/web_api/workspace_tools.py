@@ -30,7 +30,7 @@ def ensure_opening_filmstrip(store: Any, workspace_id: str) -> None:
         folder = folder_for(store, workspace_id)
     except Rejected:
         return
-    listing = folder.walk_media(kinds=["image"], record_limit=5000)
+    listing = folder.walk_media(kinds=["image"], depth_limit=0, record_limit=5000)
     items: list[dict[str, str]] = []
     seen: set[str] = set()
     for row in listing.get("media") or []:

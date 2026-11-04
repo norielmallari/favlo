@@ -228,7 +228,7 @@ def write_vision_sidecars(store: Any, workspace_id: str) -> int:
 def uncaptioned_images(store: Any, workspace_id: str) -> list[str]:
     """Image paths that still have no vision caption."""
     folder = LocalFolder(store.local_location(workspace_id))
-    listing = folder.walk_media(record_limit=5000)
+    listing = folder.walk_media(depth_limit=0, record_limit=5000)
     pending: list[str] = []
     for item in listing.get("media") or []:
         if str(item.get("kind") or "") != "image":
@@ -264,7 +264,7 @@ def _pass(
     worked = 0
     vision_used = 0
     model, base_url, effort = _chat_endpoint(store, workspace_id) if vision else (None, None, None)
-    listing = folder.walk_media(record_limit=5000 if cap is None else 80)
+    listing = folder.walk_media(depth_limit=0, record_limit=5000 if cap is None else 80)
     for item in listing.get("media") or []:
         if cap is not None and worked >= cap:
             break

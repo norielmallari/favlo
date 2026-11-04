@@ -15,6 +15,15 @@ from web_api.tool_names import qualified
 
 SOURCE = "gallery"
 
+
+def _root_media_path(path: str) -> str:
+    """Reject nested paths so media stays at the local folder root."""
+    cleaned = path.strip().strip("/").replace("\\", "/")
+    if not cleaned or cleaned in {".", ".."} or "/" in cleaned:
+        raise Rejected("Media paths stay at the local folder root.")
+    return cleaned
+
+
 INSTRUCTIONS = (
     "These tools belong to this gallery workspace session. "
     "Media files (images, mp3, mp4) live in the local folder for this gallery. "
@@ -34,7 +43,7 @@ INSTRUCTIONS = (
     "already includes the sidecar and the image. Do not load an image only because it is selected. "
     "Always pass selection for one filmstrip path when the strip has items. "
     "Do not invent media descriptions; Favlo's index job writes metadata under "
-    ".favlo_metadata beside the media (for example Albums/.favlo_metadata/media.mp3.json). "
+    ".favlo_metadata beside the media (for example .favlo_metadata/media.mp3.json). "
     "When the user asks to change a caption, title, tags, or other image metadata, call "
     f"{qualified(SOURCE, 'update_metadata')} with that image's relative path. "
     "Send only the fields they want changed. "
@@ -45,8 +54,8 @@ INSTRUCTIONS = (
     "writes that file into the gallery folder and filmstrip. "
     f"Call {qualified(SOURCE, 'write_image')} only when the person asks to save "
     "a chat link under a different path. "
-    "Folder mutate tools and "
-    f"{qualified(SOURCE, 'search_unlike_media')} are available without a load step. "
+    f"{qualified(SOURCE, 'search_unlike_media')} is available without a load step. "
+    "Keep media at the local folder root; do not use nested directories. "
     "The gallery color scheme is favlo, rose-pine, or catppuccin. Call "
     f"{qualified(SOURCE, 'set_theme')} when the user asks to change how the gallery looks. "
     "Light, dark, and system stay their appearance setting."
@@ -260,12 +269,8 @@ def tools(store: Any, workspace_id: str, bus: Any | None = None) -> list[object]
         _write_tool(store, workspace_id, bus),
         _update_metadata_tool(store, workspace_id),
         _search_unlike_tool(store, workspace_id),
-        _create_tool(store, workspace_id, bus),
-        _rename_tool(store, workspace_id, bus),
-        _move_tool(store, workspace_id, bus),
         _move_image_tool(store, workspace_id, bus),
         _delete_image_tool(store, workspace_id, bus),
-        _delete_tool(store, workspace_id, bus),
         _theme_tool(store, workspace_id, bus),
     ]
 
@@ -330,15 +335,16 @@ def _find_tool(store: Any, workspace_id: str) -> object:
         name_contains: str = "",
         kinds: list[str] | None = None,
     ) -> str:
-        """List media under the local folder in one capped recursive walk.
+        """List media at the local folder root.
 
         Each row is path and kind only. Call gallery_get_metadata for sidecar fields.
         kinds may be image, audio, and video. Prefer gallery_search_media for meaning.
+        path is ignored; listing is always the folder root.
         """
         folder = _bind_or_message(store, workspace_id)
         if isinstance(folder, str):
             return folder
-        listing = folder.walk_media(path, name_contains=name_contains, kinds=kinds)
+        listing = folder.walk_media("", name_contains=name_contains, kinds=kinds, depth_limit=0)
         if isinstance(listing, dict):
             listing = {
                 **_slim_media_rows(listing),
@@ -579,9 +585,10 @@ def _write_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
         if isinstance(folder, str):
             return folder
         try:
+            relative = _root_media_path(path)
             payload, meta = image_payload(source=source or None, data=data or None)
             written = folder.write(
-                path,
+                relative,
                 payload,
                 expected_revision=expected_revision or None,
             )
@@ -600,77 +607,22 @@ def _write_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
     return write_image
 
 
-def _create_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
-    from agent_framework import tool
-
-    @tool(approval_mode="never_require", name=qualified(SOURCE, "create_folder"))
-    async def create_folder(path: str) -> str:
-        """Create a directory inside the local folder."""
-        folder = _bind_or_message(store, workspace_id)
-        if isinstance(folder, str):
-            return folder
-        try:
-            created = folder.create_folder(path)
-        except Rejected as exc:
-            return str(exc)
-        await _notify(store, workspace_id, bus, created)
-        return _dump(created)
-
-    return create_folder
-
-
-def _rename_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
-    from agent_framework import tool
-
-    @tool(approval_mode="never_require", name=qualified(SOURCE, "rename_folder"))
-    async def rename_folder(path: str, name: str) -> str:
-        """Rename a directory inside the local folder."""
-        folder = _bind_or_message(store, workspace_id)
-        if isinstance(folder, str):
-            return folder
-        try:
-            renamed = folder.rename_folder(path, name)
-        except Rejected as exc:
-            return str(exc)
-        await _notify(store, workspace_id, bus, renamed)
-        return _dump(renamed)
-
-    return rename_folder
-
-
-def _move_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
-    from agent_framework import tool
-
-    @tool(approval_mode="never_require", name=qualified(SOURCE, "move_folder"))
-    async def move_folder(path: str, destination: str) -> str:
-        """Move a directory to another path inside the local folder."""
-        folder = _bind_or_message(store, workspace_id)
-        if isinstance(folder, str):
-            return folder
-        try:
-            moved = folder.move_folder(path, destination)
-        except Rejected as exc:
-            return str(exc)
-        await _notify(store, workspace_id, bus, moved)
-        return _dump(moved)
-
-    return move_folder
-
-
 def _move_image_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
     from agent_framework import tool
 
     @tool(approval_mode="never_require", name=qualified(SOURCE, "move_image"))
     async def move_image(path: str, destination: str) -> str:
-        """Move an image to another path inside the local folder."""
+        """Rename an image at the local folder root."""
         folder = _bind_or_message(store, workspace_id)
         if isinstance(folder, str):
             return folder
         try:
-            moved = folder.move(path, destination)
+            source = _root_media_path(path)
+            target = _root_media_path(destination)
+            moved = folder.move(source, target)
         except Rejected as exc:
             return str(exc)
-        state = _sync_media(store, workspace_id, source=path, destination=str(moved.get("path") or ""))
+        state = _sync_media(store, workspace_id, source=source, destination=str(moved.get("path") or ""))
         await _notify(store, workspace_id, bus, _with_state(moved, state))
         return _stated(_dump(moved), state)
 
@@ -682,38 +634,20 @@ def _delete_image_tool(store: Any, workspace_id: str, bus: Any | None) -> object
 
     @tool(approval_mode="never_require", name=qualified(SOURCE, "delete_image"))
     async def delete_image(path: str) -> str:
-        """Move an image to the Trash. path is relative to the local folder."""
+        """Move an image to the Trash. path is a file at the local folder root."""
         folder = _bind_or_message(store, workspace_id)
         if isinstance(folder, str):
             return folder
         try:
-            deleted = folder.delete_image(path)
+            relative = _root_media_path(path)
+            deleted = folder.delete_image(relative)
         except Rejected as exc:
             return str(exc)
-        state = _sync_media(store, workspace_id, source=path, destination=None)
+        state = _sync_media(store, workspace_id, source=relative, destination=None)
         await _notify(store, workspace_id, bus, _with_state(deleted, state))
         return _stated(_dump(deleted), state)
 
     return delete_image
-
-
-def _delete_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
-    from agent_framework import tool
-
-    @tool(approval_mode="never_require", name=qualified(SOURCE, "delete_folder"))
-    async def delete_folder(path: str) -> str:
-        """Delete an empty directory inside the local folder. The local folder itself cannot be deleted."""
-        folder = _bind_or_message(store, workspace_id)
-        if isinstance(folder, str):
-            return folder
-        try:
-            deleted = folder.delete_folder(path)
-        except Rejected as exc:
-            return str(exc)
-        await _notify(store, workspace_id, bus, deleted)
-        return _dump(deleted)
-
-    return delete_folder
 
 
 def image_bytes(*, source: str | None, data: str | None) -> bytes:

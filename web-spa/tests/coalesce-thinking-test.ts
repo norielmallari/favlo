@@ -39,7 +39,7 @@ test('a thinking-only turn folds into a tool turn and hidden tools coalesce Thin
       role: 'assistant',
       body: 'Done.',
       reasoning: 'After tool.',
-      toolCalls: [{ id: 'c1', name: 'gallery_create_folder', arguments: '{}' }],
+      toolCalls: [{ id: 'c1', name: 'gallery_delete_image', arguments: '{}' }],
     },
   ];
   const shown = coalesceThinkingTurns(messages);
