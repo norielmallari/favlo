@@ -21,8 +21,8 @@ def _park(schedule: Scheduler, kind: str, entered: threading.Event, release: thr
     schedule.release(ticket)
 
 
-def _wait_until(ready) -> None:
-    deadline = time.monotonic() + 2
+def _wait_until(ready, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if ready():
             return
@@ -31,7 +31,7 @@ def _wait_until(ready) -> None:
 
 
 def test_an_embedding_does_not_preempt_media_and_runs_before_the_chat() -> None:
-    schedule = Scheduler()
+    schedule = Scheduler(chat_debounce=0)
     order: list[str] = []
     media = schedule.acquire("media")
     embed = threading.Thread(target=_run, args=(schedule, "embed", order))
@@ -53,7 +53,7 @@ def test_an_embedding_does_not_preempt_media_and_runs_before_the_chat() -> None:
 
 
 def test_each_later_chat_preempts_the_media_slice_it_meets() -> None:
-    schedule = Scheduler()
+    schedule = Scheduler(chat_debounce=0)
     first = schedule.acquire("media")
     chat = threading.Thread(target=lambda: schedule.release(schedule.acquire("chat")))
     chat.start()
@@ -111,7 +111,7 @@ def test_a_call_waits_until_the_memory_hold_lifts() -> None:
 
 
 def test_an_embedding_does_not_preempt_a_running_chat() -> None:
-    schedule = Scheduler()
+    schedule = Scheduler(chat_debounce=0)
     order: list[str] = []
     chat = schedule.acquire("chat")
     embed = threading.Thread(target=_run, args=(schedule, "embed", order))
@@ -173,7 +173,7 @@ def test_a_second_media_waits_and_does_not_set_preempt() -> None:
 
 
 def test_media_waits_behind_a_chat_without_preempt() -> None:
-    schedule = Scheduler()
+    schedule = Scheduler(chat_debounce=0)
     order: list[str] = []
     chat = schedule.acquire("chat")
     media = threading.Thread(target=_run, args=(schedule, "media", order))
@@ -185,6 +185,45 @@ def test_media_waits_behind_a_chat_without_preempt() -> None:
     media.join(2)
     assert order == ["media"]
     assert schedule.running() is None
+
+
+def test_chat_debounce_keeps_media_from_unloading_the_language_model() -> None:
+    """Media must not admit between a chat release and the next chat acquire."""
+    schedule = Scheduler(chat_debounce=1.0)
+    order: list[str] = []
+    first = schedule.acquire("chat")
+    media = threading.Thread(target=_run, args=(schedule, "media", order))
+    media.start()
+    _wait_until(lambda: schedule.waiting("media") == 1)
+    schedule.release(first)
+    assert schedule.foreground() is True
+    assert schedule.waiting("media") == 1
+    assert order == []
+    # The follow-up /v1/responses that carries the tool result wins the gap.
+    reply = schedule.acquire("chat")
+    assert order == []
+    assert schedule.running() == "chat"
+    assert schedule.waiting("media") == 1
+    schedule.release(reply)
+    with schedule._cond:
+        schedule._chat_debounce_until = time.monotonic() + 0.05
+        schedule._cond.notify_all()
+    _wait_until(lambda: order == ["media"], timeout=2.0)
+    media.join(2)
+
+
+def test_chat_debounce_expires_so_media_can_resume() -> None:
+    schedule = Scheduler(chat_debounce=0.05)
+    order: list[str] = []
+    chat = schedule.acquire("chat")
+    media = threading.Thread(target=_run, args=(schedule, "media", order))
+    media.start()
+    _wait_until(lambda: schedule.waiting("media") == 1)
+    schedule.release(chat)
+    assert schedule.foreground() is True
+    _wait_until(lambda: order == ["media"], timeout=2.0)
+    media.join(2)
+    assert schedule.foreground() is False
 
 
 def test_preempt_clears_when_the_chat_leaves_and_an_embedding_is_still_waiting() -> None:

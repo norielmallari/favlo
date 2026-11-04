@@ -3,18 +3,25 @@
 Two queues. The foreground queue is embeddings, then chats that have not
 started. The media queue runs only when the foreground queue is empty.
 A chat preempts media at its next safe point and leaves ``preempt`` set
-until the chat queue has drained. An embedding does not set ``preempt``
-and does not preempt a chat that already holds the GPU. ``flush`` drops
-every waiter. The request that holds admission stays until it releases.
+until the chat queue has drained. After a chat releases, a short debounce
+keeps media from admitting so the next model call (the reply to a tool
+result) can reuse the resident language model instead of unloading it for
+media and loading it again. An embedding does not set ``preempt`` and does
+not preempt a chat that already holds the GPU. ``flush`` drops every
+waiter. The request that holds admission stays until it releases.
 """
 
 from __future__ import annotations
 
 import threading
+import time
 from collections import deque
 
 _FOREGROUND = frozenset({"embed", "chat", "responses"})
 _KINDS = _FOREGROUND | {"media"}
+# Gap between a chat release and the next /v1/responses that carries the
+# tool result. Media must not win that race and unload the language model.
+_CHAT_DEBOUNCE_SECONDS = 1.0
 
 
 class ClientClosed(Exception):
@@ -39,7 +46,7 @@ def ensure(state: dict) -> Scheduler:
 class Scheduler:
     """Admission queues. The pipeline manager admits one request at a time."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, chat_debounce: float | None = None) -> None:
         self._cond = threading.Condition()
         self._embeds: deque[_Ticket] = deque()
         self._chats: deque[_Ticket] = deque()
@@ -47,6 +54,10 @@ class Scheduler:
         self._running: _Ticket | None = None
         self._holding = 0
         self._dropped: set[int] = set()
+        self._chat_debounce_until = 0.0
+        self._chat_debounce_seconds = (
+            _CHAT_DEBOUNCE_SECONDS if chat_debounce is None else max(0.0, float(chat_debounce))
+        )
         self.epoch = 0
         self.preempt = threading.Event()
 
@@ -61,7 +72,6 @@ class Scheduler:
             raise ValueError(message)
         ticket = _Ticket(kind)
         noted = False
-        started = False
         self._cond.acquire()
         try:
             self._queue(kind).append(ticket)
@@ -79,13 +89,15 @@ class Scheduler:
                     finally:
                         self._cond.acquire()
                     continue
-                self._cond.wait(0.05 if cancel is not None else None)
+                wait = self._wait_seconds(cancel is not None)
+                self._cond.wait(wait)
             if cancel is not None and cancel.is_set():
                 raise ClientClosed()
             self._queue(kind).popleft()
             self._running = ticket
+            if ticket.kind in {"chat", "responses"}:
+                self._chat_debounce_until = 0.0
             self._sync_preempt()
-            started = True
         except BaseException:
             self._abandon(ticket)
             raise
@@ -97,6 +109,7 @@ class Scheduler:
         """Drop every waiter. The request that holds admission stays until it releases."""
         with self._cond:
             self.epoch += 1
+            self._chat_debounce_until = 0.0
             for queue in (self._embeds, self._chats, self._media):
                 while queue:
                     self._dropped.add(id(queue.popleft()))
@@ -108,6 +121,8 @@ class Scheduler:
         with self._cond:
             if self._running is ticket:
                 self._running = None
+                if ticket.kind in {"chat", "responses"} and self._chat_debounce_seconds > 0:
+                    self._chat_debounce_until = time.monotonic() + self._chat_debounce_seconds
             self._sync_preempt()
             self._cond.notify_all()
 
@@ -135,11 +150,17 @@ class Scheduler:
             self._cond.notify_all()
 
     def foreground(self) -> bool:
-        """True when an embedding or a chat is queued or holds admission."""
+        """True when an embedding or a chat is queued or holds admission.
+
+        Also true during the post-chat debounce so a resumed media job does
+        not unload the language model before the tool-result reply arrives.
+        """
         with self._cond:
             if self._embeds or self._chats:
                 return True
-            return self._running is not None and self._running.kind in _FOREGROUND
+            if self._running is not None and self._running.kind in _FOREGROUND:
+                return True
+            return self._debounce_active()
 
     def _queue(self, kind: str) -> deque[_Ticket]:
         if kind == "embed":
@@ -159,8 +180,21 @@ class Scheduler:
         if self._chats:
             return ticket is self._chats[0]
         if self._media:
+            if self._debounce_active():
+                return False
             return ticket is self._media[0]
         return False
+
+    def _debounce_active(self) -> bool:
+        return time.monotonic() < self._chat_debounce_until
+
+    def _wait_seconds(self, cancellable: bool) -> float | None:
+        if cancellable:
+            return 0.05
+        remaining = self._chat_debounce_until - time.monotonic()
+        if remaining > 0 and self._media and not self._embeds and not self._chats:
+            return min(0.05, remaining)
+        return None
 
     def _abandon(self, ticket: _Ticket) -> None:
         queue = self._queue(ticket.kind)
