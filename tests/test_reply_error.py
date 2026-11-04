@@ -22,6 +22,16 @@ def test_a_smoke_hold_is_a_sentence() -> None:
     )
 
 
+def test_a_smoke_hold_is_found_when_the_json_is_escaped() -> None:
+    raw = (
+        'Error code: 503 - {\\"error\\":{\\"message\\":\\"the gpu is held for a pipeline smoke\\"'
+        ',\\"type\\":\\"busy\\"}}'
+    )
+    assert spoken_error(raw) == (
+        "The GPU is held for a pipeline smoke. Send again when it is free."
+    )
+
+
 def test_a_plain_failure_stays_as_written() -> None:
     assert spoken_error("The model returned an empty reply.") == (
         "The model returned an empty reply."

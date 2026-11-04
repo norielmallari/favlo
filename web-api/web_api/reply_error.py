@@ -13,6 +13,8 @@ def spoken_error(raw: str) -> str:
     text = raw.strip()
     if not text:
         return "The listener did not complete the reply. Send again."
+    if _SMOKE in text.lower():
+        return "The GPU is held for a pipeline smoke. Send again when it is free."
     if not _dumped(text):
         return text
     found = _DETAIL.search(text)

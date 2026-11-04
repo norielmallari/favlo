@@ -8,6 +8,9 @@ export function spokenError(raw: string): string {
   if (!text) {
     return 'The listener did not complete the reply. Send again.';
   }
+  if (text.toLowerCase().includes(smoke)) {
+    return 'The GPU is held for a pipeline smoke. Send again when it is free.';
+  }
   if (!dumped(text)) {
     return text;
   }
