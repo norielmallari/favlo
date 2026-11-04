@@ -714,6 +714,7 @@ export function SettingsScreen() {
                       agent={null}
                       groups={groups}
                       providers={providers}
+                      defaultModelId={settings?.default_model_id ?? null}
                       onSuccess={setSaved}
                       onSaved={rememberAgent}
                       onModels={replaceModels}
@@ -732,6 +733,7 @@ export function SettingsScreen() {
                             agent={agent}
                             groups={groups}
                             providers={providers}
+                            defaultModelId={settings?.default_model_id ?? null}
                             onSuccess={setSaved}
                             onSaved={rememberAgent}
                             onDeleted={forgetAgent}
@@ -1341,6 +1343,7 @@ export function AgentForm({
   agent,
   groups,
   providers,
+  defaultModelId = null,
   onSuccess,
   onSaved,
   onDeleted,
@@ -1349,6 +1352,8 @@ export function AgentForm({
   agent: Agent | null;
   groups: ToolGroup[];
   providers: Provider[];
+  /** Providers default row id. Used when a provider is chosen without a model yet. */
+  defaultModelId?: string | null;
   onSuccess: (message: string) => void;
   onSaved: (agent: Agent) => void;
   onDeleted?: (agent: Agent) => void;
@@ -1384,6 +1389,20 @@ export function AgentForm({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  function pickModel(models: Model[], preferred: string): string {
+    if (preferred && models.some((model) => model.model_id === preferred)) {
+      return preferred;
+    }
+    const fromSettings = modelRow(providers, defaultModelId ?? null);
+    if (
+      fromSettings != null &&
+      models.some((model) => model.id === fromSettings.id || model.model_id === fromSettings.model_id)
+    ) {
+      return fromSettings.model_id;
+    }
+    return models[0]?.model_id ?? '';
+  }
+
   function chooseProvider(next: string) {
     setProviderId(next);
     if (next === '') {
@@ -1393,7 +1412,7 @@ export function AgentForm({
     const models = (listed[next] ?? providers.find((item) => item.id === next)?.models ?? []).filter(
       (model) => model.enabled,
     );
-    setModelId(models.some((model) => model.model_id === modelId) ? modelId : models[0]?.model_id ?? '');
+    setModelId(pickModel(models, modelId));
   }
 
   async function refreshModels() {
@@ -1406,8 +1425,8 @@ export function AgentForm({
       });
       setListed((current) => ({ ...current, [providerId]: listedModels.models }));
       onModels?.(providerId, listedModels.models);
-      const enabled = listedModels.models.filter((model) => model.enabled);
-      setModelId(enabled.some((model) => model.model_id === modelId) ? modelId : enabled[0]?.model_id ?? '');
+      const enabledModels = listedModels.models.filter((model) => model.enabled);
+      setModelId(pickModel(enabledModels, modelId));
       setNotice(listedModels.message ?? 'Models refreshed');
       setError(null);
     } catch (caught) {

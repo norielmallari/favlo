@@ -1,10 +1,10 @@
-import { useState } from 'react';
-import { StyleSheet, Text, TextInput, View, type ViewStyle } from 'react-native';
+import { useEffect, useState } from 'react';
+import { Platform, StyleSheet, Text, TextInput, View, type ViewStyle } from 'react-native';
 
 import { composerCommand } from '@/components/composer-keys';
 import { IconButton } from '@/components/IconButton';
 import { useTheme } from '@/theme/Theme';
-import { radius, space } from '@/theme/tokens';
+import { duration, radius, space } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
 
 type Props = {
@@ -14,16 +14,46 @@ type Props = {
   onSend: () => void;
   onStop?: () => void;
   agentName?: string;
+  /** Hide the Return / Shift+Return caption (narrow gallery). */
+  compact?: boolean;
+  /** Briefly pulse the field after Add to chat. */
+  pulseToken?: number;
+  onFocusChange?: (focused: boolean) => void;
 };
 
-export function Composer({ value, working, onChange, onSend, onStop, agentName }: Props) {
+export function Composer({
+  value,
+  working,
+  onChange,
+  onSend,
+  onStop,
+  agentName,
+  compact = false,
+  pulseToken = 0,
+  onFocusChange,
+}: Props) {
   const { palette } = useTheme();
   const [focused, setFocused] = useState(false);
+  const [pulse, setPulse] = useState(false);
+  const reduceMotion =
+    Platform.OS === 'web' &&
+    typeof window !== 'undefined' &&
+    Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
+
+  useEffect(() => {
+    if (pulseToken === 0 || reduceMotion) {
+      return;
+    }
+    setPulse(true);
+    const timer = setTimeout(() => setPulse(false), duration.med);
+    return () => clearTimeout(timer);
+  }, [pulseToken, reduceMotion]);
+
   const ring: ViewStyle = {
     outlineStyle: 'solid',
     outlineWidth: 2,
     outlineOffset: 2,
-    outlineColor: focused ? palette.focusRing : 'transparent',
+    outlineColor: focused || pulse ? palette.focusRing : 'transparent',
   };
   const idle = !working && value.trim() === '';
   const stop = working && onStop != null;
@@ -38,8 +68,14 @@ export function Composer({ value, working, onChange, onSend, onStop, agentName }
           multiline
           value={value}
           onChangeText={onChange}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
+          onFocus={() => {
+            setFocused(true);
+            onFocusChange?.(true);
+          }}
+          onBlur={() => {
+            setFocused(false);
+            onFocusChange?.(false);
+          }}
           onKeyPress={(event) => {
             const native = event.nativeEvent as { key: string; shiftKey?: boolean; isComposing?: boolean };
             if (composerCommand(native.key, Boolean(native.shiftKey), Boolean(native.isComposing)) === 'send') {
@@ -55,7 +91,14 @@ export function Composer({ value, working, onChange, onSend, onStop, agentName }
             textStyle('body', palette.textPrimary),
             {
               backgroundColor: palette.surface,
-              borderColor: palette.borderStrong,
+              borderColor: pulse ? palette.accent : palette.borderStrong,
+              ...(Platform.OS === 'web'
+                ? {
+                    transitionProperty: 'border-color, outline-color',
+                    transitionDuration: `${duration.fast}ms`,
+                    transitionTimingFunction: 'ease-in-out',
+                  }
+                : null),
             },
           ]}
         />
@@ -70,7 +113,9 @@ export function Composer({ value, working, onChange, onSend, onStop, agentName }
           color={!stop && idle ? palette.disabledText : stop ? palette.onDanger : palette.onAccent}
         />
       </View>
-      <Text style={textStyle('caption', palette.textSecondary)}>Return to send · Shift+Return for a line</Text>
+      {compact ? null : (
+        <Text style={textStyle('caption', palette.textSecondary)}>Return to send · Shift+Return for a line</Text>
+      )}
     </View>
   );
 }

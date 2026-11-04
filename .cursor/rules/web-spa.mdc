@@ -1,10 +1,32 @@
 ---
-description: Favlo web-spa design tokens, text roles, and button paints. Use palette and textStyle; never hardcode colors on controls.
+description: Favlo web-spa UI/UX. Every screen follows best UI/UX practice and is a pleasure to use. Design tokens, text roles, and button paints serve that. Use palette and textStyle; never hardcode colors on controls.
 globs: web-spa/**
 alwaysApply: false
 ---
 
-# Favlo web-spa design system
+# Favlo web-spa UI/UX
+
+## Principle
+
+Every change under `web-spa/` follows best UI/UX practice, and the result should be a pleasure to use. That is the rule. The sections after this one (tokens, contrast, buttons, surfaces, layout, motion) are how this repo meets it. They do not cap it. A change that passes every check below and still feels clumsy is not finished.
+
+Best practice here means the published guidance this repo already leans on: [Material 3](https://m3.material.io/), Apple's [Human Interface Guidelines](https://developer.apple.com/design/human-interface-guidelines/), and [WCAG 2.2](https://www.w3.org/TR/WCAG22/) at AA. When a change makes a choice those sources address, follow them. Where the sources are silent or disagree, pick the option that serves the person using the screen, and say why in the change.
+
+What a pleasure to use means in code:
+
+- **The task is the subject.** Give the content the person came for the most room. Chrome stays quiet and gives way to it.
+- **Nothing the person did goes away.** A scroll position, a half-typed message, a selection, a chosen size, and an open panel survive a resize, a rotation, the keyboard, and a trip to another view. Do not unmount a view to hide it when remounting loses that state.
+- **Context stays in sight.** Do not make a person remember what they cannot see. Prefer one view that shows what belongs together over a switch between views. Prefer a non-modal surface over a modal one when the person is working with what is behind it. Use a modal for a choice that must be made first.
+- **Every action answers.** A press, a send, a save, a failure, and a finished task each show a result the person can see, with no wait for the next screen. Loading, empty, error, and disabled states are designed, not left as blank space.
+- **Motion has a cause.** Movement confirms a touch or explains a change in layout. It does not decorate. Honor reduced motion by cutting, not by removing the change.
+- **Errors help.** Say what happened and what the person can do next, in plain words. Keep what they typed.
+- **A narrow window is a first-class layout.** Reaching every control by thumb, targets of at least 44 points, no two-dimensional scrolling at 320 pixels, and a keyboard that never covers the box being typed into are part of done.
+- **Keyboard and assistive technology work the same actions.** A control has a name, a role, a state, and a visible focus. Focus is never fully hidden behind docked content. A drag has a keyboard equivalent.
+- **Destructive actions are asked once, said plainly, and kept distinct.** The confirmation names what is affected and what stays.
+
+A choice between two options that work equally well takes the quieter one.
+
+## Design system
 
 Tokens live in `web-spa/src/theme/tokens.ts` (`light` / `dark` palettes, `space`, `radius`, `type`). Read the active palette with `useTheme()`. Paint text with `textStyle(role, palette.<token>)` from `web-spa/src/theme/type.ts`. Do not omit the color argument on visible text. Do not hardcode `#…`, `rgb(…)`, or theme-relative defaults on `Text`, icons, or buttons.
 
@@ -50,9 +72,16 @@ Keep ambient activity quiet. Prefer opacity (and tiny scale) pulses with `ease-i
 
 ## Checklist before finishing a SPA change
 
+- The person can see the result of every action they can start, in the state it leaves behind.
+- A view or panel hidden by a switch keeps its scroll position, draft, and selection.
+- On a narrow window, the content, the control that completes the task, and the context it depends on are on screen together, or the way between them is one obvious control.
+- Loading, empty, and error states exist for anything fetched or generated.
+- Every target is at least 44 points. A drag has a keyboard path. Focus is visible and not hidden by docked content.
 - Every new `Text` passes a palette color into `textStyle`.
 - Every `IconButton` / filled control uses `tone` or a documented paint pair.
 - No new raw hex in component files (tokens only).
 - Dark and light both stay readable; if unsure, check `contrast()` in `tokens.ts` (AA ≥ 4.5 for small text).
 - No `flex` shorthand mixed with `flexGrow` / `flexShrink` / `flexBasis`.
 - New ambient loops follow Motion above and respect reduced motion.
+- New movement has a cause the person can see, and reduced motion turns it into a cut.
+- The change reads as a pleasure to use on a phone-sized window and on a desktop window. When it does not, it is not finished, even if each check above passes.

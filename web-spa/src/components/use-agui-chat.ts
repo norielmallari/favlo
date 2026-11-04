@@ -32,6 +32,8 @@ type Options = {
 
 export function useAguiChat(options: Options) {
   const abortRef = useRef<AbortController | null>(null);
+  const stateRef = useRef(options.state);
+  stateRef.current = options.state;
   const toolsRef = useRef<Map<string, ToolCallRecord>>(new Map());
   const threadRef = useRef(options.threadId);
   threadRef.current = options.threadId;
@@ -173,8 +175,8 @@ export function useAguiChat(options: Options) {
         for await (const event of runAgUi({
           threadId: options.threadId,
           runId,
-          messages: [{ role: 'user', content: text }],
-          state: options.state,
+          messages: [{ id: userId, role: 'user', content: text }],
+          state: stateRef.current,
           signal: controller.signal,
         })) {
           if (event.type === 'RUN_ERROR') {
@@ -254,7 +256,7 @@ export function useAguiChat(options: Options) {
         runId,
         messages: [],
         favloArchive: true,
-        state: options.state,
+        state: stateRef.current,
         signal: controller.signal,
       })) {
         if (event.type === 'RUN_FINISHED') {

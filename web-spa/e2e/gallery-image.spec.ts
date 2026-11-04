@@ -117,7 +117,8 @@ async function sendLine(page: Page, text: string, shown: string, finish = false)
     await page.setViewportSize({ width: 1280, height: 640 });
     await onScreen(page.getByRole('button', { name: 'Send', exact: true }));
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.getByRole('button', { name: 'Chat', exact: true }).click();
+    await expect(page.getByLabel('Gallery', { exact: true })).toBeVisible();
+    await expect(page.getByLabel('Conversation')).toBeVisible();
     await onScreen(page.getByRole('button', { name: 'Send', exact: true }));
     await page.setViewportSize({ width: 1280, height: 800 });
   }

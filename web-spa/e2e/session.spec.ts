@@ -97,7 +97,7 @@ test('session clear and archive stay on their session', async ({ page }) => {
     await step('narrow workspace clear', async () => {
       await galleryPage.setViewportSize({ width: 390, height: 844 });
       await expect(galleryPage.getByRole('heading', { name: workspaceName })).toBeVisible();
-      await galleryPage.getByRole('button', { name: 'Chat' }).click();
+      await expect(galleryPage.getByLabel('Conversation')).toBeVisible();
       await waitIdle(galleryPage);
       const narrowLine = `Narrow workspace ${Date.now()}`;
       await sendLine(galleryPage, narrowLine);

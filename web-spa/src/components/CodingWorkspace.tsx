@@ -70,6 +70,8 @@ type AgentEvent = {
     tool_calls?: unknown;
     message?: string;
     status?: string;
+    task_id?: string;
+    task_ids?: string[];
     agui?: { type?: string; delta?: string; id?: string; name?: string; arguments?: string; result?: string };
     trace?: unknown;
   };
@@ -272,11 +274,16 @@ export function CodingWorkspace({
         ),
       );
       if (role === 'assistant') {
-        openRun.current = null;
-        setSteps([]);
-        setWorking(false);
-        setRunId(null);
-        setStatus('Reply ready');
+        const delivery =
+          Array.isArray(event.payload?.task_ids) ||
+          (typeof event.payload?.task_id === 'string' && event.payload.task_id.length > 0);
+        if (!delivery && (event.run_id == null || event.run_id === openRun.current)) {
+          openRun.current = null;
+          setSteps([]);
+          setWorking(false);
+          setRunId(null);
+          setStatus('Reply ready');
+        }
       }
     }
     if (clearedTranscript(event, sessionId)) {

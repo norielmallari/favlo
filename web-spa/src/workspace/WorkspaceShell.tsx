@@ -13,12 +13,22 @@ export function WorkspaceShell({
   fileUrl,
   onChange,
   onAddToChat,
+  onRequestDelete,
+  fullScreen = false,
+  onToggleFullScreen,
+  hideFilmstrip = false,
+  pendingMedia = [],
 }: {
   state: PlacementState;
   slots: string[];
   fileUrl: (path: string) => string;
   onChange: (next: PlacementState) => void;
   onAddToChat: (path: string) => void;
+  onRequestDelete: (path: string) => void;
+  fullScreen?: boolean;
+  onToggleFullScreen?: () => void;
+  hideFilmstrip?: boolean;
+  pendingMedia?: { task_id: string; kind: string; status: string }[];
 }) {
   const { palette } = useTheme();
   const workspace = state?.favlo_workspace;
@@ -26,24 +36,30 @@ export function WorkspaceShell({
   const selection = workspace?.selection ?? null;
   const order = slots.filter((slot, index) => slots.indexOf(slot) === index);
 
+  function stepSelection(direction: 'prev' | 'next') {
+    const paths = filmstripPaths(state);
+    if (paths.length === 0) {
+      return;
+    }
+    const current = selection?.path ?? paths[0];
+    const index = Math.max(0, paths.indexOf(current));
+    const next =
+      direction === 'next'
+        ? paths[Math.min(paths.length - 1, index + 1)]
+        : paths[Math.max(0, index - 1)];
+    onChange(selectPath(state, next));
+  }
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
         return;
       }
-      const paths = filmstripPaths(state);
-      if (paths.length === 0) {
-        return;
-      }
-      const current = selection?.path ?? paths[0];
-      const index = Math.max(0, paths.indexOf(current));
       if (event.key === 'ArrowRight') {
-        const next = paths[Math.min(paths.length - 1, index + 1)];
-        onChange(selectPath(state, next));
+        stepSelection('next');
       }
       if (event.key === 'ArrowLeft') {
-        const next = paths[Math.max(0, index - 1)];
-        onChange(selectPath(state, next));
+        stepSelection('prev');
       }
     };
     if (typeof document !== 'undefined') {
@@ -51,12 +67,17 @@ export function WorkspaceShell({
       return () => document.removeEventListener('keydown', onKey);
     }
     return undefined;
+    // state and selection are read inside stepSelection via closure of render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onChange, selection?.path, state]);
 
   function renderSlot(items: typeof elements) {
     return items.map((item) => {
       const Component = COMPONENTS[item.element];
       if (Component == null) {
+        return null;
+      }
+      if (hideFilmstrip && item.element === 'filmstrip') {
         return null;
       }
       return (
@@ -67,6 +88,11 @@ export function WorkspaceShell({
           fileUrl={fileUrl}
           onSelect={(path) => onChange(selectPath(state, path))}
           onAddToChat={onAddToChat}
+          onRequestDelete={onRequestDelete}
+          onSwipe={item.element === 'preview' ? stepSelection : undefined}
+          fullScreen={fullScreen}
+          onToggleFullScreen={item.element === 'preview' ? onToggleFullScreen : undefined}
+          pendingMedia={item.element === 'filmstrip' ? pendingMedia : undefined}
         />
       );
     });
@@ -75,15 +101,21 @@ export function WorkspaceShell({
   return (
     <View
       style={{
-        flex: 1,
+        flexGrow: 1,
+        flexShrink: 1,
+        flexBasis: 0,
+        minHeight: 0,
         backgroundColor: palette.background,
         flexDirection: 'column',
         gap: space[2],
       }}
     >
-      {order.map((slot, index) => {
+      {order.map((slot) => {
         const items = elements.filter((item) => item.slot === slot);
         if (items.length === 0) {
+          return null;
+        }
+        if (hideFilmstrip && items.every((item) => item.element === 'filmstrip')) {
           return null;
         }
         const rail = slot === 'rail';
@@ -91,7 +123,7 @@ export function WorkspaceShell({
           <View
             key={slot}
             accessibilityLabel={rail ? 'Filmstrip' : undefined}
-            style={index === 0 ? { flex: 1, minHeight: 200 } : undefined}
+            style={rail ? undefined : { flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 0 }}
           >
             {renderSlot(items)}
           </View>

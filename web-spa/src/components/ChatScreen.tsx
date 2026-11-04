@@ -88,7 +88,8 @@ type AgentEvent = {
     tool_calls?: unknown;
     message?: string;
     status?: string;
-    tool_calls?: unknown;
+    task_id?: string;
+    task_ids?: string[];
     trace?: unknown;
     session_id?: string;
     previous_session_id?: string;
@@ -445,11 +446,17 @@ export function ChatScreen() {
         ),
       );
       if (role === 'assistant') {
-        openRun.current = null;
-        setSteps([]);
-        setWorking(false);
-        setRunId(null);
-        setStatus('Reply ready');
+        const delivery =
+          Array.isArray(event.payload?.task_ids) ||
+          (typeof event.payload?.task_id === 'string' && event.payload.task_id.length > 0);
+        // Background media delivery has no run_id; leave Working for the open run.
+        if (!delivery && (event.run_id == null || event.run_id === openRun.current)) {
+          openRun.current = null;
+          setSteps([]);
+          setWorking(false);
+          setRunId(null);
+          setStatus('Reply ready');
+        }
       }
     }
     if (clearedTranscript(event, channel?.session_id)) {

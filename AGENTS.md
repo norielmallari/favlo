@@ -26,7 +26,7 @@ The files in [`.cursor/rules`](.cursor/rules) are repo rules. Cursor loads them 
 | [language-pipeline.mdc](.cursor/rules/language-pipeline.mdc) | When editing a served language model or `LanguagePipeline`. Keep the completion in the pipeline, and run the language harness after the disconnect shell changes. |
 | [embeddings-pipeline.mdc](.cursor/rules/embeddings-pipeline.mdc) | When editing a served embedding model or `EmbeddingsPipeline`. Return the vector and the token count, and let the class write the list object. |
 | [web-app.mdc](.cursor/rules/web-app.mdc) | When editing `web-spa/` or `web-api/`, and when a web feature is finished. The same change adds a deterministic Playwright happy path that performs each new action a person can start. An existing script counts only when it performs that action. The feature is finished when that script passes against a live `favlo serve`, with the completing control already inside the viewport. |
-| [web-spa.mdc](.cursor/rules/web-spa.mdc) | When editing `web-spa/`. Palette tokens, `textStyle` colors, and `IconButton` tones (`accent` / `danger` / `surface` / `ghost`). No hardcoded control colors. |
+| [web-spa.mdc](.cursor/rules/web-spa.mdc) | When editing `web-spa/`. Best UI/UX practice, and a result that is a pleasure to use. Palette tokens, `textStyle` colors, and `IconButton` tones (`accent` / `danger` / `surface` / `ghost`) serve that. No hardcoded control colors. |
 | [playwright-e2e.mdc](.cursor/rules/playwright-e2e.mdc) | When editing `web-spa/e2e/`. Natural-language prompts, teardown of agents and workspaces, Home/expand races, AG-UI durability before Stop, WCAG AA, fail-fast suite runs. |
 
 ## Changes

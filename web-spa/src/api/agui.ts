@@ -23,7 +23,7 @@ export type AguiEvent = {
 export type AguiRunInput = {
   threadId: string;
   runId: string;
-  messages: { role: string; content: string }[];
+  messages: { id?: string; role: string; content: string }[];
   state?: Record<string, unknown>;
   favloArchive?: boolean;
   signal?: AbortSignal;

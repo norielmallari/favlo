@@ -14,6 +14,7 @@ import { spokenError } from '@/reply-error';
 import {
   chatMessage,
   clearedTranscript,
+  includeCreatedMessage,
   keepLatest,
   sessionCommand,
   LiveReply,
@@ -34,13 +35,20 @@ import { useAguiChat } from '@/components/use-agui-chat';
 import { WorkspaceSkills, type WorkspaceSkill } from '@/components/WorkspaceSkills';
 import { readExpandTrace, workingLabel } from '@/components/expandTrace';
 import { WorkingStatus } from '@/components/WorkingStatus';
+import { useKeyboardInset } from '@/hooks/useKeyboardInset';
 import { isGalleryScheme, type GalleryScheme } from '@/theme/gallery-schemes';
 import { useTheme } from '@/theme/Theme';
 import { space } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
 import { FolderSetup } from '@/workspace/FolderSetup';
 import { GalleryThemeMenu } from '@/workspace/GalleryThemeMenu';
+import { GalleryChatDock } from '@/workspace/GalleryChatDock';
 import { GalleryChatResizeHandle } from '@/workspace/GalleryChatResizeHandle';
+import {
+  type GalleryChatDetent,
+  readGalleryChatDetent,
+  writeGalleryChatDetent,
+} from '@/workspace/gallery-chat-dock';
 import {
   clampGalleryChatWidth,
   readGalleryChatWidth,
@@ -89,28 +97,30 @@ export function WorkspaceScreen({
   const { palette } = useTheme();
   const { width, height } = useWindowDimensions();
   const narrow = width < 1024;
-  const [pane, setPane] = useState<'workspace' | 'chat'>(narrow ? 'workspace' : 'chat');
+  const keyboardInset = useKeyboardInset();
   const [rowWidth, setRowWidth] = useState(width);
+  const [columnHeight, setColumnHeight] = useState(height);
   const [chatWidth, setChatWidth] = useState(() => readGalleryChatWidth(width));
+  const [detent, setDetent] = useState<GalleryChatDetent>(() => readGalleryChatDetent());
+  const detentBeforeFocus = useRef<GalleryChatDetent | null>(null);
+  const personMovedDock = useRef(false);
+  const autoLiftedReply = useRef(false);
   const rowWidthRef = useRef(rowWidth);
   rowWidthRef.current = rowWidth;
-  useEffect(() => {
-    if (narrow) {
-      setPane('workspace');
-    }
-  }, [narrow]);
   useEffect(() => {
     setChatWidth((current) => clampGalleryChatWidth(current, rowWidth));
   }, [rowWidth]);
   const [detail, setDetail] = useState<WorkspaceDetail | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState('');
+  const [pulseToken, setPulseToken] = useState(0);
   const [steps, setSteps] = useState<ReplyStep[]>([]);
   const [working, setWorking] = useState(false);
   const [traceForcedOpen, setTraceForcedOpen] = useState(false);
   useEffect(() => {
     if (!working) {
       setTraceForcedOpen(false);
+      autoLiftedReply.current = false;
     }
   }, [working]);
   const [, setRunId] = useState<string | null>(null);
@@ -119,17 +129,31 @@ export function WorkspaceScreen({
   const [notice, setNotice] = useState<string | null>(null);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmImage, setConfirmImage] = useState<string | null>(null);
+  const [removingImage, setRemovingImage] = useState(false);
   const [placement, setPlacement] = useState<PlacementState>(documentFromShell(null));
   const shellRef = useRef<ShellDocument | null>(null);
   shellRef.current = detail?.shell ?? null;
   const [bound, setBound] = useState(false);
+  const [folderId, setFolderId] = useState<string | null>(null);
   const transcriptRef = useRef<ComponentRef<typeof ScrollView>>(null);
   const followLatest = useRef(true);
   const placedLatest = useRef(false);
   const openRun = useRef<string | null>(null);
   const cursorRef = useRef(0);
   const seen = useRef(new Set<string>());
+  const [pendingMedia, setPendingMedia] = useState<
+    { task_id: string; kind: string; status: string }[]
+  >([]);
   const sessionId = detail?.session_id ?? null;
+
+  const applyDetent = useCallback((next: GalleryChatDetent, fromPerson = true) => {
+    if (fromPerson) {
+      personMovedDock.current = true;
+    }
+    setDetent(next);
+    writeGalleryChatDetent(next);
+  }, []);
 
   const chat = useAguiChat({
     threadId: sessionId,
@@ -174,7 +198,9 @@ export function WorkspaceScreen({
     const body = await api<{ workspace: WorkspaceDetail }>(`/workspaces/${workspaceId}`);
     const workspace = { ...body.workspace, skills: body.workspace.skills ?? [] };
     const listed = await api<{ folders: { id: string; kind: string }[] }>(`/workspaces/${workspaceId}/folders`);
-    setBound((listed.folders ?? []).some((item) => item.kind === 'local'));
+    const local = (listed.folders ?? []).find((item) => item.kind === 'local');
+    setBound(local != null);
+    setFolderId(local?.id ?? null);
     const snap = await api<Snapshot>(`/sessions/${workspace.session_id}`);
     cursorRef.current = snap.cursor;
     setMessages(snap.messages.map((item) => chatMessage(item)));
@@ -229,6 +255,9 @@ export function WorkspaceScreen({
             tool_calls?: unknown;
             message?: string;
             status?: string;
+            task_id?: string;
+            task_ids?: string[];
+            kind?: string;
             session_id?: string;
             previous_session_id?: string;
             trace?: unknown;
@@ -249,6 +278,7 @@ export function WorkspaceScreen({
           setSteps([]);
           setWorking(false);
           setRunId(null);
+          setPendingMedia([]);
           setPlacement(documentFromShell(shellRef.current));
           if (payload.payload?.session_id) {
             setDetail((value) =>
@@ -261,9 +291,55 @@ export function WorkspaceScreen({
         }
         if (payload.type === 'gallery.updated' && payload.payload?.state?.favlo_workspace) {
           setPlacement(ensureFilmstripSelection(payload.payload.state));
+          setPendingMedia([]);
         }
-        if (payload.type === 'run.started' && payload.run_id !== openRun.current) {
+        if (payload.type === 'media.pending' && payload.payload?.task_id) {
+          const taskId = payload.payload.task_id;
+          const kind = payload.payload.kind ?? 'image';
+          const status = payload.payload.status ?? 'working';
+          if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+            setPendingMedia((current) => current.filter((item) => item.task_id !== taskId));
+          } else {
+            setPendingMedia((current) => {
+              const next = current.filter((item) => item.task_id !== taskId);
+              next.push({ task_id: taskId, kind, status });
+              return next;
+            });
+          }
+        }
+        if (
+          payload.type === 'message.created' &&
+          payload.payload?.message_id &&
+          showsMessage(payload.payload.text, payload.payload.reasoning, payload.payload.tool_calls)
+        ) {
+          const id = payload.payload.message_id;
+          const role = payload.payload.role ?? 'assistant';
+          const body = payload.payload.text ?? '';
+          setMessages((current) =>
+            includeCreatedMessage(
+              current,
+              chatMessage({
+                id,
+                role,
+                body,
+                reasoning: payload.payload?.reasoning,
+                tool_calls: payload.payload?.tool_calls,
+                trace: payload.payload?.trace,
+              }),
+            ),
+          );
+          if (role === 'assistant' && Array.isArray(payload.payload.task_ids)) {
+            setPendingMedia((current) =>
+              current.filter((item) => !(payload.payload?.task_ids ?? []).includes(item.task_id)),
+            );
+          }
+        }
+        if (payload.type === 'run.started') {
+          openRun.current = payload.run_id ?? null;
           setWorking(true);
+          setRunId(payload.run_id ?? null);
+          setError(null);
+          setStatus(null);
         }
         if (payload.type === 'run.completed' && payload.payload?.status === 'archived') {
           openRun.current = null;
@@ -273,15 +349,35 @@ export function WorkspaceScreen({
           setRunId(null);
           setError(null);
           setStatus(null);
+          setPendingMedia([]);
           return;
         }
-        if (
-          payload.type === 'run.completed' ||
-          (payload.type === 'message.created' &&
-            payload.payload?.role === 'assistant' &&
-            showsMessage(payload.payload.text, payload.payload.reasoning, payload.payload.tool_calls))
-        ) {
+        if (payload.type === 'run.completed') {
+          if (payload.run_id != null && openRun.current != null && payload.run_id !== openRun.current) {
+            return;
+          }
+          openRun.current = null;
+          setWorking(false);
+          setRunId(null);
+          setSteps([]);
+          setStatus('Reply ready');
           void load();
+          return;
+        }
+        if (payload.type === 'run.failed' || payload.type === 'run.cancelled') {
+          if (payload.run_id != null && openRun.current != null && payload.run_id !== openRun.current) {
+            return;
+          }
+          openRun.current = null;
+          setWorking(false);
+          setSteps([]);
+          setRunId(null);
+          setError(
+            payload.type === 'run.failed'
+              ? (payload.payload?.message ?? 'The reply failed.')
+              : null,
+          );
+          setStatus(payload.type === 'run.cancelled' ? 'The reply stopped.' : null);
         }
       };
       socket.onclose = () => {
@@ -323,6 +419,8 @@ export function WorkspaceScreen({
         return;
       }
       openRun.current = null;
+      personMovedDock.current = false;
+      autoLiftedReply.current = false;
       await chat.send(text);
     } catch (caught) {
       updateDraft(text);
@@ -332,6 +430,20 @@ export function WorkspaceScreen({
 
   function fileUrl(path: string) {
     return `${API_URL}/workspaces/${workspaceId}/file?path=${encodeURIComponent(path)}`;
+  }
+
+  async function deleteImage(path: string) {
+    if (folderId == null) {
+      setNotice('Bind a local folder first.');
+      return;
+    }
+    const body = await api<{ state?: PlacementState }>(
+      `/workspaces/${workspaceId}/folders/${folderId}/images`,
+      { method: 'DELETE', body: JSON.stringify({ path }) },
+    );
+    if (body.state?.favlo_workspace) {
+      setPlacement(ensureFilmstripSelection(body.state));
+    }
   }
 
   const showLatest = useCallback(() => {
@@ -353,7 +465,18 @@ export function WorkspaceScreen({
       placedLatest.current = true;
     }
     followLatest.current = keepLatest(followLatest.current, placedLatest.current, fromBottom);
-  }, []);
+    if (
+      narrow &&
+      working &&
+      !personMovedDock.current &&
+      !autoLiftedReply.current &&
+      contentSize.height > layoutMeasurement.height + 24 &&
+      detent !== 'expanded'
+    ) {
+      autoLiftedReply.current = true;
+      applyDetent('expanded', false);
+    }
+  }, [applyDetent, detent, narrow, working]);
 
   function applyChatWidth(next: number) {
     const clamped = clampGalleryChatWidth(next, rowWidthRef.current);
@@ -361,59 +484,91 @@ export function WorkspaceScreen({
     writeGalleryChatWidth(clamped, rowWidthRef.current);
   }
 
-  const chatColumn = (
-    <View
-      accessibilityLabel="Conversation"
-      style={{
-        ...(narrow
-          ? { flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 0, maxWidth: '100%' as const }
-          : {
-              width: chatWidth,
-              flexGrow: 0,
-              flexShrink: 0,
-              flexBasis: chatWidth,
-              minWidth: chatWidth,
-              maxWidth: chatWidth,
-            }),
-        minHeight: 0,
-        padding: space[4],
-        gap: space[3],
-        overflow: 'hidden',
-      }}
-    >
-      <ScrollView
-        ref={transcriptRef}
-        testID="transcript"
-        style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 0, minWidth: 0, maxWidth: '100%' }}
-        contentContainerStyle={transcriptFrame(space[4])}
-        onContentSizeChange={showLatest}
-        onLayout={showLatest}
-        onScroll={noteScroll}
-        scrollEventThrottle={16}
-      >
-        {messages.map((item) => (
-          <TranscriptTurn
-            key={item.id}
-            name={item.role === 'user' ? 'You' : agentName}
-            role={item.role}
-            body={item.body}
-            reasoning={item.reasoning}
-            toolCalls={item.toolCalls}
-            trace={item.trace}
+  function onComposerFocusChange(focused: boolean) {
+    if (!narrow) {
+      return;
+    }
+    if (focused) {
+      if (detentBeforeFocus.current == null) {
+        detentBeforeFocus.current = detent;
+      }
+      if (detent !== 'expanded') {
+        applyDetent('expanded', false);
+      }
+      return;
+    }
+    if (keyboardInset > 0) {
+      return;
+    }
+    const prior = detentBeforeFocus.current;
+    detentBeforeFocus.current = null;
+    if (prior != null && prior !== detent && !personMovedDock.current) {
+      applyDetent(prior, false);
+    }
+  }
+
+  useEffect(() => {
+    if (!narrow || keyboardInset > 0) {
+      return;
+    }
+    const prior = detentBeforeFocus.current;
+    if (prior != null && prior !== detent && !personMovedDock.current) {
+      detentBeforeFocus.current = null;
+      applyDetent(prior, false);
+    }
+  }, [applyDetent, detent, keyboardInset, narrow]);
+
+  const chatPadding = narrow ? space[3] : space[4];
+  const chatInner = (
+    <>
+      {detent === 'fullscreen' && narrow ? null : (
+        <ScrollView
+          ref={transcriptRef}
+          testID="transcript"
+          style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 0, minWidth: 0, maxWidth: '100%' }}
+          contentContainerStyle={transcriptFrame(space[4])}
+          onContentSizeChange={showLatest}
+          onLayout={showLatest}
+          onScroll={noteScroll}
+          scrollEventThrottle={16}
+        >
+          {messages.map((item) => (
+            <TranscriptTurn
+              key={item.id}
+              name={item.role === 'user' ? 'You' : agentName}
+              role={item.role}
+              body={item.body}
+              reasoning={item.reasoning}
+              toolCalls={item.toolCalls}
+              trace={item.trace}
+              expandTrace={readExpandTrace(detail?.expand_thinking)}
+              expandTools={readExpandTrace(detail?.expand_tools, 'hidden')}
+            />
+          ))}
+          <LiveReply
+            steps={steps}
+            speaker={agentName}
+            measured
             expandTrace={readExpandTrace(detail?.expand_thinking)}
             expandTools={readExpandTrace(detail?.expand_tools, 'hidden')}
+            forceOpen={traceForcedOpen}
           />
-        ))}
-        <LiveReply
-          steps={steps}
-          speaker={agentName}
-          measured
-          expandTrace={readExpandTrace(detail?.expand_thinking)}
-          expandTools={readExpandTrace(detail?.expand_tools, 'hidden')}
-          forceOpen={traceForcedOpen}
-        />
-      </ScrollView>
-      {working ? (
+          {pendingMedia.map((item) => (
+            <Text
+              key={item.task_id}
+              accessibilityLabel={`Generating ${item.kind}`}
+              style={textStyle('body', palette.textSecondary)}
+            >
+              {item.kind === 'video'
+                ? 'Generating video…'
+                : item.kind === 'audio'
+                  ? 'Generating audio…'
+                  : 'Generating image…'}
+            </Text>
+          ))}
+        </ScrollView>
+      )}
+      {working && !(detent === 'fullscreen' && narrow) ? (
         <WorkingStatus
           label={workingLabel(
             steps,
@@ -448,6 +603,9 @@ export function WorkspaceScreen({
       <Composer
         value={draft}
         agentName={agentName}
+        compact={narrow}
+        pulseToken={pulseToken}
+        onFocusChange={onComposerFocusChange}
         onChange={updateDraft}
         onSend={() => void send()}
         onStop={() => {
@@ -455,11 +613,88 @@ export function WorkspaceScreen({
         }}
         working={working}
       />
+    </>
+  );
+
+  const chatColumn = (
+    <View
+      accessibilityLabel="Conversation"
+      style={{
+        ...(narrow
+          ? { flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 0, maxWidth: '100%' as const }
+          : {
+              width: chatWidth,
+              flexGrow: 0,
+              flexShrink: 0,
+              flexBasis: chatWidth,
+              minWidth: chatWidth,
+              maxWidth: chatWidth,
+            }),
+        minHeight: 0,
+        padding: chatPadding,
+        gap: space[3],
+        overflow: 'hidden',
+      }}
+    >
+      {chatInner}
+    </View>
+  );
+
+  const galleryPane = (
+    <View
+      accessibilityLabel="Gallery"
+      style={{
+        flexGrow: 1,
+        flexShrink: 1,
+        flexBasis: 0,
+        minWidth: 0,
+        minHeight: 0,
+        borderRightWidth: !narrow && Platform.OS !== 'web' ? 1 : 0,
+        borderColor: palette.border,
+      }}
+    >
+      {!bound ? (
+        <FolderSetup
+          workspaceId={workspaceId}
+          onBound={() => {
+            setBound(true);
+            void load();
+          }}
+        />
+      ) : (
+        <WorkspaceShell
+          state={placement}
+          slots={detail?.shell?.slots ?? []}
+          fileUrl={fileUrl}
+          onChange={setPlacement}
+          onAddToChat={(path) => {
+            updateDraft(draft ? `${draft}\n${path}` : path);
+            setPulseToken((value) => value + 1);
+          }}
+          onRequestDelete={setConfirmImage}
+          fullScreen={narrow && detent === 'fullscreen'}
+          hideFilmstrip={narrow && detent === 'fullscreen'}
+          pendingMedia={pendingMedia}
+          onToggleFullScreen={
+            narrow
+              ? () => {
+                  if (detent === 'fullscreen') {
+                    applyDetent(detentBeforeFocus.current ?? 'peek');
+                    detentBeforeFocus.current = null;
+                  } else {
+                    detentBeforeFocus.current = detent;
+                    applyDetent('fullscreen');
+                  }
+                }
+              : undefined
+          }
+        />
+      )}
     </View>
   );
 
   return (
-    <View accessibilityLabel="Gallery workspace" style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
+    <View accessibilityLabel="Gallery workspace" style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 0, minHeight: 0 }}>
       <BannerPortal>
         <View
           style={{
@@ -493,18 +728,7 @@ export function WorkspaceScreen({
           {narrow ? null : (
             <Text style={textStyle('caption', palette.textSecondary)}>Gallery</Text>
           )}
-          {narrow ? null : <View style={{ flex: 1 }} />}
-          {narrow ? (
-            <IconButton
-              label={pane === 'chat' ? 'Back to workspace' : 'Chat'}
-              icon={pane === 'chat' ? 'image' : 'message-circle'}
-              onPress={() => setPane((current) => (current === 'chat' ? 'workspace' : 'chat'))}
-              iconOnly
-              background="transparent"
-              border="transparent"
-              color={palette.accent}
-            />
-          ) : null}
+          {narrow ? null : <View style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0 }} />}
           <GalleryThemeMenu
             scheme={scheme}
             narrow={narrow}
@@ -541,45 +765,35 @@ export function WorkspaceScreen({
         <Text style={[textStyle('body', palette.danger), { padding: space[3] }]}>{notice}</Text>
       ) : null}
       <View
-        style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 0, minWidth: 0, flexDirection: narrow ? 'column' : 'row' }}
-        onLayout={(event) => setRowWidth(event.nativeEvent.layout.width)}
+        style={{
+          flexGrow: 1,
+          flexShrink: 1,
+          flexBasis: 0,
+          minHeight: 0,
+          minWidth: 0,
+          flexDirection: narrow ? 'column' : 'row',
+          paddingBottom: narrow ? keyboardInset : 0,
+        }}
+        onLayout={(event) => {
+          setRowWidth(event.nativeEvent.layout.width);
+          setColumnHeight(event.nativeEvent.layout.height);
+        }}
       >
-        {(!narrow || pane === 'workspace') && (
-          <View
-            accessibilityLabel="Gallery"
-            style={{
-              flexGrow: 1,
-              flexShrink: 1,
-              flexBasis: 0,
-              minWidth: 0,
-              minHeight: 0,
-              borderRightWidth: !narrow && Platform.OS !== 'web' ? 1 : 0,
-              borderColor: palette.border,
-            }}
-          >
-            {!bound ? (
-              <FolderSetup
-                workspaceId={workspaceId}
-                onBound={() => {
-                  setBound(true);
-                  void load();
-                }}
-              />
-            ) : (
-              <WorkspaceShell
-                state={placement}
-                slots={detail?.shell?.slots ?? []}
-                fileUrl={fileUrl}
-                onChange={setPlacement}
-                onAddToChat={(path) => updateDraft(draft ? `${draft}\n${path}` : path)}
-              />
-            )}
-          </View>
-        )}
+        {galleryPane}
         {!narrow && Platform.OS === 'web' ? (
           <GalleryChatResizeHandle value={chatWidth} rowWidth={rowWidth} onChange={applyChatWidth} />
         ) : null}
-        {(!narrow || pane === 'chat') && chatColumn}
+        {narrow ? (
+          <GalleryChatDock
+            detent={detent}
+            columnHeight={Math.max(0, columnHeight - keyboardInset)}
+            onDetentChange={(next) => applyDetent(next)}
+          >
+            {chatColumn}
+          </GalleryChatDock>
+        ) : (
+          chatColumn
+        )}
       </View>
       {skillsOpen && detail != null ? (
         <WorkspaceSkills
@@ -588,6 +802,31 @@ export function WorkspaceScreen({
           onChange={(skills) => setDetail((value) => (value == null ? value : { ...value, skills }))}
           onClose={() => setSkillsOpen(false)}
         />
+      ) : null}
+      {confirmImage != null ? (
+        <Modal label="Delete image" closeLabel="Close delete image" onClose={() => setConfirmImage(null)}>
+          <Text accessibilityRole="header" aria-level={2} style={textStyle('title', palette.textPrimary)}>
+            Delete {confirmImage.split('/').pop() ?? confirmImage}?
+          </Text>
+          <Text style={textStyle('body', palette.textSecondary)}>The file moves to the Trash.</Text>
+          <IconButton
+            label={`Move ${confirmImage.split('/').pop() ?? confirmImage} to Trash`}
+            icon="trash-2"
+            tone="danger"
+            disabled={removingImage}
+            onPress={() => {
+              const path = confirmImage;
+              setRemovingImage(true);
+              void deleteImage(path)
+                .then(() => setConfirmImage(null))
+                .catch((caught: Error) => {
+                  setConfirmImage(null);
+                  setNotice(caught.message);
+                })
+                .finally(() => setRemovingImage(false));
+            }}
+          />
+        </Modal>
       ) : null}
       {confirmDelete ? (
         <Modal label="Delete workspace" closeLabel="Close delete workspace" onClose={() => setConfirmDelete(false)}>

@@ -22,6 +22,8 @@ Do not add a workaround until the operator approves that workaround. Name the na
 
 For MCP tasks, the native path is a caller-owned `mcp.Client` with `TasksClientExtension`. `Client.call_tool` resolves the task to a tool result before the function returns, and AG-UI emits that result in the same run.
 
+Favlo media generate tools are an approved workaround. `session.call_tool` with `allow_claimed` returns the task id and says the file is not ready. `Client.call_tool` would poll `tasks/get` inside that AG-UI run, so the UI stays on Thinking until the file exists, and AG-UI has no message after `RUN_FINISHED`. The next model call after a claimed generate sets `tool_choice` to `none`, so the reply is text and the run ends. The host then polls `tasks/get` on its own client. When the result contains `favlo://` links, it appends one assistant snapshot row and publishes `message.created`. That row is new. Earlier rows stay. List, set, memory, status, cancel, and read stay on `Client.call_tool`.
+
 ## Stable prefix cache
 
 Any algorithm or implementation that builds the model prompt for a chat or workspace thread must keep a stable token prefix until the person clears that chat.
@@ -31,7 +33,7 @@ The AG-UI thread snapshot is the conversation record for that thread. Later turn
 Rules:
 
 - Leave prior messages byte-stable once saved. Do not edit, reorder, or strip them on a later turn.
-- Put model-only injected context (selection cues, reminders, host notes) on a durable fenced `user` host cue (`<system_reminder>…</system_reminder>`), not spliced into the person's typed body. Mark it with AG-UI `metadata.favlo.ui=hidden`. Persist that row in the thread snapshot so the next turn replays it unchanged.
+- Put model-only injected context (reminders, host notes) on a durable fenced `user` host cue (`<system_reminder>…</system_reminder>`), not spliced into the person's typed body. Mark it with AG-UI `metadata.favlo.ui=hidden`. Persist that row in the thread snapshot so the next turn replays it unchanged. A gallery selection is the exception: its sidecar and image ride on the user message the model receives, because a separate snapshot row is left out of the service-session suffix. The path comes from that POST's `state`. The same path is not written again. The transcript projection omits the fence.
 - Do not use mid-chat `system` or `developer` for those cues.
 - Do not inject context only for the current request and omit it from history. That makes the next prompt diverge from the cached prefix.
 - Hide host cues (and other non-transcript rows) in the transcript projection. Hiding from the UI is not a reason to drop them from the snapshot.
@@ -113,8 +115,12 @@ The script is `web-spa/e2e/<feature>.spec.ts`. A fresh install uses `e2e/web-new
 | Gallery theme | `e2e/gallery-theme.spec.ts` |
 | Gallery folder bind | `e2e/gallery-bind.spec.ts` |
 | Gallery chat width resize | `e2e/gallery-chat-resize.spec.ts` |
+| Gallery narrow one-view chat | `e2e/gallery-narrow.spec.ts` |
 | Gallery placement change | `e2e/workspace-placement.spec.ts` |
 | Gallery image embedded once | `e2e/gallery-image.spec.ts` |
+| Gallery selection rides the sent message | `e2e/gallery-selection.spec.ts` |
+| Reply while an image generates, then the image | `e2e/image-generate.spec.ts` |
+| Gallery reply while an image generates, filmstrip, reload | `e2e/gallery-image-generate.spec.ts` |
 | Session clear and archive | `e2e/session.spec.ts` |
 | Workspace skill | `e2e/workspace-skills.spec.ts` |
 | Workspace type and delete | `e2e/workspace-type-delete.spec.ts` |

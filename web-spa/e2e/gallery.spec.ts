@@ -79,23 +79,41 @@ test('a gallery guide binds a folder, places a strip, and browses without AG-UI'
       expect(aguiCount).toBe(beforeBrowse);
     });
 
+    await step('delete the selected image without AG-UI', async () => {
+      const beforeDelete = aguiCount;
+      const remove = gallery.getByRole('button', { name: 'Delete zebra.png', exact: true });
+      await onScreen(remove);
+      await remove.click();
+      const confirm = gallery.getByRole('button', { name: 'Move zebra.png to Trash', exact: true });
+      await onScreen(confirm);
+      await confirm.click();
+      await expect(gallery.getByRole('button', { name: 'zebra.png', exact: true })).toHaveCount(0);
+      await expect(gallery.getByRole('button', { name: 'horse.png', exact: true })).toBeVisible();
+      await expect(gallery.getByRole('button', { name: 'cat.png', exact: true })).toBeVisible();
+      expect(fs.existsSync(path.join(albums, 'zebra.png'))).toBe(false);
+      expect(aguiCount).toBe(beforeDelete);
+    });
+
     await step('reload restores strip without AG-UI', async () => {
       const beforeReload = aguiCount;
       await gallery.reload();
       await expect(gallery.getByRole('heading', { name })).toBeVisible();
-      await expect(gallery.getByRole('button', { name: 'zebra.png', exact: true })).toBeVisible();
+      await expect(gallery.getByRole('button', { name: 'zebra.png', exact: true })).toHaveCount(0);
+      await expect(gallery.getByRole('button', { name: 'horse.png', exact: true })).toBeVisible();
       expect(aguiCount).toBe(beforeReload);
     });
 
-    await step('narrow chat / back to workspace', async () => {
+    await step('narrow keeps gallery and chat together', async () => {
       await gallery.setViewportSize({ width: 390, height: 844 });
-      const chatTab = gallery.getByRole('button', { name: 'Chat', exact: true });
-      await expect(chatTab).toBeVisible();
-      await chatTab.click();
-      await expect(gallery.getByLabel('Conversation')).toBeVisible();
-      await expectChatRestsOnComposer(gallery);
-      await gallery.getByRole('button', { name: 'Back to workspace' }).click();
+      await expect(gallery.getByRole('button', { name: 'Chat', exact: true })).toHaveCount(0);
+      await expect(gallery.getByRole('button', { name: 'Back to workspace', exact: true })).toHaveCount(0);
       await expect(gallery.getByLabel('Gallery', { exact: true })).toBeVisible();
+      await expect(gallery.getByLabel('Conversation')).toBeVisible();
+      await expect(gallery.getByLabel('Filmstrip')).toBeVisible();
+      await expect(gallery.getByText(/^\d+ of \d+$/)).toBeVisible();
+      await onScreen(gallery.getByRole('button', { name: 'Send', exact: true }));
+      await onScreen(gallery.getByRole('button', { name: 'Add to chat', exact: true }));
+      await expect(gallery.getByLabel(/said:/).first()).toBeVisible();
       await expectFits(gallery);
     });
   } finally {
