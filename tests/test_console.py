@@ -25,6 +25,10 @@ class Clock:
         return self.now
 
 
+def _stamp(clock: Clock) -> str:
+    return time.strftime("%H:%M:%S", time.localtime(clock.now))
+
+
 def _ui(mode: str, *, width: int = 120, color: int = 0) -> tuple[Console, io.StringIO, Clock]:
     stream = io.StringIO()
     clock = Clock()
@@ -33,6 +37,7 @@ def _ui(mode: str, *, width: int = 120, color: int = 0) -> tuple[Console, io.Str
         pipeline="qwen36-35b-a3b",
         stream=stream,
         clock=clock,
+        wall=clock,
         width=width,
         color=color,
         start_thread=False,
@@ -78,19 +83,27 @@ def test_a_traceback_is_not_painted_over() -> None:
 
 
 def test_pretty_listening_line_has_no_mark() -> None:
-    ui, stream, _clock = _ui("pretty", color=0)
+    ui, stream, clock = _ui("pretty", color=0)
     ui.log("listening on http://127.0.0.1:8129")
-    assert stream.getvalue() == "listening on http://127.0.0.1:8129\n"
+    assert stream.getvalue() == f"[{_stamp(clock)}] listening on http://127.0.0.1:8129\n"
 
 
-def test_plain_lines_match_the_harness_text() -> None:
-    ui, stream, _clock = _ui("plain")
+def test_plain_lines_carry_a_wall_stamp() -> None:
+    ui, stream, clock = _ui("plain")
+    recorded: list[str] = []
+    ui._recorder = recorded.append
     ui.log("listening on http://127.0.0.1:8129")
     progress = ui.begin("prefill", total=1187, unit="tok", request=7)
     ui.end(progress, "prefill 98.03 tok/s (1187 tok in 12.11s)")
+    stamp = _stamp(clock)
     assert stream.getvalue() == (
-        "listening on http://127.0.0.1:8129\nprefill 98.03 tok/s (1187 tok in 12.11s)\n"
+        f"[{stamp}] listening on http://127.0.0.1:8129\n"
+        f"[{stamp}] prefill 98.03 tok/s (1187 tok in 12.11s)\n"
     )
+    assert recorded == [
+        "listening on http://127.0.0.1:8129",
+        "prefill 98.03 tok/s (1187 tok in 12.11s)",
+    ]
 
 
 def test_pretty_omits_turn_diagnostics() -> None:
@@ -161,10 +174,13 @@ def test_pretty_hides_a_shutdown_traceback() -> None:
 
 
 def test_plain_keeps_turn_diagnostics() -> None:
-    ui, stream, _clock = _ui("plain")
+    ui, stream, clock = _ui("plain")
     ui.log("prompt tokens 10")
     ui.log("cache miss")
-    assert stream.getvalue() == "prompt tokens 10\ncache miss\n"
+    stamp = _stamp(clock)
+    assert stream.getvalue() == (
+        f"[{stamp}] prompt tokens 10\n[{stamp}] cache miss\n"
+    )
 
 
 def test_format_rate_matches_the_harness_line() -> None:
@@ -464,12 +480,12 @@ def test_two_handles_stack_in_begin_order() -> None:
 
 
 def test_phase_context_restores_on_error() -> None:
-    ui, stream, _clock = _ui("plain")
+    ui, stream, clock = _ui("plain")
     with pytest.raises(RuntimeError):
         with ui.phase("quantize", total=4, unit="layers") as progress:
             progress.summary = "quantize stopped"
             raise RuntimeError("stop")
-    assert stream.getvalue() == "quantize stopped\n"
+    assert stream.getvalue() == f"[{_stamp(clock)}] quantize stopped\n"
 
 
 def test_unknown_phase_is_rejected() -> None:
@@ -520,14 +536,14 @@ def test_every_phase_ends_in_every_mode(mode: str, phase: str) -> None:
     ui.end(progress, f"{phase} done")
     text = stream.getvalue()
     if mode == "plain":
-        assert text == f"{phase} done\n"
+        assert text == f"[{_stamp(clock)}] {phase} done\n"
     elif mode == "json":
         rows = [json.loads(line) for line in text.splitlines()]
         assert {row["phase"] for row in rows} == {phase}
         assert {row["type"] for row in rows} == {"begin", "tick", "end"}
     else:
         assert phase in text
-        assert f"{phase} done" in text
+        assert f"[{_stamp(clock)}] {phase} done" in text
 
 
 def test_a_sample_row_is_labeled_with_its_stage() -> None:

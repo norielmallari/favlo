@@ -129,6 +129,7 @@ class Console:
         pipeline: str,
         stream: TextIO | None = None,
         clock: Callable[[], float] | None = None,
+        wall: Callable[[], float] | None = None,
         sleep: Callable[[float], None] | None = None,
         width: int | None = None,
         color: int | None = None,
@@ -142,6 +143,7 @@ class Console:
         self.load_detail = ""
         self.stream = stream if stream is not None else sys.stderr
         self._clock = clock or time.perf_counter
+        self._wall = wall or time.time
         self._sleep = sleep or time.sleep
         self._width = width
         self._color = self._resolve_color() if color is None else color
@@ -255,7 +257,7 @@ class Console:
                     return
         self._note_prompt_displaced()
         self._erase()
-        self._write(line + "\n")
+        self._write(self._stamp(line) + "\n")
         self._redraw()
 
     def note(self, topic: str, **fields: Any) -> None:
@@ -594,7 +596,7 @@ class Console:
                     ):
                         self._stash_turn(summary)
                     else:
-                        self._write(self._dim(summary) + "\n")
+                        self._write(self._stamp(summary, dim=True) + "\n")
                 if remaining == 0:
                     self._show_cursor()
                 else:
@@ -606,7 +608,7 @@ class Console:
             self._event(event)
         elif summary:
             self._note_prompt_displaced()
-            self._write(summary + "\n")
+            self._write(self._stamp(summary) + "\n")
 
     def retarget(
         self,
@@ -659,7 +661,7 @@ class Console:
                 self._turn_parts = []
                 self._turn_due = None
                 if parts:
-                    self._write(self._dim("  ".join(parts)) + "\n")
+                    self._write(self._stamp("  ".join(parts), dim=True) + "\n")
             if text:
                 self._write(text if text.endswith("\n") else text + "\n")
 
@@ -1125,7 +1127,12 @@ class Console:
         pending = self._pending_summaries
         self._pending_summaries = []
         for summary in pending:
-            self._write(self._dim(summary) + "\n")
+            self._write(self._stamp(summary, dim=True) + "\n")
+
+    def _stamp(self, line: str, *, dim: bool = False) -> str:
+        """Local wall clock on a durable stderr line. The recorded body stays bare."""
+        stamped = f"[{time.strftime('%H:%M:%S', time.localtime(self._wall()))}] {line}"
+        return self._dim(stamped) if dim else stamped
 
     def _stash_turn(self, line: str) -> None:
         key = _turn_key(line)
@@ -1154,7 +1161,7 @@ class Console:
         line = "  ".join(parts)
         self._note_prompt_displaced()
         self._erase()
-        self._write(self._dim(line) + "\n")
+        self._write(self._stamp(line, dim=True) + "\n")
         if self._handles:
             self._redraw()
         else:
