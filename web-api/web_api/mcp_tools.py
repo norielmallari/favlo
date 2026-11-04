@@ -63,7 +63,8 @@ INSTRUCTIONS = (
     "There is no favlo:// link in it. "
     "Reply to the user in that same turn. "
     "Do not call media_status, read_media, or another tool after that generate. "
-    "The chat shows each favlo:// link when the file is ready. "
+        "When each file is ready the host asks for one short follow-up that "
+        "includes that favlo:// link so the chat shows the file. "
     "Do not paste the JSON, the tool name, or a file id. "
     "When the result says the tool failed or names an unknown model, "
     "call the matching list and set tools, repeat the session id, "
@@ -487,7 +488,8 @@ async def _generate_task(server: Any, tool_name: str, arguments: dict[str, Any])
         f"Task {task_id} is working. The file is not ready. "
         "There is no favlo:// link yet. "
         "Reply to the user now. Do not call another tool on this turn. "
-        "The chat shows the file when it is ready."
+        "When the file is ready the host asks for one short follow-up that "
+        "includes the favlo:// link."
     )
 
 

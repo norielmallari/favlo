@@ -3,13 +3,12 @@
 ``Client.call_tool`` would poll ``tasks/get`` inside the AG-UI run, so the UI
 stays on Thinking until the file exists. AG-UI has no message after
 ``RUN_FINISHED``. This module ends the tool loop once a generate task is
-claimed, then polls ``tasks/get`` on its own client and appends the
-``favlo://`` links.
+claimed, then polls ``tasks/get`` on its own client.
 
-When a later run is open on that thread, finished links wait in a queue and
-append in that run's ``finally`` after the library snapshot save. A gallery
-session also copies each file into the bound folder and publishes
-``gallery.updated``.
+When the file is ready the host places gallery copies, then starts a silent
+AG-UI turn (fenced host cue) so the model writes one short message that
+includes the ``favlo://`` links. When a later run is open on that thread,
+finished links wait in a queue and announce in that run's ``finally``.
 """
 
 from __future__ import annotations
@@ -108,7 +107,7 @@ def schedule(app: Any, thread_id: str) -> None:
 
 
 async def deliver(app: Any, thread_id: str, tasks: list[tuple[str, str, str]]) -> None:
-    """Append the finished ``favlo://`` links and publish ``message.created``."""
+    """Place finished files, then ask the model for a short message with the links."""
     try:
         links: list[str] = []
         task_ids: list[str] = []
@@ -119,22 +118,13 @@ async def deliver(app: Any, thread_id: str, tasks: list[tuple[str, str, str]]) -
             task_ids.append(task_id)
         if not links:
             return
-        events = await asyncio.to_thread(
-            store_links,
-            app.state.store,
-            thread_id,
-            "\n".join(links),
-            task_ids=task_ids,
-        )
-        bus = app.state.bus
-        for event in events:
-            await bus.publish(event)
+        await _place_and_announce(app, thread_id, links, task_ids=task_ids)
     except Exception:
         _LOG.exception("media delivery failed")
 
 
 async def flush_queued(app: Any, thread_id: str) -> None:
-    """Append deferred links once no run is open on this thread."""
+    """Announce deferred links once no run is open on this thread."""
     try:
         store = app.state.store
         if await asyncio.to_thread(_busy, store, thread_id):
@@ -142,11 +132,11 @@ async def flush_queued(app: Any, thread_id: str) -> None:
         texts = _take_queued(thread_id)
         if not texts:
             return
-        bus = app.state.bus
         for text in texts:
-            events = await asyncio.to_thread(store_links, store, thread_id, text)
-            for event in events:
-                await bus.publish(event)
+            found = favlo_links(text)
+            if not found:
+                continue
+            await _place_and_announce(app, thread_id, found)
     except Exception:
         _LOG.exception("media flush failed")
 
@@ -160,8 +150,8 @@ def store_links(
 ) -> list[dict[str, Any]]:
     """Append one assistant row when those links are not already in the snapshot.
 
-    When a run is still open on this thread, queue the text for that run's
-    ``finally`` instead of writing during the library's in-memory snapshot.
+    Fallback when a silent announce cannot run. When a run is still open on
+    this thread, queue the text for that run's ``finally``.
     """
     cleaned = text.strip()
     if not cleaned:
@@ -169,18 +159,146 @@ def store_links(
     if _busy(store, thread_id):
         _queue(thread_id, cleaned)
         return []
-    snapshot = store.thread_snapshot(_SCOPE, thread_id) or {}
-    messages = snapshot.get("messages") if isinstance(snapshot, dict) else None
-    if isinstance(messages, list) and cleaned in _blob(messages):
+    # Host cues also list the links; only a visible assistant row counts as delivered.
+    found = favlo_links(cleaned)
+    if found and _links_present(store, thread_id, found):
         return []
+    if not found:
+        snapshot = store.thread_snapshot(_SCOPE, thread_id) or {}
+        messages = snapshot.get("messages") if isinstance(snapshot, dict) else None
+        if isinstance(messages, list) and cleaned in _blob(messages):
+            return []
     store.append_thread_snapshot_message(
         _SCOPE,
         thread_id,
         {"id": guid(), "role": "assistant", "content": cleaned},
     )
     events = list(store.record_assistant(thread_id, cleaned, task_ids=task_ids))
-    events.extend(place_gallery_media(store, thread_id, favlo_links(cleaned)))
+    events.extend(place_gallery_media(store, thread_id, found))
     return events
+
+
+def announce_cue(links: list[str]) -> str:
+    """Host cue for the silent follow-up that shows the finished media."""
+    listed = "\n".join(link.strip() for link in links if link.strip())
+    return (
+        "These media files are ready. Write one short message to the user, then "
+        "repeat every favlo:// link below on its own line exactly as written so "
+        "the chat shows the files. Do not call tools.\n"
+        f"{listed}"
+    )
+
+
+async def _place_and_announce(
+    app: Any,
+    thread_id: str,
+    links: list[str],
+    *,
+    task_ids: list[str] | None = None,
+) -> None:
+    store = app.state.store
+    bus = app.state.bus
+    cleaned = [link.strip() for link in links if link.strip()]
+    if not cleaned:
+        return
+    events = await asyncio.to_thread(place_gallery_media, store, thread_id, cleaned)
+    for event in events:
+        await bus.publish(event)
+    if await asyncio.to_thread(_busy, store, thread_id):
+        _queue(thread_id, "\n".join(cleaned))
+        return
+    if await _announce(app, thread_id, cleaned):
+        return
+    fallback = await asyncio.to_thread(
+        store_links,
+        store,
+        thread_id,
+        "\n".join(cleaned),
+        task_ids=task_ids,
+    )
+    for event in fallback:
+        await bus.publish(event)
+
+
+async def _announce(app: Any, thread_id: str, links: list[str]) -> bool:
+    """Silent AG-UI turn that asks the model to speak with the favlo:// links.
+
+    Returns True when the announce ran (even if the model omitted a link; the
+    caller still checks the snapshot and may fall back).
+    """
+    from web_api.runs import perform
+    from web_api.store import Conflict, NotFound, Rejected
+
+    store = app.state.store
+    bus = app.state.bus
+    if not await asyncio.to_thread(store.session_exists, thread_id):
+        return True
+    if await asyncio.to_thread(_links_present, store, thread_id, links):
+        return True
+    run_id = guid()
+    try:
+        started = await asyncio.to_thread(
+            store.begin_greeting,
+            thread_id,
+            run_id,
+            announce_cue(links),
+        )
+    except Conflict:
+        _queue(thread_id, "\n".join(links))
+        job = asyncio.create_task(_flush_later(app, thread_id))
+        pending = getattr(getattr(app, "state", None), "tasks", None)
+        if isinstance(pending, set):
+            pending.add(job)
+            job.add_done_callback(pending.discard)
+        return True
+    except (NotFound, Rejected):
+        return False
+    for event in started.get("events") or []:
+        await bus.publish(event)
+    cancel = asyncio.Event()
+    cancels = getattr(getattr(app, "state", None), "cancels", None)
+    if isinstance(cancels, dict):
+        cancels[run_id] = cancel
+    try:
+        await perform(app, cancel, run_id)
+    except Exception:
+        _LOG.exception("media announce failed for %s", thread_id)
+        return False
+    finally:
+        if isinstance(cancels, dict):
+            cancels.pop(run_id, None)
+    if await asyncio.to_thread(_links_present, store, thread_id, links):
+        return True
+    return False
+
+
+async def _flush_later(app: Any, thread_id: str) -> None:
+    await asyncio.sleep(1.0)
+    await flush_queued(app, thread_id)
+
+
+def _links_present(store: Any, thread_id: str, links: list[str]) -> bool:
+    """True when every link appears in a visible assistant row (not a host cue)."""
+    from web_api.host_cues import is_host_cue
+
+    snapshot = store.thread_snapshot(_SCOPE, thread_id) or {}
+    messages = snapshot.get("messages") if isinstance(snapshot, dict) else None
+    if not isinstance(messages, list):
+        return False
+    parts: list[str] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if is_host_cue(message):
+            continue
+        role = str(message.get("role") or "")
+        if role not in {"assistant", "AI", "ai"}:
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            parts.append(content)
+    blob = "\n".join(parts)
+    return all(link in blob for link in links)
 
 
 def place_gallery_media(store: Any, thread_id: str, links: list[str]) -> list[dict[str, Any]]:

@@ -113,9 +113,17 @@ test('gallery chat keeps both turns and the image after a second message and a r
         )
         .toBe(true);
 
+      // Gallery places the file before the follow-up announce finishes in chat.
+      await expect
+        .poll(
+          async () => page.getByLabel('Filmstrip').getByRole('button', { name: /\.png$/i }).count(),
+          { timeout: 45_000 },
+        )
+        .toBeGreaterThan(0);
+      await expect(page.getByTestId('working')).toHaveCount(0, { timeout: 45_000 });
       await expect
         .poll(async () => page.getByRole('img', { name: 'Generated image' }).count(), {
-          timeout: 45_000,
+          timeout: 15_000,
         })
         .toBeGreaterThan(imagesBefore);
 
@@ -123,7 +131,9 @@ test('gallery chat keeps both turns and the image after a second message and a r
       await expect(page.getByLabel('Gallery workspace', { exact: true })).toBeVisible();
       await expect(page.getByLabel(/^You said:/).filter({ hasText: 'Draw a blue circle.' })).toBeVisible();
       await expect(page.getByLabel(/^You said:/).filter({ hasText: 'Say ready.' })).toBeVisible();
-      await expect(page.getByRole('img', { name: 'Generated image' }).first()).toBeVisible();
+      await expect(
+        page.getByLabel('Filmstrip').getByRole('button', { name: /\.png$/i }).first(),
+      ).toBeVisible();
     });
   } finally {
     await deleteWorkspacesNamed(name);
