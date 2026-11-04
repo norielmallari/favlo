@@ -151,12 +151,20 @@ export function humanText(body: string): string {
   return '';
 }
 
+const TASK_ID = /^[A-Za-z0-9_-]{20,}$/;
+const STATUS_LABEL = /^(status|task[_-]?id|taskId)\s*:?\s*$/i;
+const STATUS_FIELD = /^(status|task[_-]?id|taskId)\s*:\s*\S+\s*$/i;
+
 function machineLine(line: string): boolean {
   const trimmed = line.trim();
   if (!trimmed) {
     return false;
   }
   if (/^[a-z0-9_]+ (finished|failed|was cancelled)\.?$/i.test(trimmed)) {
+    return true;
+  }
+  // Claimed media tools leave status / task id lines the model sometimes echoes.
+  if (STATUS_LABEL.test(trimmed) || STATUS_FIELD.test(trimmed) || TASK_ID.test(trimmed)) {
     return true;
   }
   const tokens = trimmed.split(/\s+/);

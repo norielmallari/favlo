@@ -63,3 +63,18 @@ test('a download uses a plain file name', () => {
   expect(downloadName('http://127.0.0.1:8130/media/videos/video_abc.mp4', 'video')).toBe('favlo-video.mp4');
   expect(downloadName('http://127.0.0.1:8130/media/music/music_abc.flac', 'audio')).toBe('favlo-audio.flac');
 });
+
+test('status and task id lines stay off the screen', async () => {
+  const task = 's4O1fkWCRA49jY3nUVOBg_IbtlcUwR_z9NxXkCSFE8k';
+  const parts = messageParts(`status:\n${task}\nHere is the drawing.`);
+  expect(parts.map((part) => part.type)).toEqual(['text']);
+  expect(parts[0]).toMatchObject({ type: 'text', text: 'Here is the drawing.' });
+  const view = await render(
+    <ThemeProvider>
+      <MessageBody body={`status:\n${task}\nHere is the drawing.`} />
+    </ThemeProvider>,
+  );
+  expect(view.getByText('Here is the drawing.')).toBeTruthy();
+  expect(view.queryByText(/^status:?$/i)).toBeNull();
+  expect(view.queryByText(task)).toBeNull();
+});
