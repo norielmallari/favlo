@@ -8,6 +8,7 @@ import {
   noteReply,
   noteTool,
   readToolCalls,
+  visibleReplySteps,
   type ReplyStep,
 } from '@/components/chat-transcript';
 import { ToolCall } from '@/components/ToolCall';
@@ -54,6 +55,17 @@ test('each tool call is its own full-width row', async () => {
   }
   expect(view.getByRole('button', { name: 'Tool call conversation_list_conversations' })).toBeTruthy();
   expect(view.getByRole('button', { name: 'Tool call gallery_search_media' })).toBeTruthy();
+});
+
+test('hidden tools coalesce thinking around a tool into one Thinking row', () => {
+  let steps: ReplyStep[] = [];
+  steps = noteReasoning(steps, 'First look.');
+  steps = noteTool(steps, call);
+  steps = noteReasoning(steps, 'After the tool.');
+  const shown = visibleReplySteps(steps, 'collapsed', 'hidden');
+  expect(shown).toEqual([
+    { kind: 'thinking', text: 'First look.\n\nAfter the tool.', settled: false },
+  ]);
 });
 
 test('thinking closes on a tool call and the tool call closes when thinking starts', async () => {

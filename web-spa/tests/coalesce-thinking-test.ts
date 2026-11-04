@@ -1,6 +1,8 @@
 import {
   coalesceThinkingTurns,
   isThinkingOnlyMessage,
+  visibleReplySteps,
+  storedSteps,
   type ChatMessage,
 } from '@/components/chat-transcript';
 
@@ -17,22 +19,36 @@ test('thinking-only turns merge into one Thinking block', () => {
   expect(shown[0]?.body).toBe('');
 });
 
-test('a reply or tool call breaks the merge', () => {
+test('a thinking-only turn folds into the next reply', () => {
   const messages: ChatMessage[] = [
     { id: '1', role: 'assistant', body: '', reasoning: 'Alone.' },
     { id: '2', role: 'assistant', body: 'Hello.', reasoning: 'With reply.' },
-    { id: '3', role: 'assistant', body: '', reasoning: 'After.' },
-    {
-      id: '4',
-      role: 'assistant',
-      body: '',
-      reasoning: 'Tool turn.',
-      toolCalls: [{ id: 'c1', name: 'list', arguments: '{}' }],
-    },
-    { id: '5', role: 'assistant', body: '', reasoning: 'Later.' },
   ];
   const shown = coalesceThinkingTurns(messages);
-  expect(shown.map((item) => item.id)).toEqual(['1', '2', '3', '4', '5']);
+  expect(shown).toHaveLength(1);
+  expect(shown[0]?.id).toBe('2');
+  expect(shown[0]?.body).toBe('Hello.');
+  expect(shown[0]?.reasoning).toBe('Alone.\n\nWith reply.');
+});
+
+test('a thinking-only turn folds into a tool turn and hidden tools coalesce Thinking', () => {
+  const messages: ChatMessage[] = [
+    { id: '1', role: 'assistant', body: '', reasoning: 'Before tool.' },
+    {
+      id: '2',
+      role: 'assistant',
+      body: 'Done.',
+      reasoning: 'After tool.',
+      toolCalls: [{ id: 'c1', name: 'gallery_create_folder', arguments: '{}' }],
+    },
+  ];
+  const shown = coalesceThinkingTurns(messages);
+  expect(shown).toHaveLength(1);
+  const display = visibleReplySteps(storedSteps(shown[0]!), 'collapsed', 'hidden');
+  expect(display).toEqual([
+    { kind: 'thinking', text: 'Before tool.\n\nAfter tool.', settled: true },
+    { kind: 'reply', text: 'Done.' },
+  ]);
 });
 
 test('a user message breaks the merge', () => {

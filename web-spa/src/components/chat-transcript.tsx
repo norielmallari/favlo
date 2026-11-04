@@ -4,6 +4,7 @@ import { Platform, Text, View } from 'react-native';
 import { humanText, MessageBody } from '@/components/MessageBody';
 import { IconButton } from '@/components/IconButton';
 import { type ExpandTrace } from '@/components/expandTrace';
+import { focusSafePadX, focusSafePadY } from '@/components/Pressable';
 import { Thinking } from '@/components/Thinking';
 import { ToolCall, type ToolCallRecord } from '@/components/ToolCall';
 import { useTheme } from '@/theme/Theme';
@@ -165,6 +166,48 @@ export function replyVisible(steps: ReplyStep[]): boolean {
   return steps.some((step) => step.kind === 'tool' || step.text.trim() !== '');
 }
 
+/**
+ * Display-only: drop hidden tools/thinking, then merge consecutive Thinking rows.
+ * With Expand tool calls = Not shown, thinking around a tool becomes one block.
+ */
+export function visibleReplySteps(
+  steps: ReplyStep[],
+  expandTrace: ExpandTrace = 'collapsed',
+  expandTools: ExpandTrace = 'collapsed',
+): ReplyStep[] {
+  const shown: ReplyStep[] = [];
+  for (const step of steps) {
+    if (step.kind === 'tool') {
+      if (expandTools === 'hidden') {
+        continue;
+      }
+      shown.push(step);
+      continue;
+    }
+    if (step.kind === 'thinking') {
+      if (expandTrace === 'hidden' || !step.text.trim()) {
+        continue;
+      }
+      const last = shown[shown.length - 1];
+      if (last?.kind === 'thinking') {
+        shown[shown.length - 1] = {
+          kind: 'thinking',
+          text: `${last.text.trim()}\n\n${step.text.trim()}`,
+          settled: last.settled && step.settled,
+        };
+        continue;
+      }
+      shown.push({ kind: 'thinking', text: step.text.trim(), settled: step.settled });
+      continue;
+    }
+    if (!step.text.trim()) {
+      continue;
+    }
+    shown.push(step);
+  }
+  return shown;
+}
+
 export function LiveReply({
   steps,
   speaker,
@@ -181,18 +224,15 @@ export function LiveReply({
   forceOpen?: boolean;
 }) {
   const toolExpand = expandTools ?? expandTrace;
+  const display = visibleReplySteps(steps, expandTrace, toolExpand);
   return (
     <View style={{ width: '100%', maxWidth: '100%', minWidth: 0, alignSelf: 'stretch', gap: space[2] }}>
-      {steps.map((step, index) => {
+      {display.map((step, index) => {
         if (step.kind === 'thinking') {
-          const text = step.text.trim();
-          if (!text || expandTrace === 'hidden') {
-            return null;
-          }
           return (
             <Thinking
               key={`thinking-${index}`}
-              text={text}
+              text={step.text}
               settled={step.settled}
               expandTrace={expandTrace}
               forceOpen={forceOpen}
@@ -200,9 +240,6 @@ export function LiveReply({
           );
         }
         if (step.kind === 'tool') {
-          if (toolExpand === 'hidden') {
-            return null;
-          }
           return (
             <ToolCall
               key={step.call.id}
@@ -212,10 +249,6 @@ export function LiveReply({
               forceOpen={forceOpen}
             />
           );
-        }
-        const text = step.text.trim();
-        if (!text) {
-          return null;
         }
         return (
           <View
@@ -287,6 +320,9 @@ export function transcriptFrame(gap: number) {
     justifyContent: 'flex-end' as const,
     gap,
     maxWidth: '100%' as const,
+    // Room for Pressable focus rings on full-width Thinking / tool rows.
+    ...focusSafePadX,
+    ...focusSafePadY,
   };
 }
 
@@ -404,34 +440,64 @@ export function isThinkingOnlyMessage(message: ChatMessage): boolean {
   return steps.every((step) => step.kind === 'thinking' && step.text.trim() !== '');
 }
 
+function thinkingTexts(message: ChatMessage): string[] {
+  return storedSteps(message).flatMap((step) =>
+    step.kind === 'thinking' && step.text.trim() ? [step.text.trim()] : [],
+  );
+}
+
 /**
- * Display-only: consecutive thinking-only assistant turns become one Thinking block.
- * Stored messages stay separate. A reply, tool call, or media body breaks the run.
+ * Display-only: fold a thinking-only assistant turn into the next assistant turn.
+ * Stored messages stay separate. A user message breaks the run.
  */
 export function coalesceThinkingTurns(messages: ChatMessage[]): ChatMessage[] {
   const shown: ChatMessage[] = [];
   for (const item of messages) {
     const prior = shown[shown.length - 1];
-    if (prior != null && isThinkingOnlyMessage(prior) && isThinkingOnlyMessage(item)) {
-      const text = [
-        ...storedSteps(prior).flatMap((step) =>
-          step.kind === 'thinking' && step.text.trim() ? [step.text.trim()] : [],
-        ),
-        ...storedSteps(item).flatMap((step) =>
-          step.kind === 'thinking' && step.text.trim() ? [step.text.trim()] : [],
-        ),
-      ].join('\n\n');
-      shown[shown.length - 1] = {
-        id: item.id,
-        role: 'assistant',
-        body: '',
-        reasoning: text,
-      };
+    if (prior != null && isThinkingOnlyMessage(prior) && item.role === 'assistant') {
+      const priorText = thinkingTexts(prior).join('\n\n');
+      if (isThinkingOnlyMessage(item)) {
+        shown[shown.length - 1] = {
+          id: item.id,
+          role: 'assistant',
+          body: '',
+          reasoning: [priorText, ...thinkingTexts(item)].filter(Boolean).join('\n\n'),
+        };
+        continue;
+      }
+      shown[shown.length - 1] = foldThinkingInto(item, priorText);
       continue;
     }
     shown.push(item);
   }
   return shown;
+}
+
+function foldThinkingInto(message: ChatMessage, priorText: string): ChatMessage {
+  if (!priorText) {
+    return message;
+  }
+  if (message.trace?.length) {
+    const trace = message.trace.map((part) => ({ ...part }));
+    const index = trace.findIndex((part) => part.kind === 'thinking');
+    if (index >= 0) {
+      const part = trace[index];
+      if (part.kind === 'thinking') {
+        trace[index] = {
+          kind: 'thinking',
+          text: `${priorText}\n\n${part.text.trim()}`.trim(),
+        };
+      }
+    } else {
+      trace.unshift({ kind: 'thinking', text: priorText });
+    }
+    return { ...message, trace, reasoning: undefined };
+  }
+  const next = thinkingTexts(message);
+  return {
+    ...message,
+    reasoning: [priorText, ...next].filter(Boolean).join('\n\n'),
+  };
 }
 
 export function readDraft(sessionId: string): string {
@@ -474,7 +540,8 @@ export function TranscriptTurn({
   const reportEmpty = useCallback(() => setEmpty(true), []);
   const mine = role === 'user';
   const steps = storedSteps({ body, reasoning, toolCalls, trace });
-  const replyOnly = steps.length === 1 && steps[0]?.kind === 'reply';
+  const display = visibleReplySteps(steps, expandTrace, toolExpand);
+  const replyOnly = display.length === 1 && display[0]?.kind === 'reply';
   if (empty) {
     return null;
   }
@@ -499,24 +566,18 @@ export function TranscriptTurn({
         }}
       >
         <Text style={textStyle('label', palette.textPrimary, '600')}>{name}</Text>
-        {steps.map((step, index) => {
+        {display.map((step, index) => {
           if (step.kind === 'thinking') {
-            if (expandTrace === 'hidden') {
-              return null;
-            }
             return (
               <Thinking
                 key={`thinking-${index}`}
-                text={step.text.trim()}
+                text={step.text}
                 settled
                 expandTrace={expandTrace}
               />
             );
           }
           if (step.kind === 'tool') {
-            if (toolExpand === 'hidden') {
-              return null;
-            }
             return (
               <ToolCall key={step.call.id} call={step.call} settled expandTrace={toolExpand} />
             );
