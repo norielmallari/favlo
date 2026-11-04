@@ -67,7 +67,7 @@ A media harness does not take the machine lock. It calls the listener. A media h
 
 A harness change updates [docs/harness.md](docs/harness.md) in the same change. Each client keeps one subsection there: a short title, the command in a bash block, then what it does.
 
-The coding agent is `uv run python -m harness.coding --model <id>`. Pass `--vision` when that pipeline embeds an image (`embed_image` in its `vision.py`). The still is `tests/assets/favlo-horse.png`. When `sampling.py` lists both `thinking` and `instruct`, run it twice, thinking first. `--thinking on` uses the thinking card. `--thinking off` uses the instruct card. One variant runs once. Exit 0 on each run is the pass.
+The coding agent is `uv run python -m harness.coding --model <id>`. Pass `--vision` when that pipeline embeds an image (`embed_image` in its `vision.py`). The still is `tests/assets/favlo-horse.png`. When `sampling.py` lists both `thinking` and `instruct`, run it twice, thinking first. `--thinking on` uses the thinking card. `--thinking off` uses the instruct card. One variant runs once. `--store off` is the default. `--store on` sends `store` true. That one value is the ledger and the contract. Exit 0 on each run is the pass.
 
 ```text
 uv run python -m harness.coding --model qwen36-35b-a3b --vision --thinking on

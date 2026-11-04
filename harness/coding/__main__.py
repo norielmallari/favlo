@@ -20,6 +20,7 @@ load is missing or a later turn does not extend it.
     uv run python -m harness.coding --model qwen38-27b --mtp on
     uv run python -m harness.coding --model qwen38-27b --vision --thinking on
     uv run python -m harness.coding --model qwen38-27b --vision --thinking off
+    uv run python -m harness.coding --model qwen38-27b --vision --thinking off --store on
 """
 
 from __future__ import annotations
@@ -52,6 +53,12 @@ def argument_parser() -> argparse.ArgumentParser:
         help="send the horse still as the first chat",
     )
     parser.add_argument("--thinking", choices=("on", "off"), default="on")
+    parser.add_argument(
+        "--store",
+        choices=("on", "off"),
+        default="off",
+        help="one store value for the ledger and the contract",
+    )
     return parser
 
 
@@ -93,9 +100,10 @@ def main(argv: list[str] | None = None) -> int:
         selection = resolve(args.model, root=root)
         server.start()
         vision_flag = "on" if args.vision else "off"
+        store = args.store == "on"
         print(
             f"kv {selection.kv_cache} mtp {args.mtp} depth {args.mtp_depth} "
-            f"thinking {args.thinking} vision {vision_flag}",
+            f"thinking {args.thinking} vision {vision_flag} store {args.store}",
             flush=True,
         )
         _, problems = run_session(
@@ -106,12 +114,13 @@ def main(argv: list[str] | None = None) -> int:
             mtp=args.mtp == "on",
             mtp_depth=args.mtp_depth,
             vision=vision,
+            store=store,
         )
         if vision is not None:
             problems.extend(vision_problems(server.log.text()))
         _print_rates(server.log)
         base_url = f"http://127.0.0.1:{server.port}/v1"
-        problems.extend(asyncio.run(run_contract(base_url, stem)))
+        problems.extend(asyncio.run(run_contract(base_url, stem, store=store)))
         result = grade(workspace)
     finally:
         server.stop()

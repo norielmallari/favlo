@@ -9,8 +9,8 @@ still is the first coding chat when ``--vision`` is set, not a separate check.
 The listener's chat object uses ``stop``, ``length``, and ``tool_calls``. It does
 not return ``content_filter``. Audio parts, file parts, logprobs, and ``n`` greater
 than one are not checks. ``web_search`` is a hosted tool the listener runs.
-``store`` false is the client replay for reasoning and for ``locker``. ``store``
-true is the server chain for a one-turn reply, the search, and a follow-up.
+``store`` is one value for every check. False is the client replay. True
+is ``previous_response_id`` and the listener chain.
 """
 
 from __future__ import annotations
@@ -431,9 +431,9 @@ async def _run(
         await close_chat_client(client)
 
 
-async def run_reply(base_url: str, model: str) -> list[str]:
+async def run_reply(base_url: str, model: str, *, store: bool) -> list[str]:
     """A system instruction the user text does not repeat. Thinking stays off."""
-    options = _quiet(False, store=True)
+    options = _quiet(False, store=store)
     _client, _session, response = await _run(
         base_url,
         model,
@@ -446,13 +446,13 @@ async def run_reply(base_url: str, model: str) -> list[str]:
     return [*reply_problems(text, reasoning), *ended(response, "stop")]
 
 
-async def run_reasoning(base_url: str, model: str) -> list[str]:
+async def run_reasoning(base_url: str, model: str, *, store: bool) -> list[str]:
     """One thinking turn. The reasoning stays on the session."""
     from agent_framework import Agent
 
     from favlo.chat_client import close_chat_client, open_chat_client
 
-    options = _quiet(True, store=False)
+    options = _quiet(True, store=store)
     client = open_chat_client(model.partition(":")[0], base_url)
     agent = Agent(
         client=client,
@@ -464,6 +464,8 @@ async def run_reasoning(base_url: str, model: str) -> list[str]:
         response = await agent.run(_REASONING, session=session, options=options)
         reasoning, text = reply_parts(response)
         stored = stored_reasoning(session)
+        if store and not stored:
+            stored = reasoning
         print(f"reasoning reply {text!r}", flush=True)
         problems = reasoning_problems(text, reasoning, stored=stored)
         problems.extend(ended(response, "stop"))
@@ -472,10 +474,10 @@ async def run_reasoning(base_url: str, model: str) -> list[str]:
     return problems
 
 
-async def run_tools(base_url: str, model: str) -> list[str]:
+async def run_tools(base_url: str, model: str, *, store: bool) -> list[str]:
     """A required ``locker`` call, then a reply that repeats the tool result."""
     options: dict[str, object] = {
-        **_quiet(False, store=False),
+        **_quiet(False, store=store),
         "tool_choice": {"mode": "required", "required_function_name": "locker"},
     }
     _client, session, response = await _run(
@@ -494,10 +496,10 @@ async def run_tools(base_url: str, model: str) -> list[str]:
     return [*tool_problems(rounds, text), *ended(response, "stop")]
 
 
-async def run_choice(base_url: str, model: str) -> list[str]:
+async def run_choice(base_url: str, model: str, *, store: bool) -> list[str]:
     """Tools are listed and ``tool_choice`` is ``none``. The reply does not call one."""
     options: dict[str, object] = {
-        **_quiet(False, store=True),
+        **_quiet(False, store=store),
         "tool_choice": {"mode": "none"},
     }
     _client, session, response = await _run(
@@ -516,31 +518,31 @@ async def run_choice(base_url: str, model: str) -> list[str]:
     return [*choice_problems(rounds, text, reasoning), *ended(response, "stop")]
 
 
-async def run_length(base_url: str, model: str) -> list[str]:
+async def run_length(base_url: str, model: str, *, store: bool) -> list[str]:
     """Sixteen output tokens. The framework sends that cap as ``max_output_tokens``."""
-    options: dict[str, object] = {**_quiet(False, store=True), "max_tokens": 16}
+    options: dict[str, object] = {**_quiet(False, store=store), "max_tokens": 16}
     _client, _session, response = await _run(base_url, model, _LENGTH, options)
     _reasoning, text = reply_parts(response)
     print(f"length reply {text!r}", flush=True)
     return [*length_problems(text), *ended(response, "length")]
 
 
-async def run_stop(base_url: str, model: str) -> list[str]:
+async def run_stop(base_url: str, model: str, *, store: bool) -> list[str]:
     """A stop sequence ends the reply before the following word."""
-    options: dict[str, object] = {**_quiet(False, store=True), "stop": [STOP_WORD]}
+    options: dict[str, object] = {**_quiet(False, store=store), "stop": [STOP_WORD]}
     _client, _session, response = await _run(base_url, model, _STOP, options)
     _reasoning, text = reply_parts(response)
     print(f"stop reply {text!r}", flush=True)
     return [*stop_problems(text), *ended(response, "stop")]
 
 
-async def run_stream(base_url: str, model: str) -> list[str]:
+async def run_stream(base_url: str, model: str, *, store: bool) -> list[str]:
     """Stream the reply. Text deltas assemble to the same reply as the final response."""
     from agent_framework import Agent
 
     from favlo.chat_client import close_chat_client, open_chat_client
 
-    options = _quiet(False, store=True)
+    options = _quiet(False, store=store)
     client = open_chat_client(model, base_url)
     agent = Agent(
         client=client,
@@ -567,13 +569,13 @@ async def run_stream(base_url: str, model: str) -> list[str]:
     return problems
 
 
-async def run_stored(base_url: str, model: str) -> list[str]:
-    """Two turns with ``store`` true. The second continues from ``previous_response_id``."""
+async def run_stored(base_url: str, model: str, *, store: bool) -> list[str]:
+    """Two turns at this run's ``store`` value. The follow-up repeats the secret."""
     from agent_framework import Agent
 
     from favlo.chat_client import close_chat_client, open_chat_client
 
-    options = _quiet(False, store=True)
+    options = _quiet(False, store=store)
     client = open_chat_client(model, base_url)
     agent = Agent(client=client, name="coding", default_options=options)
     session = agent.create_session()
@@ -595,11 +597,11 @@ async def run_stored(base_url: str, model: str) -> list[str]:
     return problems
 
 
-async def run_web_search(base_url: str, model: str) -> list[str]:
+async def run_web_search(base_url: str, model: str, *, store: bool) -> list[str]:
     """The listener runs ``web_search``. The client only names the tool."""
     from agent_framework_openai import OpenAIChatClient
 
-    options = _quiet(False, store=True)
+    options = _quiet(False, store=store)
     tool = OpenAIChatClient.get_web_search_tool(search_context_size="low")
     _client, _session, response = await _run(
         base_url,
@@ -614,7 +616,7 @@ async def run_web_search(base_url: str, model: str) -> list[str]:
     return [*web_search_problems(text, calls), *ended(response, "stop")]
 
 
-async def run_contract(base_url: str, model: str) -> list[str]:
+async def run_contract(base_url: str, model: str, *, store: bool) -> list[str]:
     """Reply, reasoning, store, tools, choice, web search, length, and stream."""
     problems: list[str] = []
     cases = (
@@ -629,7 +631,7 @@ async def run_contract(base_url: str, model: str) -> list[str]:
     )
     for name, runner in cases:
         print(f"check {name}", flush=True)
-        found = await runner(base_url, model)
+        found = await runner(base_url, model, store=store)
         for item in found:
             print(item, flush=True)
         if found:

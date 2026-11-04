@@ -19,14 +19,17 @@ from harness.turn_printer import TurnPrinter
 SESSION_ROUNDS = 16
 
 
-def agent_options(request: Request, *, mtp: bool, mtp_depth: int) -> dict[str, object]:
+def agent_options(
+    request: Request, *, mtp: bool, mtp_depth: int, store: bool = False
+) -> dict[str, object]:
     """Fields the framework client sends. Sampling stays off the body.
 
-    ``store`` is false so the client replays function calls and reasoning.
-    A one-turn check and a server continuation use ``store`` true instead.
+    ``store`` is the value for the whole run. False makes the client replay
+    the transcript. True sends ``previous_response_id`` and the listener
+    chain rebuilds that transcript before the pipeline encodes.
     """
     return {
-        "store": False,
+        "store": store,
         "reasoning": {"effort": "medium" if request.enable_thinking else "none"},
         "extra_body": {
             "favlo:mtp": bool(mtp),
@@ -93,6 +96,7 @@ def run_session(
     mtp: bool,
     mtp_depth: int = 3,
     vision: bytes | None = None,
+    store: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Let the agent use the tools. Return the calls that succeeded and any problems."""
     prepare_workspace(workspace)
@@ -108,6 +112,7 @@ def run_session(
                 mtp=mtp,
                 mtp_depth=mtp_depth,
                 vision=vision,
+                store=store,
                 problems=problems,
             )
         )
@@ -126,6 +131,7 @@ async def _run(
     mtp: bool,
     mtp_depth: int,
     vision: bytes | None,
+    store: bool,
     problems: list[str],
 ) -> None:
     from agent_framework import Agent, ChatMiddleware
@@ -137,7 +143,7 @@ async def _run(
     client.function_invocation_configuration["max_consecutive_errors_per_request"] = SESSION_ROUNDS
     client.function_invocation_configuration["allow_concurrent_invocation"] = False
     client.function_invocation_configuration["include_detailed_errors"] = True
-    options = agent_options(request, mtp=mtp, mtp_depth=mtp_depth)
+    options = agent_options(request, mtp=mtp, mtp_depth=mtp_depth, store=store)
     restarter = _PrefixRestart(server, client)
 
     class PrefixRestartMiddleware(ChatMiddleware):

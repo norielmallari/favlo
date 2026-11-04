@@ -107,6 +107,8 @@ def test_thinking_body_omits_sampling_fields() -> None:
     assert extra["favlo:mtp"] is True
     assert extra["favlo:mtp_depth"] == 3
     assert options["store"] is False
+    kept = agent_options(request, mtp=False, mtp_depth=3, store=True)
+    assert kept["store"] is True
     assert "temperature" not in options
     assert "temperature" not in extra
     assert "top_p" not in extra
@@ -125,6 +127,7 @@ def test_mtp_defaults_off() -> None:
     assert args.mtp_depth == 3
     assert args.vision is False
     assert args.thinking == "on"
+    assert args.store == "off"
     instruct = argument_parser().parse_args(["--model", "qwen36-35b-a3b", "--thinking", "off"])
     assert instruct.thinking == "off"
 
