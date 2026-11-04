@@ -684,7 +684,7 @@ def _workspace_payload(db: Session, row: Any) -> dict[str, Any]:
         "skills": _skills_for(db, data["id"]),
         "expand_thinking": expand_thinking,
         "expand_tools": expand_tools,
-        "theme": _gallery_theme(db, data["id"]),
+        "theme": _workspace_theme(db, data["id"], data["type"]),
         "icon": shell.icon if shell is not None else "box",
         "renderer": shell.renderer if shell is not None else "chat",
         "provisioning_state": data.get("provisioning_state") or "provisioned",
@@ -692,10 +692,16 @@ def _workspace_payload(db: Session, row: Any) -> dict[str, Any]:
     }
 
 
-def _gallery_theme(db: Session, workspace_id: str) -> str:
-    row = db.get(MetaRow, f"gallery_theme:{workspace_id}")
-    if row is None or row.value not in ("favlo", "rose-pine", "catppuccin"):
-        return "rose-pine"
+_WORKSPACE_THEMES = frozenset({"favlo", "rose-pine", "catppuccin"})
+
+
+def _workspace_theme(db: Session, workspace_id: str, workspace_type: str) -> str:
+    row = db.get(MetaRow, f"workspace_theme:{workspace_id}")
+    if row is None:
+        row = db.get(MetaRow, f"gallery_theme:{workspace_id}")
+    default = "catppuccin" if workspace_type == "coding" else "rose-pine"
+    if row is None or row.value not in _WORKSPACE_THEMES:
+        return default
     return str(row.value)
 
 
@@ -2938,18 +2944,21 @@ class Store:
 
         return self._write(write)
 
-    def set_gallery_theme(
+    def set_workspace_theme(
         self, workspace_id: str, theme: str
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         def write(db: Session) -> tuple[dict[str, Any], list[dict[str, Any]]]:
             workspace = _require_workspace(db, workspace_id)
-            if workspace["type"] != "gallery":
-                raise Rejected("Themes are for the gallery.")
-            if theme not in ("favlo", "rose-pine", "catppuccin"):
+            if workspace["type"] not in ("gallery", "coding"):
+                raise Rejected("Themes are for gallery and coding workspaces.")
+            if theme not in _WORKSPACE_THEMES:
                 raise Rejected("Choose Favlo, Rosé Pine, or Catppuccin.")
-            meta_key = f"gallery_theme:{workspace_id}"
+            meta_key = f"workspace_theme:{workspace_id}"
             row = db.get(MetaRow, meta_key)
             if row is None:
+                legacy = db.get(MetaRow, f"gallery_theme:{workspace_id}")
+                if legacy is not None:
+                    db.delete(legacy)
                 db.add(MetaRow(key=meta_key, value=theme))
             else:
                 row.value = theme
@@ -2964,6 +2973,11 @@ class Store:
             return {"id": workspace_id, "theme": theme}, [event]
 
         return self._write(write)
+
+    def set_gallery_theme(
+        self, workspace_id: str, theme: str
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        return self.set_workspace_theme(workspace_id, theme)
 
     def local_location(self, workspace_id: str, folder_id: str | None = None) -> str:
         def read(db: Session) -> str:

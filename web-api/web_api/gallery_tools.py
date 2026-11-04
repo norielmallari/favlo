@@ -281,7 +281,7 @@ def _theme_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
         the user's appearance setting.
         """
         try:
-            result, events = store.set_gallery_theme(workspace_id, theme)
+            result, events = store.set_workspace_theme(workspace_id, theme)
         except Rejected as exc:
             return _dump({"error": str(exc)})
         if bus is not None:

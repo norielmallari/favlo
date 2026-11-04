@@ -1388,6 +1388,24 @@ def test_gallery_theme_round_trip(client: TestClient, tmp_path: Path) -> None:
     assert "error" in missing
 
 
+def test_coding_workspace_theme_defaults_and_rejects_unknown(client: TestClient) -> None:
+    channel_id = client.get("/channels").json()["channels"][0]["id"]
+    created = client.post(
+        "/workspaces",
+        headers={"Idempotency-Key": "ws-coding-theme"},
+        json={"channel_id": channel_id, "name": "Code Theme", "type": "coding"},
+    )
+    assert created.status_code == 201
+    workspace_id = created.json()["id"]
+    assert client.get(f"/workspaces/{workspace_id}").json()["workspace"]["theme"] == "catppuccin"
+    updated = client.put(f"/workspaces/{workspace_id}/theme", json={"theme": "rose-pine"})
+    assert updated.status_code == 200
+    assert updated.json()["theme"] == "rose-pine"
+    assert client.get(f"/workspaces/{workspace_id}").json()["workspace"]["theme"] == "rose-pine"
+    rejected = client.put(f"/workspaces/{workspace_id}/theme", json={"theme": "neon"})
+    assert rejected.status_code == 400
+
+
 def _tool_json(tool: object, arguments: dict) -> dict:
     import asyncio
     import json

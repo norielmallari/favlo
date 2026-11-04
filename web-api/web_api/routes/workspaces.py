@@ -96,7 +96,7 @@ async def read_workspace(workspace_id: str, request: Request):
 @router.put("/workspaces/{workspace_id}/theme")
 async def update_theme(workspace_id: str, body: GalleryThemeUpdate, request: Request):
     result, events = await asyncio.to_thread(
-        request.app.state.store.set_gallery_theme,
+        request.app.state.store.set_workspace_theme,
         workspace_id,
         body.theme,
     )
