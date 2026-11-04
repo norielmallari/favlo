@@ -1,7 +1,7 @@
 """Parked Qwen3.8-Flash-Next pipeline.
 
 The command scan does not load this file. The package beside it is
-``qwen38_flash_next``. The note is ``docs/qwen38-flash-next``.
+``qwen38_flash_next``. The note is ``docs/parked/qwen38-flash-next``.
 """
 
 from __future__ import annotations

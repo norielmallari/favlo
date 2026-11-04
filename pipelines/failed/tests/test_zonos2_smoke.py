@@ -17,7 +17,7 @@ from zonos2.runtime import open_runtime
 from zonos2.signals import voice_ok
 
 _RECORD = Path("models/ZONOS2-fp8-fp4")
-_SENTENCE = Path("docs/zonos2/smoke.json")
+_SENTENCE = Path("docs/failed/zonos2/smoke.json")
 
 
 def test_smoke_sentence_is_voiced():

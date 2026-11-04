@@ -51,8 +51,8 @@ A parked pipeline is not discovered and is not served. Its entry is not under `p
 
 | Pipeline | Entry | Package | Note |
 |---|---|---|---|
-| `qwen38-flash-next` | `pipelines/parked/qwen38-flash-next.py` | `pipelines/parked/qwen38_flash_next/` | [docs/qwen38-flash-next/architecture.md](docs/qwen38-flash-next/architecture.md) |
-| `spark-x26-1-7b` | `pipelines/parked/spark-x26-1-7b.py` | `pipelines/parked/spark_x26_1_7b/` | [docs/spark-x26-1-7b/README.md](docs/spark-x26-1-7b/README.md) |
+| `qwen38-flash-next` | `pipelines/parked/qwen38-flash-next.py` | `pipelines/parked/qwen38_flash_next/` | [docs/parked/qwen38-flash-next/architecture.md](docs/parked/qwen38-flash-next/architecture.md) |
+| `spark-x26-1-7b` | `pipelines/parked/spark-x26-1-7b.py` | `pipelines/parked/spark_x26_1_7b/` | [docs/parked/spark-x26-1-7b/README.md](docs/parked/spark-x26-1-7b/README.md) |
 
 ## Failed
 
@@ -60,8 +60,8 @@ A failed pipeline is not discovered and is not served. Its entry is not under `p
 
 | Pipeline | Entry | Package | Note |
 |---|---|---|---|
-| `ternary-bonsai-2` | `pipelines/failed/ternary-bonsai-2.py` | `pipelines/failed/ternary_bonsai_2/` | [docs/ternary-bonsai-2/README.md](docs/ternary-bonsai-2/README.md) |
-| `zonos2` | `pipelines/failed/zonos2.py` | `pipelines/failed/zonos2/` | [docs/zonos2/README.md](docs/zonos2/README.md) |
+| `ternary-bonsai-2` | `pipelines/failed/ternary-bonsai-2.py` | `pipelines/failed/ternary_bonsai_2/` | [docs/failed/ternary-bonsai-2/README.md](docs/failed/ternary-bonsai-2/README.md) |
+| `zonos2` | `pipelines/failed/zonos2.py` | `pipelines/failed/zonos2/` | [docs/failed/zonos2/README.md](docs/failed/zonos2/README.md) |
 
 Tests for the listener, the registry, and the console live in `tests/test_cli.py`, `tests/test_server.py`, `tests/test_registry.py`, and `tests/test_console.py`. A pipeline's tests do not import another pipeline.
 

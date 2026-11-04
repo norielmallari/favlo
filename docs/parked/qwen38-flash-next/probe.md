@@ -1,6 +1,6 @@
 # Qwen3.8 probe
 
-The block-of-32 measurement on this M5 Pro, Metal 4.1. `favlo --qwen38-flash-next probe` writes one block and reads it back on the GPU. It does not pack an expert. Scope is in [ARCHITECTURE.md](../../ARCHITECTURE.md). If this note disagrees with that file, ARCHITECTURE.md wins.
+The block-of-32 measurement on this M5 Pro, Metal 4.1. `favlo --qwen38-flash-next probe` writes one block and reads it back on the GPU. It does not pack an expert. Scope is in [ARCHITECTURE.md](../../../ARCHITECTURE.md). If this note disagrees with that file, ARCHITECTURE.md wins.
 
 Host `replaceSlice` and `getBytes` copy packed bytes: 32 int4 values are 16 bytes, 32 int2 values are 8 bytes, and int8 / fp8 values are one byte each.
 

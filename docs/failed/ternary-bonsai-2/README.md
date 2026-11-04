@@ -1,6 +1,6 @@
 # Ternary Bonsai 2
 
-Failed pipeline. The command scan does not load it, and `serve` does not serve it. The entry is `pipelines/failed/ternary-bonsai-2.py`. The package is `pipelines/failed/ternary_bonsai_2/`. The process contract is [../../ARCHITECTURE.md](../../ARCHITECTURE.md).
+Failed pipeline. The command scan does not load it, and `serve` does not serve it. The entry is `pipelines/failed/ternary-bonsai-2.py`. The package is `pipelines/failed/ternary_bonsai_2/`. The process contract is [../../../ARCHITECTURE.md](../../../ARCHITECTURE.md).
 
 Greedy decode of the packed int2 record did not collect six carrots. The reply was not readable text. The host checks and the carrot file moved with the package to `pipelines/failed/tests/` and are outside the default test run.
 

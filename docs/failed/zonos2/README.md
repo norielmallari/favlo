@@ -1,6 +1,6 @@
 # ZONOS2
 
-Failed pipeline. The command scan does not load it, and `serve` does not serve it. The entry is `pipelines/failed/zonos2.py`. The package is `pipelines/failed/zonos2/`. The process contract is [../../ARCHITECTURE.md](../../ARCHITECTURE.md).
+Failed pipeline. The command scan does not load it, and `serve` does not serve it. The entry is `pipelines/failed/zonos2.py`. The package is `pipelines/failed/zonos2/`. The process contract is [../../../ARCHITECTURE.md](../../../ARCHITECTURE.md).
 
 Emotion does not hold the speaker. One collection-voice line, "The morning train arrived on time.", measured 224.7 Hz with no tag. The same line and the same speaker vector measured 150.8 Hz for happy, 187.4 Hz for sad, 129.6 Hz for angry, and 103.3 Hz for surprised. Surprised is about an octave below the untagged line. The official control adds a direction from `emotion_directions` after the speaker projection, leaves accurate mode on, and leaves classifier-free guidance off. That add does not keep the register. The host checks and the speech smokes moved with the package to `pipelines/failed/tests/` and are outside the default test run.
 

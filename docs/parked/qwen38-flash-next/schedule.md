@@ -1,6 +1,6 @@
 # Qwen3.8 schedule
 
-As-built prefill, decode, and pack path for Qwen3.8-Flash-Next. File layout is in [record.md](record.md). Scope is in [ARCHITECTURE.md](../../ARCHITECTURE.md). If this note disagrees with that file, ARCHITECTURE.md wins.
+As-built prefill, decode, and pack path for Qwen3.8-Flash-Next. File layout is in [record.md](record.md). Scope is in [ARCHITECTURE.md](../../../ARCHITECTURE.md). If this note disagrees with that file, ARCHITECTURE.md wins.
 
 Prefill and decode run as Metal shaders on the Apple Silicon GPU. There is no host GEMV on this path, and a kernel that is not written yet is not replaced by one.
 

@@ -1,7 +1,7 @@
 """Failed ZONOS2 pipeline.
 
 The command scan does not load this file. The package beside it is
-``zonos2``. The note is ``docs/zonos2``.
+``zonos2``. The note is ``docs/failed/zonos2``.
 """
 
 from __future__ import annotations

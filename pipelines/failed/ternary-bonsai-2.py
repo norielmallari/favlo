@@ -1,7 +1,7 @@
 """Failed Ternary Bonsai 2 pipeline.
 
 The command scan does not load this file. The package beside it is
-``ternary_bonsai_2``. The note is ``docs/ternary-bonsai-2``.
+``ternary_bonsai_2``. The note is ``docs/failed/ternary-bonsai-2``.
 """
 
 from __future__ import annotations

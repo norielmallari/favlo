@@ -1,6 +1,6 @@
 # Qwen3.8-Flash-Next references
 
-Papers and specifications this pipeline is built from. The as-built forward is [architecture.md](architecture.md). Shared hardware citations stay in [../../REFERENCES.md](../../REFERENCES.md).
+Papers and specifications this pipeline is built from. The as-built forward is [architecture.md](architecture.md). Shared hardware citations stay in [../../../REFERENCES.md](../../../REFERENCES.md).
 
 ## Model
 

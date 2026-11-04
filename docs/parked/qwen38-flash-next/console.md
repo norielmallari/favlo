@@ -1,6 +1,6 @@
 # Console
 
-Parked pipeline. The binding below is for the code in `pipelines/parked/qwen38_flash_next/`. Scope is in [ARCHITECTURE.md](../../ARCHITECTURE.md). If this note disagrees with that file, ARCHITECTURE.md wins.
+Parked pipeline. The binding below is for the code in `pipelines/parked/qwen38_flash_next/`. Scope is in [ARCHITECTURE.md](../../../ARCHITECTURE.md). If this note disagrees with that file, ARCHITECTURE.md wins.
 
 `src/favlo/console.py` owns the row. It does not import a pipeline. A handle is a `Progress` value: phase, done, total, unit, and an optional gauge. The request thread writes those integers. A daemon thread samples them at 10 Hz. Registration takes a lock. The sample does not.
 

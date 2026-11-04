@@ -4,7 +4,7 @@ Kernel and bandwidth ceilings for the kernels `spark-x26-1-7b` launches. Recompu
 
 Each time is one command buffer, then a wait. The time is `GPUEndTime` minus `GPUStartTime`. Two launches are discarded. The figure is the median of the next four. Measured on 1 November 2026.
 
-The divisor is the 2 GiB streaming read on an M5 Pro with 48 GB: 7093.5 µs, 302.74 GB/s, recorded in [../qwen36-35b-a3b/ceilings.md](../qwen36-35b-a3b/ceilings.md).
+The divisor is the 2 GiB streaming read on an M5 Pro with 48 GB: 7093.5 µs, 302.74 GB/s, recorded in [qwen36-35b-a3b/ceilings.md](../../qwen36-35b-a3b/ceilings.md).
 
 ## Decode
 

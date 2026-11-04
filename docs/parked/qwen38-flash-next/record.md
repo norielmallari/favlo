@@ -1,6 +1,6 @@
 # Qwen3.8 record
 
-As-built files for the Qwen3.8-Flash-Next Metal record. Scope and the tier rules are in [ARCHITECTURE.md](../../ARCHITECTURE.md). If this note disagrees with that file, ARCHITECTURE.md wins.
+As-built files for the Qwen3.8-Flash-Next Metal record. Scope and the tier rules are in [ARCHITECTURE.md](../../../ARCHITECTURE.md). If this note disagrees with that file, ARCHITECTURE.md wins.
 
 Record version 6 is the directory this tree serves. The file is the buffer image Metal reads. `resident.bin` is one sequential load at startup, and its length is a multiple of 1 MiB. `ngram.bin` is random 16 KB pages. Each expert layer is `experts/NN-fp4.bin`. Experts sit in id order, and expert `e` starts at `e × stride`. The runtime refuses another expert width. The manifest stores `expert_quant` and the `super` list. That list is the atlas pin. Those images stay in the fp4 file, the atlas loads them, and it does not evict them. The manifest does not store a file name, a resident percent, or an importance order. Which other images stay in the atlas is the eviction strategy. MTP experts are `mtp-experts.bin` at `--mtp-bits`. Inside a live image, the data plane comes first and the E8M0 scale plane follows. Each plane starts on a 128-byte boundary. One Metal IO load covers one expert, both projections, both planes, and stops at the end of that image.
 
@@ -36,7 +36,7 @@ A version 6 directory is the Hugging Face model name plus the weight quants, wid
 
 The n-gram table is not tiered. A row's payload is 160 fp4 channels plus five E8M0 bytes, stored in a 128-byte slot so a 16 KB page holds 128 complete rows. The hash that selects a row is in [ngram.md](ngram.md).
 
-The scale for a block of 32 is one E8M0 byte, bias 127. It is the power of two at or above `amax / qmax`, so the peak fits in the format. `qmax` is 6 for fp4 E2M1, 448 for fp8 E4M3, and 1 for int2. The stored exponent is `log2(scale) + 127`, clamped to `0..254`. `0xFF` is not written. A zero block stores 0. fp4 picks the nearest of `0, 0.5, 1, 1.5, 2, 3, 4, 6` and stores the sign in bit 3 of the nibble, low nibble first. fp8 stores one OCP E4M3FN byte per value, ties to the even mantissa. The citations are [REFERENCES.md](../../REFERENCES.md).
+The scale for a block of 32 is one E8M0 byte, bias 127. It is the power of two at or above `amax / qmax`, so the peak fits in the format. `qmax` is 6 for fp4 E2M1, 448 for fp8 E4M3, and 1 for int2. The stored exponent is `log2(scale) + 127`, clamped to `0..254`. `0xFF` is not written. A zero block stores 0. fp4 picks the nearest of `0, 0.5, 1, 1.5, 2, 3, 4, 6` and stores the sign in bit 3 of the nibble, low nibble first. fp8 stores one OCP E4M3FN byte per value, ties to the even mantissa. The citations are [REFERENCES.md](../../../REFERENCES.md).
 
 int2 is packed low two bits first, signed −2..1. Metal 4.1 `unpack` does not accept `int2b` on this SDK, so that int2 layout is the one the shader shifts. The integer int4 probe, signed −8..7 and low nibble first, is in [probe.md](probe.md). That integer layout is not a weight plane.
 

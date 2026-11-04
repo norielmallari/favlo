@@ -1,7 +1,7 @@
 """Parked Spark-X2.6-1.7B pipeline.
 
 The command scan does not load this file. The package beside it is
-``spark_x26_1_7b``. The note is ``docs/spark-x26-1-7b``.
+``spark_x26_1_7b``. The note is ``docs/parked/spark-x26-1-7b``.
 """
 
 from __future__ import annotations

@@ -16,7 +16,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [ai-assistance/README.md](ai-assistance/README.md) | AI-assisted features on `favlo serve` |
 | [qwen38-27b/README.md](qwen38-27b/README.md) | Qwen3.8-27B pipeline contract |
 | [qwen38-27b/SETUP.md](qwen38-27b/SETUP.md) | Qwen3.8-27B download, pack, and first chat |
-| [ternary-bonsai-2/README.md](ternary-bonsai-2/README.md) | Failed Ternary Bonsai 2 pipeline |
+| [failed/ternary-bonsai-2/README.md](failed/ternary-bonsai-2/README.md) | Failed Ternary Bonsai 2 pipeline |
 | [qwen38-27b/research/ffn-fp8-budget.md](qwen38-27b/research/ffn-fp8-budget.md) | Qwen3.8-27B feed-forward fp8 budget measurement |
 | [qwen38-27b/research/span-draft.md](qwen38-27b/research/span-draft.md) | Qwen3.8-27B two-token draft measurement |
 | [qwen38-27b/research/kernel-ceilings.md](qwen38-27b/research/kernel-ceilings.md) | Qwen3.8-27B isolated projection sum |
@@ -46,11 +46,11 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen35-4b/research/recorded-forward.md](qwen35-4b/research/recorded-forward.md) | Qwen3.5-4B recorded prefill and decode runs |
 | [qwen35-4b/research/needle-page.md](qwen35-4b/research/needle-page.md) | Qwen3.5-4B page needle on fp8 keys and values |
 | [qwen35-4b/research/coding-agent.md](qwen35-4b/research/coding-agent.md) | Qwen3.5-4B vision coding agent on fp8 keys and values |
-| [spark-x26-1-7b/README.md](spark-x26-1-7b/README.md) | Parked Spark-X2.6-1.7B pipeline |
-| [spark-x26-1-7b/references.md](spark-x26-1-7b/references.md) | Papers and specifications for the Spark pipeline |
-| [spark-x26-1-7b/ceilings.md](spark-x26-1-7b/ceilings.md) | Spark-X2.6-1.7B kernel ceilings |
-| [spark-x26-1-7b/research/kernel-ceilings.md](spark-x26-1-7b/research/kernel-ceilings.md) | Spark-X2.6-1.7B isolated dispatch sum |
-| [spark-x26-1-7b/research/recorded-forward.md](spark-x26-1-7b/research/recorded-forward.md) | Spark-X2.6-1.7B recorded prefill and decode runs |
+| [parked/spark-x26-1-7b/README.md](parked/spark-x26-1-7b/README.md) | Parked Spark-X2.6-1.7B pipeline |
+| [parked/spark-x26-1-7b/references.md](parked/spark-x26-1-7b/references.md) | Papers and specifications for the Spark pipeline |
+| [parked/spark-x26-1-7b/ceilings.md](parked/spark-x26-1-7b/ceilings.md) | Spark-X2.6-1.7B kernel ceilings |
+| [parked/spark-x26-1-7b/research/kernel-ceilings.md](parked/spark-x26-1-7b/research/kernel-ceilings.md) | Spark-X2.6-1.7B isolated dispatch sum |
+| [parked/spark-x26-1-7b/research/recorded-forward.md](parked/spark-x26-1-7b/research/recorded-forward.md) | Spark-X2.6-1.7B recorded prefill and decode runs |
 | [gemma4-26b-a4b/ceilings.md](gemma4-26b-a4b/ceilings.md) | Gemma 4 26B-A4B kernel and bandwidth ceilings |
 | [gemma4-26b-a4b/references.md](gemma4-26b-a4b/references.md) | Papers and specifications for the Gemma 4 pipeline |
 | [gemma4-26b-a4b/research/kernel-ceilings.md](gemma4-26b-a4b/research/kernel-ceilings.md) | Gemma 4 26B-A4B packed kernel ceiling |
@@ -72,15 +72,15 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [wan22-ti2v-5b/ceilings.md](wan22-ti2v-5b/ceilings.md) | Wan 2.2 TI2V-5B kernel ceilings |
 | [ace-step-15-turbo/README.md](ace-step-15-turbo/README.md) | ACE-Step 1.5 XL Turbo pipeline contract |
 | [ace-step-15-turbo/SETUP.md](ace-step-15-turbo/SETUP.md) | ACE-Step download, pack, and first clip |
-| [zonos2/README.md](zonos2/README.md) | Failed ZONOS2 pipeline |
-| [zonos2/references.md](zonos2/references.md) | Papers and specifications for the ZONOS2 pipeline |
+| [failed/zonos2/README.md](failed/zonos2/README.md) | Failed ZONOS2 pipeline |
+| [failed/zonos2/references.md](failed/zonos2/references.md) | Papers and specifications for the ZONOS2 pipeline |
 | [bge-m3/README.md](bge-m3/README.md) | BGE-M3 pipeline contract |
 | [bge-m3/references.md](bge-m3/references.md) | Papers and specifications for the BGE-M3 pipeline |
 | [bge-m3/failed/failed.md](bge-m3/failed/failed.md) | Failed BGE-M3 Neural Engine window above 512 |
 | [voxcpm2/README.md](voxcpm2/README.md) | VoxCPM2 pipeline contract |
 | [voxcpm2/references.md](voxcpm2/references.md) | Papers and specifications for the VoxCPM2 pipeline |
 | [ace-step-15-turbo/research/dit-mlp-fp4-error.md](ace-step-15-turbo/research/dit-mlp-fp4-error.md) | ACE-Step XL Turbo DiT MLP fp4 error ranking |
-| [zonos2/research/moe-fp4-error.md](zonos2/research/moe-fp4-error.md) | ZONOS2 MoE fp4 error ranking |
+| [failed/zonos2/research/moe-fp4-error.md](failed/zonos2/research/moe-fp4-error.md) | ZONOS2 MoE fp4 error ranking |
 | [wan22-i2v/research/clip-ceiling.md](wan22-i2v/research/clip-ceiling.md) | Wan 2.2 I2V 9-frame kernel sum |
 | [wan22-i2v/research/block-fp4-error.md](wan22-i2v/research/block-fp4-error.md) | Wan 2.2 I2V fp8 block ranking |
 | [wan22-i2v/research/int8-weight-error.md](wan22-i2v/research/int8-weight-error.md) | Wan 2.2 I2V int8 weight error |

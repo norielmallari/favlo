@@ -1,6 +1,6 @@
 # Spark-X2.6-1.7B
 
-Parked pipeline. The command scan does not load it, and `serve` does not serve it. The entry is `pipelines/parked/spark-x26-1-7b.py`. The package is `pipelines/parked/spark_x26_1_7b/`. The process contract is [../../ARCHITECTURE.md](../../ARCHITECTURE.md). Host checks and smokes live under `pipelines/parked/tests/` and are outside the default test run.
+Parked pipeline. The command scan does not load it, and `serve` does not serve it. The entry is `pipelines/parked/spark-x26-1-7b.py`. The package is `pipelines/parked/spark_x26_1_7b/`. The process contract is [../../../ARCHITECTURE.md](../../../ARCHITECTURE.md). Host checks and smokes live under `pipelines/parked/tests/` and are outside the default test run.
 
 Last as-built attempt for [XHToken/Spark-X2.6-1.7B](https://huggingface.co/XHToken/Spark-X2.6-1.7B). Those weights are under the Apache License, Version 2.0. The record directory is `Spark-X2.6-1.7B-fp8`. The flag was `spark-x26-1-7b`. An empty registry downloads Qwen3.5-4B instead. The steps are [SETUP.md](SETUP.md).
 

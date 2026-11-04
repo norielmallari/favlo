@@ -1,6 +1,6 @@
 # Qwen3.8-Flash-Next
 
-Parked pipeline. The command scan does not load it, and `serve` does not serve it. The entry is `pipelines/parked/qwen38-flash-next.py`. The package is `pipelines/parked/qwen38_flash_next/`. The process contract is [../../ARCHITECTURE.md](../../ARCHITECTURE.md). That file wins on the listener and on which files an agent may edit. This file wins for this pipeline's records, cache, prefix, and kernels. Another pipeline does not edit this tree.
+Parked pipeline. The command scan does not load it, and `serve` does not serve it. The entry is `pipelines/parked/qwen38-flash-next.py`. The package is `pipelines/parked/qwen38_flash_next/`. The process contract is [../../../ARCHITECTURE.md](../../../ARCHITECTURE.md). That file wins on the listener and on which files an agent may edit. This file wins for this pipeline's records, cache, prefix, and kernels. Another pipeline does not edit this tree.
 
 The sections below describe the last as-built attempt. Host checks and smokes moved with the package to `pipelines/parked/tests/` and are outside the default test run.
 
@@ -22,7 +22,7 @@ Registration copies `sampling.py` onto the registry row. The default variant is 
 - A prefix cache so a continuation prefills only the new tokens.
 - Expert streaming from SSD into a resident atlas. Consecutive expert ids are one sequential Metal IO. The shader reads the live image from that atlas.
 - The harness scores IFEval, GSM8K, and HumanEval against `serve`. The checker reads `message.content`. Thinking stays off. Omitted sampling fields come from `GET /v1/models` row `<id>:instruct`. A harness flag overrides that field. The note is [benchmarks.md](benchmarks.md).
-- The carrot smoke is [tests/test_smoke.py](../../tests/test_smoke.py). The stored completion is greedy instruct, written to `carrots.json`. The reply collects 6 carrots. The other cases use this pipeline's instruct and thinking cards. A reasoning effort runs only when this checkpoint's template names it.
+- The carrot smoke is [pipelines/parked/tests/test_smoke.py](../../../pipelines/parked/tests/test_smoke.py). The stored completion is greedy instruct, written to `carrots.json`. The reply collects 6 carrots. The other cases use this pipeline's instruct and thinking cards. A reasoning effort runs only when this checkpoint's template names it.
 
 ## Out of scope
 
@@ -113,7 +113,7 @@ Status goes through `src/favlo/console.py`. The module imports nothing from a pi
 
 ## Calibration
 
-The profiler does not quantize a weight. It runs this app's BF16 prefill. The default collect is 128 sequences of 512 tokens, drawn from prompt strings in a bucket JSON (`tool_calling`, `chat`, `mixed`, `reasoning`, `code`, `en`, `ko`, `zh`, `ja`). That file is prompt text. The citations are [REFERENCES.md](../../REFERENCES.md).
+The profiler does not quantize a weight. It runs this app's BF16 prefill. The default collect is 128 sequences of 512 tokens, drawn from prompt strings in a bucket JSON (`tool_calling`, `chat`, `mixed`, `reasoning`, `code`, `en`, `ko`, `zh`, `ja`). That file is prompt text. The citations are [REFERENCES.md](../../../REFERENCES.md).
 
 Only the strings matter. A later corpus file can use another layout. `tool_calling` and `chat` are already wrapped in `<|im_start|>` turns, so those strings are tokenized as they stand. The other buckets are raw text. The activation file is rebuilt when the strings or the tokenizer change.
 

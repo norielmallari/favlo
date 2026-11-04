@@ -5,7 +5,7 @@ description: ZONOS2 failed and is not served. Use when asked why it moved to pip
 
 # ZONOS2 prompting
 
-The pipeline is not discovered and `serve` does not load it. The note is [docs/zonos2/README.md](../../../docs/zonos2/README.md). Do not generate a clip.
+The pipeline is not discovered and `serve` does not load it. The note is [docs/failed/zonos2/README.md](../../../docs/failed/zonos2/README.md). Do not generate a clip.
 
 Favlo speaks through `generate_voice`. The model id is `ZONOS2-fp8-fp4`. The listener contract is [favlo-server](../favlo-server/SKILL.md).
 

@@ -1,7 +1,7 @@
 # Benchmarks
 
 As-built harness scores for this pipeline. The process contract is
-[../../ARCHITECTURE.md](../../ARCHITECTURE.md).
+[../../../ARCHITECTURE.md](../../../ARCHITECTURE.md).
 
 The harness scores IFEval, GSM8K, and HumanEval against `serve`.
 The `model` field names this pipeline. The checker reads `message.content`.
