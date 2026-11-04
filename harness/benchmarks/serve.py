@@ -227,10 +227,11 @@ class Server:
 
     def start(self) -> None:
         from favlo.cli import repo_root
-        from favlo.daemon import alive, follow, read_pid, telemetry_path
+        from favlo.daemon import alive, follow, read_pid
+        from favlo.logs import favlo_home, log_path
         from favlo.smoke_lock import open_attached
 
-        path = telemetry_path(8129)
+        path = log_path(favlo_home())
         before = path.stat().st_size if path.is_file() else 0
         attached = open_attached(
             root=repo_root(),
@@ -247,7 +248,7 @@ class Server:
         if self.follow_stop is not None:
             self.follow_stop.set()
         self.follow_stop = threading.Event()
-        path = telemetry_path(self.port)
+        path = log_path(favlo_home())
         size = path.stat().st_size if path.is_file() else 0
         offset = before if size >= before else 0
 
