@@ -949,6 +949,44 @@ def test_a_wait_line_is_shown_while_the_frame_is_open() -> None:
     ui.hold(False)
 
 
+def test_a_count_carries_the_producer_elapsed() -> None:
+    ui, stream, clock = _ui("json")
+    progress = ui.begin("decode", total=0, unit="tok")
+    clock.now += 2
+    ui.count(progress, 80)
+    ticks = [json.loads(line) for line in stream.getvalue().splitlines() if '"tick"' in line]
+    assert ticks[-1]["done"] == 80
+    assert ticks[-1]["elapsed"] == pytest.approx(2)
+    assert ticks[-1]["rate"] == pytest.approx(40)
+    ui.end(progress, "")
+
+
+def test_a_mirrored_elapsed_ignores_the_painter_clock() -> None:
+    ui, stream, clock = _ui("json")
+    clock.now = 5000
+    ui.apply_event(
+        {"type": "begin", "phase": "decode", "total": 0, "unit": "tok", "ts": 10}
+    )
+    ui.apply_event(
+        {
+            "type": "tick",
+            "phase": "decode",
+            "done": 100,
+            "total": 0,
+            "unit": "tok",
+            "elapsed": 2,
+            "ts": 12,
+        }
+    )
+    ticks = [json.loads(line) for line in stream.getvalue().splitlines() if '"tick"' in line]
+    assert ticks[-1]["rate"] == pytest.approx(50)
+    clock.now += 1
+    ui.sample()
+    ticks = [json.loads(line) for line in stream.getvalue().splitlines() if '"tick"' in line]
+    assert ticks[-1]["rate"] == pytest.approx(100 / 3)
+    ui.apply_event({"type": "end", "phase": "decode", "summary": "decode settled"})
+
+
 def test_vocabulary_is_closed() -> None:
     assert "prefill" in PHASES
     assert "tok" in UNITS

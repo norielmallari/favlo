@@ -13,7 +13,7 @@ from typing import Any
 
 import numpy as np
 
-from favlo.console import format_note, format_rate
+from favlo.console import format_note, format_rate, publish_count
 from favlo.pipeline import ClientClosed
 
 from qwen36_35b_a3b.atlas import (
@@ -2222,6 +2222,7 @@ class Qwen36Runtime:
         try:
             prefill_row = self._begin_phase("prefill", len(suffix))
             self._prefill_progress = prefill_row
+            self._prefill_done = 0
             started = time.perf_counter()
             if len(suffix) > 1:
                 from qwen36_35b_a3b.prefill import prefill_ids
@@ -2373,7 +2374,7 @@ class Qwen36Runtime:
                 seen.add(nxt)
                 counts[nxt] = counts.get(nxt, 0) + 1
                 if decode_row is not None:
-                    decode_row.done = len(out)
+                    publish_count(self.console, decode_row, len(out))
                 if on_token is not None:
                     on_token(nxt)
                 repeat_done = (
@@ -2440,7 +2441,7 @@ class Qwen36Runtime:
                             seen.add(token)
                             counts[token] = counts.get(token, 0) + 1
                             if decode_row is not None:
-                                decode_row.done = len(out)
+                                publish_count(self.console, decode_row, len(out))
                             if on_token is not None:
                                 on_token(token)
                             if outcome.follow is not None:
@@ -2520,7 +2521,7 @@ class Qwen36Runtime:
                                 seen.add(int(token))
                                 counts[int(token)] = counts.get(int(token), 0) + 1
                                 if decode_row is not None:
-                                    decode_row.done = len(out)
+                                    publish_count(self.console, decode_row, len(out))
                                 if on_token is not None:
                                     on_token(int(token))
                             carry = int(nxt_id)
@@ -2626,7 +2627,9 @@ class Qwen36Runtime:
         progress = self._load_progress
         if progress is None or step <= 0:
             return
-        progress.done = min(progress.total, progress.done + step)
+        done = min(int(progress.total), int(getattr(self, "_load_done", 0)) + int(step))
+        self._load_done = done
+        publish_count(self.console, progress, done)
 
     def _status(self, line: str) -> None:
         console = self.console
@@ -2681,9 +2684,11 @@ class Qwen36Runtime:
         progress = self._prefill_progress
         if progress is None:
             return
-        capped = min(progress.total, done)
-        if capped > progress.done:
-            progress.done = capped
+        capped = min(int(progress.total), int(done))
+        if capped <= int(getattr(self, "_prefill_done", 0)):
+            return
+        self._prefill_done = capped
+        publish_count(self.console, progress, capped)
 
 
 class ThinkBudget:

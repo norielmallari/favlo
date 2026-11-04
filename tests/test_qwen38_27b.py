@@ -750,6 +750,7 @@ def test_empty_think_turn_stays_a_prefix_of_the_next_prompt() -> None:
 
 def test_prefill_progress_counts_finished_tokens() -> None:
     runtime = Qwen38Runtime.__new__(Qwen38Runtime)
+    runtime.console = None
     progress = SimpleNamespace(total=100, done=0)
     runtime._prefill_progress = progress
     runtime._note_prefill(40)

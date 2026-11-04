@@ -94,6 +94,7 @@ src/favlo/              process entry; the pipeline manager loads the pipeline a
   usage.py              OpenAI token fields on a chat completion, including max_prompt_tokens
   daemon.py             spawn and stop the listener; no pipeline imports
   console.py            status row; no pipeline imports
+  progress.py           sanitizes one raw progress event before the console paints it
   chat_client.py        Agent Framework chat client; reasoning stays on reasoning_content. It keeps max_prompt_tokens and leaves older messages out at half that cap
   persona.py            horse persona
   config_tools.py       configuration tool group for the web

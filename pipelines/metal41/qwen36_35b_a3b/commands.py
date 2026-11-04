@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from urllib.parse import urlparse
 
-from favlo.console import Console, Progress
+from favlo.console import Console, Progress, publish_count
 from favlo.prefix import checkpoint_digest, default_prefix_dir
 from favlo.registry import (
     add_model,
@@ -265,13 +265,13 @@ def _setup(args: argparse.Namespace) -> int:
 
         def _on_bytes(done: int, detail: str) -> None:
             assert quantize_bar is not None
-            quantize_bar.done = done
             if done > quantize_bar.total:
                 quantize_bar.total = done
             quantize_bar.detail = detail
+            publish_count(ui, quantize_bar, done)
 
         quantize(src, output, on_bytes=_on_bytes, expert_fp8=percent)
-        quantize_bar.done = quantize_bar.total
+        publish_count(ui, quantize_bar, quantize_bar.total)
         ui.end(quantize_bar, f"record complete: {output}")
         quantize_bar = None
         _register(output, src, alias)
@@ -291,9 +291,9 @@ def _setup(args: argparse.Namespace) -> int:
 
 
 def _move(progress: Progress, done: int, total: int, detail: str) -> None:
-    progress.done = done
     progress.total = total
     progress.detail = detail
+    publish_count(None, progress, done)
 
 
 def _manifest_complete(output: Path) -> bool:

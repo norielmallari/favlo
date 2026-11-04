@@ -10,6 +10,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from favlo.console import publish_count
+
 # Natural weights. DiT walks keep at least one point each, and these shrink to fit.
 _TEXT = 8
 _ENCODE = 8
@@ -212,7 +214,7 @@ class ClipProgress:
         self._summary = f"{self._detail} {self._stage_done}/{self._stage_total} {self._unit}"
         self._sync()
         if self.row is not None:
-            self.row.done = self._stage_done
+            publish_count(self.console, self.row, self._stage_done)
 
     def note(self, line: str) -> None:
         """One measured line. A console records it. Otherwise it is printed."""
@@ -232,7 +234,7 @@ class ClipProgress:
             self.job["eta"] = 0
             self.job["stage"] = None
         if self.row is not None and self._stage_total:
-            self.row.done = self._stage_total
+            publish_count(self.console, self.row, self._stage_total)
 
     def close(self, summary: str) -> None:
         self._finish_row(summary)

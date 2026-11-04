@@ -26,7 +26,7 @@ from typing import Any
 import numpy as np
 import objc
 
-from favlo.console import format_note, format_rate
+from favlo.console import format_note, format_rate, publish_count
 from favlo.memory import memory
 from favlo.pipeline import ClientClosed
 from qwen38_27b.attn import bind_plane, value_block_bytes
@@ -1267,6 +1267,7 @@ class Qwen38Runtime:
             bind_request(self, prompt, hit)
             prefill_row = self._begin_phase("prefill", len(suffix))
             self._prefill_progress = prefill_row
+            self._prefill_noted = 0
             started = time.perf_counter()
             if len(suffix) > 1:
                 from qwen38_27b.prefill import prefill_ids
@@ -1335,7 +1336,7 @@ class Qwen38Runtime:
                 self._note_think_token(chosen)
                 self._output_ids = list(out)
                 if decode_row is not None:
-                    decode_row.done = len(out)
+                    publish_count(self.console, decode_row, len(out))
                 if on_token is not None:
                     on_token(chosen)
                 pos = len(prompt) + emitted - 1
@@ -1414,7 +1415,7 @@ class Qwen38Runtime:
                                 self._note_think_token(int(token))
                                 self._output_ids = list(out)
                                 if decode_row is not None:
-                                    decode_row.done = len(out)
+                                    publish_count(self.console, decode_row, len(out))
                                 if on_token is not None:
                                     on_token(int(token))
                             if not halted:
@@ -1703,7 +1704,9 @@ class Qwen38Runtime:
         progress = self._load_progress
         if progress is None or step <= 0:
             return
-        progress.done = min(progress.total, progress.done + step)
+        done = min(int(progress.total), int(getattr(self, "_load_done", 0)) + int(step))
+        self._load_done = done
+        publish_count(self.console, progress, done)
 
     def _begin_phase(self, phase: str, total: int, *, live: bool = False) -> Any:
         console = self.console
@@ -1742,18 +1745,17 @@ class Qwen38Runtime:
     def _note_prefill(self, done: int) -> None:
         progress = self._prefill_progress
         if progress is not None:
-            capped = min(progress.total, done)
-            if capped > progress.done:
-                progress.done = capped
-            noted = progress.done
+            capped = min(int(progress.total), int(done))
         else:
-            noted = done
-        if noted <= getattr(self, "_prefill_noted", 0):
+            capped = int(done)
+        if capped <= int(getattr(self, "_prefill_noted", 0)):
             return
-        self._prefill_noted = noted
+        self._prefill_noted = capped
+        if progress is not None:
+            publish_count(self.console, progress, capped)
         hook = getattr(self, "_on_prefill", None)
         if hook is not None:
-            hook(noted)
+            hook(capped)
 
 
 def repeated_tail(tokens: list[int], *, minimum: int = 16) -> bool:

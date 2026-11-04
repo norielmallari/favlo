@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from favlo.console import publish_count
 from favlo.hf_cache import snapshot_dir
 from favlo.prefix import checkpoint_digest, default_prefix_dir
 from favlo.registry import (
@@ -172,8 +173,8 @@ def _download(args: argparse.Namespace) -> int:
 
 
 def _move(progress: Any, done: int, total: int) -> None:
-    progress.done = done
     progress.total = total
+    publish_count(None, progress, done)
 
 
 def _ensure_mtp_on(folder: str, root: Path | None = None) -> None:

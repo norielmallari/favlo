@@ -8,6 +8,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [../web-api/README.md](../web-api/README.md) | Web API for `favlo web` |
 | [../web-spa/README.md](../web-spa/README.md) | Expo app for `favlo web` |
 | [console.md](console.md) | Shared status row |
+| [progress-reporting.md](progress-reporting.md) | Progress calls and which pipeline uses each |
 | [prefix.md](prefix.md) | SSD prefix store |
 | [harness.md](harness.md) | File agent, coding agent, and worktree agent |
 | [coding-primitives.md](coding-primitives.md) | Tool contract for the coding harness |

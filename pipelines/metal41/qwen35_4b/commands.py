@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from favlo.console import Console
+from favlo.console import Console, publish_count
 from favlo.registry import load_registry, models_dir, register_quantized, set_alias
 from qwen35_4b.convert import checkout_dir, pack_mtp_half, quantize, record_dir
 from qwen35_4b.layout import FOLDER, REPO, STEM
@@ -141,7 +141,7 @@ def _quantize(args: argparse.Namespace) -> int:
     bar = ui.begin("quantize", total=1, unit="files", detail=src.name)
     try:
         quantize(src, dest)
-        bar.done = 1
+        publish_count(ui, bar, 1)
         ui.end(bar, f"record complete: {dest}")
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         ui.end(bar, "")
@@ -213,9 +213,9 @@ def _setup(args: argparse.Namespace) -> int:
 
 
 def _advance(progress: Any, done: int, total: int, detail: str) -> None:
-    progress.done = done
     progress.total = total
     progress.detail = detail
+    publish_count(None, progress, done)
 
 
 def _register(src: Path, output: Path) -> None:
@@ -269,7 +269,7 @@ def _mtp_half(args: argparse.Namespace) -> int:
     bar = ui.begin("quantize", total=1, unit="files", detail="mtp half")
     try:
         pack_mtp_half(record, src)
-        bar.done = 1
+        publish_count(ui, bar, 1)
         ui.end(bar, f"mtp half: {record}")
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError, FileNotFoundError) as exc:
         ui.end(bar, "")

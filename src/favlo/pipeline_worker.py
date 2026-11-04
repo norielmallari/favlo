@@ -380,7 +380,9 @@ class PipelineChild:
     def _apply_console(self, event: Any) -> None:
         apply = getattr(self._ui, "apply_event", None)
         if isinstance(event, dict) and callable(apply):
-            apply(event)
+            stamped = dict(event)
+            stamped.setdefault("source", id(self))
+            apply(stamped)
 
     def _reap(self) -> None:
         proc = self._proc

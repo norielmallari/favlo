@@ -40,7 +40,7 @@ from typing import Any
 
 import numpy as np
 
-from favlo.console import format_note, format_rate
+from favlo.console import format_note, format_rate, publish_count
 from favlo.memory import device_buffer, memory
 from favlo.prefix import (
     DEFAULT_BUDGET,
@@ -385,6 +385,7 @@ class Gemma4Runtime:
         pending = len(prompt) - hit
         prefill_row = self._begin_phase("prefill", max(pending, 0))
         self._prefill_progress = prefill_row
+        self._prefill_done = 0
         decode_row = None
         try:
             start = time.perf_counter()
@@ -424,7 +425,7 @@ class Gemma4Runtime:
                 if not stopped and on_token is not None:
                     on_token(token)
                 if decode_row is not None:
-                    decode_row.done = len(drawn)
+                    publish_count(self.console, decode_row, len(drawn))
                 self._step(token)
                 if stopped:
                     halted = True
@@ -1572,7 +1573,9 @@ class Gemma4Runtime:
         progress = self._load_progress
         if progress is None or step <= 0:
             return
-        progress.done = min(progress.total, progress.done + step)
+        done = min(int(progress.total), int(getattr(self, "_load_done", 0)) + int(step))
+        self._load_done = done
+        publish_count(getattr(self, "console", None), progress, done)
 
     def _finish_load(self, summary: str) -> None:
         progress = self._load_progress
@@ -1596,9 +1599,11 @@ class Gemma4Runtime:
         progress = self._prefill_progress
         if progress is None:
             return
-        capped = min(progress.total, done)
-        if capped > progress.done:
-            progress.done = capped
+        capped = min(int(progress.total), int(done))
+        if capped <= int(getattr(self, "_prefill_done", 0)):
+            return
+        self._prefill_done = capped
+        publish_count(getattr(self, "console", None), progress, capped)
 
     def _note(self, topic: str, **fields: object) -> None:
         console = self.console

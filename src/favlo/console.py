@@ -20,6 +20,7 @@ from typing import Any, TextIO
 
 from favlo.daemon import TracebackSkip
 from favlo.logs import RollingLog
+from favlo.progress import Sanitizer
 
 PHASES = ("load", "download", "quantize", "prefill", "decode", "sample")
 UNITS = ("tok", "layers", "bytes", "shards", "experts", "stages", "files", "blocks")
@@ -35,6 +36,7 @@ _PLATE_TOP = "▕█████████████████████
 _PLATE_MID = "▕██     F A V L O     ██▏"
 _PLATE_BOT = "▕███████████████████████▏"
 _TICK = 0.1
+_PAINT_CAP = 0.3
 _FRAME_WAIT = 2.0
 _TURN_IDLE = 0.4
 _TURN_ORDER = ("prefill", "decode", "sample", "prefix")
@@ -44,6 +46,19 @@ _CSI_FINAL = set(
 )
 _WINDOW_MIN = 0.5
 _SMOOTH = 1.5
+
+
+def publish_count(console: Any, progress: Any, done: int) -> None:
+    """Enqueue ``done`` on ``console``. With no console, store it on the handle."""
+    if progress is None or isinstance(done, bool):
+        return
+    report = getattr(console, "count", None) if console is not None else None
+    if report is None:
+        report = getattr(getattr(progress, "ui", None), "count", None)
+    if callable(report):
+        report(progress, int(done))
+        return
+    progress.done = int(done)
 
 
 def format_rate(phase: str, count: int, seconds: float, *, unit: str = "tok") -> str:
@@ -98,6 +113,10 @@ class Progress:
     started: float = 0.0
     summary: str = ""
     closed: bool = False
+    elapsed: float = 0.0
+    elapsed_at: float = 0.0
+    fed: bool = False
+    ui: Any = None
 
 
 class Console:
@@ -142,7 +161,10 @@ class Console:
         self.fold_turns = False
         self.live_decode = mode == "pretty"
         self._recorder: Callable[[str], None] | None = None
-        self._remote: dict[tuple[str, int | None], Progress] = {}
+        self._remote: dict[tuple[Any, str, int | None], Progress] = {}
+        self._sanitizer = Sanitizer(frozenset(PHASES), frozenset(UNITS))
+        self._count_paint_at = 0.0
+        self._behind = False
         self._draft: str | None = None
         self._status_lines = 0
         self._pending_summaries: list[str] = []
@@ -364,7 +386,19 @@ class Console:
             self.say(reply)
 
     def apply_event(self, event: dict[str, Any]) -> None:
-        """Mirror one daemon event onto this console."""
+        """Enqueue one daemon event. The console thread sanitizes it and paints."""
+        if self._start_thread:
+            self._actions.put(("remote", event))
+            self._ensure_thread()
+            return
+        self._accept(event)
+
+    def _accept(self, event: dict[str, Any]) -> None:
+        for item in self._sanitizer.accept(event, pretty=self.mode == "pretty"):
+            self._paint_remote(item)
+
+    def _paint_remote(self, event: dict[str, Any]) -> None:
+        """Apply one sanitized event. The caller is the console thread."""
         restore = False
         with self._lock:
             line = _log_line(event)
@@ -435,6 +469,7 @@ class Console:
             pipeline=self.pipeline,
             started=self._clock() if started is None else started,
         )
+        progress.ui = self
         with self._lock:
             self._handles.append(progress)
             self._turn_due = None
@@ -460,6 +495,64 @@ class Console:
             self._ensure_thread()
             return
         self._emit_end(progress, summary)
+
+    def count(self, progress: Progress, done: int) -> None:
+        """Enqueue a count and return. The console thread emits it.
+
+        ``done`` is copied into the fact. The caller does not wait for the
+        paint, and it does not leave the rate clock on a shared field.
+        """
+        if progress.closed or isinstance(done, bool) or not isinstance(done, int):
+            return
+        elapsed = self._clock() - progress.started
+        if elapsed < 0 or not math.isfinite(elapsed):
+            elapsed = 0.0
+        fact = (
+            done,
+            progress.total,
+            progress.unit,
+            progress.detail,
+            progress.gauge,
+            elapsed,
+        )
+        progress.fed = True
+        if self._start_thread:
+            self._actions.put(("count", progress, fact))
+            self._ensure_thread()
+            return
+        self._apply_count(progress, fact)
+
+    def _apply_count(
+        self,
+        progress: Progress,
+        fact: tuple[int, int, str, str, tuple[str, int] | None, float],
+    ) -> None:
+        if progress.closed:
+            return
+        done, total, unit, detail, gauge, elapsed = fact
+        progress.done = done
+        progress.total = total
+        progress.unit = unit
+        progress.detail = detail
+        if gauge is not None:
+            progress.gauge = gauge
+        progress.elapsed = elapsed
+        progress.elapsed_at = self._clock()
+        progress.fed = True
+        if self.mode == "json":
+            self._event(self._tick(progress, self._clock()))
+            return
+        self._paint_count()
+
+    def _paint_count(self) -> None:
+        """Paint a live count. A backed-up queue redraws at most every 300 ms."""
+        now = self._clock()
+        behind = not self._actions.empty()
+        if behind and now - self._count_paint_at < _PAINT_CAP:
+            self._behind = True
+            return
+        self._behind = False
+        self.sample()
 
     def _emit_begin(self, progress: Progress) -> None:
         if self.mode != "plain":
@@ -573,6 +666,7 @@ class Console:
     def sample(self) -> None:
         """One renderer tick. Tests call this with the thread left off."""
         now = self._clock()
+        self._count_paint_at = now
         with self._lock:
             self._flush_turn()
             handles = list(self._handles)
@@ -588,7 +682,11 @@ class Console:
                 return
             if self.mode != "json":
                 return
-            events = [self._tick(progress, now) for progress in handles]
+            events = [
+                self._tick(progress, now)
+                for progress in handles
+                if not progress.fed and not progress.closed
+            ]
         for event in events:
             self._event(event)
 
@@ -633,7 +731,13 @@ class Console:
     def _run(self) -> None:
         while not self._stop.is_set():
             self._drain_actions()
-            self.sample()
+            if self.mode == "pretty" and (
+                not self._behind or self._clock() - self._count_paint_at >= _PAINT_CAP
+            ):
+                self.sample()
+                self._behind = False
+            elif self.mode == "json":
+                self.sample()
             self._stop.wait(_TICK)
         self._drain_actions()
 
@@ -650,14 +754,22 @@ class Console:
                 self._emit_end(action[1], action[2])
             elif kind == "note":
                 self.log(format_note(action[1], **action[2]))
+            elif kind == "count":
+                self._apply_count(action[1], action[2])
+            elif kind == "remote":
+                self._accept(action[1])
             elif kind == "flush":
                 continue
 
-    def _mirror_key(self, event: dict[str, Any]) -> tuple[str, int | None]:
+    def _mirror_key(self, event: dict[str, Any]) -> tuple[Any, str, int | None]:
         request = event.get("request")
         phase = event.get("phase")
         name = phase if isinstance(phase, str) else ""
-        return (name, request if isinstance(request, int) else None)
+        source = event.get("source")
+        if isinstance(source, bool) or not isinstance(source, (int, str)):
+            source = ""
+        request_id = request if isinstance(request, int) and not isinstance(request, bool) else None
+        return (source, name, request_id)
 
     def _mirror_begin(self, event: dict[str, Any]) -> None:
         phase = event.get("phase")
@@ -698,7 +810,8 @@ class Console:
         gauge = _event_gauge(event.get("gauge"))
         if gauge is not None:
             progress.gauge = gauge
-        self.sample()
+        self._take_elapsed(progress, event)
+        self._paint_count()
 
     def _mirror_end(self, event: dict[str, Any]) -> None:
         progress = self._remote.pop(self._mirror_key(event), None)
@@ -738,6 +851,7 @@ class Console:
             "eta": eta,
             "detail": progress.detail,
             "request": progress.request,
+            "elapsed": self._elapsed(progress, now),
             "ts": now,
         }
         if progress.gauge is not None:
@@ -768,10 +882,33 @@ class Console:
         token recorded in the same instant as ``begin`` is not a throughput.
         """
         done = progress.done
-        elapsed = now - progress.started
+        elapsed = self._elapsed(progress, now)
         if done <= 0 or elapsed < _WINDOW_MIN:
             return None, done, False
         return done / elapsed, done, True
+
+    def _elapsed(self, progress: Progress, now: float) -> float:
+        """Seconds since the phase began, on one clock.
+
+        A count carries the producer's elapsed time. Time since that count
+        was applied uses the painter's clock, so a child timestamp is never
+        subtracted from this process's counter.
+        """
+        if progress.elapsed > 0 and progress.elapsed_at > 0:
+            return progress.elapsed + max(0.0, now - progress.elapsed_at)
+        return now - progress.started
+
+    def _take_elapsed(self, progress: Progress, event: dict[str, Any]) -> None:
+        elapsed = event.get("elapsed")
+        if (
+            isinstance(elapsed, bool)
+            or not isinstance(elapsed, (int, float))
+            or not math.isfinite(float(elapsed))
+            or float(elapsed) < 0
+        ):
+            return
+        progress.elapsed = float(elapsed)
+        progress.elapsed_at = self._clock()
 
     def _row(self, progress: Progress, now: float) -> str:
         rate, _display, eta = self._rates(progress, now)

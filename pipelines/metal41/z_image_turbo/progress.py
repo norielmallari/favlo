@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from favlo.console import publish_count
+
 from z_image_turbo.dit import LAYERS as DIT_LAYERS
 from z_image_turbo.text import LAYERS as TEXT_LAYERS
 
@@ -48,6 +50,7 @@ class LoadProgress:
         if total < 1:
             return False
         self.total = total
+        self._done = 0
         console = self.console
         if console is None or not getattr(console, "shows_bars", False):
             return False
@@ -58,11 +61,13 @@ class LoadProgress:
         row = self.row
         if row is None or nbytes <= 0:
             return
-        row.done = min(self.total, row.done + nbytes)
+        self._done = min(self.total, self._done + nbytes)
+        publish_count(self.console, row, self._done)
 
     def finish(self, summary: str) -> None:
         if self.row is not None:
-            self.row.done = self.total
+            self._done = self.total
+            publish_count(self.console, self.row, self._done)
         self.close(summary)
 
     def close(self, summary: str) -> None:
@@ -104,7 +109,7 @@ class ImageProgress:
         if self.total > 0:
             self.done = min(self.total, self.done)
         if self.row is not None:
-            self.row.done = self.done
+            publish_count(self.console, self.row, self.done)
 
     def note(self, line: str) -> None:
         log = getattr(self.console, "log", None) if self.console is not None else None

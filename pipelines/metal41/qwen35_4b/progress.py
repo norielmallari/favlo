@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from favlo.console import format_note, format_rate
+from favlo.console import format_note, format_rate, publish_count
 
 
 def begin_load(console: Any, total: int, detail: str) -> Any:
@@ -16,7 +16,9 @@ def begin_load(console: Any, total: int, detail: str) -> Any:
 def note_load(progress: Any, step: int) -> None:
     if progress is None or step <= 0:
         return
-    progress.done = min(progress.total, progress.done + step)
+    done = min(int(progress.total), int(getattr(progress, "_reported", 0)) + int(step))
+    progress._reported = done
+    publish_count(None, progress, done)
 
 
 def begin_phase(
@@ -48,15 +50,17 @@ def begin_phase(
 def note_prefill(progress: Any, done: int) -> None:
     if progress is None:
         return
-    capped = min(progress.total, done)
-    if capped > progress.done:
-        progress.done = capped
+    capped = min(int(progress.total), int(done))
+    if capped <= int(getattr(progress, "_reported", 0)):
+        return
+    progress._reported = capped
+    publish_count(None, progress, capped)
 
 
 def note_decode(progress: Any, done: int) -> None:
     if progress is None:
         return
-    progress.done = done
+    publish_count(None, progress, int(done))
 
 
 def end_phase(console: Any, progress: Any, summary: str) -> None:
