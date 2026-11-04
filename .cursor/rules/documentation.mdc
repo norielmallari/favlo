@@ -1,5 +1,5 @@
 ---
-globs: *.md
+globs: *.md,.cursor/rules/**
 alwaysApply: false
 ---
 # Public documentation
@@ -7,6 +7,14 @@ alwaysApply: false
 This repository is public. Anyone can read the tree, the history, issues, and pull requests. Write docs, commits, comments, and examples as if they will stay public.
 
 A block quote is a line that starts with `>`. The author wrote those lines, including the tone and the first person. Leave a block quote unchanged. Do not rephrase it, apply the tone rules to it, or move its wording into the surrounding prose. Update a block quote only when the user explicitly asks for that quote to be changed.
+
+## Cursor rules
+
+Cursor rules must stay pipeline-agnostic unless the operator asks for a pipeline-specific rule. Name a behavior, a contract, or a shared module. Do not name a served pipeline, a packed folder, or a checkpoint id in the rule body. A pipeline's as-built note and that pipeline's own rule or skill hold the model-specific detail. The `globs` frontmatter may be pipeline-scoped so the rule loads for those edits; that list is not prose that picks a pilot.
+
+Wrong: "`qwen36-35b-a3b` is the pipeline that stores those ids."
+
+Right: "A language pipeline that serves a `store: true` chat stores those ids, then remembers and compares."
 
 ## No personal data
 
