@@ -392,6 +392,48 @@ export function storedSteps(message: {
   return steps;
 }
 
+/** True when the turn is only Thinking (no tools, no visible reply or media). */
+export function isThinkingOnlyMessage(message: ChatMessage): boolean {
+  if (message.role !== 'assistant') {
+    return false;
+  }
+  const steps = storedSteps(message);
+  if (steps.length === 0) {
+    return false;
+  }
+  return steps.every((step) => step.kind === 'thinking' && step.text.trim() !== '');
+}
+
+/**
+ * Display-only: consecutive thinking-only assistant turns become one Thinking block.
+ * Stored messages stay separate. A reply, tool call, or media body breaks the run.
+ */
+export function coalesceThinkingTurns(messages: ChatMessage[]): ChatMessage[] {
+  const shown: ChatMessage[] = [];
+  for (const item of messages) {
+    const prior = shown[shown.length - 1];
+    if (prior != null && isThinkingOnlyMessage(prior) && isThinkingOnlyMessage(item)) {
+      const text = [
+        ...storedSteps(prior).flatMap((step) =>
+          step.kind === 'thinking' && step.text.trim() ? [step.text.trim()] : [],
+        ),
+        ...storedSteps(item).flatMap((step) =>
+          step.kind === 'thinking' && step.text.trim() ? [step.text.trim()] : [],
+        ),
+      ].join('\n\n');
+      shown[shown.length - 1] = {
+        id: item.id,
+        role: 'assistant',
+        body: '',
+        reasoning: text,
+      };
+      continue;
+    }
+    shown.push(item);
+  }
+  return shown;
+}
+
 export function readDraft(sessionId: string): string {
   if (Platform.OS !== 'web' || typeof localStorage === 'undefined') {
     return '';

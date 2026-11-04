@@ -26,6 +26,7 @@ import {
   replyVisible,
   showsMessage,
   transcriptFrame,
+  coalesceThinkingTurns,
   TranscriptTurn,
   writeDraft,
   type ChatMessage,
@@ -635,7 +636,7 @@ export function ChatScreen() {
   const expandTools = readExpandTrace(channel?.expand_tools, 'hidden');
   const transcript = (
     <>
-      {shownMessages.map((item) => (
+      {coalesceThinkingTurns(shownMessages).map((item) => (
         <TranscriptTurn
           key={item.id}
           name={item.role === 'user' ? 'You' : channel?.name ?? 'Agent'}

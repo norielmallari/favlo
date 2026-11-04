@@ -20,6 +20,7 @@ import {
   LiveReply,
   readDraft,
   showsMessage,
+  coalesceThinkingTurns,
   transcriptFrame,
   TranscriptTurn,
   writeDraft,
@@ -502,7 +503,7 @@ export function CodingWorkspace({
           onScroll={noteScroll}
           scrollEventThrottle={16}
         >
-          {messages.map((item) => (
+          {coalesceThinkingTurns(messages).map((item) => (
             <TranscriptTurn
               key={item.id}
               name={item.role === 'user' ? 'You' : agentName}
