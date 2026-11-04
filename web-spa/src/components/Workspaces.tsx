@@ -4,6 +4,7 @@ import { Text, View } from 'react-native';
 import { IconButton } from '@/components/IconButton';
 import { MenuRow } from '@/components/MenuRow';
 import { Modal } from '@/components/Modal';
+import { focusRingInset, focusSafeGap } from '@/components/Pressable';
 import { useTheme } from '@/theme/Theme';
 import { space } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
@@ -40,16 +41,24 @@ export function Workspaces({
   const [pending, setPending] = useState<Workspace | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   return (
-    <View accessibilityLabel="Workspaces" style={{ gap: space[2], paddingLeft: space[4] }}>
+    <View
+      accessibilityLabel="Workspaces"
+      style={{
+        gap: space[2],
+        paddingLeft: space[4],
+        paddingRight: focusRingInset,
+        paddingVertical: focusRingInset,
+      }}
+    >
       <MenuRow label="Home" icon="home" selected={homeSelected} onPress={onHome} />
       {workspaces.length === 0 ? (
         <Text style={textStyle('small', palette.textSecondary)}>No workspaces</Text>
       ) : (
-        <View style={{ gap: 8 }}>
+        <View style={{ gap: focusSafeGap }}>
           {workspaces.map((item) => (
             <View key={item.id} style={{ gap: 2 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: space[1], minWidth: 0 }}>
-                <View style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 0, overflow: 'hidden' }}>
+                <View style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 0 }}>
                   <MenuRow
                     label={item.name}
                     icon={item.icon || 'layers'}

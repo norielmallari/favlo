@@ -3,6 +3,7 @@ import { Platform, StyleSheet, Text, TextInput, View, type ViewStyle } from 'rea
 
 import { composerCommand } from '@/components/composer-keys';
 import { IconButton } from '@/components/IconButton';
+import { focusRingInset } from '@/components/Pressable';
 import { useTheme } from '@/theme/Theme';
 import { duration, radius, space } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
@@ -121,7 +122,13 @@ export function Composer({
 }
 
 const styles = StyleSheet.create({
-  stack: { gap: space[1], maxWidth: '100%', minWidth: 0 },
+  stack: {
+    gap: space[1],
+    maxWidth: '100%',
+    minWidth: 0,
+    paddingHorizontal: focusRingInset,
+    paddingVertical: focusRingInset,
+  },
   row: { flexDirection: 'row', gap: space[2], alignItems: 'flex-end', maxWidth: '100%', minWidth: 0 },
   input: {
     flex: 1,

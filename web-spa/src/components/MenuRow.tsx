@@ -53,7 +53,12 @@ export function MenuRow({
         }}
       />
       {icon ? <FeatherIcon name={icon} size={18} color={palette.textPrimary} /> : null}
-      <Text style={textStyle('label', palette.textPrimary, selected ? '600' : '400')}>{label}</Text>
+      <Text
+        numberOfLines={1}
+        style={[textStyle('label', palette.textPrimary, selected ? '600' : '400'), { flexShrink: 1, minWidth: 0 }]}
+      >
+        {label}
+      </Text>
     </Pressable>
   );
 }

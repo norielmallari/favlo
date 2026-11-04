@@ -4,7 +4,7 @@ import { Platform, Text, useWindowDimensions, View } from 'react-native';
 
 import { FeatherIcon } from '@/components/FeatherIcon';
 import { IconButton } from '@/components/IconButton';
-import { Pressable } from '@/components/Pressable';
+import { focusRingInset, Pressable } from '@/components/Pressable';
 import { useTheme, type Preference } from '@/theme/Theme';
 import { radius, space, z } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
@@ -67,8 +67,8 @@ export function Frame({
           minHeight: 48,
           width: '100%',
           maxWidth: '100%',
-          paddingHorizontal: space[3],
-          paddingVertical: 4,
+          paddingHorizontal: Math.max(space[3], focusRingInset),
+          paddingVertical: Math.max(4, focusRingInset),
           flexDirection: 'row',
           flexWrap: 'wrap',
           alignItems: 'center',

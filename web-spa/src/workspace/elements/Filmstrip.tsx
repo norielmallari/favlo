@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Platform, ScrollView, Text, View } from 'react-native';
 
-import { Pressable } from '@/components/Pressable';
+import { focusRingInset, focusSafeGap, Pressable } from '@/components/Pressable';
 import { useTheme } from '@/theme/Theme';
 import { duration, radius, space } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
@@ -67,9 +67,10 @@ export function Filmstrip({ props, selection, fileUrl, onSelect, pendingMedia = 
     Platform.OS === 'web'
       ? ({ scrollSnapType: 'x mandatory', WebkitOverflowScrolling: 'touch' } as object)
       : undefined;
+  const edgePad = Math.max(space[3], focusRingInset);
 
   return (
-    <View style={{ gap: space[1], paddingVertical: space[2], alignItems: 'stretch' }}>
+    <View style={{ gap: space[1], paddingVertical: Math.max(space[2], focusRingInset), alignItems: 'stretch' }}>
       {title ? (
         <Text style={[textStyle('label', palette.textPrimary), { textAlign: 'center', paddingHorizontal: space[3] }]}>
           {title}
@@ -80,8 +81,9 @@ export function Filmstrip({ props, selection, fileUrl, onSelect, pendingMedia = 
         showsHorizontalScrollIndicator={false}
         style={snapStyle}
         contentContainerStyle={{
-          gap: space[2],
-          paddingHorizontal: space[3],
+          gap: Math.max(space[2], focusSafeGap),
+          paddingHorizontal: edgePad,
+          paddingVertical: focusRingInset,
           alignItems: 'center',
         }}
       >
@@ -113,7 +115,6 @@ export function Filmstrip({ props, selection, fileUrl, onSelect, pendingMedia = 
                   borderWidth: selected ? 2 : 1,
                   borderColor: selected ? palette.accent : palette.border,
                   borderRadius: radius.control,
-                  overflow: 'hidden',
                   backgroundColor: palette.surface,
                   opacity: selected ? 1 : justArrived && !reduceMotion ? 0.55 : 0.72,
                   ...(Platform.OS === 'web' && justArrived && !reduceMotion
@@ -125,24 +126,26 @@ export function Filmstrip({ props, selection, fileUrl, onSelect, pendingMedia = 
                     : null),
                 }}
               >
-                {mediaLabel ? (
-                  <View style={{ height: 72, alignItems: 'center', justifyContent: 'center', padding: space[1] }}>
-                    <Text style={[textStyle('caption', palette.textPrimary), { textAlign: 'center' }]}>
-                      {mediaLabel}
-                    </Text>
-                    <Text numberOfLines={2} style={[textStyle('caption', palette.textSecondary), { textAlign: 'center' }]}>
-                      {name}
-                    </Text>
-                  </View>
-                ) : (
-                  <View style={{ width: 96, height: 72, alignItems: 'center', justifyContent: 'center' }}>
-                    <img
-                      alt={name}
-                      src={fileUrl(item.path)}
-                      style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
-                    />
-                  </View>
-                )}
+                <View style={{ overflow: 'hidden', borderRadius: radius.control - 1 }}>
+                  {mediaLabel ? (
+                    <View style={{ height: 72, alignItems: 'center', justifyContent: 'center', padding: space[1] }}>
+                      <Text style={[textStyle('caption', palette.textPrimary), { textAlign: 'center' }]}>
+                        {mediaLabel}
+                      </Text>
+                      <Text numberOfLines={2} style={[textStyle('caption', palette.textSecondary), { textAlign: 'center' }]}>
+                        {name}
+                      </Text>
+                    </View>
+                  ) : (
+                    <View style={{ width: 96, height: 72, alignItems: 'center', justifyContent: 'center' }}>
+                      <img
+                        alt={name}
+                        src={fileUrl(item.path)}
+                        style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
+                      />
+                    </View>
+                  )}
+                </View>
               </Pressable>
             </View>
           );

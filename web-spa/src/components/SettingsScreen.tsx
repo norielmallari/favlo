@@ -570,7 +570,7 @@ export function SettingsScreen() {
     <Frame title="Configuration · Favlo" link={{ label: 'Chat', onPress: () => router.push('/') }}>
       <View style={{ flex: 1, minWidth: 0, maxWidth: '100%' }}>
         {!wide ? (
-          <View style={[buttonRow, { padding: 8 }]}>
+          <View style={[buttonRow, { padding: Math.max(8, focusRingInset) }]}>
             <IconButton icon="layout" label="Sections" onPress={() => setDrawer('sections')} background={palette.surface} border={palette.borderStrong} color={palette.textPrimary} />
           </View>
         ) : null}
@@ -583,7 +583,7 @@ export function SettingsScreen() {
                 borderRightWidth: 1,
                 borderRightColor: palette.border,
                 backgroundColor: palette.surface,
-                padding: 12,
+                padding: Math.max(12, focusRingInset),
                 gap: 8,
                 ...(wide ? {} : { position: 'absolute', top: 0, bottom: 0, left: 0, zIndex: 2 }),
               }}
@@ -614,7 +614,7 @@ export function SettingsScreen() {
                 borderRightWidth: wide ? 1 : 0,
                 borderRightColor: palette.border,
                 backgroundColor: palette.surface,
-                padding: 12,
+                padding: Math.max(12, focusRingInset),
                 gap: 8,
               }}
             >
@@ -1264,8 +1264,8 @@ function AgentDetailTabs({
       accessibilityLabel="Agent details"
       style={{
         flexDirection: 'row',
-        gap: 4,
-        padding: 4,
+        gap: Math.max(4, focusRingInset),
+        padding: focusRingInset,
         borderRadius: radius.control,
         backgroundColor: palette.surfaceHover,
         borderWidth: 1,
@@ -1958,7 +1958,7 @@ function columnStyle(border: string, surface: string, wide: boolean, width: numb
     borderRightWidth: wide ? 1 : 0,
     borderRightColor: border,
     backgroundColor: surface,
-    padding: 12,
+    padding: Math.max(12, focusRingInset),
     gap: 8,
   };
 }
@@ -1989,7 +1989,7 @@ function label(color: string) {
   return textStyle('label', color);
 }
 
-const menuRows = { gap: focusRingInset * 2, padding: focusRingInset };
+const menuRows = { gap: focusRingInset * 2, padding: focusRingInset }; // focusSafeGap + focusSafePad
 
 function heading(color: string) {
   return textStyle('title', color);

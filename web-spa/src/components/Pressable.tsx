@@ -16,8 +16,29 @@ type PressState = PressableStateCallbackType & { hovered?: boolean; focused?: bo
 const FOCUS_RING_WIDTH = 2;
 const FOCUS_RING_OFFSET = 2;
 
-/** Room outside a row so the focus ring is not clipped by the list. */
+/**
+ * Room outside a focused control so the outline (width + offset) is not clipped
+ * by a ScrollView, overflow:hidden ancestor, or edge-flush layout.
+ */
 export const focusRingInset = FOCUS_RING_WIDTH + FOCUS_RING_OFFSET + 2;
+
+/** Padding on a clipping parent that hosts Pressable / IconButton children. */
+export const focusSafePad = {
+  padding: focusRingInset,
+} as const;
+
+/** Horizontal padding when only the left/right edges clip. */
+export const focusSafePadX = {
+  paddingHorizontal: focusRingInset,
+} as const;
+
+/** Vertical padding when only the top/bottom edges clip. */
+export const focusSafePadY = {
+  paddingVertical: focusRingInset,
+} as const;
+
+/** Gap between sibling focusable rows so neighboring rings do not collide. */
+export const focusSafeGap = focusRingInset * 2;
 
 export function Pressable({ children, style, ...props }: PressableProps) {
   const { palette } = useTheme();

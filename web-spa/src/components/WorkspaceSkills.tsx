@@ -5,7 +5,7 @@ import { api, idempotencyKey } from '@/api/client';
 import { Modal } from '@/components/Modal';
 import { FeatherIcon } from '@/components/FeatherIcon';
 import { buttonRow, IconButton } from '@/components/IconButton';
-import { Pressable } from '@/components/Pressable';
+import { focusSafeGap, Pressable } from '@/components/Pressable';
 import { SkillForm } from '@/components/SkillForm';
 import { useTheme } from '@/theme/Theme';
 import { radius, space } from '@/theme/tokens';
@@ -90,7 +90,7 @@ export function WorkspaceSkills({
         Any agent in this workspace uses these skills.
       </Text>
       {pane === 'list' ? (
-        <View accessibilityLabel="Workspace skills" style={{ gap: space[3] }}>
+        <View accessibilityLabel="Workspace skills" style={{ gap: Math.max(space[3], focusSafeGap) }}>
           {skills.length === 0 ? (
             <Text style={textStyle('small', palette.textSecondary)}>No skills</Text>
           ) : (
@@ -110,7 +110,7 @@ export function WorkspaceSkills({
           <IconButton icon="plus" label="New skill" onPress={openNew} background={palette.accent} color={palette.onAccent} />
         </View>
       ) : (
-        <View style={{ gap: space[3] }}>
+        <View style={{ gap: Math.max(space[3], focusSafeGap) }}>
           <IconButton icon="arrow-left" label="Back" accessibilityLabel="Back to skills" onPress={() => setPane('list')} background="transparent" border="transparent" color={palette.accent} />
           <SkillForm
             key={creating ? `new-${token}` : `${selected?.id}:${selected?.revision}`}

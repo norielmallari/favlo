@@ -2,6 +2,7 @@ import { useEffect, useRef, type ReactNode } from 'react';
 import { Platform, ScrollView, Text, useWindowDimensions, View } from 'react-native';
 
 import { IconButton } from '@/components/IconButton';
+import { focusRingInset } from '@/components/Pressable';
 import { useTheme } from '@/theme/Theme';
 import { radius, space, z } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
@@ -99,7 +100,12 @@ export function Modal({
           overflow: 'hidden',
         }}
       >
-        <ScrollView contentContainerStyle={{ padding: space[4], gap: space[3] }}>
+        <ScrollView
+          contentContainerStyle={{
+            padding: Math.max(space[4], focusRingInset),
+            gap: space[3],
+          }}
+        >
           {children}
           <IconButton icon="x" label="Close" accessibilityLabel={closeLabel} onPress={onClose} background="transparent" border="transparent" color={palette.accent} />
         </ScrollView>

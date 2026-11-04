@@ -1,6 +1,7 @@
 import { Text, View } from 'react-native';
 
 import { buttonRow, IconButton } from '@/components/IconButton';
+import { focusSafeGap, focusSafePad } from '@/components/Pressable';
 import { useTheme } from '@/theme/Theme';
 import { space } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
@@ -22,7 +23,7 @@ export function EmptyState({
 }) {
   const { palette } = useTheme();
   return (
-    <View style={{ gap: space[3], maxWidth: '100%' }}>
+    <View style={{ gap: space[3], maxWidth: '100%', ...focusSafePad }}>
       <Text
         accessibilityRole="header"
         aria-level={2}
@@ -31,7 +32,7 @@ export function EmptyState({
         {name}
       </Text>
       <Text style={textStyle('body', palette.textSecondary)}>Chat, images, music, and voice on this machine.</Text>
-      <View style={buttonRow}>
+      <View style={[buttonRow, { gap: Math.max(space[2], focusSafeGap) }]}>
         {STARTERS.map((item) => (
           <IconButton
             key={item.label}

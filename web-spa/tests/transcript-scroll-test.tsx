@@ -1,4 +1,5 @@
 import { keepLatest, transcriptFrame } from '@/components/chat-transcript';
+import { focusSafePadX, focusSafePadY } from '@/components/Pressable';
 
 test('a fresh transcript stays with the latest message', () => {
   expect(keepLatest(true, false, 900)).toBe(true);
@@ -12,6 +13,8 @@ test('a short transcript rests on the composer', () => {
     justifyContent: 'flex-end',
     gap: 16,
     maxWidth: '100%',
+    ...focusSafePadX,
+    ...focusSafePadY,
   });
 });
 

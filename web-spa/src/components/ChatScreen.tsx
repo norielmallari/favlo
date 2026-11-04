@@ -673,7 +673,7 @@ export function ChatScreen() {
     >
       <View style={{ flex: 1, minWidth: 0, minHeight: 0, maxWidth: '100%' }}>
         {!wide ? (
-          <View style={[buttonRow, { padding: space[2] }]}>
+          <View style={[buttonRow, { padding: Math.max(space[2], focusRingInset) }]}>
             <IconButton icon="menu" label="Channels" onPress={() => setDrawer('channels')} background={palette.surface} border={palette.borderStrong} color={palette.textPrimary} />
           </View>
         ) : null}
@@ -693,7 +693,7 @@ export function ChatScreen() {
                 borderRightWidth: 1,
                 borderRightColor: palette.border,
                 backgroundColor: palette.surface,
-                padding: space[3],
+                padding: Math.max(space[3], focusRingInset),
                 gap: space[2],
                 ...(wide ? {} : { position: 'absolute', top: 0, bottom: 0, left: 0, zIndex: z.drawer }),
               }}
