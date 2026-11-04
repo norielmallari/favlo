@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 _GROUPS: dict[str, tuple[str, str]] = {
     "list_image_models": ("image", "Image"),
     "set_image_model": ("image", "Image"),
@@ -41,3 +43,8 @@ GENERATE = {
 
 def group_for(name: str) -> tuple[str, str]:
     return _GROUPS.get(name, ("tools", "Tools"))
+
+
+def default_switch_payload() -> str:
+    """Every Favlo media group starts on when a new agent copies the server."""
+    return json.dumps({group_id: True for group_id in ORDER if group_id != "tools"})

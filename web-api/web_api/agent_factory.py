@@ -32,7 +32,7 @@ def from_definition(
     agent_id = agent_meta.get("id")
     instructions = str(definition.get("instructions") or "")
     options = dict(definition.get("options") or {})
-    options["store"] = False
+    options["store"] = True
     tool_list = rebuild_tools(
         definition,
         store=store,
@@ -48,7 +48,7 @@ def from_definition(
             definition.get("max_iterations") or 6
         )
     providers: list[Any] = [
-        InMemoryHistoryProvider(skip_excluded=True),
+        InMemoryHistoryProvider(skip_excluded=True, load_messages=False),
         percent_window(store.compaction_percent(session_id)),
     ]
     return Agent(

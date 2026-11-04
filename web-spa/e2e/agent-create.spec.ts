@@ -82,8 +82,8 @@ test('a new agent shows the same options as edit', async ({ page }) => {
   await expect(page.getByRole('switch', { name: `Conversation tools for ${name}` })).toBeChecked();
   await expect(page.getByRole('switch', { name: `Heartbeat tools for ${name}` })).not.toBeChecked();
 
-  await page.getByRole('tab', { name: 'MCP' }).click();
-  const media = page.getByLabel('MCP list').getByRole('button', { name: 'Favlo media', exact: true });
+  await page.getByLabel('Agent details').getByRole('tab', { name: 'MCP' }).click();
+  const media = page.getByLabel('Agent MCP').getByRole('button', { name: 'Favlo media', exact: true });
   await onScreen(media);
   await media.click();
   const url = page.getByRole('textbox', { name: 'URL' });

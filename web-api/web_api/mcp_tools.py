@@ -10,12 +10,10 @@ from typing import Any
 
 from agent_framework import MCPStdioTool, MCPStreamableHTTPTool
 from agent_framework._feature_stage import ExperimentalWarning
-from agent_framework.exceptions import ToolExecutionException
 
 from web_api.mcp_cache import catalog
 from web_api.mcp_client import McpError
 from web_api.mcp_groups import GENERATE, ORDER, group_for
-from web_api.mcp_tasks import accept, spawn, started
 from web_api.tool_names import slug
 
 _MEMORY = {"remember", "recall", "forget"}
@@ -61,11 +59,10 @@ INSTRUCTIONS = (
     "read_media(name) returns that record. "
     "When you call a generate tool, tell the user you are generating "
     "that image, video, music, or voice. "
-    "The tool returns when the task is accepted. "
-    "Do not wait for the file in this turn. "
-    "A later turn brings the result. Include each favlo:// link from that result. "
+    "The tool returns when the file is ready. "
+    "Include each favlo:// link from the result. "
     "Do not paste the JSON, the tool name, or a file id. "
-    "When a task result says the tool failed or names an unknown model, "
+    "When the result says the tool failed or names an unknown model, "
     "call the matching list and set tools, repeat the session id, "
     "and call the generate tool again with that session."
 )
@@ -196,7 +193,7 @@ def _memory_arguments(tool_name: str, arguments: dict[str, Any], agent_id: str) 
 
 
 def _mcp_client(server: dict[str, Any]) -> Any | None:
-    """A caller-owned client. The tasks extension is not on the framework's own client."""
+    """A caller-owned client whose ``call_tool`` resolves a task result."""
     from fastmcp_tasks.client import TasksClientExtension
     from mcp import Client
 
@@ -310,28 +307,71 @@ class _Turn:
 
 
 class _Lease:
-    """Close the client when the turn ends, unless a task is still running on it."""
+    """Enter and close a caller-owned MCP client on one task.
+
+    MAF does not enter or close a client passed as ``mcp_client``. The AG-UI
+    stream finishes on another task, and that task must not exit the client's
+    anyio cancel scope.
+    """
 
     def __init__(self, client: Any, server: Any) -> None:
         self._client = client
         self._server = server
+        self._ready = asyncio.Event()
+        self._stop = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
+        self._error: BaseException | None = None
 
     async def __aenter__(self) -> Any:
-        return await self._client.__aenter__()
+        task = asyncio.create_task(self._own())
+        self._task = task
+        jobs = getattr(self._server, "jobs", None)
+        if isinstance(jobs, set):
+            jobs.add(task)
+            task.add_done_callback(jobs.discard)
+        try:
+            await self._ready.wait()
+        except BaseException:
+            self._stop.set()
+            task.cancel()
+            raise
+        if self._error is not None:
+            with contextlib.suppress(Exception):
+                await task
+            raise self._error
+        return self._client
+
+    async def _own(self) -> None:
+        entered = False
+        try:
+            await self._client.__aenter__()
+            entered = True
+            self._ready.set()
+            await self._stop.wait()
+        except BaseException as exc:
+            if not entered:
+                self._error = exc
+                self._ready.set()
+            raise
+        finally:
+            if entered:
+                with contextlib.suppress(Exception):
+                    await self._client.__aexit__(None, None, None)
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
-        pending = getattr(self._server, "pending", 0)
-        jobs = getattr(self._server, "jobs", None)
-        if pending and jobs is not None:
-            spawn(jobs, self._close())
+        self._stop.set()
+        task = self._task
+        if task is None:
             return False
-        await self._client.__aexit__(exc_type, exc, tb)
-        return False
-
-    async def _close(self) -> None:
-        await self._server.idle.wait()
+        current = asyncio.current_task()
+        cancelled = exc_type is asyncio.CancelledError or (
+            current is not None and current.cancelling()
+        )
+        if cancelled:
+            return False
         with contextlib.suppress(Exception):
-            await self._client.__aexit__(None, None, None)
+            await task
+        return False
 
 
 def _server(
@@ -365,58 +405,6 @@ def _arm(server: Any, agent_id: str, client: Any, turn: _Turn | None) -> None:
     server.owned_client = client
     server.turn = turn
     server.jobs = None if turn is None else turn.jobs
-    server.pending = 0
-    server.idle = asyncio.Event()
-    server.idle.set()
-
-
-def _live_session(client: Any) -> Any | None:
-    try:
-        return client.session
-    except RuntimeError:
-        return None
-
-
-def _result_text(parsed: Any) -> str:
-    if isinstance(parsed, str):
-        return parsed
-    if isinstance(parsed, list):
-        lines = [item.text for item in parsed if getattr(item, "text", None)]
-        if lines:
-            return "\n".join(lines)
-    return "The tool failed."
-
-
-async def _invoke(server: Any, tool_name: str, arguments: dict[str, Any]) -> Any:
-    """One ``tools/call``. A task handle returns immediately."""
-    from fastmcp_tasks.client_models import ClientCreateTaskResult
-
-    filtered, meta = server._prepare_call_kwargs(tool_name, arguments)
-    raw = await server.owned_client.session.call_tool(
-        tool_name,
-        filtered,
-        meta=meta,
-        allow_claimed=True,
-        read_timeout_seconds=server.owned_client.read_timeout_seconds,
-    )
-    if isinstance(raw, ClientCreateTaskResult):
-        turn = server.turn
-        if turn is not None:
-            accept(
-                turn.store,
-                turn.bus,
-                turn.jobs,
-                server,
-                server_id=turn.server_id,
-                agent_id=turn.agent_id,
-                session_id=turn.session_id,
-                tool_name=tool_name,
-                create_result=raw,
-            )
-        return started(tool_name, raw.task_id)
-    if getattr(raw, "is_error", False):
-        raise ToolExecutionException(_result_text(server._parse_tool_result_from_mcp(raw)))
-    return server._parse_tool_result_from_mcp(raw)
 
 
 class _HttpServer(MCPStreamableHTTPTool):
@@ -435,9 +423,7 @@ class _HttpServer(MCPStreamableHTTPTool):
 
     async def call_tool(self, tool_name: str, **kwargs: Any) -> Any:
         arguments = _memory_arguments(tool_name, kwargs, self._agent_id)
-        if _live_session(self.owned_client) is None:
-            return await super().call_tool(tool_name, **arguments)
-        return await _invoke(self, tool_name, arguments)
+        return await super().call_tool(tool_name, **arguments)
 
 
 class _StdioServer(MCPStdioTool):
@@ -456,9 +442,7 @@ class _StdioServer(MCPStdioTool):
 
     async def call_tool(self, tool_name: str, **kwargs: Any) -> Any:
         arguments = _memory_arguments(tool_name, kwargs, self._agent_id)
-        if _live_session(self.owned_client) is None:
-            return await super().call_tool(tool_name, **arguments)
-        return await _invoke(self, tool_name, arguments)
+        return await super().call_tool(tool_name, **arguments)
 
 
 def _description(row: dict[str, Any], exposed: str | None = None) -> str:

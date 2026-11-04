@@ -24,13 +24,15 @@ from web_api.session_commands import ARCHIVE_CUE
 from web_api.snapshots import FavloSnapshotStore
 from web_api.store import Conflict, NotFound, Rejected
 
+_SNAPSHOT_SCOPE = "favlo"
+
 
 class _IdleAgent:
     """Stand-in for hydrate requests. A real turn replaces it before the model runs."""
 
     name = "Favlo"
     description = "Favlo"
-    default_options: dict[str, Any] = {"store": False}
+    default_options: dict[str, Any] = {"store": True}
 
     def run(self, *_args: Any, **_kwargs: Any) -> AsyncIterator[Any]:
         async def _empty() -> AsyncIterator[Any]:
@@ -48,7 +50,7 @@ class _ScriptedAgent:
         self._cancel = cancel
         self._tool_groups = tool_groups
         self.name = "Favlo"
-        self.default_options = {"store": False}
+        self.default_options = {"store": True}
 
     def run(self, *_args: Any, **_kwargs: Any) -> AsyncIterator[Any]:
         reply = self._reply
@@ -121,6 +123,7 @@ class FavloAguiHost(AgentFrameworkAgent):
             require_confirmation=False,
             snapshot_store=FavloSnapshotStore(app),
             emit_messages_snapshot=True,
+            use_service_session=True,
         )
         self._app = app
 
@@ -149,7 +152,7 @@ class FavloAguiHost(AgentFrameworkAgent):
             return
         prepared = dict(input_data)
         prepared["run_id"] = run_id
-        prepared.setdefault("__ag_ui_snapshot_scope", "favlo")
+        prepared.setdefault("__ag_ui_snapshot_scope", _SNAPSHOT_SCOPE)
         text = "" if archive else _user_text(messages)
         if archive:
             prepared["messages"] = [{"id": guid(), "role": "user", "content": ARCHIVE_CUE}]
@@ -197,13 +200,30 @@ class FavloAguiHost(AgentFrameworkAgent):
                         await bus.publish(event)
             _prefer_stored_state(store, thread_id, prepared)
             if not archive:
-                names = text
-                if adopt:
-                    names = _adopted_image_text(store, run_id, text)
-                prepared["messages"] = _with_images(
-                    list(prepared.get("messages") or []),
-                    _images(store, thread_id, names),
-                )
+                if silent:
+                    # Server cue (greeting, follow-up): fenced user host cue + empty pad.
+                    from web_api.host_cues import host_cue_message
+
+                    store.append_thread_snapshot_message(
+                        _SNAPSHOT_SCOPE,
+                        thread_id,
+                        host_cue_message(text, message_id=guid()),
+                    )
+                    prepared["messages"] = [{"id": guid(), "role": "user", "content": ""}]
+                else:
+                    prior_messages = list(snapshot.get("messages") or [])
+                    prepared["messages"] = _with_selection_cue(
+                        store,
+                        thread_id,
+                        list(prepared.get("messages") or []),
+                    )
+                    names = text
+                    if adopt:
+                        names = _adopted_named_text(store, run_id, text)
+                    prepared["messages"] = _with_images(
+                        list(prepared.get("messages") or []),
+                        _images(store, thread_id, names, prior_messages),
+                    )
             before_ids = _assistant_ids(snapshot["messages"])
         except (Conflict, NotFound, Rejected) as exc:
             if adopt:
@@ -232,7 +252,6 @@ class FavloAguiHost(AgentFrameworkAgent):
                 thread_id=thread_id,
                 agent_row=agent_row,
                 archive=archive,
-                extra_note=_adopted_note(store, run_id) if adopt else "",
                 cancel=cancel,
             )
             async for event in run_agent_stream(
@@ -267,13 +286,12 @@ class FavloAguiHost(AgentFrameworkAgent):
                             result={"status": "archived", "session_id": new_id},
                         )
                         continue
-                    if silent:
-                        await asyncio.to_thread(store.hide_snapshot_cue, thread_id, text)
                     view = await asyncio.to_thread(store.session_snapshot, thread_id)
                     if _assistant_arrived(before_ids, view["messages"]):
                         events = await asyncio.to_thread(
                             store.settle_agui_run, run_id, "completed", None
                         )
+                        _persist_mcp(agent, store, thread_id)
                     else:
                         events = await asyncio.to_thread(
                             store.settle_agui_run,
@@ -357,10 +375,40 @@ def _prefer_stored_state(store: Any, thread_id: str, prepared: dict[str, Any]) -
             prepared["state"] = {**incoming, **stored}
 
 
-def _images(store: Any, thread_id: str, text: str) -> list[tuple[bytes, str]]:
-    from web_api.gallery_tools import images_in_message
+def _images(
+    store: Any,
+    thread_id: str,
+    text: str,
+    prior_messages: list[Any],
+) -> list[tuple[bytes, str]]:
+    """Named png/jpeg bytes, skipping paths already named on the previous user turn."""
+    from web_api.folder_port import folder_for
+    from web_api.gallery_tools import named_images
 
-    return images_in_message(store, thread_id, text)
+    prior = _previous_user_text(prior_messages)
+    already = {name.lower() for name in named_images(prior)}
+    fresh_names = [name for name in named_images(text) if name.lower() not in already]
+    if not fresh_names:
+        return []
+    workspace_id = store.gallery_for_session(thread_id)
+    if not workspace_id:
+        return []
+    try:
+        folder = folder_for(store, workspace_id)
+        relative_paths = folder.find_images(fresh_names)
+    except Rejected:
+        return []
+    out: list[tuple[bytes, str]] = []
+    for relative in relative_paths:
+        try:
+            payload = folder.read(relative)
+            media = str(folder.stat(relative)["media_type"])
+        except Rejected:
+            continue
+        if media not in {"image/png", "image/jpeg"}:
+            continue
+        out.append((payload, media))
+    return out
 
 
 def _with_images(
@@ -391,23 +439,75 @@ def _with_images(
     return copied
 
 
-def _gallery_note(store: Any, thread_id: str) -> str:
-    from web_api.gallery_tools import turn_note
+def _with_selection_cue(
+    store: Any,
+    thread_id: str,
+    messages: list[Any],
+) -> list[Any]:
+    """Persist a selection-change cue as a fenced, UI-hidden user message.
 
+    The typed user message stays clean. The cue is a durable host row in the
+    thread snapshot (``<system_reminder>`` fence + AG-UI
+    ``metadata.favlo.ui=hidden``). No-op when selection is unchanged.
+    """
+    from web_api.gallery_tools import (
+        announced_selection_from_history,
+        selection_announcement,
+    )
+    from web_api.gallery_metadata import read_sidecar
+    from web_api.folder_port import folder_for
+    from web_api.host_cues import host_cue_message
+
+    workspace_id = store.gallery_for_session(thread_id)
+    if not workspace_id:
+        return messages
     placement = store.agui_state(thread_id) or {}
     workspace = placement.get("favlo_workspace") if isinstance(placement, dict) else None
-    if not isinstance(workspace, dict):
-        return ""
-    selection = workspace.get("selection")
-    selected = selection.get("path") if isinstance(selection, dict) else None
-    strip_count = None
-    for element in workspace.get("elements") or []:
-        if isinstance(element, dict) and element.get("element") == "filmstrip":
-            items = (element.get("props") or {}).get("items") or []
-            strip_count = len(items) if isinstance(items, list) else 0
-    if not selected and strip_count is None:
-        return ""
-    return turn_note("", selected, strip_count=strip_count)
+    selected = None
+    if isinstance(workspace, dict):
+        selection = workspace.get("selection")
+        if isinstance(selection, dict):
+            selected = str(selection.get("path") or "").strip() or None
+    document = store.thread_snapshot(_SNAPSHOT_SCOPE, thread_id) or {}
+    history = list(document.get("messages") or []) if isinstance(document, dict) else []
+    previous = announced_selection_from_history(history)
+    description = ""
+    if selected:
+        try:
+            folder = folder_for(store, workspace_id)
+            side = read_sidecar(folder.root, selected) or {}
+            description = str(side.get("description") or "").strip()
+        except Rejected:
+            description = ""
+    cue = selection_announcement(selected, previous, description)
+    if not cue:
+        return messages
+    store.append_thread_snapshot_message(
+        _SNAPSHOT_SCOPE,
+        thread_id,
+        host_cue_message(cue, message_id=guid()),
+    )
+    return messages
+
+
+def _previous_user_text(messages: list[Any]) -> str:
+    for item in reversed(messages):
+        if not isinstance(item, dict) or item.get("role") != "user":
+            continue
+        content = item.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = [
+                str(part.get("text") or "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") in {None, "text", "input_text"}
+            ]
+            return "".join(parts)
+        body = item.get("body")
+        if isinstance(body, str):
+            return body
+    return ""
 
 
 def _assistant_ids(messages: list[Any]) -> set[str]:
@@ -429,30 +529,27 @@ def _assistant_arrived(before: set[str], messages: list[Any]) -> bool:
     return False
 
 
-def _adopted_image_text(store: Any, run_id: str, text: str) -> str:
+def _adopted_named_text(store: Any, run_id: str, text: str) -> str:
+    """Append an add-to-chat attachment path only. Selection uses the text cue."""
     try:
         context = store.run_context(run_id)
     except (NotFound, Rejected):
         return text
-    image = context.get("gallery_image") or context.get("gallery_attachment")
-    if not image:
-        return text
-    return f"{text}\n{image}"
-
-
-def _adopted_note(store: Any, run_id: str) -> str:
-    from web_api.gallery_tools import turn_note
-
-    try:
-        context = store.run_context(run_id)
-    except (NotFound, Rejected):
-        return ""
-    folder = context.get("gallery_folder")
-    image = context.get("gallery_image")
     attached = context.get("gallery_attachment")
-    if folder is None and not image and not attached:
-        return ""
-    return turn_note(folder or "", image or attached)
+    if not attached:
+        return text
+    return f"{text}\n{attached}"
+
+
+def _persist_mcp(agent: Any, store: Any, thread_id: str) -> None:
+    """Keep progressively loaded MCP remotes for the next turn's tool schema."""
+    tools = getattr(agent, "_favlo_mcp", None)
+    if not tools:
+        return
+    with contextlib.suppress(Exception):
+        from web_api.mcp_tools import persist_loaded
+
+        persist_loaded(list(tools), store, thread_id)
 
 
 async def _open_agent(
@@ -510,9 +607,7 @@ async def _build_agent(
     pending = app.state.tasks
     mcp_text, mcp_tools = await bundle(store, agent_id, thread_id, bus, pending)
     frozen = store.definition(thread_id)
-    note = "" if archive else _gallery_note(store, thread_id)
-    if extra_note and extra_note not in note:
-        note = f"{note}\n\n{extra_note}" if note else extra_note
+    note = "" if archive else extra_note
     if frozen is None:
         instructions, tool_list = turn_setup(
             str(agent_row.get("persona") or ""),
@@ -534,7 +629,7 @@ async def _build_agent(
             agent_row.get("preserve_thinking"),
             store.reasoning_effort(agent_id),
         ) or {}
-        options = {**options, "store": False}
+        options = {**options, "store": True}
         from web_api.definition import build as build_definition
         from web_api.definition import hash_of
 
@@ -577,7 +672,7 @@ async def _build_agent(
             default_options=options,
             require_per_service_call_history_persistence=True,
             context_providers=[
-                InMemoryHistoryProvider(skip_excluded=True),
+                InMemoryHistoryProvider(skip_excluded=True, load_messages=False),
                 percent_window(store.compaction_percent(thread_id)),
             ],
         )

@@ -103,13 +103,22 @@ def test_the_default_agent_is_seeded_once(tmp_path: Path) -> None:
 
 
 def test_favlo_media_mcp_is_seeded_once(tmp_path: Path) -> None:
-    from web_api.db import LOCAL_MCP_URL
+    from web_api.ids import FAVLO_GLOBAL_MCP_ID
+    from web_api.infrastructure.db.session import LOCAL_MCP_URL
     from web_api.store import Store
 
     path = tmp_path / "app.db"
     first = Store(path)
+    catalog = first.list_global_mcp_servers()
     servers = first.mcp_servers()
     first.close()
+    assert len(catalog) == 1
+    assert catalog[0]["id"] == FAVLO_GLOBAL_MCP_ID
+    assert catalog[0]["name"] == "Favlo media"
+    assert catalog[0]["transport"] == "http"
+    assert catalog[0]["url"] == LOCAL_MCP_URL
+    assert catalog[0]["enabled"] is True
+    assert catalog[0]["add_by_default"] is True
     assert len(servers) == 1
     assert servers[0]["id"] == FAVLO_MCP_ID
     assert servers[0]["agent_id"] == FAVLO_AGENT_ID
@@ -117,14 +126,32 @@ def test_favlo_media_mcp_is_seeded_once(tmp_path: Path) -> None:
     assert servers[0]["transport"] == "http"
     assert servers[0]["url"] == LOCAL_MCP_URL
     assert servers[0]["enabled"] is True
+    assert {group["id"]: group["enabled"] for group in servers[0]["groups"]} == {
+        "image": True,
+        "video": True,
+        "music": True,
+        "voice": True,
+        "media": True,
+        "memory": True,
+    }
+    assert {group["id"]: group["enabled"] for group in catalog[0]["groups"]} == {
+        "image": True,
+        "video": True,
+        "music": True,
+        "voice": True,
+        "media": True,
+        "memory": True,
+    }
     second = Store(path)
     again = second.mcp_servers()
+    again_catalog = second.list_global_mcp_servers()
     second.close()
     assert [row["id"] for row in again] == [FAVLO_MCP_ID]
+    assert [row["id"] for row in again_catalog] == [FAVLO_GLOBAL_MCP_ID]
 
 
 def test_a_new_agent_starts_with_favlo_media(tmp_path: Path) -> None:
-    from web_api.db import LOCAL_MCP_URL
+    from web_api.infrastructure.db.session import LOCAL_MCP_URL
     from web_api.store import Store
 
     store = Store(tmp_path / "app.db")
@@ -142,8 +169,80 @@ def test_a_new_agent_starts_with_favlo_media(tmp_path: Path) -> None:
         assert servers[0]["url"] == LOCAL_MCP_URL
         assert servers[0]["enabled"] is True
         assert servers[0]["command"] == ""
+        assert {group["id"]: group["enabled"] for group in servers[0]["groups"]} == {
+            "image": True,
+            "video": True,
+            "music": True,
+            "voice": True,
+            "media": True,
+            "memory": True,
+        }
         favlo = [row for row in store.mcp_servers() if row["agent_id"] == FAVLO_AGENT_ID]
         assert [row["id"] for row in favlo] == [FAVLO_MCP_ID]
+        catalog = store.list_global_mcp_servers()[0]
+        store.update_global_mcp_server(
+            catalog["id"],
+            {
+                "expected_revision": catalog["revision"],
+                "name": catalog["name"],
+                "transport": catalog["transport"],
+                "command": catalog["command"],
+                "url": catalog["url"],
+                "enabled": catalog["enabled"],
+                "add_by_default": True,
+                "groups": [
+                    {"id": group["id"], "enabled": group["id"] != "image"}
+                    for group in catalog["groups"]
+                ],
+            },
+        )
+        _status, again, _events = store.create_agent(
+            "reed-media",
+            {"name": "Reed media", "persona": "A short persona.", "default_model_id": None},
+        )
+        copied = [
+            row
+            for row in store.mcp_servers()
+            if row["agent_id"] == again["agent"]["id"]
+        ]
+        assert {group["id"]: group["enabled"] for group in copied[0]["groups"]} == {
+            "image": True,
+            "video": True,
+            "music": True,
+            "voice": True,
+            "media": True,
+            "memory": True,
+        }
+    finally:
+        store.close()
+
+
+def test_turning_off_default_mcp_skips_new_agents(tmp_path: Path) -> None:
+    from web_api.ids import FAVLO_GLOBAL_MCP_ID
+    from web_api.store import Store
+
+    store = Store(tmp_path / "app.db")
+    try:
+        catalog = store.list_global_mcp_servers()[0]
+        store.update_global_mcp_server(
+            FAVLO_GLOBAL_MCP_ID,
+            {
+                "expected_revision": catalog["revision"],
+                "name": catalog["name"],
+                "transport": catalog["transport"],
+                "command": catalog["command"],
+                "url": catalog["url"],
+                "enabled": catalog["enabled"],
+                "add_by_default": False,
+            },
+        )
+        _status, created, _events = store.create_agent(
+            "reed-no-mcp",
+            {"name": "Reed", "persona": "A short persona.", "default_model_id": None},
+        )
+        agent_id = created["agent"]["id"]
+        servers = [row for row in store.mcp_servers() if row["agent_id"] == agent_id]
+        assert servers == []
     finally:
         store.close()
 
@@ -1293,7 +1392,6 @@ def test_a_turn_sends_the_stored_agent_framework_session(
     from agent_framework import AgentSession, InMemoryHistoryProvider, Message
 
     from web_api.chat import stream_reply
-    from web_api.gallery_tools import turn_note
     from web_api.store import Store
 
     store = Store(tmp_path / "app.db")
@@ -1355,7 +1453,6 @@ def test_a_turn_sends_the_stored_agent_framework_session(
 
     monkeypatch.setattr("agent_framework.Agent", Agent)
     monkeypatch.setattr("web_api.chat.open_chat_client", lambda *_args, **_kwargs: Client())
-    note = turn_note("", "photos/horse.png", strip_count=2)
 
     async def once() -> None:
         collected = []
@@ -1368,7 +1465,6 @@ def test_a_turn_sends_the_stored_agent_framework_session(
             store=store,
             session_id=home,
             cancel=asyncio.Event(),
-            gallery_note=note,
         ):
             collected.append(piece.text)
         assert collected == ["Again"]
@@ -1379,14 +1475,13 @@ def test_a_turn_sends_the_stored_agent_framework_session(
         restored = seen["session"]
         assert isinstance(restored, AgentSession)
         assert "Next" in prompt
-        assert "photos/horse.png" in prompt
-        assert "photos/horse.png" not in str(seen["instructions"])
-        assert seen["options"] == {"store": False}
+        assert seen["options"] == {"store": True}
         assert seen["persist"] is True
         providers = seen["providers"]
         assert isinstance(providers, list)
         assert type(providers[0]).__name__ == "InMemoryHistoryProvider"
         assert providers[0].skip_excluded is True
+        assert providers[0].load_messages is False
         assert type(providers[1]).__name__ == "PercentWindow"
         messages = restored.state[provider.source_id]["messages"]
         assert [item.text for item in messages] == ["Hello", "Hi"]
@@ -1857,16 +1952,25 @@ def test_deleting_an_agent_removes_its_downstream_rows(client: TestClient, tmp_p
         },
     )
     assert server.status_code == 201
-    client.app.state.store.begin_mcp_task(
-        {
-            "remote_id": "task-1",
-            "server_id": server.json()["id"],
-            "agent_id": agent_id,
-            "session_id": session_id,
-            "tool_name": "generate_image",
-            "poll_interval_ms": 1000,
-        }
+    leftover = sqlite3.connect(tmp_path / "app.db")
+    leftover.execute(
+        "INSERT INTO mcp_task ("
+        "id, remote_id, server_id, agent_id, session_id, tool_name, status, "
+        "poll_interval_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "task-row",
+            "task-1",
+            server.json()["id"],
+            agent_id,
+            session_id,
+            "generate_image",
+            "working",
+            1000,
+            "2026-11-04T00:00:00Z",
+        ),
     )
+    leftover.commit()
+    leftover.close()
     sent = client.post(
         f"/sessions/{session_id}/messages",
         headers={"Idempotency-Key": "delete-message"},

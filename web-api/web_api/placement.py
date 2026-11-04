@@ -196,6 +196,75 @@ def filmstrip_paths(elements: list[dict[str, Any]]) -> list[str]:
     return paths
 
 
+def retarget_media(
+    state: dict[str, Any],
+    source: str,
+    destination: str | None,
+) -> dict[str, Any] | None:
+    """Rewrite one filmstrip path, or drop it when ``destination`` is omitted.
+
+    Returns the next placement when the path is on the strip or selected.
+    Returns None when this placement does not name that path.
+    """
+    workspace = state.get("favlo_workspace")
+    if not isinstance(workspace, dict):
+        return None
+    source = source.strip().lstrip("/")
+    if not source:
+        return None
+    if destination is not None:
+        destination = destination.strip().lstrip("/")
+        if not destination or destination == source:
+            return None
+    elements = workspace.get("elements")
+    if not isinstance(elements, list):
+        return None
+    changed = False
+    next_elements: list[Any] = []
+    for element in elements:
+        if not isinstance(element, dict) or element.get("element") != "filmstrip":
+            next_elements.append(element)
+            continue
+        props = dict(element.get("props") or {})
+        items = props.get("items") if isinstance(props.get("items"), list) else []
+        rewritten: list[Any] = []
+        seen: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                rewritten.append(item)
+                continue
+            path = str(item.get("path") or "").strip()
+            if path != source:
+                rewritten.append(item)
+                if path:
+                    seen.add(path)
+                continue
+            changed = True
+            if destination is None or destination in seen:
+                continue
+            row = dict(item)
+            row["path"] = destination
+            seen.add(destination)
+            rewritten.append(row)
+        props["items"] = rewritten
+        next_elements.append({**element, "props": props})
+    selection = workspace.get("selection")
+    next_selection = selection if isinstance(selection, dict) else None
+    if isinstance(selection, dict) and str(selection.get("path") or "").strip() == source:
+        changed = True
+        next_selection = {"kind": "file", "path": destination} if destination else None
+    if not changed:
+        return None
+    return {
+        **state,
+        "favlo_workspace": {
+            **workspace,
+            "elements": next_elements,
+            "selection": selection_for_elements(next_elements, next_selection),
+        },
+    }
+
+
 def selection_for_elements(
     elements: list[dict[str, Any]],
     selection: dict[str, Any] | None,

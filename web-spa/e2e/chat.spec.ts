@@ -44,7 +44,7 @@ test('two agent channels keep separate conversations', async ({ page }) => {
 
   await page.getByRole('tab', { name: 'Agents' }).click();
   const sections = page.getByLabel('Configuration sections');
-  const mcpTab = page.getByRole('tab', { name: 'MCP' });
+  const mcpTab = sections.getByRole('tab', { name: 'MCP' });
   const orchestrationTab = page.getByRole('tab', { name: 'Orchestration' });
   const sectionBox = await sections.boundingBox();
   const mcpBox = await mcpTab.boundingBox();
@@ -80,13 +80,14 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await onScreen(saveFavlo);
   await saveFavlo.click();
   await expect(page.getByRole('status')).toHaveText(/Favlo was saved/);
+  await page.getByRole('button', { name: 'Dismiss confirmation' }).click();
   await expect(conversation).toBeChecked();
   await expect(page.getByRole('switch', { name: 'Configuration tools for Favlo' })).toBeChecked();
 
-  await page.getByRole('tab', { name: 'MCP' }).click();
-  await expect(page.getByLabel('MCP list')).toBeVisible();
-  await expect(page.getByLabel('MCP list').getByRole('button', { name: 'Favlo media' })).toBeVisible();
-  await page.getByLabel('MCP list').getByRole('button', { name: 'Favlo media' }).click();
+  await page.getByLabel('Agent details').getByRole('tab', { name: 'MCP' }).click();
+  await expect(page.getByLabel('Agent MCP')).toBeVisible();
+  await expect(page.getByLabel('Agent MCP').getByRole('button', { name: 'Favlo media' })).toBeVisible();
+  await page.getByLabel('Agent MCP').getByRole('button', { name: 'Favlo media' }).click();
   await expect(page.getByRole('textbox', { name: 'URL' })).toHaveValue('http://127.0.0.1:8129/mcp');
   await page.getByRole('button', { name: 'Test connection' }).click();
   await expect(page.getByText('Connection succeeded')).toBeVisible();
@@ -103,7 +104,7 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await imageTools.click();
   await page.getByRole('button', { name: 'Save Favlo media' }).click();
   await expect(page.getByRole('switch', { name: 'Image for Favlo media' })).not.toBeChecked();
-  await page.getByRole('tab', { name: 'Agents' }).click();
+  await page.getByLabel('Agent details').getByRole('tab', { name: 'Agent' }).click();
 
   const brook = `Brook ${Date.now()}`;
   created.push(brook);

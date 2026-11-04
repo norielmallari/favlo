@@ -14,12 +14,17 @@ def project_messages(messages: list[Any]) -> list[dict[str, Any]]:
     """Map a library snapshot onto the session rows the transcript already reads.
 
     Reasoning stays on the following assistant row. Tool rows stay out of that view.
+    Fenced host cues (``metadata.favlo.ui=hidden``) stay out of the You bubble.
     """
+    from web_api.host_cues import is_host_cue
+
     out: list[dict[str, Any]] = []
     pending: list[str] = []
     pending_calls: list[dict[str, str]] = []
     for raw in messages:
         if not isinstance(raw, dict):
+            continue
+        if is_host_cue(raw):
             continue
         role = str(raw.get("role") or "")
         if role == "reasoning":
@@ -37,6 +42,9 @@ def project_messages(messages: list[Any]) -> list[dict[str, Any]]:
             pending_calls.extend(_tool_calls(raw))
             continue
         if role == "user":
+            if not body.strip():
+                # Silent server turns keep an empty user row for the protocol only.
+                continue
             pending = []
             pending_calls = []
             calls = []

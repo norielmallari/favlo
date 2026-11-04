@@ -40,6 +40,7 @@ test('configuration stores a global skill and copies it to an agent', async ({ p
     await page.getByRole('button', { name: 'Copy to agent', exact: true }).click();
     await expect(page.getByText('Copied to Favlo.')).toBeVisible();
     await page.getByRole('tab', { name: 'Agents' }).click();
+    await page.getByLabel('Agent details').getByRole('tab', { name: 'Skills' }).click();
     await expect(page.getByLabel('Agent skills').getByRole('button', { name, exact: true })).toBeVisible();
 
     await page.setViewportSize({ width: 390, height: 844 });

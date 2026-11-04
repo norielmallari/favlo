@@ -15,6 +15,7 @@ from web_api.gallery_tools import image_payload
 from web_api.http import json_body, key
 from web_api.profile import document
 from web_api.runs import perform
+from web_api.workspace_tools import sync_media_placement
 from web_api.schemas import (
     FocusUpdate,
     GalleryThemeUpdate,
@@ -287,20 +288,36 @@ async def write_image(workspace_id: str, folder_id: str, body: ImageWrite, reque
 async def move_image(workspace_id: str, folder_id: str, body: ImageMove, request: Request):
     folder = folder_for(request.app.state.store, workspace_id, folder_id)
     moved = await asyncio.to_thread(folder.move, body.path, body.to)
-    events = await asyncio.to_thread(request.app.state.store.note_gallery, workspace_id, moved)
+    state = await asyncio.to_thread(
+        sync_media_placement,
+        request.app.state.store,
+        workspace_id,
+        source=body.path,
+        destination=str(moved.get("path") or ""),
+    )
+    payload = moved if state is None else {**moved, "state": state}
+    events = await asyncio.to_thread(request.app.state.store.note_gallery, workspace_id, payload)
     for event in events:
         await request.app.state.bus.publish(event)
-    return json_body(200, moved)
+    return json_body(200, payload)
 
 
 @router.delete("/workspaces/{workspace_id}/folders/{folder_id}/images")
 async def delete_image(workspace_id: str, folder_id: str, body: ImageDelete, request: Request):
     folder = folder_for(request.app.state.store, workspace_id, folder_id)
     deleted = await asyncio.to_thread(folder.delete_image, body.path)
-    events = await asyncio.to_thread(request.app.state.store.note_gallery, workspace_id, deleted)
+    state = await asyncio.to_thread(
+        sync_media_placement,
+        request.app.state.store,
+        workspace_id,
+        source=body.path,
+        destination=None,
+    )
+    payload = deleted if state is None else {**deleted, "state": state}
+    events = await asyncio.to_thread(request.app.state.store.note_gallery, workspace_id, payload)
     for event in events:
         await request.app.state.bus.publish(event)
-    return json_body(200, deleted)
+    return json_body(200, payload)
 
 
 @router.post("/workspaces/{workspace_id}/folders/{folder_id}/directories")

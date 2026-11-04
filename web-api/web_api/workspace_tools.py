@@ -97,6 +97,34 @@ def _place_tool(store: Any, workspace_id: str, guide_id: str) -> object:
     return workspace_place
 
 
+def sync_media_placement(
+    store: Any,
+    workspace_id: str,
+    *,
+    source: str,
+    destination: str | None,
+) -> dict[str, Any] | None:
+    """Point the filmstrip and selection at a moved image, or drop a deleted one.
+
+    ``destination`` is the new relative path. Omit it to remove ``source``.
+    The session snapshot and the stored placement both take the result.
+    """
+    from web_api.placement import retarget_media
+
+    session_id = store.workspace_session_id(workspace_id)
+    if not session_id:
+        return None
+    current = _placement_state(store, session_id)
+    if current is None:
+        return None
+    updated = retarget_media(current, source, destination)
+    if updated is None:
+        return None
+    store.save_agui_state(session_id, updated)
+    _write_snapshot_state(store, session_id, updated)
+    return updated
+
+
 def apply_placement(
     store: Any,
     workspace_id: str,
@@ -157,6 +185,30 @@ def apply_placement(
     if missing:
         ignored.extend(f"missing path {path}" for path in missing)
     return {"state": state, "ignored": ignored}
+
+
+def _placement_state(store: Any, session_id: str) -> dict[str, Any] | None:
+    """The placement the gallery is showing: snapshot state, else the stored copy."""
+    from web_api.agui import _SNAPSHOT_SCOPE
+
+    document = store.thread_snapshot(_SNAPSHOT_SCOPE, session_id)
+    if isinstance(document, dict):
+        shared = document.get("state")
+        if isinstance(shared, dict) and isinstance(shared.get("favlo_workspace"), dict):
+            return shared
+    stored = store.agui_state(session_id)
+    if isinstance(stored, dict) and isinstance(stored.get("favlo_workspace"), dict):
+        return stored
+    return None
+
+
+def _write_snapshot_state(store: Any, session_id: str, state: dict[str, Any]) -> None:
+    from web_api.agui import _SNAPSHOT_SCOPE
+
+    document = store.thread_snapshot(_SNAPSHOT_SCOPE, session_id)
+    if not isinstance(document, dict):
+        return
+    store.save_thread_snapshot(_SNAPSHOT_SCOPE, session_id, {**document, "state": state})
 
 
 def _media_exists(folder: Any, path: str) -> bool:

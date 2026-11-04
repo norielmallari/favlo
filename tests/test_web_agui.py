@@ -156,6 +156,44 @@ def test_clear_route_mints_new_guid(client: TestClient) -> None:
     assert ok.json()["state"] == {}
 
 
+def test_fenced_host_cues_stay_off_the_transcript() -> None:
+    from web_api.host_cues import host_cue_message
+    from web_api.snapshots import project_messages
+
+    rows = project_messages(
+        [
+            {"id": "user", "role": "user", "content": "Show the meadow"},
+            host_cue_message(
+                "The selected media on this turn is horse.png. This image means that path.",
+                message_id="cue",
+            ),
+            {"id": "reply", "role": "assistant", "content": "Here it is."},
+        ]
+    )
+    assert [row["role"] for row in rows] == ["user", "assistant"]
+    assert rows[0]["body"] == "Show the meadow"
+    assert "horse.png" not in rows[0]["body"]
+    assert rows[1]["body"] == "Here it is."
+
+
+def test_empty_silent_user_rows_stay_off_the_transcript() -> None:
+    from web_api.host_cues import host_cue_message
+    from web_api.snapshots import project_messages
+
+    rows = project_messages(
+        [
+            host_cue_message(
+                "The user just created this gallery, named Demo.",
+                message_id="cue",
+            ),
+            {"id": "pad", "role": "user", "content": ""},
+            {"id": "reply", "role": "assistant", "content": "Welcome."},
+        ]
+    )
+    assert [row["role"] for row in rows] == ["assistant"]
+    assert rows[0]["body"] == "Welcome."
+
+
 def test_tool_rounds_stay_on_the_transcript() -> None:
     from web_api.snapshots import project_messages
 

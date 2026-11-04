@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "web-api"))
 
 from web_api.api import create_app  # noqa: E402
-from web_api.placement import initial_for, validate  # noqa: E402
+from web_api.placement import initial_for, retarget_media, validate  # noqa: E402
 from web_api.store import Store  # noqa: E402
 
 PNG = bytes.fromhex(
@@ -390,3 +390,117 @@ def test_workspace_file_serves_relative_media(client: TestClient, tmp_path: Path
     assert response.status_code == 200
     assert response.content == PNG
     assert "image/png" in response.headers["content-type"]
+
+
+def test_retarget_media_rewrites_or_drops_one_path() -> None:
+    state = {
+        "favlo_workspace": {
+            "version": 1,
+            "guide": "gallery",
+            "elements": [
+                {
+                    "key": "filmstrip",
+                    "element": "filmstrip",
+                    "slot": "rail",
+                    "props": {
+                        "items": [
+                            {"path": "horse.png", "caption": "Horse"},
+                            {"path": "zebra.png", "caption": "Zebra"},
+                        ]
+                    },
+                }
+            ],
+            "selection": {"kind": "file", "path": "horse.png"},
+        }
+    }
+    moved = retarget_media(state, "horse.png", "Albums/horse.png")
+    assert moved is not None
+    items = moved["favlo_workspace"]["elements"][0]["props"]["items"]
+    assert items[0] == {"path": "Albums/horse.png", "caption": "Horse"}
+    assert moved["favlo_workspace"]["selection"]["path"] == "Albums/horse.png"
+    assert retarget_media(state, "missing.png", None) is None
+    deleted = retarget_media(moved, "Albums/horse.png", None)
+    assert deleted is not None
+    assert [item["path"] for item in deleted["favlo_workspace"]["elements"][0]["props"]["items"]] == [
+        "zebra.png"
+    ]
+    assert deleted["favlo_workspace"]["selection"]["path"] == "zebra.png"
+
+
+def test_move_and_delete_update_the_session_placement(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def drop(path: Path) -> Path:
+        path.unlink()
+        return path
+
+    monkeypatch.setattr("web_api.folder_port.trash_path", drop)
+    channel_id = client.get("/channels").json()["channels"][0]["id"]
+    root = tmp_path / "library"
+    root.mkdir()
+    (root / "horse.png").write_bytes(PNG)
+    (root / "zebra.png").write_bytes(PNG)
+    (root / "Albums").mkdir()
+    created = client.post(
+        "/workspaces",
+        headers={"Idempotency-Key": "ws-retarget"},
+        json={
+            "channel_id": channel_id,
+            "name": "Retarget",
+            "type": "gallery",
+            "location": str(root),
+        },
+    )
+    assert created.status_code == 201
+    workspace = created.json()
+    from web_api.workspace_tools import tools as place_tools
+
+    store: Store = client.app.state.store
+    [place] = place_tools(store, workspace["id"], guide_id="gallery")
+    _placed(
+        place.func(
+            elements=[
+                {"key": "preview", "element": "preview", "slot": "stage", "props": {"fit": "contain"}},
+                {
+                    "key": "filmstrip",
+                    "element": "filmstrip",
+                    "slot": "rail",
+                    "props": {
+                        "items": [
+                            {"path": "horse.png", "caption": "Horse"},
+                            {"path": "zebra.png"},
+                        ]
+                    },
+                },
+            ],
+            selection={"kind": "file", "path": "horse.png"},
+        )
+    )
+    session_id = workspace["session_id"]
+    stored = store.agui_state(session_id)
+    store.save_thread_snapshot(
+        "favlo",
+        session_id,
+        {"messages": [], "state": stored, "interrupt": None, "session_state": None},
+    )
+    folder_id = client.get(f"/workspaces/{workspace['id']}/folders").json()["folders"][0]["id"]
+    moved = client.post(
+        f"/workspaces/{workspace['id']}/folders/{folder_id}/images/move",
+        json={"path": "horse.png", "to": "Albums/horse.png"},
+    )
+    assert moved.status_code == 200
+    assert moved.json()["state"]["favlo_workspace"]["selection"]["path"] == "Albums/horse.png"
+    snap = client.get(f"/sessions/{session_id}").json()
+    items = snap["state"]["favlo_workspace"]["elements"][1]["props"]["items"]
+    assert [item["path"] for item in items] == ["Albums/horse.png", "zebra.png"]
+    assert items[0]["caption"] == "Horse"
+    deleted = client.request(
+        "DELETE",
+        f"/workspaces/{workspace['id']}/folders/{folder_id}/images",
+        json={"path": "zebra.png"},
+    )
+    assert deleted.status_code == 200
+    after = client.get(f"/sessions/{session_id}").json()
+    left = after["state"]["favlo_workspace"]["elements"][1]["props"]["items"]
+    assert [item["path"] for item in left] == ["Albums/horse.png"]
+    assert after["state"]["favlo_workspace"]["selection"]["path"] == "Albums/horse.png"

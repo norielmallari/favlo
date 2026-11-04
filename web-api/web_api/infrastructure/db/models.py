@@ -167,6 +167,21 @@ class McpServerRow(Base):
     group_switches: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
 
 
+class GlobalMcpServerRow(Base):
+    __tablename__ = "global_mcp_server"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    transport: Mapped[str] = mapped_column(String, nullable=False)
+    command: Mapped[str] = mapped_column(Text, nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[int] = mapped_column(Integer, nullable=False)
+    add_by_default: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    group_switches: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
 class McpTaskRow(Base):
     __tablename__ = "mcp_task"
 

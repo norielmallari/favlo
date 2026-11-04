@@ -1,4 +1,4 @@
-"""Per-agent MCP servers. A test reads the live tool catalog."""
+"""Agent MCP servers and the global MCP catalog. A test reads the live tool catalog."""
 
 from __future__ import annotations
 
@@ -10,7 +10,14 @@ from web_api.http import json_body, key
 from web_api.mcp_cache import catalog
 from web_api.mcp_client import McpError
 from web_api.mcp_tools import groups_from, prepare_catalog, with_catalog
-from web_api.schemas import McpCreate, McpTest, McpUpdate
+from web_api.schemas import (
+    GlobalMcpCopy,
+    GlobalMcpCreate,
+    GlobalMcpUpdate,
+    McpCreate,
+    McpTest,
+    McpUpdate,
+)
 from web_api.store import NotFound, Rejected, _mcp_fields
 
 router = APIRouter()
@@ -43,6 +50,61 @@ async def update_server(server_id: str, body: McpUpdate, request: Request):
         body.model_dump(),
     )
     return json_body(200, updated)
+
+
+@router.get("/global-mcp-servers")
+async def list_global_servers(request: Request):
+    rows = await asyncio.to_thread(request.app.state.store.list_global_mcp_servers)
+    servers = await asyncio.gather(*(with_catalog(row) for row in rows))
+    return json_body(200, {"servers": servers})
+
+
+@router.post("/global-mcp-servers")
+async def create_global_server(body: GlobalMcpCreate, request: Request):
+    status, result, events = await asyncio.to_thread(
+        request.app.state.store.create_global_mcp_server,
+        key(request),
+        body.model_dump(),
+    )
+    for event in events:
+        await request.app.state.bus.publish(event)
+    return json_body(status, result)
+
+
+@router.patch("/global-mcp-servers/{server_id}")
+async def update_global_server(server_id: str, body: GlobalMcpUpdate, request: Request):
+    updated, events = await asyncio.to_thread(
+        request.app.state.store.update_global_mcp_server,
+        server_id,
+        body.model_dump(),
+    )
+    for event in events:
+        await request.app.state.bus.publish(event)
+    return json_body(200, updated)
+
+
+@router.delete("/global-mcp-servers/{server_id}")
+async def delete_global_server(server_id: str, request: Request):
+    result, events = await asyncio.to_thread(
+        request.app.state.store.delete_global_mcp_server,
+        server_id,
+    )
+    for event in events:
+        await request.app.state.bus.publish(event)
+    return json_body(200, result)
+
+
+@router.post("/global-mcp-servers/{server_id}/copy")
+async def copy_global_server(server_id: str, body: GlobalMcpCopy, request: Request):
+    status, result, events = await asyncio.to_thread(
+        request.app.state.store.copy_global_mcp_server,
+        key(request),
+        server_id,
+        body.model_dump(),
+    )
+    for event in events:
+        await request.app.state.bus.publish(event)
+    return json_body(status, result)
 
 
 @router.post("/mcp-servers/test")

@@ -1,5 +1,5 @@
 ---
-description: Completing a Favlo web feature adds a deterministic Playwright happy path in the same change. The script performs the new action and passes against live favlo serve, with the completing control already inside the viewport.
+description: Completing a Favlo web feature adds a deterministic Playwright happy path in the same change, chat keeps a stable prompt prefix until clear, and MAF and AG-UI native behavior is used unless the operator approves a workaround.
 globs: web-spa/**, web-api/**
 alwaysApply: false
 ---
@@ -11,6 +11,37 @@ Completing a feature includes its happy path in the same change. A feature is an
 Write that script before treating the feature as finished. Then run it. The feature is finished when that command passes. An instruction to leave the suite unrun still leaves the script in the change.
 
 A change a person cannot start, and that leaves the screen the same, adds neither check below.
+
+## Native MAF and AG-UI
+
+Use the Microsoft Agent Framework and AG-UI implementations that already perform the step. A tool call, a task result, a stream event, and a run lifecycle stay on those paths.
+
+A workaround is host code that replaces or short-circuits that behavior. It includes returning early from a tool, polling a protocol the client already resolves, inventing a follow-up turn to deliver a result, or passing an escape hatch such as `allow_claimed=True`.
+
+Do not add a workaround until the operator approves that workaround. Name the native call and why it cannot be used. Approval of one workaround does not cover the next.
+
+For MCP tasks, the native path is a caller-owned `mcp.Client` with `TasksClientExtension`. `Client.call_tool` resolves the task to a tool result before the function returns, and AG-UI emits that result in the same run.
+
+## Stable prefix cache
+
+Any algorithm or implementation that builds the model prompt for a chat or workspace thread must keep a stable token prefix until the person clears that chat.
+
+The AG-UI thread snapshot is the conversation record for that thread. Later turns append. They do not rewrite earlier rows, drop server-owned history, or rebuild the same facts in a different shape.
+
+Rules:
+
+- Leave prior messages byte-stable once saved. Do not edit, reorder, or strip them on a later turn.
+- Put model-only injected context (selection cues, reminders, host notes) on a durable fenced `user` host cue (`<system_reminder>…</system_reminder>`), not spliced into the person's typed body. Mark it with AG-UI `metadata.favlo.ui=hidden`. Persist that row in the thread snapshot so the next turn replays it unchanged.
+- Do not use mid-chat `system` or `developer` for those cues.
+- Do not inject context only for the current request and omit it from history. That makes the next prompt diverge from the cached prefix.
+- Hide host cues (and other non-transcript rows) in the transcript projection. Hiding from the UI is not a reason to drop them from the snapshot.
+- The trusted server writes host-cue rows into the durable snapshot before the run. Clients must not supply them.
+- Silent server cues (the gallery greeting) use that same fenced host-cue channel (plus an empty user pad the transcript omits). Do not delete snapshot rows after the run to hide them.
+- Tool schemas that the model has already used in a thread must stay available on later turns until clear. Persist AG-UI progressive MCP loads (`persist_loaded` / `restore_loaded`). Prefer eager gallery tools over a mid-turn load step that changes the schema.
+- Clear and archive mint a new thread. Only then may the prefix start over.
+- A chat turn sets `store` true. The thread snapshot keeps the latest response id. The next model call sends that id as `previous_response_id` and only the new turn. The listener prepends the stored chain, including reasoning, before the pipeline renders the prompt. A missing id starts a new chain.
+
+A design that needs a fact every turn without growing history must use a channel that is identical whenever that fact is unchanged (for example frozen instructions that do not include turn-varying text). A turn-varying fact belongs in durable history when the model must remember it.
 
 ## Borders and splitters
 

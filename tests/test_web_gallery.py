@@ -23,6 +23,16 @@ PNG = bytes.fromhex(
 )
 
 
+def _drop_instead_of_trash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the suite from filling the Trash. The real move is tested beside this."""
+
+    def drop(path: Path) -> Path:
+        path.unlink()
+        return path
+
+    monkeypatch.setattr("web_api.folder_port.trash_path", drop)
+
+
 async def _reply(**_kwargs: object):
     yield "Hello"
 
@@ -194,7 +204,10 @@ def test_gallery_create_requires_a_local_folder(client: TestClient, tmp_path: Pa
     assert absent.status_code == 400
 
 
-def test_images_and_folders_stay_inside_the_local_folder(client: TestClient, tmp_path: Path) -> None:
+def test_images_and_folders_stay_inside_the_local_folder(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _drop_instead_of_trash(monkeypatch)
     gallery = _gallery(client, tmp_path)
     workspace_id = gallery["id"]
     folder_id = gallery["folder"]["id"]
@@ -308,9 +321,9 @@ def test_gallery_tools_are_only_on_the_workspace_session(tmp_path: Path) -> None
     assert "gallery_create_folder" not in home_names
     assert "gallery_write_image" not in home_names
     assert "gallery_write_image" in gallery_names
-    assert "gallery_load_folder_tools" in gallery_names
-    assert "gallery_create_folder" not in gallery_names
-    assert "gallery_search_unlike_media" not in gallery_names
+    assert "gallery_search_unlike_media" in gallery_names
+    assert "gallery_create_folder" in gallery_names
+    assert "gallery_load_folder_tools" not in gallery_names
     assert "operating in a gallery workspace" in gallery_instructions.lower()
     assert "local folder" in gallery_instructions.lower()
     assert "operating in a gallery workspace" not in home_instructions.lower()
@@ -343,16 +356,21 @@ def test_a_workspace_session_gets_the_type_prompt_before_the_root(tmp_path: Path
     names = {_tool_name(item) for item in tools}
     assert WORKSPACE_INSTRUCTIONS["gallery"] in instructions
     assert WORKSPACE_INSTRUCTIONS["coding"] not in instructions
-    assert "gallery_load_folder_tools" in names
+    assert "gallery_load_folder_tools" not in names
     assert "gallery_find_media" in names
     assert "gallery_search_media" in names
-    assert "gallery_search_unlike_media" not in names
-    assert "gallery_create_folder" not in names
+    assert "gallery_get_metadata" in names
+    assert "gallery_load_image" in names
+    assert "gallery_search_unlike_media" in names
+    assert "gallery_create_folder" in names
     assert "workspace_place" in names
     assert "gallery_set_theme" in names
     assert "gallery_update_metadata" in names
     assert "gallery_list_folder" not in names
     assert "this session is using" not in instructions.lower()
+    assert "gallery_get_metadata" in instructions
+    assert "gallery_load_image" in instructions
+    assert "When the person asks" not in instructions
 
 
 def test_workspace_prompt_is_fixed_per_type() -> None:
@@ -376,10 +394,13 @@ def test_workspace_skills_are_name_and_description(client: TestClient, tmp_path:
     assert [item["name"] for item in created.json()["skills"]] == ["manage-gallery"]
     assert "gallery_write_image" in created.json()["skills"][0]["definition"]
     assert "gallery_find_media" in created.json()["skills"][0]["definition"]
+    assert "gallery_get_metadata" in created.json()["skills"][0]["definition"]
+    assert "gallery_load_image" in created.json()["skills"][0]["definition"]
     assert "gallery_update_metadata" in created.json()["skills"][0]["definition"]
     assert "gallery_search_unlike_media" in created.json()["skills"][0]["definition"]
     assert "workspace_place" in created.json()["skills"][0]["definition"]
     assert "gallery_list_folder" not in created.json()["skills"][0]["definition"]
+    assert "When the person asks" not in created.json()["skills"][0]["definition"]
     added = client.post(
         f"/workspaces/{workspace_id}/skills",
         headers={"Idempotency-Key": "skill-1"},
@@ -758,14 +779,41 @@ def test_workspace_session_accepts_messages_when_created_with_a_local_folder(
     assert accepted.status_code in {200, 201, 202}
 
 
-def test_delete_image_removes_the_file(tmp_path: Path) -> None:
+def test_delete_image_moves_the_file_to_the_trash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = tmp_path / "root"
     root.mkdir()
     (root / "ok.png").write_bytes(PNG)
+    (root / "ok.png.json").write_text("{}\n", encoding="utf-8")
+    moved: list[str] = []
+
+    def remember(path: Path) -> Path:
+        moved.append(path.name)
+        path.unlink()
+        return path
+
+    monkeypatch.setattr("web_api.folder_port.trash_path", remember)
     folder = LocalFolder(str(root))
     deleted = folder.delete_image("ok.png")
     assert deleted["name"] == "ok.png"
+    assert moved == ["ok.png", "ok.png.json"]
     assert folder.list("")["images"] == []
+
+
+def test_trash_path_moves_a_file_into_the_macos_trash(tmp_path: Path) -> None:
+    from Foundation import NSURL, NSFileManager
+
+    from web_api.folder_port import trash_path
+
+    target = tmp_path / "favlo-trash-check.png"
+    target.write_bytes(PNG)
+    landed = trash_path(target)
+    try:
+        assert not target.exists()
+        assert landed.name.startswith("favlo-trash-check")
+        assert landed.parent == Path.home() / ".Trash"
+    finally:
+        url = NSURL.fileURLWithPath_(str(landed))
+        NSFileManager.defaultManager().removeItemAtURL_error_(url, None)
 
 
 def test_a_named_image_in_the_message_is_read_from_the_gallery_folder(tmp_path: Path) -> None:
@@ -812,11 +860,11 @@ def test_a_named_image_in_the_message_is_read_from_the_gallery_folder(tmp_path: 
     assert found == [(PNG, "image/png")]
     assert exact == [(b"mine", "image/png")]
     assert missing == []
-    prompt = user_turn("look at zebra.png", "", found)
+    prompt = user_turn("look at zebra.png", found)
     assert prompt.contents[0].text == "look at zebra.png"
     assert prompt.contents[1].media_type == "image/png"
     assert str(prompt.contents[1].uri).startswith("data:image/png;base64,")
-    assert user_turn("plain", "", None) == "plain"
+    assert user_turn("plain", None) == "plain"
 
 
 def test_an_image_already_in_the_session_is_not_attached_again() -> None:
@@ -877,72 +925,6 @@ def test_a_sent_turn_records_the_open_folder_and_image(tmp_path: Path) -> None:
     assert context["gallery_image"] == "ok.png"
     assert attached_context["gallery_image"] == "ok.png"
     assert attached_context["gallery_attachment"] == "ok.png"
-
-
-def test_seeded_manage_gallery_is_refreshed_once(tmp_path: Path) -> None:
-    import sqlite3
-
-    from web_api.db import _PREVIOUS_MANAGE_GALLERY, _refresh_manage_gallery
-    from web_api.store import Store
-
-    path = tmp_path / "app.db"
-    store = Store(path)
-    try:
-        channel_id = store.channels()[0]["id"]
-        store.create_workspace("ws-refresh", {"channel_id": channel_id, "name": "Refresh", "type": "gallery", "location": _loc(tmp_path)})
-    finally:
-        store.close()
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.execute(
-        "UPDATE skill SET definition = ? WHERE name = 'manage-gallery'",
-        (_PREVIOUS_MANAGE_GALLERY,),
-    )
-    conn.execute("DELETE FROM meta WHERE key LIKE 'workspace_skill_refresh:%'")
-    _refresh_manage_gallery(conn)
-    refreshed = conn.execute("SELECT definition FROM skill WHERE name = 'manage-gallery'").fetchone()
-    assert "gallery_delete_image" in refreshed["definition"]
-    from web_api.db import _MANAGE_GALLERY_BEFORE_EMPTY, _refresh_empty_folder_rule
-
-    conn.execute(
-        "UPDATE skill SET definition = ? WHERE name = 'manage-gallery'",
-        (_MANAGE_GALLERY_BEFORE_EMPTY,),
-    )
-    conn.execute("DELETE FROM meta WHERE key LIKE 'workspace_skill_empty:%'")
-    _refresh_empty_folder_rule(conn)
-    emptied = conn.execute("SELECT definition FROM skill WHERE name = 'manage-gallery'").fetchone()
-    assert "Delete it only when it is empty." in emptied["definition"]
-    conn.execute("UPDATE skill SET definition = ? WHERE name = 'manage-gallery'", (_MANAGE_GALLERY_BEFORE_EMPTY,))
-    _refresh_empty_folder_rule(conn)
-    kept_empty = conn.execute("SELECT definition FROM skill WHERE name = 'manage-gallery'").fetchone()
-    assert kept_empty["definition"] == _MANAGE_GALLERY_BEFORE_EMPTY
-    conn.execute("UPDATE skill SET definition = 'Custom gallery notes.' WHERE name = 'manage-gallery'")
-    conn.execute("DELETE FROM meta WHERE key LIKE 'workspace_skill_refresh:%'")
-    _refresh_manage_gallery(conn)
-    edited = conn.execute("SELECT definition FROM skill WHERE name = 'manage-gallery'").fetchone()
-    assert edited["definition"] == "Custom gallery notes."
-    conn.execute("UPDATE skill SET definition = ? WHERE name = 'manage-gallery'", (_PREVIOUS_MANAGE_GALLERY,))
-    _refresh_manage_gallery(conn)
-    kept = conn.execute("SELECT definition FROM skill WHERE name = 'manage-gallery'").fetchone()
-    assert kept["definition"] == _PREVIOUS_MANAGE_GALLERY
-    from web_api.db import _MANAGE_GALLERY_BEFORE_UNLIKE, _refresh_manage_gallery_unlike
-
-    conn.execute(
-        "UPDATE skill SET definition = ? WHERE name = 'manage-gallery'",
-        (_MANAGE_GALLERY_BEFORE_UNLIKE,),
-    )
-    conn.execute("DELETE FROM meta WHERE key LIKE 'workspace_skill_unlike:%'")
-    _refresh_manage_gallery_unlike(conn)
-    unlike = conn.execute("SELECT definition FROM skill WHERE name = 'manage-gallery'").fetchone()
-    assert "gallery_search_unlike_media" in unlike["definition"]
-    conn.execute(
-        "UPDATE skill SET definition = ? WHERE name = 'manage-gallery'",
-        (_MANAGE_GALLERY_BEFORE_UNLIKE,),
-    )
-    _refresh_manage_gallery_unlike(conn)
-    kept_unlike = conn.execute("SELECT definition FROM skill WHERE name = 'manage-gallery'").fetchone()
-    assert kept_unlike["definition"] == _MANAGE_GALLERY_BEFORE_UNLIKE
-    conn.close()
 
 
 def test_create_coding_workspace(client: TestClient) -> None:
@@ -1033,11 +1015,11 @@ def test_opening_filmstrip_keeps_the_placement_clamps(client: TestClient, tmp_pa
     assert snap["state"]["favlo_workspace"]["selection"]["path"] == "frame-00.png"
 
 
-def test_find_media_includes_the_caption(tmp_path: Path) -> None:
+def test_find_media_rows_are_path_and_kind_only(tmp_path: Path) -> None:
     import json
 
     from web_api.gallery_metadata import write_sidecar
-    from web_api.gallery_tools import _attach_captions
+    from web_api.gallery_tools import _slim_media_rows
 
     root = tmp_path / "photos"
     root.mkdir()
@@ -1055,12 +1037,156 @@ def test_find_media_includes_the_caption(tmp_path: Path) -> None:
         },
     )
     folder = LocalFolder(root)
-    listing = _attach_captions(folder, folder.walk_media())
+    listing = _slim_media_rows(folder.walk_media())
     row = listing["media"][0]
-    assert row["path"] == "horse.png"
-    assert row["description"] == "A painted horse in a field."
-    assert row["title"] == "Horse"
-    assert json.dumps(listing["images"][0]) == json.dumps(row)
+    assert row == {"path": "horse.png", "kind": "image"}
+    assert "images" not in listing
+    assert "title" not in row
+    assert "description" not in json.dumps(listing)
+
+
+def test_selection_announcement_only_when_path_changes() -> None:
+    from web_api.gallery_tools import (
+        announced_selection,
+        announced_selection_from_history,
+        selection_announcement,
+        selection_cue,
+    )
+
+    first = selection_announcement("horse.png", None, "A painted horse.")
+    assert "horse.png" in first
+    assert "A painted horse." in first
+    prior = selection_cue("horse.png", "A painted horse.")
+    assert announced_selection(prior) == "horse.png"
+    assert selection_announcement("horse.png", "horse.png", "ignored") == ""
+    cleared = selection_announcement(None, "horse.png")
+    assert cleared == "No media is selected on this turn."
+    assert announced_selection(cleared) == ""
+    from web_api.host_cues import fence_cue, host_cue_message
+
+    history = [
+        {"role": "user", "content": "show this"},
+        host_cue_message(prior, message_id="cue-1"),
+        {"role": "assistant", "content": "ok"},
+    ]
+    assert announced_selection_from_history(history) == "horse.png"
+    assert announced_selection_from_history([{"role": "user", "content": prior}]) is None
+    # Legacy developer/system rows still count.
+    assert announced_selection_from_history(
+        [{"role": "developer", "content": prior}]
+    ) == "horse.png"
+    assert announced_selection_from_history(
+        [*history, {"role": "system", "content": cleared}]
+    ) == ""
+    assert announced_selection_from_history(
+        [*history, {"role": "user", "content": fence_cue(cleared)}]
+    ) == ""
+
+
+def test_silent_server_cue_is_a_fenced_host_snapshot_row(tmp_path: Path) -> None:
+    from web_api.agui import _SNAPSHOT_SCOPE
+    from web_api.host_cues import fence_cue, host_cue_message
+    from web_api.store import Store
+
+    store = Store(tmp_path / "app.db")
+    try:
+        channel_id = store.channels()[0]["id"]
+        _status, workspace, _events = store.create_workspace(
+            "ws-silent-cue",
+            {
+                "channel_id": channel_id,
+                "name": "Silent",
+                "type": "gallery",
+                "location": _loc(tmp_path),
+            },
+        )
+        thread_id = str(workspace["session_id"])
+        cue = (
+            "The user just created this gallery, named Silent. "
+            "The filmstrip already shows the images. "
+            "Greet them once in one or two sentences."
+        )
+        row = host_cue_message(cue, message_id="cue-1")
+        store.append_thread_snapshot_message(_SNAPSHOT_SCOPE, thread_id, row)
+        document = store.thread_snapshot(_SNAPSHOT_SCOPE, thread_id)
+        assert document is not None
+        assert document["messages"] == [row]
+        # Second append keeps history; nothing is deleted after the run.
+        store.append_thread_snapshot_message(
+            _SNAPSHOT_SCOPE,
+            thread_id,
+            {"id": "u-pad", "role": "user", "content": ""},
+        )
+        store.append_thread_snapshot_message(
+            _SNAPSHOT_SCOPE,
+            thread_id,
+            {"id": "a1", "role": "assistant", "content": "Welcome."},
+        )
+        kept = store.thread_snapshot(_SNAPSHOT_SCOPE, thread_id)["messages"]
+        assert kept[0]["role"] == "user"
+        assert kept[0]["content"] == fence_cue(cue)
+        assert kept[0]["metadata"]["favlo"]["ui"] == "hidden"
+        assert kept[1]["content"] == ""
+        assert kept[2]["role"] == "assistant"
+    finally:
+        store.close()
+
+
+def test_selection_cue_is_a_fenced_host_snapshot_row(tmp_path: Path) -> None:
+    from web_api.agui import _with_selection_cue
+    from web_api.gallery_tools import selection_cue
+    from web_api.host_cues import fence_cue
+
+    root = Path(_loc(tmp_path, "cue-root"))
+    (root / "horse.png").write_bytes(PNG)
+    meta = root / ".favlo_metadata"
+    meta.mkdir()
+    (meta / "horse.png.json").write_text(
+        '{"version":1,"filename":"horse.png","kind":"image","description":"A painted horse."}\n',
+        encoding="utf-8",
+    )
+    store = Store(tmp_path / "app.db")
+    try:
+        channel_id = store.channels()[0]["id"]
+        _status, workspace, _events = store.create_workspace(
+            "ws-selection-cue",
+            {
+                "channel_id": channel_id,
+                "name": "Cue",
+                "type": "gallery",
+                "location": str(root),
+            },
+        )
+        thread_id = str(workspace["session_id"])
+        store.save_agui_state(
+            thread_id,
+            {
+                "favlo_workspace": {
+                    "version": 1,
+                    "guide": "gallery",
+                    "elements": [],
+                    "selection": {"path": "horse.png"},
+                }
+            },
+        )
+        incoming = [{"id": "u1", "role": "user", "content": "Show the meadow"}]
+        out = _with_selection_cue(store, thread_id, incoming)
+        assert out == incoming
+        assert out[0]["content"] == "Show the meadow"
+        document = store.thread_snapshot("favlo", thread_id)
+        assert document is not None
+        messages = document["messages"]
+        assert len(messages) == 1
+        assert messages[0]["role"] == "user"
+        assert messages[0]["content"] == fence_cue(
+            selection_cue("horse.png", "A painted horse.")
+        )
+        assert messages[0]["metadata"]["favlo"]["ui"] == "hidden"
+        again = _with_selection_cue(store, thread_id, incoming)
+        assert again == incoming
+        assert len(store.thread_snapshot("favlo", thread_id)["messages"]) == 1
+    finally:
+        store.close()
 
 
 def test_gallery_creation_captions_before_the_greeting(client: TestClient, tmp_path: Path, monkeypatch) -> None:
@@ -1298,6 +1424,48 @@ def test_update_metadata_changes_only_the_named_fields(client: TestClient, tmp_p
     assert missing["error"] == "missing"
     coerced = _tool_json(tool, {"path": "horse.png", "nsfw": "false"})
     assert coerced["nsfw"] is False
+
+
+def test_get_metadata_and_load_image(client: TestClient, tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+    import time
+
+    from agent_framework import Content
+
+    from web_api.gallery_tools import tools
+
+    monkeypatch.setattr("web_api.gallery_embed._embed", lambda _text: [0.0] * 1024)
+    root = tmp_path / "detail"
+    root.mkdir()
+    (root / "horse.png").write_bytes(PNG)
+    channel_id = client.get("/channels").json()["channels"][0]["id"]
+    created = client.post(
+        "/workspaces",
+        headers={"Idempotency-Key": "ws-detail"},
+        json={"channel_id": channel_id, "name": "Detail", "type": "gallery", "location": str(root)},
+    )
+    assert created.status_code == 201
+    workspace_id = created.json()["id"]
+    deadline = time.time() + 5
+    while time.time() < deadline and not (root / ".favlo_metadata" / "horse.png.json").is_file():
+        time.sleep(0.05)
+    meta = next(
+        item
+        for item in tools(client.app.state.store, workspace_id, None)
+        if _tool_name(item) == "gallery_get_metadata"
+    )
+    body = _tool_json(meta, {"path": "horse.png"})
+    assert body["path"] == "horse.png"
+    assert body["description"]
+    assert "title" in body
+    load = next(
+        item
+        for item in tools(client.app.state.store, workspace_id, None)
+        if _tool_name(item) == "gallery_load_image"
+    )
+    loaded = asyncio.run(load.invoke(arguments={"path": "horse.png"}, skip_parsing=True))
+    assert isinstance(loaded, Content)
+    assert loaded.media_type == "image/png"
 
 
 def test_vision_request_uses_the_agent_effort(client: TestClient, tmp_path: Path, monkeypatch) -> None:

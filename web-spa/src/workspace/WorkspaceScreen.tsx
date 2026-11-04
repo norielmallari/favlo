@@ -233,6 +233,7 @@ export function WorkspaceScreen({
             previous_session_id?: string;
             trace?: unknown;
             theme?: string;
+            state?: PlacementState;
           };
         };
         if (seen.current.has(payload.event_id)) {
@@ -257,6 +258,9 @@ export function WorkspaceScreen({
         }
         if (payload.type === 'workspace.theme_set' && isGalleryScheme(payload.payload?.theme)) {
           onTheme?.(payload.payload.theme);
+        }
+        if (payload.type === 'gallery.updated' && payload.payload?.state?.favlo_workspace) {
+          setPlacement(ensureFilmstripSelection(payload.payload.state));
         }
         if (payload.type === 'run.started' && payload.run_id !== openRun.current) {
           setWorking(true);

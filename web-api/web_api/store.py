@@ -22,7 +22,7 @@ from web_api.events import envelope, now
 from web_api.heartbeat_tools import GROUP_ID as HEARTBEAT_GROUP_ID
 from web_api.ids import FAVLO_AGENT_ID, LOCAL_PROVIDER_ID, guid
 from web_api.infrastructure.db.database import open_session
-from web_api.infrastructure.db.session import LOCAL_MCP_URL
+from web_api.infrastructure.db.defaults import copy_default_mcp, copy_default_skills
 from web_api.infrastructure.db.models import (
     AgentRow,
     AgentSkillRow,
@@ -32,6 +32,7 @@ from web_api.infrastructure.db.models import (
     CommandRow,
     EventRow,
     FolderRow,
+    GlobalMcpServerRow,
     GlobalSkillRow,
     HeartbeatRow,
     McpServerRow,
@@ -51,7 +52,7 @@ from web_api.infrastructure.db.models import (
     WorkspaceRow,
 )
 from web_api.infrastructure.db.row import as_dict
-from web_api.mcp_groups import GROUP_NAMES, ORDER
+from web_api.mcp_groups import GROUP_NAMES, ORDER, default_switch_payload
 from web_api.session_commands import ARCHIVE_COMMAND, ARCHIVE_CUE, CLEAR_COMMAND
 
 # SQLite insertion order. rowid is not a mapped column.
@@ -327,16 +328,46 @@ def _mcp_server(row: Any) -> dict[str, Any]:
     }
 
 
-def _save_switches(db: Session, server_id: str, groups: list[Any]) -> None:
-    """Store which groups are on. Names and schemas stay in the catalog cache."""
-    row = db.get(McpServerRow, server_id)
-    switches = _group_switches(row.group_switches if row is not None else "")
+def _global_mcp_server(row: Any) -> dict[str, Any]:
+    data = _view(row)
+    switches = _group_switches(data["group_switches"])
+    rank = {group_id: index for index, group_id in enumerate(ORDER)}
+    ordered = sorted(switches, key=lambda group_id: rank.get(group_id, len(rank)))
+    return {
+        "id": data["id"],
+        "name": data["name"],
+        "transport": data["transport"],
+        "command": data["command"],
+        "url": data["url"],
+        "enabled": bool(data["enabled"]),
+        "add_by_default": bool(data["add_by_default"]),
+        "revision": data["revision"],
+        "groups": [
+            {
+                "id": group_id,
+                "name": GROUP_NAMES.get(group_id, group_id),
+                "enabled": switches[group_id],
+                "tools": [],
+            }
+            for group_id in ordered
+        ],
+    }
+
+
+def _switch_payload(groups: list[Any], prior: str = "") -> str:
+    switches = _group_switches(prior)
     for item in groups:
         if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]:
             continue
         switches[item["id"]] = bool(item.get("enabled"))
+    return json.dumps(switches)
+
+
+def _save_switches(db: Session, server_id: str, groups: list[Any]) -> None:
+    """Store which groups are on. Names and schemas stay in the catalog cache."""
+    row = db.get(McpServerRow, server_id)
     if row is not None:
-        row.group_switches = json.dumps(switches)
+        row.group_switches = _switch_payload(groups, row.group_switches)
 
 
 def _schedule(expression: str, timezone: str) -> tuple[str, str]:
@@ -537,53 +568,6 @@ def _seed_workspace_skills(db: Session, workspace_id: str, kind: str, created: s
             )
         )
         _mark_meta(db, f"workspace_skill_seed:{workspace_id}:{name}")
-
-
-def _attach_favlo_media(db: Session, agent_id: str) -> None:
-    """Give this agent the same Favlo media server the seeded agent starts with."""
-    taken = db.scalars(
-        select(McpServerRow).where(
-            McpServerRow.agent_id == agent_id,
-            McpServerRow.name == "Favlo media",
-        )
-    ).first()
-    if taken is not None:
-        return
-    db.add(
-        McpServerRow(
-            id=guid(),
-            agent_id=agent_id,
-            name="Favlo media",
-            transport="http",
-            command="",
-            url=LOCAL_MCP_URL,
-            enabled=1,
-            status="unchecked",
-            status_message="",
-            revision=1,
-            group_switches="{}",
-        )
-    )
-
-
-def _copy_default_skills(db: Session, agent_id: str, created: str) -> None:
-    rows = db.scalars(
-        select(GlobalSkillRow)
-        .where(GlobalSkillRow.add_by_default == 1)
-        .order_by(GlobalSkillRow.name.collate("NOCASE"), GlobalSkillRow.id)
-    )
-    for row in rows:
-        db.add(
-            AgentSkillRow(
-                id=guid(),
-                agent_id=agent_id,
-                name=row.name,
-                description=row.description,
-                definition=row.definition,
-                revision=1,
-                created_at=created,
-            )
-        )
 
 
 def _skill_fields(body: dict[str, Any]) -> tuple[str, str, str]:
@@ -1182,8 +1166,8 @@ class Store:
                     created_at=created,
                 )
             )
-            _copy_default_skills(db, agent_id, created)
-            _attach_favlo_media(db, agent_id)
+            copy_default_skills(db, agent_id, created)
+            copy_default_mcp(db, agent_id)
             groups = body.get("tool_groups")
             if groups is not None:
                 _replace_groups(db, agent_id, groups)
@@ -1835,6 +1819,202 @@ class Store:
 
         return self._write(write)
 
+    def list_global_mcp_servers(self) -> list[dict[str, Any]]:
+        def read(db: Session) -> list[dict[str, Any]]:
+            rows = db.scalars(
+                select(GlobalMcpServerRow).order_by(
+                    GlobalMcpServerRow.name.collate("NOCASE"), GlobalMcpServerRow.id
+                )
+            )
+            return [_global_mcp_server(row) for row in rows]
+
+        return self._read(read)
+
+    def global_mcp_server(self, server_id: str) -> dict[str, Any] | None:
+        found = [row for row in self.list_global_mcp_servers() if row["id"] == server_id]
+        return found[0] if found else None
+
+    def create_global_mcp_server(
+        self, key: str | None, body: dict[str, Any]
+    ) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
+        def write(db: Session) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
+            prior = self._claim(db, key, body)
+            if prior is not None:
+                return prior[0], prior[1], []
+            transport, command, url = _mcp_fields(body)
+            name = str(body.get("name") or "").strip()
+            if not name:
+                raise Rejected("A name is required.")
+            taken = db.scalars(
+                select(GlobalMcpServerRow.id).where(GlobalMcpServerRow.name == name)
+            ).first()
+            if taken is not None:
+                raise Rejected("That MCP name is already in the catalog.")
+            server_id = guid()
+            db.add(
+                GlobalMcpServerRow(
+                    id=server_id,
+                    name=name,
+                    transport=transport,
+                    command=command,
+                    url=url,
+                    enabled=int(bool(body.get("enabled", True))),
+                    add_by_default=int(bool(body.get("add_by_default"))),
+                    revision=1,
+                    group_switches="{}",
+                    created_at=now(),
+                )
+            )
+            groups = body.get("groups")
+            if isinstance(groups, list):
+                row = db.get(GlobalMcpServerRow, server_id)
+                if row is not None:
+                    row.group_switches = _switch_payload(groups, row.group_switches)
+            result = _global_mcp_server(db.get(GlobalMcpServerRow, server_id))
+            events = [
+                self._event(
+                    db,
+                    stream_id="app",
+                    event_type="global_mcp.created",
+                    payload=result,
+                    actor={"kind": "user", "id": "local"},
+                )
+            ]
+            self._remember(db, key or "", body, 201, result)
+            return 201, result, events
+
+        return self._write(write)
+
+    def update_global_mcp_server(
+        self, server_id: str, body: dict[str, Any]
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        def write(db: Session) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            row = db.get(GlobalMcpServerRow, server_id)
+            if row is None:
+                raise NotFound("That MCP server does not exist.")
+            expected = int(body["expected_revision"])
+            if int(row.revision) != expected:
+                raise Conflict("The MCP server was updated. Reload and try again.")
+            transport, command, url = _mcp_fields(body)
+            name = str(body.get("name") or "").strip()
+            if not name:
+                raise Rejected("A name is required.")
+            taken = db.scalars(
+                select(GlobalMcpServerRow.id).where(
+                    GlobalMcpServerRow.name == name,
+                    GlobalMcpServerRow.id != server_id,
+                )
+            ).first()
+            if taken is not None:
+                raise Rejected("That MCP name is already in the catalog.")
+            add_by_default = row.add_by_default
+            if "add_by_default" in body and body["add_by_default"] is not None:
+                add_by_default = int(bool(body["add_by_default"]))
+            row.name = name
+            row.transport = transport
+            row.command = command
+            row.url = url
+            row.enabled = int(bool(body["enabled"]))
+            row.add_by_default = add_by_default
+            row.revision = expected + 1
+            groups = body.get("groups")
+            if isinstance(groups, list):
+                row.group_switches = _switch_payload(groups, row.group_switches)
+            result = _global_mcp_server(row)
+            events = [
+                self._event(
+                    db,
+                    stream_id="app",
+                    event_type="global_mcp.updated",
+                    payload=result,
+                    actor={"kind": "user", "id": "local"},
+                )
+            ]
+            return result, events
+
+        return self._write(write)
+
+    def delete_global_mcp_server(
+        self, server_id: str
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        def write(db: Session) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            row = db.get(GlobalMcpServerRow, server_id)
+            if row is None:
+                raise NotFound("That MCP server does not exist.")
+            db.delete(row)
+            result = {"id": server_id}
+            events = [
+                self._event(
+                    db,
+                    stream_id="app",
+                    event_type="global_mcp.deleted",
+                    payload=result,
+                    actor={"kind": "user", "id": "local"},
+                )
+            ]
+            return result, events
+
+        return self._write(write)
+
+    def copy_global_mcp_server(
+        self, key: str | None, server_id: str, body: dict[str, Any]
+    ) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
+        def write(db: Session) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
+            prior = self._claim(db, key, body)
+            if prior is not None:
+                return prior[0], prior[1], []
+            row = db.get(GlobalMcpServerRow, server_id)
+            if row is None:
+                raise NotFound("That MCP server does not exist.")
+            agent_id = str(body.get("agent_id") or "").strip()
+            if not agent_id:
+                raise Rejected("Choose an agent.")
+            agent = db.get(AgentRow, agent_id)
+            if agent is None:
+                raise NotFound("That agent does not exist.")
+            taken = db.scalars(
+                select(McpServerRow.id).where(
+                    McpServerRow.agent_id == agent_id,
+                    McpServerRow.name == row.name,
+                )
+            ).first()
+            if taken is not None:
+                raise Rejected("That MCP name is already on this agent.")
+            copy_id = guid()
+            db.add(
+                McpServerRow(
+                    id=copy_id,
+                    agent_id=agent_id,
+                    name=row.name,
+                    transport=row.transport,
+                    command=row.command,
+                    url=row.url,
+                    enabled=int(row.enabled),
+                    status="unchecked",
+                    status_message="",
+                    revision=1,
+                    group_switches=(
+                        default_switch_payload()
+                        if row.name == "Favlo media"
+                        else row.group_switches or "{}"
+                    ),
+                )
+            )
+            result = _mcp_server(db.get(McpServerRow, copy_id))
+            events = [
+                self._event(
+                    db,
+                    stream_id="app",
+                    event_type="mcp.created",
+                    payload=result,
+                    actor={"kind": "user", "id": "local"},
+                )
+            ]
+            self._remember(db, key or "", body, 201, result)
+            return 201, result, events
+
+        return self._write(write)
+
     def enabled_mcp_servers(self, agent_id: str) -> list[dict[str, Any]]:
         """Enabled servers and the group switches. Tool definitions are not here."""
 
@@ -1857,58 +2037,6 @@ class Store:
             ]
 
         return self._read(read)
-
-    def begin_mcp_task(self, body: dict[str, Any]) -> dict[str, Any]:
-        def write(db: Session) -> dict[str, Any]:
-            task_id = guid()
-            db.add(
-                McpTaskRow(
-                    id=task_id,
-                    remote_id=body["remote_id"],
-                    server_id=body["server_id"],
-                    agent_id=body["agent_id"],
-                    session_id=body["session_id"],
-                    tool_name=body["tool_name"],
-                    status="working",
-                    poll_interval_ms=int(body["poll_interval_ms"]),
-                    created_at=now(),
-                )
-            )
-            return {
-                "id": task_id,
-                "remote_id": body["remote_id"],
-                "server_id": body["server_id"],
-                "agent_id": body["agent_id"],
-                "session_id": body["session_id"],
-                "tool_name": body["tool_name"],
-                "status": "working",
-                "poll_interval_ms": int(body["poll_interval_ms"]),
-            }
-
-        return self._write(write)
-
-    def working_mcp_tasks(self) -> list[dict[str, Any]]:
-        def read(db: Session) -> list[dict[str, Any]]:
-            rows = db.scalars(
-                select(McpTaskRow)
-                .where(McpTaskRow.status == "working")
-                .order_by(McpTaskRow.created_at)
-            )
-            return [_view(row) for row in rows]
-
-        return self._read(read)
-
-    def deliver_mcp_result(self, task_pk: str, status: str) -> bool:
-        """Mark a working task finished. The result is not a chat message."""
-
-        def write(db: Session) -> bool:
-            row = db.get(McpTaskRow, task_pk)
-            if row is None or row.status != "working":
-                return False
-            row.status = status
-            return True
-
-        return self._write(write)
 
     def clear_session_messages(self, session_id: str) -> list[dict[str, Any]]:
         """Clear the chat and mint a new chat GUID for that slot."""
@@ -2097,31 +2225,48 @@ class Store:
 
         self._write(write)
 
-    def hide_snapshot_cue(self, thread_id: str, cue: str) -> None:
-        """Drop a server cue from the snapshot. It is not a chat line."""
-        from web_api.snapshots import message_text
-
-        cleaned = cue.strip()
-        if not cleaned:
-            return
+    def append_thread_snapshot_message(
+        self, scope: str, thread_id: str, message: dict[str, Any]
+    ) -> None:
+        """Append one server-owned message to the durable AG-UI thread snapshot."""
 
         def write(db: Session) -> None:
-            rows = db.scalars(
-                select(ThreadSnapshotRow).where(ThreadSnapshotRow.thread_id == thread_id)
-            )
-            for row in rows:
-                document = json.loads(row.document)
-                messages = document.get("messages") if isinstance(document, dict) else None
-                if not isinstance(messages, list):
-                    continue
-                for index in range(len(messages) - 1, -1, -1):
-                    item = messages[index]
-                    if not isinstance(item, dict) or item.get("role") != "user":
-                        continue
-                    if message_text(item.get("content")).strip() == cleaned:
-                        del messages[index]
-                        row.document = json.dumps(document)
-                        break
+            row = db.scalars(
+                select(ThreadSnapshotRow).where(
+                    ThreadSnapshotRow.scope == scope,
+                    ThreadSnapshotRow.thread_id == thread_id,
+                )
+            ).first()
+            if row is None or not row.document:
+                document: dict[str, Any] = {
+                    "messages": [message],
+                    "state": None,
+                    "interrupt": None,
+                    "session_state": None,
+                }
+                db.add(
+                    ThreadSnapshotRow(
+                        id=guid(),
+                        scope=scope,
+                        thread_id=thread_id,
+                        document=json.dumps(document),
+                    )
+                )
+                return
+            document = json.loads(row.document)
+            if not isinstance(document, dict):
+                document = {
+                    "messages": [],
+                    "state": None,
+                    "interrupt": None,
+                    "session_state": None,
+                }
+            messages = document.get("messages")
+            if not isinstance(messages, list):
+                messages = []
+            messages.append(message)
+            document["messages"] = messages
+            row.document = json.dumps(document)
 
         self._write(write)
 
@@ -2250,63 +2395,6 @@ class Store:
             return max(50, min(95, value))
 
         return self._read(read)
-
-    def begin_task_correction(
-        self, session_id: str, agent_id: str, cue: str
-    ) -> tuple[str | None, list[dict[str, Any]], bool]:
-        """Start a turn that answers a finished task.
-
-        The cue is the model prompt. It is not a chat message. A running reply
-        returns waiting so the caller can try again after that reply ends.
-        """
-
-        def write(
-            db: Session,
-        ) -> tuple[str | None, list[dict[str, Any]], bool]:
-            prompt = cue.strip()
-            if not prompt:
-                return None, [], False
-            chat = db.get(SessionRow, session_id)
-            if chat is None:
-                return None, [], False
-            active = db.scalars(
-                select(RunRow.id).where(
-                    RunRow.session_id == session_id,
-                    RunRow.status == "running",
-                )
-            ).first()
-            if active is not None:
-                return None, [], True
-            run_id = guid()
-            created = now()
-            db.add(
-                RunRow(
-                    id=run_id,
-                    session_id=session_id,
-                    agent_id=agent_id,
-                    status="running",
-                    error=None,
-                    started_at=created,
-                    finished_at=None,
-                    cue=prompt,
-                )
-            )
-            actor = {"kind": "agent", "id": agent_id}
-            events = [
-                self._event(
-                    db,
-                    stream_id=f"session:{session_id}",
-                    event_type="run.started",
-                    payload={"status": "running"},
-                    channel_id=chat.channel_id,
-                    session_id=session_id,
-                    run_id=run_id,
-                    actor=actor,
-                )
-            ]
-            return run_id, events, False
-
-        return self._write(write)
 
     def channels(self) -> list[dict[str, Any]]:
         def read(db: Session) -> list[dict[str, Any]]:
@@ -2521,7 +2609,11 @@ class Store:
         return self._write(write)
 
     def begin_greeting(self, session_id: str, run_id: str, cue: str) -> dict[str, Any]:
-        """Open a run whose cue is the greeting. The cue is not stored as a user message."""
+        """Open a run whose cue is the greeting.
+
+        The host writes that cue as a fenced, UI-hidden user row on the thread
+        snapshot (see ``host_cues``). It is not the person's typed message.
+        """
 
         def write(db: Session) -> dict[str, Any]:
             chat = db.get(SessionRow, session_id)

@@ -5,7 +5,13 @@ import path from 'node:path';
 import { expect, test } from '@playwright/test';
 
 import { onScreen } from '../on-screen';
-import { FAVLO_AGENT_ID, FAVLO_CHANNEL_ID, FAVLO_MCP_ID, LOCAL_PROVIDER_ID } from '../../src/api/seed-ids';
+import {
+  FAVLO_AGENT_ID,
+  FAVLO_CHANNEL_ID,
+  FAVLO_GLOBAL_MCP_ID,
+  FAVLO_MCP_ID,
+  LOCAL_PROVIDER_ID,
+} from '../../src/api/seed-ids';
 
 const API = 'http://127.0.0.1:8130';
 const PROMPT = 'Reply with the single word ready.';
@@ -48,6 +54,17 @@ test('a new install seeds Favlo and answers the first chat', async ({ page }) =>
   if (local?.models.some((row) => row.model_id === 'spark-x26-1-7b:high')) {
     expect(chosen?.model_id).toBe('spark-x26-1-7b:high');
   }
+  const globalMcp = await read<{ servers: McpServer[] }>('/global-mcp-servers');
+  expect(globalMcp.servers).toEqual([
+    expect.objectContaining({
+      id: FAVLO_GLOBAL_MCP_ID,
+      name: 'Favlo media',
+      transport: 'http',
+      url: 'http://127.0.0.1:8129/mcp',
+      enabled: true,
+      add_by_default: true,
+    }),
+  ]);
   const mcp = await read<{ servers: McpServer[] }>('/mcp-servers');
   expect(mcp.servers).toEqual([
     expect.objectContaining({

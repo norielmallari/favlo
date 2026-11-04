@@ -9,16 +9,23 @@ from favlo.config_tools import GROUP_ID
 from favlo.persona import PERSONA
 from web_api.events import now
 from web_api.global_skill_catalog import catalog_skills
-from web_api.ids import FAVLO_AGENT_ID, FAVLO_CHANNEL_ID, FAVLO_MCP_ID, LOCAL_PROVIDER_ID, guid
+from web_api.ids import (
+    FAVLO_AGENT_ID,
+    FAVLO_CHANNEL_ID,
+    FAVLO_GLOBAL_MCP_ID,
+    FAVLO_MCP_ID,
+    LOCAL_PROVIDER_ID,
+    guid,
+)
+from web_api.infrastructure.db.defaults import copy_default_mcp, copy_default_skills
 from web_api.infrastructure.db.models import (
     AgentRow,
-    AgentSkillRow,
     AgentToolGroupRow,
     CatalogElementRow,
     ChannelMemberRow,
     ChannelRow,
+    GlobalMcpServerRow,
     GlobalSkillRow,
-    McpServerRow,
     MetaRow,
     ProviderRow,
     SessionRow,
@@ -26,8 +33,9 @@ from web_api.infrastructure.db.models import (
     ShellElementRow,
     ShellRow,
 )
-from web_api.shell_catalog import catalog_elements, dump, shell_elements, shells
 from web_api.infrastructure.db.session import LOCAL_BASE_URL, LOCAL_MCP_URL
+from web_api.mcp_groups import default_switch_payload
+from web_api.shell_catalog import catalog_elements, dump, shell_elements, shells
 
 
 def seed(session: Session) -> None:
@@ -53,6 +61,9 @@ def seed(session: Session) -> None:
                 revision=1,
             )
         )
+    created = now()
+    _seed_global_skills(session, created)
+    _seed_global_mcp(session, created)
     if session.get(AgentRow, FAVLO_AGENT_ID) is None:
         session.add(
             AgentRow(
@@ -71,39 +82,19 @@ def seed(session: Session) -> None:
                 kind="channel",
                 channel_id=FAVLO_CHANNEL_ID,
                 participant_id=FAVLO_AGENT_ID,
-                created_at=now(),
+                created_at=created,
             )
         )
+        copy_default_skills(session, FAVLO_AGENT_ID, created)
+        copy_default_mcp(session, FAVLO_AGENT_ID, prefer_ids={"Favlo media": FAVLO_MCP_ID})
     if session.get(MetaRow, "favlo_config_seed") is None:
         if session.get(AgentRow, FAVLO_AGENT_ID) is not None:
             session.add(AgentToolGroupRow(agent_id=FAVLO_AGENT_ID, group_id=GROUP_ID))
         session.add(MetaRow(key="favlo_config_seed", value="1"))
-    if session.get(MetaRow, "favlo_mcp_seed") is None:
-        if session.get(AgentRow, FAVLO_AGENT_ID) is not None:
-            taken = session.scalars(
-                select(McpServerRow).where(
-                    McpServerRow.agent_id == FAVLO_AGENT_ID,
-                    McpServerRow.name == "Favlo media",
-                )
-            ).first()
-            if taken is None:
-                session.add(
-                    McpServerRow(
-                        id=FAVLO_MCP_ID,
-                        agent_id=FAVLO_AGENT_ID,
-                        name="Favlo media",
-                        transport="http",
-                        command="",
-                        url=LOCAL_MCP_URL,
-                        enabled=1,
-                        status="unchecked",
-                        status_message="",
-                        revision=1,
-                        group_switches="{}",
-                    )
-                )
-        session.add(MetaRow(key="favlo_mcp_seed", value="1"))
-    created = now()
+    session.commit()
+
+
+def _seed_global_skills(session: Session, created: str) -> None:
     for name, description, definition in catalog_skills():
         mark = f"global_skill_seed:{name}"
         if session.get(MetaRow, mark) is not None:
@@ -120,28 +111,32 @@ def seed(session: Session) -> None:
                     created_at=created,
                 )
             )
-        if (
-            session.scalars(
-                select(AgentSkillRow).where(
-                    AgentSkillRow.agent_id == FAVLO_AGENT_ID,
-                    AgentSkillRow.name == name,
-                )
-            ).first()
-            is None
-        ):
+        session.add(MetaRow(key=mark, value="1"))
+
+
+def _seed_global_mcp(session: Session, created: str) -> None:
+    if session.get(MetaRow, "global_mcp_seed:Favlo media") is not None:
+        return
+    if session.get(GlobalMcpServerRow, FAVLO_GLOBAL_MCP_ID) is None:
+        taken = session.scalars(
+            select(GlobalMcpServerRow).where(GlobalMcpServerRow.name == "Favlo media")
+        ).first()
+        if taken is None:
             session.add(
-                AgentSkillRow(
-                    id=guid(),
-                    agent_id=FAVLO_AGENT_ID,
-                    name=name,
-                    description=description,
-                    definition=definition,
+                GlobalMcpServerRow(
+                    id=FAVLO_GLOBAL_MCP_ID,
+                    name="Favlo media",
+                    transport="http",
+                    command="",
+                    url=LOCAL_MCP_URL,
+                    enabled=1,
+                    add_by_default=1,
                     revision=1,
+                    group_switches=default_switch_payload(),
                     created_at=created,
                 )
             )
-        session.add(MetaRow(key=mark, value="1"))
-    session.commit()
+    session.add(MetaRow(key="global_mcp_seed:Favlo media", value="1"))
 
 
 def _seed_shells(session: Session) -> None:

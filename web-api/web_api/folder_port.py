@@ -29,6 +29,22 @@ def _occupied(path: Path) -> bool:
     return any(not child.name.startswith(".") for child in path.iterdir())
 
 
+def trash_path(path: Path) -> Path:
+    """Move one file into the macOS Trash. Put Back restores its original path."""
+    from Foundation import NSURL, NSFileManager
+
+    url = NSURL.fileURLWithPath_(str(path))
+    ok, landed, _error = NSFileManager.defaultManager().trashItemAtURL_resultingItemURL_error_(
+        url, None, None
+    )
+    if not ok or landed is None:
+        raise Rejected("The file could not be moved to the Trash.")
+    restored = landed.path()
+    if not isinstance(restored, str) or not restored:
+        raise Rejected("The file could not be moved to the Trash.")
+    return Path(restored)
+
+
 class LocalFolder:
     """One local folder on this machine."""
 
@@ -323,9 +339,9 @@ class LocalFolder:
             raise Rejected("The gallery stores png, jpg, jpeg, or webp files.")
         note = path.with_name(path.name + _NOTE_SUFFIX)
         rel = self._relative(path)
-        path.unlink()
+        trash_path(path)
         if note.is_file():
-            note.unlink()
+            trash_path(note)
         remove_sidecar(self.root, rel)
         return {"path": rel, "name": path.name, "kind": "image"}
 

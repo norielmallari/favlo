@@ -40,7 +40,7 @@ def test_freeze_definition_writes_once(tmp_path: Path) -> None:
     store.close()
 
 
-def test_definition_build_sets_store_false(tmp_path: Path) -> None:
+def test_definition_build_sets_store_true(tmp_path: Path) -> None:
     store = Store(tmp_path / "app.db")
     home = next(row["session_id"] for row in store.channels() if row["agent_id"] == FAVLO_AGENT_ID)
     agent = next(row for row in store.agents() if row["id"] == FAVLO_AGENT_ID)
@@ -51,7 +51,7 @@ def test_definition_build_sets_store_false(tmp_path: Path) -> None:
         base_url="http://127.0.0.1:8129/v1",
         model="example-model",
     )
-    assert payload["options"]["store"] is False
+    assert payload["options"]["store"] is True
     assert payload["hash"] == hash_of(payload)
     assert isinstance(payload["instructions"], str) and payload["instructions"]
     store.close()
@@ -88,7 +88,7 @@ def test_agent_factory_uses_frozen_instructions(tmp_path: Path, monkeypatch) -> 
     }
     agent = from_definition(definition=definition, store=store, session_id=home)
     assert captured["instructions"] == "Frozen persona text."
-    assert captured["default_options"]["store"] is False
+    assert captured["default_options"]["store"] is True
     assert agent.client is client
     store.close()
 

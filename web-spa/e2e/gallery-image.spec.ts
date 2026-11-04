@@ -128,6 +128,8 @@ async function sendLine(page: Page, text: string, shown: string, finish = false)
   await expect(page.getByTestId('working')).toBeVisible();
   await expect(page.getByTestId('working')).toHaveCount(0, { timeout: 180_000 });
   await expect(page.getByRole('button', { name: 'Send again' })).toHaveCount(0);
+  // Hydrate must keep the typed user text; selection cues are hidden host rows.
+  await expect(page.getByLabel(`You said: ${shown}`)).toBeVisible();
 }
 
 /** Count needle hits in the trailing window of the capped favlo.log. */

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sqlite3
 import sys
 from pathlib import Path
@@ -12,10 +13,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "web-api"))
 
-from web_api.bus import Bus  # noqa: E402
 from web_api.ids import FAVLO_AGENT_ID, FAVLO_MCP_ID, guid  # noqa: E402
 from web_api.mcp_client import list_tools  # noqa: E402
-from web_api.mcp_tasks import _finish, settle  # noqa: E402
 from web_api.mcp_tools import INSTRUCTIONS, _description, groups_from, prepare_catalog  # noqa: E402
 from web_api.store import Store, _mcp_fields  # noqa: E402
 
@@ -157,7 +156,7 @@ def test_media_instructions_require_a_listed_model_id() -> None:
     assert "Match the generate tool to what the user asked for" in INSTRUCTIONS
     assert "Do not offer or insist on video when they asked for an image" in INSTRUCTIONS
     assert "Repeat the returned session id" in INSTRUCTIONS
-    assert "returns when the task is accepted" in INSTRUCTIONS
+    assert "returns when the file is ready" in INSTRUCTIONS
     assert "Do not paste the JSON" in INSTRUCTIONS
     assert "tell the user you are generating" in INSTRUCTIONS
     described = _description(
@@ -269,57 +268,6 @@ def test_progressive_initial_functions_exclude_cold_media() -> None:
     assert "favlo_generate_video_i2v" not in names
     assert "favlo_generate_music" not in names
     assert "favlo_generate_voice" not in names
-
-
-def test_a_finished_image_stays_finished() -> None:
-    status, text = settle("generate_image", "completed", "favlo://images/image_abc.png")
-    assert status == "completed"
-    assert text.startswith("generate_image finished.")
-    cancelled, note = settle("generate_image", "cancelled", "")
-    assert cancelled == "cancelled"
-    assert note == "generate_image was cancelled."
-
-
-def test_an_unknown_model_result_starts_a_correction_turn(tmp_path: Path) -> None:
-    store = Store(tmp_path / "app.db")
-    store.ensure_initial_model("example-model")
-    try:
-        task = store.begin_mcp_task(
-            {
-                "remote_id": "task-1",
-                "server_id": "server-1",
-                "agent_id": FAVLO_AGENT_ID,
-                "session_id": _home(store),
-                "tool_name": "generate_image",
-                "poll_interval_ms": 1000,
-            }
-        )
-        asyncio.run(
-            _finish(
-                store,
-                Bus(),
-                task,
-                "completed",
-                "Error calling tool 'generate_image': unknown model flux-schnell",
-            )
-        )
-        snapshot = store.session_snapshot(_home(store))
-        bodies = [message["body"] for message in snapshot["messages"]]
-        assert not any("unknown model" in body for body in bodies)
-        running = [row for row in snapshot["runs"] if row["status"] == "running"]
-        assert len(running) == 1
-        context = store.run_context(running[0]["id"])
-        assert "list_image_models" in context["user_text"]
-        assert "generate_image again" in context["user_text"]
-        assert "unknown model" in context["user_text"]
-        assert not any("unknown model" in row["text"] for row in context["prior"])
-        again, _events, waiting = store.begin_task_correction(
-            _home(store), FAVLO_AGENT_ID, "again"
-        )
-        assert again is None
-        assert waiting is True
-    finally:
-        store.close()
 
 
 def test_mcp_tools_from_two_servers_keep_unique_names(
@@ -629,12 +577,18 @@ def _shown(result: object) -> str:
     return "\n".join(getattr(item, "text", "") for item in result)  # type: ignore[arg-type]
 
 
-def test_a_modern_server_returns_when_the_task_is_accepted(tmp_path: Path) -> None:
+def test_a_task_result_returns_in_the_tool_call(tmp_path: Path) -> None:
     from web_api.mcp_tools import _mcp_client, _StdioServer
 
     command = _peer(
         tmp_path,
-        "import time; time.sleep(30)\n        reply(msg, {'resultType': 'complete'})",
+        "reply(msg, {'resultType': 'complete', 'taskId': 'task-1',\n"
+        "            'status': 'completed', 'createdAt': STAMP,\n"
+        "            'lastUpdatedAt': STAMP, 'ttlMs': 60000,\n"
+        "            'pollIntervalMs': 20,\n"
+        "            'result': {'content': [\n"
+        "                {'type': 'text', 'text': 'ready'}],\n"
+        "                'isError': False}})",
     )
 
     async def run() -> str:
@@ -657,59 +611,66 @@ def test_a_modern_server_returns_when_the_task_is_accepted(tmp_path: Path) -> No
         return _shown(result)
 
     text = asyncio.run(run())
-    assert "working" in text
-    assert "task-1" in text
-    assert "ready" not in text
+    assert text == "ready"
 
 
-def test_a_task_result_arrives_on_a_later_turn(tmp_path: Path) -> None:
-    from web_api.mcp_tools import _mcp_client, _StdioServer, _Turn
+class _ScopedClient:
+    """An anyio cancel scope, the same constraint as the streamable HTTP client."""
 
-    command = _peer(
-        tmp_path,
-        "reply(msg, {'resultType': 'complete', 'taskId': 'task-1',\n"
-        "            'status': 'completed', 'createdAt': STAMP,\n"
-        "            'lastUpdatedAt': STAMP, 'ttlMs': 60000,\n"
-        "            'pollIntervalMs': 20,\n"
-        "            'result': {'content': [\n"
-        "                {'type': 'text', 'text': 'ready'}],\n"
-        "                'isError': False}})",
-    )
-    store = Store(tmp_path / "app.db")
-    store.ensure_initial_model("example-model")
-    jobs: set[asyncio.Task[object]] = set()
-    try:
+    def __init__(self) -> None:
+        self.enter_task: asyncio.Task[object] | None = None
+        self.exit_task: asyncio.Task[object] | None = None
+        self._scope: object | None = None
 
-        async def run() -> str:
-            client = _mcp_client({"transport": "stdio", "command": command})
-            assert client is not None
-            server = _StdioServer(
-                FAVLO_AGENT_ID,
-                client,
-                _Turn(store, Bus(), jobs, "peer", FAVLO_AGENT_ID, _home(store)),
-                name="Peer",
-                tool_name_prefix="peer",
-                approval_mode="never_require",
-                allowed_tools=["echo"],
-                load_prompts=False,
-            )
-            async with client:
-                await server.connect()
-                result = await asyncio.wait_for(server.call_tool("echo", text="hi"), 2)
-                shown = _shown(result)
-                for _ in range(40):
-                    snapshot = store.session_snapshot(_home(store))
-                    running = [row for row in snapshot["runs"] if row["status"] == "running"]
-                    if running:
-                        return shown + "\n" + store.run_context(running[0]["id"])["user_text"]
-                    await asyncio.sleep(0.05)
-            raise AssertionError("task did not finish")
+    async def __aenter__(self) -> _ScopedClient:
+        import anyio
 
-        text = asyncio.run(run())
-    finally:
-        store.close()
-    call, cue = text.split("\n", 1)
-    assert "working" in call
-    assert "ready" not in call
-    assert "ready" in cue
+        self.enter_task = asyncio.current_task()
+        self._scope = anyio.CancelScope()
+        self._scope.__enter__()
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.exit_task = asyncio.current_task()
+        assert self._scope is not None
+        self._scope.__exit__(None, None, None)
+
+
+def test_the_mcp_client_closes_on_the_task_that_opened_it() -> None:
+    asyncio.run(_lease_survives_a_cancelled_turn())
+
+
+async def _lease_survives_a_cancelled_turn() -> None:
+    from types import SimpleNamespace
+
+    from web_api.mcp_tools import _Lease
+
+    client = _ScopedClient()
+    idle = asyncio.Event()
+    idle.set()
+    server = SimpleNamespace(pending=0, idle=idle, jobs=set())
+    lease = _Lease(client, server)
+    opened = asyncio.Event()
+
+    async def turn() -> None:
+        await lease.__aenter__()
+        opened.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await lease.__aexit__(None, None, None)
+
+    job = asyncio.create_task(turn())
+    await opened.wait()
+    job.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await job
+    assert lease._task is not None
+    await lease._task
+    await asyncio.sleep(0)
+    assert client.enter_task is client.exit_task
+    assert client.enter_task is not job
+    assert not server.jobs
+
+
 

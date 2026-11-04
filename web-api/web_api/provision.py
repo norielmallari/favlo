@@ -105,13 +105,13 @@ def _cue(workspace: dict[str, Any]) -> str:
     name = str(workspace.get("name") or "this workspace")
     if workspace.get("type") == "gallery":
         return (
-            f"The person just created this gallery, named {name}. "
+            f"The user just created this gallery, named {name}. "
             "The filmstrip already shows the images. "
             "Greet them once in one or two sentences. "
             "Do not call tools. Do not send a second greeting. Do not repeat the greeting."
         )
     return (
-        f"The person just created this workspace, named {name}. "
+        f"The user just created this workspace, named {name}. "
         "Greet them in one or two sentences. Do not call tools."
     )
 

@@ -8,6 +8,7 @@ import uuid
 FAVLO_AGENT_ID = str(uuid.uuid5(uuid.NAMESPACE_DNS, "favlo.agent"))
 FAVLO_CHANNEL_ID = str(uuid.uuid5(uuid.NAMESPACE_DNS, "favlo.channel"))
 FAVLO_MCP_ID = str(uuid.uuid5(uuid.NAMESPACE_DNS, "favlo.mcp"))
+FAVLO_GLOBAL_MCP_ID = str(uuid.uuid5(uuid.NAMESPACE_DNS, "favlo.mcp.global"))
 LOCAL_PROVIDER_ID = str(uuid.uuid5(uuid.NAMESPACE_DNS, "favlo.provider.local"))
 
 

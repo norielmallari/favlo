@@ -101,6 +101,31 @@ class McpUpdate(BaseModel):
     groups: list[McpGroupUpdate] | None = None
 
 
+class GlobalMcpCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    transport: str
+    command: str = ""
+    url: str = ""
+    enabled: bool = True
+    add_by_default: bool = False
+    groups: list[McpGroupUpdate] | None = None
+
+
+class GlobalMcpUpdate(BaseModel):
+    expected_revision: int = Field(ge=1)
+    name: str = Field(min_length=1, max_length=80)
+    transport: str
+    command: str = ""
+    url: str = ""
+    enabled: bool = True
+    add_by_default: bool | None = None
+    groups: list[McpGroupUpdate] | None = None
+
+
+class GlobalMcpCopy(BaseModel):
+    agent_id: str
+
+
 class McpTest(BaseModel):
     transport: str
     command: str = ""

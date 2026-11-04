@@ -17,7 +17,6 @@ from fastapi.responses import JSONResponse
 from web_api.bus import Bus
 from web_api.chat import stream_reply
 from web_api.heartbeat_clock import watch
-from web_api.mcp_tasks import bind_followup, resume
 from web_api import agui
 from web_api.routes import (
     agents,
@@ -31,7 +30,6 @@ from web_api.routes import (
     settings,
     workspaces,
 )
-from web_api.runs import perform
 from web_api.infrastructure.db.database import prepare
 from web_api.store import Conflict, NotFound, Rejected, Store
 
@@ -80,19 +78,9 @@ def create_app(home: Path | None = None, reply: Callable[..., Any] | None = None
         app.state.tasks.add(gallery_clock)
         gallery_clock.add_done_callback(app.state.tasks.discard)
 
-        async def follow(run_id: str) -> None:
-            cancel = asyncio.Event()
-            app.state.cancels[run_id] = cancel
-            job = asyncio.create_task(perform(app, cancel, run_id))
-            app.state.tasks.add(job)
-            job.add_done_callback(app.state.tasks.discard)
-
-        bind_followup(follow)
-        resume(app.state.store, app.state.bus, app.state.tasks)
         try:
             yield
         finally:
-            bind_followup(None)
             stop.set()
         for task in list(app.state.tasks):
             task.cancel()

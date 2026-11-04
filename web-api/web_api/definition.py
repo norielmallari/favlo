@@ -42,7 +42,7 @@ def build(
         agent.get("reasoning_effort"),
     ) or {}
     options = dict(options)
-    options["store"] = False
+    options["store"] = True
     tools = [_tool_identity(item) for item in tool_list]
     mcp = _mcp_rows(store, str(agent["id"])) if agent.get("id") else []
     workspace = store.workspace_for_session(session_id)

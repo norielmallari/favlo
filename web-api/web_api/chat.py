@@ -304,14 +304,13 @@ def _image_bytes(content: Any) -> bytes | None:
         return None
 
 
-def user_turn(text: str, note: str, images: list[tuple[bytes, str]] | None = None) -> Any:
-    """The new user message. A gallery note and any found images stay on this message."""
-    body = f"{text}\n\n{note}" if note else text
+def user_turn(text: str, images: list[tuple[bytes, str]] | None = None) -> Any:
+    """The new user message. Named image bytes stay on this message when present."""
     if not images:
-        return body
+        return text
     from agent_framework import Content, Message
 
-    parts: list[Any] = [body]
+    parts: list[Any] = [text]
     for data, media_type in images:
         parts.append(Content.from_data(data=data, media_type=media_type))
     return Message("user", parts)
@@ -369,7 +368,6 @@ async def stream_reply(
     bus: Any | None = None,
     pending: set[Any] | None = None,
     cancel: asyncio.Event | None = None,
-    gallery_note: str = "",
     user_images: list[tuple[bytes, str]] | None = None,
     enable_thinking: bool | None = None,
     preserve_thinking: bool | None = None,
@@ -399,7 +397,7 @@ async def stream_reply(
             mcp_tools=mcp_tools,
         )
         options = sampling_options(enable_thinking, preserve_thinking, reasoning_effort) or {}
-        options = {**options, "store": False}
+        options = {**options, "store": True}
         if store is not None and session_id and agent_id:
             from web_api.definition import build as build_definition
             from web_api.definition import hash_of
@@ -435,7 +433,9 @@ async def stream_reply(
             client.function_invocation_configuration["max_iterations"] = int(
                 (frozen or {}).get("max_iterations") or 6
             )
-        providers: list[Any] = [InMemoryHistoryProvider(skip_excluded=True)]
+        providers: list[Any] = [
+            InMemoryHistoryProvider(skip_excluded=True, load_messages=False)
+        ]
         if store is not None and session_id:
             from web_api.compaction import percent_window
 
@@ -466,7 +466,7 @@ async def stream_reply(
         )
         client = agent.client
     session = _open_session(agent, store, session_id)
-    prompt = user_turn(user_text, gallery_note, unsent_images(user_images, session))
+    prompt = user_turn(user_text, unsent_images(user_images, session))
     clients = contextlib.AsyncExitStack()
     await clients.__aenter__()
     try:

@@ -78,7 +78,19 @@ type McpServer = {
   revision: number;
   groups: McpGroup[];
 };
+type GlobalMcpServer = {
+  id: string;
+  name: string;
+  transport: 'http' | 'stdio';
+  command: string;
+  url: string;
+  enabled: boolean;
+  add_by_default: boolean;
+  revision: number;
+  groups: McpGroup[];
+};
 type Section = 'providers' | 'agents' | 'heartbeats' | 'skills' | 'mcp' | 'orchestration';
+type AgentDetailTab = 'agent' | 'skills' | 'mcp';
 type AgentSkill = {
   id: string;
   agent_id: string;
@@ -138,7 +150,12 @@ export function SettingsScreen() {
   const [mcpId, setMcpId] = useState<string | null>(null);
   const [creatingMcp, setCreatingMcp] = useState(false);
   const [mcpToken, setMcpToken] = useState(0);
-  const [mcpPane, setMcpPane] = useState<DrillPane>('agents');
+  const [globalMcpServers, setGlobalMcpServers] = useState<GlobalMcpServer[]>([]);
+  const [globalMcpId, setGlobalMcpId] = useState<string | null>(null);
+  const [creatingGlobalMcp, setCreatingGlobalMcp] = useState(false);
+  const [globalMcpToken, setGlobalMcpToken] = useState(0);
+  const [mcpPane, setMcpPane] = useState<'list' | 'detail'>('list');
+  const [agentDetailTab, setAgentDetailTab] = useState<AgentDetailTab>('agent');
   const [agentSkills, setAgentSkills] = useState<AgentSkill[]>([]);
   const [globalSkills, setGlobalSkills] = useState<GlobalSkill[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceOption[]>([]);
@@ -155,6 +172,7 @@ export function SettingsScreen() {
     keepMcp?: string,
     keepAgentSkill?: string,
     keepGlobal?: string,
+    keepGlobalMcp?: string,
   ) {
     const [
       listedProviders,
@@ -163,6 +181,7 @@ export function SettingsScreen() {
       listedGroups,
       listedHeartbeats,
       listedMcp,
+      listedGlobalMcp,
       listedSkills,
       listedGlobal,
       listedWorkspaces,
@@ -173,6 +192,7 @@ export function SettingsScreen() {
       api<{ groups: ToolGroup[] }>('/tool-groups'),
       api<{ heartbeats: Heartbeat[] }>('/heartbeats'),
       api<{ servers: McpServer[] }>('/mcp-servers'),
+      api<{ servers: GlobalMcpServer[] }>('/global-mcp-servers'),
       api<{ skills: AgentSkill[] }>('/agent-skills'),
       api<{ skills: GlobalSkill[] }>('/global-skills'),
       api<{ workspaces: WorkspaceOption[] }>('/workspaces'),
@@ -193,6 +213,7 @@ export function SettingsScreen() {
     setGlobalSkills(listedGlobal.skills);
     setWorkspaces(listedWorkspaces.workspaces);
     setMcpServers(listedMcp.servers);
+    setGlobalMcpServers(listedGlobalMcp.servers);
     setAgentSkillId((current) => {
       const chosen = keepAgentSkill ?? current;
       const row = listedSkills.skills.find((item) => item.id === chosen);
@@ -206,6 +227,11 @@ export function SettingsScreen() {
     setMcpId((current) => {
       const chosen = keepMcp ?? current;
       const row = listedMcp.servers.find((item) => item.id === chosen);
+      return row == null ? null : row.id;
+    });
+    setGlobalMcpId((current) => {
+      const chosen = keepGlobalMcp ?? current;
+      const row = listedGlobalMcp.servers.find((item) => item.id === chosen);
       return row == null ? null : row.id;
     });
     setHeartbeatId((current) => {
@@ -238,10 +264,11 @@ export function SettingsScreen() {
         setCreating(false);
         setCreatingHeartbeat(false);
         setCreatingMcp(false);
+        setCreatingGlobalMcp(false);
         setCreatingGlobal(false);
         setCreatingAgentSkill(false);
         setHeartbeatPane('agents');
-        setMcpPane('agents');
+        setMcpPane('list');
         setGlobalPane('list');
       }
     };
@@ -264,11 +291,11 @@ export function SettingsScreen() {
   const heartbeatDetail = section === 'heartbeats' && (wide || heartbeatPane === 'detail');
   const agentHeartbeats = heartbeats.filter((row) => row.agent_id === agentId);
   const heartbeat = agentHeartbeats.find((row) => row.id === heartbeatId) ?? null;
-  const mcpAgents = section === 'mcp' && (wide || mcpPane === 'agents');
   const mcpList = section === 'mcp' && (wide || mcpPane === 'list');
   const mcpDetail = section === 'mcp' && (wide || mcpPane === 'detail');
   const agentServers = mcpServers.filter((row) => row.agent_id === agentId);
   const mcpServer = agentServers.find((row) => row.id === mcpId) ?? null;
+  const globalMcp = globalMcpServers.find((row) => row.id === globalMcpId) ?? null;
   const skillList = section === 'skills' && (wide || globalPane === 'list');
   const skillDetail = section === 'skills' && (wide || globalPane === 'detail');
   const skillsForAgent = agentSkills.filter((row) => row.agent_id === agentId);
@@ -280,11 +307,12 @@ export function SettingsScreen() {
     setCreating(false);
     setCreatingHeartbeat(false);
     setCreatingMcp(false);
+    setCreatingGlobalMcp(false);
     setCreatingGlobal(false);
     setCreatingAgentSkill(false);
     setShowDetail(false);
     setHeartbeatPane('agents');
-    setMcpPane('agents');
+    setMcpPane('list');
     setGlobalPane('list');
     setDrawer(null);
   }
@@ -301,6 +329,7 @@ export function SettingsScreen() {
     setCreatingAgentSkill(true);
     setAgentSkillId(null);
     setAgentSkillToken((current) => current + 1);
+    setAgentDetailTab('skills');
   }
 
   async function saveAgentSkill(fields: SkillFields) {
@@ -375,9 +404,28 @@ export function SettingsScreen() {
   function startMcp() {
     setCreatingMcp(true);
     setMcpId(null);
-    setMcpPane('detail');
     setMcpToken((value) => value + 1);
+    setAgentDetailTab('mcp');
+  }
+
+  function startGlobalMcp() {
+    setCreatingGlobalMcp(true);
+    setGlobalMcpId(null);
+    setGlobalMcpToken((value) => value + 1);
+    setMcpPane('detail');
     setDrawer(null);
+  }
+
+  async function deleteGlobalMcp() {
+    if (globalMcp == null) {
+      return;
+    }
+    await api(`/global-mcp-servers/${globalMcp.id}`, { method: 'DELETE' });
+    setCreatingGlobalMcp(false);
+    setGlobalMcpId(null);
+    setMcpPane('list');
+    setSaved('The MCP server was deleted.');
+    await reload();
   }
 
   function startHeartbeat() {
@@ -576,6 +624,9 @@ export function SettingsScreen() {
                     setCreating(true);
                     setAgentSkillId(null);
                     setCreatingAgentSkill(false);
+                    setMcpId(null);
+                    setCreatingMcp(false);
+                    setAgentDetailTab('agent');
                     setShowDetail(true);
                     setDrawer(null);
                   }} />
@@ -595,6 +646,9 @@ export function SettingsScreen() {
                           setCreating(false);
                           setAgentSkillId(null);
                           setCreatingAgentSkill(false);
+                          setMcpId(null);
+                          setCreatingMcp(false);
+                          setAgentDetailTab('agent');
                         }
                         setShowDetail(true);
                         setDrawer(null);
@@ -665,47 +719,96 @@ export function SettingsScreen() {
                       onModels={replaceModels}
                     />
                   ) : agent != null ? (
-                    <AgentForm
-                      key={`${agent.id}:${agent.revision}`}
-                      agent={agent}
-                      groups={groups}
-                      providers={providers}
-                      onSuccess={setSaved}
-                      onSaved={rememberAgent}
-                      onDeleted={forgetAgent}
-                      onModels={replaceModels}
-                    />
+                    <View style={{ gap: 12 }}>
+                      <AgentDetailTabs value={agentDetailTab} onChange={setAgentDetailTab} />
+                      {agentDetailTab === 'agent' ? (
+                        <View
+                          accessibilityRole="tabpanel"
+                          accessibilityLabel="Agent settings"
+                          style={{ gap: 12 }}
+                        >
+                          <AgentForm
+                            key={`${agent.id}:${agent.revision}`}
+                            agent={agent}
+                            groups={groups}
+                            providers={providers}
+                            onSuccess={setSaved}
+                            onSaved={rememberAgent}
+                            onDeleted={forgetAgent}
+                            onModels={replaceModels}
+                          />
+                        </View>
+                      ) : null}
+                      {agentDetailTab === 'skills' ? (
+                        <View
+                          accessibilityRole="tabpanel"
+                          accessibilityLabel="Agent skills"
+                          style={{ gap: 8 }}
+                        >
+                          <MenuRow icon="plus" label="New skill" selected={creatingAgentSkill} onPress={startAgentSkill} />
+                          {skillsForAgent.map((row) => (
+                            <MenuRow
+                              key={row.id}
+                              label={row.name}
+                              selected={row.id === agentSkillId && !creatingAgentSkill}
+                              onPress={() => {
+                                setAgentSkillId(row.id);
+                                setCreatingAgentSkill(false);
+                              }}
+                            />
+                          ))}
+                          {skillsForAgent.length === 0 ? (
+                            <Text style={textStyle('small', palette.textSecondary)}>No skills</Text>
+                          ) : null}
+                          {creatingAgentSkill || agentSkill != null ? (
+                            <SkillForm
+                              key={creatingAgentSkill ? `new-${agentSkillToken}` : `${agentSkill?.id}:${agentSkill?.revision}`}
+                              skill={creatingAgentSkill ? null : agentSkill}
+                              onSave={saveAgentSkill}
+                              onDelete={creatingAgentSkill ? undefined : deleteAgentSkill}
+                            />
+                          ) : null}
+                        </View>
+                      ) : null}
+                      {agentDetailTab === 'mcp' ? (
+                        <View
+                          accessibilityRole="tabpanel"
+                          accessibilityLabel="Agent MCP"
+                          style={{ gap: 8 }}
+                        >
+                          <MenuRow icon="plus" label="New MCP" selected={creatingMcp} onPress={startMcp} />
+                          {agentServers.map((row) => (
+                            <MenuRow
+                              key={row.id}
+                              label={row.name}
+                              selected={row.id === mcpId && !creatingMcp}
+                              onPress={() => {
+                                setMcpId(row.id);
+                                setCreatingMcp(false);
+                              }}
+                            />
+                          ))}
+                          {agentServers.length === 0 ? (
+                            <Text style={textStyle('small', palette.textSecondary)}>No MCP servers</Text>
+                          ) : null}
+                          {creatingMcp || mcpServer != null ? (
+                            <McpForm
+                              key={creatingMcp ? `new-mcp-${mcpToken}` : `${mcpServer?.id}:${mcpServer?.revision}`}
+                              agent={agent}
+                              server={creatingMcp ? null : mcpServer}
+                              onSuccess={setSaved}
+                              onSaved={(row) => {
+                                setCreatingMcp(false);
+                                void reload(undefined, row.id);
+                              }}
+                            />
+                          ) : null}
+                        </View>
+                      ) : null}
+                    </View>
                   ) : (
                     <Text style={textStyle('body', palette.textPrimary)}>Choose an agent.</Text>
                   )}
-                  {!creating && agent != null ? (
-                    <View accessibilityLabel="Agent skills" style={{ gap: 8 }}>
-                      <Text style={label(palette.textPrimary)}>Skills</Text>
-                      <MenuRow icon="plus" label="New skill" selected={creatingAgentSkill} onPress={startAgentSkill} />
-                      {skillsForAgent.map((row) => (
-                        <MenuRow
-                          key={row.id}
-                          label={row.name}
-                          selected={row.id === agentSkillId && !creatingAgentSkill}
-                          onPress={() => {
-                            setAgentSkillId(row.id);
-                            setCreatingAgentSkill(false);
-                          }}
-                        />
-                      ))}
-                      {skillsForAgent.length === 0 ? (
-                        <Text style={textStyle('small', palette.textSecondary)}>No skills</Text>
-                      ) : null}
-                      {creatingAgentSkill || agentSkill != null ? (
-                        <SkillForm
-                          key={creatingAgentSkill ? `new-${agentSkillToken}` : `${agentSkill?.id}:${agentSkill?.revision}`}
-                          skill={creatingAgentSkill ? null : agentSkill}
-                          onSave={saveAgentSkill}
-                          onDelete={creatingAgentSkill ? undefined : deleteAgentSkill}
-                        />
-                      ) : null}
-                    </View>
-                  ) : null}
                 </View>
               ) : null}
               {section === 'orchestration' ? (
@@ -864,52 +967,27 @@ export function SettingsScreen() {
               {error ? <Text accessibilityRole="alert" style={textStyle('small', palette.danger)}>{error}</Text> : null}
             </ScrollView>
           ) : null}
-          {mcpAgents ? (
-            <View accessibilityLabel="Agents list" style={columnStyle(palette.border, palette.surface, wide, wide ? 200 : undefined)}>
-              {wide ? <Text style={label(palette.textPrimary)}>Agents</Text> : null}
-              <ScrollView contentContainerStyle={menuRows}>
-                {agents.map((item) => (
-                  <MenuRow
-                    key={item.id}
-                    label={item.name}
-                    selected={item.id === agentId}
-                    onPress={() => {
-                      setAgentId(item.id);
-                      setMcpId(null);
-                      setCreatingMcp(false);
-                      setMcpPane('list');
-                      setDrawer(null);
-                    }}
-                  />
-                ))}
-              </ScrollView>
-            </View>
-          ) : null}
           {mcpList ? (
             <View accessibilityLabel="MCP list" style={columnStyle(palette.border, palette.surface, wide, wide ? 220 : undefined)}>
-              {!wide ? (
-                <IconButton icon="arrow-left" label="Back" accessibilityLabel="Back to agents" onPress={() => setMcpPane('agents')} background="transparent" border="transparent" color={palette.accent} />
-              ) : (
-                <Text style={label(palette.textPrimary)}>MCP</Text>
-              )}
+              <Text style={label(palette.textPrimary)}>MCP</Text>
               <ScrollView contentContainerStyle={menuRows}>
-                {agent != null ? (
-                  <MenuRow icon="plus" label="New MCP" selected={creatingMcp} onPress={startMcp} />
-                ) : null}
-                {agentServers.map((row) => (
+                <MenuRow icon="plus" label="New MCP" selected={creatingGlobalMcp} onPress={startGlobalMcp} />
+                {globalMcpServers.map((row) => (
                   <MenuRow
                     key={row.id}
                     label={row.name}
-                    selected={row.id === mcpId && !creatingMcp}
+                    selected={row.id === globalMcpId && !creatingGlobalMcp}
                     onPress={() => {
-                      setMcpId(row.id);
-                      setCreatingMcp(false);
+                      setGlobalMcpId(row.id);
+                      setCreatingGlobalMcp(false);
                       setMcpPane('detail');
                       setDrawer(null);
                     }}
                   />
                 ))}
-                {agentServers.length === 0 ? <Text style={textStyle('small', palette.textSecondary)}>No MCP servers</Text> : null}
+                {globalMcpServers.length === 0 ? (
+                  <Text style={textStyle('small', palette.textSecondary)}>No MCP servers</Text>
+                ) : null}
               </ScrollView>
             </View>
           ) : null}
@@ -918,34 +996,35 @@ export function SettingsScreen() {
               {!wide ? (
                 <IconButton icon="arrow-left" label="Back" accessibilityLabel="Back to MCP" onPress={() => setMcpPane('list')} background="transparent" border="transparent" color={palette.accent} />
               ) : null}
-              {agent == null ? (
-                <Text style={textStyle('body', palette.textPrimary)}>Choose an agent.</Text>
-              ) : (
-                <View style={{ gap: 12 }}>
-                  {creatingMcp ? (
-                    <McpForm
-                      key={`new-mcp-${mcpToken}`}
-                      agent={agent}
-                      server={null}
-                      onSuccess={setSaved}
-                      onSaved={(row) => {
-                        setCreatingMcp(false);
-                        void reload(undefined, row.id);
-                      }}
-                    />
-                  ) : mcpServer != null ? (
-                    <McpForm
-                      key={`${mcpServer.id}:${mcpServer.revision}`}
-                      agent={agent}
-                      server={mcpServer}
-                      onSuccess={setSaved}
-                      onSaved={(row) => void reload(undefined, row.id)}
-                    />
-                  ) : (
-                    <Text style={textStyle('body', palette.textPrimary)}>Choose an MCP server.</Text>
-                  )}
-                </View>
-              )}
+              <View style={{ gap: 12 }}>
+                {creatingGlobalMcp || globalMcp != null ? (
+                  <McpForm
+                    key={creatingGlobalMcp ? `new-global-mcp-${globalMcpToken}` : `${globalMcp?.id}:${globalMcp?.revision}`}
+                    server={creatingGlobalMcp ? null : globalMcp}
+                    showDefault
+                    onSuccess={setSaved}
+                    onSaved={(row) => {
+                      setCreatingGlobalMcp(false);
+                      void reload(undefined, undefined, undefined, undefined, row.id);
+                    }}
+                    onDelete={creatingGlobalMcp ? undefined : deleteGlobalMcp}
+                  />
+                ) : (
+                  <Text style={textStyle('body', palette.textPrimary)}>Choose an MCP server.</Text>
+                )}
+                {!creatingGlobalMcp && globalMcp != null ? (
+                  <GlobalMcpCopy
+                    key={globalMcp.id}
+                    serverId={globalMcp.id}
+                    agents={agents}
+                    onCopied={(message) => {
+                      setSaved(message);
+                      void reload(undefined, undefined, undefined, undefined, globalMcp.id);
+                    }}
+                  />
+                ) : null}
+              </View>
+              {error ? <Text accessibilityRole="alert" style={textStyle('small', palette.danger)}>{error}</Text> : null}
             </ScrollView>
           ) : null}
         </View>
@@ -958,13 +1037,17 @@ export function SettingsScreen() {
 function McpForm({
   agent,
   server,
+  showDefault = false,
   onSuccess,
   onSaved,
+  onDelete,
 }: {
-  agent: Agent;
-  server: McpServer | null;
+  agent?: Agent;
+  server: McpServer | GlobalMcpServer | null;
+  showDefault?: boolean;
   onSuccess: (message: string) => void;
-  onSaved: (row: McpServer) => void;
+  onSaved: (row: McpServer | GlobalMcpServer) => void;
+  onDelete?: () => Promise<void>;
 }) {
   const { palette } = useTheme();
   const { height } = useWindowDimensions();
@@ -973,8 +1056,13 @@ function McpForm({
   const [url, setUrl] = useState(server?.url || (server == null ? 'http://127.0.0.1:8129/mcp' : ''));
   const [command, setCommand] = useState(server?.command ?? '');
   const [enabled, setEnabled] = useState(server?.enabled ?? true);
+  const [addByDefault, setAddByDefault] = useState(
+    server != null && 'add_by_default' in server ? server.add_by_default : false,
+  );
   const [groups, setGroups] = useState(server?.groups ?? []);
-  const [notice, setNotice] = useState<string | null>(server?.status_message || null);
+  const [notice, setNotice] = useState<string | null>(
+    server != null && 'status_message' in server ? server.status_message || null : null,
+  );
   const [error, setError] = useState<string | null>(null);
   const enabledBox = `Enabled for ${server?.name ?? 'MCP'}`;
 
@@ -986,14 +1074,25 @@ function McpForm({
       url,
       enabled,
       groups: groups.map((group) => ({ id: group.id, name: group.name, enabled: group.enabled })),
+      ...(showDefault ? { add_by_default: addByDefault } : {}),
     };
     try {
-      const saved =
-        server == null
+      const saved = showDefault
+        ? server == null
+          ? await api<GlobalMcpServer>('/global-mcp-servers', {
+              method: 'POST',
+              headers: { 'Idempotency-Key': idempotencyKey() },
+              body: JSON.stringify(payload),
+            })
+          : await api<GlobalMcpServer>(`/global-mcp-servers/${server.id}`, {
+              method: 'PATCH',
+              body: JSON.stringify({ expected_revision: server.revision, ...payload }),
+            })
+        : server == null
           ? await api<McpServer>('/mcp-servers', {
               method: 'POST',
               headers: { 'Idempotency-Key': idempotencyKey() },
-              body: JSON.stringify({ agent_id: agent.id, ...payload }),
+              body: JSON.stringify({ agent_id: agent?.id, ...payload }),
             })
           : await api<McpServer>(`/mcp-servers/${server.id}`, {
               method: 'PATCH',
@@ -1004,6 +1103,18 @@ function McpForm({
       onSaved(saved);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'The MCP server was not saved.');
+    }
+  }
+
+  async function remove() {
+    if (onDelete == null) {
+      return;
+    }
+    try {
+      await onDelete();
+      setError(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'The MCP server was not deleted.');
     }
   }
 
@@ -1072,6 +1183,21 @@ function McpForm({
         </>
       )}
       <SettingSwitch label={enabledBox} value={enabled} onValueChange={setEnabled} />
+      {showDefault ? (
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, minHeight: 44 }}>
+          <Text onPress={() => setAddByDefault((value) => !value)} style={textStyle('body', palette.textPrimary)}>
+            Add to new agents
+          </Text>
+          <Switch
+            accessibilityLabel="Add to new agents"
+            accessibilityState={{ checked: addByDefault }}
+            value={addByDefault}
+            onValueChange={setAddByDefault}
+            trackColor={{ false: palette.borderStrong, true: palette.accent }}
+            thumbColor={palette.onAccent}
+          />
+        </View>
+      ) : null}
       {notice ? <Text accessibilityLiveRegion="polite" style={textStyle('small', palette.textPrimary)}>{notice}</Text> : null}
       {groups.length > 0 ? <Text style={label(palette.textPrimary)}>Tools</Text> : null}
       {groups.map((group) => {
@@ -1092,15 +1218,84 @@ function McpForm({
         );
       })}
       </ScrollView>
-      <IconButton icon="zap" label="Test connection" onPress={() => void test()} background={palette.surface} border={palette.borderStrong} color={palette.textPrimary} />
-      <IconButton
-        icon={server == null ? 'plus' : 'check'}
-        label={server == null ? 'Create MCP' : `Save ${server.name}`}
-        onPress={() => void save()}
-        background={palette.accent}
-        color={palette.onAccent}
-      />
+      <View style={buttonRow}>
+        <IconButton icon="zap" label="Test connection" onPress={() => void test()} background={palette.surface} border={palette.borderStrong} color={palette.textPrimary} />
+        <IconButton
+          icon={server == null ? 'plus' : 'check'}
+          label={server == null ? 'Create MCP' : `Save ${server.name}`}
+          onPress={() => void save()}
+          background={palette.accent}
+          color={palette.onAccent}
+        />
+        {server != null && onDelete != null ? (
+          <IconButton
+            icon="trash-2"
+            label="Delete MCP"
+            onPress={() => void remove()}
+            background={palette.surface}
+            border={palette.borderStrong}
+            color={palette.textPrimary}
+          />
+        ) : null}
+      </View>
       {error ? <Text accessibilityRole="alert" style={textStyle('small', palette.danger)}>{error}</Text> : null}
+    </View>
+  );
+}
+
+function AgentDetailTabs({
+  value,
+  onChange,
+}: {
+  value: AgentDetailTab;
+  onChange: (next: AgentDetailTab) => void;
+}) {
+  const { palette } = useTheme();
+  const tabs: { id: AgentDetailTab; label: string }[] = [
+    { id: 'agent', label: 'Agent' },
+    { id: 'skills', label: 'Skills' },
+    { id: 'mcp', label: 'MCP' },
+  ];
+  return (
+    <View
+      accessibilityRole="tablist"
+      accessibilityLabel="Agent details"
+      style={{
+        flexDirection: 'row',
+        gap: 4,
+        padding: 4,
+        borderRadius: radius.control,
+        backgroundColor: palette.surfaceHover,
+        borderWidth: 1,
+        borderColor: palette.border,
+      }}
+    >
+      {tabs.map((tab) => {
+        const selected = value === tab.id;
+        return (
+          <Pressable
+            key={tab.id}
+            accessibilityRole="tab"
+            accessibilityLabel={tab.label}
+            accessibilityState={{ selected }}
+            onPress={() => onChange(tab.id)}
+            style={{
+              flexGrow: 1,
+              flexShrink: 1,
+              flexBasis: 0,
+              minHeight: 40,
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: radius.control,
+              backgroundColor: selected ? palette.surface : 'transparent',
+              borderBottomWidth: selected ? 2 : 0,
+              borderBottomColor: selected ? palette.accent : 'transparent',
+            }}
+          >
+            <Text style={textStyle('label', palette.textPrimary, selected ? '600' : '400')}>{tab.label}</Text>
+          </Pressable>
+        );
+      })}
     </View>
   );
 }
@@ -1541,6 +1736,72 @@ function HeartbeatForm({
       </View>
       {notice ? <Text accessibilityLiveRegion="polite" style={textStyle('small', palette.textPrimary)}>{notice}</Text> : null}
       {error ? <Text accessibilityRole="alert" style={textStyle('small', palette.danger)}>{error}</Text> : null}
+    </View>
+  );
+}
+
+function GlobalMcpCopy({
+  serverId,
+  agents,
+  onCopied,
+}: {
+  serverId: string;
+  agents: Agent[];
+  onCopied: (message: string) => void;
+}) {
+  const { palette } = useTheme();
+  const [agentId, setAgentId] = useState(
+    agents.find((item) => item.id === FAVLO_AGENT_ID)?.id ?? agents[0]?.id ?? '',
+  );
+  const [agentFocused, setAgentFocused] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const agent = agents.find((item) => item.id === agentId) ?? null;
+
+  async function copyTo() {
+    if (agent == null) {
+      return;
+    }
+    try {
+      await api(`/global-mcp-servers/${serverId}/copy`, {
+        method: 'POST',
+        headers: { 'Idempotency-Key': idempotencyKey() },
+        body: JSON.stringify({ agent_id: agent.id }),
+      });
+      setError(null);
+      onCopied(`Copied to ${agent.name}.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'The MCP server was not copied.');
+    }
+  }
+
+  return (
+    <View style={{ gap: 8 }}>
+      <Text style={label(palette.textPrimary)}>Copy to an agent</Text>
+      <Picker
+        accessibilityLabel="Agent for MCP copy"
+        selectedValue={agentId}
+        onValueChange={(value) => setAgentId(String(value))}
+        onFocus={() => setAgentFocused(true)}
+        onBlur={() => setAgentFocused(false)}
+        style={pickerStyle(palette, agentFocused)}
+      >
+        {agents.map((item) => (
+          <Picker.Item key={item.id} label={item.name} value={item.id} color={palette.textPrimary} />
+        ))}
+      </Picker>
+      <IconButton
+        icon="copy"
+        label="Copy to agent"
+        disabled={agent == null}
+        onPress={() => void copyTo()}
+        background={agent == null ? palette.disabledSurface : palette.accent}
+        color={agent == null ? palette.disabledText : palette.onAccent}
+      />
+      {error ? (
+        <Text accessibilityRole="alert" style={textStyle('small', palette.danger)}>
+          {error}
+        </Text>
+      ) : null}
     </View>
   );
 }
