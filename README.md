@@ -54,6 +54,12 @@ uv run favlo web
 
 When the app is ready, open the printed link in a browser. That address is `http://127.0.0.1:8012`.
 
+## Gallery
+
+A Gallery is a workspace on an agent's channel. New workspace offers Gallery. Bind a local folder once. Favlo captions every image in that folder, then shows a preview and a filmstrip beside the chat. The agent places those views; the browser does not invent the layout. Find, search, select, and generate work through that chat. A generate call writes a plain file name into the folder. On a wide window the chat is a resizable column beside the preview. On a narrow window the preview, the filmstrip, and the chat share one column, and the chat dock has three modes: fullscreen, peek, and expanded.
+
+The app note is [web-spa/README.md](web-spa/README.md). The API note is [web-api/README.md](web-api/README.md). The tool and greeting contract is [docs/ai-assistance/README.md](docs/ai-assistance/README.md).
+
 ## Supported Models
 
 | Pipeline | Note | 16 GB | 24 GB | 48 GB |
