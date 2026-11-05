@@ -3276,7 +3276,8 @@ static bool beats_logit(float score, uint id, float other, uint other_id) {
     return score > other || (score == other && id < other_id);
 }
 
-// One delta per id. The host merges presence, frequency, and logit bias first.
+// One delta per id. Presence and frequency stay on the resident count.
+// This list is a logit bias, including a closed think id.
 kernel void logit_adjust(
     device float* logits [[buffer(0)]],
     device const uint* ids [[buffer(1)]],
@@ -3302,6 +3303,45 @@ kernel void logit_fill(
         return;
     }
     logits[ids[tid]] = value;
+}
+
+kernel void zero_u32(
+    device uint* data [[buffer(0)]],
+    constant uint& n [[buffer(1)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid < n) {
+        data[tid] = 0u;
+    }
+}
+
+// OpenAI update: a seen id loses presence once and frequency once per copy.
+kernel void penalize(
+    device float* logits [[buffer(0)]],
+    device const uint* counts [[buffer(1)]],
+    constant uint& vocab [[buffer(2)]],
+    constant float& presence [[buffer(3)]],
+    constant float& frequency [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= vocab) {
+        return;
+    }
+    uint n = counts[gid];
+    if (n > 0u) {
+        logits[gid] = sane_logit(logits[gid]) - presence - frequency * float(n);
+    }
+}
+
+kernel void bump_count(
+    device uint* counts [[buffer(0)]],
+    constant uint& token [[buffer(1)]],
+    constant uint& vocab [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid == 0u && token < vocab) {
+        counts[token] += 1u;
+    }
 }
 
 kernel void argmax_final(

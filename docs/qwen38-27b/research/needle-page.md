@@ -43,3 +43,27 @@ The banner prints the loaded plane. Set the registry `kv_cache` to `half` or `fp
 ## Corrections
 
 Later finds are appended here. The sections above stay as committed.
+
+### 5 November 2026 — MTP off
+
+Same page mode, `fp8_e4m3`, thinking off, 65536 tokens, depth 0.5, seed 0. MTP is off. The run passed. Prefill summed to 336.42 tok/s and decode to 11.57 tok/s over five requests that closed at 46021 prompt tokens. A search on 5 November 2026 did not find that pair. Queries: "336.42 OR 11.57 Qwen3.8-27B needle page tok/s fp8_e4m3 MTP off 65536", and "\"336.42\" \"11.57\" Qwen3.8-27B needle tok/s". The overlaps were unrelated numbers and the rate reports already named above, including NInfer at 64512 and the DGX Spark FP8+MTP pair at 264.55 / 203.01. None is this page-needle sum with MTP off on an M5 Pro with 48 GB.
+
+```text
+uv run python -m harness.needle --model qwen38-27b --tokens 65536 --depth 0.5 --mtp off --thinking off --mode page
+```
+
+| Plane | Tokens | Depth | MTP | Thinking | Result | Prefill | Decode |
+|---|---|---|---|---|---|---|---|
+| fp8_e4m3 | 65536 | 0.5 | off | off | pass | 336.42 tok/s (45871 tok in 136.35 s) | 11.57 tok/s (157 tok in 13.57 s) |
+
+### 5 November 2026 — MTP on rerun
+
+Same page mode, `fp8_e4m3`, thinking off, 65536 tokens, depth 0.5, seed 0. MTP is on at depth 3. The run passed. Prefill summed to 319.21 tok/s and decode to 13.16 tok/s over five requests that closed at 46021 prompt tokens. A search on 5 November 2026 did not find that pair. Queries: "319.21 OR 13.16 Qwen3.8-27B needle page tok/s fp8_e4m3 MTP 65536", and "\"319.21\" \"13.16\" Qwen3.8-27B needle tok/s". The overlaps were unrelated numbers and the rate reports already named above, including NInfer at 64512 and the DGX Spark FP8+MTP pair at 264.55 / 203.01. None is this page-needle sum with MTP on on an M5 Pro with 48 GB.
+
+```text
+uv run python -m harness.needle --model qwen38-27b --tokens 65536 --depth 0.5 --mtp on --thinking off --mode page
+```
+
+| Plane | Tokens | Depth | MTP | Thinking | Result | Prefill | Decode |
+|---|---|---|---|---|---|---|---|
+| fp8_e4m3 | 65536 | 0.5 | on | off | pass | 319.21 tok/s (45871 tok in 143.70 s) | 13.16 tok/s (157 tok in 11.93 s) |

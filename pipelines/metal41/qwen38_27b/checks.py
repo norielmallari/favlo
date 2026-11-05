@@ -791,6 +791,47 @@ def check_sample(session: Session) -> None:
     assert _picked(session, pick) == 0
 
     logits = np.full(count, -100.0, dtype=np.float32)
+    logits[2] = np.float32(4.0)
+    logits[3] = np.float32(3.5)
+    buf = session.upload(logits)
+    counts = session.zeros(count * 4)
+    session.begin()
+    session.encode(
+        "bump_count",
+        [(counts, 0)],
+        [struct.pack("<I", 2), struct.pack("<I", count)],
+        (1, 1, 1),
+        (32, 1, 1),
+    )
+    session.encode(
+        "penalize",
+        [(buf, 0), (counts, 0)],
+        [
+            struct.pack("<I", count),
+            struct.pack("<f", 1.5),
+            struct.pack("<f", 0.0),
+        ],
+        (groups, 1, 1),
+        (256, 1, 1),
+    )
+    session.encode(
+        "argmax_partial",
+        [(buf, 0), (values, 0), (indexes, 0)],
+        [struct.pack("<I", count)],
+        (groups, 1, 1),
+        (256, 1, 1),
+    )
+    session.encode(
+        "argmax_final",
+        [(values, 0), (indexes, 0), (pick, 0), (pick, 4)],
+        [struct.pack("<I", groups)],
+        (1, 1, 1),
+        (1, 1, 1),
+    )
+    session.end()
+    assert _picked(session, pick) == 3
+
+    logits = np.full(count, -100.0, dtype=np.float32)
     logits[10] = np.float32(5.0)
     logits[20] = np.float32(4.0)
     logits[30] = np.float32(1.0)

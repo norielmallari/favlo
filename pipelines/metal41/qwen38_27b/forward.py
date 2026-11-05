@@ -5,10 +5,12 @@ stage before that layer runs. MTP weights stay in the record when MTP is off.
 The head leaves the device when the prompt needs its bytes. Decode does not run
 that block.
 
-Temperature 0 is an on-device argmax. A positive temperature, a presence
-penalty, a frequency penalty, or a logit bias is drawn on device. The host
-reads the chosen id. Presence, frequency, and logit bias follow the OpenAI
-logit update.
+Temperature 0 is an on-device argmax. A positive temperature draws on device.
+Presence and frequency subtract on device from a resident count of kept
+tokens. The kept id increments that count in the next sample's command buffer.
+A logit bias, including a closed think id, stays a short explicit list.
+The host reads the chosen id. Prefix flush and the stop check stay on this
+thread. Presence, frequency, and logit bias follow the OpenAI logit update.
 A repeated span of 16 or more tokens ends the completion. An image request
 runs the vision tower and writes those tokens into the prompt.
 """
@@ -111,6 +113,7 @@ _DEVICE_FIELDS = (
     "ab",
     "ab2",
     "logits",
+    "token_counts",
     "best_v",
     "best_i",
     "top_s",
@@ -187,6 +190,14 @@ class Qwen38Runtime:
         self._owner = owner or f"qwen38-27b:{id(self)}"
         self.root = Path(path)
         self.console = console
+        self._temperature = 0.0
+        self._top_p = 1.0
+        self._top_k = 0
+        self._presence = 0.0
+        self._frequency = 0.0
+        self._logit_bias = {}
+        self._pending_counts = []
+        self._rng = np.random.default_rng()
         self.kv_cache = kv_mode(kv_cache)
         self._request_id = 0
         self._hit_limit = False
@@ -270,6 +281,7 @@ class Qwen38Runtime:
             self.ab = zeros(AB * 4)
             self.ab2 = zeros(AB * 4)
             self.logits = zeros(VOCAB * 4)
+            self.token_counts = None
             self.best_v = zeros(_ARGMAX_GROUPS * 4)
             self.best_i = zeros(_ARGMAX_GROUPS * 4)
             self.top_s = zeros(_ARGMAX_GROUPS * SAMPLE_KEEP * 4)
@@ -1077,6 +1089,8 @@ class Qwen38Runtime:
         if pos >= self.max_pos:
             message = f"position {pos} is past {self.max_pos}"
             raise RuntimeError(message)
+        if logits:
+            self._flush_pending_counts()
         self.session.begin()
         try:
             self._embed(token)
@@ -1102,14 +1116,13 @@ class Qwen38Runtime:
             if logits:
                 head = self._resolve("lm_head.weight", "model.language_model.lm_head.weight")
                 self._gemv(self.normed, head, self.logits)
-                if not getattr(self, "_sample_host", False):
-                    self._encode_argmax()
+                self._encode_draw(adjust=True)
             self.session.end()
         except Exception:
             self.session.finish()
             raise
         self.filled = pos + 1
-        if not logits or getattr(self, "_sample_host", False):
+        if not logits:
             return None
         return self._read_pick()
 
@@ -1219,13 +1232,7 @@ class Qwen38Runtime:
         self._think_end = None if think_end is None else int(think_end)
         self._think_closed = False
         self._rng = rng or np.random.default_rng()
-        self._sample_host = (
-            self._temperature > 0.0
-            or self._presence != 0.0
-            or self._frequency != 0.0
-            or bool(self._logit_bias)
-            or self._think_end is not None
-        )
+        self._pending_counts = []
         self._output_ids = []
         self._prefill_seconds = 0.0
         self._decode_seconds = 0.0
@@ -1256,6 +1263,7 @@ class Qwen38Runtime:
             self._note("prefix_load", tokens=hit)
         self._note("cache", hit=hit)
         self._cached_tokens = hit
+        self._reset_counts()
         suffix = prompt[hit:]
         prefill_row = None
         decode_row = None
@@ -1274,10 +1282,8 @@ class Qwen38Runtime:
 
                 prefill_ids(self, suffix[:-1], hit, follow=suffix[-1])
             nxt = self.step(suffix[-1], len(prompt) - 1, logits=True, rope=self._rope_at(len(prompt) - 1))
-            if not self._sample_host:
-                assert nxt is not None
-            counts: dict[int, int] = {}
-            chosen = self._stable_draw([], self._pick(nxt, counts), counts)
+            assert nxt is not None
+            chosen = self._stable_draw([], int(nxt))
             sampled_at = time.perf_counter()
             prefill_elapsed = max(sampled_at - started, 0.0)
             self._prefill_seconds = prefill_elapsed
@@ -1331,7 +1337,7 @@ class Qwen38Runtime:
                 if chosen in stop or repeated_tail(out):
                     break
                 out.append(chosen)
-                counts[chosen] = counts.get(chosen, 0) + 1
+                self._accept(chosen)
                 emitted += 1
                 self._note_think_token(chosen)
                 self._output_ids = list(out)
@@ -1372,7 +1378,7 @@ class Qwen38Runtime:
                         feeds, expected = draft_window(chosen, drafts, stop, room)
                         if expected:
                             produced = list(out)
-                            sample_counts = dict(counts)
+                            rows = self._samples_rows()
 
                             def draw() -> int:
                                 # Span verify may have already written this row into
@@ -1380,20 +1386,20 @@ class Qwen38Runtime:
                                 if not getattr(self, "_span_logits_ready", False):
                                     self._fill_logits()
                                 self._span_logits_ready = False
-                                picked = self._sample(sample_counts, adjust=True)
-                                return self._stable_draw(produced, picked, sample_counts)
+                                picked = self._sample(adjust=True)
+                                return self._stable_draw(produced, picked)
 
                             def commit(token: int) -> None:
                                 produced.append(int(token))
-                                sample_counts[int(token)] = sample_counts.get(int(token), 0) + 1
+                                self._accept(int(token))
 
                             accepted, nxt, keep = verify(
                                 self,
                                 pos,
                                 feeds,
                                 expected,
-                                draw=draw if self._sample_host else None,
-                                commit=commit if self._sample_host else None,
+                                draw=draw if rows else None,
+                                commit=commit if rows else None,
                             )
                             self._mtp_tries += len(expected)
                             self._mtp_accepts += accepted
@@ -1410,7 +1416,6 @@ class Qwen38Runtime:
                                     halted = True
                                     break
                                 out.append(int(token))
-                                counts[int(token)] = counts.get(int(token), 0) + 1
                                 emitted += 1
                                 self._note_think_token(int(token))
                                 self._output_ids = list(out)
@@ -1419,10 +1424,10 @@ class Qwen38Runtime:
                                 if on_token is not None:
                                     on_token(int(token))
                             if not halted:
-                                if self._sample_host:
+                                if rows:
                                     chosen = int(nxt)
                                 else:
-                                    chosen = self._stable_draw(out, self._pick(nxt, counts), counts)
+                                    chosen = self._stable_draw(out, int(nxt))
                             last_sample = time.perf_counter()
                             speculated = True
                             if halted or emitted >= decode_total:
@@ -1432,9 +1437,8 @@ class Qwen38Runtime:
                 if speculated:
                     continue
                 nxt_id = step_new(chosen, pos, logits=True)
-                if not self._sample_host:
-                    assert nxt_id is not None
-                chosen = self._stable_draw(out, self._pick(nxt_id, counts), counts)
+                assert nxt_id is not None
+                chosen = self._stable_draw(out, int(nxt_id))
                 last_sample = time.perf_counter()
             if self._mtp_tries:
                 self._note("mtp", accepts=self._mtp_accepts, tries=self._mtp_tries)
@@ -1501,22 +1505,114 @@ class Qwen38Runtime:
         self.filled = hit + len(canonical)
         return canonical
 
-    def _pick(self, argmax_id: int | None, counts: dict[int, int]) -> int:
-        if not self._sample_host:
-            return int(argmax_id)
-        return self._sample(counts, adjust=True)
+    def _samples_rows(self) -> bool:
+        """True when each MTP row is drawn, not scored as one argmax window.
 
-    def _sample(self, counts: dict[int, int], *, adjust: bool) -> int:
+        Temperature, a presence or frequency penalty, or a logit bias changes
+        the next row after a kept draft. The span argmax reads every row with
+        the counts from before the window.
+        """
+        return (
+            self._temperature > 0.0
+            or self._presence != 0.0
+            or self._frequency != 0.0
+            or bool(self._logit_bias)
+        )
+
+    def _reset_counts(self) -> None:
+        """Clear the resident completion counts. Prompt tokens are not seen."""
+        self._pending_counts = []
+        if self._presence == 0.0 and self._frequency == 0.0:
+            return
+        session = getattr(self, "session", None)
+        if session is None:
+            return
+        self._ensure_counts()
         self.session.begin()
         try:
-            if adjust:
-                self._encode_penalties(counts)
-            if self._temperature <= 0.0:
-                self._encode_argmax()
-            elif 0 < self._top_k <= SAMPLE_KEEP:
-                self._encode_topk()
-            else:
-                self._encode_scan()
+            self.session.encode(
+                "zero_u32",
+                [(self.token_counts, 0)],
+                [_u32(VOCAB)],
+                ((VOCAB + 255) // 256, 1, 1),
+                (256, 1, 1),
+            )
+            self.session.end()
+        except Exception:
+            self.session.finish()
+            raise
+
+    def _ensure_counts(self) -> None:
+        """The count plane is allocated on the first penalized request."""
+        if getattr(self, "token_counts", None) is not None:
+            return
+        self.token_counts = self.session.zeros(VOCAB * 4)
+
+    def _accept(self, token: int) -> None:
+        """Queue one kept id. The next sample bumps it before it penalizes."""
+        index = int(token)
+        if 0 <= index < VOCAB:
+            self._pending_counts.append(index)
+
+    def _encode_bumps(self) -> None:
+        pending = self._pending_counts
+        self._pending_counts = []
+        for token in pending:
+            self.session.encode(
+                "bump_count",
+                [(self.token_counts, 0)],
+                [_u32(int(token)), _u32(VOCAB)],
+                (1, 1, 1),
+                (32, 1, 1),
+            )
+
+    def _flush_pending_counts(self) -> None:
+        """Bump kept ids before the forward buffer opens.
+
+        The bump stays out of the buffer that ends in the argmax, so a greedy
+        step still finishes with the same kernels as a span score.
+        """
+        if not getattr(self, "_pending_counts", None):
+            return
+        if self._presence == 0.0 and self._frequency == 0.0:
+            self._pending_counts = []
+            return
+        if getattr(self, "session", None) is None or getattr(self, "token_counts", None) is None:
+            self._pending_counts = []
+            return
+        self.session.begin()
+        try:
+            self._encode_bumps()
+            self.session.end()
+        except Exception:
+            self.session.finish()
+            raise
+
+    def _encode_draw(self, *, adjust: bool) -> None:
+        """Penalize, then draw, inside the command buffer that is already open."""
+        if adjust:
+            if self._presence != 0.0 or self._frequency != 0.0:
+                self.session.encode(
+                    "penalize",
+                    [(self.logits, 0), (self.token_counts, 0)],
+                    [_u32(VOCAB), _f32(self._presence), _f32(self._frequency)],
+                    ((VOCAB + 255) // 256, 1, 1),
+                    (256, 1, 1),
+                )
+            self._encode_bias()
+        if self._temperature <= 0.0:
+            self._encode_argmax()
+        elif 0 < self._top_k <= SAMPLE_KEEP:
+            self._encode_topk()
+        else:
+            self._encode_scan()
+
+    def _sample(self, *, adjust: bool) -> int:
+        self.session.begin()
+        try:
+            if adjust and (self._presence != 0.0 or self._frequency != 0.0):
+                self._encode_bumps()
+            self._encode_draw(adjust=adjust)
             self.session.end()
         except Exception:
             self.session.finish()
@@ -1585,22 +1681,14 @@ class Qwen38Runtime:
             return
         self._think_closed = True
         self._logit_bias[self._think_end] = -1e9
-        self._sample_host = True
 
-    def _encode_penalties(self, counts: dict[int, int]) -> None:
+    def _encode_bias(self) -> None:
+        """Add the short bias list. Presence and frequency are already on device."""
         merged: dict[int, float] = {}
         for token, bias in self._logit_bias.items():
             index = int(token)
             if 0 <= index < VOCAB:
                 merged[index] = merged.get(index, 0.0) + float(bias)
-        if self._presence != 0.0 or self._frequency != 0.0:
-            for token, count in counts.items():
-                if count <= 0:
-                    continue
-                index = int(token)
-                if 0 <= index < VOCAB:
-                    delta = -float(count) * float(self._frequency) - float(self._presence)
-                    merged[index] = merged.get(index, 0.0) + delta
         if not merged:
             return
         ids = struct.pack(f"<{len(merged)}I", *merged)
@@ -1646,7 +1734,7 @@ class Qwen38Runtime:
             self._loaded_tokenizer = tokenizer
         return tokenizer
 
-    def _stable_draw(self, produced: list[int], chosen: int, counts: dict[int, int]) -> int:
+    def _stable_draw(self, produced: list[int], chosen: int) -> int:
         """Redraw until the token is the encoding of the text it adds.
 
         The next prompt encodes the decoded completion. A token that would
@@ -1662,7 +1750,7 @@ class Qwen38Runtime:
         for _ in range(64):
             banned.append(int(chosen))
             self._ban(banned)
-            chosen = self._sample(counts, adjust=False)
+            chosen = self._sample(adjust=False)
             if not self._pick_finite:
                 return first
             if keeps_token_ids(tokenizer, produced, int(chosen)):

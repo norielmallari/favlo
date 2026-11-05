@@ -1347,8 +1347,7 @@ def test_generate_clock_ends_prefill_at_the_first_sample(monkeypatch: pytest.Mon
         return 7 if logits else None
 
     runtime.step = step
-    runtime._pick = lambda argmax_id, counts: int(argmax_id)
-    runtime._stable_draw = lambda produced, chosen, counts: int(chosen)
+    runtime._stable_draw = lambda produced, chosen: int(chosen)
     runtime._stabilize_output = lambda prompt, out: list(out)
     runtime._check_stop = lambda: None
     runtime._note = lambda *args, **kwargs: None
