@@ -389,7 +389,7 @@ class Qwen35Runtime:
         self._decode_seconds = 0.0
         self._mtp_accepts = 0
         self._mtp_tries = 0
-        from qwen35_4b.mtp import DEPTH, draft_window, propose, verify
+        from qwen35_4b.mtp import DEPTH, draft_window, kept_drafts, propose, verify
 
         depth = DEPTH if mtp_depth is None else mtp_depth
         use_mtp = bool(mtp) and bool(self._mtp_ready)
@@ -489,10 +489,10 @@ class Qwen35Runtime:
                     feeds, expected = draft_window(next_id, drafts, stop, room)
                     if expected:
                         self._mtp_tries += len(expected)
-                        accepted, nxt = verify(self, pos, feeds, expected)
+                        accepted, nxt = verify(self, pos, feeds, expected, stop)
                         self._mtp_accepts += accepted
-                        stop_mtp = False
-                        for token in expected[:accepted]:
+                        emit, stop_mtp = kept_drafts(expected, accepted, stop)
+                        for token in emit:
                             if produced >= max_tokens:
                                 break
                             last_sample = time.perf_counter()
@@ -508,7 +508,10 @@ class Qwen35Runtime:
                             break
                         carry = int(nxt)
                         continue
-                self._step(next_id)
+                if forced_token:
+                    self._step(next_id)
+                else:
+                    carry = self._step(next_id, sample=True)
             if self._mtp_tries:
                 progress.note(
                     console, "mtp", accepts=self._mtp_accepts, tries=self._mtp_tries
@@ -625,11 +628,11 @@ class Qwen35Runtime:
                 VOCAB,
                 HIDDEN,
             )
-            session.end()
+            return self._sample()
         except Exception:
-            session.finish()
+            if session.active:
+                session.end(wait=True)
             raise
-        return self._sample()
 
     def _mtp_body(self, token: int, pos: int) -> None:
         """One MTP full-attention block at ``pos``. ``hidden`` is the fused path input."""
@@ -1428,7 +1431,7 @@ class Qwen35Runtime:
             offsets=[0, gain.data, 0],
         )
 
-    def _step(self, token: int) -> None:
+    def _step(self, token: int, *, sample: bool = False) -> int | None:
         session = self.session
         emb = self._planes["embedding"]
         memory.store(self.token_buf, 0, struct.pack("<I", token))
@@ -1445,8 +1448,13 @@ class Qwen35Runtime:
             self._layer(layer)
         self._rmsnorm(self.hidden, self._planes["final_norm"], self.normed)
         self._gemv(self.normed, emb, self.logits, VOCAB, HIDDEN)
+        if sample:
+            self._encode_sample()
         session.end()
         self.pos += 1
+        if sample:
+            return self._read_token()
+        return None
 
     def _layer(self, layer: int) -> None:
         session = self.session
@@ -1622,7 +1630,8 @@ class Qwen35Runtime:
             self.attn, self._planes[f"layer.{layer}.o"], self.delta, HIDDEN, ATTN_HEADS * HEAD_DIM
         )
 
-    def _sample(self) -> int:
+    def _encode_sample(self) -> None:
+        """Penalize, argmax, and the count bump in the open command buffer."""
         session = self.session
         if self._presence or self._frequency:
             session.launch(
@@ -1655,8 +1664,18 @@ class Qwen35Runtime:
                 (1, 1, 1),
                 (1, 1, 1),
             )
-        session.flush()
+
+    def _read_token(self) -> int:
         return int.from_bytes(memory.load(self.token_out, 0, 4), "little")
+
+    def _sample(self) -> int:
+        """One submit. Joins an open forward buffer when the caller left it open."""
+        session = self.session
+        if not session.active:
+            session.begin()
+        self._encode_sample()
+        session.end()
+        return self._read_token()
 
 
 def _i8_resident_bytes() -> int:

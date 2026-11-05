@@ -35,7 +35,13 @@ from harness.benchmarks.serve import Request, Server
 from harness.coding.compliance import run_contract, vision_problems
 from harness.coding.grade import grade
 from harness.coding.loop import run_session
-from harness.file_session import format_request, format_summary, parse_requests, printed_requests
+from harness.file_session import (
+    format_request,
+    format_summary,
+    parse_requests,
+    pipeline_log,
+    printed_requests,
+)
 from harness.image_attachment import HORSE
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -121,8 +127,8 @@ def main(argv: list[str] | None = None) -> int:
             store=store,
         )
         if vision is not None:
-            problems.extend(vision_problems(server.log.text()))
-        _print_rates(server.log)
+            problems.extend(vision_problems(pipeline_log(server.log.text(), stem)))
+        _print_rates(server.log, stem)
         base_url = f"http://127.0.0.1:{server.port}/v1"
         problems.extend(asyncio.run(run_contract(base_url, stem, store=store)))
         result = grade(workspace)
@@ -140,15 +146,15 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _print_rates(log: object) -> None:
-    """Print each request once its decode line is in the followed log."""
+def _print_rates(log: object, model: str) -> None:
+    """Print this model's requests once the decode line is in the followed log."""
     text = getattr(log, "text", None)
     if not callable(text):
         return
     deadline = time.monotonic() + 2
-    requests = printed_requests(parse_requests(text()))
+    requests = printed_requests(parse_requests(pipeline_log(text(), model)))
     while time.monotonic() < deadline:
-        requests = printed_requests(parse_requests(text()))
+        requests = printed_requests(parse_requests(pipeline_log(text(), model)))
         if requests and requests[-1].decode:
             break
         time.sleep(0.05)

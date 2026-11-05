@@ -21,6 +21,7 @@ from qwen35_4b.layout import (  # noqa: E402
     is_full,
     kv_mode,
 )
+from qwen35_4b.mtp import kept_drafts, verify  # noqa: E402
 from qwen35_4b.sampling import DEFAULT_VARIANT, VARIANTS  # noqa: E402
 
 
@@ -182,6 +183,35 @@ def test_historical_reasoning_is_dropped() -> None:
     assert "</think>" not in history[1]["content"]
     assert history[3]["reasoning_content"] == "current trace"
     assert history[3]["tool_calls"][0]["function"]["name"] == "lookup"
+
+
+class _StopSteps:
+    def __init__(self, predictions: list[int]) -> None:
+        self._predictions = list(predictions)
+        self.stepped: list[int] = []
+
+    def _step(self, token: int, *, sample: bool = False) -> int:
+        del sample
+        self.stepped.append(int(token))
+        return self._predictions.pop(0)
+
+
+def test_verify_leaves_a_stop_out_of_the_cache() -> None:
+    runtime = _StopSteps([11, 248046, 99])
+    accepted, nxt = verify(runtime, 0, [7, 11], [11, 248046], {248044, 248046})
+    assert accepted == 2
+    assert nxt == 248046
+    assert runtime.stepped == [7, 11]
+
+
+def test_kept_drafts_drop_the_stop_and_everything_after_it() -> None:
+    stop = {248044, 248046}
+    kept, halted = kept_drafts([11, 248046, 12], 3, stop)
+    assert kept == [11]
+    assert halted is True
+    kept, halted = kept_drafts([11, 12, 13], 2, stop)
+    assert kept == [11, 12]
+    assert halted is False
 
 
 def test_sampling_card() -> None:

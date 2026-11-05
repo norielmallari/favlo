@@ -12,7 +12,7 @@ from harness.benchmarks.serve import Request, Server
 from harness.coding.agent_tools import coding_tools
 from harness.coding.session import session_for
 from harness.coding.workspace import PROMPT, prepare_workspace
-from harness.file_session import RequestRate, parse_requests
+from harness.file_session import RequestRate, parse_requests, pipeline_log
 from harness.turn_printer import TurnPrinter
 
 # One model call per tool step, then status polls, then a stop.
@@ -116,7 +116,7 @@ def run_session(
                 problems=problems,
             )
         )
-        problems.extend(prefix_problems(parse_requests(server.log.text())))
+        problems.extend(prefix_problems(parse_requests(pipeline_log(server.log.text(), model))))
         return list(session.calls), problems
     finally:
         session.close()
@@ -144,7 +144,7 @@ async def _run(
     client.function_invocation_configuration["allow_concurrent_invocation"] = False
     client.function_invocation_configuration["include_detailed_errors"] = True
     options = agent_options(request, mtp=mtp, mtp_depth=mtp_depth, store=store)
-    restarter = _PrefixRestart(server, client)
+    restarter = _PrefixRestart(server, client, model)
 
     class PrefixRestartMiddleware(ChatMiddleware):
         """Unload the resident model after the first turn so the next loads from SSD."""
@@ -183,26 +183,28 @@ async def _run(
 class _PrefixRestart:
     """Unload the resident model once, keeping the listener and the followed log."""
 
-    def __init__(self, server: Server, client: Any) -> None:
+    def __init__(self, server: Server, client: Any, model: str) -> None:
         self.server = server
         self.client = client
+        self.model = model
         self.calls = 0
 
     def restart(self) -> None:
-        _wait_latest_decode(self.server)
+        _wait_latest_decode(self.server, self.model)
         self.server.restart()
         rebind_chat_client(self.client, self.server.port)
 
 
-def _wait_latest_decode(server: Server, *, timeout: float = 30.0) -> None:
-    """Block until the open request's decode line is in the followed log.
+def _wait_latest_decode(server: Server, model: str, *, timeout: float = 30.0) -> None:
+    """Block until this model's open request has a decode line in the log.
 
     The prefix file is written before that line. Stopping earlier can drop the
     decode telemetry the extension check needs for the applied token count.
+    Another pipeline's decode line does not count.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        requests = parse_requests(server.log.text())
+        requests = parse_requests(pipeline_log(server.log.text(), model))
         if requests and requests[-1].decode:
             return
         time.sleep(0.05)

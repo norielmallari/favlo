@@ -21,7 +21,13 @@ import time
 from pathlib import Path
 
 from harness.benchmarks.serve import Request, Server
-from harness.file_session import format_request, format_summary, parse_requests, printed_requests
+from harness.file_session import (
+    format_request,
+    format_summary,
+    parse_requests,
+    pipeline_log,
+    printed_requests,
+)
 from harness.needle.haystack import FILE_NAME, generate
 from harness.needle.loop import run_needle
 
@@ -90,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
                 mode=args.mode,
             )
         )
-        _print_rates(server.log)
+        _print_rates(server.log, stem)
     finally:
         if server is not None:
             server.stop()
@@ -128,14 +134,14 @@ def _prepare(workspace: Path, text: str) -> None:
     (workspace / FILE_NAME).write_text(text, encoding="utf-8")
 
 
-def _print_rates(log: object) -> None:
+def _print_rates(log: object, model: str) -> None:
     text = getattr(log, "text", None)
     if not callable(text):
         return
     deadline = time.monotonic() + 2
-    requests = printed_requests(parse_requests(text()))
+    requests = printed_requests(parse_requests(pipeline_log(text(), model)))
     while time.monotonic() < deadline:
-        requests = printed_requests(parse_requests(text()))
+        requests = printed_requests(parse_requests(pipeline_log(text(), model)))
         if requests and requests[-1].decode:
             break
         time.sleep(0.05)

@@ -162,6 +162,28 @@ def _load_count(line: str) -> int | None:
     return None
 
 
+def pipeline_log(text: str, model: str) -> str:
+    """Log lines that belong to ``model`` on a shared listener.
+
+    ``request open`` names the model. Lines stay with that model until the next
+    open, including a decode line that lands after ``request closed``. Another
+    pipeline's prompt and vision notes stay out.
+    """
+    stem = model.split(":", 1)[0]
+    kept: list[str] = []
+    owner = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("request open"):
+            owner = line.removeprefix("request open").strip()
+            continue
+        if line.startswith("request closed"):
+            continue
+        if owner == stem or owner.startswith(stem + ":"):
+            kept.append(line)
+    return "\n".join(kept)
+
+
 def parse_requests(text: str) -> list[RequestRate]:
     """Group server log lines into one record per chat request.
 

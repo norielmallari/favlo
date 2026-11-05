@@ -1,4 +1,10 @@
-"""Console progress helpers. Writes stay off the hot path via ``favlo.console``."""
+"""Console progress helpers.
+
+Call sites post through ``Console`` / ``publish_count``. When the console
+thread is on, those posts reach ``favlo.host_progress``; that host thread
+builds the fact and feeds the console queue. This module does not paint and
+does not own a progress thread.
+"""
 
 from __future__ import annotations
 

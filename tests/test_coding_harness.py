@@ -15,11 +15,36 @@ from harness.coding.agent_tools import coding_tools
 from harness.coding.grade import grade
 from harness.coding.loop import agent_options, prefix_problems
 from harness.turn_printer import print_updates
-from harness.file_session import parse_requests
+from harness.file_session import parse_requests, pipeline_log
 from harness.coding.session import REQUIRED_TOOLS, session_for
 from harness.coding.workspace import PROMPT, dispatch, locate, prepare_workspace
 
 _MODULE = "def collect(before, after):\n    return after - before\n"
+
+
+def test_pipeline_log_drops_other_models() -> None:
+    text = """\
+request open qwen38-27b
+prompt tokens 17
+cache miss
+prefill 1.00 tok/s (17 tok in 17.00s)
+decode 1.00 tok/s (1 tok in 1.00s)
+request closed qwen38-27b
+request open qwen35-4b
+prompt tokens 40
+cache miss
+prefill 2.00 tok/s (40 tok in 20.00s)
+decode 2.00 tok/s (2 tok in 1.00s)
+request closed qwen35-4b
+decode 3.00 tok/s (3 tok in 1.00s)
+request open qwen38-27b
+prompt tokens 9
+cache miss
+"""
+    kept = parse_requests(pipeline_log(text, "qwen35-4b"))
+    assert len(kept) == 1
+    assert kept[0].prompt_tokens == 40
+    assert kept[0].decode_tokens == 3
 
 
 def test_thinking_card_id() -> None:

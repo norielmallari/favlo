@@ -17,7 +17,10 @@ DEPTH = 3
 def draft_window(
     chosen: int, drafts: list[int], stop: set[int], room: int
 ) -> tuple[list[int], list[int]]:
-    """Inputs to feed, and the draft token each input should predict."""
+    """Inputs to feed, and the draft token each input should predict.
+
+    A stop id can be a prediction. It is not fed.
+    """
     usable: list[int] = []
     for token in drafts[: max(room, 0)]:
         usable.append(int(token))
@@ -26,6 +29,22 @@ def draft_window(
     if not usable:
         return [int(chosen)], []
     return [int(chosen), *usable[:-1]], usable
+
+
+def kept_drafts(
+    expected: list[int], accepted: int, stop: set[int]
+) -> tuple[list[int], bool]:
+    """Drafts to append, and whether a stop id ended the window.
+
+    A confirmed stop id is not appended. Tokens after it are not appended.
+    The caller does not continue from the token sampled past that stop.
+    """
+    kept: list[int] = []
+    for token in expected[: max(accepted, 0)]:
+        if int(token) in stop:
+            return kept, True
+        kept.append(int(token))
+    return kept, False
 
 
 def propose(runtime: Any, token: int, anchor: int, depth: int = DEPTH) -> list[int]:
@@ -47,24 +66,27 @@ def verify(
     pos: int,
     feeds: list[int],
     expected: list[int],
+    stop: set[int],
 ) -> tuple[int, int]:
     """Greedy verify. Returns accepted draft count and the next backbone token.
 
     ``feeds[0]`` is the confirmed token. Each accepted draft is stepped before
-    the next sample. ``pos`` is the language position of ``feeds[0]``.
+    the next sample, except a stop id. That id ends the window and stays out of
+    the cache, so the next turn continues from the last kept token. ``pos`` is
+    the language position of ``feeds[0]``.
     """
     del pos
     if len(feeds) != len(expected) and expected:
         if len(feeds) != len(expected):
             message = f"{len(feeds)} feeds and {len(expected)} drafts"
             raise RuntimeError(message)
-    runtime._step(int(feeds[0]))
-    nxt = int(runtime._sample())
+    nxt = int(runtime._step(int(feeds[0]), sample=True))
     if not expected:
         return 0, nxt
     accepted = 0
     while accepted < len(expected) and nxt == int(expected[accepted]):
         accepted += 1
-        runtime._step(int(expected[accepted - 1]))
-        nxt = int(runtime._sample())
+        if int(nxt) in stop:
+            break
+        nxt = int(runtime._step(int(expected[accepted - 1]), sample=True))
     return accepted, nxt
