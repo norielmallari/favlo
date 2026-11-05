@@ -223,10 +223,10 @@ def verify(
                 if commit is not None and index + 1 < len(expected):
                     commit(int(expected[index]))
                 continue
-            runtime.step(int(feed), pos + index, logits=True, download=False)
             take = getattr(runtime, "_take_routes", None)
             if take is not None:
                 take(prefill=False)
+            runtime.step(int(feed), pos + index, logits=True, download=False)
             pred = int(draw(None))
             preds.append(pred)
             if pred != int(expected[index]):

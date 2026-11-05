@@ -210,7 +210,7 @@ def test_format_note_is_canonical() -> None:
 def test_pretty_folds_a_request_into_one_line() -> None:
     ui, stream, clock = _ui("pretty", color=0)
     ui.fold_turns = True
-    ui.apply_event({"type": "log", "line": "request open"})
+    ui.apply_event({"type": "log", "line": "request open example-model"})
     ui.note("prompt", tokens=10)
     ui.note("cache", hit=0)
     ui.apply_event({"type": "begin", "phase": "prefill", "total": 10, "unit": "tok"})
@@ -223,8 +223,8 @@ def test_pretty_folds_a_request_into_one_line() -> None:
         {"type": "end", "phase": "decode", "summary": "decode 1.00 tok/s (2 tok in 2.00s)"}
     )
     ui.note("prefix_store", tokens=12)
-    ui.apply_event({"type": "log", "line": "request closed"})
-    ui.apply_event({"type": "log", "line": "request open"})
+    ui.apply_event({"type": "log", "line": "request closed example-model"})
+    ui.apply_event({"type": "log", "line": "request open example-model"})
     ui.apply_event({"type": "begin", "phase": "prefill", "total": 2, "unit": "tok"})
     ui.apply_event(
         {"type": "end", "phase": "prefill", "summary": "prefill 2.00 tok/s (2 tok in 1.00s)"}
@@ -234,10 +234,12 @@ def test_pretty_folds_a_request_into_one_line() -> None:
         {"type": "end", "phase": "decode", "summary": "decode 2.00 tok/s (4 tok in 2.00s)"}
     )
     ui.note("prefix_store", tokens=16)
-    ui.apply_event({"type": "log", "line": "request closed"})
+    ui.apply_event({"type": "log", "line": "request closed example-model"})
     clock.now += 1
     ui.sample()
     text = stream.getvalue()
+    assert "request open example-model" in text
+    assert "request closed example-model" in text
     assert "prompt tokens" not in text
     assert "cache miss" not in text
     assert "prefill 1.00" not in text
@@ -265,7 +267,7 @@ def test_a_held_folded_turn_prints_one_line_before_the_reply() -> None:
     ui, stream, clock = _ui("pretty", color=0)
     ui.fold_turns = True
     ui.hold(True)
-    ui.apply_event({"type": "log", "line": "request open"})
+    ui.apply_event({"type": "log", "line": "request open example-model"})
     ui.note("prompt", tokens=10)
     ui.apply_event({"type": "begin", "phase": "prefill", "total": 10, "unit": "tok"})
     ui.apply_event(
@@ -276,7 +278,7 @@ def test_a_held_folded_turn_prints_one_line_before_the_reply() -> None:
         {"type": "end", "phase": "decode", "summary": "decode 2.00 tok/s (4 tok in 2.00s)"}
     )
     ui.note("prefix_store", tokens=16)
-    ui.apply_event({"type": "log", "line": "request closed"})
+    ui.apply_event({"type": "log", "line": "request closed example-model"})
     clock.now += 1
     ui.sample()
     ui.say("favlo: Hello")
@@ -856,9 +858,9 @@ def test_the_load_row_shows_before_the_reply() -> None:
 
 
 def test_another_clients_request_prints_the_prompt_again() -> None:
-    ui, stream, _clock = _ui("pretty", color=0)
+    ui, stream, clock = _ui("pretty", color=0)
     ui.prompt()
-    ui.apply_event({"type": "log", "line": "request open"})
+    ui.apply_event({"type": "log", "line": "request open example-model"})
     ui.apply_event(
         {"type": "begin", "phase": "load", "total": 100, "unit": "bytes", "detail": "record"}
     )
@@ -866,22 +868,26 @@ def test_another_clients_request_prints_the_prompt_again() -> None:
     ui.apply_event({"type": "end", "phase": "load", "summary": "loaded record"})
     ui.apply_event({"type": "log", "line": "prefix store 10 tokens"})
     assert "you:" not in stream.getvalue()
-    ui.apply_event({"type": "log", "line": "request closed"})
+    ui.apply_event({"type": "log", "line": "request closed example-model"})
     text = stream.getvalue()
-    assert "request open" not in text
-    assert "request closed" not in text
+    stamp = _stamp(clock)
+    assert f"[{stamp}] request open example-model" in text
+    assert f"[{stamp}] request closed example-model" in text
     assert "you:" not in text
     assert text.index("41") < text.index("loaded record")
-    assert text.rstrip().endswith("prefix store 10 tokens")
+    assert text.index("prefix store 10 tokens") < text.index("request closed example-model")
     assert ui._at_prompt is True
 
 
 def test_a_closed_request_leaves_an_untouched_prompt() -> None:
-    ui, stream, _clock = _ui("pretty", color=0)
+    ui, stream, clock = _ui("pretty", color=0)
     ui.prompt()
-    ui.apply_event({"type": "log", "line": "request open"})
-    ui.apply_event({"type": "log", "line": "request closed"})
-    assert stream.getvalue() == ""
+    ui.apply_event({"type": "log", "line": "request open example-model"})
+    ui.apply_event({"type": "log", "line": "request closed example-model"})
+    stamp = _stamp(clock)
+    text = stream.getvalue()
+    assert f"[{stamp}] request open example-model" in text
+    assert f"[{stamp}] request closed example-model" in text
     assert ui._at_prompt is True
 
 
@@ -889,10 +895,10 @@ def test_a_held_turn_does_not_print_the_prompt_when_the_request_closes() -> None
     ui, stream, _clock = _ui("pretty", color=0)
     ui.prompt()
     ui.hold(True)
-    ui.apply_event({"type": "log", "line": "request open"})
+    ui.apply_event({"type": "log", "line": "request open example-model"})
     ui.apply_event({"type": "begin", "phase": "decode", "total": 0, "unit": "tok"})
     ui.apply_event({"type": "end", "phase": "decode", "summary": "decode settled"})
-    ui.apply_event({"type": "log", "line": "request closed"})
+    ui.apply_event({"type": "log", "line": "request closed example-model"})
     assert "you:" not in stream.getvalue()
     assert ui._at_prompt is False
 
@@ -917,7 +923,7 @@ def test_the_frame_waits_until_every_request_closes() -> None:
     ui, stream, _clock = _ui("pretty", color=0)
     ui.hold(True)
     ui.note_caught_up()
-    ui.apply_event({"type": "log", "line": "request open"})
+    ui.apply_event({"type": "log", "line": "request open example-model"})
     ui.apply_event({"type": "log", "line": "prefix store 10 tokens"})
     ui.say("favlo: Hello")
     assert "prefix store 10 tokens" in stream.getvalue()
@@ -925,7 +931,7 @@ def test_the_frame_waits_until_every_request_closes() -> None:
 
     def finish() -> None:
         time.sleep(0.05)
-        ui.apply_event({"type": "log", "line": "request closed"})
+        ui.apply_event({"type": "log", "line": "request closed example-model"})
         ui.note_caught_up()
 
     threading.Thread(target=finish).start()
@@ -935,17 +941,17 @@ def test_the_frame_waits_until_every_request_closes() -> None:
     assert text.index("prefix store 10 tokens") < text.index("favlo: Hello")
     assert "you:" not in text
     assert ui._at_prompt is True
-    assert "request open" not in text
-    assert "request closed" not in text
+    assert "request open example-model" in text
+    assert "request closed example-model" in text
 
 
 def test_a_turn_prints_every_request_after_the_last_close() -> None:
     ui, stream, _clock = _ui("pretty", color=0)
     ui.hold(True)
     for label in ("prefix store 1 tokens", "prefix store 2 tokens"):
-        ui.apply_event({"type": "log", "line": "request open"})
+        ui.apply_event({"type": "log", "line": "request open example-model"})
         ui.apply_event({"type": "log", "line": label})
-        ui.apply_event({"type": "log", "line": "request closed"})
+        ui.apply_event({"type": "log", "line": "request closed example-model"})
     ui.say("favlo: Hello")
     assert "prefix store 1 tokens" in stream.getvalue()
     assert "favlo: Hello" not in stream.getvalue()
@@ -954,6 +960,8 @@ def test_a_turn_prints_every_request_after_the_last_close() -> None:
     reply_at = text.index("favlo: Hello")
     assert text.index("prefix store 1 tokens") < reply_at
     assert text.index("prefix store 2 tokens") < reply_at
+    assert "request open example-model" in text
+    assert "request closed example-model" in text
 
 
 def test_a_wait_line_is_shown_while_the_frame_is_open() -> None:

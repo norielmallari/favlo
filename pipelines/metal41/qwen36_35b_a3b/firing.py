@@ -1,6 +1,7 @@
 """Expert firing log. The request path only adds integers.
 
-The lull writes a finished request. It does not change an expert's width.
+The lull pulls the finished hist plane, stamps the turn, and writes SQLite.
+It does not change an expert's width.
 """
 
 from __future__ import annotations
@@ -19,7 +20,8 @@ WINDOW = 16384
 QUIET_SECONDS = 0.25
 
 _lock = threading.Lock()
-_pending: dict[int, list[tuple[str, RouteScratch]]] = {}
+# record, finished plane (None when host-only), optional pre-pulled snap
+_pending: dict[int, list[tuple[str, int | None, RouteScratch | None]]] = {}
 
 
 def relative_score(hits: int, layer_hits: int, experts: int = EXPERTS) -> float:
@@ -308,22 +310,26 @@ def _stamp_turn(routes: RouteScratch, runtime: Any) -> None:
     )
 
 
-def _clear_hist(runtime: Any) -> None:
+def _clear_hist(runtime: Any, plane: int | None = None) -> None:
     clear = getattr(runtime, "_clear_route_hist", None)
     if callable(clear):
-        clear()
+        clear(plane)
 
 
 def open_request(runtime: Any) -> None:
     routes = getattr(runtime, "routes", None)
     if routes is not None:
         routes.begin()
-    _clear_hist(runtime)
+    plane = int(getattr(runtime, "_route_plane", 0) or 0)
+    bind = getattr(runtime, "_bind_route_plane", None)
+    if callable(bind):
+        bind(plane)
+    _clear_hist(runtime, plane)
     runtime._firing_open = True
 
 
 def finish_request(runtime: Any, selection: Any, *, complete: bool) -> None:
-    """Queue this request. The listener runs the lull after the request closes."""
+    """Flip the hist plane and schedule the lull. The pull runs off this path."""
     runtime._firing_open = False
     routes = getattr(runtime, "routes", None)
     if routes is None or selection is None:
@@ -333,17 +339,30 @@ def finish_request(runtime: Any, selection: Any, *, complete: bool) -> None:
         routes.begin()
         _clear_hist(runtime)
         return
-    pull = getattr(runtime, "_pull_route_hist", None)
-    if callable(pull):
-        pull()
-    _stamp_turn(routes, runtime)
-    snap = routes.snapshot()
-    routes.begin()
-    _clear_hist(runtime)
     record = str(getattr(runtime, "root", ""))
     token = id(runtime)
+    pull = getattr(runtime, "_pull_route_hist", None)
+    planes = getattr(runtime, "_route_hist_planes", None)
+    if callable(pull) and planes is not None:
+        finished = int(getattr(runtime, "_route_plane", 0) or 0)
+        nxt = 1 - (finished % 2)
+        bind = getattr(runtime, "_bind_route_plane", None)
+        if callable(bind):
+            bind(nxt)
+        else:
+            runtime._route_plane = nxt
+        _clear_hist(runtime, nxt)
+        snap: RouteScratch | None = None
+        plane: int | None = finished
+    else:
+        # Host-only / tests without a device hist: freeze the scratch now.
+        _stamp_turn(routes, runtime)
+        snap = routes.snapshot()
+        routes.begin()
+        _clear_hist(runtime)
+        plane = None
     with _lock:
-        _pending.setdefault(token, []).append((record, snap))
+        _pending.setdefault(token, []).append((record, plane, snap))
     runtime._idle_heartbeat = (selection.folder, record, token)
 
 
@@ -355,18 +374,29 @@ def _lull(runtime: Any, folder: str, record: str, token: int) -> None:
         batch = _pending.pop(token, [])
     if not batch:
         return
+    routes = getattr(runtime, "routes", None)
+    pull = getattr(runtime, "_pull_route_hist", None)
     store = _store(folder)
     try:
-        for identity, routes in batch:
+        for identity, plane, snap in batch:
             if identity != record:
                 continue
-            store.commit_request(identity, routes)
+            if snap is None:
+                if callable(pull) and plane is not None:
+                    pull(plane)
+                if routes is None:
+                    continue
+                _stamp_turn(routes, runtime)
+                snap = routes.snapshot()
+                routes.begin()
+                _clear_hist(runtime, plane)
+            store.commit_request(identity, snap)
     finally:
         store.close()
 
 
 def idle_heartbeat(runtime: Any, selection: Any = None) -> None:
-    """Write the queued routes. The listener calls this after the request returns."""
+    """Pull the finished plane, stamp, and write. The listener calls this after close."""
     del selection
     job = getattr(runtime, "_idle_heartbeat", None)
     if job is None:

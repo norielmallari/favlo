@@ -39,3 +39,5 @@ The banner prints the loaded plane, MTP, thinking, and vision.
 ## Corrections
 
 Later finds are appended here. The sections above stay as committed.
+
+5 November 2026. On an M5 Pro with 48 GB, `Qwen3.6-35B-A3B-fp8-e20` with `fp8_e4m3` keys and values, MTP off, thinking on, vision off, store off: the coding agent passed at 651.69 tok/s prefill (2509 tok in 3.85 s) and 67.50 tok/s decode (806 tok in 11.94 s). Command: `uv run python -m harness.coding --model qwen36-35b-a3b --thinking on --store off`. The banner printed `vision off`. Query: "651.69 OR 67.50 Qwen3.6-35B-A3B coding agent fp8_e4m3 vision off". The card and the Metal MTP issue above do not list those rates. A search on 5 November 2026 did not find 651.69 and 67.50 in those sources.

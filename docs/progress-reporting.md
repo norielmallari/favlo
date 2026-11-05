@@ -2,7 +2,7 @@
 
 The console accepts a progress report from any pipeline. `begin`, `count`, `end`, and `note` do not branch on the kind. The row key is the pipeline process, the phase, and the request, so an embeddings load and a language-model prefill do not share a row. The phase list and the unit list are shared. The unit says what the count is.
 
-A pipeline calls these on the console it already holds. `publish_count` is the helper that calls `count`. The caller enqueues the fact and returns. The CLI thread sanitizes the fact and paints it. The map of the row itself is [console.md](console.md).
+A pipeline calls these on the console it already holds. `publish_count` is the helper that calls `count`. The caller posts onto `favlo.host_progress` and returns. That host thread builds the fact and enqueues onto the console queue the CLI already drains. The CLI thread sanitizes the fact and paints it. The map of the row itself is [console.md](console.md).
 
 Not every pipeline calls the API. The matrix below is the calls each pipeline makes now. A blank serve path means that pipeline does not open a row.
 

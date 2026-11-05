@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from favlo.daemon import TracebackSkip
+from favlo.host_progress import HostProgress
 from favlo.logs import RollingLog
 from favlo.progress import Sanitizer
 
@@ -158,8 +159,16 @@ class Console:
         self._thread: threading.Thread | None = None
         # Every mode may enqueue begin/end/note so a slow pipe does not stall
         # the GPU thread. Tests pass start_thread=False and keep the sync path.
+        # HostProgress owns CPU fact building; this thread paints / writes protocol.
         self._start_thread = start_thread
         self._actions: queue.SimpleQueue[tuple[Any, ...]] = queue.SimpleQueue()
+        self._host: HostProgress | None = None
+        if start_thread:
+            self._host = HostProgress(
+                enqueue=self._actions.put,
+                wake=self._ensure_thread,
+                clock=self._clock,
+            )
         self.fold_turns = False
         self.live_decode = mode == "pretty"
         self._recorder: Callable[[str], None] | None = None
@@ -243,14 +252,25 @@ class Console:
     def log(self, line: str) -> None:
         """A durable line. The listening line stays plain text in every mode."""
         self._record(line)
+        boundary = _request_boundary(line)
+        restore = self._apply_request_boundary(boundary) if boundary is not None else False
         if self.mode == "json":
             self._event({"type": "log", "line": line})
+            if restore:
+                self.prompt(after_output=True)
             return
-        if self.mode == "pretty" and self._handles:
+        if self.mode == "pretty" and self._handles and boundary is None:
             return
         if self.mode == "pretty" and (_folded_log(line) or self._traceback.drop(line)):
+            if restore:
+                self.prompt(after_output=True)
             return
-        if self.mode == "pretty" and self.fold_turns and _turn_key(line) is not None:
+        if (
+            boundary is None
+            and self.mode == "pretty"
+            and self.fold_turns
+            and _turn_key(line) is not None
+        ):
             with self._lock:
                 if self._turn_depth > 0:
                     self._stash_turn(line)
@@ -259,16 +279,18 @@ class Console:
         self._erase()
         self._write(self._stamp(line) + "\n")
         self._redraw()
+        if restore:
+            self.prompt(after_output=True)
 
     def note(self, topic: str, **fields: Any) -> None:
         """A structured diagnostic. Pretty folds it. Plain and json keep the line.
 
-        With the console thread running, the call enqueues and returns. The
-        console thread formats and writes. Prefill and decode do not wait.
+        With the host consumer running, the call posts and returns. The host
+        thread enqueues; the console thread formats and writes. Prefill and
+        decode do not wait.
         """
-        if self._start_thread:
-            self._actions.put(("note", topic, dict(fields)))
-            self._ensure_thread()
+        if self._host is not None:
+            self._host.note(topic, dict(fields))
             return
         self.log(format_note(topic, **fields))
 
@@ -401,29 +423,6 @@ class Console:
 
     def _paint_remote(self, event: dict[str, Any]) -> None:
         """Apply one sanitized event. The caller is the console thread."""
-        restore = False
-        with self._lock:
-            line = _log_line(event)
-            if line == "request open":
-                self._turn_depth += 1
-                self._turn_due = None
-                if self._holding:
-                    self._opens += 1
-                return
-            if line == "request closed":
-                self._turn_depth = max(0, self._turn_depth - 1)
-                if self.fold_turns and self._turn_depth == 0:
-                    self._turn_due = self._clock() + _TURN_IDLE
-                if self._holding:
-                    self._closes += 1
-                elif self._restore_prompt and not self._handles:
-                    self._restore_prompt = False
-                    restore = True
-                if not restore:
-                    return
-        if restore:
-            self.prompt(after_output=True)
-            return
         kind = event.get("type")
         if kind == "log":
             line = event.get("line")
@@ -439,6 +438,29 @@ class Console:
         if kind == "end":
             self._mirror_end(event)
 
+    def _apply_request_boundary(self, boundary: str) -> bool:
+        """Update turn depth for ``request open`` / ``request closed``.
+
+        Returns True when the prompt should be restored after the line paints.
+        """
+        with self._lock:
+            if boundary == "open":
+                self._turn_depth += 1
+                self._turn_due = None
+                if self._holding:
+                    self._opens += 1
+                return False
+            self._turn_depth = max(0, self._turn_depth - 1)
+            if self.fold_turns and self._turn_depth == 0:
+                self._turn_due = self._clock() + _TURN_IDLE
+            if self._holding:
+                self._closes += 1
+                return False
+            if self._restore_prompt and not self._handles:
+                self._restore_prompt = False
+                return True
+            return False
+
     def begin(
         self,
         phase: str,
@@ -452,8 +474,8 @@ class Console:
     ) -> Progress:
         """Open a phase row.
 
-        With the console thread running, the call stores the handle and
-        enqueues the paint. Prefill and decode do not wait for the write.
+        With the host consumer running, the call stores the handle and posts.
+        Prefill and decode do not wait for the write.
         """
         if phase not in PHASES:
             message = f"unknown console phase {phase}"
@@ -475,9 +497,8 @@ class Console:
         with self._lock:
             self._handles.append(progress)
             self._turn_due = None
-        if self._start_thread:
-            self._actions.put(("begin", progress))
-            self._ensure_thread()
+        if self._host is not None:
+            self._host.begin(progress)
             return progress
         self._emit_begin(progress)
         return progress
@@ -485,26 +506,29 @@ class Console:
     def end(self, progress: Progress, summary: str) -> None:
         """Close a phase row.
 
-        With the console thread running, the call marks the row closed and
-        enqueues the summary write. Prefill and decode do not wait for it.
+        Marks the row closed immediately, then posts. The host thread flushes a
+        pending count for that handle before the end event. Prefill and decode
+        do not wait for the write.
         """
         if progress.closed:
             return
         progress.summary = summary
         progress.closed = True
-        if self._start_thread:
-            self._actions.put(("end", progress, summary))
-            self._ensure_thread()
+        if self._host is not None:
+            self._host.end(progress, summary)
             return
         self._emit_end(progress, summary)
 
     def count(self, progress: Progress, done: int) -> None:
-        """Enqueue a count and return. The console thread emits it.
+        """Post a count and return. The host thread builds the fact.
 
-        ``done`` is copied into the fact. The caller does not wait for the
-        paint, and it does not leave the rate clock on a shared field.
+        The GPU thread does not measure elapsed or enqueue the console fact.
+        Latest-wins coalescing drops intermediate counts for the same handle.
         """
         if progress.closed or isinstance(done, bool) or not isinstance(done, int):
+            return
+        if self._host is not None:
+            self._host.count(progress, int(done))
             return
         elapsed = self._clock() - progress.started
         if elapsed < 0 or not math.isfinite(elapsed):
@@ -518,10 +542,6 @@ class Console:
             elapsed,
         )
         progress.fed = True
-        if self._start_thread:
-            self._actions.put(("count", progress, fact))
-            self._ensure_thread()
-            return
         self._apply_count(progress, fact)
 
     def _apply_count(
@@ -529,7 +549,10 @@ class Console:
         progress: Progress,
         fact: tuple[int, int, str, str, tuple[str, int] | None, float],
     ) -> None:
-        if progress.closed:
+        # A final count may land after the caller marked closed and before end.
+        with self._lock:
+            open_row = progress in self._handles
+        if progress.closed and not open_row:
             return
         done, total, unit, detail, gauge, elapsed = fact
         progress.done = done
@@ -693,6 +716,10 @@ class Console:
             self._event(event)
 
     def close(self) -> None:
+        host = self._host
+        if host is not None:
+            host.flush()
+            host.close()
         self._stop.set()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
@@ -709,8 +736,9 @@ class Console:
         self._show_cursor()
 
     def flush(self) -> None:
-        """Drain queued begin/end/note work. Tests use this when the thread is off."""
-        if self._start_thread:
+        """Drain host posts, then the console queue. Tests use this when the thread is off."""
+        if self._host is not None:
+            self._host.flush()
             self._actions.put(("flush",))
             self._ensure_thread()
             deadline = time.monotonic() + 2.0
@@ -1260,12 +1288,12 @@ class Console:
             index += 1
 
 
-def _log_line(event: dict[str, Any]) -> str | None:
-    if event.get("type") != "log":
-        return None
-    line = event.get("line")
-    if isinstance(line, str) and line:
-        return line
+def _request_boundary(line: str) -> str | None:
+    """``open`` / ``closed`` when ``line`` is a request edge, with or without a model."""
+    if line == "request open" or line.startswith("request open "):
+        return "open"
+    if line == "request closed" or line.startswith("request closed "):
+        return "closed"
     return None
 
 

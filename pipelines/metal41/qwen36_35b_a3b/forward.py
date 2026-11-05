@@ -513,8 +513,20 @@ class Qwen36Runtime:
             self._pen_i = self.session.zeros(_SAMPLE_PEN * 4)
             self._pen_d = self.session.zeros(_SAMPLE_PEN * 4)
             self._sample_choice = self.session.zeros(4)
-            self._route_hist = self.session.zeros(2 * LAYERS * EXPERTS * 4)
-            self._route_tokens = self.session.zeros(8)
+            # Two hist planes: finish schedules a pull of the finished half; open
+            # clears only the active half so the lull can download the other.
+            self._route_hist_planes = (
+                self.session.zeros(2 * LAYERS * EXPERTS * 4),
+                self.session.zeros(2 * LAYERS * EXPERTS * 4),
+            )
+            self._route_token_planes = (
+                self.session.zeros(8),
+                self.session.zeros(8),
+            )
+            self._route_plane = 0
+            self._route_hist = self._route_hist_planes[0]
+            self._route_tokens = self._route_token_planes[0]
+            self._pending_tally: bool | None = None
             self._scatter_i = self.session.zeros(EXPERTS * 4)
             self._scatter_o = self.session.zeros(EXPERTS * 8)
             self.history = self.session.zeros(30 * 3 * 8192 * 2)
@@ -638,56 +650,95 @@ class Qwen36Runtime:
         """Router ids stay on device until the request is counted."""
         return
 
-    def _take_routes(self, *, prefill: bool) -> None:
-        routes = self.routes
-        if routes is None:
+    def _bind_route_plane(self, plane: int) -> None:
+        planes = getattr(self, "_route_hist_planes", None)
+        tokens = getattr(self, "_route_token_planes", None)
+        if planes is None or tokens is None:
             return
-        self._count_routes(self.route_ids, 1, prefill=prefill)
+        index = 0 if int(plane) % 2 == 0 else 1
+        self._route_plane = index
+        self._route_hist = planes[index]
+        self._route_tokens = tokens[index]
 
-    def _count_routes(self, ids: Any, tokens: int, *, prefill: bool) -> None:
-        """Add ``tokens`` of router ids into the device histogram."""
+    def _take_routes(self, *, prefill: bool) -> None:
+        """Schedule a hist add on the next ``step`` command buffer."""
+        if self.routes is None:
+            return
+        self._pending_tally = bool(prefill)
+
+    def _encode_count_routes(self, ids: Any, tokens: int, *, prefill: bool) -> None:
+        """Encode ``count_routes`` into the open command buffer."""
         hist = getattr(self, "_route_hist", None)
         if hist is None or self.session is None or tokens < 1 or ids is None:
             return
         slot = 0 if prefill else 1
+        self.session.encode(
+            "count_routes",
+            [
+                (ids, 0),
+                (hist, slot * LAYERS * EXPERTS * 4),
+                (self._route_tokens, slot * 4),
+            ],
+            [_u32(LAYERS), _u32(int(tokens)), _u32(8)],
+            ((LAYERS * int(tokens) * 8 + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+
+    def _count_routes(self, ids: Any, tokens: int, *, prefill: bool) -> None:
+        """Add ``tokens`` of router ids into the device histogram.
+
+        Same-queue commits stay ordered, so this does not wait. Prefer
+        ``_encode_count_routes`` inside the forward buffer when possible.
+        """
+        if self.session is None or tokens < 1 or ids is None:
+            return
+        if getattr(self.session, "_recording", False):
+            self._encode_count_routes(ids, tokens, prefill=prefill)
+            return
         self.session.begin()
         try:
-            self.session.encode(
-                "count_routes",
-                [
-                    (ids, 0),
-                    (hist, slot * LAYERS * EXPERTS * 4),
-                    (self._route_tokens, slot * 4),
-                ],
-                [_u32(LAYERS), _u32(int(tokens)), _u32(8)],
-                ((LAYERS * int(tokens) * 8 + 255) // 256, 1, 1),
-                (256, 1, 1),
-            )
+            self._encode_count_routes(ids, tokens, prefill=prefill)
             self.session.commit()
-            self.session.wait_inflight()
         except Exception:
             self.session.abort()
-            self.session.wait_inflight()
             raise
 
-    def _clear_route_hist(self) -> None:
-        hist = getattr(self, "_route_hist", None)
-        tokens = getattr(self, "_route_tokens", None)
-        if hist is None or tokens is None:
+    def _clear_route_hist(self, plane: int | None = None) -> None:
+        planes = getattr(self, "_route_hist_planes", None)
+        tokens = getattr(self, "_route_token_planes", None)
+        if planes is None or tokens is None:
+            hist = getattr(self, "_route_hist", None)
+            tok = getattr(self, "_route_tokens", None)
+            if hist is None or tok is None:
+                return
+            _clear(hist, 2 * LAYERS * EXPERTS * 4)
+            _clear(tok, 8)
             return
-        _clear(hist, 2 * LAYERS * EXPERTS * 4)
-        _clear(tokens, 8)
+        index = self._route_plane if plane is None else (0 if int(plane) % 2 == 0 else 1)
+        _clear(planes[index], 2 * LAYERS * EXPERTS * 4)
+        _clear(tokens[index], 8)
 
-    def _pull_route_hist(self) -> None:
-        """Copy the device histogram into the request scratch once."""
+    def _pull_route_hist(self, plane: int | None = None) -> None:
+        """Copy one device histogram plane into the request scratch."""
         routes = self.routes
-        hist = getattr(self, "_route_hist", None)
-        if routes is None or hist is None or self.session is None:
+        planes = getattr(self, "_route_hist_planes", None)
+        token_planes = getattr(self, "_route_token_planes", None)
+        if routes is None or self.session is None:
             return
+        if planes is None or token_planes is None:
+            hist = getattr(self, "_route_hist", None)
+            tok = getattr(self, "_route_tokens", None)
+            if hist is None or tok is None:
+                return
+            hist_buf, tok_buf = hist, tok
+        else:
+            index = self._route_plane if plane is None else (0 if int(plane) % 2 == 0 else 1)
+            hist_buf = planes[index]
+            tok_buf = token_planes[index]
         counts = array.array("I")
-        counts.frombytes(self.session.download(hist, 2 * LAYERS * EXPERTS * 4))
+        counts.frombytes(self.session.download(hist_buf, 2 * LAYERS * EXPERTS * 4))
         words = array.array("I")
-        words.frombytes(self.session.download(self._route_tokens, 8))
+        words.frombytes(self.session.download(tok_buf, 8))
         prefill = np.frombuffer(
             counts[: LAYERS * EXPERTS].tobytes(), dtype=np.uint32
         ).reshape(LAYERS, EXPERTS)
@@ -2017,17 +2068,24 @@ class Qwen36Runtime:
             raise ContextFull
         pending = self._pending
         self._pending = None
+        tally = self._pending_tally
+        self._pending_tally = None
         if pending is not None and pending.pos == pos:
             self.session.begin()
             self._embed(token)
             self.session.commit()
             pending.commit(self.session)
+            # Pending replay writes route_ids; count after that buffer.
+            if tally is not None and self.routes is not None:
+                self._count_routes(self.route_ids, 1, prefill=bool(tally))
         else:
             if pending is not None:
                 pending.discard()
             self.session.begin()
             self._embed(token)
             self._layers(pos, head=logits)
+            if tally is not None and self.routes is not None:
+                self._encode_count_routes(self.route_ids, 1, prefill=bool(tally))
             self.session.commit()
         self._prepare_pending(pos + 1)
         self.session.wait_inflight()
@@ -2229,8 +2287,8 @@ class Qwen36Runtime:
 
                 self._prefill_base = 0
                 prefill_ids(self, suffix[:-1], hit, follow=suffix[-1])
-            self.step(suffix[-1], len(prompt) - 1, logits=True, download=False)
             self._take_routes(prefill=True)
+            self.step(suffix[-1], len(prompt) - 1, logits=True, download=False)
             self.prefix.note(prompt)
             self._note_prefill(len(suffix))
             # The forward is inside prefill. The first sample closes it.
@@ -2385,13 +2443,13 @@ class Qwen36Runtime:
                 )
                 pos = len(prompt) + len(out) - 1
                 if finished_forced or repeat_done:
-                    self.step(nxt, pos, logits=False)
                     self._take_routes(prefill=False)
+                    self.step(nxt, pos, logits=False)
                     break
                 if len(out) == max_tokens:
                     self._hit_limit = True
-                    self.step(nxt, pos, logits=False)
                     self._take_routes(prefill=False)
+                    self.step(nxt, pos, logits=False)
                     break
                 budget_open = (
                     budget is None
@@ -2464,8 +2522,8 @@ class Qwen36Runtime:
                     span = min(int(depth), room)
                     if room > 0 and span > 0 and self._grow(pos + span):
                         self._draft_chain(nxt, pos - 1, span, wait=False)
-                        self.step(nxt, pos, logits=True, download=False)
                         self._take_routes(prefill=False)
+                        self.step(nxt, pos, logits=True, download=False)
                         drafts = self._read_drafts()
                         feeds, expected = draft_window(nxt, drafts, stop, room)
                         if not expected:
@@ -2530,8 +2588,8 @@ class Qwen36Runtime:
                                 self._hit_limit = True
                                 break
                             continue
-                self.step(nxt, pos, logits=True, download=False)
                 self._take_routes(prefill=False)
+                self.step(nxt, pos, logits=True, download=False)
             if self._mtp_tries:
                 self._note("mtp", accepts=self._mtp_accepts, tries=self._mtp_tries)
             if prefill_open:
