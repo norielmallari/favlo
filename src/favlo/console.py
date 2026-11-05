@@ -25,7 +25,7 @@ from favlo.progress import Sanitizer
 
 PHASES = ("load", "download", "quantize", "prefill", "decode", "sample")
 UNITS = ("tok", "layers", "bytes", "shards", "experts", "stages", "files", "blocks")
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 SCHEMA = 1
 
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"

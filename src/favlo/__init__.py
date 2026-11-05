@@ -1,3 +1,3 @@
 """Process entry for Favlo. Model math lives in the pipeline file."""
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

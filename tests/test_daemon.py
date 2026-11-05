@@ -254,7 +254,7 @@ def test_a_terminal_is_the_listener(
     monkeypatch.setattr(listener, "serve", serve)
     assert listener.serve_main(["--port", "8129", "--console", "plain"]) == 0
     assert seen == ["plain"]
-    assert "favlo 0.4.0\n" in stream.getvalue()
+    assert "favlo 0.5.0\n" in stream.getvalue()
 
 
 def test_a_taken_address_does_not_start(
