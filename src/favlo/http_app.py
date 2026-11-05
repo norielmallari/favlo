@@ -593,6 +593,8 @@ def _run_once(
         return
     opened = False
     selection = None
+    model = ""
+    body: dict[str, Any] = {}
     embed_child = None
     drop_embed = False
     park_embed = False
@@ -608,8 +610,6 @@ def _run_once(
                 {"error": {"message": "the gpu is held for a pipeline smoke", "type": "busy"}},
             )
             return
-        _log("request open")
-        opened = True
         try:
             if kind in {"video", "music"}:
                 body = _video_body(content_type, raw)
@@ -640,6 +640,9 @@ def _run_once(
         try:
             prepared = open_for(kind if kind not in {"chat", "responses"} else "responses", body, state, args)
         except LookupError as exc:
+            model = _request_model(None, body)
+            _log(_request_edge("request open", model))
+            opened = True
             reply.json(404, {"error": {"message": str(exc), "type": "not_found"}})
             return
         selection = prepared.selection
@@ -650,6 +653,9 @@ def _run_once(
         park_embed = prepared.park_embed
         if selection is not None:
             reply.model_id = selection.requested_id
+        model = _request_model(selection, body)
+        _log(_request_edge("request open", model))
+        opened = True
         if runtime is None or module is None:
             reply.json(404, {"error": {"message": "no model is loaded", "type": "not_found"}})
             return
@@ -705,7 +711,7 @@ def _run_once(
             elif drop_embed:
                 drop_runtime(state, args)
             if opened:
-                _log("request closed")
+                _log(_request_edge("request closed", model))
             module = state.get("module")
             runtime = state.get("runtime")
             _touch_job(state, reply)
@@ -719,6 +725,20 @@ def _run_once(
                 500,
                 {"error": {"message": "the pipeline wrote no reply", "type": "RuntimeError"}},
             )
+
+
+def _request_model(selection: Any, body: dict[str, Any]) -> str:
+    """Model id for the request open/closed line."""
+    requested = getattr(selection, "requested_id", None)
+    if isinstance(requested, str) and requested:
+        return requested
+    model = body.get("model")
+    return model if isinstance(model, str) else ""
+
+
+def _request_edge(edge: str, model: str) -> str:
+    """``request open`` / ``request closed`` with the model when known."""
+    return f"{edge} {model}" if model else edge
 
 
 def _abandon_child(state: dict[str, Any], args: Any) -> None:

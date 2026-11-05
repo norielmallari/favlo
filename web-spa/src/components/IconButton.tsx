@@ -29,6 +29,8 @@ type Common = {
   iconOnly?: boolean;
   /** Full-width row (tool calls / thinking in the transcript). */
   block?: boolean;
+  /** Caption label and a 24px target, the WCAG AA minimum. */
+  dense?: boolean;
 };
 
 type ToneProps = Common & {
@@ -66,6 +68,7 @@ export function IconButton(props: ToneProps | PaintProps) {
     role = 'button',
     iconOnly = false,
     block = false,
+    dense = false,
   } = props;
   const expanded = accessibilityState?.expanded;
   const webExpanded =
@@ -80,8 +83,8 @@ export function IconButton(props: ToneProps | PaintProps) {
       onPress={onPress}
       {...(webExpanded ?? {})}
       style={{
-        minHeight: 44,
-        minWidth: iconOnly ? 44 : 0,
+        minHeight: dense ? 24 : 44,
+        minWidth: iconOnly ? (dense ? 24 : 44) : 0,
         maxWidth: '100%',
         width: block ? '100%' : undefined,
         alignSelf: block ? 'stretch' : 'flex-start',
@@ -89,18 +92,25 @@ export function IconButton(props: ToneProps | PaintProps) {
         flexShrink: 1,
         flexGrow: block ? 1 : 0,
         alignItems: 'center',
-        gap: space[2],
+        gap: dense ? space[1] : space[2],
         borderRadius: radius.control,
         borderWidth: 1,
         borderColor: paint.border,
         backgroundColor: paint.background,
-        paddingHorizontal: iconOnly ? 0 : space[3],
+        paddingHorizontal: iconOnly ? 0 : dense ? space[1] : space[3],
         justifyContent: block ? 'flex-start' : 'center',
       }}
     >
-      <FeatherIcon name={icon} size={18} color={paint.color} />
+      <FeatherIcon name={icon} size={dense ? 14 : 18} color={paint.color} />
       {iconOnly ? null : (
-        <Text style={[textStyle('small', paint.color, '600'), { flexShrink: 1, minWidth: 0 }]}>{label}</Text>
+        <Text
+          style={[
+            textStyle(dense ? 'caption' : 'small', paint.color, '600'),
+            { flexShrink: 1, minWidth: 0 },
+          ]}
+        >
+          {label}
+        </Text>
       )}
     </Pressable>
   );

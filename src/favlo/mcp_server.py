@@ -18,6 +18,7 @@ Chat completion is not a tool.
 from __future__ import annotations
 
 import base64
+import re
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -123,7 +124,11 @@ def build_mcp(
 
     @mcp.tool(task=False)
     async def media_status(taskId: str) -> dict[str, Any]:
-        """The queue record for one task. An unknown id is an error."""
+        """The queue record for one task.
+
+        A finished task includes the media name and the favlo:// link.
+        An unknown id is an error.
+        """
         return await tasks.status(taskId)
 
     @mcp.tool(task=False)
@@ -532,6 +537,11 @@ class FavloTasks(TasksExtension):
         view["status"] = got.status
         if got.status == "working":
             view.update(_working_fields(self.state, task_id))
+        else:
+            payload = getattr(got, "result", None)
+            if hasattr(payload, "model_dump"):
+                payload = payload.model_dump()
+            view.update(_finished_handles(payload))
         if got.status == "failed" and got.error:
             view["error"] = got.error
         return view
@@ -911,6 +921,43 @@ def _music_format(state: dict[str, Any], music_id: str) -> str | None:
     if isinstance(fmt, str) and fmt in _AUDIO:
         return fmt
     return None
+
+
+_HANDLE_LINK = re.compile(
+    r"favlo://(?:images|videos|voice|music)/[A-Za-z0-9_-]+\.(?:png|mp4|mp3|wav|flac)"
+)
+_HANDLE_NAME = re.compile(r"\b(?:image|video|music|voice)_[A-Za-z0-9_-]+\b")
+
+
+def _finished_handles(result: Any) -> dict[str, list[str]]:
+    """Media names and favlo:// links in a finished task result."""
+    links: list[str] = []
+    names: list[str] = []
+    _collect_handles(result, links, names)
+    found: dict[str, list[str]] = {}
+    if links:
+        found["links"] = links
+    if names:
+        found["names"] = names
+    return found
+
+
+def _collect_handles(value: Any, links: list[str], names: list[str]) -> None:
+    if isinstance(value, str):
+        for match in _HANDLE_LINK.findall(value):
+            if match not in links:
+                links.append(match)
+        for match in _HANDLE_NAME.findall(value):
+            if match not in names:
+                names.append(match)
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            _collect_handles(item, links, names)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _collect_handles(item, links, names)
 
 
 def _stored(state: dict[str, Any], task_id: str) -> dict[str, Any]:

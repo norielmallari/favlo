@@ -15,9 +15,12 @@ export function WorkspaceShell({
   onAddToChat,
   onRequestDelete,
   fullScreen = false,
+  chatDetent,
   onToggleFullScreen,
+  onCycleLayout,
   hideFilmstrip = false,
   pendingMedia = [],
+  folderFiles = null,
 }: {
   state: PlacementState;
   slots: string[];
@@ -26,9 +29,12 @@ export function WorkspaceShell({
   onAddToChat: (path: string) => void;
   onRequestDelete: (path: string) => void;
   fullScreen?: boolean;
+  chatDetent?: 'fullscreen' | 'peek' | 'expanded';
   onToggleFullScreen?: () => void;
+  onCycleLayout?: () => void;
   hideFilmstrip?: boolean;
   pendingMedia?: { task_id: string; kind: string; status: string }[];
+  folderFiles?: string[] | null;
 }) {
   const { palette } = useTheme();
   const workspace = state?.favlo_workspace;
@@ -37,7 +43,7 @@ export function WorkspaceShell({
   const order = slots.filter((slot, index) => slots.indexOf(slot) === index);
 
   function stepSelection(direction: 'prev' | 'next') {
-    const paths = filmstripPaths(state);
+    const paths = folderFiles ?? filmstripPaths(state);
     if (paths.length === 0) {
       return;
     }
@@ -69,7 +75,7 @@ export function WorkspaceShell({
     return undefined;
     // state and selection are read inside stepSelection via closure of render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onChange, selection?.path, state]);
+  }, [folderFiles, onChange, selection?.path, state]);
 
   function renderSlot(items: typeof elements) {
     return items.map((item) => {
@@ -83,7 +89,11 @@ export function WorkspaceShell({
       return (
         <Component
           key={item.key}
-          props={item.props}
+          props={
+            item.element === 'filmstrip' && folderFiles != null
+              ? { ...item.props, items: folderFiles.map((path) => ({ path })) }
+              : item.props
+          }
           selection={selection}
           fileUrl={fileUrl}
           onSelect={(path) => onChange(selectPath(state, path))}
@@ -91,7 +101,9 @@ export function WorkspaceShell({
           onRequestDelete={onRequestDelete}
           onSwipe={item.element === 'preview' ? stepSelection : undefined}
           fullScreen={fullScreen}
+          chatDetent={item.element === 'preview' ? chatDetent : undefined}
           onToggleFullScreen={item.element === 'preview' ? onToggleFullScreen : undefined}
+          onCycleLayout={item.element === 'preview' ? onCycleLayout : undefined}
           pendingMedia={item.element === 'filmstrip' ? pendingMedia : undefined}
         />
       );
@@ -107,7 +119,7 @@ export function WorkspaceShell({
         minHeight: 0,
         backgroundColor: palette.background,
         flexDirection: 'column',
-        gap: space[2],
+        gap: space[1],
       }}
     >
       {order.map((slot) => {

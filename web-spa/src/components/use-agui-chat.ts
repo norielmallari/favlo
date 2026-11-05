@@ -172,17 +172,19 @@ export function useAguiChat(options: Options) {
       options.onRunId(runId);
       try {
         let failed = false;
-        for await (const event of runAgUi({
+        for await (const events of runAgUi({
           threadId: options.threadId,
           runId,
           messages: [{ id: userId, role: 'user', content: text }],
           state: stateRef.current,
           signal: controller.signal,
         })) {
-          if (event.type === 'RUN_ERROR') {
-            failed = true;
+          for (const event of events) {
+            if (event.type === 'RUN_ERROR') {
+              failed = true;
+            }
+            applyEvent(event);
           }
-          applyEvent(event);
         }
         if (!failed && options.hydrate) {
           const snap = await options.hydrate();
@@ -251,7 +253,7 @@ export function useAguiChat(options: Options) {
     options.onRunId(runId);
     try {
       let archived = false;
-      for await (const event of runAgUi({
+      for await (const events of runAgUi({
         threadId: options.threadId,
         runId,
         messages: [],
@@ -259,11 +261,13 @@ export function useAguiChat(options: Options) {
         state: stateRef.current,
         signal: controller.signal,
       })) {
-        if (event.type === 'RUN_FINISHED') {
-          const result = event.result as { status?: string } | undefined;
-          archived = result?.status === 'archived';
+        for (const event of events) {
+          if (event.type === 'RUN_FINISHED') {
+            const result = event.result as { status?: string } | undefined;
+            archived = result?.status === 'archived';
+          }
+          applyEvent(event);
         }
-        applyEvent(event);
       }
       if (!archived && options.hydrate) {
         const snap = await options.hydrate();

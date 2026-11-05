@@ -15,6 +15,7 @@ const TINY_PNG = Buffer.from(
 );
 
 test('the agent can change gallery placement on the shell', async ({ page }) => {
+  test.setTimeout(360_000);
   const models = await fetch('http://127.0.0.1:8129/v1/models', {
     signal: AbortSignal.timeout(15_000),
   });
@@ -31,40 +32,20 @@ test('the agent can change gallery placement on the shell', async ({ page }) => 
       await createGalleryWorkspace(page, name, root);
     });
 
-    await step('agent places filmstrip with preview', async () => {
+    await step('opening placement shows the preview and the filmstrip', async () => {
       const frame = page.getByRole('button', { name: 'frame.png', exact: true });
-      if (!(await frame.isVisible().catch(() => false))) {
-      await page.getByRole('textbox', { name: 'Message', exact: true }).fill(
-        'Put every image from this folder on the filmstrip. Keep the preview.',
-      );
-      const send = page.getByRole('button', { name: 'Send', exact: true });
-      await onScreen(send);
-      await send.click();
-      await expect(page.getByTestId('working')).toBeVisible();
-      try {
-        await expect(frame).toBeVisible({ timeout: 180_000 });
-      } catch {
-        await expect(page.getByTestId('working')).toHaveCount(0, { timeout: 180_000 });
-        await page.getByRole('textbox', { name: 'Message', exact: true }).fill(
-          'Please put frame.png on the filmstrip now.',
-        );
-        await onScreen(send);
-        await send.click();
-        await expect(page.getByTestId('working')).toBeVisible();
-        await expect(frame).toBeVisible({ timeout: 180_000 });
-      }
-      }
+      await expect(frame).toBeVisible({ timeout: 60_000 });
       await expect(page.getByTestId('working')).toHaveCount(0, { timeout: 180_000 });
       await expect(page.getByText('No media selected')).toHaveCount(0);
       await expect(page.getByRole('button', { name: 'Download frame.png' })).toBeVisible();
       await expect(page.getByRole('button', { name: 'Add to chat' })).toBeVisible();
     });
 
-    await step('agent removes preview, keeps filmstrip', async () => {
+    await step('a place call cannot drop the preview', async () => {
       await ask(page, 'Remove the preview. Keep the filmstrip as it is.');
-      await expect(page.getByRole('button', { name: 'Download frame.png' })).toHaveCount(0);
       await expect(page.getByRole('button', { name: 'frame.png', exact: true })).toBeVisible();
-      await expect(page.getByRole('button', { name: 'Add to chat' })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: 'Download frame.png' })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Add to chat' })).toBeVisible();
     });
   } finally {
     await deleteWorkspacesNamed(name);

@@ -1,11 +1,13 @@
 import { expect, test } from '@playwright/test';
 
 import { deleteWorkspacesNamed } from './cleanup';
+import { chooseFolder, makeWorkspaceRoot, removeWorkspaceRoot } from './gallery-create';
 import { onScreen } from './on-screen';
 import { step } from './progress';
 
 test('each workspace on the channel menu can be deleted', async ({ page }) => {
   const name = `Menu ${Date.now()}`;
+  const root = makeWorkspaceRoot();
   try {
     await step('create a workspace from the channel menu', async () => {
       await page.setViewportSize({ width: 1280, height: 800 });
@@ -21,6 +23,7 @@ test('each workspace on the channel menu can be deleted', async ({ page }) => {
       await expect(form.getByText('New workspace for Favlo')).toBeVisible();
       await form.getByRole('textbox', { name: 'Workspace name' }).fill(name);
       await page.getByRole('combobox', { name: 'Workspace type' }).selectOption('coding');
+      await chooseFolder(page, root);
       const create = page.getByRole('button', { name: 'Create workspace' });
       await page.setViewportSize({ width: 1280, height: 640 });
       await onScreen(create);
@@ -59,5 +62,6 @@ test('each workspace on the channel menu can be deleted', async ({ page }) => {
     });
   } finally {
     await deleteWorkspacesNamed(name);
+    removeWorkspaceRoot(root);
   }
 });

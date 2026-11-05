@@ -136,7 +136,7 @@ def validate(
                     }
                 }, ignored
         return initial_for(guide_id), ignored
-    cleaned = _ensure_gallery_preview(guide_id, cleaned, ignored, prior)
+    cleaned = _ensure_gallery_preview(guide_id, cleaned, ignored)
     selection = selection_for_elements(cleaned, selection)
     return {
         "favlo_workspace": {
@@ -152,24 +152,17 @@ def _ensure_gallery_preview(
     guide_id: str,
     elements: list[dict[str, Any]],
     ignored: list[str],
-    prior: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
-    """On first fill, restore preview when the agent omits it.
+    """Keep preview on stage whenever the filmstrip has items.
 
-    If the strip already had items and the agent omits preview, keep that remove.
+    A place call that omits preview still shows the selected file. The narrow
+    gallery uses that image to step the chat dock.
     """
     if guide_id != "gallery":
         return elements
     if not filmstrip_paths(elements):
         return elements
     if any(item.get("element") == "preview" for item in elements):
-        return elements
-    prior_paths: list[str] = []
-    if isinstance(prior, dict):
-        prior_ws = prior.get("favlo_workspace")
-        if isinstance(prior_ws, dict):
-            prior_paths = filmstrip_paths(list(prior_ws.get("elements") or []))
-    if prior_paths:
         return elements
     ignored.append("restored preview")
     preview = {

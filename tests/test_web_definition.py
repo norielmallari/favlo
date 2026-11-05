@@ -105,5 +105,6 @@ def test_rebuild_tools_skips_live_skills(tmp_path: Path) -> None:
         agent_id=FAVLO_AGENT_ID,
         mcp_tools=[],
     )
-    assert tools == []
+    names = [getattr(item, "name", None) or getattr(item, "__name__", "") for item in tools]
+    assert names == ["display_media"]
     store.close()

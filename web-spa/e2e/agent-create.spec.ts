@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 import { deleteAgentsNamed } from './cleanup';
+import { expectFullFocusRing } from './focus-ring';
 import { onScreen } from './on-screen';
 import { LOCAL_PROVIDER_ID } from '../src/api/seed-ids';
 
@@ -13,7 +14,14 @@ test('a new agent shows the same options as edit', async ({ page }) => {
   await page.getByRole('button', { name: 'Configuration' }).click();
   await page.getByRole('tab', { name: 'Agents' }).click();
   await page.getByRole('button', { name: 'New agent' }).click();
-  await expect(page.getByRole('textbox', { name: 'Agent name', exact: true })).toBeVisible();
+  const agentName = page.getByRole('textbox', { name: 'Agent name', exact: true });
+  await onScreen(agentName);
+  await agentName.focus();
+  await expectFullFocusRing(page, agentName);
+  const providerRing = page.getByRole('combobox', { name: 'Provider', exact: true });
+  await onScreen(providerRing);
+  await providerRing.focus();
+  await expectFullFocusRing(page, providerRing);
   await expect(page.getByRole('textbox', { name: 'Persona', exact: true })).toBeVisible();
   const provider = page.getByRole('combobox', { name: 'Provider', exact: true });
   await expect(provider).toHaveValue('');
@@ -115,6 +123,10 @@ test('a new agent shows the same options as edit', async ({ page }) => {
   await expect(page.getByRole('combobox', { name: 'Model for Favlo', exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Back to list' }).click();
   await page.getByRole('button', { name: 'New agent' }).click();
+  const narrowName = page.getByRole('textbox', { name: 'Agent name', exact: true });
+  await onScreen(narrowName);
+  await narrowName.focus();
+  await expectFullFocusRing(page, narrowName);
   await page.getByRole('combobox', { name: 'Provider', exact: true }).selectOption(LOCAL_PROVIDER_ID);
   const narrowRefresh = page.getByRole('button', { name: 'Refresh models', exact: true });
   await onScreen(page.getByRole('button', { name: 'Create agent' }));

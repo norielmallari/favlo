@@ -49,7 +49,7 @@ export function Filmstrip({ props, selection, fileUrl, onSelect, pendingMedia = 
     return (
       <View style={{ padding: space[3], alignItems: 'center', justifyContent: 'center' }}>
         <Text style={[textStyle('body', palette.textSecondary), { textAlign: 'center' }]}>
-          Ask the agent to fill the filmstrip
+          No images in this folder
         </Text>
       </View>
     );
@@ -70,7 +70,7 @@ export function Filmstrip({ props, selection, fileUrl, onSelect, pendingMedia = 
   const edgePad = Math.max(space[3], focusRingInset);
 
   return (
-    <View style={{ gap: space[1], paddingVertical: Math.max(space[2], focusRingInset), alignItems: 'stretch' }}>
+    <View style={{ gap: space[1], paddingBottom: space[1], alignItems: 'stretch' }}>
       {title ? (
         <Text style={[textStyle('label', palette.textPrimary), { textAlign: 'center', paddingHorizontal: space[3] }]}>
           {title}
@@ -103,17 +103,30 @@ export function Filmstrip({ props, selection, fileUrl, onSelect, pendingMedia = 
               {...(Platform.OS === 'web'
                 ? ({ dataSet: { filmstripPath: item.path } } as object)
                 : null)}
-              style={frameStyle}
+              style={[
+                frameStyle,
+                {
+                  borderWidth: 2,
+                  borderColor: selected ? palette.accent : 'transparent',
+                  borderRadius: radius.control,
+                  backgroundColor: selected ? palette.accentSubtle : 'transparent',
+                  padding: 2,
+                },
+              ]}
             >
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={name}
-                accessibilityState={{ selected }}
+                {...(Platform.OS === 'web'
+                  ? selected
+                    ? ({ 'aria-current': 'true' } as object)
+                    : null
+                  : { accessibilityState: { selected } })}
                 onPress={() => onSelect(item.path)}
                 style={{
                   width: 96,
-                  borderWidth: selected ? 2 : 1,
-                  borderColor: selected ? palette.accent : palette.border,
+                  borderWidth: 1,
+                  borderColor: palette.border,
                   borderRadius: radius.control,
                   backgroundColor: palette.surface,
                   opacity: selected ? 1 : justArrived && !reduceMotion ? 0.55 : 0.72,

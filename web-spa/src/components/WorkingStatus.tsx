@@ -1,7 +1,5 @@
-import { createElement } from 'react';
-import { Platform, Pressable, Text, View } from 'react-native';
+import { Pressable, Text, View } from 'react-native';
 
-import { workingActivity } from '@/components/working';
 import { useTheme } from '@/theme/Theme';
 import { radius, space } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
@@ -19,9 +17,6 @@ export function WorkingStatus({
   const { palette } = useTheme();
   return (
     <View style={{ alignSelf: 'flex-start', maxWidth: '100%' }}>
-      {Platform.OS === 'web'
-        ? createElement('style', { 'data-testid': 'working-activity' }, workingActivity(palette.accent))
-        : null}
       <Pressable
         accessibilityRole="button"
         accessibilityState={{ expanded }}
@@ -39,17 +34,6 @@ export function WorkingStatus({
           borderColor: palette.accent,
         }}
       >
-        <View
-          testID="working-dot"
-          accessibilityElementsHidden
-          importantForAccessibility="no"
-          style={{
-            width: 8,
-            height: 8,
-            borderRadius: 4,
-            backgroundColor: palette.accent,
-          }}
-        />
         <Text
           testID="working"
           accessibilityLiveRegion="polite"

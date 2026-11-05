@@ -4,20 +4,32 @@ import { downloadName, formatActionNewlines, MessageBody, mediaFrame, messagePar
 import { ThemeProvider } from '@/theme/Theme';
 
 test('a closed action gets one newline and a model newline is dropped', () => {
-  expect(formatActionNewlines('*smiles*Hello')).toBe('*smiles*\nHello');
-  expect(formatActionNewlines('*smiles* Hello')).toBe('*smiles*\nHello');
-  expect(formatActionNewlines('*smiles*\nHello')).toBe('*smiles*\nHello');
-  expect(formatActionNewlines('*smiles*\r\nHello')).toBe('*smiles*\nHello');
+  expect(formatActionNewlines('*smiles*Hello')).toBe('*smiles*  \nHello');
+  expect(formatActionNewlines('*Nicker*! Making one')).toBe('*Nicker*!  \nMaking one');
+  expect(formatActionNewlines('*smiles*!? Hello')).toBe('*smiles*!?  \nHello');
+  expect(formatActionNewlines('*smiles*... next')).toBe('*smiles*...  \nnext');
+  expect(formatActionNewlines('*smiles* Hello')).toBe('*smiles*  \nHello');
+  expect(formatActionNewlines('*smiles*\nHello')).toBe('*smiles*  \nHello');
+  expect(formatActionNewlines('*smiles*\r\nHello')).toBe('*smiles*  \nHello');
   expect(formatActionNewlines('*smiles*\n\nHello')).toBe('*smiles*\n\nHello');
-  expect(formatActionNewlines('*a* *b* next')).toBe('*a*\n*b*\nnext');
+  expect(formatActionNewlines('*a* *b* next')).toBe('*a*  \n*b*  \nnext');
+  expect(formatActionNewlines('Thank you, friend! *Nicker*!')).toBe('Thank you, friend!  \n*Nicker*!');
+  expect(formatActionNewlines('Hello *smiles* there')).toBe('Hello  \n*smiles*  \nthere');
+  expect(formatActionNewlines('Hello\n*smiles*')).toBe('Hello  \n*smiles*');
+  expect(
+    formatActionNewlines('*Chomp chomp*!\nOh wow, these are crunching delicious! Thank you, friend! *Nicker*!'),
+  ).toBe('*Chomp chomp*!  \nOh wow, these are crunching delicious! Thank you, friend!  \n*Nicker*!');
   expect(formatActionNewlines('**bold** stays')).toBe('**bold** stays');
+  expect(formatActionNewlines('**see *smiles* now**')).toBe('**see *smiles* now**');
+  expect(formatActionNewlines('*smiles* **bold**')).toBe('*smiles*  \n**bold**');
+  expect(formatActionNewlines('**me.png** stays')).toBe('**me.png** stays');
   expect(formatActionNewlines('*open')).toBe('*open');
   expect(formatActionNewlines('*smiles*')).toBe('*smiles*');
   expect(formatActionNewlines('> *smiles* Hello')).toBe('> *smiles* Hello');
   expect(formatActionNewlines('> *smiles*\n> more')).toBe('> *smiles*\n> more');
-  expect(formatActionNewlines('> *a* quoted\n*b* outside')).toBe('> *a* quoted\n*b*\noutside');
+  expect(formatActionNewlines('> *a* quoted\n*b* outside')).toBe('> *a* quoted  \n*b*  \noutside');
   expect(formatActionNewlines('```xml\n*smiles* Hello\n```')).toBe('```xml\n*smiles* Hello\n```');
-  expect(formatActionNewlines('```json\n*a* x\n```\n*b* y')).toBe('```json\n*a* x\n```\n*b*\ny');
+  expect(formatActionNewlines('```json\n*a* x\n```\n*b* y')).toBe('```json\n*a* x\n```  \n*b*  \ny');
 });
 
 test('a favlo image link becomes a generated image', async () => {
@@ -41,6 +53,18 @@ test('a favlo image link becomes a generated image', async () => {
   expect(mediaFrame.width).toBe('auto');
   expect(mediaFrame.objectFit).toBe('contain');
   expect(mediaFrame.alignSelf).toBe('flex-start');
+});
+
+test('a gallery chat shows the image file name', () => {
+  const parts = messageParts('Here: **favlo://images/image_abc.png** now', true);
+  expect(parts).toEqual([{ type: 'text', text: 'Here: **image_abc.png** now' }]);
+});
+
+test('bold markers around an image link stay off their own line', () => {
+  const parts = messageParts('See **favlo://images/image_abc.png** now');
+  expect(parts.map((part) => part.type)).toEqual(['text', 'image', 'text']);
+  expect(parts[0]).toMatchObject({ text: 'See' });
+  expect(parts[2]).toMatchObject({ text: 'now' });
 });
 
 test('a missing image stays off the screen', async () => {

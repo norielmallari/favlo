@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Platform, useWindowDimensions, View } from 'react-native';
 
 import { FeatherIcon } from '@/components/FeatherIcon';
@@ -9,6 +9,7 @@ import { space, z } from '@/theme/tokens';
 import type { WorkspaceApp } from '@/workspace/workspace-apps';
 import {
   useWorkspaceBannerEnd,
+  WorkspaceBannerProvider,
   WorkspaceChromeProvider,
 } from '@/workspace/workspace-chrome';
 import { WorkspaceTitleMenu } from '@/workspace/WorkspaceTitleMenu';
@@ -76,6 +77,10 @@ function WorkspaceFrameShell({
   const { width } = useWindowDimensions();
   const narrow = width < 1024;
   const bannerEnd = useWorkspaceBannerEnd();
+  const [bannerHosted, setBannerHostedState] = useState(false);
+  const setBannerHosted = useCallback((next: boolean) => {
+    setBannerHostedState((current) => (current === next ? current : next));
+  }, []);
   const [reducedMotion, setReducedMotion] = useState(false);
   const titleName = closed ? 'This workspace is gone' : name;
   const documentTitle = `${titleName} — ${app.name}`;
@@ -136,16 +141,7 @@ function WorkspaceFrameShell({
 
   const canvas = app.bar === 'canvas';
 
-  return (
-    <View
-      testID="app-frame"
-      style={{
-        flex: 1,
-        width: '100%',
-        maxWidth: '100%',
-        backgroundColor: palette.background,
-      }}
-    >
+  const banner = (
       <View
         testID="app-banner"
         {...(Platform.OS === 'web' ? { role: 'banner' as const } : {})}
@@ -196,8 +192,23 @@ function WorkspaceFrameShell({
           </View>
         ) : null}
       </View>
-      {children}
-    </View>
+  );
+
+  return (
+    <WorkspaceBannerProvider banner={banner} hosted={bannerHosted} setHosted={setBannerHosted}>
+      <View
+        testID="app-frame"
+        style={{
+          flex: 1,
+          width: '100%',
+          maxWidth: '100%',
+          backgroundColor: palette.background,
+        }}
+      >
+        {bannerHosted ? null : banner}
+        {children}
+      </View>
+    </WorkspaceBannerProvider>
   );
 }
 
@@ -221,15 +232,13 @@ function AppMark({ glyph }: { glyph: WorkspaceApp['mark'] }) {
   );
 }
 
-function appMarkIcon(glyph: WorkspaceApp['mark'], accent: string, onAccent: string): string {
-  const path =
+/** Same Feather glyph as the header mark, drawn at 18px inside the 32px tile. */
+export function appMarkIcon(glyph: WorkspaceApp['mark'], accent: string, onAccent: string): string {
+  const mark =
     glyph === 'terminal'
-      ? '<path d="M4 8l6 4-6 4M12 18h8" fill="none" stroke="CURRENT" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>'
-      : '<circle cx="12" cy="12" r="3" fill="none" stroke="CURRENT" stroke-width="2"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" fill="none" stroke="CURRENT" stroke-width="2" stroke-linecap="round"/>';
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="${accent}"/>${path.replaceAll(
-    'CURRENT',
-    onAccent,
-  )}</svg>`;
+      ? `<path d="M4 8l6 4-6 4M12 18h8" fill="none" stroke="${onAccent}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`
+      : `<g transform="translate(7 7) scale(0.75)" fill="none" stroke="${onAccent}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M14.31 8L20.05 17.94M9.69 8h11.48M7.38 12L13.12 2.06M9.69 16L3.95 6.06M14.31 16H2.83M16.62 12l-5.74 9.94"/></g>`;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="${accent}"/>${mark}</svg>`;
   return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
 

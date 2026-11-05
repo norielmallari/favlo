@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 import { deleteWorkspacesNamed } from './cleanup';
-import { waitUntilProvisioned } from './gallery-create';
+import { chooseFolder, makeWorkspaceRoot, removeWorkspaceRoot, waitUntilProvisioned } from './gallery-create';
 import { onScreen } from './on-screen';
 import { step } from './progress';
 
@@ -13,9 +13,10 @@ test('new workspace lists the shells from the API', async ({ page, request }) =>
   expect(listed.ok()).toBeTruthy();
   const shells = (await listed.json()).shells as Shell[];
   expect(shells.length).toBeGreaterThan(0);
-  const chat = shells.find((item) => item.setup === 'none');
-  expect(chat).toBeTruthy();
+  const chat = shells.find((item) => item.id === 'coding');
+  expect(chat?.setup).toBe('local_folder');
   const name = `Shell ${Date.now()}`;
+  const root = makeWorkspaceRoot();
   try {
     await step('the picker shows the shell labels', async () => {
       await page.setViewportSize({ width: 390, height: 844 });
@@ -35,6 +36,7 @@ test('new workspace lists the shells from the API', async ({ page, request }) =>
       const picker = page.getByRole('combobox', { name: 'Workspace type' });
       await onScreen(picker);
       await picker.selectOption(chat!.id);
+      await chooseFolder(page, root);
       const create = page.getByRole('button', { name: 'Create workspace' });
       await onScreen(create);
       const popupPromise = page.waitForEvent('popup');
@@ -47,5 +49,6 @@ test('new workspace lists the shells from the API', async ({ page, request }) =>
     });
   } finally {
     await deleteWorkspacesNamed(name);
+    removeWorkspaceRoot(root);
   }
 });

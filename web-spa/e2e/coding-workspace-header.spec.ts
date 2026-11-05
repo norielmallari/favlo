@@ -2,12 +2,13 @@ import { expect, test, type Page } from '@playwright/test';
 
 import { assertWcagAa } from './a11y';
 import { deleteWorkspacesNamed } from './cleanup';
-import { waitUntilProvisioned } from './gallery-create';
+import { chooseFolder, makeWorkspaceRoot, removeWorkspaceRoot, waitUntilProvisioned } from './gallery-create';
 import { onScreen } from './on-screen';
 import { step } from './progress';
 
 test('coding workspace header uses its own shell and Catppuccin', async ({ page }) => {
   const name = `CodeHead ${Date.now()}`;
+  const root = makeWorkspaceRoot();
   let workspace: Page;
   try {
     await step('create coding workspace', async () => {
@@ -23,6 +24,7 @@ test('coding workspace header uses its own shell and Catppuccin', async ({ page 
       await page.getByRole('button', { name: 'New workspace for Favlo' }).click();
       await page.getByRole('textbox', { name: 'Workspace name' }).fill(name);
       await page.getByRole('combobox', { name: 'Workspace type' }).selectOption('coding');
+      await chooseFolder(page, root);
       await page.setViewportSize({ width: 1280, height: 640 });
       const createWorkspace = page.getByRole('button', { name: 'Create workspace' });
       await onScreen(createWorkspace);
@@ -92,6 +94,7 @@ test('coding workspace header uses its own shell and Catppuccin', async ({ page 
     });
   } finally {
     await deleteWorkspacesNamed(name);
+    removeWorkspaceRoot(root);
   }
 });
 

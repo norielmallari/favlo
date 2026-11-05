@@ -4,8 +4,14 @@ import {
   cycleGalleryDetent,
   GALLERY_CHAT_DETENT_KEY,
   GALLERY_COMPOSER_LINE,
+  GALLERY_DOCK_GAP,
   GALLERY_DOCK_GRABBER,
-  GALLERY_PEEK_TURN,
+  GALLERY_DOCK_PAD,
+  GALLERY_COPY_ROW,
+  GALLERY_HISTORY_FRAME,
+  GALLERY_HISTORY_LINE,
+  GALLERY_PEEK_HISTORY,
+  GALLERY_PEEK_HISTORY_LINES,
   galleryDockHeight,
   galleryDockHeights,
   nearestGalleryDetent,
@@ -14,18 +20,28 @@ import {
   writeGalleryChatDetent,
 } from '@/workspace/gallery-chat-dock';
 
+const CHROME = GALLERY_DOCK_GRABBER + GALLERY_DOCK_PAD * 2;
+
 test('gallery dock heights keep peek between fullscreen and expanded', () => {
   const heights = galleryDockHeights(800);
-  expect(heights.fullscreen).toBe(GALLERY_DOCK_GRABBER + GALLERY_COMPOSER_LINE);
+  expect(heights.fullscreen).toBe(CHROME + GALLERY_COMPOSER_LINE);
   expect(heights.peek).toBeGreaterThan(heights.fullscreen);
   expect(heights.peek).toBeLessThanOrEqual(Math.floor(800 / 3));
   expect(heights.expanded).toBeGreaterThanOrEqual(heights.peek);
   expect(heights.expanded).toBeLessThanOrEqual(800);
 });
 
-test('gallery dock peek uses the natural turn height on a tall column', () => {
-  const natural = GALLERY_DOCK_GRABBER + GALLERY_PEEK_TURN + GALLERY_COMPOSER_LINE;
+test('gallery dock peek fits three reply lines and Copy', () => {
+  expect(GALLERY_PEEK_HISTORY_LINES).toBe(3);
+  expect(GALLERY_PEEK_HISTORY).toBe(
+    (GALLERY_PEEK_HISTORY_LINES + 1) * GALLERY_HISTORY_LINE + 4 + GALLERY_COPY_ROW + GALLERY_HISTORY_FRAME,
+  );
+  expect(GALLERY_PEEK_HISTORY).toBeGreaterThanOrEqual(
+    GALLERY_PEEK_HISTORY_LINES * GALLERY_HISTORY_LINE + GALLERY_COPY_ROW,
+  );
+  const natural = CHROME + GALLERY_DOCK_GAP + GALLERY_PEEK_HISTORY + GALLERY_COMPOSER_LINE;
   expect(galleryDockHeight('peek', 900)).toBe(natural);
+  expect(galleryDockHeight('fullscreen', 900)).toBe(CHROME + GALLERY_COMPOSER_LINE);
   const short = galleryDockHeights(natural);
   expect(short.peek).toBe(short.fullscreen);
   expect(short.peek).toBeLessThanOrEqual(natural);

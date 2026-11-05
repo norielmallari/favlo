@@ -22,7 +22,7 @@ Do not add a workaround until the operator approves that workaround. Name the na
 
 For MCP tasks, the native path is a caller-owned `mcp.Client` with `TasksClientExtension`. `Client.call_tool` resolves the task to a tool result before the function returns, and AG-UI emits that result in the same run.
 
-Favlo media generate tools are an approved workaround. `session.call_tool` with `allow_claimed` returns the task id and says the file is not ready. `Client.call_tool` would poll `tasks/get` inside that AG-UI run, so the UI stays on Thinking until the file exists, and AG-UI has no message after `RUN_FINISHED`. The next model call after a claimed generate sets `tool_choice` to `none`, so the reply is text and the run ends. The host then polls `tasks/get` on its own client. When the result contains `favlo://` links, the host places gallery copies if needed, then starts a silent AG-UI follow-up (fenced host cue via `begin_greeting` / `favloSilent`) so the model writes one short message that includes those links. That assistant row is new. Earlier rows stay. If the announce cannot run, the host falls back to appending the links alone. List, set, memory, status, cancel, and read stay on `Client.call_tool`.
+Favlo media generate tools are an approved workaround. `session.call_tool` with `allow_claimed` returns the file name and says the file is not ready. `Client.call_tool` would poll `tasks/get` inside that AG-UI run, so the UI stays on Thinking until the file exists, and AG-UI has no message after `RUN_FINISHED`. Later tools in that turn stay available. The host then polls `tasks/get` on its own client. When a task reaches a terminal status, the host starts a silent AG-UI follow-up (hidden host cue via `begin_greeting` / `favloSilent`). The cue is `<media_completed>`, `<media_cancelled>`, or `<media_error>` around the file name. That fence is the new user message the service session sends. The task result is not sent. A gallery write selects that file in the same `gallery.updated` event, so the filmstrip highlights it when the file lands. It is not wrapped in `<system_reminder>`. A file cue does not include a link or a task id. The chat or workspace tools decide what to do. Attaching MCP tools adds no system-instruction block; tool descriptions come from the MCP server. The gallery workspace skill tells that session how to use those tools. List, set, memory, status, cancel, and read stay on `Client.call_tool`.
 
 ## Stable prefix cache
 
@@ -33,11 +33,11 @@ The AG-UI thread snapshot is the conversation record for that thread. Later turn
 Rules:
 
 - Leave prior messages byte-stable once saved. Do not edit, reorder, or strip them on a later turn.
-- Put model-only injected context (reminders, host notes) on a durable fenced `user` host cue (`<system_reminder>…</system_reminder>`), not spliced into the person's typed body. Mark it with AG-UI `metadata.favlo.ui=hidden`. Persist that row in the thread snapshot so the next turn replays it unchanged. A gallery selection is the exception: its sidecar and image ride on the user message the model receives, because a separate snapshot row is left out of the service-session suffix. The path comes from that POST's `state`. The same path is not written again. The transcript projection omits the fence.
+- Put model-only injected context (reminders, host notes) on a durable fenced `user` host cue (`<system_reminder>…</system_reminder>`), not spliced into the person's typed body. A finished generate task uses `<media_completed>`, `<media_cancelled>`, or `<media_error>` around the file name, on that same hidden row, and is not wrapped in `<system_reminder>`. That row is the new user message of the follow-up, so the service session sends the fence and not the task result. Mark it with AG-UI `metadata.favlo.ui=hidden`. The run persists that row so the next turn replays it unchanged. A gallery selection is the exception: its sidecar text and file name ride on the user message the model receives, not the image pixels, because a separate snapshot row is left out of the service-session suffix. The path comes from that POST's `state`. The same path is not written again. The transcript projection omits the fence.
 - Do not use mid-chat `system` or `developer` for those cues.
 - Do not inject context only for the current request and omit it from history. That makes the next prompt diverge from the cached prefix.
 - Hide host cues (and other non-transcript rows) in the transcript projection. Hiding from the UI is not a reason to drop them from the snapshot.
-- The trusted server writes host-cue rows into the durable snapshot before the run. Clients must not supply them.
+- The trusted server writes host-cue rows into the durable snapshot before the run. A media fence is the follow-up's new message instead, and that run saves it. Clients must not supply them.
 - Silent server cues (the gallery greeting) use that same fenced host-cue channel (plus an empty user pad the transcript omits). Do not delete snapshot rows after the run to hide them.
 - Tool schemas that the model has already used in a thread must stay available on later turns until clear. Persist AG-UI progressive MCP loads (`persist_loaded` / `restore_loaded`). Prefer eager gallery tools over a mid-turn load step that changes the schema.
 - Clear and archive mint a new thread. Only then may the prefix start over.
@@ -97,6 +97,7 @@ The script is `web-spa/e2e/<feature>.spec.ts`. A fresh install uses `e2e/web-new
 | Feature | Script |
 |---|---|
 | Chat, configuration, heartbeats | `e2e/chat.spec.ts` |
+| Basic home chat | `e2e/home-chat.spec.ts` |
 | Gallery captions use the agent model (Orchestration) | `e2e/gallery-vision-settings.spec.ts` |
 | Short transcript on the composer | `e2e/chat-align.spec.ts` |
 | New agent | `e2e/agent-create.spec.ts` |
@@ -120,12 +121,14 @@ The script is `web-spa/e2e/<feature>.spec.ts`. A fresh install uses `e2e/web-new
 | Gallery placement change | `e2e/workspace-placement.spec.ts` |
 | Gallery image embedded once | `e2e/gallery-image.spec.ts` |
 | Gallery selection rides the sent message | `e2e/gallery-selection.spec.ts` |
+| Filmstrip highlights the selected folder file | `e2e/gallery-filmstrip-select.spec.ts` |
 | Reply while an image generates, then the image | `e2e/image-generate.spec.ts` |
 | Gallery reply while an image generates, filmstrip, reload | `e2e/gallery-image-generate.spec.ts` |
 | Session clear and archive | `e2e/session.spec.ts` |
 | Workspace skill | `e2e/workspace-skills.spec.ts` |
 | Workspace type and delete | `e2e/workspace-type-delete.spec.ts` |
 | Delete a workspace from the channel menu | `e2e/workspace-menu-delete.spec.ts` |
+| Wide workspace menu focus ring | `e2e/workspace-menu-focus.spec.ts` |
 | Workspace shells from the API | `e2e/workspace-shells.spec.ts` |
 | Fresh install and first chat | `e2e/web-new-user-e2e-setup/setup.spec.ts` |
 | Failed reply sent again | `e2e/reply-error.spec.ts` |

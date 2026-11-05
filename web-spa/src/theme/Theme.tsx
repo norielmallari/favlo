@@ -2,7 +2,7 @@ import { createContext, createElement, useContext, useEffect, useMemo, useState,
 import { Appearance, Platform, useColorScheme } from 'react-native';
 
 import { workspaceSchemes, type WorkspaceScheme } from '@/theme/workspace-schemes';
-import { scrollbarStyle } from '@/theme/scrollbar';
+import { focusRingCss, scrollbarStyle } from '@/theme/scrollbar';
 import { dark, light, type Palette } from '@/theme/tokens';
 
 export type Preference = 'system' | 'light' | 'dark';
@@ -57,7 +57,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   return (
     <ThemeContext.Provider value={value}>
       {Platform.OS === 'web'
-        ? createElement('style', { 'data-testid': 'scrollbar' }, scrollbarStyle(palette))
+        ? createElement('style', { 'data-testid': 'scrollbar' }, `${scrollbarStyle(palette)}\n${focusRingCss(palette.focusRing)}`)
         : null}
       {children}
     </ThemeContext.Provider>
@@ -90,11 +90,19 @@ export function WorkspaceSchemeProvider({
     if (Platform.OS !== 'web' || scheme === 'favlo' || typeof document === 'undefined') {
       return;
     }
+    const root = document.documentElement;
+    const previous = root.style.getPropertyValue('--favlo-focus-ring');
+    root.style.setProperty('--favlo-focus-ring', palette.focusRing);
     const node = document.createElement('style');
     node.dataset.testid = 'workspace-scrollbar';
     node.textContent = scrollbarStyle(palette);
     document.head.appendChild(node);
     return () => {
+      if (previous) {
+        root.style.setProperty('--favlo-focus-ring', previous);
+      } else {
+        root.style.removeProperty('--favlo-focus-ring');
+      }
       node.remove();
     };
   }, [palette, scheme]);

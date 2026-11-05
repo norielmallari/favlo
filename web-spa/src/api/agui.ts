@@ -29,8 +29,13 @@ export type AguiRunInput = {
   signal?: AbortSignal;
 };
 
-/** Post one AG-UI run and yield decoded SSE events. */
-export async function* runAgUi(input: AguiRunInput): AsyncGenerator<AguiEvent> {
+/**
+ * Post one AG-UI run and yield the events from each network read together.
+ * A reasoning burst is many SSE events in one read. Yielding those one at a
+ * time lets React flush a render between already-buffered tokens and hit its
+ * nested update limit.
+ */
+export async function* runAgUi(input: AguiRunInput): AsyncGenerator<AguiEvent[]> {
   const response = await fetch(agUiUrl(), {
     method: 'POST',
     headers: {
@@ -72,17 +77,18 @@ export async function* runAgUi(input: AguiRunInput): AsyncGenerator<AguiEvent> {
     buffer += decoder.decode(value, { stream: true });
     const chunks = buffer.split('\n\n');
     buffer = chunks.pop() ?? '';
-    for (const chunk of chunks) {
+    const events = chunks.flatMap((chunk) => {
       const event = decodeSseChunk(chunk);
-      if (event != null) {
-        yield event;
-      }
+      return event == null ? [] : [event];
+    });
+    if (events.length > 0) {
+      yield events;
     }
   }
   if (buffer.trim()) {
     const event = decodeSseChunk(buffer);
     if (event != null) {
-      yield event;
+      yield [event];
     }
   }
 }

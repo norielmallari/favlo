@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -21,6 +22,9 @@ const ActionsContext = createContext<WorkspaceChromeActions>({
 });
 const BannerEndContext = createContext<ReactNode>(null);
 const BannerEndRegisterContext = createContext<(node: ReactNode) => void>(() => undefined);
+const BannerNodeContext = createContext<ReactNode>(null);
+const BannerHostedContext = createContext(false);
+const SetBannerHostedContext = createContext<(hosted: boolean) => void>(() => undefined);
 
 export function WorkspaceChromeProvider({ children }: { children: ReactNode }) {
   const actionsRef = useRef<WorkspaceChromeActions>({
@@ -67,6 +71,38 @@ export function useRegisterWorkspaceChrome(actions: WorkspaceChromeActions) {
       requestDelete: () => actionsRef.current.requestDelete(),
     });
   }, [register]);
+}
+
+export function WorkspaceBannerProvider({
+  banner,
+  hosted,
+  setHosted,
+  children,
+}: {
+  banner: ReactNode;
+  hosted: boolean;
+  setHosted: (hosted: boolean) => void;
+  children: ReactNode;
+}) {
+  return (
+    <BannerNodeContext.Provider value={banner}>
+      <BannerHostedContext.Provider value={hosted}>
+        <SetBannerHostedContext.Provider value={setHosted}>{children}</SetBannerHostedContext.Provider>
+      </BannerHostedContext.Provider>
+    </BannerNodeContext.Provider>
+  );
+}
+
+/** On a wide gallery, the screen places the banner over the gallery pane only. */
+export function useHostWorkspaceBanner(host: boolean): ReactNode {
+  const banner = useContext(BannerNodeContext);
+  const hosted = useContext(BannerHostedContext);
+  const setHosted = useContext(SetBannerHostedContext);
+  useLayoutEffect(() => {
+    setHosted(host);
+  }, [host, setHosted]);
+  useLayoutEffect(() => () => setHosted(false), [setHosted]);
+  return host && hosted ? banner : null;
 }
 
 /** Put focusable controls in the workspace banner, right-aligned after the title. */

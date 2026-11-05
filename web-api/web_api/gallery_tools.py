@@ -24,43 +24,6 @@ def _root_media_path(path: str) -> str:
     return cleaned
 
 
-INSTRUCTIONS = (
-    "These tools belong to this gallery workspace session. "
-    "Media files (images, mp3, mp4) live in the local folder for this gallery. "
-    "Paths are relative to that folder. Do not use a host path or another workspace id. "
-    "Search with "
-    f"{qualified(SOURCE, 'search_media')} when the request is semantic. "
-    "Find with "
-    f"{qualified(SOURCE, 'find_media')} once for path or name coverage, then "
-    "workspace_place once in the same turn. Do not call find twice. "
-    "Find and search return path and kind only. "
-    "Call "
-    f"{qualified(SOURCE, 'get_metadata')} for one path when the user asks about "
-    "captions or other sidecar fields, or before an edit. "
-    "Call "
-    f"{qualified(SOURCE, 'load_image')} for one path when the sidecar description is not enough "
-    "and the model must see the pixels. When the selected path changed, that user message "
-    "already includes the sidecar and the image. Do not load an image only because it is selected. "
-    "Always pass selection for one filmstrip path when the strip has items. "
-    "Do not invent media descriptions; Favlo's index job writes metadata under "
-    ".favlo_metadata beside the media (for example .favlo_metadata/media.mp3.json). "
-    "When the user asks to change a caption, title, tags, or other image metadata, call "
-    f"{qualified(SOURCE, 'update_metadata')} with that image's relative path. "
-    "Send only the fields they want changed. "
-    "This image or this clip means the selected media path on the turn, when one is named. "
-    "An image generate tool returns a task id and the file is not ready. "
-    "Reply in that same turn. Do not call media_status on this turn. "
-    "The chat shows the favlo:// link when the file is ready, and the host "
-    "writes that file into the gallery folder and filmstrip. "
-    f"Call {qualified(SOURCE, 'write_image')} only when the person asks to save "
-    "a chat link under a different path. "
-    f"{qualified(SOURCE, 'search_unlike_media')} is available without a load step. "
-    "Keep media at the local folder root; do not use nested directories. "
-    "The gallery color scheme is favlo, rose-pine, or catppuccin. Call "
-    f"{qualified(SOURCE, 'set_theme')} when the user asks to change how the gallery looks. "
-    "Light, dark, and system stay their appearance setting."
-)
-
 _SELECTED_LINE = re.compile(
     r"^The selected media on this turn is (.+)\. This image means that path\.$"
 )
@@ -272,6 +235,9 @@ def tools(store: Any, workspace_id: str, bus: Any | None = None) -> list[object]
         _move_image_tool(store, workspace_id, bus),
         _delete_image_tool(store, workspace_id, bus),
         _theme_tool(store, workspace_id, bus),
+        _select_media_tool(store, workspace_id, bus),
+        _show_generating_tool(store, workspace_id, bus),
+        _update_generating_tool(store, workspace_id, bus),
     ]
 
 
@@ -298,6 +264,76 @@ def _theme_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
     return gallery_set_theme
 
 
+def _show_generating_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
+    from agent_framework import tool
+
+    @tool(approval_mode="never_require", name=qualified(SOURCE, "show_generating_media"))
+    async def show_generating_media(task_id: str, kind: str = "image") -> str:
+        """Show a generating tile on the filmstrip for one task.
+
+        task_id is the file name passed to generate, or the id that call
+        returned. kind is image, video, or audio.
+        """
+        from web_api.media_delivery import bound_task
+
+        session_id = store.workspace_session_id(workspace_id)
+        if not session_id:
+            return "This gallery has no chat."
+        media = kind.strip().lower()
+        if media not in {"image", "video", "audio"}:
+            media = "image"
+        bound = bound_task(media, task_id)
+        if bound is None:
+            return "That file is not being made."
+        events = store.note_media_pending(session_id, bound, media, "working")
+        await _publish(bus, events)
+        return "The filmstrip shows a tile for that task."
+
+    return show_generating_media
+
+
+def _update_generating_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
+    from agent_framework import tool
+
+    from web_api.media_delivery import place_gallery_media
+
+    @tool(approval_mode="never_require", name=qualified(SOURCE, "update_generating_media"))
+    async def update_generating_media(task_id: str, link: str = "") -> str:
+        """Save a finished favlo:// file and replace its generating tile.
+
+        task_id is the id from the host cue. link is the favlo:// URI from
+        read_media. Omit link to clear the tile when the task failed or was
+        cancelled.
+        """
+        session_id = store.workspace_session_id(workspace_id)
+        if not session_id:
+            return "This gallery has no chat."
+        cleaned = task_id.strip()
+        uri = link.strip()
+        if not cleaned:
+            return "Pass the task id."
+        if not uri:
+            events = store.note_media_pending(session_id, cleaned, "image", "cancelled")
+            await _publish(bus, events)
+            return "The generating tile is cleared."
+        events = place_gallery_media(store, session_id, [uri])
+        await _publish(bus, events)
+        if not events:
+            return "That link could not be saved."
+        done = store.note_media_pending(session_id, cleaned, "image", "completed")
+        await _publish(bus, done)
+        return "The file is on the filmstrip."
+
+    return update_generating_media
+
+
+async def _publish(bus: Any | None, events: list[dict[str, Any]]) -> None:
+    if bus is None:
+        return
+    for event in events:
+        await bus.publish(event)
+
+
 def _bind_or_message(store: Any, workspace_id: str) -> Any | str:
     if not store.has_local_folder(workspace_id):
         return "Bind a local folder first."
@@ -307,23 +343,57 @@ def _bind_or_message(store: Any, workspace_id: str) -> Any | str:
         return str(exc)
 
 
-def _slim_media_rows(listing: dict[str, Any]) -> dict[str, Any]:
-    """Path and kind only. Drop the duplicate images array and listing noise."""
-    media: list[dict[str, Any]] = []
-    for item in listing.get("media") or []:
+def _file_names(rows: list[Any]) -> list[str]:
+    """File names only, in the order given."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in rows:
         if not isinstance(item, dict):
             continue
-        path = str(item.get("path") or "").strip()
-        if not path:
+        path = str(item.get("path") or item.get("name") or "").strip()
+        name = path.rsplit("/", 1)[-1]
+        if not name or name in seen:
             continue
-        row: dict[str, Any] = {"path": path, "kind": str(item.get("kind") or "image")}
-        media.append(row)
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def _slim_media_rows(listing: dict[str, Any]) -> dict[str, Any]:
+    """File names only. Drop kind, captions, and the duplicate images array."""
     return {
-        "root": listing.get("root") or "",
-        "media": media,
+        "names": _file_names(list(listing.get("media") or [])),
         "truncated": bool(listing.get("truncated")),
-        "depth_limit_hit": bool(listing.get("depth_limit_hit")),
     }
+
+
+def _select_media_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
+    from agent_framework import tool
+
+    from web_api.workspace_tools import select_media_placement
+
+    @tool(approval_mode="never_require", name=qualified(SOURCE, "select_media"))
+    async def select_media(name: str) -> str:
+        """Select one image on the filmstrip.
+
+        name is a file name at the folder root. The strip already shows the folder.
+        """
+        folder = _bind_or_message(store, workspace_id)
+        if isinstance(folder, str):
+            return folder
+        try:
+            relative = _root_media_path(name)
+            written = folder.stat(relative)
+        except Rejected as exc:
+            return str(exc)
+        path = str(written.get("path") or relative)
+        state = select_media_placement(store, workspace_id, path)
+        if state is None:
+            return "This gallery has no chat."
+        await _notify(store, workspace_id, bus, {"path": path, "state": state})
+        return "That file is selected."
+
+    return select_media
 
 
 def _find_tool(store: Any, workspace_id: str) -> object:
@@ -335,9 +405,9 @@ def _find_tool(store: Any, workspace_id: str) -> object:
         name_contains: str = "",
         kinds: list[str] | None = None,
     ) -> str:
-        """List media at the local folder root.
+        """List file names at the local folder root.
 
-        Each row is path and kind only. Call gallery_get_metadata for sidecar fields.
+        The result is names only. Call gallery_get_metadata for sidecar fields.
         kinds may be image, audio, and video. Prefer gallery_search_media for meaning.
         path is ignored; listing is always the folder root.
         """
@@ -346,13 +416,7 @@ def _find_tool(store: Any, workspace_id: str) -> object:
             return folder
         listing = folder.walk_media("", name_contains=name_contains, kinds=kinds, depth_limit=0)
         if isinstance(listing, dict):
-            listing = {
-                **_slim_media_rows(listing),
-                "next": (
-                    "Call workspace_place once with preview on stage and filmstrip on rail "
-                    "using these paths; pass selection for one path."
-                ),
-            }
+            listing = _slim_media_rows(listing)
         return _dump(listing)
 
     # Alias kept for prompts that still say find_images.
@@ -405,10 +469,13 @@ def _search_hits(
         return vector
     index = GalleryIndex(store.path.with_name("gallery_index.db"))
     hits = index.search(workspace_id, vector, limit=limit, kinds=kinds, unlike=unlike)
-    enriched = [
-        {"path": hit["path"], "kind": hit["kind"], "score": hit["score"]} for hit in hits
-    ]
-    return _dump({"media": enriched, "indexed": index.count(workspace_id), "unlike": unlike})
+    return _dump(
+        {
+            "names": _file_names(hits),
+            "indexed": index.count(workspace_id),
+            "unlike": unlike,
+        }
+    )
 
 
 def _get_metadata_tool(store: Any, workspace_id: str) -> object:

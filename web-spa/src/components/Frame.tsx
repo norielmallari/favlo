@@ -4,7 +4,7 @@ import { Platform, Text, useWindowDimensions, View } from 'react-native';
 
 import { FeatherIcon } from '@/components/FeatherIcon';
 import { IconButton } from '@/components/IconButton';
-import { focusRingInset, Pressable } from '@/components/Pressable';
+import { focusRingInset, focusSafeGap, Pressable } from '@/components/Pressable';
 import { useTheme, type Preference } from '@/theme/Theme';
 import { radius, space, z } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
@@ -144,7 +144,8 @@ export function Frame({
                 zIndex: z.modal,
                 minWidth: 140,
                 maxWidth: 240,
-                padding: space[1],
+                padding: focusRingInset,
+                gap: focusSafeGap,
                 borderRadius: radius.control,
                 borderWidth: 1,
                 borderColor: palette.borderStrong,

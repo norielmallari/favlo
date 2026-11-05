@@ -12,6 +12,7 @@ from typing import Any
 from web_api.catalog import ELEMENTS
 
 _GALLERY_HINT = "Favlo indexes images, mp3, and mp4 in that folder for the gallery filmstrip."
+_CODING_HINT = "Generated files are written at the root of this folder."
 
 
 def shells() -> list[dict[str, Any]]:
@@ -31,8 +32,8 @@ def shells() -> list[dict[str, Any]]:
             "id": "coding",
             "label": "Coding",
             "icon": "box",
-            "setup": "none",
-            "setup_hint": "",
+            "setup": "local_folder",
+            "setup_hint": _CODING_HINT,
             "slots": [],
             "renderer": "chat",
             "version": 1,

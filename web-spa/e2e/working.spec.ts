@@ -5,7 +5,7 @@ import { deleteAgentsNamed } from './cleanup';
 import { onScreen } from './on-screen';
 import { createAgent, openAgentChat } from './open-agent-chat';
 
-test('working pulses the activity dot during a reply', async ({ page }) => {
+test('working shows the activity chip during a reply', async ({ page }) => {
   const name = `Wren ${Date.now()}`;
   try {
   await page.setViewportSize({ width: 1280, height: 800 });
@@ -30,7 +30,7 @@ test('working pulses the activity dot during a reply', async ({ page }) => {
   const working = page.getByTestId('working');
   await expect(working).toBeVisible({ timeout: 180_000 });
   await expect(working).toHaveText(/^(Working|Thinking|Tool call)/);
-  await expect(page.getByTestId('working-dot')).toHaveCSS('animation-name', 'favlo-working-pulse');
+  await expect(page.getByTestId('working-dot')).toHaveCount(0);
   await expect(working).not.toHaveCSS('-webkit-background-clip', 'text');
   await expect(working).toBeVisible();
 

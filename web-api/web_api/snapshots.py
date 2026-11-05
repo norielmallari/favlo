@@ -13,7 +13,9 @@ from web_api.ids import guid
 def project_messages(messages: list[Any]) -> list[dict[str, Any]]:
     """Map a library snapshot onto the session rows the transcript already reads.
 
-    Reasoning stays on the following assistant row. Tool rows stay out of that view.
+    Reasoning stays on the following assistant row. A blank assistant row
+    (whitespace only, no reply) does not become its own turn, so thinking
+    before a tool stays with the reply. Tool rows stay out of that view.
     Fenced host cues (``metadata.favlo.ui=hidden``) stay out of the You bubble.
     """
     from web_api.host_cues import is_host_cue
@@ -38,7 +40,9 @@ def project_messages(messages: list[Any]) -> list[dict[str, Any]]:
         if role not in {"user", "assistant"}:
             continue
         body = _text(raw.get("content"))
-        if role == "assistant" and not body.strip() and _tool_calls(raw):
+        if role == "assistant" and not body.strip():
+            # The model often writes a whitespace assistant row between
+            # reasoning and a tool call. Keep that reasoning for the reply.
             pending_calls.extend(_tool_calls(raw))
             continue
         if role == "user":

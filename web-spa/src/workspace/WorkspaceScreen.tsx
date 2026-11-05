@@ -42,9 +42,12 @@ import { space } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
 import { FolderSetup } from '@/workspace/FolderSetup';
 import { GalleryChatDock } from '@/workspace/GalleryChatDock';
-import { useRegisterWorkspaceChrome } from '@/workspace/workspace-chrome';
+import { useHostWorkspaceBanner, useRegisterWorkspaceChrome } from '@/workspace/workspace-chrome';
 import { GalleryChatResizeHandle } from '@/workspace/GalleryChatResizeHandle';
 import {
+  cycleGalleryDetent,
+  GALLERY_DOCK_GAP,
+  GALLERY_DOCK_PAD,
   type GalleryChatDetent,
   readGalleryChatDetent,
   writeGalleryChatDetent,
@@ -55,7 +58,7 @@ import {
   writeGalleryChatWidth,
 } from '@/workspace/gallery-chat-width';
 import { WorkspaceShell } from '@/workspace/WorkspaceShell';
-import { documentFromShell, ensureFilmstripSelection, type PlacementState, type ShellDocument } from '@/workspace/placement';
+import { documentFromShell, ensureShellElements, type PlacementState, type ShellDocument } from '@/workspace/placement';
 
 type WorkspaceDetail = {
   id: string;
@@ -70,12 +73,17 @@ type WorkspaceDetail = {
   shell?: ShellDocument;
 };
 
+type PendingMedia = { task_id: string; kind: string; status: string };
+
 type Snapshot = {
   messages: { id: string; role: string; body: string; reasoning?: string | null; tool_calls?: unknown; trace?: unknown }[];
   runs: { id: string; status: string; error: string | null }[];
   cursor: number;
   state?: PlacementState;
+  pending_media?: PendingMedia[];
 };
+
+const MEDIA_DONE = new Set(['completed', 'failed', 'cancelled']);
 
 const LATEST_SLACK = 64;
 
@@ -95,18 +103,20 @@ export function WorkspaceScreen({
   const { palette } = useTheme();
   const { width, height } = useWindowDimensions();
   const narrow = width < 1024;
+  const wideChat = !narrow && Platform.OS === 'web';
+  const columnBanner = useHostWorkspaceBanner(wideChat);
   const keyboardInset = useKeyboardInset();
   const [rowWidth, setRowWidth] = useState(width);
   const [columnHeight, setColumnHeight] = useState(height);
   const [chatWidth, setChatWidth] = useState(() => readGalleryChatWidth(width));
   const [detent, setDetent] = useState<GalleryChatDetent>(() => readGalleryChatDetent());
   const detentBeforeFocus = useRef<GalleryChatDetent | null>(null);
-  const personMovedDock = useRef(false);
-  const autoLiftedReply = useRef(false);
   const rowWidthRef = useRef(rowWidth);
   rowWidthRef.current = rowWidth;
   useEffect(() => {
-    setChatWidth((current) => clampGalleryChatWidth(current, rowWidth));
+    // Read the saved width again once the row is known. Clamping the in-memory
+    // value would forget a width that was saved against a wider window.
+    setChatWidth(readGalleryChatWidth(rowWidth));
   }, [rowWidth]);
   const [detail, setDetail] = useState<WorkspaceDetail | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -118,7 +128,6 @@ export function WorkspaceScreen({
   useEffect(() => {
     if (!working) {
       setTraceForcedOpen(false);
-      autoLiftedReply.current = false;
     }
   }, [working]);
   const [, setRunId] = useState<string | null>(null);
@@ -138,23 +147,48 @@ export function WorkspaceScreen({
   shellRef.current = detail?.shell ?? null;
   const [bound, setBound] = useState(false);
   const [folderId, setFolderId] = useState<string | null>(null);
+  const [folderFiles, setFolderFiles] = useState<string[] | null>(null);
+  const folderIdRef = useRef<string | null>(null);
+  folderIdRef.current = folderId;
   const transcriptRef = useRef<ComponentRef<typeof ScrollView>>(null);
   const followLatest = useRef(true);
   const placedLatest = useRef(false);
   const openRun = useRef<string | null>(null);
   const cursorRef = useRef(0);
   const seen = useRef(new Set<string>());
-  const [pendingMedia, setPendingMedia] = useState<
-    { task_id: string; kind: string; status: string }[]
-  >([]);
+  const [pendingMedia, setPendingMedia] = useState<PendingMedia[]>([]);
   const sessionId = detail?.session_id ?? null;
 
-  const applyDetent = useCallback((next: GalleryChatDetent, fromPerson = true) => {
-    if (fromPerson) {
-      personMovedDock.current = true;
-    }
+  const applyDetent = useCallback((next: GalleryChatDetent) => {
     setDetent(next);
     writeGalleryChatDetent(next);
+  }, []);
+  const cycleLayout = useCallback(() => {
+    setDetent((current) => {
+      const next = cycleGalleryDetent(current);
+      writeGalleryChatDetent(next);
+      return next;
+    });
+  }, []);
+  const toggleFullScreen = useCallback(() => {
+    setDetent((current) => {
+      if (current === 'fullscreen') {
+        const prior = detentBeforeFocus.current ?? 'peek';
+        detentBeforeFocus.current = null;
+        writeGalleryChatDetent(prior);
+        return prior;
+      }
+      detentBeforeFocus.current = current;
+      writeGalleryChatDetent('fullscreen');
+      return 'fullscreen';
+    });
+  }, []);
+
+  const folderFilesRef = useRef<string[] | null>(null);
+  folderFilesRef.current = folderFiles;
+
+  const commitPlacement = useCallback((next: PlacementState) => {
+    setPlacement(ensureShellElements(next, shellRef.current, folderFilesRef.current ?? []));
   }, []);
 
   const chat = useAguiChat({
@@ -168,27 +202,32 @@ export function WorkspaceScreen({
     onStatus: setStatus,
     onState: (next) => {
       if (next && typeof next === 'object' && 'favlo_workspace' in next) {
-        setPlacement(ensureFilmstripSelection(next as PlacementState));
+        commitPlacement(next as PlacementState);
       }
     },
     onSessionId: (nextId) => {
       setDetail((value) => (value == null ? value : { ...value, session_id: nextId }));
-      setPlacement(documentFromShell(shellRef.current));
+      commitPlacement(documentFromShell(shellRef.current));
     },
     hydrate: async () => {
       if (sessionId == null) {
         return { messages: [] };
       }
       const snap = await api<Snapshot>(`/sessions/${sessionId}`);
+      setPendingMedia(snap.pending_media ?? []);
       if (snap.state?.favlo_workspace) {
-        const placed = ensureFilmstripSelection(snap.state);
+        const placed = ensureShellElements(
+          snap.state,
+          shellRef.current,
+          folderFilesRef.current ?? [],
+        );
         setPlacement(placed);
         return {
           messages: snap.messages.map((item) => chatMessage(item)),
           state: placed as unknown as Record<string, unknown>,
         };
       }
-      setPlacement(documentFromShell(shellRef.current));
+      commitPlacement(documentFromShell(shellRef.current));
       return {
         messages: snap.messages.map((item) => chatMessage(item)),
         state: documentFromShell(shellRef.current) as unknown as Record<string, unknown>,
@@ -205,10 +244,11 @@ export function WorkspaceScreen({
     setFolderId(local?.id ?? null);
     const snap = await api<Snapshot>(`/sessions/${workspace.session_id}`);
     cursorRef.current = snap.cursor;
+    setPendingMedia(snap.pending_media ?? []);
     setMessages(snap.messages.map((item) => chatMessage(item)));
     shellRef.current = workspace.shell ?? null;
     if (snap.state?.favlo_workspace) {
-      setPlacement(ensureFilmstripSelection(snap.state));
+      setPlacement(ensureShellElements(snap.state, workspace.shell, folderFilesRef.current ?? []));
     } else {
       setPlacement(documentFromShell(workspace.shell));
     }
@@ -281,7 +321,7 @@ export function WorkspaceScreen({
           setWorking(false);
           setRunId(null);
           setPendingMedia([]);
-          setPlacement(documentFromShell(shellRef.current));
+          commitPlacement(documentFromShell(shellRef.current));
           if (payload.payload?.session_id) {
             setDetail((value) =>
               value == null ? value : { ...value, session_id: payload.payload!.session_id! },
@@ -291,15 +331,20 @@ export function WorkspaceScreen({
         if (payload.type === 'workspace.theme_set' && isWorkspaceScheme(payload.payload?.theme)) {
           onTheme?.(payload.payload.theme);
         }
-        if (payload.type === 'gallery.updated' && payload.payload?.state?.favlo_workspace) {
-          setPlacement(ensureFilmstripSelection(payload.payload.state));
-          setPendingMedia([]);
+        if (payload.type === 'gallery.updated') {
+          if (payload.payload?.state?.favlo_workspace) {
+            commitPlacement(payload.payload.state);
+          }
+          const listed = folderIdRef.current;
+          if (listed != null) {
+            void loadFolderFiles(listed);
+          }
         }
         if (payload.type === 'media.pending' && payload.payload?.task_id) {
           const taskId = payload.payload.task_id;
           const kind = payload.payload.kind ?? 'image';
           const status = payload.payload.status ?? 'working';
-          if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+          if (MEDIA_DONE.has(status)) {
             setPendingMedia((current) => current.filter((item) => item.task_id !== taskId));
           } else {
             setPendingMedia((current) => {
@@ -413,7 +458,7 @@ export function WorkspaceScreen({
     try {
       if (command === 'clear') {
         await chat.clear();
-        setPlacement(documentFromShell(shellRef.current));
+        commitPlacement(documentFromShell(shellRef.current));
         return;
       }
       if (command === 'archive') {
@@ -421,14 +466,30 @@ export function WorkspaceScreen({
         return;
       }
       openRun.current = null;
-      personMovedDock.current = false;
-      autoLiftedReply.current = false;
       await chat.send(text);
     } catch (caught) {
       updateDraft(text);
       setNotice(caught instanceof Error ? caught.message : 'The message was not sent.');
     }
   }
+
+  const loadFolderFiles = useCallback(async (id: string) => {
+    const listing = await api<{ images?: { path?: string }[] }>(
+      `/workspaces/${workspaceId}/folders/${id}/images`,
+    );
+    const names = (listing.images ?? [])
+      .map((item) => String(item.path || ''))
+      .filter(Boolean);
+    setFolderFiles(names);
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (folderId == null) {
+      setFolderFiles(null);
+      return;
+    }
+    void loadFolderFiles(folderId).catch((caught: Error) => setNotice(caught.message));
+  }, [folderId, loadFolderFiles]);
 
   function fileUrl(path: string) {
     return `${API_URL}/workspaces/${workspaceId}/file?path=${encodeURIComponent(path)}`;
@@ -444,7 +505,7 @@ export function WorkspaceScreen({
       { method: 'DELETE', body: JSON.stringify({ path }) },
     );
     if (body.state?.favlo_workspace) {
-      setPlacement(ensureFilmstripSelection(body.state));
+      commitPlacement(body.state);
     }
   }
 
@@ -467,18 +528,7 @@ export function WorkspaceScreen({
       placedLatest.current = true;
     }
     followLatest.current = keepLatest(followLatest.current, placedLatest.current, fromBottom);
-    if (
-      narrow &&
-      working &&
-      !personMovedDock.current &&
-      !autoLiftedReply.current &&
-      contentSize.height > layoutMeasurement.height + 24 &&
-      detent !== 'expanded'
-    ) {
-      autoLiftedReply.current = true;
-      applyDetent('expanded', false);
-    }
-  }, [applyDetent, detent, narrow, working]);
+  }, []);
 
   function applyChatWidth(next: number) {
     const clamped = clampGalleryChatWidth(next, rowWidthRef.current);
@@ -486,41 +536,7 @@ export function WorkspaceScreen({
     writeGalleryChatWidth(clamped, rowWidthRef.current);
   }
 
-  function onComposerFocusChange(focused: boolean) {
-    if (!narrow) {
-      return;
-    }
-    if (focused) {
-      if (detentBeforeFocus.current == null) {
-        detentBeforeFocus.current = detent;
-      }
-      if (detent !== 'expanded') {
-        applyDetent('expanded', false);
-      }
-      return;
-    }
-    if (keyboardInset > 0) {
-      return;
-    }
-    const prior = detentBeforeFocus.current;
-    detentBeforeFocus.current = null;
-    if (prior != null && prior !== detent && !personMovedDock.current) {
-      applyDetent(prior, false);
-    }
-  }
-
-  useEffect(() => {
-    if (!narrow || keyboardInset > 0) {
-      return;
-    }
-    const prior = detentBeforeFocus.current;
-    if (prior != null && prior !== detent && !personMovedDock.current) {
-      detentBeforeFocus.current = null;
-      applyDetent(prior, false);
-    }
-  }, [applyDetent, detent, keyboardInset, narrow]);
-
-  const chatPadding = narrow ? space[3] : space[4];
+  const chatPadding = narrow ? GALLERY_DOCK_PAD : space[4];
   const chatInner = (
     <>
       {detent === 'fullscreen' && narrow ? null : (
@@ -528,7 +544,11 @@ export function WorkspaceScreen({
           ref={transcriptRef}
           testID="transcript"
           style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 0, minWidth: 0, maxWidth: '100%' }}
-          contentContainerStyle={transcriptFrame(space[4])}
+          contentContainerStyle={
+            narrow
+              ? { ...transcriptFrame(space[4]), paddingBottom: 0, minHeight: '100%' }
+              : transcriptFrame(space[4])
+          }
           onContentSizeChange={showLatest}
           onLayout={showLatest}
           onScroll={noteScroll}
@@ -545,6 +565,7 @@ export function WorkspaceScreen({
               trace={item.trace}
               expandTrace={readExpandTrace(detail?.expand_thinking)}
               expandTools={readExpandTrace(detail?.expand_tools, 'hidden')}
+              imageNames={detail?.type === 'gallery'}
             />
           ))}
           <LiveReply
@@ -554,20 +575,8 @@ export function WorkspaceScreen({
             expandTrace={readExpandTrace(detail?.expand_thinking)}
             expandTools={readExpandTrace(detail?.expand_tools, 'hidden')}
             forceOpen={traceForcedOpen}
+            imageNames={detail?.type === 'gallery'}
           />
-          {pendingMedia.map((item) => (
-            <Text
-              key={item.task_id}
-              accessibilityLabel={`Generating ${item.kind}`}
-              style={textStyle('body', palette.textSecondary)}
-            >
-              {item.kind === 'video'
-                ? 'Generating video…'
-                : item.kind === 'audio'
-                  ? 'Generating audio…'
-                  : 'Generating image…'}
-            </Text>
-          ))}
         </ScrollView>
       )}
       {working && !(detent === 'fullscreen' && narrow) ? (
@@ -606,8 +615,9 @@ export function WorkspaceScreen({
         value={draft}
         agentName={agentName}
         compact={narrow}
+        flushTop={narrow}
+        singleLine={narrow && detent !== 'expanded'}
         pulseToken={pulseToken}
-        onFocusChange={onComposerFocusChange}
         onChange={updateDraft}
         onSend={() => void send()}
         onStop={() => {
@@ -632,9 +642,10 @@ export function WorkspaceScreen({
               minWidth: chatWidth,
               maxWidth: chatWidth,
             }),
+        alignSelf: 'stretch',
         minHeight: 0,
         padding: chatPadding,
-        gap: space[3],
+        gap: narrow ? GALLERY_DOCK_GAP : space[3],
         overflow: 'hidden',
       }}
     >
@@ -668,7 +679,9 @@ export function WorkspaceScreen({
           state={placement}
           slots={detail?.shell?.slots ?? []}
           fileUrl={fileUrl}
-          onChange={setPlacement}
+          onChange={commitPlacement}
+          chatDetent={narrow ? detent : undefined}
+          onCycleLayout={narrow ? cycleLayout : undefined}
           onAddToChat={(path) => {
             updateDraft(draft ? `${draft}\n${path}` : path);
             setPulseToken((value) => value + 1);
@@ -677,19 +690,8 @@ export function WorkspaceScreen({
           fullScreen={narrow && detent === 'fullscreen'}
           hideFilmstrip={narrow && detent === 'fullscreen'}
           pendingMedia={pendingMedia}
-          onToggleFullScreen={
-            narrow
-              ? () => {
-                  if (detent === 'fullscreen') {
-                    applyDetent(detentBeforeFocus.current ?? 'peek');
-                    detentBeforeFocus.current = null;
-                  } else {
-                    detentBeforeFocus.current = detent;
-                    applyDetent('fullscreen');
-                  }
-                }
-              : undefined
-          }
+          folderFiles={folderFiles}
+          onToggleFullScreen={narrow ? toggleFullScreen : undefined}
         />
       )}
     </View>
@@ -697,9 +699,6 @@ export function WorkspaceScreen({
 
   return (
     <View accessibilityLabel="Gallery workspace" style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 0, minHeight: 0 }}>
-      {notice ? (
-        <Text style={[textStyle('body', palette.danger), { padding: space[3] }]}>{notice}</Text>
-      ) : null}
       <View
         style={{
           flexGrow: 1,
@@ -715,8 +714,22 @@ export function WorkspaceScreen({
           setColumnHeight(event.nativeEvent.layout.height);
         }}
       >
-        {galleryPane}
-        {!narrow && Platform.OS === 'web' ? (
+        <View
+          style={{
+            flexGrow: 1,
+            flexShrink: 1,
+            flexBasis: 0,
+            minWidth: 0,
+            minHeight: 0,
+          }}
+        >
+          {columnBanner}
+          {notice ? (
+            <Text style={[textStyle('body', palette.danger), { padding: space[3] }]}>{notice}</Text>
+          ) : null}
+          {galleryPane}
+        </View>
+        {wideChat ? (
           <GalleryChatResizeHandle value={chatWidth} rowWidth={rowWidth} onChange={applyChatWidth} />
         ) : null}
         {narrow ? (

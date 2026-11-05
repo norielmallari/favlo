@@ -24,6 +24,9 @@ from web_api.gallery_vision import analyze_image
 _PASS_CAP = 40
 _VISION_CAP = 8
 _SLEEP_SECONDS = 30.0
+# A generate sidecar is indexed from its prompt first. Vision waits so it
+# does not take the chat model while the file is still new.
+_VISION_DEBOUNCE_SECONDS = 120.0
 
 
 def _app_of(target: Any) -> Any | None:
@@ -221,8 +224,11 @@ def write_path_sidecars(store: Any, workspace_id: str) -> int:
 
 
 def write_vision_sidecars(store: Any, workspace_id: str) -> int:
-    """Caption every image that still lacks a vision description. No vision cap."""
-    return _pass(store, None, workspace_id, True, cap=None, vision_cap=None)
+    """Caption every image that still lacks a vision description. No vision cap.
+
+    Provisioning does not wait out the generate debounce.
+    """
+    return _pass(store, None, workspace_id, True, cap=None, vision_cap=None, debounce=False)
 
 
 def uncaptioned_images(store: Any, workspace_id: str) -> list[str]:
@@ -246,6 +252,7 @@ def _pass(
     vision: bool = True,
     cap: int | None = _PASS_CAP,
     vision_cap: int | None = _VISION_CAP,
+    debounce: bool = True,
 ) -> int:
     if index is None:
         index = GalleryIndex(Path(store.path).with_name("gallery_index.db"))
@@ -275,7 +282,8 @@ def _pass(
         under_cap = vision_cap is None or vision_used < vision_cap
         if vision and kind == "image" and model and base_url and under_cap:
             existing = read_sidecar(folder.root, relative)
-            if _needs_vision(existing, relative):
+            fresh = debounce and _generated_too_fresh(absolute, existing)
+            if _needs_vision(existing, relative) and not fresh:
                 allow_vision = True
         status = _load_and_embed(
             folder=folder,
@@ -436,6 +444,19 @@ def _needs_vision(sidecar: dict[str, Any] | None, relative: str) -> bool:
     if _needs_generation_enrichment(sidecar):
         return True
     return _path_only(sidecar, relative)
+
+
+def _generated_too_fresh(absolute: Path, sidecar: dict[str, Any] | None) -> bool:
+    """True when a generated image was written less than 120 seconds ago."""
+    if sidecar is None or sidecar.get("source") != "generate":
+        return False
+    if not isinstance(sidecar.get("generation"), dict):
+        return False
+    try:
+        age = time.time() - absolute.stat().st_mtime
+    except OSError:
+        return False
+    return age < _VISION_DEBOUNCE_SECONDS
 
 
 def _needs_generation_enrichment(sidecar: dict[str, Any]) -> bool:

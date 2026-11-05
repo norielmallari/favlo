@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / "web-api"))
 
 from web_api.ids import FAVLO_AGENT_ID, FAVLO_MCP_ID, guid  # noqa: E402
 from web_api.mcp_client import list_tools  # noqa: E402
-from web_api.mcp_tools import INSTRUCTIONS, _description, groups_from, prepare_catalog  # noqa: E402
+from web_api.mcp_tools import _description, groups_from, prepare_catalog  # noqa: E402
 from web_api.store import Store, _mcp_fields  # noqa: E402
 
 
@@ -146,21 +146,6 @@ def test_save_keeps_a_disabled_group_and_lists_its_tools(
 
 
 def test_media_instructions_require_a_listed_model_id() -> None:
-    assert "set_image_model" in INSTRUCTIONS
-    assert "set_video_i2v_model" in INSTRUCTIONS
-    assert "set_video_t2v_model" in INSTRUCTIONS
-    assert "set_music_model" in INSTRUCTIONS
-    assert "set_voice_model" in INSTRUCTIONS
-    assert "progressive disclosure" in INSTRUCTIONS
-    assert "load_tool" in INSTRUCTIONS
-    assert "Match the generate tool to what the user asked for" in INSTRUCTIONS
-    assert "Do not offer or insist on video when they asked for an image" in INSTRUCTIONS
-    assert "Repeat the returned session id" in INSTRUCTIONS
-    assert "file is still being made" in INSTRUCTIONS
-    assert "file is not ready" in INSTRUCTIONS
-    assert "media_status" in INSTRUCTIONS
-    assert "Do not paste the JSON" in INSTRUCTIONS
-    assert "tell the user you are generating" in INSTRUCTIONS
     described = _description(
         {"name": "generate_image", "description": "Generate one or more PNGs."}
     )
@@ -318,7 +303,7 @@ def test_mcp_tools_from_two_servers_keep_unique_names(
         assert "favlo_media_2" in prefixes
         assert len(prefixes) == len(set(prefixes))
         assert all(list(item.allowed_tools) == ["generate_image"] for item in tools)
-        assert "favlo_media_generate_image" in text
+        assert text == ""
         described = _description(
             {"name": "generate_image", "description": "Generate."},
             "favlo_media_generate_image",
@@ -335,6 +320,56 @@ def test_mcp_tools_from_two_servers_keep_unique_names(
             stored.close()
     finally:
         store.close()
+
+
+def test_any_configured_server_attaches_with_no_instruction_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from web_api.mcp_tools import bundle
+    from web_api.store import Store
+
+    async def listed(
+        server: dict[str, object], *, refresh: bool = False
+    ) -> list[dict[str, object]]:
+        if server.get("url") == "http://127.0.0.1:9001/mcp":
+            return [
+                {
+                    "name": "lookup_note",
+                    "description": "Look up a note.",
+                    "schema": {"type": "object"},
+                }
+            ]
+        return [
+            {
+                "name": "generate_image",
+                "description": "Generate.",
+                "schema": {"type": "object"},
+            }
+        ]
+
+    monkeypatch.setattr("web_api.mcp_cache.catalog.get", listed)
+    store = Store(tmp_path / "app.db")
+    try:
+        store.create_mcp_server(
+            "mcp-notes",
+            {
+                "agent_id": FAVLO_AGENT_ID,
+                "name": "Notes",
+                "transport": "http",
+                "command": "",
+                "url": "http://127.0.0.1:9001/mcp",
+                "enabled": True,
+            },
+        )
+        text, tools = asyncio.run(bundle(store, FAVLO_AGENT_ID, _home(store), None, set()))
+    finally:
+        store.close()
+    by_prefix = {item.tool_name_prefix: item for item in tools}
+    assert text == ""
+    assert set(by_prefix) == {"favlo_media", "notes"}
+    assert list(by_prefix["notes"].allowed_tools) == ["lookup_note"]
+    assert list(by_prefix["notes"].always_load or []) == []
+    assert "generate_image" in list(by_prefix["favlo_media"].always_load or [])
 
 
 def test_an_unstamped_database_is_rebuilt(tmp_path: Path) -> None:
@@ -650,8 +685,57 @@ def test_a_generate_tool_returns_the_task_id(tmp_path: Path) -> None:
     assert "task-1" in text
     assert "not ready" in text
     assert "no favlo:// link yet" in text
-    assert "Do not call another tool" in text
-    assert "media_status" not in text
+    assert "Do not call media_status." in text
+    assert "Do not call another tool" not in text
+    assert "filmstrip" not in text
+
+
+def test_a_workspace_generate_keeps_the_file_name(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from web_api.mcp_tools import _mcp_client, _StdioServer, _Turn
+
+    command = _peer(tmp_path, "import time; time.sleep(30)", tool="generate_image")
+    root = tmp_path / "folder"
+    root.mkdir()
+    store = SimpleNamespace(
+        workspace_for_session=lambda _sid: {"id": "ws"},
+        has_local_folder=lambda _wid: True,
+        local_location=lambda _wid: str(root),
+    )
+
+    async def run() -> str:
+        client = _mcp_client({"transport": "stdio", "command": command})
+        assert client is not None
+        server = _StdioServer(
+            FAVLO_AGENT_ID,
+            client,
+            _Turn(store, None, set(), "srv", FAVLO_AGENT_ID, "sess"),
+            name="Peer",
+            tool_name_prefix="peer",
+            approval_mode="never_require",
+            allowed_tools=["generate_image"],
+            load_prompts=False,
+        )
+        async with client:
+            await server.connect()
+            func = next(
+                item
+                for item in server._functions
+                if (item.additional_properties or {}).get("_mcp_remote_name") == "generate_image"
+            )
+            result = await asyncio.wait_for(
+                func.invoke(arguments={"prompt": "a horse", "filename": "star.png"}),
+                2,
+            )
+            await server.close()
+        return _shown(result)
+
+    text = asyncio.run(run())
+    assert "star.png" in text
+    assert "task-1" not in text
+    assert "not ready" in text
+    assert "Pass a file name" not in text
 
 
 class _ScopedClient:

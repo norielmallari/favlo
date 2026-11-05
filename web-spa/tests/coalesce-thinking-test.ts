@@ -51,6 +51,39 @@ test('a thinking-only turn folds into a tool turn and hidden tools coalesce Thin
   ]);
 });
 
+test('a whitespace thinking row with a trace folds into the tool reply', () => {
+  const messages: ChatMessage[] = [
+    {
+      id: 'think',
+      role: 'assistant',
+      body: '\n\n',
+      reasoning: 'Before the tool.',
+      trace: [{ kind: 'thinking', text: 'Before the tool.' }],
+    },
+    {
+      id: 'reply',
+      role: 'assistant',
+      body: '\n\nThank you.',
+      reasoning: 'After the tool.',
+      toolCalls: [{ id: 'c1', name: 'favlo_media_remember', arguments: '{}' }],
+      trace: [
+        { kind: 'thinking', text: 'After the tool.' },
+        { kind: 'tool', call: { id: 'c1', name: 'favlo_media_remember', arguments: '{}' } },
+        { kind: 'reply', text: '\n\nThank you.' },
+      ],
+    },
+  ];
+  expect(isThinkingOnlyMessage(messages[0]!)).toBe(true);
+  const shown = coalesceThinkingTurns(messages);
+  expect(shown).toHaveLength(1);
+  const display = visibleReplySteps(storedSteps(shown[0]!), 'collapsed', 'hidden');
+  expect(display.map((step) => step.kind)).toEqual(['thinking', 'reply']);
+  expect(display[0]).toMatchObject({
+    kind: 'thinking',
+    text: 'Before the tool.\n\nAfter the tool.',
+  });
+});
+
 test('a user message breaks the merge', () => {
   const messages: ChatMessage[] = [
     { id: '1', role: 'assistant', body: '', reasoning: 'A.' },

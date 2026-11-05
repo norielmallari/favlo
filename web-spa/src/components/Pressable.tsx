@@ -1,4 +1,6 @@
+import { useEffect, useRef, useState } from 'react';
 import {
+  Platform,
   Pressable as NativePressable,
   StyleSheet,
   View,
@@ -11,16 +13,16 @@ import {
 import { useTheme } from '@/theme/Theme';
 import { dark, radius } from '@/theme/tokens';
 
-type PressState = PressableStateCallbackType & { hovered?: boolean; focused?: boolean };
+type PressState = PressableStateCallbackType & { hovered?: boolean };
 
 const FOCUS_RING_WIDTH = 2;
-const FOCUS_RING_OFFSET = 2;
+const FOCUS_RING_OUTSET = 2;
 
 /**
- * Room outside a focused control so the outline (width + offset) is not clipped
- * by a ScrollView, overflow:hidden ancestor, or edge-flush layout.
+ * Room outside a focused control so the ring is not clipped by a ScrollView,
+ * an overflow:hidden ancestor, or an edge-flush layout.
  */
-export const focusRingInset = FOCUS_RING_WIDTH + FOCUS_RING_OFFSET + 2;
+export const focusRingInset = FOCUS_RING_WIDTH + FOCUS_RING_OUTSET + 2;
 
 /** Padding on a clipping parent that hosts Pressable / IconButton children. */
 export const focusSafePad = {
@@ -45,11 +47,39 @@ export function Pressable({ children, style, ...props }: PressableProps) {
   const night = palette.background === dark.background;
   const pressedTint = night ? 'rgba(255, 255, 255, 0.18)' : 'rgba(24, 34, 48, 0.14)';
   const hoverTint = night ? 'rgba(255, 255, 255, 0.08)' : 'rgba(24, 34, 48, 0.06)';
+  const hostRef = useRef<HTMLElement | null>(null);
+  const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') {
+      return;
+    }
+    const node = hostRef.current;
+    if (node == null || typeof node.addEventListener !== 'function') {
+      return;
+    }
+    const onFocus = () => setFocused(true);
+    const onBlur = () => setFocused(false);
+    node.addEventListener('focus', onFocus);
+    node.addEventListener('blur', onBlur);
+    setFocused(document.activeElement === node);
+    return () => {
+      node.removeEventListener('focus', onFocus);
+      node.removeEventListener('blur', onBlur);
+    };
+  }, []);
 
   return (
     <NativePressable
       {...props}
-      style={(state) => [typeof style === 'function' ? style(state) : style, focusRing(palette.focusRing, state)]}
+      ref={(node) => {
+        hostRef.current = node as unknown as HTMLElement | null;
+      }}
+      style={(state) => [
+        typeof style === 'function' ? style(state) : style,
+        webControl,
+        focusRingStyle(palette.focusRing, focused),
+      ]}
     >
       {(state) => {
         const current = state as PressState;
@@ -74,12 +104,14 @@ export function Pressable({ children, style, ...props }: PressableProps) {
   );
 }
 
-function focusRing(color: string, state: PressableStateCallbackType): StyleProp<ViewStyle> {
-  const focused = (state as PressState).focused === true;
+/** Native buttons keep a platform appearance that clips an offset outline to the corners. */
+const webControl =
+  Platform.OS === 'web' ? ({ appearance: 'none' } as ViewStyle) : null;
+
+/** A spread shadow follows the radius. An offset outline is clipped to corner ticks. */
+export function focusRingStyle(color: string, on: boolean): ViewStyle {
   return {
-    outlineStyle: 'solid',
-    outlineWidth: FOCUS_RING_WIDTH,
-    outlineOffset: FOCUS_RING_OFFSET,
-    outlineColor: focused ? color : 'transparent',
+    outlineStyle: 'none',
+    boxShadow: on ? `0 0 0 ${FOCUS_RING_WIDTH}px ${color}` : 'none',
   };
 }

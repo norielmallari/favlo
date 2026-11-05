@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { Appearance, Platform, Text, useColorScheme, View } from 'react-native';
 
 import { FeatherIcon } from '@/components/FeatherIcon';
-import { Pressable } from '@/components/Pressable';
+import { focusRingInset, focusSafeGap, Pressable } from '@/components/Pressable';
 import { useTheme, type Preference } from '@/theme/Theme';
 import {
   WORKSPACE_SCHEMES,
@@ -63,7 +63,8 @@ export function WorkspaceAppearanceMenu({
         zIndex: z.modal,
         minWidth: 220,
         maxWidth: 280,
-        padding: space[1],
+        padding: focusRingInset,
+        gap: focusSafeGap,
         borderRadius: radius.control,
         borderWidth: 1,
         borderColor: palette.borderStrong,
@@ -128,7 +129,6 @@ export function WorkspaceAppearanceMenu({
         accessibilityElementsHidden
         style={{
           height: 1,
-          marginVertical: space[1],
           marginHorizontal: space[2],
           backgroundColor: palette.border,
         }}
@@ -151,6 +151,8 @@ export function WorkspaceAppearanceMenu({
               {
                 flexDirection: 'row',
                 alignItems: 'center',
+                justifyContent: 'flex-start',
+                alignSelf: 'stretch',
                 gap: space[2],
                 paddingHorizontal: space[3],
                 borderRadius: radius.control,

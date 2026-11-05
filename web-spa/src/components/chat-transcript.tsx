@@ -215,6 +215,7 @@ export function LiveReply({
   expandTrace = 'collapsed',
   expandTools,
   forceOpen = false,
+  imageNames = false,
 }: {
   steps: ReplyStep[];
   speaker?: string;
@@ -222,6 +223,7 @@ export function LiveReply({
   expandTrace?: ExpandTrace;
   expandTools?: ExpandTrace;
   forceOpen?: boolean;
+  imageNames?: boolean;
 }) {
   const toolExpand = expandTools ?? expandTrace;
   const display = visibleReplySteps(steps, expandTrace, toolExpand);
@@ -242,7 +244,7 @@ export function LiveReply({
         if (step.kind === 'tool') {
           return (
             <ToolCall
-              key={step.call.id}
+              key={`tool-${step.call.id}-${index}`}
               call={step.call}
               settled={step.settled}
               expandTrace={toolExpand}
@@ -253,10 +255,10 @@ export function LiveReply({
         return (
           <View
             key={`reply-${index}`}
-            accessibilityLabel={speaker ? `${speaker} said: ${humanText(step.text)}` : undefined}
+            accessibilityLabel={speaker ? `${speaker} said: ${humanText(step.text, imageNames)}` : undefined}
             style={[{ width: '100%', maxWidth: '100%', alignSelf: 'stretch' }, measured ? measureStyle : null]}
           >
-            <MessageBody body={step.text} />
+            <MessageBody body={step.text} imageNames={imageNames} />
           </View>
         );
       })}
@@ -523,6 +525,7 @@ export function TranscriptTurn({
   trace,
   expandTrace = 'collapsed',
   expandTools,
+  imageNames = false,
 }: {
   name: string;
   role: string;
@@ -532,6 +535,7 @@ export function TranscriptTurn({
   trace?: StoredPart[];
   expandTrace?: ExpandTrace;
   expandTools?: ExpandTrace;
+  imageNames?: boolean;
 }) {
   const toolExpand = expandTools ?? expandTrace;
   const { palette } = useTheme();
@@ -547,7 +551,7 @@ export function TranscriptTurn({
   }
   return (
     <View
-      accessibilityLabel={`${name} said: ${humanText(body)}`}
+      accessibilityLabel={`${name} said: ${humanText(body, imageNames)}`}
       style={{
         alignItems: mine ? 'flex-end' : 'stretch',
         width: '100%',
@@ -559,13 +563,14 @@ export function TranscriptTurn({
           width: mine ? undefined : '100%',
           maxWidth: mine ? '85%' : '100%',
           alignSelf: mine ? undefined : 'stretch',
-          gap: space[2],
-          padding: mine ? space[3] : 0,
+          gap: space[1],
+          paddingVertical: mine ? space[1] : 0,
+          paddingHorizontal: mine ? space[2] : 0,
           borderRadius: radius.card,
           backgroundColor: mine ? palette.accentSubtle : 'transparent',
         }}
       >
-        <Text style={textStyle('label', palette.textPrimary, '600')}>{name}</Text>
+        <Text style={textStyle('caption', palette.textPrimary, '600')}>{name}</Text>
         {display.map((step, index) => {
           if (step.kind === 'thinking') {
             return (
@@ -579,19 +584,32 @@ export function TranscriptTurn({
           }
           if (step.kind === 'tool') {
             return (
-              <ToolCall key={step.call.id} call={step.call} settled expandTrace={toolExpand} />
+              <ToolCall
+                key={`tool-${step.call.id}-${index}`}
+                call={step.call}
+                settled
+                expandTrace={toolExpand}
+              />
             );
           }
-          return <MessageBody key={`reply-${index}`} body={step.text} onEmpty={replyOnly ? reportEmpty : undefined} />;
+          return (
+            <MessageBody
+              key={`reply-${index}`}
+              body={step.text}
+              onEmpty={replyOnly ? reportEmpty : undefined}
+              imageNames={imageNames}
+            />
+          );
         })}
-        {!mine && humanText(body) ? (
+        {!mine && humanText(body, imageNames) ? (
           <IconButton
             icon={copied ? 'check' : 'copy'}
             label={copied ? 'Copied' : 'Copy'}
             accessibilityLabel="Copy"
+            dense
             onPress={() => {
               if (Platform.OS === 'web') {
-                void navigator.clipboard.writeText(humanText(body)).then(() => setCopied(true));
+                void navigator.clipboard.writeText(humanText(body, imageNames)).then(() => setCopied(true));
               }
             }}
             background="transparent"

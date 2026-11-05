@@ -1,6 +1,7 @@
 import { render, userEvent, waitFor } from '@testing-library/react-native';
 
 import { ThemeProvider } from '@/theme/Theme';
+import { Preview, previewActionsInPane } from '@/workspace/elements/Preview';
 import { WorkspaceScreen } from '@/workspace/WorkspaceScreen';
 import { documentFromShell, filmstripPaths, selectPath, type ShellDocument } from '@/workspace/placement';
 
@@ -26,6 +27,30 @@ test('selectPath updates selection only', () => {
   expect(filmstripPaths(next)).toEqual([]);
 });
 
+test('preview actions sit in the pane only on a wide web window', () => {
+  expect(previewActionsInPane('web', 1280)).toBe(true);
+  expect(previewActionsInPane('web', 1024)).toBe(true);
+  expect(previewActionsInPane('web', 1023)).toBe(false);
+  expect(previewActionsInPane('web', 390)).toBe(false);
+  expect(previewActionsInPane('ios', 1280)).toBe(false);
+});
+
+test('the preview shows the file name under the image', async () => {
+  const view = await render(
+    <ThemeProvider>
+      <Preview
+        props={{ fit: 'contain' }}
+        selection={{ kind: 'file', path: 'Albums/zebra.png' }}
+        fileUrl={(item) => `http://127.0.0.1:8130/files/${item}`}
+        onSelect={() => undefined}
+        onAddToChat={() => undefined}
+        onRequestDelete={() => undefined}
+      />
+    </ThemeProvider>,
+  );
+  expect(view.getByText('zebra.png')).toBeTruthy();
+});
+
 test('folder setup binds a local folder then shows the empty strip', async () => {
   const fetchMock = mockWorkspace();
   const user = userEvent.setup();
@@ -38,7 +63,7 @@ test('folder setup binds a local folder then shows the empty strip', async () =>
   await user.press(view.getByRole('button', { name: 'Choose folder' }));
   await waitFor(() => expect(view.getByLabelText('Folder location').props.value).toBe('/tmp/gallery'));
   await user.press(view.getByRole('button', { name: 'Save folder' }));
-  await waitFor(() => expect(view.getByText('Ask the agent to fill the filmstrip')).toBeTruthy());
+  await waitFor(() => expect(view.getByText('No images in this folder')).toBeTruthy());
   expect(view.getByText('No media selected')).toBeTruthy();
   expect(fetchMock).toHaveBeenCalled();
 });

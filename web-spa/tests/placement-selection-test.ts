@@ -1,6 +1,7 @@
 import {
   documentFromShell,
   ensureFilmstripSelection,
+  ensureShellElements,
   type PlacementState,
 } from '@/workspace/placement';
 
@@ -36,6 +37,43 @@ test('ensureFilmstripSelection keeps a path that is still on the strip', () => {
 test('ensureFilmstripSelection replaces a path that left the strip', () => {
   const next = ensureFilmstripSelection(strip(['a.png'], 'gone.png'));
   expect(next.favlo_workspace.selection).toEqual({ kind: 'file', path: 'a.png' });
+});
+
+test('ensureFilmstripSelection keeps a folder file the placement list omits', () => {
+  const next = ensureFilmstripSelection(strip(['a.png'], 'late.png'), ['a.png', 'late.png']);
+  expect(next.favlo_workspace.selection).toEqual({ kind: 'file', path: 'late.png' });
+});
+
+test('ensureShellElements puts a dropped preview back on stage', () => {
+  const shell = {
+    id: 'gallery',
+    elements: [
+      { name: 'preview', slot: 'stage', initial_props: { fit: 'contain' } },
+      { name: 'filmstrip', slot: 'rail', initial_props: { title: '', items: [] } },
+    ],
+  };
+  const dropped: PlacementState = {
+    favlo_workspace: {
+      version: 1,
+      guide: 'gallery',
+      elements: [
+        {
+          key: 'filmstrip',
+          element: 'filmstrip',
+          slot: 'rail',
+          props: { title: '', items: [{ path: 'horse.png' }] },
+        },
+      ],
+      selection: { kind: 'file', path: 'horse.png' },
+    },
+  };
+  const next = ensureShellElements(dropped, shell);
+  expect(next.favlo_workspace.elements.map((item) => item.element)).toEqual(['preview', 'filmstrip']);
+  expect(next.favlo_workspace.elements[1]?.props).toEqual({
+    title: '',
+    items: [{ path: 'horse.png' }],
+  });
+  expect(next.favlo_workspace.selection).toEqual({ kind: 'file', path: 'horse.png' });
 });
 
 test('ensureFilmstripSelection clears selection when the strip is empty', () => {

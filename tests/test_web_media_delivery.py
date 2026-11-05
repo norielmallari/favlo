@@ -12,28 +12,31 @@ sys.path.insert(0, str(ROOT / "web-api"))
 from web_api.media_delivery import (  # noqa: E402
     _QUEUED,
     _TASKS,
-    ReplyAfterGenerate,
-    announce_cue,
+    TrackGenerateTasks,
+    bound_task,
     favlo_links,
     flush_queued,
+    media_middleware,
     note_task,
+    resolve_pending_task,
     store_links,
     take_tasks,
+    task_cue,
 )
 from web_api.store import Rejected  # noqa: E402
 
 
-def test_a_claimed_generate_makes_the_next_call_text_only() -> None:
+def test_a_claimed_generate_leaves_later_tool_calls_available() -> None:
     _TASKS.set(None)
-    middleware = ReplyAfterGenerate()
+    middleware = TrackGenerateTasks()
     first: dict[str, object] = {}
     second: dict[str, object] = {}
 
     async def call_next() -> None:
         return None
 
-    claimed: list[tuple[str, str, str]] = []
-    again: list[tuple[str, str, str]] = []
+    claimed: list[tuple[str, str, str, str]] = []
+    again: list[tuple[str, str, str, str]] = []
 
     async def turn() -> None:
         await middleware.process(_Options(first), call_next)
@@ -43,10 +46,36 @@ def test_a_claimed_generate_makes_the_next_call_text_only() -> None:
         again.extend(take_tasks())
 
     asyncio.run(turn())
+    assert media_middleware()
     assert "tool_choice" not in first
-    assert second["tool_choice"] == "none"
-    assert claimed == [("task-1", "http://127.0.0.1:8129/mcp", "image")]
+    assert "tool_choice" not in second
+    assert claimed == [("task-1", "http://127.0.0.1:8129/mcp", "image", "")]
     assert again == []
+
+
+def test_a_show_hint_uses_the_open_task() -> None:
+    _TASKS.set([])
+    note_task(
+        "task-real",
+        "http://127.0.0.1:8129/mcp",
+        kind="image",
+        filename="star.png",
+    )
+    assert resolve_pending_task("image", "task-real") == "task-real"
+    assert resolve_pending_task("image", "star.png") == "task-real"
+    assert resolve_pending_task("image", "task-reaI") == "task-real"
+    note_task(
+        "task-other",
+        "http://127.0.0.1:8129/mcp",
+        kind="image",
+        filename="moon.png",
+    )
+    assert resolve_pending_task("image", "moon.png") == "task-other"
+    assert resolve_pending_task("image", "task-reaI") == "task-reaI"
+    assert bound_task("image", "moon.png") == "task-other"
+    _TASKS.set([])
+    assert bound_task("image", "moon.png") is None
+    _TASKS.set(None)
 
 
 def test_favlo_links_come_from_the_task_result() -> None:
@@ -76,14 +105,14 @@ def test_delivery_waits_while_a_run_is_open() -> None:
     assert store.messages == []
     assert _QUEUED["thread-1"] == ["favlo://images/image_abc.png"]
     store.busy = False
-    # Announce cannot open a run in this stub; fall back to appending the links.
     store.reject_greeting = True
+    _QUEUED["thread-1"] = ["Task task-1 completed."]
 
     async def flush() -> None:
         await flush_queued(_App(store), "thread-1")
 
     asyncio.run(flush())
-    assert store.messages[0]["content"] == "favlo://images/image_abc.png"
+    assert store.messages == []
     assert "thread-1" not in _QUEUED
 
 
@@ -98,11 +127,41 @@ def test_delivery_marks_task_ids_on_the_event() -> None:
     assert events[0]["payload"]["task_ids"] == ["task-1"]
 
 
-def test_announce_cue_lists_every_link() -> None:
-    cue = announce_cue(["favlo://images/a.png", "favlo://images/b.png"])
-    assert "favlo://images/a.png" in cue
-    assert "favlo://images/b.png" in cue
-    assert "Do not call tools." in cue
+def test_a_finished_task_sends_only_the_fence() -> None:
+    from web_api.host_cues import host_cue_message
+    from web_api.media_delivery import media_turn_messages
+
+    text = "<media_completed>\nstar.png\n</media_completed>"
+    messages = media_turn_messages(text, message_id="cue-1")
+    assert messages == [host_cue_message(text, message_id="cue-1")]
+    assert messages[0]["content"] == text
+    assert "system_reminder" not in messages[0]["content"]
+    assert "favlo://" not in messages[0]["content"]
+    assert media_turn_messages("The user just created this gallery.", message_id="cue-2") is None
+
+
+def test_task_cue_fences_the_file_name() -> None:
+    from web_api.host_cues import host_cue_message
+
+    cue = task_cue(
+        [
+            ("task-a", "completed", ""),
+            ("task-b", "failed", "moon.png"),
+            ("task-c", "cancelled", "dot.png"),
+            ("task-e", "completed", "star.png"),
+        ]
+    )
+    assert cue == (
+        "<media_error>\nmoon.png\n</media_error>\n"
+        "<media_cancelled>\ndot.png\n</media_cancelled>\n"
+        "<media_completed>\nstar.png\n</media_completed>"
+    )
+    assert "task-a" not in cue
+    assert "favlo://" not in cue
+    assert task_cue([(" ", "completed", ""), ("task-d", "working", "star.png")]) == ""
+    row = host_cue_message(cue, message_id="cue-1")
+    assert row["content"] == cue
+    assert "system_reminder" not in row["content"]
 
 
 def test_links_in_a_host_cue_do_not_count_as_delivered() -> None:

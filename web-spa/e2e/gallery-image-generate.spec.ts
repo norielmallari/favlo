@@ -11,6 +11,11 @@ import { step } from './progress';
 
 test.describe.configure({ mode: 'serial' });
 
+async function chatFileName(page: Page): Promise<boolean> {
+  const text = await page.getByTestId('transcript').innerText();
+  return /image_[A-Za-z0-9_-]+\.png/.test(text);
+}
+
 async function requireQwen35b() {
   const models = await fetch('http://127.0.0.1:8129/v1/models', {
     signal: AbortSignal.timeout(15_000),
@@ -51,22 +56,25 @@ test('gallery chat keeps the request while an image generates, then shows it', a
         )
         .toBe(true);
 
-      await expect.poll(async () => images.count(), { timeout: 45_000 }).toBeGreaterThan(imagesBefore);
+      await expect(page.getByTestId('transcript')).not.toContainText('Generating image…');
+      await expect(images).toHaveCount(imagesBefore);
       await expect(page.getByLabel(/^You said:/).filter({ hasText: 'Draw a red square.' })).toBeVisible();
       await expect(said.nth(saidBefore)).toBeVisible();
-      const image = images.last();
-      await expect(image).toBeVisible();
-      const src = await image.getAttribute('src');
-      expect(src).toContain('/media/images/');
 
       await expect
         .poll(async () => fs.readdirSync(root).some((file) => file.endsWith('.png')), {
-          timeout: 15_000,
+          timeout: 45_000,
         })
         .toBe(true);
       // Gallery outcome on screen: the filmstrip tile (chat image may sit in the scrolled transcript).
-      const stripImage = page.getByLabel('Filmstrip').getByRole('button', { name: /\.png$/i }).last();
+      const file = fs.readdirSync(root).find((name) => name.endsWith('.png')) ?? '';
+      expect(file).not.toBe('');
+      const stripImage = page.getByLabel('Filmstrip').getByRole('button', { name: file, exact: true });
       await onScreen(stripImage);
+      await expect(stripImage).toHaveAttribute('aria-current', 'true');
+      await expect(page.getByRole('button', { name: `Download ${file}` })).toBeVisible();
+      await expect(page.getByLabel('Filmstrip').getByLabel('Generating image')).toHaveCount(0);
+      expect(await chatFileName(page)).toBe(false);
     });
   } finally {
     await deleteWorkspacesNamed(name);
@@ -121,11 +129,8 @@ test('gallery chat keeps both turns and the image after a second message and a r
         )
         .toBeGreaterThan(0);
       await expect(page.getByTestId('working')).toHaveCount(0, { timeout: 45_000 });
-      await expect
-        .poll(async () => page.getByRole('img', { name: 'Generated image' }).count(), {
-          timeout: 15_000,
-        })
-        .toBeGreaterThan(imagesBefore);
+      expect(await chatFileName(page)).toBe(false);
+      await expect(page.getByRole('img', { name: 'Generated image' })).toHaveCount(imagesBefore);
 
       await page.reload();
       await expect(page.getByLabel('Gallery workspace', { exact: true })).toBeVisible();

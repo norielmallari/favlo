@@ -214,18 +214,25 @@ class FavloAguiHost(AgentFrameworkAgent):
             _prefer_stored_state(store, thread_id, prepared)
             if not archive:
                 if silent:
-                    # Server cue (greeting, follow-up): fenced user host cue + empty pad.
                     from web_api.host_cues import host_cue_message
+                    from web_api.media_delivery import media_turn_messages
 
-                    store.append_thread_snapshot_message(
-                        _SNAPSHOT_SCOPE,
-                        thread_id,
-                        host_cue_message(text, message_id=guid()),
-                    )
-                    prepared["messages"] = [{"id": guid(), "role": "user", "content": ""}]
+                    # A media fence is the new suffix. Writing it first would
+                    # leave the service session an empty pad. A greeting stays
+                    # a hidden row plus that pad.
+                    turn = media_turn_messages(text, message_id=guid())
+                    if turn is not None:
+                        prepared["messages"] = turn
+                    else:
+                        store.append_thread_snapshot_message(
+                            _SNAPSHOT_SCOPE,
+                            thread_id,
+                            host_cue_message(text, message_id=guid()),
+                        )
+                        prepared["messages"] = [{"id": guid(), "role": "user", "content": ""}]
                 else:
                     prior_messages = list(snapshot.get("messages") or [])
-                    prepared["messages"], fresh = _with_selection_cue(
+                    prepared["messages"], _ = _with_selection_cue(
                         store,
                         thread_id,
                         list(prepared.get("messages") or []),
@@ -234,8 +241,6 @@ class FavloAguiHost(AgentFrameworkAgent):
                     names = text
                     if adopt:
                         names = _adopted_named_text(store, run_id, text)
-                    if fresh:
-                        names = f"{names}\n{fresh}"
                     prepared["messages"] = _with_images(
                         list(prepared.get("messages") or []),
                         _images(store, thread_id, names, prior_messages),
@@ -515,8 +520,8 @@ def _with_selection_cue(
 
     The path comes from this POST's ``state``. A separate snapshot row is
     skipped by the service-session suffix, so the model would not see it.
-    The fence sits on that user message. The same path is not written again.
-    The returned path is the one whose pixels should ride with this message.
+    The fence sits on that user message and names the file. The same path is
+    not written again. The returned path is not attached as image bytes.
     """
     from web_api.gallery_tools import (
         announced_selection_from_history,
@@ -674,7 +679,7 @@ async def _build_agent(
     model_id, base_url = store.chat_model(agent_id)
     bus = app.state.bus
     pending = app.state.tasks
-    mcp_text, mcp_tools = await bundle(store, agent_id, thread_id, bus, pending)
+    _, mcp_tools = await bundle(store, agent_id, thread_id, bus, pending)
     frozen = store.definition(thread_id)
     note = "" if archive else extra_note
     if frozen is None:
@@ -688,7 +693,6 @@ async def _build_agent(
             thread_id,
             bus,
             pending,
-            mcp_text=mcp_text,
             mcp_tools=mcp_tools,
         )
         if note and note not in instructions:
@@ -717,7 +721,6 @@ async def _build_agent(
             session_id=thread_id,
             base_url=base_url,
             model=str(model_id),
-            mcp_text=mcp_text,
             mcp_tools=mcp_tools,
             bus=bus,
             pending=pending,

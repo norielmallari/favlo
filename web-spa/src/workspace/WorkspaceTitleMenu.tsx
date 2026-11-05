@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Platform, Text, View } from 'react-native';
 
 import { FeatherIcon } from '@/components/FeatherIcon';
-import { Pressable } from '@/components/Pressable';
+import { focusRingInset, focusSafeGap, Pressable } from '@/components/Pressable';
 import { useTheme } from '@/theme/Theme';
 import { radius, space, z } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
@@ -95,7 +95,8 @@ export function WorkspaceTitleMenu({
             zIndex: z.modal,
             minWidth: 200,
             maxWidth: 280,
-            padding: space[1],
+            padding: focusRingInset,
+            gap: focusSafeGap,
             borderRadius: radius.control,
             borderWidth: 1,
             borderColor: palette.borderStrong,
@@ -141,7 +142,6 @@ export function WorkspaceTitleMenu({
             accessibilityElementsHidden
             style={{
               height: 1,
-              marginVertical: space[1],
               marginHorizontal: space[2],
               backgroundColor: palette.border,
             }}

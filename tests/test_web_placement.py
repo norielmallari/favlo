@@ -192,7 +192,7 @@ def test_validate_restores_preview_when_filmstrip_has_items() -> None:
     assert any("restored preview" in item for item in ignored)
 
 
-def test_validate_allows_removing_preview_after_fill() -> None:
+def test_validate_keeps_preview_after_the_strip_is_filled() -> None:
     prior = {
         "favlo_workspace": {
             "version": 1,
@@ -226,8 +226,8 @@ def test_validate_allows_removing_preview_after_fill() -> None:
     }
     state, ignored = validate(payload, guide_id="gallery", prior=prior)
     names = [item["element"] for item in state["favlo_workspace"]["elements"]]
-    assert names == ["filmstrip"]
-    assert not any("restored preview" in item for item in ignored)
+    assert names == ["preview", "filmstrip"]
+    assert any("restored preview" in item for item in ignored)
 
 
 def test_validate_drops_unknown_elements_and_wrong_slots() -> None:

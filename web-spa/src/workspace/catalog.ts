@@ -20,8 +20,12 @@ export type ElementProps = {
   onSwipe?: (direction: 'prev' | 'next') => void;
   /** Local only: preview is filling the column above the composer. */
   fullScreen?: boolean;
-  /** Local only: toggle the full-screen preview detent. */
+  /** Narrow dock size. The image steps fullscreen → peek → expanded. */
+  chatDetent?: 'fullscreen' | 'peek' | 'expanded';
+  /** Local only: banner control jumps to or leaves full-screen preview. */
   onToggleFullScreen?: () => void;
+  /** Local only: a tap on the image steps the narrow dock. */
+  onCycleLayout?: () => void;
   /** Host media tasks still working; shown as filmstrip placeholders. */
   pendingMedia?: PendingMedia[];
 };

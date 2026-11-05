@@ -17,7 +17,6 @@ def build(
     session_id: str,
     base_url: str,
     model: str,
-    mcp_text: str = "",
     mcp_tools: list[object] | None = None,
     bus: Any | None = None,
     pending: set[Any] | None = None,
@@ -33,7 +32,6 @@ def build(
         session_id,
         bus,
         pending,
-        mcp_text=mcp_text,
         mcp_tools=mcp_tools,
     )
     options = sampling_options(

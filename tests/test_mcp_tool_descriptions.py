@@ -69,6 +69,21 @@ def test_agent_facing_descriptions_fit_after_web_enrichment() -> None:
     assert overs == [], overs
 
 
+def test_a_finished_task_result_names_the_file_and_the_link() -> None:
+    from favlo.mcp_server import _finished_handles
+
+    found = _finished_handles(
+        {
+            "content": [
+                {"type": "text", "text": "image_abc"},
+                {"type": "resource_link", "uri": "favlo://images/image_abc.png"},
+            ]
+        }
+    )
+    assert found["names"] == ["image_abc"]
+    assert found["links"] == ["favlo://images/image_abc.png"]
+
+
 def test_tool_description_max_is_256() -> None:
     assert TOOL_DESCRIPTION_MAX_CHARS == 256
     assert TOOL_DESCRIPTION_MAX_CHARS < 1024

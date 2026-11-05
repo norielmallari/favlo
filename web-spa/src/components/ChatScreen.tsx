@@ -594,9 +594,6 @@ export function ChatScreen() {
     if (target == null || workspaceName.trim() === '') {
       return;
     }
-    if (needsFolder && workspaceLocation.trim() === '') {
-      return;
-    }
     try {
       const created = await api<Workspace>('/workspaces', {
         method: 'POST',
@@ -605,7 +602,9 @@ export function ChatScreen() {
           channel_id: target.id,
           name: workspaceName.trim(),
           type: workspaceType,
-          ...(needsFolder ? { location: workspaceLocation.trim() } : {}),
+          ...(needsFolder && workspaceLocation.trim() !== ''
+            ? { location: workspaceLocation.trim() }
+            : {}),
         }),
       });
       setCreatingWorkspace(false);
@@ -896,7 +895,7 @@ export function ChatScreen() {
                     accessibilityLabel="Folder location"
                     value={workspaceLocation}
                     onChangeText={setWorkspaceLocation}
-                    placeholder="Folder location"
+                    placeholder="Leave empty for the default folder"
                     placeholderTextColor={palette.textSecondary}
                     style={{
                       ...textStyle('body', palette.textPrimary),
@@ -913,20 +912,15 @@ export function ChatScreen() {
               <IconButton
                 icon="plus"
                 label="Create workspace"
-                disabled={
-                  workspaceName.trim() === '' ||
-                  (workspaceType === '' || (needsFolder && workspaceLocation.trim() === ''))
-                }
+                disabled={workspaceName.trim() === '' || workspaceType === ''}
                 onPress={() => void createWorkspace()}
                 background={
-                  workspaceName.trim() === '' ||
-                  (workspaceType === '' || (needsFolder && workspaceLocation.trim() === ''))
+                  workspaceName.trim() === '' || workspaceType === ''
                     ? palette.disabledSurface
                     : palette.accent
                 }
                 color={
-                  workspaceName.trim() === '' ||
-                  (workspaceType === '' || (needsFolder && workspaceLocation.trim() === ''))
+                  workspaceName.trim() === '' || workspaceType === ''
                     ? palette.disabledText
                     : palette.onAccent
                 }

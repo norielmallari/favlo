@@ -18,6 +18,15 @@ _FENCE = re.compile(
     re.DOTALL,
 )
 
+_MEDIA_TAG = {
+    "completed": "media_completed",
+    "failed": "media_error",
+    "cancelled": "media_cancelled",
+}
+_MEDIA_FENCE = re.compile(
+    r"^(?:<(media_completed|media_cancelled|media_error)>\n[^\n]+\n</\1>\n*)+$"
+)
+
 # Application key under message.metadata (not the reserved "ag-ui" key).
 _METADATA_UI = "ui"
 _METADATA_HIDDEN = "hidden"
@@ -27,6 +36,20 @@ _HOST_NAME = "favlo"
 def fence_cue(body: str) -> str:
     """Wrap host instruction text in the user-role fence."""
     return f"{FENCE_OPEN}\n{body.strip()}\n{FENCE_CLOSE}"
+
+
+def fence_media_status(filename: str, status: str) -> str:
+    """Fence one file name. The tag is the terminal status. An unknown status is empty."""
+    tag = _MEDIA_TAG.get(status.strip())
+    cleaned = filename.strip()
+    if not tag or not cleaned:
+        return ""
+    return f"<{tag}>\n{cleaned}\n</{tag}>"
+
+
+def is_media_fence(text: str) -> bool:
+    """True when the text is one or more media fences and nothing else."""
+    return bool(text) and _MEDIA_FENCE.fullmatch(text.strip()) is not None
 
 
 def cue_inner(text: str) -> str | None:
@@ -51,23 +74,33 @@ def is_host_cue(message: dict[str, Any]) -> bool:
     if str(message.get("name") or "") == _HOST_NAME and message.get("role") == "user":
         content = message.get("content")
         text = content if isinstance(content, str) else ""
-        if cue_inner(text) is not None:
+        if cue_inner(text) is not None or is_media_fence(text):
             return True
     if message.get("role") == "user":
         content = message.get("content")
-        if isinstance(content, str) and cue_inner(content) is not None:
+        if isinstance(content, str) and (
+            cue_inner(content) is not None or is_media_fence(content)
+        ):
             # Fence alone is enough when metadata was stripped on round-trip.
             return True
     return False
 
 
 def host_cue_message(body: str, *, message_id: str) -> dict[str, Any]:
-    """Durable ``user`` row: fenced body, hidden from the transcript."""
+    """Durable ``user`` row: fenced body, hidden from the transcript.
+
+    A media fence stays as written. Other cues use ``<system_reminder>``.
+    """
+    cleaned = body.strip()
+    if is_media_fence(cleaned) or cue_inner(cleaned) is not None:
+        content = cleaned
+    else:
+        content = fence_cue(body)
     return {
         "id": message_id,
         "role": "user",
         "name": _HOST_NAME,
-        "content": fence_cue(body),
+        "content": content,
         "metadata": {"favlo": {_METADATA_UI: _METADATA_HIDDEN}},
     }
 

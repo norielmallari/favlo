@@ -177,7 +177,6 @@ def turn_setup(
     session_id: str | None = None,
     bus: Any | None = None,
     pending: set[Any] | None = None,
-    mcp_text: str = "",
     mcp_tools: list[object] | None = None,
 ) -> tuple[str, list[object]]:
     """Instructions and tools for one turn. Each enabled group adds its own text."""
@@ -206,22 +205,12 @@ def turn_setup(
             instructions = f"{instructions}\n\n{HEARTBEAT_INSTRUCTIONS}"
         tool_list.extend(heartbeat_tools(store, agent_id))
     if mcp_tools:
-        from web_api.mcp_tools import INSTRUCTIONS as MCP_INSTRUCTIONS
-
-        if MCP_INSTRUCTIONS not in instructions:
-            instructions = f"{instructions}\n\n{mcp_text}"
         tool_list.extend(mcp_tools)
     if store is not None and session_id:
-        from web_api.gallery_tools import INSTRUCTIONS as GALLERY_INSTRUCTIONS
         from web_api.gallery_tools import tools as gallery_tools
         from web_api.workspace import skills_text
-        from web_api.workspace import text_for as workspace_text
 
         workspace = store.workspace_for_session(session_id)
-        if workspace is not None:
-            extra = workspace_text(workspace["type"])
-            if extra and extra not in instructions:
-                instructions = f"{instructions}\n\n{extra}"
         skill_rows: list[dict[str, Any]] = []
         if agent_id:
             skill_rows.extend(store.list_agent_skills(agent_id))
@@ -232,12 +221,14 @@ def turn_setup(
             instructions = f"{instructions}\n\n{skill_block}"
         workspace_id = store.gallery_for_session(session_id)
         if workspace_id:
-            if GALLERY_INSTRUCTIONS not in instructions:
-                instructions = f"{instructions}\n\n{GALLERY_INSTRUCTIONS}"
             tool_list.extend(gallery_tools(store, workspace_id, bus))
-            from web_api.workspace_tools import tools as workspace_place_tools
+        else:
+            from web_api.display_tools import INSTRUCTIONS as DISPLAY_INSTRUCTIONS
+            from web_api.display_tools import tools as display_tools
 
-            tool_list.extend(workspace_place_tools(store, workspace_id, guide_id="gallery"))
+            if DISPLAY_INSTRUCTIONS not in instructions:
+                instructions = f"{instructions}\n\n{DISPLAY_INSTRUCTIONS}"
+            tool_list.extend(display_tools(store, session_id, bus))
     return instructions, tool_list
 
 
@@ -375,12 +366,11 @@ async def stream_reply(
 ) -> AsyncIterator[ReplyPiece]:
     from agent_framework import Agent, InMemoryHistoryProvider
 
-    mcp_text = ""
     mcp_tools: list[object] = []
     if store is not None and agent_id and session_id and bus is not None and pending is not None:
         from web_api.mcp_tools import bundle
 
-        mcp_text, mcp_tools = await bundle(store, agent_id, session_id, bus, pending)
+        _, mcp_tools = await bundle(store, agent_id, session_id, bus, pending)
     frozen = store.definition(session_id) if store is not None and session_id else None
     if frozen is None:
         instructions, tool_list = turn_setup(
@@ -393,7 +383,6 @@ async def stream_reply(
             session_id,
             bus,
             pending,
-            mcp_text=mcp_text,
             mcp_tools=mcp_tools,
         )
         options = sampling_options(enable_thinking, preserve_thinking, reasoning_effort) or {}
@@ -418,7 +407,6 @@ async def stream_reply(
                 session_id=session_id,
                 base_url=base_url,
                 model=model,
-                mcp_text=mcp_text,
                 mcp_tools=mcp_tools,
                 bus=bus,
                 pending=pending,

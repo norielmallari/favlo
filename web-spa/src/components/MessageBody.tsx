@@ -9,19 +9,25 @@ import { type as typeScale } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
 
 const MEDIA = /favlo:\/\/(images|videos|voice|music)\/([A-Za-z0-9_-]+)\.(png|mp4|mp3|wav|flac)/g;
-const ACTION = /(?<!\*)\*([^*\n]+)\*(?!\*)/g;
+const ACTION = /(?<!\*)\*([^*\n]+)\*(?!\*)[!?.…,:;]*/g;
 const MEDIA_MAX_HEIGHT = 480;
 
-/** Display-only: put a line break after a closed ``*action*``. One model newline after it is dropped. Block quotes and fenced code are left alone. */
+/** Display-only: each closed ``*action*`` is on its own line. Punctuation glued to that star stays on the action line. One model newline after it is dropped. Block quotes, fenced code, and ``**`` bold are left alone. */
 export function formatActionNewlines(text: string): string {
   let out = '';
   let last = 0;
   for (const match of text.matchAll(ACTION)) {
-    if (match.index == null || inBlockquote(text, match.index) || inFencedCode(text, match.index)) {
+    if (
+      match.index == null ||
+      inBlockquote(text, match.index) ||
+      inFencedCode(text, match.index) ||
+      insideBold(text, match.index)
+    ) {
       continue;
     }
     const end = match.index + match[0].length;
-    out += text.slice(last, end);
+    out += beforeAction(text.slice(last, match.index));
+    out += text.slice(match.index, end);
     last = end;
     if (last >= text.length) {
       break;
@@ -35,11 +41,43 @@ export function formatActionNewlines(text: string): string {
       last += 1;
     }
     if (last < text.length) {
-      out += '\n';
+      out += text[last] === '\n' || text[last] === '\r' ? '\n' : '  \n';
     }
   }
   out += text.slice(last);
   return out;
+}
+
+/** Text before an action. A sentence on that line moves the action onto the next line. */
+function beforeAction(gap: string): string {
+  let body = gap.endsWith(' ') ? gap.slice(0, -1) : gap;
+  const blankLine = body.endsWith('\n\n') || body.endsWith('\r\n\r\n');
+  if (!blankLine) {
+    if (body.endsWith('\r\n')) {
+      body = body.slice(0, -2);
+    } else if (body.endsWith('\n')) {
+      body = body.slice(0, -1);
+    }
+    body = body.replace(/ +$/, '');
+  }
+  if (body.trim() === '') {
+    return blankLine ? body : '';
+  }
+  if (blankLine || body.endsWith('\n')) {
+    return body;
+  }
+  return `${body}  \n`;
+}
+
+function insideBold(text: string, index: number): boolean {
+  let open = false;
+  for (let i = 0; i + 1 < index; i++) {
+    if (text[i] === '*' && text[i + 1] === '*') {
+      open = !open;
+      i += 1;
+    }
+  }
+  return open;
 }
 
 function inBlockquote(text: string, index: number): boolean {
@@ -87,8 +125,13 @@ export type MessagePart =
   | { type: 'text'; text: string }
   | { type: 'image' | 'video' | 'audio'; src: string; label: string };
 
-export function messageParts(body: string): MessagePart[] {
-  const source = formatActionNewlines(body);
+export function messageParts(body: string, imageNames = false): MessagePart[] {
+  let source = formatActionNewlines(body);
+  if (imageNames) {
+    source = source.replace(MEDIA, (full, kind: string, id: string, ext: string) =>
+      kind === 'images' ? `${id}.${ext}` : full,
+    );
+  }
   const parts: MessagePart[] = [];
   let cursor = 0;
   for (const match of source.matchAll(MEDIA)) {
@@ -98,15 +141,21 @@ export function messageParts(body: string): MessagePart[] {
     if (!allowed(kind, ext) || match.index == null) {
       continue;
     }
-    if (match.index > cursor) {
-      pushText(parts, source.slice(cursor, match.index));
+    let start = match.index;
+    let end = start + match[0].length;
+    if (source.slice(start - 2, start) === '**' && source.slice(end, end + 2) === '**') {
+      start -= 2;
+      end += 2;
+    }
+    if (start > cursor) {
+      pushText(parts, source.slice(cursor, start));
     }
     parts.push({
       type: kind === 'images' ? 'image' : kind === 'videos' ? 'video' : 'audio',
       src: `${API_URL}/media/${kind}/${id}.${ext}`,
       label: kind === 'images' ? 'Generated image' : kind === 'videos' ? 'Generated video' : 'Generated audio',
     });
-    cursor = match.index + match[0].length;
+    cursor = end;
   }
   if (cursor < source.length) {
     pushText(parts, source.slice(cursor));
@@ -129,8 +178,8 @@ const MEDIA_ID = /^(image|video|music|voice)_[A-Za-z0-9_-]+$/;
 const MEDIA_SIZE = /^\d+x\d+$/;
 const MEDIA_DURATION = /^\d+(\.\d+)?s?$/;
 
-export function humanText(body: string): string {
-  const parts = messageParts(body);
+export function humanText(body: string, imageNames = false): string {
+  const parts = messageParts(body, imageNames);
   const words = parts
     .filter((part) => part.type === 'text')
     .map((part) => part.text)
@@ -173,9 +222,17 @@ function machineLine(line: string): boolean {
   return named && onlyFile;
 }
 
-export function MessageBody({ body, onEmpty }: { body: string; onEmpty?: () => void }) {
+export function MessageBody({
+  body,
+  onEmpty,
+  imageNames = false,
+}: {
+  body: string;
+  onEmpty?: () => void;
+  imageNames?: boolean;
+}) {
   const { palette } = useTheme();
-  const parts = messageParts(body);
+  const parts = messageParts(body, imageNames);
   const media = parts.filter((part) => part.type !== 'text').length;
   const hasText = parts.some((part) => part.type === 'text');
   const [gone, setGone] = useState(0);
@@ -308,7 +365,11 @@ function WebMedia({
             },
           }),
         )}
-        {createElement('style', null, `[data-media-view]:focus-visible { outline: 2px solid ${palette.focusRing}; outline-offset: 2px; }`)}
+        {createElement(
+          'style',
+          null,
+          `[data-media-view]:focus-visible { outline: none; box-shadow: 0 0 0 2px ${palette.focusRing}; }`,
+        )}
         {open ? <MediaDialog part={part} label={downloadLabel} failed={failed} onSave={() => void save()} onClose={() => setOpen(false)} /> : null}
       </>
     );

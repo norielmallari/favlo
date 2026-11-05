@@ -750,6 +750,53 @@ def _next_sequence(db: Session, stream_id: str) -> int:
     return int(current or 0) + 1
 
 
+_MEDIA_DONE = frozenset({"completed", "failed", "cancelled"})
+
+
+def _open_media_tasks(db: Session, session_id: str) -> list[dict[str, str]]:
+    """In-flight generate tasks, oldest first, from this session's event log."""
+    stream_id = f"session:{session_id}"
+    rows = db.scalars(
+        select(EventRow)
+        .where(
+            EventRow.stream_id == stream_id,
+            EventRow.type.in_(("media.pending", "message.created")),
+        )
+        .order_by(EventRow.sequence)
+    )
+    order: list[str] = []
+    by_id: dict[str, dict[str, str]] = {}
+    for row in rows:
+        try:
+            body = json.loads(row.body)
+        except json.JSONDecodeError:
+            continue
+        payload = body.get("payload") if isinstance(body, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        if row.type == "message.created":
+            finished = payload.get("task_ids")
+            if isinstance(finished, list):
+                for item in finished:
+                    by_id.pop(str(item or "").strip(), None)
+            continue
+        task_id = str(payload.get("task_id") or "").strip()
+        if not task_id:
+            continue
+        status = str(payload.get("status") or "working").strip() or "working"
+        if status in _MEDIA_DONE:
+            by_id.pop(task_id, None)
+            continue
+        if task_id not in by_id:
+            order.append(task_id)
+        by_id[task_id] = {
+            "task_id": task_id,
+            "kind": str(payload.get("kind") or "image").strip() or "image",
+            "status": status,
+        }
+    return [by_id[task_id] for task_id in order if task_id in by_id]
+
+
 class Store:
     def __init__(self, path: Any) -> None:
         self._lock = threading.Lock()
@@ -2496,11 +2543,11 @@ class Store:
             location = str(body.get("location") or "").strip()
             if not name:
                 raise Rejected("A name is required.")
+            if name in {".", ".."} or "/" in name or "\\" in name:
+                raise Rejected("That workspace name cannot be a folder.")
             shell = db.get(ShellRow, kind)
             if shell is None:
                 raise Rejected("That workspace shell does not exist.")
-            if shell.setup == "local_folder" and not location:
-                raise Rejected("This workspace needs a local folder.")
             if shell.setup != "local_folder" and location:
                 raise Rejected("This workspace has no local folder.")
             channel = db.get(ChannelRow, channel_id)
@@ -2511,6 +2558,18 @@ class Store:
             ).first()
             if member is None:
                 raise Rejected("That channel has no agent.")
+            if shell.setup == "local_folder" and not location:
+                from web_api.workspace_files import default_workspace_dir
+
+                path = default_workspace_dir(str(member.agent_id), name)
+                resolved = str(path.resolve())
+                taken = db.scalars(
+                    select(FolderRow.id).where(FolderRow.location == resolved)
+                ).first()
+                if taken is not None:
+                    raise Rejected("That folder is already a workspace.")
+                path.mkdir(parents=True, exist_ok=True)
+                location = resolved
             workspace_id = guid()
             session_id = guid()
             created = now()
@@ -3451,6 +3510,17 @@ class Store:
 
         return self._write(write)
 
+    def agent_for_session(self, session_id: str) -> str | None:
+        """The agent that owns this chat, or none when the session is missing."""
+
+        def read(db: Session) -> str | None:
+            chat = db.get(SessionRow, session_id)
+            if chat is None or not chat.participant_id:
+                return None
+            return str(chat.participant_id)
+
+        return self._read(read)
+
     def workspace_for_session(self, session_id: str) -> dict[str, str] | None:
         def read(db: Session) -> dict[str, str] | None:
             chat = db.get(SessionRow, session_id)
@@ -3591,6 +3661,7 @@ class Store:
                 "runs": runs,
                 "cursor": int(cursor or 0),
                 "state": state,
+                "pending_media": _open_media_tasks(db, session_id),
             }
 
         return self._read(read)

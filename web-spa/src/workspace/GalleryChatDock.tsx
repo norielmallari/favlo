@@ -1,6 +1,7 @@
 import { useRef, useState, type ReactNode } from 'react';
 import { Platform, View } from 'react-native';
 
+import { focusRingStyle } from '@/components/Pressable';
 import { useTheme } from '@/theme/Theme';
 import { duration, radius, space } from '@/theme/tokens';
 import {
@@ -215,10 +216,7 @@ export function GalleryChatDock({
             cursor: 'row-resize',
             userSelect: 'none',
             backgroundColor: hot ? palette.accentSubtle : 'transparent',
-            outlineStyle: 'solid',
-            outlineWidth: 2,
-            outlineOffset: 2,
-            outlineColor: focused ? palette.focusRing : 'transparent',
+            ...focusRingStyle(palette.focusRing, focused),
             transitionProperty: 'background-color',
             transitionDuration: `${duration.fast}ms`,
           } as object

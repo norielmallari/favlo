@@ -87,16 +87,20 @@ def rebuild_tools(
         tool_list.extend(mcp_tools)
     workspace = definition.get("workspace")
     workspace_id = None
-    guide_id = "gallery"
+    guide_id = ""
     if isinstance(workspace, dict) and workspace.get("id"):
         workspace_id = str(workspace["id"])
-        guide_id = str(workspace.get("guide") or workspace.get("type") or "gallery")
+        guide_id = str(workspace.get("guide") or workspace.get("type") or "")
     else:
         workspace_id = store.gallery_for_session(session_id)
-    if workspace_id:
+        if workspace_id:
+            guide_id = "gallery"
+    if workspace_id and guide_id == "gallery":
         from web_api.gallery_tools import tools as gallery_tools
-        from web_api.workspace_tools import tools as workspace_place_tools
 
         tool_list.extend(gallery_tools(store, workspace_id, bus))
-        tool_list.extend(workspace_place_tools(store, workspace_id, guide_id=guide_id))
+    elif session_id:
+        from web_api.display_tools import tools as display_tools
+
+        tool_list.extend(display_tools(store, session_id, bus))
     return tool_list

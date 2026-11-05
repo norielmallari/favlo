@@ -154,7 +154,7 @@ class WorkspaceCreate(BaseModel):
     type: str = Field(min_length=1, max_length=80)
     location: str | None = Field(
         default=None,
-        description="Required local folder path when the shell setup is local_folder.",
+        description="Picked folder. Empty uses the default folder.",
     )
 
 

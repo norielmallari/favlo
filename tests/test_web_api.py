@@ -247,6 +247,25 @@ def test_turning_off_default_mcp_skips_new_agents(tmp_path: Path) -> None:
         store.close()
 
 
+def test_session_snapshot_lists_open_media_tasks(tmp_path: Path) -> None:
+    from web_api.store import Store
+
+    store = Store(tmp_path / "app.db")
+    store.ensure_initial_model("example-model")
+    try:
+        session_id = _favlo_session(store)
+        store.note_media_pending(session_id, "task-a", "image", "working")
+        store.note_media_pending(session_id, "task-b", "video", "working")
+        store.note_media_pending(session_id, "task-a", "image", "completed")
+        assert store.session_snapshot(session_id)["pending_media"] == [
+            {"task_id": "task-b", "kind": "video", "status": "working"},
+        ]
+        store.record_assistant(session_id, "The clip is ready.", task_ids=["task-b"])
+        assert store.session_snapshot(session_id)["pending_media"] == []
+    finally:
+        store.close()
+
+
 def test_session_commands_stay_on_the_session_that_sent_them(tmp_path: Path) -> None:
     from web_api.session_commands import ARCHIVE_CUE
     from web_api.store import Store

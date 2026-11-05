@@ -182,15 +182,53 @@ def test_pick_root_returns_the_chosen_directory(
     assert cancelled.json() == {"cancelled": True}
 
 
-def test_gallery_create_requires_a_local_folder(client: TestClient, tmp_path: Path) -> None:
-    channel_id = client.get("/channels").json()["channels"][0]["id"]
+def test_home_chat_uses_the_agent_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from web_api.workspace_files import local_root
+
+    monkeypatch.setattr("favlo.logs.favlo_home", lambda: tmp_path)
+    store = Store(tmp_path / "app.db")
+    try:
+        home = next(
+            row["session_id"] for row in store.channels() if row["agent_id"] == FAVLO_AGENT_ID
+        )
+        root = local_root(store, home)
+    finally:
+        store.close()
+    assert root == tmp_path / FAVLO_AGENT_ID / "channels" / "home"
+    assert root is not None and root.is_dir()
+
+
+def test_gallery_create_without_a_folder_uses_the_agent_directory(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("favlo.logs.favlo_home", lambda: tmp_path)
+    channel = client.get("/channels").json()["channels"][0]
+    channel_id = channel["id"]
+    agent_id = channel["agent_id"]
     missing = client.post(
         "/workspaces",
         headers={"Idempotency-Key": "ws-no-folder"},
         json={"channel_id": channel_id, "name": "NoFolder", "type": "gallery"},
     )
-    assert missing.status_code == 400
-    assert "local folder" in missing.json()["message"].lower()
+    assert missing.status_code == 201
+    folders = client.get(f"/workspaces/{missing.json()['id']}/folders").json()["folders"]
+    location = folders[0]["location"]
+    assert location.endswith("/workspaces/NoFolder")
+    assert (tmp_path / agent_id / "workspaces" / "NoFolder").is_dir()
+    again = client.post(
+        "/workspaces",
+        headers={"Idempotency-Key": "ws-no-folder-2"},
+        json={"channel_id": channel_id, "name": "NoFolder", "type": "gallery"},
+    )
+    assert again.status_code == 400
+    slash = client.post(
+        "/workspaces",
+        headers={"Idempotency-Key": "ws-slash"},
+        json={"channel_id": channel_id, "name": "a/b", "type": "gallery"},
+    )
+    assert slash.status_code == 400
     absent = client.post(
         "/workspaces",
         headers={"Idempotency-Key": "ws-missing-dir"},
@@ -298,21 +336,30 @@ def test_gallery_tools_are_only_on_the_workspace_session(tmp_path: Path) -> None
         store.close()
     home_names = {_tool_name(item) for item in home_tools}
     gallery_names = {_tool_name(item) for item in gallery_tools}
+    assert "display_media" in home_names
+    assert "display_media" not in gallery_names
+    assert "gallery_show_generating_media" not in home_names
     assert "gallery_delete_image" not in home_names
     assert "gallery_write_image" not in home_names
+    assert "gallery_show_generating_media" in gallery_names
+    assert "gallery_update_generating_media" in gallery_names
     assert "gallery_write_image" in gallery_names
     assert "gallery_search_unlike_media" in gallery_names
     assert "gallery_delete_image" in gallery_names
     assert "gallery_load_folder_tools" not in gallery_names
-    assert "operating in a gallery workspace" in gallery_instructions.lower()
+    assert "Never mention a task id." in gallery_instructions
+    assert "Do not call media_status." in gallery_instructions
+    assert "Do not say you are generating." in gallery_instructions
+    assert "gallery workspace" in gallery_instructions.lower()
     assert "local folder" in gallery_instructions.lower()
-    assert "operating in a gallery workspace" not in home_instructions.lower()
+    assert "<media_completed>" in gallery_instructions
+    assert "Never mention a task id." not in home_instructions
+    assert "gallery workspace" not in home_instructions.lower()
     assert "local folder" not in home_instructions.lower()
 
 
 def test_a_workspace_session_gets_the_type_prompt_before_the_root(tmp_path: Path) -> None:
     from web_api.chat import turn_setup
-    from web_api.workspace import INSTRUCTIONS as WORKSPACE_INSTRUCTIONS
 
     store = Store(tmp_path / "app.db")
     try:
@@ -334,8 +381,9 @@ def test_a_workspace_session_gets_the_type_prompt_before_the_root(tmp_path: Path
     finally:
         store.close()
     names = {_tool_name(item) for item in tools}
-    assert WORKSPACE_INSTRUCTIONS["gallery"] in instructions
-    assert WORKSPACE_INSTRUCTIONS["coding"] not in instructions
+    assert "gallery workspace" in instructions.lower()
+    assert "coding workspace" not in instructions.lower()
+    assert "<media_completed>" in instructions
     assert "gallery_load_folder_tools" not in names
     assert "gallery_find_media" in names
     assert "gallery_search_media" in names
@@ -343,8 +391,12 @@ def test_a_workspace_session_gets_the_type_prompt_before_the_root(tmp_path: Path
     assert "gallery_load_image" in names
     assert "gallery_search_unlike_media" in names
     assert "gallery_delete_image" in names
-    assert "workspace_place" in names
+    assert "gallery_select_media" in names
+    assert "workspace_place" not in names
     assert "gallery_set_theme" in names
+    assert "gallery_show_generating_media" in names
+    assert "gallery_update_generating_media" in names
+    assert "display_media" not in names
     assert "gallery_update_metadata" in names
     assert "gallery_list_folder" not in names
     assert "this session is using" not in instructions.lower()
@@ -353,14 +405,15 @@ def test_a_workspace_session_gets_the_type_prompt_before_the_root(tmp_path: Path
     assert "When the person asks" not in instructions
 
 
-def test_workspace_prompt_is_fixed_per_type() -> None:
-    from web_api.workspace import INSTRUCTIONS, text_for
+def test_workspace_skills_carry_the_type_instructions() -> None:
+    from web_api.workspace_skill_catalog import skills_for
 
-    assert "gallery workspace" in text_for("gallery")
-    assert "coding workspace" in text_for("coding")
-    assert text_for("gallery") != text_for("coding")
-    assert text_for("gallery") == INSTRUCTIONS["gallery"]
-    assert text_for("unknown") is None
+    gallery = skills_for("gallery")
+    coding = skills_for("coding")
+    assert gallery and "gallery workspace" in gallery[0][2]
+    assert coding and "coding workspace" in coding[0][2]
+    assert gallery[0][2] != coding[0][2]
+    assert skills_for("unknown") == []
 
 
 def test_workspace_skills_are_name_and_description(client: TestClient, tmp_path: Path) -> None:
@@ -372,13 +425,15 @@ def test_workspace_skills_are_name_and_description(client: TestClient, tmp_path:
     )
     workspace_id = created.json()["id"]
     assert [item["name"] for item in created.json()["skills"]] == ["manage-gallery"]
-    assert "gallery_write_image" in created.json()["skills"][0]["definition"]
-    assert "gallery_find_media" in created.json()["skills"][0]["definition"]
-    assert "gallery_get_metadata" in created.json()["skills"][0]["definition"]
-    assert "gallery_load_image" in created.json()["skills"][0]["definition"]
-    assert "gallery_update_metadata" in created.json()["skills"][0]["definition"]
-    assert "gallery_search_unlike_media" in created.json()["skills"][0]["definition"]
-    assert "workspace_place" in created.json()["skills"][0]["definition"]
+    definition = created.json()["skills"][0]["definition"]
+    assert "Never mention a task id." in definition
+    assert "Do not say you are generating." in definition
+    assert "gallery_show_generating_media" in definition
+    assert "<media_completed>" in definition
+    assert "Do not paste the JSON" in definition
+    assert "gallery_find_media" in definition
+    assert "gallery_select_media" in definition
+    assert "workspace_place" not in definition
     assert "gallery_list_folder" not in created.json()["skills"][0]["definition"]
     assert "When the person asks" not in created.json()["skills"][0]["definition"]
     added = client.post(
@@ -907,12 +962,17 @@ def test_a_sent_turn_records_the_open_folder_and_image(tmp_path: Path) -> None:
     assert attached_context["gallery_attachment"] == "ok.png"
 
 
-def test_create_coding_workspace(client: TestClient) -> None:
+def test_create_coding_workspace(client: TestClient, tmp_path: Path) -> None:
     channel_id = client.get("/channels").json()["channels"][0]["id"]
     created = client.post(
         "/workspaces",
         headers={"Idempotency-Key": "ws-coding"},
-        json={"channel_id": channel_id, "name": "Repos", "type": "coding"},
+        json={
+            "channel_id": channel_id,
+            "name": "Repos",
+            "type": "coding",
+            "location": _loc(tmp_path, "coding-root"),
+        },
     )
     assert created.status_code == 201
     body = created.json()
@@ -946,6 +1006,25 @@ def test_shells_are_listed_from_the_database(client: TestClient) -> None:
     assert [item["name"] for item in gallery["elements"]] == ["preview", "filmstrip"]
     assert shells[1]["renderer"] == "chat"
     assert shells[1]["elements"] == []
+
+
+def test_a_finished_image_is_selected_on_the_filmstrip(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gallery = _gallery(client, tmp_path)
+    monkeypatch.setattr("web_api.media_delivery._media_bytes", lambda *_args, **_kwargs: PNG)
+    from web_api.media_delivery import _place_named
+
+    events = _place_named(
+        client.app.state.store,
+        gallery["session_id"],
+        "star.png",
+        ["favlo://images/image_abc.png"],
+    )
+    assert events
+    state = events[0]["payload"]["state"]["favlo_workspace"]
+    assert state["selection"] == {"kind": "file", "path": "star.png"}
+    assert (gallery["root_path"] / "star.png").is_file()
 
 
 def test_gallery_greeting_does_not_place_the_filmstrip() -> None:
@@ -1018,10 +1097,10 @@ def test_find_media_rows_are_path_and_kind_only(tmp_path: Path) -> None:
     )
     folder = LocalFolder(root)
     listing = _slim_media_rows(folder.walk_media())
-    row = listing["media"][0]
-    assert row == {"path": "horse.png", "kind": "image"}
-    assert "images" not in listing
-    assert "title" not in row
+    assert listing["names"] == ["horse.png"]
+    assert "media" not in listing
+    assert "kind" not in listing
+    assert "title" not in json.dumps(listing)
     assert "description" not in json.dumps(listing)
 
 
@@ -1173,8 +1252,9 @@ def test_selection_metadata_rides_the_model_suffix(tmp_path: Path) -> None:
         suffix, _full = _split_service_session_input(stored, out)
         assert len(suffix) == 1
         assert "A striped zebra." in suffix[0]["content"]
-        pixels = _images(store, thread_id, f"Show the meadow\n{fresh}", [])
-        assert pixels and pixels[0][1] == "image/png"
+        assert _images(store, thread_id, "Show the meadow", []) == []
+        named = _images(store, thread_id, "zebra.png", [])
+        assert named and named[0][1] == "image/png"
         shown = project_messages([*stored, suffix[0]])
         assert shown[-1]["body"] == "Show the meadow"
         assert "zebra" not in shown[-1]["body"]
@@ -1292,7 +1372,12 @@ def test_create_provisions_then_shows_the_failure_in_chat(client: TestClient, tm
     coding = client.post(
         "/workspaces",
         headers={"Idempotency-Key": "ws-provision-coding"},
-        json={"channel_id": channel_id, "name": "Code", "type": "coding"},
+        json={
+            "channel_id": channel_id,
+            "name": "Code",
+            "type": "coding",
+            "location": _loc(tmp_path, "coding-root"),
+        },
     )
     assert coding.status_code == 201
     coding_id = coding.json()["id"]
@@ -1368,12 +1453,19 @@ def test_gallery_theme_round_trip(client: TestClient, tmp_path: Path) -> None:
     assert "error" in missing
 
 
-def test_coding_workspace_theme_defaults_and_rejects_unknown(client: TestClient) -> None:
+def test_coding_workspace_theme_defaults_and_rejects_unknown(
+    client: TestClient, tmp_path: Path
+) -> None:
     channel_id = client.get("/channels").json()["channels"][0]["id"]
     created = client.post(
         "/workspaces",
         headers={"Idempotency-Key": "ws-coding-theme"},
-        json={"channel_id": channel_id, "name": "Code Theme", "type": "coding"},
+        json={
+            "channel_id": channel_id,
+            "name": "Code Theme",
+            "type": "coding",
+            "location": _loc(tmp_path, "coding-theme"),
+        },
     )
     assert created.status_code == 201
     workspace_id = created.json()["id"]

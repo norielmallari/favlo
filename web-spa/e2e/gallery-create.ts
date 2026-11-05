@@ -1,6 +1,32 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { expect, test, type Page } from '@playwright/test';
 
 import { onScreen } from './on-screen';
+
+export function makeWorkspaceRoot(): string {
+  return mkdtempSync(join(tmpdir(), 'favlo-workspace-'));
+}
+
+export function removeWorkspaceRoot(root: string) {
+  rmSync(root, { recursive: true, force: true });
+}
+
+export async function chooseFolder(page: Page, root: string) {
+  await page.route('**/folders/pick', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ cancelled: false, location: root }),
+    });
+  });
+  const choose = page.getByRole('button', { name: 'Choose folder' });
+  await onScreen(choose);
+  await choose.click();
+  await expect(page.getByLabel('Folder location')).toHaveValue(root);
+}
 
 /**
  * Create a gallery workspace. Create opens `/w/<id>` in a new tab.
@@ -54,6 +80,7 @@ export async function createGalleryWorkspace(
   await waitUntilProvisioned(workspace);
   await expect(workspace.getByLabel('Gallery workspace', { exact: true })).toBeVisible();
   await expect(workspace.getByText('Choose a local folder')).toHaveCount(0);
+  await expect(workspace.getByLabel(/^Favlo said:/).first()).toBeVisible();
   if (options?.keepChannel) {
     return workspace;
   }
@@ -62,5 +89,6 @@ export async function createGalleryWorkspace(
   await page.goto(url);
   await expect(page.getByRole('button', { name: `${name}, Gallery workspace menu` })).toBeVisible();
   await expect(page.getByLabel('Gallery workspace', { exact: true })).toBeVisible();
+  await expect(page.getByLabel(/^Favlo said:/).first()).toBeVisible();
   return page;
 }

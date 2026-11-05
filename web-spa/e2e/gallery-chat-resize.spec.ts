@@ -36,6 +36,8 @@ test('wide gallery chat width resizes within limits', async ({ page }) => {
     await page.goto('http://127.0.0.1:8012/');
     await createGalleryWorkspace(page, workspaceName, folderRoot);
     await expect(page.getByLabel('Conversation')).toBeVisible();
+    const icon = await page.evaluate(() => document.querySelector("link[rel='icon']")?.getAttribute('href') ?? '');
+    expect(decodeURIComponent(icon)).toContain('cx="12" cy="12" r="10"');
   });
 
   await step('drag chat wider then clamp at the max', async () => {
@@ -85,12 +87,20 @@ test('wide gallery chat width resizes within limits', async ({ page }) => {
     expect(minned).toBe(320);
   });
 
-  await step('reload keeps the clamped width', async () => {
-    await page.reload();
-    await expect(page.getByRole('heading', { name: workspaceName })).toBeVisible();
-    const kept = await page.getByLabel('Conversation').evaluate((node) => node.getBoundingClientRect().width);
-    expect(kept).toBe(320);
+  await step('reload keeps the chosen width', async () => {
     const handle = page.getByRole('slider', { name: 'Resize chat' });
     await onScreen(handle);
+    await handle.focus();
+    await page.keyboard.press('ArrowLeft');
+    await expect
+      .poll(async () => page.getByLabel('Conversation').evaluate((node) => Math.round(node.getBoundingClientRect().width)))
+      .toBe(344);
+    const chosen = 344;
+    expect(await page.evaluate(() => localStorage.getItem('favlo.galleryChatWidth'))).toBe(String(chosen));
+    await page.reload();
+    await expect(page.getByRole('heading', { name: workspaceName })).toBeVisible();
+    const kept = await page.getByLabel('Conversation').evaluate((node) => Math.round(node.getBoundingClientRect().width));
+    expect(kept).toBe(chosen);
+    await onScreen(page.getByRole('slider', { name: 'Resize chat' }));
   });
 });

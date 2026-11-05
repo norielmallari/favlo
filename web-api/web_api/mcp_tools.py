@@ -33,44 +33,6 @@ ALWAYS_LOAD = frozenset(
     }
 )
 
-INSTRUCTIONS = (
-    "Enabled MCP tools use progressive disclosure. "
-    "Image generate, memory, and media_status/cancel/read_media are available immediately. "
-    "Each MCP tool name starts with the server name, then the tool. "
-    "Before calling a video, music, or voice tool, call that server's load_tool with the "
-    "remote tool name (or a list of names). Prefer loading a whole media group together: "
-    "list, set, and generate for that kind (i2v and t2v are separate). "
-    "Do not call list_mcp_tools just to browse; it returns full schemas. "
-    "remember, recall, and forget use only this agent's memories. "
-    "Match the generate tool to what the user asked for. "
-    "generate_image is for a still (image, picture, photo, illustration, drawing). "
-    "Do not call generate_video_i2v or generate_video_t2v unless the user asked for "
-    "video, a clip, motion, animation, or to animate a still. "
-    "Do not offer or insist on video when they asked for an image. "
-    "generate_music and generate_voice only when they asked for music or spoken audio. "
-    "Those generate tools use the registry default for that media type. "
-    "To change a model, call the matching list tool, then set_image_model, set_video_i2v_model, "
-    "set_video_t2v_model, set_music_model, or set_voice_model, each with that server prefix. "
-    "Repeat the returned session id in your reply. "
-    "Pass that same id as session on later set and generate calls. "
-    "Omit session to use the registry defaults. "
-    "An omitted seed is chosen at random. "
-    "read_media(name) returns that record. "
-    "When you call a generate tool, tell the user you are generating "
-    "that image, video, music, or voice. "
-    "The tool returns a task id while the file is still being made. "
-    "That result says the file is not ready and names the id. "
-    "There is no favlo:// link in it. "
-    "Reply to the user in that same turn. "
-    "Do not call media_status, read_media, or another tool after that generate. "
-        "When each file is ready the host asks for one short follow-up that "
-        "includes that favlo:// link so the chat shows the file. "
-    "Do not paste the JSON, the tool name, or a file id. "
-    "When the result says the tool failed or names an unknown model, "
-    "call the matching list and set tools, repeat the session id, "
-    "and call the generate tool again with that session."
-)
-
 
 async def bundle(
     store: Any,
@@ -79,13 +41,16 @@ async def bundle(
     bus: Any,
     pending: set[asyncio.Task[Any]],
 ) -> tuple[str, list[object]]:
-    """Tools for one turn. Definitions come from the catalog cache."""
+    """Tools for one turn. Every enabled server is attached the same way.
+
+    The text is empty. Descriptions come from that server. A known Favlo media
+    name can be eager. Any other tool stays on that server's ``load_tool``.
+    """
     servers = store.enabled_mcp_servers(agent_id)
     if not servers:
         return "", []
     taken: set[str] = set()
     tools = []
-    eager_names: list[str] = []
     for server in servers:
         try:
             listed = await catalog.get(server)
@@ -113,16 +78,9 @@ async def bundle(
         if opened is None:
             continue
         tools.append(opened)
-        eager_names.extend(f"{prefix}_{name}" for name in always)
-        eager_names.append(f"{prefix}_load_tool")
     if not tools:
         return "", []
-    joined = ", ".join(eager_names)
-    return (
-        f"{INSTRUCTIONS} This turn's eager MCP tools include: {joined}. "
-        "Load cold tools with that server's load_tool before calling them.",
-        tools,
-    )
+    return "", tools
 
 
 def overlay(server: dict[str, Any], tools: list[dict[str, Any]]) -> dict[str, Any]:
@@ -197,7 +155,7 @@ def _memory_arguments(tool_name: str, arguments: dict[str, Any], agent_id: str) 
 
 
 def _mcp_client(server: dict[str, Any]) -> Any | None:
-    """A caller-owned client. ``call_tool`` resolves a task. A generate tool returns the task id."""
+    """A caller-owned client. ``call_tool`` resolves a task. A named file returns that name."""
     from fastmcp_tasks.client import TasksClientExtension
     from mcp import Client
 
@@ -425,12 +383,20 @@ class _HttpServer(MCPStreamableHTTPTool):
         super().__init__(name, mcp_client=client, **kwargs)
         _arm(self, agent_id, client, turn)
 
+    async def load_tools(self) -> None:
+        await super().load_tools()
+        _declare_filename(self)
+
     async def call_tool(self, tool_name: str, **kwargs: Any) -> Any:
         arguments = _memory_arguments(tool_name, kwargs, self._agent_id)
+        _drop_runtime_session(arguments)
+        refusal = _rewrite_inputs(self, arguments)
+        if refusal is not None:
+            return refusal
         started = await _generate_task(self, tool_name, arguments)
         if started is not None:
             return started
-        return await super().call_tool(tool_name, **arguments)
+        return await _finish_call(self, tool_name, arguments)
 
 
 class _StdioServer(MCPStdioTool):
@@ -447,12 +413,85 @@ class _StdioServer(MCPStdioTool):
         super().__init__(name, mcp_client=client, **kwargs)
         _arm(self, agent_id, client, turn)
 
+    async def load_tools(self) -> None:
+        await super().load_tools()
+        _declare_filename(self)
+
     async def call_tool(self, tool_name: str, **kwargs: Any) -> Any:
         arguments = _memory_arguments(tool_name, kwargs, self._agent_id)
+        _drop_runtime_session(arguments)
+        refusal = _rewrite_inputs(self, arguments)
+        if refusal is not None:
+            return refusal
         started = await _generate_task(self, tool_name, arguments)
         if started is not None:
             return started
-        return await super().call_tool(tool_name, **arguments)
+        return await _finish_call(self, tool_name, arguments)
+
+
+async def _finish_call(server: Any, tool_name: str, arguments: dict[str, Any]) -> Any:
+    """Call the listener. A status miss is a sentence, not a raised tool error."""
+    try:
+        return await super(type(server), server).call_tool(tool_name, **arguments)
+    except Exception:
+        if tool_name in {"media_status", "media_cancel", "read_media"}:
+            return "That task is not here."
+        raise
+
+
+def _declare_filename(server: Any) -> None:
+    """A workspace root adds a required file name the listener never sees."""
+    turn = getattr(server, "turn", None)
+    if turn is None:
+        return
+    from web_api.workspace_files import local_root
+
+    if local_root(turn.store, turn.session_id) is None:
+        return
+    for func in getattr(server, "_functions", []):
+        extra = func.additional_properties or {}
+        remote = str(extra.get("_mcp_remote_name") or "")
+        if remote not in GENERATE:
+            continue
+        schema = dict(func._input_schema_cached or {})
+        properties = dict(schema.get("properties") or {})
+        properties["filename"] = {
+            "type": "string",
+            "description": "File name at the folder root.",
+        }
+        required = [item for item in schema.get("required") or [] if item != "filename"]
+        required.append("filename")
+        schema["properties"] = properties
+        schema["required"] = required
+        func._input_schema_cached = schema
+        func._cached_parameters = schema
+
+
+def _drop_runtime_session(arguments: dict[str, Any]) -> None:
+    """The run injects its chat session under ``session``. The tool argument is a string."""
+    if not isinstance(arguments.get("session"), str):
+        arguments.pop("session", None)
+
+
+def _rewrite_inputs(server: Any, arguments: dict[str, Any]) -> str | None:
+    """Turn a root image name into bytes before the listener sees it."""
+    turn = getattr(server, "turn", None)
+    if turn is None:
+        return None
+    from web_api.store import Rejected
+    from web_api.workspace_files import local_root, rewrite_still
+
+    root = local_root(turn.store, turn.session_id)
+    if root is None:
+        return None
+    try:
+        rewritten = rewrite_still(root, arguments)
+    except Rejected as exc:
+        return str(exc)
+    if rewritten is not arguments:
+        arguments.clear()
+        arguments.update(rewritten)
+    return None
 
 
 async def _generate_task(server: Any, tool_name: str, arguments: dict[str, Any]) -> str | None:
@@ -468,14 +507,34 @@ async def _generate_task(server: Any, tool_name: str, arguments: dict[str, Any])
         return None
     from fastmcp_tasks.client_models import ClientCreateTaskResult
 
-    filtered, meta = server._prepare_call_kwargs(tool_name, arguments)
-    raw = await client.session.call_tool(
-        tool_name,
-        arguments=filtered or None,
-        meta=meta if isinstance(meta, dict) else None,
-        allow_claimed=True,
-    )
+    from web_api.store import Rejected
+    from web_api.workspace_files import local_root, release_output, reserve_output
+
+    turn = getattr(server, "turn", None)
+    root = None if turn is None else local_root(turn.store, turn.session_id)
+    held = ""
+    if root is None:
+        arguments.pop("filename", None)
+    else:
+        try:
+            held = reserve_output(root, tool_name, arguments)
+        except Rejected as exc:
+            return str(exc)
+    try:
+        filtered, meta = server._prepare_call_kwargs(tool_name, arguments)
+        raw = await client.session.call_tool(
+            tool_name,
+            arguments=filtered or None,
+            meta=meta if isinstance(meta, dict) else None,
+            allow_claimed=True,
+        )
+    except Exception:
+        if root is not None and held:
+            release_output(root, held)
+        raise
     if not isinstance(raw, ClientCreateTaskResult):
+        if root is not None and held:
+            release_output(root, held)
         parser = server.parse_tool_results or server._parse_tool_result_from_mcp
         return parser(raw)
     task_id = str(raw.task_id)
@@ -483,13 +542,12 @@ async def _generate_task(server: Any, tool_name: str, arguments: dict[str, Any])
     if isinstance(target, str):
         from web_api.media_delivery import kind_for_tool, note_task
 
-        note_task(task_id, target, kind=kind_for_tool(tool_name))
+        note_task(task_id, target, kind=kind_for_tool(tool_name), filename=held)
+    named = held.strip()
+    label = named or f"Task {task_id}"
     return (
-        f"Task {task_id} is working. The file is not ready. "
-        "There is no favlo:// link yet. "
-        "Reply to the user now. Do not call another tool on this turn. "
-        "When the file is ready the host asks for one short follow-up that "
-        "includes the favlo:// link."
+        f"{label} is working. The file is not ready. "
+        "There is no favlo:// link yet. Do not call media_status."
     )
 
 

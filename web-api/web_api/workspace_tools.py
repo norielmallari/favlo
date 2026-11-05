@@ -125,20 +125,39 @@ def sync_media_placement(
     return updated
 
 
-def append_media_placement(
-    store: Any,
-    workspace_id: str,
-    path: str,
-) -> dict[str, Any] | None:
-    """Add a relative path to the gallery filmstrip and select it."""
-    from web_api.placement import append_filmstrip_path
+def select_media_placement(store: Any, workspace_id: str, path: str) -> dict[str, Any] | None:
+    """Select one file already in the folder. The filmstrip list stays the folder."""
+    from web_api.placement import initial_for
 
     session_id = store.workspace_session_id(workspace_id)
     if not session_id:
         return None
     current = _placement_state(store, session_id)
     if current is None:
+        current = initial_for("gallery")
+    workspace = current.get("favlo_workspace")
+    if not isinstance(workspace, dict):
         return None
+    workspace["selection"] = {"kind": "file", "path": path}
+    store.save_agui_state(session_id, current)
+    _write_snapshot_state(store, session_id, current)
+    return current
+
+
+def append_media_placement(
+    store: Any,
+    workspace_id: str,
+    path: str,
+) -> dict[str, Any] | None:
+    """Add a relative path to the gallery filmstrip and select it."""
+    from web_api.placement import append_filmstrip_path, initial_for
+
+    session_id = store.workspace_session_id(workspace_id)
+    if not session_id:
+        return None
+    current = _placement_state(store, session_id)
+    if current is None:
+        current = initial_for("gallery")
     updated = append_filmstrip_path(current, path)
     if updated is None:
         return None

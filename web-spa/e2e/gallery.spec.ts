@@ -87,6 +87,7 @@ test('a gallery guide binds a folder, places a strip, and browses without AG-UI'
     await step('browse strip without AG-UI', async () => {
       const beforeBrowse = aguiCount;
       await gallery.getByRole('button', { name: 'zebra.png', exact: true }).click();
+      await onScreen(gallery.getByText('zebra.png', { exact: true }));
       await expect(gallery.getByRole('button', { name: 'Download zebra.png' })).toBeVisible();
       await gallery.keyboard.press('ArrowRight');
       await gallery.keyboard.press('ArrowLeft');

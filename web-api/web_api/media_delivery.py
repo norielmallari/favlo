@@ -2,13 +2,15 @@
 
 ``Client.call_tool`` would poll ``tasks/get`` inside the AG-UI run, so the UI
 stays on Thinking until the file exists. AG-UI has no message after
-``RUN_FINISHED``. This module ends the tool loop once a generate task is
-claimed, then polls ``tasks/get`` on its own client.
+``RUN_FINISHED``. A claimed generate returns its task id and later tools in
+that turn stay available. This module then polls ``tasks/get`` on its own client.
 
-When the file is ready the host places gallery copies, then starts a silent
-AG-UI turn (fenced host cue) so the model writes one short message that
-includes the ``favlo://`` links. When a later run is open on that thread,
-finished links wait in a queue and announce in that run's ``finally``.
+When a task reaches a terminal status the host starts a silent AG-UI turn.
+The file is copied into the session root under the name the agent passed.
+``adapt_media_cue`` turns that task result into ``<media_completed>``,
+``<media_cancelled>``, or ``<media_error>`` around the file name. The chat's
+tools decide what to do with it. When a later run is open on that thread,
+the cue waits until the thread is idle.
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ _LINK = re.compile(
 _URI = re.compile(
     r"^favlo://(images|videos|voice|music)/([A-Za-z0-9_-]+)\.(png|mp4|mp3|wav|flac)$"
 )
-_TASKS: ContextVar[list[tuple[str, str, str]] | None] = ContextVar(
+_TASKS: ContextVar[list[tuple[str, str, str, str]] | None] = ContextVar(
     "favlo_media_tasks", default=None
 )
 _QUEUED: dict[str, list[str]] = {}
@@ -47,23 +49,65 @@ _KIND_BY_TOOL = {
 }
 
 
-class ReplyAfterGenerate(ChatMiddleware):
-    """After a generate task is claimed, the next model call is text."""
+class TrackGenerateTasks(ChatMiddleware):
+    """Remember generate task ids from this turn. Later tool calls stay available."""
 
     async def process(self, context: Any, call_next: Any) -> None:
-        if _arm():
-            options = getattr(context, "options", None)
-            if isinstance(options, dict):
-                options["tool_choice"] = "none"
+        _arm()
         await call_next()
 
 
-def media_middleware() -> list[ReplyAfterGenerate]:
+def media_middleware() -> list[TrackGenerateTasks]:
     """The middleware the web chat client installs."""
-    return [ReplyAfterGenerate()]
+    return [TrackGenerateTasks()]
 
 
-def note_task(task_id: str, target: str, *, kind: str = "image") -> None:
+def resolve_pending_task(kind: str, hint: str) -> str:
+    """The in-flight task for this tile.
+
+    A generate id is long, and a copied id can miss by a character. The file
+    name, or the only open task of this kind, is the tile the host will clear.
+    """
+    cleaned = hint.strip()
+    current = _TASKS.get() or []
+    media = kind.strip().lower()
+    if any(task_id == cleaned for task_id, _url, _task_kind, _name in current):
+        return cleaned
+    named = [
+        task_id
+        for task_id, _url, task_kind, name in current
+        if name == cleaned and task_kind == media
+    ]
+    if len(named) == 1:
+        return named[0]
+    same = [task_id for task_id, _url, task_kind, _name in current if task_kind == media]
+    if len(same) == 1:
+        return same[0]
+    return cleaned
+
+
+def bound_task(kind: str, hint: str) -> str | None:
+    """The open task this hint names. A finished task is not open."""
+    resolved = resolve_pending_task(kind, hint)
+    current = _TASKS.get() or []
+    media = kind.strip().lower()
+    open_ids = {
+        task_id
+        for task_id, _url, task_kind, _name in current
+        if task_id == resolved and task_kind == media
+    }
+    if open_ids:
+        return resolved
+    return None
+
+
+def note_task(
+    task_id: str,
+    target: str,
+    *,
+    kind: str = "image",
+    filename: str = "",
+) -> None:
     """Remember one claimed generate so the turn can finish and the file can follow."""
     current = _TASKS.get()
     if current is None:
@@ -73,10 +117,10 @@ def note_task(task_id: str, target: str, *, kind: str = "image") -> None:
     media = kind.strip() or "image"
     if not cleaned or not url:
         return
-    current.append((cleaned, url, media))
+    current.append((cleaned, url, media, filename.strip()))
 
 
-def take_tasks() -> list[tuple[str, str, str]]:
+def take_tasks() -> list[tuple[str, str, str, str]]:
     """The claimed generates for this turn. A second call returns none."""
     current = _TASKS.get()
     if not current:
@@ -87,12 +131,10 @@ def take_tasks() -> list[tuple[str, str, str]]:
 
 
 def schedule(app: Any, thread_id: str) -> None:
-    """Poll claimed generates after the run, and flush deferred links when idle."""
+    """Poll claimed generates after the run, and flush a deferred cue when idle."""
     found = take_tasks()
     cleaned = thread_id.strip()
     if found and cleaned:
-        for task_id, _target, kind in found:
-            _publish_pending(app, cleaned, task_id, kind, "working")
         job = asyncio.create_task(deliver(app, cleaned, found))
         pending = getattr(getattr(app, "state", None), "tasks", None)
         if isinstance(pending, set):
@@ -106,37 +148,65 @@ def schedule(app: Any, thread_id: str) -> None:
             flush.add_done_callback(pending.discard)
 
 
-async def deliver(app: Any, thread_id: str, tasks: list[tuple[str, str, str]]) -> None:
-    """Place finished files, then ask the model for a short message with the links."""
+async def deliver(
+    app: Any, thread_id: str, tasks: list[tuple[str, str, str, str]]
+) -> None:
+    """Cue the model when each task reaches a terminal status."""
+    from web_api.workspace_files import release_output
+
     try:
-        links: list[str] = []
-        task_ids: list[str] = []
-        for task_id, target, kind in tasks:
-            for link in await _wait_links(app, thread_id, target, task_id, kind):
-                if link not in links:
-                    links.append(link)
-            task_ids.append(task_id)
-        if not links:
-            return
-        await _place_and_announce(app, thread_id, links, task_ids=task_ids)
+        finished: list[tuple[str, str, str]] = []
+        store = app.state.store
+        root = await asyncio.to_thread(_session_root, store, thread_id)
+        for task_id, target, kind, filename in tasks:
+            try:
+                status, result = await _wait_status(app, thread_id, target, task_id)
+                if not status:
+                    continue
+                name = filename.strip()
+                if name and status == "completed":
+                    events = await asyncio.to_thread(
+                        _place_named, store, thread_id, name, favlo_links(result)
+                    )
+                    if events is not None:
+                        if events:
+                            await _publish(app, events)
+                        await _drop_tile(app, store, thread_id, task_id, kind, "completed", name)
+                        finished.append((task_id, "completed", name))
+                        continue
+                    status = "failed"
+                if name:
+                    await _drop_tile(
+                        app,
+                        store,
+                        thread_id,
+                        task_id,
+                        kind,
+                        "cancelled" if status != "failed" else "failed",
+                        name,
+                    )
+                finished.append((task_id, status, name))
+            finally:
+                if root is not None and filename.strip():
+                    release_output(root, filename)
+        text = task_cue(finished)
+        if text:
+            await _cue(app, thread_id, text)
     except Exception:
         _LOG.exception("media delivery failed")
 
 
 async def flush_queued(app: Any, thread_id: str) -> None:
-    """Announce deferred links once no run is open on this thread."""
+    """Send a deferred task cue once no run is open on this thread."""
     try:
         store = app.state.store
         if await asyncio.to_thread(_busy, store, thread_id):
             return
         texts = _take_queued(thread_id)
-        if not texts:
-            return
         for text in texts:
-            found = favlo_links(text)
-            if not found:
-                continue
-            await _place_and_announce(app, thread_id, found)
+            cleaned = text.strip()
+            if cleaned:
+                await _cue(app, thread_id, cleaned)
     except Exception:
         _LOG.exception("media flush failed")
 
@@ -148,10 +218,10 @@ def store_links(
     *,
     task_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Append one assistant row when those links are not already in the snapshot.
+    """Append one assistant row when that text is not already in the snapshot.
 
-    Fallback when a silent announce cannot run. When a run is still open on
-    this thread, queue the text for that run's ``finally``.
+    When a run is still open on this thread, queue the text for that run's
+    ``finally``.
     """
     cleaned = text.strip()
     if not cleaned:
@@ -159,7 +229,6 @@ def store_links(
     if _busy(store, thread_id):
         _queue(thread_id, cleaned)
         return []
-    # Host cues also list the links; only a visible assistant row counts as delivered.
     found = favlo_links(cleaned)
     if found and _links_present(store, thread_id, found):
         return []
@@ -173,86 +242,72 @@ def store_links(
         thread_id,
         {"id": guid(), "role": "assistant", "content": cleaned},
     )
-    events = list(store.record_assistant(thread_id, cleaned, task_ids=task_ids))
-    events.extend(place_gallery_media(store, thread_id, found))
-    return events
+    return list(store.record_assistant(thread_id, cleaned, task_ids=task_ids))
 
 
-def announce_cue(links: list[str]) -> str:
-    """Host cue for the silent follow-up that shows the finished media."""
-    listed = "\n".join(link.strip() for link in links if link.strip())
-    return (
-        "These media files are ready. Write one short message to the user, then "
-        "repeat every favlo:// link below on its own line exactly as written so "
-        "the chat shows the files. Do not call tools.\n"
-        f"{listed}"
-    )
+def adapt_media_cue(filename: str, status: str) -> str:
+    """The cue for one finished generate. The body is the agent's file name."""
+    from web_api.host_cues import fence_media_status
+
+    return fence_media_status(filename, status)
 
 
-async def _place_and_announce(
-    app: Any,
-    thread_id: str,
-    links: list[str],
-    *,
-    task_ids: list[str] | None = None,
-) -> None:
-    store = app.state.store
-    bus = app.state.bus
-    cleaned = [link.strip() for link in links if link.strip()]
-    if not cleaned:
-        return
-    events = await asyncio.to_thread(place_gallery_media, store, thread_id, cleaned)
-    for event in events:
-        await bus.publish(event)
-    if await asyncio.to_thread(_busy, store, thread_id):
-        _queue(thread_id, "\n".join(cleaned))
-        return
-    if await _announce(app, thread_id, cleaned):
-        return
-    fallback = await asyncio.to_thread(
-        store_links,
-        store,
-        thread_id,
-        "\n".join(cleaned),
-        task_ids=task_ids,
-    )
-    for event in fallback:
-        await bus.publish(event)
+def media_turn_messages(text: str, *, message_id: str) -> list[dict[str, Any]] | None:
+    """The only messages the model receives after a task finishes.
 
-
-async def _announce(app: Any, thread_id: str, links: list[str]) -> bool:
-    """Silent AG-UI turn that asks the model to speak with the favlo:// links.
-
-    Returns True when the announce ran (even if the model omitted a link; the
-    caller still checks the snapshot and may fall back).
+    A media fence is that turn. The task result is not included. None when
+    ``text`` is not a media fence.
     """
+    from web_api.host_cues import host_cue_message, is_media_fence
+
+    if not is_media_fence(text):
+        return None
+    return [host_cue_message(text, message_id=message_id)]
+
+
+def task_cue(finished: list[tuple[str, str, str]]) -> str:
+    """One media fence per finished task. A missing file name is left out."""
+    blocks: list[str] = []
+    for _task_id, status, filename in finished:
+        block = adapt_media_cue(filename, status)
+        if block:
+            blocks.append(block)
+    return "\n".join(blocks)
+
+
+async def _cue(app: Any, thread_id: str, text: str) -> None:
+    """Silent AG-UI turn. The cue fences the task id."""
     from web_api.runs import perform
     from web_api.store import Conflict, NotFound, Rejected
 
     store = app.state.store
     bus = app.state.bus
+    cleaned = text.strip()
+    if not cleaned:
+        return
     if not await asyncio.to_thread(store.session_exists, thread_id):
-        return True
-    if await asyncio.to_thread(_links_present, store, thread_id, links):
-        return True
+        return
+    if await asyncio.to_thread(_busy, store, thread_id):
+        _queue(thread_id, cleaned)
+        return
     run_id = guid()
     try:
         started = await asyncio.to_thread(
             store.begin_greeting,
             thread_id,
             run_id,
-            announce_cue(links),
+            cleaned,
         )
     except Conflict:
-        _queue(thread_id, "\n".join(links))
+        _queue(thread_id, cleaned)
         job = asyncio.create_task(_flush_later(app, thread_id))
         pending = getattr(getattr(app, "state", None), "tasks", None)
         if isinstance(pending, set):
             pending.add(job)
             job.add_done_callback(pending.discard)
-        return True
+        return
     except (NotFound, Rejected):
-        return False
+        return
     for event in started.get("events") or []:
         await bus.publish(event)
     cancel = asyncio.Event()
@@ -262,14 +317,10 @@ async def _announce(app: Any, thread_id: str, links: list[str]) -> bool:
     try:
         await perform(app, cancel, run_id)
     except Exception:
-        _LOG.exception("media announce failed for %s", thread_id)
-        return False
+        _LOG.exception("media cue failed for %s", thread_id)
     finally:
         if isinstance(cancels, dict):
             cancels.pop(run_id, None)
-    if await asyncio.to_thread(_links_present, store, thread_id, links):
-        return True
-    return False
 
 
 async def _flush_later(app: Any, thread_id: str) -> None:
@@ -389,24 +440,6 @@ def _blob(messages: list[Any]) -> str:
     return "\n".join(parts)
 
 
-def _publish_pending(app: Any, thread_id: str, task_id: str, kind: str, status: str) -> None:
-    bus = getattr(getattr(app, "state", None), "bus", None)
-    store = getattr(getattr(app, "state", None), "store", None)
-    if bus is None or store is None:
-        return
-    try:
-        events = store.note_media_pending(thread_id, task_id, kind, status)
-    except Exception:
-        _LOG.exception("media.pending failed for %s", task_id)
-        return
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return
-    for event in events:
-        loop.create_task(bus.publish(event))
-
-
 def _write_link(folder: Any, link: str) -> dict[str, Any] | None:
     match = _URI.match(link.strip())
     if match is None:
@@ -470,23 +503,107 @@ def _image_meta(link: str, relative: str) -> dict[str, Any] | None:
     return meta
 
 
-async def _wait_links(
+def _session_root(store: Any, thread_id: str) -> Path | None:
+    from web_api.workspace_files import local_root
+
+    return local_root(store, thread_id)
+
+
+def _place_named(
+    store: Any, thread_id: str, filename: str, links: list[str]
+) -> list[dict[str, Any]] | None:
+    """Copy one finished file onto the session root under the chosen name.
+
+    ``None`` means the file was not written. An empty list is a home write
+    with nothing to publish. A workspace write publishes ``gallery.updated``.
+    """
+    from web_api.folder_port import LocalFolder
+    from web_api.gallery_metadata import write_sidecar
+    from web_api.workspace_files import local_root, remember_source
+
+    root = local_root(store, thread_id)
+    if root is None or not links:
+        return None
+    link = links[0]
+    match = _URI.match(link.strip())
+    if match is None:
+        return None
+    payload = _media_bytes(match.group(1), match.group(2), match.group(3))
+    if payload is None:
+        return None
+    folder = LocalFolder(str(root))
+    try:
+        written = folder.write(filename, payload)
+    except Exception:
+        _LOG.exception("session write failed for %s", filename)
+        return None
+    remember_source(root, filename, link)
+    if written.get("kind") == "image" and written.get("has_sidecar") is False:
+        meta = _image_meta(link, written["path"])
+        if meta is not None:
+            write_sidecar(folder.root, written["path"], meta)
+            written = folder.stat(written["path"])
+    workspace = store.workspace_for_session(thread_id)
+    if workspace and store.has_local_folder(workspace["id"]):
+        from web_api.workspace_tools import append_media_placement
+
+        path = str(written.get("path") or filename)
+        state = append_media_placement(store, workspace["id"], path)
+        payload = {**written, "state": state} if state is not None else written
+        return list(store.note_gallery(workspace["id"], payload))
+    return []
+
+
+async def _drop_tile(
     app: Any,
+    store: Any,
     thread_id: str,
-    target: str,
     task_id: str,
     kind: str,
-) -> list[str]:
+    status: str,
+    filename: str,
+) -> None:
+    """Clear the generating tile, including one keyed by the file name."""
+    ids = [task_id]
+    name = filename.strip()
+    if name and name != task_id:
+        ids.append(name)
+    for item in ids:
+        await _publish(
+            app,
+            await asyncio.to_thread(
+                store.note_media_pending,
+                thread_id,
+                item,
+                kind,
+                status,
+            ),
+        )
+
+
+async def _publish(app: Any, events: list[dict[str, Any]]) -> None:
+    bus = app.state.bus
+    for event in events:
+        await bus.publish(event)
+
+
+async def _wait_status(
+    app: Any, thread_id: str, target: str, task_id: str
+) -> tuple[str, Any]:
+    """Poll until the task is completed, failed, or cancelled."""
     from fastmcp_tasks.client import TasksClientExtension
-    from fastmcp_tasks.client_models import ClientGetTaskResult, GetTaskRequest, GetTaskRequestParams
+    from fastmcp_tasks.client_models import (
+        ClientGetTaskResult,
+        GetTaskRequest,
+        GetTaskRequestParams,
+    )
     from mcp import Client
 
     delay = 0.5
-    last_status = ""
     async with Client(target, extensions=[TasksClientExtension()]) as client:
         while True:
             if not await asyncio.to_thread(app.state.store.session_exists, thread_id):
-                return []
+                return "", None
             try:
                 raw = await client.session.send_request(
                     GetTaskRequest(params=GetTaskRequestParams(task_id=task_id)),
@@ -494,16 +611,9 @@ async def _wait_links(
                 )
             except Exception:
                 _LOG.exception("tasks/get failed for %s", task_id)
-                return []
+                return "", None
             status = str(getattr(raw, "status", "") or "")
-            message = str(getattr(raw, "status_message", "") or "").strip()
-            shown = message or status or "working"
-            if shown != last_status:
-                last_status = shown
-                _publish_pending(app, thread_id, task_id, kind, shown)
-            if status == "completed":
-                return favlo_links(getattr(raw, "result", None))
-            if status in {"failed", "cancelled"}:
-                return []
+            if status in {"completed", "failed", "cancelled"}:
+                return status, getattr(raw, "result", None)
             await asyncio.sleep(delay)
             delay = min(delay * 2, 2.0)

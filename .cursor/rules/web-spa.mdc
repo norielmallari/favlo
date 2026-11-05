@@ -1,5 +1,5 @@
 ---
-description: Favlo web-spa UI/UX. Every screen follows best UI/UX practice and is a pleasure to use. Design tokens, text roles, and button paints serve that. Use palette and textStyle; never hardcode colors on controls.
+description: Favlo web-spa UI/UX. Every screen follows best UI/UX practice and is a pleasure to use. Design tokens, text roles, and button paints serve that. Use palette and textStyle; never hardcode colors on controls. Never open a browser in Cursor. A screen check is a deterministic Playwright script on headless Chromium.
 globs: web-spa/**
 alwaysApply: false
 ---
@@ -25,6 +25,12 @@ What a pleasure to use means in code:
 - **Destructive actions are asked once, said plainly, and kept distinct.** The confirmation names what is affected and what stays.
 
 A choice between two options that work equally well takes the quieter one.
+
+## Browser
+
+Never open a browser in Cursor. That includes the Cursor IDE browser, browser MCP tools, Computer Use, and any headed window the agent starts.
+
+A screen check is a deterministic Playwright script on headless Chromium. The script lives under `web-spa/e2e/`. From `web-spa/`, run `npx playwright test e2e/<feature>.spec.ts --project=chromium`. Jest covers a check that does not need a page. A one-off script that launches a browser, a headed Chromium, and an interactive session are not that check.
 
 ## Design system
 
@@ -68,7 +74,7 @@ Do not mix the `flex` shorthand with `flexGrow`, `flexShrink`, or `flexBasis` on
 
 ## Motion
 
-Keep ambient activity quiet. Prefer opacity (and tiny scale) pulses with `ease-in-out` over traveling high-contrast light on text. Cycles for “still working” feedback should land around 2–2.5s, not under ~1.5s with `linear`. Do not clip label text with a shimmer gradient that flashes to `onAccent` or white. Honor `prefers-reduced-motion: reduce` by freezing decorative loops. The Working chip uses `workingActivity` in `web-spa/src/components/working.ts`.
+Keep ambient activity quiet. Prefer opacity (and tiny scale) pulses with `ease-in-out` over traveling high-contrast light on text. Cycles for “still working” feedback should land around 2–2.5s, not under ~1.5s with `linear`. Do not clip label text with a shimmer gradient that flashes to `onAccent` or white. Honor `prefers-reduced-motion: reduce` by freezing decorative loops. The Working chip is label-only (no pulsing activity dot).
 
 ## Checklist before finishing a SPA change
 
@@ -85,3 +91,4 @@ Keep ambient activity quiet. Prefer opacity (and tiny scale) pulses with `ease-i
 - New ambient loops follow Motion above and respect reduced motion.
 - New movement has a cause the person can see, and reduced motion turns it into a cut.
 - The change reads as a pleasure to use on a phone-sized window and on a desktop window. When it does not, it is not finished, even if each check above passes.
+- Never open a browser in Cursor. The screen check is a headless Chromium Playwright script under `web-spa/e2e/`.

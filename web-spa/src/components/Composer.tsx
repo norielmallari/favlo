@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Platform, StyleSheet, Text, TextInput, View, type ViewStyle } from 'react-native';
+import { Platform, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { composerCommand } from '@/components/composer-keys';
 import { IconButton } from '@/components/IconButton';
-import { focusRingInset } from '@/components/Pressable';
+import { focusRingInset, focusRingStyle } from '@/components/Pressable';
 import { useTheme } from '@/theme/Theme';
 import { duration, radius, space } from '@/theme/tokens';
 import { textStyle } from '@/theme/type';
@@ -17,6 +17,10 @@ type Props = {
   agentName?: string;
   /** Hide the Return / Shift+Return caption (narrow gallery). */
   compact?: boolean;
+  /** Keep the field one line tall. Extra lines scroll inside it. */
+  singleLine?: boolean;
+  /** Drop the pad above the field so the transcript sits on it. */
+  flushTop?: boolean;
   /** Briefly pulse the field after Add to chat. */
   pulseToken?: number;
   onFocusChange?: (focused: boolean) => void;
@@ -30,6 +34,8 @@ export function Composer({
   onStop,
   agentName,
   compact = false,
+  singleLine = false,
+  flushTop = false,
   pulseToken = 0,
   onFocusChange,
 }: Props) {
@@ -50,17 +56,12 @@ export function Composer({
     return () => clearTimeout(timer);
   }, [pulseToken, reduceMotion]);
 
-  const ring: ViewStyle = {
-    outlineStyle: 'solid',
-    outlineWidth: 2,
-    outlineOffset: 2,
-    outlineColor: focused || pulse ? palette.focusRing : 'transparent',
-  };
+  const ring = focusRingStyle(palette.focusRing, focused || pulse);
   const idle = !working && value.trim() === '';
   const stop = working && onStop != null;
 
   return (
-    <View style={styles.stack}>
+    <View style={[styles.stack, flushTop ? styles.flushTop : null]}>
       <View style={styles.row}>
         <TextInput
           accessibilityLabel="Message"
@@ -88,6 +89,7 @@ export function Composer({
           }}
           style={[
             styles.input,
+            singleLine ? styles.oneLine : null,
             ring,
             textStyle('body', palette.textPrimary),
             {
@@ -95,7 +97,7 @@ export function Composer({
               borderColor: pulse ? palette.accent : palette.borderStrong,
               ...(Platform.OS === 'web'
                 ? {
-                    transitionProperty: 'border-color, outline-color',
+                    transitionProperty: 'border-color, box-shadow',
                     transitionDuration: `${duration.fast}ms`,
                     transitionTimingFunction: 'ease-in-out',
                   }
@@ -129,6 +131,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: focusRingInset,
     paddingVertical: focusRingInset,
   },
+  flushTop: {
+    paddingTop: 0,
+  },
   row: { flexDirection: 'row', gap: space[2], alignItems: 'flex-end', maxWidth: '100%', minWidth: 0 },
   input: {
     flex: 1,
@@ -139,6 +144,9 @@ const styles = StyleSheet.create({
     borderRadius: radius.card,
     paddingHorizontal: space[3],
     paddingVertical: space[2],
+  },
+  oneLine: {
+    maxHeight: 44,
   },
   send: {
     minHeight: 44,

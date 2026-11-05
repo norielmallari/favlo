@@ -10,7 +10,7 @@ import { FeatherIcon } from '@/components/FeatherIcon';
 import { Frame } from '@/components/Frame';
 import { MenuRow } from '@/components/MenuRow';
 import { buttonRow, IconButton } from '@/components/IconButton';
-import { focusRingInset, Pressable } from '@/components/Pressable';
+import { focusRingInset, focusRingStyle, Pressable } from '@/components/Pressable';
 import { SkillForm, type SkillFields } from '@/components/SkillForm';
 import { useTheme } from '@/theme/Theme';
 import { radius, type as typeScale } from '@/theme/tokens';
@@ -1148,7 +1148,7 @@ function McpForm({
 
   return (
     <View style={{ width: '100%', maxWidth: '100%', minWidth: 0, gap: 8 }}>
-      <ScrollView style={{ maxHeight: fieldLimit }} contentContainerStyle={{ gap: 8 }}>
+      <ScrollView style={{ maxHeight: fieldLimit }} contentContainerStyle={{ gap: 8, padding: focusRingInset }}>
       <Text accessibilityRole="header" aria-level={2} style={heading(palette.textPrimary)}>{server?.name ?? 'New MCP'}</Text>
       <Text style={label(palette.textPrimary)}>Name</Text>
       <TextInput accessibilityLabel="MCP name" value={name} onChangeText={setName} style={fieldStyle(palette)} />
@@ -1507,7 +1507,7 @@ export function AgentForm({
 
   return (
     <View style={{ width: '100%', maxWidth: '100%', minWidth: 0, gap: 8 }}>
-      <ScrollView style={{ maxHeight: fieldLimit }} contentContainerStyle={{ gap: 8 }}>
+      <ScrollView style={{ maxHeight: fieldLimit }} contentContainerStyle={{ gap: 8, padding: focusRingInset }}>
       <Text accessibilityRole="header" aria-level={2} style={heading(palette.textPrimary)}>{creating ? 'New agent' : agent.name}</Text>
       <Text style={label(palette.textPrimary)}>{creating ? 'Name' : nameLabel}</Text>
       <TextInput accessibilityLabel={nameLabel} value={name} onChangeText={setName} style={fieldStyle(palette)} />
@@ -1978,10 +1978,7 @@ function pickerStyle(
     borderRadius: radius.control,
     paddingHorizontal: 12,
     backgroundColor: palette.surface,
-    outlineStyle: 'solid' as const,
-    outlineWidth: 2,
-    outlineOffset: 2,
-    outlineColor: focused ? palette.focusRing : 'transparent',
+    ...focusRingStyle(palette.focusRing, focused),
   };
 }
 

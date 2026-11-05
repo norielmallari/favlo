@@ -45,13 +45,14 @@ export function Thinking({
         border="transparent"
         color={palette.textSecondary}
         accessibilityState={{ expanded: open }}
+        dense
         block
       />
       {open ? (
         <View
           testID="thinking-text"
           style={{
-            paddingLeft: space[3],
+            paddingLeft: space[2],
             borderLeftWidth: 2,
             borderLeftColor: palette.borderStrong,
             maxWidth: '100%',

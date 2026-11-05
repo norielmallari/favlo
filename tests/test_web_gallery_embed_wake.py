@@ -276,3 +276,99 @@ def test_run_once_skips_embed_when_prompt_hash_matches(tmp_path: Path, monkeypat
     row = index.row(workspace["id"], "still.png")
     assert row is not None
     assert row["prompt_hash"]
+
+
+def test_vision_waits_120_seconds_for_a_new_generated_image(tmp_path: Path, monkeypatch) -> None:
+    import json
+    import os
+    import time
+
+    from web_api.gallery_embed import write_vision_sidecars
+    from web_api.gallery_metadata import write_sidecar
+    from web_api.store import Store
+
+    home = tmp_path / "web"
+    store = Store(home / "app.db")
+    monkeypatch.setattr(
+        store,
+        "gallery_vision_model",
+        lambda workspace_id=None: ("example-model", "http://127.0.0.1:9"),
+    )
+    monkeypatch.setattr(store, "gallery_vision_effort", lambda workspace_id=None: None)
+    monkeypatch.setattr("web_api.gallery_embed._embed", lambda _text: [0.0] * 1024)
+    calls: list[str] = []
+
+    def fake_analyze(path, *, relative, model, base_url, existing=None, reasoning_effort=None):
+        calls.append(relative)
+        return {
+            "filename": "shot.png",
+            "kind": "image",
+            "title": "Square",
+            "description": "A red square.",
+            "tags": ["square"],
+            "objects": ["square"],
+            "style": "flat",
+            "source": "index",
+        }
+
+    monkeypatch.setattr("web_api.gallery_embed.analyze_image", fake_analyze)
+
+    channel = store.channels()[0]
+    root = tmp_path / "photos"
+    root.mkdir()
+    image = root / "shot.png"
+    image.write_bytes(b"png")
+    write_sidecar(
+        root,
+        "shot.png",
+        {
+            "version": 1,
+            "filename": "shot.png",
+            "kind": "image",
+            "description": "a red square",
+            "source": "generate",
+            "generation": {"prompt": "a red square", "model": "example-model"},
+            "style": "",
+            "objects": [],
+        },
+    )
+    status, workspace, _events = store.create_workspace(
+        "fresh-gen",
+        {
+            "channel_id": channel["id"],
+            "name": "Fresh",
+            "type": "gallery",
+            "location": str(root),
+        },
+    )
+    assert status in {200, 201}
+
+    assert run_once(store, workspace_id=workspace["id"]) >= 1
+    assert calls == []
+    side = json.loads((root / METADATA_DIR / "shot.png.json").read_text())
+    assert side["source"] == "generate"
+
+    stamped = time.time() - 121
+    os.utime(image, (stamped, stamped))
+    run_once(store, workspace_id=workspace["id"])
+    assert calls == ["shot.png"]
+
+    calls.clear()
+    other = root / "new.png"
+    other.write_bytes(b"png")
+    write_sidecar(
+        root,
+        "new.png",
+        {
+            "version": 1,
+            "filename": "new.png",
+            "kind": "image",
+            "description": "a blue circle",
+            "source": "generate",
+            "generation": {"prompt": "a blue circle", "model": "example-model"},
+            "style": "",
+            "objects": [],
+        },
+    )
+    write_vision_sidecars(store, workspace["id"])
+    assert "new.png" in calls

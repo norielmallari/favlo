@@ -1,5 +1,8 @@
 import { Platform } from 'react-native';
 
+import { focusRingInset } from '@/components/Pressable';
+import { space, type } from '@/theme/tokens';
+
 /** Resting heights for the narrow gallery chat dock. */
 export type GalleryChatDetent = 'peek' | 'expanded' | 'fullscreen';
 
@@ -12,10 +15,29 @@ export const GALLERY_PREVIEW_FLOOR = 120;
 export const GALLERY_STRIP_HEIGHT = 110;
 /** Grabber hit target (matches the borders rule). */
 export const GALLERY_DOCK_GRABBER = 12;
-/** Composer row without the Return caption. */
-export const GALLERY_COMPOSER_LINE = 56;
-/** One short turn above the composer in Peek. */
-export const GALLERY_PEEK_TURN = 88;
+/** Chat column padding on each edge inside the dock. */
+export const GALLERY_DOCK_PAD = space[3];
+/** Gap between the history and the composer. */
+export const GALLERY_DOCK_GAP = 0;
+/** One composer row: the field plus the focus-ring pad under it. */
+export const GALLERY_COMPOSER_LINE = 44 + focusRingInset;
+/** Body line in the transcript. */
+export const GALLERY_HISTORY_LINE = type.line.body;
+/** Reply lines that stay fully visible above Copy in Peek. */
+export const GALLERY_PEEK_HISTORY_LINES = 3;
+/** Dense Copy row in a transcript turn. */
+export const GALLERY_COPY_ROW = 24;
+/** Top padding inside the transcript. The bottom sits on the composer gap. */
+export const GALLERY_HISTORY_FRAME = focusRingInset;
+/**
+ * Three body lines, the gap, and Copy, plus one body line so the top line is
+ * not clipped by the frame pad.
+ */
+export const GALLERY_PEEK_HISTORY =
+  (GALLERY_PEEK_HISTORY_LINES + 1) * GALLERY_HISTORY_LINE +
+  space[1] +
+  GALLERY_COPY_ROW +
+  GALLERY_HISTORY_FRAME;
 /** Peek may not take more than this share of the column. */
 export const GALLERY_PEEK_MAX_FRACTION = 1 / 3;
 /** Drag velocity (px/ms) that jumps to the next detent. */
@@ -28,8 +50,9 @@ export function isGalleryChatDetent(value: unknown): value is GalleryChatDetent 
 /** Height of the dock at each detent for a column of `columnHeight`. */
 export function galleryDockHeights(columnHeight: number): Record<GalleryChatDetent, number> {
   const height = Math.max(0, Math.round(columnHeight));
-  const fullscreen = Math.min(height, GALLERY_DOCK_GRABBER + GALLERY_COMPOSER_LINE);
-  const peekNatural = GALLERY_DOCK_GRABBER + GALLERY_PEEK_TURN + GALLERY_COMPOSER_LINE;
+  const chrome = GALLERY_DOCK_GRABBER + GALLERY_DOCK_PAD * 2;
+  const fullscreen = Math.min(height, chrome + GALLERY_COMPOSER_LINE);
+  const peekNatural = chrome + GALLERY_DOCK_GAP + GALLERY_PEEK_HISTORY + GALLERY_COMPOSER_LINE;
   const peekCap = Math.floor(height * GALLERY_PEEK_MAX_FRACTION);
   const peek = Math.min(height, Math.max(fullscreen, Math.min(peekNatural, peekCap || peekNatural)));
   const galleryReserve = GALLERY_PREVIEW_FLOOR + GALLERY_STRIP_HEIGHT;

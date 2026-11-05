@@ -288,6 +288,45 @@ def test_tool_rounds_stay_on_the_transcript() -> None:
     assert stored["trace"][0]["kind"] == "tool"
 
 
+def test_blank_assistant_row_keeps_reasoning_on_the_reply() -> None:
+    from web_api.snapshots import project_messages
+
+    call = {
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "favlo_media_remember", "arguments": "{}"},
+    }
+    rows = project_messages(
+        [
+            {"id": "user", "role": "user", "content": "Here's some carrots"},
+            {"id": "think-1", "role": "reasoning", "content": "Before the tool."},
+            {"id": "blank", "role": "assistant", "content": "\n\n"},
+            {"id": "tool", "role": "assistant", "tool_calls": [call]},
+            {"id": "result", "role": "tool", "tool_call_id": "call-1", "content": "saved"},
+            {"id": "think-2", "role": "reasoning", "content": "After the tool."},
+            {"id": "reply", "role": "assistant", "content": "\n\nThank you."},
+        ]
+    )
+    assert [row["role"] for row in rows] == ["user", "assistant"]
+    assistant = rows[1]
+    assert assistant["body"] == "\n\nThank you."
+    assert assistant["reasoning"] == "Before the tool.\nAfter the tool."
+    assert [part["kind"] for part in assistant["trace"]] == ["thinking", "tool", "reply"]
+    assert assistant["trace"][0]["text"] == "Before the tool.\nAfter the tool."
+    assert assistant["tool_calls"][0]["result"] == "saved"
+
+    open_turn = project_messages(
+        [
+            {"id": "user", "role": "user", "content": "Hi"},
+            {"id": "think", "role": "reasoning", "content": "Hmm."},
+            {"id": "blank", "role": "assistant", "content": "\n\n"},
+        ]
+    )
+    assert [row["role"] for row in open_turn] == ["user", "assistant"]
+    assert open_turn[1]["body"] == ""
+    assert open_turn[1]["trace"] == [{"kind": "thinking", "text": "Hmm."}]
+
+
 def test_archive_arm_returns_run_id(client: TestClient) -> None:
     thread = _favlo_session(client)
     run_id = guid()
