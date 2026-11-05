@@ -158,6 +158,51 @@ def test_expert_budget_keeps_the_lower_index() -> None:
     assert promoted_indices(scores, 4) == [0, 1, 2, 3]
 
 
+def test_firing_promote_ranks_by_total_hits(tmp_path: Path) -> None:
+    import sqlite3
+
+    import numpy as np
+
+    from qwen36_35b_a3b.convert import _promoted_sets_firing
+    from qwen36_35b_a3b.firing import EXPERTS, LAYERS, flat_hit_scores
+
+    db = tmp_path / "firing.sqlite"
+    with sqlite3.connect(db) as con:
+        con.executescript(
+            """
+            CREATE TABLE request (id INTEGER PRIMARY KEY, complete INTEGER);
+            CREATE TABLE layer_hits (
+                request_id INTEGER NOT NULL,
+                layer INTEGER NOT NULL,
+                prefill BLOB NOT NULL,
+                decode BLOB NOT NULL,
+                PRIMARY KEY (request_id, layer)
+            );
+            """
+        )
+        con.execute("INSERT INTO request (id, complete) VALUES (1, 1)")
+        for layer in range(LAYERS):
+            prefill = np.zeros(EXPERTS, dtype=np.uint32)
+            decode = np.zeros(EXPERTS, dtype=np.uint32)
+            prefill[0] = 10
+            decode[1] = 100 if layer == 0 else 1
+            con.execute(
+                "INSERT INTO layer_hits (request_id, layer, prefill, decode) VALUES (1, ?, ?, ?)",
+                (layer, prefill.tobytes(), decode.tobytes()),
+            )
+    scores = flat_hit_scores(db)
+    assert scores[1] == 100.0
+    assert scores[0] == 10.0
+    assert scores[256 + 1] == 1.0
+    output = tmp_path / "record"
+    output.mkdir()
+    chosen = _promoted_sets_firing(output, 20.0, 2, db)
+    assert chosen == {(0, 0), (0, 1)}
+    body = json.loads((output / "expert_firing.json").read_text())
+    assert body["promote"] == "firing"
+    assert body["language"]["count"] == 2
+
+
 def test_load_row_opens_when_the_console_shows_bars() -> None:
     from qwen36_35b_a3b.forward import Qwen36Runtime
 

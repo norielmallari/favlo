@@ -274,11 +274,19 @@ def _promoted_sets(
     weight_map: dict[str, str],
     output: Path,
     percent: float,
+    *,
+    promote: str = "error",
+    firing_db: Path | None = None,
 ) -> tuple[set[tuple[int, int]], set[int]]:
     language_count = promote_count(percent, LANGUAGE_EXPERTS)
     # MTP stays unpacked. mtp-fp8 is the command that stores those weights.
     if language_count == 0:
         return set(), set()
+    if promote == "firing":
+        return _promoted_sets_firing(output, percent, language_count, firing_db), set()
+    if promote != "error":
+        message = f"promote path {promote!r} is not error or firing"
+        raise ValueError(message)
     path = output / "expert_error.json"
     progress = output / "quantize_progress.json"
     if path.is_file():
@@ -295,6 +303,7 @@ def _promoted_sets(
     language_ids = promoted_indices(language_scores, language_count)
     body = {
         "percent": percent,
+        "promote": "error",
         "language": {
             "pool": LANGUAGE_EXPERTS,
             "count": language_count,
@@ -312,6 +321,63 @@ def _promoted_sets(
     }
     _replace_json(path, body)
     return _language_set(body, language_count), set()
+
+
+def _promoted_sets_firing(
+    output: Path,
+    percent: float,
+    language_count: int,
+    firing_db: Path | None,
+) -> set[tuple[int, int]]:
+    """Promote by total prefill+decode hits. Does not score weight planes."""
+    from qwen36_35b_a3b.firing import flat_hit_scores
+
+    path = output / "expert_firing.json"
+    progress = output / "quantize_progress.json"
+    if path.is_file():
+        body = json.loads(path.read_text())
+        if float(body.get("percent", -1)) != float(percent):
+            message = "expert_firing.json does not match --expert-fp8"
+            raise RuntimeError(message)
+        if body.get("promote") != "firing":
+            message = "expert_firing.json is not a firing promote list"
+            raise RuntimeError(message)
+        return _language_set(body, language_count)
+    if progress.is_file():
+        message = "expert_firing.json is missing from an unfinished record"
+        raise RuntimeError(message)
+    if firing_db is None:
+        message = "firing promote needs --firing"
+        raise ValueError(message)
+    db = firing_db.expanduser().resolve()
+    if not db.is_file():
+        message = f"firing log is missing: {db}"
+        raise FileNotFoundError(message)
+    language_scores = flat_hit_scores(db)
+    if len(language_scores) != LANGUAGE_EXPERTS:
+        message = f"firing log covers {len(language_scores)} experts, not {LANGUAGE_EXPERTS}"
+        raise RuntimeError(message)
+    language_ids = promoted_indices(language_scores, language_count)
+    body = {
+        "percent": percent,
+        "promote": "firing",
+        "firing": str(db),
+        "language": {
+            "pool": LANGUAGE_EXPERTS,
+            "count": language_count,
+            "promoted": [[index // 256, index % 256] for index in language_ids],
+            "scores": {
+                f"{index // 256}.{index % 256}": {
+                    "hits": language_scores[index],
+                    "expert": language_scores[index],
+                }
+                for index in range(LANGUAGE_EXPERTS)
+            },
+        },
+        "mtp": {"pool": MTP_EXPERTS, "count": 0, "promoted": [], "scores": {}},
+    }
+    _replace_json(path, body)
+    return _language_set(body, language_count)
 
 
 def _language_set(body: dict, language_count: int) -> set[tuple[int, int]]:
@@ -446,8 +512,15 @@ def quantize(
     on_bytes: Callable[[int, str], None] | None = None,
     *,
     expert_fp8: float = 20.0,
+    promote: str = "error",
+    firing_db: Path | None = None,
 ) -> Path:
-    """Pack ``src``. A finished manifest with the same percentage stays."""
+    """Pack ``src``. A finished manifest with the same percentage stays.
+
+    ``promote`` ``error`` ranks experts by fp4 restoration RMS.
+    ``promote`` ``firing`` ranks them by total hits in a firing log and does
+    not score weight planes.
+    """
 
     def _notify(detail: str) -> None:
         if on_bytes is None:
@@ -467,10 +540,21 @@ def quantize(
         body = json.loads(manifest_path.read_text())
         if body.get("complete"):
             _same_budget(body, percent)
+            stored = body.get("expert_promote", "error")
+            if stored != promote:
+                message = f"record promote {stored!r} does not match {promote!r}"
+                raise RuntimeError(message)
             return output
     index = json.loads((src / "model.safetensors.index.json").read_text())
     weight_map: dict[str, str] = index["weight_map"]
-    language, mtp = _promoted_sets(src, weight_map, output, percent)
+    language, mtp = _promoted_sets(
+        src,
+        weight_map,
+        output,
+        percent,
+        promote=promote,
+        firing_db=firing_db,
+    )
     dense_fp8 = percent > 0
     progress_path = output / "quantize_progress.json"
     done: dict[str, dict] = {}
@@ -557,6 +641,7 @@ def quantize(
         "source": src.name,
         "expert_order": "router",
         "expert_fp8_percent": percent,
+        "expert_promote": promote,
         "tensors": done,
         "expert_image": EXPERT_IMAGE,
         "gate_up_bytes": GATE_UP_BYTES,

@@ -135,6 +135,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="percentage of routed experts stored as fp8, from 0 to 100",
     )
     quant.add_argument(
+        "--promote",
+        choices=("error", "firing"),
+        default="error",
+        help="error ranks by fp4 restoration RMS; firing ranks by telemetry hits",
+    )
+    quant.add_argument(
+        "--firing",
+        type=Path,
+        default=None,
+        help="firing.sqlite path when --promote firing",
+    )
+    quant.add_argument(
         "--keep-bf16",
         action="store_true",
         help="leave the BF16 checkout under models/ after a successful quantize",
@@ -352,7 +364,13 @@ def _quantize(args: argparse.Namespace) -> int:
         output = Path("models") / record_name(Path(src), percent)
         alias = _ALIAS
     try:
-        quantize(src, output, expert_fp8=percent)
+        quantize(
+            src,
+            output,
+            expert_fp8=percent,
+            promote=args.promote,
+            firing_db=args.firing,
+        )
         register_quantized(
             output.name,
             source=src,
@@ -364,7 +382,7 @@ def _quantize(args: argparse.Namespace) -> int:
         )
         if not args.keep_bf16:
             _remove_checkout(src, spare=output)
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError, FileNotFoundError) as exc:
         sys.stderr.write(f"{exc}\n")
         return 1
     sys.stdout.write(f"{output}\n")

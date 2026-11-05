@@ -29,6 +29,33 @@ def relative_score(hits: int, layer_hits: int, experts: int = EXPERTS) -> float:
     return hits / (layer_hits / experts)
 
 
+def hit_totals(path: Path, *, layers: int = LAYERS, experts: int = EXPERTS) -> np.ndarray:
+    """Sum prefill and decode hits from a firing log. Shape is ``(layers, experts)``."""
+    totals = np.zeros((layers, experts), dtype=np.uint64)
+    with sqlite3.connect(path) as db:
+        rows = db.execute("SELECT layer, prefill, decode FROM layer_hits")
+        for layer, prefill, decode in rows:
+            if layer < 0 or layer >= layers:
+                continue
+            both = np.frombuffer(prefill, dtype=np.uint32).astype(np.uint64)
+            both = both + np.frombuffer(decode, dtype=np.uint32).astype(np.uint64)
+            if both.size != experts:
+                message = f"layer {layer} hit vector length {both.size} is not {experts}"
+                raise ValueError(message)
+            totals[layer] += both
+    return totals
+
+
+def flat_hit_scores(path: Path, *, layers: int = LAYERS, experts: int = EXPERTS) -> dict[int, float]:
+    """Flat index ``layer * experts + expert`` to total hits for promote ranking."""
+    totals = hit_totals(path, layers=layers, experts=experts)
+    return {
+        layer * experts + expert: float(totals[layer, expert])
+        for layer in range(layers)
+        for expert in range(experts)
+    }
+
+
 class RouteScratch:
     """In-memory adds for one request. A lull is what writes them."""
 
