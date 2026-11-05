@@ -3472,15 +3472,29 @@ static bool better(float left, uint left_id, float right, uint right_id) {
     return left_id < right_id;
 }
 
-kernel void presence_penalty(
+// Subtract the presence penalty once from each logit whose count is positive.
+kernel void penalize(
     device float* logits [[buffer(0)]],
-    device const uint* seen [[buffer(1)]],
-    constant uint& count [[buffer(2)]],
-    constant float& penalty [[buffer(3)]],
-    uint index [[thread_position_in_grid]])
+    device const uint* counts [[buffer(1)]],
+    constant uint& vocab [[buffer(2)]],
+    constant float& presence [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
 {
-    if (index < count) {
-        logits[seen[index]] -= penalty;
+    if (gid >= vocab) {
+        return;
+    }
+    if (counts[gid] > 0u) {
+        logits[gid] -= presence;
+    }
+}
+
+kernel void bump_count(
+    device uint* counts [[buffer(0)]],
+    device const uint* tokens [[buffer(1)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid == 0u) {
+        counts[tokens[0]] += 1u;
     }
 }
 

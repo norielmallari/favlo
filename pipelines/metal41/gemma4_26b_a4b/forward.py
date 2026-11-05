@@ -136,7 +136,6 @@ _SLOTS = 256
 _MAX_K = 8192
 _MAX_N = VOCAB
 _PICK = 65536
-_SEEN = 8192
 _STOP = (1, 106, 50)
 
 
@@ -405,7 +404,7 @@ class Gemma4Runtime:
             self.prefix.note(prompt[: self.filled])
             self._store_prefix()
             drawn: list[int] = []
-            seen: list[int] = []
+            self._counts_fresh = True
             decode_row = self._begin_phase("decode", limit, live=True)
             decode_start = time.perf_counter()
             if hit == len(prompt):
@@ -415,12 +414,11 @@ class Gemma4Runtime:
                 if self._stop:
                     halted = True
                     break
-                token = self._draw(temperature, top_p, top_k, presence, seen, rng)
+                token = self._draw(temperature, top_p, top_k, presence, rng)
                 if token in _STOP:
                     halted = True
                     break
                 drawn.append(token)
-                seen.append(token)
                 stopped = bool(halt_at) and _contains_stop(self.root, drawn, halt_at)
                 if not stopped and on_token is not None:
                     on_token(token)
@@ -1712,7 +1710,8 @@ class Gemma4Runtime:
         self.pick_score = [session.zeros(_PICK * 4), session.zeros(_PICK * 4)]
         self.pick_id = [session.zeros(_PICK * 4), session.zeros(_PICK * 4)]
         self.chosen = session.zeros(4)
-        self.seen_ids = session.zeros(_SEEN * 4)
+        self.token_counts = session.zeros(VOCAB * 4)
+        self._counts_fresh = True
 
     def _cache(self) -> None:
         self.local_k = []
@@ -1839,30 +1838,43 @@ class Gemma4Runtime:
         memory.release(source)
         return dest
 
+    def _penalize(self, presence: float) -> None:
+        """Apply presence from the device counts. The host does not walk the completion."""
+        if not presence:
+            return
+        if self._counts_fresh:
+            self._zero(self.token_counts, VOCAB * 4)
+            self._counts_fresh = False
+        self.session.encode(
+            "penalize",
+            [self.out, self.token_counts],
+            [self.session._u32(VOCAB), self.session._f32(presence)],
+            *self._grid(VOCAB),
+        )
+
+    def _bump(self, token_ids: object, presence: float) -> None:
+        if not presence:
+            return
+        self.session.encode(
+            "bump_count",
+            [self.token_counts, token_ids],
+            [],
+            (1, 1, 1),
+            (1, 1, 1),
+        )
+
     def _draw(
         self,
         temperature: float,
         top_p: float,
         top_k: int,
         presence: float,
-        seen: list[int],
         rng: random.Random,
     ) -> int:
-        if presence:
-            unique = list(dict.fromkeys(seen))
-            if len(unique) > _SEEN:
-                message = "presence window exceeded the device buffer"
-                raise RuntimeError(message)
-            packed = struct.pack(f"<{len(unique)}I", *unique)
-            memory.store(self.seen_ids, 0, packed)
-            self.session.encode(
-                "presence_penalty",
-                [self.out, self.seen_ids],
-                [self.session._u32(len(unique)), self.session._f32(presence)],
-                *self._grid(len(unique)),
-            )
+        self._penalize(presence)
         if temperature == 0.0:
             self._reduce_top(self.out, VOCAB, 1, 1.0)
+            self._bump(self._kept_ids, presence)
             return struct.unpack("<I", self._bytes(self._kept_ids, 4))[0]
         if not 0 < top_k <= 64:
             message = "top_k must be from 1 to 64"
@@ -1879,6 +1891,7 @@ class Gemma4Runtime:
             (1, 1, 1),
             (1, 1, 1),
         )
+        self._bump(self.chosen, presence)
         return struct.unpack("<I", self._bytes(self.chosen, 4))[0]
 
     def _reduce_top(self, scores: object, count: int, keep: int, temperature: float) -> None:
