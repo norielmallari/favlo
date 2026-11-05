@@ -2498,8 +2498,12 @@ class Store:
 
     def list_shells(self) -> list[dict[str, Any]]:
         def read(db: Session) -> list[dict[str, Any]]:
+            from web_api.shell_catalog import OFFERED_SHELLS
+
             rows = db.scalars(select(ShellRow).order_by(ShellRow.sort, ShellRow.id))
-            return [_shell_payload(db, row) for row in rows]
+            return [
+                _shell_payload(db, row) for row in rows if row.id in OFFERED_SHELLS
+            ]
 
         return self._read(read)
 
@@ -2548,6 +2552,10 @@ class Store:
             shell = db.get(ShellRow, kind)
             if shell is None:
                 raise Rejected("That workspace shell does not exist.")
+            from web_api.shell_catalog import OFFERED_SHELLS
+
+            if kind not in OFFERED_SHELLS:
+                raise Rejected("That workspace shell is not available.")
             if shell.setup != "local_folder" and location:
                 raise Rejected("This workspace has no local folder.")
             channel = db.get(ChannelRow, channel_id)

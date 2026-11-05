@@ -20,7 +20,6 @@ test('wide workspace menu focus ring runs along every side', async ({ page }) =>
       await open.click();
       const form = page.getByRole('dialog', { name: 'New workspace for Favlo' });
       await form.getByRole('textbox', { name: 'Workspace name' }).fill(name);
-      await page.getByRole('combobox', { name: 'Workspace type' }).selectOption('coding');
       await chooseFolder(page, root);
       const create = page.getByRole('button', { name: 'Create workspace' });
       await onScreen(create);
@@ -34,7 +33,7 @@ test('wide workspace menu focus ring runs along every side', async ({ page }) =>
       await page.setViewportSize({ width: 1280, height: 800 });
     });
 
-    const menu = page.getByRole('button', { name: `${name}, Coding workspace menu` });
+    const menu = page.getByRole('button', { name: `${name}, Gallery workspace menu` });
 
     await step('keyboard focus on the workspace menu draws a full ring', async () => {
       await onScreen(menu);

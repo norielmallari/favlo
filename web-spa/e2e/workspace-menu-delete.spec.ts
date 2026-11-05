@@ -22,7 +22,6 @@ test('each workspace on the channel menu can be deleted', async ({ page }) => {
       const form = page.getByRole('dialog', { name: 'New workspace for Favlo' });
       await expect(form.getByText('New workspace for Favlo')).toBeVisible();
       await form.getByRole('textbox', { name: 'Workspace name' }).fill(name);
-      await page.getByRole('combobox', { name: 'Workspace type' }).selectOption('coding');
       await chooseFolder(page, root);
       const create = page.getByRole('button', { name: 'Create workspace' });
       await page.setViewportSize({ width: 1280, height: 640 });

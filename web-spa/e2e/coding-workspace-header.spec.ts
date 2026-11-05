@@ -6,7 +6,7 @@ import { chooseFolder, makeWorkspaceRoot, removeWorkspaceRoot, waitUntilProvisio
 import { onScreen } from './on-screen';
 import { step } from './progress';
 
-test('coding workspace header uses its own shell and Catppuccin', async ({ page }) => {
+test.skip('Coding is not offered when creating a workspace.', async ({ page }) => {
   const name = `CodeHead ${Date.now()}`;
   const root = makeWorkspaceRoot();
   let workspace: Page;

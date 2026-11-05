@@ -962,7 +962,7 @@ def test_a_sent_turn_records_the_open_folder_and_image(tmp_path: Path) -> None:
     assert attached_context["gallery_attachment"] == "ok.png"
 
 
-def test_create_coding_workspace(client: TestClient, tmp_path: Path) -> None:
+def test_coding_workspace_is_not_offered(client: TestClient, tmp_path: Path) -> None:
     channel_id = client.get("/channels").json()["channels"][0]["id"]
     created = client.post(
         "/workspaces",
@@ -974,12 +974,8 @@ def test_create_coding_workspace(client: TestClient, tmp_path: Path) -> None:
             "location": _loc(tmp_path, "coding-root"),
         },
     )
-    assert created.status_code == 201
-    body = created.json()
-    assert body["type"] == "coding"
-    assert body["name"] == "Repos"
-    listed = client.get(f"/workspaces?channel_id={channel_id}").json()["workspaces"]
-    assert any(row["id"] == body["id"] and row["type"] == "coding" for row in listed)
+    assert created.status_code == 400
+    assert "not available" in created.json()["message"].lower()
 
 
 def test_delete_workspace_keeps_disk_files(client: TestClient, tmp_path: Path) -> None:
@@ -997,15 +993,13 @@ def test_delete_workspace_keeps_disk_files(client: TestClient, tmp_path: Path) -
 def test_shells_are_listed_from_the_database(client: TestClient) -> None:
     shells = client.get("/shells").json()["shells"]
     ids = [row["id"] for row in shells]
-    assert ids == ["gallery", "coding"]
+    assert ids == ["gallery"]
     gallery = shells[0]
     assert gallery["label"] == "Gallery"
     assert gallery["icon"] == "image"
     assert gallery["setup"] == "local_folder"
     assert gallery["renderer"] == "media"
     assert [item["name"] for item in gallery["elements"]] == ["preview", "filmstrip"]
-    assert shells[1]["renderer"] == "chat"
-    assert shells[1]["elements"] == []
 
 
 def test_a_finished_image_is_selected_on_the_filmstrip(
@@ -1379,18 +1373,7 @@ def test_create_provisions_then_shows_the_failure_in_chat(client: TestClient, tm
             "location": _loc(tmp_path, "coding-root"),
         },
     )
-    assert coding.status_code == 201
-    coding_id = coding.json()["id"]
-    deadline = time.time() + 10
-    coding_row = coding.json()
-    while time.time() < deadline:
-        coding_row = client.get(f"/workspaces/{coding_id}").json()["workspace"]
-        if coding_row["provisioning_state"] == "provisioned":
-            break
-        time.sleep(0.05)
-    assert coding_row["provisioning_state"] == "provisioned"
-    coding_snap = client.get(f"/sessions/{coding.json()['session_id']}").json()
-    assert coding_snap["state"]["favlo_workspace"]["elements"] == []
+    assert coding.status_code == 400
     replay = client.post(
         "/workspaces",
         headers={"Idempotency-Key": "ws-provision"},
@@ -1467,15 +1450,7 @@ def test_coding_workspace_theme_defaults_and_rejects_unknown(
             "location": _loc(tmp_path, "coding-theme"),
         },
     )
-    assert created.status_code == 201
-    workspace_id = created.json()["id"]
-    assert client.get(f"/workspaces/{workspace_id}").json()["workspace"]["theme"] == "catppuccin"
-    updated = client.put(f"/workspaces/{workspace_id}/theme", json={"theme": "rose-pine"})
-    assert updated.status_code == 200
-    assert updated.json()["theme"] == "rose-pine"
-    assert client.get(f"/workspaces/{workspace_id}").json()["workspace"]["theme"] == "rose-pine"
-    rejected = client.put(f"/workspaces/{workspace_id}/theme", json={"theme": "neon"})
-    assert rejected.status_code == 400
+    assert created.status_code == 400
 
 
 def _tool_json(tool: object, arguments: dict) -> dict:

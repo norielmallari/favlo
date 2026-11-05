@@ -14,6 +14,9 @@ from web_api.catalog import ELEMENTS
 _GALLERY_HINT = "Favlo indexes images, mp3, and mp4 in that folder for the gallery filmstrip."
 _CODING_HINT = "Generated files are written at the root of this folder."
 
+# Coding stays in the seed so an existing workspace still opens. It is not offered.
+OFFERED_SHELLS = frozenset({"gallery"})
+
 
 def shells() -> list[dict[str, Any]]:
     return [

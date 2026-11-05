@@ -5,7 +5,7 @@ import { chooseFolder, makeWorkspaceRoot, removeWorkspaceRoot, waitUntilProvisio
 import { onScreen } from './on-screen';
 import { step } from './progress';
 
-test('creating a coding workspace picks the type and delete asks first', async ({ page }) => {
+test('creating a gallery workspace picks the type and delete asks first', async ({ page }) => {
   test.setTimeout(360_000);
   const name = `Repos ${Date.now()}`;
   const root = makeWorkspaceRoot();
@@ -18,7 +18,9 @@ test('creating a coding workspace picks the type and delete asks first', async (
       await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8012\/?$/);
       await page.getByRole('button', { name: 'New workspace for Favlo' }).click();
       await page.getByRole('textbox', { name: 'Workspace name' }).fill(name);
-      await page.getByRole('combobox', { name: 'Workspace type' }).selectOption('coding');
+      await expect(page.getByRole('combobox', { name: 'Workspace type' }).locator('option')).toHaveText([
+        'Gallery',
+      ]);
       await chooseFolder(page, root);
       await page.setViewportSize({ width: 1280, height: 640 });
       const createWorkspace = page.getByRole('button', { name: 'Create workspace' });
@@ -30,9 +32,9 @@ test('creating a coding workspace picks the type and delete asks first', async (
       workspace = await popupPromise;
       await expect(workspace).toHaveURL(/\/w\/.+/);
       await waitUntilProvisioned(workspace);
-      await expect(workspace.getByLabel('Coding workspace', { exact: true })).toBeVisible();
-      await expect(workspace.getByRole('button', { name: `${name}, Coding workspace menu` })).toBeVisible();
-      await expect(workspace).toHaveTitle(`${name} — Coding`);
+      await expect(workspace.getByLabel('Gallery workspace', { exact: true })).toBeVisible();
+      await expect(workspace.getByRole('button', { name: `${name}, Gallery workspace menu` })).toBeVisible();
+      await expect(workspace).toHaveTitle(`${name} — Gallery`);
     });
 
     await step('chat once then delete with confirm', async () => {
@@ -41,7 +43,7 @@ test('creating a coding workspace picks the type and delete asks first', async (
       await onScreen(send);
       await send.click();
       await expect(workspace.getByLabel(`You said: ${line}`)).toBeVisible();
-      const title = workspace.getByRole('button', { name: `${name}, Coding workspace menu` });
+      const title = workspace.getByRole('button', { name: `${name}, Gallery workspace menu` });
       await onScreen(title);
       await title.click();
       const remove = workspace.getByRole('menuitem', { name: 'Delete workspace' });
