@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from umt5_xxl.source import pack_dir, repo_id
+from umt5_xxl.weights import FORMATS
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -20,8 +21,20 @@ def main(argv: list[str] | None = None) -> int:
         help="umT5 repository, org/name or a huggingface.co link",
     )
     quant = sub.add_parser("quantize", help="pack int8 and copy the tokenizer into that pack")
+    quant.add_argument(
+        "--format",
+        choices=FORMATS,
+        required=True,
+        help="wan is the official zip .pth; hf is a Hugging Face .safetensors encoder",
+    )
     quant.add_argument("--src", type=Path, default=None, help="BF16 encoder file")
     quant.add_argument("--out", type=Path, default=None, help="packed directory")
+    quant.add_argument(
+        "--tokenizer",
+        type=Path,
+        default=None,
+        help="directory that holds tokenizer.json when it is not beside --src",
+    )
     quant.add_argument(
         "--keep-source",
         action="store_true",
@@ -55,9 +68,11 @@ def _quantize(args: argparse.Namespace) -> int:
         worst = quantize(
             src=args.src,
             dest=dest,
+            encoder_format=args.format,
+            tokenizer_src=args.tokenizer,
             drop_source=not args.keep_source,
         )
-    except (OSError, ValueError, RuntimeError) as exc:
+    except (OSError, ValueError, RuntimeError, FileNotFoundError, KeyError, TypeError) as exc:
         sys.stderr.write(f"{exc}\n")
         return 1
     print(dest, flush=True)

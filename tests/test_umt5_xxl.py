@@ -1,7 +1,9 @@
-"""umT5-XXL pack paths, int8 roundtrip, and tokenizer copy."""
+"""umT5-XXL pack paths, int8 roundtrip, tokenizer copy, and encoder formats."""
 
 from __future__ import annotations
 
+import json
+import struct
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +12,7 @@ import pytest
 from umt5_xxl.formats import pack_int8, relative_error, restore_int8
 from umt5_xxl.quantize import _copy_tokenizer, _drop_source
 from umt5_xxl.source import ENCODER_FILE, TOKENIZER_FILE, pack_dir, source_dir
+from umt5_xxl.weights import hf_key, open_weights
 
 
 def test_pack_paths_live_under_models_google() -> None:
@@ -70,6 +73,54 @@ def test_quantize_keeps_the_pack_when_it_is_the_source(tmp_path: Path) -> None:
     assert pack.is_dir()
 
 
+def test_hf_key_maps_the_wan_names() -> None:
+    assert hf_key("token_embedding.weight") == "shared.weight"
+    assert hf_key("norm.weight") == "encoder.final_layer_norm.weight"
+    assert hf_key("blocks.3.attn.q.weight") == (
+        "encoder.block.3.layer.0.SelfAttention.q.weight"
+    )
+    assert hf_key("blocks.3.ffn.gate.0.weight") == (
+        "encoder.block.3.layer.1.DenseReluDense.wi_0.weight"
+    )
+    assert hf_key("blocks.3.pos_embedding.embedding.weight") == (
+        "encoder.block.3.layer.0.SelfAttention.relative_attention_bias.weight"
+    )
+
+
+def test_hf_safetensors_reads_wan_layout_names(tmp_path: Path) -> None:
+    path = tmp_path / "encoder.safetensors"
+    values = {
+        "shared.weight": np.arange(8, dtype=np.float32).reshape(2, 4),
+        "encoder.final_layer_norm.weight": np.linspace(0.1, 0.4, 4, dtype=np.float32),
+        "encoder.block.0.layer.0.SelfAttention.q.weight": np.eye(4, dtype=np.float32),
+    }
+    _write_bf16_safetensors(path, values)
+    reader = open_weights("hf", path)
+    try:
+        assert reader.embed_shape() == (2, 4)
+        assert np.allclose(reader.read_embed_rows(0, 2), values["shared.weight"], atol=1e-2)
+        assert np.allclose(
+            reader.tensor("norm.weight"),
+            values["encoder.final_layer_norm.weight"],
+            atol=1e-2,
+        )
+        assert np.allclose(
+            reader.tensor("blocks.0.attn.q.weight"),
+            values["encoder.block.0.layer.0.SelfAttention.q.weight"],
+            atol=1e-2,
+        )
+    finally:
+        reader.close()
+
+
+def test_commands_require_the_encoder_format() -> None:
+    from umt5_xxl.commands import main
+
+    with pytest.raises(SystemExit) as raised:
+        main(["quantize"])
+    assert raised.value.code == 2
+
+
 def test_commands_quantize_writes_the_pack(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -81,12 +132,14 @@ def test_commands_quantize_writes_the_pack(
         src: Path | None = None,
         dest: Path | None = None,
         *,
+        encoder_format: str,
         tokenizer_src: Path | None = None,
         drop_source: bool = True,
     ) -> float:
-        del tokenizer_src
         seen["src"] = src
         seen["dest"] = dest
+        seen["format"] = encoder_format
+        seen["tokenizer"] = tokenizer_src
         seen["drop"] = drop_source
         assert dest is not None
         dest.mkdir(parents=True, exist_ok=True)
@@ -95,11 +148,51 @@ def test_commands_quantize_writes_the_pack(
 
     monkeypatch.setattr("umt5_xxl.source.models_dir", lambda root=None: tmp_path / "models")
     monkeypatch.setattr("umt5_xxl.quantize.quantize", quantize)
-    packed = main(["quantize"])
+    packed = main(["quantize", "--format", "wan"])
     assert packed == 0
     assert seen["dest"] == tmp_path / "models" / "google" / "umt5-xxl-int8"
+    assert seen["format"] == "wan"
     assert seen["drop"] is True
-    kept = main(["quantize", "--keep-source", "--out", str(tmp_path / "custom")])
+    kept = main(
+        [
+            "quantize",
+            "--format",
+            "hf",
+            "--keep-source",
+            "--src",
+            str(tmp_path / "enc.safetensors"),
+            "--out",
+            str(tmp_path / "custom"),
+            "--tokenizer",
+            str(tmp_path / "tok"),
+        ]
+    )
     assert kept == 0
     assert seen["dest"] == tmp_path / "custom"
+    assert seen["format"] == "hf"
+    assert seen["src"] == tmp_path / "enc.safetensors"
+    assert seen["tokenizer"] == tmp_path / "tok"
     assert seen["drop"] is False
+
+
+def _write_bf16_safetensors(path: Path, tensors: dict[str, np.ndarray]) -> None:
+    header: dict[str, object] = {"__metadata__": {"format": "pt"}}
+    cursor = 0
+    blobs: list[bytes] = []
+    for name, array in tensors.items():
+        flat = np.ascontiguousarray(array, dtype=np.float32).reshape(-1)
+        bits = (flat.view(np.uint32) >> np.uint32(16)).astype("<u2")
+        raw = bits.tobytes()
+        header[name] = {
+            "dtype": "BF16",
+            "shape": list(array.shape),
+            "data_offsets": [cursor, cursor + len(raw)],
+        }
+        blobs.append(raw)
+        cursor += len(raw)
+    payload = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    with path.open("wb") as handle:
+        handle.write(struct.pack("<Q", len(payload)))
+        handle.write(payload)
+        for blob in blobs:
+            handle.write(blob)

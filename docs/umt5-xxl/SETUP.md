@@ -16,12 +16,21 @@ and the tokenizer files. `--umt5 org/name` downloads that repository instead.
 ## Pack
 
 ```bash
-uv run favlo --umt5-xxl quantize
+uv run favlo --umt5-xxl quantize --format wan
 ```
 
 That writes `models/google/umt5-xxl-int8`, copies every tokenizer file into
 that directory, and removes the BF16 checkout. A clip never opens the BF16
-file. `--keep-source` leaves the checkout in place.
+file. `--keep-source` leaves the checkout in place. A Hugging Face
+`.safetensors` encoder uses `--format hf` and `--src` for that file:
+
+```bash
+uv run favlo --umt5-xxl quantize --format hf \
+  --src models/google/umt5-xxl-realistic_bf16/umt5-xxl-realistic_bf16.safetensors \
+  --out models/google/umt5-xxl-realistic-int8 \
+  --tokenizer models/google/umt5-xxl-int8 \
+  --keep-source
+```
 
 Point a Wan video row at the pack with `parts.umt5`, or let `quantize` on
 that video pipeline store the shared path.
