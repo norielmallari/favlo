@@ -39,7 +39,7 @@ Run Python through `uv run` so the command uses this checkout's environment. A m
 
 Changes stay in this repository. Edit another repository only when the user asks for that repository.
 
-The closed source implementation is the sibling directory `favlo-cloud`, when that checkout is present. It holds the hosted account service. Read it only when the task is the hosted product. When the sibling checkout is absent, ignore the closed source implementation and continue in this repository.
+The open product in this repository is the listener, the web app, and the web API. A hosted build of the same app calls another process that implements the same HTTP contract. That process is not part of this repository, and this repository does not name it. When a sibling checkout of the hosted product is present, read it only for a hosted task. When it is absent, stay in this repository.
 
 Edit one runtime. Leave every other runtime's files untouched. The write set and the runtime table are in [ARCHITECTURE.md](ARCHITECTURE.md). Do not edit `src/favlo/cli.py` to register a runtime. Do not edit another pipeline's package, shaders, tests, or docs. A served media pipeline inherits `ImagePipeline`, `VideoPipeline`, `MusicPipeline`, or `VoicePipeline` under `MediaPipeline`. A language-model pipeline does not. Do not add a kernel that branches on the pipeline. A new abstract method on `MediaPipeline` updates every media subclass in that same change.
 

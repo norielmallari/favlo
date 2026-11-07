@@ -26,7 +26,7 @@ export function readToolCalls(value: unknown): ToolCallRecord[] {
   if (value == null || value === '') {
     return [];
   }
-  let raw = value;
+  let raw: unknown = value;
   if (typeof value === 'string') {
     try {
       raw = JSON.parse(value) as unknown;
@@ -255,10 +255,12 @@ export function LiveReply({
         return (
           <View
             key={`reply-${index}`}
-            accessibilityLabel={speaker ? `${speaker} said: ${humanText(step.text, imageNames)}` : undefined}
+            accessibilityLabel={
+              speaker ? `${speaker} said: ${humanText(step.text, imageNames, true)}` : undefined
+            }
             style={[{ width: '100%', maxWidth: '100%', alignSelf: 'stretch' }, measured ? measureStyle : null]}
           >
-            <MessageBody body={step.text} imageNames={imageNames} />
+            <MessageBody body={step.text} imageNames={imageNames} stripHtml />
           </View>
         );
       })}
@@ -332,7 +334,7 @@ export function readTrace(value: unknown): StoredPart[] {
   if (value == null || value === '') {
     return [];
   }
-  let raw = value;
+  let raw: unknown = value;
   if (typeof value === 'string') {
     try {
       raw = JSON.parse(value) as unknown;
@@ -343,16 +345,16 @@ export function readTrace(value: unknown): StoredPart[] {
   if (!Array.isArray(raw)) {
     return [];
   }
-  return raw.flatMap((item) => {
+  return raw.flatMap((item): StoredPart[] => {
     if (item == null || typeof item !== 'object') {
       return [];
     }
     const row = item as { kind?: unknown; text?: unknown; id?: unknown; name?: unknown; arguments?: unknown; result?: unknown };
     if (row.kind === 'thinking' && typeof row.text === 'string' && row.text.trim()) {
-      return [{ kind: 'thinking' as const, text: row.text }];
+      return [{ kind: 'thinking', text: row.text }];
     }
     if (row.kind === 'reply' && typeof row.text === 'string' && row.text.trim()) {
-      return [{ kind: 'reply' as const, text: row.text }];
+      return [{ kind: 'reply', text: row.text }];
     }
     if (row.kind === 'tool' && typeof row.id === 'string' && row.id !== '') {
       const call: ToolCallRecord = {
@@ -363,7 +365,7 @@ export function readTrace(value: unknown): StoredPart[] {
       if (typeof row.result === 'string' && row.result !== '') {
         call.result = row.result;
       }
-      return [{ kind: 'tool' as const, call }];
+      return [{ kind: 'tool', call }];
     }
     return [];
   });
@@ -551,7 +553,7 @@ export function TranscriptTurn({
   }
   return (
     <View
-      accessibilityLabel={`${name} said: ${humanText(body, imageNames)}`}
+      accessibilityLabel={`${name} said: ${humanText(body, imageNames, !mine)}`}
       style={{
         alignItems: mine ? 'flex-end' : 'stretch',
         width: '100%',
@@ -598,10 +600,11 @@ export function TranscriptTurn({
               body={step.text}
               onEmpty={replyOnly ? reportEmpty : undefined}
               imageNames={imageNames}
+              stripHtml={!mine}
             />
           );
         })}
-        {!mine && humanText(body, imageNames) ? (
+        {!mine && humanText(body, imageNames, true) ? (
           <IconButton
             icon={copied ? 'check' : 'copy'}
             label={copied ? 'Copied' : 'Copy'}
@@ -609,7 +612,9 @@ export function TranscriptTurn({
             dense
             onPress={() => {
               if (Platform.OS === 'web') {
-                void navigator.clipboard.writeText(humanText(body, imageNames)).then(() => setCopied(true));
+                void navigator.clipboard
+                  .writeText(humanText(body, imageNames, true))
+                  .then(() => setCopied(true));
               }
             }}
             background="transparent"

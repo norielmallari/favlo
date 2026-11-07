@@ -10,15 +10,41 @@ import { textStyle } from '@/theme/type';
 
 const MEDIA = /favlo:\/\/(images|videos|voice|music)\/([A-Za-z0-9_-]+)\.(png|mp4|mp3|wav|flac)/g;
 const ACTION = /(?<!\*)\*([^*\n]+)\*(?!\*)[!?.…,:;]*/g;
+/** Opening, closing, or self-closing tags. Comments. Not Markdown autolinks. */
+const HTML_TAG = /<!--[\s\S]*?-->|<\/?[a-zA-Z][\w:-]*(?:\s[^>]*)?\/?>/g;
 const MEDIA_MAX_HEIGHT = 480;
 
-/** Display-only: each closed ``*action*`` is on its own line. Punctuation glued to that star stays on the action line. One model newline after it is dropped. Block quotes, fenced code, and ``**`` bold are left alone. */
+/**
+ * Display-only: drop HTML tags outside block quotes and fenced code. Tag content
+ * is removed; the text between tags stays. Markdown autolinks stay.
+ */
+export function stripHtmlTags(text: string): string {
+  let out = '';
+  let last = 0;
+  for (const match of text.matchAll(HTML_TAG)) {
+    if (match.index == null || inBlockquote(text, match.index) || inFencedCode(text, match.index)) {
+      continue;
+    }
+    out += text.slice(last, match.index);
+    last = match.index + match[0].length;
+  }
+  out += text.slice(last);
+  return out;
+}
+
+/**
+ * Display-only: each closed ``*action*`` is on its own line. A star span after a
+ * letter or digit stays italic Markdown and is not an action. Punctuation glued
+ * to the closing star stays on the action line. One model newline after it is
+ * dropped. Block quotes, fenced code, and ``**`` bold are left alone.
+ */
 export function formatActionNewlines(text: string): string {
   let out = '';
   let last = 0;
   for (const match of text.matchAll(ACTION)) {
     if (
       match.index == null ||
+      afterWord(text, match.index) ||
       inBlockquote(text, match.index) ||
       inFencedCode(text, match.index) ||
       insideBold(text, match.index)
@@ -46,6 +72,22 @@ export function formatActionNewlines(text: string): string {
   }
   out += text.slice(last);
   return out;
+}
+
+/** True when the last non-space before ``index`` is a letter or digit. */
+function afterWord(text: string, index: number): boolean {
+  let i = index - 1;
+  while (i >= 0 && (text[i] === ' ' || text[i] === '\t')) {
+    i -= 1;
+  }
+  if (i < 0) {
+    return false;
+  }
+  const ch = text[i];
+  if (ch === '\n' || ch === '\r') {
+    return false;
+  }
+  return /[\p{L}\p{N}_]/u.test(ch);
 }
 
 /** Text before an action. A sentence on that line moves the action onto the next line. */
@@ -125,8 +167,9 @@ export type MessagePart =
   | { type: 'text'; text: string }
   | { type: 'image' | 'video' | 'audio'; src: string; label: string };
 
-export function messageParts(body: string, imageNames = false): MessagePart[] {
-  let source = formatActionNewlines(body);
+export function messageParts(body: string, imageNames = false, stripHtml = false): MessagePart[] {
+  let source = stripHtml ? stripHtmlTags(body) : body;
+  source = formatActionNewlines(source);
   if (imageNames) {
     source = source.replace(MEDIA, (full, kind: string, id: string, ext: string) =>
       kind === 'images' ? `${id}.${ext}` : full,
@@ -178,8 +221,8 @@ const MEDIA_ID = /^(image|video|music|voice)_[A-Za-z0-9_-]+$/;
 const MEDIA_SIZE = /^\d+x\d+$/;
 const MEDIA_DURATION = /^\d+(\.\d+)?s?$/;
 
-export function humanText(body: string, imageNames = false): string {
-  const parts = messageParts(body, imageNames);
+export function humanText(body: string, imageNames = false, stripHtml = false): string {
+  const parts = messageParts(body, imageNames, stripHtml);
   const words = parts
     .filter((part) => part.type === 'text')
     .map((part) => part.text)
@@ -226,13 +269,16 @@ export function MessageBody({
   body,
   onEmpty,
   imageNames = false,
+  stripHtml = false,
 }: {
   body: string;
   onEmpty?: () => void;
   imageNames?: boolean;
+  /** Assistant replies: drop HTML tags outside quotes and fences. */
+  stripHtml?: boolean;
 }) {
   const { palette } = useTheme();
-  const parts = messageParts(body, imageNames);
+  const parts = messageParts(body, imageNames, stripHtml);
   const media = parts.filter((part) => part.type !== 'text').length;
   const hasText = parts.some((part) => part.type === 'text');
   const [gone, setGone] = useState(0);

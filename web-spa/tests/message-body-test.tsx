@@ -1,7 +1,30 @@
 import { act, render } from '@testing-library/react-native';
 
-import { downloadName, formatActionNewlines, MessageBody, mediaFrame, messageParts } from '@/components/MessageBody';
+import {
+  downloadName,
+  formatActionNewlines,
+  MessageBody,
+  mediaFrame,
+  messageParts,
+  stripHtmlTags,
+} from '@/components/MessageBody';
 import { ThemeProvider } from '@/theme/Theme';
+
+test('assistant display drops HTML tags outside quotes and fences', () => {
+  expect(stripHtmlTags('Hello <b>there</b>')).toBe('Hello there');
+  expect(stripHtmlTags('A <br/> break')).toBe('A  break');
+  expect(stripHtmlTags('<!-- note -->kept')).toBe('kept');
+  expect(stripHtmlTags('> <b>quoted</b>')).toBe('> <b>quoted</b>');
+  expect(stripHtmlTags('```html\n<div>x</div>\n```')).toBe('```html\n<div>x</div>\n```');
+  expect(stripHtmlTags('out <i>x</i>\n```html\n<span>y</span>\n```\nafter <b>z</b>')).toBe(
+    'out x\n```html\n<span>y</span>\n```\nafter z',
+  );
+  expect(messageParts('Say <em>hi</em>', false, true)[0]).toMatchObject({ type: 'text', text: 'Say hi' });
+  expect(messageParts('Keep <em>hi</em>', false, false)[0]).toMatchObject({
+    type: 'text',
+    text: 'Keep <em>hi</em>',
+  });
+});
 
 test('a closed action gets one newline and a model newline is dropped', () => {
   expect(formatActionNewlines('*smiles*Hello')).toBe('*smiles*  \nHello');
@@ -14,7 +37,12 @@ test('a closed action gets one newline and a model newline is dropped', () => {
   expect(formatActionNewlines('*smiles*\n\nHello')).toBe('*smiles*\n\nHello');
   expect(formatActionNewlines('*a* *b* next')).toBe('*a*  \n*b*  \nnext');
   expect(formatActionNewlines('Thank you, friend! *Nicker*!')).toBe('Thank you, friend!  \n*Nicker*!');
-  expect(formatActionNewlines('Hello *smiles* there')).toBe('Hello  \n*smiles*  \nthere');
+  expect(formatActionNewlines('Example *this should not* result to a new line.')).toBe(
+    'Example *this should not* result to a new line.',
+  );
+  expect(formatActionNewlines('Hello *smiles* there')).toBe('Hello *smiles* there');
+  expect(formatActionNewlines('*while this does*')).toBe('*while this does*');
+  expect(formatActionNewlines('*while this does* And more')).toBe('*while this does*  \nAnd more');
   expect(formatActionNewlines('Hello\n*smiles*')).toBe('Hello  \n*smiles*');
   expect(
     formatActionNewlines('*Chomp chomp*!\nOh wow, these are crunching delicious! Thank you, friend! *Nicker*!'),

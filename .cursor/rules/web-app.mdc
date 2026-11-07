@@ -68,9 +68,9 @@ Token colors only. Pair with [web-spa.mdc](web-spa.mdc) for surfaces and contras
 
 ## Curated gallery and workspace shell
 
-The gallery workspace is generative UI on a shared shell (closed catalog, agent placement, AG-UI state). The single as-built note is in the closed tree: [favlo-cloud/docs/maf/curated-gallery.md](../../../favlo-cloud/docs/maf/curated-gallery.md). When a change touches that surface, update that note in the same change. Keep short pointers only in [web-spa/README.md](../../web-spa/README.md), [web-api/README.md](../../web-api/README.md), and [docs/ai-assistance/README.md](../../docs/ai-assistance/README.md).
+The gallery workspace is generative UI on a shared shell (closed catalog, agent placement, AG-UI state). The public notes are [web-spa/README.md](../../web-spa/README.md), [web-api/README.md](../../web-api/README.md), and [docs/ai-assistance/README.md](../../docs/ai-assistance/README.md). When a change touches that surface, update those notes in the same change.
 
-Catalog names and versions in `web_api/catalog.py` and `web-spa/src/workspace/catalog.ts` stay paired. A new element updates both registries, the guide when it may place it, the as-built note, and the happy-path script for that action.
+Catalog names and versions in `web_api/catalog.py` and `web-spa/src/workspace/catalog.ts` stay paired. A new element updates both registries, the guide when it may place it, the open notes named above, and the happy-path script for that action.
 
 ## Unit tests
 
