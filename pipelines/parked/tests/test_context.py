@@ -65,6 +65,14 @@ def test_atlas_budget_keeps_headroom_and_the_expert_files() -> None:
         memory=memory, content_bytes=0, footprint=footprint, growth=growth
     )
     assert open_budget == memory - HEADROOM - footprint - growth
+    measured = atlas_budget(
+        memory=footprint + (20 << 30),
+        content_bytes=0,
+        footprint=footprint,
+        growth=growth,
+        headroom=0,
+    )
+    assert measured == (20 << 30) - growth
 
 
 def test_a_tight_room_keeps_one_layer_and_the_pins() -> None:

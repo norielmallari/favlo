@@ -12,12 +12,14 @@ import numpy as np
 
 from qwen38_flash_next.convert import ShardStore, _bypass_cache, pread_exact
 from qwen38_flash_next.formats import (
+    NGRAM_FP8_SLOT,
     NGRAM_SLOT,
     NGRAM_WIDTH,
     PAGE,
     QUANT_LAYOUT_VERSION,
     RECORD_VERSION,
     dequant_int4,
+    dequant_int8,
     int4_plane_sizes,
     quant_file,
     stored_k_int4,
@@ -116,6 +118,7 @@ class QuantRecord:
             raise FileNotFoundError(message)
         self.root = root
         self.manifest = json.loads(manifest_path.read_text())
+        self.ngram_slot = int(self.manifest.get("ngram_slot") or NGRAM_SLOT)
         if not self.manifest.get("complete"):
             message = f"quantized record is incomplete: {root}"
             raise RuntimeError(message)
@@ -545,7 +548,7 @@ class QuantRecord:
         if row < 0 or row >= int(self.manifest["ngram_rows"]):
             message = f"n-gram row {row} is outside the table"
             raise IndexError(message)
-        slot_off = row * NGRAM_SLOT
+        slot_off = row * self.ngram_slot
         page = (slot_off // PAGE) * PAGE
         cached = self.pages.get(page)
         if cached is None:
@@ -554,7 +557,9 @@ class QuantRecord:
                 self.pages.clear()
             self.pages[page] = cached
         local = slot_off - page
-        slot = cached[local : local + NGRAM_SLOT]
+        slot = cached[local : local + self.ngram_slot]
+        if self.ngram_slot == NGRAM_FP8_SLOT:
+            return dequant_int8(slot[:NGRAM_WIDTH], slot[NGRAM_WIDTH : NGRAM_WIDTH + 5], 1, NGRAM_WIDTH)[0]
         return dequant_int4(slot[:80], slot[80:85], 1, NGRAM_WIDTH)[0]
 
     def release_io(self) -> None:

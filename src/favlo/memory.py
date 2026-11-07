@@ -307,6 +307,19 @@ class Memory:
         """Bytes a new span may take after this process's own live and pending counts."""
         return max(0, self.budget() - self.live - self.pending)
 
+    def wire_room(self) -> int:
+        """Bytes this device can still wire inside its recommended working set.
+
+        The recommended working set is the allocation total Metal still runs
+        with. ``currentAllocatedSize`` is what this device has already
+        allocated. The difference is the room a new buffer can wire. A
+        negative result means that working set is already overcommitted.
+        """
+        device = self.device
+        limit = int(device.recommendedMaxWorkingSetSize())
+        used = int(device.currentAllocatedSize())
+        return limit - used
+
     def _raw_locked(self) -> int:
         reported = sum(self._reported.values())
         for child in self._children.values():
@@ -446,6 +459,7 @@ class Memory:
         heap: str = "resident",
         storage: str = "shared",
         zero: bool = False,
+        align: int | None = None,
     ) -> Handle:
         kind = "private" if storage == "private" or heap == "private" else heap
         mode = "private" if kind == "private" or storage == "private" else "shared"
@@ -454,7 +468,7 @@ class Memory:
             raise ValueError(message)
         request = max(int(nbytes), 16)
         with self._lock:
-            span = self._span_locked(request, owner, kind, mode)
+            span = self._span_locked(request, owner, kind, mode, align)
             handle = Handle(span_id := self._next)
             self._next += 1
             self._spans[span_id] = span
@@ -604,6 +618,13 @@ class Memory:
             if aligned >= page and span.storage == "shared":
                 self.commit_span(handle, 0, aligned)
         return _NONVOLATILE
+
+    def location(self, handle: Any, offset: int = 0) -> tuple[Any, int] | None:
+        """Metal buffer and byte offset for a span. A raw buffer returns None."""
+        span = self._lookup(handle)
+        if span is None:
+            return None
+        return span.segment.buffer, span.offset + int(offset)
 
     def bind(self, encoder: Any, index: int, handle: Any, offset: int = 0) -> None:
         span = self._lookup(handle)
@@ -782,13 +803,20 @@ class Memory:
         )
         return int(mode) | int(metal.MTLResourceCPUCacheModeDefaultCache)
 
-    def _span_locked(self, request: int, owner: str, kind: str, storage: str) -> _Span:
+    def _span_locked(
+        self,
+        request: int,
+        owner: str,
+        kind: str,
+        storage: str,
+        align: int | None = None,
+    ) -> _Span:
         self._device_locked()
-        placed = self._place(request, owner, kind, storage)
+        placed = self._place(request, owner, kind, storage, align)
         if placed is None:
             self._drop_idle_segments()
             self._add_segment(request, owner, kind, storage)
-            placed = self._place(request, owner, kind, storage)
+            placed = self._place(request, owner, kind, storage, align)
         if placed is None:
             message = f"no span for {request} bytes"
             raise RuntimeError(message)
@@ -797,12 +825,17 @@ class Memory:
         return _Span(segment, token, offset, length, request, owner, kind, storage)
 
     def _place(
-        self, request: int, owner: str, kind: str, storage: str
+        self,
+        request: int,
+        owner: str,
+        kind: str,
+        storage: str,
+        align: int | None = None,
     ) -> tuple[_Segment, int, int, int] | None:
         for segment in self._segments:
             if segment.owner != owner or segment.kind != kind or segment.storage != storage:
                 continue
-            found = segment.mapping.allocate(request)
+            found = segment.mapping.allocate(request, align)
             if found is None:
                 continue
             token, offset = found

@@ -37,6 +37,12 @@ SCRATCH_FLOOR = 256 << 20
 SCRATCH_PER_TOKEN = 2 << 20
 RESIDENT_FLOOR = 8 << 30
 RESIDENT_STEP = 4 << 30
+# Room a mapped atlas keeps beyond scratch and cache growth. A decode command
+# wires more than the scratch arenas, and a remainder under this fails it.
+COMMAND_ROOM = 2 << 30
+# The longest Metal buffer is not a safe atlas. The command also wires scratch,
+# the n-gram set, and the cache. Leave this much under that limit.
+ATLAS_BUFFER_SLACK = 12 << 30
 DEFAULT_LADDER = (24 << 30, 20 << 30, 16 << 30, 12 << 30, 8 << 30)
 DEFAULT_PROMPT_LIMIT = 128 << 10
 
@@ -75,11 +81,22 @@ def process_footprint() -> int:
         import resource
 
         return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
-    libc = ctypes.CDLL("/usr/lib/libSystem.dylib", use_errno=True)
+    libc = _libsystem()
     info = _RUsageInfoV0()
     if libc.proc_pid_rusage(os.getpid(), 0, ctypes.byref(info)) != 0:
         raise OSError(ctypes.get_errno(), "proc_pid_rusage")
     return int(info.ri_phys_footprint)
+
+
+def _libsystem() -> ctypes.CDLL:
+    """The process library, opened once. Opening it on every footprint read stalls decode."""
+    global _LIBSYSTEM
+    if _LIBSYSTEM is None:
+        _LIBSYSTEM = ctypes.CDLL("/usr/lib/libSystem.dylib", use_errno=True)
+    return _LIBSYSTEM
+
+
+_LIBSYSTEM: ctypes.CDLL | None = None
 
 
 def cache_growth_bytes(tokens: int, per_token: int) -> int:
@@ -118,6 +135,7 @@ def atlas_budget(
     footprint: int,
     growth: int,
     hold: int = PAGE,
+    headroom: int | None = None,
 ) -> int:
     """Largest atlas that leaves headroom, the live process, and one cache growth.
 
@@ -125,12 +143,14 @@ def atlas_budget(
     than the bytes it can hold. ``hold`` is the bytes one stage keeps. When the
     room after headroom is smaller than ``hold`` and those bytes are free after
     the process and the cache growth, the atlas is ``hold`` and the headroom is
-    what remains.
+    what remains. ``headroom`` defaults to 6 GiB. A caller that already measured
+    the free bytes passes 0.
     """
     need = _page_up(hold) if hold > PAGE else PAGE
     spent = max(0, footprint) + max(0, growth)
     free = memory - spent
-    room = free - HEADROOM
+    reserve = HEADROOM if headroom is None else max(0, int(headroom))
+    room = free - reserve
     if room >= need:
         cap = _page_down(room)
     elif free >= need:

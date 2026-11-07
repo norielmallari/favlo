@@ -353,6 +353,14 @@ def _require_page(offset: int, size: int) -> None:
         raise RuntimeError(message)
 
 
+def _io_target(buffer: Any, offset: int) -> tuple[Any, int]:
+    """Heap buffer and byte for a span. A raw Metal buffer stays as given."""
+    found = memory.location(buffer, offset)
+    if found is None:
+        return buffer, int(offset)
+    return found
+
+
 def _append_transcript(path: Path | None, prompt: str, output: str) -> None:
     """Append one prompt and its completion. Token rates stay on the console."""
     if path is None:
@@ -506,6 +514,7 @@ class MetalSession:
         self.gemm = Int4Gemm(self._owner)
         self.device = self.gemm.device
         self.metal = self.gemm.metal
+        self.ngram_slot = NGRAM_SLOT
         width = self.gemm.decode.threadExecutionWidth()
         if int(width) != 32:
             message = f"shader dot assumes simd width 32, device reported {width}"
@@ -593,6 +602,9 @@ class MetalSession:
             "sample_f32",
             "suppress_logit",
             "presence_logits",
+            "penalize_counts",
+            "bump_count",
+            "sample_ids",
             "sample_topk_partial",
             "sample_topk_draw",
             "spec_topk_accept",
@@ -651,6 +663,10 @@ class MetalSession:
         self._sample_scratch = None
         self._ngram_pages: dict[int, Any] = {}
         self._ngram_order: list[int] = []
+        self._ngram_io: Any = None
+        self._ngram_event: Any = None
+        self._ngram_event_value = 0
+        self._ngram_locate: dict[int, tuple[Any, int]] = {}
         self.activation = self.alloc(10240 * 2)
         self.f32_activation = self.alloc(10240 * 4)
         self.destination = self.alloc(248320 * 4)
@@ -678,8 +694,8 @@ class MetalSession:
             raise RuntimeError(message)
         return pipeline
 
-    def alloc(self, nbytes: int) -> Any:
-        return memory.allocate(max(int(nbytes), 16), owner=self._owner)
+    def alloc(self, nbytes: int, *, align: int | None = None) -> Any:
+        return memory.allocate(max(int(nbytes), 16), owner=self._owner, align=align)
 
     def begin_scratch(self, nbytes: int, *, copies: int = 1) -> None:
         copies = 2 if copies > 1 else 1
@@ -702,6 +718,15 @@ class MetalSession:
         self._arena_i = 0
         self._arena = self._arenas[0]
         self._arena_used = 0
+
+    def end_scratch(self) -> None:
+        """Drop the prefill arenas once the request has finished."""
+        old = list(self._arenas)
+        self._arena = None
+        self._arenas = []
+        self._arena_used = 0
+        for buf in old:
+            discard_buffer(buf)
 
     def rewind_scratch(self) -> None:
         """Reuse this arena from offset zero.
@@ -1680,6 +1705,60 @@ class MetalSession:
             1,
         )
 
+    def penalize_counts(self, logits: Dev, counts: Any, presence: float, frequency: float) -> None:
+        """Subtract presence once and frequency per copy. The host does not walk the window."""
+        if presence == 0.0 and frequency == 0.0:
+            return
+        self._ew(
+            "penalize_counts",
+            (_dev_bind(logits), (counts, 0)),
+            (
+                struct.pack("<I", logits.n),
+                struct.pack("<f", float(presence)),
+                struct.pack("<f", float(frequency)),
+            ),
+            logits.n,
+        )
+
+    def bump_count(self, counts: Any, index: int, delta: int) -> None:
+        self.dispatch(
+            self.act["bump_count"],
+            ((counts, 0),),
+            (struct.pack("<I", int(index)), struct.pack("<i", int(delta))),
+            self._size(1),
+            self._size(1),
+        )
+
+    def sample_ids(self, logits: Dev, ids: Sequence[int], temperature: float, rng: Any) -> int:
+        """Draw one id from the name mask. The host does not copy the logit row."""
+        count = len(ids)
+        if count == 0:
+            message = "name mask is empty"
+            raise RuntimeError(message)
+        if count == 1:
+            return int(ids[0])
+        raw = np.asarray(ids, dtype=np.uint32).tobytes()
+        mask = getattr(self, "_mask_ids", None)
+        if mask is None or int(mask.length()) < len(raw):
+            mask = self.alloc(max(len(raw), 4096))
+            self._mask_ids = mask
+        _buffer_view(mask, len(raw))[:] = raw
+        uniform = float(rng.random()) if temperature > 0.0 else 0.0
+        self.dispatch(
+            self.act["sample_ids"],
+            (_dev_bind(logits), (mask, 0), (self._argmax_out, 0)),
+            (
+                struct.pack("<I", count),
+                struct.pack("<f", float(temperature)),
+                struct.pack("<f", uniform),
+            ),
+            self._size(1),
+            self._size(1),
+        )
+        self.flush()
+        chosen = _buffer_bytes(self._argmax_out, 4)
+        return int(np.frombuffer(chosen, dtype=np.uint32)[0])
+
     def _cast_half(self, src: Dev, logical: int, stored: int) -> Span:
         half = self.span(stored * 2)
         self._ew(
@@ -1742,6 +1821,21 @@ class MetalSession:
         if src.n != count * inner:
             message = f"linear source {src.n} is not {count} by {inner}"
             raise ValueError(message)
+        if getattr(matrix, "fp8", False):
+            if count == 1:
+                dst = self.gemv_int8(
+                    src,
+                    matrix.weights,
+                    matrix.rows,
+                    matrix.stored_inner,
+                    matrix.weight_off,
+                    matrix.scale_off,
+                    matrix.inner,
+                    half=False,
+                )
+            else:
+                dst = self._gemm_fp8(matrix, src, count, inner)
+            return self._apply_epilogue(dst, epilogue, epilogue_scale)
         if count == 1 and isinstance(matrix, Int4Matrix):
             return self._gemv_int4(matrix, src, epilogue, epilogue_scale)
         # A span of at most four tokens uses the span GEMV. One read of the
@@ -1906,6 +2000,53 @@ class MetalSession:
         )
         self.dispatch(
             self.gemm.prefill,
+            (
+                (act.buf, act.offset),
+                (matrix.weights, matrix.weight_off),
+                (matrix.scales, matrix.scale_off),
+                _dev_bind(wide),
+            ),
+            (
+                struct.pack("<I", padded),
+                struct.pack("<I", cols),
+                struct.pack("<I", stored),
+            ),
+            self._size(cols // 32, padded // 64, 1),
+            self._size(32 * 4, 1, 1),
+        )
+        packed = self.tmp(count * matrix.rows)
+        self._ew(
+            "compact_rows",
+            (_dev_bind(wide), _dev_bind(packed)),
+            (
+                struct.pack("<I", count),
+                struct.pack("<I", matrix.rows),
+                struct.pack("<I", cols),
+            ),
+            count * matrix.rows,
+        )
+        return packed
+
+    def _gemm_fp8(self, matrix: Int4Matrix, src: Dev, count: int, inner: int) -> Dev:
+        padded = ((count + 63) // 64) * 64
+        stored = matrix.stored_inner
+        cols = matrix.rows
+        act = self.span(padded * stored * 2)
+        wide = self.tmp(padded * cols)
+        _zero_dev(wide)
+        self._ew(
+            "cast_prefill",
+            (_dev_bind(src), (act.buf, act.offset)),
+            (
+                struct.pack("<I", count),
+                struct.pack("<I", inner),
+                struct.pack("<I", padded),
+                struct.pack("<I", stored),
+            ),
+            padded * stored,
+        )
+        self.dispatch(
+            self.gemm.prefill_fp8,
             (
                 (act.buf, act.offset),
                 (matrix.weights, matrix.weight_off),
@@ -2156,6 +2297,65 @@ class MetalSession:
         self._io = queue
         self._event = self.device.newSharedEvent()
 
+    def ensure_ngram_io(self) -> None:
+        """A second IO queue. Its command does not wait on the expert chain."""
+        if self._ngram_io is not None:
+            return
+        desc = self.metal.MTLIOCommandQueueDescriptor.alloc().init()
+        desc.setPriority_(0)
+        # Concurrent, and zero keeps the system maximum of commands in flight.
+        desc.setType_(0)
+        desc.setMaxCommandsInFlight_(0)
+        queue, error = _objc_pair(self.device.newIOCommandQueueWithDescriptor_error_(desc, None))
+        if queue is None:
+            message = f"n-gram IO queue failed: {error}"
+            raise RuntimeError(message)
+        self._ngram_io = queue
+        self._ngram_event = self.device.newSharedEvent()
+
+    def ngram_io_read(self, handle: Any, loads: Sequence[tuple[Any, int, int, int]]) -> int:
+        """Commit n-gram loads and return the event layer 1 waits on."""
+        if not loads:
+            return 0
+        self.ensure_ngram_io()
+        command = self._ngram_io.commandBuffer()
+        if command is None:
+            message = "n-gram IO command buffer was not vended"
+            raise RuntimeError(message)
+        issued = 0
+        for buffer, dest_off, size, src_off in loads:
+            _require_page(dest_off, size)
+            _require_page(src_off, size)
+            offset = 0
+            while offset < size:
+                take = min(IO_CHUNK, size - offset)
+                dest, dest_at = _io_target(buffer, dest_off + offset)
+                _require_page(dest_at, take)
+                command.loadBuffer_offset_size_sourceHandle_sourceHandleOffset_(
+                    dest, dest_at, take, handle, src_off + offset
+                )
+                offset += take
+                issued += 1
+        self._ngram_event_value += 1
+        value = self._ngram_event_value
+        command.signalEvent_value_(self._ngram_event, value)
+        command.commit()
+        self._io_pending.append((command, value))
+        self.io_loads += issued
+        return int(value)
+
+    def wait_ngram(self, value: int) -> None:
+        """Make the next compute command wait for the n-gram loads only."""
+        if value <= 0 or self._ngram_event is None:
+            return
+        if self._encoder is not None:
+            self._encoder.endEncoding()
+            self._encoder = None
+        if self._command is None:
+            self._command = memory.command_buffer(self.queue)
+            self._batch_launches = 0
+        self._command.encodeWaitForEvent_value_(self._ngram_event, int(value))
+
     def _open_io(self) -> Any:
         self.ensure_io()
         command = self._io.commandBuffer()
@@ -2189,8 +2389,10 @@ class MetalSession:
             offset = 0
             while offset < size:
                 take = min(IO_CHUNK, size - offset)
+                dest, dest_at = _io_target(buffer, dest_off + offset)
+                _require_page(dest_at, take)
                 command.loadBuffer_offset_size_sourceHandle_sourceHandleOffset_(
-                    buffer, dest_off + offset, take, handle, src_off + offset
+                    dest, dest_at, take, handle, src_off + offset
                 )
                 offset += take
                 issued += 1
@@ -2217,8 +2419,10 @@ class MetalSession:
                 offset = 0
                 while offset < size:
                     take = min(IO_CHUNK, size - offset)
+                    dest, dest_at = _io_target(buffer, dest_off + offset)
+                    _require_page(dest_at, take)
                     command.loadBuffer_offset_size_sourceHandle_sourceHandleOffset_(
-                        buffer, dest_off + offset, take, handle, src_off + offset
+                        dest, dest_at, take, handle, src_off + offset
                     )
                     offset += take
                     issued += 1
@@ -2250,8 +2454,10 @@ class MetalSession:
             offset = 0
             while offset < size:
                 take = min(IO_CHUNK, size - offset)
+                dest, dest_at = _io_target(buffer, dest_off + offset)
+                _require_page(dest_at, take)
                 command.loadBuffer_offset_size_sourceHandle_sourceHandleOffset_(
-                    buffer, dest_off + offset, take, handle, src_off + offset
+                    dest, dest_at, take, handle, src_off + offset
                 )
                 offset += take
                 issued += 1
@@ -2281,36 +2487,61 @@ class MetalSession:
             self._command_wait = value
 
     def ngram_dequant(self, handle: Any, rows: Sequence[int]) -> Dev:
-        if len(rows) > 16:
-            return self._ngram_dequant_packed(handle, rows)
-        raw = self.span(len(rows) * NGRAM_SLOT)
-        loads: list[tuple[Any, int, int, int]] = []
-        copies: list[tuple[Any, int, int]] = []
-        needed: set[int] = set()
-        for index, row in enumerate(rows):
-            byte = int(row) * NGRAM_SLOT
-            page = byte // PAGE
-            local = byte - page * PAGE
-            buf = self._ngram_pages.get(page)
-            if buf is None:
-                buf = self.alloc(PAGE)
-                self._ngram_pages[page] = buf
-                self._ngram_order.append(page)
-                loads.append((buf, 0, PAGE, page * PAGE))
-                needed.add(page)
-            copies.append((buf, local, index * NGRAM_SLOT))
-        trim_page_cache(self._ngram_order, self._ngram_pages, needed, 4096)
-        if loads:
-            self.io_read(handle, loads, gpu_wait=True)
-        for buf, local, dest in copies:
-            self.copy_bytes(buf, local, raw.buf, raw.offset + dest, NGRAM_SLOT)
+        del handle
+        locate = self._ngram_locate
+        if not locate:
+            message = "n-gram pages were not issued"
+            raise RuntimeError(message)
+        slot_bytes = self.ngram_slot
         dst = self.tmp(len(rows) * NGRAM_WIDTH)
-        self._ew(
-            "dequant_ngram",
-            ((raw.buf, raw.offset), _dev_bind(dst)),
-            (struct.pack("<I", NGRAM_WIDTH), struct.pack("<I", NGRAM_SLOT)),
-            len(rows) * NGRAM_WIDTH,
-        )
+        step = 4096
+        for start in range(0, len(rows), step):
+            part = rows[start : start + step]
+            slots: dict[int, int] = {}
+            order: list[int] = []
+            offs: list[int] = []
+            for row in part:
+                byte = int(row) * slot_bytes
+                page = byte // PAGE
+                local = byte - page * PAGE
+                placed = locate.get(page)
+                if placed is None:
+                    message = f"n-gram page {page} is not resident"
+                    raise RuntimeError(message)
+                slot = slots.get(page)
+                if slot is None:
+                    slot = len(order)
+                    slots[page] = slot
+                    order.append(page)
+                offs.append(slot * PAGE + local)
+            pack = self.span_page(max(len(order), 1) * PAGE)
+            for page, slot in slots.items():
+                src, src_off = locate[page]
+                self.copy_bytes(src, src_off, pack.buf, pack.offset + slot * PAGE, PAGE)
+            raw = np.ascontiguousarray(np.asarray(offs, dtype=np.uint32)).tobytes()
+            index = self.span(len(raw))
+            _buffer_view(index.buf, index.offset + len(raw))[
+                index.offset : index.offset + len(raw)
+            ] = raw
+            part_dst = dst if len(rows) <= step else self.tmp(len(part) * NGRAM_WIDTH)
+            self._ew(
+                "dequant_ngram_packed",
+                ((pack.buf, pack.offset), (index.buf, index.offset), _dev_bind(part_dst)),
+                (
+                    struct.pack("<I", NGRAM_WIDTH),
+                    struct.pack("<I", len(part)),
+                    struct.pack("<I", slot_bytes),
+                ),
+                len(part) * NGRAM_WIDTH,
+            )
+            if part_dst is not dst:
+                self.copy_bytes(
+                    part_dst.buf,
+                    part_dst.offset * 4,
+                    dst.buf,
+                    dst.offset * 4 + start * NGRAM_WIDTH * 4,
+                    part_dst.n * 4,
+                )
         return dst
 
     def _ngram_dequant_packed(self, handle: Any, rows: Sequence[int]) -> Dev:
@@ -2323,7 +2554,7 @@ class MetalSession:
             order: list[int] = []
             offs: list[int] = []
             for row in part:
-                byte = int(row) * NGRAM_SLOT
+                byte = int(row) * self.ngram_slot
                 page = byte // PAGE
                 local = byte - page * PAGE
                 slot = slots.get(page)
@@ -2348,7 +2579,11 @@ class MetalSession:
             self._ew(
                 "dequant_ngram_packed",
                 ((pack.buf, pack.offset), (index.buf, index.offset), _dev_bind(part_dst)),
-                (struct.pack("<I", NGRAM_WIDTH), struct.pack("<I", len(part))),
+                (
+                    struct.pack("<I", NGRAM_WIDTH),
+                    struct.pack("<I", len(part)),
+                    struct.pack("<I", self.ngram_slot),
+                ),
                 len(part) * NGRAM_WIDTH,
             )
             self.copy_bytes(

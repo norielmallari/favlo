@@ -177,11 +177,26 @@ def test_function_name_stays_inside_the_request() -> None:
         "confirm_file>",
     ]
     assert function_name_options("<tool_call>\n<function=cre", names) == ["ate_file>"]
+    from qwen38_flash_next.tools import tool_markup_options
+
+    assert tool_markup_options("Look.\n<tool_call>") == ["\n<function="]
+    assert tool_markup_options("Look.\n<tool_call>\n<") == ["function="]
+    assert tool_markup_options("Look.\n<tool_call>\n<function=") is None
+    assert tool_markup_options("Look.\n<tool_call>\n=write_file") is None
     closed = "<tool_call>\n<function=create_file>\n</function>\n</tool_call>"
     assert function_name_options(closed, names) is None
     pieces = ["", "make", "create", "edit", "confirm", ">", "ate_file>"]
     assert continuing_ids(["create_file>", "edit_file>", "confirm_file>"], pieces) == [2, 3, 4]
     assert continuing_ids(["ate_file>"], pieces) == [6]
+    from qwen38_flash_next.tools import build_prefix_index, indexed_continuations
+
+    index = build_prefix_index(pieces)
+    assert set(indexed_continuations(index, ["create_file>", "edit_file>", "confirm_file>"])) == {
+        2,
+        3,
+        4,
+    }
+    assert indexed_continuations(index, ["ate_file>"]) == [6]
 
 
 def test_required_function_forces_the_opening() -> None:
@@ -238,8 +253,15 @@ def test_think_stream_holds_a_partial_close_tag() -> None:
     stream = ThinkStream(True)
     assert stream.push("The ninth buoy is bl") == [("reasoning", "The ninth buoy is bl")]
     assert stream.push("ue.</thi") == [("reasoning", "ue.")]
-    assert stream.push("nk>\nMara Ellison Voss.") == [("content", "\nMara Ellison Voss.")]
-    assert stream.finish() == []
+    assert stream.push("nk>\nMara Ellison Voss.") == []
+    assert stream.finish() == [("content", "\nMara Ellison Voss.")]
+
+
+def test_think_stream_drops_a_restarted_block() -> None:
+    stream = ThinkStream(True)
+    text = "Look up the file.</think>\n</think>\nLook up the file.\n</think>\nDone."
+    assert stream.push(text) == [("reasoning", "Look up the file.")]
+    assert stream.finish() == [("content", "\nDone.")]
 
 
 def test_think_stream_closed_request_is_content() -> None:

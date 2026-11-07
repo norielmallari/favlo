@@ -32,6 +32,20 @@ static float fp4_e2m1(uint nibble) {
     return k_fp4_e2m1[nibble & 15u];
 }
 
+static float ngram_e4m3(uchar code) {
+    uint value = code;
+    float sign = (value & 0x80u) != 0u ? -1.0f : 1.0f;
+    uint exponent = (value >> 3) & 0xfu;
+    uint mantissa = value & 0x7u;
+    if (exponent == 0u) {
+        return sign * (float(mantissa) / 8.0f) * exp2(-6.0f);
+    }
+    if (exponent == 15u && mantissa == 7u) {
+        return sign * NAN;
+    }
+    return sign * (1.0f + float(mantissa) / 8.0f) * exp2(float(exponent) - 7.0f);
+}
+
 kernel void silu_f32(
     device const float* x [[buffer(0)]],
     device float* y [[buffer(1)]],
@@ -655,10 +669,16 @@ kernel void embed_gather(
     uint token = tokens[token_i];
     device const uchar* data = image + token * data_row;
     device const uchar* scales = image + data_base + token * scale_row;
-    uchar byte = data[col >> 1];
-    uint nibble = (col & 1u) != 0u ? (byte >> 4) : (byte & 0x0Fu);
-    int exponent = int(scales[col >> 5]) - 127;
-    float value = fp4_e2m1(nibble) * ldexp(1.0f, exponent);
+    float value;
+    if (data_row == logical) {
+        int exponent = int(scales[col >> 5]) - 127;
+        value = ngram_e4m3(data[col]) * ldexp(1.0f, exponent);
+    } else {
+        uchar byte = data[col >> 1];
+        uint nibble = (col & 1u) != 0u ? (byte >> 4) : (byte & 0x0Fu);
+        int exponent = int(scales[col >> 5]) - 127;
+        value = fp4_e2m1(nibble) * ldexp(1.0f, exponent);
+    }
     for (uint branch = 0u; branch < branches; ++branch) {
         uint at = (token_i * branches + branch) * logical + col;
         residual[at] = value;
@@ -679,6 +699,11 @@ kernel void dequant_ngram(
     uint row = tid / width;
     uint col = tid - row * width;
     device const uchar* slot = slots + row * slot_bytes;
+    if (slot_bytes == 256u) {
+        int exponent = int(slot[160u + (col >> 5)]) - 127;
+        out[tid] = ngram_e4m3(slot[col]) * ldexp(1.0f, exponent);
+        return;
+    }
     uchar byte = slot[col >> 1];
     uint nibble = (col & 1u) != 0u ? (byte >> 4) : (byte & 0x0Fu);
     int exponent = int(slot[80u + (col >> 5)]) - 127;
@@ -693,6 +718,7 @@ kernel void dequant_ngram_packed(
     device float* out [[buffer(2)]],
     constant uint& width [[buffer(3)]],
     constant uint& n_rows [[buffer(4)]],
+    constant uint& slot_bytes [[buffer(5)]],
     uint tid [[thread_position_in_grid]])
 {
     if (tid >= n_rows * width) {
@@ -701,6 +727,11 @@ kernel void dequant_ngram_packed(
     uint row = tid / width;
     uint col = tid - row * width;
     device const uchar* slot = pack + row_off[row];
+    if (slot_bytes == 256u) {
+        int exponent = int(slot[160u + (col >> 5)]) - 127;
+        out[tid] = ngram_e4m3(slot[col]) * ldexp(1.0f, exponent);
+        return;
+    }
     uchar byte = slot[col >> 1];
     uint nibble = (col & 1u) != 0u ? (byte >> 4) : (byte & 0x0Fu);
     int exponent = int(slot[80u + (col >> 5)]) - 127;
@@ -869,6 +900,93 @@ kernel void presence_logits(
     for (uint i = 0u; i < n; ++i) {
         logits[ids[i]] -= penalty;
     }
+}
+
+kernel void penalize_counts(
+    device float* logits [[buffer(0)]],
+    device const uint* counts [[buffer(1)]],
+    constant uint& n [[buffer(2)]],
+    constant float& presence [[buffer(3)]],
+    constant float& frequency [[buffer(4)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= n) {
+        return;
+    }
+    uint count = counts[tid];
+    float penalty = frequency * float(count);
+    if (count > 0u) {
+        penalty += presence;
+    }
+    logits[tid] -= penalty;
+}
+
+kernel void bump_count(
+    device uint* counts [[buffer(0)]],
+    constant uint& index [[buffer(1)]],
+    constant int& delta [[buffer(2)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid != 0u) {
+        return;
+    }
+    int next = int(counts[index]) + delta;
+    if (next < 0) {
+        next = 0;
+    }
+    counts[index] = uint(next);
+}
+
+kernel void sample_ids(
+    device const float* logits [[buffer(0)]],
+    device const uint* ids [[buffer(1)]],
+    device uint* out [[buffer(2)]],
+    constant uint& n [[buffer(3)]],
+    constant float& temperature [[buffer(4)]],
+    constant float& uniform [[buffer(5)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid != 0u || n == 0u) {
+        return;
+    }
+    float peak = logits[ids[0]];
+    uint best = 0u;
+    for (uint i = 1u; i < n; ++i) {
+        float value = logits[ids[i]];
+        if (value > peak) {
+            peak = value;
+            best = i;
+        }
+    }
+    if (!(temperature > 0.0f)) {
+        out[0] = ids[best];
+        return;
+    }
+    float inv = 1.0f / temperature;
+    float sum = 0.0f;
+    for (uint i = 0u; i < n; ++i) {
+        float weight = exp((logits[ids[i]] - peak) * inv);
+        if (weight == weight) {
+            sum += weight;
+        }
+    }
+    if (!(sum > 0.0f)) {
+        out[0] = ids[best];
+        return;
+    }
+    float cursor = 0.0f;
+    float mark = uniform * sum;
+    for (uint i = 0u; i < n; ++i) {
+        float weight = exp((logits[ids[i]] - peak) * inv);
+        if (weight == weight) {
+            cursor += weight;
+        }
+        if (mark < cursor) {
+            out[0] = ids[i];
+            return;
+        }
+    }
+    out[0] = ids[n - 1u];
 }
 
 kernel void suppress_logit(

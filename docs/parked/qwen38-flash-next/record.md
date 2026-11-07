@@ -2,7 +2,7 @@
 
 As-built files for the Qwen3.8-Flash-Next Metal record. Scope and the tier rules are in [ARCHITECTURE.md](../../../ARCHITECTURE.md). If this note disagrees with that file, ARCHITECTURE.md wins.
 
-Record version 6 is the directory this tree serves. The file is the buffer image Metal reads. `resident.bin` is one sequential load at startup, and its length is a multiple of 1 MiB. `ngram.bin` is random 16 KB pages. Each expert layer is `experts/NN-fp4.bin`. Experts sit in id order, and expert `e` starts at `e × stride`. The runtime refuses another expert width. The manifest stores `expert_quant` and the `super` list. That list is the atlas pin. Those images stay in the fp4 file, the atlas loads them, and it does not evict them. The manifest does not store a file name, a resident percent, or an importance order. Which other images stay in the atlas is the eviction strategy. MTP experts are `mtp-experts.bin` at `--mtp-bits`. Inside a live image, the data plane comes first and the E8M0 scale plane follows. Each plane starts on a 128-byte boundary. One Metal IO load covers one expert, both projections, both planes, and stops at the end of that image.
+Record version 6 is the directory this tree serves. The file is the buffer image Metal reads. `resident.bin` is one sequential load at startup, and its length is a multiple of 1 MiB. `ngram.bin` is random 16 KB pages. Each expert layer is `experts/NN-fp4.bin`. Experts sit in id order, and expert `e` starts at `e × stride`. The runtime refuses another expert width. The manifest stores `expert_quant` and the `super` list. That list is the atlas pin. Those images stay in the fp4 file, the atlas loads them, and it does not evict them. The manifest does not store a file name, a resident percent, or an importance order. Which other images stay in the atlas is the eviction strategy. `quantize` does not write `mtp-experts.bin`. Inside a live image, the data plane comes first and the E8M0 scale plane follows. Each plane starts on a 128-byte boundary. One Metal IO load covers one expert, both projections, both planes, and stops at the end of that image.
 
 A version 5 directory still opens. That layout is `experts/NN-hot.bin` and `experts/NN-cold.bin`, plus `experts/NN-super.bin` when a layer has a pin. `quantize` writes version 6. A version 5 manifest in the output directory is refused.
 
@@ -24,17 +24,17 @@ A version 6 directory is the Hugging Face model name plus the weight quants, wid
 
 | Weight | Record |
 |---|---|
-| Output head | Middle fp4. Loaded once into a device tensor |
-| Token embedding | Middle fp4. Loaded once. A token gathers one row from that copy |
+| Output head | fp8 E4M3, 248,320 × 2,560. Loaded once |
+| Token embedding | fp8 E4M3, 248,320 × 2,560. Loaded once. A token gathers one row from that copy |
 | Gated residual, DeltaNet projections, sparse-attention projections, indexer, shared expert, n-gram `key_proj` and `value_proj` | Middle fp4. Loaded once |
 | Router, 512×2560 | 16-bit. Loaded once. It picks the tier |
-| N-gram table | One fp4 table. Each row occupies 128 bytes. The request path loads that slot |
+| N-gram table | fp8 E4M3. Each row occupies 256 bytes. The request path loads that slot |
 | MTP experts | The same middle image, packed with no hole between experts |
 | Norms, DeltaNet convolution, n-gram convolution | 16-bit. Loaded once |
 | Rotary embedding | Computed, not stored |
 | Running residual, four branches | 16-bit |
 
-The n-gram table is not tiered. A row's payload is 160 fp4 channels plus five E8M0 bytes, stored in a 128-byte slot so a 16 KB page holds 128 complete rows. The hash that selects a row is in [ngram.md](ngram.md).
+The n-gram table is not tiered. A row's payload is 160 E4M3 bytes plus five E8M0 bytes, stored in a 256-byte slot so a 16 KB page holds 64 complete rows. The hash that selects a row is in [ngram.md](ngram.md).
 
 The scale for a block of 32 is one E8M0 byte, bias 127. It is the power of two at or above `amax / qmax`, so the peak fits in the format. `qmax` is 6 for fp4 E2M1, 448 for fp8 E4M3, and 1 for int2. The stored exponent is `log2(scale) + 127`, clamped to `0..254`. `0xFF` is not written. A zero block stores 0. fp4 picks the nearest of `0, 0.5, 1, 1.5, 2, 3, 4, 6` and stores the sign in bit 3 of the nibble, low nibble first. fp8 stores one OCP E4M3FN byte per value, ties to the even mantissa. The citations are [REFERENCES.md](../../../REFERENCES.md).
 

@@ -8,7 +8,7 @@ from qwen38_flash_next.checks import (
     check_routed_expert,
     check_state_kernels,
 )
-from qwen38_flash_next.commands import handle_chat, main, open_runtime
+from qwen38_flash_next.commands import handle_responses, main, open_runtime
 from qwen38_flash_next.convert import (
     _expert_start,
     _load_progress,
@@ -88,7 +88,7 @@ __all__ = [
     "check_routed_expert",
     "check_state_kernels",
     "group_assignments",
-    "handle_chat",
+    "handle_responses",
     "idle_heartbeat",
     "classify_subbyte",
     "cold_live_bytes",

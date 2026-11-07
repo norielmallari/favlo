@@ -49,6 +49,14 @@ def preallocate(fd: int, nbytes: int) -> None:
     if nbytes <= 0 or nbytes % PAGE:
         message = f"allocation {nbytes} is not a positive multiple of {PAGE}"
         raise ValueError(message)
+    if not hasattr(fcntl, "F_PREALLOCATE"):
+        os.ftruncate(fd, 0)
+        fallocate = getattr(os, "posix_fallocate", None)
+        if fallocate is not None:
+            fallocate(fd, 0, nbytes)
+            return
+        os.ftruncate(fd, nbytes)
+        return
     os.ftruncate(fd, 0)
     filled = 0
     while filled < nbytes:

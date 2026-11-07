@@ -36,27 +36,36 @@ class OffsetMap:
         self._used: dict[int, tuple[int, int]] = {}
         self._next = 1
 
-    def allocate(self, nbytes: int) -> tuple[int, int] | None:
-        need = bin_size(nbytes, self.alignment)
+    def allocate(self, nbytes: int, align_to: int | None = None) -> tuple[int, int] | None:
+        grain = self.alignment if align_to is None else max(self.alignment, int(align_to))
+        need = bin_size(nbytes, grain)
         if need > self.size:
             return None
         choice: int | None = None
         best = self.size + 1
-        for index, (_offset, length) in enumerate(self._free):
-            if length >= need and length < best:
+        start_at = 0
+        for index, (offset, length) in enumerate(self._free):
+            start = align(offset, grain)
+            pad = start - offset
+            if pad + need <= length and length < best:
                 choice = index
                 best = length
+                start_at = start
         if choice is None:
             return None
         offset, length = self._free.pop(choice)
-        spare = length - need
+        pad = start_at - offset
+        if pad:
+            self._free.append((offset, pad))
+        spare = length - pad - need
         if spare:
-            self._free.append((offset + need, spare))
+            self._free.append((start_at + need, spare))
+        if pad or spare:
             self._free.sort()
         token = self._next
         self._next += 1
-        self._used[token] = (offset, need)
-        return token, offset
+        self._used[token] = (start_at, need)
+        return token, start_at
 
     def free(self, token: int) -> None:
         found = self._used.pop(token, None)
@@ -91,9 +100,10 @@ class BumpMap:
         self._used: dict[int, tuple[int, int]] = {}
         self._next = 1
 
-    def allocate(self, nbytes: int) -> tuple[int, int] | None:
-        need = bin_size(nbytes, self.alignment)
-        offset = align(self._cursor, self.alignment)
+    def allocate(self, nbytes: int, align_to: int | None = None) -> tuple[int, int] | None:
+        grain = self.alignment if align_to is None else max(self.alignment, int(align_to))
+        need = bin_size(nbytes, grain)
+        offset = align(self._cursor, grain)
         if offset + need > self.size:
             return None
         self._cursor = offset + need

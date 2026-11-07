@@ -259,3 +259,15 @@ def test_decode_take_keeps_the_prefix() -> None:
     assert int(routes.decode[0][2]) == 0
     routes.take_decode(1)
     assert routes.decode_tokens == 2
+
+
+def test_posted_decode_bins_when_the_request_closes() -> None:
+    routes = RouteScratch(1, 4)
+    routes.note_decode(np.array([[[0], [1], [2]]], dtype=np.int64))
+    routes.post_decode(2)
+    assert routes.decode_tokens == 0
+    snap = routes.snapshot()
+    assert snap.decode_tokens == 2
+    assert int(snap.decode[0][0]) == 1
+    assert int(snap.decode[0][1]) == 1
+    assert int(snap.decode[0][2]) == 0

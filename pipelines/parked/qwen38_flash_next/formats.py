@@ -16,6 +16,7 @@ PAGE = 16384
 # statvfs f_bsize on this APFS volume, and the transfer size that fills the SSD.
 PREFERRED_IO = 1 << 20
 NGRAM_SLOT = 128
+NGRAM_FP8_SLOT = 256
 NGRAM_WIDTH = 160
 IO_CHUNK = 256 * 1024 * 1024
 RECORD_VERSION = 5
@@ -558,6 +559,28 @@ def ngram_slots(weight: np.ndarray) -> bytes:
     slots = np.zeros((rows, NGRAM_SLOT), dtype=np.uint8)
     slots[:, :80] = data
     slots[:, 80:85] = scales
+    return np.ascontiguousarray(slots).tobytes()
+
+
+def ngram_fp8_slots(weight: np.ndarray) -> bytes:
+    """One 256-byte slot per row: 160 E4M3 bytes, five E8M0 bytes, then padding."""
+    rows, inner = weight.shape
+    if inner != NGRAM_WIDTH:
+        message = f"n-gram width {inner} is not {NGRAM_WIDTH}"
+        raise ValueError(message)
+    image, stored = quantize_int8_image(weight, align_k=False)
+    if stored != NGRAM_WIDTH:
+        message = f"n-gram stored K {stored} is not {NGRAM_WIDTH}"
+        raise RuntimeError(message)
+    data_n, scale_n = int8_plane_sizes(rows, stored)
+    if scale_n != rows * (NGRAM_WIDTH // BLOCK):
+        message = f"n-gram scales {scale_n} are not {rows} rows"
+        raise RuntimeError(message)
+    data = np.frombuffer(image[:data_n], dtype=np.uint8).reshape(rows, NGRAM_WIDTH)
+    scales = np.frombuffer(image[data_n:], dtype=np.uint8).reshape(rows, NGRAM_WIDTH // BLOCK)
+    slots = np.zeros((rows, NGRAM_FP8_SLOT), dtype=np.uint8)
+    slots[:, :NGRAM_WIDTH] = data
+    slots[:, NGRAM_WIDTH : NGRAM_WIDTH + scales.shape[1]] = scales
     return np.ascontiguousarray(slots).tobytes()
 
 

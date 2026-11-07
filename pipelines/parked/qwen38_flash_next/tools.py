@@ -28,7 +28,8 @@ def split_completion(
     and a later render of the message would no longer extend the prefix.
     """
     reasoning, reply = split_thinking(text, enable_thinking)
-    visible = reply if reply else text
+    closed = enable_thinking and _THINK_CLOSE in text
+    visible = reply if closed or reply else text
     if tool_choice == "none":
         content = text if not enable_thinking else visible
         return content, [], reasoning if enable_thinking else ""
@@ -92,23 +93,38 @@ def normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 _THINK_CLOSE = "</think>"
 
 
+def _after_last_close(text: str) -> str:
+    """Text after the last think close. A partial tag at the end stays."""
+    at = text.rfind(_THINK_CLOSE)
+    if at < 0:
+        return text
+    return text[at + len(_THINK_CLOSE) :]
+
+
 class ThinkStream:
     """Split a completion that starts inside an open ``<think>`` block.
 
     The chat template leaves ``<think>`` at the end of the prompt, so the
-    generated tokens are reasoning until ``</think>``. Text after that tag
-    is the reply. A request with thinking closed emits only the reply.
+    generated tokens are reasoning until ``</think>``. The reply is the text
+    after the last close. A later close drops the block the model wrote again.
+    A request with thinking closed emits only the reply.
     """
 
     def __init__(self, thinking: bool) -> None:
+        self._thinking = thinking
         self._reasoning = thinking
         self._held = ""
+        self._reply = ""
 
     def push(self, piece: str) -> list[tuple[str, str]]:
         if piece == "":
             return []
-        if not self._reasoning:
+        if not self._thinking:
             return [("content", piece)]
+        if not self._reasoning:
+            self._reply += piece
+            self._reply = _after_last_close(self._reply)
+            return []
         self._held += piece
         at = self._held.find(_THINK_CLOSE)
         if at < 0:
@@ -117,23 +133,21 @@ class ThinkStream:
             self._held = self._held[-keep:] if keep else ""
             return [("reasoning", emit)] if emit else []
         reasoning = self._held[:at]
-        rest = self._held[at + len(_THINK_CLOSE) :]
+        self._reply = _after_last_close(self._held[at + len(_THINK_CLOSE) :])
         self._held = ""
         self._reasoning = False
-        out: list[tuple[str, str]] = []
-        if reasoning:
-            out.append(("reasoning", reasoning))
-        if rest:
-            out.append(("content", rest))
-        return out
+        return [("reasoning", reasoning)] if reasoning else []
 
     def finish(self) -> list[tuple[str, str]]:
-        if not self._held:
-            return []
-        channel = "reasoning" if self._reasoning else "content"
-        emit = self._held
-        self._held = ""
-        return [(channel, emit)]
+        out: list[tuple[str, str]] = []
+        if self._held:
+            channel = "reasoning" if self._reasoning else "content"
+            out.append((channel, self._held))
+            self._held = ""
+        if self._reply:
+            out.append(("content", self._reply))
+            self._reply = ""
+        return out
 
 
 PENALTY_WINDOW = 20
@@ -292,6 +306,27 @@ def forced_call_options(text: str, name: str | None, *, close: bool = False) -> 
     return [rest]
 
 
+def tool_markup_options(text: str) -> list[str] | None:
+    """The unwritten ``<function=`` after an open ``<tool_call>``.
+
+    ``None`` once that tag has started, once the call has closed, or when the
+    text after ``<tool_call>`` is not a prefix of the opening.
+    """
+    start = text.rfind("<tool_call>")
+    if start < 0 or "</tool_call>" in text[start:]:
+        return None
+    written = text[start + len("<tool_call>") :]
+    if "<function" in written:
+        return None
+    target = "\n<function="
+    if not target.startswith(written):
+        return None
+    rest = target[len(written) :]
+    if not rest:
+        return None
+    return [rest]
+
+
 def function_name_options(text: str, names: Sequence[str]) -> list[str] | None:
     """What an open ``<function=`` may still spell.
 
@@ -332,6 +367,61 @@ def continuing_ids(options: Sequence[str], pieces: Sequence[str]) -> list[int]:
                 allowed.append(index)
                 break
     return allowed
+
+
+class PrefixIndex:
+    """Pieces arranged so a suffix walk returns every prefix token."""
+
+    __slots__ = ("children", "ids")
+
+    def __init__(self) -> None:
+        self.children: dict[str, PrefixIndex] = {}
+        self.ids: list[int] = []
+
+
+def build_prefix_index(pieces: Sequence[str]) -> PrefixIndex:
+    root = PrefixIndex()
+    for index, piece in enumerate(pieces):
+        if not piece:
+            continue
+        node = root
+        for char in piece:
+            nxt = node.children.get(char)
+            if nxt is None:
+                nxt = PrefixIndex()
+                node.children[char] = nxt
+            node = nxt
+        node.ids.append(index)
+    return root
+
+
+def indexed_continuations(index: PrefixIndex, options: Sequence[str]) -> list[int]:
+    """Token ids whose piece is a prefix of one remaining suffix."""
+    found: list[int] = []
+    seen: set[int] = set()
+    for option in options:
+        node = index
+        for char in option:
+            nxt = node.children.get(char)
+            if nxt is None:
+                break
+            node = nxt
+            for token in node.ids:
+                if token not in seen:
+                    seen.add(token)
+                    found.append(token)
+    return found
+
+
+def prefix_index_from_tokenizer(tokenizer: Any) -> PrefixIndex:
+    """One index for this tokenizer. The generate loop does not decode the vocabulary."""
+    size = int(tokenizer.get_vocab_size())
+    pieces: list[str] = []
+    step = 8192
+    for start in range(0, size, step):
+        stop = min(start + step, size)
+        pieces.extend(tokenizer.decode_batch([[index] for index in range(start, stop)]))
+    return build_prefix_index(pieces)
 
 
 def _parameter_value(value: str) -> str:

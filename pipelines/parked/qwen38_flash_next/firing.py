@@ -121,6 +121,7 @@ class RouteScratch:
         self.prefill_tokens = 0
         self.decode_tokens = 0
         self._held: np.ndarray | None = None
+        self._posted: list[np.ndarray] = []
         self._clear_turn()
 
     def begin(self) -> None:
@@ -129,6 +130,7 @@ class RouteScratch:
         self.prefill_tokens = 0
         self.decode_tokens = 0
         self._held = None
+        self._posted = []
         self._clear_turn()
 
     def note_turn(
@@ -182,10 +184,28 @@ class RouteScratch:
             self._add(self.decode, layer, part[layer])
         self.decode_tokens += int(min(tokens, held.shape[1]))
 
+    def post_decode(self, tokens: int) -> None:
+        """Keep the raw ids. The lull bins them after the request closes."""
+        held = self._held
+        self._held = None
+        if held is None or tokens <= 0:
+            return
+        self._posted.append(np.array(held[:, : int(tokens), :], dtype=np.int64, copy=True))
+
+    def fold_posted(self) -> None:
+        posted = self._posted
+        self._posted = []
+        for part in posted:
+            for layer in range(self.layers):
+                self._add(self.decode, layer, part[layer])
+            self.decode_tokens += int(part.shape[1])
+
     def drop_decode(self) -> None:
         self._held = None
+        self._posted = []
 
     def snapshot(self) -> RouteScratch:
+        self.fold_posted()
         snap = RouteScratch(self.layers, self.experts)
         snap.prefill = self.prefill.copy()
         snap.decode = self.decode.copy()

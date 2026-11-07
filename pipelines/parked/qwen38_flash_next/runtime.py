@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import objc
 
+from favlo.memory import memory
 from favlo.pipeline import ClientClosed
 from favlo.prefix import (
     DEFAULT_BUDGET,
@@ -29,6 +30,8 @@ from qwen38_flash_next.context import (
     BLOCK as INDEX_BLOCK,
 )
 from qwen38_flash_next.context import (
+    ATLAS_BUFFER_SLACK,
+    COMMAND_ROOM,
     DENSE_LIMIT,
     INDEX_STRIDE,
     PREFILL_CHUNK,
@@ -36,7 +39,6 @@ from qwen38_flash_next.context import (
     atlas_fallbacks,
     cache_growth_bytes,
     kv_bytes_per_token,
-    machine_memory,
     process_footprint,
     resident_candidates,
     resident_hold,
@@ -53,6 +55,7 @@ from qwen38_flash_next.formats import (
     KV_BF16_BYTES,
     KV_E4M3_BYTES,
     KV_TAIL_TOKENS,
+    NGRAM_SLOT,
     NGRAM_WIDTH,
     PAGE,
     ExpertPlanes,
@@ -61,6 +64,7 @@ from qwen38_flash_next.formats import (
     kv_cache_name,
     stored_k_int4,
 )
+from qwen38_flash_next.ngram_set import COLD_RESERVE, METAL_MARGIN, SET_BYTES, NgramTable
 from qwen38_flash_next.record import QuantRecord, _Bf16Ngram, prefill_image_table
 from qwen38_flash_next.session import (
     Dev,
@@ -82,11 +86,13 @@ from qwen38_flash_next.session import (
 )
 from qwen38_flash_next.tools import (
     canonical_continuation,
-    continuing_ids,
     forced_call_options,
     function_name_options,
+    indexed_continuations,
     normalize_messages,
     penalty_ids,
+    prefix_index_from_tokenizer,
+    tool_markup_options,
 )
 
 
@@ -248,6 +254,12 @@ class Qwen38Runtime:
         self._presence_penalty = 0.0
         self._frequency_penalty = 0.0
         self._penalty_window = 20
+        self._token_counts: Any = None
+        self._counts_fresh = True
+        self._name_index: Any = None
+        self._text_sig: tuple[Any, ...] | None = None
+        self._text_cache = ""
+        self._span_held: Dev | None = None
         self._predicted: dict[int, list[int]] = {}
         self._span_rows = 1
         self._prefetch_events: dict[int, int] = {}
@@ -287,7 +299,6 @@ class Qwen38Runtime:
         self.tool_names: list[str] = []
         self.required_function: str | None = None
         self.required_closes = False
-        self._token_pieces: list[str] | None = None
         self.gdn_state = {
             index: self.gpu.zeros(48 * 128 * 128 * 4)
             for index, kind in enumerate(self.kinds)
@@ -312,6 +323,12 @@ class Qwen38Runtime:
         self.kv_v_tail = {index: self.gpu.alloc(tail) for index in attention}
         self.indexer_buf = {index: self.gpu.alloc(INDEX_BF16_BYTES) for index in attention}
         self._mtp_on = False
+        self._ngram_table = None
+        self._ngram_buf = None
+        self._ngram_staging = None
+        self._ngram_event = 0
+        self._mtp_logit_buf = None
+        self._mtp_logit_n = 0
         self._mtp_drafts = False
         self._draft_limit = 1
         self._span_snap = False
@@ -361,7 +378,11 @@ class Qwen38Runtime:
             # position of the span. The atlas budget then sees this footprint.
             self._ensure_tok_snaps()
         tok_cfg = json.loads((root / "tokenizer_config.json").read_text())
-        self.chat_template = tok_cfg["chat_template"]
+        template_path = root / "chat_template.jinja"
+        if template_path.is_file():
+            self.chat_template = template_path.read_text()
+        else:
+            self.chat_template = tok_cfg["chat_template"]
         from tokenizers import Tokenizer
 
         self.tokenizer = Tokenizer.from_file(str(root / "tokenizer.json"))
@@ -587,6 +608,7 @@ class Qwen38Runtime:
                 self._end_prefill_stream()
             elif self.atlas is not None:
                 self.atlas.release_unused()
+            self._release_ngram_staging()
             if getattr(self, "_kv_snap", None):
                 self._restore_recurrent()
                 self._kv_snap = None
@@ -614,6 +636,8 @@ class Qwen38Runtime:
             # A cache hit decodes with the experts already mapped. A streamed
             # prefill evicts the atlas tail until its staging buffers fit.
             self._flush_prefix(release_atlas=False)
+            if self.gpu is not None:
+                self.gpu.end_scratch()
             self.reset()
             cached = self._load_prefix(prompt)
         self._cached_tokens = cached
@@ -898,22 +922,35 @@ class Qwen38Runtime:
         stored = stored_bytes(ref.length)
         if stored == 0:
             return buf
-        if buf is None or int(buf.length()) < stored:
-            buf = self.gpu.alloc(stored)
+        if buf is None or int(buf.length()) < stored or not self._page_span(buf):
+            previous = buf
+            buf = self.gpu.alloc(stored, align=PAGE)
+            if previous is not None and buf is not None:
+                discard_buffer(previous)
             if buf is None:
                 message = f"prefix buffer of {stored} bytes was not allocated"
                 raise RuntimeError(message)
         loads.append((buf, 0, stored, ref.offset))
         return buf
 
+    def _page_span(self, buf: Any) -> bool:
+        found = memory.location(buf, 0)
+        return found is None or found[1] % PAGE == 0
+
     def _replace_cache(self, table: dict[int, Any], layer: int, nbytes: int) -> Any:
         current = table[layer]
-        if current is not None and int(current.length()) >= nbytes:
+        if (
+            current is not None
+            and int(current.length()) >= nbytes
+            and self._page_span(current)
+        ):
             return current
-        allocated = self.gpu.alloc(nbytes)
+        allocated = self.gpu.alloc(nbytes, align=PAGE)
         if allocated is None:
             message = f"prefix buffer of {nbytes} bytes was not allocated"
             raise RuntimeError(message)
+        if current is not None:
+            discard_buffer(current)
         table[layer] = allocated
         return allocated
 
@@ -989,6 +1026,10 @@ class Qwen38Runtime:
         produced_ids: list[int] = []
         produced = 0
         first_sample = True
+        self._counts_fresh = True
+        self._text_sig = None
+        if self.tool_names:
+            self._ensure_name_index()
         try:
             while True:
                 self._check_stop()
@@ -1035,9 +1076,10 @@ class Qwen38Runtime:
                     yield item
                     produced += 1
                     produced_ids.append(item)
+                    self._note_penalty(item, produced_ids)
                     if carry_pending and index == pending_count - 1:
                         self._carry_yielded = True
-                    if self.required_function and "</tool_call>" in self.decode(produced_ids):
+                    if self.required_function and "</tool_call>" in self._text_of(produced_ids):
                         return
                 if stopped:
                     return
@@ -1180,6 +1222,16 @@ class Qwen38Runtime:
             constrained = self._constrained_name(logits, temperature, produced)
             if constrained is not None:
                 return constrained
+        if isinstance(logits, Dev):
+            if (self._presence_penalty or self._frequency_penalty) and produced:
+                self._ensure_penalty_counts()
+                self.gpu.penalize_counts(
+                    logits,
+                    self._token_counts,
+                    float(self._presence_penalty),
+                    float(self._frequency_penalty),
+                )
+            return logits
         frequency_ids = (
             penalty_ids(produced, self._penalty_window, once=False)
             if self._frequency_penalty and produced
@@ -1191,12 +1243,6 @@ class Qwen38Runtime:
             else []
         )
         if not frequency_ids and not presence_ids:
-            return logits
-        if isinstance(logits, Dev):
-            if frequency_ids:
-                self.gpu.presence(logits, frequency_ids, self._frequency_penalty)
-            if presence_ids:
-                self.gpu.presence(logits, presence_ids, self._presence_penalty)
             return logits
         adjusted = np.array(logits, copy=True)
         for token in frequency_ids:
@@ -1212,12 +1258,22 @@ class Qwen38Runtime:
 
         A required opening uses the tokenizer's encoding of that text.
         """
-        text = self.decode(produced) if produced else ""
+        text = self._text_of(produced)
         options = forced_call_options(
             text, self.required_function, close=self.required_closes
         )
         forced = options is not None
         if options is None and produced:
+            opening = tool_markup_options(text)
+            if opening:
+                nxt = canonical_continuation(
+                    produced,
+                    opening[0],
+                    lambda piece: self.tokenizer.encode(piece).ids,
+                    self.decode,
+                )
+                if nxt is not None:
+                    return nxt
             options = function_name_options(text, self.tool_names)
         if not options:
             return None
@@ -1230,28 +1286,92 @@ class Qwen38Runtime:
             )
             if nxt is not None:
                 return nxt
-        allowed = continuing_ids(options, self._pieces())
+        allowed = self._allowed_ids(options)
         if not allowed:
             return None
-        raw = _buffer_slice(logits.buf, logits.offset * 4, logits.n * 4)
-        values = np.frombuffer(raw, dtype=np.float32)
-        ids = np.asarray(allowed, dtype=np.int64)
-        chosen = values[ids]
-        if temperature <= 0.0 or not np.isfinite(chosen).any():
-            return int(ids[int(np.argmax(chosen))])
-        scaled = chosen / temperature
-        scaled = scaled - np.max(scaled)
-        weights = np.exp(scaled)
-        total = float(np.sum(weights))
-        if total == 0.0 or not np.isfinite(total):
-            return int(ids[int(np.argmax(chosen))])
-        return int(self.rng.choice(ids, p=weights / total))
+        return self.gpu.sample_ids(logits, allowed, temperature, self.rng)
 
-    def _pieces(self) -> list[str]:
-        if self._token_pieces is None:
-            size = int(self.tokenizer.get_vocab_size())
-            self._token_pieces = [self.tokenizer.decode([index]) for index in range(size)]
-        return self._token_pieces
+    def _text_of(self, produced: list[int]) -> str:
+        """The decoded completion. A second call with the same ends reuses it."""
+        count = len(produced)
+        sig = (count, produced[0] if count else None, produced[-1] if count else None)
+        if self._text_sig == sig:
+            return self._text_cache
+        text = self.decode(produced) if count else ""
+        self._text_sig = sig
+        self._text_cache = text
+        return text
+
+    def _ensure_name_index(self) -> None:
+        if self._name_index is not None:
+            return
+        self._name_index = prefix_index_from_tokenizer(self.tokenizer)
+
+    def _allowed_ids(self, options: list[str]) -> list[int]:
+        self._ensure_name_index()
+        return indexed_continuations(self._name_index, options)
+
+    def _ensure_penalty_counts(self) -> None:
+        if self._token_counts is None:
+            self._token_counts = self.gpu.zeros(self.vocab * 4)
+            self._counts_fresh = False
+            return
+        if self._counts_fresh:
+            self.gpu.flush()
+            _fill_buffer(self._token_counts, self.vocab * 4, 0)
+            self._counts_fresh = False
+
+    def _note_penalty(self, token: int, produced: list[int]) -> None:
+        """Bump the drawn id. A finite window also drops the id that left it."""
+        if not self._presence_penalty and not self._frequency_penalty:
+            return
+        if not produced:
+            return
+        self._ensure_penalty_counts()
+        drawn = int(token)
+        if drawn < 0 or drawn >= self.vocab:
+            return
+        self.gpu.bump_count(self._token_counts, drawn, 1)
+        window = int(self._penalty_window)
+        index = len(produced) - 1
+        if window > 0 and index >= window:
+            leaving = int(produced[index - window])
+            if 0 <= leaving < self.vocab:
+                self.gpu.bump_count(self._token_counts, leaving, -1)
+
+    def _encode_span_hold(self, logits: Dev, count: int) -> Dev:
+        words = count * self.vocab
+        if getattr(self, "_mtp_span_buf", None) is None or self._mtp_span_n < words:
+            self._mtp_span_buf = self._mtp_alloc("span", max(words, 4 * self.vocab))
+            self._mtp_span_n = max(words, 4 * self.vocab)
+        self.gpu.copy_span(logits, 0, self._mtp_span_buf, 0, words)
+        return Dev(self._mtp_span_buf, words)
+
+    def _encode_logit_hold(self, logits: Dev) -> Dev:
+        """Copy the sampled row into the resident buffer in this command."""
+        row = logits
+        if row.n > self.vocab and row.n % self.vocab == 0:
+            row = row.view(row.n - self.vocab, self.vocab)
+        if self._mtp_logit_buf is None or self._mtp_logit_n < row.n:
+            buf = self.gpu.alloc(row.n * 4)
+            if buf is None:
+                message = "MTP logit buffer was not allocated"
+                raise RuntimeError(message)
+            self._mtp_logit_buf = buf
+            self._mtp_logit_n = row.n
+        self.gpu.copy_span(row, 0, self._mtp_logit_buf, 0, row.n)
+        return Dev(self._mtp_logit_buf, row.n)
+
+    def _seal_logits(self, logits: Dev, count: int) -> Dev:
+        if count > 1 and logits.n >= count * self.vocab:
+            self._span_held = self._encode_span_hold(logits, count)
+        return self._encode_logit_hold(logits)
+
+    def _commit_logits(self, logits: Dev, count: int, *, decode: bool) -> Dev:
+        if decode:
+            logits = self._seal_logits(logits, count)
+        self.gpu.flush()
+        return logits
 
     def forward(
         self,
@@ -1286,7 +1406,13 @@ class Qwen38Runtime:
         # A clean draft has already stepped MTP for this span. Rewinding that
         # cache here leaves it two tokens behind once the span is committed.
         self._rewind_uncommitted(keep_mtp=0 if commit else len(tokens))
-        self.gpu.begin_scratch(scratch, copies=2 if decode else 1)
+        copies = 2 if decode else 1
+        self._fit_atlas(scratch * copies)
+        try:
+            self.gpu.begin_scratch(scratch, copies=copies)
+        except RuntimeError:
+            self._fit_atlas(scratch * copies, force=True)
+            self.gpu.begin_scratch(scratch, copies=copies)
         if decode:
             self._make_room_for_cache(len(tokens))
         self._prepare_experts(decode=decode, count=len(tokens))
@@ -1299,9 +1425,9 @@ class Qwen38Runtime:
         self._capture_recurrent()
         self._forward_open = bool(getattr(self, "_kv_snap", None))
         streamed_before = self.atlas.streamed if decode and self.atlas is not None else 0
+        self._span_held = None
         try:
-            logits = self._forward_body(tokens)
-            self.gpu.flush()
+            logits = self._commit_logits(self._forward_body(tokens), len(tokens), decode=decode)
             if self._streaming_prefill:
                 missed = self._stage_missed()
                 self._end_prefill_stream()
@@ -1327,7 +1453,7 @@ class Qwen38Runtime:
             self.tokens.extend(tokens)
             self._prefix_dirty = True
             if decode and self.routes is not None:
-                self.routes.take_decode(len(tokens))
+                self.routes.post_decode(len(tokens))
         self._forward_open = False
         self.last_logits = logits
         now = time.perf_counter()
@@ -1693,7 +1819,7 @@ class Qwen38Runtime:
     def _name_constrained(self, produced: list[int]) -> bool:
         if not self.tool_names:
             return False
-        text = self.decode(produced) if produced else ""
+        text = self._text_of(produced)
         options = forced_call_options(
             text, self.required_function, close=self.required_closes
         )
@@ -1720,6 +1846,14 @@ class Qwen38Runtime:
 
     def _mtp_hold_rows(self, logits: Dev, count: int) -> Dev:
         words = count * self.vocab
+        held = self._span_held
+        if (
+            isinstance(held, Dev)
+            and held.buf is getattr(self, "_mtp_span_buf", None)
+            and held.n >= words
+        ):
+            self._span_held = None
+            return Dev(self._mtp_span_buf, words)
         if getattr(self, "_mtp_span_buf", None) is None or self._mtp_span_n < words:
             self._mtp_span_buf = self._mtp_alloc("span", 4 * self.vocab)
             self._mtp_span_n = 4 * self.vocab
@@ -1765,7 +1899,7 @@ class Qwen38Runtime:
                 drafts.append(guess)
                 views.append(prepared)
                 chosen.append(guess)
-                if self.required_function and "</tool_call>" in self.decode(produced + chosen):
+                if self.required_function and "</tool_call>" in self._text_of(produced + chosen):
                     break
             else:
                 # Every drafted step was kept. One more step records the last
@@ -1848,7 +1982,7 @@ class Qwen38Runtime:
         drafts: list[int] = []
         views: list[Dev] = []
         opened = produced + [first]
-        closed = bool(self.required_function) and "</tool_call>" in self.decode(opened)
+        closed = bool(self.required_function) and "</tool_call>" in self._text_of(opened)
         if (
             self._mtp_drafts
             and room > 1
@@ -1903,7 +2037,7 @@ class Qwen38Runtime:
             self._note_sample(first=False)
         if correction is None and len(kept) == len(span):
             if self.routes is not None:
-                self.routes.take_decode(len(span))
+                self.routes.post_decode(len(span))
             self.tokens.extend(span)
             self._prefix_dirty = True
             self.last_logits = held.view((len(span) - 1) * self.vocab, self.vocab)
@@ -1925,7 +2059,7 @@ class Qwen38Runtime:
         deferred = False
         if snapped and correction is not None and self._can_carry(stopped):
             if self.routes is not None:
-                self.routes.take_decode(len(kept))
+                self.routes.post_decode(len(kept))
             self._restore_span_prefix(len(kept))
             self.tokens.extend(kept)
             self._prefix_dirty = True
@@ -1943,7 +2077,7 @@ class Qwen38Runtime:
             deferred = True
         elif snapped:
             if self.routes is not None:
-                self.routes.take_decode(len(kept))
+                self.routes.post_decode(len(kept))
             self._restore_span_prefix(len(kept))
             self.tokens.extend(kept)
             self._prefix_dirty = True
@@ -1965,6 +2099,8 @@ class Qwen38Runtime:
         logits = self.last_logits
         if not isinstance(logits, Dev):
             return
+        if logits.buf is self._mtp_logit_buf:
+            return
         if logits.n > self.vocab and logits.n % self.vocab == 0:
             logits = logits.view(logits.n - self.vocab, self.vocab)
             self.last_logits = logits
@@ -1979,7 +2115,66 @@ class Qwen38Runtime:
         self.gpu.flush()
         self.last_logits = Dev(self._mtp_logit_buf, logits.n)
 
+    def _release_ngram_staging(self) -> None:
+        staging = getattr(self, "_ngram_staging", None)
+        self._ngram_staging = None
+        if staging is None:
+            return
+        memory.release(staging)
+
+    def _issue_ngram(self, tokens: list[int]) -> None:
+        """Load this forward's n-gram pages before the embed.
+
+        The command uses the n-gram queue, so it does not wait on an expert
+        load. Layer 1 waits on the event. A prefix token is not looked up.
+        """
+        self._ngram_event = 0
+        self._release_ngram_staging()
+        table = getattr(self, "_ngram_table", None)
+        if (
+            table is None
+            or self._bf16
+            or not tokens
+            or not isinstance(self.files, QuantRecord)
+        ):
+            self.gpu._ngram_locate = {}
+            return
+        ple = self._ple_bundle()
+        rows = ngram_rows(
+            self.tokens + tokens,
+            ple["mult"],
+            ple["offset"],
+            ple["vocab"],
+            heads_per_ngram=self.heads_per_ngram,
+            ngram_size=self.ngram_size,
+            eos=self.eos,
+            start=len(self.tokens),
+        )
+        admits, once = table.plan(rows)
+        locate = {
+            page: (self._ngram_buf, slot * PAGE) for page, slot in table.slot_of.items()
+        }
+        loads: list[tuple[Any, int, int, int]] = [
+            (self._ngram_buf, slot * PAGE, PAGE, page * PAGE) for page, slot in admits
+        ]
+        if once:
+            staging = self.gpu.alloc(len(once) * PAGE, align=PAGE)
+            self._ngram_staging = staging
+            for index, page in enumerate(once):
+                offset = index * PAGE
+                locate[page] = (staging, offset)
+                loads.append((staging, offset, PAGE, page * PAGE))
+        self.gpu._ngram_locate = locate
+        self._ngram_event = self.gpu.ngram_io_read(self.files.ngram_io, loads)
+
     def _forward_body(self, tokens: list[int]) -> Dev:
+        self._issue_ngram(tokens)
+        try:
+            return self._forward_body_inner(tokens)
+        finally:
+            self._release_ngram_staging()
+
+    def _forward_body_inner(self, tokens: list[int]) -> Dev:
         count = len(tokens)
         self._span_snap_count = 0
         self._span_snap = False
@@ -1998,14 +2193,17 @@ class Qwen38Runtime:
             self._ensure_hold(count)
         for layer in range(self.layers):
             self._check_stop()
+            if self._ngram_event and (layer + 1) in self.ple_layers:
+                self.gpu.wait_ngram(self._ngram_event)
+                self._ngram_event = 0
             bundle = None
             for offset in range(0, count, step):
                 n = min(step, count - offset)
                 view = residual.view(offset * span, n * span)
-                self.gpu.rewind_scratch()
-                # Objective-C temporaries from this chunk. The command buffer stays
-                # open until prefill needs expert ids, the host reads the token, or
-                # the next n-gram chunk reuses this scratch.
+                self._open_decode_scratch(n)
+                # Objective-C temporaries from this chunk. A device-routed decode
+                # keeps the token in one command buffer until scratch fills.
+                # Prefill commits when it has to read expert ids.
                 with objc.autorelease_pool():
                     chunk_tokens = tokens[offset : offset + n]
                     if (layer + 1) in self.ple_layers:
@@ -2041,8 +2239,7 @@ class Qwen38Runtime:
                         self._inject_dev(view, hats, mixed, bundle["mlp_inject"], n)
                     if not self._decoding:
                         self._note_prefill(layer, offset + n, count)
-                    if self._decoding and self.atlas is not None:
-                        self.gpu.submit()
+                    self._close_decode_scratch(n)
             if wide and count:
                 if bundle is None:
                     message = "prefill layer had no tokens"
@@ -2060,6 +2257,8 @@ class Qwen38Runtime:
                 0,
                 count * span * 4,
             )
+        if self._device_route(count):
+            self.gpu.submit()
         self.gpu.rewind_scratch()
         final = self._final_bundle()
         positions = count if self._decoding and count > 1 else 1
@@ -2085,8 +2284,7 @@ class Qwen38Runtime:
                 _fill_buffer(self.atlas.miss, self.layers * 4, 0)
             self._restore_recurrent()
             self._atlas_trusted = True
-            logits = self._forward_body(tokens)
-            self.gpu.flush()
+            logits = self._commit_logits(self._forward_body(tokens), len(tokens), decode=True)
             if not self._expert_miss():
                 return logits
         self._force_sync = True
@@ -2094,8 +2292,7 @@ class Qwen38Runtime:
         if self.atlas is not None:
             _fill_buffer(self.atlas.miss, self.layers * 4, 0)
         self._restore_recurrent()
-        logits = self._forward_body(tokens)
-        self.gpu.flush()
+        logits = self._commit_logits(self._forward_body(tokens), len(tokens), decode=True)
         self._force_sync = False
         if self._expert_miss():
             message = "expert atlas missed after reloading this token"
@@ -2111,8 +2308,6 @@ class Qwen38Runtime:
         if self._bf16:
             return
         self._pending_prefill = 0 if decode or count <= 0 else count
-        if self._pending_prefill and self.atlas is not None:
-            self._atlas_fit_tokens = -PREFILL_CHUNK
         if not decode and count > 0:
             end = len(self.tokens) + count
             try:
@@ -2194,22 +2389,158 @@ class Qwen38Runtime:
             )
         return total
 
-    def _live_atlas_candidates(self) -> tuple[int, ...]:
-        self.gpu.flush()
-        gc.collect()
+    def _working_footprint(self) -> int:
+        """Bytes the next atlas budget has to leave in place.
+
+        The mapped atlas is the buffer this budget replaces. The physical
+        footprint counts it until the kernel reclaims those pages, so a
+        budget that subtracts the live footprint sizes the next atlas from
+        the leftover. The footprint taken before that buffer, plus later
+        growth that is still resident, is the working set.
+        """
+        live = process_footprint()
+        held = 0
+        atlas = self.atlas
+        if atlas is not None:
+            held = int(getattr(atlas, "budget", 0) or 0)
+        else:
+            held = int(getattr(self, "_atlas_unreclaimed", 0) or 0)
+        base = getattr(self, "_atlas_base_footprint", None)
+        if held and base is not None and live <= int(base) + (1 << 30):
+            held = 0
+        return max(0, live - held)
+
+    def _pipeline_pending(self) -> int:
+        """Bytes a forward still allocates that Metal has not counted yet.
+
+        The resident n-gram set is counted once it exists. Cold pages of one
+        prefill stay reserved, because they are allocated after the atlas.
+        """
+        pending = COLD_RESERVE
+        if not self._bf16 and getattr(self, "_ngram_buf", None) is None:
+            pending += SET_BYTES
+        return pending
+
+    def _pipeline_room(self) -> int:
+        """Bytes the atlas may still take.
+
+        Metal's working-set remainder, minus 1 GiB, minus this process's
+        footprint that is not a Metal allocation, minus pipeline bytes that
+        are not allocated yet.
+        """
+        reported = memory.wire_room()
+        allocated = int(memory.device.currentAllocatedSize())
+        outside = max(0, process_footprint() - allocated)
+        return reported - METAL_MARGIN - outside - self._pipeline_pending()
+
+    def _await_wire_room(self, need: int) -> int:
+        """The bytes the atlas may take, after a short wait when a release is in flight."""
+        room = self._pipeline_room()
+        if room >= need:
+            return room
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+            room = self._pipeline_room()
+            if room >= need:
+                return room
+        _log(f"wire room {max(room, 0) >> 20} MiB")
+        return room
+
+    def _atlas_budget_now(self, scratch: int) -> int:
         layers = sum(kind == "full_attention" for kind in self.kinds)
         if self._mtp_on:
             layers += 1
         per_token = kv_bytes_per_token(layers, cache=self.kv_cache)
-        growth = cache_growth_bytes(len(self.tokens), per_token) + self._prefill_workspace()
+        growth = (
+            cache_growth_bytes(len(self.tokens), per_token)
+            + self._prefill_workspace()
+            + max(0, int(scratch))
+        )
+        # Metal's remainder, minus 1 GiB, minus footprint Metal did not
+        # allocate, minus the n-gram set and the cold-page reserve. Inactive
+        # pages are not that room.
+        working = self._working_footprint()
+        room = max(0, self._await_wire_room(self._atlas_hold() + growth))
         budget = atlas_budget(
-            memory=machine_memory(),
+            memory=working + room,
             content_bytes=getattr(self, "_tier_bytes", 0),
-            footprint=process_footprint(),
+            footprint=working,
             growth=growth,
             hold=self._atlas_hold(),
+            headroom=0,
         )
-        return atlas_fallbacks(budget)
+        # One atlas is one buffer. Metal will not wire a buffer past this, and
+        # the command still has to wire scratch and the rest of the pipeline.
+        span = int(memory.device.maxBufferLength())
+        if span > PAGE:
+            span -= span % PAGE
+            if span > ATLAS_BUFFER_SLACK + PAGE:
+                span -= ATLAS_BUFFER_SLACK
+                span -= span % PAGE
+            budget = min(budget, span)
+        return budget
+
+    def _live_atlas_candidates(self, scratch: int | None = None) -> tuple[int, ...]:
+        self.gpu.flush()
+        gc.collect()
+        if scratch is None:
+            scratch = scratch_bytes(PREFILL_CHUNK)
+        return atlas_fallbacks(self._atlas_budget_now(scratch))
+
+    def _fit_atlas(self, scratch: int, *, force: bool = False) -> None:
+        """Release an atlas that does not leave room for this forward.
+
+        The first atlas is the bytes Metal can still wire, minus 1 GiB, the
+        footprint that is not a Metal allocation, the n-gram set, one cache
+        growth, and this forward's scratch. It also stays 12 GiB under the
+        longest buffer Metal will wire. A mapped atlas stays while that
+        remainder covers the same need, including 2 GiB the command wires
+        beyond scratch. Otherwise it shrinks by the shortfall, including the
+        amount the working set is already overcommitted. The freed bytes are
+        not used to size the replacement back up. ``force`` steps at least
+        1 GiB below the mapped buffer when the scratch allocation has already
+        failed.
+        """
+        if self._bf16 or not isinstance(self.files, QuantRecord):
+            return
+        if self.resident_percent is not None:
+            return
+        layers = sum(kind == "full_attention" for kind in self.kinds)
+        if self._mtp_on:
+            layers += 1
+        per_token = kv_bytes_per_token(layers, cache=self.kv_cache)
+        need = (
+            cache_growth_bytes(len(self.tokens), per_token)
+            + self._prefill_workspace()
+            + max(0, int(scratch))
+            + COMMAND_ROOM
+        )
+        mapped = self.atlas
+        slack = self._pipeline_room()
+        if mapped is not None and not force and slack >= need:
+            return
+        if mapped is None:
+            budget = self._atlas_budget_now(scratch)
+        else:
+            short = max(1 << 30, need - slack)
+            budget = max(self._atlas_hold(), int(mapped.budget) - short)
+            if budget >= int(mapped.budget):
+                return
+            self._release_atlas()
+        candidates = atlas_fallbacks(budget)
+        if mapped is not None:
+            _log(
+                f"resident atlas refit {candidates[0] >> 20} MiB "
+                f"for {len(self.tokens)} tokens"
+            )
+        elif not self.resident_candidates:
+            _log(
+                f"resident atlas {candidates[0] >> 20} MiB "
+                f"for {len(self.tokens)} tokens"
+            )
+        self.resident_candidates = candidates
+        self.resident_budget = candidates[0]
 
     def _atlas_hold(self) -> int:
         """One layer of expert images, plus every pin."""
@@ -2227,62 +2558,14 @@ class Qwen38Runtime:
         pins = sum(len(row) for row in files.super)
         return resident_hold(image, self.experts, pins)
 
-    def _refit_atlas(self) -> None:
-        """Release an atlas that was sized for a shorter sequence.
-
-        The buffer stays mapped across a long suffix. Once the cache has grown,
-        a buffer more than 1 GiB above the budget for this length is released.
-        The next allocation uses the budget the live sequence leaves. A fixed
-        resident percent is left as requested.
-        """
-        if self.atlas is None or self.resident_percent is not None:
-            return
-        tokens = len(self.tokens)
-        checked = int(getattr(self, "_atlas_fit_tokens", -PREFILL_CHUNK))
-        if tokens < checked + PREFILL_CHUNK:
-            return
-        self._atlas_fit_tokens = tokens
-        layers = sum(kind == "full_attention" for kind in self.kinds)
-        if self._mtp_on:
-            layers += 1
-        per_token = kv_bytes_per_token(layers, cache=self.kv_cache)
-        growth = cache_growth_bytes(tokens, per_token) + self._prefill_workspace()
-        # Physical footprint shrinks when the atlas is compressed, so subtracting
-        # the buffer from it sizes the next atlas as if that RAM were free.
-        # The footprint from before this buffer, plus the cache added since, is
-        # the working set the next budget has to leave in place.
-        base = getattr(self, "_atlas_base_footprint", None)
-        if base is None:
-            return
-        base_tokens = int(getattr(self, "_atlas_base_tokens", 0))
-        added = max(0, tokens - base_tokens) * per_token
-        budget = atlas_budget(
-            memory=machine_memory(),
-            content_bytes=getattr(self, "_tier_bytes", 0),
-            footprint=int(base) + added,
-            growth=growth,
-            hold=self._atlas_hold(),
-        )
-        if int(self.atlas.budget) <= budget + (1 << 30):
-            return
-        candidates = atlas_fallbacks(budget)
-        self._release_atlas()
-        self.resident_candidates = candidates
-        self.resident_budget = candidates[0]
-        _log(
-            f"resident atlas refit {self.resident_budget >> 20} MiB for {tokens} tokens"
-        )
-
     def _ensure_atlas(self) -> None:
         if self._bf16:
             return
         if not isinstance(self.files, QuantRecord):
             return
         if self.atlas is not None:
-            self._refit_atlas()
-            if self.atlas is not None:
-                self._seat_pins()
-                return
+            self._seat_pins()
+            return
         candidates = self.resident_candidates
         if not candidates:
             candidates = self._live_atlas_candidates()
@@ -2291,11 +2574,12 @@ class Qwen38Runtime:
                 f"resident atlas {self.resident_budget >> 20} MiB "
                 f"for {len(self.tokens)} tokens"
             )
-        self._atlas_base_footprint = process_footprint()
+        self._atlas_base_footprint = self._working_footprint()
         self._atlas_base_tokens = len(self.tokens)
         self.atlas = ExpertAtlas(
             self.gpu, self.files, self.layers, self.experts, candidates
         )
+        self._atlas_unreclaimed = 0
         self._seat_pins()
 
     def _seat_pins(self) -> None:
@@ -2347,23 +2631,37 @@ class Qwen38Runtime:
         A pending Metal IO command retains its destination. Wait for those
         commands before the Python reference is the last one.
         """
+        from favlo.memory import memory, reclaimable_bytes
+
         atlas = getattr(self, "atlas", None)
         self.atlas = None
         if atlas is None:
             return
+        nbytes = int(getattr(atlas, "budget", 0) or 0)
+        self._atlas_unreclaimed = nbytes
         gpu = getattr(self, "gpu", None)
         if gpu is None:
             return
+        before = reclaimable_bytes()
         gpu.flush()
         gpu.finish_io()
-        discard_buffer(getattr(atlas, "atlas", None))
-        discard_buffer(getattr(atlas, "table", None))
-        discard_buffer(getattr(atlas, "miss", None))
+        for buf in (
+            getattr(atlas, "atlas", None),
+            getattr(atlas, "table", None),
+            getattr(atlas, "miss", None),
+        ):
+            memory.release(buf)
         for name in ("atlas", "table", "miss"):
             if hasattr(atlas, name):
                 setattr(atlas, name, None)
         del atlas
         gc.collect()
+        # The replacement must not allocate until these pages are free.
+        # Counting them as room while they are still wired doubles the atlas.
+        if memory.confirm_released(before, nbytes, timeout=8.0):
+            self._atlas_unreclaimed = 0
+        else:
+            _log("reclaimable pages stopped short")
 
     def _shrink_atlas(self, nbytes: int) -> None:
         """Evict the least-fired tail until ``nbytes`` of images are released.
@@ -2617,10 +2915,25 @@ class Qwen38Runtime:
             _log("loading quantized record")
         self.files.open_io(self.gpu)
         manifest = self.files.manifest
-        self._resident = self.gpu.alloc(size)
+        self._resident = self.gpu.alloc(size, align=PAGE)
         self.gpu.io_read(self.files.resident_io, [(self._resident, 0, size, 0)])
+        self.gpu.ngram_slot = int(manifest.get("ngram_slot") or NGRAM_SLOT)
+        rows = int(manifest.get("ngram_rows") or 0)
+        pages = max(1, (rows + (PAGE // 256) - 1) // (PAGE // 256))
+        self._ngram_table = NgramTable(pages)
+        self._ngram_buf = self.gpu.alloc(SET_BYTES, align=PAGE)
+        self._ngram_staging = None
+        self._ngram_event = 0
         if progress is not None:
             progress.done = size
+        for key, meta in manifest.get("fp8", {}).items():
+            matrix = self._fp8_matrix(meta)
+            if key == manifest["embed_key"]:
+                self._embed_meta = meta
+                continue
+            if key == manifest.get("head_key"):
+                self._head = matrix
+                continue
         for key, meta in manifest["int4"].items():
             if key == manifest["embed_key"]:
                 self._embed_meta = meta
@@ -2733,6 +3046,7 @@ class Qwen38Runtime:
             return dst
         meta = self._embed_meta
         stored = int(meta["stored_inner"])
+        fp8 = int(meta["data"]) == int(meta["rows"]) * stored
         self.gpu.embed_gather(
             self._resident,
             int(meta["offset"]),
@@ -2740,7 +3054,7 @@ class Qwen38Runtime:
             dst,
             count,
             self.hidden,
-            stored // 2,
+            stored if fp8 else stored // 2,
             stored // BLOCK,
             int(meta["data"]),
             self.branches,
@@ -3248,6 +3562,54 @@ class Qwen38Runtime:
                 )
         return self.gpu.linear(bundle["o_proj"], gated, count, 6144)
 
+    def _fp4_experts(self) -> bool:
+        files = self.files
+        return (
+            isinstance(files, QuantRecord)
+            and files.hot_bits == 4
+            and files.cold_bits == 4
+            and not files.narrow_bits
+        )
+
+    def _device_route(self, count: int) -> bool:
+        """Decode experts from the ids on the device once a token loaded nothing.
+
+        A cold token reads the ids and stages the miss first. Running the
+        kernel before that load changes every later route. After a token loads
+        no image, later tokens keep one command buffer until scratch fills,
+        and a miss replays the token.
+        """
+        return (
+            self._decoding
+            and self._atlas_trusted
+            and 1 <= count <= 4
+            and not self._force_sync
+            and self.atlas is not None
+            and self._tier is not None
+            and self._fp4_experts()
+        )
+
+    def _open_decode_scratch(self, count: int) -> None:
+        """Keep a device-routed token in one command buffer until scratch fills."""
+        if not self._device_route(count):
+            self.gpu.rewind_scratch()
+            return
+        arena = self.gpu._arena
+        reserve = max(int(getattr(self, "_layer_scratch", 0)) * 2, 4 << 20) * count
+        if arena is not None and self.gpu._arena_used + reserve > int(arena.length()):
+            self.gpu.submit()
+            self.gpu.rewind_scratch()
+        self._scratch_mark = self.gpu._arena_used
+
+    def _close_decode_scratch(self, count: int) -> None:
+        if not self._device_route(count):
+            if self._decoding and self.atlas is not None:
+                self.gpu.submit()
+            return
+        used = self.gpu._arena_used - int(getattr(self, "_scratch_mark", 0))
+        if used > int(getattr(self, "_layer_scratch", 0)):
+            self._layer_scratch = used
+
     def _moe_dev(
         self,
         layer: int,
@@ -3291,19 +3653,7 @@ class Qwen38Runtime:
                 )
                 choice = Dev(kept, count * self.top_k, base)
         self._choice[layer] = choice
-        fp4_tiers = (
-            isinstance(self.files, QuantRecord)
-            and self.files.hot_bits == 4
-            and self.files.cold_bits == 4
-            and not self.files.narrow_bits
-        )
-        if (
-            self._decoding
-            and 1 <= count <= 4
-            and self._atlas_trusted
-            and self._tier is not None
-            and fp4_tiers
-        ):
+        if self._device_route(count):
             shared = self._shared_expert(bundle, xs, count)
             if count == 1:
                 return self._moe_decode_trusted(layer, xs, weight, shared)
@@ -3802,6 +4152,9 @@ class Qwen38Runtime:
         choice = Dev(self._choice_ids, self.top_k, layer * self.top_k)
         row = xs if xs.n == self.hidden else xs.view(0, self.hidden)
         shared_row = shared if shared.n == self.hidden else shared.view(0, self.hidden)
+        event = self._prefetch_events.pop(layer, 0)
+        if event:
+            self.gpu.io_fence(event)
         return self._decode_tier_ids(layer, row, shared_row, choice, weight, self._cold, 255)
 
     def _decode_tier_ids(
@@ -4416,7 +4769,7 @@ class Qwen38Runtime:
             if tier != 0:
                 message = "the linear expert path reads int4 hot images"
                 raise RuntimeError(message)
-            buf = self.gpu.alloc(self.files.live)
+            buf = self.gpu.alloc(self.files.live, align=PAGE)
             buffers.append((expert, buf))
             loads.append((buf, 0, self.files.live, row * self.files.slot))
         self.gpu.io_read(self.files.hot_io[layer], loads, gpu_wait=True)
@@ -4659,6 +5012,22 @@ class Qwen38Runtime:
                 "up": self._int4(f"{base}.input_mix_weight_up.weight"),
             }
         return self._final
+
+    def _fp8_matrix(self, meta: dict[str, Any]) -> Int4Matrix:
+        rows = int(meta["rows"])
+        offset = int(meta["offset"])
+        matrix = Int4Matrix(
+            rows,
+            int(meta["logical_inner"]),
+            ((rows + 31) // 32) * 32,
+            self._resident,
+            self._resident,
+            int(meta["stored_inner"]),
+            offset,
+            offset + int(meta["data"]),
+        )
+        matrix.fp8 = True
+        return matrix
 
     def _lm_head(self) -> Int4Matrix:
         if self._head is None:

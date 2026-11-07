@@ -16,6 +16,17 @@ from typing import Any
 
 from favlo.console import Console
 from favlo.language_pipeline import LanguagePipeline
+from favlo.responses import (
+    RequestError,
+    function_tools,
+    new_id,
+    prepare_request,
+    response_object,
+    template_messages,
+    thinking_enabled,
+    usage_object,
+    web_search_context,
+)
 from favlo.registry import (
     add_model,
     choose_complete,
@@ -46,7 +57,6 @@ from qwen38_flash_next.tools import (
     ContentGate,
     ThinkStream,
     call_closes,
-    parse_tool_calls,
     required_function,
     split_completion,
     tool_names,
@@ -427,10 +437,11 @@ def _drain_stream(runtime: Any, tokens: Iterator[int], emit: Any) -> str:
 
 def _reasoning_effort(body: dict[str, Any]) -> str | None:
     """Template effort. ``none`` is omitted, so the template keeps xhigh."""
-    effort = body.get("reasoning_effort")
+    reasoning = body.get("reasoning")
+    effort = reasoning.get("effort") if isinstance(reasoning, dict) else body.get("reasoning_effort")
     if not isinstance(effort, str) or effort.strip().lower() == "none":
         return None
-    return effort
+    return effort.strip().lower()
 
 
 def _enable_thinking(body: dict[str, Any]) -> bool:
@@ -693,10 +704,26 @@ class Pipeline(LanguagePipeline):
         args: Any,
         state: dict[str, Any],
     ) -> None:
-        del args, state
-        messages = body["messages"]
-        tools = body.get("tools")
-        requested = requested_thinking(body)
+        self._reject = None
+        try:
+            prepared = prepare_request(body, state)
+        except RequestError as exc:
+            self._reject = str(exc)
+            reply.json(
+                400,
+                {"error": {"message": str(exc), "type": "invalid_request_error"}},
+            )
+            return
+        del args
+        messages, _kept = template_messages(prepared)
+        search, note = web_search_context(prepared)
+        if note:
+            messages.append({"role": "user", "content": note})
+        tools = function_tools(prepared.get("tools"))
+        requested = thinking_enabled(prepared)
+        if requested is None:
+            requested = requested_thinking(prepared)
+        body = prepared
         enable_thinking, card = mode_card(selection, requested)
         prompt_cap = DEFAULT_MAX_PROMPT_TOKENS
         if selection is not None:
@@ -718,16 +745,23 @@ class Pipeline(LanguagePipeline):
             frequency=0.0 if frequency is None else float(frequency),
             window=_penalty_window(body),
         )
+        limit = body.get("max_output_tokens")
+        if limit is None:
+            limit = _request_limit(body)
+        else:
+            limit = int(limit)
         self._fields = {
             "messages": messages,
             "tools": tools,
+            "prepared": body,
             "enable_thinking": enable_thinking,
-            "max_tokens": _request_limit(body),
+            "max_tokens": limit,
             "prompt_cap": prompt_cap,
             "temperature": temperature,
             "top_p": top_p,
             "top_k": top_k,
             "stream": bool(body.get("stream", False)),
+            "search": search,
         }
 
     def handle_responses(
@@ -740,6 +774,8 @@ class Pipeline(LanguagePipeline):
         state: dict[str, Any],
     ) -> None:
         del selection, state
+        if self._reject:
+            return
         fields = self._fields
         messages = fields["messages"]
         tools = fields["tools"]
@@ -765,6 +801,8 @@ class Pipeline(LanguagePipeline):
                 args,
                 fields["prompt_cap"],
                 tool_choice=body.get("tool_choice"),
+                prepared=fields["prepared"],
+                search=fields["search"],
             )
             return
         tokens = runtime.generate(
@@ -780,23 +818,20 @@ class Pipeline(LanguagePipeline):
             enable_thinking=enable_thinking,
             tool_choice=body.get("tool_choice"),
         )
-        _append_transcript(args.transcript, _prompt_text(messages), text)
-        if calls:
-            reason = "tool_calls"
-        else:
-            reason = "length" if runtime._hit_limit else "stop"
+        _append_transcript(getattr(args, "transcript", None), _prompt_text(messages), text)
         reply.json(
             200,
-            _completion(
+            _response_payload(
+                reply,
+                runtime,
+                fields["prepared"],
+                reasoning if enable_thinking else "",
                 content,
+                calls,
                 len(prompt),
                 len(tokens),
-                reason,
-                calls,
-                reasoning if enable_thinking else "",
-                runtime,
-                reply.model_id,
-                fields["prompt_cap"],
+                bool(runtime._hit_limit),
+                search=fields["search"],
             ),
         )
 
@@ -812,6 +847,10 @@ class Pipeline(LanguagePipeline):
 
     def on_finish(self, runtime: Any, selection: Any, *, complete: bool) -> None:
         finish_request(runtime, selection, complete=complete)
+        gpu = getattr(runtime, "gpu", None)
+        end_scratch = getattr(gpu, "end_scratch", None)
+        if end_scratch is not None:
+            end_scratch()
         runtime._stop = None
         runtime.tool_names = []
         runtime.required_function = None
@@ -819,7 +858,80 @@ class Pipeline(LanguagePipeline):
         self._fields = None
 
 
-handle_chat = Pipeline()
+handle_responses = Pipeline()
+
+
+def _message_item(text: str) -> dict[str, Any]:
+    return {
+        "type": "message",
+        "id": new_id("msg_"),
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": text or "", "annotations": []}],
+    }
+
+
+def _response_payload(
+    reply: Any,
+    runtime: Any,
+    prepared: dict[str, Any],
+    reasoning: str,
+    content: str | None,
+    calls: list[dict[str, Any]],
+    prompt_tokens: int,
+    completion_tokens: int,
+    hit_limit: bool,
+    search: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """One Response. Chat usage rides along for the listener's chat wrapper."""
+    output: list[dict[str, Any]] = []
+    if search is not None:
+        output.append(search)
+    if reasoning:
+        output.append(
+            {
+                "type": "reasoning",
+                "id": new_id("rs_"),
+                "summary": [],
+                "content": [{"type": "reasoning_text", "text": reasoning}],
+                "status": "completed",
+                "encrypted_content": reasoning,
+            }
+        )
+    visible = content or ""
+    if calls:
+        if visible:
+            output.append(_message_item(visible))
+        for call in calls:
+            function = call.get("function") if isinstance(call.get("function"), dict) else {}
+            output.append(
+                {
+                    "type": "function_call",
+                    "id": new_id("fc_"),
+                    "call_id": str(call.get("id") or new_id("call_")),
+                    "name": function.get("name") or "",
+                    "arguments": function.get("arguments") or "{}",
+                    "status": "completed",
+                }
+            )
+        status = "completed"
+        incomplete = None
+    else:
+        output.append(_message_item(visible))
+        status = "incomplete" if hit_limit else "completed"
+        incomplete = "max_output_tokens" if hit_limit else None
+    cached = int(getattr(runtime, "_cached_tokens", 0) or 0)
+    payload = response_object(
+        model=getattr(reply, "model_id", "") or prepared.get("model") or "",
+        output=output,
+        usage=usage_object(prompt_tokens, completion_tokens, cached, 0),
+        body=prepared,
+        status=status,
+        incomplete=incomplete,
+        response_id=new_id("resp_"),
+    )
+    payload["_chat_usage"] = _usage(runtime, prompt_tokens, completion_tokens, None)
+    return payload
 
 
 def _stream_chat(
@@ -835,40 +947,102 @@ def _stream_chat(
     args: Any,
     max_prompt_tokens: int | None = None,
     tool_choice: Any = None,
+    prepared: dict[str, Any] | None = None,
+    search: dict[str, Any] | None = None,
 ) -> None:
     try:
         reply.begin_events()
     except OSError:
         raise RequestClosed() from None
 
+    sequence = 0
+
     def event(payload: dict[str, Any]) -> None:
+        nonlocal sequence
+        payload["sequence_number"] = sequence
+        sequence += 1
         try:
             reply.event(payload)
         except OSError as exc:
             raise RequestClosed() from exc
 
-    event({"choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]})
+    response_id = new_id("resp_")
+    reasoning_id = new_id("rs_")
+    message_id = new_id("msg_")
+    if prepared is None:
+        prepared = {"model": getattr(reply, "model_id", "") or ""}
+    shell = response_object(
+        model=getattr(reply, "model_id", "") or prepared.get("model") or "",
+        output=[],
+        usage=usage_object(0, 0, 0, 0),
+        body=prepared,
+        status="in_progress",
+        incomplete=None,
+        response_id=response_id,
+    )
+    event({"type": "response.created", "response": shell})
+    event({"type": "response.in_progress", "response": shell})
     logits = runtime._prompt_logits(prompt)
     gate = ContentGate()
     thinking = ThinkStream(enable_thinking)
+    opened: dict[str, int] = {}
+    next_index = 0
 
     keep_text = tool_choice == "none"
+    reasoning_parts: list[str] = []
 
     def emit_channel(channel: str, visible: str) -> None:
+        nonlocal next_index
         if channel == "content" and not keep_text:
             visible = gate.push(visible)
         if not visible:
             return
-        field = "reasoning_content" if channel == "reasoning" else "content"
+        if channel not in opened:
+            opened[channel] = next_index
+            next_index += 1
+            if channel == "reasoning":
+                item: dict[str, Any] = {
+                    "type": "reasoning",
+                    "id": reasoning_id,
+                    "summary": [],
+                    "content": [],
+                    "status": "in_progress",
+                }
+            else:
+                item = {
+                    "type": "message",
+                    "id": message_id,
+                    "role": "assistant",
+                    "status": "in_progress",
+                    "content": [{"type": "output_text", "text": "", "annotations": []}],
+                }
+            event(
+                {
+                    "type": "response.output_item.added",
+                    "output_index": opened[channel],
+                    "item": item,
+                }
+            )
+        if channel == "reasoning":
+            reasoning_parts.append(visible)
+            event(
+                {
+                    "type": "response.reasoning_text.delta",
+                    "content_index": 0,
+                    "delta": visible,
+                    "item_id": reasoning_id,
+                    "output_index": opened[channel],
+                }
+            )
+            return
         event(
             {
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {field: visible},
-                        "finish_reason": None,
-                    }
-                ]
+                "type": "response.output_text.delta",
+                "content_index": 0,
+                "delta": visible,
+                "item_id": message_id,
+                "output_index": opened[channel],
+                "logprobs": [],
             }
         )
 
@@ -885,68 +1059,73 @@ def _stream_chat(
         emit_channel(channel, visible)
     tail = gate.finish()
     if tail:
-        event(
-            {
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"content": tail},
-                        "finish_reason": None,
-                    }
-                ]
-            }
-        )
-    if keep_text:
-        calls = []
-    else:
-        _content, calls = parse_tool_calls(previous)
-    if calls:
-        for index, call in enumerate(calls):
+        emit_channel("content", tail)
+    content, calls, reasoning = split_completion(
+        previous,
+        enable_thinking=enable_thinking,
+        tool_choice="none" if keep_text else tool_choice,
+    )
+    if reasoning:
+        reasoning_parts = [reasoning]
+    produced = getattr(runtime, "_output_ids", []) or []
+    payload = _response_payload(
+        reply,
+        runtime,
+        prepared,
+        "".join(reasoning_parts) if enable_thinking else "",
+        content,
+        calls,
+        len(prompt),
+        len(produced),
+        bool(runtime._hit_limit),
+        search=search,
+    )
+    payload["id"] = response_id
+    for index, item in enumerate(payload["output"]):
+        kind = item.get("type")
+        if kind == "reasoning":
+            item["id"] = reasoning_id
+            event({"type": "response.output_item.done", "output_index": index, "item": item})
+        elif kind == "message":
+            item["id"] = message_id
+            text = ""
+            content_items = item.get("content")
+            if isinstance(content_items, list) and content_items:
+                text = str(content_items[0].get("text") or "")
             event(
                 {
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {
-                                "tool_calls": [
-                                    {
-                                        "index": index,
-                                        "id": call["id"],
-                                        "type": "function",
-                                        "function": {
-                                            "name": call["function"]["name"],
-                                            "arguments": call["function"]["arguments"],
-                                        },
-                                    }
-                                ]
-                            },
-                            "finish_reason": None,
-                        }
-                    ]
+                    "type": "response.output_text.done",
+                    "content_index": 0,
+                    "item_id": message_id,
+                    "output_index": index,
+                    "text": text,
+                    "logprobs": [],
                 }
             )
-        reason = "tool_calls"
-    else:
-        reason = "length" if runtime._hit_limit else "stop"
-    event({"choices": [{"index": 0, "delta": {}, "finish_reason": reason}]})
-    event(
-        {
-            "choices": [],
-            "max_prompt_tokens": max_prompt_tokens,
-            "usage": _usage(
-                runtime,
-                len(prompt),
-                len(getattr(runtime, "_output_ids", []) or []),
-                max_prompt_tokens,
-            ),
-        }
-    )
+            event({"type": "response.output_item.done", "output_index": index, "item": item})
+        elif kind == "function_call":
+            arguments = item.get("arguments") or "{}"
+            if not isinstance(arguments, str):
+                arguments = json.dumps(arguments)
+            opened_item = dict(item)
+            opened_item["arguments"] = ""
+            event({"type": "response.output_item.added", "output_index": index, "item": opened_item})
+            event(
+                {
+                    "type": "response.function_call_arguments.done",
+                    "arguments": arguments,
+                    "item_id": item.get("id") or "",
+                    "output_index": index,
+                }
+            )
+            event({"type": "response.output_item.done", "output_index": index, "item": item})
+    event({"type": "response.completed", "response": payload})
     try:
         reply.done()
     except OSError as exc:
         raise RequestClosed() from exc
     runtime._log_decode()
-    _append_transcript(args.transcript, prompt_text, previous)
+    _append_transcript(getattr(args, "transcript", None), prompt_text, previous)
 
 
 def models_main(args: Any) -> int:
