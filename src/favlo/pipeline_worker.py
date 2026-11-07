@@ -548,7 +548,7 @@ def _selection_payload(selection: Any) -> dict[str, Any]:
         "enable_thinking": getattr(selection, "enable_thinking", None),
         "reasoning_effort": getattr(selection, "reasoning_effort", None),
         "runtime": selection.runtime,
-        "custom": selection.custom,
+        "pipeline_root": getattr(selection, "pipeline_root", "") or "",
         "parts": {str(key): str(path) for key, path in parts.items()},
     }
 
@@ -771,7 +771,7 @@ def _open(
             else None
         ),
         runtime=str(raw.get("runtime") or ""),
-        custom=bool(raw.get("custom")),
+        pipeline_root=str(raw.get("pipeline_root") or ""),
         parts={str(key): Path(str(path)) for key, path in parts.items()},
     )
     module = pipeline_module(selection)

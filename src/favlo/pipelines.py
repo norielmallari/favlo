@@ -227,7 +227,7 @@ def pipeline_module(selection: Any) -> Any:
     return load_pipeline(
         selection.pipeline,
         runtime=selection.runtime,
-        custom=selection.custom,
+        pipeline_root=getattr(selection, "pipeline_root", None),
     )
 
 
@@ -336,7 +336,11 @@ def source_mtime(selection: Any) -> float:
     from favlo.cli import pipeline_tree
 
     try:
-        root = pipeline_tree(runtime, custom=bool(getattr(selection, "custom", False)))
+        root = pipeline_tree(
+            runtime,
+            pipeline=pipeline,
+            pipeline_root=getattr(selection, "pipeline_root", None),
+        )
     except ValueError:
         return 0.0
     newest = 0.0

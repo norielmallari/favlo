@@ -66,7 +66,12 @@ def chat_encode(selection: Any, *, thinking: bool) -> Callable[[str], int]:
     """
     from favlo.cli import pipeline_tree, repo_root
 
-    tree = pipeline_tree(selection.runtime, custom=selection.custom, root=repo_root())
+    tree = pipeline_tree(
+        selection.runtime,
+        pipeline=str(selection.pipeline),
+        pipeline_root=getattr(selection, "pipeline_root", None),
+        root=repo_root(),
+    )
     entry = str(tree)
     if entry not in sys.path:
         sys.path.insert(0, entry)

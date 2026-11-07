@@ -13,8 +13,8 @@ Add these, and nothing of another pipeline:
 
 | Piece | Path |
 |---|---|
-| Entry | `pipelines/metal41/<pipeline>.py` |
-| Package | `pipelines/metal41/<package>/` where `<package>` is `<pipeline>` with hyphens replaced by underscores |
+| Entry | `pipelines/metal41/<pipeline>/<pipeline>.py` |
+| Package | `pipelines/metal41/<pipeline>/<package>/` where `<package>` is `<pipeline>` with hyphens replaced by underscores |
 | Note | `docs/<pipeline>/` |
 | Tests | `tests/` files that import only `<package>` |
 
@@ -29,7 +29,7 @@ Add `<package>/sampling.py` with no imports from the package. Registration loads
 - `VARIANTS`: a non-empty dict. Each name is one token and contains no colon. Each row sets `temperature`, `top_p`, `top_k`, and `presence_penalty`.
 - `DEFAULT_VARIANT`: one of those names.
 
-`add_model` and `register_quantized` copy that module onto the row and store `runtime` `metal41`. A custom entry under `custom-pipelines/metal41/` also sets `custom` true. Do not pass a card into the registry. A `:suffix` id is one of those names. A bare id selects no row; this pipeline applies `DEFAULT_VARIANT`, or the row the request selects. Numbers come from this model's card, not from another pipeline's `sampling.py`.
+`add_model` and `register_quantized` copy that module onto the row and store `runtime` `metal41` and `pipeline_root` `pipelines/metal41/<pipeline>`. A row that names another `pipeline_root` loads `{pipeline_root}/<pipeline>.py`. Do not pass a card into the registry. A `:suffix` id is one of those names. A bare id selects no row; this pipeline applies `DEFAULT_VARIANT`, or the row the request selects. Numbers come from this model's card, not from another pipeline's `sampling.py`.
 
 ## Docs
 
@@ -41,7 +41,7 @@ No personal data: no names, home directories, hostnames, or volume paths. A clai
 
 ## Isolation
 
-Leave every other pipeline's entry, package, shaders, tests, and docs untouched. Do not import another pipeline. A served media pipeline inherits `ImagePipeline`, `VideoPipeline`, `MusicPipeline`, or `VoicePipeline` and binds `handle_<kind>` to an instance. A served language model inherits `LanguagePipeline`, implements abstract `handle_responses`, and binds `handle_responses` to an instance. A served embedding model inherits `EmbeddingsPipeline` and binds `handle_embed` to an instance. Read the seam rule before writing that class, and add `pipelines/metal41/<package>/**` and `docs/<pipeline>/**` to its globs in the same change: [language-pipeline.mdc](../../rules/language-pipeline.mdc) for a language model, [embeddings-pipeline.mdc](../../rules/embeddings-pipeline.mdc) for an embedding model, and [media-pipeline.mdc](../../rules/media-pipeline.mdc) for a media pipeline. Do not add another base class, a shared runner, or a kernel that branches on the pipeline. Do not change `src/favlo/` unless the task is the listener, the registry, the console, or the prefix store. A pipeline that keeps a sequence cache imports that store. Load [prefix-caching](../prefix-caching/SKILL.md) before writing the adapter.
+Leave every other pipeline's entry, package, shaders, tests, and docs untouched. Do not import another pipeline. A served media pipeline inherits `ImagePipeline`, `VideoPipeline`, `MusicPipeline`, or `VoicePipeline` and binds `handle_<kind>` to an instance. A served language model inherits `LanguagePipeline`, implements abstract `handle_responses`, and binds `handle_responses` to an instance. A served embedding model inherits `EmbeddingsPipeline` and binds `handle_embed` to an instance. Read the seam rule before writing that class, and add `pipelines/metal41/<pipeline>/<package>/**` and `docs/<pipeline>/**` to its globs in the same change: [language-pipeline.mdc](../../rules/language-pipeline.mdc) for a language model, [embeddings-pipeline.mdc](../../rules/embeddings-pipeline.mdc) for an embedding model, and [media-pipeline.mdc](../../rules/media-pipeline.mdc) for a media pipeline. Do not add another base class, a shared runner, or a kernel that branches on the pipeline. Do not change `src/favlo/` unless the task is the listener, the registry, the console, or the prefix store. A pipeline that keeps a sequence cache imports that store. Load [prefix-caching](../prefix-caching/SKILL.md) before writing the adapter.
 
 Re-implement the math from this model's papers, model card, and the vendor documents. Another pipeline's source, tests, comments, and design notes are not a reference. Another application's tree is not a reference.
 

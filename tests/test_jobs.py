@@ -32,7 +32,7 @@ def _selection() -> SimpleNamespace:
         variants=None,
         default_variant=None,
         runtime="metal41",
-        custom=False,
+        pipeline_root="pipelines",
         parts=None,
     )
 

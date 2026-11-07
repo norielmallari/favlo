@@ -926,7 +926,13 @@ def _each_pipeline() -> list[tuple[str, str, Any]]:
             message = f"{folder} has no runtime"
             raise LookupError(message)
         try:
-            module = load_pipeline(pipeline, runtime=runtime, custom=bool(entry.get("custom")))
+            module = load_pipeline(
+                pipeline,
+                runtime=runtime,
+                pipeline_root=entry.get("pipeline_root")
+                if isinstance(entry.get("pipeline_root"), str)
+                else None,
+            )
         except (FileNotFoundError, ImportError, OSError):
             continue
         seen.add(pipeline)

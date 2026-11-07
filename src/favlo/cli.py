@@ -32,17 +32,58 @@ def repo_root() -> Path:
     raise FileNotFoundError(message)
 
 
-def pipeline_tree(runtime: str, *, custom: bool = False, root: Path | None = None) -> Path:
-    """The directory that holds one runtime's entry files."""
+def resolve_pipeline_root(pipeline_root: str, *, root: Path | None = None) -> Path:
+    """One pipeline's directory. A relative value resolves against the checkout."""
+    text = pipeline_root.strip()
+    if not text:
+        message = "pipeline_root is empty"
+        raise ValueError(message)
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        path = (root or repo_root()) / path
+    return path.resolve()
+
+
+def pipeline_tree(
+    runtime: str,
+    *,
+    pipeline: str,
+    pipeline_root: str | None = None,
+    root: Path | None = None,
+) -> Path:
+    """The pipeline directory. It contains ``<pipeline>.py`` and the package."""
     if runtime not in RUNTIMES:
         message = f"unknown runtime: {runtime}"
         raise ValueError(message)
-    base = "custom-pipelines" if custom else "pipelines"
-    return (root or repo_root()) / base / runtime
+    text = pipeline_root.strip() if isinstance(pipeline_root, str) else ""
+    if not text or text == "pipelines":
+        text = f"pipelines/{runtime}/{pipeline}"
+    return resolve_pipeline_root(text, root=root)
+
+
+def _registry_pipeline_roots(root: Path | None = None) -> tuple[str, ...]:
+    """Each ``pipeline_root`` stored on a registry row."""
+    names: list[str] = []
+    try:
+        from favlo.registry import load_registry
+
+        data = load_registry(root)
+    except (OSError, ValueError):
+        return ()
+    models = data.get("models") if isinstance(data, dict) else None
+    if not isinstance(models, dict):
+        return ()
+    for entry in models.values():
+        if not isinstance(entry, dict):
+            continue
+        stored = entry.get("pipeline_root")
+        if isinstance(stored, str) and stored.strip() and stored.strip() not in names:
+            names.append(stored.strip())
+    return tuple(names)
 
 
 def pipeline_names(root: Path | None = None) -> tuple[str, ...]:
-    """Entry stems under the four pipeline trees.
+    """Entry stems under every pipeline root.
 
     A new runtime is a new file. Discovering it does not edit this module.
     Two files with the same ``PIPELINE`` stem are an error.
@@ -52,21 +93,38 @@ def pipeline_names(root: Path | None = None) -> tuple[str, ...]:
 
 def pipeline_entries(root: Path | None = None) -> dict[str, Path]:
     """Stem to entry file. A duplicate stem raises ``ValueError``."""
+    base = root or repo_root()
     found: dict[str, Path] = {}
-    for custom in (False, True):
-        for runtime in RUNTIMES:
-            directory = pipeline_tree(runtime, custom=custom, root=root)
-            if not directory.is_dir():
-                continue
-            for path in sorted(directory.glob("*.py")):
-                stem = _pipeline_stem(path)
-                if stem is None:
-                    continue
-                previous = found.get(stem)
-                if previous is not None:
-                    message = f"duplicate pipeline {stem}: {previous} and {path}"
-                    raise ValueError(message)
-                found[stem] = path
+
+    def consider(path: Path) -> None:
+        stem = _pipeline_stem(path)
+        if stem is None:
+            return
+        previous = found.get(stem)
+        if previous is not None and previous.resolve() != path.resolve():
+            message = f"duplicate pipeline {stem}: {previous} and {path}"
+            raise ValueError(message)
+        found[stem] = path
+
+    for runtime in RUNTIMES:
+        tree = base / "pipelines" / runtime
+        if not tree.is_dir():
+            continue
+        for child in sorted(path for path in tree.iterdir() if path.is_dir()):
+            entry = child / f"{child.name}.py"
+            if entry.is_file():
+                consider(entry)
+    for stored in _registry_pipeline_roots(root):
+        if stored == "pipelines":
+            continue
+        try:
+            directory = resolve_pipeline_root(stored, root=base)
+        except ValueError:
+            continue
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*.py")):
+            consider(path)
     return found
 
 
@@ -106,7 +164,7 @@ def load_pipeline(
     root: Path | None = None,
     *,
     runtime: str | None = None,
-    custom: bool = False,
+    pipeline_root: str | None = None,
 ) -> ModuleType:
     if runtime is None:
         path = pipeline_entries(root).get(name)
@@ -114,7 +172,9 @@ def load_pipeline(
             message = f"pipeline file is missing: {name}"
             raise FileNotFoundError(message)
     else:
-        path = pipeline_tree(runtime, custom=custom, root=root) / f"{name}.py"
+        path = pipeline_tree(
+            runtime, pipeline=name, pipeline_root=pipeline_root, root=root
+        ) / f"{name}.py"
         if not path.is_file():
             message = f"pipeline file is missing: {path}"
             raise FileNotFoundError(message)
@@ -129,13 +189,15 @@ def load_pipeline(
 
 
 def pipeline_roots(root: Path | None = None) -> tuple[Path, ...]:
-    """Pipeline trees that exist in this checkout."""
+    """Directories that hold a discovered pipeline entry and its package."""
     found: list[Path] = []
-    for custom in (False, True):
-        for runtime in RUNTIMES:
-            directory = pipeline_tree(runtime, custom=custom, root=root)
-            if directory.is_dir():
-                found.append(directory.resolve())
+    seen: set[Path] = set()
+    for path in pipeline_entries(root).values():
+        directory = path.parent.resolve()
+        if directory in seen:
+            continue
+        seen.add(directory)
+        found.append(directory)
     return tuple(found)
 
 

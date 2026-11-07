@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-_ROOT = Path(__file__).resolve().parents[1] / "pipelines" / "metal41"
+_ROOT = Path(__file__).resolve().parents[1] / "pipelines" / "metal41" / "qwen35-4b"
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 

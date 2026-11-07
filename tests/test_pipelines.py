@@ -86,11 +86,12 @@ def test_close_lets_the_next_generate_open_again() -> None:
 def test_drop_pipeline_modules_reloads_the_next_load(
     tmp_path: Path,
 ) -> None:
-    tree = tmp_path / "pipelines" / "metal41"
+    tree = tmp_path / "pipelines" / "metal41" / "probe"
     package = tree / "pipeline_reload_probe"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
     (tree / "probe.py").write_text(
+        'PIPELINE = "probe"\n'
         "import sys\n"
         "from pathlib import Path\n"
         "_ROOT = Path(__file__).resolve().parent\n"

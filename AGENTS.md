@@ -43,7 +43,7 @@ The open product in this repository is the listener, the web app, and the web AP
 
 Edit one runtime. Leave every other runtime's files untouched. The write set and the runtime table are in [ARCHITECTURE.md](ARCHITECTURE.md). Do not edit `src/favlo/cli.py` to register a runtime. Do not edit another pipeline's package, shaders, tests, or docs. A served media pipeline inherits `ImagePipeline`, `VideoPipeline`, `MusicPipeline`, or `VoicePipeline` under `MediaPipeline`. A language-model pipeline does not. Do not add a kernel that branches on the pipeline. A new abstract method on `MediaPipeline` updates every media subclass in that same change.
 
-Adding a model adds an entry file under `pipelines/metal41/`, a package beside it, a `docs/<pipeline>/` note, and one row in the runtime table. Load [bootstrap-new-model](.cursor/skills/bootstrap-new-model/SKILL.md) before creating one. Load [prefix-caching](.cursor/skills/prefix-caching/SKILL.md) before wiring a pipeline to the shared prefix store.
+Adding a model adds `pipelines/metal41/<pipeline>/`, the entry file and package inside it, a `docs/<pipeline>/` note, and one row in the runtime table. Load [bootstrap-new-model](.cursor/skills/bootstrap-new-model/SKILL.md) before creating one. Load [prefix-caching](.cursor/skills/prefix-caching/SKILL.md) before wiring a pipeline to the shared prefix store.
 
 The listener runs one request. A language-model pipeline does not fuse a whole layer. An image, video, music, or voice pipeline may place several kernels of one generation in one command buffer and may fuse those kernels. The Neural Engine may run a module. A missing Metal kernel stays missing. It is not replaced by a host GEMV, a CPU matmul, or any other stand-in forward.
 

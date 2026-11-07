@@ -48,7 +48,7 @@ class Selection:
     enable_thinking: bool | None = None
     reasoning_effort: str | None = None
     runtime: str = ""
-    custom: bool = False
+    pipeline_root: str = ""
     parts: dict[str, Path] | None = None
 
 
@@ -140,7 +140,7 @@ def add_model(
     root: Path | None = None,
     pipeline: str,
     runtime: str,
-    custom: bool = False,
+    pipeline_root: str | None = None,
     max_prompt_tokens: int | None = None,
     kv_cache: str | None = None,
 ) -> dict[str, Any]:
@@ -151,20 +151,21 @@ def add_model(
     if folder in data["models"]:
         message = f"{folder} is already registered"
         raise ValueError(message)
+    stored_root = _stored_pipeline_root(pipeline_root, pipeline=pipeline, runtime=runtime)
     entry = _entry(
         alias=alias,
         source=source,
         pipeline=pipeline,
         runtime=runtime,
-        custom=custom,
+        pipeline_root=stored_root,
         max_prompt_tokens=max_prompt_tokens,
         directory=str(path),
         kv_cache=kv_cache,
     )
     data["models"][folder] = entry
     _ensure_default_llm(data, folder, alias, entry)
-    _ensure_media_defaults(data, folder, pipeline, runtime, custom)
-    _ensure_embeddings_default(data, folder, pipeline, runtime, custom)
+    _ensure_media_defaults(data, folder, pipeline, runtime, stored_root)
+    _ensure_embeddings_default(data, folder, pipeline, runtime, stored_root)
     save_registry(data, root)
     return data
 
@@ -243,7 +244,7 @@ def register_quantized(
     root: Path | None = None,
     pipeline: str,
     runtime: str,
-    custom: bool = False,
+    pipeline_root: str | None = None,
     max_prompt_tokens: int | None = None,
     parts: Mapping[str, Path] | None = None,
     kv_cache: str | None = None,
@@ -254,10 +255,18 @@ def register_quantized(
     source_text = str(source)
     directory_text = str(directory)
     part_text = _part_text(parts)
-    variants, default_variant = pipeline_sampling(pipeline, runtime=runtime, custom=custom)
-    thinking = pipeline_enable_thinking(pipeline, runtime=runtime, custom=custom)
-    effort = pipeline_reasoning_effort(pipeline, runtime=runtime, custom=custom)
     current = data["models"].get(folder)
+    stored_root = _stored_pipeline_root(
+        pipeline_root,
+        current.get("pipeline_root") if isinstance(current, dict) else None,
+        pipeline=pipeline,
+        runtime=runtime,
+    )
+    variants, default_variant = pipeline_sampling(
+        pipeline, runtime=runtime, pipeline_root=stored_root
+    )
+    thinking = pipeline_enable_thinking(pipeline, runtime=runtime, pipeline_root=stored_root)
+    effort = pipeline_reasoning_effort(pipeline, runtime=runtime, pipeline_root=stored_root)
     if current is not None:
         stored = current.get("source")
         if stored and _same_path(stored, source):
@@ -273,23 +282,21 @@ def register_quantized(
             current["runtime"] = runtime
             if kv_cache is not None:
                 current["kv_cache"] = kv_cache
-            if custom:
-                current["custom"] = True
-            else:
-                current.pop("custom", None)
+            current["pipeline_root"] = stored_root
+            current.pop("custom", None)
             if alias is not None:
                 current["alias"] = alias
             if max_prompt_tokens is not None:
                 current["max_prompt_tokens"] = max_prompt_tokens
                 current.pop("max_tokens", None)
-            ctx = card_context_length(pipeline, runtime=runtime, custom=custom)
+            ctx = card_context_length(pipeline, runtime=runtime, pipeline_root=stored_root)
             if ctx is not None:
                 current["context_length"] = ctx
             else:
                 current.setdefault("context_length", DEFAULT_CONTEXT_LENGTH)
             _ensure_default_llm(data, folder, alias, current)
-            _ensure_media_defaults(data, folder, pipeline, runtime, custom)
-            _ensure_embeddings_default(data, folder, pipeline, runtime, custom)
+            _ensure_media_defaults(data, folder, pipeline, runtime, stored_root)
+            _ensure_embeddings_default(data, folder, pipeline, runtime, stored_root)
             save_registry(data, root)
             return
         message = f"{folder} is already registered for a different source"
@@ -299,7 +306,7 @@ def register_quantized(
         source=source_text,
         pipeline=pipeline,
         runtime=runtime,
-        custom=custom,
+        pipeline_root=stored_root,
         max_prompt_tokens=max_prompt_tokens,
         directory=directory_text,
         parts=part_text,
@@ -307,8 +314,8 @@ def register_quantized(
     )
     data["models"][folder] = entry
     _ensure_default_llm(data, folder, alias, entry)
-    _ensure_media_defaults(data, folder, pipeline, runtime, custom)
-    _ensure_embeddings_default(data, folder, pipeline, runtime, custom)
+    _ensure_media_defaults(data, folder, pipeline, runtime, stored_root)
+    _ensure_embeddings_default(data, folder, pipeline, runtime, stored_root)
     save_registry(data, root)
 
 
@@ -483,8 +490,35 @@ def _require_runtime(entry: dict[str, Any], folder: str) -> str:
     return runtime
 
 
-def _custom(entry: dict[str, Any]) -> bool:
-    return bool(entry.get("custom"))
+def _stored_pipeline_root(
+    value: str | None,
+    current: str | None = None,
+    *,
+    pipeline: str,
+    runtime: str,
+) -> str:
+    """The pipeline directory to store. A passed value wins, then the row."""
+    for item in (value, current):
+        if isinstance(item, str) and item.strip() and item.strip() != "pipelines":
+            return item.strip()
+    return f"pipelines/{runtime}/{pipeline}"
+
+
+def pipeline_root_of(entry: Mapping[str, Any] | None) -> str:
+    """``pipeline_root`` on a row. An omitted value is ``pipelines/<runtime>/<pipeline>``."""
+    if not isinstance(entry, Mapping):
+        return "pipelines/metal41/pipeline"
+    pipeline = entry.get("pipeline")
+    runtime = entry.get("runtime")
+    name = pipeline.strip() if isinstance(pipeline, str) and pipeline.strip() else "pipeline"
+    kind = runtime.strip() if isinstance(runtime, str) and runtime.strip() else "metal41"
+    stored = entry.get("pipeline_root")
+    return _stored_pipeline_root(
+        None,
+        stored if isinstance(stored, str) else None,
+        pipeline=name,
+        runtime=kind,
+    )
 
 
 _LANGUAGE_VARIANTS = frozenset({"instruct", "thinking", "high", "low", "none"})
@@ -566,7 +600,7 @@ def media_default(kind: str, root: Path | None = None) -> str:
             folder,
             pipeline,
             runtime,
-            bool(entry.get("custom")),
+            pipeline_root_of(entry),
         )
     if _media_map(data) != before:
         save_registry(data, root)
@@ -601,10 +635,10 @@ def _ensure_media_defaults(
     folder: str,
     pipeline: str,
     runtime: str,
-    custom: bool,
+    pipeline_root: str,
 ) -> None:
     """Fill an empty ``media`` key with this folder when the pipeline serves that kind."""
-    kinds = _media_kinds(pipeline, runtime, custom)
+    kinds = _media_kinds(pipeline, runtime, pipeline_root)
     if not kinds:
         return
     media = data.get("media")
@@ -617,15 +651,16 @@ def _ensure_media_defaults(
             media[kind] = folder
 
 
-def _media_kinds(pipeline: str, runtime: str, custom: bool) -> tuple[str, ...]:
+def _media_kinds(pipeline: str, runtime: str, pipeline_root: str | None = None) -> tuple[str, ...]:
     from favlo.cli import load_pipeline
 
     try:
-        module = load_pipeline(pipeline, runtime=runtime, custom=custom)
+        module = load_pipeline(pipeline, runtime=runtime, pipeline_root=pipeline_root)
     except (FileNotFoundError, ImportError, OSError):
         return ()
     found: list[str] = []
-    if callable(getattr(module, "handle_image", None)):
+    image = getattr(module, "handle_image", None)
+    if callable(image) and getattr(module, "fills_image_default", True):
         found.append("image")
     if callable(getattr(module, "handle_video", None)):
         modes = getattr(module, "video_modes", None)
@@ -668,7 +703,7 @@ def embeddings_default(root: Path | None = None) -> str:
             folder,
             pipeline,
             runtime,
-            bool(entry.get("custom")),
+            pipeline_root_of(entry),
         )
         if _embeddings_value(data):
             break
@@ -691,19 +726,19 @@ def _ensure_embeddings_default(
     folder: str,
     pipeline: str,
     runtime: str,
-    custom: bool,
+    pipeline_root: str,
 ) -> None:
     """Fill an empty ``embeddings`` key when this pipeline serves embeddings."""
-    if _embeddings_value(data) or not _serves_embed(pipeline, runtime, custom):
+    if _embeddings_value(data) or not _serves_embed(pipeline, runtime, pipeline_root):
         return
     data["embeddings"] = folder
 
 
-def _serves_embed(pipeline: str, runtime: str, custom: bool) -> bool:
+def _serves_embed(pipeline: str, runtime: str, pipeline_root: str | None = None) -> bool:
     from favlo.cli import load_pipeline
 
     try:
-        module = load_pipeline(pipeline, runtime=runtime, custom=custom)
+        module = load_pipeline(pipeline, runtime=runtime, pipeline_root=pipeline_root)
     except (FileNotFoundError, ImportError, OSError):
         return False
     return callable(getattr(module, "handle_embed", None))
@@ -716,15 +751,18 @@ def _entry(
     pipeline: str,
     runtime: str,
     directory: str,
-    custom: bool = False,
+    pipeline_root: str | None = None,
     max_prompt_tokens: int | None = None,
     parts: dict[str, str] | None = None,
     kv_cache: str | None = None,
 ) -> dict[str, Any]:
-    variants, default_variant = pipeline_sampling(pipeline, runtime=runtime, custom=custom)
-    thinking = pipeline_enable_thinking(pipeline, runtime=runtime, custom=custom)
-    effort = pipeline_reasoning_effort(pipeline, runtime=runtime, custom=custom)
-    ctx = card_context_length(pipeline, runtime=runtime, custom=custom)
+    stored_root = _stored_pipeline_root(pipeline_root, pipeline=pipeline, runtime=runtime)
+    variants, default_variant = pipeline_sampling(
+        pipeline, runtime=runtime, pipeline_root=stored_root
+    )
+    thinking = pipeline_enable_thinking(pipeline, runtime=runtime, pipeline_root=stored_root)
+    effort = pipeline_reasoning_effort(pipeline, runtime=runtime, pipeline_root=stored_root)
+    ctx = card_context_length(pipeline, runtime=runtime, pipeline_root=stored_root)
     entry: dict[str, Any] = {
         "pipeline": pipeline,
         "runtime": runtime,
@@ -737,13 +775,12 @@ def _entry(
         "default_variant": default_variant,
         "enable_thinking": thinking,
         "context_length": ctx if ctx is not None else DEFAULT_CONTEXT_LENGTH,
+        "pipeline_root": stored_root,
     }
     if effort is not None:
         entry["reasoning_effort"] = effort
     if parts:
         entry["parts"] = parts
-    if custom:
-        entry["custom"] = True
     if max_prompt_tokens is not None:
         entry["max_prompt_tokens"] = max_prompt_tokens
     return entry
@@ -867,7 +904,7 @@ def _selection(
         enable_thinking=_enable_thinking(entry),
         reasoning_effort=_resolved_effort(entry, stored, variant, default),
         runtime=_require_runtime(entry, folder),
-        custom=_custom(entry),
+        pipeline_root=pipeline_root_of(entry),
         parts=_parts(entry),
     )
 
@@ -924,10 +961,12 @@ def _same_path(stored: str, source: Path) -> bool:
     return Path(stored).expanduser().resolve() == source.expanduser().resolve()
 
 
-def card_context_length(pipeline: str, *, runtime: str, custom: bool = False) -> int | None:
+def card_context_length(
+    pipeline: str, *, runtime: str, pipeline_root: str | None = None
+) -> int | None:
     """``CONTEXT_LENGTH`` on the sampling card, when the pipeline defines one."""
     package = pipeline.replace("-", "_")
-    path = _sampling_path(package, runtime=runtime, custom=custom)
+    path = _sampling_path(pipeline, runtime=runtime, pipeline_root=pipeline_root)
     if not path.is_file():
         return None
     spec = importlib.util.spec_from_file_location(f"{package}.sampling_context", path)
@@ -942,14 +981,14 @@ def card_context_length(pipeline: str, *, runtime: str, custom: bool = False) ->
 
 
 def pipeline_sampling(
-    pipeline: str, *, runtime: str, custom: bool = False
+    pipeline: str, *, runtime: str, pipeline_root: str | None = None
 ) -> tuple[dict[str, dict[str, Any]], str]:
     """Load ``VARIANTS`` and ``DEFAULT_VARIANT`` from ``<package>/sampling.py``.
 
     The module is loaded by path so registration does not import the pipeline.
     Each row must set the sampler fields. ``reasoning_effort`` is optional.
     """
-    module = _sampling_module(pipeline, runtime=runtime, custom=custom)
+    module = _sampling_module(pipeline, runtime=runtime, pipeline_root=pipeline_root)
     raw = getattr(module, "VARIANTS", None)
     default = getattr(module, "DEFAULT_VARIANT", None)
     if not isinstance(raw, dict) or not raw:
@@ -987,27 +1026,29 @@ def pipeline_sampling(
     return variants, default
 
 
-def pipeline_enable_thinking(pipeline: str, *, runtime: str, custom: bool = False) -> bool:
+def pipeline_enable_thinking(
+    pipeline: str, *, runtime: str, pipeline_root: str | None = None
+) -> bool:
     """``DEFAULT_THINKING`` on the sampling card. Missing means thinking on."""
-    module = _sampling_module(pipeline, runtime=runtime, custom=custom)
+    module = _sampling_module(pipeline, runtime=runtime, pipeline_root=pipeline_root)
     value = getattr(module, "DEFAULT_THINKING", True)
     return bool(value)
 
 
 def pipeline_reasoning_effort(
-    pipeline: str, *, runtime: str, custom: bool = False
+    pipeline: str, *, runtime: str, pipeline_root: str | None = None
 ) -> str | None:
     """``DEFAULT_REASONING_EFFORT`` on the sampling card, when the pipeline sets one."""
-    module = _sampling_module(pipeline, runtime=runtime, custom=custom)
+    module = _sampling_module(pipeline, runtime=runtime, pipeline_root=pipeline_root)
     value = getattr(module, "DEFAULT_REASONING_EFFORT", None)
     if not isinstance(value, str) or not value:
         return None
     return value
 
 
-def _sampling_module(pipeline: str, *, runtime: str, custom: bool = False) -> Any:
+def _sampling_module(pipeline: str, *, runtime: str, pipeline_root: str | None = None) -> Any:
     package = pipeline.replace("-", "_")
-    path = _sampling_path(package, runtime=runtime, custom=custom)
+    path = _sampling_path(pipeline, runtime=runtime, pipeline_root=pipeline_root)
     if not path.is_file():
         message = f"{pipeline} has no sampling card at {package}/sampling.py"
         raise ValueError(message)
@@ -1091,10 +1132,12 @@ def _resolved_effort(
     return _reasoning_effort(entry)
 
 
-def _sampling_path(package: str, *, runtime: str, custom: bool) -> Path:
+def _sampling_path(pipeline: str, *, runtime: str, pipeline_root: str | None) -> Path:
     from favlo.cli import pipeline_tree
 
-    return pipeline_tree(runtime, custom=custom) / package / "sampling.py"
+    package = pipeline.replace("-", "_")
+    directory = pipeline_tree(runtime, pipeline=pipeline, pipeline_root=pipeline_root)
+    return directory / package / "sampling.py"
 
 
 def _repo_root() -> Path:

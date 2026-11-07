@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 
@@ -7,10 +8,34 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_a_pipeline_entry_is_the_file_that_names_itself(tmp_path: Path) -> None:
-    tree = tmp_path / "pipelines" / "metal41"
+    tree = tmp_path / "pipelines" / "metal41" / "demo-model"
     tree.mkdir(parents=True)
     (tree / "demo-model.py").write_text('PIPELINE = "demo-model"\n', encoding="utf-8")
     (tree / "notes.py").write_text("PIPELINE = 'other'\n", encoding="utf-8")
+    assert pipeline_names(tmp_path) == ("demo-model",)
+
+
+def test_a_registry_pipeline_root_is_discovered(tmp_path: Path) -> None:
+    tree = tmp_path / "outside"
+    tree.mkdir(parents=True)
+    (tree / "demo-model.py").write_text('PIPELINE = "demo-model"\n', encoding="utf-8")
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "registry.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "models": {
+                    "demo": {
+                        "pipeline": "demo-model",
+                        "runtime": "metal41",
+                        "pipeline_root": "outside",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     assert pipeline_names(tmp_path) == ("demo-model",)
 
 

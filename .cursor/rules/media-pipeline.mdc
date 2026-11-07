@@ -1,6 +1,6 @@
 ---
 description: How a served media pipeline implements MediaPipeline, and when to extend and run the preemption harness. Scratch sizes from the serve ledger, with no private cap. The request keeps its resolution, frame count, and duration. The preemption harness waits and does not take the lock. A GPU test uses smoke_lock run.
-globs: src/favlo/media_pipeline.py,src/favlo/pipeline_worker.py,src/favlo/pipelines.py,harness/media_pipeline.py,tests/test_media_pipeline.py,tests/test_media_pipeline_harness.py,pipelines/metal41/z_image_turbo/**,pipelines/metal41/wan22_i2v/**,pipelines/metal41/wan22_ti2v_5b/**,pipelines/metal41/ace_step_15_turbo/**,pipelines/metal41/voxcpm2/**,docs/z-image-turbo/**,docs/wan22-i2v/**,docs/wan22-ti2v-5b/**,docs/ace-step-15-turbo/**,docs/voxcpm2/**,docs/harness.md
+globs: src/favlo/media_pipeline.py,src/favlo/pipeline_worker.py,src/favlo/pipelines.py,harness/media_pipeline.py,tests/test_media_pipeline.py,tests/test_media_pipeline_harness.py,pipelines/metal41/z-image-turbo/z_image_turbo/**,pipelines/metal41/wan22-i2v/wan22_i2v/**,pipelines/metal41/wan22-ti2v-5b/wan22_ti2v_5b/**,pipelines/metal41/ace-step-15-turbo/ace_step_15_turbo/**,pipelines/metal41/voxcpm2/voxcpm2/**,docs/z-image-turbo/**,docs/wan22-i2v/**,docs/wan22-ti2v-5b/**,docs/ace-step-15-turbo/**,docs/voxcpm2/**,docs/harness.md
 alwaysApply: false
 ---
 

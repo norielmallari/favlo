@@ -1,6 +1,6 @@
 ---
 description: How a served embedding model implements EmbeddingsPipeline. Passage length sizes from the serve ledger, with no private cap. The embeddings harness waits and does not take the lock. A GPU test uses smoke_lock run.
-globs: src/favlo/embeddings_pipeline.py,src/favlo/pipeline.py,pipelines/metal41/bge_m3/**,docs/bge-m3/**,harness/language_pipeline.py,harness/embeddings_agent.py
+globs: src/favlo/embeddings_pipeline.py,src/favlo/pipeline.py,pipelines/metal41/bge-m3/bge_m3/**,docs/bge-m3/**,harness/language_pipeline.py,harness/embeddings_agent.py
 alwaysApply: false
 ---
 
