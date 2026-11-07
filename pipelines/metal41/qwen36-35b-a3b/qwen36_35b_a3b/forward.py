@@ -423,7 +423,7 @@ class Qwen36Runtime:
             self.max_memory, fixed, self.kv_cache, card, _plane, keep=MIN_IMAGES * image
         )
         if ceiling is None:
-            message = "the key/value cache does not fit a 2048-token context"
+            message = "the key/value cache does not fit a 4096-token context"
             raise RuntimeError(message)
         self._context_limit = min(ceiling, DEFAULT_CONTEXT_LENGTH)
         self._plane_at = _plane

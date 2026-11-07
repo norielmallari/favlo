@@ -1,8 +1,8 @@
 """Context length and key/value width for this pipeline.
 
 The checkpoint cap is ``max_position_embeddings``. The served window stops at
-``DEFAULT_CONTEXT_LENGTH``. The live cache starts at one 2048-token chunk and
-grows with the prompt and with decode, up to the longest multiple of 2048 that
+``DEFAULT_CONTEXT_LENGTH``. The live cache starts at one 4096-token chunk and
+grows with the prompt and with decode, up to the longest multiple of 4096 that
 still leaves eight expert images and still fits that window. The atlas then keeps
 as many images as the remaining bytes allow. The cache is ``fp8_e4m3`` unless
 the caller asks for half, ``e2m1``, or the float32 values. half and float32
@@ -37,7 +37,7 @@ _ALIASES = {
     "fp4": "e2m1",
     "float32": "f32",
 }
-_CONTEXT_STEP = 2048
+_CONTEXT_STEP = 4096
 CONTEXT_STEP = _CONTEXT_STEP
 # Ten language full-attention layers, plus the MTP layer.
 FULL_ATTENTION = 11
@@ -104,7 +104,7 @@ def fit_positions(
     *,
     keep: int = 0,
 ) -> int | None:
-    """Largest multiple of 2048 whose cache fits, or None when 2048 does not.
+    """Largest multiple of 4096 whose cache fits, or None when 4096 does not.
 
     ``fixed`` is every byte that does not grow with the context. ``extra`` is
     the plane scratch at a candidate length. ``keep`` is left for the expert

@@ -36,7 +36,9 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen36-35b-a3b/research/kernel-ceilings.md](qwen36-35b-a3b/research/kernel-ceilings.md) | Qwen3.6-35B-A3B isolated dispatch sum |
 | [qwen36-35b-a3b/research/recorded-forward.md](qwen36-35b-a3b/research/recorded-forward.md) | Qwen3.6-35B-A3B recorded prefill and decode sums |
 | [qwen36-35b-a3b/research/needle-retrieve.md](qwen36-35b-a3b/research/needle-retrieve.md) | Qwen3.6-35B-A3B retrieve needle on fp8 keys and values |
+| [qwen36-35b-a3b/research/needle-page.md](qwen36-35b-a3b/research/needle-page.md) | Qwen3.6-35B-A3B page needle on half keys and values |
 | [qwen36-35b-a3b/research/coding-agent.md](qwen36-35b-a3b/research/coding-agent.md) | Qwen3.6-35B-A3B coding agent on fp8 keys and values |
+| [qwen36-35b-a3b/research/coding-agent-half.md](qwen36-35b-a3b/research/coding-agent-half.md) | Qwen3.6-35B-A3B coding agent on half keys and values |
 | [qwen36-35b-a3b/research/synthetic-prompt.md](qwen36-35b-a3b/research/synthetic-prompt.md) | Qwen3.6-35B-A3B cold 512-token and 10000-token prompts |
 | [qwen36-35b-a3b/performance.md](qwen36-35b-a3b/performance.md) | Qwen3.6-35B-A3B recorded prefill and decode rates |
 | [gemma4-26b-a4b/README.md](gemma4-26b-a4b/README.md) | Gemma 4 26B-A4B pipeline contract |

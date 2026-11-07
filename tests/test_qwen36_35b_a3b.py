@@ -1255,13 +1255,13 @@ def test_context_shrinks_to_the_bytes_the_cache_can_hold() -> None:
         return 0
     full = fixed + cache_bytes(mode, 8192)
     assert fit_positions(full, fixed, mode, limit, nothing, keep=0) == 8192
-    one = cache_bytes(mode, 2048)
-    assert fit_positions(full, fixed, mode, limit, nothing, keep=one) == 6144
+    one = cache_bytes(mode, 4096)
+    assert fit_positions(full, fixed, mode, limit, nothing, keep=one) == 4096
     short = fixed + cache_bytes(mode, 4096) - 1
-    assert fit_positions(short, fixed, mode, limit, nothing, keep=0) == 2048
+    assert fit_positions(short, fixed, mode, limit, nothing, keep=0) is None
     assert fit_positions(fixed, fixed, mode, limit, nothing, keep=0) is None
     wider = fit_positions(full, fixed, "f32", limit, nothing, keep=0)
-    assert wider is not None and wider < 8192
+    assert wider is None
 
 
 def test_a_tight_budget_keeps_context_by_shrinking_the_atlas() -> None:
