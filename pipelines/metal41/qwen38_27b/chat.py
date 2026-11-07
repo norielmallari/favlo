@@ -714,9 +714,16 @@ def _stream(
     )
     event({"type": "response.created", "response": shell})
     event({"type": "response.in_progress", "response": shell})
-    pending: queue.Queue[int | str | None] = queue.Queue()
+    pending: queue.Queue[int | str | None | object] = queue.Queue()
     failed: list[BaseException] = []
     held: list[tuple[str, int]] = []
+    keepalive = object()
+
+    def on_prefill(_done: int) -> None:
+        """Queue one empty delta. The stream thread writes it."""
+        if failed:
+            raise RequestClosed()
+        pending.put(keepalive)
 
     def write() -> None:
         produced: list[int] = []
@@ -735,6 +742,18 @@ def _stream(
         try:
             while True:
                 item = pending.get()
+                if item is keepalive:
+                    event(
+                        {
+                            "type": "response.output_text.delta",
+                            "content_index": 0,
+                            "delta": "",
+                            "item_id": message_id,
+                            "output_index": 1,
+                            "logprobs": [],
+                        }
+                    )
+                    continue
                 final = item is None
                 if not final:
                     produced.append(int(item))
@@ -777,6 +796,7 @@ def _stream(
             think_end=think_end,
             mtp=mtp,
             mtp_depth=mtp_depth,
+            on_prefill=on_prefill,
         )
     finally:
         pending.put(None)

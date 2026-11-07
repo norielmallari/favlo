@@ -1157,6 +1157,51 @@ def test_stream_text_emits_reasoning_then_reply() -> None:
     ]
 
 
+def test_stream_sends_an_empty_delta_when_a_prefill_chunk_finishes() -> None:
+    import threading
+
+    sample = threading.current_thread()
+    writers: list[threading.Thread] = []
+
+    class _Runtime:
+        _hit_limit = False
+        _cached_tokens = 0
+        _prefill_seconds = 0.0
+        _decode_seconds = 0.0
+        _output_ids: list[int] = []
+
+        def decode(self, ids: list[int]) -> str:
+            return "a" * len(ids)
+
+        def generate(self, prompt, limit, stop, **kwargs):
+            del prompt, limit, stop
+            kwargs["on_prefill"](2048)
+            assert threading.current_thread() is sample
+            kwargs["on_token"](1)
+            self._output_ids = [1]
+            return [1]
+
+    from favlo.reply import MemoryReply
+
+    class _Reply(MemoryReply):
+        def event(self, payload: dict) -> None:
+            if payload.get("type") == "response.output_text.delta" and payload.get("delta") == "":
+                writers.append(threading.current_thread())
+            super().event(payload)
+
+    reply = _Reply("qwen38-27b")
+    _stream(reply, _Runtime(), [9], [], False, 8, False)
+    assert writers
+    assert writers[0] is not sample
+    assert writers[0].name == "favlo-stream"
+    assert any(
+        isinstance(payload, dict)
+        and payload.get("type") == "response.output_text.delta"
+        and payload.get("delta") == ""
+        for payload in reply.events
+    )
+
+
 def test_stream_decodes_off_the_sample_thread() -> None:
     import threading
 
