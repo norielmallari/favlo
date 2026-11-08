@@ -7,8 +7,8 @@ for a 64-row tile. The groups are built on device, and the layer stays one
 command buffer. The Gated DeltaNet scan is chunks of 64, with the state
 update and the outputs dispatched across the chunk and the 32 heads. The
 short convolution is one thread per token and channel. Float attention is
-one dispatch per layer. fp8 and fp4 attention scores and value mixes are
-``matmul2d`` tiles. Expert groups are gathered, multiplied, and scattered
+one dispatch per layer. fp8, fp4, and half attention scores and value mixes
+are ``matmul2d`` tiles. Expert groups are gathered, multiplied, and scattered
 back onto the token rows. A widths file dispatches the fp8 expert tile when
 that expert's width byte is 8. ``in_proj_a``, ``in_proj_b``, and the routed
 experts stay on the packed tiles.
@@ -21,7 +21,7 @@ from typing import Any
 
 import array
 
-from qwen36_35b_a3b.attn import attend_plane
+from qwen36_35b_a3b.attn import attend_half, attend_plane
 from qwen36_35b_a3b.cache import kv_io, plain_cache
 from qwen36_35b_a3b.convert import GATE_UP_BYTES
 from qwen36_35b_a3b.formats import EXPERT_IMAGE, FP8_DOWN_DATA, FP8_DOWN_SCALE, FP8_GATE_SCALE
@@ -504,7 +504,19 @@ def _attend(
     )
     slot = layer // 4
     _zero(runtime, work.attn, rows * 4096)
-    if plain_cache(runtime.kv_cache):
+    if runtime.kv_cache == "half":
+        attend_half(
+            runtime,
+            query=work.query,
+            key=work.kv,
+            value=work.vv,
+            gate=work.gate,
+            dest=work.attn,
+            pos0=pos0,
+            count=count,
+            slot=slot,
+        )
+    elif plain_cache(runtime.kv_cache):
         store, attend = kv_io(runtime.kv_cache, rows=True)
         stride = runtime.max_pos * HEAD
         runtime.session.encode(

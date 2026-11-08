@@ -835,6 +835,69 @@ kernel void prefill_fp8_n64_stride(
     op.run(tile_left, tile_right, tile_out);
 }
 
+// Half keys, [token, channel]. Same 64 by 64 tile as prefill_fp8_n64.
+kernel void prefill_f16_n64(
+    device half* activation [[buffer(0)]],
+    device half* weights [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        activation,
+        dextents<int, 2>(int(inner), int(rows)),
+        array<int, 2>{1, int(inner)});
+    tensor<device half, dextents<int, 2>, tensor_inline> right(
+        weights,
+        dextents<int, 2>(int(inner), int(cols)),
+        array<int, 2>{1, int(inner)});
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        destination,
+        dextents<int, 2>(int(cols), int(rows)),
+        array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(
+        64, 64, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, int(tgid.y) * 64);
+    auto tile_right = right.slice(0, int(tgid.x) * 64);
+    auto tile_out = out.slice(int(tgid.x) * 64, int(tgid.y) * 64);
+    op.run(tile_left, tile_right, tile_out);
+}
+
+// Half values, [channel, token]. ``stride`` is the token axis of one channel.
+kernel void prefill_f16_n64_stride(
+    device half* activation [[buffer(0)]],
+    device half* weights [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    constant uint& stride [[buffer(6)]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        activation,
+        dextents<int, 2>(int(inner), int(rows)),
+        array<int, 2>{1, int(inner)});
+    tensor<device half, dextents<int, 2>, tensor_inline> right(
+        weights,
+        dextents<int, 2>(int(inner), int(cols)),
+        array<int, 2>{1, int(stride)});
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        destination,
+        dextents<int, 2>(int(cols), int(rows)),
+        array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(
+        64, 64, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, int(tgid.y) * 64);
+    auto tile_right = right.slice(0, int(tgid.x) * 64);
+    auto tile_out = out.slice(int(tgid.x) * 64, int(tgid.y) * 64);
+    op.run(tile_left, tile_right, tile_out);
+}
+
 kernel void prefill_fp8_n64_sweep(
     device half* activation [[buffer(0)]],
     device uchar* weights [[buffer(1)]],
@@ -2402,8 +2465,9 @@ kernel void attend_gqa_heads(
     destination[head * 256u + tid] = acc * sigmoid_f(gate[head * 256u + tid]);
 }
 
-// fp16 cache. Same [head, token, channel] layout as the float32 cache, two bytes
-// per element, no scale plane. ``stride`` counts elements, not bytes.
+// fp16 cache. Keys are [head, token, channel]. Values are [head, channel, token]
+// so the value mix contracts along a contiguous token axis. ``stride`` is the
+// key plane's element count for one head, ``max_pos * 256``.
 
 kernel void store_kv_f16(
     device half* key_cache [[buffer(0)]],
@@ -2415,8 +2479,9 @@ kernel void store_kv_f16(
     uint tid [[thread_index_in_threadgroup]],
     uint head [[threadgroup_position_in_grid]])
 {
+    uint span = stride / 256u;
     key_cache[head * stride + pos * 256u + tid] = half(key[head * 256u + tid]);
-    value_cache[head * stride + pos * 256u + tid] = half(value[head * 256u + tid]);
+    value_cache[(head * 256u + tid) * span + pos] = half(value[head * 256u + tid]);
 }
 
 // One simdgroup per key/value head. The eight query heads that share that
@@ -3544,8 +3609,9 @@ kernel void store_kv_rows_f16(
     uint token = tgid.x;
     uint kv = tgid.y;
     uint pos = pos0 + token;
+    uint span = stride / 256u;
     key_cache[kv * stride + pos * 256u + tid] = half(key[(token * 2u + kv) * 256u + tid]);
-    value_cache[kv * stride + pos * 256u + tid] = half(value[(token * 2u + kv) * 256u + tid]);
+    value_cache[(kv * 256u + tid) * span + pos] = half(value[(token * 2u + kv) * 256u + tid]);
 }
 
 kernel void attend_prefill2_f16(
@@ -4802,6 +4868,43 @@ kernel void kv_pv_split8(
         dextents<int, 2>(int(block), int(channels)),
         array<int, 2>{1, int(value_stride)},
         scales_plane(scale));
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        dest,
+        dextents<int, 2>(int(channels), int(rows)),
+        array<int, 2>{1, int(channels)});
+    constexpr auto desc = matmul2d_descriptor(
+        8, 64, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, 0);
+    auto tile_right = right.slice(0, int(tgid.x) * 64);
+    auto tile_out = out.slice(int(tgid.x) * 64, 0);
+    op.run(tile_left, tile_right, tile_out);
+}
+
+// Eight live query rows against half values stored [channel, token].
+kernel void kv_pv_f16_split8(
+    device half* activation [[buffer(0)]],
+    device half* weights [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& channels [[buffer(4)]],
+    constant uint& block [[buffer(5)]],
+    constant uint& row_stride [[buffer(6)]],
+    constant uint& value_stride [[buffer(7)]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    uint k0 = tgid.y * block;
+    device half* act = activation + k0;
+    device half* data = weights + k0;
+    device float* dest = destination + (tgid.y * rows * channels);
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        act,
+        dextents<int, 2>(int(block), int(rows)),
+        array<int, 2>{1, int(row_stride)});
+    tensor<device half, dextents<int, 2>, tensor_inline> right(
+        data,
+        dextents<int, 2>(int(block), int(channels)),
+        array<int, 2>{1, int(value_stride)});
     tensor<device float, dextents<int, 2>, tensor_inline> out(
         dest,
         dextents<int, 2>(int(channels), int(rows)),

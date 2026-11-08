@@ -25,7 +25,7 @@ from qwen36_35b_a3b.atlas import (
     read_expert_layout,
 )
 from qwen36_35b_a3b.attn import (
-    attend_half_decode,
+    attend_half,
     attend_plane,
     bind_plane,
     plane_bytes,
@@ -1026,7 +1026,19 @@ class Qwen36Runtime:
             (HEAD, 1, 1),
         )
         slot = layer // 4
-        if plain_cache(self.kv_cache):
+        if self.kv_cache == "half":
+            attend_half(
+                self,
+                query=self.query,
+                key=self.kv,
+                value=self.vv,
+                gate=self.gate,
+                dest=self.attn,
+                pos0=pos,
+                count=1,
+                slot=slot,
+            )
+        elif plain_cache(self.kv_cache):
             store, attend = kv_io(self.kv_cache, rows=False)
             stride = self.max_pos * HEAD
             self.session.encode(
@@ -1041,29 +1053,19 @@ class Qwen36Runtime:
                 (KV, 1, 1),
                 (HEAD, 1, 1),
             )
-            if self.kv_cache == "half":
-                attend_half_decode(
-                    self,
-                    query=self.query,
-                    gate=self.gate,
-                    dest=self.attn,
-                    pos=pos,
-                    slot=slot,
-                )
-            else:
-                self.session.encode(
-                    attend,
-                    [
-                        (self.query, 0),
-                        (self.k_cache[slot], 0),
-                        (self.v_cache[slot], 0),
-                        (self.gate, 0),
-                        (self.attn, 0),
-                    ],
-                    [_u32(pos + 1), _u32(stride)],
-                    (Q_HEADS, 1, 1),
-                    (HEAD, 1, 1),
-                )
+            self.session.encode(
+                attend,
+                [
+                    (self.query, 0),
+                    (self.k_cache[slot], 0),
+                    (self.v_cache[slot], 0),
+                    (self.gate, 0),
+                    (self.attn, 0),
+                ],
+                [_u32(pos + 1), _u32(stride)],
+                (Q_HEADS, 1, 1),
+                (HEAD, 1, 1),
+            )
         else:
             attend_plane(
                 self,
@@ -1878,7 +1880,19 @@ class Qwen36Runtime:
             (Q_HEADS + KV, 1, 1),
             (HEAD, 1, 1),
         )
-        if plain_cache(self.kv_cache):
+        if self.kv_cache == "half":
+            attend_half(
+                self,
+                query=self.query,
+                key=self.kv,
+                value=self.vv,
+                gate=self.gate,
+                dest=self.attn,
+                pos0=pos,
+                count=1,
+                slot=MTP_SLOT,
+            )
+        elif plain_cache(self.kv_cache):
             store, attend = kv_io(self.kv_cache, rows=False)
             stride = self.max_pos * HEAD
             self.session.encode(
@@ -1893,29 +1907,19 @@ class Qwen36Runtime:
                 (KV, 1, 1),
                 (HEAD, 1, 1),
             )
-            if self.kv_cache == "half":
-                attend_half_decode(
-                    self,
-                    query=self.query,
-                    gate=self.gate,
-                    dest=self.attn,
-                    pos=pos,
-                    slot=MTP_SLOT,
-                )
-            else:
-                self.session.encode(
-                    attend,
-                    [
-                        (self.query, 0),
-                        (self.k_cache[MTP_SLOT], 0),
-                        (self.v_cache[MTP_SLOT], 0),
-                        (self.gate, 0),
-                        (self.attn, 0),
-                    ],
-                    [_u32(pos + 1), _u32(stride)],
-                    (Q_HEADS, 1, 1),
-                    (HEAD, 1, 1),
-                )
+            self.session.encode(
+                attend,
+                [
+                    (self.query, 0),
+                    (self.k_cache[MTP_SLOT], 0),
+                    (self.v_cache[MTP_SLOT], 0),
+                    (self.gate, 0),
+                    (self.attn, 0),
+                ],
+                [_u32(pos + 1), _u32(stride)],
+                (Q_HEADS, 1, 1),
+                (HEAD, 1, 1),
+            )
         else:
             attend_plane(
                 self,

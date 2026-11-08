@@ -80,7 +80,14 @@ def _frequency(body: dict[str, Any]) -> float:
 
 
 def requested_limit(body: dict[str, Any]) -> int | None:
-    """Request or settings cap. None when neither set one."""
+    """Request or settings cap. None when neither set one.
+
+    ``max_output_tokens`` is the Responses field. Chat Completions names are
+    read after it, then ``settings.json``.
+    """
+    cap = body.get("max_output_tokens")
+    if cap is not None:
+        return int(cap)
     from favlo.logs import output_token_limit
 
     return output_token_limit(body)
@@ -417,8 +424,7 @@ def _respond(
     mtp_depth = _mtp_depth(mtp_body, selection)
     # Grow happens inside generate. A cap taken from the previous cache is 0
     # once the prompt is longer than that cache, and decode never samples.
-    cap = prepared.get("max_output_tokens")
-    requested = requested_limit({"max_tokens": int(cap)} if cap is not None else {})
+    requested = requested_limit(prepared)
     limit = runtime._context_limit if requested is None else requested
     if stream:
         _stream(

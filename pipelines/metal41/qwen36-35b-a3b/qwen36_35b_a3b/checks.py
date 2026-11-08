@@ -1162,6 +1162,73 @@ def _check_attend_gqa_heads_f16(session: Session, rng: np.random.Generator) -> N
     mixed = session.download_f32(acc, rows * 256).reshape(rows, 256)
     expect_long = probs_long @ value_long.astype(np.float32)
     _close("prefill_f16_pv_blocks", mixed, expect_long, rtol=3e-2, atol=3e-2)
+    _check_half_plane(session, rng)
+
+
+def _check_half_plane(session: Session, rng: np.random.Generator) -> None:
+    """Half prefill score and the strided value mix, plus the decode block mix."""
+    rows = 64
+    cols = 64
+    inner = 256
+    query = rng.normal(scale=0.1, size=(rows, inner)).astype(np.float16)
+    key = rng.normal(scale=0.1, size=(cols, inner)).astype(np.float16)
+    scores = session.zeros(rows * cols * 4)
+    width = int(session.pipes["prefill_f16_n64"].threadExecutionWidth())
+    session.dispatch(
+        "prefill_f16_n64",
+        [session.upload(query.tobytes()), session.upload(key.tobytes()), scores],
+        [
+            np.uint32(rows).tobytes(),
+            np.uint32(cols).tobytes(),
+            np.uint32(inner).tobytes(),
+        ],
+        (cols // 64, rows // 64, 1),
+        (width * 4, 1, 1),
+    )
+    got = session.download_f32(scores, rows * cols).reshape(rows, cols)
+    expect = query.astype(np.float32) @ key.astype(np.float32).T
+    _close("prefill_f16_n64", got, expect, rtol=2e-2, atol=2e-2)
+    span = 512
+    channels = 256
+    probs = rng.normal(scale=0.05, size=(rows, span)).astype(np.float16)
+    values = rng.normal(scale=0.1, size=(channels, span)).astype(np.float16)
+    partial = session.zeros(rows * channels * 4)
+    stride_width = int(session.pipes["prefill_f16_n64_stride"].threadExecutionWidth())
+    session.dispatch(
+        "prefill_f16_n64_stride",
+        [session.upload(probs.tobytes()), session.upload(np.ascontiguousarray(values)), partial],
+        [
+            np.uint32(rows).tobytes(),
+            np.uint32(channels).tobytes(),
+            np.uint32(span).tobytes(),
+            np.uint32(span).tobytes(),
+        ],
+        (channels // 64, rows // 64, 1),
+        (stride_width * 4, 1, 1),
+    )
+    mixed = session.download_f32(partial, rows * channels).reshape(rows, channels)
+    expect_mix = probs.astype(np.float32) @ values.astype(np.float32).T
+    _close("prefill_f16_n64_stride", mixed, expect_mix, rtol=2e-2, atol=2e-2)
+    live = 8
+    packed = rng.normal(scale=0.05, size=(live, span)).astype(np.float16)
+    acc = session.zeros(live * channels * 4)
+    split_width = int(session.pipes["kv_pv_f16_split8"].threadExecutionWidth())
+    session.dispatch(
+        "kv_pv_f16_split8",
+        [session.upload(packed.tobytes()), session.upload(np.ascontiguousarray(values)), acc],
+        [
+            np.uint32(live).tobytes(),
+            np.uint32(channels).tobytes(),
+            np.uint32(span).tobytes(),
+            np.uint32(span).tobytes(),
+            np.uint32(span).tobytes(),
+        ],
+        (channels // 64, 1, 1),
+        (split_width * 4, 1, 1),
+    )
+    got_split = session.download_f32(acc, live * channels).reshape(live, channels)
+    expect_split = packed.astype(np.float32) @ values.astype(np.float32).T
+    _close("kv_pv_f16_split8", got_split, expect_split, rtol=2e-2, atol=2e-2)
 
 
 def struct_f32(value: float) -> bytes:

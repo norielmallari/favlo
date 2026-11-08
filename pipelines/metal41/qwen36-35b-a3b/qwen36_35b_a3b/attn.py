@@ -10,12 +10,13 @@ and splits the value mix into blocks of 512 keys. Softmax writes float32
 weights. Each window divides by that row's peak, multiplies in float16, then
 restores the peak.
 
-The half cache keeps ``[head, token, channel]`` for both keys and values, with
-no scale plane. Decode scores the eight query rows of a key/value head in
-float with ``score_f32_m8`` and softmaxes the same way as the fp8 step. The value mix casts each 128-token block with ``kv_cast_blocks``, then
-``prefill_f16_pv_blocks`` reads that block with one threadgroup and one thread
-per channel, so the eight rows share the value row. ``kv_restore_sum`` scales
-each block by its peak and adds it.
+The half cache keeps keys ``[head, token, channel]`` and values
+``[head, channel, token]``, with no scale plane. Prefill scores up to 4096
+keys with ``prefill_f16_n64`` and mixes values with ``prefill_f16_n64_stride``.
+Decode casts the eight query rows to half, scores them with ``prefill_f16_m8``,
+and mixes values in blocks of 512 keys with ``kv_pv_f16_split8``. Softmax
+writes float32 weights. Each value-mix block divides by that block's peak,
+multiplies in float16, then restores the peak.
 """
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ from qwen36_35b_a3b.cache import plain_cache
 TILE = 256
 SCORE = 4096
 BLOCK = 512
-_HALF_BLOCK = 128
 HEAD = 256
 CHUNK = 2048
 GROUP = 8
@@ -85,74 +85,6 @@ def resize_plane(runtime: Any) -> None:
         return
     blocks = max(runtime.max_pos, BLOCK) // BLOCK
     runtime.plane_parts = runtime.session.zeros(blocks * (GROUP * GROUP) * HEAD * 4)
-
-
-def attend_half_decode(
-    runtime: Any,
-    *,
-    query: Any,
-    gate: Any,
-    dest: Any,
-    pos: int,
-    slot: int,
-) -> None:
-    """One-token half decode. Eight float query rows per key/value head."""
-    if runtime.max_pos % TILE:
-        message = f"context {runtime.max_pos} is not a multiple of {TILE}"
-        raise RuntimeError(message)
-    limit = pos + 1
-    aligned = (limit + TILE - 1) // TILE * TILE
-    if aligned > runtime.max_pos:
-        aligned = runtime.max_pos
-    if aligned < limit:
-        message = f"attention span {limit} does not fit context {runtime.max_pos}"
-        raise RuntimeError(message)
-    room = (GROUP * CHUNK * SCORE) // GROUP
-    room = room // TILE * TILE
-    if room < TILE:
-        message = f"score buffer cannot hold {GROUP} rows"
-        raise RuntimeError(message)
-    for head in range(2):
-        _encode(
-            runtime,
-            "kv_row_init",
-            [(runtime.plane_max, 0), (runtime.plane_sum, 0), (runtime.plane_acc, 0)],
-            [],
-            (GROUP, 1, 1),
-            (HEAD, 1, 1),
-        )
-        start = 0
-        while start < aligned:
-            span = min(room, aligned - start)
-            if span % TILE:
-                message = f"decode span {span} is not a multiple of {TILE}"
-                raise RuntimeError(message)
-            key_off = (head * runtime.max_pos + start) * HEAD * 2
-            _score_f32_m8(
-                runtime,
-                query,
-                head * GROUP * HEAD * 4,
-                runtime.k_cache[slot],
-                key_off,
-                runtime.plane_scores,
-                span,
-            )
-            _softmax8(runtime, span, pos, start)
-            _half_pv(runtime, runtime.v_cache[slot], key_off, GROUP, span)
-            start += span
-        _encode(
-            runtime,
-            "kv_attend_write",
-            [
-                (runtime.plane_acc, 0),
-                (runtime.plane_sum, 0),
-                (gate, 0),
-                (dest, 0),
-            ],
-            [_u32(1), _u32(1), _u32(head)],
-            (1, GROUP, 1),
-            (HEAD, 1, 1),
-        )
 
 
 def attend_plane(
@@ -217,6 +149,196 @@ def attend_plane(
             (count, GROUP, 1),
             (HEAD, 1, 1),
         )
+
+
+def attend_half(
+    runtime: Any,
+    *,
+    query: Any,
+    key: Any,
+    value: Any,
+    gate: Any,
+    dest: Any,
+    pos0: int,
+    count: int,
+    slot: int,
+) -> None:
+    """Store this chunk on the half plane and mix it with ``matmul2d``."""
+    if runtime.max_pos % TILE:
+        message = f"context {runtime.max_pos} is not a multiple of {TILE}"
+        raise RuntimeError(message)
+    if count < 1 or count > CHUNK:
+        message = f"attention count {count} is outside 1..{CHUNK}"
+        raise RuntimeError(message)
+    _store_half(runtime, key, value, pos0, count, slot)
+    decode8 = count == 1
+    pad = 1 if decode8 else (count + GROUP - 1) // GROUP * GROUP
+    rows = GROUP if decode8 else GROUP * pad
+    for head in range(2):
+        _zero(runtime, runtime.plane_q, rows * HEAD // 2)
+        _encode(
+            runtime,
+            "kv_row_init",
+            [(runtime.plane_max, 0), (runtime.plane_sum, 0), (runtime.plane_acc, 0)],
+            [],
+            (rows, 1, 1),
+            (HEAD, 1, 1),
+        )
+        _encode(
+            runtime,
+            "kv_cast_q",
+            [(query, 0), (runtime.plane_q, 0)],
+            [_u32(pad), _u32(head)],
+            (count, GROUP, 1),
+            (HEAD, 1, 1),
+        )
+        if decode8:
+            _mix_half_decode(runtime, head, rows, pos0, count, slot)
+        else:
+            _mix_half_tiles(runtime, head, rows, pad, pos0, count, slot)
+        _encode(
+            runtime,
+            "kv_attend_write",
+            [
+                (runtime.plane_acc, 0),
+                (runtime.plane_sum, 0),
+                (gate, 0),
+                (dest, 0),
+            ],
+            [_u32(pad), _u32(count), _u32(head)],
+            (count, GROUP, 1),
+            (HEAD, 1, 1),
+        )
+
+
+def _store_half(runtime: Any, key: Any, value: Any, pos0: int, count: int, slot: int) -> None:
+    stride = runtime.max_pos * HEAD
+    name = "store_kv_f16" if count == 1 else "store_kv_rows_f16"
+    groups = (2, 1, 1) if count == 1 else (count, 2, 1)
+    _encode(
+        runtime,
+        name,
+        [
+            (runtime.k_cache[slot], 0),
+            (runtime.v_cache[slot], 0),
+            (key, 0),
+            (value, 0),
+        ],
+        [_u32(pos0), _u32(stride)],
+        groups,
+        (HEAD, 1, 1),
+    )
+
+
+def _mix_half_tiles(
+    runtime: Any,
+    head: int,
+    rows: int,
+    pad: int,
+    pos0: int,
+    count: int,
+    slot: int,
+) -> None:
+    limit = pos0 + count
+    start = 0
+    while start < limit:
+        width = min(SCORE, limit - start) // TILE * TILE
+        if width >= TILE:
+            _mix_half_window(runtime, head, rows, pad, pos0, count, slot, start, width)
+            start += width
+            continue
+        _mix_half_window(runtime, head, rows, pad, pos0, count, slot, start, TILE)
+        start += TILE
+
+
+def _mix_half_window(
+    runtime: Any,
+    head: int,
+    rows: int,
+    pad: int,
+    pos0: int,
+    count: int,
+    slot: int,
+    start: int,
+    cols: int,
+) -> None:
+    _matmul_f16_n64(
+        runtime,
+        runtime.plane_q,
+        runtime.k_cache[slot],
+        _half_key(runtime, head, start),
+        runtime.plane_scores,
+        rows,
+        cols,
+        HEAD,
+    )
+    if cols == TILE:
+        _softmax_tile(runtime, pad, count, pos0, start)
+    else:
+        _softmax_rows(runtime, cols, pad, count, pos0, start)
+    _matmul_f16_stride(
+        runtime,
+        runtime.plane_probs,
+        runtime.v_cache[slot],
+        _half_value(runtime, head, start),
+        runtime.plane_partial,
+        rows,
+        HEAD,
+        cols,
+        runtime.max_pos,
+    )
+    _acc_add(runtime, rows)
+
+
+def _mix_half_decode(
+    runtime: Any,
+    head: int,
+    rows: int,
+    pos0: int,
+    count: int,
+    slot: int,
+) -> None:
+    """One score product per span. Half values are reduced in blocks of 512 keys."""
+    limit = pos0 + count
+    aligned = (limit + BLOCK - 1) // BLOCK * BLOCK
+    if aligned > runtime.max_pos or aligned < limit:
+        message = f"attention span {limit} does not fit context {runtime.max_pos}"
+        raise RuntimeError(message)
+    room = (GROUP * CHUNK * SCORE) // rows
+    room = room // BLOCK * BLOCK
+    if room < BLOCK:
+        message = f"score buffer cannot hold {rows} rows"
+        raise RuntimeError(message)
+    start = 0
+    while start < aligned:
+        span = min(room, aligned - start)
+        if span % TILE:
+            message = f"decode span {span} is not a multiple of {TILE}"
+            raise RuntimeError(message)
+        _matmul_f16_m8(
+            runtime,
+            runtime.plane_q,
+            runtime.k_cache[slot],
+            _half_key(runtime, head, start),
+            runtime.plane_scores,
+            rows,
+            span,
+            HEAD,
+        )
+        _softmax8(runtime, span, pos0, start)
+        _pv_f16_split8(runtime, _half_value(runtime, head, start), slot, rows, span)
+        start += span
+
+
+def _half_key(runtime: Any, head: int, start: int) -> int:
+    return (head * runtime.max_pos + start) * HEAD * 2
+
+
+def _half_value(runtime: Any, head: int, start: int) -> int:
+    if start % 32:
+        message = f"value window {start} is not a multiple of 32"
+        raise RuntimeError(message)
+    return ((head * HEAD) * runtime.max_pos + start) * 2
 
 
 def _store_keys(
@@ -663,22 +785,114 @@ def _matmul_m8(
     )
 
 
-def _score_f32_m8(
+def _matmul_f16_n64(
     runtime: Any,
-    query: Any,
-    query_off: int,
-    keys: Any,
-    key_off: int,
+    left: Any,
+    right: Any,
+    data_off: int,
     dest: Any,
+    rows: int,
     cols: int,
+    inner: int,
 ) -> None:
+    name = "prefill_f16_n64"
+    width = int(runtime.session.pipes[name].threadExecutionWidth())
     _encode(
         runtime,
-        "score_f32_m8",
-        [(query, query_off), (keys, key_off), (dest, 0)],
-        [_u32(GROUP), _u32(cols), _u32(HEAD)],
-        (cols // TILE, 1, 1),
-        (TILE, 1, 1),
+        name,
+        [(left, 0), (right, data_off), (dest, 0)],
+        [_u32(rows), _u32(cols), _u32(inner)],
+        (cols // 64, rows // 64, 1),
+        (width * 4, 1, 1),
+    )
+
+
+def _matmul_f16_stride(
+    runtime: Any,
+    left: Any,
+    right: Any,
+    data_off: int,
+    dest: Any,
+    rows: int,
+    cols: int,
+    inner: int,
+    stride: int,
+) -> None:
+    name = "prefill_f16_n64_stride"
+    width = int(runtime.session.pipes[name].threadExecutionWidth())
+    _cast_probs(runtime, left, rows, inner, inner, 0)
+    _encode(
+        runtime,
+        name,
+        [(runtime.plane_prob_half, 0), (right, data_off), (dest, 0)],
+        [_u32(rows), _u32(cols), _u32(inner), _u32(stride)],
+        (cols // 64, rows // 64, 1),
+        (width * 4, 1, 1),
+    )
+    _scale_partial(runtime, dest, rows, cols)
+
+
+def _pv_f16_split8(
+    runtime: Any,
+    data_off: int,
+    slot: int,
+    rows: int,
+    span: int,
+) -> None:
+    """Cast every 512-key block, mix them in one dispatch, then restore the peaks."""
+    blocks = span // BLOCK
+    if blocks < 1 or rows > GROUP:
+        message = f"half value mix cannot cover {blocks} blocks of {rows} rows"
+        raise RuntimeError(message)
+    half_bytes = rows * span * 2
+    peak_bytes = blocks * rows * 4
+    part_bytes = blocks * rows * HEAD * 4
+    if half_bytes > GROUP * CHUNK * SCORE * 2:
+        message = f"half value mix scratch {half_bytes} exceeds the plane"
+        raise RuntimeError(message)
+    if peak_bytes > GROUP * CHUNK * (SCORE // TILE) * 4:
+        message = f"half value mix peaks {peak_bytes} exceed the plane"
+        raise RuntimeError(message)
+    if part_bytes > (runtime.max_pos // BLOCK) * (GROUP * GROUP) * HEAD * 4:
+        message = f"half value mix parts {part_bytes} exceed the plane"
+        raise RuntimeError(message)
+    _encode(
+        runtime,
+        "kv_cast_blocks",
+        [
+            (runtime.plane_probs, 0),
+            (runtime.plane_prob_half, 0),
+            (runtime.plane_chunk_max, 0),
+        ],
+        [_u32(BLOCK), _u32(span), _u32(rows)],
+        (blocks, rows, 1),
+        (32, 1, 1),
+    )
+    name = "kv_pv_f16_split8"
+    width = int(runtime.session.pipes[name].threadExecutionWidth())
+    _encode(
+        runtime,
+        name,
+        [
+            (runtime.plane_prob_half, 0),
+            (runtime.v_cache[slot], data_off),
+            (runtime.plane_parts, 0),
+        ],
+        [_u32(rows), _u32(HEAD), _u32(BLOCK), _u32(span), _u32(runtime.max_pos)],
+        (HEAD // 64, blocks, 1),
+        (width * 4, 1, 1),
+    )
+    _encode(
+        runtime,
+        "kv_restore_sum",
+        [
+            (runtime.plane_parts, 0),
+            (runtime.plane_chunk_max, 0),
+            (runtime.plane_acc, 0),
+        ],
+        [_u32(blocks), _u32(rows), _u32(HEAD)],
+        ((rows * HEAD) // 256, 1, 1),
+        (256, 1, 1),
     )
 
 
@@ -721,57 +935,6 @@ def _matmul_f16_pv(
         [_u32(rows), _u32(cols), _u32(inner)],
         (rows, 1, 1),
         (cols, 1, 1),
-    )
-
-
-def _half_pv(runtime: Any, values: Any, data_off: int, rows: int, span: int) -> None:
-    """Mix one half span. Cast, reduce, and restore each 128-token block."""
-    if rows != GROUP:
-        message = f"half value mix is {GROUP} rows, got {rows}"
-        raise RuntimeError(message)
-    block = _HALF_BLOCK
-    if span % block:
-        message = f"half value span {span} is not a multiple of {block}"
-        raise RuntimeError(message)
-    blocks = span // block
-    need = blocks * rows * HEAD * 4
-    room = (runtime.max_pos // BLOCK) * (GROUP * GROUP) * HEAD * 4
-    peaks = blocks * rows * 4
-    peak_room = (GROUP * CHUNK) * (SCORE // TILE) * 4
-    if need > room or peaks > peak_room:
-        message = f"half value mix partials {need} exceed the plane"
-        raise RuntimeError(message)
-    _encode(
-        runtime,
-        "kv_cast_blocks",
-        [
-            (runtime.plane_probs, 0),
-            (runtime.plane_prob_half, 0),
-            (runtime.plane_chunk_max, 0),
-        ],
-        [_u32(block), _u32(span), _u32(rows)],
-        (blocks, rows, 1),
-        (32, 1, 1),
-    )
-    _encode(
-        runtime,
-        "prefill_f16_pv_blocks",
-        [(runtime.plane_prob_half, 0), (values, data_off), (runtime.plane_parts, 0)],
-        [_u32(rows), _u32(HEAD), _u32(block), _u32(span)],
-        (blocks, 1, 1),
-        (HEAD, 1, 1),
-    )
-    _encode(
-        runtime,
-        "kv_restore_sum",
-        [
-            (runtime.plane_parts, 0),
-            (runtime.plane_chunk_max, 0),
-            (runtime.plane_acc, 0),
-        ],
-        [_u32(blocks), _u32(rows), _u32(HEAD)],
-        ((rows * HEAD) // 256, 1, 1),
-        (256, 1, 1),
     )
 
 

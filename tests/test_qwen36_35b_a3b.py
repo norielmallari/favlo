@@ -238,6 +238,8 @@ def test_an_omitted_completion_cap_is_the_context_room() -> None:
     assert requested_limit({"max_tokens": None, "max_completion_tokens": 16}) == 16
     assert requested_limit({"max_tokens": 32}) == 32
     assert requested_limit({"max_tokens": 0}) == 0
+    assert requested_limit({"max_output_tokens": 80}) == 80
+    assert requested_limit({"max_output_tokens": 80, "max_tokens": 32}) == 80
     assert completion_limit(100, 40, None) == 60
     assert completion_limit(100, 40, 10) == 10
     assert completion_limit(100, 40, 80) == 60
@@ -1245,6 +1247,11 @@ def test_a_longer_cache_keeps_the_tokens_already_stored() -> None:
     value[: 2 * old * 256].reshape(2, 256, old)[0, 3, 4] = 41
     moved = repack_plane(value, old, new, count, mode, "value")
     assert moved[: 2 * new * 256].reshape(2, 256, new)[0, 3, 4] == 41
+    half = "half"
+    source = np.zeros(kv_buffer_bytes(half, old), dtype=np.uint8)
+    source.reshape(2, 256, old, 2)[1, 7, 4, 0] = 19
+    kept = repack_plane(source, old, new, count, half, "value")
+    assert kept.reshape(2, 256, new, 2)[1, 7, 4, 0] == 19
 
 
 def test_context_shrinks_to_the_bytes_the_cache_can_hold() -> None:

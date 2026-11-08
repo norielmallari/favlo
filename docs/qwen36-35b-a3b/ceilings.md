@@ -99,19 +99,23 @@ Those MTP-on figures are the serial verify: one language token plus one draft. T
 
 ## Half decode
 
-Measured on 2 November 2026, after the half value mix moved to `prefill_f16_pv_blocks`. The live decode score is `score_f32_m8`, which keeps the query in float. The `prefill_f16_m8` row is that day's half-query matmul. Each figure is one command buffer, then a wait, the first sample discarded, the median of the next four. One call is the eight query rows of one key/value head. The forward launches that call 20 times. The softmax rows are the 30 October figures above: those kernels and the float score shape did not change. The other rows of the 30 October token are unchanged. A half key and a half value are two bytes per channel.
+Measured on 7 November 2026. The live score is `prefill_f16_m8`. The value mix is `kv_cast_blocks`, `kv_pv_f16_split8`, and `kv_restore_sum`, with values stored `[head, channel, token]` and a token stride of 262144. Each block is 512 keys. Each figure is one command buffer, then a wait, the first sample discarded, the median of the next four. One call is the eight query rows of one key/value head. The forward launches that call 20 times. The softmax rows are the 30 October figures: those kernels did not change. The other rows of the 30 October token are unchanged. A half key and a half value are two bytes per channel.
 
 | Kernel | Context 2048 µs | Context 65536 µs |
 |---|---:|---:|
-| `prefill_f16_m8` | 37.0 | 193.6 |
+| `prefill_f16_m8` | 42.9 | 210.5 |
 | `kv_softmax_max` | 3.6 | 7.4 |
 | `kv_softmax_prob` | 4.0 | 9.4 |
 | `kv_softmax_close` | 4.0 | 5.2 |
-| `kv_cast_blocks` | 11.4 | 29.0 |
-| `prefill_f16_pv_blocks` | 104.6 | 605.5 |
-| `kv_restore_sum` | 20.7 | 271.8 |
+| `kv_cast_blocks` | 38.3 | 33.1 |
+| `kv_pv_f16_split8` | 28.1 | 242.6 |
+| `kv_restore_sum` | 12.2 | 107.0 |
 
-Twenty calls make the attention 3.71 ms at context 2048 and 22.44 ms at context 65536. Added to the unchanged remainder of the 30 October token, context 2048 is 15.16 ms, 66.0 tok/s, and context 65536 is 34.00 ms, 29.4 tok/s. The 90% test for a half decode uses these kernel ceilings.
+Twenty calls make the attention 2.66 ms at context 2048 and 12.30 ms at context 65536. Added to the unchanged remainder of the 30 October token, context 2048 is 14.11 ms, 70.9 tok/s, and context 65536 is 23.86 ms, 41.9 tok/s. The 90% test for a half decode uses these kernel ceilings.
+
+## Half prefill
+
+Measured on 7 November 2026. A score window is `prefill_f16_n64` and the value mix is `prefill_f16_n64_stride`, 16384 query rows, value token stride 262144. The softmax, probability cast, scale, and add rows are the fp8 prefill figures above: those kernels did not change. One 2048-key window is 4488.1 µs. One 4096-key window is 7639.8 µs. The first chunk, one 2048-key window per head, is 1306.7 ms, 1567.3 tok/s. A prompt of 65536 tokens, with the same window counts as the fp8 prompt, is 79494.8 ms, 824.4 tok/s. The 90% test for a half prefill uses this kernel ceiling.
 
 ## Prefill
 

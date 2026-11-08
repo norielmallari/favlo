@@ -5,8 +5,9 @@ The checkpoint cap is ``max_position_embeddings``. The served window stops at
 grows with the prompt and with decode, up to the longest multiple of 4096 that
 still leaves eight expert images and still fits that window. The atlas then keeps
 as many images as the remaining bytes allow. The cache is ``fp8_e4m3`` unless
-the caller asks for half, ``e2m1``, or the float32 values. half and float32
-store raw values, ``[head, token, channel]``, with no scale plane.
+the caller asks for half, ``e2m1``, or the float32 values. half keys are
+``[head, token, channel]`` and half values lie along the token axis, with no
+scale plane. float32 stores both planes ``[head, token, channel]``.
 ``fp8_e4m3`` and ``e2m1`` keys scale every 32 channels. Their values lie
 along the token axis and scale every 32 tokens.
 """
@@ -143,6 +144,11 @@ def repack_plane(
     if count < 1:
         return dst
     mode = kv_mode(mode)
+    if mode == "half" and kind == "value":
+        dst.reshape(KV_HEADS, HEAD, new_pos, 2)[:, :, :count, :] = src.reshape(
+            KV_HEADS, HEAD, old_pos, 2
+        )[:, :, :count, :]
+        return dst
     if mode in ("f32", "half"):
         row = F32_RECORD if mode == "f32" else F16_RECORD
         dst.reshape(KV_HEADS, new_pos, row)[:, :count, :] = src.reshape(KV_HEADS, old_pos, row)[

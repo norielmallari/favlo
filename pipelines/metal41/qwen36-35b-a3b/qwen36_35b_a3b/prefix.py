@@ -37,7 +37,11 @@ def open_session(runtime: Any) -> PrefixSession:
             default_prefix_dir(),
             model="qwen36-35b-a3b",
             digest=checkpoint_digest(runtime.root),
-            tag=f"{runtime.kv_cache}-mrope-mtp",
+            tag=(
+                "half-vchan-mrope-mtp"
+                if runtime.kv_cache == "half"
+                else f"{runtime.kv_cache}-mrope-mtp"
+            ),
             budget=DEFAULT_BUDGET,
         ),
         CacheAdapter(runtime),
@@ -179,6 +183,8 @@ def _slices(
     array: np.ndarray, max_pos: int, count: int, mode: str, kind: str
 ) -> tuple[np.ndarray, np.ndarray | None]:
     mode = kv_mode(mode)
+    if mode == "half" and kind == "value":
+        return array.reshape(_KV, _HEAD, max_pos, 2)[:, :, :count, :], None
     if mode in ("half", "f32"):
         row = _HEAD * (2 if mode == "half" else 4)
         return array.reshape(_KV, max_pos, row)[:, :count, :], None
