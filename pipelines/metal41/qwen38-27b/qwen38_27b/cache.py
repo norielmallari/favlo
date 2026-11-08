@@ -23,15 +23,17 @@ MODES = ("half", "fp8_e4m3")
 _ALIASES = {
     "e4m3": "fp8_e4m3",
     "fp8": "fp8_e4m3",
+    "f16": "half",
+    "fp16": "half",
 }
 
 
 def kv_mode(name: str | None) -> str:
-    """``half`` or ``fp8_e4m3``. Empty means ``fp8_e4m3``.
+    """``half`` or ``fp8_e4m3``. Empty means ``half``.
 
-    ``e4m3`` and ``fp8`` are ``fp8_e4m3``.
+    ``f16`` and ``fp16`` are ``half``. ``e4m3`` and ``fp8`` are ``fp8_e4m3``.
     """
-    text = "fp8_e4m3" if name is None or name == "" else str(name)
+    text = "half" if name is None or name == "" else str(name)
     text = _ALIASES.get(text, text)
     if text not in MODES:
         message = f"kv cache {name} is not half or fp8_e4m3"
@@ -51,23 +53,23 @@ def kv_record_bytes(mode: str | None) -> int:
     return E4M3_RECORD
 
 
-def plane_bytes(positions: int, mode: str | None = "fp8_e4m3") -> int:
+def plane_bytes(positions: int, mode: str | None = "half") -> int:
     """One key plane or one value plane for every head."""
     return KV_HEADS * positions * kv_record_bytes(mode)
 
 
-def layer_cache_bytes(positions: int, mode: str | None = "fp8_e4m3") -> int:
+def layer_cache_bytes(positions: int, mode: str | None = "half") -> int:
     """Key and value planes of one full-attention layer."""
     return 2 * plane_bytes(positions, mode)
 
 
-def cache_bytes(positions: int, mode: str | None = "fp8_e4m3") -> int:
+def cache_bytes(positions: int, mode: str | None = "half") -> int:
     """The 16 language full-attention layers."""
     return FULL_LAYERS * layer_cache_bytes(positions, mode)
 
 
 def sequence_cache_bytes(
-    positions: int, slots: int = FULL_LAYERS, mode: str | None = "fp8_e4m3"
+    positions: int, slots: int = FULL_LAYERS, mode: str | None = "half"
 ) -> int:
     """Key and value planes for ``slots`` full-attention layers, including MTP when present."""
     return slots * layer_cache_bytes(positions, mode)
@@ -78,7 +80,7 @@ def fit_positions(
     resident: int,
     scratch: int,
     slots: int = FULL_LAYERS,
-    mode: str | None = "fp8_e4m3",
+    mode: str | None = "half",
 ) -> int:
     """Largest context, a multiple of 2048, whose cache fits in ``budget``.
 

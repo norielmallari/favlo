@@ -219,20 +219,19 @@ def test_one_token_cache_bytes() -> None:
     from qwen38_27b.cache import kv_mode
 
     assert kv_mode("half") == "half"
+    assert kv_mode("f16") == "half"
+    assert kv_mode("fp16") == "half"
     assert kv_mode("fp8_e4m3") == "fp8_e4m3"
     assert kv_mode("e4m3") == "fp8_e4m3"
     assert kv_mode("fp8") == "fp8_e4m3"
-    assert kv_mode(None) == "fp8_e4m3"
-    try:
-        kv_mode("fp16")
-    except ValueError as exc:
-        assert "fp16" in str(exc)
-    else:
-        raise AssertionError("fp16 must be rejected")
-    assert cache_bytes(1) == 33792
+    assert kv_mode(None) == "half"
+    assert kv_mode("") == "half"
+    assert cache_bytes(1) == 65536
+    assert cache_bytes(1, "fp8_e4m3") == 33792
     assert cache_bytes(1, "half") == 65536
-    assert cache_bytes(262144) == 33792 * 262144
-    assert sequence_cache_bytes(1, 17) == 35904
+    assert cache_bytes(262144) == 65536 * 262144
+    assert sequence_cache_bytes(1, 17) == 69632
+    assert sequence_cache_bytes(1, 17, "fp8_e4m3") == 35904
     assert sequence_cache_bytes(1, 17, "half") == 69632
 
 
@@ -1770,6 +1769,46 @@ def test_an_image_is_logged_before_its_bytes_are_read() -> None:
     bind_request(tower, prompt, 4)
     assert cached == ["vision cached 4"]
     assert tower._vision_rows is None
+
+
+def test_a_repeated_still_past_the_hit_reuses_its_rows(monkeypatch) -> None:
+    import hashlib
+
+    from qwen38_27b import tower
+    from qwen38_27b.tower import bind_request
+    from qwen38_27b.vision import IMAGE_PAD
+
+    blob = b"still"
+    rows = np.arange(32, dtype=np.float32).reshape(4, 8)
+    notes: list[str] = []
+    uploaded: list[np.ndarray] = []
+
+    class Session:
+        def upload(self, array: np.ndarray) -> np.ndarray:
+            uploaded.append(np.array(array, copy=True))
+            return array
+
+    runtime = SimpleNamespace(
+        _status=notes.append,
+        root="example-model",
+        session=Session(),
+        _vision_images=[(blob, 1, 2), (blob, 1, 2)],
+        _vision_prepared=[
+            (np.zeros((16, 8), dtype=np.float32), (4, 4)),
+            (np.zeros((16, 8), dtype=np.float32), (4, 4)),
+        ],
+    )
+    key = ("example-model", hashlib.sha256(blob).digest(), 1, 2)
+    monkeypatch.setattr(tower, "_ROW_CACHE", {key: rows})
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("tower")
+
+    monkeypatch.setattr(tower, "embed_image", fail)
+    bind_request(runtime, [IMAGE_PAD] * 8, 4)
+    assert notes == ["vision cached 4", "vision cache 4"]
+    assert runtime._vision_map == {4: 0, 5: 1, 6: 2, 7: 3}
+    assert uploaded and np.allclose(uploaded[0], rows)
 
 
 def test_vision_disk_cache_round_trip(tmp_path, monkeypatch) -> None:

@@ -28,6 +28,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen38-27b/research/needle-page.md](qwen38-27b/research/needle-page.md) | Qwen3.8-27B page needle at 65536 and 131072 on half and fp8 keys and values |
 | [qwen38-27b/research/needle-retrieve.md](qwen38-27b/research/needle-retrieve.md) | Qwen3.8-27B retrieve needle on fp8 keys and values |
 | [qwen38-27b/research/coding-agent.md](qwen38-27b/research/coding-agent.md) | Qwen3.8-27B coding agent on fp8 keys and values |
+| [qwen38-27b/research/coding-agent-half.md](qwen38-27b/research/coding-agent-half.md) | Qwen3.8-27B coding agent on half keys and values |
 | [qwen38-27b/research/synthetic-prompt.md](qwen38-27b/research/synthetic-prompt.md) | Qwen3.8-27B cold 512-token and 10000-token prompts |
 | [qwen38-27b/research/synthetic-prompt-mtp.md](qwen38-27b/research/synthetic-prompt-mtp.md) | Qwen3.8-27B cold synthetic prompts with MTP on |
 | [qwen36-35b-a3b/README.md](qwen36-35b-a3b/README.md) | Qwen3.6-35B-A3B pipeline contract |

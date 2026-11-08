@@ -3,10 +3,12 @@
 The record stores the tower. A text forward leaves it there. An image request
 copies that span once, then each block is a layer norm, an fp4 projection,
 and a residual. The merger writes one language vector per 2×2 patch block.
-An image this process already embedded is reused from the in-memory row
-cache. The same rows are also written under
-``~/.favlo/vision-cache/qwen38-27b/``, so a later serve process that sees the
-same bytes logs ``vision cache`` and does not run the tower again.
+Each still has its own row cache, keyed by the checkpoint, the byte hash, and
+the pixel bounds. Eight entries stay in memory, and the same rows are written
+under ``~/.favlo/vision-cache/qwen38-27b/``. A span whose tokens sit inside
+the prefix hit logs ``vision cached`` and uploads no rows. A span past the
+hit reuses that entry and logs ``vision cache``. A miss runs the tower, logs
+``vision patches`` and ``vision merged``, and stores the rows.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ _ROW_LIMIT = 8
 
 
 def bind_request(runtime: Any, prompt: list[int], hit: int) -> None:
-    """Build RoPE ids and, when the image is not already cached, the embeddings."""
+    """Build RoPE ids and embed only the stills that sit past ``hit``."""
     images = list(getattr(runtime, "_vision_images", None) or [])
     runtime._vision_rows = None
     runtime._vision_map = None
@@ -62,12 +64,36 @@ def bind_request(runtime: Any, prompt: list[int], hit: int) -> None:
     if len(slots) != expected:
         message = f"{len(slots)} image tokens, the grids need {expected}"
         raise RuntimeError(message)
-    if not any(index >= hit for index in slots):
-        _note(runtime, f"vision cached {expected}")
+    cursor = 0
+    covered: list[int] = []
+    pending: list[tuple[bytes, int, int, list[int], int]] = []
+    for (blob, low, high), (height, width) in zip(images, merged, strict=True):
+        count = height * width
+        span = slots[cursor : cursor + count]
+        cursor += count
+        if span[0] + count <= hit:
+            covered.append(count)
+        else:
+            pending.append((blob, int(low), int(high), span, count))
+    for count in covered:
+        _note(runtime, f"vision cached {count}")
+    if not pending:
         return
-    host = _cached_rows(runtime, images, prepared, expected)
-    runtime._vision_rows = runtime.session.upload(np.ascontiguousarray(host, dtype=np.float32))
-    runtime._vision_map = {slot: row for row, slot in enumerate(slots)}
+    hosts: list[np.ndarray] = []
+    mapping: dict[int, int] = {}
+    placed = 0
+    for blob, low, high, span, count in pending:
+        host = _vision_row(runtime, blob, min_pixels=low, max_pixels=high)
+        if int(host.shape[0]) != count:
+            message = f"vision rows {host.shape[0]} are not {count} merged tokens"
+            raise RuntimeError(message)
+        hosts.append(host)
+        for slot in span:
+            mapping[slot] = placed
+            placed += 1
+    packed = hosts[0] if len(hosts) == 1 else np.concatenate(hosts, axis=0)
+    runtime._vision_rows = runtime.session.upload(np.ascontiguousarray(packed, dtype=np.float32))
+    runtime._vision_map = mapping
 
 
 def embed_image(
@@ -82,7 +108,6 @@ def embed_image(
 
     prepared = prepare_image(blob, min_pixels=min_pixels, max_pixels=max_pixels)
     patches, (grid_h, grid_w) = prepared
-    _note(runtime, f"vision patches {int(patches.shape[0])}")
     rows = _encode(runtime, [prepared])
     height, width = merged_grid((grid_h, grid_w))
     expected = height * width
@@ -90,60 +115,47 @@ def embed_image(
         runtime.session.download_f32(rows, expected * _LANG).reshape(expected, _LANG),
         dtype=np.float32,
     )
+    # Prompt and context notes are posted to the host thread. Drain them
+    # before the tower lines so those lines stay on this request.
+    console = getattr(runtime, "console", None)
+    flush = getattr(console, "flush", None)
+    if callable(flush):
+        flush()
+    _note(runtime, f"vision patches {int(patches.shape[0])}")
     _note(runtime, f"vision merged {expected}")
     return host, int(grid_h), int(grid_w)
 
 
-def _cached_rows(
+def _vision_row(
     runtime: Any,
-    images: list[tuple[bytes, int, int]],
-    prepared: list[tuple[Any, tuple[int, int]]],
-    expected: int,
+    blob: bytes,
+    *,
+    min_pixels: int,
+    max_pixels: int,
 ) -> np.ndarray:
-    """Merged host rows from memory, disk, or a fresh tower run."""
-    key = _row_key(runtime, images)
+    """Merged rows for one still. A repeat reuses the stored rows."""
+    key = (
+        str(getattr(runtime, "root", "")),
+        hashlib.sha256(blob).digest(),
+        int(min_pixels),
+        int(max_pixels),
+    )
     cached = _ROW_CACHE.get(key)
     if cached is None:
         cached = _load_vision_disk(key)
         if cached is not None:
             _ROW_CACHE[key] = cached
     if cached is not None:
-        if int(cached.shape[0]) != expected:
-            message = f"vision cache {cached.shape[0]} is not {expected} merged tokens"
-            raise RuntimeError(message)
-        _note(runtime, f"vision cache {expected}")
+        _note(runtime, f"vision cache {int(cached.shape[0])}")
         return cached
-    if len(images) == 1:
-        blob, low, high = images[0]
-        host, _grid_h, _grid_w = embed_image(
-            runtime, blob, min_pixels=low, max_pixels=high
-        )
-    else:
-        patch_count = sum(int(item[0].shape[0]) for item in prepared)
-        _note(runtime, f"vision patches {patch_count}")
-        rows = _encode(runtime, prepared)
-        _note(runtime, f"vision merged {expected}")
-        host = np.ascontiguousarray(
-            runtime.session.download_f32(rows, expected * _LANG).reshape(expected, _LANG),
-            dtype=np.float32,
-        )
-    if int(host.shape[0]) != expected:
-        message = f"vision rows {host.shape[0]} are not {expected} merged tokens"
-        raise RuntimeError(message)
+    host, _grid_h, _grid_w = embed_image(
+        runtime, blob, min_pixels=min_pixels, max_pixels=max_pixels
+    )
     _ROW_CACHE[key] = host
     _store_vision_disk(key, host)
     while len(_ROW_CACHE) > _ROW_LIMIT:
         _ROW_CACHE.pop(next(iter(_ROW_CACHE)))
     return host
-
-
-def _row_key(runtime: Any, images: list[tuple[bytes, int, int]]) -> tuple[Any, ...]:
-    parts: list[Any] = [str(getattr(runtime, "root", ""))]
-    for blob, low, high in images:
-        parts.append(hashlib.sha256(blob).digest())
-        parts.append(int(low))
-        parts.append(int(high))
-    return tuple(parts)
 
 
 def _vision_cache_dir() -> Path:

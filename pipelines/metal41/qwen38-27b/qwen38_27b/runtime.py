@@ -12,7 +12,7 @@ from qwen38_27b.forward import Qwen38Runtime
 def open_runtime(
     path: Path,
     *,
-    kv_cache: str = "fp8_e4m3",
+    kv_cache: str = "half",
     console: Any = None,
     resident_percent: float | None = None,
     max_memory: str | int | None = None,
