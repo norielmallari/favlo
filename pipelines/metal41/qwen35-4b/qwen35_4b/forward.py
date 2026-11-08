@@ -112,6 +112,7 @@ class Qwen35Runtime:
         self._rope_length = 0
         self._vision_rows = None
         self._vision_index = None
+        self._vision_plan = None
         self._presence = 0.0
         self._frequency = 0.0
         manifest = self.root / "manifest.json"
@@ -381,6 +382,9 @@ class Qwen35Runtime:
             progress.note(console, "prefix_load", tokens=hit)
         progress.note(console, "cache", hit=hit)
         self._cached_tokens = hit
+        from qwen35_4b.vision import bind_vision
+
+        bind_vision(self, hit)
         suffix = prompt[hit:]
         uncached = len(suffix)
         boundary = False

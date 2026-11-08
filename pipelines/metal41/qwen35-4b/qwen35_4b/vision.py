@@ -3,10 +3,12 @@
 The patch embed is the flattened Conv3d. Position rows are a bilinear sample of
 the 48 by 48 table, then reordered into 2 by 2 merge blocks. Each block is
 LayerNorm, full attention, and a tanh GELU MLP. The merger LayerNorms each
-patch, concatenates the block, and applies erf GELU. The language prefill
-overwrites the expanded image-pad rows with that output. Rows are also written
-under ``~/.favlo/vision-cache/qwen35-4b/``, so a later serve process that sees
-the same bytes logs ``vision cache`` and does not re-run the tower.
+patch, concatenates the block, and applies erf GELU. The prompt expands each still to its merged grid before the prefix check.
+Prefill overwrites only the image-pad rows past that hit. A span already in
+the loaded prefix logs ``vision cached`` and uploads no rows. A span past the
+hit reuses rows under ``~/.favlo/vision-cache/qwen35-4b/`` and logs
+``vision cache``, or runs the tower and logs ``vision patches`` and
+``vision merged``.
 """
 
 from __future__ import annotations
@@ -142,6 +144,30 @@ def smart_size(
         h_bar = int(np.ceil(height * beta / FACTOR) * FACTOR)
         w_bar = int(np.ceil(width * beta / FACTOR) * FACTOR)
     return int(h_bar), int(w_bar)
+
+
+def merged_grid(
+    rgb: np.ndarray,
+    *,
+    min_pixels: int = MIN_PIXELS,
+    max_pixels: int = MAX_PIXELS,
+) -> tuple[int, int]:
+    """Merged height and width for one still. This does not run the tower."""
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
+        message = f"image is {getattr(rgb, 'shape', None)}"
+        raise RuntimeError(message)
+    height, width = smart_size(
+        int(rgb.shape[0]),
+        int(rgb.shape[1]),
+        min_pixels=min_pixels,
+        max_pixels=max_pixels,
+    )
+    merged_h = height // FACTOR
+    merged_w = width // FACTOR
+    if merged_h < 1 or merged_w < 1:
+        message = f"image grid {height}x{width} has no merged tokens"
+        raise RuntimeError(message)
+    return merged_h, merged_w
 
 
 def pack_image(
@@ -306,29 +332,24 @@ def expand_image_tokens(
 
 
 def prepare_prompt(runtime: Any, messages: list[dict[str, Any]], ids: list[int]) -> list[int]:
-    """Run the tower for each image and remember the rows prefill must overwrite."""
+    """Expand each image to its merged grid and install mRoPE. The tower waits for the prefix hit."""
     _reject_video(messages)
     blobs = _image_blobs(messages)
     if not blobs:
         runtime._vision_rows = None
         runtime._vision_index = None
         runtime._rope_device = None
+        runtime._rope_length = 0
         runtime._rope_delta = 0
+        runtime._vision_plan = None
         return ids
-    rows: list[np.ndarray] = []
     lengths: list[int] = []
     grids: list[tuple[int, int]] = []
     for blob, low, high in blobs:
-        embedded, grid_h, grid_w = _vision_row(
-            runtime, blob, min_pixels=low, max_pixels=high
+        merged_h, merged_w = merged_grid(
+            _decode_bitmap(blob), min_pixels=low, max_pixels=high
         )
-        merged_h = grid_h // MERGE
-        merged_w = grid_w // MERGE
-        if embedded.shape != (merged_h * merged_w, HIDDEN):
-            message = f"vision merged {embedded.shape} is not {merged_h}x{merged_w} by {HIDDEN}"
-            raise RuntimeError(message)
-        rows.append(embedded)
-        lengths.append(int(embedded.shape[0]))
+        lengths.append(merged_h * merged_w)
         grids.append((merged_h, merged_w))
     expanded, spans = expand_image_tokens(ids, lengths, IMAGE_TOKEN)
     if spans and lengths and spans[-1] + lengths[-1] == len(expanded):
@@ -338,9 +359,55 @@ def prepare_prompt(runtime: Any, messages: list[dict[str, Any]], ids: list[int])
         len(expanded),
         [(start, height, width) for start, (height, width) in zip(spans, grids, strict=True)],
     )
-    _install_vision(runtime, expanded, spans, rows, positions)
+    _install_rope(runtime, positions)
     runtime._rope_delta = delta
+    runtime._vision_plan = [
+        (blob, low, high, start, height, width)
+        for (blob, low, high), start, (height, width) in zip(blobs, spans, grids, strict=True)
+    ]
+    runtime._vision_rows = None
+    runtime._vision_index = None
     return expanded
+
+
+def bind_vision(runtime: Any, hit: int) -> None:
+    """Embed images that sit past ``hit``. A covered image is already in the stored KV."""
+    plan = getattr(runtime, "_vision_plan", None) or []
+    if not plan:
+        return
+    covered: list[int] = []
+    pending: list[tuple[Any, ...]] = []
+    for item in plan:
+        _blob, _low, _high, start, height, width = item
+        count = height * width
+        if start + count <= hit:
+            covered.append(count)
+        else:
+            pending.append(item)
+    for count in covered:
+        _note(runtime, f"vision cached {count}")
+    if not pending:
+        runtime._vision_rows = None
+        runtime._vision_index = None
+        return
+    rows: list[np.ndarray] = []
+    spans: list[int] = []
+    for blob, low, high, start, height, width in pending:
+        embedded, grid_h, grid_w = _vision_row(
+            runtime, blob, min_pixels=low, max_pixels=high
+        )
+        merged_h = grid_h // MERGE
+        merged_w = grid_w // MERGE
+        if (merged_h, merged_w) != (height, width) or embedded.shape[0] != height * width:
+            message = f"vision merged {embedded.shape[0]} is not {height}x{width}"
+            raise RuntimeError(message)
+        rows.append(embedded)
+        spans.append(start)
+    length = int(getattr(runtime, "_rope_length", 0))
+    if length < 1:
+        message = "vision rows have no position table"
+        raise RuntimeError(message)
+    _install_rows(runtime, length, spans, rows)
 
 
 def embed_image(
@@ -411,6 +478,7 @@ def embed_image(
     if VISION_OUT != HIDDEN:
         message = f"vision output {VISION_OUT} is not hidden {HIDDEN}"
         raise RuntimeError(message)
+    _note(runtime, f"vision merged {merged}")
     return embedded, grid_h, grid_w
 
 
@@ -646,15 +714,21 @@ def _vision_row(
     return embedded, grid_h, grid_w
 
 
-def _install_vision(
+def _install_rope(runtime: Any, positions: np.ndarray) -> None:
+    packed = np.ascontiguousarray(positions, dtype=np.uint32)
+    runtime._rope_device = runtime.session.upload(packed.tobytes())
+    runtime._rope_length = int(packed.shape[1])
+
+
+def _install_rows(
     runtime: Any,
-    expanded: list[int],
+    length: int,
     spans: list[int],
     rows: list[np.ndarray],
-    positions: np.ndarray,
 ) -> None:
+    """Upload rows for image tokens past the prefix hit. Covered positions stay empty."""
     blob = bytearray()
-    index = np.full(len(expanded), _EMPTY, dtype=np.uint32)
+    index = np.full(length, _EMPTY, dtype=np.uint32)
     slot = 0
     for start, embedded in zip(spans, rows, strict=True):
         flat = np.ascontiguousarray(embedded, dtype=np.float32)
@@ -663,11 +737,8 @@ def _install_vision(
             slot, slot + int(flat.shape[0]), dtype=np.uint32
         )
         slot += int(flat.shape[0])
-    packed = np.ascontiguousarray(positions, dtype=np.uint32)
     runtime._vision_rows = runtime.session.upload(bytes(blob))
     runtime._vision_index = runtime.session.upload(index.tobytes())
-    runtime._rope_device = runtime.session.upload(packed.tobytes())
-    runtime._rope_length = int(packed.shape[1])
 
 
 def _reject_video(messages: list[dict[str, Any]]) -> None:
