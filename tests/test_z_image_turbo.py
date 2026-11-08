@@ -7,6 +7,7 @@ import json
 import shutil
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -278,11 +279,11 @@ def test_lower_quality_uses_a_higher_zlib_level(tmp_path) -> None:
 def test_image_request_default_size() -> None:
     fields = _fields({"prompt": "a cat"})
     assert fields.prompt == "a cat"
-    assert (fields.width, fields.height, fields.seed) == (720, 1280, 0)
+    assert (fields.width, fields.height, fields.seed) == (1024, 1024, 0)
     assert fields.quality == "high"
     assert fields.background == "opaque"
     assert fields.output_format == "png"
-    assert fields.size == "720x1280"
+    assert fields.size == "1024x1024"
     assert fields.safety_identifier is None
 
 
@@ -307,7 +308,7 @@ def test_image_request_accepts_a_standard_body() -> None:
         }
     )
     assert fields.seed == 4
-    assert fields.size == "720x1280"
+    assert fields.size == "1024x1024"
     assert fields.quality == "high"
     assert fields.safety_identifier == "reader"
 
@@ -327,18 +328,97 @@ def test_image_request_rejects_sizes_this_model_cannot_draw() -> None:
         _fields({"prompt": "a cat", "size": "16x1280"})
 
 
+def test_image_request_accepts_a_transparent_background() -> None:
+    fields = _fields({"prompt": "a cat", "background": "transparent"})
+    assert fields.background == "transparent"
+
+
 def test_image_request_rejects_unsupported_image_options() -> None:
     rejected = {
-        "background": "transparent",
         "response_format": "url",
         "output_format": "jpeg",
         "stream": True,
         "partial_images": 1,
+        "background": "blur",
     }
     for key, value in rejected.items():
         with pytest.raises(ImageRequestError) as raised:
             _fields({"prompt": "a cat", key: value})
         assert raised.value.param == key
+
+
+def test_encode_png_writes_an_rgba_color_type() -> None:
+    image = np.zeros((4, 4, 4), dtype=np.uint8)
+    image[..., 0] = 200
+    image[..., 3] = 128
+    blob = encode_png(image, "high")
+    assert blob.startswith(b"\x89PNG\r\n\x1a\n")
+    assert blob[25] == 6
+    packed = pack_rgb(image)
+    assert packed[:4] == b"RGBA"
+    assert np.array_equal(unpack_rgb(packed), image)
+
+
+def test_a_transparent_store_runs_the_matte(tmp_path, monkeypatch) -> None:
+    from z_image_turbo import chat as chat_mod
+
+    seen: list[tuple[int, int, int]] = []
+
+    def fake_cutout(image: np.ndarray) -> np.ndarray:
+        seen.append(image.shape)
+        rgba = np.zeros((image.shape[0], image.shape[1], 4), dtype=np.uint8)
+        rgba[..., :3] = image
+        rgba[..., 3] = 200
+        return rgba
+
+    monkeypatch.setattr(chat_mod, "cutout", fake_cutout)
+
+    class _Runtime:
+        def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **_extra):
+            del prompt, width, height, steps, seed
+            timing = {"total": 1.0, "caption": 0.1, "vae": 0.2, "steps": [0.1]}
+            return np.full((8, 8, 3), 40, dtype=np.uint8), "digest", timing
+
+    reply = MemoryReply()
+    state = {"image_home": tmp_path}
+    handle_image(
+        reply,
+        _Runtime(),
+        {"prompt": "a cat", "seed": 1, "background": "transparent", "size": "16x16"},
+        None,
+        None,
+        state,
+    )
+    assert reply.status == 200
+    assert reply.body["background"] == "transparent"
+    assert seen == [(8, 8, 3)]
+    png = base64.b64decode(reply.body["data"][0]["b64_json"])
+    assert png[25] == 6
+    rgb = tmp_path / "images" / f"{reply.body['data'][0]['id']}.rgb"
+    assert unpack_rgb(rgb.read_bytes()).shape[2] == 4
+
+
+def test_matte_cutout_applies_a_soft_alpha(monkeypatch) -> None:
+    from favlo import birefnet
+
+    class _Session:
+        def get_inputs(self):
+            return [SimpleNamespace(name="input_image")]
+
+        def run(self, _outputs, feeds):
+            batch = feeds["input_image"]
+            assert batch.shape == (1, 3, 1024, 1024)
+            logits = np.full((1, 1, 1024, 1024), 8.0, dtype=np.float32)
+            logits[:, :, :512] = -8.0
+            return [logits]
+
+    monkeypatch.setattr(birefnet, "_session_or", lambda session=None: _Session())
+    image = np.full((32, 48, 3), 90, dtype=np.uint8)
+    rgba = birefnet.cutout(image)
+    assert rgba.shape == (32, 48, 4)
+    assert np.array_equal(rgba[..., :3], image)
+    assert rgba[:16, :, 3].max() < 20
+    assert rgba[16:, :, 3].min() > 230
 
 
 def test_image_response_returns_one_png(tmp_path) -> None:
@@ -366,7 +446,7 @@ def test_image_response_returns_one_png(tmp_path) -> None:
     assert isinstance(reply.body["generation_seconds"], dict)
     assert reply.body["output_format"] == "png"
     assert reply.body["background"] == "opaque"
-    assert reply.body["size"] == "720x1280"
+    assert reply.body["size"] == "1024x1024"
     assert "usage" not in reply.body
     assert "status" not in reply.body
     assert "revised_prompt" not in data[0]
@@ -394,7 +474,7 @@ def test_an_omitted_seed_is_stored_with_the_prompt(tmp_path, monkeypatch) -> Non
     assert record["source"] == "generate"
     assert record["generation"]["seed"] == 17
     assert record["generation"]["prompt"] == "a red cube"
-    assert record["generation"]["size"] == "720x1280"
+    assert record["generation"]["size"] == "1024x1024"
     assert "b64_json" not in record["generation"]
 
 

@@ -1,8 +1,9 @@
 """Chat is refused. Images use the OpenAI generations body.
 
 ``POST /v1/images/edits`` and ``POST /v1/images/variations`` are not routes.
-This pipeline has no image input. A transparent background, a hosted URL, and a
-streaming partial are not produced. JPEG and WebP are not encoded.
+This pipeline has no image input. ``background=transparent`` runs BiRefNet after
+the VAE decode and writes an RGBA PNG. A hosted URL and a streaming partial are
+not produced. JPEG and WebP are not encoded.
 """
 
 from __future__ import annotations
@@ -16,8 +17,9 @@ from typing import Any, NamedTuple
 import numpy as np
 
 from favlo.images import load_image, store_source, sweep_images
-from favlo.media_pipeline import ImagePipeline, MediaCall, MediaPaused, MediaRequestError
+from favlo.media_pipeline import MediaCall, MediaPaused, MediaPipeline, MediaRequestError
 from z_image_turbo.hold import ImageHold, ImageJob, ImagePaused
+from z_image_turbo.matte import cutout
 from z_image_turbo.png import REPORTED_QUALITY, pack_rgb, write_png
 from z_image_turbo.schedule import STEPS
 from z_image_turbo.scratch import MAX_EDGE
@@ -56,8 +58,12 @@ def handle_chat(
     )
 
 
-class Pipeline(ImagePipeline):
+class Pipeline(MediaPipeline):
     """Z-Image's listener contract. The DiT stays in the runtime."""
+
+    kind = "image"
+    id_prefix = "image_"
+    object_name = "image"
 
     def parse(self, body: dict[str, Any]) -> ImageFields:
         return _fields(body)
@@ -69,6 +75,7 @@ class Pipeline(ImagePipeline):
             request.width,
             request.height,
             request.quality,
+            request.background,
         )
 
     def matches(self, request: ImageFields, identity: Any) -> bool:
@@ -108,7 +115,9 @@ class Pipeline(ImagePipeline):
                 if reason == "preempt":
                     image.hold = _decoded(pixels, timing)
                     raise MediaPaused("preempt", image)
-                image.images.append(_store(pixels, request.quality, home))
+                image.images.append(
+                    _store(pixels, request.quality, home, background=request.background)
+                )
                 image.timings.append(timing)
                 image.index += 1
                 image.hold = None
@@ -134,18 +143,13 @@ class Pipeline(ImagePipeline):
         del runtime, job, home, table, call
         return _finished(result, request)
 
-    def working(self, request: ImageFields, job: dict[str, Any], hold: Any) -> dict[str, Any] | None:
+    def working(
+        self, request: ImageFields, job: dict[str, Any], hold: Any
+    ) -> dict[str, Any] | None:
         del job
         if isinstance(hold, ImageJob):
             return _working(hold, request)
         return None
-
-    def on_finish(self, runtime: Any, call: MediaCall) -> None:
-        del call
-        release = getattr(runtime, "close", None)
-        if callable(release):
-            release()
-
 
 handle_image = Pipeline()
 
@@ -185,9 +189,16 @@ def _draw(
     return pixels, timing
 
 
-def _store(pixels: np.ndarray, quality: str, root: Path | None) -> dict[str, str]:
+def _store(
+    pixels: np.ndarray,
+    quality: str,
+    root: Path | None,
+    *,
+    background: str = "opaque",
+) -> dict[str, str]:
     image_id = "image_" + secrets.token_hex(12)
-    write_png(store_source(image_id, pack_rgb(pixels), home=root), quality)
+    samples = cutout(pixels) if background == "transparent" else pixels
+    write_png(store_source(image_id, pack_rgb(samples), home=root), quality)
     sweep_images(home=root)
     stored = load_image(image_id, home=root)
     if stored is None:
@@ -311,7 +322,12 @@ def _fields(body: dict[str, Any]) -> ImageFields:
     output_format = _absent_or(body, "output_format", {"png"}, "output_format must be png")
     _absent_or(body, "stream", {False}, "stream must be false")
     _bounded_int(body, "partial_images", 0, 0, 0, "partial_images must be 0")
-    _absent_or(body, "background", {"auto", "opaque"}, "background must be auto or opaque")
+    background = _absent_or(
+        body,
+        "background",
+        {"auto", "opaque", "transparent"},
+        "background must be auto, opaque, or transparent",
+    )
     _absent_or(body, "moderation", {"low", "auto"}, "moderation must be low or auto")
     _absent_or(body, "style", {"vivid", "natural"}, "style must be vivid or natural")
     quality = _absent_or(
@@ -330,7 +346,7 @@ def _fields(body: dict[str, Any]) -> ImageFields:
         height=height,
         seed=_optional_int(body, "seed", 0, "seed must be an integer"),
         quality=REPORTED_QUALITY[quality or "auto"],
-        background="opaque",
+        background="transparent" if background == "transparent" else "opaque",
         output_format=output_format or "png",
         size=size,
         safety_identifier=_safety_identifier(body),
@@ -384,7 +400,7 @@ def _safety_identifier(body: dict[str, Any]) -> str | None:
 
 def _size(value: Any) -> tuple[int, int, str]:
     if value is None or value == "auto":
-        return 720, 1280, "720x1280"
+        return 1024, 1024, "1024x1024"
     if not isinstance(value, str) or "x" not in value:
         raise ImageRequestError("size must be auto or WIDTHxHEIGHT", "size")
     left, _, right = value.partition("x")

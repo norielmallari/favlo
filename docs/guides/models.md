@@ -52,8 +52,7 @@ The official checkpoint is `Qwen/Qwen3.8-27B`. The steps are [qwen38-27b/SETUP.m
 
 The official checkpoint is `Tongyi-MAI/Z-Image-Turbo`. The steps are [z-image-turbo/SETUP.md](../z-image-turbo/SETUP.md).
 
-`favlo --z-image-turbo setup` downloads that repository into `models/Z-Image-Turbo`. `quantize` packs `models/Z-Image-Turbo-fp4`. `quantize --int8` packs `models/Z-Image-Turbo-int8` from that checkout and copies `tokenizer/` into that record. Generation reads the copy. `--weights` is one `.safetensors` file or a directory of shards. With no `--name`, the folder is that file or directory name plus `-fp4`, or `-int8` when `--int8` is set. `--name` is the registry id.
-
+`favlo --z-image-turbo setup` downloads that repository into `models/Z-Image-Turbo`. `quantize` packs `models/Z-Image-Turbo-fp4`. `quantize --int8` packs `models/Z-Image-Turbo-int8` from that checkout and copies `tokenizer/` into that record. Generation reads the copy. `--weights` is one `.safetensors` file or a directory of shards. With no `--name`, the folder is that file or directory name plus `-fp4`, or `-int8` when `--int8` is set. `--name` is the registry id. `setup-matte` downloads BiRefNet general for `background=transparent`.
 ## Wan 2.2 I2V
 
 The official checkpoint is `Wan-AI/Wan2.2-I2V-A14B`. The text encoder is `google/umt5-xxl`. The steps are [wan22-i2v/SETUP.md](../wan22-i2v/SETUP.md).
@@ -69,8 +68,6 @@ The official checkpoint is `ACE-Step/acestep-v15-xl-turbo`. `setup` downloads th
 ## Default chat model
 
 `models/registry.json` may set top-level `"default"` to a variant id such as `qwen36-35b-a3b:instruct`. The first registered language model writes that field to its instruct variant when it is still unset. Agent harnesses and Favlo web read it when no model is chosen.
-
-The same file may set `"media"` to folder ids for `image`, `i2v`, `t2v`, `music`, and `voice`. The first registered row for a kind fills an empty key. A later read fills a key that is still empty and saves it. A generate call with no session uses that folder.
 
 The same file may set `"embeddings"` to one embeddings folder id. The first registered row whose pipeline defines `handle_embed` fills an empty key. A later read fills a key that is still empty and saves it. `POST /v1/embeddings` uses that folder when the body omits `model`.
 

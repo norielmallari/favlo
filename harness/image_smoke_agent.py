@@ -1,9 +1,11 @@
-"""Agent that generates two images and checks them with the 35B vision tower.
+"""Agent that generates two images and checks them with the vision tower.
 
 The Microsoft Agent Framework agent calls ``generate_image`` on ``POST /mcp``
-at ``quality`` ``low``, then ``max``. Each later turn sends that PNG back to
-the same model and asks whether the picture matches the prompt. Exit 0 means
-both replies affirm it and the max file is larger.
+at ``quality`` ``low``, then ``max``. Pass ``--transparent`` to set MCP
+``transparent`` true (BiRefNet after decode). Each later turn sends that PNG
+back to the same model and asks whether the picture matches the prompt. Exit 0
+means both replies affirm it and the max file is larger. With ``--transparent``,
+each PNG must also be RGBA.
 """
 
 from __future__ import annotations
@@ -24,7 +26,6 @@ from harness.harness_model import judge_model
 from harness.mcp_media import generate, read_link
 from harness.server import close_listener, open_listener
 
-IMAGE_MODEL = "Z-Image-Turbo-fp4"
 HOST = "127.0.0.1"
 QUESTION = "Does this picture show a red cube on a white table? Reply with one word: yes or no."
 QUALITIES = ("low", "max")
@@ -39,15 +40,18 @@ def affirms(text: str) -> bool:
     return False
 
 
-def smoke_body(root: Path) -> dict[str, Any]:
+def smoke_body(root: Path, model: str | None = None) -> dict[str, Any]:
+    """Prompt, size, and seed from smoke.json. Omit ``model`` for the registry default."""
     note = root / "docs" / "z-image-turbo" / "smoke.json"
     stored = json.loads(note.read_text(encoding="utf-8"))
-    return {
-        "model": IMAGE_MODEL,
+    body: dict[str, Any] = {
         "prompt": stored["prompt"],
         "size": f"{stored['width']}x{stored['height']}",
         "seed": stored["seed"],
     }
+    if model:
+        body["model"] = model
+    return body
 
 
 def post_json(port: int, route: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -116,7 +120,7 @@ def judge(port: int, png: bytes, model: str) -> str:
         {
             "model": model,
             "temperature": 0,
-            "max_tokens": 8,
+            "max_tokens": 16,
             "enable_thinking": False,
             "messages": [
                 {
@@ -135,6 +139,14 @@ def judge(port: int, png: bytes, model: str) -> str:
     return str(payload["choices"][0]["message"].get("content") or "")
 
 
+def png_color_type(blob: bytes) -> int:
+    """IHDR color type. 2 is RGB. 6 is RGBA."""
+    if len(blob) < 26 or blob[:8] != b"\x89PNG\r\n\x1a\n":
+        message = "not a PNG"
+        raise ValueError(message)
+    return blob[25]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate a low and a max image and check both.")
     parser.add_argument("--root", type=Path, default=Path("."))
@@ -143,10 +155,20 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="chat model id for generation and vision checks; default is the registry default",
     )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="image model id; default is the registry media image default",
+    )
+    parser.add_argument(
+        "--transparent",
+        action="store_true",
+        help="pass transparent true so BiRefNet writes an RGBA PNG",
+    )
     args = parser.parse_args(argv)
     root = args.root.resolve()
     judge_id = args.judge or judge_model(root)
-    body = smoke_body(root)
+    body = smoke_body(root, args.model)
     listener = None
     try:
         listener = open_listener()
@@ -154,23 +176,31 @@ def main(argv: list[str] | None = None) -> int:
         base = f"http://{HOST}:{port}/v1"
         (root / "artifacts").mkdir(parents=True, exist_ok=True)
         saved: dict[str, Path] = {}
+        suffix = "-transparent" if args.transparent else ""
         for quality in QUALITIES:
-            print(f"generating {quality} on {port}", flush=True)
-            request = {**body, "quality": quality}
+            label = f"{quality}{suffix}"
+            print(f"generating {label} on {port}", flush=True)
+            request = {**body, "quality": quality, "transparent": args.transparent}
             png = asyncio.run(create_image(base, port, request, judge_id))
-            out = root / "artifacts" / f"image-smoke-agent-{quality}.png"
+            out = root / "artifacts" / f"image-smoke-agent-{quality}{suffix}.png"
             out.write_bytes(png)
             saved[quality] = out
             print(f"wrote {out.name} bytes {out.stat().st_size}", flush=True)
+            if args.transparent and png_color_type(png) != 6:
+                print(f"{out.name} is not RGBA", flush=True)
+                return 1
+            if not args.transparent and png_color_type(png) != 2:
+                print(f"{out.name} is not RGB", flush=True)
+                return 1
         if saved["max"].stat().st_size <= saved["low"].stat().st_size:
             print("max quality is not larger", flush=True)
             return 1
         for quality in QUALITIES:
-            print(f"checking {quality}", flush=True)
+            print(f"checking {quality}{suffix}", flush=True)
             reply = judge(port, saved[quality].read_bytes(), judge_id)
             print(reply, flush=True)
             if not affirms(reply):
-                print(f"{quality} image does not match", flush=True)
+                print(f"{quality}{suffix} image does not match", flush=True)
                 return 1
         print("images match", flush=True)
         return 0

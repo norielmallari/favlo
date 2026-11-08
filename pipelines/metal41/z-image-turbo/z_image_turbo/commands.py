@@ -17,6 +17,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="favlo --z-image-turbo")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("setup", help="download Tongyi-MAI/Z-Image-Turbo from the repository")
+    sub.add_parser(
+        "setup-matte",
+        help="download the BiRefNet general ONNX used for background=transparent",
+    )
     sub.add_parser("kernels", help="dispatch the fp4 matmul and the attention shader")
     quant = sub.add_parser("quantize", help="pack safetensors weights")
     quant.add_argument(
@@ -59,6 +63,11 @@ def main(argv: list[str] | None = None) -> int:
         from z_image_turbo.source import download
 
         print(download(), flush=True)
+        return 0
+    if args.command == "setup-matte":
+        from z_image_turbo.matte import ensure_matte
+
+        print(ensure_matte(), flush=True)
         return 0
     if args.command == "kernels":
         return kernels()

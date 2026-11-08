@@ -76,6 +76,17 @@ That registers `example-model`. The official folder `Z-Image-Turbo-fp4` stays on
 
 A weights-only file copies the tokenizer from `models/Z-Image-Turbo` when that checkout contains `tokenizer/tokenizer.json`. Otherwise pass `--tokenizer-source` pointing at a tree that contains `tokenizer/`. The copy is written into the packed record. `--out` names the packed directory. `--name` and `--out` are not used together. A folder name is one token of letters, digits, dots, underscores, or hyphens. A file name that is not such a token needs `--name`.
 
+
+## Transparent background
+
+`background=transparent` (MCP `transparent` true) cuts the subject with BiRefNet general after the eight Euler steps and the VAE decode. The cutout is `favlo.birefnet`, shared with every other pipeline. The matte is not a checkpoint. Download the ONNX once:
+
+```bash
+uv run favlo --z-image-turbo setup-matte
+```
+
+That writes `models/BiRefNet/model.onnx` from the BiRefNet v1 release (MIT). The first transparent request downloads the same file when it is missing.
+
 ## Draw a picture
 
 Start the listener:
