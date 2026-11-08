@@ -8,10 +8,9 @@ open the BF16 encoder file. The tokenizer is `tokenizer.json` inside that
 pack. `favlo --umt5-xxl` writes the pack. This pipeline does not pack the
 encoder. The VAE is the float32 `Wan2.2_VAE.pth` from that card.
 
-`handle_video` is a `VideoPipeline`. `generate_video_t2v` samples from text. `generate_video_i2v` conditions the
-first latent frame on a PNG. This pipeline is listed by both
-`list_video_models_t2v` and `list_video_models_i2v`. The clip is 24 fps.
-Both tools require `size`. Those lists name `1280x704` and `704x1280`. MCP
+`handle_video` is a `MediaPipeline`. `wan22_ti2v_5b__generate_video_t2v` samples from text. `wan22_ti2v_5b__generate_video_i2v` conditions the
+first latent frame on a PNG. The clip is 24 fps.
+Both tools require `size`. Accepted sizes are `1280x704` and `704x1280`. MCP
 `duration` is clip length in seconds. An omitted `duration` is 121 frames. Edges are multiples of 32. `steps` is
 0 or 4. `guidance_scale` is omitted or 1. `negative_prompt` is accepted and
 not encoded.
@@ -44,13 +43,16 @@ DiT sum at 576×320 and 9 frames is 4.267 s. A printed 832×480 9-frame text
 clip decoded in 18.942 s and the still clip decoded in 15.315 s. That
 measurement is [research/clip-ceiling.md](research/clip-ceiling.md).
 
-The serve ledger answers `memory.budget()`. `--max-memory` is that ledger's
-cap. `open_runtime` calls `memory.set_max_memory` before the first read.
-Device spans come from `device_buffer`. The decoder frame tile and the clip
-fit use the largest answer this opening has seen, and a later dip does not
-shrink them. A request keeps the resolution, frame count, and duration it
-named when that clip fits. Open refuses when three decoder frames do not
-fit. The 30 DiT blocks and the 24 text blocks stay resident until close.
+`MediaPipeline` calls `ensure_open` before the clip and always calls `close`
+when the request returns. `ensure_open` runs the shared open gate and reloads
+the DiT, text encoder, and VAE when closed. The serve ledger answers
+`memory.budget()`. `--max-memory` is that ledger's cap through
+`memory.set_max_memory`. Device spans come from `device_buffer`. The decoder
+frame tile and the clip fit use the largest answer this opening has seen, and
+a later dip does not shrink them. A request keeps the resolution, frame count,
+and duration it named when that clip fits. Open refuses when three decoder
+frames do not fit. The 30 DiT blocks and the 24 text blocks stay resident
+until that request's `close`.
 
 ## Commands
 

@@ -25,11 +25,11 @@ mcp_servers:
 
 There is no `/v1/images`, `/v1/videos`, or `/v1/audio` HTTP API. Stored bytes are read with `resources/read` on a `favlo://` URI.
 
-Each Favlo tool `description` from `tools/list` is at most 256 characters (`TOOL_DESCRIPTION_MAX_CHARS`). That is stricter than the OpenAI Chat Completions limit of 1024 on `tools[].function.description`. The MCP specification does not set a description length cap. Each parameter property `description` in the tool input schema is at most 48 characters (`TOOL_PARAM_DESCRIPTION_MAX_CHARS`); an empty property description is allowed when the name and type carry the meaning. `tests/test_mcp_tool_descriptions.py` checks both bounds, including the agent-facing tool text after the web list/set model note.
+Each Favlo tool `description` from `tools/list` is at most 256 characters (`TOOL_DESCRIPTION_MAX_CHARS`). That is stricter than the OpenAI Chat Completions limit of 1024 on `tools[].function.description`. The MCP specification does not set a description length cap. Each parameter property `description` in the tool input schema is at most 48 characters (`TOOL_PARAM_DESCRIPTION_MAX_CHARS`); an empty property description is allowed when the name and type carry the meaning. `tests/test_mcp_tool_descriptions.py` checks both bounds on the mounted listener tools and on every published plugin tool.
 
 ## Tasks
 
-Five tools are optional tasks: `generate_image`, `generate_video_i2v`, `generate_video_t2v`, `generate_music`, and `generate_voice`. Poll interval is 2000 ms.
+A catalog row with `task` true is an optional task on `io.modelcontextprotocol/tasks`. Poll interval is 2000 ms. The listener publishes listener tools first, then one tool per `mcp_tools()` row, as `{pipeline_id}__{local name}`. Hyphens in the pipeline id become underscores. The local name does not contain `__`. `tools/list` is that full set, in that order, for every connection. Every plugin tool name includes the pipeline prefix. A client must not keep a forever cache of those names; this response sets `ttlMs` 0 so a later list can replace the set. `tools/call` splits on the first `__`. The left side is the pipeline id and the right side is the local name. An unknown name is an error. One wrapper checks the schema, writes the arguments into the body, and sets the pipeline and the folder from the catalog. MCP does not list models. The pipeline id in the tool name is the model. The host opens the first registry folder on that pipeline. A task tool takes a media ticket. The child calls the handler attribute the record names and returns the saved file. The host packs that file by result kind. The first link is `favlo://`. Still fields are `image`, `source`, and `target` only: an `image_` id, a PNG object, or an absolute `file://` URI. A bare path and a `favlo://` input are refused. Other strings, including a prompt with a slash, stay text. Reload rebuilds the catalog. The next `tools/list` is that catalog.
 
 | Client | `tools/call` behavior |
 |--------|------------------------|
@@ -50,62 +50,7 @@ While `status` is `working`, `tasks/get` and `media_status` may include:
 
 ## Tools
 
-### Registry lists
-
-These run in the request and do not enter the media task queue.
-
-#### `list_image_models`
-
-Returns registry rows whose pipeline generates an image.
-
-#### `list_video_models_i2v`
-
-Returns image-to-video rows. Each row includes `resolutions` when the pipeline defines `list_resolutions`. A pipeline that declares both modes appears on the I2V and T2V lists.
-
-#### `list_video_models_t2v`
-
-Returns text-to-video rows, with the same `resolutions` shape as I2V.
-
-#### `list_music_models`
-
-Returns registry rows whose pipeline generates music.
-
-#### `list_voice_models`
-
-Returns registry rows whose pipeline speaks. A row includes `voices` when the pipeline defines `list_voices`, and `emotions` when it defines `list_emotions`.
-
-### Defaults and sessions
-
-`models/registry.json` stores a `media` object. Its keys are `image`, `i2v`, `t2v`, `music`, and `voice`. Each value is a registry folder id. The first registered row for a kind fills an empty key. A later read fills a key that is still empty and saves it.
-
-A generate call with no `session` uses that folder. `set_image_model`, `set_video_i2v_model`, `set_video_t2v_model`, `set_music_model`, and `set_voice_model` copy those defaults into one in-memory session, replace the kind named by the tool, and return the session id. A later `set_*` or generate call passes that same id. An omitted `session` on `set_*` starts a new id. An unknown id is an error. The session is not kept across a listener restart.
-
-The caller repeats the returned id in its reply so a later turn can pass it.
-
-#### `set_image_model`
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `model` | string | required | Id from `list_image_models` |
-| `session` | string | `""` | Omit to start a session. Pass an id to change that session |
-
-**Result:** The session id, a token starting with `media_`.
-
-#### `set_video_i2v_model`
-
-Same parameters. `model` is an id from `list_video_models_i2v`.
-
-#### `set_video_t2v_model`
-
-Same parameters. `model` is an id from `list_video_models_t2v`.
-
-#### `set_music_model`
-
-Same parameters. `model` is an id from `list_music_models`.
-
-#### `set_voice_model`
-
-Same parameters. `model` is an id from `list_voice_models`.
+Listener tools are listed here. A pipeline tool's schema lives on that module's `mcp_tools()` and is published with the pipeline prefix. This catalog does not copy those schemas.
 
 ### Task control
 
@@ -155,81 +100,6 @@ Returns matching rows (id and text) or an error string.
 | `client` | string | `""` | Owner. When set, another owner's sentence is left in place. |
 
 Removes one stored sentence.
-
-### `generate_image`
-
-Optional task. Use for a still when the user asked for an image, picture, photo, or illustration. Do not substitute a video tool for that request.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `prompt` | string | required | Image prompt |
-| `size` | string | `720x1280` | `WIDTHxHEIGHT`; `auto` is the same 9:16 frame |
-| `quality` | string | `high` | Quality preset for the pipeline |
-| `seed` | integer | omitted | Omitted draws a random seed |
-| `include_image` | boolean | `false` | Inline PNG in the result when decoded size ≤ 1 MiB |
-| `session` | string | `""` | Session id from a `set_*` call. Omitted uses the registry default |
-
-**Result:** Text content with the `image_*` id, a second text block with the standardized metadata JSON (semantic fields plus a nested `generation` object for the prompt, seed, model, and other parameters), a `resource_link` `favlo://images/{id}.png`, and optionally an inline `image` block. The same JSON is `images/.favlo_metadata/<id>.png.json`.
-
-### `generate_video_i2v`
-
-Optional task. Produces one MP4. Call only when the user asked for video, a clip, motion, animation, or to animate a still.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `prompt` | string | required | Motion prompt; the still is the first frame |
-| `size` | string | required | `WIDTHxHEIGHT` from `list_video_models_i2v` |
-| `image` | string or object | required | `image_*` id from `generate_image`, or `{"type":"image","data":"<base64 png>"}` |
-| `duration` | number | omitted | Clip length in seconds; omitted uses the model default |
-| `seed` | integer | omitted | Omitted draws a random seed |
-| `quality` | string | `high` | `auto`, `low`, `medium`, `high`, `xhigh`, `max`, `standard`, or `hd` |
-| `negative_prompt` | string | `""` | Empty uses Wan’s published sample negative where applicable |
-| `guidance_scale` | number or array | omitted | One number or `[low, high]`; default effective scale is 1 |
-| `steps` | integer | `0` | Euler steps 1–40; `0` uses 4 |
-| `session` | string | `""` | Session id from a `set_*` call. Omitted uses the registry default |
-
-`image` refuses a filesystem path and a `favlo://` URI.
-
-**Result:** Text with `video_*` id (and optional `size` / `seconds` fields), a text block with the standardized metadata JSON (including nested `generation`), plus `resource_link` `favlo://videos/{id}.mp4`. Video is never inlined. The same JSON is `videos/.favlo_metadata/<id>.mp4.json`. The still is not stored in that file.
-
-### `generate_video_t2v`
-
-Optional task. Same routing as I2V: only when the user asked for video or motion. Same parameters and result shape as I2V except there is no `image`. `size` comes from `list_video_models_t2v`.
-
-### `generate_music`
-
-Optional task.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `prompt` | string | required | Caption / style prompt |
-| `response_format` | string | `mp3` | `mp3`, `wav`, or `flac` |
-| `lyrics` | string | `""` | Lyrics when the pipeline uses them |
-| `seconds` | number | omitted | Target duration when supported |
-| `seed` | integer | omitted | Omitted draws a random seed |
-| `vocal_language` | string | `""` | Vocal language when supported |
-| `bpm` | integer | omitted | Tempo when supported |
-| `keyscale` | string | `""` | Key when supported |
-| `timesignature` | string | `""` | Meter when supported |
-| `include_audio` | boolean | `false` | Inline audio when decoded size ≤ 1 MiB |
-| `session` | string | `""` | Session id from a `set_*` call. Omitted uses the registry default |
-
-**Result:** `music_*` id, a text block with the standardized metadata JSON (including nested `generation` for the prompt, lyrics, and seed), `resource_link` `favlo://music/{id}.{ext}`, optional inline `audio`. The same JSON is `music/.favlo_metadata/<id>.wav.json`.
-
-### `generate_voice`
-
-Optional task.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `input` | string | required | Text to speak; `[emotion]` tags use ids from `list_voice_models` when defined |
-| `voice` | string | `""` | Speaker id from that row; empty uses the zero speaker |
-| `instructions` | string | `""` | Extra instructions when the pipeline supports them |
-| `response_format` | string | `mp3` | `mp3`, `wav`, or `flac` |
-| `include_audio` | boolean | `false` | Inline audio when decoded size ≤ 1 MiB |
-| `session` | string | `""` | Session id from a `set_*` call. Omitted uses the registry default |
-
-**Result:** `voice_*` id, a text block with the standardized metadata JSON (including nested `generation` for the spoken line and other fields), `resource_link` `favlo://voice/{id}.{ext}`, optional inline `audio`. The same JSON is `voice/.favlo_metadata/<id>.wav.json`. Voice has no seed.
 
 ### `read_media`
 

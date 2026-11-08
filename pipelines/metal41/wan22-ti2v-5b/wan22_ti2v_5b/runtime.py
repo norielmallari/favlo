@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 
 from favlo.cli import repo_root
-from favlo.media_pipeline import MediaCall, MediaPaused, VideoPipeline
+from favlo.media_memory import begin_release, finish_release, open_gate, stamp_owner
+from favlo.media_pipeline import MediaCall, MediaPaused, MediaPipeline
 from favlo.memory import memory
 from favlo.registry import models_dir
 from wan22_ti2v_5b.clip import Clip, ClipHold
@@ -24,25 +25,76 @@ class Runtime:
         self,
         record: Path,
         owner: str,
-        dit: DiT,
-        text: TextEncoder,
-        vae: WanVae,
-        gpu: Gpu,
+        umt5: Path,
+        vae_path: Path,
+        tokenizer: Path,
     ) -> None:
         self.record = record
         self._owner = owner
-        self.dit = dit
-        self.text = text
-        self.vae = vae
-        self.gpu = gpu
-        self.clip = Clip(dit, text, vae)
+        self._umt5 = umt5
+        self._vae_path = vae_path
+        self._tokenizer = tokenizer
+        self._closed = True
         self._ceiling = 0
         self.frame_tile = 1
-        self.refresh_budget()
+        self.gpu: Gpu | None = None
+        self.dit: DiT | None = None
+        self.text: TextEncoder | None = None
+        self.vae: WanVae | None = None
+        self.clip: Clip | None = None
+        open_gate(_MIN_FRAME * 3, detail="packed record")
+        self._bind()
+
+    def ensure_open(self, request: VideoRequest) -> None:
+        """Wait for prior releases, reload when closed, then check this clip fits."""
+        need = self.working_set_bytes(request)
+        detail = f"{request.frames} frames at {request.width}x{request.height}"
+        open_gate(need, detail=detail)
+        if self._closed:
+            self._bind()
+        _require_fit(self, request)
+
+    def working_set_bytes(self, request: VideoRequest) -> int:
+        """Bytes the frame tile for this clip needs, plus the load floor."""
+        wide = 256 * (request.height // 2) * (request.width // 2) * 4
+        clip = int(request.frames * max(wide, 1) / 0.45)
+        return max(_MIN_FRAME * 3, clip)
+
+    def _bind(self) -> None:
+        if not self._closed:
+            return
+        self.gpu = Gpu(self._owner)
+        try:
+            self.text = TextEncoder(self._umt5, self.gpu, self._tokenizer)
+            self.vae = WanVae(self._vae_path, self.gpu)
+            self.dit = DiT(self.record, self.gpu)
+            self.clip = Clip(self.dit, self.text, self.vae)
+            self._closed = False
+            self.refresh_budget()
+        except Exception:
+            self._closed = False
+            self.close()
+            raise
 
     def close(self) -> None:
-        self.vae.close()
-        self.gpu.close()
+        if self._closed:
+            return
+        before, held = begin_release(self._owner)
+        self._closed = True
+        try:
+            vae = self.vae
+            gpu = self.gpu
+            self.vae = None
+            self.gpu = None
+            self.dit = None
+            self.text = None
+            self.clip = None
+            if vae is not None:
+                vae.close()
+            if gpu is not None:
+                gpu.close()
+        finally:
+            finish_release(self._owner, before, held)
 
     def halt(self) -> None:
         self.close()
@@ -75,11 +127,6 @@ def open_runtime(
     memory.set_max_memory(max_memory)
     record = Path(path)
     manifest = json.loads((record / "manifest.json").read_text(encoding="utf-8"))
-    if memory.budget() < _MIN_FRAME * 3:
-        message = "minimum working set does not fit"
-        raise MemoryError(message)
-    owner_name = owner or "wan22-ti2v-5b"
-    gpu = Gpu(owner_name)
     umt5 = _umt5(parts, record)
     print(f"umt5 {umt5.name}", flush=True)
     # The tokenizer sits in the int8 pack. The BF16 encoder file is not opened.
@@ -87,15 +134,18 @@ def open_runtime(
     if not tokenizer.is_file():
         message = "umT5 pack is missing tokenizer.json"
         raise FileNotFoundError(message)
-    text = TextEncoder(umt5, gpu, tokenizer)
     vae_path = repo_root() / str(manifest["vae"])
-    vae = WanVae(vae_path, gpu)
-    return Runtime(record, owner_name, DiT(record, gpu), text, vae, gpu)
+    owner_name = stamp_owner("wan22-ti2v-5b", owner, id(record))
+    return Runtime(record, owner_name, umt5, vae_path, tokenizer)
 
 
-class Pipeline(VideoPipeline):
+class Pipeline(MediaPipeline):
     """Wan TI2V's listener contract. The clip sampler stays in this package."""
 
+    kind = "video"
+    id_prefix = "video_"
+    object_name = "video"
+    table_name = "videos"
     id_hex = 4
 
     def parse(self, body: dict) -> VideoRequest:
@@ -111,7 +161,6 @@ class Pipeline(VideoPipeline):
         }
 
     def generate(self, runtime, request, hold, job, stop, call: MediaCall):
-        _require_fit(runtime, request)
         kept = hold if isinstance(hold, ClipHold) else None
 
         def gate(pause: bool = False) -> bool:

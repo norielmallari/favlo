@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import ctypes
-import os
 import struct
-import time
 from pathlib import Path
 from typing import Any
 
@@ -14,64 +11,6 @@ import numpy as np
 
 from favlo.memory import device_buffer, memory
 from z_image_turbo.formats import INT8_TILE_N, TILE_M, TILE_N, pad_to
-
-_LIBC = ctypes.CDLL(None, use_errno=True)
-_LIBC.host_statistics64.argtypes = [
-    ctypes.c_uint,
-    ctypes.c_int,
-    ctypes.c_void_p,
-    ctypes.POINTER(ctypes.c_uint),
-]
-_LIBC.host_statistics64.restype = ctypes.c_int
-_LIBC.mach_host_self.restype = ctypes.c_uint
-
-
-class _VMStats(ctypes.Structure):
-    _fields_ = (
-        ("free_count", ctypes.c_uint),
-        ("active_count", ctypes.c_uint),
-        ("inactive_count", ctypes.c_uint),
-        ("wire_count", ctypes.c_uint),
-        ("zero_fill_count", ctypes.c_uint),
-        ("reactivations", ctypes.c_uint64),
-        ("pageins", ctypes.c_uint64),
-        ("pageouts", ctypes.c_uint64),
-        ("faults", ctypes.c_uint64),
-        ("cow_faults", ctypes.c_uint64),
-        ("lookups", ctypes.c_uint64),
-        ("hits", ctypes.c_uint64),
-        ("purges", ctypes.c_uint64),
-        ("purgeable_count", ctypes.c_uint),
-        ("speculative_count", ctypes.c_uint),
-    )
-
-
-def reclaimable_bytes() -> int:
-    """Bytes the next pipeline can take. Wired device pages are not included."""
-    page = int(os.sysconf("SC_PAGE_SIZE"))
-    count = ctypes.c_uint(ctypes.sizeof(_VMStats) // 4)
-    stats = _VMStats()
-    kern = _LIBC.host_statistics64(
-        _LIBC.mach_host_self(),
-        ctypes.c_int(4),
-        ctypes.byref(stats),
-        ctypes.byref(count),
-    )
-    if kern != 0:
-        return page * int(os.sysconf("SC_PHYS_PAGES"))
-    reclaimable = stats.free_count + stats.inactive_count + stats.speculative_count
-    return int(reclaimable) * page
-
-
-def wait_until_reclaimed(before: int, freed: int) -> None:
-    """Block until ``freed`` bytes show up as reclaimable, at most two seconds."""
-    if freed < 1:
-        return
-    target = before + freed // 2
-    deadline = time.perf_counter() + 2.0
-    while reclaimable_bytes() < target and time.perf_counter() < deadline:
-        time.sleep(0.05)
-
 
 _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"
 _NAMES = (

@@ -310,9 +310,15 @@ def close_runtime(runtime: Any, owners: Any = None) -> None:
 
 
 def start_pipeline(selection: Any, args: Any, schedule: Any = None) -> Any:
-    """Open the pipeline in its own process. The manager keeps the handle."""
+    """Open the pipeline in its own process. The manager keeps the handle.
+
+    The previous runtime has already been closed. The child is spawned after
+    the ledger reports that release.
+    """
+    from favlo.memory import memory
     from favlo.pipeline_worker import PipelineChild
 
+    memory.wait_released()
     child = PipelineChild(
         selection,
         getattr(args, "max_memory", None),
@@ -712,9 +718,9 @@ def open_for(kind: str, body: dict[str, Any], state: dict[str, Any], args: Any) 
     return Opened(selection, state.get("runtime"), state.get("module"))
 
 
-def handler_for(kind: str, module: Any) -> Any:
+def handler_for(kind: str, module: Any, handler: str | None = None) -> Any:
     """The handler on the runtime the manager opened. A missing kind stays missing."""
-    name = _HANDLERS.get(kind)
+    name = handler or _HANDLERS.get(kind)
     if name is None or module is None:
         return None
     try:

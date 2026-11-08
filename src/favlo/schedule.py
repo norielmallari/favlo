@@ -53,6 +53,7 @@ class Scheduler:
         self._media: deque[_Ticket] = deque()
         self._running: _Ticket | None = None
         self._holding = 0
+        self._holders: list[str] = []
         self._dropped: set[int] = set()
         self._chat_debounce_until = 0.0
         self._chat_debounce_seconds = (
@@ -83,9 +84,10 @@ class Scheduler:
                 if not noted:
                     noted = True
                     holding = self._holding > 0
+                    holder = self._memory_holder() if holding else ""
                     self._cond.release()
                     try:
-                        self._note_wait(holding)
+                        self._note_wait(holding, holder)
                     finally:
                         self._cond.acquire()
                     continue
@@ -138,16 +140,29 @@ class Scheduler:
                 return None
             return self._running.kind
 
-    def hold_memory(self) -> None:
-        """Keep the next call queued until an allocation or a release finishes."""
+    def hold_memory(self, pipeline: str | None = None) -> None:
+        """Keep the next call queued until an allocation or a release finishes.
+
+        ``pipeline`` is the runtime that owns the hold. Nested holds stack; the
+        newest non-empty name is what a waiter prints.
+        """
         with self._cond:
             self._holding += 1
+            self._holders.append(str(pipeline or "").strip())
 
     def release_memory(self) -> None:
         """The ledger check passed. Admit whoever is next."""
         with self._cond:
             self._holding = max(0, self._holding - 1)
+            if self._holders:
+                self._holders.pop()
             self._cond.notify_all()
+
+    def _memory_holder(self) -> str:
+        for name in reversed(self._holders):
+            if name:
+                return name
+        return ""
 
     def foreground(self) -> bool:
         """True when an embedding or a chat is queued or holds admission.
@@ -214,7 +229,13 @@ class Scheduler:
             return
         self.preempt.clear()
 
-    def _note_wait(self, holding: bool) -> None:
+    def _note_wait(self, holding: bool, pipeline: str = "") -> None:
         from favlo.listener import _log
 
-        _log("waiting for memory" if holding else "waiting for the open request")
+        if holding:
+            if pipeline:
+                _log(f"waiting for memory for {pipeline}")
+            else:
+                _log("waiting for memory")
+            return
+        _log("waiting for the open request")

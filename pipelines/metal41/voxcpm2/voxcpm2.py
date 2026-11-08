@@ -21,3 +21,27 @@ import voxcpm2 as _pipeline  # noqa: E402
 
 def __getattr__(name: str) -> Any:
     return getattr(_pipeline, name)
+
+
+def mcp_tools() -> list[dict[str, Any]]:
+    """Local tools. The host publishes the pipeline prefix. This loads no weights."""
+    return [
+        {
+            "name": "generate_voice",
+            "description": "Speak one line as mp3, wav, or flac.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "input": {"type": "string", "description": "Line to speak."},
+                    "voice": {"type": "string", "description": "Empty speaks with no reference."},
+                    "instructions": {"type": "string", "description": "Style prefix."},
+                    "response_format": {"type": "string", "description": "mp3, wav, or flac."},
+                    "include_audio": {"type": "boolean", "description": "Inline audio if at most 1 MiB."},
+                },
+                "required": ["input"],
+            },
+            "task": True,
+            "handler": "handle_voice",
+            "result": "audio",
+        }
+    ]

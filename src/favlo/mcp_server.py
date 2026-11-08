@@ -1,18 +1,13 @@
 """Media tools on the same process as the listener.
 
-FastMCP serves MCP 2026-07-28 at ``/mcp``. ``generate_image``,
-``generate_video_i2v``, ``generate_video_t2v``, ``generate_music``, and
-``generate_voice`` are optional Tasks. Each uses the ``media`` default in
-``models/registry.json`` unless ``session`` names a ``set_*`` result. A client that
-advertises ``io.modelcontextprotocol/tasks`` gets a ``CreateTaskResult`` and
-the in-memory worker runs one task at a time. A client that does not gets the
-tool result on that call. ``list_image_models``, ``list_video_models_i2v``,
-``list_video_models_t2v``, ``list_music_models``, ``list_voice_models``,
-``set_image_model``, ``set_video_i2v_model``, ``set_video_t2v_model``,
-``set_music_model``, ``set_voice_model``, ``media_status``,
-``media_cancel``, and ``read_media`` run in the request. A generate
-tool calls the pipeline handler through the same lock as ``POST /v1``.
-Chat completion is not a tool.
+FastMCP serves MCP 2026-07-28 at ``/mcp``. Listener tools are
+``media_status``, ``media_cancel``, ``read_media``, ``remember``, ``recall``,
+and ``forget``. A registered module's ``mcp_tools()`` adds the other tools.
+The published name is ``{pipeline}__{local name}``. A tool marked ``task`` is
+an optional Task. A client that advertises ``io.modelcontextprotocol/tasks``
+gets a ``CreateTaskResult`` and the in-memory worker runs one task at a time.
+A client that does not gets the tool result on that call. Chat completion is
+not a tool.
 """
 
 from __future__ import annotations
@@ -27,7 +22,8 @@ import mcp_types
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.resources import ResourceContent, ResourceResult
-from fastmcp.tools.base import ToolResult
+from fastmcp.tools.base import Tool, ToolResult
+from pydantic import PrivateAttr
 from fastmcp.utilities.tasks import TaskConfig
 from fastmcp_tasks import TasksExtension
 from fastmcp_tasks.context import get_task_context
@@ -37,9 +33,16 @@ from fastmcp_tasks.models import CreateTaskResult, GetTaskParams, GetTaskResult
 from mcp.shared.exceptions import MCPError
 
 from favlo import __version__
-from favlo.images import load_image
+from favlo.images import image_path, load_image
 from favlo.json_model import dumps_for_model
-from favlo.media_session import assign, choose
+from favlo.local_uri import file_uri, is_file_uri, materialize
+from favlo.media_catalog import (
+    CatalogError,
+    PipelineRecord,
+    ToolSpec,
+    build_catalog,
+    default_folder,
+)
 from favlo.memory_mcp import (
     FORGET_DESCRIPTION,
     RECALL_DESCRIPTION,
@@ -50,15 +53,9 @@ from favlo.memory_mcp import (
     remember_text,
 )
 from favlo.music import load_music, music_dir
-from favlo.videos import load_video
+from favlo.videos import load_video, video_path
 from favlo.voice import load_voice, voice_dir
 
-_MEDIA = (
-    ("image", "handle_image"),
-    ("video", "handle_video"),
-    ("music", "handle_music"),
-    ("voice", "handle_voice"),
-)
 # Favlo tool descriptions stay at or under this length (stricter than OpenAI's 1024).
 # The MCP spec does not cap description length.
 TOOL_DESCRIPTION_MAX_CHARS = 256
@@ -76,9 +73,20 @@ _AUDIO = {"mp3": "audio/mpeg", "wav": "audio/wav", "flac": "audio/flac"}
 _IMAGE_EXT = frozenset({"png"})
 _VIDEO_EXT = frozenset({"mp4"})
 _STILL = (
-    'image is an id starting with image_ from generate_image, or {"type": "image", "data": "<base64 png>"}. '
-    "A path and a favlo:// URI are refused."
+    "image is an id starting with image_, "
+    '{"type": "image", "data": "<base64 png>"}, or an absolute file:// URI. '
+    "A bare path and a favlo:// URI are refused."
 )
+# Only these keys are stills. A prompt with a slash (f/1.8) is not a path.
+_STILL_KEYS = frozenset({"image", "source", "target"})
+_TYPES = {
+    "string": str,
+    "integer": int,
+    "number": (int, float),
+    "boolean": bool,
+    "array": list,
+    "object": dict,
+}
 
 
 def build_mcp(
@@ -86,41 +94,14 @@ def build_mcp(
     state: dict[str, Any],
     embed: Any,
 ) -> FastMCP:
-    """Tools close over ``dispatch(kind, body, task_id)``.
+    """Listener tools, then one tool per registered ``mcp_tools()`` row.
 
-    ``kind`` is ``list``, ``image``, ``video``, ``music``, or ``voice``. A
-    generate call passes the task id the worker is running. ``list`` reads
-    ``media`` from the body, and ``mode`` when the media is video. Task
-    records are stored on ``state``.
+    A task tool dispatches ``image``, ``video``, ``music``, or ``voice``.
+    The body carries the handler attribute and the registry folder.
     """
     mcp = FastMCP("Favlo", version=__version__)
     tasks = FavloTasks(state)
     mcp.add_extension(tasks)
-
-    @mcp.tool(task=False)
-    def list_image_models() -> list[dict[str, Any]]:
-        """Registry rows whose pipeline generates an image."""
-        return dispatch("list", {"media": "image"})
-
-    @mcp.tool(task=False)
-    def list_video_models_i2v() -> list[dict[str, Any]]:
-        """Image-to-video rows, with each row's resolutions."""
-        return dispatch("list", {"media": "video", "mode": "i2v"})
-
-    @mcp.tool(task=False)
-    def list_video_models_t2v() -> list[dict[str, Any]]:
-        """Text-to-video rows, with each row's resolutions."""
-        return dispatch("list", {"media": "video", "mode": "t2v"})
-
-    @mcp.tool(task=False)
-    def list_music_models() -> list[dict[str, Any]]:
-        """Registry rows whose pipeline generates music."""
-        return dispatch("list", {"media": "music"})
-
-    @mcp.tool(task=False)
-    def list_voice_models() -> list[dict[str, Any]]:
-        """Registry rows whose pipeline speaks. A row lists voices and emotions when defined."""
-        return dispatch("list", {"media": "voice"})
 
     @mcp.tool(task=False)
     async def media_status(taskId: str) -> dict[str, Any]:
@@ -170,276 +151,7 @@ def build_mcp(
         who = client.strip() or None
         return forget_text(store, id, client=who)
 
-    def _set_model(kind: str, model: str, session: str) -> str:
-        if model not in _catalog(dispatch, kind):
-            message = f"unknown {kind} model"
-            raise ToolError(message)
-        try:
-            return assign(tasks.state, kind, model, session)
-        except LookupError as exc:
-            raise ToolError(str(exc)) from exc
-
-    @mcp.tool(task=False)
-    def set_image_model(model: str, session: str = "") -> str:
-        """Use this image model for one session. The reply is the session id.
-
-        Args:
-            model: Id from list_image_models.
-            session: Omit to mint; pass id to change.
-        """
-        return _set_model("image", model, session)
-
-    @mcp.tool(task=False)
-    def set_video_i2v_model(model: str, session: str = "") -> str:
-        """Use this image-to-video model for one session. The reply is the session id.
-
-        Args:
-            model: Id from list_video_models_i2v.
-            session: Omit to mint; pass id to change.
-        """
-        return _set_model("i2v", model, session)
-
-    @mcp.tool(task=False)
-    def set_video_t2v_model(model: str, session: str = "") -> str:
-        """Use this text-to-video model for one session. The reply is the session id.
-
-        Args:
-            model: Id from list_video_models_t2v.
-            session: Omit to mint; pass id to change.
-        """
-        return _set_model("t2v", model, session)
-
-    @mcp.tool(task=False)
-    def set_music_model(model: str, session: str = "") -> str:
-        """Use this music model for one session. The reply is the session id.
-
-        Args:
-            model: Id from list_music_models.
-            session: Omit to mint; pass id to change.
-        """
-        return _set_model("music", model, session)
-
-    @mcp.tool(task=False)
-    def set_voice_model(model: str, session: str = "") -> str:
-        """Use this voice model for one session. The reply is the session id.
-
-        Args:
-            model: Id from list_voice_models.
-            session: Omit to mint; pass id to change.
-        """
-        return _set_model("voice", model, session)
-
-    @mcp.tool(task=_TASK, annotations=_ANNOTATIONS)
-    async def generate_image(
-        prompt: str,
-        size: str = "720x1280",
-        quality: str = "high",
-        seed: int | None = None,
-        include_image: bool = False,
-        session: str = "",
-    ) -> ToolResult:
-        """Still PNG for an image or picture request only, not video.
-
-        size defaults to 720x1280 (auto is 9:16). session from set_*; omitted seed is random.
-
-        Args:
-            prompt: Image prompt.
-            size: WxH; auto = 9:16.
-            quality: Quality preset.
-            seed: Omit for random.
-            include_image: Inline PNG if ≤1 MiB.
-            session: set_* id; omit = registry default.
-        """
-        body: dict[str, Any] = {
-            "prompt": prompt,
-            "model": _model(tasks.state, "image", session),
-            "size": size,
-            "quality": quality,
-        }
-        if seed is not None:
-            body["seed"] = seed
-        payload = await _run_task(dispatch, "image", body)
-        return _image_result(payload, include_image, tasks.state)
-
-    async def _generate_video(
-        prompt: str,
-        kind: str,
-        size: str,
-        image: str | dict[str, Any] | None,
-        duration: float | None,
-        seed: int | None,
-        quality: str,
-        negative_prompt: str,
-        guidance_scale: float | list[float] | None,
-        steps: int,
-        session: str,
-    ) -> ToolResult:
-        body: dict[str, Any] = {
-            "prompt": prompt,
-            "model": _model(tasks.state, kind, session),
-            "size": size,
-            "quality": quality,
-        }
-        if seed is not None:
-            body["seed"] = seed
-        if image is not None:
-            body["image"] = _still(image, tasks.state)
-        if duration is not None:
-            body["duration"] = duration
-        if negative_prompt:
-            body["negative_prompt"] = negative_prompt
-        if guidance_scale is not None:
-            body["guidance_scale"] = guidance_scale
-        if steps:
-            body["steps"] = steps
-        payload = await _run_task(dispatch, "video", body)
-        return _video_result(payload, tasks.state)
-
-    @mcp.tool(task=_TASK, annotations=_ANNOTATIONS)
-    async def generate_video_i2v(
-        prompt: str,
-        size: str,
-        image: str | dict[str, Any],
-        duration: float | None = None,
-        seed: int | None = None,
-        quality: str = "high",
-        negative_prompt: str = "",
-        guidance_scale: float | list[float] | None = None,
-        steps: int = 0,
-        session: str = "",
-    ) -> ToolResult:
-        """MP4 from a still only when the user asked for video or motion, not a still.
-
-        Use generate_image for stills. Read favlo://videos/{id}.mp4.
-
-        Args:
-            prompt: Motion prompt; still is frame 0.
-            size: Required WxH from list_video_models_i2v.
-            image: image_ id or PNG block.
-            duration: Seconds; omit = model default.
-            seed: Omit for random.
-            quality: auto|low|medium|high|xhigh|max|standard|hd.
-            negative_prompt: Empty = Wan sample negative.
-            guidance_scale: Number or [low, high]; default 1.
-            steps: Euler 1-40; 0 = 4.
-            session: set_* id; omit = registry default.
-        """
-        return await _generate_video(
-            prompt,
-            "i2v",
-            size,
-            image,
-            duration,
-            seed,
-            quality,
-            negative_prompt,
-            guidance_scale,
-            steps,
-            session,
-        )
-
-    @mcp.tool(task=_TASK, annotations=_ANNOTATIONS)
-    async def generate_video_t2v(
-        prompt: str,
-        size: str,
-        duration: float | None = None,
-        seed: int | None = None,
-        quality: str = "high",
-        negative_prompt: str = "",
-        guidance_scale: float | list[float] | None = None,
-        steps: int = 0,
-        session: str = "",
-    ) -> ToolResult:
-        """MP4 from text only when the user asked for video or motion, not a still.
-
-        Use generate_image for stills. Read favlo://videos/{id}.mp4.
-
-        Args:
-            prompt: Motion prompt.
-            size: Required WxH from list_video_models_t2v.
-            duration: Seconds; omit = model default.
-            seed: Omit for random.
-            quality: auto|low|medium|high|xhigh|max|standard|hd.
-            negative_prompt: Empty = Wan sample negative.
-            guidance_scale: Number or [low, high]; default 1.
-            steps: Euler 1-40; 0 = 4.
-            session: set_* id; omit = registry default.
-        """
-        return await _generate_video(
-            prompt,
-            "t2v",
-            size,
-            None,
-            duration,
-            seed,
-            quality,
-            negative_prompt,
-            guidance_scale,
-            steps,
-            session,
-        )
-
-    @mcp.tool(task=_TASK, annotations=_ANNOTATIONS)
-    async def generate_music(
-        prompt: str,
-        response_format: str = "mp3",
-        lyrics: str = "",
-        seconds: float | None = None,
-        seed: int | None = None,
-        vocal_language: str = "",
-        bpm: int | None = None,
-        keyscale: str = "",
-        timesignature: str = "",
-        include_audio: bool = False,
-        session: str = "",
-    ) -> ToolResult:
-        """One music clip (mp3, wav, or flac). session from set_*; omitted seed is random."""
-        body: dict[str, Any] = {
-            "prompt": prompt,
-            "model": _model(tasks.state, "music", session),
-            "response_format": response_format,
-        }
-        if lyrics:
-            body["lyrics"] = lyrics
-        if seconds is not None:
-            body["seconds"] = seconds
-        if seed is not None:
-            body["seed"] = seed
-        if vocal_language:
-            body["vocal_language"] = vocal_language
-        if bpm is not None:
-            body["bpm"] = bpm
-        if keyscale:
-            body["keyscale"] = keyscale
-        if timesignature:
-            body["timesignature"] = timesignature
-        payload = await _run_task(dispatch, "music", body)
-        return _music_result(payload, include_audio, tasks.state)
-
-    @mcp.tool(task=_TASK, annotations=_ANNOTATIONS)
-    async def generate_voice(
-        input: str,
-        voice: str = "",
-        instructions: str = "",
-        response_format: str = "mp3",
-        include_audio: bool = False,
-        session: str = "",
-    ) -> ToolResult:
-        """Speak one line. voice and emotions from list_voice_models; mp3, wav, or flac.
-
-        session from set_*.
-        """
-        body: dict[str, Any] = {
-            "input": input,
-            "model": _model(tasks.state, "voice", session),
-            "response_format": response_format,
-        }
-        if voice:
-            body["voice"] = voice
-        if instructions:
-            body["instructions"] = instructions
-        payload = await _run_task(dispatch, "voice", body)
-        return _voice_result(payload, include_audio, tasks.state)
+    mount_plugins(mcp, dispatch, state)
 
     @mcp.resource("favlo://images/{image_id}", mime_type="image/png")
     def read_image(image_id: str) -> ResourceResult:
@@ -556,7 +268,26 @@ class FavloTasks(TasksExtension):
 
 
 def media_kinds(module: Any) -> list[str]:
-    found = [name for name, attr in _MEDIA if callable(getattr(module, attr, None))]
+    """Kinds published by ``mcp_tools()``. A module without tools is not media."""
+    declare = getattr(module, "mcp_tools", None)
+    if not callable(declare):
+        return []
+    try:
+        raw = declare()
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    found: list[str] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("handler")
+        if not isinstance(name, str):
+            continue
+        kind = getattr(getattr(module, name, None), "kind", None)
+        if kind in {"image", "video", "music", "voice"} and kind not in found:
+            found.append(kind)
     return found
 
 
@@ -567,22 +298,181 @@ def _home(state: dict[str, Any], key: str) -> Path | None:
     return None
 
 
-def _model(state: dict[str, Any], kind: str, session: str) -> str:
+class CatalogTool(Tool):
+    """One published plugin tool. The schema is the module's, not a signature."""
+
+    _spec: ToolSpec = PrivateAttr()
+    _record: PipelineRecord = PrivateAttr()
+    _dispatch: Any = PrivateAttr()
+    _state: dict[str, Any] = PrivateAttr()
+
+    def __init__(
+        self,
+        name: str,
+        spec: ToolSpec,
+        record: PipelineRecord,
+        dispatch: Any,
+        state: dict[str, Any],
+    ) -> None:
+        task = _TASK if spec.task else TaskConfig(mode="forbidden")
+        super().__init__(
+            name=name,
+            description=spec.description,
+            parameters=spec.parameters,
+            task_config=task,
+            annotations=_ANNOTATIONS if spec.task else None,
+            meta={"pipeline": record.pipeline, "result": spec.result},
+        )
+        self._spec = spec
+        self._record = record
+        self._dispatch = dispatch
+        self._state = state
+
+    async def run(self, arguments: dict[str, Any]) -> ToolResult:
+        sent = arguments or {}
+        _check_schema(self._spec.parameters, sent)
+        body = _request_body(sent, self._record, self._spec, self._state)
+        if not self._spec.task:
+            return _pack(self._spec.result, {"result": body}, sent, self._state)
+        kind = self._spec.kind
+        payload = await _run_task(self._dispatch, kind, body)
+        return _pack(self._spec.result, payload, sent, self._state)
+
+
+def mount_plugins(mcp: FastMCP, dispatch: Any, state: dict[str, Any]) -> None:
+    """Replace plugin tools with the current registry catalog."""
+    previous = state.get("plugin_tools")
+    if isinstance(previous, list):
+        for name in previous:
+            try:
+                mcp._local_provider.remove_tool(str(name))
+            except KeyError:
+                continue
     try:
-        return choose(state, kind, session)
+        catalog = build_catalog(
+            description_max=TOOL_DESCRIPTION_MAX_CHARS,
+            param_max=TOOL_PARAM_DESCRIPTION_MAX_CHARS,
+        )
+    except CatalogError:
+        raise
+    names: list[str] = []
+    for name, record, spec in catalog.published():
+        mcp.add_tool(CatalogTool(name, spec, record, dispatch, state))
+        names.append(name)
+    state["plugin_tools"] = names
+    state["media_catalog"] = catalog
+    state["remount_media"] = lambda: mount_plugins(mcp, dispatch, state)
+
+
+def _check_schema(schema: dict[str, Any], arguments: dict[str, Any]) -> None:
+    if not isinstance(arguments, dict):
+        raise ToolError("arguments must be an object")
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        properties = {}
+    required = schema.get("required") or []
+    for key in required:
+        if key not in arguments:
+            raise ToolError(f"{key} is required")
+    for key, value in arguments.items():
+        prop = properties.get(key)
+        if not isinstance(prop, dict):
+            if schema.get("additionalProperties") is False:
+                raise ToolError(f"unknown argument {key}")
+            continue
+        expected = prop.get("type")
+        if not isinstance(expected, str):
+            continue
+        if expected == "integer" and isinstance(value, bool):
+            raise ToolError(f"{key} must be an integer")
+        if expected == "number" and isinstance(value, bool):
+            raise ToolError(f"{key} must be a number")
+        kind = _TYPES.get(expected)
+        if kind is not None and not isinstance(value, kind):
+            raise ToolError(f"{key} must be a {expected}")
+
+
+def _request_body(
+    arguments: dict[str, Any],
+    record: PipelineRecord,
+    spec: ToolSpec,
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    body: dict[str, Any] = {}
+    for key, value in arguments.items():
+        if key in {"include_image", "include_audio", "session"}:
+            continue
+        body[key] = _argument(value, state, still=key in _STILL_KEYS)
+    if body.get("transparent") is True and "background" not in body:
+        body["background"] = "transparent"
+    body.pop("transparent", None)
+    named = body.get("model")
+    try:
+        body["model"] = _media_model_id(named, record, spec)
     except LookupError as exc:
+        raise ToolError(str(exc) or "unknown model") from exc
+    body["pipeline"] = record.pipeline
+    body["handler"] = spec.handler
+    return body
+
+
+def _media_model_id(named: Any, record: PipelineRecord, spec: ToolSpec) -> str:
+    """Public model id for ``resolve``. Accepts the folder name or its alias."""
+    from favlo.registry import load_registry
+
+    data = load_registry()
+    if isinstance(named, str) and named.strip():
+        for folder in record.folders:
+            entry = data["models"].get(folder)
+            if not isinstance(entry, dict):
+                continue
+            alias = entry.get("alias")
+            public = alias if isinstance(alias, str) and alias else folder
+            if named == folder or named == public:
+                return public
+        raise LookupError("unknown model")
+    if named in (None, ""):
+        folder = default_folder(record, spec)
+        entry = data["models"].get(folder)
+        if isinstance(entry, dict):
+            alias = entry.get("alias")
+            if isinstance(alias, str) and alias:
+                return alias
+        return folder
+    raise LookupError("unknown model")
+
+
+def _argument(value: Any, state: dict[str, Any], *, still: bool = False) -> Any:
+    """Pass still fields through ``_still``. Do not materialize first: base64 often
+    contains ``/``, and a second path check would refuse a valid ``file://`` read.
+    """
+    if not still:
+        return value
+    try:
+        return _still(value, state)
+    except (RuntimeError, ValueError, OSError) as exc:
         raise ToolError(str(exc)) from exc
 
 
-def _catalog(dispatch: Any, kind: str) -> set[str]:
-    media = "video" if kind in {"i2v", "t2v"} else kind
-    body: dict[str, Any] = {"media": media}
-    if media == "video":
-        body["mode"] = kind
-    rows = dispatch("list", body)
-    if not isinstance(rows, list):
-        return set()
-    return {row["id"] for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)}
+def _pack(
+    kind: str,
+    payload: dict[str, Any],
+    arguments: dict[str, Any],
+    state: dict[str, Any],
+) -> ToolResult:
+    if kind == "image":
+        return _image_result(payload, bool(arguments.get("include_image")), state)
+    if kind == "video":
+        return _video_result(payload, state)
+    if kind == "audio":
+        item = payload.get("id")
+        if isinstance(item, str) and item.startswith("voice_"):
+            return _voice_result(payload, bool(arguments.get("include_audio")), state)
+        return _music_result(payload, bool(arguments.get("include_audio")), state)
+    if kind == "json":
+        text = payload if isinstance(payload, str) else dumps_for_model(payload)
+        return ToolResult([mcp_types.TextContent(type="text", text=text)])
+    raise ToolError("unknown result")
 
 
 async def _run_task(dispatch: Any, kind: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -611,10 +501,17 @@ async def _already_cancelled(task_id: str) -> bool:
 
 
 def _still(image: Any, state: dict[str, Any]) -> str:
+    if isinstance(image, str) and is_file_uri(image):
+        loaded = materialize(image)
+        if not isinstance(loaded, str) or not loaded:
+            raise RuntimeError(_STILL)
+        return loaded
     if isinstance(image, dict):
         if image.get("type") != "image":
             raise RuntimeError(_STILL)
         data = image.get("data")
+        if isinstance(data, str) and is_file_uri(data):
+            data = materialize(data)
         if not isinstance(data, str) or not data:
             raise RuntimeError(_STILL)
         return data
@@ -653,6 +550,9 @@ def _image_result(
         if meta is not None:
             blocks.append(meta)
         blocks.append(_media_link("images", image_id, "png", "image/png"))
+        local = _local_link(state, "images", image_id, "png", "image/png")
+        if local is not None:
+            blocks.append(local)
         if not include_image:
             continue
         raw = _image_bytes(item, state)
@@ -700,6 +600,9 @@ def _video_result(payload: dict[str, Any], state: dict[str, Any]) -> ToolResult:
     if meta is not None:
         blocks.append(meta)
     blocks.append(_media_link("videos", video_id, "mp4", "video/mp4"))
+    local = _local_link(state, "videos", video_id, "mp4", "video/mp4")
+    if local is not None:
+        blocks.append(local)
     return ToolResult(blocks)
 
 
@@ -723,6 +626,9 @@ def _music_result(
     if meta is not None:
         blocks.append(meta)
     blocks.append(_media_link("music", music_id, fmt, mime))
+    local = _local_link(state, "music", music_id, fmt, mime)
+    if local is not None:
+        blocks.append(local)
     if include_audio:
         loaded = load_music(music_id, fmt, home=_home(state, "music_home"))
         if loaded is not None and len(loaded[0]) <= _INLINE:
@@ -756,6 +662,9 @@ def _voice_result(
     if meta is not None:
         blocks.append(meta)
     blocks.append(_media_link("voice", voice_id, fmt, mime))
+    local = _local_link(state, "voice", voice_id, fmt, mime)
+    if local is not None:
+        blocks.append(local)
     if include_audio:
         loaded = load_voice(voice_id, fmt, home=_home(state, "voice_home"))
         if loaded is not None and len(loaded[0]) <= _INLINE:
@@ -780,6 +689,57 @@ def _metadata_text(name: str, state: dict[str, Any]) -> mcp_types.TextContent | 
     if record is None:
         return None
     return mcp_types.TextContent(type="text", text=dumps_for_model(record))
+
+
+def _load_local(value: Any) -> Any:
+    """Read a file:// argument. Other values pass through."""
+    try:
+        return materialize(value)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+    except OSError as exc:
+        raise ToolError("local file is missing") from exc
+
+
+def _local_link(
+    state: dict[str, Any], kind: str, item_id: str, ext: str, mime: str
+) -> mcp_types.ResourceLink | None:
+    """A file:// link when the stored file is on this machine."""
+    path = _stored_path(state, kind, item_id, ext)
+    if path is None or not path.is_file():
+        return None
+    filename = f"{item_id}.{ext}"
+    return mcp_types.ResourceLink(
+        type="resource_link",
+        uri=file_uri(path),
+        name=filename,
+        mime_type=mime,
+    )
+
+
+def _stored_path(state: dict[str, Any], kind: str, item_id: str, ext: str) -> Path | None:
+    homes = {
+        "images": "image_home",
+        "videos": "video_home",
+        "music": "music_home",
+        "voice": "voice_home",
+    }
+    home = _home(state, homes[kind])
+    if home is None:
+        from favlo.logs import favlo_home
+
+        home = favlo_home()
+    try:
+        if kind == "images":
+            return image_path(home, item_id)
+        if kind == "videos":
+            return video_path(home, item_id)
+        folder = music_dir(home) if kind == "music" else voice_dir(home)
+    except ValueError:
+        return None
+    if "/" in item_id or "\\" in item_id or item_id in {".", ".."}:
+        return None
+    return folder / f"{item_id}.{ext}"
 
 
 def _media_link(kind: str, item_id: str, ext: str, mime: str) -> mcp_types.ResourceLink:

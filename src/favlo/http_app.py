@@ -423,6 +423,9 @@ async def _pipelines_reload(args: Any, state: dict[str, Any]) -> Response:
     _prepare_listener(state)
     try:
         closed, modules = await asyncio.to_thread(pipelines.reload, state, args)
+        remount = state.get("remount_media")
+        if callable(remount):
+            await asyncio.to_thread(remount)
     except Exception as exc:
         return _error(500, str(exc), type(exc).__name__)
     return _json_response({"reloaded": True, "closed": closed, "modules": modules})
@@ -659,7 +662,8 @@ def _run_once(
         if runtime is None or module is None:
             reply.json(404, {"error": {"message": "no model is loaded", "type": "not_found"}})
             return
-        call = handler_for(dispatch, module)
+        named = body.pop("handler", None) if isinstance(body, dict) else None
+        call = handler_for(dispatch, module, named if isinstance(named, str) else None)
         if call is None:
             if kind in {"chat", "responses"}:
                 name = state.get("pipeline") or "pipeline"
@@ -759,8 +763,12 @@ def _leave_cleared(reply: LiveReply) -> None:
 
 
 def _paused(state: dict[str, Any], reply: LiveReply) -> bool:
-    if not state["preempt"].is_set():
-        return False
+    """A slice left the job in progress. The task stays on this call until it finishes.
+
+    The chat that asked for the pause may already have left, so ``preempt`` can
+    be clear. The next slice runs only after the foreground queue drains.
+    """
+    del state
     payload = reply.payload
     return isinstance(payload, dict) and payload.get("status") == "in_progress"
 
@@ -866,14 +874,6 @@ def _mcp_dispatch(
     body: dict[str, Any],
     task_id: str = "",
 ) -> Any:
-    if kind == "list":
-        media = body.get("media") if isinstance(body, dict) else None
-        mode = body.get("mode") if isinstance(body, dict) else None
-        if media not in {"image", "video", "music", "voice"}:
-            return []
-        if media == "video" and mode not in {"i2v", "t2v"}:
-            return []
-        return _media_rows(media, mode if isinstance(mode, str) else None)
     _prepare_listener(state)
     if task_id:
         record = state["media_tasks"].get(task_id)
@@ -957,33 +957,6 @@ def _is_language_module(module: Any) -> bool:
     if media_kinds(module) or callable(getattr(module, "handle_embed", None)):
         return False
     return callable(getattr(module, "handle_responses", None))
-
-
-def _media_rows(media: str, mode: str | None = None) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for folder, pipeline, module in _each_pipeline():
-        kinds = media_kinds(module)
-        if media not in kinds:
-            continue
-        if media == "video":
-            modes = getattr(module, "video_modes", None)
-            offered = modes() if callable(modes) else ()
-            if mode not in offered:
-                continue
-        row: dict[str, Any] = {"id": folder, "pipeline": pipeline, "media": [media]}
-        if media == "voice":
-            speakers = getattr(module, "list_voices", None)
-            if callable(speakers):
-                row["voices"] = speakers()
-            emotions = getattr(module, "list_emotions", None)
-            if callable(emotions):
-                row["emotions"] = emotions()
-        if media == "video":
-            listed = getattr(module, "list_resolutions", None)
-            if callable(listed):
-                row["resolutions"] = listed()
-        rows.append(row)
-    return rows
 
 
 async def _pid(request: Request) -> tuple[int, Response | None]:

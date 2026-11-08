@@ -21,3 +21,32 @@ import ace_step_15_turbo as _pipeline  # noqa: E402
 
 def __getattr__(name: str) -> Any:
     return getattr(_pipeline, name)
+
+
+def mcp_tools() -> list[dict[str, Any]]:
+    """Local tools. The host publishes the pipeline prefix. This loads no weights."""
+    return [
+        {
+            "name": "generate_music",
+            "description": "One music clip as mp3, wav, or flac.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "Caption or style."},
+                    "response_format": {"type": "string", "description": "mp3, wav, or flac."},
+                    "lyrics": {"type": "string", "description": "Lyrics, when used."},
+                    "seconds": {"type": "number", "description": "Duration in seconds."},
+                    "seed": {"type": "integer", "description": "Omit for random."},
+                    "vocal_language": {"type": "string", "description": "Vocal language."},
+                    "bpm": {"type": "integer", "description": "Tempo."},
+                    "keyscale": {"type": "string", "description": "Key."},
+                    "timesignature": {"type": "string", "description": "Meter."},
+                    "include_audio": {"type": "boolean", "description": "Inline audio if at most 1 MiB."},
+                },
+                "required": ["prompt"],
+            },
+            "task": True,
+            "handler": "handle_music",
+            "result": "audio",
+        }
+    ]

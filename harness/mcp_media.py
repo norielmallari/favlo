@@ -31,67 +31,34 @@ def call_tool(port: int, name: str, arguments: dict[str, Any]) -> dict[str, Any]
     )
 
 
-_KIND = {
-    "generate_image": "image",
-    "generate_video_i2v": "i2v",
-    "generate_video_t2v": "t2v",
-    "generate_music": "music",
-    "generate_voice": "voice",
-}
-_SET = {
-    "image": "set_image_model",
-    "i2v": "set_video_i2v_model",
-    "t2v": "set_video_t2v_model",
-    "music": "set_music_model",
-    "voice": "set_voice_model",
-}
+def published_call(name: str, arguments: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Prefix a local tool with its pipeline.
 
-
-def bind_model(port: int, kind: str, model: str, session: str | None = None) -> str:
-    """Store ``model`` on a media session and return that session id."""
-    arguments: dict[str, Any] = {"model": model}
-    if session:
-        arguments["session"] = session
-    result = call_tool(port, _SET[kind], arguments)
-    text = _result_text(result)
-    token = text.strip().split()[0] if text.strip() else ""
-    if not token.startswith("media_"):
-        message = text or "set returned no session"
-        raise RuntimeError(message)
-    return token
-
-
-def _with_session(port: int, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Turn a harness ``model`` field into a session id the server accepts."""
-    kind = _KIND.get(name)
+    A name that already contains ``__`` is sent as given. When ``model`` names
+    a registry folder, that folder's pipeline is the prefix. When ``model`` is
+    omitted, the first published tool whose local name matches is used.
+    """
+    if "__" in name:
+        return name, arguments
     model = arguments.get("model")
-    if kind is None or not isinstance(model, str) or not model:
-        return arguments
-    current = arguments.get("session")
-    session = current if isinstance(current, str) and current else None
-    bound = bind_model(port, kind, model, session)
-    rest = {key: value for key, value in arguments.items() if key != "model"}
-    rest["session"] = bound
-    return rest
+    if isinstance(model, str) and model.strip():
+        from favlo.registry import resolve
 
+        pipeline = resolve(model).pipeline.replace("-", "_")
+        return f"{pipeline}__{name}", arguments
+    from favlo.media_catalog import build_catalog
 
-def _result_text(result: dict[str, Any]) -> str:
-    content = result.get("content")
-    if not isinstance(content, list):
-        return ""
-    parts = [
-        block["text"]
-        for block in content
-        if isinstance(block, dict)
-        and block.get("type") == "text"
-        and isinstance(block.get("text"), str)
-    ]
-    return "\n".join(parts)
+    suffix = f"__{name}"
+    for published, _record, spec in build_catalog().published():
+        if published.endswith(suffix) and spec.name == name:
+            return published, arguments
+    message = f"no published tool for {name}"
+    raise LookupError(message)
 
 
 def start_task(port: int, name: str, arguments: dict[str, Any]) -> str:
     """Create one generate task and return its id without waiting."""
-    arguments = _with_session(port, name, arguments)
+    name, arguments = published_call(name, arguments)
     _post(port, "server/discover", {})
     created = _post(
         port,

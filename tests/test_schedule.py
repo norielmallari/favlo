@@ -110,6 +110,21 @@ def test_a_call_waits_until_the_memory_hold_lifts() -> None:
     assert worker.is_alive() is False
 
 
+def test_waiting_for_memory_names_the_pipeline(monkeypatch) -> None:
+    lines: list[str] = []
+    monkeypatch.setattr("favlo.listener._log", lines.append)
+    schedule = Scheduler()
+    order: list[str] = []
+    schedule.hold_memory("z-image-turbo")
+    worker = threading.Thread(target=_run, args=(schedule, "chat", order))
+    worker.start()
+    _wait_until(lambda: schedule.waiting("chat") == 1 and lines)
+    assert lines == ["waiting for memory for z-image-turbo"]
+    schedule.release_memory()
+    worker.join(2)
+    assert order == ["chat"]
+
+
 def test_an_embedding_does_not_preempt_a_running_chat() -> None:
     schedule = Scheduler(chat_debounce=0)
     order: list[str] = []

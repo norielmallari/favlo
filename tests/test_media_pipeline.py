@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import threading
 
-from favlo.media_pipeline import (
-    MediaCall,
-    MediaPaused,
-    MediaRequestError,
-    VideoPipeline,
-)
+import pytest
+
+from favlo.media_pipeline import MediaCall, MediaPaused, MediaPipeline, MediaRequestError
 
 
 class _Reply:
@@ -29,6 +26,15 @@ class _Runtime:
         self.console = None
         self._halted = False
         self.finished = 0
+        self.opened = 0
+        self.closed = 0
+
+    def ensure_open(self, request: object) -> None:
+        del request
+        self.opened += 1
+
+    def close(self) -> None:
+        self.closed += 1
 
     def generate(self) -> object:
         if self.error is not None:
@@ -36,7 +42,11 @@ class _Runtime:
         return self.result
 
 
-class _Pipe(VideoPipeline):
+class _Pipe(MediaPipeline):
+    kind = "video"
+    id_prefix = "video_"
+    object_name = "video"
+    table_name = "videos"
     same = True
 
     def parse(self, body: dict) -> dict:
@@ -192,3 +202,56 @@ def test_on_finish_runs_after_success_pause_and_failure(tmp_path) -> None:
     broken["video_home"] = tmp_path
     pipe(_Reply(), failed, {"prompt": "move"}, None, None, broken)
     assert (ok.finished, paused.finished, failed.finished) == (1, 1, 1)
+    assert (ok.opened, paused.opened, failed.opened) == (1, 1, 1)
+    assert (ok.closed, paused.closed, failed.closed) == (1, 1, 1)
+
+
+def test_shell_requires_ensure_open_and_close(tmp_path) -> None:
+    pipe = _Pipe()
+    state = _state()
+    state["video_home"] = tmp_path
+
+    class _Bare:
+        def close(self) -> None:
+            return
+
+        def generate(self) -> object:
+            return b"clip"
+
+    missing_open = _Bare()
+    reply = _Reply()
+    pipe(reply, missing_open, {"prompt": "move"}, None, None, state)
+    assert reply.payload is not None
+    assert reply.payload["status"] == "failed"
+    assert "ensure_open" in reply.payload["error"]["message"]
+
+    class _NoClose:
+        def ensure_open(self, request: object) -> None:
+            del request
+
+        def generate(self) -> object:
+            return b"clip"
+
+    with pytest.raises(TypeError, match="must implement close"):
+        pipe(
+            _Reply(),
+            _NoClose(),
+            {"prompt": "move"},
+            None,
+            None,
+            _state() | {"video_home": tmp_path},
+        )
+
+
+def test_a_concrete_subclass_sets_kind_id_prefix_and_object_name() -> None:
+    with pytest.raises(TypeError, match="must set kind"):
+
+        class _Bare(MediaPipeline):
+            def parse(self, body: dict) -> dict:
+                return body
+
+            def generate(self, runtime, request, hold, job, stop, call) -> None:
+                return None
+
+            def pack(self, runtime, request, result, job, home, table, call) -> None:
+                return None

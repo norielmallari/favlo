@@ -12,11 +12,12 @@ from typing import Any
 import numpy as np
 import objc
 
+from favlo.media_memory import begin_release, finish_release, open_gate, stamp_owner
 from favlo.memory import memory
 from z_image_turbo.dit import velocity
 from z_image_turbo.formats import TILE_M, pad_to
 from z_image_turbo.hold import ImageHold, ImagePaused, ask
-from z_image_turbo.metal import Gpu, reclaimable_bytes, wait_until_reclaimed
+from z_image_turbo.metal import Gpu
 from z_image_turbo.progress import ImageProgress, LoadProgress, sample_total
 from z_image_turbo.record import Plane, load, weight_bytes
 from z_image_turbo.schedule import STEPS, sigmas
@@ -37,13 +38,30 @@ class Runtime:
         self.path = path
         self.console = console
         self._closed = True
-        self._owner = owner or f"z-image-turbo:{id(self)}"
+        self._owner = stamp_owner("z-image-turbo", owner, id(self))
         self.gpu = None
         self.weights = {}
         self.scratch = None
         self.ones = None
         self.source = None
+        open_gate(weight_bytes(self.path) + _ONES, detail="packed record")
         self._open()
+
+    def ensure_open(self, request: Any) -> None:
+        """Wait for prior releases, then load when closed and reserve this image."""
+        width = int(getattr(request, "width", MAX_EDGE))
+        height = int(getattr(request, "height", MAX_EDGE))
+        need = self.working_set_bytes(request)
+        if self._closed:
+            open_gate(need, detail=f"{width}x{height}")
+            self._open()
+        self._reserve_scratch(width, height)
+
+    def working_set_bytes(self, request: Any) -> int:
+        """Weights plus scratch for the named size."""
+        width = int(getattr(request, "width", MAX_EDGE))
+        height = int(getattr(request, "height", MAX_EDGE))
+        return weight_bytes(self.path) + scratch_bytes(width, height) + _ONES
 
     def _open(self) -> None:
         """Load the record after ``close`` has dropped the previous device."""
@@ -74,15 +92,14 @@ class Runtime:
             raise
 
     def close(self) -> None:
-        """Finish device work and drop every buffer before another pipeline allocates."""
+        """Finish device work, sweep the owner, and wait until those pages return."""
         if self._closed:
             return
-        gpu = self.gpu
-        freed = gpu.held_bytes() if gpu is not None and hasattr(gpu, "held_bytes") else 0
-        before = reclaimable_bytes() if freed else 0
+        before, held = begin_release(self._owner)
         self._closed = True
         try:
             with objc.autorelease_pool():
+                gpu = self.gpu
                 if gpu is not None:
                     gpu.close()
                 for plane in self.weights.values():
@@ -95,21 +112,12 @@ class Runtime:
                 self.ones = None
                 self.gpu = None
                 gc.collect()
-            if freed:
-                wait_until_reclaimed(before, freed)
         finally:
-            self._sweep_owner()
-
-    def _sweep_owner(self) -> None:
-        """Return this opening's spans. ``Gpu.close`` sweeps the same string."""
-        owner = getattr(self, "_owner", None)
-        if isinstance(owner, str) and owner:
-            memory.sweep(owner)
+            finish_release(self._owner, before, held)
 
     def _room(self) -> int:
         """Bytes a new span may take. The serve ledger applies ``--max-memory``."""
         return memory.room()
-
     def _reserve_scratch(self, width: int, height: int) -> None:
         """Hold scratch for this image. A larger ledger grows it; a smaller one keeps it."""
         scratch = self.scratch

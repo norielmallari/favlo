@@ -11,6 +11,13 @@ from typing import Any
 import numpy as np
 import objc
 
+from favlo.media_memory import (
+    begin_release,
+    confirm_release,
+    finish_release,
+    open_gate,
+    stamp_owner,
+)
 from favlo.memory import memory
 from wan22_i2v.dit import Forward, drop_expert, forward_bytes
 from wan22_i2v.formats import TILE_M, pad_to
@@ -63,7 +70,7 @@ class Runtime:
         parts: Mapping[str, Path] | None = None,
     ) -> None:
         self.console = console
-        self._owner = owner or f"wan22-i2v:{id(self)}"
+        self._owner = stamp_owner("wan22-i2v", owner, id(self))
         self.path = Path(path)
         found = {name: Path(value) for name, value in (parts or {}).items()}
         self.high = found.get("high", self.path / "high")
@@ -76,39 +83,62 @@ class Runtime:
         self._resident: Any = None
         self._forward: Forward | None = None
 
+    def ensure_open(self, request: Any) -> None:
+        """Wait for prior releases, then refuse when this clip's working set does not fit."""
+        frames = int(getattr(request, "frames"))
+        width = int(getattr(request, "width"))
+        height = int(getattr(request, "height"))
+        need = self.working_set_bytes(request)
+        open_gate(need, detail=f"{frames} frames at {width}x{height}")
+
+    def working_set_bytes(self, request: Any) -> int:
+        """Largest stage peak for the named clip: one expert, DiT scratch, or VAE."""
+        frames = int(getattr(request, "frames"))
+        width = int(getattr(request, "width"))
+        height = int(getattr(request, "height"))
+        lat_t, lat_h, lat_w, tokens = geometry(frames, height, width)
+        volume = 36 * lat_t * lat_h * lat_w
+        dit = (
+            expert_bytes(self.path, high=self.high, low=self.low)
+            + forward_bytes(self.config, tokens, volume)
+            + _latent_device_bytes(lat_t, lat_h, lat_w, frames)
+        )
+        peaks = [dit]
+        path = vae_path()
+        if path.is_file():
+            device = vae_device_bytes(str(path.resolve()))
+            peaks.append(device + encode_peak_bytes(height, width, lat_t, lat_h, lat_w))
+            window = _pixel_bytes(min(4, frames), height, width)
+            peaks.append(
+                device
+                + decode_peak_bytes(frames, height, width, lat_t, lat_h, lat_w, window)
+            )
+        return max(peaks)
+
     def close(self) -> None:
         """Drop the expert and the device buffers, then wait until those pages return."""
-        from favlo.memory import memory, reclaimable_bytes
-
-        owner = self._owner if isinstance(getattr(self, "_owner", None), str) else ""
-        before = reclaimable_bytes()
-        held = memory.owner_bytes().get(owner, 0)
+        forward = self._forward
+        resident = self._resident
+        gpu = self.gpu
+        if forward is None and resident is None and gpu is None:
+            return
+        before, held = begin_release(self._owner)
+        self._forward = None
+        self._resident = None
+        self.gpu = None
         try:
-            forward = self._forward
-            resident = self._resident
-            gpu = self.gpu
-            if forward is None and resident is None and gpu is None:
-                return
-            self._forward = None
-            self._resident = None
-            self.gpu = None
             with objc.autorelease_pool():
                 if forward is not None:
                     forward.release()
-                forward = None
                 if resident is not None and gpu is not None:
                     drop_expert(gpu, resident)
                 elif resident is not None:
                     _clear_resident(resident)
-                resident = None
                 if gpu is not None:
                     gpu.close()
-                gpu = None
                 gc.collect()
         finally:
-            self._sweep_owner()
-            freed = held - memory.owner_bytes().get(owner, 0)
-            memory.confirm_released(before, max(freed, 0))
+            finish_release(self._owner, before, held)
 
     def generate(
         self,
@@ -576,11 +606,6 @@ class Runtime:
         """Bytes a new span may take. The serve ledger applies ``--max-memory``."""
         return memory.room()
 
-    def _sweep_owner(self) -> None:
-        owner = getattr(self, "_owner", None)
-        if isinstance(owner, str):
-            memory.sweep(owner)
-
     def _open(self, on_pipeline: Any = None) -> Gpu:
         if self.gpu is None:
             self.gpu = Gpu(on_pipeline=on_pipeline, owner=self._owner)
@@ -631,16 +656,11 @@ class Runtime:
         """Drop the expert and wait until those pages are reclaimable."""
         if self._resident is None:
             return
-        from favlo.memory import memory, reclaimable_bytes
-
-        owner = self._owner if isinstance(self._owner, str) else ""
-        before = reclaimable_bytes()
-        held = memory.owner_bytes().get(owner, 0)
+        before, held = begin_release(self._owner)
         drop_expert(gpu, self._resident)
         self._resident = None
         gc.collect()
-        freed = held - memory.owner_bytes().get(owner, 0)
-        memory.confirm_released(before, max(freed, 0))
+        confirm_release(self._owner, before, held)
 
     def _use(self, name: str, on_file: Any, stop: Any = None) -> None:
         def tick() -> None:

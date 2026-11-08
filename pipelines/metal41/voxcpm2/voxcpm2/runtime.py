@@ -7,7 +7,9 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
-from favlo.media_pipeline import MediaCall, MediaPaused, MediaRequestError, VoicePipeline
+from favlo.media_memory import begin_release, finish_release, open_gate, stamp_owner
+from favlo.media_pipeline import MediaCall, MediaPaused, MediaPipeline, MediaRequestError
+from favlo.memory import memory
 from voxcpm2.audio import encode_wav
 from voxcpm2.config import ModelConfig, load_config
 from voxcpm2.metal import Session
@@ -29,7 +31,6 @@ class Runtime:
         config: ModelConfig,
         *,
         owner: str,
-        max_memory: str | None,
         kv_cache: str,
         resident_percent: float | None,
         console: Any,
@@ -37,7 +38,6 @@ class Runtime:
         self.path = path
         self.config = config
         self._owner = owner
-        self.max_memory = max_memory
         self.kv_cache = kv_cache
         self.resident_percent = resident_percent
         self.console = console
@@ -46,18 +46,40 @@ class Runtime:
         self._decoder: Decoder | None = None
         self._tokenizer: LineTokenizer | None = None
 
-    def close(self) -> None:
-        from favlo.memory import memory
+    def ensure_open(self, request: Any) -> None:
+        """Wait for prior releases, then open when the line's working set fits."""
+        del request
+        need = self.working_set_bytes(None)
+        open_gate(need, detail="voice line")
+        self._open()
 
-        if self._session is not None:
-            self._session.close()
-            self._session = None
-        if self._store is not None:
-            self._store.close()
-            self._store = None
-        self._decoder = None
-        self._tokenizer = None
-        memory.sweep(self._owner)
+    def working_set_bytes(self, request: Any) -> int:
+        """Weight files plus the fixed scratch reservation."""
+        del request
+        weights = self.path / "model.safetensors"
+        vae_path = self.path / "audiovae.pth"
+        return weights.stat().st_size + vae_path.stat().st_size + _SCRATCH
+
+    def close(self) -> None:
+        if (
+            self._session is None
+            and self._store is None
+            and self._decoder is None
+            and self._tokenizer is None
+        ):
+            return
+        before, held = begin_release(self._owner)
+        try:
+            if self._session is not None:
+                self._session.close()
+                self._session = None
+            if self._store is not None:
+                self._store.close()
+                self._store = None
+            self._decoder = None
+            self._tokenizer = None
+        finally:
+            finish_release(self._owner, before, held)
 
     def speak(
         self,
@@ -107,15 +129,13 @@ class Runtime:
         if not tokenizer_path.is_file():
             message = f"{self.path.name} has no tokenizer.json"
             raise FileNotFoundError(message)
-        weights = self.path / "model.safetensors"
-        need = weights.stat().st_size + vae_path.stat().st_size + _SCRATCH
-        room = _room(self.max_memory)
-        if room < need:
-            message = f"a voice line does not fit in {room} bytes"
+        need = self.working_set_bytes(None)
+        if memory.room() < need:
+            message = f"a voice line does not fit in {memory.room()} bytes"
             raise RuntimeError(message)
         self._session = Session(self._owner)
         try:
-            self._store = Store(weights)
+            self._store = Store(self.path / "model.safetensors")
             self._decoder = Decoder(
                 self._session,
                 vae_path,
@@ -149,12 +169,12 @@ def open_runtime(
     if not config_path.is_file():
         message = f"{checkout.name} has no config.json"
         raise FileNotFoundError(message)
+    memory.set_max_memory(max_memory)
     percent = None if resident_percent is None else float(resident_percent)
     return Runtime(
         checkout,
         load_config(config_path),
-        owner=owner or f"voxcpm2:{id(checkout)}",
-        max_memory=max_memory,
+        owner=stamp_owner("voxcpm2", owner, id(checkout)),
         kv_cache=kv_cache,
         resident_percent=percent,
         console=console,
@@ -188,8 +208,29 @@ class VoiceRequest(NamedTuple):
     output_format: str
 
 
-class Pipeline(VoicePipeline):
+class Pipeline(MediaPipeline):
     """VoxCPM2's listener contract. Speech stays in the runtime."""
+
+    kind = "voice"
+    id_prefix = "voice_"
+    object_name = "audio.voice"
+    table_name = "voice"
+    seeds = False
+
+    def parameters(self, request: Any) -> dict[str, Any]:
+        """Map the spoken line onto ``input`` for stored metadata."""
+        fields = super().parameters(request)
+        if "input" in fields:
+            return fields
+        text = getattr(request, "text", None)
+        if isinstance(text, str):
+            fields = dict(fields)
+            fields["input"] = text
+            return fields
+        if isinstance(request, dict) and isinstance(request.get("text"), str):
+            fields = dict(fields)
+            fields["input"] = request["text"]
+        return fields
 
     def parse(self, body: dict[str, Any]) -> VoiceRequest:
         text = body.get("input")
@@ -240,52 +281,3 @@ class Pipeline(VoicePipeline):
 
 
 handle_voice = Pipeline()
-
-
-def _room(max_memory: str | int | None) -> int:
-    from favlo.memory import memory
-
-    ceiling = int(memory.budget())
-    cap = _parse_memory(max_memory)
-    if cap is not None:
-        ceiling = min(ceiling, cap)
-    return max(0, ceiling - int(memory.live) - int(memory.pending))
-
-
-def _parse_memory(text: str | int | None) -> int | None:
-    """``32GiB``, ``512MiB``, or a byte count. Empty leaves the ledger uncapped."""
-    if text is None or text == "":
-        return None
-    if isinstance(text, int):
-        if text < 1:
-            message = f"maximum memory {text} is not positive"
-            raise ValueError(message)
-        return text
-    raw = str(text).strip().replace("_", "")
-    suffix = ""
-    digits = raw
-    for ending, name in (
-        ("gib", "GiB"),
-        ("mib", "MiB"),
-        ("gb", "GiB"),
-        ("mb", "MiB"),
-        ("g", "GiB"),
-        ("m", "MiB"),
-    ):
-        if raw.lower().endswith(ending):
-            suffix = name
-            digits = raw[: -len(ending)]
-            break
-    try:
-        number = int(digits)
-    except ValueError as exc:
-        message = f"maximum memory {text} is not a byte count"
-        raise ValueError(message) from exc
-    if number < 1:
-        message = f"maximum memory {text} is not positive"
-        raise ValueError(message)
-    if suffix == "GiB":
-        return number << 30
-    if suffix == "MiB":
-        return number << 20
-    return number

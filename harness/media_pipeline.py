@@ -33,14 +33,13 @@ from harness.mcp_media import call_tool, read_link, start_task, task_view
 from harness.music_template import smoke_body
 from harness.server import close_listener, open_listener
 from harness.video_mp4 import save_mp4
-from harness.video_smoke_agent import _image_block, _png_size, post_json, smoke_paths
+from harness.video_smoke_agent import _image_block, _png_size, post_json
 
 HOST = "127.0.0.1"
 FRAMES = 5
 WIDTH = 576
 HEIGHT = 320
 CLIP_SECONDS = 0.5
-IMAGE_MODEL = "Z-Image-Turbo-fp4"
 TI2V_FRAMES = 5
 TI2V_WIDTH = 1280
 TI2V_HEIGHT = 704
@@ -136,17 +135,31 @@ def select_probes(cases: list[Probe], names: list[str] | None) -> list[Probe]:
     return [by_name[name] for name in _PROBES if name in chosen]
 
 
+def _smoke(root: Path, kind: str) -> tuple[dict[str, Any], str]:
+    """The registered pipeline's smoke note and the folder the kind defaults to."""
+    from favlo.media_catalog import build_catalog
+
+    served = build_catalog().for_kind(kind)
+    if served is None:
+        message = f"no registered pipeline serves {kind}"
+        raise FileNotFoundError(message)
+    record, spec, folder = served
+    note = root / "docs" / record.pipeline / "smoke.json"
+    return json.loads(note.read_text(encoding="utf-8")), folder, spec.name
+
+
 def probes(root: Path, still: Path) -> list[Probe]:
     """The five served media tasks, shortest settings first within each kind."""
-    image = json.loads((root / "docs" / "z-image-turbo" / "smoke.json").read_text(encoding="utf-8"))
-    ti2v = json.loads((root / "docs" / "wan22-ti2v-5b" / "smoke.json").read_text(encoding="utf-8"))
-    music = json.loads((root / "docs" / "ace-step-15-turbo" / "smoke.json").read_text(encoding="utf-8"))
-    voice = json.loads((root / "docs" / "voxcpm2" / "smoke.json").read_text(encoding="utf-8"))
-    video = smoke_paths(root)[1]
+    image, image_model, image_tool = _smoke(root, "image")
+    ti2v, ti2v_model, ti2v_tool = _smoke(root, "t2v")
+    music, music_model, music_tool = _smoke(root, "music")
+    voice, voice_model, voice_tool = _smoke(root, "voice")
+    video, video_model, video_tool = _smoke(root, "i2v")
     music_body = smoke_body(music)
+    music_body["model"] = music_model
     voice_body: dict[str, Any] = {
         "input": voice["input"],
-        "model": voice["model"],
+        "model": voice_model,
         "response_format": "wav",
     }
     instructions = voice.get("instructions") or ""
@@ -155,9 +168,9 @@ def probes(root: Path, still: Path) -> list[Probe]:
     return [
         Probe(
             "image",
-            "generate_image",
+            image_tool,
             {
-                "model": IMAGE_MODEL,
+                "model": image_model,
                 "prompt": image["prompt"],
                 "size": f"{image['width']}x{image['height']}",
                 "quality": "low",
@@ -169,9 +182,9 @@ def probes(root: Path, still: Path) -> list[Probe]:
         ),
         Probe(
             "i2v",
-            "generate_video_i2v",
+            video_tool,
             {
-                "model": video["model"],
+                "model": video_model,
                 "prompt": video["video_prompt"],
                 "image": _image_block(still),
                 "size": f"{WIDTH}x{HEIGHT}",
@@ -184,9 +197,9 @@ def probes(root: Path, still: Path) -> list[Probe]:
         ),
         Probe(
             "t2v",
-            "generate_video_t2v",
+            ti2v_tool,
             {
-                "model": ti2v["model"],
+                "model": ti2v_model,
                 "prompt": ti2v["prompt"],
                 "size": f"{TI2V_WIDTH}x{TI2V_HEIGHT}",
                 "duration": TI2V_SECONDS,
@@ -198,7 +211,7 @@ def probes(root: Path, still: Path) -> list[Probe]:
         ),
         Probe(
             "music",
-            "generate_music",
+            music_tool,
             music_body,
             "audio/wav",
             "media-preempt-music.wav",
@@ -206,7 +219,7 @@ def probes(root: Path, still: Path) -> list[Probe]:
         ),
         Probe(
             "voice",
-            "generate_voice",
+            voice_tool,
             voice_body,
             "audio/wav",
             "media-preempt-voice.wav",

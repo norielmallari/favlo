@@ -11,13 +11,13 @@ This applies to a new endpoint and to a change in how an existing one returns by
 
 ## Tasks
 
-`generate_image`, `generate_video`, and `generate_music` are optional MCP tasks on `io.modelcontextprotocol/tasks`. A client that advertises the extension receives a task (`resultType` `task`, `pollIntervalMs` 2000). The GPU starts when the worker reaches it. Poll `tasks/get` or `media_status` until `completed`, `failed`, or `cancelled`, then `resources/read` the `favlo://` link. A client that does not advertise the extension receives the finished tool result on that same `tools/call`.
+A tool marked `task` is an optional task on `io.modelcontextprotocol/tasks`. A client that advertises the extension receives a task (`resultType` `task`, `pollIntervalMs` 2000). The GPU starts when the worker reaches it. Poll `tasks/get` or `media_status` until `completed`, `failed`, or `cancelled`, then `resources/read` the `favlo://` link. A client that does not advertise the extension receives the finished tool result on that same `tools/call`.
 
 Leave the mode optional. Required mode returns JSON-RPC `-32021` when the client did not advertise the extension, and the job never starts. Many MCP clients do not advertise it.
 
 The inline call ends at that client's tool timeout. An image or a short clip can finish inside it. A long video or a long music clip needs a client that polls. Otherwise the call ends at the timeout while the job is still running. Closing the poll request does not cancel the job. Cancel with `tasks/cancel` or `media_cancel`.
 
-Do not add an HTTP media route so a client can skip the extension. Chat stays `POST /v1/chat/completions`.
+Save the file, then stream that file. Do not add an HTTP media route so a client can skip the extension. Chat stays `POST /v1/chat/completions`.
 
 ## Order
 

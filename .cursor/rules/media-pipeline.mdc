@@ -1,50 +1,36 @@
 ---
 description: How a served media pipeline implements MediaPipeline, and when to extend and run the preemption harness. Scratch sizes from the serve ledger, with no private cap. The request keeps its resolution, frame count, and duration. The preemption harness waits and does not take the lock. A GPU test uses smoke_lock run.
-globs: src/favlo/media_pipeline.py,src/favlo/pipeline_worker.py,src/favlo/pipelines.py,harness/media_pipeline.py,tests/test_media_pipeline.py,tests/test_media_pipeline_harness.py,pipelines/metal41/z-image-turbo/z_image_turbo/**,pipelines/metal41/wan22-i2v/wan22_i2v/**,pipelines/metal41/wan22-ti2v-5b/wan22_ti2v_5b/**,pipelines/metal41/ace-step-15-turbo/ace_step_15_turbo/**,pipelines/metal41/voxcpm2/voxcpm2/**,docs/z-image-turbo/**,docs/wan22-i2v/**,docs/wan22-ti2v-5b/**,docs/ace-step-15-turbo/**,docs/voxcpm2/**,docs/harness.md
+globs: src/favlo/media_pipeline.py,src/favlo/media_catalog.py,src/favlo/pipeline_worker.py,src/favlo/pipelines.py,src/favlo/mcp_server.py,harness/media_pipeline.py,harness/mcp_media.py,tests/test_media_pipeline.py,tests/test_media_pipeline_harness.py,tests/test_media_catalog.py,pipelines/**,docs/harness.md
 alwaysApply: false
 ---
 
 # Media pipelines
 
-`MediaPipeline` in `src/favlo/media_pipeline.py` extends `Pipeline` and owns the shared job / pause / pack shell. A language model, an embedding model, and a failed pipeline do not inherit it. Served packages inherit a kind class: `ImagePipeline`, `VideoPipeline`, `MusicPipeline`, or `VoicePipeline`. Those classes fix `kind`, `id_prefix`, `object_name`, and table/hold keys. The class does not run a forward, name stages, acquire a scheduler ticket, or free device memory.
+`MediaPipeline` in `src/favlo/media_pipeline.py` extends `Pipeline` and owns the shared job / pause / pack / memory-gate shell. A language model, an embedding model, and a failed pipeline do not inherit it. A served package subclasses `MediaPipeline` and sets `kind` (`image`, `video`, `music`, or `voice`), `id_prefix`, and `object_name`. `table_name`, `seeds`, and `id_hex` stay on that class when they differ from the shell defaults. The class does not run a forward, name stages, or acquire a scheduler ticket. It does call `runtime.ensure_open` and `runtime.close`.
 
-Bind `handle_<kind> = Pipeline()` where `Pipeline` subclasses the matching kind class. `__call__` is `handle`. The concrete class implements `parse`, `generate`, and `pack`. Do not restate kind constants the kind class already sets. The checkpoint type stays in the pipeline package. `ClipPaused` and `ImagePaused` subclass `MediaPaused`.
+Bind one instance. `__call__` is `handle`. The concrete class implements `parse`, `generate`, and `pack`. The tool record names that instance. The checkpoint type stays in the pipeline package. `ClipPaused` and `ImagePaused` subclass `MediaPaused`.
 
 `generate` calls `stop()` at a stage boundary, after the Metal command already submitted has finished. Preempt raises `MediaPaused("preempt", hold)` with the host values the next stage needs. Cancel raises `MediaPaused("cancel", None)`. Device buffers do not go in the hold. They do not survive `close`. Resume calls `generate` again with that hold and the same job id.
 
 Clear a hold with `state[key] = None`. Do not `pop` the key. The exported keys are `image_hold`, `video_hold`, `music_hold`, and `voice_hold`, the same tuple in `pipeline_worker.py` and `pipelines.py`. A new kind adds its key to both tuples in that change.
 
-`parse` or `generate` raises `MediaRequestError` for a bad body. That is a 400. Any other exception fails the job with `error` `{"message", "type"}`. `describe` copies the job keys MCP already reads (`size`, `seconds`, `response_format`). `reply.json` runs once with the job before `generate`. Call it again only when `pack` or `working` returns a different dict. A new abstract method on `MediaPipeline` updates every served media package in that same change. A new abstract method on one kind class updates only that kind's packages. One pipeline note records that pipeline's checkpoint. Do not describe another pipeline there.
+`parse` or `generate` raises `MediaRequestError` for a bad body. That is a 400. Any other exception fails the job with `error` `{"message", "type"}`. `describe` copies the job keys MCP already reads (`size`, `seconds`, `response_format`). `reply.json` runs once with the job before `generate`. Call it again only when `pack` or `working` returns a different dict. A new abstract method on `MediaPipeline` updates every served media package in that same change. One pipeline note records that pipeline's checkpoint. Do not describe another pipeline there.
 
 ## Memory
 
-`src/favlo/memory.py` is the only allocator. `memory` is the process singleton. Device, residency set, and command queues stay process-owned. Heaps are per owner, kind (`resident`, `scratch`, `private`), and storage (`shared` or `private`). Do not call `newBufferWithLength` or keep a second allocator.
+`MediaPipeline` enforces the open and close gates. The runtime must implement `ensure_open(request)` and `close()`. The shell calls `ensure_open` after parse and always calls `close` before `on_finish`, including on pause, fail, and cancel. Helpers live in `src/favlo/media_memory.py`: `stamp_owner`, `open_gate`, `begin_release`, `confirm_release` (mid-run drop), and `finish_release` (sweep then confirm). Packages do not keep `_memory_cap`, a private `parse_memory`, or a private reclaim wait.
 
-`open_runtime` accepts `owner`. The listener calls `memory.set_max_memory` before that open. Stamp `_owner` before the first allocate:
+`src/favlo/memory.py` is the only allocator. `open_runtime` accepts `owner` and calls `memory.set_max_memory`. Stamp with `stamp_owner(stem, owner, id(self))` before the first allocate. Every span in that opening uses that string. `working_set_bytes(request)` returns weights plus scratch for the named shape. `ensure_open` runs `open_gate` (`wait_released` then `room()` vs that need) and reloads when closed. The request keeps its resolution, frame count, and duration; shrink only the scratch knob. Device buffers do not go in a preemption hold.
 
-```python
-self._owner = owner or f"{stem}:{id(self)}"
-```
+Wrong: skipping `close` from `on_finish`, a private reclaim helper, or a shorter clip because `room()` dipped.
 
-`stem` is the flag stem (`z-image-turbo`). Every `allocate` and `upload` in that opening uses that string. `sweep` matches the whole string. `close` sweeps it in `finally`, including when `open` fails after a span exists. A missing record raises `FileNotFoundError` before `Gpu()`. The listener passes `mint_owner(stem)` when the signature includes `owner`, records `runtime._owner`, and sweeps that opening after `close`.
-
-The serve process keeps the ledger. This process allocates its own Metal buffers. `allocate`, `zeros`, `release`, and `sweep` report the owner and the byte counts on the worker pipe. Do not open that pipe. `budget()` asks the serve process and waits. The answer is reclaimable pages plus this daemon's live, pending, and returning bytes, including every child. `memory.set_max_memory` caps that answer. `room()` is `max(0, budget() - live - pending)`. Read those two. Do not parse `--max-memory`, and do not keep `_memory_cap` or a private `parse_memory`. An in-process command calls `memory.set_max_memory` before the first `budget()`.
-
-The request keeps its resolution, its frame count, and its duration. The one knob is the scratch this pipeline already sizes for that request. Weights plus that scratch must fit in `room()` before the first commit. Read the budget at open and again when a later stage can use a larger reservation. A larger answer may raise the knob. Do not shrink it while a request is in flight. At open, shrink the knob down to the minimum that still runs the named request. When that minimum does not fit, raise `RuntimeError` and name the request. Do not drop layers, stand in a host GEMV, or change the packed quant. 16 GB is the product floor. It is not free memory and it is not `budget()`.
-
-Spans go through `device_buffer(owner, nbytes)`. `release` returns a span the caller has dropped. Leave a buffer a later command or a live local still names. `sweep` waits out tracked command buffers, then frees that owner's spans and idle heaps. Device buffers do not go in a preemption hold.
-
-`close` sweeps the owner. The release is done when that owner has no live span and no command still holds a freed span. `memory.wait_released` returns on that check. The sweep runs in this process before the handler returns. Pending and returning bytes stay in the budget until the kernel reports them. They do not keep the process alive, and they do not keep the next call queued. The daemon does not admit the next call while an allocation or a release is still open. A short reclaim calls `note_returning` for the bytes still held, then drops the child. `confirm_released` and `reclaimable_bytes` stay on raw Mach counts.
-
-Wrong: a private `_memory_cap`, a `16GiB` string left unread, or a shorter clip because `room()` dipped.
-
-Right: `memory.room()` sizes the scratch, and the request keeps its resolution, frame count, and duration.
+Right: the shell closes every request, and `ensure_open` reopens through the shared gate.
 
 ## Preemption harness
 
-One agent covers every served media pipeline: `python -m harness.media_pipeline`. The order is `image`, `i2v`, `t2v`, `music`, `voice`. Names after the command run that subset in the same order, as in `python -m harness.media_pipeline i2v`. An omitted list runs every name. Do not add a second preemption agent.
+A served module returns `mcp_tools()`. Binding `handle_*` publishes nothing. The host publishes `{pipeline}__{local name}`.
 
-A new served media pipeline adds one probe in that module: a name on `_PROBES`, a body in `probes()` taken from that pipeline's `smoke.json` at the shortest length that still reaches a `stop()` check, a file `artifacts/media-preempt-<name>.*`, and a shape check in `accept`. The same change adds the package and its `docs/<pipeline>/` path to this rule's globs, and one sentence in `docs/harness.md`.
+One agent covers every served media pipeline: `python -m harness.media_pipeline`. It discovers registered pipelines. Kind names on the command may stay: `image`, `i2v`, `t2v`, `music`, `voice`. An omitted list runs every kind. Do not add a second preemption agent, a `_PROBES` row, or a glob that names the pipeline.
 
 Run both checks before the change is done when the edit touches `MediaPipeline`, a hold tuple, or a media pipeline's `parse`, `generate`, `pack`, pause, or job dict:
 
@@ -59,4 +45,4 @@ A command that compiles shaders, loads a checkpoint, or uses the GPU in its own 
 
 Wrong: a host matmul standing in for a missing kernel, a popped hold, or one preemption agent per pipeline.
 
-Right: `MediaPaused("preempt", hold)` after the command finishes, `state["video_hold"] = None` when the job completes, and one new row in `_PROBES`.
+Right: `MediaPaused("preempt", hold)` after the command finishes, and `state["video_hold"] = None` when the job completes.

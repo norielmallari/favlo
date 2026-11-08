@@ -79,7 +79,7 @@ class _Proxy:
         ) -> None:
             del runtime, selection, args
             payload = body if isinstance(body, dict) else {}
-            self._child.call(kind, reply, payload, state)
+            self._child.call(kind, reply, payload, state, handler=name)
 
         return handler
 
@@ -152,7 +152,14 @@ class PipelineChild:
         finally:
             self._release_memory()
 
-    def call(self, kind: str, reply: Any, body: dict[str, Any], state: dict[str, Any]) -> None:
+    def call(
+        self,
+        kind: str,
+        reply: Any,
+        body: dict[str, Any],
+        state: dict[str, Any],
+        handler: str | None = None,
+    ) -> None:
         """Run one handler in the child and copy its reply onto ``reply``."""
         proc = self._proc
         if proc is None or proc.poll() is not None:
@@ -172,6 +179,7 @@ class PipelineChild:
                 {
                     "op": "call",
                     "kind": kind,
+                    "handler": handler or _KINDS.get(kind),
                     "body": body,
                     "homes": _homes(state),
                     "holds": _hold_paths(state),
@@ -421,12 +429,16 @@ class PipelineChild:
     def _hold_memory(self) -> None:
         hold = getattr(self.admission, "hold_memory", None)
         if callable(hold):
-            hold()
+            hold(self._pipeline_label())
 
     def _release_memory(self) -> None:
         release = getattr(self.admission, "release_memory", None)
         if callable(release):
             release()
+
+    def _pipeline_label(self) -> str:
+        pipeline = getattr(self.selection, "pipeline", None)
+        return pipeline if isinstance(pipeline, str) else ""
 
     def _forget(self) -> None:
         with self._write_lock:
@@ -814,7 +826,11 @@ def _call(
             {"op": "result", "status": 200, "payload": {"status": "completed", "stub": True}},
         )
         return
-    handler_name = _KINDS.get(message.get("kind")) if isinstance(message.get("kind"), str) else None
+    named = message.get("handler")
+    if isinstance(named, str) and named:
+        handler_name = named
+    else:
+        handler_name = _KINDS.get(message.get("kind")) if isinstance(message.get("kind"), str) else None
     call = getattr(module, handler_name, None) if handler_name else None
     if not callable(call):
         text = "the pipeline does not handle this request"

@@ -15,7 +15,8 @@ from ace_step_15_turbo.record import load, weight_bytes
 from ace_step_15_turbo.request import MusicRequest, parse_music
 from ace_step_15_turbo.schedule import HOP, LYRIC_LIMIT, STEPS, TEXT_LIMIT, latent_frames
 from ace_step_15_turbo.tiles import tile_frames
-from favlo.media_pipeline import MediaCall, MediaRequestError, MusicPipeline
+from favlo.media_memory import begin_release, finish_release, open_gate, stamp_owner
+from favlo.media_pipeline import MediaCall, MediaPipeline, MediaRequestError
 from favlo.memory import memory
 
 _UNITS = 28 + 8 + 4 + 32 * STEPS + 7
@@ -31,7 +32,8 @@ def open_runtime(
     owner: str | None = None,
 ) -> "Runtime":
     del kv_cache, resident_percent
-    return Runtime(path, console, owner=owner, max_memory=max_memory)
+    memory.set_max_memory(max_memory)
+    return Runtime(path, console, owner=owner)
 
 
 def handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any, args: Any, state: dict[str, Any]) -> None:
@@ -47,9 +49,13 @@ def handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any, 
     )
 
 
-class Pipeline(MusicPipeline):
+class Pipeline(MediaPipeline):
     """ACE-Step's listener contract. The graph stays in this package."""
 
+    kind = "music"
+    id_prefix = "music_"
+    object_name = "audio.music"
+    table_name = "music"
     id_hex = 16
 
     def parse(self, body: dict[str, Any]) -> MusicRequest:
@@ -125,11 +131,6 @@ class Pipeline(MusicPipeline):
         store_wav(job["id"], result, home=home, music=table, output_format=request.output_format)
         return None
 
-    def on_pause(self, runtime: Any, reason: str, call: MediaCall) -> None:
-        del reason, call
-        _release(runtime)
-
-
 handle_music = Pipeline()
 
 
@@ -140,20 +141,35 @@ class Runtime:
         console: Any = None,
         *,
         owner: str | None = None,
-        max_memory: str | int | None = None,
     ) -> None:
         self.console = console
         self.path = Path(path)
         self.gpu: Gpu | None = None
         self.weights: dict[str, Any] = {}
         self._halted = False
-        self._owner = owner or f"ace-step-15-turbo:{id(self)}"
-        self._memory_cap = _parse_memory(max_memory)
+        self._closed = True
+        self._owner = stamp_owner("ace-step-15-turbo", owner, id(self))
         tokenizer = self.path / "tokenizer.json"
         if not tokenizer.is_file():
             raise FileNotFoundError(tokenizer)
         self.tokenizer = Tokenizer.from_file(str(tokenizer))
+        open_gate(weight_bytes(self.path), detail="packed record")
         self._open()
+
+    def ensure_open(self, request: Any) -> None:
+        """Wait for prior releases, then load when closed and check this duration."""
+        seconds = float(getattr(request, "seconds"))
+        need = self.working_set_bytes(request)
+        if self._closed:
+            open_gate(need, detail=f"{seconds:g} seconds")
+            self._open()
+        self._reserve_step(seconds)
+
+    def working_set_bytes(self, request: Any) -> int:
+        """Weights plus the larger of one step or the decoder peak."""
+        seconds = float(getattr(request, "seconds"))
+        scratch = max(step_scratch_bytes(seconds), decoder_bytes(seconds))
+        return weight_bytes(self.path) + scratch
 
     def halt(self) -> None:
         """Stop at the next stage boundary. The listener calls this from a signal."""
@@ -164,40 +180,35 @@ class Runtime:
             found = getattr(progress, "hold", None)
             if isinstance(found, ClipHold):
                 hold = found
-        self._open()
         gpu = self.gpu
-        if gpu is None:
+        if gpu is None or self._closed:
             message = "the music device is closed"
             raise RuntimeError(message)
         self._reserve_step(float(fields.seconds))
         gpu.seconds = 0.0
         gpu.end_clip()
-        try:
-            wav = generate(
-                gpu,
-                self.weights,
-                self.tokenizer,
-                fields.prompt,
-                fields.lyrics,
-                fields.seconds,
-                fields.seed,
-                fields.vocal_language,
-                fields.bpm,
-                fields.keyscale,
-                fields.timesignature,
-                progress,
-                hold,
-            )
-        except ClipPaused:
-            self.close()
-            raise
+        wav = generate(
+            gpu,
+            self.weights,
+            self.tokenizer,
+            fields.prompt,
+            fields.lyrics,
+            fields.seconds,
+            fields.seed,
+            fields.vocal_language,
+            fields.bpm,
+            fields.keyscale,
+            fields.timesignature,
+            progress,
+            hold,
+        )
         gpu.end_clip()
         print(f"generation_seconds {gpu.seconds:.3f}", flush=True)
         return wav
 
     def _open(self) -> None:
         """Open the device and load the record when a pause closed them."""
-        if self.weights:
+        if not self._closed:
             return
         record = weight_bytes(self.path)
         if record > self._room():
@@ -207,12 +218,18 @@ class Runtime:
         try:
             self.weights = load(self.gpu, self.path)
             self.gpu.reclaim()
+            self._closed = False
         except Exception:
+            self._closed = False
             self.close()
             raise
 
     def close(self) -> None:
-        """Drop the device. A later ``generate`` opens it again."""
+        """Drop the device, sweep the owner, and wait until those pages return."""
+        if self._closed and self.gpu is None and not self.weights:
+            return
+        before, held = begin_release(self._owner)
+        self._closed = True
         gpu = self.gpu
         self.gpu = None
         self.weights = {}
@@ -220,21 +237,11 @@ class Runtime:
             if gpu is not None:
                 gpu.close()
         finally:
-            self._sweep_owner()
-
-    def _sweep_owner(self) -> None:
-        """Return this opening's spans. ``Gpu.close`` sweeps the same string."""
-        owner = getattr(self, "_owner", None)
-        if isinstance(owner, str) and owner:
-            memory.sweep(owner)
+            finish_release(self._owner, before, held)
 
     def _room(self) -> int:
-        """Bytes a new span may take. ``max_memory`` caps the ledger."""
-        ceiling = memory.budget()
-        cap = getattr(self, "_memory_cap", None)
-        if cap is not None:
-            ceiling = min(ceiling, cap)
-        return max(0, ceiling - memory.live - memory.pending)
+        """Bytes a new span may take. The serve ledger applies ``--max-memory``."""
+        return memory.room()
 
     def _reserve_step(self, seconds: float) -> None:
         """Require room for one step or the decoder peak. The duration stays the request."""
@@ -342,45 +349,6 @@ def step_scratch_bytes(seconds: float) -> int:
     return total
 
 
-def _parse_memory(text: str | int | None) -> int | None:
-    """``32GiB``, ``512MiB``, or a byte count. Empty leaves the ledger uncapped."""
-    if text is None or text == "":
-        return None
-    if isinstance(text, int):
-        if text < 1:
-            message = f"maximum memory {text} is not positive"
-            raise ValueError(message)
-        return text
-    raw = str(text).strip().replace("_", "")
-    suffix = ""
-    digits = raw
-    for ending, name in (
-        ("gib", "GiB"),
-        ("mib", "MiB"),
-        ("gb", "GiB"),
-        ("mb", "MiB"),
-        ("g", "GiB"),
-        ("m", "MiB"),
-    ):
-        if raw.lower().endswith(ending):
-            suffix = name
-            digits = raw[: -len(ending)]
-            break
-    try:
-        number = int(digits)
-    except ValueError as exc:
-        message = f"maximum memory {text} is not a byte count"
-        raise ValueError(message) from exc
-    if number < 1:
-        message = f"maximum memory {text} is not positive"
-        raise ValueError(message)
-    if suffix == "GiB":
-        return number << 30
-    if suffix == "MiB":
-        return number << 20
-    return number
-
-
 def _identity(fields: MusicRequest) -> tuple[Any, ...]:
     return (
         fields.prompt,
@@ -393,15 +361,3 @@ def _identity(fields: MusicRequest) -> tuple[Any, ...]:
         fields.timesignature,
         fields.output_format,
     )
-
-
-def _release(runtime: Any) -> None:
-    """Close the device at a pause so the next call opens it again."""
-    close = getattr(runtime, "close", None)
-    if callable(close):
-        close()
-        return
-    gpu = getattr(runtime, "gpu", None)
-    end = getattr(gpu, "end_clip", None)
-    if callable(end):
-        end()

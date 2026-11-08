@@ -1,7 +1,7 @@
 """Turn the horse still into two 240p clips, at low and max.
 
 The still is ``tests/assets/favlo-horse.png``. The pipeline resizes it to
-416×240. ``generate_video_i2v`` then runs twice, at ``quality`` ``low`` and
+416×240. ``wan22_i2v__generate_video`` then runs twice, at ``quality`` ``low`` and
 ``max``, with no chat between them. Each result is read from
 ``favlo://videos/{id}.mp4`` and saved as ``artifacts/video-quality-low.mp4``
 and ``artifacts/video-quality-max.mp4``. Exit 0 means both files are 5 frames
@@ -79,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
 def _clip(port: int, body: dict[str, Any], still: Path, quality: str) -> bytes:
     result = generate(
         port,
-        "generate_video_i2v",
+        "generate_video",
         {
             "model": body["model"],
             "prompt": body["prompt"],

@@ -144,10 +144,10 @@ A Microsoft Agent Framework agent on the registry default chat model calls `reme
 ### MCP image read
 
 ```bash
-python -m harness.image --model <id>
+python -m harness.image
 ```
 
-Calls `generate_image` on `POST /mcp`, then reads the PNG with `resources/read`. The prompt, size, and seed come from that pipeline's `smoke.json`. Uses the listener session. Exit 0 means those bytes were read. Does not score the picture. Not part of `pytest`.
+Calls `z_image_turbo__generate_image` on `POST /mcp`, then reads the PNG with `resources/read`. The prompt, size, and seed come from that pipeline's `smoke.json`. An omitted `--model` leaves the folder to the host. Uses the listener session. Exit 0 means those bytes were read. Does not score the picture. Not part of `pytest`.
 
 ### Image smoke agent
 
@@ -155,7 +155,7 @@ Calls `generate_image` on `POST /mcp`, then reads the PNG with `resources/read`.
 python -m harness.image_smoke_agent
 ```
 
-A Microsoft Agent Framework agent on the registry default chat model calls `generate_image` twice for `Z-Image-Turbo-fp4` with the prompt, size, and seed in `docs/z-image-turbo/smoke.json`, at `quality` `low` and then `max`. Each PNG is read with `resources/read` and written to `artifacts/image-smoke-agent-low.png` or `artifacts/image-smoke-agent-max.png`. The next turns send each PNG to the same model and ask whether the picture matches the prompt. Exit 0 means both replies affirm it and the max file is larger. Uses the listener session. Not part of `pytest`.
+A Microsoft Agent Framework agent on the registry default chat model calls `generate_image` twice with the prompt, size, and seed in `docs/z-image-turbo/smoke.json`, at `quality` `low` and then `max`. The MCP call is published as `z_image_turbo__generate_image`. Pass `--model <folder>` to select a registry folder. Each PNG is read with `resources/read` and written to `artifacts/image-smoke-agent-low.png` or `artifacts/image-smoke-agent-max.png`. `--transparent` sets MCP `transparent` true, writes `artifacts/image-smoke-agent-*-transparent.png`, and requires RGBA. The next turns send each PNG to the same model and ask whether the picture matches the prompt. Exit 0 means both replies affirm it and the max file is larger. Uses the listener session. Not part of `pytest`.
 
 ### Image attachment
 
@@ -173,6 +173,14 @@ python -m harness.image_persona
 
 The agent instructions are the horse persona. The user asks that horse to draw a picture of himself. The image prompt is a cute 2.5D horse with a white blaze and large blue eyes, sitting at a desk. The image call is `Z-Image-Turbo-fp4` at the pipeline's maximum edge, seed 0. Prints the PNG byte count. The next turn asks whether the picture shows that stylized horse rather than a photograph. Exit 0 means the reply affirms it. The PNG is `artifacts/favlo-horse.png`. Uses the listener session. Not part of `pytest`.
 
+### Lighting agent
+
+```bash
+python -m harness.lighting_agent
+```
+
+An existing `artifacts/lighting-subject.png` (RGBA) and `artifacts/lighting-background.png` are reused. A missing file is drawn by one turn that calls `generate_image`. `--fresh` draws both again. The last turn calls `relight_image` with those PNGs and a lighting sentence. Files are `artifacts/lighting-subject.png`, `artifacts/lighting-background.png`, `artifacts/lighting-foreground.png` (the relit subject), and `artifacts/lighting-output.png` (that subject pasted on the plate). The face color temperature on the relit still must move toward the plate, measured as red minus blue on the cutout's face window. The same model then sees the street with the composite and the cutout with the composite, each as one `POST /v1/responses` call with `max_output_tokens` 80 and reasoning effort `none`, and must return `background_kept` and `same_person` true. Exit 0 means the subject is RGBA, the relit file is RGB, the face moved toward the plate, and those objects accept the composite. Uses the listener session. Not part of `pytest`.
+
 ## Video
 
 ### I2V smoke agent
@@ -181,7 +189,7 @@ The agent instructions are the horse persona. The user asks that horse to draw a
 python -m harness.video_smoke_agent
 ```
 
-The still is `tests/assets/favlo-horse.png`. The pipeline resizes it to the clip size. The agent calls `generate_video_i2v` for the model in `docs/wan22-i2v/smoke.json`, using `video_prompt`, the smoke frame count, and that PNG as an image block. It reads `favlo://videos/{id}.mp4` into `artifacts/video-smoke-agent.mp4`. The same model reads frame 0, the middle frame, and the last frame and must affirm `prompt` in that file. Exit 0 means each frame was affirmed and the file has that geometry. Uses the listener session. Not part of `pytest`.
+The still is `tests/assets/favlo-horse.png`. The pipeline resizes it to the clip size. The agent calls `wan22_i2v__generate_video` for the model in `docs/wan22-i2v/smoke.json`, using `video_prompt`, the smoke frame count, and that PNG as an image block. It reads `favlo://videos/{id}.mp4` into `artifacts/video-smoke-agent.mp4`. The same model reads frame 0, the middle frame, and the last frame and must affirm `prompt` in that file. Exit 0 means each frame was affirmed and the file has that geometry. Uses the listener session. Not part of `pytest`.
 
 ### TI2V smoke agent
 
@@ -197,7 +205,7 @@ The text clip omits the still. The still clip passes `tests/assets/favlo-horse.p
 python -m harness.video_quality_agent
 ```
 
-The still is `tests/assets/favlo-horse.png`. The pipeline resizes it to 416×240. Calls `generate_video_i2v` twice at `quality` `low` and then `max`, with no chat between tasks, and reads each MP4 into `artifacts/video-quality-low.mp4` and `artifacts/video-quality-max.mp4`. Exit 0 means both files are 5 frames at 416×240 and the max file is larger. Uses the listener session. Not part of `pytest`.
+The still is `tests/assets/favlo-horse.png`. The pipeline resizes it to 416×240. Calls `wan22_i2v__generate_video` twice at `quality` `low` and then `max`, with no chat between tasks, and reads each MP4 into `artifacts/video-quality-low.mp4` and `artifacts/video-quality-max.mp4`. Exit 0 means both files are 5 frames at 416×240 and the max file is larger. Uses the listener session. Not part of `pytest`.
 
 ## Music
 
@@ -236,7 +244,7 @@ python -m harness.media_pipeline
 python -m harness.media_pipeline i2v
 ```
 
-One Microsoft Agent Framework agent preempts served media pipelines: image (`Z-Image-Turbo-fp4`), I2V (5 frames at 576×320), T2V (5 frames at 1280×704), music (10 second smoke), and voice (voxcpm2 smoke). Names after the command run that subset, in that order. An omitted list runs every one. Each case starts the MCP task; the next turn is a chat completion that preempts it. The tool polls `media_status` and `tasks/get` and reads the file into `artifacts/media-preempt-*`. Exit 0 means every selected task was paused with `task is ongoing` and the same task finished at the expected shape. Uses the listener session. Not part of `pytest`. `tests/test_media_pipeline_harness.py` checks the pause-then-complete rule and the name filter without a listener.
+One Microsoft Agent Framework agent preempts the registered media pipelines. It discovers them from the catalog and each pipeline's `smoke.json`. Kind names after the command run that subset, in catalog order: `image`, `i2v`, `t2v`, `music`, `voice`. An omitted list runs every kind. Each case starts the MCP task; the next turn is a chat completion that preempts it. The tool polls `media_status` and `tasks/get` and reads the file into `artifacts/media-preempt-*`. Exit 0 means every selected task was paused with `task is ongoing` and the same task finished at the expected shape. Uses the listener session. Not part of `pytest`. `tests/test_media_pipeline_harness.py` checks the pause-then-complete rule and the name filter without a listener.
 
 ## Helpers
 
@@ -260,4 +268,4 @@ Measures the speech fundamental of a WAV and optional gap to a reference clip. U
 
 ### MCP media client
 
-Import `harness.mcp_media` (no `python -m` entry). Shared MCP client helpers (`start_task`, `task_view`, `read_link`, and related) used by media agent harnesses. A `model` argument on `generate` or `start_task` calls the matching `set_*` tool and sends the returned session id. The server schema has no `model` parameter.
+Import `harness.mcp_media` (no `python -m` entry). Shared MCP client helpers (`start_task`, `task_view`, `read_link`, and related) used by media agent harnesses. A local tool name is published as `{pipeline}__{local}`. An omitted `model` picks the first published match. MCP does not list models; the pipeline is the model.

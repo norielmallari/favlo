@@ -19,7 +19,11 @@ from harness.server import HOST, close_listener, open_listener
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="python -m harness.image")
-    parser.add_argument("--model", default="Z-Image-Turbo-fp4")
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="registry folder; omit for the first z-image-turbo folder",
+    )
     parser.add_argument("--host", default=HOST)
     parser.add_argument("--port", type=int, default=8129)
     args = parser.parse_args()
@@ -29,24 +33,16 @@ def main() -> int:
         return 1
     stored = json.loads(note.read_text(encoding="utf-8"))
     body = {
-        "model": args.model,
         "prompt": stored["prompt"],
         "size": f"{stored['width']}x{stored['height']}",
         "seed": stored["seed"],
     }
+    if args.model:
+        body["model"] = args.model
     listener = None
     try:
         listener = open_listener(args.host, args.port)
-        result = generate(
-            listener.port,
-            "generate_image",
-            {
-                "model": body["model"],
-                "prompt": body["prompt"],
-                "size": body["size"],
-                "seed": body["seed"],
-            },
-        )
+        result = generate(listener.port, "generate_image", body)
         png = read_link(listener.port, result, "image/png")
     finally:
         if listener is not None:

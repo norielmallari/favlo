@@ -164,7 +164,6 @@ def add_model(
     )
     data["models"][folder] = entry
     _ensure_default_llm(data, folder, alias, entry)
-    _ensure_media_defaults(data, folder, pipeline, runtime, stored_root)
     _ensure_embeddings_default(data, folder, pipeline, runtime, stored_root)
     save_registry(data, root)
     return data
@@ -295,7 +294,6 @@ def register_quantized(
             else:
                 current.setdefault("context_length", DEFAULT_CONTEXT_LENGTH)
             _ensure_default_llm(data, folder, alias, current)
-            _ensure_media_defaults(data, folder, pipeline, runtime, stored_root)
             _ensure_embeddings_default(data, folder, pipeline, runtime, stored_root)
             save_registry(data, root)
             return
@@ -314,7 +312,6 @@ def register_quantized(
     )
     data["models"][folder] = entry
     _ensure_default_llm(data, folder, alias, entry)
-    _ensure_media_defaults(data, folder, pipeline, runtime, stored_root)
     _ensure_embeddings_default(data, folder, pipeline, runtime, stored_root)
     save_registry(data, root)
 
@@ -573,106 +570,6 @@ def _ensure_default_llm(
     if not _is_language_model_entry(entry):
         return
     data["default"] = _language_model_id(entry, folder)
-
-
-_media_misses: set[tuple[str, str]] = set()
-
-
-def media_default(kind: str, root: Path | None = None) -> str:
-    """The folder id for ``kind``. An empty ``media`` key is filled from registered rows."""
-    data = load_registry(root)
-    stored = _media_value(data, kind)
-    if stored:
-        return stored
-    token = (str(registry_path(root)), kind)
-    if token in _media_misses:
-        return ""
-    before = _media_map(data)
-    for folder, entry in data["models"].items():
-        if not isinstance(entry, dict):
-            continue
-        pipeline = entry.get("pipeline")
-        runtime = entry.get("runtime")
-        if not isinstance(pipeline, str) or not isinstance(runtime, str):
-            continue
-        _ensure_media_defaults(
-            data,
-            folder,
-            pipeline,
-            runtime,
-            pipeline_root_of(entry),
-        )
-    if _media_map(data) != before:
-        save_registry(data, root)
-    else:
-        _media_misses.add(token)
-    return _media_value(data, kind)
-
-
-def _media_value(data: dict[str, Any], kind: str) -> str:
-    raw = data.get("media")
-    if not isinstance(raw, dict):
-        return ""
-    value = raw.get(kind)
-    if not isinstance(value, str):
-        return ""
-    return value.strip()
-
-
-def _media_map(data: dict[str, Any]) -> dict[str, str]:
-    raw = data.get("media")
-    if not isinstance(raw, dict):
-        return {}
-    return {
-        key: value.strip()
-        for key, value in raw.items()
-        if isinstance(key, str) and isinstance(value, str) and value.strip()
-    }
-
-
-def _ensure_media_defaults(
-    data: dict[str, Any],
-    folder: str,
-    pipeline: str,
-    runtime: str,
-    pipeline_root: str,
-) -> None:
-    """Fill an empty ``media`` key with this folder when the pipeline serves that kind."""
-    kinds = _media_kinds(pipeline, runtime, pipeline_root)
-    if not kinds:
-        return
-    media = data.get("media")
-    if not isinstance(media, dict):
-        media = {}
-        data["media"] = media
-    for kind in kinds:
-        current = media.get(kind)
-        if not isinstance(current, str) or not current.strip():
-            media[kind] = folder
-
-
-def _media_kinds(pipeline: str, runtime: str, pipeline_root: str | None = None) -> tuple[str, ...]:
-    from favlo.cli import load_pipeline
-
-    try:
-        module = load_pipeline(pipeline, runtime=runtime, pipeline_root=pipeline_root)
-    except (FileNotFoundError, ImportError, OSError):
-        return ()
-    found: list[str] = []
-    image = getattr(module, "handle_image", None)
-    if callable(image) and getattr(module, "fills_image_default", True):
-        found.append("image")
-    if callable(getattr(module, "handle_video", None)):
-        modes = getattr(module, "video_modes", None)
-        offered = modes() if callable(modes) else ()
-        for mode in ("i2v", "t2v"):
-            if mode in offered:
-                found.append(mode)
-    if callable(getattr(module, "handle_music", None)):
-        found.append("music")
-    if callable(getattr(module, "handle_voice", None)):
-        found.append("voice")
-    return tuple(found)
 
 
 _embeddings_misses: set[str] = set()

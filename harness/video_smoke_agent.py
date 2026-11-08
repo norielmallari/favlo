@@ -1,7 +1,7 @@
 """Agent that turns the horse still into the shortest 320p clip.
 
 The still is ``tests/assets/favlo-horse.png``. The pipeline resizes it to the
-clip size. The Microsoft Agent Framework agent calls ``generate_video_i2v``
+clip size. The Microsoft Agent Framework agent calls ``wan22_i2v__generate_video``
 and reads ``favlo://videos/{id}.mp4`` into ``artifacts/video-smoke-agent.mp4``.
 The vision tower then reads frame 0, the middle frame, and the last frame of
 that file and must affirm the still sentence. Exit 0 means each of those
@@ -74,7 +74,7 @@ def video_tools(
             return "image is missing"
         result = generate(
             port,
-            "generate_video_i2v",
+            "generate_video",
             {
                 "model": video_body["model"],
                 "prompt": video_body["prompt"],

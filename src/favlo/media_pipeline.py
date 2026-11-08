@@ -1,10 +1,11 @@
 """Listener contract for one media request.
 
 ``MediaPipeline`` is the shared job / pause / pack shell. A served package
-inherits ``ImagePipeline``, ``VideoPipeline``, ``MusicPipeline``, or
-``VoicePipeline``, implements ``parse`` / ``generate`` / ``pack``, and binds
-``handle_<kind>`` to one instance. The class does not name stages or dispatch
-a kernel.
+subclasses it, sets ``kind``, ``id_prefix``, and ``object_name``, implements
+``parse`` / ``generate`` / ``pack``, and binds one instance. The tool record
+names that instance. The shell calls ``runtime.ensure_open(request)`` before
+``generate`` and always calls ``runtime.close()`` before finish hooks. The
+class does not name stages or dispatch a kernel.
 """
 
 from __future__ import annotations
@@ -44,11 +45,15 @@ class MediaCall:
         self.table: dict[str, Any] = {}
 
 
-class MediaPipeline(Pipeline):
-    """Shared media shell. Prefer a kind subclass (``ImagePipeline``, …).
+_KINDS = frozenset({"image", "video", "music", "voice"})
 
-    The module binds ``handle_<kind> = Concrete()``. ``__call__`` is
-    ``handle``, which is the attribute the listener already looks up.
+
+class MediaPipeline(Pipeline):
+    """Shared media shell. A concrete subclass sets the job fields.
+
+    ``kind`` is ``image``, ``video``, ``music``, or ``voice``. ``id_prefix``
+    and ``object_name`` name the stored file. ``__call__`` is ``handle``.
+    The shell opens through ``ensure_open`` and always closes the runtime.
     """
 
     kind: str
@@ -57,6 +62,27 @@ class MediaPipeline(Pipeline):
     table_name: str | None = None
     id_hex: int = 12
     seeds: bool = True
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if getattr(cls, "__abstractmethods__", frozenset()):
+            return
+        values: dict[str, str] = {}
+        for name in ("kind", "id_prefix", "object_name"):
+            value = None
+            for base in cls.__mro__:
+                if base is MediaPipeline:
+                    break
+                if name in base.__dict__:
+                    value = base.__dict__[name]
+                    break
+            if not isinstance(value, str) or not value:
+                message = f"{cls.__name__} must set {name}"
+                raise TypeError(message)
+            values[name] = value
+        if values["kind"] not in _KINDS:
+            message = f"{cls.__name__} kind must be image, video, music, or voice"
+            raise TypeError(message)
 
     def handle(
         self,
@@ -67,12 +93,13 @@ class MediaPipeline(Pipeline):
         args: Any,
         state: dict[str, Any],
     ) -> None:
-        """Parse, resume, generate, then pause, fail, or complete."""
+        """Parse, open, generate, then always close before finish hooks."""
         del args
         call = MediaCall()
         try:
             self._run(reply, runtime, body, selection, state, call)
         finally:
+            self._close_runtime(runtime)
             self._hook(self.on_finish, runtime, call)
 
     def stop(self, state: dict[str, Any], runtime: Any) -> str | None:
@@ -185,6 +212,15 @@ class MediaPipeline(Pipeline):
         call.home = home
         call.table = table
         reply.json(200, job)
+        try:
+            self._ensure_runtime(runtime, request)
+        except MediaRequestError as exc:
+            self._clear(state)
+            self.reject(reply, str(exc), exc.param)
+            return
+        except Exception as exc:
+            self._failed(reply, runtime, job, state, exc, call)
+            return
         stop = lambda: self.stop(state, runtime)
         try:
             result = self.generate(runtime, request, hold, job, stop, call)
@@ -218,6 +254,25 @@ class MediaPipeline(Pipeline):
                 job["status"] = "completed"
             return
         reply.json(200, replacement)
+
+    def _ensure_runtime(self, runtime: Any, request: Any) -> None:
+        """Open gate for this request. The runtime must implement ``ensure_open``."""
+        ensure = getattr(runtime, "ensure_open", None)
+        if not callable(ensure):
+            message = f"{type(runtime).__name__} must implement ensure_open(request)"
+            raise TypeError(message)
+        ensure(request)
+
+    def _close_runtime(self, runtime: Any) -> None:
+        """Always close. A missing ``close`` fails the contract."""
+        close = getattr(runtime, "close", None)
+        if not callable(close):
+            message = f"{type(runtime).__name__} must implement close()"
+            raise TypeError(message)
+        try:
+            close()
+        except Exception:
+            return
 
     def _paused(
         self,
@@ -451,54 +506,3 @@ def _jsonable(value: Any) -> Any:
             found[str(key)] = encoded
         return found
     return _SKIP
-
-
-class ImagePipeline(MediaPipeline):
-    """Abstract image generation. Bind ``handle_image = Concrete()``."""
-
-    kind = "image"
-    id_prefix = "image_"
-    object_name = "image"
-
-
-class VideoPipeline(MediaPipeline):
-    """Abstract video generation. Bind ``handle_video = Concrete()``."""
-
-    kind = "video"
-    id_prefix = "video_"
-    object_name = "video"
-    table_name = "videos"
-
-
-class MusicPipeline(MediaPipeline):
-    """Abstract music generation. Bind ``handle_music = Concrete()``."""
-
-    kind = "music"
-    id_prefix = "music_"
-    object_name = "audio.music"
-    table_name = "music"
-
-
-class VoicePipeline(MediaPipeline):
-    """Abstract speech generation. Bind ``handle_voice = Concrete()``."""
-
-    kind = "voice"
-    id_prefix = "voice_"
-    object_name = "audio.voice"
-    table_name = "voice"
-    seeds = False
-
-    def parameters(self, request: Any) -> dict[str, Any]:
-        """Map the spoken line onto ``input`` for stored metadata."""
-        fields = super().parameters(request)
-        if "input" in fields:
-            return fields
-        text = getattr(request, "text", None)
-        if isinstance(text, str):
-            fields = dict(fields)
-            fields["input"] = text
-            return fields
-        if isinstance(request, dict) and isinstance(request.get("text"), str):
-            fields = dict(fields)
-            fields["input"] = request["text"]
-        return fields
