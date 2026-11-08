@@ -2967,8 +2967,8 @@ kernel void kv_attend_write(
     destination[index] = acc[row * 256u + channel] * inv * sigmoid_f(gate[index]);
 }
 
-// half cache. Both planes are [head, token, channel], two bytes per element,
-// no scale plane. ``stride`` counts half elements, not bytes.
+// half cache. Keys are [head, token, channel]. Values are [head, channel, token].
+// ``stride`` counts half elements of one key head, ``max_pos * 256``.
 
 kernel void store_kv_half(
     device half* key_cache [[buffer(0)]],
@@ -2980,8 +2980,9 @@ kernel void store_kv_half(
     uint tid [[thread_index_in_threadgroup]],
     uint head [[threadgroup_position_in_grid]])
 {
+    uint span = stride / 256u;
     key_cache[head * stride + pos * 256u + tid] = half(key[head * 256u + tid]);
-    value_cache[head * stride + pos * 256u + tid] = half(value[head * 256u + tid]);
+    value_cache[(head * 256u + tid) * span + pos] = half(value[head * 256u + tid]);
 }
 
 kernel void store_kv_rows_half(
@@ -3000,195 +3001,122 @@ kernel void store_kv_rows_half(
         return;
     }
     uint pos = pos0 + token;
+    uint span = stride / 256u;
     uint src = (token * KV_HEADS + head) * 256u + tid;
     key_cache[head * stride + pos * 256u + tid] = half(key[src]);
-    value_cache[head * stride + pos * 256u + tid] = half(value[src]);
+    value_cache[(head * 256u + tid) * span + pos] = half(value[src]);
 }
 
-kernel void attend_gqa_heads_half(
-    device const float* query [[buffer(0)]],
-    device const half* key_cache [[buffer(1)]],
-    device const half* value_cache [[buffer(2)]],
-    device const float* gate [[buffer(3)]],
-    device float* destination [[buffer(4)]],
-    constant uint& tokens [[buffer(5)]],
-    constant uint& stride [[buffer(6)]],
-    uint lane [[thread_index_in_simdgroup]],
-    uint head [[threadgroup_position_in_grid]])
+// Eight query rows against half keys. Two rows are padding when a head has six queries.
+kernel void prefill_f16_m8(
+    device half* activation [[buffer(0)]],
+    device half* weights [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint gid [[threadgroup_position_in_grid]])
 {
-    // One simdgroup of 32 lanes, eight channels each. Matches attend_prefill_half.
-    // A 256-wide threadgroup reduction over red[8] raced on device.
-    if (head >= Q_HEADS) {
-        return;
-    }
-    uint kv = head / GROUP;
-    device const half* key = key_cache + kv * stride;
-    device const half* value = value_cache + kv * stride;
-    device const float* q = query + head * 256u;
-    float qreg[8];
-    for (uint i = 0u; i < 8u; ++i) {
-        qreg[i] = q[lane * 8u + i];
-    }
-    float running_max = -INFINITY;
-    float running_sum = 0.0f;
-    float outv[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-    for (uint token = 0u; token < tokens; ++token) {
-        device const half* ks = key + token * 256u;
-        float partial = 0.0f;
-        for (uint i = 0u; i < 8u; ++i) {
-            partial += qreg[i] * float(ks[lane * 8u + i]);
-        }
-        float score = simd_sum(partial) * INV_SQRT_256;
-        float next = max(running_max, score);
-        float rescale = exp(running_max - next);
-        float prob = exp(score - next);
-        running_sum = running_sum * rescale + prob;
-        device const half* vs = value + token * 256u;
-        for (uint i = 0u; i < 8u; ++i) {
-            outv[i] = outv[i] * rescale + prob * float(vs[lane * 8u + i]);
-        }
-        running_max = next;
-    }
-    float inv = running_sum == 0.0f ? 0.0f : 1.0f / running_sum;
-    device float* out = destination + head * 256u;
-    device const float* g = gate + head * 256u;
-    for (uint i = 0u; i < 8u; ++i) {
-        out[lane * 8u + i] = outv[i] * inv * sigmoid_f(g[lane * 8u + i]);
-    }
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        activation,
+        dextents<int, 2>(int(inner), int(rows)),
+        array<int, 2>{1, int(inner)});
+    tensor<device half, dextents<int, 2>, tensor_inline> right(
+        weights,
+        dextents<int, 2>(int(inner), int(cols)),
+        array<int, 2>{1, int(inner)});
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        destination,
+        dextents<int, 2>(int(cols), int(rows)),
+        array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(8, 256, 256, false, true, false);
+    matmul2d<desc, execution_simdgroups<2>> op;
+    auto tile_left = left.slice(0, 0);
+    auto tile_right = right.slice(0, int(gid) * 256);
+    auto tile_out = out.slice(int(gid) * 256, 0);
+    op.run(tile_left, tile_right, tile_out);
 }
 
-kernel void attend_prefill_half(
-    device const float* query [[buffer(0)]],
-    device const half* key_cache [[buffer(1)]],
-    device const half* value_cache [[buffer(2)]],
-    device const float* gate [[buffer(3)]],
-    device float* destination [[buffer(4)]],
-    constant uint& count [[buffer(5)]],
-    constant uint& pos0 [[buffer(6)]],
-    constant uint& stride [[buffer(7)]],
-    uint lane [[thread_index_in_simdgroup]],
+// Half values, [channel, token]. ``stride`` is the token axis of one channel.
+kernel void prefill_f16_n64_stride(
+    device half* activation [[buffer(0)]],
+    device half* weights [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    constant uint& stride [[buffer(6)]],
     uint2 tgid [[threadgroup_position_in_grid]])
 {
-    uint token = tgid.x * 2u;
-    uint head = tgid.y;
-    if (token >= count || head >= Q_HEADS) {
-        return;
-    }
-    uint token1 = token + 1u;
-    bool second = token1 < count;
-    uint kv = head / GROUP;
-    device const half* keys = key_cache + kv * stride;
-    device const half* values = value_cache + kv * stride;
-    device const float* q = query + (token * Q_HEADS + head) * 256u;
-    float qreg[8];
-    float qreg1[8];
-    for (uint i = 0u; i < 8u; ++i) {
-        qreg[i] = q[lane * 8u + i];
-        qreg1[i] = 0.0f;
-    }
-    if (second) {
-        device const float* q1 = query + (token1 * Q_HEADS + head) * 256u;
-        for (uint i = 0u; i < 8u; ++i) {
-            qreg1[i] = q1[lane * 8u + i];
-        }
-    }
-    float running_max = -INFINITY;
-    float running_sum = 0.0f;
-    float running_max1 = -INFINITY;
-    float running_sum1 = 0.0f;
-    float outv[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-    float outv1[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-    uint tokens = pos0 + (second ? token1 : token) + 1u;
-    uint limit0 = pos0 + token + 1u;
-    uint step = 0u;
-    for (; step + 8u <= tokens; step += 8u) {
-        float score[8];
-        float score1[8];
-        for (uint b = 0u; b < 8u; ++b) {
-            device const half* ks = keys + (step + b) * 256u;
-            float partial = 0.0f;
-            float partial1 = 0.0f;
-            for (uint i = 0u; i < 8u; ++i) {
-                float key = float(ks[lane * 8u + i]);
-                partial += qreg[i] * key;
-                partial1 += qreg1[i] * key;
-            }
-            score[b] = simd_sum(partial) * INV_SQRT_256;
-            score1[b] = simd_sum(partial1) * INV_SQRT_256;
-            if (step + b >= limit0) {
-                score[b] = -INFINITY;
-            }
-        }
-        for (uint b = 0u; b < 8u; ++b) {
-            device const half* vs = values + (step + b) * 256u;
-            if (score[b] != -INFINITY) {
-                float next = max(running_max, score[b]);
-                float rescale = exp(running_max - next);
-                float prob = exp(score[b] - next);
-                running_sum = running_sum * rescale + prob;
-                for (uint i = 0u; i < 8u; ++i) {
-                    outv[i] = outv[i] * rescale + prob * float(vs[lane * 8u + i]);
-                }
-                running_max = next;
-            }
-            if (second) {
-                float next1 = max(running_max1, score1[b]);
-                float rescale1 = exp(running_max1 - next1);
-                float prob1 = exp(score1[b] - next1);
-                running_sum1 = running_sum1 * rescale1 + prob1;
-                for (uint i = 0u; i < 8u; ++i) {
-                    outv1[i] = outv1[i] * rescale1 + prob1 * float(vs[lane * 8u + i]);
-                }
-                running_max1 = next1;
-            }
-        }
-    }
-    for (; step < tokens; ++step) {
-        device const half* ks = keys + step * 256u;
-        float partial = 0.0f;
-        float partial1 = 0.0f;
-        for (uint i = 0u; i < 8u; ++i) {
-            float key = float(ks[lane * 8u + i]);
-            partial += qreg[i] * key;
-            partial1 += qreg1[i] * key;
-        }
-        device const half* vs = values + step * 256u;
-        if (step < limit0) {
-            float value = simd_sum(partial) * INV_SQRT_256;
-            float next = max(running_max, value);
-            float rescale = exp(running_max - next);
-            float prob = exp(value - next);
-            running_sum = running_sum * rescale + prob;
-            for (uint i = 0u; i < 8u; ++i) {
-                outv[i] = outv[i] * rescale + prob * float(vs[lane * 8u + i]);
-            }
-            running_max = next;
-        }
-        if (second) {
-            float value1 = simd_sum(partial1) * INV_SQRT_256;
-            float next1 = max(running_max1, value1);
-            float rescale1 = exp(running_max1 - next1);
-            float prob1 = exp(value1 - next1);
-            running_sum1 = running_sum1 * rescale1 + prob1;
-            for (uint i = 0u; i < 8u; ++i) {
-                outv1[i] = outv1[i] * rescale1 + prob1 * float(vs[lane * 8u + i]);
-            }
-            running_max1 = next1;
-        }
-    }
-    float inv = running_sum == 0.0f ? 0.0f : 1.0f / running_sum;
-    device float* out = destination + (token * Q_HEADS + head) * 256u;
-    device const float* g = gate + (token * Q_HEADS + head) * 256u;
-    for (uint i = 0u; i < 8u; ++i) {
-        out[lane * 8u + i] = outv[i] * inv * sigmoid_f(g[lane * 8u + i]);
-    }
-    if (second) {
-        float inv1 = running_sum1 == 0.0f ? 0.0f : 1.0f / running_sum1;
-        device float* out1 = destination + (token1 * Q_HEADS + head) * 256u;
-        device const float* g1 = gate + (token1 * Q_HEADS + head) * 256u;
-        for (uint i = 0u; i < 8u; ++i) {
-            out1[lane * 8u + i] = outv1[i] * inv1 * sigmoid_f(g1[lane * 8u + i]);
-        }
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        activation,
+        dextents<int, 2>(int(inner), int(rows)),
+        array<int, 2>{1, int(inner)});
+    tensor<device half, dextents<int, 2>, tensor_inline> right(
+        weights,
+        dextents<int, 2>(int(inner), int(cols)),
+        array<int, 2>{1, int(stride)});
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        destination,
+        dextents<int, 2>(int(cols), int(rows)),
+        array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(
+        64, 64, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, int(tgid.y) * 64);
+    auto tile_right = right.slice(0, int(tgid.x) * 64);
+    auto tile_out = out.slice(int(tgid.x) * 64, int(tgid.y) * 64);
+    op.run(tile_left, tile_right, tile_out);
+}
+
+// Half values, [channel, token], one 512-key block per threadgroup row.
+kernel void kv_pv_f16_split8(
+    device half* activation [[buffer(0)]],
+    device half* weights [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    device const float* row_scales [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& channels [[buffer(5)]],
+    constant uint& block [[buffer(6)]],
+    constant uint& row_stride [[buffer(7)]],
+    constant uint& value_stride [[buffer(8)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 lane [[thread_position_in_threadgroup]],
+    uint2 group_size [[threads_per_threadgroup]])
+{
+    uint k0 = tgid.y * block;
+    device half* act = activation + tgid.y * rows * block;
+    device half* data = weights + k0;
+    device float* dest = destination + (tgid.y * rows * channels);
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        act,
+        dextents<int, 2>(int(block), int(rows)),
+        array<int, 2>{1, int(row_stride)});
+    tensor<device half, dextents<int, 2>, tensor_inline> right(
+        data,
+        dextents<int, 2>(int(block), int(channels)),
+        array<int, 2>{1, int(value_stride)});
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        dest,
+        dextents<int, 2>(int(channels), int(rows)),
+        array<int, 2>{1, int(channels)});
+    constexpr auto desc = matmul2d_descriptor(
+        8, 64, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, 0);
+    auto tile_right = right.slice(0, int(tgid.x) * 64);
+    auto tile_out = out.slice(int(tgid.x) * 64, 0);
+    op.run(tile_left, tile_right, tile_out);
+    threadgroup_barrier(mem_flags::mem_device);
+    uint local = lane.x;
+    uint stride = group_size.x;
+    uint tile = 64u;
+    uint outputs = rows * tile;
+    uint channel0 = tgid.x * tile;
+    for (uint item = local; item < outputs; item += stride) {
+        uint local_row = item / tile;
+        uint channel = channel0 + (item - local_row * tile);
+        dest[local_row * channels + channel] *= row_scales[tgid.y * rows + local_row];
     }
 }
 

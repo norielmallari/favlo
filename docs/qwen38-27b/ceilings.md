@@ -50,6 +50,20 @@ The bytes of one head at context C are the float scores read twice (64 C), the f
 
 One prefill value-mix tile, `prefill_fp8_n64_stride`, is 12288 rows by 2048 keys by 256 channels and measured 614.6 µs. That is one head of one 2048-token chunk. Sixty-four such tiles, each in its own command buffer, are 39.3 ms.
 
+The `half` cache uses the same softmax kernels and the same peak restore. Decode scores with `prefill_f16_m8` and mixes values with `kv_pv_f16_split8`. Prefill scores with `prefill_half_n64` and mixes values with `prefill_f16_n64_stride`. The table above is the `fp8_e4m3` plane. These two half times are one command buffer each, the median of five dispatches after one discarded sample, one head, on an M5 Pro with 48 GB. The streaming bandwidth above is 254.6 GB/s.
+
+| Context | `prefill_f16_m8` | `kv_pv_f16_split8` |
+|---|---:|---:|
+| 2048 | 38.9 | 31.0 |
+| 8192 | 43.9 | 42.4 |
+| 32768 | 130.3 | 116.9 |
+| 65536 | 138.3 | 154.2 |
+| 262144 | 613.8 | 655.1 |
+
+Times are microseconds. A half value is 512 bytes per head per token and has no scale plane, so the value term in the byte count above is 512 C instead of 264 C. That traffic is 736 C bytes per head, 47104 C bytes for 64 heads. At 65536 tokens that is 3.087 GB. Divided by 254.6 GB/s the bandwidth ceiling is 12.12 ms, 82.5 tok/s. The softmax rows above, with `kv_pv_f16_split8` in place of `kv_pv_split8`, are 197.9 µs for one head and 12.67 ms for 64 heads, 78.9 tok/s. At 262144 tokens the same sum is 48.4 ms beside the 48.5 ms bandwidth ceiling, 20.6 tok/s.
+
+`prefill_f16_m8` reads 512 C key bytes and writes 32 C score bytes, 544 C per head. At 65536 tokens that is 2.282 GB, 8.96 ms, 112 tok/s, and the 64-head kernel sum is 8.85 ms. At 262144 tokens the kernel sum is 39.3 ms beside the 35.8 ms bandwidth ceiling.
+
 ## Feed-forward fp8
 
 `gemv_fp8_x4`. Decode launches it once per matrix. The threadgroup is 160 when the K dimension has a multiple of 160 groups of 16 bytes, and 256 otherwise. Gate and up use 160. Down uses 256. Same timing rule as the fp4 rows: one command buffer, then a wait, the median of five dispatches after one discarded sample. The copy above counts a read and a write, so one direction of that copy is 127.3 GB/s.

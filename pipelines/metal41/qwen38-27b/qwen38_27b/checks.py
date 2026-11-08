@@ -475,10 +475,10 @@ def check_attention_half(session: Session) -> None:
 
     runtime = Runtime()
     runtime.session = session
-    runtime.max_pos = 256
+    runtime.max_pos = 512
     runtime.kv_cache = "half"
-    runtime.k_cache = [session.zeros(plane_bytes(256, "half"))]
-    runtime.v_cache = [session.zeros(plane_bytes(256, "half"))]
+    runtime.k_cache = [session.zeros(plane_bytes(512, "half"))]
+    runtime.v_cache = [session.zeros(plane_bytes(512, "half"))]
     bind_plane(runtime)
     count = 4
     query = np.ones((count, 24, 256), dtype=np.float32)
@@ -506,6 +506,27 @@ def check_attention_half(session: Session) -> None:
     for token in range(count):
         expect[token] = np.float32(0.5 * (token + 2) / 2.0)
     _close("attention half", got, expect, atol=2e-3)
+    query1 = np.ones((1, 24, 256), dtype=np.float32)
+    key1 = np.ones((1, 4, 256), dtype=np.float32)
+    value1 = np.full((1, 4, 256), 5.0, dtype=np.float32)
+    gate1 = np.zeros((1, 24, 256), dtype=np.float32)
+    dest1 = session.zeros(24 * 256 * 4)
+    session.begin()
+    attend_plane(
+        runtime,
+        query=session.upload(query1),
+        key=session.upload(key1),
+        value=session.upload(value1),
+        gate=session.upload(gate1),
+        dest=dest1,
+        pos0=4,
+        count=1,
+        slot=0,
+    )
+    session.end()
+    got1 = session.download_f32(dest1, 24 * 256).reshape(24, 256)
+    expect1 = np.full_like(got1, np.float32(1.5))
+    _close("attention half decode", got1, expect1, atol=2e-3)
 
 
 def check_attention_blocks(session: Session) -> None:

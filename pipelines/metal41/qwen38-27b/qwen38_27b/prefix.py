@@ -40,11 +40,22 @@ def open_session(runtime: Any) -> PrefixSession:
             default_prefix_dir(),
             model="qwen38-27b",
             digest=checkpoint_digest(runtime.root),
-            tag=runtime.kv_cache,
+            tag=_prefix_tag(runtime.kv_cache),
             budget=DEFAULT_BUDGET,
         ),
         CacheAdapter(runtime),
     )
+
+
+def _prefix_tag(mode: str) -> str:
+    """File tag for this cache layout.
+
+    A ``half`` file from before values moved onto the token axis used the tag
+    ``half``. That file is not read.
+    """
+    if plain_cache(mode):
+        return "half-channel"
+    return mode
 
 
 class CacheAdapter:
@@ -249,8 +260,11 @@ def _slices(
     array: np.ndarray, max_pos: int, count: int, kind: str, mode: str
 ) -> tuple[np.ndarray, np.ndarray]:
     if plain_cache(mode):
-        row = kv_record_bytes(mode)
-        data = array.reshape(KV_HEADS, max_pos, row)[:, :count, :]
+        if kind == "value":
+            data = array.reshape(KV_HEADS, HEAD, max_pos * 2)[:, :, : count * 2]
+        else:
+            row = kv_record_bytes(mode)
+            data = array.reshape(KV_HEADS, max_pos, row)[:, :count, :]
         return data, np.empty((0,), dtype=np.uint8)
     scale_base = KV_HEADS * max_pos * HEAD
     if kind == "key":

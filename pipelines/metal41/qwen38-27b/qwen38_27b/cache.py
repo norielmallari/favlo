@@ -1,7 +1,8 @@
 """Context length and the key/value plane for this pipeline.
 
-``half`` stores Metal halves at ``[head, token, channel]`` with no scale plane:
-512 bytes per head per token. ``fp8_e4m3`` keeps the quantized layout (Metal
+``half`` stores Metal halves with no scale plane, 512 bytes per head per
+token. Keys are ``[head, token, channel]`` and values are ``[head, channel,
+token]``. ``fp8_e4m3`` keeps the quantized layout (Metal
 ``metal_fp8_e4m3``): keys ``[head, token, channel]`` with an E8M0 scale every
 32 channels, values ``[head, channel, token]`` with an E8M0 scale every 32
 tokens, 264 bytes per head per token. The served window stops at

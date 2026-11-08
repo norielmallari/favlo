@@ -23,4 +23,4 @@ The step that grows toward 131,072 allocates the new cache before it releases th
 
 An opening with MTP off keeps the 16 language planes and leaves the MTP block in the record file. The decode buffers on either opening include the grouped top-k lists, 248,336 bytes. The cache is then 33,792 bytes per token. A fit that cannot keep the head drops it the same way, before any language feed-forward layer.
 
-An opening that sets `kv_cache` to `half` keeps the Metal half planes: 69,632 bytes per token with MTP (9.127 GB at this length) and no attention scratch, for a steady total of 27.050 GB with MTP on.
+An opening that sets `kv_cache` to `half` keeps the Metal half planes: 69,632 bytes per token with MTP (9.127 GB at this length) and the same 0.288 GB attention scratch, for a steady total of 27.338 GB with MTP on.

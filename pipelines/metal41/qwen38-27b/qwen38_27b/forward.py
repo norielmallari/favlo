@@ -748,7 +748,7 @@ class Qwen38Runtime:
             _wipe(buffer, nbytes)
         for cache in (*self.k_cache, *self.v_cache):
             _wipe(cache, plane_bytes(self.max_pos, self.kv_cache))
-        # fp8_e4m3 only: half leaves plane scratch unset.
+        # Both cache modes keep the value-block tail.
         if self.plane_tail is not None:
             _wipe(self.plane_tail, self.kv_slots * 4 * 32 * 256 * 4)
         self.filled = 0
