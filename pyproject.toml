@@ -11,6 +11,8 @@ dependencies = [
     "fastmcp[tasks]>=2.14",
     "jinja2>=3.1",
     "numpy>=2.1",
+    "onnxruntime>=1.20",
+    "opencv-python-headless>=4.10",
     "pyobjc-framework-coreml>=12.2.2",
     "pyobjc-framework-Metal",
     "safetensors>=0.6",
@@ -25,6 +27,7 @@ dependencies = [
     "agent-framework-ag-ui>=1.7.1",
     "sqlalchemy>=2.1.6",
     "alembic>=1.20.1",
+    "spandrel>=0.4.2",
 ]
 
 [project.optional-dependencies]
