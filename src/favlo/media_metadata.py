@@ -276,13 +276,15 @@ def write_sidecar(root: str | Path, relative: str, payload: dict[str, Any]) -> P
 
 
 def remove_sidecar(root: str | Path, relative: str) -> None:
+    from favlo.trash import trash_path
+
     side = sidecar_path(root, relative)
     if not side.is_file():
         legacy = _legacy_sidecar_path(root, relative)
         if legacy is not None and legacy.is_file():
             side = legacy
     if side.is_file():
-        side.unlink()
+        trash_path(side)
     _drop_empty_metadata_dir(side.parent)
 
 

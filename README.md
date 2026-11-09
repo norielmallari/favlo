@@ -38,6 +38,8 @@ This installs the `favlo` package and the `dev` extra, including pytest. Release
 uv run favlo serve
 ```
 
+`favlo media --pipeline <id>` calls a listener that is already up. It does not start `favlo serve`. It is the command that generates. A pipeline command does not. Remaining arguments are `key=value` body fields. Stdout is one `file://` URI per stored file. `--out` writes the pack JSON (`metadata` and `mediaUri`). A pipeline's arguments are in that pipeline's note.
+
 On a terminal with an empty registry, this downloads Qwen3.5-4B and packs it before the daemon listens. Wait until that finishes, and leave this process running.
 
 The web app needs its packages. From the repository root:
@@ -68,12 +70,11 @@ The app note is [web-spa/README.md](web-spa/README.md). The API note is [web-api
 | `qwen36-35b-a3b` | [Qwen3.6-35B-A3B](docs/qwen36-35b-a3b/README.md) | ⚠️ | ⚠️ | ✅ |
 | `gemma4-26b-a4b` | [Gemma 4 26B-A4B](docs/gemma4-26b-a4b/README.md) | ⚠️ | ⚠️ | ✅ |
 | `qwen38-27b` | [Qwen3.8-27B](docs/qwen38-27b/README.md) | ⚠️ | ⚠️ | ✅ |
-| `z-image-turbo` | [Z-Image-Turbo](docs/z-image-turbo/README.md) | ✅ | ✅ | ✅ |
-| `wan22-i2v` | [Wan 2.2 I2V](docs/wan22-i2v/README.md) | ❌ | ⚠️ | ✅ |
-| `wan22-ti2v-5b` | [Wan2.2 TI2V-5B](docs/wan22-ti2v-5b/README.md) | ✅ | ✅ | ✅ |
-| `ace-step-15-turbo` | [ACE-Step 1.5 XL Turbo](docs/ace-step-15-turbo/README.md) | ✅ | ✅ | ✅ |
 | `bge-m3` | [BGE-M3](docs/bge-m3/README.md) | ✅ | ✅ | ✅ |
-| `voxcpm2` | [VoxCPM2](docs/voxcpm2/README.md) | ✅ | ✅ | ✅ |
+
+## Media pipeline
+
+A media pipeline is `pipelines/<runtime>/<pipeline>/`. Its module returns `mcp_tools()`. The host publishes `{pipeline}__{local name}`. The call takes a media ticket. A chat preempts it. The pipeline's own note names the tool and the checkpoint.
 
 ⚠️ is degraded mode. The pipeline still runs the request, and it shrinks the one knob it owns until that request fits. The request keeps the resolution, the frame count, and the duration it named. ✅ keeps that knob at its full size.
 
@@ -98,7 +99,7 @@ Weights follow the Open Compute Project *Microscaling Formats (MX) Specification
 | `LanguagePipeline` | `POST /v1/responses` | The disconnect shell around one response |
 | `EmbeddingsPipeline` | `POST /v1/embeddings` | The embeddings list object |
 | `MediaPipeline` | `POST /mcp` | Shared job, pause, and host checkpoint |
-| `ImagePipeline` / `VideoPipeline` / `MusicPipeline` / `VoicePipeline` | `POST /mcp` | Kind constants; subclass implements `parse` / `generate` / `pack` |
+| `MediaPipeline` | `POST /mcp` | Subclass sets kind, id prefix, and object name; implements `parse` / `generate` / `pack` |
 
 A served language model inherits `LanguagePipeline` and binds `handle_responses`. The listener translates `POST /v1/chat/completions` into that request and translates the Response back. A served embedding model inherits `EmbeddingsPipeline` and binds `handle_embed`. A served image, video, music, or voice pipeline inherits the matching kind class and binds `handle_image`, `handle_video`, `handle_music`, or `handle_voice`. A pipeline that is not served inherits none of them. The map is [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -132,10 +133,4 @@ Favlo is licensed under the Apache License, Version 2.0. The terms are in [LICEN
 | Qwen3.6-35B-A3B | Apache License, Version 2.0 | [note](docs/qwen36-35b-a3b/README.md) |
 | Gemma 4 26B-A4B | [Apache License, Version 2.0](https://ai.google.dev/gemma/docs/gemma_4_license) | [note](docs/gemma4-26b-a4b/README.md) |
 | Qwen3.8-27B | Apache License, Version 2.0 | [note](docs/qwen38-27b/README.md) |
-| Z-Image-Turbo | Apache License, Version 2.0 | [note](docs/z-image-turbo/README.md) |
-| Wan 2.2 I2V | Apache License, Version 2.0 | [note](docs/wan22-i2v/SETUP.md) |
-| umT5-XXL | Apache License, Version 2.0 | [note](docs/wan22-i2v/SETUP.md) |
-| Wan 2.2 TI2V-5B | Apache License, Version 2.0 on the base card. The source checkpoint's license is unset. | [note](docs/wan22-ti2v-5b/SETUP.md) |
-| ACE-Step 1.5 XL Turbo | MIT License | [note](docs/ace-step-15-turbo/README.md) |
 | bge-m3 | MIT License | [note](docs/bge-m3/README.md) |
-| VoxCPM2 | Apache License, Version 2.0 | [note](docs/voxcpm2/references.md) |

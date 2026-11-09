@@ -267,7 +267,7 @@ def build_app(args: Any, state: dict[str, Any]) -> Any:
     _prepare_listener(state)
 
     def dispatch(kind: str, body: dict[str, Any], task_id: str = "") -> Any:
-        return _mcp_dispatch(args, state, kind, body, task_id)
+        return dispatch_kind(args, state, kind, body, task_id)
 
     def embed(text: str) -> list[float] | str:
         return embed_input(args, state, text)
@@ -323,6 +323,38 @@ def build_app(args: Any, state: dict[str, Any]) -> Any:
     async def embeddings(request: Request) -> Response:
         return await _locked(request, args, state, "embed")
 
+    async def media_dispatch(request: Request) -> Response:
+        try:
+            parsed = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            return _error(400, "request body must be an object", "invalid_request_error")
+        if not isinstance(parsed, dict):
+            return _error(400, "request body must be an object", "invalid_request_error")
+        kind = parsed.get("kind")
+        body = parsed.get("body")
+        if kind not in {"image", "video", "music", "voice"} or not isinstance(body, dict):
+            return _error(400, "kind and body are required", "invalid_request_error")
+
+        def work() -> Any:
+            return dispatch_kind(args, state, str(kind), body, "")
+
+        try:
+            payload = await asyncio.to_thread(work)
+        except Exception as exc:
+            return _error(500, str(exc), type(exc).__name__)
+        if not isinstance(payload, dict):
+            return _error(500, "the pipeline wrote no reply", "RuntimeError")
+        if payload.get("status") == "cancelled":
+            return _json_response({"status": "cancelled"})
+        from favlo.media_result import pack_media
+
+        try:
+            packed = pack_media(payload, state)
+        except RuntimeError as exc:
+            return _error(500, str(exc), "RuntimeError")
+        encoded = json.dumps(packed).encode()
+        return Response(encoded, status_code=200, media_type="application/json")
+
     routes = [
         Route("/v1/models", models, methods=["GET"]),
         Route("/v1/models/{model_id:path}", model, methods=["GET"]),
@@ -336,6 +368,7 @@ def build_app(args: Any, state: dict[str, Any]) -> Any:
         Route("/v1/responses/{response_id}", response_delete, methods=["DELETE"]),
         Route("/v1/conversations", conversations, methods=["POST"]),
         Route("/v1/embeddings", embeddings, methods=["POST"]),
+        Route("/v1/dispatch", media_dispatch, methods=["POST"]),
         *mcp_app.routes,
     ]
     return _QuietCancel(Starlette(routes=routes, lifespan=mcp_app.lifespan))
@@ -827,6 +860,7 @@ def _discard_output(state: dict[str, Any], payload: Any) -> None:
     from favlo.images import image_path, source_path
     from favlo.media_meta import drop_media
     from favlo.music import music_dir
+    from favlo.trash import trash_path
     from favlo.videos import source_path as video_source
     from favlo.videos import video_path
     from favlo.voice import voice_dir
@@ -841,7 +875,7 @@ def _discard_output(state: dict[str, Any], payload: Any) -> None:
                     continue
                 for path_of in (image_path, source_path):
                     try:
-                        path_of(root, item["id"]).unlink(missing_ok=True)
+                        trash_path(path_of(root, item["id"]))
                     except (OSError, ValueError):
                         continue
                 drop_media(root, "image", item["id"])
@@ -854,8 +888,8 @@ def _discard_output(state: dict[str, Any], payload: Any) -> None:
         if root is None:
             return
         try:
-            video_source(root, item_id).unlink(missing_ok=True)
-            video_path(root, item_id).unlink(missing_ok=True)
+            trash_path(video_source(root, item_id))
+            trash_path(video_path(root, item_id))
         except (OSError, ValueError):
             return
         drop_media(root, "video", item_id)
@@ -867,7 +901,7 @@ def _discard_output(state: dict[str, Any], payload: Any) -> None:
         folder = music_dir(root)
         for suffix in ("wav", "mp3", "flac"):
             try:
-                (folder / f"{item_id}.{suffix}").unlink(missing_ok=True)
+                trash_path(folder / f"{item_id}.{suffix}")
             except OSError:
                 continue
         drop_media(root, "music", item_id)
@@ -879,13 +913,13 @@ def _discard_output(state: dict[str, Any], payload: Any) -> None:
         folder = voice_dir(root)
         for suffix in ("wav", "mp3", "flac"):
             try:
-                (folder / f"{item_id}.{suffix}").unlink(missing_ok=True)
+                trash_path(folder / f"{item_id}.{suffix}")
             except OSError:
                 continue
         drop_media(root, "voice", item_id)
 
 
-def _mcp_dispatch(
+def dispatch_kind(
     args: Any,
     state: dict[str, Any],
     kind: str,

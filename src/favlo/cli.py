@@ -147,12 +147,14 @@ def _pipeline_stem(path: Path) -> str | None:
 def _help(names: Sequence[str]) -> str:
     lines = ["usage: favlo serve [--non-interactive]"]
     lines.append("       favlo web")
+    lines.append("       favlo media --pipeline <id> [key=value ...]")
     lines.extend(f"       favlo --{name} [args]" for name in names)
     lines.append("")
     lines.append("  serve                  listen on this terminal")
     lines.append("  serve --non-interactive")
     lines.append("                         start the server daemon and exit")
     lines.append("  web                    start the API and the Expo app")
+    lines.append("  media --pipeline <id>  run one media pipeline on a listening serve")
     width = max((len(name) for name in names), default=0)
     for name in names:
         lines.append(f"  --{name.ljust(width)}    {name}")
@@ -268,6 +270,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from favlo.web_host import main as web_main
 
         return int(web_main(args[1:]))
+    if args[0] == "media":
+        from favlo.media_cli import main as media_main
+
+        return int(media_main(args[1:]))
     flag = args[0]
     if not flag.startswith("--") or flag == "--":
         sys.stderr.write(_help(names))

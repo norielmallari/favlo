@@ -4,7 +4,7 @@ Each kind folder stores the sidecar under that folder's
 ``.favlo_metadata/<filename>.json``.
 An image record is ``images/.favlo_metadata/<id>.png.json``. Other kinds use
 ``<id>.mp4.json`` or ``<id>.wav.json``. Generation parameters live under
-``generation``. A sweep deletes that sidecar with the media.
+``generation``. A sweep moves that sidecar to Trash with the media.
 """
 
 from __future__ import annotations
@@ -132,7 +132,7 @@ def load_media(name: str, *, home: Path | None = None) -> dict[str, Any] | None:
 
 
 def drop_media(home: Path, kind: str, name: str) -> None:
-    """Delete the sidecar beside one media id."""
+    """Move the sidecar beside one media id to Trash."""
     if kind not in _FOLDERS or kind_of(name) != kind:
         return
     try:
@@ -178,9 +178,11 @@ def _load_legacy(folder: Path, kind: str, name: str) -> dict[str, Any] | None:
 
 
 def _drop_legacy(folder: Path, kind: str, name: str) -> None:
+    from favlo.trash import trash_path
+
     for path in _legacy_paths(folder, kind, name):
         try:
-            path.unlink(missing_ok=True)
+            trash_path(path)
         except OSError:
             continue
 

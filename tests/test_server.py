@@ -98,14 +98,6 @@ commands = SimpleNamespace(handle_responses=_listener_handle_responses)
 
 
 @pytest.fixture(autouse=True)
-def _registry_media_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "favlo.media_session.default_model",
-        lambda kind, root=None: "example-model",
-    )
-
-
-@pytest.fixture(autouse=True)
 def _stub_language_pipeline_scan(monkeypatch: pytest.MonkeyPatch) -> None:
     """GET /v1/models must not load every registered pipeline module."""
     monkeypatch.setattr(
@@ -1626,6 +1618,16 @@ def _tool(
     tasks: bool = True,
     rpc_id: int = 1,
 ) -> tuple[int, Any]:
+    if "__" not in name:
+        _status, listed = _mcp(port, "tools/list", {})
+        tools = listed.get("result", {}).get("tools", [])
+        matches = [
+            tool["name"]
+            for tool in tools
+            if isinstance(tool, dict) and str(tool.get("name", "")).endswith(f"__{name}")
+        ]
+        if matches:
+            name = sorted(matches)[0]
     return _mcp(
         port,
         "tools/call",
@@ -1841,7 +1843,8 @@ def test_mcp_answers_after_the_pipeline_is_closed() -> None:
     assert state["runtime"] is None
     assert status == 200
     names = {tool["name"] for tool in listed["result"]["tools"]}
-    assert "list_video_models_i2v" in names
+    assert "media_status" in names
+    assert "list_video_models_i2v" not in names
 
 
 def test_mcp_initialize_lists_tools_and_rejects_a_batch(tmp_path) -> None:
@@ -1871,29 +1874,32 @@ def test_mcp_initialize_lists_tools_and_rejects_a_batch(tmp_path) -> None:
     assert "io.modelcontextprotocol/tasks" in json.dumps(result["capabilities"])
     assert names_status == 200
     names = {tool["name"] for tool in listed["result"]["tools"]}
-    assert names == {
+    listener = {
+        "media_status",
+        "media_cancel",
+        "remember",
+        "recall",
+        "forget",
+    }
+    assert listener <= names
+    assert not names & {
         "list_image_models",
         "list_video_models_i2v",
         "list_video_models_t2v",
         "list_music_models",
         "list_voice_models",
-        "media_status",
-        "media_cancel",
-        "read_media",
-        "remember",
-        "recall",
-        "forget",
+        "list_media_models",
+        "generate_image",
         "set_image_model",
         "set_video_i2v_model",
         "set_video_t2v_model",
         "set_music_model",
         "set_voice_model",
-        "generate_image",
-        "generate_video_i2v",
-        "generate_video_t2v",
-        "generate_music",
-        "generate_voice",
+        "swap_face_image",
     }
+    assert not any(name.startswith("list_") for name in names)
+    assert not any(name.startswith("set_") for name in names)
+    assert all("__" in name for name in names - listener)
     assert inline_status == 200, inline
     assert "error" not in inline
     assert inline["result"].get("resultType") == "complete"
@@ -2058,7 +2064,7 @@ def test_mcp_image_results_are_links_and_resources_read_the_file(tmp_path) -> No
         _status, big = _tool(
             port,
             "generate_image",
-            {"prompt": "big", "include_image": True},
+            {"prompt": "big"},
         )
         big_done = _wait_task(port, big["result"]["taskId"])
         _status, read = _mcp(
@@ -2070,20 +2076,68 @@ def test_mcp_image_results_are_links_and_resources_read_the_file(tmp_path) -> No
     finally:
         _stop_background(state, thread)
     blocks = pair_done["result"]["content"]
-    links = [block for block in blocks if block["type"] == "resource_link"]
-    assert [block["uri"] for block in links] == [
-        "favlo://images/image_a.png",
-        "favlo://images/image_b.png",
+    assert len(blocks) == 1 and blocks[0]["type"] == "text"
+    from favlo.images import image_path
+
+    parsed = json.loads(blocks[0]["text"])
+    assert parsed == [
+        {"metadata": {}, "mediaUri": image_path(tmp_path, "image_a").resolve().as_uri()},
+        {"metadata": {}, "mediaUri": image_path(tmp_path, "image_b").resolve().as_uri()},
     ]
-    assert [block["name"] for block in links] == ["image_a.png", "image_b.png"]
-    assert all(block["type"] != "image" for block in blocks)
     big_blocks = big_done["result"]["content"]
-    assert any(block["type"] == "resource_link" for block in big_blocks)
-    assert all(block["type"] != "image" for block in big_blocks)
+    assert len(big_blocks) == 1 and big_blocks[0]["type"] == "text"
+    big_parsed = json.loads(big_blocks[0]["text"])
+    assert big_parsed["mediaUri"] == image_path(tmp_path, "image_big").resolve().as_uri()
+    assert big_parsed["metadata"] == {}
     content = read["result"]["contents"][0]
     assert content["uri"] == "favlo://images/image_a.png"
     assert content["mimeType"] == "image/png"
     assert base64.b64decode(content["blob"]) == b"aaa"
+
+
+def test_dispatch_returns_the_file_uri_and_the_cli_prints_it(tmp_path, capsys) -> None:
+    runtime = _Runtime()
+    state, thread = _serve_background(runtime)
+    state["image_home"] = tmp_path
+    state["module"] = _QueueMedia(tmp_path)
+    port = int(state["server"].server_address[1])
+    out = tmp_path / "pack.json"
+    try:
+        raw = _post_json(
+            port,
+            "/v1/dispatch",
+            {"kind": "image", "body": {"prompt": "later"}},
+        )
+        from favlo.media_cli import main as media_main
+
+        code = media_main(
+            [
+                "--pipeline",
+                "example",
+                "--kind",
+                "image",
+                "--model",
+                "example",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--out",
+                str(out),
+                "prompt=later",
+            ]
+        )
+    finally:
+        _stop_background(state, thread)
+    assert raw.startswith(b"HTTP/1.1 200")
+    packed = json.loads(raw.split(b"\r\n\r\n", 1)[1])
+    from favlo.images import image_path
+
+    uri = image_path(tmp_path, "image_later").resolve().as_uri()
+    assert packed == {"metadata": {}, "mediaUri": uri}
+    assert code == 0
+    assert uri in capsys.readouterr().out
+    assert json.loads(out.read_text())["mediaUri"] == uri
 
 
 def test_generate_video_schema_names_the_still_and_the_frame_default() -> None:
@@ -2093,34 +2147,27 @@ def test_generate_video_schema_names_the_still_and_the_frame_default() -> None:
 
     mcp = build_mcp(lambda *_args: {}, {}, lambda _text: [0.0] * 1024)
     tools = asyncio.run(mcp.list_tools(run_middleware=False))
-    i2v = next(tool for tool in tools if tool.name == "generate_video_i2v")
-    t2v = next(tool for tool in tools if tool.name == "generate_video_t2v")
-    description = i2v.description or ""
+    i2v = next(tool for tool in tools if tool.name.endswith("__generate_video"))
+    t2v = next(tool for tool in tools if tool.name.endswith("__generate_video_t2v"))
     properties = i2v.parameters["properties"]
-    assert "image_" in description or "image_" in properties["image"]["description"]
-    assert "favlo://videos/" in description
+    assert "image_" in properties["image"]["description"]
     assert "duration" in properties
     assert "frames" not in properties
     assert "seconds" in properties["duration"]["description"]
-    assert "4n+1" not in properties["duration"]["description"]
-    assert "16 fps" not in description
     assert "image" in i2v.parameters["required"]
     assert "size" in i2v.parameters["required"]
-    assert "list_video_models_i2v" in properties["size"]["description"]
     assert "image" not in t2v.parameters["properties"]
     assert "size" in t2v.parameters["required"]
-    assert "list_video_models_t2v" in t2v.parameters["properties"]["size"]["description"]
     assert "xhigh" in properties["quality"]["description"]
     assert "sample negative" in properties["negative_prompt"]["description"]
     assert "[low, high]" in properties["guidance_scale"]["description"]
     assert "40" in properties["steps"]["description"]
     assert "model" not in properties
-    assert "session" in properties
-    assert "session" not in i2v.parameters["required"]
-    image = next(tool for tool in tools if tool.name == "generate_image")
+    assert "session" not in properties
+    image = next(tool for tool in tools if tool.name.endswith("__generate_image"))
     assert "model" not in image.parameters["properties"]
     assert "n" not in image.parameters["properties"]
-    assert "session" in image.parameters["properties"]
+    assert "session" not in image.parameters["properties"]
     assert "seed" not in image.parameters["required"]
     seed = image.parameters["properties"]["seed"]["description"]
     assert "random" in seed
@@ -2208,13 +2255,6 @@ def test_media_http_routes_are_gone(monkeypatch, tmp_path) -> None:
                         "variants": {},
                         "context_length": 131072,
                     },
-                    "missing-model": {
-                        "pipeline": "missing-pipeline",
-                        "runtime": "metal41",
-                        "alias": None,
-                        "variants": {"default": {}},
-                        "context_length": 1024,
-                    },
                 },
             }
         )
@@ -2286,9 +2326,9 @@ def test_mcp_voice_writes_a_wav_and_the_link_reads_it(tmp_path) -> None:
         _stop_background(state, thread)
     assert status == 200, called
     content = called["result"]["content"]
-    assert content[1]["uri"] == "favlo://voice/voice_smoke.wav"
-    assert content[1]["name"] == "voice_smoke.wav"
-    assert content[1]["mimeType"] == "audio/wav"
+    parsed = json.loads(content[0]["text"])
+    assert parsed["mediaUri"].endswith("/voice_smoke.wav")
+    assert parsed["metadata"] == {}
     blob = read["result"]["contents"][0]
     assert blob["uri"] == "favlo://voice/voice_smoke.wav"
     assert blob["mimeType"] == "audio/wav"
@@ -2431,6 +2471,9 @@ class _ForegroundMedia:
             reply.json(200, {"status": "in_progress"})
             return
         self.order.append("resume")
+        home = state.get("image_home")
+        if isinstance(home, Path):
+            _store_png(home, "image_queue", b"q")
         reply.json(200, {"data": [{"id": "image_queue"}]})
 
     def handle_responses(self, reply, runtime, body, selection, args, state) -> None:
@@ -2459,9 +2502,10 @@ def _foreground_listener(module):
     return state, thread
 
 
-def test_the_foreground_queue_drains_before_media_resumes() -> None:
+def test_the_foreground_queue_drains_before_media_resumes(tmp_path) -> None:
     module = _ForegroundMedia()
     state, thread = _foreground_listener(module)
+    state["image_home"] = tmp_path
     port = int(state["server"].server_address[1])
     image: dict[str, Any] = {}
 
@@ -2524,6 +2568,9 @@ class _TwoSlices:
             reply.json(200, {"status": "in_progress"})
             return
         self.order.append("resume")
+        home = state.get("image_home")
+        if isinstance(home, Path):
+            _store_png(home, "image_queue", b"q")
         reply.json(200, {"data": [{"id": "image_queue"}]})
 
     def handle_responses(self, reply, runtime, body, selection, args, state) -> None:
@@ -2532,9 +2579,10 @@ class _TwoSlices:
         reply.json(200, {"id": "chat", "choices": []})
 
 
-def test_a_later_chat_preempts_the_next_media_slice() -> None:
+def test_a_later_chat_preempts_the_next_media_slice(tmp_path) -> None:
     module = _TwoSlices()
     state, thread = _foreground_listener(module)
+    state["image_home"] = tmp_path
     port = int(state["server"].server_address[1])
 
     def post_image() -> None:
@@ -2574,4 +2622,36 @@ def test_a_later_chat_preempts_the_next_media_slice() -> None:
         module.hold.set()
         _stop_background(state, thread)
     assert module.order == ["yield1", "chat:one", "yield2", "chat:two", "resume"]
+
+
+class _FinishesOnTheNextSlice:
+    """The first slice is still in progress after preempt has cleared."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def handle_image(self, reply, runtime, body, selection, args, state) -> None:
+        del runtime, body, selection, args
+        self.calls += 1
+        if self.calls == 1:
+            assert not state["preempt"].is_set()
+            reply.json(200, {"status": "in_progress", "progress": 20, "stage": "step"})
+            return
+        home = state.get("image_home")
+        if isinstance(home, Path):
+            _store_png(home, "image_waited", b"w")
+        reply.json(200, {"status": "completed", "data": [{"id": "image_waited"}]})
+
+
+def test_an_in_progress_slice_resumes_until_the_image_exists(tmp_path) -> None:
+    module = _FinishesOnTheNextSlice()
+    state, thread = _foreground_listener(module)
+    state["image_home"] = tmp_path
+    port = int(state["server"].server_address[1])
+    try:
+        result = _tool(port, "generate_image", {"prompt": "wait"}, tasks=False)
+    finally:
+        _stop_background(state, thread)
+    assert module.calls == 2
+    assert "image_waited" in json.dumps(result)
 

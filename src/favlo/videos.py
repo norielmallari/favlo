@@ -3,8 +3,8 @@
 Each clip keeps ``<home>/videos/<id>.avi`` and the MP4 encoded from it.
 A later quality is ``<id>.<quality>.mp4``, encoded from that same AVI.
 ``~/.favlo/settings.json`` key ``video_ttl_seconds`` is how long they stay.
-The default is one day. A sweep at startup and after each stored MP4 deletes
-an older clip and drops the matching job.
+The default is one day. A sweep at startup and after each stored MP4 moves
+an older clip to Trash and drops the matching job.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from favlo.logs import favlo_home, load_settings, video_ttl_seconds
+from favlo.trash import trash_path
 
 _DIR = "videos"
 _CRF = {"low": 32, "medium": 28, "high": 23, "xhigh": 18, "max": 14}
@@ -142,7 +143,7 @@ def sweep_videos(
     home: Path | None = None,
     now: float | None = None,
 ) -> None:
-    """Delete a pair once its MP4, or a lone AVI, has reached the expiry."""
+    """Move a pair to Trash once its MP4, or a lone AVI, has expired."""
     root = favlo_home() if home is None else home
     folder = videos_dir(root)
     if not folder.is_dir():
@@ -167,7 +168,7 @@ def sweep_videos(
             continue
         for path in existing:
             try:
-                path.unlink()
+                trash_path(path)
             except OSError:
                 continue
         from favlo.media_meta import drop_media

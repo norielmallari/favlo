@@ -1,7 +1,7 @@
 """Media tools on the same process as the listener.
 
 FastMCP serves MCP 2026-07-28 at ``/mcp``. Listener tools are
-``media_status``, ``media_cancel``, ``read_media``, ``remember``, ``recall``,
+``media_status``, ``media_cancel``, ``remember``, ``recall``,
 and ``forget``. A registered module's ``mcp_tools()`` adds the other tools.
 The published name is ``{pipeline}__{local name}``. A tool marked ``task`` is
 an optional Task. A client that advertises ``io.modelcontextprotocol/tasks``
@@ -63,7 +63,6 @@ TOOL_DESCRIPTION_MAX_CHARS = 256
 TOOL_PARAM_DESCRIPTION_MAX_CHARS = 48
 _POLL = timedelta(seconds=2)
 _TASK = TaskConfig(mode="optional", poll_interval=_POLL)
-_INLINE = 1024 * 1024
 _ANNOTATIONS = mcp_types.ToolAnnotations(
     read_only_hint=False,
     idempotent_hint=False,
@@ -78,7 +77,7 @@ _STILL = (
     "A bare path and a favlo:// URI are refused."
 )
 # Only these keys are stills. A prompt with a slash (f/1.8) is not a path.
-_STILL_KEYS = frozenset({"image", "source", "target"})
+_STILL_KEYS = frozenset({"image", "source", "target", "subject", "background"})
 _TYPES = {
     "string": str,
     "integer": int,
@@ -116,23 +115,6 @@ def build_mcp(
     async def media_cancel(taskId: str) -> dict[str, Any]:
         """Cancel one task. A second call returns the same status."""
         return await tasks.cancel(taskId)
-
-    @mcp.tool(task=False)
-    def read_media(name: str) -> str:
-        """The parameters stored with one generated file.
-
-        Args:
-            name: image_/video_/music_/voice_ id.
-        """
-        from favlo.media_meta import kind_of, load_media
-
-        kind = kind_of(name)
-        if kind is None:
-            raise ToolError("unknown media")
-        record = load_media(name, home=_home(tasks.state, f"{kind}_home"))
-        if record is None:
-            raise ToolError("unknown media")
-        return dumps_for_model(record)
 
     store = open_store(state.get("memory_home"))
 
@@ -403,9 +385,6 @@ def _request_body(
         if key in {"include_image", "include_audio", "session"}:
             continue
         body[key] = _argument(value, state, still=key in _STILL_KEYS)
-    if body.get("transparent") is True and "background" not in body:
-        body["background"] = "transparent"
-    body.pop("transparent", None)
     named = body.get("model")
     try:
         body["model"] = _media_model_id(named, record, spec)
@@ -460,15 +439,8 @@ def _pack(
     arguments: dict[str, Any],
     state: dict[str, Any],
 ) -> ToolResult:
-    if kind == "image":
-        return _image_result(payload, bool(arguments.get("include_image")), state)
-    if kind == "video":
-        return _video_result(payload, state)
-    if kind == "audio":
-        item = payload.get("id")
-        if isinstance(item, str) and item.startswith("voice_"):
-            return _voice_result(payload, bool(arguments.get("include_audio")), state)
-        return _music_result(payload, bool(arguments.get("include_audio")), state)
+    if kind in {"image", "video", "audio"}:
+        return _media_tool_result(payload, state)
     if kind == "json":
         text = payload if isinstance(payload, str) else dumps_for_model(payload)
         return ToolResult([mcp_types.TextContent(type="text", text=text)])
@@ -531,164 +503,15 @@ def _is_path(value: str) -> bool:
     return "/" in value and not value.startswith("data:")
 
 
-def _image_result(
-    payload: dict[str, Any], include_image: bool, state: dict[str, Any]
-) -> ToolResult:
+def _media_tool_result(payload: dict[str, Any], state: dict[str, Any]) -> ToolResult:
+    """Text JSON of ``metadata`` and ``mediaUri``. No inline bytes."""
     if payload.get("status") == "cancelled":
         return ToolResult([mcp_types.TextContent(type="text", text="cancelled")])
-    data = payload.get("data")
-    if not isinstance(data, list) or not data:
-        message = "the pipeline wrote no image"
-        raise RuntimeError(message)
-    blocks: list[mcp_types.ContentBlock] = []
-    for item in data:
-        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
-            continue
-        image_id = item["id"]
-        blocks.append(mcp_types.TextContent(type="text", text=image_id))
-        meta = _metadata_text(image_id, state)
-        if meta is not None:
-            blocks.append(meta)
-        blocks.append(_media_link("images", image_id, "png", "image/png"))
-        local = _local_link(state, "images", image_id, "png", "image/png")
-        if local is not None:
-            blocks.append(local)
-        if not include_image:
-            continue
-        raw = _image_bytes(item, state)
-        if raw is not None and len(raw) <= _INLINE:
-            blocks.append(
-                mcp_types.ImageContent(
-                    type="image",
-                    data=base64.b64encode(raw).decode("ascii"),
-                    mime_type="image/png",
-                )
-            )
-    if not blocks:
-        message = "the pipeline wrote no image"
-        raise RuntimeError(message)
-    return ToolResult(blocks)
+    from favlo.media_result import pack_media
 
-
-def _image_bytes(item: dict[str, Any], state: dict[str, Any]) -> bytes | None:
-    image_id = item.get("id")
-    if isinstance(image_id, str):
-        raw = load_image(image_id, home=_home(state, "image_home"))
-        if raw is not None:
-            return raw
-    encoded = item.get("b64_json")
-    if not isinstance(encoded, str):
-        return None
-    try:
-        return base64.b64decode(encoded)
-    except (ValueError, TypeError):
-        return None
-
-
-def _video_result(payload: dict[str, Any], state: dict[str, Any]) -> ToolResult:
-    if payload.get("status") == "cancelled":
-        return ToolResult([mcp_types.TextContent(type="text", text="cancelled")])
-    video_id = payload.get("id")
-    if not isinstance(video_id, str) or not video_id:
-        message = "the pipeline wrote no video"
-        raise RuntimeError(message)
-    size = payload.get("size") if isinstance(payload.get("size"), str) else ""
-    seconds = payload.get("seconds") if isinstance(payload.get("seconds"), str) else ""
-    text = " ".join(part for part in (video_id, size, seconds) if part)
-    blocks: list[mcp_types.ContentBlock] = [mcp_types.TextContent(type="text", text=text)]
-    meta = _metadata_text(video_id, state)
-    if meta is not None:
-        blocks.append(meta)
-    blocks.append(_media_link("videos", video_id, "mp4", "video/mp4"))
-    local = _local_link(state, "videos", video_id, "mp4", "video/mp4")
-    if local is not None:
-        blocks.append(local)
-    return ToolResult(blocks)
-
-
-def _music_result(
-    payload: dict[str, Any], include_audio: bool, state: dict[str, Any]
-) -> ToolResult:
-    if payload.get("status") == "cancelled":
-        return ToolResult([mcp_types.TextContent(type="text", text="cancelled")])
-    music_id = payload.get("id")
-    if not isinstance(music_id, str) or not music_id:
-        message = "the pipeline wrote no music"
-        raise RuntimeError(message)
-    fmt = payload.get("response_format")
-    if not isinstance(fmt, str) or fmt not in _AUDIO:
-        fmt = "mp3"
-    mime = _AUDIO[fmt]
-    blocks: list[mcp_types.ContentBlock] = [
-        mcp_types.TextContent(type="text", text=music_id),
-    ]
-    meta = _metadata_text(music_id, state)
-    if meta is not None:
-        blocks.append(meta)
-    blocks.append(_media_link("music", music_id, fmt, mime))
-    local = _local_link(state, "music", music_id, fmt, mime)
-    if local is not None:
-        blocks.append(local)
-    if include_audio:
-        loaded = load_music(music_id, fmt, home=_home(state, "music_home"))
-        if loaded is not None and len(loaded[0]) <= _INLINE:
-            blocks.append(
-                mcp_types.AudioContent(
-                    type="audio",
-                    data=base64.b64encode(loaded[0]).decode("ascii"),
-                    mime_type=mime,
-                )
-            )
-    return ToolResult(blocks)
-
-
-def _voice_result(
-    payload: dict[str, Any], include_audio: bool, state: dict[str, Any]
-) -> ToolResult:
-    if payload.get("status") == "cancelled":
-        return ToolResult([mcp_types.TextContent(type="text", text="cancelled")])
-    voice_id = payload.get("id")
-    if not isinstance(voice_id, str) or not voice_id:
-        message = "the pipeline wrote no voice"
-        raise RuntimeError(message)
-    fmt = payload.get("response_format")
-    if not isinstance(fmt, str) or fmt not in _AUDIO:
-        fmt = "mp3"
-    mime = _AUDIO[fmt]
-    blocks: list[mcp_types.ContentBlock] = [
-        mcp_types.TextContent(type="text", text=voice_id),
-    ]
-    meta = _metadata_text(voice_id, state)
-    if meta is not None:
-        blocks.append(meta)
-    blocks.append(_media_link("voice", voice_id, fmt, mime))
-    local = _local_link(state, "voice", voice_id, fmt, mime)
-    if local is not None:
-        blocks.append(local)
-    if include_audio:
-        loaded = load_voice(voice_id, fmt, home=_home(state, "voice_home"))
-        if loaded is not None and len(loaded[0]) <= _INLINE:
-            blocks.append(
-                mcp_types.AudioContent(
-                    type="audio",
-                    data=base64.b64encode(loaded[0]).decode("ascii"),
-                    mime_type=mime,
-                )
-            )
-    return ToolResult(blocks)
-
-
-def _metadata_text(name: str, state: dict[str, Any]) -> mcp_types.TextContent | None:
-    """The stored parameters for one id, when the JSON record is on disk."""
-    from favlo.media_meta import kind_of, load_media
-
-    kind = kind_of(name)
-    if kind is None:
-        return None
-    record = load_media(name, home=_home(state, f"{kind}_home"))
-    if record is None:
-        return None
-    return mcp_types.TextContent(type="text", text=dumps_for_model(record))
+    packed = pack_media(payload, state)
+    text = dumps_for_model(packed, drop_empty=False)
+    return ToolResult([mcp_types.TextContent(type="text", text=text)])
 
 
 def _load_local(value: Any) -> Any:
@@ -884,13 +707,14 @@ def _music_format(state: dict[str, Any], music_id: str) -> str | None:
 
 
 _HANDLE_LINK = re.compile(
-    r"favlo://(?:images|videos|voice|music)/[A-Za-z0-9_-]+\.(?:png|mp4|mp3|wav|flac)"
+    r"(?:favlo://(?:images|videos|voice|music)/[A-Za-z0-9_-]+\.(?:png|mp4|mp3|wav|flac)"
+    r"|file://[^\s\"'\\]+\.(?:png|mp4|mp3|wav|flac))"
 )
 _HANDLE_NAME = re.compile(r"\b(?:image|video|music|voice)_[A-Za-z0-9_-]+\b")
 
 
 def _finished_handles(result: Any) -> dict[str, list[str]]:
-    """Media names and favlo:// links in a finished task result."""
+    """Media names and file or favlo links in a finished task result."""
     links: list[str] = []
     names: list[str] = []
     _collect_handles(result, links, names)

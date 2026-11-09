@@ -1,7 +1,8 @@
 """Shared BiRefNet cutout.
 
-One ONNX session serves every pipeline. A transparent request and a relight
-both call ``cutout``. The weights live at ``models/BiRefNet/model.onnx``.
+One ONNX session. Callers that need an RGBA subject call ``cutout`` after an
+opaque generate. Image generate does not. The weights live at
+``models/BiRefNet/model.onnx``.
 """
 
 from __future__ import annotations
@@ -61,7 +62,7 @@ def ensure_matte(dest: Path | None = None) -> Path:
                 written += len(chunk)
                 now = time.time()
                 if now - last > 30:
-                    print(f"setup-matte {FILE} {written}/{EXPECTED}", flush=True)
+                    print(f"setup-birefnet {FILE} {written}/{EXPECTED}", flush=True)
                     last = now
     if partial.stat().st_size != EXPECTED:
         message = f"{FILE} size {partial.stat().st_size} != {EXPECTED}"

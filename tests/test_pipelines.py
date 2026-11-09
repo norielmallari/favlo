@@ -163,7 +163,7 @@ def test_reload_drops_a_checkpoint_file(monkeypatch, tmp_path: Path) -> None:
 
 def test_reload_drops_waiting_queues(monkeypatch) -> None:
     monkeypatch.setattr("favlo.cli.drop_pipeline_modules", lambda root=None: 0)
-    from favlo.http_app import _mcp_dispatch
+    from favlo.http_app import dispatch_kind
     from favlo.schedule import ClientClosed, Scheduler
 
     schedule = Scheduler()
@@ -195,7 +195,7 @@ def test_reload_drops_waiting_queues(monkeypatch) -> None:
         assert state["media_tasks"]["queued"]["dropped"] is True
         assert state["media_tasks"]["running"].get("dropped") is not True
         assert state["media_order"] == ["running"]
-        assert _mcp_dispatch(SimpleNamespace(), state, "image", {"prompt": "a cat"}, "queued") == {
+        assert dispatch_kind(SimpleNamespace(), state, "image", {"prompt": "a cat"}, "queued") == {
             "status": "cancelled"
         }
     finally:

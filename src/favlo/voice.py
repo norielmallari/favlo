@@ -3,8 +3,8 @@
 Each clip keeps ``<home>/voice/<id>.wav``. The served file is that WAV, or
 an MP3 or FLAC encoded from it. ``~/.favlo/settings.json`` key
 ``voice_ttl_seconds`` is how long they stay. The default is one day. A sweep
-at startup and after each stored clip deletes an older file and drops the
-matching job.
+at startup and after each stored clip moves an older file to Trash and drops
+the matching job.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from favlo.logs import favlo_home, load_settings, voice_ttl_seconds
+from favlo.trash import trash_path
 
 _DIR = "voice"
 _FORMATS = {"wav": "audio/wav", "mp3": "audio/mpeg", "flac": "audio/flac"}
@@ -101,7 +102,7 @@ def sweep_voice(
     home: Path | None = None,
     now: float | None = None,
 ) -> None:
-    """Delete a clip once its WAV has reached the expiry."""
+    """Move a clip to Trash once its WAV has reached the expiry."""
     root = favlo_home() if home is None else home
     folder = voice_dir(root)
     if not folder.is_dir():
@@ -119,7 +120,7 @@ def sweep_voice(
         for suffix in ("wav", "mp3", "flac"):
             sibling = folder / f"{stem}.{suffix}"
             try:
-                sibling.unlink()
+                trash_path(sibling)
             except OSError:
                 continue
         from favlo.media_meta import drop_media

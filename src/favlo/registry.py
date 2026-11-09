@@ -165,6 +165,7 @@ def add_model(
     data["models"][folder] = entry
     _ensure_default_llm(data, folder, alias, entry)
     _ensure_embeddings_default(data, folder, pipeline, runtime, stored_root)
+    _ensure_media_default(data, folder, pipeline, runtime, stored_root)
     save_registry(data, root)
     return data
 
@@ -295,6 +296,7 @@ def register_quantized(
                 current.setdefault("context_length", DEFAULT_CONTEXT_LENGTH)
             _ensure_default_llm(data, folder, alias, current)
             _ensure_embeddings_default(data, folder, pipeline, runtime, stored_root)
+            _ensure_media_default(data, folder, pipeline, runtime, stored_root)
             save_registry(data, root)
             return
         message = f"{folder} is already registered for a different source"
@@ -313,6 +315,7 @@ def register_quantized(
     data["models"][folder] = entry
     _ensure_default_llm(data, folder, alias, entry)
     _ensure_embeddings_default(data, folder, pipeline, runtime, stored_root)
+    _ensure_media_default(data, folder, pipeline, runtime, stored_root)
     save_registry(data, root)
 
 
@@ -629,6 +632,114 @@ def _ensure_embeddings_default(
     if _embeddings_value(data) or not _serves_embed(pipeline, runtime, pipeline_root):
         return
     data["embeddings"] = folder
+
+
+_media_misses: set[str] = set()
+_MEDIA_KINDS = ("image", "music", "voice")
+
+
+def media_default(kind: str, root: Path | None = None) -> str:
+    """The folder id for one media kind when a request omits ``model``.
+
+    An empty ``media`` key is filled from the first registered row whose
+    pipeline serves that kind, then saved.
+    """
+    data = load_registry(root)
+    stored = _media_value(data, kind)
+    if stored:
+        return stored
+    token = f"{registry_path(root)}:{kind}"
+    if token in _media_misses:
+        return ""
+    for folder, entry in data["models"].items():
+        if not isinstance(entry, dict):
+            continue
+        pipeline = entry.get("pipeline")
+        runtime = entry.get("runtime")
+        if not isinstance(pipeline, str) or not isinstance(runtime, str):
+            continue
+        _ensure_media_default(
+            data,
+            folder,
+            pipeline,
+            runtime,
+            pipeline_root_of(entry),
+        )
+        if _media_value(data, kind):
+            break
+    if _media_value(data, kind):
+        save_registry(data, root)
+    else:
+        _media_misses.add(token)
+    return _media_value(data, kind)
+
+
+def _media_value(data: dict[str, Any], kind: str) -> str:
+    raw = data.get("media")
+    if not isinstance(raw, dict):
+        return ""
+    value = raw.get(kind)
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
+def _ensure_media_default(
+    data: dict[str, Any],
+    folder: str,
+    pipeline: str,
+    runtime: str,
+    pipeline_root: str | None,
+) -> None:
+    """Fill empty ``media`` keys this pipeline serves. A stored key stays."""
+    media = data.get("media")
+    if media is None:
+        media = {}
+    elif not isinstance(media, dict):
+        return
+    wrote = False
+    for key in _media_keys(pipeline, runtime, pipeline_root):
+        if _media_value({"media": media}, key):
+            continue
+        media[key] = folder
+        wrote = True
+    if wrote:
+        data["media"] = media
+
+
+def _media_keys(pipeline: str, runtime: str, pipeline_root: str | None) -> list[str]:
+    from favlo.cli import load_pipeline
+
+    try:
+        module = load_pipeline(pipeline, runtime=runtime, pipeline_root=pipeline_root)
+    except (FileNotFoundError, ImportError, OSError):
+        return []
+    declare = getattr(module, "mcp_tools", None)
+    if not callable(declare):
+        return []
+    try:
+        raw = declare()
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    keys: list[str] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        handler = item.get("handler")
+        name = item.get("name")
+        call = getattr(module, handler, None) if isinstance(handler, str) else None
+        kind = getattr(call, "kind", None)
+        if kind == "video":
+            key = "t2v" if isinstance(name, str) and "t2v" in name else "i2v"
+        elif kind in _MEDIA_KINDS:
+            key = str(kind)
+        else:
+            continue
+        if key not in keys:
+            keys.append(key)
+    return keys
 
 
 def _serves_embed(pipeline: str, runtime: str, pipeline_root: str | None = None) -> bool:

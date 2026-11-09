@@ -14,7 +14,7 @@ from favlo.images import (
 from favlo.logs import settings_path
 
 
-def test_a_fresh_image_stays_and_an_old_one_is_removed(tmp_path) -> None:
+def test_a_fresh_image_stays_and_an_old_one_moves_to_trash(tmp_path) -> None:
     settings_path(tmp_path).write_text(
         json.dumps({"image_ttl_seconds": 60}),
         encoding="utf-8",

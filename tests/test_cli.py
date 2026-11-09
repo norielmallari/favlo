@@ -39,6 +39,24 @@ def test_a_registry_pipeline_root_is_discovered(tmp_path: Path) -> None:
     assert pipeline_names(tmp_path) == ("demo-model",)
 
 
+def test_media_exits_when_serve_is_down(capsys) -> None:
+    assert main(
+        [
+            "media",
+            "--pipeline",
+            "example",
+            "--kind",
+            "image",
+            "--model",
+            "example",
+            "--port",
+            "1",
+            "prompt=a",
+        ]
+    ) == 1
+    assert "not listening" in capsys.readouterr().err
+
+
 def test_help_lists_the_model_flag(capsys) -> None:
     assert main(["--help"]) == 0
     captured = capsys.readouterr()
@@ -98,6 +116,40 @@ def test_pipeline_help_comes_from_the_hyphenated_file(capsys) -> None:
     assert "download" in captured.out
     assert "quantize" in captured.out
     assert "kernels" in captured.out
+
+
+def test_media_uses_the_registry_default_when_model_is_omitted(monkeypatch) -> None:
+    from favlo.media_cli import _default_model
+
+    registry = {
+        "models": {
+            "first": {"pipeline": "z-image-turbo"},
+            "chosen": {"pipeline": "z-image-turbo", "alias": "served"},
+            "other": {"pipeline": "z-image-base"},
+        },
+        "media": {"image": "chosen"},
+    }
+    monkeypatch.setattr("favlo.registry.load_registry", lambda root=None: registry)
+    assert _default_model("z-image-turbo", "image") == "served"
+    registry["media"]["image"] = "other"
+    assert _default_model("z-image-turbo", "image") == "first"
+
+
+def test_media_body_keeps_numbers() -> None:
+    from favlo.media_cli import _body
+
+    body = _body(
+        ["guidance=3.5", "steps=28", "shift=6", "cfg_normalization=false", "size=1024x1024"],
+        "Z-Image-int8",
+        "z-image-base",
+        "image",
+    )
+    assert body["guidance"] == 3.5
+    assert body["steps"] == 28
+    assert body["shift"] == 6
+    assert body["cfg_normalization"] is False
+    assert body["size"] == "1024x1024"
+    assert body["model"] == "Z-Image-int8"
 
 
 def test_an_unknown_argument_is_an_error(capsys) -> None:

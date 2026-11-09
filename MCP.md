@@ -29,7 +29,7 @@ Each Favlo tool `description` from `tools/list` is at most 256 characters (`TOOL
 
 ## Tasks
 
-A catalog row with `task` true is an optional task on `io.modelcontextprotocol/tasks`. Poll interval is 2000 ms. The listener publishes listener tools first, then one tool per `mcp_tools()` row, as `{pipeline_id}__{local name}`. Hyphens in the pipeline id become underscores. The local name does not contain `__`. `tools/list` is that full set, in that order, for every connection. Every plugin tool name includes the pipeline prefix. A client must not keep a forever cache of those names; this response sets `ttlMs` 0 so a later list can replace the set. `tools/call` splits on the first `__`. The left side is the pipeline id and the right side is the local name. An unknown name is an error. One wrapper checks the schema, writes the arguments into the body, and sets the pipeline and the folder from the catalog. MCP does not list models. The pipeline id in the tool name is the model. The host opens the first registry folder on that pipeline. A task tool takes a media ticket. The child calls the handler attribute the record names and returns the saved file. The host packs that file by result kind. The first link is `favlo://`. Still fields are `image`, `source`, and `target` only: an `image_` id, a PNG object, or an absolute `file://` URI. A bare path and a `favlo://` input are refused. Other strings, including a prompt with a slash, stay text. Reload rebuilds the catalog. The next `tools/list` is that catalog.
+A catalog row with `task` true is an optional task on `io.modelcontextprotocol/tasks`. Poll interval is 2000 ms. The listener publishes listener tools first, then one tool per `mcp_tools()` row, as `{pipeline_id}__{local name}`. Hyphens in the pipeline id become underscores. The local name does not contain `__`. `tools/list` is that full set, in that order, for every connection. Every plugin tool name includes the pipeline prefix. A client must not keep a forever cache of those names; this response sets `ttlMs` 0 so a later list can replace the set. `tools/call` splits on the first `__`. The left side is the pipeline id and the right side is the local name. An unknown name is an error. One wrapper checks the schema, writes the arguments into the body, and sets the pipeline and the folder from the catalog. MCP does not list models. The pipeline id in the tool name is the model. The host opens the first registry folder on that pipeline. A task tool takes a media ticket. The child calls the handler attribute the record names and returns the saved file id. The host packs that file as one JSON text block: `metadata` and `mediaUri` (`file://`). Several files are an array of that object. The result does not include media bytes. Still fields are `image`, `source`, `target`, `subject`, and `background`: an `image_` id, a PNG object, or an absolute `file://` URI. A bare path and a `favlo://` input are refused. Other strings, including a prompt with a slash, stay text. Reload rebuilds the catalog. The next `tools/list` is that catalog.
 
 | Client | `tools/call` behavior |
 |--------|------------------------|
@@ -100,16 +100,6 @@ Returns matching rows (id and text) or an error string.
 | `client` | string | `""` | Owner. When set, another owner's sentence is left in place. |
 
 Removes one stored sentence.
-
-### `read_media`
-
-Immediate. Returns the standardized metadata JSON for one generated file (the same `.favlo_metadata` sidecar used for embeddings).
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `name` | string | Id starting with `image_`, `video_`, `music_`, or `voice_` |
-
-An unknown id is an error. The record uses the shared media metadata schema: semantic fields (`title`, `description`, `tags`, and the rest) plus a nested `generation` object with the model, prompt, seed, and other resolved parameters when the file was generated.
 
 ## Resources
 

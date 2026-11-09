@@ -21,7 +21,7 @@ _LOG_ENV = "FAVLO_LOG_FILE"
 
 DEFAULT_LOG_MAX_BYTES = 1024 * 1024
 DEFAULT_VIDEO_TTL_SECONDS = 24 * 60 * 60
-DEFAULT_IMAGE_TTL_SECONDS = 24 * 60 * 60
+DEFAULT_IMAGE_TTL_SECONDS = 5 * 24 * 60 * 60
 DEFAULT_MUSIC_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_VOICE_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_EMBEDDINGS_TTL_SECONDS = 60
@@ -90,7 +90,7 @@ def video_ttl_seconds(settings: dict[str, Any]) -> int:
 
 
 def image_ttl_seconds(settings: dict[str, Any]) -> int:
-    """How long a stored PNG stays, in seconds. The default is one day."""
+    """How long a stored PNG stays, in seconds. The default is five days."""
     return _ttl_seconds(settings, "image_ttl_seconds", DEFAULT_IMAGE_TTL_SECONDS)
 
 

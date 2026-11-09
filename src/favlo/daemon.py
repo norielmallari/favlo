@@ -239,6 +239,23 @@ def telemetry_event(raw: str) -> dict[str, Any] | None:
     return None
 
 
+def _skipped_prefix(path: Path, offset: int) -> bytes:
+    """Bytes already on disk before ``offset``.
+
+    A follower that starts at the end has not delivered those bytes. A later
+    roll keeps them as the new file's head, and the overlap check needs them
+    in ``seen`` or the whole retained file is delivered again.
+    """
+    if offset <= 0 or not path.is_file():
+        return b""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(max(0, offset - _SEEN_LIMIT))
+            return handle.read(min(offset, _SEEN_LIMIT))
+    except OSError:
+        return b""
+
+
 def _delivered_prefix(seen: bytes, new: bytes) -> int:
     """Leading bytes of ``new`` that are already a suffix of ``seen``.
 
@@ -284,7 +301,7 @@ def _follow(
     def run() -> None:
         position = offset
         pending = b""
-        seen = b""
+        seen = _skipped_prefix(path, offset)
         identity: tuple[int, int] | None = None
         while not stop.is_set():
             size = position

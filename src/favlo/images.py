@@ -2,8 +2,8 @@
 
 Each image keeps ``<home>/images/<id>.rgb`` and the PNG encoded from it.
 ``~/.favlo/settings.json`` key ``image_ttl_seconds`` is how long both stay.
-The default is one day. A sweep at startup and after each stored PNG deletes
-an older pair.
+The default is five days. A sweep at startup and after each stored PNG moves
+an older pair to Trash.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from favlo.logs import favlo_home, image_ttl_seconds, load_settings
+from favlo.trash import trash_path
 
 _DIR = "images"
 
@@ -41,7 +42,7 @@ def store_image(
     home: Path | None = None,
     images: dict[str, Any] | None = None,
 ) -> Path:
-    """Write one PNG, then drop images older than the configured expiry."""
+    """Write one PNG, then trash images older than the configured expiry."""
     root = favlo_home() if home is None else home
     path = image_path(root, image_id)
     _replace(path, payload)
@@ -67,7 +68,7 @@ def sweep_images(
     home: Path | None = None,
     now: float | None = None,
 ) -> None:
-    """Delete a pair once its PNG, or a lone RGB file, has reached the expiry."""
+    """Move a pair to Trash once its PNG, or a lone RGB file, has expired."""
     root = favlo_home() if home is None else home
     folder = images_dir(root)
     if not folder.is_dir():
@@ -89,7 +90,7 @@ def sweep_images(
         for suffix in ("png", "rgb"):
             path = folder / f"{stem}.{suffix}"
             try:
-                path.unlink()
+                trash_path(path)
             except OSError:
                 continue
         from favlo.media_meta import drop_media

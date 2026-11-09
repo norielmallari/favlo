@@ -82,6 +82,29 @@ def test_a_rolled_log_is_not_delivered_again(tmp_path: Path) -> None:
     ]
 
 
+def test_a_follower_that_starts_at_the_end_does_not_replay_a_roll(tmp_path: Path) -> None:
+    path = tmp_path / "serve.log"
+    older = b"prompt tokens 10\ncache miss\n"
+    path.write_bytes(older)
+    seen: list[str] = []
+    stop = threading.Event()
+    follow(path, seen.append, stop, offset=len(older))
+    with path.open("ab") as handle:
+        handle.write(b"prefill 1.00 tok/s (1 tok in 1.00s)\n")
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and seen != ["prefill 1.00 tok/s (1 tok in 1.00s)"]:
+        time.sleep(0.05)
+    _replace_log(path, "prefill 1.00 tok/s (1 tok in 1.00s)\ndecode 2.00 tok/s (1 tok in 0.50s)\n")
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and seen[-1:] != ["decode 2.00 tok/s (1 tok in 0.50s)"]:
+        time.sleep(0.05)
+    stop.set()
+    assert seen == [
+        "prefill 1.00 tok/s (1 tok in 1.00s)",
+        "decode 2.00 tok/s (1 tok in 0.50s)",
+    ]
+
+
 def test_follow_events_keeps_ticks(tmp_path: Path) -> None:
     raw = '{"type":"tick","phase":"load","done":3}'
     assert telemetry_event(raw) == {"type": "tick", "phase": "load", "done": 3}

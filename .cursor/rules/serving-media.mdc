@@ -28,7 +28,7 @@ Save the file, then stream that file. Do not add an HTTP media route so a client
 
 Tests pass a temporary home on the request state. They do not write `~/.favlo`.
 
-A kept file expires through one integer in `~/.favlo/settings.json`. The sweep deletes a file whose age has reached that value and drops the matching job. The default for a new kind is one day when the pipeline note does not name another value.
+A kept file expires through one integer in `~/.favlo/settings.json`. The sweep moves a file whose age has reached that value to Trash and drops the matching job. The default for a new kind is one day when the pipeline note does not name another value.
 
 ## Examples
 
