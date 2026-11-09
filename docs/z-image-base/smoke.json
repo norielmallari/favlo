@@ -1,0 +1,8 @@
+{
+  "prompt": "A single matte red 3D cube centered on an empty white surface. The surface is flat, clean, and uniformly white. The background is plain white. Soft even light. Nothing else is in the frame.",
+  "negative_prompt": "clutter, stains, debris, extra objects, text, watermark, pattern, colored background, multiple cubes",
+  "seed": 0,
+  "width": 512,
+  "height": 512,
+  "question": "Does this picture show a red 3D cube on a white surface? Reply with one word: yes or no."
+}

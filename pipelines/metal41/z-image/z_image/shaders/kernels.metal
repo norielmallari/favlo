@@ -51,97 +51,97 @@ kernel void matmul_fp4(
 
 constant int TILE_N_I8 = 128;
 
-kernel void quantize_i8(
+constant int I8_GROUP = 128;
+
+// One scale per 128 K values. A zero group stores scale 1 and zero codes.
+template <typename T>
+void quantize_group(
+    device const T* src,
+    device int8_t* codes,
+    device float* scales,
+    uint row,
+    uint group,
+    uint logical_k,
+    uint stored_k,
+    uint src_cols)
+{
+    uint k0 = group * uint(I8_GROUP);
+    uint groups = stored_k / uint(I8_GROUP);
+    float peak = 0.0f;
+    for (uint i = 0u; i < uint(I8_GROUP); ++i) {
+        uint k = k0 + i;
+        if (k >= logical_k || k >= src_cols) {
+            break;
+        }
+        peak = max(peak, fabs(float(src[row * src_cols + k])));
+    }
+    float inverse = peak > 0.0f ? 127.0f / peak : 0.0f;
+    scales[row * groups + group] = peak > 0.0f ? peak / 127.0f : 1.0f;
+    for (uint i = 0u; i < uint(I8_GROUP); ++i) {
+        uint k = k0 + i;
+        float value = 0.0f;
+        if (k < logical_k && k < src_cols) {
+            value = float(src[row * src_cols + k]);
+        }
+        int q = int(rint(value * inverse));
+        codes[row * stored_k + k] = int8_t(clamp(q, -127, 127));
+    }
+}
+
+kernel void quantize_f32_i8(
     device const float* src [[buffer(0)]],
-    device int8_t* dst [[buffer(1)]],
-    device float* factor [[buffer(2)]],
+    device int8_t* codes [[buffer(1)]],
+    device float* scales [[buffer(2)]],
     constant uint& rows [[buffer(3)]],
     constant uint& logical_k [[buffer(4)]],
     constant uint& stored_k [[buffer(5)]],
     constant uint& src_cols [[buffer(6)]],
-    uint row [[threadgroup_position_in_grid]],
-    uint lane [[thread_position_in_threadgroup]])
+    uint2 gid [[thread_position_in_grid]])
 {
-    if (row >= rows) {
+    uint groups = stored_k / uint(I8_GROUP);
+    if (gid.y >= rows || gid.x >= groups) {
         return;
     }
-    float peak = 0.0f;
-    for (uint col = lane; col < logical_k; col += 128u) {
-        peak = max(peak, abs(src[row * src_cols + col]));
-    }
-    float grouped = simd_max(peak);
-    threadgroup float parts[4];
-    if ((lane & 31u) == 0u) {
-        parts[lane >> 5] = grouped;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float total = max(max(parts[0], parts[1]), max(parts[2], parts[3]));
-    float scale = total > 0.0f ? total / 127.0f : 0.0f;
-    float inv = total > 0.0f ? 127.0f / total : 0.0f;
-    if (lane == 0u) {
-        factor[row] = scale;
-    }
-    for (uint col = lane; col < stored_k; col += 128u) {
-        float value = 0.0f;
-        if (col < logical_k) {
-            value = src[row * src_cols + col] * inv;
-        }
-        int code = int(rint(value));
-        code = clamp(code, -127, 127);
-        dst[row * stored_k + col] = int8_t(code);
-    }
+    quantize_group(src, codes, scales, gid.y, gid.x, logical_k, stored_k, src_cols);
 }
 
-kernel void quantize_half_i8(
+kernel void quantize_f16_i8(
     device const half* src [[buffer(0)]],
-    device int8_t* dst [[buffer(1)]],
-    device float* factor [[buffer(2)]],
+    device int8_t* codes [[buffer(1)]],
+    device float* scales [[buffer(2)]],
     constant uint& rows [[buffer(3)]],
     constant uint& logical_k [[buffer(4)]],
     constant uint& stored_k [[buffer(5)]],
     constant uint& src_cols [[buffer(6)]],
-    uint row [[threadgroup_position_in_grid]],
-    uint lane [[thread_position_in_threadgroup]])
+    uint2 gid [[thread_position_in_grid]])
 {
-    if (row >= rows) {
+    uint groups = stored_k / uint(I8_GROUP);
+    if (gid.y >= rows || gid.x >= groups) {
         return;
     }
-    float peak = 0.0f;
-    for (uint col = lane; col < logical_k; col += 128u) {
-        peak = max(peak, abs(float(src[row * src_cols + col])));
-    }
-    float grouped = simd_max(peak);
-    threadgroup float parts[4];
-    if ((lane & 31u) == 0u) {
-        parts[lane >> 5] = grouped;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float total = max(max(parts[0], parts[1]), max(parts[2], parts[3]));
-    float scale = total > 0.0f ? total / 127.0f : 0.0f;
-    float inv = total > 0.0f ? 127.0f / total : 0.0f;
-    if (lane == 0u) {
-        factor[row] = scale;
-    }
-    for (uint col = lane; col < stored_k; col += 128u) {
-        float value = 0.0f;
-        if (col < logical_k) {
-            value = float(src[row * src_cols + col]) * inv;
-        }
-        int code = int(rint(value));
-        code = clamp(code, -127, 127);
-        dst[row * stored_k + col] = int8_t(code);
-    }
+    quantize_group(src, codes, scales, gid.y, gid.x, logical_k, stored_k, src_cols);
 }
 
+// int8 activation times int8 weight. Each K group of 128 has its own row scale.
+// The descriptor K is that group, so each run consumes 128 values from the slice.
 kernel void matmul_i8(
     device int8_t* activation [[buffer(0)]],
-    device int8_t* weights [[buffer(1)]],
-    device int32_t* destination [[buffer(2)]],
-    constant uint& rows [[buffer(3)]],
-    constant uint& cols [[buffer(4)]],
-    constant uint& inner [[buffer(5)]],
+    device const float* row_scale [[buffer(1)]],
+    device int8_t* weights [[buffer(2)]],
+    device const float* col_scale [[buffer(3)]],
+    device const half* bias [[buffer(4)]],
+    device float* destination [[buffer(5)]],
+    constant uint& rows [[buffer(6)]],
+    constant uint& cols [[buffer(7)]],
+    constant uint& inner [[buffer(8)]],
+    constant uint& logical_n [[buffer(9)]],
+    constant uint& dest_stride [[buffer(10)]],
+    constant uint& has_bias [[buffer(11)]],
     uint2 tgid [[threadgroup_position_in_grid]])
 {
+    int row0 = int(tgid.y) * TILE_M;
+    int col0 = int(tgid.x) * TILE_N_I8;
+    int groups = int(inner) / I8_GROUP;
     tensor<device int8_t, dextents<int, 2>, tensor_inline> left(
         activation,
         dextents<int, 2>(int(inner), int(rows)),
@@ -150,47 +150,51 @@ kernel void matmul_i8(
         weights,
         dextents<int, 2>(int(inner), int(cols)),
         array<int, 2>{1, int(inner)});
-    tensor<device int32_t, dextents<int, 2>, tensor_inline> out(
-        destination,
-        dextents<int, 2>(int(cols), int(rows)),
-        array<int, 2>{1, int(cols)});
-
-    constexpr auto desc = matmul2d_descriptor(
-        64, 128, static_cast<int>(dynamic_extent), false, true, false);
+    constexpr auto desc = matmul2d_descriptor(64, 128, I8_GROUP, false, true, false);
     matmul2d<desc, execution_simdgroups<4>> op;
-    auto tile_left = left.slice(0, int(tgid.y) * TILE_M);
-    auto tile_right = right.slice(0, int(tgid.x) * TILE_N_I8);
-    auto tile_out = out.slice(int(tgid.x) * TILE_N_I8, int(tgid.y) * TILE_M);
-    op.run(tile_left, tile_right, tile_out);
-}
-
-kernel void scale_i8(
-    device const int* acc [[buffer(0)]],
-    device const float* row_scale [[buffer(1)]],
-    device const float* col_scale [[buffer(2)]],
-    device const half* bias [[buffer(3)]],
-    device float* destination [[buffer(4)]],
-    constant uint& rows [[buffer(5)]],
-    constant uint& padded [[buffer(6)]],
-    constant uint& logical [[buffer(7)]],
-    constant uint& dest_stride [[buffer(8)]],
-    constant uint& has_bias [[buffer(9)]],
-    uint gid [[thread_position_in_grid]])
-{
-    uint n = rows * padded;
-    if (gid >= n) {
-        return;
+    auto origin_left = left.slice(0, row0);
+    auto origin_right = right.slice(0, col0);
+    auto dots = op.get_destination_cooperative_tensor<
+        decltype(origin_left), decltype(origin_right), int>();
+    float partial[128];
+    for (int i = 0; i < 128; ++i) {
+        partial[i] = 0.0f;
     }
-    uint col = gid % padded;
-    uint row = gid / padded;
-    if (col >= logical) {
-        return;
+    for (int g = 0; g < groups; ++g) {
+        int k0 = g * I8_GROUP;
+        auto tile_left = left.slice(k0, row0);
+        auto tile_right = right.slice(k0, col0);
+        for (uint16_t i = 0u; i < dots.get_capacity(); ++i) {
+            if (dots.is_valid_element(i)) {
+                dots[i] = 0;
+            }
+        }
+        op.run(tile_left, tile_right, dots);
+        for (uint16_t i = 0u; i < dots.get_capacity(); ++i) {
+            if (!dots.is_valid_element(i) || i >= 128u) {
+                continue;
+            }
+            auto ids = dots.get_multidimensional_index(i);
+            int row = row0 + int(ids[1]);
+            partial[i] += float(dots[i]) * row_scale[row * groups + g];
+        }
     }
-    float value = float(acc[gid]) * row_scale[row] * col_scale[col];
-    if (has_bias != 0u) {
-        value += float(bias[col]);
+    for (uint16_t i = 0u; i < dots.get_capacity(); ++i) {
+        if (!dots.is_valid_element(i) || i >= 128u) {
+            continue;
+        }
+        auto ids = dots.get_multidimensional_index(i);
+        int col = col0 + int(ids[0]);
+        int row = row0 + int(ids[1]);
+        if (col >= int(logical_n)) {
+            continue;
+        }
+        float value = partial[i] * col_scale[col];
+        if (has_bias != 0u) {
+            value += float(bias[col]);
+        }
+        destination[row * int(dest_stride) + col] = value;
     }
-    destination[row * dest_stride + col] = value;
 }
 
 kernel void gather_i8(
@@ -813,8 +817,9 @@ kernel void channel_gate(
         return;
     }
     uint index = gid.y * width + gid.x;
-    float value = residual[index] + tanh(gate[gid.x]) * branch[index];
-    destination[index] = value;
+    // Device tanh is NaN past about 44. The real value is already ±1 there.
+    float limited = clamp(gate[gid.x], -40.0f, 40.0f);
+    destination[index] = residual[index] + tanh(limited) * branch[index];
 }
 
 kernel void add_rows(
@@ -1083,6 +1088,60 @@ kernel void euler(
 {
     if (gid < n) {
         latent[gid] = latent[gid] + delta * velocity[gid];
+    }
+}
+
+// pred = pos + scale * (pos - neg), written over `neg`.
+// limit > 0 rescales pred so its L2 norm does not exceed ||pos|| * limit.
+kernel void cfg_apply(
+    device const float* pos [[buffer(0)]],
+    device float* neg [[buffer(1)]],
+    constant float& scale [[buffer(2)]],
+    constant float& limit [[buffer(3)]],
+    constant uint& n [[buffer(4)]],
+    uint tid [[thread_position_in_threadgroup]])
+{
+    float pred_sum = 0.0f;
+    float pos_sum = 0.0f;
+    for (uint i = tid; i < n; i += 256u) {
+        float p = pos[i];
+        float v = neg[i];
+        float pred = p + scale * (p - v);
+        neg[i] = pred;
+        pred_sum += pred * pred;
+        pos_sum += p * p;
+    }
+    pred_sum = simd_sum(pred_sum);
+    pos_sum = simd_sum(pos_sum);
+    threadgroup float pred_parts[8];
+    threadgroup float pos_parts[8];
+    if ((tid & 31u) == 0u) {
+        pred_parts[tid >> 5] = pred_sum;
+        pos_parts[tid >> 5] = pos_sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0u) {
+        float pred_total = 0.0f;
+        float pos_total = 0.0f;
+        for (uint i = 0u; i < 8u; ++i) {
+            pred_total += pred_parts[i];
+            pos_total += pos_parts[i];
+        }
+        pred_parts[0] = pred_total;
+        pos_parts[0] = pos_total;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (limit <= 0.0f) {
+        return;
+    }
+    float pred_norm = sqrt(pred_parts[0]);
+    float cap = sqrt(pos_parts[0]) * limit;
+    if (pred_norm <= cap || pred_norm == 0.0f) {
+        return;
+    }
+    float factor = cap / pred_norm;
+    for (uint i = tid; i < n; i += 256u) {
+        neg[i] *= factor;
     }
 }
 

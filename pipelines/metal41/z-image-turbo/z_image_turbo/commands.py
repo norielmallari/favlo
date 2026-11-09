@@ -1,4 +1,4 @@
-"""CLI for setup, kernels, quantize, and generate."""
+"""CLI for setup, kernels, and quantize."""
 
 from __future__ import annotations
 
@@ -17,10 +17,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="favlo --z-image-turbo")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("setup", help="download Tongyi-MAI/Z-Image-Turbo from the repository")
-    sub.add_parser(
-        "setup-matte",
-        help="download the BiRefNet general ONNX used for background=transparent",
-    )
     sub.add_parser("kernels", help="dispatch the fp4 matmul and the attention shader")
     quant = sub.add_parser("quantize", help="pack safetensors weights")
     quant.add_argument(
@@ -50,24 +46,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="pack symmetric int8 from the original weights",
     )
-    gen = sub.add_parser("generate", help="write one PNG")
-    gen.add_argument("--prompt", required=True)
-    gen.add_argument("--width", type=int, default=1024)
-    gen.add_argument("--height", type=int, default=1024)
-    gen.add_argument("--steps", type=int, default=8)
-    gen.add_argument("--seed", type=int, default=0)
-    gen.add_argument("--out", type=Path, required=True)
-    gen.add_argument("--record", type=Path)
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
     if args.command == "setup":
         from z_image_turbo.source import download
 
         print(download(), flush=True)
-        return 0
-    if args.command == "setup-matte":
-        from z_image_turbo.matte import ensure_matte
-
-        print(ensure_matte(), flush=True)
         return 0
     if args.command == "kernels":
         return kernels()
@@ -80,8 +63,6 @@ def main(argv: list[str] | None = None) -> int:
             args.name,
             int8=args.int8,
         )
-    if args.command == "generate":
-        return _generate(args)
     return 2
 
 
@@ -147,25 +128,6 @@ def _check_folder(name: str) -> None:
     if _FOLDER.fullmatch(name) is None:
         message = f"{name} is not a folder name; pass --name"
         raise ValueError(message)
-
-
-def _generate(args: argparse.Namespace) -> int:
-    from z_image_turbo.png import encode_png
-    from z_image_turbo.runtime import Runtime
-    from z_image_turbo.source import source_dir
-
-    record = args.record or source_dir().parent / "Z-Image-Turbo-fp4"
-    runtime = Runtime(record)
-    try:
-        pixels, digest, timing = runtime.generate(
-            args.prompt, args.width, args.height, args.steps, args.seed
-        )
-    finally:
-        runtime.close()
-    args.out.write_bytes(encode_png(pixels))
-    print(f"latent {digest}", flush=True)
-    print(f"wrote {args.out} steps {len(timing['steps'])}", flush=True)
-    return 0
 
 
 def kernels() -> int:

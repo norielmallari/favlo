@@ -16,7 +16,7 @@ Generation-time work is [optimization-image](../optimization-image/SKILL.md). Se
 | Steps | Eight Euler steps; not tunable on the request |
 | Negative prompt | Not served; ignored if a client sends one |
 | Caption limit | **1536** tokens after the chat template; longer prompts are **rejected**, not truncated |
-| Default size | `auto` is **1024×1024**; edges are multiples of 16, max **1280**, aspect between 1:3 and 3:1 |
+| Default size | `auto` is **1024×1024**; edges are multiples of 16, max **2560**, aspect between 1:3 and 3:1 |
 | Text rendering | English and Chinese; quote exact strings with `"..."` |
 
 Fix **seed** while editing the prompt; change seed only when exploring variety. Turbo has **low** seed diversity versus base Z-Image.

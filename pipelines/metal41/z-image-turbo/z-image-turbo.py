@@ -13,6 +13,9 @@ from typing import Any
 PIPELINE = "z-image-turbo"
 
 _ROOT = Path(__file__).resolve().parent
+_SHARED = _ROOT.parent / "z-image"
+if str(_SHARED) not in sys.path:
+    sys.path.insert(0, str(_SHARED))
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
@@ -36,8 +39,6 @@ def mcp_tools() -> list[dict[str, Any]]:
                     "size": {"type": "string", "description": "WxH; auto is 1024x1024."},
                     "quality": {"type": "string", "description": "Quality preset."},
                     "seed": {"type": "integer", "description": "Omit for random."},
-                    "transparent": {"type": "boolean", "description": "RGBA PNG after the draw."},
-                    "include_image": {"type": "boolean", "description": "Inline PNG if at most 1 MiB."},
                 },
                 "required": ["prompt"],
             },

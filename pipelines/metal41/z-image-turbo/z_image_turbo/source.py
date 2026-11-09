@@ -6,10 +6,9 @@ and does not read or write a hub cache.
 
 from __future__ import annotations
 
-import os
-import time
-import urllib.request
 from pathlib import Path
+
+from z_image.source import fetch
 
 REPO = "Tongyi-MAI/Z-Image-Turbo"
 BASE = f"https://huggingface.co/{REPO}/resolve/main/"
@@ -52,46 +51,9 @@ def download(dest: Path | None = None) -> Path:
     folder = dest or source_dir()
     folder.mkdir(parents=True, exist_ok=True)
     for rel in SMALL:
-        _fetch(folder, rel, None)
+        fetch(BASE, folder, rel, None)
         print(f"setup {rel}", flush=True)
     for rel, size in WEIGHTS.items():
-        _fetch(folder, rel, size)
+        fetch(BASE, folder, rel, size)
         print(f"setup {rel}", flush=True)
     return folder
-
-
-def _fetch(folder: Path, rel: str, expected: int | None) -> None:
-    path = folder / rel
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if expected is not None and path.is_file() and path.stat().st_size == expected:
-        return
-    if expected is None and path.is_file() and path.stat().st_size > 0:
-        return
-    partial = Path(str(path) + ".partial")
-    have = partial.stat().st_size if partial.is_file() else 0
-    headers = {"User-Agent": "favlo-setup"}
-    if have:
-        headers["Range"] = f"bytes={have}-"
-    request = urllib.request.Request(BASE + rel, headers=headers)
-    with urllib.request.urlopen(request, timeout=120) as response:
-        status = int(getattr(response, "status", 200))
-        if status == 200 and have:
-            have = 0
-        mode = "ab" if status == 206 and have else "wb"
-        written = have if mode == "ab" else 0
-        last = time.time()
-        with partial.open(mode) as handle:
-            while True:
-                chunk = response.read(8 << 20)
-                if not chunk:
-                    break
-                handle.write(chunk)
-                written += len(chunk)
-                now = time.time()
-                if expected and now - last > 30:
-                    print(f"setup {rel} {written}/{expected}", flush=True)
-                    last = now
-    if expected is not None and partial.stat().st_size != expected:
-        message = f"{rel} size {partial.stat().st_size} != {expected}"
-        raise RuntimeError(message)
-    os.replace(partial, path)

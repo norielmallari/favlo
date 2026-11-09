@@ -4,6 +4,7 @@
   "width": 512,
   "height": 512,
   "latent_sha256": "0eafe40ea1cae5517c22eb816be408b971e6c76f8f7ae1689daabeee71dea9b4",
+  "question": "Does this picture show a red cube on a white table? Reply with one word: yes or no.",
   "sizes": [
     {
       "width": 512,

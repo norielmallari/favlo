@@ -72,8 +72,11 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [gemma4-26b-a4b/benchmarks.md](gemma4-26b-a4b/benchmarks.md) | Gemma 4 26B-A4B harness scores against `serve` |
 | [qwen38-27b/benchmarks.md](qwen38-27b/benchmarks.md) | Harness scores against `serve` |
 | [qwen36-35b-a3b/benchmarks.md](qwen36-35b-a3b/benchmarks.md) | Harness scores against `serve` |
+| [z-image/README.md](z-image/README.md) | Shared Z-Image forward used by Turbo and the base checkpoint |
 | [z-image-turbo/README.md](z-image-turbo/README.md) | Z-Image-Turbo pipeline contract |
 | [z-image-turbo/SETUP.md](z-image-turbo/SETUP.md) | Z-Image-Turbo download, pack, and first image |
+| [z-image-base/README.md](z-image-base/README.md) | Z-Image pipeline contract |
+| [z-image-base/SETUP.md](z-image-base/SETUP.md) | Z-Image download, pack, and first image |
 | [wan22-i2v/README.md](wan22-i2v/README.md) | Wan 2.2 I2V pipeline contract |
 | [wan22-i2v/SETUP.md](wan22-i2v/SETUP.md) | Wan 2.2 I2V download, pack, and first clip |
 | [wan22-ti2v-5b/README.md](wan22-ti2v-5b/README.md) | Wan 2.2 TI2V-5B pipeline contract |
@@ -98,6 +101,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [wan22-ti2v-5b/research/int8-weight-error.md](wan22-ti2v-5b/research/int8-weight-error.md) | Wan 2.2 TI2V-5B int8 weight error |
 | [wan22-ti2v-5b/research/clip-ceiling.md](wan22-ti2v-5b/research/clip-ceiling.md) | Wan 2.2 TI2V-5B 9-frame kernel sum and printed clips |
 | [z-image-turbo/research/generation-ceiling.md](z-image-turbo/research/generation-ceiling.md) | Z-Image-Turbo 1280 generation sum |
+| [z-image-base/research/generation-time.md](z-image-base/research/generation-time.md) | Z-Image base 512 and 1024 generation times |
 | [bge-m3/research/recorded-encode.md](bge-m3/research/recorded-encode.md) | BGE-M3 warm encode times |
 
 Do not commit plan or option-comparison notes here. A measured research remainder lives at `docs/<pipeline>/research/<slug>.md` and does not change the serving note until that behavior ships.

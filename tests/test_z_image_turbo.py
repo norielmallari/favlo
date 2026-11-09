@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import shutil
 import threading
@@ -11,9 +10,6 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-
-from favlo.media_meta import load_media
-from favlo.reply import MemoryReply
 from z_image_turbo.chat import ImageRequestError, _fields, handle_image
 from z_image_turbo.formats import (
     dequant_fp4,
@@ -36,6 +32,19 @@ from z_image_turbo.record import Plane, load, quantize, weight_bytes
 from z_image_turbo.runtime import Runtime, _patchify, _unpatchify, open_runtime
 from z_image_turbo.schedule import sigmas, timestep
 from z_image_turbo.scratch import MAX_EDGE, Scratch, scratch_bytes
+
+from favlo.media_meta import load_media
+from favlo.reply import MemoryReply
+
+
+class _Gate:
+    """Satisfy the listener open and close contract. These tests draw in memory."""
+
+    def ensure_open(self, request: object) -> None:
+        del request
+
+    def close(self) -> None:
+        return None
 
 
 def test_stored_k_pads_a_conv_row() -> None:
@@ -92,8 +101,8 @@ def test_embedded_time_is_the_complement() -> None:
     assert timestep(0.0) == 1000.0
 
 
-def test_max_edge_is_the_training_square() -> None:
-    assert MAX_EDGE == 1280
+def test_max_edge_is_a_multiple_of_sixteen() -> None:
+    assert MAX_EDGE == 2560
     assert MAX_EDGE % 16 == 0
 
 
@@ -321,16 +330,19 @@ def test_image_request_ignores_a_count() -> None:
 
 
 def test_image_request_rejects_sizes_this_model_cannot_draw() -> None:
-    with pytest.raises(ImageRequestError, match="1280") as raised:
-        _fields({"prompt": "a cat", "size": "1536x1024"})
+    with pytest.raises(ImageRequestError, match="2560") as raised:
+        _fields({"prompt": "a cat", "size": "2576x1024"})
     assert raised.value.param == "size"
     with pytest.raises(ImageRequestError, match="1:3"):
-        _fields({"prompt": "a cat", "size": "16x1280"})
+        _fields({"prompt": "a cat", "size": "16x2560"})
+    fields = _fields({"prompt": "a cat", "size": "1536x1024"})
+    assert fields.size == "1536x1024"
 
 
-def test_image_request_accepts_a_transparent_background() -> None:
-    fields = _fields({"prompt": "a cat", "background": "transparent"})
-    assert fields.background == "transparent"
+def test_image_request_rejects_a_transparent_background() -> None:
+    with pytest.raises(ImageRequestError, match="auto or opaque") as raised:
+        _fields({"prompt": "a cat", "background": "transparent"})
+    assert raised.value.param == "background"
 
 
 def test_image_request_rejects_unsupported_image_options() -> None:
@@ -359,45 +371,6 @@ def test_encode_png_writes_an_rgba_color_type() -> None:
     assert np.array_equal(unpack_rgb(packed), image)
 
 
-def test_a_transparent_store_runs_the_matte(tmp_path, monkeypatch) -> None:
-    from z_image_turbo import chat as chat_mod
-
-    seen: list[tuple[int, int, int]] = []
-
-    def fake_cutout(image: np.ndarray) -> np.ndarray:
-        seen.append(image.shape)
-        rgba = np.zeros((image.shape[0], image.shape[1], 4), dtype=np.uint8)
-        rgba[..., :3] = image
-        rgba[..., 3] = 200
-        return rgba
-
-    monkeypatch.setattr(chat_mod, "cutout", fake_cutout)
-
-    class _Runtime:
-        def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **_extra):
-            del prompt, width, height, steps, seed
-            timing = {"total": 1.0, "caption": 0.1, "vae": 0.2, "steps": [0.1]}
-            return np.full((8, 8, 3), 40, dtype=np.uint8), "digest", timing
-
-    reply = MemoryReply()
-    state = {"image_home": tmp_path}
-    handle_image(
-        reply,
-        _Runtime(),
-        {"prompt": "a cat", "seed": 1, "background": "transparent", "size": "16x16"},
-        None,
-        None,
-        state,
-    )
-    assert reply.status == 200
-    assert reply.body["background"] == "transparent"
-    assert seen == [(8, 8, 3)]
-    png = base64.b64decode(reply.body["data"][0]["b64_json"])
-    assert png[25] == 6
-    rgb = tmp_path / "images" / f"{reply.body['data'][0]['id']}.rgb"
-    assert unpack_rgb(rgb.read_bytes()).shape[2] == 4
-
-
 def test_matte_cutout_applies_a_soft_alpha(monkeypatch) -> None:
     from favlo import birefnet
 
@@ -422,7 +395,7 @@ def test_matte_cutout_applies_a_soft_alpha(monkeypatch) -> None:
 
 
 def test_image_response_returns_one_png(tmp_path) -> None:
-    class _Runtime:
+    class _Runtime(_Gate):
         def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **_extra):
             del prompt, width, height, steps
             timing = {"total": 1.0, "caption": 0.1, "vae": 0.2, "steps": [0.1]}
@@ -439,7 +412,7 @@ def test_image_response_returns_one_png(tmp_path) -> None:
     assert len(data) == 1
     first = np.zeros((8, 8, 3), dtype=np.uint8)
     first[..., 0] = 7
-    assert base64.b64decode(data[0]["b64_json"]) == encode_png(first, "high")
+    assert "b64_json" not in data[0]
     rgb = tmp_path / "images" / f"{data[0]['id']}.rgb"
     assert np.array_equal(unpack_rgb(rgb.read_bytes()), first)
     assert (tmp_path / "images" / f"{data[0]['id']}.png").read_bytes() == encode_png(first, "high")
@@ -456,7 +429,7 @@ def test_an_omitted_seed_is_stored_with_the_prompt(tmp_path, monkeypatch) -> Non
     monkeypatch.setattr("favlo.media_pipeline.secrets.randbits", lambda _bits: 17)
     seen: list[int] = []
 
-    class _Runtime:
+    class _Runtime(_Gate):
         def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **_extra):
             del prompt, width, height, steps
             seen.append(seed)
@@ -481,7 +454,7 @@ def test_an_omitted_seed_is_stored_with_the_prompt(tmp_path, monkeypatch) -> Non
 def test_an_explicit_zero_seed_stays(tmp_path) -> None:
     seen: list[int] = []
 
-    class _Runtime:
+    class _Runtime(_Gate):
         def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **_extra):
             del prompt, width, height, steps
             seen.append(seed)
@@ -501,7 +474,7 @@ def test_an_explicit_zero_seed_stays(tmp_path) -> None:
 def test_a_resumed_image_keeps_the_drawn_seed(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("favlo.media_pipeline.secrets.randbits", lambda _bits: 17)
 
-    class _Runtime:
+    class _Runtime(_Gate):
         def __init__(self) -> None:
             self.seeds: list[int] = []
 
@@ -542,7 +515,7 @@ def _picture(seed: int) -> np.ndarray:
 
 
 def test_the_image_request_releases_the_runtime(tmp_path) -> None:
-    class _Runtime:
+    class _Runtime(_Gate):
         def __init__(self) -> None:
             self.closed = 0
 
@@ -567,7 +540,7 @@ def test_the_image_request_releases_the_runtime(tmp_path) -> None:
 def test_preempt_after_decode_keeps_the_pixels_and_the_same_id(tmp_path) -> None:
     preempt = threading.Event()
 
-    class _Runtime:
+    class _Runtime(_Gate):
         def __init__(self) -> None:
             self.seeds: list[int] = []
 
@@ -598,7 +571,7 @@ def test_preempt_after_decode_keeps_the_pixels_and_the_same_id(tmp_path) -> None
 def test_a_paused_step_resumes_with_its_latent(tmp_path) -> None:
     latent = np.arange(4, dtype=np.float32)
 
-    class _Runtime:
+    class _Runtime(_Gate):
         def __init__(self) -> None:
             self.resumed: list[dict] = []
 
@@ -637,7 +610,7 @@ def test_a_waiting_chat_still_draws_the_next_step(tmp_path) -> None:
     preempt.set()
     called: list[int] = []
 
-    class _Runtime:
+    class _Runtime(_Gate):
         def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **extra):
             del prompt, width, height, steps, seed
             called.append(extra.get("done_steps") or 0)
@@ -660,7 +633,7 @@ def test_a_waiting_chat_still_draws_the_next_step(tmp_path) -> None:
 
 
 def test_cancel_before_the_draw_skips_the_runtime(tmp_path) -> None:
-    class _Runtime:
+    class _Runtime(_Gate):
         def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **_extra):
             del prompt, width, height, steps, seed
             raise AssertionError("draw")
@@ -677,7 +650,7 @@ def test_cancel_before_the_draw_skips_the_runtime(tmp_path) -> None:
 
 
 def test_cancel_during_the_draw_drops_the_checkpoint(tmp_path) -> None:
-    class _Runtime:
+    class _Runtime(_Gate):
         def __init__(self) -> None:
             self.seeds: list[int] = []
 
@@ -703,7 +676,7 @@ def test_cancel_during_the_draw_drops_the_checkpoint(tmp_path) -> None:
 
 
 def test_a_different_prompt_drops_the_paused_image(tmp_path) -> None:
-    class _Runtime:
+    class _Runtime(_Gate):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -738,6 +711,7 @@ def test_a_different_prompt_drops_the_paused_image(tmp_path) -> None:
 def test_close_drops_the_device_buffers() -> None:
     runtime = Runtime.__new__(Runtime)
     runtime._closed = False
+    runtime._owner = "z-image-turbo:test"
     plane = Plane.__new__(Plane)
     plane.data = object()
     plane.scale = object()
@@ -1085,6 +1059,8 @@ def test_a_custom_safetensors_file_is_its_own_registry_id(
     monkeypatch.setattr("z_image_turbo.record.quantize", quantize)
     assert main(["quantize"]) == 0
     assert seen["dest"] == tmp_path / "models" / "Z-Image-Turbo-fp4"
+    packed = json.loads((tmp_path / "models" / "registry.json").read_text())
+    assert packed["media"]["image"] == "Z-Image-Turbo-fp4"
     assert main(["quantize", "--weights", str(weights)]) == 0
     assert seen["dest"] == tmp_path / "models" / "example-model-fp4"
     named = main(["quantize", "--weights", str(weights), "--name", "example-model"])
@@ -1103,8 +1079,48 @@ def test_a_custom_safetensors_file_is_its_own_registry_id(
     assert main(["quantize", "--int8"]) == 0
     assert seen["dest"] == tmp_path / "models" / "Z-Image-Turbo-int8"
     assert seen["kind"] == "int8"
+    packed = json.loads((tmp_path / "models" / "registry.json").read_text())
+    assert packed["media"]["image"] == "Z-Image-Turbo-fp4"
     assert main(["quantize", "--weights", str(weights), "--int8"]) == 0
     assert seen["dest"] == tmp_path / "models" / "example-model-int8"
+
+
+def test_int8_quantize_fills_an_empty_image_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from z_image_turbo.commands import main
+
+    def models_dir(root: Path | None = None) -> Path:
+        del root
+        return tmp_path / "models"
+
+    monkeypatch.setattr("favlo.registry.models_dir", models_dir)
+    monkeypatch.setattr(
+        "z_image_turbo.source.source_dir",
+        lambda: tmp_path / "models" / "Z-Image-Turbo",
+    )
+
+    def quantize(
+        origin: Path,
+        dest: Path,
+        tokenizer_source: Path | None = None,
+        kind: str = "fp4",
+    ) -> Path:
+        del origin, tokenizer_source, kind
+        dest.mkdir(parents=True)
+        (dest / "manifest.json").write_text("{}\n")
+        return dest
+
+    monkeypatch.setattr("z_image_turbo.record.quantize", quantize)
+    assert main(["quantize", "--int8"]) == 0
+    registry = json.loads((tmp_path / "models" / "registry.json").read_text())
+    assert registry["media"]["image"] == "Z-Image-Turbo-int8"
+    weights = tmp_path / "incoming" / "example-model.safetensors"
+    weights.parent.mkdir()
+    weights.write_bytes(b"st")
+    assert main(["quantize", "--int8", "--weights", str(weights)]) == 0
+    registry = json.loads((tmp_path / "models" / "registry.json").read_text())
+    assert registry["media"]["image"] == "Z-Image-Turbo-int8"
 
 
 def test_load_counts_bytes_and_skips_the_print(tmp_path, capsys) -> None:

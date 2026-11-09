@@ -1,14 +1,12 @@
 """Chat is refused. Images use the OpenAI generations body.
 
 ``POST /v1/images/edits`` and ``POST /v1/images/variations`` are not routes.
-This pipeline has no image input. ``background=transparent`` runs BiRefNet after
-the VAE decode and writes an RGBA PNG. A hosted URL and a streaming partial are
-not produced. JPEG and WebP are not encoded.
+This pipeline has no image input. A transparent background, a hosted URL, and a
+streaming partial are not produced. JPEG and WebP are not encoded.
 """
 
 from __future__ import annotations
 
-import base64
 import secrets
 import time
 from pathlib import Path
@@ -19,7 +17,6 @@ import numpy as np
 from favlo.images import load_image, store_source, sweep_images
 from favlo.media_pipeline import MediaCall, MediaPaused, MediaPipeline, MediaRequestError
 from z_image_turbo.hold import ImageHold, ImageJob, ImagePaused
-from z_image_turbo.matte import cutout
 from z_image_turbo.png import REPORTED_QUALITY, pack_rgb, write_png
 from z_image_turbo.schedule import STEPS
 from z_image_turbo.scratch import MAX_EDGE
@@ -115,9 +112,7 @@ class Pipeline(MediaPipeline):
                 if reason == "preempt":
                     image.hold = _decoded(pixels, timing)
                     raise MediaPaused("preempt", image)
-                image.images.append(
-                    _store(pixels, request.quality, home, background=request.background)
-                )
+                image.images.append(_store(pixels, request.quality, home))
                 image.timings.append(timing)
                 image.index += 1
                 image.hold = None
@@ -189,21 +184,14 @@ def _draw(
     return pixels, timing
 
 
-def _store(
-    pixels: np.ndarray,
-    quality: str,
-    root: Path | None,
-    *,
-    background: str = "opaque",
-) -> dict[str, str]:
+def _store(pixels: np.ndarray, quality: str, root: Path | None) -> dict[str, str]:
     image_id = "image_" + secrets.token_hex(12)
-    samples = cutout(pixels) if background == "transparent" else pixels
-    write_png(store_source(image_id, pack_rgb(samples), home=root), quality)
+    write_png(store_source(image_id, pack_rgb(pixels), home=root), quality)
     sweep_images(home=root)
     stored = load_image(image_id, home=root)
     if stored is None:
         raise RuntimeError("stored image is missing")
-    return {"id": image_id, "b64_json": base64.b64encode(stored).decode("ascii")}
+    return {"id": image_id}
 
 
 def _decoded(pixels: np.ndarray, timing: dict[str, Any]) -> ImageHold:
@@ -322,11 +310,11 @@ def _fields(body: dict[str, Any]) -> ImageFields:
     output_format = _absent_or(body, "output_format", {"png"}, "output_format must be png")
     _absent_or(body, "stream", {False}, "stream must be false")
     _bounded_int(body, "partial_images", 0, 0, 0, "partial_images must be 0")
-    background = _absent_or(
+    _absent_or(
         body,
         "background",
-        {"auto", "opaque", "transparent"},
-        "background must be auto, opaque, or transparent",
+        {"auto", "opaque"},
+        "background must be auto or opaque",
     )
     _absent_or(body, "moderation", {"low", "auto"}, "moderation must be low or auto")
     _absent_or(body, "style", {"vivid", "natural"}, "style must be vivid or natural")
@@ -346,7 +334,7 @@ def _fields(body: dict[str, Any]) -> ImageFields:
         height=height,
         seed=_optional_int(body, "seed", 0, "seed must be an integer"),
         quality=REPORTED_QUALITY[quality or "auto"],
-        background="transparent" if background == "transparent" else "opaque",
+        background="opaque",
         output_format=output_format or "png",
         size=size,
         safety_identifier=_safety_identifier(body),
