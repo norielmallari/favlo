@@ -31,6 +31,20 @@ def call_tool(port: int, name: str, arguments: dict[str, Any]) -> dict[str, Any]
     )
 
 
+def published_name(pipeline: str, tool: str) -> str:
+    """The listener name for one local tool.
+
+    A name that already contains ``__`` is already published. Otherwise the
+    pipeline id is the prefix, with hyphens turned into underscores.
+    """
+    if "__" in tool:
+        return tool
+    if not pipeline:
+        message = "pass --pipeline"
+        raise ValueError(message)
+    return f"{pipeline.replace('-', '_')}__{tool}"
+
+
 def published_call(name: str, arguments: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """Prefix a local tool with its pipeline.
 
@@ -104,21 +118,46 @@ def generate(port: int, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def read_link(port: int, result: dict[str, Any], mime: str) -> bytes:
-    """Read the first ``resource_link`` of ``mime``."""
+    """Read the first ``mediaUri`` or ``resource_link`` of ``mime``."""
     content = result.get("content")
     if not isinstance(content, list):
         message = "the task result has no content"
         raise RuntimeError(message)
     for block in content:
-        if not isinstance(block, dict) or block.get("type") != "resource_link":
+        if not isinstance(block, dict):
             continue
-        if block.get("mimeType") != mime:
+        if block.get("type") == "text" and isinstance(block.get("text"), str):
+            raw = _media_bytes(port, block["text"])
+            if raw is not None:
+                return raw
+        if block.get("type") != "resource_link" or block.get("mimeType") != mime:
             continue
         uri = block.get("uri")
         if isinstance(uri, str):
             return read_uri(port, uri)
     message = f"the task result has no {mime} link"
     raise RuntimeError(message)
+
+
+def _media_bytes(port: int, text: str) -> bytes | None:
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    rows = parsed if isinstance(parsed, list) else [parsed]
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        uri = row.get("mediaUri")
+        if not isinstance(uri, str) or not uri:
+            continue
+        if uri.startswith("file://"):
+            from favlo.local_uri import read_file_uri
+
+            return read_file_uri(uri)
+        if uri.startswith("favlo://"):
+            return read_uri(port, uri)
+    return None
 
 
 def read_uri(port: int, uri: str) -> bytes:

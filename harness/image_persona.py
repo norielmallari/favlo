@@ -20,7 +20,7 @@ from pydantic import Field
 from favlo.chat_client import open_chat_client
 from favlo.persona import PERSONA
 from harness.harness_model import judge_model
-from harness.image_smoke_agent import HOST, IMAGE_MODEL, affirms, post_json
+from harness.image_smoke_agent import HOST, affirms, post_json
 from harness.mcp_media import generate, read_link
 from harness.server import close_listener, open_listener
 from z_image_turbo.scratch import MAX_EDGE
@@ -81,7 +81,6 @@ def image_tools(port: int, png: list[bytes]) -> list[object]:
             port,
             "generate_image",
             {
-                "model": IMAGE_MODEL,
                 "prompt": IMAGE_PROMPT,
                 "size": f"{MAX_EDGE}x{MAX_EDGE}",
                 "seed": 0,

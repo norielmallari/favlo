@@ -6,6 +6,7 @@ Sampling stays on the selected model id. ``--mtp``
 sends the draft flag. Omitted, that flag is off. ``--mtp-depth`` is the draft
 length, three when omitted. ``--vision`` is off unless set. When it is set,
 the first chat is the horse still, and a later request must reuse the tower.
+After the ledger, that same still is sent again, and that request must extend the prefix.
 Each model call prints the reasoning and the reply as the tokens arrive, then
 the tool calls when that call ends. The framework runs the coding tools.
 After the ledger, the same listener runs the chat contract.
@@ -32,9 +33,9 @@ import time
 from pathlib import Path
 
 from harness.benchmarks.serve import Request, Server
-from harness.coding.compliance import run_contract, vision_problems
+from harness.coding.compliance import run_contract
 from harness.coding.grade import grade
-from harness.coding.loop import run_session
+from harness.coding.loop import ledger_log, run_session
 from harness.file_session import (
     format_request,
     format_summary,
@@ -126,8 +127,6 @@ def main(argv: list[str] | None = None) -> int:
             vision=vision,
             store=store,
         )
-        if vision is not None:
-            problems.extend(vision_problems(pipeline_log(server.log.text(), stem)))
         _print_rates(server.log, stem)
         base_url = f"http://127.0.0.1:{server.port}/v1"
         problems.extend(asyncio.run(run_contract(base_url, stem, store=store)))
@@ -152,9 +151,9 @@ def _print_rates(log: object, model: str) -> None:
     if not callable(text):
         return
     deadline = time.monotonic() + 2
-    requests = printed_requests(parse_requests(pipeline_log(text(), model)))
+    requests = printed_requests(parse_requests(ledger_log(pipeline_log(text(), model))))
     while time.monotonic() < deadline:
-        requests = printed_requests(parse_requests(pipeline_log(text(), model)))
+        requests = printed_requests(parse_requests(ledger_log(pipeline_log(text(), model))))
         if requests and requests[-1].decode:
             break
         time.sleep(0.05)

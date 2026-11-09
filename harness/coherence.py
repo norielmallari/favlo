@@ -315,7 +315,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         path = telemetry_path(attached.port)
         size = path.stat().st_size if path.is_file() else 0
-        offset = before if size >= before else 0
+        # A rolled log keeps its newest bytes. Starting at 0 would replay them.
+        offset = before if size >= before else size
         follow(path, on_line, follow_stop, offset=offset)
         pid = attached.pid
         if not pid:

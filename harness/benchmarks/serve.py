@@ -250,7 +250,8 @@ class Server:
         self.follow_stop = threading.Event()
         path = log_path(favlo_home())
         size = path.stat().st_size if path.is_file() else 0
-        offset = before if size >= before else 0
+        # A rolled log keeps its newest bytes. Starting at 0 would replay them.
+        offset = before if size >= before else size
 
         def on_line(line: str) -> None:
             self.log.append(line + "\n")

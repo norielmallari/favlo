@@ -38,6 +38,113 @@ def agent_options(
     }
 
 
+_PREAMBLE = (
+    "vision ",
+    "prefix store ",
+    "prefix load ",
+    "waiting ",
+    "loaded ",
+    "released ",
+)
+
+
+def _prompt_count(line: str) -> int:
+    parts = line.split()
+    if len(parts) == 3 and parts[2].isdigit():
+        return int(parts[2])
+    return 0
+
+
+def ledger_log(text: str) -> str:
+    """The growing transcript on a shared model log.
+
+    A second upload of one still logs that still twice, as ``vision cached`` for
+    the copy already in the prefix and ``vision cache`` for the copy past the
+    hit. The chain runs from that still's tower through the repeated upload. A later request
+    with a shorter prompt is another client. Lines after one prompt that
+    belong to the next request stay with that next request.
+    """
+    buckets: list[list[str]] = []
+    bucket: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("prompt tokens ") and bucket:
+            buckets.append(bucket)
+            bucket = [line]
+        else:
+            bucket.append(line)
+    if bucket:
+        buckets.append(bucket)
+    blocks: list[tuple[int, list[str]]] = []
+    carry: list[str] = []
+    for item in buckets:
+        if not item[0].startswith("prompt tokens "):
+            carry = item
+            continue
+        body = carry + item
+        carry = []
+        end = len(body)
+        while end > 1 and body[end - 1].startswith(_PREAMBLE):
+            end -= 1
+        blocks.append((_prompt_count(item[0]), body[:end]))
+        carry = body[end:]
+    if carry and blocks:
+        blocks[-1][1].extend(carry)
+    if not blocks:
+        return ""
+    start, end = _still_span(blocks)
+
+    chain = [blocks[start]]
+    for index in range(start + 1, end + 1):
+        prompt, lines = blocks[index]
+        if prompt < chain[-1][0]:
+            continue
+        chain.append((prompt, lines))
+    return "\n".join(line for _prompt, lines in chain for line in lines)
+
+
+def _cache_counts(lines: list[str]) -> dict[int, int]:
+    counts: dict[int, int] = {}
+    for line in lines:
+        token = ""
+        for prefix in ("vision cached ", "vision cache "):
+            if line.startswith(prefix):
+                token = line.removeprefix(prefix).strip()
+                break
+        if not token.isdigit():
+            continue
+        count = int(token)
+        counts[count] = counts.get(count, 0) + 1
+    return counts
+
+
+def _still_span(blocks: list[tuple[int, list[str]]]) -> tuple[int, int]:
+    """Tower index and repeated-upload index for one still.
+
+    The repeated upload names the same still twice, as ``vision cached`` or
+    ``vision cache``. The tower is the
+    latest earlier block that merged that still. Without a repeated upload,
+    the span is the whole log.
+    """
+    end: int | None = None
+    still: int | None = None
+    for index, (_prompt, lines) in enumerate(blocks):
+        for count, times in _cache_counts(lines).items():
+            if times >= 2:
+                end = index
+                still = count
+    if end is None or still is None:
+        return 0, len(blocks) - 1
+    start = end
+    marker = f"vision merged {still}"
+    for index in range(end + 1):
+        if any(line == marker for line in blocks[index][1]):
+            start = index
+    return start, end
+
+
 def prefix_problems(requests: list[RequestRate]) -> list[str]:
     """Problems when the restart did not load the prefix or later turns drifted.
 
@@ -116,7 +223,12 @@ def run_session(
                 problems=problems,
             )
         )
-        problems.extend(prefix_problems(parse_requests(pipeline_log(server.log.text(), model))))
+        text = ledger_log(pipeline_log(server.log.text(), model))
+        problems.extend(prefix_problems(parse_requests(text)))
+        if vision is not None:
+            from harness.coding.compliance import vision_problems
+
+            problems.extend(vision_problems(text))
         return list(session.calls), problems
     finally:
         session.close()
@@ -176,6 +288,8 @@ async def _run(
         async for update in stream:
             printer.take(update)
         printer.close()
+        if vision is not None and chat is not None:
+            await _describe(agent, client, vision, options, chat, printer, problems)
     finally:
         await close_chat_client(client)
 
@@ -195,8 +309,21 @@ class _PrefixRestart:
         rebind_chat_client(self.client, self.server.port)
 
 
+def decode_ready(requests: list[RequestRate]) -> bool:
+    """True when the finished request has its decode line.
+
+    A later request that has not logged prefill is another client still
+    inside prefill. Its open row does not hold the restart.
+    """
+    if not requests:
+        return False
+    if requests[-1].decode:
+        return True
+    return len(requests) >= 2 and bool(requests[-2].decode) and not requests[-1].prefill
+
+
 def _wait_latest_decode(server: Server, model: str, *, timeout: float = 30.0) -> None:
-    """Block until this model's open request has a decode line in the log.
+    """Block until this model's finished request has a decode line in the log.
 
     The prefix file is written before that line. Stopping earlier can drop the
     decode telemetry the extension check needs for the applied token count.
@@ -204,8 +331,7 @@ def _wait_latest_decode(server: Server, model: str, *, timeout: float = 30.0) ->
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        requests = parse_requests(pipeline_log(server.log.text(), model))
-        if requests and requests[-1].decode:
+        if decode_ready(parse_requests(pipeline_log(server.log.text(), model))):
             return
         time.sleep(0.05)
     message = "server log did not record decode before restart"
@@ -221,7 +347,7 @@ async def _describe(
     printer: TurnPrinter,
     problems: list[str],
 ) -> None:
-    """The first chat is the still. Tools stay off so the tower runs before the ledger."""
+    """One still chat. Tools stay off so the tower is not mixed with a tool call."""
     from harness.chat_agent import reply_parts
     from harness.coding.compliance import ended, image_message, image_turn_problems
     from harness.image_attachment import png_size

@@ -13,7 +13,8 @@ from harness.benchmarks.serve import Request, apply_sampling, card_model_id
 from harness.coding.__main__ import argument_parser
 from harness.coding.agent_tools import coding_tools
 from harness.coding.grade import grade
-from harness.coding.loop import agent_options, prefix_problems
+from harness.coding.compliance import vision_problems
+from harness.coding.loop import agent_options, decode_ready, ledger_log, prefix_problems
 from harness.turn_printer import print_updates
 from harness.file_session import parse_requests, pipeline_log
 from harness.coding.session import REQUIRED_TOOLS, session_for
@@ -118,6 +119,68 @@ prefill 1.00 tok/s (0 tok in 0.00s)
 decode 1.00 tok/s (1 tok in 1.00s)
 """
     assert prefix_problems(parse_requests(drifted)) == ["prefix did not extend"]
+    shared = """\
+vision patches 3200
+vision merged 800
+prompt tokens 40
+cache miss
+prefill 1.00 tok/s (40 tok in 1.00s)
+decode 1.00 tok/s (1 tok in 1.00s)
+prompt tokens 29
+cache miss
+prefill 1.00 tok/s (29 tok in 1.00s)
+decode 1.00 tok/s (1 tok in 1.00s)
+vision patches 256
+vision merged 180
+prompt tokens 100
+cache miss
+prefill 1.00 tok/s (100 tok in 1.00s)
+decode 1.00 tok/s (4 tok in 1.00s)
+prompt tokens 12
+cache miss
+prefill 1.00 tok/s (12 tok in 1.00s)
+decode 1.00 tok/s (1 tok in 1.00s)
+vision cache 180
+vision cache 180
+prefix load 104 tokens
+prompt tokens 130
+cache hit 104
+prefill 1.00 tok/s (26 tok in 1.00s)
+decode 1.00 tok/s (2 tok in 1.00s)
+"""
+    kept = ledger_log(shared)
+    assert prefix_problems(parse_requests(kept)) == []
+    assert "prompt tokens 29" not in kept
+    assert "prompt tokens 12" not in kept
+    assert "vision patches 3200" not in kept
+    assert vision_problems(kept) == []
+    missed = kept.replace("cache hit 104", "cache miss")
+    assert prefix_problems(parse_requests(missed)) == ["prefix did not extend"]
+    repeat = shared.replace(
+        "vision cache 180\nvision cache 180",
+        "vision cached 180\nvision cache 180",
+    )
+    kept_repeat = ledger_log(repeat)
+    assert "prompt tokens 29" not in kept_repeat
+    assert "vision merged 180" in kept_repeat
+    assert vision_problems(kept_repeat) == []
+
+
+def test_an_open_prefill_does_not_hold_the_restart() -> None:
+    finished = """\
+prompt tokens 100
+cache miss
+prefill 1.00 tok/s (100 tok in 1.00s)
+decode 1.00 tok/s (4 tok in 1.00s)
+prompt tokens 12
+"""
+    assert decode_ready(parse_requests(finished))
+    waiting = """\
+prompt tokens 100
+cache miss
+prefill 1.00 tok/s (100 tok in 1.00s)
+"""
+    assert not decode_ready(parse_requests(waiting))
 
 
 def test_thinking_body_omits_sampling_fields() -> None:
