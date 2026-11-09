@@ -279,6 +279,22 @@ class Memory:
         with self._lock:
             self._returning += count
 
+    def note_shortfall(self, before: int, nbytes: int) -> int:
+        """Count the part of a finished release that reclaimable has not shown.
+
+        ``confirm_released`` already failed. The kernel may have returned part
+        of ``nbytes``. Only the gap still below that check is added, and never
+        more than ``nbytes``.
+        """
+        if nbytes <= _SLAB:
+            return 0
+        gap = before + nbytes - _SLAB - reclaimable_bytes()
+        if gap <= 0:
+            return 0
+        count = min(gap, nbytes)
+        self.note_returning(count)
+        return count
+
     def budget(self) -> int:
         """The serve process answers. A child with a query waits for that answer.
 

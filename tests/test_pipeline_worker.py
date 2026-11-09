@@ -96,8 +96,9 @@ def test_a_short_reclaim_still_drops_the_owners(monkeypatch) -> None:
         def drop_child(self, key: int) -> None:
             seen["dropped"] = key
 
-        def note_returning(self, nbytes: int) -> None:
-            seen["returning"] = nbytes
+        def note_shortfall(self, before: int, nbytes: int) -> int:
+            seen["shortfall"] = (before, nbytes)
+            return nbytes
 
     monkeypatch.setattr("favlo.memory.memory", _Ledger())
     monkeypatch.setattr("favlo.pipeline_worker._log_line", lines.append)
@@ -110,7 +111,7 @@ def test_a_short_reclaim_still_drops_the_owners(monkeypatch) -> None:
     child.counts = {"chat": 30_000_000_000}
     child._forget()
     assert seen["owners"] == ("chat",)
-    assert seen["returning"] == 24_000_000_000
+    assert seen["shortfall"] == (16_000_000_000, 24_000_000_000)
     assert seen["dropped"] == id(child)
     assert lines == ["reclaimable pages stopped short"]
 

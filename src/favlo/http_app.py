@@ -5,9 +5,11 @@ never a socket. ``GET /v1/models`` does not take the request lock. The
 pipeline manager admits the GPU: embeddings, then chats, then media. An
 embedding waits until the open chat returns. A chat that has not started
 waits while an embedding is queued or running. A chat preempts media and
-leaves ``preempt`` set until the chat queue is empty. An embedding does not
-set ``preempt``. It opens beside the resident model and closes when the
-request returns. Image, video, music, and voice run on the MCP queue. The
+leaves ``preempt`` set until the chat queue is empty. A chat whose client
+leaves before that model is opened does not open a runtime. A chat that
+leaves without a reply is not reported as a pipeline failure. An embedding
+does not set ``preempt``. It opens beside the resident model and closes when
+the request returns. Image, video, music, and voice run on the MCP queue. The
 manager opens the runtime that serves the request.
 """
 
@@ -460,6 +462,9 @@ async def _locked(request: Request, args: Any, state: dict[str, Any], kind: str)
     if reply.kind == "json":
         watcher.cancel()
         return Response(reply.encoded, status_code=reply.status, media_type="application/json")
+    if disconnected.is_set() and not reply.started:
+        watcher.cancel()
+        return Response(status_code=204)
 
     async def chunks():
         try:
@@ -517,6 +522,8 @@ def _run_locked(
         if kind in {"embed", "chat", "responses"}:
             ticket = admit(state, kind, cancel=cancel)
             if ticket is None:
+                if cancel is not None and cancel.is_set():
+                    return
                 _leave_cleared(reply)
                 return
         if cancel is not None and cancel.is_set():
@@ -588,10 +595,11 @@ def _run_once(
         _log("waiting for the open request")
         lock.acquire()
     holds = True
+    wire = reply
     if state.get("unload"):
         lock.release()
         holds = False
-        if not reply.started:
+        if not reply.started and not _client_left(reply):
             reply.json(409, {"error": {"message": "the pipeline is closing", "type": "busy"}})
         return
     opened = False
@@ -602,6 +610,8 @@ def _run_once(
     drop_embed = False
     park_embed = False
     try:
+        if kind in {"chat", "responses"} and _client_left(wire):
+            return
         if kind in _MEDIA_KINDS and foreground_busy(state):
             state["media_yield"] = True
             return
@@ -679,6 +689,8 @@ def _run_once(
             else:
                 reply.json(404, {"error": {"message": "not found"}})
             return
+        if kind in {"chat", "responses"} and _client_left(wire):
+            return
         try:
             call(reply, runtime, body, selection, args, state)
         except KeyError as exc:
@@ -697,7 +709,7 @@ def _run_once(
                 if console is None:
                     console = getattr(state.get("runtime"), "console", None)
                 _report_failure(console)
-            if not reply.started:
+            if not reply.started and not _client_left(wire):
                 reply.json(500, {"error": {"message": str(exc), "type": type(exc).__name__}})
     finally:
         try:
@@ -724,7 +736,7 @@ def _run_once(
                 lock.release()
         if opened and kind != "embed":
             _schedule_pipeline_heartbeat(module, runtime, selection)
-        if not reply.started and not state.get("media_yield"):
+        if not reply.started and not state.get("media_yield") and not _client_left(wire):
             reply.json(
                 500,
                 {"error": {"message": "the pipeline wrote no reply", "type": "RuntimeError"}},
@@ -752,6 +764,12 @@ def _abandon_child(state: dict[str, Any], args: Any) -> None:
     runtime = state.get("runtime")
     if isinstance(runtime, PipelineChild):
         drop_runtime(state, args)
+
+
+def _client_left(reply: Any) -> bool:
+    """True when the HTTP client has already gone. A wrapper has no event of its own."""
+    flag = getattr(reply, "disconnected", None)
+    return isinstance(flag, threading.Event) and flag.is_set()
 
 
 def _leave_cleared(reply: LiveReply) -> None:

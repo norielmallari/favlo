@@ -435,6 +435,96 @@ def test_requests_wait_until_the_current_one_finishes() -> None:
         _stop_background(state, thread)
 
 
+def test_a_chat_that_left_before_open_does_not_load_a_model(monkeypatch) -> None:
+    from favlo.http_app import _run_once
+    from favlo.reply import LiveReply
+
+    def opened(*_args, **_kwargs):
+        raise AssertionError("opened")
+
+    monkeypatch.setattr("favlo.http_app.open_for", opened)
+    gone = threading.Event()
+    gone.set()
+    reply = LiveReply(gone)
+    _run_once(
+        None,
+        {"lock": threading.Lock()},
+        "chat",
+        "application/json",
+        b"{}",
+        reply,
+    )
+    assert reply.started is False
+    assert reply.kind == ""
+
+
+def test_a_chat_that_leaves_without_a_reply_is_not_a_pipeline_failure(monkeypatch) -> None:
+    from favlo.http_app import _run_once
+    from favlo.reply import LiveReply
+
+    def opened(*_args, **_kwargs):
+        return SimpleNamespace(
+            selection=SimpleNamespace(requested_id="qwen36-35b-a3b"),
+            runtime=object(),
+            module=object(),
+            embed_child=None,
+            drop_embed=False,
+            park_embed=False,
+        )
+
+    gone = threading.Event()
+
+    def call(reply, runtime, body, selection, args, state) -> None:
+        del reply, runtime, body, selection, args, state
+        gone.set()
+
+    monkeypatch.setattr("favlo.http_app.open_for", opened)
+    monkeypatch.setattr("favlo.http_app.handler_for", lambda *_args, **_kwargs: call)
+    reply = LiveReply(gone)
+    _run_once(
+        None,
+        {"lock": threading.Lock()},
+        "chat",
+        "application/json",
+        b'{"model":"qwen36-35b-a3b","messages":[{"role":"user","content":"hi"}]}',
+        reply,
+    )
+    assert reply.started is False
+    assert reply.status != 500
+
+
+def test_a_silent_chat_is_still_a_pipeline_failure(monkeypatch) -> None:
+    from favlo.http_app import _run_once
+    from favlo.reply import LiveReply
+
+    def opened(*_args, **_kwargs):
+        return SimpleNamespace(
+            selection=SimpleNamespace(requested_id="qwen36-35b-a3b"),
+            runtime=object(),
+            module=object(),
+            embed_child=None,
+            drop_embed=False,
+            park_embed=False,
+        )
+
+    def call(reply, runtime, body, selection, args, state) -> None:
+        del reply, runtime, body, selection, args, state
+
+    monkeypatch.setattr("favlo.http_app.open_for", opened)
+    monkeypatch.setattr("favlo.http_app.handler_for", lambda *_args, **_kwargs: call)
+    reply = LiveReply(threading.Event())
+    _run_once(
+        None,
+        {"lock": threading.Lock()},
+        "chat",
+        "application/json",
+        b'{"model":"qwen36-35b-a3b","messages":[{"role":"user","content":"hi"}]}',
+        reply,
+    )
+    assert reply.status == 500
+    assert reply.payload["error"]["message"] == "the pipeline wrote no reply"
+
+
 def test_a_queued_chat_whose_client_left_does_not_run() -> None:
     runtime = _Runtime()
     runtime.hold = True

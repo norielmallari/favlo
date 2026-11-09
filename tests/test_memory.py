@@ -155,6 +155,22 @@ def test_confirm_released_waits_until_the_pages_return(monkeypatch: Any) -> None
     assert state["calls"] >= 3
 
 
+def test_a_short_reclaim_notes_only_the_pages_still_missing(monkeypatch: Any) -> None:
+    before = 4_000_000_000
+    held = (128 << 20)
+    rose = 40 << 20
+    saved = memory._returning
+    monkeypatch.setattr("favlo.memory.reclaimable_bytes", lambda: before + rose)
+    try:
+        memory._returning = 0
+        missing = memory.note_shortfall(before, held)
+        assert missing == held - (64 << 20) - rose
+        assert memory._returning == missing
+        assert memory.note_shortfall(before, 64 << 20) == 0
+    finally:
+        memory._returning = saved
+
+
 def test_confirm_released_ends_when_the_count_stops_rising(monkeypatch: Any) -> None:
     monkeypatch.setattr("favlo.memory.reclaimable_bytes", lambda: 4_000_000_000)
     monkeypatch.setattr("favlo.memory._RECLAIM_PAUSE", 0.01)

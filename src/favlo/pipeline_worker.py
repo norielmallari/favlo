@@ -466,7 +466,7 @@ class PipelineChild:
             if before is not None and code is not None:
                 if not memory.confirm_released(before, held):
                     _log_line("reclaimable pages stopped short")
-                    memory.note_returning(held)
+                    memory.note_shortfall(before, held)
             memory.drop_child(id(self))
             memory.forget(owners)
         finally:
