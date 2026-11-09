@@ -1,4 +1,4 @@
-"""setup, quantize, kernels, smoke, and generate."""
+"""setup, quantize, kernels, and smoke."""
 
 from __future__ import annotations
 
@@ -37,12 +37,6 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("kernels", help="compile and check matmul2d")
     sub.add_parser("ceilings", help="time the isolated kernels")
     sub.add_parser("smoke", help="832x480 text clip and still clip")
-    generate = sub.add_parser("generate", help="write one mp4")
-    generate.add_argument("--prompt", required=True)
-    generate.add_argument("--size", default="1280x704")
-    generate.add_argument("--frames", type=int, default=9)
-    generate.add_argument("--seed", type=int, default=0)
-    generate.add_argument("--image", type=Path, default=None)
     args = parser.parse_args(argv)
     if args.command == "setup":
         return _setup(args.student_dir)
@@ -55,8 +49,6 @@ def main(argv: list[str] | None = None) -> int:
         return _locked(_ceilings, "ceilings")
     if args.command == "smoke":
         return _locked(_smoke, "smoke")
-    if args.command == "generate":
-        return _locked(lambda: _generate(args), "generate")
     return 2
 
 
@@ -410,31 +402,3 @@ def _drop_student(record: Path) -> None:
         weights.unlink()
         print("removed student checkpoint", flush=True)
 
-
-def _generate(args) -> int:
-    record = repo_root() / "models" / "Wan2.2-TI2V-5B-int8"
-    runtime = open_runtime(
-        record,
-        "fp8",
-        None,
-        None,
-        owner="wan22-ti2v-5b-generate",
-        parts=parts_for_directory(record),
-    )
-    try:
-        width = int(args.size.lower().split("x")[0])
-        height = int(args.size.lower().split("x")[1])
-        image = None
-        if args.image is not None:
-            image = _load_image(args.image, height, width)
-        card = {
-            "prompt": args.prompt,
-            "width": width,
-            "height": height,
-            "frames": args.frames,
-            "seed": args.seed,
-        }
-        _one(runtime, card, image, favlo_home())
-    finally:
-        runtime.close()
-    return 0

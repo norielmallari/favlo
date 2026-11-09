@@ -1,4 +1,4 @@
-"""``kernels``, ``quantize``, ``generate``, ``setup``, and ``delete``."""
+"""``kernels``, ``quantize``, ``setup``, and ``delete``."""
 
 from __future__ import annotations
 
@@ -10,12 +10,8 @@ import urllib.request
 from pathlib import Path
 from typing import Sequence
 
-import numpy as np
-
 from ace_step_15_turbo.measure import run_kernels
 from ace_step_15_turbo.record import HUB, PACKED_NAME, SOURCE_NAME, quantize
-from ace_step_15_turbo.request import MusicRequest
-from ace_step_15_turbo.runtime import open_runtime
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -25,17 +21,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     quant = sub.add_parser("quantize")
     quant.add_argument("--source", type=Path, default=None)
     quant.add_argument("--dest", type=Path, default=None)
-    gen = sub.add_parser("generate")
-    gen.add_argument("--record", type=Path, default=None)
-    gen.add_argument("--prompt", required=True)
-    gen.add_argument("--lyrics", default="")
-    gen.add_argument("--seconds", type=float, default=10.0)
-    gen.add_argument("--seed", type=int, default=0)
-    gen.add_argument("--vocal-language", default="en")
-    gen.add_argument("--bpm", type=int, default=None)
-    gen.add_argument("--keyscale", default=None)
-    gen.add_argument("--timesignature", default=None)
-    gen.add_argument("--out", type=Path, required=True)
     setup = sub.add_parser("setup")
     setup.add_argument("--dest", type=Path, default=None)
     delete = sub.add_parser("delete", help="remove one packed model")
@@ -67,29 +52,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "delete":
         return _delete(args)
-    record = root / PACKED_NAME if args.record is None else args.record
-    runtime = open_runtime(record, kv_cache="e4m3", console=None, resident_percent=None)
-    try:
-        fields = MusicRequest(
-            args.prompt,
-            args.lyrics,
-            args.seconds,
-            args.seed,
-            "wav",
-            args.vocal_language,
-            args.bpm,
-            args.keyscale,
-            args.timesignature,
-        )
-        payload = runtime.generate(fields, lambda stage: print(stage, flush=True))
-    finally:
-        runtime.close()
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    temporary = args.out.with_name(args.out.name + ".tmp")
-    temporary.write_bytes(payload)
-    temporary.replace(args.out)
-    print(args.out)
-    return 0
+    return 2
 
 
 def _delete(args: argparse.Namespace) -> int:

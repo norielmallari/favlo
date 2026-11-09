@@ -76,6 +76,17 @@ add a score for the cutoff.
 
 Setup and the first clip are in [SETUP.md](SETUP.md).
 
+## Listener
+
+`favlo serve` must already be listening. `favlo media` does not start it, and it exits when that port is closed. The command posts the body to the listener. Stdout is one `file://` URI. `--out` writes the pack JSON, `metadata` and `mediaUri`, and does not copy the MP4. `--model` is optional. An omitted `--model` uses the t2v default in the registry when that folder is this pipeline. Otherwise it uses the first folder registered for this pipeline. `--kind` is unnecessary. This pipeline serves one kind.
+
+```text
+uv run favlo media --pipeline wan22-ti2v-5b prompt="A horse gallops at speed. Fixed camera." size=832x480 frames=9
+uv run favlo media --pipeline wan22-ti2v-5b prompt="A horse gallops at speed. Fixed camera." image=file:///absolute/still.png size=832x480 frames=9
+```
+
+`prompt` and `size` are required. An omitted `image` is text-to-video. A provided `image` is a `file://` URI or a base64 PNG and is image-to-video. `frames` defaults from the tool duration when omitted. This is the command that writes the clip. The pipeline command does not.
+
 ## Papers
 
 The transformer and the causal VAE are Wan, [arXiv:2503.20314](https://arxiv.org/abs/2503.20314).

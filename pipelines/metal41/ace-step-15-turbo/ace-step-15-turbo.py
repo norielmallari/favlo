@@ -41,7 +41,6 @@ def mcp_tools() -> list[dict[str, Any]]:
                     "bpm": {"type": "integer", "description": "Tempo."},
                     "keyscale": {"type": "string", "description": "Key."},
                     "timesignature": {"type": "string", "description": "Meter."},
-                    "include_audio": {"type": "boolean", "description": "Inline audio if at most 1 MiB."},
                 },
                 "required": ["prompt"],
             },

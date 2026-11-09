@@ -74,13 +74,11 @@ uv run favlo serve
 
 The daemon listens on `http://127.0.0.1:8129`. The model id is `acestep-v15-xl-turbo-fp8-fp4`. A music client calls `generate_music`. The default length is 30 seconds. A length is from 10 seconds through 10 minutes. The step count is 8.
 
-From the checkout, without the listener:
-
 ```bash
-uv run favlo --ace-step-15-turbo generate --prompt "bright piano, soft drums" --seconds 10 --out clip.wav
+uv run favlo media --pipeline ace-step-15-turbo prompt="bright piano, soft drums" seconds=10
 ```
 
-`--seconds` defaults to 10 on this command. `--lyrics` is optional. `--record` selects a packed directory other than `models/acestep-v15-xl-turbo-fp8-fp4`. The command writes a WAV.
+`favlo media` does not start the listener. Stdout is one `file://` URI. This is the command that writes the clip. The pipeline command does not.
 
 ## If download stops
 

@@ -36,7 +36,6 @@ def mcp_tools() -> list[dict[str, Any]]:
                     "voice": {"type": "string", "description": "Empty speaks with no reference."},
                     "instructions": {"type": "string", "description": "Style prefix."},
                     "response_format": {"type": "string", "description": "mp3, wav, or flac."},
-                    "include_audio": {"type": "boolean", "description": "Inline audio if at most 1 MiB."},
                 },
                 "required": ["input"],
             },

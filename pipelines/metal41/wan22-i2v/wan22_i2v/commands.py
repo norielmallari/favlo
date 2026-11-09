@@ -1,4 +1,4 @@
-"""CLI for quantize, kernels, and generate."""
+"""CLI for quantize and kernels."""
 
 from __future__ import annotations
 
@@ -11,15 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from wan22_i2v.formats import TILE_M, dequant_fp4, dequant_fp8, pack_linear
-from wan22_i2v.png import decode_png
-from wan22_i2v.schedule import (
-    OFFICIAL,
-    P320_HEIGHT,
-    P320_WIDTH,
-    PROMOTE_PERCENT,
-    SHORT_FRAMES,
-    STEPS,
-)
+from wan22_i2v.schedule import OFFICIAL, PROMOTE_PERCENT
 
 _FOLDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _RECORD = "Wan2.2-I2V-A14B-fp4"
@@ -50,18 +42,6 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="pack every DiT linear as per-channel int8",
     )
-    gen = sub.add_parser("generate", help="write one AVI")
-    gen.add_argument("--record", type=Path, required=True)
-    gen.add_argument("--image", type=Path, required=True)
-    gen.add_argument("--prompt", required=True)
-    gen.add_argument("--frames", type=int, default=SHORT_FRAMES)
-    gen.add_argument("--width", type=int, default=P320_WIDTH)
-    gen.add_argument("--height", type=int, default=P320_HEIGHT)
-    gen.add_argument("--seed", type=int, default=0)
-    gen.add_argument("--negative-prompt", default="")
-    gen.add_argument("--guidance-scale", type=float, nargs="+")
-    gen.add_argument("--steps", type=int, default=STEPS)
-    gen.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
     if args.command == "setup":
         from wan22_i2v.source import dit_dir, download, expert_paths, vae_dir
@@ -77,20 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         return kernels()
     if args.command == "quantize":
         return _quantize(args)
-    if args.command == "generate":
-        return _generate(args)
     return 2
-
-
-def _guidance(values: list[float] | None) -> tuple[float, float]:
-    if not values:
-        return (1.0, 1.0)
-    if len(values) == 1:
-        return (values[0], values[0])
-    if len(values) == 2:
-        return (values[0], values[1])
-    message = "guidance-scale is one number or a low, high pair"
-    raise ValueError(message)
 
 
 def kernels() -> int:
@@ -200,37 +167,6 @@ def _quantize(args: argparse.Namespace) -> int:
     else:
         print(f"high fp8 blocks {manifest['high_promoted']}", flush=True)
         print(f"low fp8 blocks {manifest['low_promoted']}", flush=True)
-    return 0
-
-
-def _generate(args: argparse.Namespace) -> int:
-    from wan22_i2v.runtime import Runtime
-
-    image = decode_png(args.image.read_bytes())
-    try:
-        guidance = _guidance(args.guidance_scale)
-    except ValueError as exc:
-        print(exc, file=sys.stderr, flush=True)
-        return 2
-    from favlo.registry import parts_for_directory
-
-    runtime = Runtime(args.record, parts=parts_for_directory(args.record))
-    try:
-        avi, timing = runtime.generate(
-            args.prompt,
-            image,
-            args.frames,
-            args.width,
-            args.height,
-            args.seed,
-            negative_prompt=args.negative_prompt,
-            guidance=guidance,
-            steps=args.steps,
-        )
-    finally:
-        runtime.close()
-    args.out.write_bytes(avi)
-    print(f"wrote {args.out} frames {args.frames} steps {len(timing['steps'])}", flush=True)
     return 0
 
 

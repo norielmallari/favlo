@@ -23,4 +23,15 @@ Each patch is 4 latent frames. The diffusion transformer takes 10 Euler steps, g
 
 `models add <folder>` writes `manifest.json` with `complete` true when that directory holds `model.safetensors` and `config.json`, then registers the folder. The served record is `models/VoxCPM2`, a link to the checkout. `setup` still does not register.
 
+## Listener
+
+`favlo serve` must already be listening. `favlo media` does not start it, and it exits when that port is closed. The command posts the body to the listener. Stdout is one `file://` URI. `--out` writes the pack JSON, `metadata` and `mediaUri`, and does not copy the audio file. `--model` is optional. An omitted `--model` uses the voice default in the registry when that folder is this pipeline. Otherwise it uses the first folder registered for this pipeline. `--kind` is unnecessary. This pipeline serves one kind.
+
+```text
+uv run favlo media --pipeline voxcpm2 input="Hello."
+uv run favlo media --pipeline voxcpm2 --model VoxCPM2 --out pack.json input="Hello." instructions="calm"
+```
+
+`input` is required. `voice` must be empty or omitted. `instructions` is the optional style prefix. `response_format` defaults to `mp3`. Offline `speak` writes a WAV without the listener. `media` is the command that goes through serve.
+
 `handle_voice` is a `MediaPipeline`. A chat that arrives between patches pauses the job. The same job speaks the line again after the chat releases the GPU. Patches drawn before the pause are not kept. `voxcpm2__generate_voice` on `POST /mcp` speaks `input` with an empty `voice`. `instructions` is the style prefix. The row does not list speakers or emotions. `python -m harness.voice_smoke_agent` calls that tool for the model, line, and instructions in [smoke.json](smoke.json). The file is `artifacts/voice-smoke-agent.wav`, 48 kHz mono, with RMS above the silence floor and a duration inside `max_seconds`. That run is not part of `pytest`.

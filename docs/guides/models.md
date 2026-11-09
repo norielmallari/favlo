@@ -52,7 +52,7 @@ The official checkpoint is `Qwen/Qwen3.8-27B`. The steps are [qwen38-27b/SETUP.m
 
 The official checkpoint is `Tongyi-MAI/Z-Image-Turbo`. The steps are [z-image-turbo/SETUP.md](../z-image-turbo/SETUP.md).
 
-`favlo --z-image-turbo setup` downloads that repository into `models/Z-Image-Turbo`. `quantize` packs `models/Z-Image-Turbo-fp4`. `quantize --int8` packs `models/Z-Image-Turbo-int8` from that checkout and copies `tokenizer/` into that record. Generation reads the copy. `--weights` is one `.safetensors` file or a directory of shards. With no `--name`, the folder is that file or directory name plus `-fp4`, or `-int8` when `--int8` is set. `--name` is the registry id. `setup-matte` downloads BiRefNet general for `background=transparent`.
+`favlo --z-image-turbo setup` downloads that repository into `models/Z-Image-Turbo`. `quantize --int8` packs `models/Z-Image-Turbo-int8` and copies `tokenizer/` into that record. That is the served record. Generation reads the copy. `quantize` without `--int8` packs `models/Z-Image-Turbo-fp4`. `--weights` is one `.safetensors` file or a directory of shards. With no `--name`, the folder is that file or directory name plus `-int8` when `--int8` is set, or `-fp4` otherwise. `--name` is the registry id.
 ## Wan 2.2 I2V
 
 The official checkpoint is `Wan-AI/Wan2.2-I2V-A14B`. The text encoder is `google/umt5-xxl`. The steps are [wan22-i2v/SETUP.md](../wan22-i2v/SETUP.md).

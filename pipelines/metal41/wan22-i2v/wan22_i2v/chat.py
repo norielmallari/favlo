@@ -237,6 +237,13 @@ def _image_bytes(body: dict[str, Any]) -> bytes:
         ref = url
     if not isinstance(ref, str) or not ref:
         raise VideoRequestError("input_reference is required", "input_reference")
+    if ref.startswith("file://"):
+        from favlo.local_uri import read_file_uri
+
+        try:
+            return read_file_uri(ref)
+        except (OSError, ValueError) as exc:
+            raise VideoRequestError("input_reference must be a PNG", "input_reference") from exc
     if ref.startswith("data:"):
         _header, _sep, ref = ref.partition(",")
     try:

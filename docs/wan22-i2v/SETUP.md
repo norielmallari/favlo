@@ -90,15 +90,13 @@ Start the listener:
 uv run favlo serve
 ```
 
-The daemon listens on `http://127.0.0.1:8129`. The model id is `Wan2.2-I2V-A14B-int8`. A video client calls `generate_video_i2v`. The still is an image id from `generate_image`, or a PNG block. A filesystem path is refused. `size` is required. `list_video_models_i2v` lists the landscape and portrait sizes for 240p, 320p, 480p, and 720p. The `generate` command still defaults to 576×320. MCP `duration` is clip length in seconds. An omitted `duration` is 81 frames. A frame count is `4n+1`. The shortest moving clip is 5 frames. The default step count is 4.
-
-From the checkout, without the listener:
+The daemon listens on `http://127.0.0.1:8129`. The model id is `Wan2.2-I2V-A14B-int8`. A video client calls `wan22_i2v__generate_video`. The still is an image id from `generate_image`, a PNG block, or a `file://` URI. `size` is required. Landscape and portrait sizes for 240p, 320p, 480p, and 720p are accepted. An omitted duration is 81 frames. A frame count is `4n+1`. The shortest moving clip is 5 frames. The default step count is 4.
 
 ```bash
-uv run favlo --wan22-i2v generate --record models/Wan2.2-I2V-A14B-int8 --image still.png --prompt "The cube slides to the right. Fixed camera." --frames 5 --width 576 --height 320 --out clip.avi
+uv run favlo media --pipeline wan22-i2v prompt="The cube slides to the right. Fixed camera." image=file:///absolute/still.png size=576x320 frames=5
 ```
 
-`--image` is a PNG. A still that is not the clip size is resized to that size. The command writes an uncompressed AVI.
+`favlo media` does not start the listener. Stdout is one `file://` URI. This is the command that writes the clip. The pipeline command does not. A still that is not the clip size is resized to that size.
 
 ## If download stops
 

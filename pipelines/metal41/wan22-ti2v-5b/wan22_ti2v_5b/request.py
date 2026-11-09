@@ -167,9 +167,14 @@ def _image(value: object, width: int, height: int) -> np.ndarray | None:
         message = "image must be base64 png"
         raise VideoRequestError(message)
     try:
-        raw = base64.b64decode(value, validate=False)
+        if value.startswith("file://"):
+            from favlo.local_uri import read_file_uri
+
+            raw = read_file_uri(value)
+        else:
+            raw = base64.b64decode(value, validate=False)
         image = decode_png(raw)
-    except (ValueError, TypeError) as exc:
+    except (OSError, ValueError, TypeError) as exc:
         message = "image must be a png"
         raise VideoRequestError(message) from exc
     if image.shape[1] != width or image.shape[0] != height:
