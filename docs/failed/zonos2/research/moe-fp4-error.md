@@ -19,7 +19,7 @@ The sort key is the maximum expert score in one layer. The budget is the largest
 
 ## Command
 
-`uv run favlo --zonos2 quantize --src <checkout>` writes `models/ZONOS2-fp8-fp4/ffn_error.json` before it packs that record. A later run reads that file and does not rescore. The table below is that file, rounded to six digits.
+The table is `models/ZONOS2-fp8-fp4/ffn_error.json`, written when that record was packed. A later read of the file does not rescore. The pipeline has no CLI. The figures below are that file, rounded to six digits.
 
 ## Table
 
