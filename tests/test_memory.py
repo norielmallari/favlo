@@ -216,6 +216,29 @@ def test_a_later_budget_ask_sees_pages_that_became_free() -> None:
         memory.set_budget_query(None)
 
 
+def test_a_reported_working_set_is_released_with_the_owner(monkeypatch: Any) -> None:
+    from favlo.media_memory import begin_release, confirm_release
+
+    owner = "ic-light:reported"
+    memory.report({owner: 80 << 20})
+    try:
+        before, held = begin_release(owner)
+        assert held == 80 << 20
+        memory.report({owner: 0})
+        seen: dict[str, int] = {}
+
+        def confirm(start: int, nbytes: int, timeout: float | None = None) -> bool:
+            del start, timeout
+            seen["nbytes"] = nbytes
+            return True
+
+        monkeypatch.setattr(memory, "confirm_released", confirm)
+        confirm_release(owner, before, held)
+        assert seen["nbytes"] == 80 << 20
+    finally:
+        memory.forget((owner,))
+
+
 def test_a_global_cap_keeps_the_smaller_budget(monkeypatch: Any) -> None:
     _freeze_reclaimable(monkeypatch, 8 << 30)
     uncapped = memory.budget()

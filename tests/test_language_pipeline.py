@@ -8,13 +8,7 @@ import pytest
 
 from favlo.embeddings_pipeline import EmbeddingsPipeline
 from favlo.language_pipeline import LanguagePipeline
-from favlo.media_pipeline import (
-    ImagePipeline,
-    MediaPipeline,
-    MusicPipeline,
-    VideoPipeline,
-    VoicePipeline,
-)
+from favlo.media_pipeline import MediaPipeline
 from favlo.pipeline import ClientClosed, Pipeline
 
 
@@ -31,16 +25,8 @@ class _Reply:
 
 def test_media_pipeline_extends_the_daemon_base() -> None:
     assert issubclass(MediaPipeline, Pipeline)
-    assert issubclass(ImagePipeline, MediaPipeline)
-    assert issubclass(VideoPipeline, MediaPipeline)
-    assert issubclass(MusicPipeline, MediaPipeline)
-    assert issubclass(VoicePipeline, MediaPipeline)
     assert issubclass(LanguagePipeline, Pipeline)
     assert issubclass(EmbeddingsPipeline, Pipeline)
-    assert ImagePipeline.kind == "image"
-    assert VideoPipeline.kind == "video"
-    assert MusicPipeline.kind == "music"
-    assert VoicePipeline.kind == "voice"
 
 
 def test_a_closed_client_clears_stop_and_does_not_fail() -> None:

@@ -2268,6 +2268,9 @@ class Qwen36Runtime:
             self._note("prefix_load", tokens=hit)
         self._note("cache", hit=hit)
         self._cached_tokens = hit
+        from qwen36_35b_a3b.vision import bind_vision
+
+        bind_vision(self, hit)
         suffix = prompt[hit:]
         if mtp and not self._mtp_ready:
             message = "this record has no MTP weights"

@@ -157,4 +157,5 @@ def test_mcp_lists_memory_tools() -> None:
     mcp = build_mcp(lambda *_args: {}, {}, lambda _text: _unit(0))
     tools = asyncio.run(mcp.list_tools(run_middleware=False))
     names = {tool.name for tool in tools}
-    assert {"remember", "recall", "forget", "generate_image"}.issubset(names)
+    assert {"remember", "recall", "forget"} <= names
+    assert any(name.endswith("__generate_image") for name in names)

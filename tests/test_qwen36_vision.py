@@ -18,8 +18,10 @@ from qwen36_35b_a3b.vision import (
     _pixel_bounds,
     decode_image,
     decode_png,
+    bind_vision,
     expand_image_tokens,
     interpolate_positions,
+    merged_grid,
     pack_image,
     rope_positions,
     smart_size,
@@ -148,6 +150,71 @@ def test_an_image_advances_mrope_by_its_longer_side() -> None:
     assert delta == -3
     assert (10 - 1) + delta == int(positions[0, -1])
     assert 10 + delta == int(positions[0, -1]) + 1
+
+
+def test_merged_grid_matches_the_pack() -> None:
+    image = np.zeros((32, 32, 3), dtype=np.uint8)
+    _packed, grid_h, grid_w = pack_image(image, min_pixels=32 * 32, max_pixels=32 * 32)
+    assert merged_grid(image, min_pixels=32 * 32, max_pixels=32 * 32) == (
+        grid_h // 2,
+        grid_w // 2,
+    )
+
+
+class _Upload:
+    def __init__(self) -> None:
+        self.blobs: list[bytes] = []
+
+    def upload(self, blob: bytes) -> bytes:
+        self.blobs.append(blob)
+        return blob
+
+
+def test_a_covered_image_skips_the_tower(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("tower")
+
+    monkeypatch.setattr("qwen36_35b_a3b.vision._vision_row", fail)
+    notes: list[str] = []
+    runtime = type("Runtime", (), {})()
+    runtime._status = notes.append
+    runtime._vision_plan = [(b"png", 1, 2, 4, 2, 3)]
+    runtime._vision_rows = object()
+    runtime._vision_index = object()
+    runtime._free_device = lambda buffers: None
+    bind_vision(runtime, 4 + 6)
+    assert notes == ["vision cached 6"]
+    assert runtime._vision_rows is None
+    assert runtime._vision_index is None
+
+
+def test_an_image_past_the_hit_is_the_only_one_embedded(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[bytes] = []
+
+    def row(_runtime: object, blob: bytes, **_kwargs: object) -> tuple[np.ndarray, int, int]:
+        calls.append(blob)
+        return np.ones((2, 4), dtype=np.float32), 2, 4
+
+    monkeypatch.setattr("qwen36_35b_a3b.vision._vision_row", row)
+    notes: list[str] = []
+    runtime = type("Runtime", (), {})()
+    runtime._status = notes.append
+    runtime._vision_plan = [
+        (b"kept", 1, 2, 0, 2, 2),
+        (b"new", 1, 2, 8, 1, 2),
+    ]
+    runtime._rope_length = 12
+    runtime.session = _Upload()
+    runtime._vision_rows = None
+    runtime._vision_index = None
+    runtime._free_device = lambda buffers: None
+    bind_vision(runtime, 8)
+    assert calls == [b"new"]
+    assert notes == ["vision cached 4"]
+    index = np.frombuffer(runtime.session.blobs[1], dtype=np.uint32)
+    assert index.tolist()[:8] == [0xFFFFFFFF] * 8
+    assert index[8] == 0
+    assert index[9] == 1
 
 
 def test_image_pad_expands_once() -> None:
