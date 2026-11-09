@@ -127,18 +127,10 @@ def test_favlo_media_mcp_is_seeded_once(tmp_path: Path) -> None:
     assert servers[0]["url"] == LOCAL_MCP_URL
     assert servers[0]["enabled"] is True
     assert {group["id"]: group["enabled"] for group in servers[0]["groups"]} == {
-        "image": True,
-        "video": True,
-        "music": True,
-        "voice": True,
         "media": True,
         "memory": True,
     }
     assert {group["id"]: group["enabled"] for group in catalog[0]["groups"]} == {
-        "image": True,
-        "video": True,
-        "music": True,
-        "voice": True,
         "media": True,
         "memory": True,
     }
@@ -170,10 +162,6 @@ def test_a_new_agent_starts_with_favlo_media(tmp_path: Path) -> None:
         assert servers[0]["enabled"] is True
         assert servers[0]["command"] == ""
         assert {group["id"]: group["enabled"] for group in servers[0]["groups"]} == {
-            "image": True,
-            "video": True,
-            "music": True,
-            "voice": True,
             "media": True,
             "memory": True,
         }
@@ -206,10 +194,6 @@ def test_a_new_agent_starts_with_favlo_media(tmp_path: Path) -> None:
             if row["agent_id"] == again["agent"]["id"]
         ]
         assert {group["id"]: group["enabled"] for group in copied[0]["groups"]} == {
-            "image": True,
-            "video": True,
-            "music": True,
-            "voice": True,
             "media": True,
             "memory": True,
         }

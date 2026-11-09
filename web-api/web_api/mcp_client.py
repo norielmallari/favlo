@@ -62,13 +62,18 @@ async def list_tools(server: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(schema, dict):
             schema = {"type": "object", "properties": {}}
         description = tool.get("description")
-        found.append(
-            {
-                "name": tool["name"],
-                "description": description if isinstance(description, str) else "",
-                "schema": schema,
-            }
-        )
+        meta = tool.get("_meta")
+        if not isinstance(meta, dict):
+            meta = tool.get("meta")
+        pipeline = meta.get("pipeline") if isinstance(meta, dict) else None
+        row = {
+            "name": tool["name"],
+            "description": description if isinstance(description, str) else "",
+            "schema": schema,
+        }
+        if isinstance(pipeline, str) and pipeline:
+            row["pipeline"] = pipeline
+        found.append(row)
     return found
 
 

@@ -25,7 +25,7 @@ test('the reply shows while an image generates, then the image appears', async (
       await page
         .getByRole('textbox', { name: 'Persona', exact: true })
         .fill(
-          'When asked to draw, call generate_image with the default model. Do not call set_image_model. Then reply in one short sentence.',
+          'When asked to draw, call z_image_turbo__generate_image. Omit model. Then reply in one short sentence.',
         );
       await page.getByRole('combobox', { name: 'Provider', exact: true }).selectOption(LOCAL_PROVIDER_ID);
       const refresh = page.getByRole('button', { name: 'Refresh models', exact: true });

@@ -96,14 +96,18 @@ def test_save_keeps_a_disabled_group_and_lists_its_tools(
 ) -> None:
     catalog = prepare_catalog(
         [
-            {"name": "generate_image", "description": "Generate.", "schema": {"type": "object"}},
-            {"name": "list_image_models", "description": "List.", "schema": {"type": "object"}},
-            {"name": "set_image_model", "description": "Set.", "schema": {"type": "object"}},
+            {
+                "name": "z_image_turbo__generate_image",
+                "description": "Generate.",
+                "schema": {"type": "object"},
+                "pipeline": "z-image-turbo",
+            },
             {"name": "echo", "description": "Echo.", "schema": {"type": "object"}},
         ]
     )
     groups = groups_from(catalog)
-    assert groups[0]["tools"] == ["generate_image", "list_image_models", "set_image_model"]
+    assert groups[0]["id"] == "z-image-turbo"
+    assert groups[0]["tools"] == ["z_image_turbo__generate_image"]
     store = Store(tmp_path / "app.db")
     try:
         _status, created, _events = store.create_mcp_server(
@@ -115,11 +119,11 @@ def test_save_keeps_a_disabled_group_and_lists_its_tools(
                 "command": "",
                 "url": "http://127.0.0.1:9/mcp",
                 "enabled": True,
-                "groups": [{"id": "image", "enabled": False}],
+                "groups": [{"id": "z-image-turbo", "enabled": False}],
                 "tools": catalog,
             },
         )
-        image = next(group for group in created["groups"] if group["id"] == "image")
+        image = next(group for group in created["groups"] if group["id"] == "z-image-turbo")
         assert image["enabled"] is False
         assert image["tools"] == []
         from web_api.mcp_tools import bundle
@@ -127,9 +131,10 @@ def test_save_keeps_a_disabled_group_and_lists_its_tools(
         async def listed(_server: object, *, refresh: bool = False) -> list[dict[str, object]]:
             return [
                 {
-                    "name": "generate_image",
+                    "name": "z_image_turbo__generate_image",
                     "description": "Generate.",
                     "schema": {"type": "object"},
+                    "pipeline": "z-image-turbo",
                 },
                 {"name": "echo", "description": "Echo.", "schema": {"type": "object"}},
             ]
@@ -145,23 +150,25 @@ def test_save_keeps_a_disabled_group_and_lists_its_tools(
         store.close()
 
 
-def test_media_instructions_require_a_listed_model_id() -> None:
+def test_media_instructions_keep_the_server_description() -> None:
     described = _description(
-        {"name": "generate_image", "description": "Generate one or more PNGs."}
+        {"name": "z_image_turbo__generate_image", "description": "Generate one or more PNGs."}
     )
-    assert "set_image_model" in described
-    assert "session" in described
+    assert described == "Generate one or more PNGs."
 
 
-def test_mcp_always_load_covers_image_memory_and_media_tasks() -> None:
-    from web_api.mcp_tools import ALWAYS_LOAD
+def test_mcp_always_load_covers_generate_memory_and_media_tasks() -> None:
+    from web_api.mcp_tools import eager
 
-    assert "generate_image" in ALWAYS_LOAD
-    assert "remember" in ALWAYS_LOAD
-    assert "media_status" in ALWAYS_LOAD
-    assert "generate_video_i2v" not in ALWAYS_LOAD
-    assert "generate_music" not in ALWAYS_LOAD
-    assert "generate_voice" not in ALWAYS_LOAD
+    assert eager("z_image_turbo__generate_image")
+    assert eager("wan22_i2v__generate_video")
+    assert eager("wan22_ti2v_5b__generate_video_i2v")
+    assert eager("wan22_ti2v_5b__generate_video_t2v")
+    assert eager("ace_step_15_turbo__generate_music")
+    assert eager("voxcpm2__generate_voice")
+    assert eager("remember")
+    assert eager("media_status")
+    assert not eager("example_pipeline__custom_tool")
 
 
 def test_dumps_for_model_omits_spaces() -> None:
@@ -178,8 +185,24 @@ def test_dumps_for_model_drops_empty_fields() -> None:
     assert text == '{"path":"a.png","score":0.1}'
 
 
+_EAGER = frozenset(
+    {
+        "remember",
+        "recall",
+        "forget",
+        "media_status",
+        "media_cancel",
+        "z_image_turbo__generate_image",
+        "wan22_i2v__generate_video",
+        "ace_step_15_turbo__generate_music",
+        "voxcpm2__generate_voice",
+    }
+)
+_COLD = frozenset({"example_pipeline__custom_tool"})
+
+
 def test_progressive_mcp_server_flags_and_eager_mask() -> None:
-    from web_api.mcp_tools import ALWAYS_LOAD, _server
+    from web_api.mcp_tools import _server
 
     class _Client:
         pass
@@ -193,24 +216,24 @@ def test_progressive_mcp_server_flags_and_eager_mask() -> None:
         },
         "agent",
         "favlo",
-        sorted(ALWAYS_LOAD | {"generate_video_i2v", "generate_music"}),
-        sorted(ALWAYS_LOAD),
+        sorted(_EAGER | _COLD),
+        sorted(_EAGER),
         None,
     )
     assert opened is not None
     # Replace the real client so construction stayed side-effect free for flags.
     opened.owned_client = _Client()
     assert opened.use_progressive_disclosure is True
-    assert set(opened.always_load or []) == set(ALWAYS_LOAD)
-    assert "generate_video_i2v" in set(opened.allowed_tools or [])
-    assert "generate_video_i2v" not in set(opened.always_load or [])
+    assert set(opened.always_load or []) == set(_EAGER)
+    assert "example_pipeline__custom_tool" in set(opened.allowed_tools or [])
+    assert "example_pipeline__custom_tool" not in set(opened.always_load or [])
 
 
-def test_progressive_initial_functions_exclude_cold_media() -> None:
-    """Eager progressive surface has loaders + always_load, not video/music generate."""
+def test_progressive_initial_functions_include_generate_tools() -> None:
+    """Eager progressive surface has loaders, generate_*, and cold non-generate remotes stay out."""
     from agent_framework import FunctionTool
 
-    from web_api.mcp_tools import ALWAYS_LOAD, _server
+    from web_api.mcp_tools import _server
 
     opened = _server(
         {
@@ -221,8 +244,8 @@ def test_progressive_initial_functions_exclude_cold_media() -> None:
         },
         "agent",
         "favlo",
-        sorted(ALWAYS_LOAD | {"generate_video_i2v", "generate_music", "generate_voice"}),
-        sorted(ALWAYS_LOAD),
+        sorted(_EAGER | _COLD),
+        sorted(_EAGER),
         None,
     )
     assert opened is not None
@@ -242,19 +265,17 @@ def test_progressive_initial_functions_exclude_cold_media() -> None:
             func=_run,
         )
 
-    fakes = [
-        _fake(f"favlo_{remote}", remote)
-        for remote in sorted(ALWAYS_LOAD | {"generate_video_i2v", "generate_music", "generate_voice"})
-    ]
+    fakes = [_fake(f"favlo_{remote}", remote) for remote in sorted(_EAGER | _COLD)]
     opened._filtered_functions = lambda: fakes  # type: ignore[method-assign]
     opened._progressive_loader_functions = None
     names = {func.name for func in opened._progressive_functions()}
     assert "favlo_load_tool" in names
     assert "favlo_list_mcp_tools" in names
-    assert "favlo_generate_image" in names
-    assert "favlo_generate_video_i2v" not in names
-    assert "favlo_generate_music" not in names
-    assert "favlo_generate_voice" not in names
+    assert "favlo_z_image_turbo__generate_image" in names
+    assert "favlo_wan22_i2v__generate_video" in names
+    assert "favlo_ace_step_15_turbo__generate_music" in names
+    assert "favlo_voxcpm2__generate_voice" in names
+    assert "favlo_example_pipeline__custom_tool" not in names
 
 
 def test_mcp_tools_from_two_servers_keep_unique_names(
@@ -266,9 +287,10 @@ def test_mcp_tools_from_two_servers_keep_unique_names(
     async def listed(_server: object, *, refresh: bool = False) -> list[dict[str, object]]:
         return [
             {
-                "name": "generate_image",
+                "name": "z_image_turbo__generate_image",
                 "description": "Generate.",
                 "schema": {"type": "object", "properties": {"prompt": {"type": "string"}}},
+                "pipeline": "z-image-turbo",
             }
         ]
 
@@ -302,14 +324,13 @@ def test_mcp_tools_from_two_servers_keep_unique_names(
         assert prefixes[0] == "favlo_media"
         assert "favlo_media_2" in prefixes
         assert len(prefixes) == len(set(prefixes))
-        assert all(list(item.allowed_tools) == ["generate_image"] for item in tools)
+        assert all(list(item.allowed_tools) == ["z_image_turbo__generate_image"] for item in tools)
         assert text == ""
         described = _description(
-            {"name": "generate_image", "description": "Generate."},
-            "favlo_media_generate_image",
+            {"name": "z_image_turbo__generate_image", "description": "Generate."},
+            "favlo_media_z_image_turbo__generate_image",
         )
-        assert "favlo_media_list_image_models" in described
-        assert "favlo_media_set_image_model" in described
+        assert described == "Generate."
         stored = sqlite3.connect(tmp_path / "app.db")
         try:
             tables = stored.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -341,9 +362,10 @@ def test_any_configured_server_attaches_with_no_instruction_text(
             ]
         return [
             {
-                "name": "generate_image",
+                "name": "z_image_turbo__generate_image",
                 "description": "Generate.",
                 "schema": {"type": "object"},
+                "pipeline": "z-image-turbo",
             }
         ]
 
@@ -369,7 +391,7 @@ def test_any_configured_server_attaches_with_no_instruction_text(
     assert set(by_prefix) == {"favlo_media", "notes"}
     assert list(by_prefix["notes"].allowed_tools) == ["lookup_note"]
     assert list(by_prefix["notes"].always_load or []) == []
-    assert "generate_image" in list(by_prefix["favlo_media"].always_load or [])
+    assert "z_image_turbo__generate_image" in list(by_prefix["favlo_media"].always_load or [])
 
 
 def test_an_unstamped_database_is_rebuilt(tmp_path: Path) -> None:
@@ -444,7 +466,10 @@ def test_an_unstamped_database_is_rebuilt(tmp_path: Path) -> None:
         seeded = store.mcp_server(FAVLO_MCP_ID)
         assert seeded is not None
         assert seeded["name"] == "Favlo media"
-        assert seeded["groups"] == []
+        assert {group["id"]: group["enabled"] for group in seeded["groups"]} == {
+            "media": True,
+            "memory": True,
+        }
     finally:
         store.close()
     check = sqlite3.connect(path)

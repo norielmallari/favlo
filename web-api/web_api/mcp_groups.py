@@ -1,50 +1,46 @@
-"""Favlo media tools, grouped for one enable switch each."""
+"""Favlo media tools, grouped for one enable switch each.
+
+A registered pipeline is one switch. Listener tools stay on their own switches.
+Kind switches are not read.
+"""
 
 from __future__ import annotations
 
 import json
+from typing import Any
 
-_GROUPS: dict[str, tuple[str, str]] = {
-    "list_image_models": ("image", "Image"),
-    "set_image_model": ("image", "Image"),
-    "generate_image": ("image", "Image"),
-    "list_video_models_i2v": ("video", "Video"),
-    "list_video_models_t2v": ("video", "Video"),
-    "set_video_i2v_model": ("video", "Video"),
-    "set_video_t2v_model": ("video", "Video"),
-    "generate_video_i2v": ("video", "Video"),
-    "generate_video_t2v": ("video", "Video"),
-    "list_music_models": ("music", "Music"),
-    "set_music_model": ("music", "Music"),
-    "generate_music": ("music", "Music"),
-    "list_voice_models": ("voice", "Voice"),
-    "set_voice_model": ("voice", "Voice"),
-    "generate_voice": ("voice", "Voice"),
+_LISTENER: dict[str, tuple[str, str]] = {
     "media_status": ("media", "Media tasks"),
     "media_cancel": ("media", "Media tasks"),
-    "read_media": ("media", "Media tasks"),
     "remember": ("memory", "Memory"),
     "recall": ("memory", "Memory"),
     "forget": ("memory", "Memory"),
 }
 
-ORDER = ("image", "video", "music", "voice", "media", "memory", "tools")
-GROUP_NAMES = {group_id: name for group_id, name in _GROUPS.values()}
+ORDER = ("media", "memory", "tools")
+GROUP_NAMES = {group_id: name for group_id, name in _LISTENER.values()}
 GROUP_NAMES["tools"] = "Tools"
 
-GENERATE = {
-    "generate_image": ("list_image_models", "set_image_model"),
-    "generate_video_i2v": ("list_video_models_i2v", "set_video_i2v_model"),
-    "generate_video_t2v": ("list_video_models_t2v", "set_video_t2v_model"),
-    "generate_music": ("list_music_models", "set_music_model"),
-    "generate_voice": ("list_voice_models", "set_voice_model"),
-}
 
-
-def group_for(name: str) -> tuple[str, str]:
-    return _GROUPS.get(name, ("tools", "Tools"))
+def group_for(tool: str | dict[str, Any]) -> tuple[str, str]:
+    """The switch for one listed tool. A pipeline id comes from the tool meta."""
+    if isinstance(tool, str):
+        name = tool
+        pipeline = ""
+    else:
+        name = str(tool.get("name") or "")
+        found = tool.get("pipeline")
+        pipeline = found if isinstance(found, str) else ""
+    if name in _LISTENER:
+        return _LISTENER[name]
+    if pipeline:
+        return pipeline, pipeline
+    if "__" in name:
+        prefix = name.split("__", 1)[0]
+        return prefix, prefix
+    return ("tools", "Tools")
 
 
 def default_switch_payload() -> str:
-    """Every Favlo media group starts on when a new agent copies the server."""
-    return json.dumps({group_id: True for group_id in ORDER if group_id != "tools"})
+    """Listener switches start on. A pipeline switch stays on until it is saved off."""
+    return json.dumps({group_id: True for group_id in ("media", "memory")})

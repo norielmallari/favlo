@@ -28,7 +28,7 @@ test('test connection lists MCP tools before save', async ({ page }) => {
   for (const tool of tools) {
     await expect(page.getByText(tool, { exact: true })).toBeVisible();
   }
-  const image = page.getByRole('switch', { name: `Image for ${name}` });
+  const image = page.getByRole('switch', { name: `z-image-turbo for ${name}` });
   await expect(image).toBeChecked();
   await image.click();
   await expect(image).not.toBeChecked();
@@ -38,8 +38,8 @@ test('test connection lists MCP tools before save', async ({ page }) => {
   await onScreen(createMcp);
   await createMcp.click();
   await expect(page.getByLabel('Agent MCP').getByRole('button', { name, exact: true })).toBeVisible();
-  await expect(page.getByText('generate_image', { exact: true })).toBeVisible();
-  await expect(page.getByRole('switch', { name: `Image for ${name}` })).not.toBeChecked();
+  await expect(page.getByText('z_image_turbo__generate_image', { exact: true })).toBeVisible();
+  await expect(page.getByRole('switch', { name: `z-image-turbo for ${name}` })).not.toBeChecked();
 
   await page.setViewportSize({ width: 1280, height: 640 });
   await page.getByLabel('Agent MCP').getByRole('button', { name: 'New MCP' }).click();
@@ -82,7 +82,7 @@ test('test connection lists MCP tools before save', async ({ page }) => {
   for (const tool of tools) {
     await expect(page.getByText(tool, { exact: true })).toBeVisible();
   }
-  await expect(page.getByRole('switch', { name: `Image for ${name}` })).not.toBeChecked();
+  await expect(page.getByRole('switch', { name: `z-image-turbo for ${name}` })).not.toBeChecked();
 });
 
 async function liveMcpTools(): Promise<string[]> {

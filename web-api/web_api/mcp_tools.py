@@ -13,25 +13,33 @@ from agent_framework._feature_stage import ExperimentalWarning
 
 from web_api.mcp_cache import catalog
 from web_api.mcp_client import McpError
-from web_api.mcp_groups import GENERATE, ORDER, group_for
+from web_api.mcp_groups import group_for
 from web_api.tool_names import slug
 
 _MEMORY = {"remember", "recall", "forget"}
 
-# Eager under MAF progressive disclosure. Cold media groups stay in allowed_tools.
-ALWAYS_LOAD = frozenset(
+# Eager under MAF progressive disclosure. Non-generate pipeline tools stay cold.
+_EAGER = frozenset(
     {
-        "generate_image",
-        "list_image_models",
-        "set_image_model",
         "remember",
         "recall",
         "forget",
         "media_status",
         "media_cancel",
-        "read_media",
     }
 )
+
+
+def task_tool(name: str) -> bool:
+    """A published generate tool returns a task id instead of polling."""
+    return name.split("__")[-1].startswith("generate_")
+
+
+def eager(name: str) -> bool:
+    """Every generate_*, memory, and media-task tool loads with the turn."""
+    if name in _EAGER:
+        return True
+    return name.split("__")[-1].startswith("generate_")
 
 
 async def bundle(
@@ -43,8 +51,8 @@ async def bundle(
 ) -> tuple[str, list[object]]:
     """Tools for one turn. Every enabled server is attached the same way.
 
-    The text is empty. Descriptions come from that server. A known Favlo media
-    name can be eager. Any other tool stays on that server's ``load_tool``.
+    The text is empty. Descriptions come from that server. Every ``generate_*``
+    tool, memory, and media task is eager. Any other tool stays on ``load_tool``.
     """
     servers = store.enabled_mcp_servers(agent_id)
     if not servers:
@@ -66,7 +74,7 @@ async def bundle(
         if not allowed:
             continue
         prefix = _prefix(str(server["server_name"] or server["server_id"]), taken)
-        always = [name for name in allowed if name in ALWAYS_LOAD]
+        always = [name for name in allowed if eager(name)]
         opened = _server(
             server,
             agent_id,
@@ -112,7 +120,7 @@ async def with_catalog(server: dict[str, Any], *, refresh: bool = False) -> dict
 def prepare_catalog(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     prepared = []
     for tool in tools:
-        group_id, group_name = group_for(tool["name"])
+        group_id, group_name = group_for(tool)
         prepared.append({**tool, "group_id": group_id, "group_name": group_name})
     return prepared
 
@@ -126,8 +134,16 @@ def groups_from(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
             {"id": group_id, "name": tool["group_name"], "enabled": True, "tools": []},
         )
         bucket["tools"].append(tool["name"])
-    rank = {group_id: index for index, group_id in enumerate(ORDER)}
-    ordered = sorted(buckets.values(), key=lambda item: rank.get(str(item["id"]), len(rank)))
+    def _rank(group_id: str) -> tuple[int, str]:
+        if group_id == "media":
+            return (1, "")
+        if group_id == "memory":
+            return (2, "")
+        if group_id == "tools":
+            return (3, "")
+        return (0, group_id)
+
+    ordered = sorted(buckets.values(), key=lambda item: _rank(str(item["id"])))
     for bucket in ordered:
         bucket["tools"] = sorted(bucket["tools"])
     return ordered
@@ -434,7 +450,7 @@ async def _finish_call(server: Any, tool_name: str, arguments: dict[str, Any]) -
     try:
         return await super(type(server), server).call_tool(tool_name, **arguments)
     except Exception:
-        if tool_name in {"media_status", "media_cancel", "read_media"}:
+        if tool_name in {"media_status", "media_cancel"}:
             return "That task is not here."
         raise
 
@@ -451,7 +467,7 @@ def _declare_filename(server: Any) -> None:
     for func in getattr(server, "_functions", []):
         extra = func.additional_properties or {}
         remote = str(extra.get("_mcp_remote_name") or "")
-        if remote not in GENERATE:
+        if not task_tool(remote):
             continue
         schema = dict(func._input_schema_cached or {})
         properties = dict(schema.get("properties") or {})
@@ -468,9 +484,8 @@ def _declare_filename(server: Any) -> None:
 
 
 def _drop_runtime_session(arguments: dict[str, Any]) -> None:
-    """The run injects its chat session under ``session``. The tool argument is a string."""
-    if not isinstance(arguments.get("session"), str):
-        arguments.pop("session", None)
+    """Drop ``session``. MCP media tools do not take a model session."""
+    arguments.pop("session", None)
 
 
 def _rewrite_inputs(server: Any, arguments: dict[str, Any]) -> str | None:
@@ -500,7 +515,7 @@ async def _generate_task(server: Any, tool_name: str, arguments: dict[str, Any])
     ``session.call_tool(..., allow_claimed=True)`` is the early return.
     ``Client.call_tool`` would poll ``tasks/get`` until the file exists.
     """
-    if tool_name not in GENERATE:
+    if not task_tool(tool_name):
         return None
     client = getattr(server, "owned_client", None)
     if client is None:
@@ -552,19 +567,5 @@ async def _generate_task(server: Any, tool_name: str, arguments: dict[str, Any])
 
 
 def _description(row: dict[str, Any], exposed: str | None = None) -> str:
-    text = str(row.get("description") or row["name"])
-    pair = GENERATE.get(str(row.get("name") or ""))
-    if pair is None:
-        return text
-    original = str(row.get("name") or "")
-    prefix = ""
-    if exposed and original and exposed.endswith(original):
-        prefix = exposed[: -len(original)]
-    listed, setter = pair
-    note = (
-        f"Default model selected. For another: {prefix}{listed}, "
-        f"then {prefix}{setter}; pass session."
-    )
-    if note in text:
-        return text
-    return f"{text} {note}"
+    del exposed
+    return str(row.get("description") or row["name"])

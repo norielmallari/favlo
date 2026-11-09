@@ -299,11 +299,11 @@ def _update_generating_tool(store: Any, workspace_id: str, bus: Any | None) -> o
 
     @tool(approval_mode="never_require", name=qualified(SOURCE, "update_generating_media"))
     async def update_generating_media(task_id: str, link: str = "") -> str:
-        """Save a finished favlo:// file and replace its generating tile.
+        """Save a finished file and replace its generating tile.
 
-        task_id is the id from the host cue. link is the favlo:// URI from
-        read_media. Omit link to clear the tile when the task failed or was
-        cancelled.
+        task_id is the id from the host cue. link is the mediaUri from the
+        generate result. Omit link to clear the tile when the task failed
+        or was cancelled.
         """
         session_id = store.workspace_session_id(workspace_id)
         if not session_id:
@@ -645,7 +645,7 @@ def _write_tool(store: Any, workspace_id: str, bus: Any | None) -> object:
     ) -> str:
         """Write an image under the local folder.
 
-        Pass source as a favlo://images/{id}.png URI from generate_image, or data
+        Pass source as a favlo://images/{id}.png URI from an image tool, or data
         as base64. path is relative to the local folder.
         """
         folder = _bind_or_message(store, workspace_id)

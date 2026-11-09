@@ -32,6 +32,7 @@ _SCOPE = "favlo"
 _LINK = re.compile(
     r"favlo://(?:images|videos|voice|music)/[A-Za-z0-9_-]+\.(?:png|mp4|mp3|wav|flac)"
 )
+_FILE_URI = re.compile(r"file://[^\s\"'\\]+\.(?:png|mp4|mp3|wav|flac)")
 _URI = re.compile(
     r"^favlo://(images|videos|voice|music)/([A-Za-z0-9_-]+)\.(png|mp4|mp3|wav|flac)$"
 )
@@ -40,13 +41,14 @@ _TASKS: ContextVar[list[tuple[str, str, str, str]] | None] = ContextVar(
 )
 _QUEUED: dict[str, list[str]] = {}
 _QUEUE_LOCK = threading.Lock()
-_KIND_BY_TOOL = {
-    "generate_image": "image",
-    "generate_video_i2v": "video",
-    "generate_video_t2v": "video",
-    "generate_music": "audio",
-    "generate_voice": "audio",
-}
+def kind_for_tool(tool_name: str) -> str:
+    """Chat and filmstrip kind for one generate tool name."""
+    local = tool_name.split("__")[-1]
+    if "video" in local:
+        return "video"
+    if "music" in local or "voice" in local:
+        return "audio"
+    return "image"
 
 
 class TrackGenerateTasks(ChatMiddleware):
@@ -379,15 +381,10 @@ def place_gallery_media(store: Any, thread_id: str, links: list[str]) -> list[di
 
 
 def favlo_links(payload: Any) -> list[str]:
-    """``favlo://`` media URIs in a ``tasks/get`` result, in first-seen order."""
+    """``favlo://`` and ``file://`` media URIs in a ``tasks/get`` result, in first-seen order."""
     found: list[str] = []
     _walk(payload, found)
     return found
-
-
-def kind_for_tool(tool_name: str) -> str:
-    """Chat/filmstrip kind for one generate tool name."""
-    return _KIND_BY_TOOL.get(tool_name, "image")
 
 
 def _arm() -> list[tuple[str, str, str]]:
@@ -417,9 +414,10 @@ def _take_queued(thread_id: str) -> list[str]:
 
 def _walk(payload: Any, found: list[str]) -> None:
     if isinstance(payload, str):
-        for match in _LINK.findall(payload):
-            if match not in found:
-                found.append(match)
+        for pattern in (_LINK, _FILE_URI):
+            for match in pattern.findall(payload):
+                if match not in found:
+                    found.append(match)
         return
     if isinstance(payload, dict):
         for value in payload.values():
@@ -441,6 +439,16 @@ def _blob(messages: list[Any]) -> str:
 
 
 def _write_link(folder: Any, link: str) -> dict[str, Any] | None:
+    local = _file_bytes(link)
+    if local is not None:
+        name, payload = local
+        try:
+            if folder.resolve(name, create=True).exists():
+                return folder.stat(name)
+            return folder.write(name, payload)
+        except Exception:
+            _LOG.exception("gallery write failed for %s", link)
+            return None
     match = _URI.match(link.strip())
     if match is None:
         return None
@@ -460,6 +468,23 @@ def _write_link(folder: Any, link: str) -> dict[str, Any] | None:
     except Exception:
         _LOG.exception("gallery write failed for %s", link)
         return None
+
+
+def _file_bytes(link: str) -> tuple[str, bytes] | None:
+    if not link.startswith("file://"):
+        return None
+    from urllib.parse import unquote, urlsplit
+
+    from favlo.local_uri import read_file_uri
+
+    path = Path(unquote(urlsplit(link.strip()).path))
+    if path.suffix.lower() not in {".png", ".mp4", ".mp3", ".wav", ".flac"}:
+        return None
+    try:
+        raw = read_file_uri(link.strip())
+    except (OSError, ValueError):
+        return None
+    return path.name, raw
 
 
 def _media_bytes(folder_name: str, stem: str, ext: str) -> bytes | None:
@@ -490,6 +515,19 @@ def _media_bytes(folder_name: str, stem: str, ext: str) -> bytes | None:
 
 
 def _image_meta(link: str, relative: str) -> dict[str, Any] | None:
+    local = _file_bytes(link)
+    if local is not None:
+        stem = Path(local[0]).stem
+        if not stem.startswith("image_"):
+            return None
+        from favlo.media_meta import load_media
+
+        meta = load_media(stem)
+        if meta is None:
+            return None
+        meta = dict(meta)
+        meta["filename"] = Path(relative).name
+        return meta
     match = _URI.match(link.strip())
     if match is None or match.group(1) != "images":
         return None
@@ -525,10 +563,14 @@ def _place_named(
     if root is None or not links:
         return None
     link = links[0]
-    match = _URI.match(link.strip())
-    if match is None:
-        return None
-    payload = _media_bytes(match.group(1), match.group(2), match.group(3))
+    local = _file_bytes(link)
+    if local is not None:
+        payload = local[1]
+    else:
+        match = _URI.match(link.strip())
+        if match is None:
+            return None
+        payload = _media_bytes(match.group(1), match.group(2), match.group(3))
     if payload is None:
         return None
     folder = LocalFolder(str(root))

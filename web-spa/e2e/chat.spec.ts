@@ -91,8 +91,8 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await expect(page.getByRole('textbox', { name: 'URL' })).toHaveValue('http://127.0.0.1:8129/mcp');
   await page.getByRole('button', { name: 'Test connection' }).click();
   await expect(page.getByText('Connection succeeded')).toBeVisible();
-  await expect(page.getByText('generate_image', { exact: true })).toBeVisible();
-  const imageTools = page.getByRole('switch', { name: 'Image for Favlo media' });
+  await expect(page.getByText('z_image_turbo__generate_image', { exact: true })).toBeVisible();
+  const imageTools = page.getByRole('switch', { name: 'z-image-turbo for Favlo media' });
   const saveMedia = page.getByRole('button', { name: 'Save Favlo media' });
   if (!(await imageTools.isChecked())) {
     await imageTools.click();
@@ -103,7 +103,7 @@ test('two agent channels keep separate conversations', async ({ page }) => {
   await expect(imageTools).toBeChecked();
   await imageTools.click();
   await page.getByRole('button', { name: 'Save Favlo media' }).click();
-  await expect(page.getByRole('switch', { name: 'Image for Favlo media' })).not.toBeChecked();
+  await expect(page.getByRole('switch', { name: 'z-image-turbo for Favlo media' })).not.toBeChecked();
   await page.getByLabel('Agent details').getByRole('tab', { name: 'Agent' }).click();
 
   const brook = `Brook ${Date.now()}`;

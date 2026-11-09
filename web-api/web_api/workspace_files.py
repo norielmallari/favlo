@@ -130,9 +130,10 @@ def _plain_name(raw: object) -> str:
 
 
 def _suffixes(tool_name: str, arguments: dict[str, Any]) -> set[str]:
-    if tool_name == "generate_image":
+    local = tool_name.split("__")[-1]
+    if local == "generate_image" or local.endswith("_image"):
         return set(_IMAGE)
-    if tool_name.startswith("generate_video"):
+    if "video" in local:
         return set(_VIDEO)
     fmt = str(arguments.get("response_format") or "mp3").strip().lower()
     if f".{fmt}" not in _AUDIO:

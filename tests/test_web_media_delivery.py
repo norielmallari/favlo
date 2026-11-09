@@ -87,6 +87,8 @@ def test_favlo_links_come_from_the_task_result() -> None:
         ]
     }
     assert favlo_links(payload) == ["favlo://images/image_abc.png"]
+    filed = {"content": [{"type": "text", "text": '{"mediaUri":"file:///images/image_abc.png"}'}]}
+    assert favlo_links(filed) == ["file:///images/image_abc.png"]
 
 
 def test_finished_links_append_once() -> None:
